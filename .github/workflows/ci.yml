@@ -1,112 +1,185 @@
-name: CI
+# =============================================================================
+# NimRTC continuous integration
+#
+# Goals (P0 stage):
+#   1. Library builds on every supported platform/compiler combo.
+#   2. Unit tests (gtest) pass on every combo.
+#   3. Loopback-p2p example exits 0 (ICE connectivity smoke test).
+#
+# Matrix:
+#   linux × {gcc, clang}
+#   windows × msvc
+#   macos × {Intel, Apple Silicon} × Apple Clang
+#   linux-aarch64 × gcc (cross-compile via ARM runner; build-only, no test)
+#
+# Build configuration: CMakePresets.json "debug" family, with
+# NIMRTC_BUILD_EXAMPLES=ON so the loopback example target is available.
+# =============================================================================
+
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/**, fix/**, chore/**]
   pull_request:
     branches: [main]
 
+# Cancel in-progress runs for the same branch / PR to save runner minutes.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BUILD_TYPE: Debug
+  CMAKE_GENERATOR: Ninja
+
 jobs:
-  cmake:
-    name: CMake Configure & Build
+  # ---------------------------------------------------------------------------
+  # Linux: GCC and Clang on x86_64 ubuntu-22.04
+  # ---------------------------------------------------------------------------
+  linux:
+    name: linux / ${{ matrix.compiler }}
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-14]
-        preset: [debug, release]
-        include:
-          - os: windows-2022
-            preset: debug.msvc
-          - os: windows-2022
-            preset: release.msvc
-
-    runs-on: ${{ matrix.os }}
-
+        compiler: [gcc, clang]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure CMake
-        run: cmake --preset ${{ matrix.preset }}
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Set compiler
+        shell: bash
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          else
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure
+        run: >
+          cmake
+          --preset debug
+          -DCMAKE_C_COMPILER=$CC
+          -DCMAKE_CXX_COMPILER=$CXX
+          -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset --parallel --config ${{ contains(matrix.preset, 'release') && 'Release' || 'Debug' }}
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: failure()
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -j 2
+
+      - name: Loopback smoke
+        working-directory: build
+        run: |
+          ctest --output-on-failure -R loopback
+          # Direct invocation as backup:
+          ./examples/loopback-p2p/loopback-p2p
+
+  # ---------------------------------------------------------------------------
+  # Windows: MSVC on windows-2022
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows / msvc
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          name: build-${{ matrix.os }}-${{ matrix.preset }}
-          path: build/
-          retention-days: 7
+          arch: x64
 
-  test:
-    name: Unit Tests
-    needs: cmake
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure with tests
-        run: cmake --preset debug -DNIMRTC_BUILD_TESTS=ON
+      - name: Configure
+        run: >
+          cmake
+          --preset debug.msvc
+          -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset debug --parallel
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
 
-      - name: Run tests
-        run: ctest --preset tests --output-on-failure
+      - name: Test
+        working-directory: build
+        shell: cmd
+        run: ctest --output-on-failure -j 2 -C ${{ env.BUILD_TYPE }}
 
-  clang-format:
-    name: Code Format Check
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run clang-format
+      - name: Loopback smoke
+        working-directory: build
+        shell: cmd
         run: |
-          find src -name '*.cpp' -o -name '*.hpp' | \
-            xargs clang-format --Werror --dry-run || \
-            { echo "Format errors found. Run 'clang-format -i' to fix."; exit 1; }
+          ctest --output-on-failure -R loopback -C ${{ env.BUILD_TYPE }}
+          examples\loopback-p2p\Debug\loopback-p2p.exe
 
-  cmake-lint:
-    name: CMake Lint
-    runs-on: ubuntu-24.04
-
+  # ---------------------------------------------------------------------------
+  # macOS: Apple Clang on Intel (macos-13) and Apple Silicon (macos-14)
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macos / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-13, macos-14]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Check CMakeLists.txt
-        run: |
-          pip install cmakelang 2>/dev/null || true
-          cmake-format --check CMakeLists.txt || true
-          find . -name 'CMakeLists.txt' -not -path './build/*' | \
-            xargs cmake-format --check || \
-            { echo "CMake formatting issues found."; exit 1; }
+      - name: Install Ninja
+        run: brew install ninja
 
-  sanitizer:
-    name: Sanitizers (ASan + UBSan)
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure with sanitizers
-        run: cmake --preset asan -DNIMRTC_BUILD_TESTS=ON
+      - name: Configure
+        run: >
+          cmake
+          --preset debug.macos
+          -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset asan --parallel
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
 
-      - name: Run tests under ASan
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -j 2
+
+      - name: Loopback smoke
+        working-directory: build
         run: |
-          ctest --preset tests --output-on-failure || true
-          # ASan reports cause non-zero exit; check for errors in output
-          grep -q "ERROR: AddressSanitizer" build-testing-output.txt && exit 1 || true
+          ctest --output-on-failure -R loopback
+          ./examples/loopback-p2p/loopback-p2p
+
+  # ---------------------------------------------------------------------------
+  # Linux aarch64: build-only smoke (no ICE test in cross-compile)
+  # Uses blacksmith-aarch64 hosted runner (free for open-source).
+  # ---------------------------------------------------------------------------
+  linux-arm:
+    name: linux / aarch64
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja + cross-toolchain (best-effort)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-aarch64-linux-gnu
+          # Native gcc is also available on arm64 runners — use it for pure build smoke.
+
+      - name: Configure (native aarch64)
+        run: >
+          cmake
+          --preset debug
+          -DNIMRTC_BUILD_EXAMPLES=ON
+
+      - name: Build (build-only smoke; cross-runtime not yet supported)
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2

@@ -47,6 +47,20 @@
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       }
+    },
+    {
+      "name": "dev.macos.clang",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
     }
   ],
   "buildPresets": [
@@ -69,6 +83,19 @@
       "description": "Debug build using Visual Studio toolchain",
       "inherits": ["dev", "dev.msvc"],
       "configurePreset": "dev.msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "debug.macos",
+      "displayName": "Debug (Apple Clang)",
+      "description": "Debug build using Apple Clang toolchain on macOS",
+      "inherits": ["dev", "dev.macos.clang"],
+      "configurePreset": "dev.macos.clang",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
@@ -167,6 +194,32 @@
       "execution": {
         "noTestsAction": "error"
       }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "ci.linux",
+      "displayName": "CI: Linux (GCC)",
+      "description": "Configure + build + test in one step on Linux/GCC",
+      "configurePreset": "debug",
+      "buildPreset": "debug",
+      "testPreset": "tests"
+    },
+    {
+      "name": "ci.windows",
+      "displayName": "CI: Windows (MSVC)",
+      "description": "Configure + build + test in one step on Windows/MSVC",
+      "configurePreset": "debug.msvc",
+      "buildPreset": "debug.msvc",
+      "testPreset": "tests"
+    },
+    {
+      "name": "ci.macos",
+      "displayName": "CI: macOS (Apple Clang)",
+      "description": "Configure + build + test in one step on macOS/Apple Clang",
+      "configurePreset": "debug.macos",
+      "buildPreset": "debug.macos",
+      "testPreset": "tests"
     }
   ]
 }

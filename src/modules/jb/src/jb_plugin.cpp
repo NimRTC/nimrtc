@@ -244,4 +244,14 @@ void do_register_default_plugins() noexcept {
 
 } // namespace detail
 
+// Non-inline (declared in jb_plugin.hpp) so the symbol is guaranteed
+// in nimrtc_jb.lib for consumers that link via static lib + PluginRegistry.
+void register_default_plugins() noexcept {
+    static const int once = []() {
+        detail::do_register_default_plugins();
+        return 1;
+    }();
+    (void)once;
+}
+
 } // namespace nimrtc::jb

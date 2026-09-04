@@ -172,7 +172,7 @@ private:
 
     // ---- Plugin instances (created via PluginRegistry in open()) ----
     std::unique_ptr<plugins::ITransport>        transport_;   // wraps IceTransport
-    std::unique_ptr<plugins::IAudio3A>          audio3a_;     // null until plugin adapter ships (P1.1)
+    std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;  // R2.5: prefer over concrete
 
     // ---- Non-plugin concrete modules ----
     // SDP: Parser/Munger are concrete classes (session module not yet scaffolded).

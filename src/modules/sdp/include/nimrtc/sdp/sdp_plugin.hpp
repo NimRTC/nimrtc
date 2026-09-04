@@ -132,12 +132,13 @@ namespace detail {
 void do_register_default_plugins() noexcept;
 } // namespace detail
 
-inline void register_default_plugins() noexcept {
-    static const int once = []() {
-        detail::do_register_default_plugins();
-        return 1;
-    }();
-    (void)once;
-}
+/**
+ * @brief Register all built-in SDP plugins with core::PluginRegistry.
+ *
+ * @note Not `inline` because the static-local latch would otherwise be
+ *       emitted as a weak external symbol that the static lib doesn't
+ *       carry; non-inline ensures the symbol is in `nimrtc_sdp.lib`.
+ */
+void register_default_plugins() noexcept;
 
 } // namespace nimrtc::sdp

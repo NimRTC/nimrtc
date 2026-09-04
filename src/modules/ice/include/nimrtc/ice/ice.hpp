@@ -284,16 +284,10 @@ void do_register_default_plugins() noexcept;
  * `core::PluginRegistry::instance().get_transport(...)` lookup of the "ice"
  * factory. Idempotent (Meyer's-singleton latch inside ice.cpp).
  *
- * See `nimrtc::audio3a::register_default_plugins()` for the same pattern.
- * A future `nimrtc::core::register_all_default_plugins()` will fold all
- * per-module calls into one entry point.
+ * @note Not `inline` because the static-local latch would otherwise be
+ *       emitted as a weak external symbol that the static lib doesn't
+ *       carry; non-inline ensures the symbol is in `nimrtc_ice.lib`.
  */
-inline void register_default_plugins() noexcept {
-    static const int once = []() {
-        detail::do_register_default_plugins();
-        return 1;
-    }();
-    (void)once;
-}
+void register_default_plugins() noexcept;
 
 } // namespace nimrtc::ice

@@ -106,6 +106,13 @@ NimRTCEngine::~NimRTCEngine() {
 uint32_t NimRTCEngine::open() noexcept {
     if (state_ != State::kConstructed) return 0x1002;
 
+    // ---- Register all built-in plugins ---------------------------------
+    // (R2.5) The engine is the entry point; consumers link one library and
+    // expect everything to "just work". We force-initialise every concrete
+    // module's plugin adapter here so PluginRegistry lookups below succeed.
+    // Each per-module registrar is Meyer's-singleton (idempotent).
+    core::register_all_default_plugins();
+
     auto& reg = core::PluginRegistry::instance();
 
     // ---- Plugin: Transport --------------------------------------------
@@ -142,12 +149,45 @@ uint32_t NimRTCEngine::open() noexcept {
         return 0x1FFF;
     }
     std::fprintf(stderr, "[debug] op7 transport open ok\n");
-    audio3a_concrete_ = std::make_unique<audio3a::NullAudio3A>();
-    audio3a::Config a3a;
-    a3a.sample_rate_hz   = config_.pcm_sample_rate_hz;
-    a3a.capture_channels = config_.pcm_channels;
-    a3a.render_channels  = config_.pcm_channels;
-    audio3a_concrete_->init(a3a);
+
+    // ---- Plugin: Audio3A (R2.5 — registry-preferred, concrete-fallback)
+    const plugins::IAudio3AFactory* a3a_factory =
+        reg.get_audio3a(config_.audio3a_name);
+    if (a3a_factory) {
+        audio3a_plugin_.reset(a3a_factory->create());
+        if (audio3a_plugin_) {
+            // Push error through the same engine-side on_error_ path so the
+            // host's error UI sees plugin failures identically.
+            audio3a_plugin_->set_callbacks(
+                /* on_vad   */ [](bool) {},
+                /* on_level */ [](float) {},
+                /* on_error */ [this](std::uint32_t err, std::string_view msg) {
+                    if (on_error_) on_error_(err, msg);
+                });
+            if (audio3a_plugin_->open() != plugins::kOk) {
+                if (on_error_) on_error_(0x1A00,
+                    "audio3a plugin open failed; falling back to concrete");
+                audio3a_plugin_.reset();
+            } else {
+                std::fprintf(stderr, "[debug] op8 audio3a plugin ok\n");
+            }
+        }
+    } else {
+        std::fprintf(stderr, "[debug] op8 audio3a plugin \"%.*s\" not registered; "
+                              "using concrete NullAudio3A fallback\n",
+                     (int)config_.audio3a_name.size(),
+                     config_.audio3a_name.data());
+    }
+    // Concrete fallback path — used when no plugin adapter is registered,
+    // or when the plugin's open() failed (above).
+    if (!audio3a_plugin_) {
+        audio3a_concrete_ = std::make_unique<audio3a::NullAudio3A>();
+        audio3a::Config a3a;
+        a3a.sample_rate_hz   = config_.pcm_sample_rate_hz;
+        a3a.capture_channels = config_.pcm_channels;
+        a3a.render_channels  = config_.pcm_channels;
+        audio3a_concrete_->init(a3a);
+    }
 
     std::fprintf(stderr, "[debug] op9 audio3a ok\n");
     // ---- Opus codec (stub) --------------------------------------------
@@ -194,9 +234,11 @@ uint32_t NimRTCEngine::open() noexcept {
 void NimRTCEngine::close() noexcept {
     if (state_ != State::kOpen) return;
     if (transport_) transport_->close();
+    if (audio3a_plugin_) audio3a_plugin_->close();
     transport_.reset();
     jitter_buffers_.clear();
     sdp_impl_.reset();
+    audio3a_plugin_.reset();
     audio3a_concrete_.reset();
     opus_encoder_.reset();
     opus_decoder_.reset();
@@ -388,7 +430,14 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     if (!is_open()) return 0x1002;
     if (!pcm_samples || num_samples == 0) return 0x1001;
 
-    if (audio3a_concrete_) {
+    // 3A — prefer plugin adapter; fall back to concrete NullAudio3A.
+    if (audio3a_plugin_) {
+        // Plugin API takes raw (ptr, samples, channels) — same shape we have.
+        audio3a_plugin_->process_capture(
+            const_cast<float*>(pcm_samples),
+            num_samples,
+            config_.pcm_channels);
+    } else if (audio3a_concrete_) {
         audio3a::Frame frame;
         frame.samples        = const_cast<float*>(pcm_samples);
         frame.num_samples    = num_samples;

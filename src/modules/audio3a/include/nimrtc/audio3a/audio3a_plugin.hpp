@@ -158,9 +158,7 @@ public:
 // ---------------------------------------------------------------------------
 
 namespace detail {
-/** Defined in audio3a_plugin.cpp. Calling this ODR-uses the symbol, which
- *  forces the .obj (and its static Audio3APluginRegistrar) to be linked
- *  into any consumer that calls register_default_plugins(). */
+/** Defined in audio3a_plugin.cpp. Forces .obj linkage on consumer call. */
 void do_register_default_plugins() noexcept;
 } // namespace detail
 
@@ -173,16 +171,11 @@ void do_register_default_plugins() noexcept;
  *
  * Typical placement: main() entry, or any first call into the audio3a plugin
  * path.
+ *
+ * @note Not `inline` because the static-local latch would otherwise be
+ *       emitted as a weak external symbol that the static lib doesn't
+ *       carry; non-inline ensures the symbol is in `nimrtc_audio3a.lib`.
  */
-inline void register_default_plugins() noexcept {
-    // Latch via static-init in the body. The reference to
-    // detail::do_register_default_plugins() ensures the .obj containing
-    // the actual registration work is pulled into the link.
-    static const int once = []() {
-        detail::do_register_default_plugins();
-        return 1;
-    }();
-    (void)once;
-}
+void register_default_plugins() noexcept;
 
 } // namespace nimrtc::audio3a

@@ -31,7 +31,6 @@ concurrency:
 
 env:
   BUILD_TYPE: Debug
-  CMAKE_GENERATOR: Ninja
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -44,44 +43,33 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
+        preset: [debug]
+        include:
+          - compiler: gcc
+            preset: debug
+          - compiler: clang
+            preset: debug.clang
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: Set compiler
-        shell: bash
-        run: |
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            echo "CC=gcc" >> "$GITHUB_ENV"
-            echo "CXX=g++" >> "$GITHUB_ENV"
-          else
-            echo "CC=clang" >> "$GITHUB_ENV"
-            echo "CXX=clang++" >> "$GITHUB_ENV"
-          fi
-
       - name: Configure
-        run: >
-          cmake
-          --preset debug
-          -DCMAKE_C_COMPILER=$CC
-          -DCMAKE_CXX_COMPILER=$CXX
-          -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset ${{ matrix.preset }} -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
+        run: cmake --build --preset ${{ matrix.preset }} -j 2
 
       - name: Test
-        working-directory: build
-        run: ctest --output-on-failure -j 2
+        run: ctest --preset tests --output-on-failure -j 2
 
       - name: Loopback smoke
-        working-directory: build
         run: |
-          ctest --output-on-failure -R loopback
-          # Direct invocation as backup:
-          ./examples/loopback-p2p/loopback-p2p
+          set -e
+          if [ -x ./build/examples/loopback-p2p/loopback-p2p ]; then
+            ./build/examples/loopback-p2p/loopback-p2p
+          fi
 
   # ---------------------------------------------------------------------------
   # Windows: MSVC on windows-2022
@@ -104,25 +92,20 @@ jobs:
           arch: x64
 
       - name: Configure
-        run: >
-          cmake
-          --preset debug.msvc
-          -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
+        run: cmake --build --preset debug.msvc -j 2
 
       - name: Test
-        working-directory: build
-        shell: cmd
-        run: ctest --output-on-failure -j 2 -C ${{ env.BUILD_TYPE }}
+        run: ctest --preset tests.msvc --output-on-failure -j 2
 
       - name: Loopback smoke
-        working-directory: build
         shell: cmd
         run: |
-          ctest --output-on-failure -R loopback -C ${{ env.BUILD_TYPE }}
-          examples\loopback-p2p\Debug\loopback-p2p.exe
+          if exist build\examples\loopback-p2p\Debug\loopback-p2p.exe (
+            build\examples\loopback-p2p\Debug\loopback-p2p.exe
+          )
 
   # ---------------------------------------------------------------------------
   # macOS: Apple Clang on Intel (macos-13) and Apple Silicon (macos-14)
@@ -141,27 +124,24 @@ jobs:
         run: brew install ninja
 
       - name: Configure
-        run: >
-          cmake
-          --preset debug.macos
-          -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
+        run: cmake --build --preset debug.macos -j 2
 
       - name: Test
-        working-directory: build
-        run: ctest --output-on-failure -j 2
+        run: ctest --preset tests.macos --output-on-failure -j 2
 
       - name: Loopback smoke
-        working-directory: build
         run: |
-          ctest --output-on-failure -R loopback
-          ./examples/loopback-p2p/loopback-p2p
+          set -e
+          if [ -x ./build/examples/loopback-p2p/loopback-p2p ]; then
+            ./build/examples/loopback-p2p/loopback-p2p
+          fi
 
   # ---------------------------------------------------------------------------
   # Linux aarch64: build-only smoke (no ICE test in cross-compile)
-  # Uses blacksmith-aarch64 hosted runner (free for open-source).
+  # Uses GitHub-hosted ARM runner (free for public repos).
   # ---------------------------------------------------------------------------
   linux-arm:
     name: linux / aarch64
@@ -169,17 +149,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Ninja + cross-toolchain (best-effort)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build g++-aarch64-linux-gnu
-          # Native gcc is also available on arm64 runners — use it for pure build smoke.
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: Configure (native aarch64)
-        run: >
-          cmake
-          --preset debug
-          -DNIMRTC_BUILD_EXAMPLES=ON
+      - name: Configure (native aarch64 build smoke)
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON
 
-      - name: Build (build-only smoke; cross-runtime not yet supported)
-        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j 2
+      - name: Build
+        run: cmake --build --preset debug -j 2

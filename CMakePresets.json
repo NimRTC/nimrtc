@@ -8,21 +8,9 @@
       "installDir": "${sourceDir}/install"
     },
     {
-      "name": "dev.clang",
-      "hidden": true,
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++"
-      },
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      }
-    },
-    {
       "name": "dev.gcc",
       "hidden": true,
+      "inherits": ["dev"],
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++"
@@ -34,8 +22,23 @@
       }
     },
     {
+      "name": "dev.clang",
+      "hidden": true,
+      "inherits": ["dev"],
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
       "name": "dev.msvc",
       "hidden": true,
+      "inherits": ["dev"],
       "cacheVariables": {
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",
@@ -51,6 +54,7 @@
     {
       "name": "dev.macos.clang",
       "hidden": true,
+      "inherits": ["dev"],
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
@@ -61,15 +65,25 @@
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
       }
-    }
-  ],
-  "buildPresets": [
+    },
+
     {
       "name": "debug",
-      "displayName": "Debug",
-      "description": "Debug build with symbols and sanitizers disabled",
-      "inherits": ["dev", "dev.gcc"],
-      "configurePreset": "dev.gcc",
+      "displayName": "Debug (GCC/Clang, Linux)",
+      "description": "Debug build using the host's default Linux toolchain",
+      "inherits": ["dev.gcc"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "debug.clang",
+      "displayName": "Debug (Clang, Linux)",
+      "description": "Debug build forcing Clang on Linux",
+      "inherits": ["dev.clang"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
@@ -79,10 +93,9 @@
     },
     {
       "name": "debug.msvc",
-      "displayName": "Debug (MSVC)",
+      "displayName": "Debug (MSVC, Windows)",
       "description": "Debug build using Visual Studio toolchain",
-      "inherits": ["dev", "dev.msvc"],
-      "configurePreset": "dev.msvc",
+      "inherits": ["dev.msvc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
@@ -92,10 +105,9 @@
     },
     {
       "name": "debug.macos",
-      "displayName": "Debug (Apple Clang)",
-      "description": "Debug build using Apple Clang toolchain on macOS",
-      "inherits": ["dev", "dev.macos.clang"],
-      "configurePreset": "dev.macos.clang",
+      "displayName": "Debug (Apple Clang, macOS)",
+      "description": "Debug build using Apple Clang on macOS",
+      "inherits": ["dev.macos.clang"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
@@ -105,10 +117,9 @@
     },
     {
       "name": "release",
-      "displayName": "Release",
-      "description": "Optimised release build",
-      "inherits": ["dev", "dev.gcc"],
-      "configurePreset": "dev.gcc",
+      "displayName": "Release (GCC/Clang, Linux)",
+      "description": "Optimised release build using the host's default Linux toolchain",
+      "inherits": ["dev.gcc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "NIMRTC_ASAN": "OFF",
@@ -118,10 +129,9 @@
     },
     {
       "name": "release.msvc",
-      "displayName": "Release (MSVC)",
+      "displayName": "Release (MSVC, Windows)",
       "description": "Optimised release build using Visual Studio toolchain",
-      "inherits": ["dev", "dev.msvc"],
-      "configurePreset": "dev.msvc",
+      "inherits": ["dev.msvc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "NIMRTC_ASAN": "OFF",
@@ -131,23 +141,9 @@
     },
     {
       "name": "asan",
-      "displayName": "AddressSanitizer",
+      "displayName": "AddressSanitizer (GCC/Clang, Linux)",
       "description": "Debug build with AddressSanitizer enabled",
-      "inherits": ["dev", "dev.gcc"],
-      "configurePreset": "dev.gcc",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "NIMRTC_ASAN": "ON",
-        "NIMRTC_UBSAN": "OFF",
-        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
-      }
-    },
-    {
-      "name": "asan.msvc",
-      "displayName": "AddressSanitizer (MSVC)",
-      "description": "Debug build with MSVC AddressSanitizer enabled",
-      "inherits": ["dev", "dev.msvc"],
-      "configurePreset": "dev.msvc",
+      "inherits": ["dev.gcc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "ON",
@@ -157,10 +153,9 @@
     },
     {
       "name": "ubsan",
-      "displayName": "UndefinedBehaviourSanitizer",
+      "displayName": "UndefinedBehaviourSanitizer (GCC/Clang, Linux)",
       "description": "Debug build with UndefinedBehaviourSanitizer enabled",
-      "inherits": ["dev", "dev.gcc"],
-      "configurePreset": "dev.gcc",
+      "inherits": ["dev.gcc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
@@ -170,10 +165,9 @@
     },
     {
       "name": "coverage",
-      "displayName": "Coverage",
+      "displayName": "Coverage (GCC, Linux)",
       "description": "Debug build with coverage instrumentation",
-      "inherits": ["dev", "dev.gcc"],
-      "configurePreset": "dev.gcc",
+      "inherits": ["dev.gcc"],
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "--coverage",
@@ -183,43 +177,92 @@
       }
     }
   ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Build: Debug (Linux)",
+      "description": "Build the debug preset's binary directory",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "debug.clang",
+      "displayName": "Build: Debug (Clang, Linux)",
+      "configurePreset": "debug.clang"
+    },
+    {
+      "name": "debug.msvc",
+      "displayName": "Build: Debug (MSVC, Windows)",
+      "configurePreset": "debug.msvc"
+    },
+    {
+      "name": "debug.macos",
+      "displayName": "Build: Debug (Apple Clang, macOS)",
+      "configurePreset": "debug.macos"
+    },
+    {
+      "name": "release",
+      "displayName": "Build: Release (Linux)",
+      "configurePreset": "release"
+    },
+    {
+      "name": "release.msvc",
+      "displayName": "Build: Release (MSVC, Windows)",
+      "configurePreset": "release.msvc"
+    },
+    {
+      "name": "asan",
+      "displayName": "Build: AddressSanitizer (Linux)",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "ubsan",
+      "displayName": "Build: UBSan (Linux)",
+      "configurePreset": "ubsan"
+    },
+    {
+      "name": "coverage",
+      "displayName": "Build: Coverage (Linux)",
+      "configurePreset": "coverage"
+    }
+  ],
   "testPresets": [
     {
       "name": "tests",
-      "displayName": "Run tests",
+      "displayName": "Run all tests (Debug/Linux)",
       "description": "Run all tests via ctest",
-      "inherits": ["debug"],
       "configurePreset": "debug",
-      "output": "quiet",
+      "output": {
+        "outputOnFailure": true
+      },
       "execution": {
-        "noTestsAction": "error"
+        "noTestsAction": "error",
+        "stopOnFailure": false
       }
-    }
-  ],
-  "workflowPresets": [
-    {
-      "name": "ci.linux",
-      "displayName": "CI: Linux (GCC)",
-      "description": "Configure + build + test in one step on Linux/GCC",
-      "configurePreset": "debug",
-      "buildPreset": "debug",
-      "testPreset": "tests"
     },
     {
-      "name": "ci.windows",
-      "displayName": "CI: Windows (MSVC)",
-      "description": "Configure + build + test in one step on Windows/MSVC",
+      "name": "tests.msvc",
+      "displayName": "Run all tests (Debug/MSVC)",
       "configurePreset": "debug.msvc",
-      "buildPreset": "debug.msvc",
-      "testPreset": "tests"
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
     },
     {
-      "name": "ci.macos",
-      "displayName": "CI: macOS (Apple Clang)",
-      "description": "Configure + build + test in one step on macOS/Apple Clang",
+      "name": "tests.macos",
+      "displayName": "Run all tests (Debug/macOS)",
       "configurePreset": "debug.macos",
-      "buildPreset": "debug.macos",
-      "testPreset": "tests"
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
     }
   ]
 }

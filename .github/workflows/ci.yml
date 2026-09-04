@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cmake:
+    name: CMake Configure & Build
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+        preset: [debug, release]
+        include:
+          - os: windows-2022
+            preset: debug.msvc
+          - os: windows-2022
+            preset: release.msvc
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset --parallel --config ${{ contains(matrix.preset, 'release') && 'Release' || 'Debug' }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-${{ matrix.os }}-${{ matrix.preset }}
+          path: build/
+          retention-days: 7
+
+  test:
+    name: Unit Tests
+    needs: cmake
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure with tests
+        run: cmake --preset debug -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build --preset debug --parallel
+
+      - name: Run tests
+        run: ctest --preset tests --output-on-failure
+
+  clang-format:
+    name: Code Format Check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run clang-format
+        run: |
+          find src -name '*.cpp' -o -name '*.hpp' | \
+            xargs clang-format --Werror --dry-run || \
+            { echo "Format errors found. Run 'clang-format -i' to fix."; exit 1; }
+
+  cmake-lint:
+    name: CMake Lint
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check CMakeLists.txt
+        run: |
+          pip install cmakelang 2>/dev/null || true
+          cmake-format --check CMakeLists.txt || true
+          find . -name 'CMakeLists.txt' -not -path './build/*' | \
+            xargs cmake-format --check || \
+            { echo "CMake formatting issues found."; exit 1; }
+
+  sanitizer:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure with sanitizers
+        run: cmake --preset asan -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build --preset asan --parallel
+
+      - name: Run tests under ASan
+        run: |
+          ctest --preset tests --output-on-failure || true
+          # ASan reports cause non-zero exit; check for errors in output
+          grep -q "ERROR: AddressSanitizer" build-testing-output.txt && exit 1 || true

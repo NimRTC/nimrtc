@@ -1,0 +1,324 @@
+/*
+ * srtp_priv.h
+ *
+ * private internal data structures and functions for libSRTP
+ *
+ * David A. McGrew
+ * Cisco Systems, Inc.
+ */
+/*
+ *
+ * Copyright (c) 2001-2017 Cisco Systems, Inc.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ *   Redistributions of source code must retain the above copyright
+ *   notice, this list of conditions and the following disclaimer.
+ *
+ *   Redistributions in binary form must reproduce the above
+ *   copyright notice, this list of conditions and the following
+ *   disclaimer in the documentation and/or other materials provided
+ *   with the distribution.
+ *
+ *   Neither the name of the Cisco Systems, Inc. nor the names of its
+ *   contributors may be used to endorse or promote products derived
+ *   from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
+#ifndef SRTP_PRIV_H
+#define SRTP_PRIV_H
+
+// Leave this as the top level import. Ensures the existence of defines
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include "srtp.h"
+#include "rdbx.h"
+#include "rdb.h"
+#include "cipher.h"
+#include "auth.h"
+#include "aes.h"
+#include "crypto_kernel.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SRTP_VER_STRING PACKAGE_STRING
+#define SRTP_VERSION PACKAGE_VERSION
+
+typedef struct srtp_stream_ctx_t_ srtp_stream_ctx_t;
+typedef srtp_stream_ctx_t *srtp_stream_t;
+typedef struct srtp_stream_list_ctx_t_ *srtp_stream_list_t;
+
+typedef struct srtp_crypto_policy_t {
+    srtp_cipher_type_id_t cipher_type;
+    size_t cipher_key_len;
+    srtp_auth_type_id_t auth_type;
+    size_t auth_key_len;
+    size_t auth_tag_len;
+    srtp_sec_serv_t sec_serv;
+} srtp_crypto_policy_t;
+
+typedef struct srtp_master_key_t {
+    uint8_t key[SRTP_MAX_KEY_LEN];
+    size_t key_len;
+    size_t salt_len;
+    uint8_t mki_id[SRTP_MAX_MKI_LEN];
+    size_t mki_id_len;
+} srtp_master_key_t;
+
+typedef struct srtp_policy_ctx_t_ {
+    srtp_profile_t profile; /**< The SRTP profile that this policy applies to */
+    srtp_ssrc_t ssrc;       /**< The SSRC value of stream, or the    */
+                            /**< flags SSRC_ANY_INBOUND or           */
+                            /**< SSRC_ANY_OUTBOUND if key sharing    */
+                            /**< is used for this policy element.    */
+    srtp_crypto_policy_t rtp;  /**< SRTP crypto policy.                 */
+    srtp_crypto_policy_t rtcp; /**< SRTCP crypto policy.                */
+    srtp_master_key_t master_keys[SRTP_MAX_NUM_MASTER_KEYS];
+    size_t num_master_keys; /** Number of master keys                */
+    bool use_mki;           /** Whether MKI is in use                */
+    size_t mki_size;        /** Size of MKI when in use              */
+    size_t window_size;     /**< The window size to use for replay   */
+                            /**< protection.                         */
+    bool allow_repeat_tx;   /**< Whether retransmissions of          */
+                            /**< packets with the same sequence      */
+                            /**< number are allowed.                 */
+                            /**< (Note that such repeated            */
+                            /**< transmissions must have the same    */
+                            /**< RTP payload, or a severe security   */
+                            /**< weakness is introduced!)            */
+    uint8_t enc_xtn_hdr[SRTP_MAX_NUM_ENC_HDR_XTND_IDS]; /**< List of header ids
+                                                           to encrypt.      */
+    size_t enc_xtn_hdr_count; /**< Number of entries in list of header */
+                              /**<  ids.                               */
+    bool use_cryptex;         /**< Encrypt header block and CSRCs with */
+                              /**< cryptex, RFC 9335.                  */
+    srtp_rcc_mode_t rcc_mode; /**< RFC 4771 RCC integrity transform     */
+                              /**< mode for SRTP (default none).        */
+    uint16_t roc_tx_rate;     /**< RFC 4771 ROC transmission rate R:    */
+                              /**< the ROC is carried in packets whose  */
+                              /**< sequence number is 0 modulo R. A     */
+                              /**< value of 0 is treated as 1.          */
+} srtp_policy_ctx_t_;
+
+static inline bool srtp_policy_is_null_cipher_null_auth(
+    const srtp_policy_t policy)
+{
+    return policy != NULL && policy->rtp.cipher_type == SRTP_NULL_CIPHER &&
+           policy->rtp.auth_type == SRTP_NULL_AUTH &&
+           policy->rtcp.cipher_type == SRTP_NULL_CIPHER &&
+           policy->rtcp.auth_type == SRTP_NULL_AUTH;
+}
+
+static inline bool srtp_policy_is_valid_window_size(size_t window_size)
+{
+    return window_size == 0 || (window_size >= 64 && window_size < 0x8000);
+}
+
+/*
+ * the following declarations are libSRTP internal functions
+ */
+
+/*
+ * srtp_get_stream(ssrc) returns a pointer to the stream corresponding
+ * to ssrc, or NULL if no stream exists for that ssrc
+ */
+srtp_stream_t srtp_get_stream(srtp_t srtp, uint32_t ssrc);
+
+/*
+ * libsrtp internal datatypes
+ */
+typedef enum direction_t {
+    dir_unknown = 0,
+    dir_srtp_sender = 1,
+    dir_srtp_receiver = 2
+} direction_t;
+
+/*
+ * srtp_session_keys_t will contain the encryption, hmac, salt keys
+ * for both SRTP and SRTCP.  The session keys will also contain the
+ * MKI ID which is used to identify the session keys.
+ */
+typedef struct srtp_session_keys_t {
+    srtp_cipher_t *rtp_cipher;
+    srtp_cipher_t *rtp_xtn_hdr_cipher;
+    srtp_auth_t *rtp_auth;
+    srtp_cipher_t *rtcp_cipher;
+    srtp_auth_t *rtcp_auth;
+    uint8_t salt[SRTP_AEAD_SALT_LEN];
+    uint8_t c_salt[SRTP_AEAD_SALT_LEN];
+    uint8_t *mki_id;
+    srtp_key_limit_ctx_t *limit;
+} srtp_session_keys_t;
+
+/*
+ * an srtp_stream_t has its own SSRC, encryption key, authentication
+ * key, sequence number, and replay database
+ *
+ * note that the keys might not actually be unique, in which case the
+ * srtp_cipher_t and srtp_auth_t pointers will point to the same structures
+ */
+typedef struct srtp_stream_ctx_t_ {
+    uint32_t ssrc;
+    srtp_session_keys_t *session_keys;
+    size_t num_master_keys;
+    bool use_mki;
+    size_t mki_size;
+    srtp_rdbx_t rtp_rdbx;
+    srtp_sec_serv_t rtp_services;
+    srtp_rdb_t rtcp_rdb;
+    srtp_sec_serv_t rtcp_services;
+    direction_t direction;
+    bool allow_repeat_tx;
+    uint8_t *enc_xtn_hdr;
+    size_t enc_xtn_hdr_count;
+    uint32_t pending_roc;
+    bool use_cryptex;
+    srtp_rcc_mode_t rcc_mode; /* RFC 4771 RCC integrity transform mode      */
+    uint16_t roc_tx_rate;     /* RFC 4771 ROC transmission rate R (>= 1)    */
+} strp_stream_ctx_t_;
+
+/*
+ * an srtp_ctx_t holds a stream list and a service description
+ */
+typedef struct srtp_ctx_t_ {
+    srtp_stream_list_t stream_list;             /* linked list of streams     */
+    struct srtp_stream_ctx_t_ *stream_template; /* act as template for other  */
+                                                /* streams                    */
+    void *user_data;                            /* user custom data           */
+} srtp_ctx_t_;
+
+/*
+ * srtp_hdr_t represents an RTP or SRTP header.  The bit-fields in
+ * this structure should be declared "unsigned int" instead of
+ * "unsigned char", but doing so causes the MS compiler to not
+ * fully pack the bit fields.
+ *
+ * In this implementation, an srtp_hdr_t is assumed to be 32-bit aligned
+ *
+ * (note that this definition follows that of RFC 1889 Appendix A, but
+ * is not identical)
+ */
+
+#ifndef WORDS_BIGENDIAN
+
+typedef struct {
+    unsigned char cc : 4;      /* CSRC count             */
+    unsigned char x : 1;       /* header extension flag  */
+    unsigned char p : 1;       /* padding flag           */
+    unsigned char version : 2; /* protocol version       */
+    unsigned char pt : 7;      /* payload type           */
+    unsigned char m : 1;       /* marker bit             */
+    uint16_t seq;              /* sequence number        */
+    uint32_t ts;               /* timestamp              */
+    uint32_t ssrc;             /* synchronization source */
+} srtp_hdr_t;
+
+#else /*  BIG_ENDIAN */
+
+typedef struct {
+    unsigned char version : 2; /* protocol version       */
+    unsigned char p : 1;       /* padding flag           */
+    unsigned char x : 1;       /* header extension flag  */
+    unsigned char cc : 4;      /* CSRC count             */
+    unsigned char m : 1;       /* marker bit             */
+    unsigned char pt : 7;      /* payload type           */
+    uint16_t seq;              /* sequence number        */
+    uint32_t ts;               /* timestamp              */
+    uint32_t ssrc;             /* synchronization source */
+} srtp_hdr_t;
+
+#endif
+
+typedef struct {
+    uint16_t profile_specific; /* profile-specific info               */
+    uint16_t length;           /* number of 32-bit words in extension */
+} srtp_hdr_xtnd_t;
+
+/*
+ * srtcp_hdr_t represents a secure rtcp header
+ *
+ * in this implementation, an srtcp header is assumed to be 32-bit
+ * aligned
+ */
+
+#ifndef WORDS_BIGENDIAN
+
+typedef struct {
+    unsigned char rc : 5;      /* reception report count */
+    unsigned char p : 1;       /* padding flag           */
+    unsigned char version : 2; /* protocol version       */
+    unsigned char pt : 8;      /* payload type           */
+    uint16_t len;              /* length                 */
+    uint32_t ssrc;             /* synchronization source */
+} srtcp_hdr_t;
+
+typedef struct {
+    unsigned int index : 31; /* srtcp packet index in network order!  */
+    unsigned int e : 1;      /* encrypted? 1=yes                      */
+                             /* optional mikey/etc go here            */
+                             /* and then the variable-length auth tag */
+} srtcp_trailer_t;
+
+#else /*  BIG_ENDIAN */
+
+typedef struct {
+    unsigned char version : 2; /* protocol version       */
+    unsigned char p : 1;       /* padding flag           */
+    unsigned char rc : 5;      /* reception report count */
+    unsigned char pt : 8;      /* payload type           */
+    uint16_t len;              /* length                 */
+    uint32_t ssrc;             /* synchronization source */
+} srtcp_hdr_t;
+
+typedef struct {
+    unsigned int e : 1;      /* encrypted? 1=yes                      */
+    unsigned int index : 31; /* srtcp packet index                    */
+                             /* optional mikey/etc go here            */
+                             /* and then the variable-length auth tag */
+} srtcp_trailer_t;
+
+#endif
+
+/*
+ * srtp_handle_event(srtp, srtm, evnt) calls the event handling
+ * function, if there is one.
+ *
+ * This macro is not included in the documentation as it is
+ * an internal-only function.
+ */
+
+#define srtp_handle_event(srtp, strm, evnt)                                    \
+    if (srtp_event_handler) {                                                  \
+        srtp_event_data_t data;                                                \
+        data.session = srtp;                                                   \
+        data.ssrc = ntohl(strm->ssrc);                                         \
+        data.event = evnt;                                                     \
+        srtp_event_handler(&data);                                             \
+    }
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SRTP_PRIV_H */

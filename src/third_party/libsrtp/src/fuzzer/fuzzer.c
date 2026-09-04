@@ -1,0 +1,830 @@
+/* By Guido Vranken <guidovranken@gmail.com> --
+ * https://guidovranken.wordpress.com/ */
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <limits.h>
+#include "srtp.h"
+#include "srtp_priv.h"
+#include "fuzzer.h"
+#include "mt19937.h"
+#include "testmem.h"
+
+/* Global variables */
+static bool g_no_align = false; /* Can be enabled with --no_align */
+static bool g_post_init =
+    false; /* Set to true once past initialization phase */
+static bool g_write_input = false;
+
+#ifdef FUZZ_32BIT
+#include <sys/mman.h>
+static bool g_no_mmap = false; /* Can be enabled with --no_mmap */
+static void *g_mmap_allocation =
+    NULL; /* Keeps current mmap() allocation address */
+static size_t g_mmap_allocation_size =
+    0; /* Keeps current mmap() allocation size */
+#endif
+
+/* Custom allocator functions */
+
+static void *fuzz_alloc(const size_t size, const bool do_zero)
+{
+    void *ret = NULL;
+#ifdef FUZZ_32BIT
+    bool do_malloc = true;
+#endif
+    bool do_mmap, mmap_high = true;
+
+    if (size == 0) {
+        size_t ret;
+        /* Allocations of size 0 are not illegal, but are a bad practice, since
+         * writing just a single byte to this region constitutes undefined
+         * behavior per the C spec. glibc will return a small, valid memory
+         * region
+         * whereas OpenBSD will crash upon writing to it.
+         * Intentionally return a pointer to an invalid page to detect
+         * unsound code efficiently.
+         * fuzz_free is aware of this pointer range and will not attempt
+         * to free()/munmap() it.
+         */
+        ret = 0x01 + (fuzz_mt19937_get() % 1024);
+        return (void *)ret;
+    }
+
+    /* Don't do mmap()-based allocations during initialization */
+    if (g_post_init == true) {
+        /* Even extract these values if --no_mmap is specified.
+         * This keeps the PRNG output stream consistent across
+         * fuzzer configurations.
+         */
+        do_mmap = (fuzz_mt19937_get() % 64) == 0 ? true : false;
+        if (do_mmap == true) {
+            mmap_high = (fuzz_mt19937_get() % 2) == 0 ? true : false;
+        }
+    } else {
+        do_mmap = false;
+    }
+
+#ifdef FUZZ_32BIT
+    /* g_mmap_allocation must be NULL because we only support a single
+     * concurrent mmap allocation at a time
+     */
+    if (g_mmap_allocation == NULL && g_no_mmap == false && do_mmap == true) {
+        void *mmap_address;
+        if (mmap_high == true) {
+            mmap_address = (void *)0xFFFF0000;
+        } else {
+            mmap_address = (void *)0x00010000;
+        }
+        g_mmap_allocation_size = size;
+
+        ret = mmap(mmap_address, g_mmap_allocation_size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+        if (ret == MAP_FAILED) {
+            /* That's okay -- just return NULL to the caller */
+
+            ret = NULL;
+
+            /* Reset this for the sake of cleanliness */
+            g_mmap_allocation_size = 0;
+        }
+        /* ret not being MAP_FAILED does not mean that ret is the requested
+         * address (mmap_address). That's okay. We're not going to perform
+         * a munmap() on it and call malloc() instead. It won't gain us
+         * anything.
+         */
+
+        g_mmap_allocation = ret;
+        do_malloc = false;
+    }
+
+    if (do_malloc == true)
+#endif
+    {
+        ret = malloc(size);
+    }
+
+    /* Mimic calloc() if so requested */
+    if (ret != NULL && do_zero) {
+        memset(ret, 0, size);
+    }
+
+    return ret;
+}
+
+/* Internal allocations by this fuzzer must on one hand (sometimes)
+ * receive memory from mmap(), but on the other hand these requests for
+ * memory may not fail. By calling this function, the allocation is
+ * guaranteed to succeed; it first tries with fuzz_alloc(), which may
+ * fail if it uses mmap(), and if that is the case, memory is allocated
+ * via the libc allocator (malloc, calloc) which should always succeed */
+static void *fuzz_alloc_succeed(const size_t size, const bool do_zero)
+{
+    void *ret = fuzz_alloc(size, do_zero);
+    if (ret == NULL) {
+        if (do_zero == false) {
+            ret = malloc(size);
+        } else {
+            ret = calloc(1, size);
+        }
+    }
+
+    return ret;
+}
+
+void *fuzz_calloc(const size_t nmemb, const size_t size)
+{
+    /* We must be past srtp_init() to prevent that that function fails */
+    if (g_post_init == true) {
+        /* Fail 1 in 64 allocations on average to test whether the library
+         * can deal with this properly.
+         */
+        if ((fuzz_mt19937_get() % 64) == 0) {
+            return NULL;
+        }
+    }
+
+    return fuzz_alloc(nmemb * size, true);
+}
+
+static bool fuzz_is_special_pointer(void *ptr)
+{
+    /* Special, invalid pointers introduced when code attempted
+     * to do size = 0 allocations.
+     */
+    if ((size_t)ptr >= 0x01 && (size_t)ptr < (0x01 + 1024)) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+void fuzz_free(void *ptr)
+{
+    if (fuzz_is_special_pointer(ptr) == true) {
+        return;
+    }
+
+#ifdef FUZZ_32BIT
+    if (g_post_init == true && ptr != NULL && ptr == g_mmap_allocation) {
+        if (munmap(g_mmap_allocation, g_mmap_allocation_size) == -1) {
+            /* Shouldn't happen */
+            abort();
+        }
+        g_mmap_allocation = NULL;
+    } else
+#endif
+    {
+        free(ptr);
+    }
+}
+
+static srtp_err_status_t fuzz_srtp_protect(srtp_t srtp_sender,
+                                           void *hdr,
+                                           size_t *len,
+                                           size_t mki)
+{
+    size_t out_len = *len + SRTP_MAX_TRAILER_LEN;
+    srtp_err_status_t s =
+        srtp_protect(srtp_sender, hdr, *len, hdr, &out_len, mki);
+    *len = out_len;
+    return s;
+}
+
+static srtp_err_status_t fuzz_srtp_unprotect(srtp_t srtp_sender,
+                                             void *hdr,
+                                             size_t *len,
+                                             size_t mki)
+{
+    return srtp_unprotect(srtp_sender, hdr, *len, hdr, len);
+}
+
+static srtp_err_status_t fuzz_srtp_protect_rtcp(srtp_t srtp_sender,
+                                                void *hdr,
+                                                size_t *len,
+                                                size_t mki)
+{
+    size_t out_len = *len + SRTP_MAX_SRTCP_TRAILER_LEN;
+    srtp_err_status_t s =
+        srtp_protect_rtcp(srtp_sender, hdr, *len, hdr, &out_len, mki);
+    *len = out_len;
+    return s;
+}
+
+static srtp_err_status_t fuzz_srtp_unprotect_rtcp(srtp_t srtp_sender,
+                                                  void *hdr,
+                                                  size_t *len,
+                                                  size_t mki)
+{
+    return srtp_unprotect_rtcp(srtp_sender, hdr, *len, hdr, len);
+}
+
+/* Get protect length functions */
+
+static srtp_err_status_t fuzz_srtp_get_protect_length(const srtp_t srtp_ctx,
+                                                      size_t mki,
+                                                      size_t *length)
+{
+    return srtp_get_protect_trailer_length(srtp_ctx, mki, length);
+}
+
+static srtp_err_status_t fuzz_srtp_get_protect_rtcp_length(
+    const srtp_t srtp_ctx,
+    size_t mki,
+    size_t *length)
+{
+    return srtp_get_protect_rtcp_trailer_length(srtp_ctx, mki, length);
+}
+
+static uint8_t *extract_key(const uint8_t **data,
+                            size_t *size,
+                            const size_t key_size)
+{
+    uint8_t *ret;
+    if (*size < key_size) {
+        return NULL;
+    }
+
+    ret = fuzz_alloc_succeed(key_size, false);
+    EXTRACT(ret, *data, *size, key_size);
+
+    return ret;
+}
+
+static bool extract_and_add_key(srtp_policy_t policy,
+                                const uint8_t **data,
+                                size_t *size,
+                                size_t key_size,
+                                size_t salt_size)
+{
+    bool added = false;
+    uint8_t *salt = NULL;
+    uint8_t *key = extract_key(data, size, key_size);
+    if (key == NULL) {
+        return false;
+    }
+
+    salt = extract_key(data, size, salt_size);
+    if (salt == NULL) {
+        goto end;
+    }
+
+    if (srtp_policy_add_key(policy, key, key_size, salt, salt_size, NULL, 0) ==
+        srtp_err_status_ok) {
+        added = true;
+    }
+
+end:
+    fuzz_free(salt);
+    fuzz_free(key);
+    return added;
+}
+
+static bool extract_and_add_master_key(srtp_policy_t policy,
+                                       const uint8_t **data,
+                                       size_t *size,
+                                       size_t key_size,
+                                       size_t salt_size)
+{
+    bool added = false;
+    uint8_t *key = NULL;
+    uint8_t *salt = NULL;
+    uint16_t mki_id_size = 0;
+    const uint8_t *mki = NULL;
+    srtp_err_status_t status;
+
+    EXTRACT_IF(&mki_id_size, *data, *size, sizeof(mki_id_size));
+
+    if (*size < key_size + salt_size + mki_id_size) {
+        return false;
+    }
+
+    if (mki_id_size > SRTP_MAX_MKI_LEN) {
+        *data += key_size + salt_size + mki_id_size;
+        *size -= key_size + salt_size + mki_id_size;
+        return false;
+    }
+
+    key = extract_key(data, size, key_size);
+    if (key == NULL) {
+        return false;
+    }
+    salt = extract_key(data, size, salt_size);
+    if (salt == NULL) {
+        goto end;
+    }
+    mki = *data;
+    *data += mki_id_size;
+    *size -= mki_id_size;
+
+    if (mki_id_size > 0) {
+        status = srtp_policy_use_mki(policy, mki_id_size);
+        if (status != srtp_err_status_ok) {
+            goto end;
+        }
+    }
+
+    status = srtp_policy_add_key(policy, key, key_size, salt, salt_size, mki,
+                                 mki_id_size);
+    if (status != srtp_err_status_ok) {
+        goto end;
+    }
+
+    added = true;
+
+end:
+    fuzz_free(salt);
+    fuzz_free(key);
+    return added;
+}
+
+static srtp_policy_t extract_policy(const uint8_t **data, size_t *size)
+{
+    srtp_policy_t policy = NULL;
+    srtp_profile_t profile;
+    size_t key_size;
+    size_t salt_size;
+    srtp_err_status_t status;
+    struct {
+        uint8_t srtp_profile;
+        size_t window_size;
+        uint8_t allow_repeat_tx;
+        uint8_t ssrc_type;
+        uint32_t ssrc_value;
+        uint8_t num_xtn_hdr;
+        uint8_t do_extract_key;
+        uint8_t do_extract_master_keys;
+    } params;
+
+    EXTRACT_IF(&params, *data, *size, sizeof(params));
+
+    params.srtp_profile %=
+        sizeof(fuzz_srtp_profiles) / sizeof(fuzz_srtp_profiles[0]);
+    params.allow_repeat_tx %= 2;
+    params.ssrc_type %=
+        sizeof(fuzz_ssrc_type_map) / sizeof(fuzz_ssrc_type_map[0]);
+    profile = fuzz_srtp_profiles[params.srtp_profile].profile;
+
+    status = srtp_policy_create(&policy);
+    if (status != srtp_err_status_ok || policy == NULL) {
+        return NULL;
+    }
+
+    status = srtp_policy_set_profile(policy, profile);
+    if (status != srtp_err_status_ok) {
+        srtp_policy_destroy(policy);
+        return NULL;
+    }
+
+    key_size = srtp_profile_get_master_key_length(profile);
+    salt_size = srtp_profile_get_master_salt_length(profile);
+    if (key_size + salt_size > SRTP_MAX_KEY_LEN) {
+        /* Shouldn't happen for a public profile. */
+        abort();
+    }
+
+    status = srtp_policy_set_ssrc(
+        policy, (srtp_ssrc_t){
+                    .type = fuzz_ssrc_type_map[params.ssrc_type].srtp_ssrc_type,
+                    .value = params.ssrc_value,
+                });
+    if (status != srtp_err_status_ok) {
+        srtp_policy_destroy(policy);
+        return NULL;
+    }
+
+    if (profile != srtp_profile_null_null && (params.do_extract_key % 2) == 0) {
+        if (!extract_and_add_key(policy, data, size, key_size, salt_size)) {
+            srtp_policy_destroy(policy);
+            return NULL;
+        }
+    }
+
+    if (params.num_xtn_hdr != 0) {
+        const size_t xtn_hdr_size = params.num_xtn_hdr;
+        size_t copy_size = xtn_hdr_size;
+        if (*size < xtn_hdr_size) {
+            srtp_policy_destroy(policy);
+            return NULL;
+        }
+        if (copy_size > SRTP_MAX_NUM_ENC_HDR_XTND_IDS) {
+            copy_size = SRTP_MAX_NUM_ENC_HDR_XTND_IDS;
+        }
+        for (size_t i = 0; i < copy_size; i++) {
+            (void)srtp_policy_add_enc_hdr_xtnd_id(policy, (*data)[i]);
+        }
+        *data += xtn_hdr_size;
+        *size -= xtn_hdr_size;
+    }
+
+    if (profile != srtp_profile_null_null &&
+        (params.do_extract_master_keys % 2) == 0) {
+        while (1) {
+            uint8_t do_extract_master_key;
+            EXTRACT_IF(&do_extract_master_key, *data, *size,
+                       sizeof(do_extract_master_key));
+
+            if ((do_extract_master_key % 2) == 0) {
+                break;
+            }
+
+            if (!extract_and_add_master_key(policy, data, size, key_size,
+                                            salt_size)) {
+                break;
+            }
+        }
+    }
+
+    status = srtp_policy_set_window_size(policy, params.window_size);
+    if (status != srtp_err_status_ok) {
+        srtp_policy_destroy(policy);
+        return NULL;
+    }
+    status = srtp_policy_set_allow_repeat_tx(policy, params.allow_repeat_tx);
+    if (status != srtp_err_status_ok) {
+        srtp_policy_destroy(policy);
+        return NULL;
+    }
+
+end:
+    return policy;
+}
+
+static void extract_more_policies_to_session(const uint8_t **data,
+                                             size_t *size,
+                                             srtp_t srtp_ctx)
+{
+    while (1) {
+        uint8_t do_extract_policy;
+        srtp_policy_t policy = NULL;
+        EXTRACT_IF(&do_extract_policy, *data, *size, sizeof(do_extract_policy));
+
+        /* Decide whether to extract another policy */
+        if ((do_extract_policy % 2) == 0) {
+            break;
+        }
+
+        policy = extract_policy(data, size);
+        if (policy == NULL) {
+            break;
+        }
+
+        if (srtp_ctx != NULL) {
+            (void)srtp_stream_add(srtp_ctx, policy);
+        }
+        srtp_policy_destroy(policy);
+    }
+
+end:
+    return;
+}
+
+static uint32_t *extract_remove_stream_ssrc(const uint8_t **data,
+                                            size_t *size,
+                                            uint8_t *num_remove_stream)
+{
+    uint32_t *ret = NULL;
+    uint8_t _num_remove_stream;
+    size_t total_size;
+
+    *num_remove_stream = 0;
+
+    EXTRACT_IF(&_num_remove_stream, *data, *size, sizeof(_num_remove_stream));
+
+    if (_num_remove_stream == 0) {
+        goto end;
+    }
+
+    total_size = _num_remove_stream * sizeof(uint32_t);
+
+    if (*size < total_size) {
+        goto end;
+    }
+
+    ret = fuzz_alloc_succeed(total_size, false);
+    EXTRACT(ret, *data, *size, total_size);
+
+    *num_remove_stream = _num_remove_stream;
+
+end:
+    return ret;
+}
+
+static uint32_t *extract_set_roc(const uint8_t **data,
+                                 size_t *size,
+                                 uint8_t *num_set_roc)
+{
+    uint32_t *ret = NULL;
+    uint8_t _num_set_roc;
+    size_t total_size;
+
+    *num_set_roc = 0;
+    EXTRACT_IF(&_num_set_roc, *data, *size, sizeof(_num_set_roc));
+    if (_num_set_roc == 0) {
+        goto end;
+    }
+
+    /* Tuples of 2 uint32_t's */
+    total_size = _num_set_roc * sizeof(uint32_t) * 2;
+
+    if (*size < total_size) {
+        goto end;
+    }
+
+    ret = fuzz_alloc_succeed(total_size, false);
+    EXTRACT(ret, *data, *size, total_size);
+
+    *num_set_roc = _num_set_roc;
+
+end:
+    return ret;
+}
+
+static uint8_t *run_srtp_func(const srtp_t srtp_ctx,
+                              const uint8_t **data,
+                              size_t *size)
+{
+    uint8_t *ret = NULL;
+    uint8_t *copy = NULL, *copy_2 = NULL;
+
+    struct {
+        uint16_t size;
+        uint8_t srtp_func;
+        uint32_t mki;
+        uint8_t stretch;
+    } params_1;
+
+    struct {
+        uint8_t srtp_func;
+        uint32_t mki;
+    } params_2;
+    size_t ret_size;
+
+    EXTRACT_IF(&params_1, *data, *size, sizeof(params_1));
+    params_1.srtp_func %= sizeof(srtp_funcs) / sizeof(srtp_funcs[0]);
+
+    if (*size < params_1.size) {
+        goto end;
+    }
+
+    /* Enforce 4 byte alignment */
+    if (g_no_align == false) {
+        params_1.size -= params_1.size % 4;
+    }
+
+    if (params_1.size == 0) {
+        goto end;
+    }
+
+    ret_size = params_1.size;
+    if (srtp_funcs[params_1.srtp_func].protect == true) {
+        /* Intentionally not initialized to trigger MemorySanitizer, if
+         * applicable */
+        size_t alloc_size;
+
+        if (srtp_funcs[params_1.srtp_func].get_length(
+                srtp_ctx, params_1.mki, &alloc_size) != srtp_err_status_ok) {
+            goto end;
+        }
+
+        copy = fuzz_alloc_succeed(ret_size + alloc_size, false);
+    } else {
+        copy = fuzz_alloc_succeed(ret_size, false);
+    }
+
+    EXTRACT(copy, *data, *size, params_1.size);
+
+    if (srtp_funcs[params_1.srtp_func].srtp_func(
+            srtp_ctx, copy, &ret_size, params_1.mki) != srtp_err_status_ok) {
+        fuzz_free(copy);
+        goto end;
+    }
+    // fuzz_free(copy);
+
+    fuzz_testmem(copy, ret_size);
+
+    ret = copy;
+
+    EXTRACT_IF(&params_2, *data, *size, sizeof(params_2));
+    params_2.srtp_func %= sizeof(srtp_funcs) / sizeof(srtp_funcs[0]);
+
+    if (ret_size == 0) {
+        goto end;
+    }
+
+    if (srtp_funcs[params_2.srtp_func].protect == true) {
+        /* Intentionally not initialized to trigger MemorySanitizer, if
+         * applicable */
+        size_t alloc_size;
+
+        if (srtp_funcs[params_2.srtp_func].get_length(
+                srtp_ctx, params_2.mki, &alloc_size) != srtp_err_status_ok) {
+            goto end;
+        }
+
+        copy_2 = fuzz_alloc_succeed(ret_size + alloc_size, false);
+    } else {
+        copy_2 = fuzz_alloc_succeed(ret_size, false);
+    }
+
+    memcpy(copy_2, copy, ret_size);
+    fuzz_free(copy);
+    copy = copy_2;
+
+    if (srtp_funcs[params_2.srtp_func].srtp_func(
+            srtp_ctx, copy, &ret_size, params_2.mki) != srtp_err_status_ok) {
+        fuzz_free(copy);
+        ret = NULL;
+        goto end;
+    }
+
+    fuzz_testmem(copy, ret_size);
+
+    ret = copy;
+
+end:
+    return ret;
+}
+
+void fuzz_srtp_event_handler(srtp_event_data_t *data)
+{
+    fuzz_testmem(data, sizeof(srtp_event_data_t));
+    if (data->session != NULL) {
+        fuzz_testmem(data->session, sizeof(*data->session));
+    }
+}
+
+static void fuzz_write_input(const uint8_t *data, size_t size)
+{
+    FILE *fp = fopen("input.bin", "wb");
+
+    if (fp == NULL) {
+        /* Shouldn't happen */
+        abort();
+    }
+
+    if (size != 0 && fwrite(data, size, 1, fp) != 1) {
+        printf("Cannot write\n");
+        /* Shouldn't happen */
+        abort();
+    }
+
+    fclose(fp);
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+    char **_argv = *argv;
+    int i;
+    bool no_custom_event_handler = false;
+
+    if (srtp_init() != srtp_err_status_ok) {
+        /* Shouldn't happen */
+        abort();
+    }
+
+    for (i = 0; i < *argc; i++) {
+        if (strcmp("--no_align", _argv[i]) == 0) {
+            g_no_align = true;
+        } else if (strcmp("--no_custom_event_handler", _argv[i]) == 0) {
+            no_custom_event_handler = true;
+        } else if (strcmp("--write_input", _argv[i]) == 0) {
+            g_write_input = true;
+        }
+#ifdef FUZZ_32BIT
+        else if (strcmp("--no_mmap", _argv[i]) == 0) {
+            g_no_mmap = true;
+        }
+#endif
+    }
+
+    if (no_custom_event_handler == false) {
+        if (srtp_install_event_handler(fuzz_srtp_event_handler) !=
+            srtp_err_status_ok) {
+            /* Shouldn't happen */
+            abort();
+        }
+    }
+
+    /* Fully initialized -- past this point, simulated allocation failures
+     * are allowed to occur */
+    g_post_init = true;
+
+    return 0;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+    uint8_t num_remove_stream;
+    uint32_t *remove_stream_ssrc = NULL;
+    uint8_t num_set_roc;
+    uint32_t *set_roc = NULL;
+    srtp_t srtp_ctx = NULL;
+    srtp_policy_t policy = NULL;
+    srtp_policy_t policy_2 = NULL;
+    uint32_t randseed;
+    static bool firstrun = true;
+
+    if (firstrun == true) {
+        /* TODO version check etc and send it to MSAN */
+    }
+
+#ifdef FUZZ_32BIT
+    /* Free the mmap allocation made during the previous iteration, if
+     * applicable */
+    fuzz_free(g_mmap_allocation);
+#endif
+
+    if (g_write_input == true) {
+        fuzz_write_input(data, size);
+    }
+
+    EXTRACT_IF(&randseed, data, size, sizeof(randseed));
+    fuzz_mt19937_init(randseed);
+    srand(randseed);
+
+    /* policy is used to initialize the srtp context with */
+    if ((policy = extract_policy(&data, &size)) == NULL) {
+        goto end;
+    }
+
+    /* Create context */
+    if (srtp_create(&srtp_ctx, policy) != srtp_err_status_ok) {
+        goto end;
+    }
+
+    /* Add additional policies extracted for initial stream setup */
+    extract_more_policies_to_session(&data, &size, srtp_ctx);
+
+    /* policy_2 is used as an argument for post-create stream additions */
+    if ((policy_2 = extract_policy(&data, &size)) == NULL) {
+        goto end;
+    }
+
+    /* Consume any additional policies from this second extraction phase */
+    extract_more_policies_to_session(&data, &size, NULL);
+
+    /* Don't check for NULL result -- no extractions is fine */
+    remove_stream_ssrc =
+        extract_remove_stream_ssrc(&data, &size, &num_remove_stream);
+
+    /* Don't check for NULL result -- no extractions is fine */
+    set_roc = extract_set_roc(&data, &size, &num_set_roc);
+
+    {
+        uint8_t *ret;
+        int i = 0, j = 0;
+
+        while ((ret = run_srtp_func(srtp_ctx, &data, &size)) != NULL) {
+            fuzz_free(ret);
+
+            /* Keep removing streams until the set of SSRCs extracted from the
+             * fuzzer input is exhausted */
+            if (i < num_remove_stream) {
+                if (srtp_stream_remove(srtp_ctx, remove_stream_ssrc[i]) !=
+                    srtp_err_status_ok) {
+                    goto end;
+                }
+                i++;
+            }
+
+            /* Keep setting and getting ROCs until the set of SSRC/ROC tuples
+             * extracted from the fuzzer input is exhausted */
+            if (j < num_set_roc * 2) {
+                uint32_t roc;
+                if (srtp_stream_set_roc(srtp_ctx, set_roc[j], set_roc[j + 1]) !=
+                    srtp_err_status_ok) {
+                    goto end;
+                }
+                if (srtp_stream_get_roc(srtp_ctx, set_roc[j + 1], &roc) !=
+                    srtp_err_status_ok) {
+                    goto end;
+                }
+                j += 2;
+            }
+
+            if (policy_2 != NULL) {
+                (void)srtp_stream_add(srtp_ctx, policy_2);
+
+                /* Discard after using once */
+                srtp_policy_destroy(policy_2);
+                policy_2 = NULL;
+            }
+        }
+    }
+
+end:
+    srtp_policy_destroy(policy);
+    srtp_policy_destroy(policy_2);
+    fuzz_free(remove_stream_ssrc);
+    fuzz_free(set_roc);
+    if (srtp_ctx != NULL) {
+        srtp_dealloc(srtp_ctx);
+    }
+    fuzz_mt19937_destroy();
+
+    return 0;
+}

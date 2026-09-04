@@ -1,0 +1,113 @@
+NimRTC
+Copyright 2026 The NimRTC Authors
+
+This product includes software developed by third parties.
+The full license texts are available in the `third_party/` subdirectories.
+
+============================================================
+Cryptography
+============================================================
+
+This product includes software developed by ARM mbedTLS contributors.
+  - Source:   https://github.com/Mbed-TLS/mbedtls
+  - License:  Apache-2.0
+  - Location: third_party/mbedtls/
+
+============================================================
+SRTP
+============================================================
+
+This product includes software developed by Cisco Systems, Inc. and the
+libsrtp contributors.
+  - Source:   https://github.com/cisco/libsrtp
+  - License:  BSD-3-Clause
+  - Location: third_party/libsrtp/
+
+============================================================
+ICE / NAT traversal
+============================================================
+
+This product includes software developed by Paul-Louis Ageneau and the
+libjuice contributors.
+  - Source:   https://github.com/paullouisageneau/libjuice
+  - License:  MPL-2.0 (weak copyleft — applies to libjuice source files
+              only; not the NimRTC code that links against it)
+  - Location: third_party/libjuice/
+
+============================================================
+Codecs
+============================================================
+
+This product includes software developed by the Xiph.Org Foundation
+(libopus, opus-tools).
+  - Source:   https://github.com/xiph/opus
+  - License:  BSD-3-Clause
+  - Location: third_party/libopus/
+
+This product includes software developed by the WebM project (libvpx).
+  - Source:   https://chromium.googlesource.com/webm/libvpx
+  - License:  BSD-3-Clause
+  - Location: third_party/libvpx/   (P1/P2)
+
+============================================================
+SCTP (P2)
+============================================================
+
+This product includes software developed by the usrsctp contributors.
+  - Source:   https://github.com/sctplab/usrsctp
+  - License:  BSD-3-Clause
+  - Location: third_party/usrsctp/   (P2)
+
+============================================================
+Audio processing (P2)
+============================================================
+
+This product includes software from the WebRTC project (audio processing
+module, including AEC/ANS/AGC).
+  - Source:   https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_processing/
+  - License:  BSD-3-Clause
+  - Location: third_party/webrtc_audio_processing/   (P2)
+
+============================================================
+Build / Test dependencies
+============================================================
+
+This product includes software developed by Google (GoogleTest).
+  - Source:   https://github.com/google/googletest
+  - License:  BSD-3-Clause
+  - Scope:    test-only
+
+This product includes software developed by Niels Lohmann (nlohmann/json).
+  - Source:   https://github.com/nlohmann/json
+  - License:  MIT
+  - Scope:    header-only, runtime
+
+This product includes software developed by Gabi Melman (spdlog, optional).
+  - Source:   https://github.com/gabime/spdlog
+  - License:  MIT
+  - Scope:    optional logging backend
+
+============================================================
+Test tools (NOT shipped in release artifacts)
+============================================================
+
+This product uses FFmpeg and opus-tools during CI for test vector
+generation. These tools are invoked as external processes and are NOT
+vendored into the source tree or distributed with release artifacts.
+  - FFmpeg:   https://ffmpeg.org/  (LGPL/GPL, only as test tool)
+  - opus-tools: https://github.com/xiph/opus-tools  (BSD)
+
+============================================================
+Reference materials
+============================================================
+
+NimRTC draws on protocol descriptions, RFCs, and test vectors from
+public standards bodies and open-source projects. Refer to NOTICE files
+within each `third_party/` subdirectory for module-specific acknowledgements.
+Reference materials do NOT include code copied verbatim from upstream
+sources; only protocol definitions and interface conventions are reused
+(see docs/license/borrowing.md).
+
+For the complete borrowing policy, see:
+  - docs/license/borrowing.md (when published)
+  - §11.8 of docs/NimRTC-V2-技术文档.md

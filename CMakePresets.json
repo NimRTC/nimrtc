@@ -1,0 +1,172 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "installDir": "${sourceDir}/install"
+    },
+    {
+      "name": "dev.clang",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "dev.gcc",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "dev.msvc",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "description": "Debug build with symbols and sanitizers disabled",
+      "inherits": ["dev", "dev.gcc"],
+      "configurePreset": "dev.gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "debug.msvc",
+      "displayName": "Debug (MSVC)",
+      "description": "Debug build using Visual Studio toolchain",
+      "inherits": ["dev", "dev.msvc"],
+      "configurePreset": "dev.msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "description": "Optimised release build",
+      "inherits": ["dev", "dev.gcc"],
+      "configurePreset": "dev.gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "release.msvc",
+      "displayName": "Release (MSVC)",
+      "description": "Optimised release build using Visual Studio toolchain",
+      "inherits": ["dev", "dev.msvc"],
+      "configurePreset": "dev.msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer",
+      "description": "Debug build with AddressSanitizer enabled",
+      "inherits": ["dev", "dev.gcc"],
+      "configurePreset": "dev.gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "ON",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan.msvc",
+      "displayName": "AddressSanitizer (MSVC)",
+      "description": "Debug build with MSVC AddressSanitizer enabled",
+      "inherits": ["dev", "dev.msvc"],
+      "configurePreset": "dev.msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "ON",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "ubsan",
+      "displayName": "UndefinedBehaviourSanitizer",
+      "description": "Debug build with UndefinedBehaviourSanitizer enabled",
+      "inherits": ["dev", "dev.gcc"],
+      "configurePreset": "dev.gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "ON",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage",
+      "description": "Debug build with coverage instrumentation",
+      "inherits": ["dev", "dev.gcc"],
+      "configurePreset": "dev.gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "--coverage",
+        "CMAKE_EXE_LINKER_FLAGS": "--coverage",
+        "NIMRTC_BUILD_TESTS": "ON",
+        "NIMRTC_WARNINGS_AS_ERRORS": "OFF"
+      }
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "tests",
+      "displayName": "Run tests",
+      "description": "Run all tests via ctest",
+      "inherits": ["debug"],
+      "configurePreset": "debug",
+      "output": "quiet",
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+name: Bug Report
+
+description: Report something that is broken or behaves unexpectedly
+title: "[Bug] "
+labels: [bug]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug description
+        A clear description of the bug. What did you expect to happen, and what actually happened?
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce the issue? Be as specific as possible.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happens?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: version
+    attributes:
+      label: NimRTC version
+      options:
+        - latest main
+        - v0.1.x
+        - other (please specify in description)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - other (please specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Any other relevant information (compiler version, CMake flags, logs, etc.)

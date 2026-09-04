@@ -1,0 +1,69 @@
+# CMake / build system
+build/
+build_*/
+build-*/
+build*/
+out/
+cmake-configure.log
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+CTestTestfile.cmake
+_deps/
+CMakeUserPresets.json
+
+# Ninja
+.ninja/
+.ninja_log
+.ninja_deps
+
+# MSVC / VS
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.obj
+*.pch
+*.ipch
+*.aps
+*.res
+*.tlog
+*.log
+*.bak
+*.exe
+*.dll
+*.lib
+*.o
+*.a
+CTestTestfile.cmake
+
+# Tooling lock / unlock helpers (development-time only)
+force_write.ps1
+write_engine.ps1
+write_via_rename.ps1
+find_lock.ps1
+delete_locked.ps1
+
+# Captured stdio / dangling test artifacts
+stderr.txt
+stdout.txt
+test_detail.xml
+test_offer.sdp
+mbedtls-4.2.0.tar.gz
+mbedtls-extract/
+
+# CTest scratch
+Testing/
+
+# OS / editor cruft
+Thumbs.db
+*.swp
+*~
+.DS_Store

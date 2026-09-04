@@ -1,0 +1,30 @@
+# Code Owners
+#
+# Each module and top-level area has a designated owner who is responsible for:
+# - reviewing changes to the module's public API
+# - maintaining the module's CHANGELOG entry
+# - answering questions about design decisions
+#
+# Format: each line is `path glob    owner`
+# More specific paths take precedence.
+
+# ---- Core library ----
+src/core/                    @nimrtc/maintainers
+
+# ---- Modules ----
+src/modules/rtp/             @nimrtc/agent-rtpcodec
+src/modules/sdp/             @nimrtc/agent-sdp
+src/modules/jb/              @nimrtc/agent-jitterbuffer
+
+# ---- Build & CI ----
+CMakeLists.txt               @nimrtc/maintainers
+cmake/                       @nimrtc/maintainers
+.github/                     @nimrtc/maintainers
+CMakePresets.json            @nimrtc/maintainers
+
+# ---- Documentation ----
+docs/                        @nimrtc/maintainers
+docs/zh/                     @nimrtc/maintainers
+
+# ---- Root project files ----
+*                            @nimrtc/maintainers

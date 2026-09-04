@@ -1,7 +1,4 @@
 # CMake / build system
-build/
-build_*/
-build-*/
 build*/
 out/
 cmake-configure.log
@@ -19,7 +16,7 @@ CMakeUserPresets.json
 .ninja_log
 .ninja_deps
 
-# MSVC / VS
+# MSVC / VS / generic binary build artifacts
 .vs/
 *.sln
 *.vcxproj
@@ -35,16 +32,14 @@ CMakeUserPresets.json
 *.aps
 *.res
 *.tlog
-*.log
 *.bak
 *.exe
 *.dll
 *.lib
 *.o
 *.a
-CTestTestfile.cmake
 
-# Tooling lock / unlock helpers (development-time only)
+# Tooling lock / unlock helpers (development-time only, safe to keep ignored)
 force_write.ps1
 write_engine.ps1
 write_via_rename.ps1

@@ -1,3 +1,17 @@
-libjuice   77daa8befd828046169adbb012d8de928bfdcdd4
-libsrtp    2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2
-mbedtls    023aca86208a4f1e602b4098fb46d936adb4657a
+# Vendored upstream library versions
+#
+# Format: <name>   <release-or-tag>   <short-sha>   <full-sha>   <vendored-on>   <url>
+#
+# These libraries are vendored as source (not submodules). To update:
+#   1. rm -rf <dir>/src
+#   2. git clone --depth=1 <url> <dir>/src
+#   3. update this file with the new SHA
+#   4. add the change to src/third_party/<name>/SOURCE_VERSIONS update commit
+#
+# Do NOT delete this file even if you update the libraries — the SHA is the
+# only ground truth for what the consumer (us) tested against.
+
+libjuice    master      77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
+libsrtp     master      2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
+mbedtls     4.2.0       023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
+libopus     (stub)      -         -                                              -            https://github.com/xiph/opus

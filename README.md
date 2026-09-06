@@ -1,7 +1,7 @@
 # NimRTC
 
-> ⚠️ **Status: experimental — not for production use.**
-> 当前处于 P0 脚手架阶段（v0.12 文档设计期）。所有发布版本在 1.0 之前不得用于生产环境。详见 `docs/zh/NimRTC-V2-技术文档.md` §11.1 安全声明。
+> ⚠️ **Status: 0.9.0-rc1 (Release Candidate) — Windows-only validation.**
+> 本次发布是 **0.9.0-rc1**，不是 1.0。Chrome DTLS 互通尚未完成（详见 [CHANGELOG](CHANGELOG.md) "Known issues"）。**所有验证仅在 Windows 10 / MSVC 上完成**，Linux / macOS / 移动平台均未验证，CMake 在那些平台可能 configure 通过，但**不要在没有跑通完整测试和 e2e 验收的情况下在非 Windows 平台上部署**。
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 
@@ -11,21 +11,17 @@
 
 ## Quick Start
 
-**Prerequisites**: CMake ≥ 3.25 · C++20-capable compiler (MSVC 19.30+ / GCC 10+ / Clang 12+ / Apple Clang 14+) · Ninja · Python 3.8+ (only for vendor scripts).
+**Prerequisites**: CMake ≥ 3.20 · **MSVC 19.30+ (Windows 10/11 only for this RC)** · Ninja · Python 3.8+ (for the e2e harness).
 
-**Clone and configure** (Linux / macOS):
-
-```bash
-git clone https://github.com/<your-org>/nimrtc.git
-cd nimrtc
-cmake --preset dev              # → uses default host toolchain
-cmake --build build -j
-```
+> ⚠️ The "GCC 10+ / Clang 12+ / Apple Clang 14+" prerequisite listed in earlier
+> drafts is **not** valid for 0.9.0-rc1. The project may configure on those
+> platforms, but build + test + e2e acceptance have only been run on Windows.
+> See `CHANGELOG.md` "Platform support notice".
 
 **Clone and configure** (Windows, MSVC + Ninja, x64 dev prompt):
 
 ```bat
-git clone https://github.com/<your-org>/nimrtc.git
+git clone --recurse-submodules https://github.com/NimRTC/nimrtc.git
 cd nimrtc
 cmake --preset dev.msvc
 cmake --build build --config Debug -j
@@ -33,21 +29,31 @@ cmake --build build --config Debug -j
 
 **Run all tests** (after build):
 
-```bash
+```bat
 ctest --preset tests --output-on-failure
 ```
 
 **Run the loopback-p2p smoke test** (two in-process agents handshake over real UDP):
 
-```bash
+```bat
 cmake -B build -DNIMRTC_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target loopback-p2p
-./build/examples/loopback-p2p/loopback-p2p
+.\build\examples\Debug\loopback-p2p.exe
 ```
 
-If you see `ICE connected, session established, exiting 0` — you're good.
+**Run the full end-to-end acceptance suite** (includes NimRTC↔Chrome via Playwright):
 
-> **First-build note**: `libopus` is shipped as a stub `CMakeLists.txt` (see `src/third_party/libopus/`). Until `git clone https://github.com/xiph/opus.git src/third_party/libopus/src`, only the loopback example builds (no audio path). The vendored versions of `libjuice`, `libsrtp`, and `mbedtls` are pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS).
+```bat
+python tools\run_e2e_acceptance.py
+```
+
+Artifacts land in `build/e2e/`.
+
+> **First-build note**: `libopus` is shipped as a stub `CMakeLists.txt` (see
+> `src/third_party/libopus/`). Until `git clone https://github.com/xiph/opus.git
+> src/third_party/libopus/src`, only the loopback example builds (no audio
+> path). The vendored versions of `libjuice`, `libsrtp`, and `mbedtls` are
+> pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS).
 
 ---
 
@@ -67,7 +73,7 @@ If you see `ICE connected, session established, exiting 0` — you're good.
 下面这些**单点都不新**，但**组合在一起**在 2026 年的开源 WebRTC 生态里是少见的：
 
 1. **分层剪裁 + Profile 组合**——L0/L1/L2/L3 模块化，编译时选层。同一份代码既能发出 P2P 客户端（全栈），也能发出 SFU 网关（**跳过 L2**）。LiveKit / mediasoup 是 server-only，libwebrtc 是 monolithic，不能切层切到这个粒度。
-2. **首期平台矩阵一致**——`x86_64-linux/macos/windows` + `aarch64-linux-gnu` **同一个 codebase**。aarch64 CI 编译由 GitHub Actions ARM runner 兜底（P0/P1 是编译验证，互通验证在 x86_64 CI）。
+2. **首期平台：Windows-only（0.9.0-rc1）** —— 0.9.0-rc1 阶段只在 Windows 10 / MSVC 上验证过构建、单测、e2e 互通（含真实 Chrome）。Linux/macOS/aarch64 路线图上是 P1/P2 目标，**当前 RC 不要在那上面部署**。
 3. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
 4. **三层 + Profile 显式公开**——`docs/zh/NimRTC-V2-技术文档.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
 

@@ -1,12 +1,12 @@
 # Enforce C++20 before project() so all targets inherit it.
 # Rationale: std::span (core/bytes.hpp) is used pervasively for media buffer
-# views and requires C++20. The technical doc §13 originally locked C++17 for
-# ARM GCC compatibility; that decision is re-opened here because:
-#   - As of 2026, every compiler we target (MSVC 19.30+, GCC 10+, Clang 12+,
-#     Apple Clang 14+) has full C++20 support per cmake/NimRTCOptions.cmake.
-#   - Removing std::span to honour the original C++17 lock would be a large
-#     refactor for diminishing returns on platforms we already support.
-# See docs/zh/NimRTC-V2-技术文档.md §13 (decision: C++17 → C++20, 2026-09-03).
+# views and requires C++20.
+#
+# PLATFORM NOTE (0.9.0-rc1): this RC has ONLY been built + tested on
+# Windows 10 / MSVC 19.30+. The compiler list below documents *intended*
+# future support, NOT verified support for this release. See CHANGELOG.md
+# "Platform support notice" before reporting build failures on other
+# compilers — they are expected and out of scope for this RC.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_minimum_required(VERSION 3.20)

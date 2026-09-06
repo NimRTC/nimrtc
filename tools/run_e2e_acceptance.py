@@ -195,8 +195,57 @@ def run_chrome_interop() -> bool:
             print(f"   | {ln}")
         print(f"[rc]  e2e_chrome_interop.py exit={rc_chrome}")
 
+        # Real pass/fail is in the JSON block.  We assert on:
+        #   wsConnected   — signaling plane
+        #   iceConnected  — ICE completed
+        #   sdpOfferSeen  — Chrome produced an offer (offerer side)
+        #   audioReceived — Chrome actually received RTP audio (i.e. DTLS
+        #                   handshake finished AND SRTP unwrap worked)
+        #   rtpPackets    — sanity check that media flowed
+        #   errors        — must be empty
+        # We do NOT treat "ICE Connected but DTLS failed" as PASS — that was
+        # a bug in earlier revisions of this script.
+        ok = False
+        results_obj: dict = {}
+        try:
+            text = chrome_log.read_text(errors="replace")
+            # Look for the JSON results block between markers.
+            marker = "=== Chrome interop results ==="
+            i = text.find(marker)
+            if i < 0:
+                print("[FAIL] no results marker found in chrome log")
+            else:
+                tail_block = text[i + len(marker):]
+                j = tail_block.find("{")
+                k = tail_block.find("}", j) if j >= 0 else -1
+                if j < 0 or k < 0:
+                    print("[FAIL] could not locate JSON in results block")
+                else:
+                    cand = tail_block[j:k+1]
+                    try:
+                        results_obj = json.loads(cand)
+                    except json.JSONDecodeError as e:
+                        print(f"[FAIL] JSON decode error: {e}")
+        except Exception as e:
+            print(f"[FAIL] error parsing chrome log: {e}")
+
+        if results_obj:
+            checks = {
+                "wsConnected":   results_obj.get("wsConnected")  is True,
+                "iceConnected":  results_obj.get("iceConnected") is True,
+                "sdpOfferSeen":  results_obj.get("sdpOfferSeen") is True,
+                "audioReceived": results_obj.get("audioReceived") is True,
+                "rtpPackets>0":  (results_obj.get("rtpPackets") or 0) > 0,
+                "errors==[]":    not results_obj.get("errors"),
+            }
+            for name, passed in checks.items():
+                print(f"   | check {name:18s}: {'OK' if passed else 'FAIL'}")
+            ok = all(checks.values())
+
+        if not ok and rc_chrome == 0:
+            print("[FAIL] chrome script exit=0 but result assertions FAILED")
         rc_overall = rc_chrome
-        return rc_chrome == 0
+        return ok
 
     finally:
         # Tear everything down (port-first, then process).

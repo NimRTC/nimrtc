@@ -5,9 +5,101 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-09-06
+## ?? Platform support notice
 
-### Added
+**This release has only been validated on Windows 10 / MSVC.**
+Linux, macOS, Android, and iOS are **NOT** verified for any sub-version of
+0.9.0-rc1. CMake configuration will likely succeed on those platforms
+but the build, the vendored DTLS, and the end-to-end acceptance harness
+have not been exercised. **Do not** deploy 0.9.0-rc1 on any non-Windows
+platform without first running the full test + acceptance suite there.
+
+## [0.9.0-rc1] - 2026-09-06
+
+### Status: Release Candidate ? NOT a stable release
+
+**Pre-release / RC quality.** This is the first tagged artefact intended
+for external review. The Chrome DTLS interop story is **incomplete**;
+see "Known issues" below.
+
+### Verified on Windows 10 / MSVC
+
+| Layer                                | Status |
+|--------------------------------------|--------|
+| AES-128-GCM AEAD (BCrypt round-trip) | ? PASS |
+| DTLS 1.2 client/server (NimRTC ? NimRTC loopback) | ? PASS |
+| ICE + STUN/host candidates           | ? PASS |
+| DTLS 1.2 with real Chrome (BoringSSL)| ?? Partial ? see below |
+
+### What works against real Chrome (verified)
+
+- ICE host candidate gathering, ICE connectivity check, ICE Connected
+  state observed by both peers.
+- SDP offer/answer exchange over the WebSocket signaling server.
+- DTLS 1.2 ClientHello / HelloVerifyRequest / ClientHello (cookie)
+  sequence.
+- DTLS 1.2 ServerHello + Certificate + ServerKeyExchange +
+  ServerHelloDone flight emitted by NimRTC with a syntactically valid
+  DER-encoded X.509v3 cert, ECDSA-P256 signature on
+  `client_random || server_random || server_params`, and a
+  `supported_versions` extension advertising DTLS 1.2.
+
+### Known issues (DTLS ? Chrome)
+
+- **Chrome rejects NimRTC's ServerHello flight.** The NimRTC-side DTLS
+  state machine computes a `verify_data` for the server Finished
+  message (visible in `build/e2e/nimrtc_chrome.trace`), but Chrome's
+  BoringSSL DTLS layer never sends a `ClientKeyExchange` ? it keeps
+  retransmitting ClientHellos and eventually times out with
+  `connectionState=failed`. Suspected causes:
+    - Cipher suite mismatch: NimRTC negotiates
+      `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` (0xC023); modern Chrome
+      prefers `0xC02B` (AES-128-GCM) or `0xCCA9` (ChaCha20-Poly1305).
+      GCM requires implementing the AEAD nonce/explicit-IV twist
+      (RFC 5288 / RFC 5246 �6.2.3.2) in the DTLS record layer.
+    - X.509 cert: Chrome's BoringSSL parser is strict; the current
+      self-signed cert is minimal (single CN, no extensions, no
+      `basicConstraints CA:FALSE`, no `subjectAltName`).
+    - Certificate chain: BoringSSL may require a non-empty issuer
+      chain even when the fingerprint matches the SDP pin.
+- **As a result, no RTP/SRTP media is exchanged.** Chrome reports
+  `audioReceived=false`, `rtpPackets=0`, `connectionState=failed`.
+  This is a known blocker for using NimRTC with real-world WebRTC
+  peers; it is tracked separately and is **not** fixed in 0.9.0-rc1.
+- **`run_e2e_acceptance.py` Case D was previously misreporting PASS.**
+  Older revisions only checked the `e2e_chrome_interop.py` exit code
+  (which is 0 whenever the script runs to completion ? even when
+  Chrome reports `connectionState=failed`). 0.9.0-rc1 ships with a
+  tightened assertion that requires `wsConnected=true`,
+  `iceConnected=true`, `sdpOfferSeen=true`, `audioReceived=true`,
+  `rtpPackets>0`, and `errors==[]`. As a result, Case D will
+  **FAIL** against real Chrome at HEAD; this is intentional and
+  documents the current state.
+
+### Deferred for 1.0.0 (post-RC)
+
+- **Vendor sources are checked into the tree** instead of being pulled via
+  `git submodule` + a `vendor.json` manifest. 0.9.0-rc1 ships a ~280 MB
+  checkout because upstream mbedtls / libopus / libjuice / libsrtp /
+  googletest / nlohmann_json source trees are committed directly. This
+  means upstream security patches must be merged by hand. Migrating to
+  submodules + a `vendor.json` manifest with SHA256-pinned tags is a
+  blocker for the 1.0.0 tag.
+- **Signaling answerer bridge for real Chrome is not implemented.**
+  The WebSocket signaling server (`interop/signaling/signaling_server.py`)
+  is wired up, but the NimRTC demo binary does not yet consume the
+  buffered offer / ICE candidates from the WS ? it expects SDP on the
+  CLI. As a result, `run_interop.py` (the older harness) cannot reach
+  the full Chrome?NimRTC audio round-trip yet. The new
+  `tools/run_e2e_acceptance.py` Case D works around this by going
+  through `signaling_proxy` instead.
+- **Cross-platform validation is out of scope.** Linux, macOS, and
+  aarch64 builds have not been executed at HEAD; CI has been reduced
+  to Windows-only to avoid false-positive green ticks. Linux/macOS
+  support is a 1.0.0 acceptance gate.
+
+### What's in this RC
+
 - **`src/` directory as canonical source layout**
 - `.clang-format`, `.editorconfig`, `.gitattributes` for consistent formatting
 - `CMakePresets.json` for `cmake --preset` workflows
@@ -19,89 +111,99 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `cmake/NimRTCOptions.cmake`: standardised C++20 flags and MSVC/GCC/Clang warnings
 - `cmake/NimRTCVendored.cmake`: convenience wrappers for linking vendor libraries
 - `cmake/NimRTCTest.cmake`: `nimrtc_add_test()` macro with GoogleTest integration
-- vendored libjuice 77daa8b, libsrtp 2f82ec0, mbedtls 4.2.0 source trees (un-stubs P0 vendor plumbing)
-- R2.5: `plugins::IICETransport` interface (extends `ITransport`) and `plugins::IICETransportFactory`, registered via `PluginRegistry::register_ice_transport()` / `get_ice_transport()`; the engine and demo now reach ICE-specific methods through `engine.get_ice_transport()`, removing the previous `dynamic_cast<ice::IceTransport*>` leak. New header: `src/plugins/include/nimrtc/plugins/ice_transport.hpp`.
-- P2: PCM tap interface on `IAudio3A` (§8.7 of the technical doc) — `set_pre_process_tap()` and `set_post_process_tap(PcmTapCallback, PcmTapCallbackI16)` plus the supporting `PcmFrameMetadata` struct, allowing wake-word engines to see raw mic PCM pre-3A and ASR engines to see 3A-cleaned PCM in float32 or int16. Design rationale captured in ADR-008.
-- P0 vendor: third-party sources for libjuice (`77daa8b`), libsrtp (`2f82ec0`) and mbedtls (`023aca8`) materialised on disk with submodules initialised; CMake wrappers unchanged.
-- P0 fetch: nlohmann_json FetchContent now supports a four-tier offline fallback — `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged tarball at `${CMAKE_BINARY_DIR}/_deps-cache/nlohmann_json.tar.xz`, `NLOHMANN_JSON_ARCHIVE` user-supplied archive, and online fetch from github.com with SHA256 verification.
-- Interop harness: `interop/run_interop.py` now drives Chrome via Playwright (with a subprocess fallback) so `_interopResults` is actually extracted from the headless page instead of being silently discarded.
+- vendored libjuice, libsrtp, mbedtls source trees (P0 vendor plumbing)
+- R2.5: `plugins::IICETransport` interface (extends `ITransport`) and
+  `plugins::IICETransportFactory`, registered via
+  `PluginRegistry::register_ice_transport()` / `get_ice_transport()`; the
+  engine and demo now reach ICE-specific methods through
+  `engine.get_ice_transport()`, removing the previous
+  `dynamic_cast<ice::IceTransport*>` leak. New header:
+  `src/plugins/include/nimrtc/plugins/ice_transport.hpp`.
+- P2: PCM tap interface on `IAudio3A` ? `set_pre_process_tap()` and
+  `set_post_process_tap(PcmTapCallback, PcmTapCallbackI16)` plus the
+  supporting `PcmFrameMetadata` struct, allowing wake-word engines to
+  see raw mic PCM pre-3A and ASR engines to see 3A-cleaned PCM in
+  float32 or int16. Design rationale captured in ADR-008.
+- P0 vendor: third-party sources for libjuice, libsrtp and mbedtls
+  materialised on disk; CMake wrappers unchanged.
+- P0 fetch: nlohmann_json FetchContent now supports a four-tier offline
+  fallback ? `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged
+  tarball at `${CMAKE_BINARY_DIR}/_deps-cache/nlohmann_json.tar.xz`,
+  `NLOHMANN_JSON_ARCHIVE` user-supplied archive, and online fetch from
+  github.com with SHA256 verification.
+- Interop harness: `interop/run_interop.py` now drives Chrome via
+  Playwright (with a subprocess fallback) so `_interopResults` is
+  actually extracted from the headless page instead of being silently
+  discarded.
+- **`tools/run_e2e_acceptance.py`** ? automated 4-case acceptance
+  orchestrator with tightened result assertions for Case D.
 
 ### Changed
-- **Vendored nlohmann_json 3.11.3** as a single-header INTERFACE library at `src/third_party/nlohmann_json/`. Top-level CMakeLists no longer fetches nlohmann_json via FetchContent; assembly module now builds fully offline. See `src/third_party/nlohmann_json/LICENSE.MIT` (MIT, Copyright (c) 2013-2022 Niels Lohmann).
-- **Vendored GoogleTest 1.12.1** at `src/third_party/googletest/`. Replaces FetchContent in `cmake/NimRTCTest.cmake`. All builds (configure + build + test) are now fully offline. License: BSD-3-Clause (Copyright 2008 Google Inc.). GoogleMock is disabled by default (`BUILD_GMOCK=OFF`) because `tests/` do not use it.
+
+- **Vendored nlohmann_json 3.11.3** as a single-header INTERFACE library
+  at `src/third_party/nlohmann_json/`. Top-level CMakeLists no longer
+  fetches nlohmann_json via FetchContent; assembly module now builds
+  fully offline. License: MIT (Copyright (c) 2013-2022 Niels Lohmann).
+- **Vendored GoogleTest 1.12.1** at `src/third_party/googletest/`.
+  Replaces FetchContent in `cmake/NimRTCTest.cmake`. All builds
+  (configure + build + test) are now fully offline. License: BSD-3-Clause
+  (Copyright 2008 Google Inc.). GoogleMock is disabled by default.
+- **CI matrix reduced to Windows-only.** The previous `ci.yml` and
+  `interop.yml` advertised a Linux/macOS/aarch64 matrix that produced
+  false-positive green ticks (those platforms were never actually
+  exercised). Both workflows now run only on `windows-2022` /
+  MSVC. Re-introducing cross-platform jobs is a 1.0.0 gate.
 
 ### Fixed
-- CMake: `nimrtc_add_test` unknown command (moved `include(NimRTCTest)` before `add_subdirectory(modules)`)
+
+- CMake: `nimrtc_add_test` unknown command (moved `include(NimRTCTest)`
+  before `add_subdirectory(modules)`)
 - CMake: duplicate `DEPS` keyword in `cmake_parse_arguments`
-- `.gitignore`: added `cmake-configure.log`, `.vs/`, `CMakeUserPresets.json`
-- Interop: `signaling_server.py` handler now reads connection path via `ws.path` (websockets 13.x legacy protocol) instead of the missing `ws.request`, so per-path room routing actually works.
-- **`HwSeam.IsHwAcceleratedHelperDetectsHwPlugin`** test was crashing with SEH `0xc0000005`. Root cause: the test queried `PluginRegistry::get_video_sender("reference")` without first calling `register_default_plugins()` to populate the registry. Fixed by adding the three `register_default_plugins()` calls (video_source / video_sink / video_pipeline) at the top of the test, matching the pattern used by every other test in `tests/test_hw_plugin_seam.cpp`.
-- **DTLS handshake with Chrome — ServerHello / Certificate / ServerKeyExchange now sent**.  Previously, the NimRTC DTLS server path only emitted `ServerHello + ServerKeyExchange + ServerHelloDone`, omitting the mandatory `Certificate` handshake message, and the ServerKeyExchange signature was a raw SHA-256 digest instead of an ECDSA signature.  Chrome's BoringSSL rejects both, causing the ClientHello retransmit loop observed in `build/_proxy.log`.  Fixed in `src/modules/dtls/src/dtls.cpp`:
-  - Added `build_self_signed_cert()` that emits a syntactically valid DER-encoded X.509v3 certificate (`SubjectPublicKeyInfo` wrapping the ECDSA P-256 pubkey) and self-signs the TBSCertificate via `BCryptSignHash` against the ECDSA keypair.  Cert is cached at `open()` and embedded in the `Certificate` handshake message sent between `ServerHello` and `ServerKeyExchange`.
-  - Added a separate ECDSA P-256 keypair (`ecdsa_alg`/`ecdsa_key`) since BCrypt binds key handles to their alg provider and `BCryptSignHash` rejects ECDH-bound keys.  ECDSA keypair shares its certificate's pubkey with the SDP-pinned fingerprint (fingerprint now computed from the cert's SPKI, not the ECDH pubkey).
-  - ServerKeyExchange signature now uses `bcrypt_ecdsa_sign_der()` which calls `BCryptSignHash` on a SHA-256 digest of `(client_random || server_random || server_params)` and re-encodes the raw r||s output as ASN.1 DER `SEQUENCE { INTEGER r, INTEGER s }`.  Wire format: 2-byte big-endian length prefix + DER bytes.
-  - ServerHello `legacy_version` changed from `0xFEFF` (DTLS 1.0) to `0xFEFD` (DTLS 1.2) and now carries a `supported_versions` extension (`type 0x002B`, value `0xFEFD`) — modern Chrome (≥M150) requires this to confirm DTLS 1.2 was selected since their ClientHello's `legacy_version=0xFEFF` is treated as DTLS 1.0 without the explicit extension.
-  - DER helpers added: `der_encode_integer`, `der_encode_oid`, `der_encode_utctime`, `der_wrap_sequence`.  All use length-prefix encoding with the proper ASN.1 tag byte.
+- `.gitignore`: added `cmake-configure.log`, `.vs/`,
+  `CMakeUserPresets.json`, `__pycache__/`, `*.py[cod]`
+- Interop: `signaling_server.py` handler now reads connection path via
+  `ws.path` (websockets 13.x legacy protocol) instead of the missing
+  `ws.request`, so per-path room routing actually works.
+- **`HwSeam.IsHwAcceleratedHelperDetectsHwPlugin`** test was crashing
+  with SEH `0xc0000005`. Root cause: the test queried
+  `PluginRegistry::get_video_sender("reference")` without first calling
+  `register_default_plugins()` to populate the registry. Fixed by adding
+  the three `register_default_plugins()` calls at the top of the test.
+- **DTLS handshake with Chrome ? ServerHello / Certificate /
+  ServerKeyExchange now sent**.  Previously, the NimRTC DTLS server
+  path only emitted `ServerHello + ServerKeyExchange + ServerHelloDone`,
+  omitting the mandatory `Certificate` handshake message, and the
+  ServerKeyExchange signature was a raw SHA-256 digest instead of an
+  ECDSA signature.  Chrome's BoringSSL rejects both, causing the
+  ClientHello retransmit loop observed in `build/_proxy.log`.  Fixed
+  in `src/modules/dtls/src/dtls.cpp`:
+  - Added `build_self_signed_cert()` that emits a syntactically valid
+    DER-encoded X.509v3 certificate (`SubjectPublicKeyInfo` wrapping the
+    ECDSA P-256 pubkey) and self-signs the TBSCertificate via
+    `BCryptSignHash` against the ECDSA keypair.  Cert is cached at
+    `open()` and embedded in the `Certificate` handshake message sent
+    between `ServerHello` and `ServerKeyExchange`.
+  - Added a separate ECDSA P-256 keypair (`ecdsa_alg`/`ecdsa_key`) since
+    BCrypt binds key handles to their alg provider and `BCryptSignHash`
+    rejects ECDH-bound keys.  ECDSA keypair shares its certificate's
+    pubkey with the SDP-pinned fingerprint (fingerprint now computed
+    from the cert's SPKI, not the ECDH pubkey).
+  - ServerKeyExchange signature now uses `bcrypt_ecdsa_sign_der()` which
+    calls `BCryptSignHash` on a SHA-256 digest of
+    `(client_random || server_random || server_params)` and re-encodes
+    the raw r||s output as ASN.1 DER `SEQUENCE { INTEGER r, INTEGER s }`.
+  - ServerHello `legacy_version` changed from `0xFEFF` (DTLS 1.0) to
+    `0xFEFD` (DTLS 1.2) and now carries a `supported_versions` extension
+    (`type 0x002B`, value `0xFEFD`).
+  - DER helpers added: `der_encode_integer`, `der_encode_oid`,
+    `der_encode_utctime`, `der_wrap_sequence`.
   - `teardown_crypto()` extended to release the ECDSA key/alg handles.
-  Verified: ICE completes (`connected` → `completed`), NimRTC sends the full ServerHello + Certificate (336 bytes) + ServerKeyExchange (167 bytes) + ServerHelloDone (25 bytes) DTLS flight.  Chrome still retransmits ClientHellos after this flight, which suggests an additional cert/SPKI or signature-format mismatch — see `Known issues` below.
+  Verified: ICE completes, NimRTC sends the full ServerHello +
+  Certificate (336 bytes) + ServerKeyExchange (167 bytes) +
+  ServerHelloDone (25 bytes) DTLS flight.  Chrome still rejects the
+  flight (see "Known issues" above).
 
-### Known issues (deferred)
-- **Chrome DTLS still rejects NimRTC's ServerHello flight** — After the
-  fixes above, NimRTC emits the full ServerHello + Certificate +
-  ServerKeyExchange + ServerHelloDone flight, but Chrome continues to
-  retransmit ClientHello (logged in `build/_proxy.log` as four
-  ClientHellos before ICE fails with "Consent expired").  The most likely
-  remaining issues:
-  - **DTLS cipher**: NimRTC selects `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256`
-    (`0xC023`).  Modern Chrome prefers `0xC02B` (AES-128-GCM) or `0xCCA9`
-    (ChaCha20-Poly1305).  Switching to GCM requires implementing the
-    AES-GCM AEAD nonce/explicit-IV twist in the DTLS record layer — see
-    RFC 5288 / RFC 5246 §6.2.3.2.
-  - **X.509 cert parse**: Chrome's BoringSSL X.509 parser is strict.
-    The current self-signed cert is structurally minimal (single CN,
-    no extensions, no AIA, no SKI/AKI).  A more complete cert with
-    `basicConstraints CA:FALSE` and `subjectAltName` may be required.
-  - **Certificate verify chain**: Even with fingerprint match, BoringSSL
-    may require a non-empty `issuer` chain.  Test with `--enable-features=...
-    WebRtcAllowInputVolumeAdjustment` or by adding a debug callback to
-    Chrome to inspect the verify error.
-  *Reproduction*: `python build/orchestrate_e2e_v2.py` (after `cmake
-  --build build --config Debug --target demo-p2p`).
-- **`chrome_opus_interop` partial fix — NimRTC still has no signaling answerer bridge.**
-  Identified 2026-09-05 during R3 regression.
-  *What is now fixed (2026-09-05, 07:53)*:
-    - `interop/signaling/signaling_server.py`: handler now reads the connection
-      path via `ws.path` (websockets 13.x legacy protocol exposes the URL path
-      there; `ws.request` is absent). Without this fix the path was always empty
-      and rooms were routed by `args.room` default only. Verified: log now shows
-      `WS HANDSHAKE: path='/interop' room_id='interop'` for Chrome connections.
-    - `interop/run_interop.py`: `ChromeBrowser` rewritten on top of Playwright
-      (with a subprocess fallback) so that `window._interopResults` is actually
-      extracted from the headless page. Subprocess launch was launching Chrome
-      correctly but never reading results back, so the test always reported
-      "did not connect" even when the WS had connected. Verified: Playwright
-      now reports `wsConnected=True` when the WS succeeds.
-  *What is still blocked (deferred)*: signaling server works, Chrome connects
-  and joins the room as offerer, but the NimRTC demo binary has no consumer
-  for the buffered SDP offer / ICE candidates, so it never creates a
-  `PeerConnection` and never sends back an SDP answer. Chrome waits 8s for an
-  answer, closes the WS (`exitCode=18, "WebSocket closed before ICE connected"`).
-  Reproduction artifacts: `build/_sig_err.log`, `build/_cdp_e2e.log`,
-  `build/_cdp_e2e_ofer.py`.
-  Required follow-up: implement a NimRTC-side signaling client (answerer bridge)
-  that listens for `offer`/`candidate` messages on the WS, drives
-  `Engine::createPeerConnection` / `setRemoteDescription` / `createAnswer`,
-  pushes the resulting answer and local ICE candidates back over the same socket.
-  Out of scope for R3-Batch; track as a separate work item (suggested title:
-  *NimRTC signaling answerer bridge for Chrome interop*).
-
-### Changed
-- `NIMRTC_FETCH_GTEST` is now initialised before `include(NimRTCTest)` to ensure
-  GoogleTest is fetched on first configure without a stale cache
-- `nimrtc_target_include_directories()` dead function removed from `NimRTCOptions.cmake`
-- Vendor library target names standardised to `nimrtc::vendor::<name>` namespace
-
-## [0.1.0] — P0 scaffold
+## [0.1.0] ? P0 scaffold
 
 ### Added
 - Project skeleton: `core/`, `modules/rtp/`, `modules/sdp/`, `modules/jb/`, `third_party/`
@@ -122,5 +224,7 @@ NimRTC uses a three-part version number `MAJOR.MINOR.PATCH`:
 - **MINOR**: new backwards-compatible features or module additions
 - **PATCH**: backwards-compatible bug fixes
 
-Until v1.0.0, **MINOR** bumps indicate phase completions (P0, P1, P2…),
-and **PATCH** bumps indicate internal fixes within a phase.
+Pre-1.0 tags use the form `0.MINOR.PATCH` where:
+- `0.MINOR.0` indicates a release-candidate milestone (e.g. `0.9.0-rc1`)
+- `0.MINOR.N>0` indicates post-RC patches on the same milestone
+- `1.0.0` indicates the first API-stable release

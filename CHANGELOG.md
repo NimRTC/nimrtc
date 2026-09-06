@@ -5,7 +5,7 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## ?? Platform support notice
+## ⚠️ Platform support notice
 
 **This release has only been validated on Windows 10 / MSVC.**
 Linux, macOS, Android, and iOS are **NOT** verified for any sub-version of
@@ -16,7 +16,7 @@ platform without first running the full test + acceptance suite there.
 
 ## [0.9.0-rc1] - 2026-09-06
 
-### Status: Release Candidate ? NOT a stable release
+### Status: Release Candidate — NOT a stable release
 
 **Pre-release / RC quality.** This is the first tagged artefact intended
 for external review. The Chrome DTLS interop story is **incomplete**;
@@ -26,10 +26,10 @@ see "Known issues" below.
 
 | Layer                                | Status |
 |--------------------------------------|--------|
-| AES-128-GCM AEAD (BCrypt round-trip) | ? PASS |
-| DTLS 1.2 client/server (NimRTC ? NimRTC loopback) | ? PASS |
-| ICE + STUN/host candidates           | ? PASS |
-| DTLS 1.2 with real Chrome (BoringSSL)| ?? Partial ? see below |
+| AES-128-GCM AEAD (BCrypt round-trip) | ✅ PASS |
+| DTLS 1.2 client/server (NimRTC ↔ NimRTC loopback) | ✅ PASS |
+| ICE + STUN/host candidates           | ✅ PASS |
+| DTLS 1.2 with real Chrome (BoringSSL)| ⚠️ Partial — see below |
 
 ### What works against real Chrome (verified)
 
@@ -44,19 +44,19 @@ see "Known issues" below.
   `client_random || server_random || server_params`, and a
   `supported_versions` extension advertising DTLS 1.2.
 
-### Known issues (DTLS ? Chrome)
+### Known issues (DTLS ↔ Chrome)
 
 - **Chrome rejects NimRTC's ServerHello flight.** The NimRTC-side DTLS
   state machine computes a `verify_data` for the server Finished
   message (visible in `build/e2e/nimrtc_chrome.trace`), but Chrome's
-  BoringSSL DTLS layer never sends a `ClientKeyExchange` ? it keeps
+  BoringSSL DTLS layer never sends a `ClientKeyExchange` — it keeps
   retransmitting ClientHellos and eventually times out with
   `connectionState=failed`. Suspected causes:
     - Cipher suite mismatch: NimRTC negotiates
       `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` (0xC023); modern Chrome
       prefers `0xC02B` (AES-128-GCM) or `0xCCA9` (ChaCha20-Poly1305).
       GCM requires implementing the AEAD nonce/explicit-IV twist
-      (RFC 5288 / RFC 5246 �6.2.3.2) in the DTLS record layer.
+      (RFC 5288 / RFC 5246 §6.2.3.2) in the DTLS record layer.
     - X.509 cert: Chrome's BoringSSL parser is strict; the current
       self-signed cert is minimal (single CN, no extensions, no
       `basicConstraints CA:FALSE`, no `subjectAltName`).
@@ -68,7 +68,7 @@ see "Known issues" below.
   peers; it is tracked separately and is **not** fixed in 0.9.0-rc1.
 - **`run_e2e_acceptance.py` Case D was previously misreporting PASS.**
   Older revisions only checked the `e2e_chrome_interop.py` exit code
-  (which is 0 whenever the script runs to completion ? even when
+  (which is 0 whenever the script runs to completion — even when
   Chrome reports `connectionState=failed`). 0.9.0-rc1 ships with a
   tightened assertion that requires `wsConnected=true`,
   `iceConnected=true`, `sdpOfferSeen=true`, `audioReceived=true`,
@@ -88,9 +88,9 @@ see "Known issues" below.
 - **Signaling answerer bridge for real Chrome is not implemented.**
   The WebSocket signaling server (`interop/signaling/signaling_server.py`)
   is wired up, but the NimRTC demo binary does not yet consume the
-  buffered offer / ICE candidates from the WS ? it expects SDP on the
+  buffered offer / ICE candidates from the WS — it expects SDP on the
   CLI. As a result, `run_interop.py` (the older harness) cannot reach
-  the full Chrome?NimRTC audio round-trip yet. The new
+  the full Chrome↔NimRTC audio round-trip yet. The new
   `tools/run_e2e_acceptance.py` Case D works around this by going
   through `signaling_proxy` instead.
 - **Cross-platform validation is out of scope.** Linux, macOS, and
@@ -119,7 +119,7 @@ see "Known issues" below.
   `engine.get_ice_transport()`, removing the previous
   `dynamic_cast<ice::IceTransport*>` leak. New header:
   `src/plugins/include/nimrtc/plugins/ice_transport.hpp`.
-- P2: PCM tap interface on `IAudio3A` ? `set_pre_process_tap()` and
+- P2: PCM tap interface on `IAudio3A` — `set_pre_process_tap()` and
   `set_post_process_tap(PcmTapCallback, PcmTapCallbackI16)` plus the
   supporting `PcmFrameMetadata` struct, allowing wake-word engines to
   see raw mic PCM pre-3A and ASR engines to see 3A-cleaned PCM in
@@ -127,7 +127,7 @@ see "Known issues" below.
 - P0 vendor: third-party sources for libjuice, libsrtp and mbedtls
   materialised on disk; CMake wrappers unchanged.
 - P0 fetch: nlohmann_json FetchContent now supports a four-tier offline
-  fallback ? `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged
+  fallback — `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged
   tarball at `${CMAKE_BINARY_DIR}/_deps-cache/nlohmann_json.tar.xz`,
   `NLOHMANN_JSON_ARCHIVE` user-supplied archive, and online fetch from
   github.com with SHA256 verification.
@@ -135,7 +135,7 @@ see "Known issues" below.
   Playwright (with a subprocess fallback) so `_interopResults` is
   actually extracted from the headless page instead of being silently
   discarded.
-- **`tools/run_e2e_acceptance.py`** ? automated 4-case acceptance
+- **`tools/run_e2e_acceptance.py`** — automated 4-case acceptance
   orchestrator with tightened result assertions for Case D.
 
 ### Changed
@@ -169,7 +169,7 @@ see "Known issues" below.
   `PluginRegistry::get_video_sender("reference")` without first calling
   `register_default_plugins()` to populate the registry. Fixed by adding
   the three `register_default_plugins()` calls at the top of the test.
-- **DTLS handshake with Chrome ? ServerHello / Certificate /
+- **DTLS handshake with Chrome — ServerHello / Certificate /
   ServerKeyExchange now sent**.  Previously, the NimRTC DTLS server
   path only emitted `ServerHello + ServerKeyExchange + ServerHelloDone`,
   omitting the mandatory `Certificate` handshake message, and the
@@ -203,7 +203,7 @@ see "Known issues" below.
   ServerHelloDone (25 bytes) DTLS flight.  Chrome still rejects the
   flight (see "Known issues" above).
 
-## [0.1.0] ? P0 scaffold
+## [0.1.0] — P0 scaffold
 
 ### Added
 - Project skeleton: `core/`, `modules/rtp/`, `modules/sdp/`, `modules/jb/`, `third_party/`

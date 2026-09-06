@@ -33,6 +33,7 @@ CMakeUserPresets.json
 *.res
 *.tlog
 *.bak
+*.bak
 *.exe
 *.dll
 *.lib

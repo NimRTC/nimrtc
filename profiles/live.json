@@ -1,0 +1,79 @@
+{
+  // ==========================================================================
+  // profiles/live.json — live broadcast / one-way streaming profile
+  // ==========================================================================
+  //
+  // Use case: one-way live streaming from a server (broadcaster) to many
+  // receivers. Typically pushed through CDN or relayed via SFU.
+  //
+  // Design rationale (see §2.6 Profile Table):
+  //   - jitter_buffer.mode = "live": higher buffer depth to absorb CDN
+  //     re-ordering and burst packet arrivals common in UDP push paths.
+  //   - bwe.initial_bitrate_bps = 2 Mbps: higher than call to accommodate
+  //     the video bitrate budget for 720p–1080p live video.
+  //   - timeline_enabled = false: no frame-level timestamps needed for CDN.
+  //   - datachannel_enabled = false: broadcast is send-only.
+  //   - scheduler.strategy = "weighted_fair": fair sharing between audio
+  //     and video tracks when multiple are present.
+  //
+  // Override tips:
+  //   - Increase max_bitrate_bps for 4K streams (up to 50 Mbps).
+  //   - Lower jitter_buffer.max_delay_ms to ~300 ms for near-live scenarios.
+  // ==========================================================================
+
+  "name": "live",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // 3A is often already applied on the broadcaster side. "" disables receive-side 3A.
+  "audio3a_name": "webrtc",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Disable timeline: reduces overhead for high-throughput CDN paths.
+  "timeline_enabled": false,
+  // Disable DataChannel: broadcast is send-only; no back-channel needed.
+  "datachannel_enabled": false,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  "bwe": {
+    "impl": "aimd",
+    // Start at 2 Mbps to accommodate video bitrate budget for 720p–1080p.
+    "initial_bitrate_bps": 2000000,
+    // Increase for high-quality 1080p / 4K streams.
+    "max_bitrate_bps": 20000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  "jitter_buffer": {
+    "impl": "adaptive",
+    // "live" mode: moderate headroom for burst arrivals common in CDN/UDP paths.
+    "mode": "live",
+    "initial_delay_ms": 80,
+    "min_delay_ms": 30,
+    // 500 ms upper bound: enough for CDN re-ordering, still acceptable latency.
+    "max_delay_ms": 500
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  "scheduler": {
+    "enabled": true,
+    // WeightedFair: audio and video share bandwidth proportionally.
+    // StrictPriority would starve video when audio competes.
+    "strategy": "weighted_fair",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  }
+}

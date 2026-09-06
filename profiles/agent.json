@@ -1,0 +1,85 @@
+{
+  // ==========================================================================
+  // profiles/agent.json — AI Agent SDK profile (voice/text interaction)
+  // ==========================================================================
+  //
+  // Use case: NimRTC embedded as an SDK inside an AI Agent service that
+  // processes voice in real time (e.g. voice assistants, call centre bots,
+  // real-time transcription pipelines).
+  //
+  // Design rationale (see §2.6 Profile Table):
+  //   - timeline_enabled = true: per-frame timestamps are required for
+  //     latency observability in agent pipelines (measure mouth-to-ASR delay).
+  //   - datachannel_enabled = true: the SDK uses DataChannel for control
+  //     messages, session state sync, and model-to-engine signalling.
+  //   - jitter_buffer.mode = "low_latency": agent interactions require
+  //     minimum buffering. initial_delay_ms = 30 ms (tighter than call).
+  //   - audio3a_name = "webrtc": clean audio input is critical for ASR accuracy.
+  //   - bwe.initial_bitrate_bps = 500 kbps: agents are often on low-bandwidth
+  //     or asymmetric links; start conservative and ramp up.
+  //   - scheduler.strategy = "strict_priority": control messages (ASR results,
+  //     model commands) must not be delayed by audio/video.
+  //
+  // Override tips:
+  //   - Set bwe.initial_bitrate_bps to 1–2 Mbps for video-capable agents.
+  //   - Increase jitter_buffer.min_delay_ms to 10 ms on unstable mobile links.
+  //   - Disable datachannel_enabled if only audio passthrough is needed.
+  // ==========================================================================
+
+  "name": "agent",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // WebRTC 3A: AEC / ANR / AGC applied before ASR input.
+  "audio3a_name": "webrtc",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: per-frame timestamps for agent pipeline latency observability.
+  "timeline_enabled": true,
+  // Required: SDK control channel for model ↔ engine signalling.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  "bwe": {
+    "impl": "aimd",
+    // Conservative initial rate: agent may be on asymmetric / low-bandwidth link.
+    "initial_bitrate_bps": 500000,
+    // Cap at 5 Mbps: agent video (if any) is secondary to audio.
+    "max_bitrate_bps": 5000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  "jitter_buffer": {
+    "impl": "adaptive",
+    // LowLatency: minimum buffering — agent cannot afford 40 ms+ added delay.
+    "mode": "low_latency",
+    // Tighter than call (30 ms): agent ASR pipeline is latency-sensitive.
+    "initial_delay_ms": 30,
+    "min_delay_ms": 5,
+    // Allow up to 150 ms on very bursty links; agent prefers some robustness.
+    "max_delay_ms": 150
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  "scheduler": {
+    "enabled": true,
+    // StrictPriority: control messages (ASR results, model commands) preempt
+    // audio/video to avoid deadlock in the agent pipeline.
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  }
+}

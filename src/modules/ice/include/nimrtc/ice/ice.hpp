@@ -10,6 +10,7 @@
 #include <nimrtc/core/time.hpp>
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/transport.hpp>
+#include <nimrtc/plugins/ice_transport.hpp>
 
 // =============================================================================
 // nimrtc::ice
@@ -43,15 +44,20 @@ namespace nimrtc::ice {
 // ICE state, role, candidate type
 // -----------------------------------------------------------------------------
 
-// Mirrors juice_state_t 1:1 (subset — NimRTC doesn't expose internal state).
-enum class IceState : std::uint8_t {
-    Disconnected = 0,
-    Gathering    = 1,
-    Connecting   = 2,
-    Connected    = 3,
-    Completed    = 4,
-    Failed       = 5,
-};
+// `IceState` IS `plugins::IceState` — same type, same underlying storage.
+//
+// Why an alias rather than a fresh enum? Because `ice::IceTransport` must
+// override the pure-virtual `plugins::IICETransport::state()` and that
+// override has to return the *exact* same C++ type as the base declaration
+// (C++ does not allow return-type-only overloading). Keeping the two names
+// as aliases means the concrete `IceTransport::state()` overrides the
+// interface method without an explicit conversion at every call site, and
+// every consumer that imports `using nimrtc::ice::IceState` keeps working
+// unchanged.
+//
+// The numeric values mirror juice_state_t 1:1; any new state added here
+// MUST also be added to `plugins::IceState`, and vice versa.
+using IceState = plugins::IceState;
 
 enum class Role : std::uint8_t {
     Controlling,
@@ -137,13 +143,40 @@ struct IceConfig {
      *  thread multiplexes all connections on a single UDP socket. */
     enum class Mode : std::uint8_t { Poll, Mux, Thread };
     Mode mode = Mode::Mux;
+
+    // -------------------------------------------------------------------------
+    // ICE consent freshness (RFC 7675 / RFC 8445 §10)
+    // -------------------------------------------------------------------------
+
+    /** Period (ms) between STUN Binding request transmissions used to keep
+     *  ICE consent fresh on the selected pair. Per RFC 7675 the actual
+     *  transmission is performed by libjuice (randomized ~5s base); this
+     *  field sizes NimRTC's app-level consent tracker that decides when
+     *  on_consent_lost() fires, and it can be tuned independently.
+     *  Default: 5000. */
+    std::int64_t consent_interval_ms = 5000;
+
+    /** Timeout (ms) without receiving any peer STUN Binding request before
+     *  consent is considered lost. Default: 30000 (RFC 7675 §3). */
+    std::int64_t consent_timeout_ms = 30000;
+
+    /** Disable NimRTC's app-level consent tracker entirely.
+     *  When false, set_on_consent_lost() will never fire on this transport.
+     *  Default: true (full ICE implementation). ICE-Lite peers should keep
+     *  this true — they still track consent per RFC 7675 §5. */
+    bool enable_consent_freshness = true;
 };
 
 // -----------------------------------------------------------------------------
-// IceTransport — concrete ITransport.
+// IceTransport — concrete IICETransport.
+//
+// Inherits from `plugins::IICETransport` (which virtually inherits
+// `plugins::ITransport`) so that the engine and other consumers can talk to
+// it through the plugin seam without reaching past the interface with
+// `dynamic_cast<ice::IceTransport*>`.
 // -----------------------------------------------------------------------------
 
-class IceTransport : public plugins::ITransport {
+class IceTransport : public plugins::IICETransport {
 public:
     explicit IceTransport(IceConfig config);
     ~IceTransport() override;
@@ -180,48 +213,114 @@ public:
     plugins::Addr local_addr() const noexcept override;
     plugins::Addr remote_addr() const noexcept override;
 
+    // ---- ICE consent freshness (RFC 7675 / RFC 8445 §10) ------------------
+
+    /** Register a callback fired (on the ice consent tracker thread) when
+     *  ICE consent freshness is lost — i.e. no peer STUN Binding request
+     *  has been observed within `consent_timeout_ms`.
+     *
+     *  The callback fires at most once per loss event; the tracker is
+     *  automatically rearmed and the callback may fire again on the next
+     *  loss. Pass a null callback to clear. */
+    void set_on_consent_lost(plugins::OnConsentLost cb) noexcept override;
+
+    /** Explicitly notify the app-level consent tracker that a STUN Binding
+     *  request has been received from the peer.
+     *
+     *  In production, ICE transports rely on libjuice's built-in consent
+     *  freshness (RFC 7675 §3 in libjuice, CONSENT_TIMEOUT = 30s) for the
+     *  wire-level side; this method is the visible entry point at the
+     *  NimRTC wrapper layer that resets the timer.
+     *
+     *  Tests use this directly to simulate peer activity without spinning
+     *  up a full STUN relay.
+     *
+     *  No-op if enable_consent_freshness is false in IceConfig, or if the
+     *  transport is not yet Connected.
+     *
+     *  @note Thread-safe. */
+    void notify_binding_received() noexcept;
+
+    /** Returns true if a single on_consent_lost event has been fired since
+     *  the last reset (or since open()), or since the last reset triggered
+     *  by notify_binding_received().
+     *
+     *  Useful for tests that want a one-shot signal instead of a callback.
+     *  Cleared by notify_binding_received() (or by close() / open()). */
+    bool consent_lost_pending() const noexcept;
+
+    /** Test-only: arm the consent-freshness tracker as if ICE has reached
+     *  Connected state, without having to wait for an actual libjuice
+     *  connectivity check.
+     *
+     *  Production code MUST NOT call this; consent tracking is normally
+     *  enabled only after a successful candidate-pair selection so we don't
+     *  generate false-positive on_consent_lost() events during slow handshakes
+     *  on lossy networks.
+     *
+     *  Used by `tests/test_consent_freshness.cpp` to keep the unit-test
+     *  runtime well under 1 second per case; without it, each test would
+     *  need ~5–10 s of loopback connectivity before the timer becomes
+     *  meaningful.
+     *
+     *  No-op if `enable_consent_freshness` is `false` in IceConfig. */
+    void force_consent_armed_for_testing() noexcept;
+
     // ICE-specific ------------------------------------------------------
 
     /** Get the local candidates gathered so far (SDP-ready, full
      *  "a=candidate:<rest>" lines).  Empty if gathering hasn't started. */
-    std::vector<std::string> gathered_local_candidates() const;
+    std::vector<std::string> gathered_local_candidates() const noexcept override;
 
     /** Wait (with timeout) until gathering completes or ICE reaches
      *  Connected/Completed state.  Returns true if finished within
      *  `timeout_ms`, false otherwise. */
-    bool wait_for_gathering(std::int64_t timeout_ms) noexcept;
+    bool wait_for_gathering(int timeout_ms) noexcept override;
 
-    IceState state() const noexcept;
-    Role     role() const noexcept;
+    plugins::IceState state() const noexcept override;
+    Role               role()   const noexcept;
 
     /** Returns the local SDP description (a=ice-ufrag/pwd, a=candidate lines).
      *  Should be embedded in the SDP "media" section. May be called multiple
      *  times during gathering; results differ as new candidates arrive. */
     std::string local_description() const;
 
-    /** Apply remote SDP description (peer's ufrag / pwd / candidates). */
-    plugins::Status set_remote_description(std::string_view sdp) noexcept;
+    /** Set the remote ICE description (SDP media block containing a=ice-ufrag,
+     *  a=ice-pwd, and optionally a=candidate lines).  Can be called before
+     *  open() (preferred — sets the ICE role correctly before gathering) or
+     *  after open() (applied immediately via juice_set_remote_description()).
+     *
+     *  The SDP should contain at minimum the ICE ufrag and pwd lines, e.g.:
+     *    a=ice-ufrag:xxx\n
+     *    a=ice-pwd:yyy\n
+     *  The full SDP media block (with candidates) is also accepted.
+     *
+     *  @return plugins::kOk on success;
+     *          plugins::kErrCorrupt if the SDP was syntactically invalid;
+     *          plugins::kErrNotReady if the agent isn't initialised and
+     *          we couldn't even cache the SDP for deferred apply. */
+    plugins::Status set_remote_description(std::string_view sdp) noexcept override;
 
     /** Add a single remote candidate (full SDP candidate line including the
      *  "candidate:" prefix is fine; "a=candidate:..." also accepted). */
-    plugins::Status add_remote_candidate(std::string_view sdp) noexcept;
+    plugins::Status add_remote_candidate(std::string_view sdp) noexcept override;
 
     /** Override configuration before open() (EngineConfig → IceConfig bridge). */
     void set_config(const IceConfig& cfg) noexcept;
 
     /** Override binding address (e.g. from EngineConfig.local_bind_address).
      *  Only effective before open() — libjuice binds at create-time. */
-    void set_bind_address(std::string_view addr) noexcept;
+    void set_bind_address(std::string_view addr) noexcept override;
 
     /** Override STUN server. Same precondition as set_bind_address. */
-    void set_stun_server(std::string_view host, std::uint16_t port) noexcept;
+    void set_stun_server(std::string_view host, std::uint16_t port) noexcept override;
 
     /** Override local UDP port range. Same precondition as above. */
-    void set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept;
+    void set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept override;
 
     /** ICE credentials as generated by libjuice (or as overridden via config). */
-    std::string local_ufrag()    const noexcept;
-    std::string local_password() const noexcept;
+    std::string local_ufrag()    const noexcept override;
+    std::string local_password() const noexcept override;
     /** ICE credentials parsed from the remote SDP (set after set_remote_description).
      *  Empty before that. */
     std::string remote_ufrag()    const noexcept;
@@ -241,10 +340,16 @@ private:
 };
 
 // -----------------------------------------------------------------------------
-// IceTransportFactory — registers an ITransport under the id "ice".
+// IceTransportFactory — registers an IICETransport under the id "ice".
+//
+// Inherits from `plugins::IICETransportFactory` (which virtually inherits
+// `plugins::ITransportFactory`) so the same instance satisfies both
+// `core::PluginRegistry::register_transport()` and
+// `core::PluginRegistry::register_ice_transport()` — consumers can pick
+// the strongest typed view that matches their needs.
 // -----------------------------------------------------------------------------
 
-class IceTransportFactory : public plugins::ITransportFactory {
+class IceTransportFactory : public plugins::IICETransportFactory {
 public:
     /** Factory with a default IceConfig. Use create() to get a fresh transport
      *  per connection. */
@@ -261,7 +366,7 @@ public:
     /** Returns a new IceTransport with default_config. Caller owns the
      *  returned pointer; will not be the same as default_config.role/etc —
      *  call open() then configure per-connection ICE state. */
-    plugins::ITransport* create() const override;
+    plugins::IICETransport* create_ice() const override;
 
 private:
     IceConfig default_config_;

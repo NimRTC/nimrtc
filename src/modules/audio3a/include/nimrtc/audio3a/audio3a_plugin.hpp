@@ -111,6 +111,17 @@ public:
 
     plugins::IAudio3A::Stats stats() const noexcept override;
 
+    // -------------------------------------------------------------------------
+    // PCM Taps (pre/post 3A, §8.7)
+    // -------------------------------------------------------------------------
+
+    /** @see plugins::IAudio3A::set_pre_process_tap */
+    void set_pre_process_tap(plugins::PcmTapCallback tap) noexcept override;
+
+    /** @see plugins::IAudio3A::set_post_process_tap */
+    void set_post_process_tap(plugins::PcmTapCallback    tap,
+                             plugins::PcmTapCallbackI16 tap_i16) noexcept override;
+
 private:
     /** Concrete audio3a impl (audio3a::IAudio3A, NOT the plugin interface). */
     std::unique_ptr<audio3a::IAudio3A> concrete_;
@@ -119,6 +130,17 @@ private:
     plugins::VadCallback       on_vad_;
     plugins::LevelCallback     on_level_;
     plugins::AudioErrorCallback on_error_;
+
+    /** PCM Tap callbacks (§8.7).  Fired from invoke_pre/post_tap.
+     *  post_tap_i16_ is the int16 variant (ASR/LLM consumers prefer PCM16). */
+    plugins::PcmTapCallback    pre_tap_;
+    plugins::PcmTapCallback    post_tap_;
+    plugins::PcmTapCallbackI16 post_tap_i16_;
+
+    /** Monotonic frame timestamp for tap callbacks. Advanced by
+     *  invoke_pre_tap() to mark the frame boundary; post_tap() uses the
+     *  same value (single tick per process_capture call). */
+    std::int64_t                tap_timestamp_us_ = 0;
 
     /** Concrete-side config, populated on first process_* call if open()
      *  was called with no explicit config (lazy init). */
@@ -133,6 +155,12 @@ private:
 
     /** Lazy init: apply concrete_config_ to the concrete impl if not yet done. */
     plugins::Status ensure_configured() noexcept;
+
+    /** Fire pre-/post-3A PCM taps (§8.7).  Called from process_capture. */
+    void invoke_pre_tap(float* samples, std::size_t num_samples,
+                         std::size_t num_channels) noexcept;
+    void invoke_post_tap(float* samples, std::size_t num_samples,
+                          std::size_t num_channels) noexcept;
 };
 
 

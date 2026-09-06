@@ -1,0 +1,88 @@
+{
+  // ==========================================================================
+  // profiles/transport.json — embedded ICE transport gateway (no media processing)
+  // ==========================================================================
+  //
+  // Use case: embedded gateway, protocol translator, or test harness that
+  // requires ICE/DTLS-SRTP transport but no media processing (no JB, no 3A,
+  // no codec, no BWE). The engine acts as a raw relay.
+  //
+  // Design rationale (see §2.6 Profile Table):
+  //   - jb_name = "": no jitter buffer — raw passthrough (minimal latency).
+  //   - audio3a_name = "": no 3A — passthrough only.
+  //   - bwe_name = "": no bandwidth estimator — fixed-rate passthrough.
+  //   - codec_name = "": no codec — SRTP packets forwarded unchanged.
+  //   - scheduler.enabled = false: no priority queuing needed for raw relay.
+  //
+  // NOTE: This profile intentionally disables all L2 media processing.
+  // It is suitable for:
+  //   - Gateway / firewall traversal testing
+  //   - Media recording proxies (record raw SRTP)
+  //   - Protocol bridges that operate at the transport layer
+  //
+  // Override tips:
+  //   - Do NOT enable BWE or JB unless the peer also expects adaptation.
+  //   - This profile does NOT perform transcoding; codec_name = "" means
+  //     the engine will not negotiate audio codecs in SDP.
+  // ==========================================================================
+
+  "name": "transport",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  // ICE transport: still needed for ICE connectivity checks and DTLS handshake.
+  "transport_name": "ice",
+  // SDP: WebRTC-compatible SDP for negotiation, but no media processing follows.
+  "sdp_name": "webrtc",
+  // RTP: parsed to extract headers (for statistics) but media bytes forwarded as-is.
+  "rtp_name": "webrtc",
+  // Empty: no jitter buffer — raw passthrough with minimum latency.
+  "jb_name": "",
+  // Empty: no 3A processing — passthrough of raw PCM (if decoded).
+  "audio3a_name": "",
+  // Empty: no codec — SRTP forwarded as raw encrypted bytes.
+  "codec_name": "",
+  // Empty: no bandwidth estimator — no rate adaptation.
+  "bwe_name": "",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // No timeline instrumentation — raw relay path is not instrumented.
+  "timeline_enabled": false,
+  // DataChannel is optional; enable if gateway needs out-of-band signalling.
+  "datachannel_enabled": false,
+
+  // ---- Audio format --------------------------------------------------------
+  // Values here are placeholders; codec_name = "" means they are not used.
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // All fields are ignored when bwe_name = "".
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 1000000,
+    "max_bitrate_bps": 10000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // All fields are ignored when jb_name = "".
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 0,
+    "min_delay_ms": 0,
+    "max_delay_ms": 0
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  "scheduler": {
+    // Disabled: no priority queuing needed for raw passthrough.
+    "enabled": false,
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  }
+}

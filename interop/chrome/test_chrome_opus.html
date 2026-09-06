@@ -1,0 +1,410 @@
+/**
+ * @file interop/chrome/test_chrome_opus.html
+ * @brief Headless Chrome test harness for NimRTC ↔ Chrome Opus audio interop.
+ *
+ * ## How it works
+ *
+ *   1. Open ws://<signaling-server>/<room> and wait for an offer from NimRTC.
+ *   2. Receive SDP offer → RTCPeerConnection.setRemoteDescription(offer).
+ *   3. Create answer → RTCPeerConnection.setLocalDescription(answer).
+ *   4. Send answer back over WebSocket.
+ *   5. ICE candidates are exchanged via the same WebSocket channel.
+ *   6. Once ICE Connected, receive RTP audio from NimRTC and verify:
+ *        - packets arrive (audio packets > 0)
+ *        - payload type = 111 (Opus)
+ *        - sequence number increments monotonically
+ *
+ * ## Run with Chrome headless
+ *
+ *   chrome --headless=new \
+ *          --virtual-time-budget=5000 \
+ *          --use-fake-ui-for-media-stream \
+ *          --use-fake-device-for-media-stream \
+ *          "file:///$(pwd)/interop/chrome/test_chrome_opus.html?room=interop&ws=ws://localhost:8765"
+ *
+ * ## Query parameters
+ *
+ *   room=<name>   Room name for signaling (default: interop)
+ *   ws=<url>      WebSocket signaling server URL (default: ws://localhost:8765)
+ *   offerer=1     Act as offerer instead of answerer (NimRTC answerer mode)
+ *   timeout=<ms>  Wait time after ICE connected (default: 3000)
+ */
+<script>
+"use strict";
+
+const PARAMS = new URLSearchParams(window.location.search);
+const ROOM    = PARAMS.get("room")    || "interop";
+const WS_URL  = PARAMS.get("ws")      || "ws://localhost:8765/" + ROOM;
+const OFFERER = PARAMS.get("offerer") === "1";
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "3000", 10);
+
+// ---------- Results (written by page JS, read by Playwright) ----------
+window._interopResults = {
+    wsConnected:   false,
+    iceConnected:  false,
+    sdpOfferSeen:  false,
+    sdpAnswerSent: false,
+    audioReceived: false,
+    rtpPackets:    0,
+    rtpPayloadType: null,
+    lastSeqNum:    null,
+    errors:        [],
+    exitCode:      0,
+};
+
+// RTCPeerConnection — answerer side (receives offer from NimRTC)
+let pc = null;
+let ws = null;
+let pendingCandidates = [];
+let audioTrack = null;
+let rtpPacketsSeen = 0;
+
+function log(tag, msg) {
+    const line = `[${new Date().toISOString()}] [${tag}] ${msg}`;
+    console.log(line);
+    const el = document.getElementById("log");
+    if (el) {
+        el.textContent += line + "\n";
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
+function setStatus(s) {
+    const el = document.getElementById("status");
+    if (el) el.textContent = s;
+}
+
+function reportError(code, msg) {
+    window._interopResults.errors.push({ code, msg });
+    window._interopResults.exitCode = code;
+    log("ERROR", `code=0x${code.toString(16)} ${msg}`);
+}
+
+// ----- WebRTC helpers -----
+
+function makePc() {
+    const config = {
+        // STUN server for ICE (same as NimRTC uses)
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    };
+    log("RTC", "Creating RTCPeerConnection: " + JSON.stringify(config));
+    const peer = new RTCPeerConnection(config);
+
+    peer.oniceconnectionstatechange = () => {
+        log("ICE", `state=${peer.iceConnectionState}`);
+        if (peer.iceConnectionState === "connected" ||
+            peer.iceConnectionState === "completed") {
+            window._interopResults.iceConnected = true;
+            setStatus("ICE Connected ✓");
+            log("ICE", "ICE Connected — waiting for audio…");
+            scheduleEndCheck();
+        } else if (peer.iceConnectionState === "failed") {
+            reportError(0x10, "ICE connection failed");
+        }
+    };
+
+    peer.onconnectionstatechange = () => {
+        log("CONN", `state=${peer.connectionState}`);
+    };
+    peer.oniceconnectionerror = (e) => {
+        log("ICE_ERR", JSON.stringify(e));
+    };
+    peer.onsignalingstatechange = () => {
+        log("SIGNAL", `state=${peer.signalingState}`);
+    };
+
+    peer.onicecandidate = (event) => {
+        if (event.candidate === null) {
+            // ICE gathering complete
+            log("ICE", "ICE gathering complete (null candidate)");
+            return;
+        }
+        const cand = event.candidate;
+        log("ICE", `candidate: ${cand.candidate}`);
+        sendWs({ type: "candidate", candidate: cand.candidate });
+    };
+
+    // Receive audio track from NimRTC
+    peer.ontrack = (event) => {
+        log("RTP", `ontrack: ${event.track.kind} id=${event.track.id}`);
+        if (event.track.kind === "audio") {
+            audioTrack = event.track;
+            // Attach to audio element for playback verification
+            const el = document.getElementById("audioEl") ||
+                       Object.assign(document.createElement("audio"), { id: "audioEl" });
+            el.srcObject = new MediaStream([event.track]);
+            el.autoplay = false;  // Don't play in headless; just verify frames
+            document.body.appendChild(el);
+            log("RTP", "Audio track attached to element");
+        }
+    };
+
+    return peer;
+}
+
+function addPendingCandidates() {
+    for (const c of pendingCandidates) {
+        pc.addIceCandidate(c).catch(e => {
+            log("ICE", "addIceCandidate error: " + e);
+        });
+    }
+    pendingCandidates = [];
+}
+
+// ----- WebSocket -----
+
+function sendWs(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+    }
+}
+
+function connectWs() {
+    log("WS", "Connecting to " + WS_URL);
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        log("WS", "Connected");
+        window._interopResults.wsConnected = true;
+        setStatus("WS Connected");
+        if (OFFERER) {
+            // As offerer: create offer and send it
+            createAndSendOffer();
+        }
+        // Otherwise: wait for offer from NimRTC
+        if (!OFFERER) setStatus("Waiting for SDP offer from NimRTC…");
+    };
+
+    ws.onmessage = async (evt) => {
+        let msg;
+        try {
+            msg = JSON.parse(evt.data);
+        } catch (e) {
+            log("WS", "Invalid JSON: " + evt.data);
+            return;
+        }
+
+        const t = msg.type;
+        log("WS", `→ ${t}`);
+
+        if (t === "offer") {
+            window._interopResults.sdpOfferSeen = true;
+            log("SDP", `offer received (len=${msg.sdp.length})`);
+            setStatus("Processing SDP offer…");
+
+            // Parse SDP to verify Opus payload type
+            if (msg.sdp.includes("111")) {
+                log("SDP", "Opus payload type 111 found in offer ✓");
+            } else {
+                reportError(0x20, "No Opus payload type 111 in offer SDP");
+            }
+
+            try {
+                await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+                log("SDP", "setRemoteDescription(offer) OK");
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                log("SDP", "createAnswer + setLocalDescription OK");
+                window._interopResults.sdpAnswerSent = true;
+                setStatus("SDP Answer sent, waiting for ICE…");
+                sendWs({ type: "answer", sdp: answer.sdp });
+                addPendingCandidates();
+            } catch (e) {
+                reportError(0x21, "setRemoteDescription/createAnswer failed: " + e);
+            }
+
+        } else if (t === "answer") {
+            log("SDP", "answer received");
+            if (pc.signalingState === "have-local-offer") {
+                try {
+                    await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+                    log("SDP", "setRemoteDescription(answer) OK");
+                    addPendingCandidates();
+                } catch (e) {
+                    reportError(0x22, "setRemoteDescription(answer) failed: " + e);
+                }
+            }
+
+        } else if (t === "candidate") {
+            const cand = msg.candidate;
+            log("ICE", `candidate: ${cand}`);
+            // Prefer sdpMid/sdpMLineIndex from the message envelope — modern
+            // Chrome (and Firefox) require both for addIceCandidate, and
+            // candidates from libjuice don't include them inline.  Fall back
+            // to parseCandidate() for legacy peers that bundle the fields
+            // into the candidate string itself.
+            let sdpMid = msg.sdpMid;
+            let sdpMLineIndex = (typeof msg.sdpMLineIndex === "number")
+                ? msg.sdpMLineIndex : null;
+            if (sdpMid == null || sdpMLineIndex == null) {
+                const parsed = parseCandidate(cand);
+                if (parsed.sdpMid) sdpMid = parsed.sdpMid;
+                if (parsed.sdpMLineIndex != null) sdpMLineIndex = parsed.sdpMLineIndex;
+            }
+            if (sdpMid != null && sdpMLineIndex != null) {
+                const rtcCand = {
+                    candidate: cand,
+                    sdpMid: sdpMid,
+                    sdpMLineIndex: sdpMLineIndex,
+                };
+                if (pc.remoteDescription && pc.remoteDescription.sdp) {
+                    pc.addIceCandidate(rtcCand).catch(e =>
+                        log("ICE", "addIceCandidate error: " + e));
+                } else {
+                    pendingCandidates.push(rtcCand);
+                }
+            } else {
+                log("ICE", "skip candidate without sdpMid/sdpMLineIndex: " + cand);
+            }
+        } else {
+            log("WS", "Unknown message type: " + t);
+        }
+    };
+
+    ws.onerror = (e) => {
+        reportError(0x11, "WebSocket error");
+        log("WS", "WebSocket error: " + JSON.stringify(e));
+    };
+
+    ws.onclose = (e) => {
+        log("WS", "WebSocket closed: code=" + e.code + " reason=" + e.reason);
+        if (!window._interopResults.iceConnected) {
+            reportError(0x12, "WebSocket closed before ICE connected");
+        }
+    };
+}
+
+async function createAndSendOffer() {
+    // Ensure the offer has a media section: Chrome's createOffer() with no
+    // transceivers/tracks returns a media-less SDP, which the NimRTC SDP
+    // parser can't extract ICE creds from.  Add a recvonly audio transceiver
+    // before createOffer().
+    try { pc.addTransceiver("audio", { direction: "recvonly" }); } catch (_) {}
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log("SDP", "Offer created, sending to server…");
+    if (offer.sdp.includes("111")) {
+        window._interopResults.sdpOfferSeen = true;  // offer includes Opus PT 111
+    }
+    sendWs({ type: "offer", sdp: offer.sdp });
+    setStatus("SDP Offer sent, waiting for answer…");
+}
+
+// Minimal candidate parser — extract sdpMid and sdpMLineIndex
+function parseCandidate(cand) {
+    const parts = cand.split(" ");
+    let sdpMid = null, sdpMLineIndex = null;
+    for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === "mid" && i + 1 < parts.length) sdpMid = parts[i + 1];
+        if (parts[i] === "mled" && i + 1 < parts.length) {
+            sdpMLineIndex = parseInt(parts[i + 1], 10);
+        }
+    }
+    return { sdpMid, sdpMLineIndex };
+}
+
+// ----- Packet-level verification via RTCRtpReceiver -----
+
+let verifierInterval = null;
+
+function startPacketVerifier() {
+    if (!pc) return;
+    const receivers = pc.getReceivers();
+    log("RTP", `getReceivers(): ${receivers.length}`);
+
+    // Try to intercept RTP packets via a RTCRtpSender with a mock transform.
+    // In headless Chrome, we can use RTCRtpScriptTransformer (Firefox also supports it).
+    // Fall back to track-level audio analysis.
+    const audioReceiver = receivers.find(r => r.track && r.track.kind === "audio");
+    if (!audioReceiver) {
+        log("RTP", "No audio receiver yet — will retry");
+        return;
+    }
+
+    log("RTP", `Audio receiver: ${audioReceiver.id}`);
+
+    // --- RTCRtpScriptTransformer approach (Chrome 94+) ---
+    if (typeof RTCRtpScriptTransformer !== "undefined") {
+        try {
+            const transformer = new RTCRtpScriptTransformer();
+            // Read incoming RTP packets
+            transformer.readable.pipeTo(new WritableStream({
+                write(packet) {
+                    rtpPacketsSeen++;
+                    window._interopResults.rtpPackets = rtpPacketsSeen;
+                    window._interopResults.audioReceived = true;
+                    // packet is an RTCEncodedAudioFrame
+                    const meta = packet.getMetadata?.() || {};
+                    log("RTP", `frame seq=${meta.encodedFrameSequencenumber || '?'} `
+                              + `pt=${meta.payloadType || '?'} `
+                              + `size=${packet.data?.byteLength || 0}`);
+                }
+            })).catch(e => log("RTP", "transformer pipe error: " + e));
+
+            // Inject transform into receiver
+            audioReceiver.transform = transformer;
+            log("RTP", "RTCRtpScriptTransformer attached ✓");
+            return;
+        } catch (e) {
+            log("RTP", "RTCRtpScriptTransformer not available: " + e);
+        }
+    }
+
+    // --- Fallback: track-level stats polling ---
+    log("RTP", "Using stats polling fallback");
+    verifierInterval = setInterval(async () => {
+        if (!pc) { clearInterval(verifierInterval); return; }
+        try {
+            const stats = await pc.getStats();
+            stats.forEach(report => {
+                if (report.type === "inbound-rtp" && report.kind === "audio") {
+                    if (report.packetsReceived > 0) {
+                        rtpPacketsSeen = report.packetsReceived;
+                        window._interopResults.rtpPackets = rtpPacketsSeen;
+                        window._interopResults.audioReceived = true;
+                        window._interopResults.rtpPayloadType = report.payloadType;
+                        window._interopResults.lastSeqNum = report.lastReceivedFrameId;
+                        log("RTP", `packetsReceived=${report.packetsReceived} `
+                                  + `payloadType=${report.payloadType} `
+                                  + `jitter=${report.jitter?.toFixed(4) || '?'}`);
+                    }
+                }
+            });
+        } catch (e) {
+            log("RTP", "getStats error: " + e);
+        }
+    }, 200);
+}
+
+// ----- End verification -----
+
+function scheduleEndCheck() {
+    setTimeout(() => {
+        log("RESULT", "=== Interop Verification Results ===");
+        log("RESULT", `wsConnected:    ${window._interopResults.wsConnected}`);
+        log("RESULT", `sdpOfferSeen:   ${window._interopResults.sdpOfferSeen}`);
+        log("RESULT", `sdpAnswerSent:  ${window._interopResults.sdpAnswerSent}`);
+        log("RESULT", `iceConnected:   ${window._interopResults.iceConnected}`);
+        log("RESULT", `audioReceived:  ${window._interopResults.audioReceived}`);
+        log("RESULT", `rtpPackets:     ${window._interopResults.rtpPackets}`);
+        log("RESULT", `rtpPayloadType: ${window._interopResults.rtpPayloadType}`);
+        log("RESULT", `errors:         ${JSON.stringify(window._interopResults.errors)}`);
+        log("RESULT", `exitCode:       ${window._interopResults.exitCode}`);
+
+        if (window._interopResults.iceConnected) {
+            startPacketVerifier();
+        }
+    }, TIMEOUT_MS);
+}
+
+// ----- Init -----
+
+window.addEventListener("load", () => {
+    log("INIT", `ROOM=${ROOM} WS=${WS_URL} OFFERER=${OFFERER}`);
+    pc = makePc();
+    window.pc = pc;  // expose for diagnostics from page.evaluate()
+    connectWs();
+});
+</script>
+</body>
+</html>

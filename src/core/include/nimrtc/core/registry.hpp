@@ -58,10 +58,17 @@
 // just the factory type names. Full definitions are in the respective headers.
 namespace nimrtc::plugins {
 class ITransportFactory;
+class IICETransportFactory;
 class IRTPFactory;
 class ISDPFactory;
 class IJBFactory;
 class IAudio3AFactory;
+class ICodecFactory;
+class IVideoCodecFactory;
+class IVideoSourceFactory;
+class IVideoSinkFactory;
+class IVideoReceiverFactory;
+class IVideoSenderFactory;
 } // namespace plugins
 
 // ---------------------------------------------------------------------------
@@ -69,9 +76,9 @@ class IAudio3AFactory;
 //
 // Each concrete module exposes `register_default_plugins()` (defined in its
 // plugin adapter .cpp). The unified `core::register_all_default_plugins()`
-// below calls all five. Consumers linking the unified entry point MUST also
-// link the corresponding module library — the forward declarations below
-// intentionally avoid pulling any module header into core (Layout Invariant 1).
+// below calls each enabled module. Consumers linking the unified entry point
+// MUST also link the corresponding module libraries — the forward declarations
+// below intentionally avoid pulling any module header into core (Layout Invariant 1).
 // ---------------------------------------------------------------------------
 
 namespace nimrtc {
@@ -80,6 +87,21 @@ namespace rtp     { void register_default_plugins() noexcept; }
 namespace sdp     { void register_default_plugins() noexcept; }
 namespace jb      { void register_default_plugins() noexcept; }
 namespace audio3a { void register_default_plugins() noexcept; }
+#ifdef NIMRTC_HAS_OPUS
+namespace opus    { void register_default_plugins() noexcept; }
+#endif
+#ifdef NIMRTC_HAS_H264
+namespace h264    { void register_default_plugins() noexcept; }
+#endif
+#ifdef NIMRTC_HAS_VIDEO_SOURCE
+namespace video_source    { void register_default_plugins() noexcept; }
+#endif
+#ifdef NIMRTC_HAS_VIDEO_PIPELINE
+namespace video_pipeline  { void register_default_plugins() noexcept; }
+#endif
+#ifdef NIMRTC_HAS_VIDEO_SINK
+namespace video_sink      { void register_default_plugins() noexcept; }
+#endif
 } // namespace nimrtc
 
 namespace nimrtc::core {
@@ -161,6 +183,27 @@ public:
         return transport_.list_ids();
     }
 
+    // -- ICE Transport (ICE-specific factory, see plugins/ice_transport.hpp) -
+    //
+    // Mirrors the transport registry but is typed as
+    // `IICETransportFactory*` so callers can resolve the ICE-aware surface
+    // (state, credentials, gathering, remote SDP) without a
+    // dynamic_cast to the concrete `ice::IceTransport`. The factory itself
+    // inherits from `ITransportFactory` and `IICETransportFactory::create()`
+    // forwards to `create_ice()`, so registering via `register_ice_transport`
+    // also satisfies `get_transport` lookups for the same id.
+    void register_ice_transport(std::string_view id,
+                                const plugins::IICETransportFactory* f) {
+        ice_transport_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IICETransportFactory*
+    get_ice_transport(std::string_view id) const {
+        return ice_transport_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_ice_transports() const {
+        return ice_transport_.list_ids();
+    }
+
     // -- RTP ----------------------------------------------------------------
     void register_rtp(std::string_view id, const plugins::IRTPFactory* f) {
         rtp_.register_one(id, f);
@@ -206,12 +249,97 @@ public:
         return audio3a_.list_ids();
     }
 
+    // -- Codec --------------------------------------------------------------
+    void register_codec(std::string_view id,
+                        const plugins::ICodecFactory* f) {
+        codec_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::ICodecFactory*
+    get_codec(std::string_view id) const {
+        return codec_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_codecs() const {
+        return codec_.list_ids();
+    }
+
+    // -- Video Codec --------------------------------------------------------
+    void register_video_codec(std::string_view id,
+                              const plugins::IVideoCodecFactory* f) {
+        video_codec_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IVideoCodecFactory*
+    get_video_codec(std::string_view id) const {
+        return video_codec_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_codecs() const {
+        return video_codec_.list_ids();
+    }
+
+    // -- Video Source -------------------------------------------------------
+    void register_video_source(std::string_view id,
+                               const plugins::IVideoSourceFactory* f) {
+        video_source_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IVideoSourceFactory*
+    get_video_source(std::string_view id) const {
+        return video_source_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_sources() const {
+        return video_source_.list_ids();
+    }
+
+    // -- Video Sink ---------------------------------------------------------
+    void register_video_sink(std::string_view id,
+                             const plugins::IVideoSinkFactory* f) {
+        video_sink_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IVideoSinkFactory*
+    get_video_sink(std::string_view id) const {
+        return video_sink_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_sinks() const {
+        return video_sink_.list_ids();
+    }
+
+    // -- Video Receiver -----------------------------------------------------
+    void register_video_receiver(std::string_view id,
+                                 const plugins::IVideoReceiverFactory* f) {
+        video_receiver_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IVideoReceiverFactory*
+    get_video_receiver(std::string_view id) const {
+        return video_receiver_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_receivers() const {
+        return video_receiver_.list_ids();
+    }
+
+    // -- Video Sender -------------------------------------------------------
+    void register_video_sender(std::string_view id,
+                               const plugins::IVideoSenderFactory* f) {
+        video_sender_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IVideoSenderFactory*
+    get_video_sender(std::string_view id) const {
+        return video_sender_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_senders() const {
+        return video_sender_.list_ids();
+    }
+
 private:
-    TypedRegistry<plugins::ITransportFactory> transport_;
-    TypedRegistry<plugins::IRTPFactory>        rtp_;
-    TypedRegistry<plugins::ISDPFactory>         sdp_;
-    TypedRegistry<plugins::IJBFactory>          jb_;
-    TypedRegistry<plugins::IAudio3AFactory>    audio3a_;
+    TypedRegistry<plugins::ITransportFactory>    transport_;
+    TypedRegistry<plugins::IICETransportFactory> ice_transport_;
+    TypedRegistry<plugins::IRTPFactory>          rtp_;
+    TypedRegistry<plugins::ISDPFactory>          sdp_;
+    TypedRegistry<plugins::IJBFactory>           jb_;
+    TypedRegistry<plugins::IAudio3AFactory>      audio3a_;
+    TypedRegistry<plugins::ICodecFactory>        codec_;
+    TypedRegistry<plugins::IVideoCodecFactory>   video_codec_;
+    TypedRegistry<plugins::IVideoSourceFactory>  video_source_;
+    TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
+    TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_;
+    TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
 };
 
 // ---------------------------------------------------------------------------
@@ -224,40 +352,99 @@ private:
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_transport_){                              \
             ::nimrtc::core::PluginRegistry::instance(),                \
-            ::nimrtc::core::PluginRegistry::Category::kTransport,      \
-            id, factory_ptr }
+            ::nimrtc::core::detail::Registrar::Category::kTransport,      \
+            #id, factory_ptr }
+
+/** Register an ICE-aware transport factory.
+ *  Equivalent to NIMRTC_REGISTER_TRANSPORT but typed as IICETransportFactory*
+ *  so the registry exposes the ICE-specific surface (state, credentials,
+ *  gathering, remote SDP). */
+#define NIMRTC_REGISTER_ICE_TRANSPORT(id, factory_ptr)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_ice_transport_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kICETransport,   \
+            #id, factory_ptr }
 
 /** Register an RTP plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_RTP(id, factory_ptr)                             \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_rtp_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
-            ::nimrtc::core::PluginRegistry::Category::kRTP,             \
-            id, factory_ptr }
+            ::nimrtc::core::detail::Registrar::Category::kRTP,             \
+            #id, factory_ptr }
 
 /** Register an SDP plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_SDP(id, factory_ptr)                             \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_sdp_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
-            ::nimrtc::core::PluginRegistry::Category::kSDP,             \
-            id, factory_ptr }
+            ::nimrtc::core::detail::Registrar::Category::kSDP,             \
+            #id, factory_ptr }
 
 /** Register a JB plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_JB(id, factory_ptr)                             \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_jb_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
-            ::nimrtc::core::PluginRegistry::Category::kJB,            \
-            id, factory_ptr }
+            ::nimrtc::core::detail::Registrar::Category::kJB,            \
+            #id, factory_ptr }
 
 /** Register an audio 3A plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_AUDIO3A(id, factory_ptr)                        \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_audio3a_){                               \
             ::nimrtc::core::PluginRegistry::instance(),                \
-            ::nimrtc::core::PluginRegistry::Category::kAudio3A,       \
-            id, factory_ptr }
+            ::nimrtc::core::detail::Registrar::Category::kAudio3A,       \
+            #id, factory_ptr }
+
+/** Register a codec plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_CODEC(id, factory_ptr)                           \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_codec_){                                 \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kCodec,          \
+            #id, factory_ptr }
+
+/** Register a video codec plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_VIDEO_CODEC(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_codec_){                           \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoCodec,     \
+            #id, factory_ptr }
+
+/** Register a video source plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_VIDEO_SOURCE(id, factory_ptr)                    \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_source_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoSource,    \
+            #id, factory_ptr }
+
+/** Register a video sink plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_VIDEO_SINK(id, factory_ptr)                      \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_sink_){                            \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoSink,      \
+            #id, factory_ptr }
+
+/** Register a video receiver pipeline plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_VIDEO_RECEIVER(id, factory_ptr)                  \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_receiver_){                        \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoReceiver,  \
+            #id, factory_ptr }
+
+/** Register a video sender pipeline plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_VIDEO_SENDER(id, factory_ptr)                    \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_sender_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoSender,    \
+            #id, factory_ptr }
 
 namespace detail {
 
@@ -269,7 +456,8 @@ namespace detail {
 class Registrar {
 public:
     enum class Category {
-        kTransport, kRTP, kSDP, kJB, kAudio3A
+        kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
+        kVideoSource, kVideoSink, kVideoReceiver, kVideoSender
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -278,6 +466,10 @@ public:
             case Category::kTransport:
                 reg.register_transport(id,
                     static_cast<const plugins::ITransportFactory*>(factory));
+                break;
+            case Category::kICETransport:
+                reg.register_ice_transport(id,
+                    static_cast<const plugins::IICETransportFactory*>(factory));
                 break;
             case Category::kRTP:
                 reg.register_rtp(id,
@@ -294,6 +486,30 @@ public:
             case Category::kAudio3A:
                 reg.register_audio3a(id,
                     static_cast<const plugins::IAudio3AFactory*>(factory));
+                break;
+            case Category::kCodec:
+                reg.register_codec(id,
+                    static_cast<const plugins::ICodecFactory*>(factory));
+                break;
+            case Category::kVideoCodec:
+                reg.register_video_codec(id,
+                    static_cast<const plugins::IVideoCodecFactory*>(factory));
+                break;
+            case Category::kVideoSource:
+                reg.register_video_source(id,
+                    static_cast<const plugins::IVideoSourceFactory*>(factory));
+                break;
+            case Category::kVideoSink:
+                reg.register_video_sink(id,
+                    static_cast<const plugins::IVideoSinkFactory*>(factory));
+                break;
+            case Category::kVideoReceiver:
+                reg.register_video_receiver(id,
+                    static_cast<const plugins::IVideoReceiverFactory*>(factory));
+                break;
+            case Category::kVideoSender:
+                reg.register_video_sender(id,
+                    static_cast<const plugins::IVideoSenderFactory*>(factory));
                 break;
         }
     }
@@ -324,6 +540,21 @@ inline void register_all_default_plugins() noexcept {
     nimrtc::sdp::register_default_plugins();
     nimrtc::jb::register_default_plugins();
     nimrtc::audio3a::register_default_plugins();
+#ifdef NIMRTC_HAS_OPUS
+    nimrtc::opus::register_default_plugins();
+#endif
+#ifdef NIMRTC_HAS_H264
+    nimrtc::h264::register_default_plugins();
+#endif
+#ifdef NIMRTC_HAS_VIDEO_SOURCE
+    nimrtc::video_source::register_default_plugins();
+#endif
+#ifdef NIMRTC_HAS_VIDEO_PIPELINE
+    nimrtc::video_pipeline::register_default_plugins();
+#endif
+#ifdef NIMRTC_HAS_VIDEO_SINK
+    nimrtc::video_sink::register_default_plugins();
+#endif
 }
 
 } // namespace nimrtc::core
@@ -334,10 +565,16 @@ inline void register_all_default_plugins() noexcept {
 // New code should use nimrtc/core/registry.hpp directly.
 // ---------------------------------------------------------------------------
 #include "nimrtc/plugins/transport.hpp"
+#include "nimrtc/plugins/ice_transport.hpp"
 #include "nimrtc/plugins/rtp.hpp"
 #include "nimrtc/plugins/sdp.hpp"
 #include "nimrtc/plugins/jb.hpp"
 #include "nimrtc/plugins/audio3a.hpp"
+#include "nimrtc/plugins/codec.hpp"
+#include "nimrtc/plugins/video_codec.hpp"
+#include "nimrtc/plugins/video_source.hpp"
+#include "nimrtc/plugins/video_sink.hpp"
+#include "nimrtc/plugins/video_pipeline.hpp"
 
 namespace nimrtc::plugins {
 

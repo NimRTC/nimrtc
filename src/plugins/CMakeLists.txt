@@ -32,6 +32,15 @@ target_link_libraries(nimrtc_plugins
 
 # No compile definitions needed — header-only.
 
+# plugins/base.hpp       — IPlugin, IPluginFactory, BufferView, Status
+# plugins/transport.hpp   — ITransport, ITransportFactory
+# plugins/rtp.hpp        — IRTP, IRTPFactory
+# plugins/sdp.hpp        — ISDP, ISDPFactory
+# plugins/jb.hpp         — IJB, IJBFactory
+# plugins/audio3a.hpp    — IAudio3A, IAudio3AFactory
+# plugins/codec.hpp      — ICodec, ICodecFactory
+# plugins/datachannel.hpp — IDataChannel, IDataChannelFactory (P1: interface only)
+
 # Tests
 if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)

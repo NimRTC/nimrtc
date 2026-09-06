@@ -104,6 +104,8 @@ private:
     mutable std::string cached_session_name_;
     mutable std::vector<std::string> cached_attrs_kv_;   // serialized "k:v"
     mutable std::vector<plugins::SdpMedia> cached_medias_;
+    mutable std::vector<std::pair<std::string_view, std::string_view>>
+        cached_session_attrs_;  // mirrors last_parsed_.extra_attrs
     mutable plugins::SdpSession cached_view_;
 };
 

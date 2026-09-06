@@ -100,11 +100,19 @@ PacketBuilder& PacketBuilder::set_extension(std::uint16_t type, core::ByteSpan d
     extension_ = Extension{};
     extension_->type = type;
     extension_->data = data;
+    abs_send_time_ = std::nullopt;  // disambiguate: explicit extension wins
+    return *this;
+}
+
+PacketBuilder& PacketBuilder::set_abs_send_time(AbsSendTime t) noexcept {
+    abs_send_time_ = t;
+    extension_     = std::nullopt;  // disambiguate: fast-path override (see build())
     return *this;
 }
 
 PacketBuilder& PacketBuilder::clear_extension() noexcept {
-    extension_ = std::nullopt;
+    extension_     = std::nullopt;
+    abs_send_time_ = std::nullopt;
     return *this;
 }
 
@@ -124,25 +132,26 @@ std::size_t PacketBuilder::compute_size() const noexcept {
     // CSRC list
     size += csrc_.size() * 4;
 
-    // Extension header (4 bytes) + extension data (rounded up to 4-byte boundary)
-    if (extension_.has_value()) {
+    // Extension header (4 bytes) + extension data (rounded up to 4-byte boundary).
+    // abs-send-time is emitted as a one-byte-form element (RFC 5285 §4.2,
+    // profile = 0xBEDE) with local id 1 and 3 data bytes = 4 bytes total
+    // (already 4-aligned, so no extra padding).
+    if (extension_.has_value() || abs_send_time_.has_value()) {
         size += 4;  // 2 bytes profile + 2 bytes length
-        // Length field is in 32-bit words, ceiling division
-        std::size_t words = (extension_->data.size() + 3) / 4;
+        std::size_t data_bytes = extension_.has_value()
+                                     ? extension_->data.size()
+                                     : 4;  // abs-send-time element = 4 bytes
+        std::size_t words = (data_bytes + 3) / 4;
         size += words * 4;
     }
 
-    // Padding: per RFC 3550 §5.1 the last byte of the padding region is
-    // the count of padding octets that should be ignored (including itself).
-    // The parser strips (count + 1) bytes from the end of the packet, treating
-    // the count as "number of zero padding data octets preceding the count
-    // byte". So set_padding(N) produces N zero bytes followed by a count byte
-    // whose value is N, giving N+1 bytes of padding region in total.
-    size += payload_.size();  // Payload
+    // Payload
+    size += payload_.size();
 
     // Padding region (only present when padding_bytes_ > 0).
+    // Per RFC 3550 §5.1: set_padding(N) → N zero bytes + 1 count byte (value N).
     if (padding_bytes_ > 0) {
-        size += padding_bytes_ + 1;  // N zeros + 1 count byte
+        size += padding_bytes_ + 1;
     }
 
     return size;
@@ -158,7 +167,7 @@ core::ByteBuffer PacketBuilder::build() const {
     // Byte 0: version=2 (bits 6-7), padding flag, extension flag, CSRC count
     std::uint8_t byte0 = (kVersion << 6);
     if (padding_bytes_ > 0) byte0 |= 0x20;
-    if (extension_.has_value()) byte0 |= 0x10;
+    if (extension_.has_value() || abs_send_time_.has_value()) byte0 |= 0x10;
     byte0 |= static_cast<std::uint8_t>(csrc_.size() & 0x0F);
     buf[offset++] = byte0;
 
@@ -185,19 +194,38 @@ core::ByteBuffer PacketBuilder::build() const {
     }
 
     // Extension header
-    if (extension_.has_value()) {
-        // Profile (2 bytes)
-        write_be16(buf + offset, extension_->type);
-        offset += 2;
+    if (extension_.has_value() || abs_send_time_.has_value()) {
+        if (abs_send_time_.has_value()) {
+            // Emit abs-send-time as a one-byte-form extension element
+            // (RFC 5285 §4.2 with profile = 0xBEDE and local id = 1 per RFC 9143 §5).
+            //
+            // On-wire layout:
+            //   2 bytes profile      = 0xBEDE
+            //   2 bytes length       = 1  (one 32-bit word of element data)
+            //   1 byte  id+len       = (1 << 4) | 2   ; id=1, len=2 (3-1)
+            //   3 bytes abs-send-time = 24-bit BE timestamp at 24 MHz
+            write_be16(buf + offset, 0xBEDE);
+            offset += 2;
+            write_be16(buf + offset, 1);  // one 32-bit word
+            offset += 2;
 
-        // Length in 32-bit words
-        std::size_t ext_words = (extension_->data.size() + 3) / 4;
-        write_be16(buf + offset, static_cast<std::uint16_t>(ext_words));
-        offset += 2;
+            const std::uint32_t ts24 = abs_send_time_->send_time_24mhz & 0x00FFFFFFu;
+            buf[offset++] = static_cast<std::uint8_t>(0x10u | 0x02u);  // id=1, len=2
+            buf[offset++] = static_cast<std::uint8_t>((ts24 >> 16) & 0xFFu);
+            buf[offset++] = static_cast<std::uint8_t>((ts24 >>  8) & 0xFFu);
+            buf[offset++] = static_cast<std::uint8_t>( ts24        & 0xFFu);
+        } else {
+            // Generic extension (caller-supplied profile + raw payload).
+            write_be16(buf + offset, extension_->type);
+            offset += 2;
 
-        // Extension data (padded to 4-byte boundary)
-        std::memcpy(buf + offset, extension_->data.data(), extension_->data.size());
-        offset += ext_words * 4;
+            std::size_t ext_words = (extension_->data.size() + 3) / 4;
+            write_be16(buf + offset, static_cast<std::uint16_t>(ext_words));
+            offset += 2;
+
+            std::memcpy(buf + offset, extension_->data.data(), extension_->data.size());
+            offset += ext_words * 4;
+        }
     }
 
     // Payload
@@ -226,6 +254,7 @@ void PacketBuilder::reset() noexcept {
     marker_ = false;
     csrc_.clear();
     extension_ = std::nullopt;
+    abs_send_time_ = std::nullopt;
     payload_ = {};
     padding_bytes_ = 0;
 }

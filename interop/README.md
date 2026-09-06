@@ -1,29 +1,113 @@
-# interop/
+# interop/ — Chrome ↔ NimRTC Interop Test Suite
 
 Browser and third-party interop test fixtures, scripts, and runners.
 
-## Scope
+## 目录结构
 
-- Test vectors (SDP offers/answers, RTP packet dumps) for Chrome / Firefox interop
-- Automation scripts (Python / Bash) that drive headless browsers
-- Expected-results matrices per NimRTC release
+```
+interop/
+├── README.md                   ← 本文件
+├── signaling/
+│   ├── README.md               ← 信令协议说明
+│   └── signaling_server.py     ← Python WebSocket 信令服务器（SDP 交换）
+├── chrome/
+│   └── test_chrome_opus.html   ← Chrome headless 测试页面（WebRTC API）
+├── fixtures/
+│   ├── chrome_opus_offer.sdp         ← Chrome 生成的 Opus SDP offer 样本
+│   └── chrome_opus_offer.expected.md ← NimRTC 解析该 SDP 的期望结果
+├── run_interop.py              ← Python 测试运行器（所有测试用例）
+└── .github/
+    └── workflows/
+        └── interop.yml         ← CI 自动化 workflow
+```
 
-## Browser matrix (P1 baseline)
+## 测试用例
 
-| Browser | Version | Platform |
-|---------|---------|----------|
-| Chrome  | fixed stable | Windows / Linux |
-| Firefox | fixed stable | Windows / Linux |
+| 测试 | 验证内容 | 依赖 |
+|------|---------|------|
+| `sdp_exchange` | `demo-p2p` 生成 RFC 8829 兼容的 Opus SDP offer | 仅需二进制 |
+| `loopback_ice` | 两个 `NimRTCEngine` 实例在 127.0.0.1 上完成 ICE 握手 | `loopback-p2p` |
+| `chrome_opus_interop` | Chrome (headless) ↔ NimRTC via 信令服务器，验证 ICE + RTP | 信令服务器 + Chrome |
 
-## CI integration
+## 快速开始
 
-`interop/` is consumed by `.github/workflows/interop.yml`. The runner uses
-headless Chrome + Firefox via Selenium or Playwright to validate:
-1. SDP offer / answer exchange (webrtc-internal API)
-2. Opus audio round-trip (PCM capture → encode → decode → playback)
-3. RTP packet loss concealment behaviour
+### 1. 启动信令服务器
 
-## Adding a test fixture
+```bash
+# 安装依赖
+pip install websockets
 
-Drop a `.json` or `.rtpdump` file alongside a matching `expected.md` that
-describes the expected behaviour. The interop CI script picks them up automatically.
+# 启动（默认 ws://localhost:8765）
+python interop/signaling/signaling_server.py --port 8765
+```
+
+### 2. 运行测试
+
+```bash
+# 安装依赖
+pip install websockets
+
+# 运行所有测试
+python interop/run_interop.py
+
+# 运行单个测试
+python interop/run_interop.py --test sdp_exchange
+
+# 指定 NimRTC 二进制路径
+python interop/run_interop.py --nimrtc-binary ./build/examples/demo-p2p/demo-p2p
+```
+
+### 3. 手动验证（Chrome 交互）
+
+```bash
+# 1. 启动信令服务器
+python interop/signaling/signaling_server.py --port 8765
+
+# 2. 打开 Chrome（headless）
+chrome --headless=new \
+       --virtual-time-budget=10000 \
+       --use-fake-ui-for-media-stream \
+       --use-fake-device-for-media-stream \
+       "file:///$(pwd)/interop/chrome/test_chrome_opus.html?room=interop&ws=ws://localhost:8765/interop"
+
+# 3. 另一终端：用 demo-p2p 生成 offer 并保存
+./build/examples/demo-p2p/demo-p2p > /tmp/offer.sdp
+
+# 4. 通过信令服务器手动交换 SDP（需要 demo-p2p 支持 WebSocket）
+```
+
+## CI 集成
+
+`interop.yml` 在以下情况触发：
+
+- 推送到 `main` / `feat/**` / `fix/**` / `chore/**` 分支
+- PR 合入 `main` 时
+- 修改 `interop/`、`src/engine/`、`src/modules/sdp/`、`src/modules/rtp/`、`src/modules/opus/`、`examples/` 时
+
+CI 运行内容：
+1. 构建 NimRTC（`--preset debug -DNIMRTC_BUILD_EXAMPLES=ON`）
+2. 运行 `sdp_exchange` 测试
+3. 运行 `loopback_ice` 测试
+4. 启动信令服务器，运行 `chrome_opus_interop` 测试
+5. 上传 SDP fixture 到 artifacts
+
+## P1 互通口径（Tier 0）
+
+当前仅承诺 **音频单向**（NimRTC 发送，Chrome 接收）：
+- Chrome → NimRTC answer 的 SDP offer（NimRTC 解析 + 生成 answer）
+- ICE 连接建立（STUN 握手）
+- Chrome 接收 NimRTC 发出的 Opus RTP 包
+
+**不含**：
+- Chrome → NimRTC 的音频（需要 `demo-p2p` 接入麦克风）
+- DataChannel（属于 P2 范畴）
+- 视频（属于 P1 范畴）
+
+## 预期失败项（P1 完成前）
+
+| 测试 | 当前预期 | 原因 |
+|------|---------|------|
+| `chrome_opus_interop.audioReceived` | FAIL | libopus 是 stub，不产生真实 Opus 包 |
+| `chrome_opus_interop.iceConnected` | PASS (loopback) / SKIP (Chrome WS) | 需要信令服务器 |
+
+libopus vendor 完成后，这些测试应该自动通过。

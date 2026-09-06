@@ -79,7 +79,7 @@ struct SdpSession {
 // ---------------------------------------------------------------------------
 
 /** Per-codec constraints for munging. */
-struct CodecConfig {
+struct SdpCodecConfig {
     std::string_view codec_name;    // "opus", "vp8", "h264", …
     int ptime_ms = 0;               // 0 = keep default
     int max_ptime_ms = 0;
@@ -101,7 +101,7 @@ struct MungOptions {
     std::vector<std::string_view> allowed_codecs;
 
     /** Per-media-type codec overrides. */
-    std::vector<CodecConfig> codec_configs;
+    std::vector<SdpCodecConfig> codec_configs;
 
     /** Add extra session-level attribute "a=key:value". */
     std::vector<std::pair<std::string_view, std::string_view>> extra_attrs;

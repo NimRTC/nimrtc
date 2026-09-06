@@ -1,0 +1,5 @@
+# interop/requirements.txt
+# Python dependencies for the NimRTC interop test suite.
+# Install with: pip install -r interop/requirements.txt
+
+websockets>=12.0

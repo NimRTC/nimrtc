@@ -208,10 +208,32 @@ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t
 	if (getsockname(sock, (struct sockaddr *)&name.addr, &name.len) == 0) {
 		if (name.addr.ss_family == AF_INET6)
 			addr_map_inet6_v4mapped(&tmp.addr, &tmp.len);
+		// Diagnostic: log local address we are sending FROM
+		if (name.addr.ss_family == AF_INET) {
+			const struct sockaddr_in *sn = (const struct sockaddr_in *)&name.addr;
+			uint32_t ip = ntohl(sn->sin_addr.s_addr);
+			JLOG_INFO("udp_sendto: local=%u.%u.%u.%u:%u",
+			          (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+			          (ip >> 8) & 0xFF, ip & 0xFF,
+			          ntohs(sn->sin_port));
+		} else {
+			JLOG_INFO("udp_sendto: local family=%d", name.addr.ss_family);
+		}
 	} else {
 		JLOG_WARN("getsockname failed, errno=%d", sockerrno);
 	}
-	return sendto(sock, data, (socklen_t)size, 0, (const struct sockaddr *)&tmp.addr, tmp.len);
+	// Diagnostic: log destination address
+	if (tmp.addr.ss_family == AF_INET) {
+		const struct sockaddr_in *sin = (const struct sockaddr_in *)&tmp.addr;
+		uint32_t ip = ntohl(sin->sin_addr.s_addr);
+		JLOG_INFO("udp_sendto: size=%d dst=%u.%u.%u.%u:%u",
+		          size, (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+		          (ip >> 8) & 0xFF, ip & 0xFF,
+		          ntohs(sin->sin_port));
+	}
+	int ret = sendto(sock, data, (socklen_t)size, 0, (const struct sockaddr *)&tmp.addr, tmp.len);
+	JLOG_INFO("udp_sendto: size=%d ret=%d errno=%d dst_family=%d", size, ret, sockerrno, tmp.addr.ss_family);
+	return ret;
 #else
 	return sendto(sock, data, size, 0, (const struct sockaddr *)&dst->addr, dst->len);
 #endif

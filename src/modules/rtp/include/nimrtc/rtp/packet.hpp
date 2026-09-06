@@ -26,10 +26,48 @@ inline constexpr std::uint8_t kVersion = 2;
 // -----------------------------------------------------------------------------
 // Extension element (RFC 5285)
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Extension element (RFC 5285). abs-send-time and transport-wide-CC
+// (RFC 9143) are layered on top of this; see parse_*_extension below.
+// -----------------------------------------------------------------------------
 struct Extension {
     std::uint16_t type = 0;          // 1..14 for one-byte form; 1..255 for two-byte
     core::ByteSpan data{};           // payload bytes (NOT including the type byte)
 };
+
+// -----------------------------------------------------------------------------
+// RFC 9143 abs-send-time (one-byte-form, extension id = 1).
+// 24-bit absolute timestamp at 24 MHz; wrapping is handled by the
+// assignment operator (caller may store the 32-bit-aligned value here).
+// -----------------------------------------------------------------------------
+struct AbsSendTime {
+    std::uint32_t send_time_24mhz = 0;
+};
+
+// -----------------------------------------------------------------------------
+// RFC 9143 transport-wide CC feedback packet (PT = RTPFB, FMT = 15).
+// `packets` has length = packet_status_count; one element per RTP packet,
+// in seq order starting at base_seq (modulo 2^16).
+// -----------------------------------------------------------------------------
+enum class PacketStatus : std::uint8_t {
+    NotReceived   = 0,
+    Received      = 1,
+    ReceivedSmall = 2,
+};
+struct TransportCcPacketStatus {
+    PacketStatus status    = PacketStatus::NotReceived;
+    std::int16_t delta_250us = 0;  // recv-time delta in 250-µs ticks vs reference time
+                                   // (only meaningful when status != NotReceived)
+};
+struct TransportCcFeedback {
+    std::uint32_t sender_ssrc = 0;
+    std::uint32_t media_ssrc  = 0;
+    std::uint16_t base_seq    = 0;
+    std::uint16_t packet_status_count = 0;
+    std::uint32_t reference_time_24mhz = 0;  // 24-bit wrap timestamp at 1 kHz / 24 kHz
+    std::vector<TransportCcPacketStatus> packets;
+};
+
 
 // -----------------------------------------------------------------------------
 // PacketView — non-owning view into a parsed RTP packet.
@@ -99,6 +137,9 @@ public:
     core::Result<SenderReport>   parse_sr  (core::ByteSpan raw) const;
     core::Result<ReceiverReport> parse_rr  (core::ByteSpan raw) const;
     core::Result<NackPacket>     parse_nack(core::ByteSpan raw) const;
+    core::Result<TransportCcFeedback> parse_transport_cc(core::ByteSpan raw) const;
+    core::Result<void> parse_abs_send_time_extension(core::ByteSpan ext_data, AbsSendTime& out) const;
+    core::Result<std::size_t> build_abs_send_time_extension(AbsSendTime t, core::MutableByteSpan out) const;
 
 private:
     struct Impl;
@@ -118,6 +159,7 @@ public:
     PacketBuilder& add_csrc(std::uint32_t v);
 
     PacketBuilder& set_extension(std::uint16_t type, core::ByteSpan data);
+    PacketBuilder& set_abs_send_time(AbsSendTime t) noexcept;
     PacketBuilder& clear_extension() noexcept;
     PacketBuilder& set_payload(core::ByteSpan data);
     PacketBuilder& set_padding(std::size_t bytes);
@@ -140,6 +182,7 @@ private:
     bool          marker_          = false;
     std::vector<std::uint32_t> csrc_;
     std::optional<Extension> extension_;
+    std::optional<AbsSendTime> abs_send_time_;
     core::ByteSpan payload_{};
     std::size_t    padding_bytes_  = 0;
 };

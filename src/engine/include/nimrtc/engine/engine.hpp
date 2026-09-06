@@ -35,23 +35,58 @@
 
 #include <nimrtc/core/registry.hpp>     // PluginRegistry (Layout Invariant 6)
 #include <nimrtc/plugins/transport.hpp>
+#include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
+#include <nimrtc/plugins/codec.hpp>
+#include <nimrtc/plugins/video_source.hpp>
+#include <nimrtc/plugins/video_sink.hpp>
+#include <nimrtc/plugins/video_pipeline.hpp>
 
 // Concrete module headers still required (until P1.1 plugin adapters land).
-#include <nimrtc/ice/ice.hpp>
+// NOTE: nimrtc/ice/ice.hpp is intentionally NOT included here. The engine
+// talks to the ICE transport through `plugins::IICETransport*` (see
+// `ice_t_` member and `get_ice_transport()` accessor); including the
+// concrete module header here would re-introduce the leak this refactor
+// was meant to close. Tests that need the concrete class still include
+// `<nimrtc/ice/ice.hpp>` directly.
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/rtp/packet.hpp>
 #include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/audio3a/audio3a.hpp>
 #include <nimrtc/dtls/dtls.hpp>
 #include <nimrtc/srtp/srtp.hpp>
+#ifdef NIMRTC_HAS_OPUS
 #include <nimrtc/opus/opus.hpp>
+#endif
 
 namespace nimrtc::engine {
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+
+/** Parameters for the audio codec advertised in the SDP and used for
+ *  encoding / decoding.  Defaults match RFC 7587 Opus.
+ *  When NIMRTC_HAS_OPUS is not defined, the engine ignores codec_name and
+ *  falls back to the first statically-linked codec plugin (e.g. PCMU). */
+struct AudioCodecConfig {
+    /** RTP payload type number.  RFC 7587 uses 111 for Opus.
+     *  WebRTC mandatory: 0 (PCMU) and 8 (PCMA). */
+    std::uint8_t  payload_type  = 111;
+
+    /** Encoding name per RFC 4855 / IANA registry, e.g. "opus", "PCMU", "PCMA". */
+    std::string   encoding      = "opus";
+
+    /** Audio sampling rate in Hz. Opus = 48000; PCMU/PCMA = 8000. */
+    std::uint32_t clock_rate    = 48000;
+
+    /** Number of audio channels. Opus stereo = 2; narrowband codecs = 1. */
+    std::uint8_t  channels      = 2;
+
+    /** fmtp (format parameters) string, e.g. "minptime=10;useinbandfec=1".
+     *  Empty string means no a=fmtp line is emitted. */
+    std::string   fmtp;
+};
 
 struct EngineConfig {
     // ---- Plugin selection (ADR-001: look up by string ID in PluginRegistry) ----
@@ -70,6 +105,16 @@ struct EngineConfig {
 
     /** IAudio3A plugin name. Default = "webrtc". */
     std::string_view audio3a_name = "webrtc";
+
+    /** ICodec plugin name. Default = "opus". */
+    std::string_view codec_name = "opus";
+
+    /** Audio codec parameters for the SDP offer and send_audio().
+     *  Defaults to RFC 7587 Opus (payload type 111, 48 kHz, stereo).
+     *  When opus is not available (NIMRTC_HAS_OPUS undefined), set to
+     *  { .payload_type=0, .encoding="PCMU", .clock_rate=8000, .channels=1 }
+     *  for WebRTC-mandatory narrowband fallback. */
+    AudioCodecConfig audio_codec;
 
     // ---- Transport config (forwarded to ITransport::open) ----
 
@@ -98,6 +143,52 @@ struct EngineConfig {
     int jb_initial_delay_ms = 40;
     int jb_min_delay_ms     = 10;
     int jb_max_delay_ms     = 200;
+
+    // ---- Video plugin selection (R3-Batch: lookup by string ID) ----
+    //
+    // Video integration is in P1.1/R3 scope; the engine currently does not
+    // pipe video RTP/RTCP, so these plugins are resolved but not yet
+    // threaded into the ICE/DTLS/SRTP pipeline. Callers can drive them
+    // manually via the `video_source() / video_sink() / video_receiver()
+    // / video_sender()` accessors.
+    //
+    // Defaults match the IDs registered by `video_source::register_default_plugins()`,
+    // `video_sink::register_default_plugins()`, and
+    // `video_pipeline::register_default_plugins()`. Override here to
+    // select alternate implementations (HW plugins register under
+    // different ids; see `plugins::hw::*`).
+
+    /** IVideoSource plugin id (e.g. "memory", or HW plugin id). */
+    std::string_view video_source_name = "memory";
+
+    /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
+    std::string_view video_sink_name   = "headless";
+
+    /** IVideoReceiver plugin id (e.g. "reference"). */
+    std::string_view video_receiver_name = "reference";
+
+    /** IVideoSender plugin id (e.g. "reference"). */
+    std::string_view video_sender_name   = "reference";
+
+    /** Defaults forwarded to plugins::VideoReceiverConfig when the engine
+     *  instantiates the video receiver plugin. */
+    struct VideoReceiverTuning {
+        std::uint32_t ssrc                = 0xDEADBEEF;
+        std::uint8_t  payload_type        = 102;
+        std::uint32_t max_inflight_frames = 8;
+        std::uint32_t max_jitter_buffer_ms = 200;
+        bool          emit_nacks          = true;
+        bool          expect_fu_a         = true;
+    } video_receiver_tuning;
+
+    /** Defaults forwarded to plugins::VideoSenderConfig when the engine
+     *  instantiates the video sender plugin. */
+    struct VideoSenderTuning {
+        std::uint32_t ssrc         = 0xCAFEBABE;
+        std::uint8_t  payload_type = 102;
+        std::uint16_t mtu          = 1200;
+        std::uint16_t initial_seq  = 0;
+    } video_sender_tuning;
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +217,17 @@ public:
     void     close() noexcept;
     bool     is_open() const noexcept { return state_ == State::kOpen; }
 
+    /** Optional early setup: creates the ICE transport (and all other modules)
+     *  WITHOUT starting ICE candidate gathering.  Callers can then call
+     *  set_remote_ice() to inject the peer's ICE credentials before open().
+     *  This allows the loopback test to ensure the answerer knows the offerer's
+     *  ICE ufrag/pwd BEFORE gather_candidates() starts, so libjuice sets the
+     *  answerer to CONTROLLED instead of CONTROLLING (avoids ICE role conflict).
+     *
+     *  After pre_open(), call open() normally — gather_candidates() will fire.
+     *  Can be called at most once. Returns same error codes as open(). */
+    uint32_t pre_open() noexcept;
+
     // Callbacks
     void set_on_audio_frame(AudioFrameCallback cb) noexcept { on_audio_frame_ = std::move(cb); }
     void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
@@ -147,6 +249,48 @@ public:
      *  SrtpContext.  Idempotent. */
     void maybe_install_srtp_keys() noexcept;
 
+    // --- Inspection helpers (for tests / debugging) ---
+
+    /** True iff SRTP keys have been installed (post-DTLS-Connected). */
+    bool srtp_installed() const noexcept { return srtp_installed_; }
+
+    /** Current DTLS state, or Closed if DTLS not initialised. */
+    dtls::DtlsState dtls_state() const noexcept {
+        return dtls_ ? dtls_->state() : dtls::DtlsState::Closed;
+    }
+
+    /** True iff DTLS has reached Connected state. */
+    bool dtls_connected() const noexcept {
+        return dtls_ && dtls_->is_connected();
+    }
+
+    /** True iff the ICE agent has selected at least one candidate pair
+     *  (Connected or Completed).  Used to gate outbound DTLS sends.
+     *  Implementation now goes through the plugin seam
+     *  (`plugins::IICETransport::state()`), not a dynamic_cast to the
+     *  concrete module class. */
+    bool is_ice_connected() const noexcept {
+        if (!ice_t_) return false;
+        const auto s = ice_t_->state();
+        return s == plugins::IceState::Connected ||
+               s == plugins::IceState::Completed;
+    }
+
+    /** Last error code from open()/pre_open() — useful for diagnostics
+     *  when the bool result is non-OK but we want to know which subsystem
+     *  failed (e.g. 0x1FFF = ICE, 0x2000 = DTLS, 0x1A00 = audio3a). */
+    uint32_t last_open_rc() const noexcept { return last_open_rc_; }
+
+    /** Set the remote ICE description (ice-ufrag / ice-pwd / candidates) BEFORE
+     *  open() is called.  This is required for the loopback test: the answerer
+     *  (controlled) must know the offerer's ICE credentials before its ICE
+     *  transport opens, so libjuice sets the agent to CONTROLLED instead of
+     *  CONTROLLING (avoiding the ICE role conflict).  The ice_block should be
+     *  the raw SDP media section containing a=ice-ufrag, a=ice-pwd, and
+     *  optionally a=candidate lines.  Can also be called after open() (applied
+     *  immediately). */
+    bool set_remote_ice(std::string_view ice_block) noexcept;
+
     /** Inbound raw bytes — alternative entry point for test injection. */
     uint32_t feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept;
 
@@ -161,6 +305,63 @@ public:
     std::string local_ufrag()    const noexcept;
     std::string local_password() const noexcept;
 
+    /** Underlying ITransport (ICE by default).  Useful for tests and demos that
+     *  need direct access to the transport — e.g. for ICE candidate forwarding
+     *  in the WebSocket signaling proxy.  Returns nullptr if not yet open().
+     *
+     *  The pointer is non-owning: the engine retains the only owner
+     *  (`ice_t_`). Callers must not delete it. */
+    plugins::ITransport* get_transport() noexcept { return ice_t_.get(); }
+    const plugins::ITransport* get_transport() const noexcept { return ice_t_.get(); }
+
+    /** ICE-aware view of the transport.  Returns nullptr if no
+     *  IICETransport plugin has been resolved (which only happens if the
+     *  transport plugin chosen by `cfg.transport_name` does not implement
+     *  the ICE-aware interface — the engine only treats ICE transports as
+     *  ICE transports).
+     *
+     *  Non-owning; same lifetime as the engine. */
+    plugins::IICETransport* get_ice_transport() noexcept { return ice_t_.get(); }
+    const plugins::IICETransport* get_ice_transport() const noexcept {
+        return ice_t_.get();
+    }
+
+    // ---- Video plugin accessors (R3-Batch) ----
+    //
+    // The engine resolves all 4 video plugins from core::PluginRegistry
+    // at open() time, using the *_name fields in EngineConfig. The plugins
+    // themselves live for the engine's lifetime (or until replaced via
+    // set_video_sink / set_video_source).
+    //
+    // The engine does NOT thread these into the RTP/DTLS/SRTP pipeline
+    // yet (P1.1 future work). Callers can:
+    //   - drive video_source_->start() / produce_one() to feed a sender;
+    //   - push encoded frames via video_sender_->push_frame();
+    //   - receive encoded frames via video_receiver_->push_rtp() and
+    //     listen on set_frame_callback();
+    //   - render decoded frames via video_sink_->render().
+    //
+    // Returns nullptr if the configured plugin id was not found at open().
+
+    plugins::IVideoSource*   video_source()   noexcept { return video_source_.get(); }
+    plugins::IVideoSink*     video_sink()     noexcept { return video_sink_.get(); }
+    plugins::IVideoReceiver* video_receiver() noexcept { return video_receiver_.get(); }
+    plugins::IVideoSender*   video_sender()   noexcept { return video_sender_.get(); }
+    const plugins::IVideoSource*   video_source()   const noexcept { return video_source_.get(); }
+    const plugins::IVideoSink*     video_sink()     const noexcept { return video_sink_.get(); }
+    const plugins::IVideoReceiver* video_receiver() const noexcept { return video_receiver_.get(); }
+    const plugins::IVideoSender*   video_sender()   const noexcept { return video_sender_.get(); }
+
+    /** Replace the video sink at runtime (e.g. swap "headless" for an SDL
+     *  renderer). Closes the previous sink and transfers ownership of @p sink.
+     *  Safe to call before or after open(); if called before open(), the
+     *  sink configured via video_sink_name is replaced and the new one is
+     *  used instead. Pass nullptr to detach (next render() calls are no-ops). */
+    void set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noexcept;
+
+    /** Replace the video source at runtime. Same semantics as set_video_sink. */
+    void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
+
     // Engine stats for debugging
     struct Stats {
         int srtp_drops = 0;
@@ -171,8 +372,30 @@ private:
     EngineConfig                                config_;
 
     // ---- Plugin instances (created via PluginRegistry in open()) ----
-    std::unique_ptr<plugins::ITransport>        transport_;   // wraps IceTransport
+    //
+    // `ice_t_` is the owning handle to the ICE-aware transport plugin
+    // (concretely `nimrtc::ice::IceTransport` for the default "ice"
+    // plugin, but resolvable through the plugin seam — see
+    // `plugins::IICETransport`). Because IICETransport IS-A ITransport,
+    // callers can downcast to ITransport* for generic send/recv; we keep
+    // the IICETransport* alias around because every ICE-specific call
+    // (state, credentials, gathering, remote SDP, pre-open config) goes
+    // through it.  Storing the IICETransport pointer eliminates all
+    // **`dynamic_cast<ice::IceTransport*>`** calls from this class — the
+    // plugin-seam objective achieved by this refactor.
+    std::unique_ptr<plugins::IICETransport>      ice_t_;
     std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;  // R2.5: prefer over concrete
+    std::unique_ptr<plugins::ICodec>            codec_plugin_;    // R2-Batch1: prefer over concrete
+
+    // ---- Video plugins (R3-Batch: resolved from core::PluginRegistry) ----
+    // All four are created from EngineConfig.{video_source,sink,receiver,sender}_name
+    // in open(). They own their concrete impl (MemoryVideoSource / HeadlessSink /
+    // VideoReceiver / VideoSender) via the adapter layer; the engine only
+    // sees the plugins::IVideo* interfaces.
+    std::unique_ptr<plugins::IVideoSource>      video_source_;
+    std::unique_ptr<plugins::IVideoSink>        video_sink_;
+    std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
+    std::unique_ptr<plugins::IVideoSender>      video_sender_;
 
     // ---- Non-plugin concrete modules ----
     // SDP: Parser/Munger are concrete classes (session module not yet scaffolded).
@@ -192,12 +415,15 @@ private:
     // ---- SRTP / DTLS / Opus — not yet plugin-exposed ----
     std::unique_ptr<dtls::DtlsSession>          dtls_;
     std::unique_ptr<srtp::SrtpContext>          srtp_;
+#ifdef NIMRTC_HAS_OPUS
     std::unique_ptr<opus::Encoder>              opus_encoder_;
     std::unique_ptr<opus::Decoder>              opus_decoder_;
+#endif
 
     bool                                        dtls_active_inbound_ = false;
     bool                                        srtp_installed_ = false;
     int                                         srtp_stats_drop_ = 0;
+    dtls::DtlsState                             last_dtls_state_ = dtls::DtlsState::Closed;
 
     // Local SDP (after create_offer / process_remote_sdp)
     std::optional<sdp::SessionDescription>      local_sdp_;
@@ -209,9 +435,17 @@ private:
 
     enum class State { kConstructed, kOpen, kClosed };
     State state_ = State::kConstructed;
+    uint32_t last_open_rc_ = 0;
 
     void on_transport_recv(const plugins::BufferView& pkt) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
+
+    /** Resolve & open the 4 video plugins from core::PluginRegistry using
+     *  EngineConfig.video_*_name. Called by open() and pre_open(). */
+    void init_video_plugins() noexcept;
+
+    /** Close and release the 4 video plugins. Called by close(). */
+    void shutdown_video_plugins() noexcept;
 
     static void default_on_error(uint32_t err, std::string_view msg) noexcept;
 };

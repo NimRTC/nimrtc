@@ -165,5 +165,24 @@ public:
     virtual void close() noexcept = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Plugin factory base (per §8.6 P1)
+// ---------------------------------------------------------------------------
+
+/** Base class for all plugin factories.
+ *  Concrete factories (e.g. IDataChannelFactory) inherit from this so
+ *  the PluginRegistry can hold heterogeneous factory types uniformly.
+ *  @note P1 scaffold — stable interface, binary layout TBD P4. */
+class IPluginFactory {
+public:
+    virtual ~IPluginFactory() = default;
+
+    /** Unique identifier, e.g. "sctp", "quic". */
+    virtual std::string_view id() const noexcept = 0;
+
+    /** Short human-readable name, e.g. "SCTP (usrsctp)". */
+    virtual std::string_view display_name() const noexcept = 0;
+};
+
 } // namespace nimrtc::plugins
 #endif // NIMRTC_PLUGINS_BASE_HPP

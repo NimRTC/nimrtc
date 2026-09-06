@@ -39,12 +39,74 @@ CMakeUserPresets.json
 *.o
 *.a
 
-# Tooling lock / unlock helpers (development-time only, safe to keep ignored)
-force_write.ps1
-write_engine.ps1
-write_via_rename.ps1
-find_lock.ps1
-delete_locked.ps1
+# ─────────────────────────────────────────────
+# Dev / tooling helpers: keep ALL under scripts/ or tools/
+# Rule: no .ps1 / .sh / .bat / .cmd / .py scripts at the project root.
+#       Put helpers in scripts/ or tools/ — they are excluded below.
+#       A pre-commit hook (scripts/check-root-clean.sh) also enforces this.
+# ─────────────────────────────────────────────
+# Block scripts only at the project root (/*. matches root, not subdirs)
+# Note: CMakeLists.txt / CMakePresets.json / .github are allow-listed
+#       by the pre-commit hook, not by gitignore.
+/*.ps1
+/*.sh
+/*.bat
+/*.cmd
+/*.py
+
+# ─────────────────────────────────────────────
+# Project root MUST stay clean (only allowed: CMake config, docs, .git metadata).
+# Block scratch logs / output captures / downloaded archives / etc. that
+# prior build/test sessions may dump at the repo root.
+# ─────────────────────────────────────────────
+# Build & configure logs at the repo root (writes are usually redirected to
+# build/ via tee, but guard against accidents).
+/build_output*.txt
+/rebuild*.txt
+/rebuild*.log
+/reconfigure*.log
+/_cmake_reconf*.log
+/final_build.log
+/full_build*.log
+/test_opus_build*.log
+/opus_build*.log
+/opus_test_build*.log
+
+# Test/script capture output at the repo root
+/_loopback*.log
+/_loopback*.err
+/_looperr.txt
+/_loopout.txt
+/_loopback_test.*
+/_server_wrap.*
+/_signaling_server.log
+/_last_*.txt
+/_last_*.log
+
+# Throwaway helper scripts at the repo root (canonical versions live in
+# scripts/ or interop/)
+/_run_server.py
+/_test_*.py
+/_test_*.ps1
+/_wait_subagents.ps1
+/_run_all_video_tests.ps1
+/_build_*.log
+/_build_*.ps1
+/_full_build.log
+/_full_build.ps1
+/_reconf*.log
+/_reconf*.ps1
+/_reconf*.bat
+/_cmake*.log
+/_cmake*.txt
+/check_encoding.ps1
+
+# Downloaded third-party archives at the repo root (already extracted into
+# build/_deps/ when needed)
+/*.zip
+/*.tar.gz
+/*.tar.bz2
+/*.tar.xz
 
 # Captured stdio / dangling test artifacts
 stderr.txt
@@ -62,3 +124,14 @@ Thumbs.db
 *.swp
 *~
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

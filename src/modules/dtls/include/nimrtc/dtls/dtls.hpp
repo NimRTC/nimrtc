@@ -166,7 +166,8 @@ struct SrtpKeyingMaterial {
 struct Fingerprint {
     std::string algorithm;     // "sha-256"
     std::vector<std::uint8_t> bytes;     // raw hash
-    std::string base64;        // SDP-ready
+    std::string base64;        // base64-encoded (kept for legacy/debug; NOT for SDP)
+    std::string hex_colon;     // colon-separated UPPER hex per RFC 8122 (SDP form)
 };
 
 // -----------------------------------------------------------------------------
@@ -232,8 +233,26 @@ public:
     DtlsState state() const noexcept;
     bool is_connected() const noexcept;
 
+    /** Human-readable name for a DtlsState enum value (for tracing). */
+    static const char* state_name(DtlsState s) noexcept;
+
     /** Local certificate fingerprint (advertised in SDP).  Valid after open(). */
     const Fingerprint& local_fingerprint() const noexcept;
+
+    /** Update the SDP-pinned peer fingerprint without recreating the local
+     *  certificate/keypair.  Safe to call any time before the handshake
+     *  completes.  Required because the engine learns the remote fingerprint
+     *  AFTER its own SDP has already advertised the local fingerprint —
+     *  recreating the session here would change the advertised fingerprint
+     *  and break the handshake. */
+    void set_peer_fingerprint(std::string algo,
+                              std::vector<std::uint8_t> value) noexcept;
+
+    /** Update the DTLS role without recreating the local certificate/keypair.
+     *  When transitioning Server -> Client, the state machine also generates
+     *  and enqueues an initial ClientHello.  Safe to call any time before
+     *  the handshake completes. */
+    void set_role(DtlsRole r) noexcept;
 
     /** SRTP keying material — available once state() == Connected. */
     std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;

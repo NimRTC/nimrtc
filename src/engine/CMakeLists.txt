@@ -25,17 +25,41 @@ target_link_libraries(nimrtc_engine
         nimrtc::ice            # ICE transport (P1)
         nimrtc::dtls           # DTLS handshake (P1.1)
         nimrtc::srtp           # SRTP protect/unprotect (P1.1)
-        nimrtc::opus           # Opus codec stub (P1) — header path
     PRIVATE
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 
-# Propagate Opus include directory to consumers (since engine.hpp includes
-# <nimrtc/opus/opus.hpp>).
+if(NIMRTC_MODULE_OPUS)
+    target_link_libraries(nimrtc_engine PUBLIC nimrtc::opus)
+endif()
+
+# Video plugin seam (R3-Batch): the engine resolves video_source / sink /
+# receiver / sender from core::PluginRegistry, but does not link any
+# concrete video_* module header. Consumers that want engine integration
+# must ensure video_source::register_default_plugins() etc. are invoked
+# before any engine open() — see nimrtc::core::register_all_default_plugins().
+#
+# The plugin adapters live in their respective modules; the engine pulls
+# in the plugin interface headers (under nimrtc::plugins) via PUBLIC
+# propagation of nimrtc::core (which already links nimrtc::plugins).
+# The optional module dependencies below are marked PRIVATE because the
+# engine itself never references concrete types — they're only required
+# at link time so the static initialisers in `register_default_plugins()`
+# are not stripped (Layout Invariant 5 + MSVC-linker quirk; see
+# `video_source::register_default_plugins()` header for details).
+if(NIMRTC_MODULE_VIDEO_SOURCE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_source)
+endif()
+if(NIMRTC_MODULE_VIDEO_SINK)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
+endif()
+if(NIMRTC_MODULE_VIDEO_PIPELINE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_pipeline)
+endif()
+
 target_include_directories(nimrtc_engine
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/opus/include>
     PRIVATE
         ${CMAKE_BINARY_DIR}/include)
 

@@ -121,9 +121,16 @@ public:
 
     // Create session from crypto suite and master key material.
     // Returns error if keys are invalid for the chosen suite.
+    // Configured as OUTBOUND by default (sender side).
     core::Result<void> init_from_master_key(const Config& config,
                                             std::span<const std::uint8_t> master_key,
                                             std::span<const std::uint8_t> master_salt);
+
+    /** Same as init_from_master_key but configures the session as INBOUND
+     *  (receiver side).  Use this for the peer that consumes SRTP packets. */
+    core::Result<void> init_from_master_key_inbound(const Config& config,
+                                                    std::span<const std::uint8_t> master_key,
+                                                    std::span<const std::uint8_t> master_salt);
 
     // Create session from pre-derived session keys (used in DTLS-SRTP).
     core::Result<void> init_from_session_keys(const Config& config);

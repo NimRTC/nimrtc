@@ -15,6 +15,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_dtls STATIC
     src/dtls.cpp
+    src/dtls_prf.cpp
     )
 
 nimrtc_apply_options(nimrtc_dtls)

@@ -76,11 +76,14 @@ This product includes software developed by Google (GoogleTest).
   - Source:   https://github.com/google/googletest
   - License:  BSD-3-Clause
   - Scope:    test-only
+  - Version:  1.12.1 (vendored at src/third_party/googletest/)
+            GoogleMock disabled by default; BUILD_GMOCK=OFF)
 
 This product includes software developed by Niels Lohmann (nlohmann/json).
   - Source:   https://github.com/nlohmann/json
   - License:  MIT
   - Scope:    header-only, runtime
+  - Version:  3.11.3 (vendored at src/third_party/nlohmann_json/)
 
 This product includes software developed by Gabi Melman (spdlog, optional).
   - Source:   https://github.com/gabime/spdlog

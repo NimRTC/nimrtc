@@ -113,9 +113,10 @@ struct SrtpSession::Impl {
         }
     }
 
-    /** Build a libsrtp policy + add a key.  key||salt (concatenated) is
-     *  expected to be 30 bytes for AES-CM-128 (16+14). */
-    bool install(const std::vector<std::uint8_t>& key_with_salt,
+    /** Build a libsrtp policy + add a key.  libsrtp v3 expects the master
+     *  key and master salt to be passed SEPARATELY (not concatenated). */
+    bool install(std::span<const std::uint8_t> key,
+                 std::span<const std::uint8_t> salt,
                  std::uint32_t ssrc,
                  bool outbound,
                  CryptoSuite suite,
@@ -133,18 +134,31 @@ struct SrtpSession::Impl {
         if (rc != srtp_err_status_ok) return false;
 
         srtp_ssrc_t ssrc_sel;
-        ssrc_sel.type = ssrc_specific;
-        ssrc_sel.value = ssrc;
+        // For tests that pre-allocate a session before knowing SSRC, use the
+        // "any" wildcard: any-outbound for senders, any-inbound for receivers.
+        // Real production code should pass the actual SSRC via ssrc_specific.
+        if (outbound) {
+            ssrc_sel.type  = ssrc_any_outbound;
+            ssrc_sel.value = 0;
+        } else {
+            ssrc_sel.type  = ssrc_any_inbound;
+            ssrc_sel.value = 0;
+        }
         srtp_policy_set_ssrc(policy, ssrc_sel);
         srtp_policy_set_profile(policy, to_lib_profile(suite));
         srtp_policy_set_sec_serv(policy, sec_serv, sec_serv);
 
         rc = srtp_policy_add_key(policy,
-                                 key_with_salt.data(),
-                                 key_with_salt.size(),
-                                 nullptr, 0,
-                                 nullptr, 0);    // salt already in key buffer
+                                 key.data(),
+                                 key.size(),
+                                 salt.data(),
+                                 salt.size(),
+                                 /*mki=*/nullptr,
+                                 /*mki_len=*/0);
         if (rc != srtp_err_status_ok) {
+            core::log::Logger::instance().error(
+                "SRTP: srtp_policy_add_key failed rc=" +
+                std::to_string(static_cast<int>(rc)));
             srtp_policy_destroy(policy);
             return false;
         }
@@ -176,14 +190,11 @@ core::Result<void> SrtpSession::init_from_master_key(
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: empty key/salt");
     }
-    std::vector<std::uint8_t> combo;
-    combo.reserve(master_key.size() + master_salt.size());
-    combo.insert(combo.end(), master_key.begin(), master_key.end());
-    combo.insert(combo.end(), master_salt.begin(), master_salt.end());
 
     // Default bound SSRC = 0; library treats that as outbound-any, fine
     // for the stub usage; for test purposes we pass 0 here.
-    if (!impl_->install(combo, /*ssrc=*/0, /*outbound=*/true,
+    if (!impl_->install(master_key, master_salt,
+                        /*ssrc=*/0, /*outbound=*/true,
                         config.suite,
                         config.enable_encryption
                             ? sec_serv_conf_and_auth
@@ -195,19 +206,38 @@ core::Result<void> SrtpSession::init_from_master_key(
     return core::Result<void>::make_ok();
 }
 
+core::Result<void> SrtpSession::init_from_master_key_inbound(
+        const Config& config,
+        std::span<const std::uint8_t> master_key,
+        std::span<const std::uint8_t> master_salt) {
+    impl_->config = config;
+    if (master_key.empty() || master_salt.empty()) {
+        return core::Result<void>::fail(
+            core::ErrorCode::InvalidArgument, "SRTP: empty key/salt");
+    }
+
+    if (!impl_->install(master_key, master_salt,
+                        /*ssrc=*/0, /*outbound=*/false,
+                        config.suite,
+                        config.enable_encryption
+                            ? sec_serv_conf_and_auth
+                            : sec_serv_auth)) {
+        return core::Result<void>::fail(
+            core::ErrorCode::InvalidArgument,
+            "SRTP: libsrtp install (inbound) failed");
+    }
+    return core::Result<void>::make_ok();
+}
+
 core::Result<void> SrtpSession::init_from_session_keys(const Config& config) {
-    // Same code path: libsrtp expects key||salt as master, regardless of
-    // whether pre-derived or freshly keyed.
+    // Same code path: libsrtp expects separate master key + master salt.
     impl_->config = config;
     if (config.session_key_rtp.empty() || config.session_salt_rtp.empty()) {
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: empty session keys");
     }
-    std::vector<std::uint8_t> combo;
-    combo.reserve(config.session_key_rtp.size() + config.session_salt_rtp.size());
-    combo.insert(combo.end(), config.session_key_rtp.begin(), config.session_key_rtp.end());
-    combo.insert(combo.end(), config.session_salt_rtp.begin(), config.session_salt_rtp.end());
-    if (!impl_->install(combo, /*ssrc=*/0, true, config.suite,
+    if (!impl_->install(config.session_key_rtp, config.session_salt_rtp,
+                        /*ssrc=*/0, true, config.suite,
                         config.enable_encryption ? sec_serv_conf_and_auth : sec_serv_auth)) {
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: libsrtp install failed");

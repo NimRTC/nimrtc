@@ -17,9 +17,11 @@
 
 #include <nimrtc/audio3a/audio3a_plugin.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/registry.hpp>
@@ -65,7 +67,11 @@ plugins::IAudio3A::Stats to_plugin_stats(const LevelStats& s) noexcept {
 // ---------------------------------------------------------------------------
 
 PluginAdapter::PluginAdapter(audio3a::IAudio3A* impl)
-    : concrete_(impl ? impl : new NullAudio3A()) {
+    : concrete_(impl ? impl : new NullAudio3A())
+    , pre_tap_(nullptr)
+    , post_tap_(nullptr)
+    , post_tap_i16_(nullptr)
+    , tap_timestamp_us_(0) {
     core::log::Logger::instance().debug(
         "audio3a::PluginAdapter created (concrete impl owned)");
 }
@@ -139,12 +145,18 @@ plugins::Status PluginAdapter::process_capture(float*       samples,
     plugins::Status rc = ensure_configured();
     if (rc != plugins::kOk) return rc;
 
+    // ── Pre-tap: raw mic PCM before 3A (for wake-word / monitoring) ──
+    invoke_pre_tap(samples, num_samples, num_channels);
+
     audio3a::Frame frame;
     frame.samples        = samples;
     frame.num_samples    = num_samples;
     frame.num_channels   = num_channels;
     frame.sample_rate_hz = concrete_config_.sample_rate_hz;
     concrete_->process_capture(frame);
+
+    // ── Post-tap: 3A-cleaned PCM (for ASR consumption) ──
+    invoke_post_tap(samples, num_samples, num_channels);
 
     maybe_fire_callbacks();
     return plugins::kOk;
@@ -195,6 +207,59 @@ void PluginAdapter::maybe_fire_callbacks() noexcept {
     const LevelStats s = concrete_->stats();
     if (on_vad_)   on_vad_(s.vad_active);
     if (on_level_) on_level_(s.capture_level_dbfs);
+}
+
+// -------------------------------------------------------------------------
+// PCM Taps (pre/post 3A, §8.7)
+// -------------------------------------------------------------------------
+
+void PluginAdapter::invoke_pre_tap(float* samples, std::size_t num_samples,
+                                   std::size_t num_channels) noexcept {
+    if (!pre_tap_) return;
+    plugins::PcmFrameMetadata meta{};
+    meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
+    meta.num_samples     = num_samples;
+    meta.num_channels   = static_cast<std::uint8_t>(num_channels);
+    meta.timestamp_us    = tap_timestamp_us_;
+    tap_timestamp_us_ += static_cast<std::int64_t>(num_samples * 1000000ULL / meta.sample_rate_hz);
+    pre_tap_(samples, meta);
+}
+
+void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
+                                    std::size_t num_channels) noexcept {
+    if (!post_tap_ && !post_tap_i16_) return;
+    plugins::PcmFrameMetadata meta{};
+    meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
+    meta.num_samples     = num_samples;
+    meta.num_channels   = static_cast<std::uint8_t>(num_channels);
+    meta.timestamp_us    = tap_timestamp_us_;
+    // Note: tap_timestamp_us_ is NOT advanced here — the frame boundary
+    // is the same as the pre-tap; only one tick per process_capture call.
+
+    if (post_tap_) {
+        post_tap_(samples, meta);
+    }
+    if (post_tap_i16_) {
+        // Convert float → int16_t inline for ASR consumers.
+        // Only convert the samples we need (no extra copy for the float tap).
+        std::vector<std::int16_t> i16_buf(num_samples * num_channels);
+        for (std::size_t i = 0; i < num_samples * num_channels; ++i) {
+            float v = samples[i] * 32767.0f;
+            v = std::max(-32768.0f, std::min(32767.0f, v));
+            i16_buf[i] = static_cast<std::int16_t>(v);
+        }
+        post_tap_i16_(i16_buf.data(), meta);
+    }
+}
+
+void PluginAdapter::set_pre_process_tap(plugins::PcmTapCallback tap) noexcept {
+    pre_tap_ = std::move(tap);
+}
+
+void PluginAdapter::set_post_process_tap(plugins::PcmTapCallback    tap,
+                                        plugins::PcmTapCallbackI16 tap_i16) noexcept {
+    post_tap_   = std::move(tap);
+    post_tap_i16_ = std::move(tap_i16);
 }
 
 // ---------------------------------------------------------------------------

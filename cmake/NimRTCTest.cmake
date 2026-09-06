@@ -25,14 +25,14 @@ find_package(GTest QUIET)
 
 if(NOT GTEST_FOUND)
     if(NIMRTC_FETCH_GTEST)
-        message(STATUS "GoogleTest not found locally — fetching via FetchContent")
-        include(FetchContent)
-        FetchContent_Declare(
-            googletest
-            GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
-            GIT_TAG        release-1.12.1)
+        message(STATUS "GoogleTest not found locally — using vendored copy at src/third_party/googletest")
+        # Upstream googletest CMakeLists exposes these options; we disable
+        # BUILD_GMOCK because tests/ do not use MOCK_METHOD (verified 2026-09-05).
+        # Users who want googlemock can re-enable it via -DBUILD_GMOCK=ON.
+        set(BUILD_GMOCK OFF CACHE BOOL "Build GoogleMock as part of vendored googletest" FORCE)
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-        FetchContent_MakeAvailable(googletest)
+        add_subdirectory(src/third_party/googletest)
     else()
         message(FATAL_ERROR
             "GoogleTest not found. Either:\n"
@@ -61,6 +61,9 @@ function(nimrtc_add_test source)
     get_filename_component(src_name ${source} NAME_WLE)
     string(REPLACE "/tests/" "_test_" test_name ${src_dir})
     string(REPLACE "/" "_" test_name ${test_name})
+    # Append the source filename (without .cpp) to ensure unique test names
+    # when multiple test files live in the same directory.
+    set(test_name "${test_name}_${src_name}")
     set(test_target "${src_name}_test")
 
     # -------------------------------------------------------------------------
@@ -102,12 +105,20 @@ function(nimrtc_add_test source)
         # parent = .../src/modules/<name>
         get_filename_component(module_root "${src_dir}" DIRECTORY)
         list(APPEND test_includes "${module_root}/include")
+        get_filename_component(module_name "${module_root}" NAME)
     endif()
 
     target_include_directories(${test_target} PRIVATE ${test_includes})
 
-    add_test(NAME ${test_name} COMMAND ${test_target})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+    if(DEFINED module_name)
+        # Module-level test — hardcode the path under src/modules/<name>/tests/Debug/.
+        add_test(NAME ${test_name}
+            COMMAND ${CMAKE_BINARY_DIR}/src/modules/${module_name}/tests/Debug/${test_target}.exe)
+    else()
+        # Top-level test — fall back to top-level build dir.
+        add_test(NAME ${test_name}
+            COMMAND ${CMAKE_BINARY_DIR}/Debug/${test_target}.exe)
+    endif()
 
     # gtest_discover_tests where supported
     if(COMMAND gtest_discover_tests)

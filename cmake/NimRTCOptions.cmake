@@ -52,7 +52,7 @@ function(nimrtc_apply_options target)
 
     target_compile_features(${target} PUBLIC
         cxx_std_${NIMRTC_CXX_STANDARD}
-        c_std_${NIMRTC_C_STANDARD})
+        c_std_11)
 
     # Default visibility: only the public headers' symbols are exported.
     # Each module is responsible for marking its API with NIMRTC_API.

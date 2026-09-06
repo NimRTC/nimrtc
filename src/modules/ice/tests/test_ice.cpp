@@ -55,7 +55,11 @@ TEST(IceTransportFactory, CreateReturnsTransport) {
     IceTransportFactory f;
     auto* raw = f.create();
     ASSERT_NE(raw, nullptr);
-    std::unique_ptr<IceTransport> t{static_cast<IceTransport*>(raw)};
+    // The factory returns plugins::IICETransport* (via the overridden
+    // IICETransportFactory::create which forwards to create_ice()).
+    // The concrete IceTransport is the runtime type, so we can downcast.
+    std::unique_ptr<IceTransport> t{dynamic_cast<IceTransport*>(raw)};
+    ASSERT_NE(t.get(), nullptr);
     EXPECT_NE(t->name(), nullptr);
     // open()/close() lifecycle (no network reachability assumed for gathering)
     EXPECT_EQ(t->open(), 0u);          // kOk
@@ -278,8 +282,8 @@ TEST(IceTransportLoopback, TwoAgentsConnectAndExchangeData) {
     ASSERT_FALSE(sdp_a.empty()) << "libjuice produced empty SDP for A";
     ASSERT_FALSE(sdp_b.empty()) << "libjuice produced empty SDP for B";
 
-    ASSERT_EQ(b.set_remote_description(sdp_a), 0u) << "B rejected A's SDP";
-    ASSERT_EQ(a.set_remote_description(sdp_b), 0u) << "A rejected B's SDP";
+    ASSERT_EQ(b.set_remote_description(sdp_a), nimrtc::plugins::kOk) << "B rejected A's SDP";
+    ASSERT_EQ(a.set_remote_description(sdp_b), nimrtc::plugins::kOk) << "A rejected B's SDP";
 
     // ---- Wait for both sides to reach Connected -----------------------------
     const auto deadline = std::chrono::steady_clock::now() + 10s;
@@ -428,8 +432,8 @@ TEST(IceTransportLoopback, TwoAgentsWithRandomUfrag) {
     ASSERT_FALSE(sdp_a.empty());
     ASSERT_FALSE(sdp_b.empty());
 
-    ASSERT_EQ(b.set_remote_description(sdp_a), 0u);
-    ASSERT_EQ(a.set_remote_description(sdp_b), 0u);
+    ASSERT_EQ(b.set_remote_description(sdp_a), nimrtc::plugins::kOk);
+    ASSERT_EQ(a.set_remote_description(sdp_b), nimrtc::plugins::kOk);
 
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     IceState sa = IceState::Disconnected, sb = IceState::Disconnected;

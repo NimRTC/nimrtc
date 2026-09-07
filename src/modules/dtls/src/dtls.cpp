@@ -2953,7 +2953,19 @@ struct DtlsSession::Impl {
             case kHsServerKeyExchange:    handle_server_key_exchange(body); break;
             case kHsClientKeyExchange:    handle_client_key_exchange(body); break;
             case kHsHelloVerify: {
-                // Client receives HelloVerifyRequest: re-send ClientHello with cookie.
+                // Client receives HelloVerifyRequest: re-send ClientHello
+                // with the cookie in its body.
+                //
+                // RFC 6347 §4.1.2.6 (and RFC 6347 §4.5.2 via RFC 5246):
+                // a retransmitted flight MUST use the same message_seq
+                // values as the original transmission.  Bumping
+                // message_seq_counter here collides the retransmit with
+                // the seq numbers used by the later CKE/Finished flight,
+                // which Chrome's BoringSSL state machine rejects with
+                // fatal unexpected_message (alert 10).  Pin the
+                // retransmit to seq=0 because the initial ClientHello
+                // (see make_client_hello path, line ~3207) was sent at
+                // seq=0.
                 if (config.role != DtlsRole::Client) break;
                 if (body.size() < 4) break;
                 std::size_t b2 = 3;  // skip version (2) + cookie_len (1)
@@ -2964,8 +2976,8 @@ struct DtlsSession::Impl {
                     cookie_len = cl;
                 }
                 auto ch = make_client_hello(/*with_cookie=*/true);
-                std::uint32_t seq = ++message_seq_counter;
-                enqueue_handshake(kHsClientHello, ch, 0, seq);
+                constexpr std::uint32_t kRetransmitSeq = 0;
+                enqueue_handshake(kHsClientHello, ch, 0, kRetransmitSeq);
                 state = DtlsState::HelloSent;
                 break;
             }
@@ -3011,6 +3023,19 @@ struct DtlsSession::Impl {
                 if (config.role != DtlsRole::Client) break;
                 if (state != DtlsState::KeyExchange &&
                     state != DtlsState::HelloReceived) break;
+                // Belt-and-braces guard: Chrome occasionally retransmits
+                // its ServerHello/SHD after we've already produced the
+                // matching CKE+CCS+Finished flight.  Re-entering this
+                // branch would emit a second flight at the same
+                // already-allocated msg_seq window and Chrome would
+                // immediately reply with unexpected_message.  If we've
+                // already promoted ourselves to Finished, drop the
+                // duplicate dispatch.
+                if (state == DtlsState::Finished ||
+                    state == DtlsState::ChangeCipherSpec ||
+                    state == DtlsState::Connected) {
+                    break;
+                }
                 // CKE body is just the raw public key bytes for the curve
                 // the server picked in its SKE (negotiated_curve).  For
                 // X25519 that's 32 bytes of Montgomery u-coord; for P-256
@@ -3024,13 +3049,17 @@ struct DtlsSession::Impl {
                                     local_pub_bytes.end());
                 }
                 // RFC 6347 §4.5.2: message_seq is a per-direction counter
-                // starting at 0.  The client's first outbound handshake
-                // message (CKE) MUST be sent at msg_seq=0, and Finished
-                // MUST follow at msg_seq=1.  Chrome's BoringSSL DTLS
-                // state machine strictly enforces this ordering: a
-                // CKE with msg_seq=1 (followed by Finished at msg_seq=2)
-                // causes Chrome to abort with fatal unexpected_message
-                // (alert 10) before it ever checks our verify_data.
+                // starting at 0.  The client's outbound flight is:
+                //   * ClientHello (initial + HelloVerify-driven
+                //     retransmit) at msg_seq=0
+                //   * ClientKeyExchange    at msg_seq=1
+                //   * Finished             at msg_seq=2
+                // Chrome's BoringSSL DTLS state machine enforces strict
+                // uniqueness and monotonicity within a single direction.
+                // The counter is therefore advanced exactly once per
+                // distinct outbound handshake message (not per byte and
+                // not per retransmit); the retransmit path above pins
+                // its seq to 0 to comply with RFC 6347 §4.1.2.6.
                 //
                 // Note on CertificateRequest: Chrome's BoringSSL ALWAYS
                 // sends a CertReq in its WebRTC DTLS flight but does NOT
@@ -3048,8 +3077,9 @@ struct DtlsSession::Impl {
                 // record sequence number is taken from the per-epoch
                 // counter inside enqueue_change_cipher_spec() (resets to
                 // 0 at the epoch boundary per RFC 6347 §4.1.2.1).
+                std::uint32_t cke_seq = ++message_seq_counter;
                 enqueue_handshake(kHsClientKeyExchange, cke_body, /*epoch=*/0,
-                                  /*seq=*/0);
+                                  /*seq=*/cke_seq);
                 enqueue_change_cipher_spec(/*epoch=*/1, /*seq=*/0);
                 // IMPORTANT: derive master_secret + traffic keys + srtp
                 // keys AFTER CKE has been added to hs_log (enqueue_handshake
@@ -3059,10 +3089,15 @@ struct DtlsSession::Impl {
                 // from Chrome's and the Finished verify_data would never
                 // match.
                 derive_session_secrets_idempotent();
+                std::uint32_t fin_seq = ++message_seq_counter;
                 enqueue_handshake(kHsFinished,
                                   make_finished("client finished"),
-                                  /*epoch=*/1, /*seq=*/1);
-                message_seq_counter = 2;  // next outbound handshake msg_seq
+                                  /*epoch=*/1, /*seq=*/fin_seq);
+                // message_seq_counter is now at the next free seq (which
+                // is, for the standard client flight, the value 2).  We
+                // leave it incremented; do not reset it here — the
+                // ++message_seq_counter calls above are the single source
+                // of truth for outbound msg_seq allocation.
                 // Note: do NOT mark Connected yet — we still have to
                 // receive the Server's Finished (with valid verify_data)
                 // before the handshake is complete.  The Finished case

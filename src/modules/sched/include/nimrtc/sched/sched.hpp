@@ -48,10 +48,14 @@ namespace nimrtc::sched {
     using IScheduler         = plugins::IScheduler;
     constexpr std::size_t kPriorityCount = plugins::kPriorityCount;
 
-    // NOTE: `plugins::priority_rank` and `plugins::lower_priority` are
-    // free functions in `nimrtc::plugins::` — they are picked up through
-    // ADL on the `Priority` argument (which is `plugins::Priority`).
-    // We do NOT re-declare them here to avoid shadowing ambiguity.
+    // NOTE: `plugins::priority_rank` is a free function in `nimrtc::plugins::`
+    // and is picked up through ADL on the `Priority` argument (which is
+    // `plugins::Priority`). We do NOT re-declare it here to avoid shadowing
+    // ambiguity.
+    //
+    // `sched::lower_priority()` below is *our* helper that walks one priority
+    // step down and returns std::nullopt at the bottom. It is not re-exported
+    // from `plugins::` because priority traversal is a sched-module concept.
 
     /** Return the next lower priority, or std::nullopt at the bottom. */
     [[nodiscard]] constexpr std::optional<Priority> lower_priority(Priority p) noexcept {

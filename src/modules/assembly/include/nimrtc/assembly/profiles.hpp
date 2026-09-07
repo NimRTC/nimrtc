@@ -58,9 +58,11 @@ inline const Profile kProfileCall = Profile{
         .best_effort_weight = 1,
     },
     .bwe = {
-        .impl               = "aimd",
-        .initial_bitrate_bps = 1'000'000,   // 1 Mbps
-        .max_bitrate_bps    = 10'000'000,   // 10 Mbps
+        .impl   = "aimd",
+        .params = {
+            .initial_bitrate_bps = 1'000'000,   // 1 Mbps
+            .max_bitrate_bps     = 10'000'000,  // 10 Mbps
+        },
     },
     .jitter_buffer = {
         .impl           = "adaptive",
@@ -105,9 +107,11 @@ inline const Profile kProfileLive = Profile{
         .best_effort_weight = 1,
     },
     .bwe = {
-        .impl               = "aimd",
-        .initial_bitrate_bps = 2'000'000,   // 2 Mbps (higher for video)
-        .max_bitrate_bps    = 20'000'000,   // 20 Mbps
+        .impl   = "aimd",
+        .params = {
+            .initial_bitrate_bps = 2'000'000,   // 2 Mbps (higher for video)
+            .max_bitrate_bps     = 20'000'000,  // 20 Mbps
+        },
     },
     .jitter_buffer = {
         .impl           = "adaptive",
@@ -191,9 +195,11 @@ inline const Profile kProfileAgent = Profile{
         .best_effort_weight = 1,
     },
     .bwe = {
-        .impl               = "aimd",
-        .initial_bitrate_bps = 500'000,     // lower than call; agent may be low-bandwidth
-        .max_bitrate_bps    = 5'000'000,
+        .impl   = "aimd",
+        .params = {
+            .initial_bitrate_bps = 500'000,     // lower than call; agent may be low-bandwidth
+            .max_bitrate_bps     = 5'000'000,
+        },
     },
     .jitter_buffer = {
         .impl           = "adaptive",
@@ -238,9 +244,11 @@ inline const Profile kProfileTeleop = Profile{
         .best_effort_weight = 1,
     },
     .bwe = {
-        .impl               = "aimd",
-        .initial_bitrate_bps = 2'000'000,   // 2 Mbps (video + telemetry)
-        .max_bitrate_bps    = 20'000'000,
+        .impl   = "aimd",
+        .params = {
+            .initial_bitrate_bps = 2'000'000,   // 2 Mbps (video + telemetry)
+            .max_bitrate_bps     = 20'000'000,
+        },
     },
     .jitter_buffer = {
         .impl           = "adaptive",

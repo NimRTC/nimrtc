@@ -143,6 +143,13 @@ def run_chrome_interop() -> bool:
         kill_port(SIGNAL_PORT)
         time.sleep(0.3)
 
+        # Set DTLS diagnostic env vars BEFORE spawning the proxy so the
+        # demo-p2p child (which the proxy Popen()s without env= and
+        # therefore inherits the proxy's environment) sees them.
+        os.environ["NIMRTC_DTLS_KEYLOG"] = str(E2E / "nimrtc_chrome.keylog")
+        os.environ["NIMRTC_DTLS_TRACE"]  = str(E2E / "nimrtc_chrome.trace")
+        os.environ["NIMRTC_DTLS_DUMP"]   = "1"
+
         # 1) Signaling server
         _start(
             "signaling_server",
@@ -184,7 +191,8 @@ def run_chrome_interop() -> bool:
         # tools/e2e_chrome_interop.py takes care of launching headless Chrome
         # and pulling `window._interopResults`. We run it as a subprocess so
         # its full output appears in build/e2e/case_d_chrome.log.
-        chrome_log = E2E / "case_d_chrome.log"        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
+        chrome_log = E2E / "case_d_chrome.log"
+        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
         with open(chrome_log, "w", encoding="utf-8") as f:
             rc_chrome = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT,
                                         timeout=PROXY_DURATION + 30)

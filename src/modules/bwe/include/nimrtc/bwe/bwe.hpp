@@ -35,11 +35,16 @@
 
 // Re-export plugin types under nimrtc::bwe:: for backwards-compatibility
 // (callers can keep writing `bwe::Config`, `bwe::Feedback`, etc.).
+//
+// `plugins::IBwe` is re-exported via a using-declaration (not a type alias)
+// so that `bwe::IBwe` and `plugins::IBwe` are *the same type* — preserving
+// identity across translation units, which matters for explicit
+// `dynamic_cast` and template type deduction.
 namespace nimrtc::bwe {
     using Config   = plugins::BweConfig;
     using Feedback = plugins::BweFeedback;
     using Estimate = plugins::BweEstimate;
-    using IBwe     = plugins::IBwe;
+    using plugins::IBwe;        // <-- using-declaration (single source of truth)
 }
 
 // =============================================================================

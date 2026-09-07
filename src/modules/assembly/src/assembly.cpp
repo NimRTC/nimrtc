@@ -202,11 +202,24 @@ Profile profile_from_json_file(const std::string& file_path) {
     p.audio_payload_type  = static_cast<std::uint8_t>(root.value("audio_payload_type", 111));
 
     // -- BWE config ------------------------------------------------------------
+    //
+    // JSON schema (kept stable for backward compatibility):
+    //   "bwe": {
+    //       "impl":                "<plugin id, e.g. aimd>",
+    //       "initial_bitrate_bps": <uint32>,   // -> params.initial_bitrate_bps
+    //       "max_bitrate_bps":     <uint32>    // -> params.max_bitrate_bps
+    //   }
+    //
+    // All other `plugins::BweConfig` fields fall back to their default
+    // values; future schema extension may add `params: { ... }` as a
+    // nested object to surface the full canonical config.
     if (root.contains("bwe") && root["bwe"].is_object()) {
         const auto& bwe = root["bwe"];
-        p.bwe.impl               = json_to_string(bwe.value("impl", "aimd"));
-        p.bwe.initial_bitrate_bps = bwe.value("initial_bitrate_bps", 1'000'000u);
-        p.bwe.max_bitrate_bps     = bwe.value("max_bitrate_bps",    10'000'000u);
+        p.bwe.impl = json_to_string(bwe.value("impl", "aimd"));
+        p.bwe.params.initial_bitrate_bps =
+            bwe.value("initial_bitrate_bps", 1'000'000u);
+        p.bwe.params.max_bitrate_bps =
+            bwe.value("max_bitrate_bps", 10'000'000u);
     }
 
     // -- jitter buffer config --------------------------------------------------
@@ -230,6 +243,27 @@ Profile profile_from_json_file(const std::string& file_path) {
         p.scheduler.audio_weight       = static_cast<std::uint8_t>(sc.value("audio_weight", 8));
         p.scheduler.video_weight       = static_cast<std::uint8_t>(sc.value("video_weight", 4));
         p.scheduler.best_effort_weight = static_cast<std::uint8_t>(sc.value("best_effort_weight", 1));
+
+        // `impl` is the plugin id resolved through PluginRegistry. Older
+        // profile JSON files predate this field — auto-fill from the
+        // Strategy so they continue to round-trip.
+        const std::string impl_explicit = json_to_string(sc.value("impl", ""));
+        p.scheduler.impl = impl_explicit.empty()
+            ? std::string{default_impl_for(p.scheduler.strategy)}
+            : impl_explicit;
+
+        // `params` is the plugins::SchedulerConfig (avg packet size,
+        // queue depth, keyframe protection). Optional — the default
+        // constructed struct is fine for typical usage.
+        if (sc.contains("params") && sc["params"].is_object()) {
+            const auto& ps = sc["params"];
+            p.scheduler.params.avg_packet_size_bytes =
+                ps.value("avg_packet_size_bytes", 1200u);
+            p.scheduler.params.max_queue_depth =
+                ps.value("max_queue_depth",     8192u);
+            p.scheduler.params.protect_keyframes =
+                ps.value("protect_keyframes",   true);
+        }
     }
 
     return p;
@@ -258,11 +292,15 @@ std::string profile_to_json_string(const Profile& p) {
     root["audio_channels"]       = p.audio_channels;
     root["audio_payload_type"]  = p.audio_payload_type;
 
-    // BWE sub-object
+    // BWE sub-object — keep the legacy top-level schema so existing profile
+    // JSONs continue to round-trip. We serialise `params.initial_bitrate_bps`
+    // / `params.max_bitrate_bps` at the top level (the canonical
+    // `plugins::BweConfig` lives at `params`, but the on-disk layout is
+    // intentionally flat for backward compatibility).
     root["bwe"] = json::object();
-    root["bwe"]["impl"]               = std::string{p.bwe.impl};
-    root["bwe"]["initial_bitrate_bps"] = p.bwe.initial_bitrate_bps;
-    root["bwe"]["max_bitrate_bps"]     = p.bwe.max_bitrate_bps;
+    root["bwe"]["impl"]                 = std::string{p.bwe.impl};
+    root["bwe"]["initial_bitrate_bps"] = p.bwe.params.initial_bitrate_bps;
+    root["bwe"]["max_bitrate_bps"]     = p.bwe.params.max_bitrate_bps;
 
     // JitterBuffer sub-object
     root["jitter_buffer"] = json::object();
@@ -280,6 +318,24 @@ std::string profile_to_json_string(const Profile& p) {
     root["scheduler"]["audio_weight"]       = p.scheduler.audio_weight;
     root["scheduler"]["video_weight"]        = p.scheduler.video_weight;
     root["scheduler"]["best_effort_weight"]  = p.scheduler.best_effort_weight;
+
+    // Plugin binding (new in P1 — absent on legacy profiles).
+    // We emit `impl` as the resolved value (after default-filling), so
+    // the round-trip is byte-identical even when the source JSON omits
+    // `impl`. The legacy fields above remain first-class for backwards
+    // compatibility.
+    root["scheduler"]["impl"] = std::string{resolve_scheduler_impl(p.scheduler)};
+
+    // Runtime parameters (plugins::SchedulerConfig). Always emitted so
+    // a downstream consumer that only reads `impl + params` doesn't have
+    // to special-case missing fields.
+    root["scheduler"]["params"] = json::object();
+    root["scheduler"]["params"]["avg_packet_size_bytes"] =
+        p.scheduler.params.avg_packet_size_bytes;
+    root["scheduler"]["params"]["max_queue_depth"] =
+        p.scheduler.params.max_queue_depth;
+    root["scheduler"]["params"]["protect_keyframes"] =
+        p.scheduler.params.protect_keyframes;
 
     return root.dump(/*indent=*/2);
 }

@@ -93,7 +93,15 @@ async def run_e2e() -> int:
                 # Surface DTLS/SSL errors on stderr (doesn't help with DTLS
                 # but useful when checking protocol versions).
                 "--enable-logging=stderr",
-                "--v=0",
+                "--v=1",
+                # DTLS uses SCTP-like transport; WebRTC's RTCPeerConnection
+                # is what raises DTLS errors to JS, so we can't see the raw
+                # alert in JS console — enable BoringSSL-level logging so
+                # `--v=1` actually surfaces the alert level/description.
+                "--log-level=0",
+                # Pin Chrome's verbose logs to a file we can read after the
+                # run (Playwright discards Chrome's stderr).
+                f"--log-file={E2E / 'chrome_verbose.log'}",
             ],
         )
         context = await browser.new_context()
@@ -104,6 +112,9 @@ async def run_e2e() -> int:
         console_log.write_text("")
         msgs: list[str] = []
         page.on("console", lambda m: msgs.append(f"[{m.type}] {m.text}"))
+        # Also capture page errors (uncaught JS exceptions, which is where
+        # RTCPeerConnection DTLS-failure callbacks land).
+        page.on("pageerror", lambda e: msgs.append(f"[pageerror] {e}"))
 
         await page.goto(url)
         print("[E2E] Page loaded — waiting for ICE+DTLS to complete")

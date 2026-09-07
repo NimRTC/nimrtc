@@ -206,14 +206,15 @@ TEST_F(AssemblyTest, BuilderLoadProfileThenOverride) {
     auto profile = nimrtc::assembly::Builder{}
         .load_profile("call")
         .override_transport("ice")
-        .override_bwe({.impl = "aimd", .initial_bitrate_bps = 500'000})
+        .override_bwe({.impl = "aimd",
+                       .params = {.initial_bitrate_bps = 500'000}})
         .build();
 
     EXPECT_EQ(profile.name, "call");
     EXPECT_EQ(profile.transport_name, "ice");
-    EXPECT_EQ(profile.bwe.initial_bitrate_bps, 500'000u);
+    EXPECT_EQ(profile.bwe.params.initial_bitrate_bps, 500'000u);
     // Original call BWE max is preserved.
-    EXPECT_EQ(profile.bwe.max_bitrate_bps, 10'000'000u);
+    EXPECT_EQ(profile.bwe.params.max_bitrate_bps, 10'000'000u);
 }
 
 TEST_F(AssemblyTest, BuilderLoadUnknownProfileLeavesBuilderUnchanged) {
@@ -298,12 +299,19 @@ static void expect_profiles_equal(
     EXPECT_EQ(a.audio_sample_rate_hz,  b.audio_sample_rate_hz);
     EXPECT_EQ(a.audio_channels,        b.audio_channels);
     EXPECT_EQ(a.audio_payload_type,    b.audio_payload_type);
-    EXPECT_EQ(a.bwe.impl,              b.bwe.impl);
-    EXPECT_EQ(a.bwe.initial_bitrate_bps, b.bwe.initial_bitrate_bps);
-    EXPECT_EQ(a.bwe.max_bitrate_bps,   b.bwe.max_bitrate_bps);
+    EXPECT_EQ(a.bwe.impl,                b.bwe.impl);
+    EXPECT_EQ(a.bwe.params.initial_bitrate_bps, b.bwe.params.initial_bitrate_bps);
+    EXPECT_EQ(a.bwe.params.max_bitrate_bps,     b.bwe.params.max_bitrate_bps);
     EXPECT_EQ(a.jitter_buffer.mode,    b.jitter_buffer.mode);
     EXPECT_EQ(a.jitter_buffer.initial_delay_ms, b.jitter_buffer.initial_delay_ms);
     EXPECT_EQ(a.scheduler.strategy,    b.scheduler.strategy);
+    EXPECT_EQ(a.scheduler.impl,        b.scheduler.impl);
+    EXPECT_EQ(a.scheduler.params.avg_packet_size_bytes,
+              b.scheduler.params.avg_packet_size_bytes);
+    EXPECT_EQ(a.scheduler.params.max_queue_depth,
+              b.scheduler.params.max_queue_depth);
+    EXPECT_EQ(a.scheduler.params.protect_keyframes,
+              b.scheduler.params.protect_keyframes);
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
@@ -337,7 +345,9 @@ TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
 TEST_F(AssemblyTest, JsonRoundTripBuilderProfile) {
     nimrtc::assembly::Profile built = nimrtc::assembly::Builder{}
         .load_profile("agent")
-        .override_bwe({.impl = "aimd", .initial_bitrate_bps = 750'000, .max_bitrate_bps = 8'000'000})
+        .override_bwe({.impl = "aimd",
+                       .params = {.initial_bitrate_bps = 750'000,
+                                  .max_bitrate_bps = 8'000'000}})
         .override_timeline(false)
         .build();
 
@@ -353,7 +363,7 @@ TEST_F(AssemblyTest, JsonRoundTripBuilderProfile) {
     nimrtc::assembly::Profile loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
 
     EXPECT_EQ(loaded.name, built.name);
-    EXPECT_EQ(loaded.bwe.initial_bitrate_bps, 750'000u);
+    EXPECT_EQ(loaded.bwe.params.initial_bitrate_bps, 750'000u);
     EXPECT_EQ(loaded.timeline_enabled, false);  // overridden
 
     fs::remove(tmp);
@@ -381,4 +391,97 @@ TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
             EXPECT_EQ(p.name, name);
         }) << "Failed to parse: " << path;
     }
+}
+
+// =============================================================================
+// 5. Scheduler plugin bridge (impl + params + helpers)
+// =============================================================================
+
+TEST_F(AssemblyTest, SchedulerConfigDefaultsToStrictPriority) {
+    nimrtc::assembly::SchedulerConfig cfg;
+    EXPECT_EQ(cfg.impl, "strict_priority");
+    EXPECT_EQ(cfg.strategy,
+              nimrtc::assembly::SchedulerConfig::Strategy::kStrictPriority);
+    // plugins::SchedulerConfig default values flow through params.
+    EXPECT_EQ(cfg.params.avg_packet_size_bytes, 1200u);
+    EXPECT_EQ(cfg.params.max_queue_depth, 8192u);
+    EXPECT_TRUE(cfg.params.protect_keyframes);
+}
+
+TEST_F(AssemblyTest, DefaultImplForEachStrategy) {
+    using S = nimrtc::assembly::SchedulerConfig::Strategy;
+    EXPECT_EQ(nimrtc::assembly::default_impl_for(S::kStrictPriority),
+              "strict_priority");
+    EXPECT_EQ(nimrtc::assembly::default_impl_for(S::kWeightedFair),
+              "weighted_fair");
+    EXPECT_EQ(nimrtc::assembly::default_impl_for(S::kFixedRate),
+              "fixed_rate");
+}
+
+TEST_F(AssemblyTest, ResolveSchedulerImplFallsBackOnEmpty) {
+    nimrtc::assembly::SchedulerConfig cfg;
+    cfg.impl = "custom_q";
+    EXPECT_EQ(nimrtc::assembly::resolve_scheduler_impl(cfg), "custom_q");
+
+    cfg.impl.clear();
+    cfg.strategy = nimrtc::assembly::SchedulerConfig::Strategy::kWeightedFair;
+    EXPECT_EQ(nimrtc::assembly::resolve_scheduler_impl(cfg), "weighted_fair");
+}
+
+TEST_F(AssemblyTest, ToPluginsSchedulerConfigForwardsParams) {
+    nimrtc::assembly::SchedulerConfig cfg;
+    cfg.params.avg_packet_size_bytes = 800;
+    cfg.params.max_queue_depth       = 256;
+    cfg.params.protect_keyframes     = false;
+
+    auto psc = nimrtc::assembly::to_plugins_scheduler_config(cfg);
+    EXPECT_EQ(psc.avg_packet_size_bytes, 800u);
+    EXPECT_EQ(psc.max_queue_depth,       256u);
+    EXPECT_FALSE(psc.protect_keyframes);
+}
+
+TEST_F(AssemblyTest, LegacyJsonInfersSchedulerImplFromStrategy) {
+    // A profile that uses strategy="weighted_fair" without explicit
+    // `impl` should still resolve to the weighted_fair plugin id after
+    // JSON round-trip — preserving intent across versions.
+    std::string legacy_json = R"({
+      "name": "legacy_weighted",
+      "scheduler": { "strategy": "weighted_fair" }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_legacy.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << legacy_json;
+    }
+
+    auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(loaded.scheduler.strategy,
+              nimrtc::assembly::SchedulerConfig::Strategy::kWeightedFair);
+    EXPECT_EQ(loaded.scheduler.impl, "weighted_fair");
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, ExplicitSchedulerImplPreservedInJson) {
+    nimrtc::assembly::Profile p;
+    p.name = "custom";
+    p.scheduler.strategy =
+        nimrtc::assembly::SchedulerConfig::Strategy::kStrictPriority;
+    p.scheduler.impl     = "my_custom_q";
+    p.scheduler.params.avg_packet_size_bytes = 999;
+
+    std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_NE(s.find("\"impl\": \"my_custom_q\""), std::string::npos);
+    EXPECT_NE(s.find("\"avg_packet_size_bytes\": 999"), std::string::npos);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_custom_impl.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << s;
+    }
+    auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(loaded.scheduler.impl, "my_custom_q");
+    EXPECT_EQ(loaded.scheduler.params.avg_packet_size_bytes, 999u);
+    fs::remove(tmp);
 }

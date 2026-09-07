@@ -215,6 +215,15 @@ function connectWs() {
 
         } else if (t === "answer") {
             log("SDP", "answer received");
+            // In OFFERER mode the engine NEVER creates an answer — it
+            // receives one from the peer.  The harness used to only
+            // mark sdpAnswerSent true when the page created an answer
+            // (i.e. when OFFERER was false), which made OFFERER runs
+            // permanently FAIL on that flag even though Chrome had
+            // successfully processed the remote answer and gone ICE
+            // Connected.  Set the flag here too so OFFERER mode lights
+            // up correctly.
+            window._interopResults.sdpAnswerSent = true;
             if (pc.signalingState === "have-local-offer") {
                 try {
                     await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });

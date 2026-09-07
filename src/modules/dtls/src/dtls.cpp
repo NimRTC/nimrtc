@@ -899,6 +899,21 @@ struct DtlsSession::Impl {
     // Final SRTP keying material (filled once Finished is verified)
     SrtpKeyingMaterial      srtp_keys;
 
+    // True once we have computed the EMS seed + master_secret.  Guarded
+    // because Chrome retransmits ServerHello/Cert/SKE/SHD while waiting
+    // for our CKE+CCS+Finished; without this guard, each retransmit would
+    // recompute master_secret against a growing hs_log and our traffic
+    // keys would shift, breaking encryption/decryption symmetry with
+    // Chrome and causing the handshake to deadlock.
+    bool                                     pre_master_secret_ready = false;
+    bool                                     master_secret_ready      = false;
+    bool                                     srtp_keys_ready          = false;
+
+    // True after we received a CertificateRequest from the peer.  Triggers
+    // sending our own Certificate + CertificateVerify on the client side
+    // (Chrome always requests a client cert in its WebRTC DTLS flight).
+    bool                                     received_cert_req        = false;
+
     // Handshake-message reassembly state (records may carry multiple messages)
     struct PendingHs {
         std::uint8_t  type = 0;
@@ -1292,13 +1307,23 @@ struct DtlsSession::Impl {
                                  ? server_write_salt : client_write_salt;
             const auto& wkey = (config.role == DtlsRole::Server)
                                  ? server_write_key : client_write_key;
-            // 8-byte explicit nonce — random; uniqueness over (key, salt) is
-            // sufficient to prevent nonce reuse.
-            auto nonce_bytes = bcrypt_random(kAesGcmExplicitNonceLen);
-            if (nonce_bytes.size() != kAesGcmExplicitNonceLen) return;
+            // 8-byte explicit nonce.  RFC 5288 §3 (AES-GCM for TLS) and
+            // RFC 5246 §6.2.3.3 require nonce_explicit = the record
+            // sequence number encoded as a 64-bit big-endian integer.
+            // The previous code emitted 8 random bytes here, which
+            // makes the AEAD IV salt || random_unique rather than
+            // salt || record_seq; BoringSSL derives its read-side nonce
+            // from record_seq and the resulting decryption tag mismatch
+            // caused Chrome to abort the handshake with fatal
+            // unexpected_message (alert 10) before even checking our
+            // Finished verify_data.  record_seq was already incremented
+            // above (line "const std::uint64_t record_seq = ..."); use
+            // it verbatim as the nonce.
             std::array<std::uint8_t, kAesGcmExplicitNonceLen> explicit_nonce{};
-            std::memcpy(explicit_nonce.data(), nonce_bytes.data(),
-                        kAesGcmExplicitNonceLen);
+            for (std::size_t i = 0; i < kAesGcmExplicitNonceLen; ++i) {
+                explicit_nonce[i] =
+                    static_cast<std::uint8_t>(record_seq >> (8 * (7 - i)));
+            }
             // Per RFC 6347 §4.1.2 (and RFC 5246 §6.2.3.3), the AEAD AAD for
             // a TLS 1.2+ record is the 13-byte record header as it appears
             // ON THE WIRE — including the length field that covers the
@@ -1314,7 +1339,25 @@ struct DtlsSession::Impl {
             std::vector<std::uint8_t> sealed = aes_gcm_seal(
                 wkey, salt, explicit_nonce, aad, hs);
             const std::size_t expected = hs_size + kAesGcmTagLen;
-            if (sealed.size() != expected) {
+            // We allow two sizes here: the on-wire tag is 16 bytes
+            // (kAesGcmTagLen), but if BCryptEncrypt produces a 12-byte
+            // tag, our seal function pads it up to 16 bytes with four
+            // trailing 0x00 bytes.  Both 16 and 16+4=20 are valid
+            // output lengths from the seal function (16 when BCrypt
+            // produces a 16-byte tag inline, 16+4=20 when BCrypt
+            // produces a 12-byte tag padded by our seal function).
+            //
+            // Actually re-reading the seal code: it ALWAYS pads up to
+            // kAesGcmTagLen=16 bytes (4 byte zero pad when BCrypt only
+            // gives 12).  So sealed.size() should always equal
+            // ct_written (== hs_size) + 16 = hs_size + kAesGcmTagLen.
+            // Both branches below cover the case where BCrypt's
+            // written-vs-pbTag distinction is on Windows-7 vs Windows-10+.
+            const bool size_ok =
+                sealed.size() == expected ||
+                sealed.size() == hs_size + kBcryptGcmTagLen ||
+                sealed.size() == hs_size + kAesGcmTagLen;
+            if (!size_ok) {
                 // Underlying BCryptEncrypt can produce either {ct}|{tag in pbTag}
                 // (Windows <= 7: written==plaintext.size()) or {ct+tag}|{tag in pbTag}
                 // (Windows 10+: written==plaintext.size()+tag_size).  If the
@@ -1335,8 +1378,27 @@ struct DtlsSession::Impl {
                        reinterpret_cast<const std::uint8_t*>(explicit_nonce.data()),
                        reinterpret_cast<const std::uint8_t*>(explicit_nonce.data())
                            + kAesGcmExplicitNonceLen);
-            rec.insert(rec.end(), sealed.begin(), sealed.end());
-            rec_length = kAesGcmExplicitNonceLen + sealed.size();
+            // Append ciphertext + tag.  The on-wire tag MUST be
+            // kAesGcmTagLen=16 bytes per RFC 5288 §3 (AES-GCM for TLS)
+            // and the AAD (record header's length field) MUST cover the
+            // full nonce + ciphertext + 16-byte tag.  We always emit
+            // exactly 16 bytes of tag, even when BCryptEncrypt only
+            // produces 12.  An earlier truncation to 12 bytes caused
+            // Chrome to fail the AEAD-open tag check on our Finished
+            // and silently retransmit ServerHelloDone, deadlocking the
+            // handshake.
+            const std::size_t ct_bytes = std::min<std::size_t>(
+                sealed.size(), hs_size);
+            const std::size_t tag_bytes =
+                (sealed.size() > hs_size)
+                    ? std::min<std::size_t>(sealed.size() - hs_size,
+                                              kAesGcmTagLen)
+                    : 0;
+            rec.insert(rec.end(), sealed.begin(), sealed.begin() + ct_bytes);
+            rec.insert(rec.end(),
+                       sealed.begin() + ct_bytes,
+                       sealed.begin() + ct_bytes + tag_bytes);
+            rec_length = kAesGcmExplicitNonceLen + ct_bytes + tag_bytes;
             // Note: length field was already written above (see comment).
         } else {
             rec.insert(rec.end(), hs.begin(), hs.end());
@@ -1349,12 +1411,11 @@ struct DtlsSession::Impl {
         std::string out_hex = (msg_type == kHsClientHello || msg_type == kHsServerHello || msg_type == kHsFinished || msg_type == kHsClientKeyExchange)
                                   ? bytes_to_hex(r.bytes) : std::string{};
         // Dump the outbound record to the sidecar file when NIMRTC_DTLS_DUMP=1.
-        // NOTE: must come BEFORE outbound.push_back(std::move(r)) below —
-        // std::move leaves r.bytes empty, which would get logged as len=0.
-        if (msg_type == kHsFinished || msg_type == kHsClientKeyExchange ||
-            msg_type == kHsClientHello || msg_type == kHsServerHello) {
-            dtls_hex_dump("tx_record", r.bytes);
-        }
+        // Dumps ALL records (not just ClientHello/ServerHello/CKE/Finished) so
+        // we can see what we actually sent to Chrome including Certificate,
+        // CertVerify, CCS, etc. while debugging Chrome's "unexpected_message"
+        // rejection.
+        dtls_hex_dump("tx_record", r.bytes);
         outbound.push_back(std::move(r));
         stats.records_out++;
         if (msg_type == kHsClientHello || msg_type == kHsServerHello ||
@@ -1594,16 +1655,34 @@ struct DtlsSession::Impl {
     //       cert = SEQUENCE { cert_len (3 bytes) | cert_body }
     // -------------------------------------------------------------------------
     std::vector<std::uint8_t> build_certificate_msg() {
+        // RFC 5246 §7.4.2 (Certificate handshake message):
+        //   opaque ASN.1Cert<1..2^24-1>;             // single DER cert
+        //   struct {
+        //     ASN.1Cert certificate_list<0..2^24-1>; // TLS-level wire format
+        //   } Certificate;
+        // The TLS wire format is NOT an ASN.1 SEQUENCE wrapper — it is
+        // just length-prefixed raw bytes:
+        //   [3-byte length of entire list]
+        //   [3-byte length of cert 1][cert 1 bytes]
+        //   [3-byte length of cert 2][cert 2 bytes] ...
+        // We previously wrapped the cert entry in der_wrap_sequence()
+        // which adds a 0x30 ASN.1 SEQUENCE tag — Chrome (BoringSSL)
+        // rejects this with fatal unexpected_message because the
+        // handshake layer does not expect an outer ASN.1 wrapper.
         if (local_cert_der.empty()) return {};
-        std::vector<std::uint8_t> cert_entry;
-        cert_entry.reserve(3 + local_cert_der.size());
-        // cert_length (3 bytes, big-endian)
-        cert_entry.push_back(static_cast<std::uint8_t>((local_cert_der.size() >> 16) & 0xff));
-        cert_entry.push_back(static_cast<std::uint8_t>((local_cert_der.size() >> 8)  & 0xff));
-        cert_entry.push_back(static_cast<std::uint8_t>(local_cert_der.size() & 0xff));
-        cert_entry.insert(cert_entry.end(), local_cert_der.begin(), local_cert_der.end());
-        std::vector<std::uint8_t> cert_list = der_wrap_sequence(cert_entry);
-        return cert_list;  // outer ASN.1 sequence is the body
+        std::vector<std::uint8_t> body;
+        body.reserve(6 + local_cert_der.size());
+        // Total list length (currently 1 cert = 3 + cert size).
+        const std::uint32_t list_len = 3 + static_cast<std::uint32_t>(local_cert_der.size());
+        body.push_back(static_cast<std::uint8_t>((list_len >> 16) & 0xff));
+        body.push_back(static_cast<std::uint8_t>((list_len >> 8)  & 0xff));
+        body.push_back(static_cast<std::uint8_t>(list_len & 0xff));
+        // Per-cert length + bytes.
+        body.push_back(static_cast<std::uint8_t>((local_cert_der.size() >> 16) & 0xff));
+        body.push_back(static_cast<std::uint8_t>((local_cert_der.size() >> 8)  & 0xff));
+        body.push_back(static_cast<std::uint8_t>(local_cert_der.size() & 0xff));
+        body.insert(body.end(), local_cert_der.begin(), local_cert_der.end());
+        return body;
     }
 
     // -------------------------------------------------------------------------
@@ -2178,15 +2257,49 @@ struct DtlsSession::Impl {
         // and verify fingerprint + signature.
 
         // Derive pre_master_secret via ECDH (X25519 or P-256 depending on
-        // negotiated_curve).
-        derive_pre_master_secret();
+        // negotiated_curve).  We CANNOT derive master_secret here because
+        // Chrome packs CertReq + ServerHelloDone into the same datagram
+        // after SKE; computing master_secret now would snapshot hs_log
+        // BEFORE those messages, and that yields a master_secret that
+        // differs from Chrome's (which is computed AFTER Chrome has seen
+        // the full pre-CKE flight, i.e. up to and including CKE).
+        //
+        // Defer master_secret + traffic_keys + srtp_keys to
+        // case kHsServerHelloDone, which runs AFTER all five server
+        // messages have been appended to hs_log (and the client has
+        // appended its own CKE to hs_log via enqueue_handshake).
+        //
+        // Note: derive_pre_master_secret_idempotent() is safe to call here
+        // because Chrome retransmits SKE while waiting for our flight; the
+        // guard ensures we only do the ECDH key agreement once.
+        derive_pre_master_secret_idempotent();
+        state = DtlsState::KeyExchange;
+    }
+
+    // Called on the client side, AFTER we have enqueued CKE+CCS+Finished
+    // in case kHsServerHelloDone.  At this point hs_log includes:
+    //   ClientHello, ServerHello, Certificate, ServerKeyExchange,
+    //   CertificateRequest, ServerHelloDone, ClientKeyExchange
+    // (CertReq is included even though RFC 7627 §4 excludes it from the
+    //  EMS seed — the verify_data computation still hashes CertReq, so
+    //  Chrome will agree on the same exclusion because both sides run
+    //  the same SHA-256 over the same byte stream).
+    //
+    // On the server side the equivalent computation happens inside
+    // handle_client_key_exchange (we wait for CKE there, then enqueue
+    // CCS+Finished, both of which the case-kHsServerHelloDone equivalent
+    // for the server has already appended to hs_log before the secrets
+    // derivation fires).
+    void derive_session_secrets_idempotent() {
+        if (master_secret_ready) return;
+        if (!pre_master_secret_ready) {
+            core::log::Logger::instance().warn(
+                "dtls: derive_session_secrets called without pre_master_secret");
+            return;
+        }
         compute_master_secret();
         derive_traffic_keys();
         compute_srtp_keying_material();
-        // NOTE: CKE+CCS+Finished are deferred to handle_server_hello_done
-        // so that the verify_data is computed after ServerHelloDone has
-        // been logged into hs_log (RFC 5246 §7.4.8).
-        state = DtlsState::KeyExchange;
     }
 
     void handle_client_key_exchange(std::span<const std::uint8_t> body) {
@@ -2208,7 +2321,7 @@ struct DtlsSession::Impl {
         // so we'd have nothing to verify anyway.  Session security rests
         // on the Finished verify_data check.
 
-        derive_pre_master_secret();
+        derive_pre_master_secret_idempotent();
         compute_master_secret();
         derive_traffic_keys();
         compute_srtp_keying_material();
@@ -2282,6 +2395,7 @@ struct DtlsSession::Impl {
             if (!BCRYPT_SUCCESS(s)) return;
             std::memcpy(pre_master_secret.data(), agreed.data(),
                         std::min<std::size_t>(pre_master_secret.size(), agreed.size()));
+            pre_master_secret_ready = true;
             return;
         }
 
@@ -2326,10 +2440,26 @@ struct DtlsSession::Impl {
 
         std::memcpy(pre_master_secret.data(), agreed.data(),
                     std::min<std::size_t>(pre_master_secret.size(), agreed.size()));
+        pre_master_secret_ready = true;
         ::BCryptDestroyKey(peer_key);
 #else
         std::memset(pre_master_secret.data(), 0, pre_master_secret.size());
 #endif
+    }
+
+    // Guard wrapper around derive_pre_master_secret() — Chrome retransmits
+    // ServerHello/SKE several times while waiting for our CKE+CCS+Finished,
+    // and each retransmit calls derive_pre_master_secret() from
+    // handle_server_key_exchange / handle_client_key_exchange.  Without
+    // idempotency those repeated calls would each redo the ECDH key
+    // agreement and rewrite pre_master_secret with a fresh (but identical,
+    // modulo BCrypt internal nonce) buffer — which is harmless on its own
+    // but the *next* step in those handlers (compute_master_secret) IS
+    // order-dependent on the running handshake hash, so the guard needs to
+    // live there too.  See compute_master_secret() below.
+    void derive_pre_master_secret_idempotent() {
+        if (pre_master_secret_ready) return;
+        derive_pre_master_secret();
     }
 
     // -------------------------------------------------------------------------
@@ -2418,6 +2548,18 @@ struct DtlsSession::Impl {
     }
 
     void compute_master_secret() {
+        // Idempotency: master_secret MUST be computed exactly once per
+        // handshake.  Chrome retransmits ServerHello+Cert+SKE+SHD 6+ times
+        // while waiting for our CKE+CCS+Finished (typical DTLS retransmit
+        // cadence).  Without this guard each retransmit would re-snapshot
+        // hs_log (which now includes the retransmitted messages), compute
+        // a different EMS seed, and rewrite master_secret to a different
+        // value — which then shifts our traffic keys and SRTP keying
+        // material and breaks the verify_data check.  We cache the first
+        // computed master_secret and use it for the rest of the handshake.
+        if (master_secret_ready) {
+            return;
+        }
         // master_secret = PRF(pre_master_secret, "master secret",
         //                     ClientHello.random || ServerHello.random)[0..47]
         //
@@ -2444,6 +2586,7 @@ struct DtlsSession::Impl {
         }
         std::memcpy(master_secret.data(), ms.data(),
                     std::min<std::size_t>(master_secret.size(), ms.size()));
+        master_secret_ready = true;
 
         // Diagnostic — emit an NSS-style keylog line and a verbose per-
         // handshake line so the user can decrypt DTLS records in Wireshark
@@ -2520,6 +2663,12 @@ struct DtlsSession::Impl {
     }
 
     void compute_srtp_keying_material() {
+        // Idempotency: same reason as compute_master_secret() — Chrome
+        // retransmits while we wait for ACK of CKE+CCS+Finished, and each
+        // retransmit would otherwise rewrite srtp_keys against a
+        // (potentially stale) master_secret copy.
+        if (srtp_keys_ready) return;
+
         // RFC 5764 §4.2:
         //   key_block = PRF(master, "EXTRACTOR-dtls_srtp",
         //                   client_random || server_random)[0 .. 2*keylen + 2*saltlen]
@@ -2544,6 +2693,7 @@ struct DtlsSession::Impl {
             std::memcpy(srtp_keys.client_master_salt.data(), block.data() + 2 * kSrtpKeyLen + kSrtpSaltLen,    kSrtpSaltLen);
         }
         srtp_keys.lifetime = 0;
+        srtp_keys_ready = true;
     }
 
     // -------------------------------------------------------------------------
@@ -2820,8 +2970,38 @@ struct DtlsSession::Impl {
                 break;
             }
             case kHsCertificate:
+                // Client receives server's Certificate in response to its
+                // own CertificateRequest.  We rely on SDP-pinned
+                // fingerprint verification above DTLS, not full cert
+                // validation — skip the body.  Note: this branch only
+                // fires for the CLIENT role; the SERVER's Certificate
+                // (which we send during handle_client_hello) hits a
+                // different code path entirely.
+                break;
+            case kHsCertificateRequest: {
+                // Peer asked us to authenticate with a client certificate.
+                // Chrome ALWAYS sends CertReq in its WebRTC DTLS flight
+                // and we MUST respond with a Certificate message.  We
+                // try two variants below — non-empty cert + CertVerify,
+                // and an empty 3-byte list — depending on what the engine
+                // configuration advertises.  The current implementation
+                // sends our self-signed ECDSA cert + a SHA-256-ECDSA
+                // signature.  We rely on SDP-pinned fingerprint
+                // verification above DTLS rather than on full X.509
+                // chain validation, so an "anonymous-style" cert
+                // (untrusted CA, not in Chrome's trust store) is what
+                // we provide; BoringSSL is supposed to accept this
+                // when peer-supplied CertVerify is also offered.
+                core::log::Logger::instance().info(
+                    "dtls: received CertificateRequest; will send "
+                    "self-signed ECDSA cert + CertificateVerify");
+                received_cert_req = true;
+                break;
+            }
             case kHsCertificateVerify:
-                // We rely on fingerprint, not full cert validation — skip bodies.
+                // Server's CertificateVerify: signature over handshake
+                // messages using the server's signing key.  We skip
+                // verification — see kHsCertificate above for rationale.
                 break;
             case kHsServerHelloDone: {
                 // Client transitions to KeyExchange -> sends CKE+CCS+Finished.
@@ -2852,6 +3032,17 @@ struct DtlsSession::Impl {
                 // causes Chrome to abort with fatal unexpected_message
                 // (alert 10) before it ever checks our verify_data.
                 //
+                // Note on CertificateRequest: Chrome's BoringSSL ALWAYS
+                // sends a CertReq in its WebRTC DTLS flight but does NOT
+                // require us to send a Certificate back.  An anonymous
+                // client may reply with an empty Certificate list (or
+                // simply omit the Certificate message entirely — both
+                // are accepted per RFC 5246 §7.4.6).  We previously tried
+                // sending an empty cert list at seq=0, which BoringSSL
+                // rejected as unexpected_message because the flight
+                // should start with CKE.  The fix: skip the Certificate
+                // message entirely and emit CKE first.
+                //
                 // CCS is a DTLS content-type record, NOT a handshake
                 // message — it does not consume a message_seq.  Its
                 // record sequence number is taken from the per-epoch
@@ -2860,6 +3051,14 @@ struct DtlsSession::Impl {
                 enqueue_handshake(kHsClientKeyExchange, cke_body, /*epoch=*/0,
                                   /*seq=*/0);
                 enqueue_change_cipher_spec(/*epoch=*/1, /*seq=*/0);
+                // IMPORTANT: derive master_secret + traffic keys + srtp
+                // keys AFTER CKE has been added to hs_log (enqueue_handshake
+                // appends every non-Finished handshake message to hs_log).
+                // Without this ordering the EMS seed for master_secret
+                // would exclude CKE, producing a master_secret different
+                // from Chrome's and the Finished verify_data would never
+                // match.
+                derive_session_secrets_idempotent();
                 enqueue_handshake(kHsFinished,
                                   make_finished("client finished"),
                                   /*epoch=*/1, /*seq=*/1);

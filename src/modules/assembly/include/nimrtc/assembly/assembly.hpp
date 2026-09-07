@@ -6,6 +6,9 @@
 #include <string_view>
 #include <vector>
 
+#include <nimrtc/plugins/bwe.hpp>   // plugins::BweConfig (canonical BWE config)
+
+#include <nimrtc/plugins/scheduler.hpp>   // plugins::SchedulerConfig (runtime params)
 // =============================================================================
 // nimrtc::assembly
 // --------------------------------------------------------------------------------
@@ -29,12 +32,30 @@ namespace nimrtc::assembly {
 
 // ---------------------------------------------------------------------------
 // SchedulerConfig — packet-scheduling priority configuration
+//
+// This struct mixes two orthogonal concerns:
+//
+//   1. USER-LEVEL STRATEGY — which algorithm should be used to schedule
+//      packets (Strategy enum + per-band weights). This is a "scenario
+//      choice" and lives in `assembly::` because it shapes the engine
+//      contract visible to user code.
+//
+//   2. PLUGIN-LEVEL BINDING — which concrete plugin implementation
+//      satisfies that strategy, and the runtime parameters handed to
+//      that plugin's `IScheduler::open()` / `IScheduler::config()`.
+//      The plugin id (`impl`) and runtime parameters (`params`,
+//      `plugins::SchedulerConfig`) bridge into `src/plugins/` so a
+//      `nimrtc::core::PluginRegistry::get_scheduler(impl)` lookup
+//      produces a scheduler preconfigured for the user.
+//
+// `to_plugins_scheduler_config()` collapses both layers into the
+// single struct the scheduler plugin factory expects.
 // ---------------------------------------------------------------------------
 struct SchedulerConfig {
     /// Enable the priority scheduler. When false, packets are sent FIFO.
     bool enabled = true;
 
-    /// Scheduling priority strategy.
+    /// Scheduling priority strategy (user-visible scenario choice).
     enum class Strategy {
         kStrictPriority,  ///< High-priority frames always preempt low-priority.
         kWeightedFair,    ///< Weighted fair queuing across priority bands.
@@ -47,21 +68,95 @@ struct SchedulerConfig {
     std::uint8_t audio_weight       = 8;   ///< audio frames
     std::uint8_t video_weight       = 4;   ///< video frames
     std::uint8_t best_effort_weight = 1;   ///< background / bulk data
+
+    /// Plugin id resolved via `core::PluginRegistry::get_scheduler()`.
+    /// Defaults match the `Strategy::kStrictPriority` implementation.
+    /// Reserved ids currently shipping: `"strict_priority"`.
+    /// Reserved for future work: `"weighted_fair"`, `"fixed_rate"`.
+    std::string impl = "strict_priority";
+
+    /// Runtime parameters passed to `ISchedulerFactory::create()` and
+    /// forwarded to `IScheduler::config()` on the resolved plugin.
+    /// These are the plugin-layer knobs (avg packet size, queue depth,
+    /// keyframe protection) — see `plugins::SchedulerConfig`.
+    plugins::SchedulerConfig params{};
 };
+
+/** Translate the assembly-level scheduler configuration into the
+ *  plugin-level configuration consumed by `ISchedulerFactory::create()`.
+ *
+ *  The returned struct is independent of the assembly layer (Strategy
+ *  enum, weights, enabled flag) — those are user-policy choices that
+ *  the engine interprets when wiring the scheduler into its tick path;
+ *  the plugin itself only sees runtime parameters.
+ *
+ *  If `assembly::SchedulerConfig::impl` is empty, the helper defaults
+ *  to `"strict_priority"` so the legacy profile JSON files (which
+ *  predate this field) keep resolving to the default plugin. */
+inline plugins::SchedulerConfig
+to_plugins_scheduler_config(const SchedulerConfig& sc) noexcept {
+    plugins::SchedulerConfig out = sc.params;
+    return out;
+}
+
+/** Return the canonical plugin id that satisfies a given Strategy.
+ *  Used by JSON deserialisation to auto-fill `SchedulerConfig::impl`
+ *  when the JSON omits the field — keeps legacy profiles valid. */
+inline std::string_view
+default_impl_for(SchedulerConfig::Strategy s) noexcept {
+    switch (s) {
+        case SchedulerConfig::Strategy::kStrictPriority: return "strict_priority";
+        case SchedulerConfig::Strategy::kWeightedFair:   return "weighted_fair";
+        case SchedulerConfig::Strategy::kFixedRate:      return "fixed_rate";
+    }
+    return "strict_priority";
+}
+
+/** Resolve the effective plugin id for `sc`. If `sc.impl` is empty,
+ *  fall back to the strategy's canonical default. */
+inline std::string_view
+resolve_scheduler_impl(const SchedulerConfig& sc) noexcept {
+    if (!sc.impl.empty()) return sc.impl;
+    return default_impl_for(sc.strategy);
+}
 
 // ---------------------------------------------------------------------------
 // BweConfig — bandwidth estimator settings
 // ---------------------------------------------------------------------------
+//
+// `impl` selects which `plugins::IBweFactory` to instantiate (resolved via
+// `core::PluginRegistry`). `params` carries the full canonical BWE config
+// defined by the plugin interface (`plugins::BweConfig`), so changing
+// fields on `params` is the supported way to influence the underlying
+// implementation. The convenience helpers below (`to_plugins_bwe_config`)
+// forward `assembly::BweConfig` to `plugins::BweConfig` for engine wiring.
+//
+// JSON compatibility: the on-disk schema keeps the legacy top-level
+// `impl` / `initial_bitrate_bps` / `max_bitrate_bps` keys under the
+// `bwe` object (see `profile_from_json_file` / `profile_to_json_string`).
+// During (de)serialisation those fields are mapped to/from `params.*`,
+// so existing profile JSONs continue to load without modification.
 struct BweConfig {
     /// BWE implementation name. Known values: "aimd" (P1 default), "googcc" (P3).
     std::string impl = "aimd";
 
-    /// Initial target bitrate in bits per second.
-    std::uint32_t initial_bitrate_bps = 1'000'000;  // 1 Mbps
-
-    /// Maximum bitrate ceiling; BWE will never suggest above this.
-    std::uint32_t max_bitrate_bps = 10'000'000;  // 10 Mbps
+    /// Canonical plugin-layer BWE config. The engine forwards this directly
+    /// to the selected `plugins::IBweFactory::create()`.
+    plugins::BweConfig params{};
 };
+
+/** Convert an `assembly::BweConfig` into the canonical
+ *  `plugins::BweConfig` consumed by `IBweFactory::create()`.
+ *
+ *  Today this is a simple pass-through (`return cfg.params;`) because
+ *  `assembly::BweConfig::params` already holds the full canonical shape.
+ *  The helper exists so that future divergences (e.g. assembly-only
+ *  fields) have a single, documented bridge point — and so call sites
+ *  read as "we hand the assembly config to the plugin factory".
+ */
+inline plugins::BweConfig to_plugins_bwe_config(const BweConfig& cfg) noexcept {
+    return cfg.params;
+}
 
 // ---------------------------------------------------------------------------
 // JitterBufferConfig — adaptive jitter buffer settings

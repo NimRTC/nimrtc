@@ -1,24 +1,29 @@
 /**
  * @file src/modules/sched/tests/test_scheduler_plugin.cpp
- * @brief Unit tests for the scheduler plugin seam (plugins::IScheduler).
+ * @brief Implementation-detail tests for the Scheduler module's plugin
+ *        adapter.
  *
- * Verifies:
- *   1. PluginRegistry resolves the scheduler factory registered by
- *      `sched::register_default_plugins()` under id `"strict_priority"`.
- *   2. StrictPriorityPluginFactory reports correct id / display_name.
- *   3. The factory's `create()` returns a `plugins::IScheduler*`.
- *   4. The created instance dispatches correctly through the plugin
- *      interface (enqueue → drain_with → priority order).
+ * These tests live here (not in src/plugins/tests/) because they
+ * exercise `nimrtc::sched::Scheduler` directly — they verify how the
+ * concrete implementation behaves when driven through the
+ * `plugins::IScheduler` interface. Pure plugin-seam tests (registry
+ * round-trip, factory contracts) live in
+ * src/plugins/tests/test_scheduler_plugin_seam.cpp.
  *
- * @note P1 — IScheduler is interface-only in P1; engine integration
- *       (send_audio → scheduler enqueue) lands in P2.
+ * Coverage:
+ *   1. `sched::register_default_plugins()` registers the
+ *      `"strict_priority"` factory.
+ *   2. The registered factory creates a `Scheduler` that responds to
+ *      `open()` / `close()`.
+ *   3. The created instance dispatches correctly through the plugin
+ *      interface — enqueue → drain_with → priority order, drain
+ *      budgets, stats.
  */
 
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <cstdint>
-#include <string_view>
+#include <memory>
 #include <vector>
 
 #include <nimrtc/sched/sched.hpp>          // sched::Scheduler (concrete)
@@ -61,66 +66,10 @@ std::vector<std::uint8_t> drain_all(plugins::IScheduler& s, int budget) {
 } // namespace
 
 // -----------------------------------------------------------------------------
-// Registration
+// Implementation-detail tests — instance behaviour through the plugin seam
 // -----------------------------------------------------------------------------
 
-TEST(SchedulerPlugin, RegisterDefaultPluginsRegistersStrictPriority) {
-    nimrtc::sched::register_default_plugins();
-
-    auto& reg = core::PluginRegistry::instance();
-    const auto* f = reg.get_scheduler("strict_priority");
-    ASSERT_NE(f, nullptr) << "Scheduler factory \"strict_priority\" not registered";
-    EXPECT_EQ(f->id(), "strict_priority");
-}
-
-TEST(SchedulerPlugin, UnknownIdReturnsNullptr) {
-    auto& reg = core::PluginRegistry::instance();
-    EXPECT_EQ(reg.get_scheduler("nonexistent_scheduler"), nullptr);
-}
-
-TEST(SchedulerPlugin, ListSchedulersContainsStrictPriority) {
-    nimrtc::sched::register_default_plugins();
-    auto& reg = core::PluginRegistry::instance();
-    auto ids = reg.list_schedulers();
-    bool found = false;
-    for (auto id : ids) {
-        if (id == "strict_priority") { found = true; break; }
-    }
-    EXPECT_TRUE(found);
-}
-
-// -----------------------------------------------------------------------------
-// Factory
-// -----------------------------------------------------------------------------
-
-TEST(SchedulerPlugin, FactoryDisplayNameNonEmpty) {
-    nimrtc::sched::register_default_plugins();
-    auto& reg = core::PluginRegistry::instance();
-    const auto* f = reg.get_scheduler("strict_priority");
-    ASSERT_NE(f, nullptr);
-    EXPECT_FALSE(f->display_name().empty());
-}
-
-TEST(SchedulerPlugin, FactoryCreatesConcreteScheduler) {
-    nimrtc::sched::register_default_plugins();
-    auto& reg = core::PluginRegistry::instance();
-    const auto* f = reg.get_scheduler("strict_priority");
-    ASSERT_NE(f, nullptr);
-
-    plugins::SchedulerConfig cfg;
-    std::unique_ptr<plugins::IScheduler> inst(f->create(cfg));
-    ASSERT_NE(inst, nullptr);
-
-    EXPECT_NE(inst->name(), nullptr);
-    EXPECT_EQ(inst->open(), plugins::kOk);
-    inst->close();
-}
-
-// -----------------------------------------------------------------------------
-// Dispatch through the plugin interface
-// -----------------------------------------------------------------------------
-
-TEST(SchedulerPlugin, EnqueueDrainViaInterface) {
+TEST(SchedulerPluginImpl, EnqueueDrainViaInterface) {
     std::unique_ptr<plugins::IScheduler> inst(
         new nimrtc::sched::Scheduler());
     ASSERT_EQ(inst->open(), plugins::kOk);
@@ -128,10 +77,10 @@ TEST(SchedulerPlugin, EnqueueDrainViaInterface) {
     std::vector<std::uint8_t> storage;
 
     // Enqueue in mixed order; verify drain yields them in priority order.
-    enqueue_one(*inst, storage, Priority::kVideo,        0xA1);
-    enqueue_one(*inst, storage, Priority::kControl,      0xC1);
-    enqueue_one(*inst, storage, Priority::kAudio,        0xB1);
-    enqueue_one(*inst, storage, Priority::kBestEffort,   0xD1);
+    enqueue_one(*inst, storage, Priority::kVideo,         0xA1);
+    enqueue_one(*inst, storage, Priority::kControl,       0xC1);
+    enqueue_one(*inst, storage, Priority::kAudio,         0xB1);
+    enqueue_one(*inst, storage, Priority::kBestEffort,    0xD1);
     enqueue_one(*inst, storage, Priority::kVideoKeyframe, 0xA2);
 
     auto markers = drain_all(*inst, 100);
@@ -145,7 +94,7 @@ TEST(SchedulerPlugin, EnqueueDrainViaInterface) {
     EXPECT_EQ(markers[4], 0xD1);
 }
 
-TEST(SchedulerPlugin, DrainBudgetViaInterface) {
+TEST(SchedulerPluginImpl, DrainBudgetViaInterface) {
     std::unique_ptr<plugins::IScheduler> inst(
         new nimrtc::sched::Scheduler());
     ASSERT_EQ(inst->open(), plugins::kOk);
@@ -163,7 +112,7 @@ TEST(SchedulerPlugin, DrainBudgetViaInterface) {
     EXPECT_EQ(second.size(), 7u);
 }
 
-TEST(SchedulerPlugin, StatsViaInterface) {
+TEST(SchedulerPluginImpl, StatsViaInterface) {
     std::unique_ptr<plugins::IScheduler> inst(
         new nimrtc::sched::Scheduler());
     ASSERT_EQ(inst->open(), plugins::kOk);
@@ -176,27 +125,4 @@ TEST(SchedulerPlugin, StatsViaInterface) {
     auto s = inst->stats();
     EXPECT_EQ(s.sent_packets, 2u);
     EXPECT_EQ(s.queued_packets, 0u);
-}
-
-// -----------------------------------------------------------------------------
-// SimpleSchedulerFactory<T>
-// -----------------------------------------------------------------------------
-
-TEST(SimpleSchedulerFactory, ReportsCorrectId) {
-    plugins::SimpleSchedulerFactory<nimrtc::sched::Scheduler> factory{
-        "my_q", "My queue"};
-    EXPECT_EQ(factory.id(), "my_q");
-    EXPECT_EQ(factory.display_name(), "My queue");
-}
-
-TEST(SimpleSchedulerFactory, CreateReturnsNewInstance) {
-    plugins::SimpleSchedulerFactory<nimrtc::sched::Scheduler> factory{
-        "my_q", "My queue"};
-
-    plugins::SchedulerConfig cfg;
-    std::unique_ptr<plugins::IScheduler> a(factory.create(cfg));
-    std::unique_ptr<plugins::IScheduler> b(factory.create(cfg));
-    ASSERT_NE(a, nullptr);
-    ASSERT_NE(b, nullptr);
-    EXPECT_NE(a.get(), b.get());
 }

@@ -18,3 +18,6 @@
 
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_bwe_plugin_seam.cpp
     DEPS nimrtc::plugins nimrtc::bwe)
+
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_plugin_seam.cpp
+    DEPS nimrtc::plugins)

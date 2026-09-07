@@ -32,15 +32,16 @@ target_link_libraries(nimrtc_engine
         nimrtc::ice            # ICE transport (P1)
         nimrtc::dtls           # DTLS handshake (P1.1)
         nimrtc::srtp           # SRTP protect/unprotect (P1.1)
-        nimrtc::bwe            # AIMD bandwidth estimator (P1; interface-only,
-                               # plugin factory registered by core)
-        nimrtc::sched          # Strict-priority 5-queue scheduler (P1;
-                               # plugin factory registered by core)
+        nimrtc::bwe            # AIMD bandwidth estimator — resolved via
+                               # PluginRegistry at open() and injected into ICE
+        nimrtc::sched          # Strict-priority 5-queue scheduler — resolved via
+                               # PluginRegistry at open(); tick() drains through ICE
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 
 if(NIMRTC_MODULE_OPUS)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::opus)
+    target_compile_definitions(nimrtc_engine PUBLIC NIMRTC_HAS_OPUS=1)
 endif()
 
 # Video plugin seam (R3-Batch): the engine resolves video_source / sink /
@@ -65,6 +66,9 @@ if(NIMRTC_MODULE_VIDEO_SINK)
 endif()
 if(NIMRTC_MODULE_VIDEO_PIPELINE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_pipeline)
+endif()
+if(NIMRTC_MODULE_H264)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::h264)
 endif()
 
 target_include_directories(nimrtc_engine

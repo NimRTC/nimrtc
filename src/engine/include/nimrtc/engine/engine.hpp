@@ -2,9 +2,12 @@
  * @file nimrtc/engine/engine.hpp
  * @brief NimRTCEngine — top-level composable engine that wires modules.
  *
- * P1 implementation:
+ * P1.1 implementation:
  *   - Uses PluginRegistry to create ICE transport + SDP + RTP + JB + Audio3A
  *     plugin instances at open() time (ADR-001 wiring).
+ *   - BWE (AIMD) and Scheduler (strict-priority) plugins are created via
+ *     PluginRegistry and injected into the ICE transport.
+ *   - H.264 video codec plugin is resolved via PluginRegistry at open().
  *   - Generates RFC 8829-conformant SDP offers and parses answers.
  *   - Drives the wire protocol on tick() / drain callbacks.
  *   - Wires DTLS handshake + SRTP encryption + Opus codec.
@@ -15,14 +18,18 @@
  * default IDs match what the built-in plugins register under in their
  * `register_default_plugins()` entry points:
  *
- *   cfg.transport_name = "ice";       // nimrtc::ice::register_default_plugins()
- *   cfg.rtp_name       = "webrtc";    // nimrtc::rtp::register_default_plugins()
- *   cfg.sdp_name       = "webrtc";    // nimrtc::sdp::register_default_plugins()
- *   cfg.jb_name        = "adaptive";  // nimrtc::jb::register_default_plugins()
- *   cfg.audio3a_name   = "webrtc";    // nimrtc::audio3a::register_default_plugins()
- *   cfg.codec_name     = "opus";      // nimrtc::opus::register_default_plugins() (if enabled)
+ *   cfg.transport_name    = "ice";       // nimrtc::ice::register_default_plugins()
+ *   cfg.rtp_name        = "webrtc";    // nimrtc::rtp::register_default_plugins()
+ *   cfg.sdp_name        = "webrtc";    // nimrtc::sdp::register_default_plugins()
+ *   cfg.jb_name         = "adaptive";   // nimrtc::jb::register_default_plugins()
+ *   cfg.audio3a_name    = "webrtc";    // nimrtc::audio3a::register_default_plugins()
+ *   cfg.codec_name      = "opus";      // nimrtc::opus::register_default_plugins() (if enabled)
+ *   cfg.bwe_name        = "aimd";      // nimrtc::bwe::register_default_plugins()
+ *   cfg.scheduler_name   = "strict_priority"; // nimrtc::sched::register_default_plugins()
+ *   cfg.video_codec_name = "h264";     // nimrtc::h264::register_default_plugins()
  *
  * Open() calls `core::register_all_default_plugins()` first, so callers
+ * normally do not need to do anything to populate the registry.
  * normally do not need to do anything to populate the registry.
  *
  * @note P1 — DTLS-SRTP keying material is now derived after the DTLS
@@ -53,6 +60,7 @@
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
+#include <nimrtc/plugins/video_codec.hpp>
 
 // Forward declarations of concrete module types — full definitions live
 // in module headers (e.g. <nimrtc/dtls/dtls.hpp>) and are pulled in by
@@ -70,6 +78,9 @@ namespace nimrtc::srtp   { class SrtpContext; }
 #ifdef NIMRTC_HAS_OPUS
 namespace nimrtc::opus   { class Encoder; class Decoder; }
 #endif
+namespace nimrtc::plugins {
+class IVideoCodec;
+}
 
 namespace nimrtc::engine {
 
@@ -201,6 +212,51 @@ struct EngineConfig {
         std::uint16_t mtu          = 1200;
         std::uint16_t initial_seq  = 0;
     } video_sender_tuning;
+
+    // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
+    //
+    // BWE controls outbound pacing and adapts to network congestion.
+    // Default = "aimd" (AIMD BWE, P1 default).  Empty string = no BWE
+    // (passthrough, used by the "transport" profile).
+    //
+    // The engine resolves the factory at open() via
+    // `core::PluginRegistry::instance().get_bwe(bwe_name)`.
+
+    /** IBwe plugin id. Default = "aimd". */
+    std::string bwe_name = "aimd";
+
+    /** Initial BWE parameters handed to `IBweFactory::create()`. */
+    plugins::BweConfig bwe_config;
+
+    // ---- Scheduler plugin selection (ADR-001: resolved via PluginRegistry) ----
+    //
+    // The scheduler prioritises outbound packets (audio / video / control).
+    // Default = "strict_priority" (5-queue strict priority, P1 default).
+    // Empty `scheduler_name` (and scheduler_config.enabled == false) = no
+    // scheduler (direct ICE send, used by the "transport" profile).
+    //
+    // The engine resolves the factory at open() via
+    // `core::PluginRegistry::instance().get_scheduler(scheduler_name)`.
+    // When `scheduler_config.enabled == false`, no scheduler is created and
+    // `send_audio()` sends directly through ICE.
+
+    /** IScheduler plugin id. Default = "strict_priority". */
+    std::string scheduler_name = "strict_priority";
+
+    /** Scheduler parameters handed to `ISchedulerFactory::create()`. */
+    plugins::SchedulerConfig scheduler_config;
+
+    // ---- Video codec selection (ADR-001: resolved via PluginRegistry) ----
+    //
+    // The engine resolves the video codec factory at open() (via init_video_plugins()).
+    // This field is used when the video pipeline is active; it does NOT gate
+    // whether the video pipeline is created — that is controlled by whether
+    // `video_sender_name` / `video_receiver_name` resolve to non-null factories.
+    //
+    // Default = "h264" (H.264 stub decoder/encoder).  Empty string = no video codec.
+
+    /** IVideoCodec plugin id. Default = "h264". */
+    std::string video_codec_name = "h264";
 };
 
 // ---------------------------------------------------------------------------
@@ -250,8 +306,42 @@ public:
     std::string create_offer() noexcept;
     std::optional<std::string> process_remote_sdp(std::string_view remote_sdp) noexcept;
 
-    // Media I/O — Opus encode + RTP packetise + SRTP encrypt + transport.send.
+    // ---- Audio I/O --------------------------------------------------------
+    // Opus encode + RTP packetise + SRTP encrypt + transport.send.
     uint32_t send_audio(const float* pcm_samples, size_t num_samples) noexcept;
+
+    // ---- Video I/O --------------------------------------------------------
+    //
+    // Outbound: drive the full video pipeline:
+    //   video_source_ (frame capture) → video_codec_ (encode H.264)
+    //   → video_sender_ (FU-A packetize) → RTP header → SRTP
+    //   → scheduler_ (priority queue, tick drains to ICE).
+    // The engine tick() must be called frequently (≥30 Hz) to drain the
+    // scheduler and send packets.  start_video() / stop_video() control the
+    // source cadence.
+    //
+    // Inbound: ICE recv → on_transport_recv → handle_rtp (PT demux)
+    //   → video_receiver_ (FU-A depacketize) → video_codec_ (decode)
+    //   → video_sink_ (render).  The on_video_frame_ callback fires on
+    //   the raw NAL level (before decode) for users who want to do their
+    //   own rendering.
+    //
+    // Both paths require `open()` to have been called first.
+
+    /** Start the video capture source (produces frames at the configured fps).
+     *  Idempotent if already running.  Returns kOk on success. */
+    plugins::Status start_video() noexcept;
+
+    /** Stop the video capture source. Idempotent if already stopped. */
+    void stop_video() noexcept;
+
+    /** Manually push one raw frame through the video pipeline.
+     *  Bypasses the video_source capture cadence; useful for feeding
+     *  camera frames directly (caller owns the cadence loop).
+     *  The frame is encoded, packetized, and enqueued to the scheduler
+     *  exactly like the auto-capture path.
+     *  @param frame  Raw frame (must remain valid for the call). */
+    plugins::Status send_video(const plugins::VideoSourceFrame& frame) noexcept;
 
     /** Drive DTLS state machine: feed pending outbound DTLS records back
      *  through ICE.  Returns number of records sent. */
@@ -332,6 +422,11 @@ public:
         return ice_t_.get();
     }
 
+    /** Read-only view of the engine's config.  Useful for tools that need
+     *  to know the PCM rate / channels (e.g. demo-p2p's audio generator)
+     *  without making those fields public. */
+    const EngineConfig& config() const noexcept { return config_; }
+
     // ---- Video plugin accessors (R3-Batch) ----
     //
     // The engine resolves all 4 video plugins from core::PluginRegistry
@@ -367,6 +462,25 @@ public:
 
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
     void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
+
+    // ---- BWE / Scheduler accessors (ADR-001: resolved via PluginRegistry) ----
+    //
+    // These plugins are created at open() time via
+    // `core::PluginRegistry::instance().get_bwe()` and `get_scheduler()`.
+    // The engine injects them into `ice_t_` via `set_bwe()` / `set_scheduler()`.
+    // Callers can use the accessors to drive the plugins manually
+    // (e.g. inject custom BWE feedback, inspect scheduler stats).
+    //
+    // Returns nullptr if the configured plugin id was not found at open().
+
+    plugins::IBwe*        bwe()        noexcept { return bwe_.get(); }
+    const plugins::IBwe*  bwe()  const noexcept { return bwe_.get(); }
+
+    plugins::IScheduler*  scheduler()  noexcept { return scheduler_.get(); }
+    const plugins::IScheduler* scheduler() const noexcept { return scheduler_.get(); }
+
+    plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
+    const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
     // Engine stats for debugging
     struct Stats {
@@ -413,6 +527,15 @@ private:
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
 
+    // ---- BWE / Scheduler plugins (ADR-001: resolved via PluginRegistry) ----
+    // Created in init_bwe_scheduler() (called from pre_open/open).
+    // Injected into ice_t_ via set_bwe() / set_scheduler().
+    std::unique_ptr<plugins::IBwe>        bwe_;
+    std::unique_ptr<plugins::IScheduler>  scheduler_;
+
+    // ---- Video codec plugin (ADR-001: resolved via PluginRegistry) ----
+    std::unique_ptr<plugins::IVideoCodec> video_codec_;
+
     // ---- Public callbacks (no concrete deps) ----
     AudioFrameCallback  on_audio_frame_;
     VideoFrameCallback  on_video_frame_;
@@ -427,6 +550,8 @@ private:
     // those headers (Layout Invariant 4).
     void on_transport_recv(const plugins::BufferView& pkt) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
+    void init_bwe_scheduler() noexcept;
+    void shutdown_bwe_scheduler() noexcept;
     void init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 

@@ -227,6 +227,13 @@ struct IceTransport::Impl {
     std::mutex                           consent_mu_;        // protects on_consent_lost_
     plugins::OnConsentLost               on_consent_lost_;
 
+    // ---- Plugin injection (BWE + Scheduler) --------------------------------
+    // Non-owning raw pointers set by set_bwe() / set_scheduler().
+    // The engine owns the plugin instances; the ICE transport merely
+    // references them to call bwe->on_feedback() and sched->drain_with().
+    plugins::IBwe*         bwe_         = nullptr;
+    plugins::IScheduler*    scheduler_   = nullptr;
+
     // ---- libjuice static callbacks ---------------------------------------
 
     static void on_state(juice_agent_t*, juice_state_t st, void* user) {
@@ -504,6 +511,14 @@ void IceTransport::set_stun_server(std::string_view host, std::uint16_t port) no
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {
     impl_->config.local_port_range_begin = begin;
     impl_->config.local_port_range_end   = end;
+}
+
+void IceTransport::set_bwe(plugins::IBwe* bwe) noexcept {
+    impl_->bwe_ = bwe;
+}
+
+void IceTransport::set_scheduler(plugins::IScheduler* sched) noexcept {
+    impl_->scheduler_ = sched;
 }
 
 IceTransport::~IceTransport() {

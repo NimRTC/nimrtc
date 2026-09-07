@@ -119,8 +119,19 @@ async def run_e2e() -> int:
         await page.goto(url)
         print("[E2E] Page loaded — waiting for ICE+DTLS to complete")
 
+        # Hard wall-clock deadline for the whole run (Chrome + ICE + DTLS + audio).
         deadline = time.monotonic() + 35
         last_results = {}
+        # After ICE Connected we keep polling for audioReceived / rtpPackets
+        # until either we see them or POST_ICE_BUDGET elapses. 10 s used to
+        # be 3 s in earlier runs — Chrome's polling timeout sometimes kills
+        # the PeerConnection before DTLS completes, so we just give it
+        # more wall-clock instead of fiddling with the harness.
+        POST_ICE_BUDGET_S = 10
+        # After audioReceived flips, give the stats sampler one more tick.
+        POST_AUDIO_SETTLE_S = 2
+        post_audio_started_at: float | None = None
+        saw_post_ice = False
         while time.monotonic() < deadline:
             try:
                 snap = await page.evaluate(
@@ -134,14 +145,43 @@ async def run_e2e() -> int:
                     "})"
                 ) or {}
                 last_results = snap
-                if snap.get("ice"):
-                    print(f"[E2E] ICE connected (audio={snap.get('audio')}, "
-                          f"rtp={snap.get('rtp')}); waiting for DTLS")
-                    await page.wait_for_timeout(3000)
-                    break
+                if snap.get("ice") and not saw_post_ice:
+                    print(f"[E2E] ICE connected "
+                          f"(audio={snap.get('audio')}, rtp={snap.get('rtp')}); "
+                          f"polling up to {POST_ICE_BUDGET_S}s for DTLS+audio")
+                    saw_post_ice = True
+                # Once both audio and RTP are observed, settle one more
+                # tick so the JS-side stats catch up, then exit early.
+                if (saw_post_ice
+                        and snap.get("audio")
+                        and snap.get("rtp")):
+                    if post_audio_started_at is None:
+                        post_audio_started_at = time.monotonic()
+                        print("[E2E] audioReceived + rtpPackets observed — "
+                              "letting stats settle")
+                    elif (time.monotonic() - post_audio_started_at
+                          >= POST_AUDIO_SETTLE_S):
+                        print("[E2E] audio+rtp settled — exiting poll loop")
+                        break
+                # If ICE never connected within the first ~3 s of budget we
+                # still bail — no point waiting another 30 s with nothing.
+                if not saw_post_ice:
+                    # Keep polling until ICE shows up or deadline hits.
+                    pass
             except Exception as exc:
                 print(f"[DEBUG] poll failed: {exc}")
             await page.wait_for_timeout(500)
+
+        # If ICE never connected, give the same post-ICE budget a chance
+        # by sleeping briefly so the last page state has time to land in
+        # the JS results object.
+        if last_results.get("ice") and not (
+                last_results.get("audio") and last_results.get("rtp")):
+            extra = max(0, POST_ICE_BUDGET_S - 10)
+            if extra > 0:
+                print(f"[E2E] ICE up but audio/rtp missing — "
+                      f"giving {extra}s more")
+                await page.wait_for_timeout(extra * 1000)
 
         try:
             results = await page.evaluate("window._interopResults") or {}

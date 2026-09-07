@@ -47,7 +47,9 @@
 
 // base.hpp must be included BEFORE the include guard.
 // This ensures base types are always available regardless of include order.
-#include "nimrtc/plugins/base.hpp"
+#include "nimrtc/plugins/transport.hpp"
+#include "nimrtc/plugins/bwe.hpp"
+#include "nimrtc/plugins/scheduler.hpp"
 
 #ifndef NIMRTC_PLUGINS_ICE_TRANSPORT_HPP
 #define NIMRTC_PLUGINS_ICE_TRANSPORT_HPP
@@ -56,8 +58,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "nimrtc/plugins/transport.hpp"
 
 namespace nimrtc::plugins {
 
@@ -140,6 +140,37 @@ public:
 
     /** Override the local UDP port range (begin..end, inclusive). */
     virtual void set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept = 0;
+
+    // ---- BWE / Scheduler injection -------------------------------------------
+    //
+    // The engine creates BWE and Scheduler plugin instances at open() time
+    // (via PluginRegistry) and injects them here.  This keeps the plugin
+    // seam clean — the ICE transport does not know about specific BWE or
+    // Scheduler implementations; it only receives the plugin interfaces.
+    //
+    // Ownership: the engine retains the owning unique_ptr; the ICE transport
+    // stores a non-owning raw pointer.  Callers must ensure the plugins
+    // outlive the ICE transport (guaranteed by engine lifecycle ordering:
+    // plugins are closed / destroyed in engine::close() before ice_t_ is
+    // reset).
+
+    /** Inject the BWE plugin instance.  The ICE transport calls
+     *  `bwe->on_feedback()` when it receives RTCP receiver reports, and
+     *  reads `bwe->estimate()` to drive pacing.  Pass nullptr to detach
+     *  (e.g. when the engine is configured without a BWE).
+     *
+     *  Thread-safety: the caller guarantees no concurrent calls while
+     *  the ICE transport is open. */
+    virtual void set_bwe(plugins::IBwe* bwe) noexcept = 0;
+
+    /** Inject the Scheduler plugin instance.  The ICE transport calls
+     *  `sched->drain_with()` from its send path to let the scheduler
+     *  apply priority queuing before packets hit the wire.  Pass nullptr
+     *  to bypass the scheduler (raw send — used by the "transport" profile).
+     *
+     *  Thread-safety: the caller guarantees no concurrent calls while
+     *  the ICE transport is open. */
+    virtual void set_scheduler(plugins::IScheduler* sched) noexcept = 0;
 };
 
 // ---------------------------------------------------------------------------

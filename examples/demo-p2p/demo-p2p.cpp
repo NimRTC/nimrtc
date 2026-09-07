@@ -40,11 +40,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/core/log.hpp>
@@ -383,6 +385,14 @@ struct ProxyState {
 };
 
 // Drain transport every 10 ms; emit ICE candidates once when gathering completes.
+//
+// We also synthesise a 440 Hz sine-wave PCM frame at the engine's
+// configured PCM rate (8 kHz mono for PCMU, 48 kHz mono for Opus) and feed
+// it into engine->send_audio() once ICE has reached connected/completed.
+// Without this, the e2e Chrome test never sees any RTP packets from
+// NimRTC and "audioReceived"/"rtpPackets" stay at zero — DTLS can be
+// fully connected and SRTP keys installed, but if we never emit audio
+// Chrome's inbound-rtp stats never move.
 static void engine_tick_thread(ProxyState* st) {
     auto end = std::chrono::steady_clock::now()
              + std::chrono::seconds(st->duration_sec);
@@ -392,6 +402,15 @@ static void engine_tick_thread(ProxyState* st) {
         st->ice->wait_for_gathering(2000);
     }
 
+    // PCM ring buffer + 440 Hz sine generator.  20 ms frames at the
+    // engine's rate = pcm_sample_rate_hz / 50 samples.  We cycle
+    // monotonically so the Opus encoder sees a real signal (not silence).
+    double phase  = 0.0;
+    double dphase = 0.0;     // set once we know the engine's PCM rate
+    std::vector<float> pcm;
+    bool rate_set = false;
+    static thread_local int audio_packets_sent = 0;
+
     while (st->running.load() && std::chrono::steady_clock::now() < end) {
         st->engine->tick();
 
@@ -400,6 +419,37 @@ static void engine_tick_thread(ProxyState* st) {
             && !st->ice_connected.load()) {
             st->ice_connected.store(true);
             std::fprintf(stderr, "[demo-p2p] ICE %s\n", state.c_str());
+        }
+
+        // Drive synthetic audio into the engine once ICE is up.  We
+        // do not gate on DTLS — engine.send_audio() will internally
+        // enqueue the SRTP-protected packet and send_buffer through
+        // ice_t_->send() which drops packets if ICE isn't connected
+        // (so before ICE=connected we drop on the floor).
+        if (st->ice_connected.load()) {
+            if (!rate_set) {
+                const auto& cfg = st->engine->config();
+                dphase = 2.0 * 3.14159265358979323846 * 440.0 /
+                         static_cast<double>(cfg.pcm_sample_rate_hz);
+                // 20 ms frame at the engine's PCM rate.
+                std::size_t frame = cfg.pcm_sample_rate_hz / 50u;
+                pcm.assign(frame, 0.0f);
+                rate_set = true;
+            }
+            for (auto& s : pcm) {
+                s = static_cast<float>(0.2 * std::sin(phase));
+                phase += dphase;
+                if (phase > 6.283185307179586) phase -= 6.283185307179586;
+            }
+            auto rc = st->engine->send_audio(pcm.data(), pcm.size());
+            ++audio_packets_sent;
+            if (audio_packets_sent % 50 == 0) {
+                std::fprintf(stderr,
+                    "[demo-p2p] audio frames sent=%d (sample_rate=%u) rc=0x%X\n",
+                    audio_packets_sent,
+                    st->engine->config().pcm_sample_rate_hz,
+                    static_cast<unsigned>(rc));
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

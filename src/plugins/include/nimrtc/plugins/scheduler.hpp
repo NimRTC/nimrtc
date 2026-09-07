@@ -84,6 +84,11 @@ struct SchedulerConfig {
     /** When true, kVideoKeyframe is treated equal to kAudio under
      *  congestion (keyframes are never demoted below audio). */
     bool protect_keyframes = true;
+
+    /** Master switch.  When false (the default), the engine does not
+     *  resolve or open a scheduler at open() and send_audio() sends
+     *  directly through ICE.  Matches the docs in EngineConfig. */
+    bool enabled = false;
 };
 
 // ---------------------------------------------------------------------------

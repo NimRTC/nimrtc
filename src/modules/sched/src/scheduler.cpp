@@ -36,6 +36,7 @@
 #include <numeric>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include <nimrtc/core/log.hpp>  // core::log::Logger
 
@@ -54,7 +55,9 @@ constexpr auto kLog = core::log::Level::Debug;
 // ---------------------------------------------------------------------------
 struct PacketRecord {
     plugins::Priority priority = plugins::Priority::kBestEffort;
-    core::ByteSpan    data;
+    // Owned packet data — the scheduler copies the caller's buffer at enqueue
+    // time, so the caller does not need to keep it alive until drain().
+    std::vector<std::uint8_t> owned_data;
     plugins::Addr     dst_addr;
     core::TimePoint   enqueue_time;
     std::uint32_t     estimated_size_bytes = 0;
@@ -194,7 +197,8 @@ void Scheduler::enqueue(plugins::Priority p, core::ByteSpan data,
 
     PacketRecord rec;
     rec.priority           = p;
-    rec.data               = data;
+    // Copy the caller's buffer — the scheduler now owns this memory.
+    rec.owned_data.assign(data.data(), data.data() + data.size());
     rec.dst_addr           = dst;
     rec.enqueue_time       = core::SteadyClock::now();
     rec.estimated_size_bytes = 0;  // use average from config
@@ -235,7 +239,8 @@ int Scheduler::drain_with(int max_packets,
             // If the caller wants per-packet observation, give them a chance
             // to veto the dequeue by returning false from the callback.
             if (cb) {
-                if (!cb(rec.priority, rec.data)) {
+                core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
+                if (!cb(rec.priority, span)) {
                     // Caller vetoed — but we already removed the record.
                     // (In practice callers will accept the dequeue; this
                     // exists so they can early-exit on transport errors.)

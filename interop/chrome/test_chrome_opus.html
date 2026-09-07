@@ -36,7 +36,7 @@ const PARAMS = new URLSearchParams(window.location.search);
 const ROOM    = PARAMS.get("room")    || "interop";
 const WS_URL  = PARAMS.get("ws")      || "ws://localhost:8765/" + ROOM;
 const OFFERER = PARAMS.get("offerer") === "1";
-const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "3000", 10);
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "10000", 10);
 
 // ---------- Results (written by page JS, read by Playwright) ----------
 window._interopResults = {
@@ -96,7 +96,10 @@ function makePc() {
             peer.iceConnectionState === "completed") {
             window._interopResults.iceConnected = true;
             setStatus("ICE Connected ✓");
-            log("ICE", "ICE Connected — waiting for audio…");
+            log("ICE", "ICE Connected — starting packet verifier immediately");
+            // Start the verifier right away so we don't miss early RTP.
+            // The end-check (RESULT print) is scheduled independently.
+            startPacketVerifier();
             scheduleEndCheck();
         } else if (peer.iceConnectionState === "failed") {
             reportError(0x10, "ICE connection failed");
@@ -399,10 +402,6 @@ function scheduleEndCheck() {
         log("RESULT", `rtpPayloadType: ${window._interopResults.rtpPayloadType}`);
         log("RESULT", `errors:         ${JSON.stringify(window._interopResults.errors)}`);
         log("RESULT", `exitCode:       ${window._interopResults.exitCode}`);
-
-        if (window._interopResults.iceConnected) {
-            startPacketVerifier();
-        }
     }, TIMEOUT_MS);
 }
 

@@ -63,6 +63,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -2566,6 +2567,8 @@ struct DtlsSession::Impl {
         std::stringstream ssb;
         ssb << "verify_data(server finished): "
             << hexline(make_finished("server finished")) << "\n";
+        ssb << "verify_data(client finished): "
+            << hexline(make_finished("client finished")) << "\n";
         f << ssb.str();
         f.flush();
     }
@@ -3113,6 +3116,34 @@ struct DtlsSession::Impl {
                 // match.
                 derive_session_secrets_idempotent();
                 std::uint32_t fin_seq = ++message_seq_counter;
+                {
+                    auto vd = make_finished("client finished");
+                    core::log::Logger::instance().info(
+                        std::string("dtls: client verify_data=") + hexline(vd));
+                }
+                core::log::Logger::instance().info(
+                    std::string("dtls: pre-finished state: cke_seq=") + std::to_string(cke_seq) +
+                    " fin_seq=" + std::to_string(fin_seq) +
+                    " message_seq_counter=" + std::to_string(message_seq_counter) +
+                    " record_seq_per_epoch_[0]=" + std::to_string(record_seq_per_epoch_[0]) +
+                    " record_seq_per_epoch_[1]=" + std::to_string(record_seq_per_epoch_[1]));
+                {
+                    // Log the server_write_key and explicit_nonce so the user
+                    // can cross-check with Wireshark/BoringSSL keylog.  The
+                    // server_write_key = key_block[16:32] (RFC 5246 §6.3) is
+                    // what Chrome uses to decrypt our Finished record.
+                    std::stringstream ssk;
+                    ssk << "dtls: Finished server_write_key=" << std::hex << std::setfill('0');
+                    for (auto b : server_write_key) ssk << std::setw(2) << (int)b;
+                    ssk << " server_write_salt=";
+                    for (auto b : server_write_salt) ssk << std::setw(2) << (int)b;
+                    ssk << " explicit_nonce=";
+                    // explicit_nonce = record_seq (6 bytes BE) padded to 8
+                    std::uint64_t fin_nonce = record_seq_per_epoch_[1] - 1;
+                    for (int i = 5; i >= 0; --i)
+                        ssk << std::setw(2) << (int)((fin_nonce >> (8 * i)) & 0xff);
+                    core::log::Logger::instance().info(ssk.str());
+                }
                 enqueue_handshake(kHsFinished,
                                   make_finished("client finished"),
                                   /*epoch=*/1, /*seq=*/fin_seq);

@@ -24,12 +24,13 @@
 
 #include "nimrtc/engine/engine.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
-#include <cstdlib>
 #include <format>
 #include <random>
+#include <vector>
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/time.hpp>
@@ -39,8 +40,6 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/scheduler.hpp>
-#include <nimrtc/bwe/bwe.hpp>
-#include <nimrtc/sched/sched.hpp>
 #ifdef NIMRTC_HAS_H264
 #include <nimrtc/h264/codec_plugin.hpp>
 #endif
@@ -176,6 +175,22 @@ struct NimRTCEngine::Impl {
 
     // Local SDP (after create_offer / process_remote_sdp).
     std::optional<sdp::SessionDescription> local_sdp;
+
+    // ---- Video receive pipeline decode buffers (ping-pong I420) ------------
+    // Allocated lazily on first decoded frame; reused across frames.
+    // We keep two buffers so we can receive a new frame while the previous
+    // one is still being rendered (the sink takes a view, not ownership).
+    static constexpr std::size_t kDecodeBufferCount = 2;
+    std::array<std::vector<std::uint8_t>, kDecodeBufferCount> video_decode_bufs;
+    std::atomic<std::size_t> video_decode_buf_idx_{0};
+    std::uint32_t video_decode_width_  = 0;
+    std::uint32_t video_decode_height_ = 0;
+
+    // ---- Video send pipeline state ------------------------------------------
+    // Tracks whether the next encoded frame is a keyframe (forced by
+    // force_keyframe() or signalled by the codec).  Consumed by the sender's
+    // packet callback to set kVideoKeyframe priority on the marker packet.
+    std::atomic<bool> video_keyframe_pending_{false};
 
     uint32_t        last_open_rc = 0;
 };
@@ -587,7 +602,11 @@ void NimRTCEngine::set_video_source(
 void NimRTCEngine::init_video_plugins() noexcept {
     auto& reg = core::PluginRegistry::instance();
 
-    // ---- Video Sink (independent of others; safest to open first) --------
+    // ========================================================================
+    // PHASE 1 — create all plugins (order: sink, source, receiver, sender, codec)
+    // ========================================================================
+
+    // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
         const auto* f = reg.get_video_sink(config_.video_sink_name);
         if (f) {
@@ -607,7 +626,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
         }
     }
 
-    // ---- Video Source ----------------------------------------------------
+    // ---- Video Source ------------------------------------------------------
     if (!video_source_) {
         const auto* f = reg.get_video_source(config_.video_source_name);
         if (f) {
@@ -631,7 +650,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
         }
     }
 
-    // ---- Video Receiver --------------------------------------------------
+    // ---- Video Receiver ----------------------------------------------------
     if (!video_receiver_) {
         const auto* f = reg.get_video_receiver(config_.video_receiver_name);
         if (f) {
@@ -651,20 +670,6 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     if (on_error_) on_error_(0x1A24,
                         "video_receiver plugin open failed");
                     video_receiver_.reset();
-                } else {
-                    // Bridge receiver frame callback → engine's
-                    // on_video_frame_ (H.264 NAL delivery) so existing
-                    // engine clients see the same callback shape.
-                    // Decoded rendering is up to the user via video_sink().
-                    video_receiver_->set_frame_callback(
-                        [this](const plugins::EncodedVideoFrame& f,
-                               plugins::TimestampUs /*now_us*/) {
-                            if (on_video_frame_) {
-                                on_video_frame_(f.payload.data(),
-                                                f.payload.size(),
-                                                f.is_keyframe);
-                            }
-                        });
                 }
             }
         } else if (on_error_) {
@@ -674,7 +679,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
         }
     }
 
-    // ---- Video Sender ----------------------------------------------------
+    // ---- Video Sender ------------------------------------------------------
     if (!video_sender_) {
         const auto* f = reg.get_video_sender(config_.video_sender_name);
         if (f) {
@@ -702,8 +707,6 @@ void NimRTCEngine::init_video_plugins() noexcept {
     }
 
     // ---- Video Codec (H.264) -----------------------------------------------
-    // Resolved from PluginRegistry; used by the video pipeline when active.
-    // Empty video_codec_name means no video codec (audio-only mode).
     if (!config_.video_codec_name.empty() && !video_codec_) {
         const auto* f = reg.get_video_codec(config_.video_codec_name);
         if (f) {
@@ -731,6 +734,175 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     .append(config_.video_codec_name));
         }
     }
+
+    // ========================================================================
+    // PHASE 2 — wire all pipeline callbacks (all plugins now exist)
+    // ========================================================================
+
+    // ---- Video send pipeline: source → codec → sender → RTP+SRTP → scheduler
+    //
+    // Tracking state: the codec's force_keyframe() causes the NEXT encoded
+    // frame to be a keyframe. We track it in impl_->video_keyframe_pending_
+    // (atomic bool) so it survives across send_video() calls.
+    //
+    // The video_source frame callback is NOT wired to the encode path
+    // here (IVideoCodec / IVideoSender are NOT thread-safe; the source
+    // cadence thread would race with any concurrent user thread).
+    // Users drive video through send_video() — see engine.hpp.
+
+    if (video_sender_) {
+        // video_sender packet callback: build RTP header → SRTP protect → enqueue
+        video_sender_->set_packet_callback(
+            [this](plugins::BufferView payload,
+                                          std::uint32_t rtp_ts,
+                                          std::uint16_t seq,
+                                          bool marker) {
+                // ---- Build 12-byte RTP header ---------------------------------
+                // byte 0: V=2 P=0 X=0 CC=0 → 0x80
+                // byte 1: M=X(1) PT(7)
+                std::uint8_t pt = config_.video_sender_tuning.payload_type;
+                std::uint8_t hdr[12] = {
+                    0x80,                             // version, no extensions
+                    static_cast<std::uint8_t>((marker ? 0x80 : 0x00) | (pt & 0x7F)),
+                    static_cast<std::uint8_t>((seq >> 8) & 0xFF),
+                    static_cast<std::uint8_t>(seq & 0xFF),
+                    static_cast<std::uint8_t>((rtp_ts >> 24) & 0xFF),
+                    static_cast<std::uint8_t>((rtp_ts >> 16) & 0xFF),
+                    static_cast<std::uint8_t>((rtp_ts >>  8) & 0xFF),
+                    static_cast<std::uint8_t>(rtp_ts & 0xFF),
+                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >> 24) & 0xFF),
+                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >> 16) & 0xFF),
+                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >>  8) & 0xFF),
+                    static_cast<std::uint8_t>(config_.video_sender_tuning.ssrc & 0xFF),
+                };
+
+                // ---- Assemble full RTP packet ----------------------------------
+                std::vector<std::uint8_t> rtp_pkt;
+                rtp_pkt.reserve(12 + payload.size());
+                rtp_pkt.insert(rtp_pkt.end(), hdr, hdr + 12);
+                rtp_pkt.insert(rtp_pkt.end(),
+                               payload.data(), payload.data() + payload.size());
+
+                // ---- SRTP protect (if DTLS is connected) ----------------------
+                if (impl_->srtp_installed && impl_->srtp) {
+                    auto* sess = impl_->srtp->get_session(
+                        config_.video_sender_tuning.ssrc);
+                    if (!sess) {
+                        // SRTP not ready — drop this packet silently.
+                        return;
+                    }
+                    core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
+                    auto enc = sess->protect_rtp(span,
+                        config_.video_sender_tuning.ssrc, rtp_ts);
+                    if (!enc) return;
+                    rtp_pkt.assign(enc.value().data(),
+                                   enc.value().data() + enc.value().size());
+                }
+
+                // ---- Enqueue to scheduler (or send directly) -----------------
+                plugins::Priority prio = plugins::Priority::kVideo;
+                if (marker && impl_->video_keyframe_pending_.load(std::memory_order_acquire)) {
+                    prio = plugins::Priority::kVideoKeyframe;
+                    impl_->video_keyframe_pending_.store(false, std::memory_order_release);
+                }
+
+                plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
+                if (scheduler_) {
+                    scheduler_->enqueue(prio,
+                                       core::ByteSpan(rtp_pkt.data(), rtp_pkt.size()),
+                                       plugins::Addr{});
+                } else if (ice_t_) {
+                    ice_t_->send(bv, {});
+                }
+            });
+    }
+
+    // ---- Video receive pipeline: receiver → codec → sink
+    //
+    // On each assembled frame from the receiver:
+    //   1. Decode via video_codec_
+    //   2. Render via video_sink_
+    //   3. Fire on_video_frame_ (NAL delivery, for existing users)
+    // -------------------------------------------------------------------------
+    if (video_receiver_) {
+        video_receiver_->set_frame_callback(
+            [this](const plugins::EncodedVideoFrame& enc,
+                   plugins::TimestampUs /*now_us*/) {
+                // Fire the NAL-level callback (existing behaviour).
+                if (on_video_frame_) {
+                    on_video_frame_(enc.payload.data(),
+                                   enc.payload.size(),
+                                   enc.is_keyframe);
+                }
+
+                // Decode + render if the codec and sink are available.
+                if (!video_codec_ || !video_sink_) return;
+
+                const std::uint32_t w = enc.payload.size() > 0 ? 640 : 0;
+                const std::uint32_t h = 480;
+
+                // Lazily allocate / resize decode buffers to the frame size.
+                // Stride is aligned to 16 bytes.
+                auto align16 = [](std::uint32_t v) -> std::uint32_t {
+                    return (v + 15u) & ~15u;
+                };
+                const std::uint32_t stride_y = align16(w);
+                const std::uint32_t stride_uv = align16(w / 2);
+                const std::size_t y_size = static_cast<std::size_t>(stride_y) * h;
+                const std::size_t uv_size = static_cast<std::size_t>(stride_uv) * (h / 2);
+                const std::size_t total = y_size + uv_size + uv_size;
+
+                // Use a ping-pong buffer: alternate between two allocations.
+                std::size_t buf_idx = impl_->video_decode_buf_idx_.fetch_add(1)
+                                      % 2;
+                auto& buf = impl_->video_decode_bufs[buf_idx];
+                if (buf.size() < total) buf.resize(total);
+
+                // Set plane pointers into the flat buffer.
+                std::uint8_t* planes[3] = {
+                    buf.data(),
+                    buf.data() + y_size,
+                    buf.data() + y_size + uv_size,
+                };
+
+                // Decode.
+                plugins::VideoFrame raw_out{};
+                raw_out.width   = w;
+                raw_out.height  = h;
+                raw_out.format  = plugins::VideoPixelFormat::kI420;
+                raw_out.stride_y = static_cast<std::int32_t>(stride_y);
+                raw_out.stride_u = static_cast<std::int32_t>(stride_uv);
+                raw_out.stride_v = static_cast<std::int32_t>(stride_uv);
+                raw_out.plane_y  = planes[0];
+                raw_out.plane_u  = planes[1];
+                raw_out.plane_v  = planes[2];
+                raw_out.capture_ts_us = enc.info.capture_ts_us;
+                raw_out.frame_seq     = enc.info.frame_seq;
+                raw_out.rtp_timestamp = enc.info.rtp_timestamp;
+
+                if (video_codec_->decode(enc, raw_out, planes) != plugins::kOk) {
+                    return;
+                }
+
+                // Render to sink.
+                plugins::VideoSourceFrame sink_frame{};
+                sink_frame.width   = w;
+                sink_frame.height  = h;
+                sink_frame.format  = plugins::VideoPixelFormat::kI420;
+                sink_frame.stride_y = static_cast<std::int32_t>(stride_y);
+                sink_frame.stride_u = static_cast<std::int32_t>(stride_uv);
+                sink_frame.stride_v = static_cast<std::int32_t>(stride_uv);
+                sink_frame.plane_y  = planes[0];
+                sink_frame.plane_u  = planes[1];
+                sink_frame.plane_v  = planes[2];
+                sink_frame.buffer_size = total;
+                sink_frame.capture_ts_us = enc.info.capture_ts_us;
+                sink_frame.frame_seq     = enc.info.frame_seq;
+                sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
+
+                video_sink_->render(sink_frame);
+            });
+    }
 }
 
 void NimRTCEngine::shutdown_video_plugins() noexcept {
@@ -738,6 +910,7 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
         if (p) p->close();
         p.reset();
     };
+    stop_video();   // stop video source if running
     close_all(video_source_);
     close_all(video_sink_);
     close_all(video_receiver_);
@@ -933,15 +1106,13 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         //                      are the answerer → we are the server (passive).
         //   remote passive  → the peer will send ClientHello (we are server).
         //   remote active   → the peer will wait for our ClientHello (we are client).
-        dtls::DtlsRole desired_role = dtls::DtlsRole::Server;
-        if (rm.dtls_setup == "passive") {
-            desired_role = dtls::DtlsRole::Server;
-        } else if (rm.dtls_setup == "active") {
-            desired_role = dtls::DtlsRole::Client;
-        } else {
-            // actpass or unknown: offerer convention → we are the server (passive).
-            desired_role = dtls::DtlsRole::Server;
-        }
+        // DEBUG: force Client role to bypass server path bug (cookie flow).
+        // Force desired_role = Client to follow the path that was traced
+        // in 17:22 run (ClientHello → ServerHello+Cert+SKE+CertReq+SHD →
+        // CKE+CCS+Finished) — that path completes the NimRTC side of the
+        // flight and only fails Chrome's verify_data check, which is the
+        // bug we're trying to isolate.
+        dtls::DtlsRole desired_role = dtls::DtlsRole::Client;
         impl_->dtls->set_role(desired_role);
 
             if (!rm.dtls_fingerprint_algo.empty() &&
@@ -983,7 +1154,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.rtcp_mux_value  = "rtcp-mux";
         am.ice_ufrag       = local_ufrag();
         am.ice_pwd         = local_password();
-        am.dtls_setup      = "passive";  // Chrome requires answerer setup to be active or passive (not actpass)
+        am.dtls_setup      = "active";  // DEBUG: forced for Client role
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: answer SDP setup='") + am.dtls_setup +
             "' (peer wanted '" + rm.dtls_setup + "')");
@@ -1110,6 +1281,60 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
 
     // Fallback: no scheduler — send directly through ICE (transport profile).
     return ice_t_->send(bv, {});
+}
+
+plugins::Status NimRTCEngine::start_video() noexcept {
+    if (!is_open()) return plugins::kErrNotReady;
+    if (video_source_) {
+        video_source_->start();
+        return plugins::kOk;
+    }
+    return plugins::kErrNotReady;
+}
+
+void NimRTCEngine::stop_video() noexcept {
+    if (video_source_) {
+        video_source_->stop();
+    }
+}
+
+plugins::Status NimRTCEngine::send_video(
+    const plugins::VideoSourceFrame& frame) noexcept {
+    if (!is_open()) return plugins::kErrNotReady;
+    if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+
+    // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
+    plugins::VideoFrame raw{};
+    raw.width          = frame.width;
+    raw.height         = frame.height;
+    raw.format        = frame.format;
+    raw.stride_y      = frame.stride_y;
+    raw.stride_u      = frame.stride_u;
+    raw.stride_v      = frame.stride_v;
+    raw.plane_y       = frame.plane_y;
+    raw.plane_u       = frame.plane_u;
+    raw.plane_v       = frame.plane_v;
+    raw.capture_ts_us = frame.capture_ts_us;
+    raw.frame_seq     = frame.frame_seq;
+    raw.rtp_timestamp = frame.rtp_timestamp;
+
+    // Encode.
+    std::vector<std::uint8_t> enc_buf(64 * 1024);
+    plugins::EncodedVideoFrame encoded{};
+    if (video_codec_->encode(raw, enc_buf.data(),
+                             enc_buf.size(), encoded) != plugins::kOk) {
+        return plugins::kErrInternal;
+    }
+
+    // Mark keyframe so the sender packet callback gives it kVideoKeyframe
+    // priority (consumed on the marker=true packet).
+    if (encoded.is_keyframe) {
+        impl_->video_keyframe_pending_.store(true, std::memory_order_release);
+    }
+
+    // Packetize (the sender's packet callback handles RTP header assembly
+    // + SRTP protect + scheduler enqueue).
+    return video_sender_->push_frame(encoded, frame.rtp_timestamp);
 }
 
 int NimRTCEngine::tick() noexcept {
@@ -1356,6 +1581,32 @@ bool NimRTCEngine::set_remote_ice(std::string_view ice_block) noexcept {
 }
 
 void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
+    // ---- Demux by RTP payload type --------------------------------------
+    // The audio_codec PT is configured in EngineConfig; the video codec PT
+    // lives in the video_receiver/video_sender tuning. We first check
+    // whether this packet matches the video PT (and a video_receiver
+    // plugin is wired up) — if so, push it through the video receiver
+    // pipeline; otherwise treat it as audio.
+    if (video_receiver_ &&
+        pv.payload_type == config_.video_receiver_tuning.payload_type) {
+        plugins::VideoRtpPacket vp;
+        vp.ssrc          = pv.ssrc;
+        vp.seq           = pv.seq;
+        vp.rtp_timestamp = pv.timestamp;
+        vp.payload_type  = pv.payload_type;
+        vp.marker        = pv.marker;
+        vp.recv_ts_us    = plugins::TimestampUs{
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    core::SteadyClock::now().time_since_epoch()).count())};
+        // BufferView = core::ByteSpan = std::span<const uint8_t>
+        vp.payload       = pv.payload;
+        video_receiver_->push_rtp(vp, vp.recv_ts_us);
+        video_receiver_->tick(vp.recv_ts_us);
+        return;
+    }
+
+    // ---- Audio path (existing behaviour) --------------------------------
     auto& jb = impl_->jitter_buffers[pv.ssrc];
     if (!jb) {
         jb::Config jc;

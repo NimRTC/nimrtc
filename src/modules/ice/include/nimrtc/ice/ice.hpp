@@ -334,6 +334,14 @@ public:
     /** Trigger a fresh gathering round. open() calls this automatically. */
     plugins::Status gather_candidates() noexcept;
 
+    // ---- BWE / Scheduler injection (IICETransport override) ---------------
+
+    /** @override plugins::IICETransport */
+    void set_bwe(plugins::IBwe* bwe) noexcept override;
+
+    /** @override plugins::IICETransport */
+    void set_scheduler(plugins::IScheduler* sched) noexcept override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

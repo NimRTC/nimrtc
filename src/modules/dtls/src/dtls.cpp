@@ -3116,24 +3116,12 @@ struct DtlsSession::Impl {
                 // match.
                 derive_session_secrets_idempotent();
                 std::uint32_t fin_seq = ++message_seq_counter;
+                auto vd_client = make_finished("client finished");
                 {
-                    auto vd = make_finished("client finished");
-                    core::log::Logger::instance().info(
-                        std::string("dtls: client verify_data=") + hexline(vd));
-                }
-                core::log::Logger::instance().info(
-                    std::string("dtls: pre-finished state: cke_seq=") + std::to_string(cke_seq) +
-                    " fin_seq=" + std::to_string(fin_seq) +
-                    " message_seq_counter=" + std::to_string(message_seq_counter) +
-                    " record_seq_per_epoch_[0]=" + std::to_string(record_seq_per_epoch_[0]) +
-                    " record_seq_per_epoch_[1]=" + std::to_string(record_seq_per_epoch_[1]));
-                {
-                    // Log the server_write_key and explicit_nonce so the user
-                    // can cross-check with Wireshark/BoringSSL keylog.  The
-                    // server_write_key = key_block[16:32] (RFC 5246 §6.3) is
-                    // what Chrome uses to decrypt our Finished record.
                     std::stringstream ssk;
-                    ssk << "dtls: Finished server_write_key=" << std::hex << std::setfill('0');
+                    ssk << "dtls: client verify_data=" << std::hex << std::setfill('0')
+                        << hexline(vd_client);
+                    ssk << " server_write_key=";
                     for (auto b : server_write_key) ssk << std::setw(2) << (int)b;
                     ssk << " server_write_salt=";
                     for (auto b : server_write_salt) ssk << std::setw(2) << (int)b;
@@ -3144,8 +3132,13 @@ struct DtlsSession::Impl {
                         ssk << std::setw(2) << (int)((fin_nonce >> (8 * i)) & 0xff);
                     core::log::Logger::instance().info(ssk.str());
                 }
-                enqueue_handshake(kHsFinished,
-                                  make_finished("client finished"),
+                core::log::Logger::instance().info(
+                    std::string("dtls: pre-finished state: cke_seq=") + std::to_string(cke_seq) +
+                    " fin_seq=" + std::to_string(fin_seq) +
+                    " message_seq_counter=" + std::to_string(message_seq_counter) +
+                    " record_seq_per_epoch_[0]=" + std::to_string(record_seq_per_epoch_[0]) +
+                    " record_seq_per_epoch_[1]=" + std::to_string(record_seq_per_epoch_[1]));
+                enqueue_handshake(kHsFinished, vd_client,
                                   /*epoch=*/1, /*seq=*/fin_seq);
                 // message_seq_counter is now at the next free seq (which
                 // is, for the standard client flight, the value 2).  We

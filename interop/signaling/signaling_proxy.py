@@ -149,7 +149,12 @@ class NimRTCSubprocess:
 
 
 async def pump_subprocess_to_ws(sub: NimRTCSubprocess, ws) -> None:
-    """Forward JSON lines from demo-p2p to the WebSocket."""
+    """Forward JSON lines from demo-p2p to the WebSocket.
+
+    On _closed (WS side closed or bye received), drain the queue for a
+    brief window before exiting so that any answer/candidates already in the
+    pipe are flushed to the peer even after pump_ws_to_subprocess exits.
+    """
     while not sub._closed:
         msg = await sub.next_message(timeout=1.0)
         if msg is None:
@@ -170,7 +175,39 @@ async def pump_subprocess_to_ws(sub: NimRTCSubprocess, ws) -> None:
             logger.info("demo-p2p >> %s (from %s)", mtype, sender)
         else:
             logger.info("demo-p2p >> %s", mtype)
-        await ws.send(msg)
+        try:
+            await ws.send(msg)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("WS closed mid-send for %s — draining queue", mtype)
+            sub._closed = True
+            break
+
+    # Drain any remaining queued messages (e.g. answer + candidates that
+    # arrived before the close signal) before this pump exits so Chrome sees
+    # the complete answer even when we exit early due to a bye / WS close.
+    drained = 0
+    while True:
+        try:
+            msg = await sub.next_message(timeout=0.5)
+        except Exception:
+            break
+        if msg is None:
+            break
+        drained += 1
+        try:
+            parsed = json.loads(msg)
+        except json.JSONDecodeError:
+            logger.warning("drain: non-JSON skipped: %s", msg[:80])
+            continue
+        mtype = parsed.get("type", "?")
+        logger.info("drain: flushing %s", mtype)
+        try:
+            await ws.send(msg)
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("drain: WS closed during flush of %s", mtype)
+            break
+    if drained:
+        logger.info("drain: flushed %d pending messages", drained)
 
 
 async def pump_ws_to_subprocess(ws, sub: NimRTCSubprocess) -> None:

@@ -49,6 +49,17 @@ namespace {
 
 constexpr auto kLog = core::log::Level::Debug;
 
+// ---------------------------------------------------------------------------
+// PacketRecord — one entry in the send queue (PIMPL internal type).
+// ---------------------------------------------------------------------------
+struct PacketRecord {
+    plugins::Priority priority = plugins::Priority::kBestEffort;
+    core::ByteSpan    data;
+    plugins::Addr     dst_addr;
+    core::TimePoint   enqueue_time;
+    std::uint32_t     estimated_size_bytes = 0;
+};
+
 /** Log a debug message only when log level is at or below Debug. */
 inline void sched_debug(const char* fmt, ...) {
     if (core::log::Logger::instance().level() <= kLog) {
@@ -121,15 +132,29 @@ struct Scheduler::Impl {
 // Scheduler public interface
 // ---------------------------------------------------------------------------
 
-Scheduler::Scheduler(SchedulerConfig config)
+Scheduler::Scheduler(plugins::SchedulerConfig config)
     : impl_(std::make_unique<Impl>(
-          config.avg_packet_size_bytes == 0 ? SchedulerConfig{} : config)) {}
+          config.avg_packet_size_bytes == 0
+              ? plugins::SchedulerConfig{} : config)) {}
 
 Scheduler::~Scheduler() = default;
 Scheduler::Scheduler(Scheduler&&) noexcept = default;
 Scheduler& Scheduler::operator=(Scheduler&&) noexcept = default;
 
-void Scheduler::enqueue(Priority p, core::ByteSpan data, plugins::Addr dst) {
+const char* Scheduler::name() const noexcept {
+    return "nimrtc::sched::Scheduler (strict-priority, 5 queues, BWE-aware)";
+}
+
+plugins::Status Scheduler::open() noexcept {
+    return plugins::kOk;
+}
+
+void Scheduler::close() noexcept {
+    // No external resources; reset() is the explicit state-cleanup path.
+}
+
+void Scheduler::enqueue(plugins::Priority p, core::ByteSpan data,
+                        plugins::Addr dst) noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     // Remember last non-empty destination address.
@@ -174,16 +199,17 @@ void Scheduler::enqueue(Priority p, core::ByteSpan data, plugins::Addr dst) {
     rec.enqueue_time       = core::SteadyClock::now();
     rec.estimated_size_bytes = 0;  // use average from config
 
-    impl_->queues_[priority_rank(p)].push_back(std::move(rec));
+    impl_->queues_[plugins::priority_rank(p)].push_back(std::move(rec));
     sched_debug("Scheduler: enqueued priority=%u, queue depth now %u",
                 static_cast<unsigned>(p), total_queued());
 }
 
-int Scheduler::drain(int max_packets) {
+int Scheduler::drain(int max_packets) noexcept {
     return drain_with(max_packets, nullptr);
 }
 
-int Scheduler::drain_with(int max_packets, DrainCallback cb) {
+int Scheduler::drain_with(int max_packets,
+                          plugins::DrainCallback cb) noexcept {
     if (max_packets <= 0) return 0;
 
     std::lock_guard<std::mutex> lock(impl_->mu_);
@@ -235,7 +261,7 @@ int Scheduler::drain_with(int max_packets, DrainCallback cb) {
     return sent;
 }
 
-void Scheduler::on_bwe_update(std::uint32_t target_bps) {
+void Scheduler::on_bwe_update(std::uint32_t target_bps) noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     impl_->target_bps_       = target_bps;
@@ -302,7 +328,7 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) {
     // survivors from a single priority level).
     std::uint64_t remaining_budget = budget_bytes;
     for (std::size_t idx = kPriorityCount; idx-- > 0;) {
-        if (idx == priority_rank(Priority::kControl)) continue;
+        if (idx == plugins::priority_rank(plugins::Priority::kControl)) continue;
 
         auto& q = impl_->queues_[idx];
         const std::uint64_t queue_bytes =
@@ -326,7 +352,7 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) {
     }
 }
 
-void Scheduler::reset() {
+void Scheduler::reset() noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     for (auto& q : impl_->queues_) {
@@ -341,10 +367,10 @@ void Scheduler::reset() {
     impl_->last_dst_addr_       = {};
 }
 
-SchedulerStats Scheduler::stats() const {
+plugins::SchedulerStats Scheduler::stats() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
-    SchedulerStats s;
+    plugins::SchedulerStats s;
     for (std::size_t i = 0; i < kPriorityCount; ++i) {
         s.queued_packets += static_cast<std::uint32_t>(impl_->queues_[i].size());
     }
@@ -356,7 +382,7 @@ SchedulerStats Scheduler::stats() const {
     return s;
 }
 
-SchedulerConfig Scheduler::config() const {
+plugins::SchedulerConfig Scheduler::config() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
     return impl_->config_;
 }

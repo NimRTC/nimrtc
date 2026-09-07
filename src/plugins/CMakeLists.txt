@@ -34,11 +34,18 @@ target_link_libraries(nimrtc_plugins
 
 # plugins/base.hpp       — IPlugin, IPluginFactory, BufferView, Status
 # plugins/transport.hpp   — ITransport, ITransportFactory
+# plugins/ice_transport.hpp — IICETransport, IICETransportFactory
 # plugins/rtp.hpp        — IRTP, IRTPFactory
 # plugins/sdp.hpp        — ISDP, ISDPFactory
 # plugins/jb.hpp         — IJB, IJBFactory
 # plugins/audio3a.hpp    — IAudio3A, IAudio3AFactory
 # plugins/codec.hpp      — ICodec, ICodecFactory
+# plugins/video_codec.hpp — IVideoCodec, IVideoCodecFactory
+# plugins/video_source.hpp — IVideoSource, IVideoSourceFactory
+# plugins/video_sink.hpp — IVideoSink, IVideoSinkFactory
+# plugins/video_pipeline.hpp — IVideoReceiver, IVideoSender
+# plugins/bwe.hpp        — IBwe, IBweFactory
+# plugins/scheduler.hpp  — IScheduler, ISchedulerFactory
 # plugins/datachannel.hpp — IDataChannel, IDataChannelFactory (P1: interface only)
 
 # Tests

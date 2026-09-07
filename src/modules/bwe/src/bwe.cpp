@@ -34,7 +34,6 @@ namespace {
 constexpr double kRembTrustFactor = 0.8;
 
 // How much to increase per RTT when in increase phase
-// This is an alternative to per-second increase
 constexpr double kIncreasePerRtt = 0.05;  // 5% per RTT
 
 constexpr auto kLog = core::log::Level::Debug;
@@ -57,7 +56,7 @@ inline void bwe_debug(const char* fmt, ...) {
 // -----------------------------------------------------------------------------
 
 struct Bwe::Impl {
-    explicit Impl(Config config)
+    explicit Impl(plugins::BweConfig config)
         : config_(config)
         , current_bps_(config.initial_bitrate_bps)
         , smoothed_bps_(config.initial_bitrate_bps)
@@ -65,12 +64,12 @@ struct Bwe::Impl {
         , state_(State::kIncrease)  // start in increase mode
     {}
 
-    Config config_;
+    plugins::BweConfig config_;
     std::uint32_t current_bps_;
     std::uint32_t smoothed_bps_;
     std::optional<core::TimePoint> last_update_time_;
     std::optional<core::TimePoint> last_change_time_;
-    Estimate::Reason last_reason_ = Estimate::Reason::Initial;
+    plugins::BweEstimate::Reason last_reason_ = plugins::BweEstimate::Reason::Initial;
 
     // Loss history (for trend detection)
     double last_loss_rate_ = 0.0;
@@ -85,7 +84,7 @@ struct Bwe::Impl {
     // Time we entered decrease state
     std::optional<core::TimePoint> decrease_start_;
 
-    void on_feedback(Feedback feedback) {
+    void on_feedback(plugins::BweFeedback feedback) {
         // Clamp REMB if provided
         if (feedback.remb_bps.has_value()) {
             std::uint32_t remb = *feedback.remb_bps;
@@ -98,7 +97,7 @@ struct Bwe::Impl {
             if (remb > smoothed_bps_) {
                 // Use REMB as target if it's higher than our current estimate
                 current_bps_ = remb;
-                last_reason_ = Estimate::Reason::REMBOverride;
+                last_reason_ = plugins::BweEstimate::Reason::REMBOverride;
                 bwe_debug("BWE: REMB override: %u bps", remb);
             }
         }
@@ -115,7 +114,7 @@ struct Bwe::Impl {
 
             if (new_rate != current_bps_) {
                 current_bps_ = new_rate;
-                last_reason_ = Estimate::Reason::AIMDDecrease;
+                last_reason_ = plugins::BweEstimate::Reason::AIMDDecrease;
                 decrease_start_ = feedback.timestamp;
                 state_ = State::kDecrease;
                 bwe_debug("BWE: loss %.1f%%, decreased to %u bps",
@@ -161,7 +160,7 @@ struct Bwe::Impl {
 
                         if (new_rate > current_bps_) {
                             current_bps_ = new_rate;
-                            last_reason_ = Estimate::Reason::AIMDIncrease;
+                            last_reason_ = plugins::BweEstimate::Reason::AIMDIncrease;
                             last_change_time_ = feedback.timestamp;
                             state_ = State::kIncrease;
                             bwe_debug("BWE: increased to %u bps", current_bps_);
@@ -182,8 +181,8 @@ struct Bwe::Impl {
         last_loss_rate_ = feedback.loss_rate;
     }
 
-    Estimate estimate() const {
-        Estimate e;
+    plugins::BweEstimate estimate() const {
+        plugins::BweEstimate e;
         e.target_bitrate_bps = smoothed_bps_;
         // Pacing slightly higher for burst smoothing
         e.pacing_bitrate_bps = static_cast<std::uint32_t>(smoothed_bps_ * 1.1);
@@ -195,7 +194,7 @@ struct Bwe::Impl {
         return e;
     }
 
-    void update_config(Config config) {
+    void update_config(plugins::BweConfig config) {
         config_ = config;
         // Clamp current values to new limits
         current_bps_ = std::clamp(current_bps_,
@@ -206,7 +205,7 @@ struct Bwe::Impl {
                                    config_.max_bitrate_bps);
     }
 
-    Config config() const { return config_; }
+    plugins::BweConfig config() const { return config_; }
 
     void reset() {
         current_bps_ = config_.initial_bitrate_bps;
@@ -216,15 +215,15 @@ struct Bwe::Impl {
         last_loss_rate_ = 0.0;
         state_ = State::kIncrease;
         decrease_start_ = std::nullopt;
-        last_reason_ = Estimate::Reason::Initial;
+        last_reason_ = plugins::BweEstimate::Reason::Initial;
     }
 };
 
 // -----------------------------------------------------------------------------
-// Bwe public interface
+// Bwe public interface (plugins::IBwe)
 // -----------------------------------------------------------------------------
 
-Bwe::Bwe(Config config)
+Bwe::Bwe(plugins::BweConfig config)
     : impl_(std::make_unique<Impl>(config)) {}
 
 Bwe::~Bwe() = default;
@@ -232,23 +231,35 @@ Bwe::~Bwe() = default;
 Bwe::Bwe(Bwe&&) noexcept = default;
 Bwe& Bwe::operator=(Bwe&&) noexcept = default;
 
-void Bwe::on_feedback(Feedback feedback) {
+const char* Bwe::name() const noexcept {
+    return "nimrtc::bwe::Bwe (AIMD bandwidth estimator)";
+}
+
+plugins::Status Bwe::open() noexcept {
+    return plugins::kOk;
+}
+
+void Bwe::close() noexcept {
+    // No-op — Bwe holds no external resources.
+}
+
+void Bwe::on_feedback(plugins::BweFeedback feedback) noexcept {
     impl_->on_feedback(feedback);
 }
 
-Estimate Bwe::estimate() const {
+plugins::BweEstimate Bwe::estimate() const noexcept {
     return impl_->estimate();
 }
 
-void Bwe::update_config(Config config) {
+void Bwe::update_config(plugins::BweConfig config) noexcept {
     impl_->update_config(config);
 }
 
-Config Bwe::config() const {
+plugins::BweConfig Bwe::config() const noexcept {
     return impl_->config();
 }
 
-void Bwe::reset() {
+void Bwe::reset() noexcept {
     impl_->reset();
 }
 

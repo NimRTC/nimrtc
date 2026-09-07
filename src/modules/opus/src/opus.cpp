@@ -304,22 +304,523 @@ Decoder::Stats Decoder::stats() const noexcept {
 }
 
 // -----------------------------------------------------------------------------
-// RTP packetisation (RFC 7587)
+// RFC 7587 RTP packetisation helpers
 // -----------------------------------------------------------------------------
+//
+// The TOC byte's 5-bit config field follows RFC 6716 §3.1 Table 2:
+//
+//   0..3   SILK-only NB        10/20/40/60 ms
+//   4..7   SILK-only MB        10/20/40/60 ms
+//   8..11  SILK-only WB        10/20/40/60 ms
+//   12..13 Hybrid    SWB       10/20 ms
+//   14..15 Hybrid    FB        10/20 ms
+//   16..19 CELT-only NB        2.5/5/10/20 ms
+//   20..23 CELT-only WB        2.5/5/10/20 ms
+//   24..27 CELT-only SWB       2.5/5/10/20 ms
+//   28..31 CELT-only FB        2.5/5/10/20 ms
+//
+// Within each range config N is the smallest duration and config N+3 (or
+// N+1 for Hybrid) is the largest.  Frame-size ↔ config offset within a
+// range is deterministic given the duration.
+//
+// For RFC 7587 the only knob a packetiser needs is the per-frame duration
+// in ms. We therefore resolve config purely by frame_size_ms using the
+// lowest config in the broadest bandwidth range (CELT-only FB covers all
+// supported durations: 2.5, 5, 10, 20 ms; the SILK-only ranges cover
+// 10/20/40/60 ms). A real bandwidth hint could be layered on top later.
 
-std::size_t packetise(const std::uint8_t* /*frames*/,
-                     std::size_t /*num_frames*/,
-                     std::uint8_t* output,
-                     std::size_t output_capacity,
-                     std::uint8_t channels,
-                     bool /*cbr*/) noexcept {
+namespace {
+
+// 120 ms ceiling: at 2.5 ms per frame we can pack at most 48 frames.
+// 120 / 2.5 = 48 (RFC 7587 §4.2, RFC 6716 §3.2.5 [R5]).
+inline constexpr std::size_t kMaxFramesPerPacket = 48;
+
+inline constexpr std::uint8_t kCode0_SingleFrame       = 0;
+inline constexpr std::uint8_t kCode1_TwoEqualFrames    = 1;
+inline constexpr std::uint8_t kCode2_TwoUnequalFrames  = 2;
+inline constexpr std::uint8_t kCode3_NFrames           = 3;
+
+// Encode an Opus frame length in 1 or 2 bytes per RFC 6716 §3.2.1.
+// Returns number of bytes written (1 or 2), or 0 if the length cannot
+// be encoded (> 1275 — RFC 6716 [R2]).
+//
+//   value 0           → DTX / lost
+//   value 1..251      → 1 byte, value as-is
+//   value 252..1275   → 2 bytes (b0, b1) where b0 ∈ [252..255] and
+//                       total = b0 + 4 * b1
+//
+// For the 2-byte form, we pick b0 in [252..255] (low) and b1 in [0..255]
+// such that len = b0 + 4 * b1.  Solving for b0 = 252..255 gives:
+//   b1 = (len - 252) / 4   (floor)
+//   b0 = (len - 252) & 3   (low 2 bits)
+//   first_byte = 252 + b0
+inline std::size_t encode_frame_length(std::uint16_t len,
+                                       std::uint8_t* out) noexcept {
+    if (len > 1275) return 0;  // RFC 6716 [R2]
+    if (len <= 251) {
+        out[0] = static_cast<std::uint8_t>(len);
+        return 1;
+    }
+    // 252..1275 → 2-byte form.
+    const std::uint16_t offset = static_cast<std::uint16_t>(len - 252);
+    const std::uint16_t b1     = static_cast<std::uint16_t>(offset >> 2);  // /=4
+    const std::uint8_t  b0     = static_cast<std::uint8_t>(offset & 0x03);
+    // b1 is at most (1275-252)/4 = 255. b0 is in [0..3].
+    out[0] = static_cast<std::uint8_t>(252 + b0);
+    out[1] = static_cast<std::uint8_t>(b1);
+    return 2;
+}
+
+// Decode an Opus frame length from a 1- or 2-byte sequence. `pos` advances
+// past the consumed bytes. Returns 0xFFFF on malformed input.
+inline std::uint16_t decode_frame_length(const std::uint8_t* in,
+                                          std::size_t len,
+                                          std::size_t* pos) noexcept {
+    if (*pos >= len) return 0xFFFF;
+    const std::uint8_t b0 = in[*pos];
+    if (b0 <= 251) {
+        (*pos)++;
+        return b0;
+    }
+    // b0 in 252..255 → 2-byte length; total = b0 + b1*4 per RFC 6716.
+    if (*pos + 1 >= len) return 0xFFFF;
+    const std::uint8_t b1 = in[*pos + 1];
+    const std::uint32_t total = static_cast<std::uint32_t>(b0)
+                              + static_cast<std::uint32_t>(b1) * 4u;
+    if (total > 1275) return 0xFFFF;  // RFC 6716 [R2]
+    *pos += 2;
+    return static_cast<std::uint16_t>(total);
+}
+
+} // anonymous namespace
+
+std::optional<std::uint8_t> toc_config_for_frame_size_ms(
+    std::uint16_t frame_size_ms) noexcept {
+    // RFC 6716 §3.1 Table 2 — see module-level comment for the layout.
+    // We always emit the canonical config for the chosen duration:
+    //   2.5 / 5 / 10 / 20 ms → FB CELT (configs 28..31)
+    //   40 / 60 ms            → WB SILK last two slots (10, 11)
+    // Round-trip via depacketise() preserves frame_size_ms exactly.
+    using R = std::optional<std::uint8_t>;
+    switch (frame_size_ms) {
+        case 3:   return R{std::in_place, static_cast<std::uint8_t>(28)};   // 2.5 ms (RFC 7587 §6.1: rounded up)
+        case 5:   return R{std::in_place, static_cast<std::uint8_t>(29)};
+        case 10:  return R{std::in_place, static_cast<std::uint8_t>(30)};
+        case 20:  return R{std::in_place, static_cast<std::uint8_t>(31)};
+        case 40:  return R{std::in_place, static_cast<std::uint8_t>(10)};   // SILK WB, 40 ms
+        case 60:  return R{std::in_place, static_cast<std::uint8_t>(11)};   // SILK WB, 60 ms
+        default:  return std::nullopt;
+    }
+}
+
+namespace {
+
+// Inverse mapping used by depacketise() — given a TOC config field,
+// return the corresponding frame size in ms (the canonical duration
+// for the chosen config slot).
+inline std::uint16_t frame_size_ms_for_config(std::uint8_t config) noexcept {
+    config &= 0x1F;
+    // CELT ranges (16..31) — sizes: 2.5, 5, 10, 20 ms.
+    // Each range covers all four durations; we map by index within range.
+    if (config >= 28) { // FB CELT
+        switch (config) {
+            case 28: return 3;    // 2.5 ms
+            case 29: return 5;
+            case 30: return 10;
+            case 31: return 20;
+        }
+    }
+    if (config >= 24) { // SWB CELT
+        switch (config - 24) {
+            case 0: return 3;
+            case 1: return 5;
+            case 2: return 10;
+            case 3: return 20;
+        }
+    }
+    if (config >= 20) { // WB CELT
+        switch (config - 20) {
+            case 0: return 3;
+            case 1: return 5;
+            case 2: return 10;
+            case 3: return 20;
+        }
+    }
+    if (config >= 16) { // NB CELT
+        switch (config - 16) {
+            case 0: return 3;
+            case 1: return 5;
+            case 2: return 10;
+            case 3: return 20;
+        }
+    }
+    // Hybrid (12..15) — SWB/FB, 10 or 20 ms only.
+    if (config >= 12) return (config == 12 || config == 13) ? 10 : 20;
+    // SILK-only (0..11) — 10, 20, 40, 60 ms in each range; index in
+    // range maps to 10, 20, 40, 60 ms respectively.
+    static constexpr std::uint16_t silk_ms[4] = { 10, 20, 40, 60 };
+    return silk_ms[config & 0x03];
+}
+
+} // anonymous namespace
+
+std::size_t packetise(const CodecFrame* frames,
+                      std::size_t num_frames,
+                      std::uint32_t /*sample_rate_hz*/,
+                      bool cbr,
+                      std::uint8_t* output,
+                      std::size_t output_capacity) noexcept {
     if (!output || output_capacity < 1) return 0;
-    // RFC 7587 TOC byte for single-frame Opus:
-    //   For mono: 0x80 (config=1, mono, no FEC)
-    //   For stereo: 0x78 (config=0, stereo, no FEC)
-    output[0] = static_cast<std::uint8_t>(
-        (channels == 1) ? 0x80 : 0x78);
-    return 1;  // stub: only the TOC byte (frame body is written separately by RTP layer)
+    if (!frames) return 0;
+    if (num_frames == 0 || num_frames > kMaxFramesPerPacket) return 0;
+
+    // Sanity-check inputs.
+    for (std::size_t i = 0; i < num_frames; ++i) {
+        if (!frames[i].data && frames[i].size != 0) return 0;
+        if (frames[i].size > kMaxOpusFrameBytes) return 0;
+    }
+
+    // Resolve per-frame TOC config + s field. All frames must agree on
+    // config (RFC 7587 §4.2 — Opus frames in a single packet share mode,
+    // bandwidth, frame size, and channel count).
+    std::uint8_t s_field = frames[0].is_stereo & 0x03;
+    std::uint8_t resolved_config = 0;
+    for (std::size_t i = 0; i < num_frames; ++i) {
+        const auto cfg = toc_config_for_frame_size_ms(frames[i].frame_size_ms);
+        if (!cfg) return 0;
+        const std::uint8_t c = static_cast<std::uint8_t>(*cfg & 0x1F);
+        if (i == 0) resolved_config = c;
+        // Reject mixed configs / s fields across the packet (RFC 7587 §4.2).
+        if (i > 0 && c != resolved_config) return 0;
+        if ((frames[i].is_stereo & 0x03) != s_field) return 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 0: one frame in the packet (RFC 6716 §3.2.2, Figure 2).
+    //   Layout: [TOC][N-1 bytes of frame data]
+    // ------------------------------------------------------------------
+    if (num_frames == 1) {
+        const std::size_t need = 1 + frames[0].size;
+        if (output_capacity < need) return 0;
+        output[0] = make_toc_byte(resolved_config, s_field, kCode0_SingleFrame);
+        if (frames[0].size > 0) {
+            std::memcpy(output + 1, frames[0].data, frames[0].size);
+        }
+        return need;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 1: two frames, equal compressed size (RFC 6716 §3.2.3, Figure 3).
+    //   Layout: [TOC][frame1 (N-1)/2 bytes][frame2 (N-1)/2 bytes]
+    //   [R3]: N-1 must be even.
+    // ------------------------------------------------------------------
+    if (num_frames == 2 && frames[0].size == frames[1].size) {
+        const std::size_t per = frames[0].size;
+        const std::size_t need = 1 + 2 * per;
+        // [R3]: N-1 (= 2*per) is always even — auto-satisfied.
+        if (output_capacity < need) return 0;
+        output[0] = make_toc_byte(resolved_config, s_field, kCode1_TwoEqualFrames);
+        if (per > 0) {
+            std::memcpy(output + 1,          frames[0].data, per);
+            std::memcpy(output + 1 + per,    frames[1].data, per);
+        }
+        return need;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 2: two frames with different sizes (RFC 6716 §3.2.4, Figure 4).
+    //   Layout: [TOC][N1 length 1-2 bytes][frame1 N1 bytes][frame2]
+    // ------------------------------------------------------------------
+    if (num_frames == 2) {
+        std::uint8_t lenbuf[2];
+        const std::size_t len_bytes = encode_frame_length(
+            static_cast<std::uint16_t>(frames[0].size), lenbuf);
+        if (len_bytes == 0) return 0;
+        const std::size_t need = 1 + len_bytes + frames[0].size + frames[1].size;
+        if (output_capacity < need) return 0;
+        output[0] = make_toc_byte(resolved_config, s_field, kCode2_TwoUnequalFrames);
+        std::memcpy(output + 1, lenbuf, len_bytes);
+        std::size_t off = 1 + len_bytes;
+        if (frames[0].size > 0) {
+            std::memcpy(output + off, frames[0].data, frames[0].size);
+            off += frames[0].size;
+        }
+        if (frames[1].size > 0) {
+            std::memcpy(output + off, frames[1].data, frames[1].size);
+            off += frames[1].size;
+        }
+        return off;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 3: N >= 3 frames, signalled count (RFC 6716 §3.2.5, Figures 5-7).
+    //   Layout:
+    //     [TOC][frame_count byte (v|p|M)][optional padding length bytes]
+    //     [M-1 length entries (VBR only)][frame 1]...[frame M][padding]
+    //
+    //   M (in bits 7..2) must be non-zero, and the total audio duration
+    //   MUST NOT exceed 120 ms (RFC 6716 [R5]).
+    // ------------------------------------------------------------------
+    const std::size_t m = num_frames;
+    // Compute total duration in ms (sum of per-frame frame_size_ms).
+    // We reject packets that exceed 120 ms — RFC 6716 [R5].
+    std::uint32_t total_ms = 0;
+    for (std::size_t i = 0; i < m; ++i) {
+        total_ms += frames[i].frame_size_ms;
+        if (total_ms > 120) return 0;
+    }
+    if (m > kMaxFramesPerPacket) return 0;  // sanity re-check
+
+    // Build the frame-count byte: bit 0 = v (VBR=1), bit 1 = p (padding), bits 7..2 = M.
+    // Opus padding is not used here (always 0).
+    std::uint8_t v_bit = cbr ? 0 : 1;
+    std::uint8_t p_bit = 0;
+    std::uint8_t m_field = static_cast<std::uint8_t>(m & 0x3F);
+    const std::uint8_t fc_byte = static_cast<std::uint8_t>(
+        (v_bit << 0) | (p_bit << 1) | (m_field << 2));
+
+    // For CBR (RFC 6716 §3.2.5), all M frames MUST share the same compressed
+    // size — otherwise depacketise() cannot recover the per-frame boundaries
+    // (the R/M divisibility rule). Reject mixed sizes early.
+    if (cbr) {
+        const std::size_t ref = frames[0].size;
+        for (std::size_t i = 1; i < m; ++i) {
+            if (frames[i].size != ref) return 0;
+        }
+    }
+
+    // Length table size: M-1 entries (VBR) or 0 (CBR). Each entry is 1 or 2 bytes.
+    std::size_t len_table_bytes = 0;
+    if (!cbr) {
+        std::uint8_t scratch[2];
+        for (std::size_t i = 0; i + 1 < m; ++i) {
+            const std::size_t n = encode_frame_length(
+                static_cast<std::uint16_t>(frames[i].size), scratch);
+            if (n == 0) return 0;
+            len_table_bytes += n;
+        }
+    }
+
+    const std::size_t need = 1 + 1 + len_table_bytes;
+    std::size_t total_bytes = need;
+    for (std::size_t i = 0; i < m; ++i) total_bytes += frames[i].size;
+    if (output_capacity < total_bytes) return 0;
+
+    output[0] = make_toc_byte(resolved_config, s_field, kCode3_NFrames);
+    output[1] = fc_byte;
+    std::size_t off = 2;
+
+    if (!cbr) {
+        std::uint8_t scratch[2];
+        for (std::size_t i = 0; i + 1 < m; ++i) {
+            const std::size_t n = encode_frame_length(
+                static_cast<std::uint16_t>(frames[i].size), scratch);
+            // encode_frame_length already validated above, n > 0 here.
+            std::memcpy(output + off, scratch, n);
+            off += n;
+        }
+    }
+
+    for (std::size_t i = 0; i < m; ++i) {
+        if (frames[i].size > 0) {
+            std::memcpy(output + off, frames[i].data, frames[i].size);
+            off += frames[i].size;
+        }
+    }
+    return off;
+}
+
+std::size_t depacketise(const std::uint8_t* payload,
+                        std::size_t payload_len,
+                        PacketView* views,
+                        std::size_t views_capacity,
+                        std::size_t* num_views) noexcept {
+    if (num_views) *num_views = 0;
+    if (!payload || payload_len < 1) return 0;
+    if (!views || views_capacity == 0) return 0;
+
+    const std::uint8_t toc = payload[0];
+    // RFC 6716 §3.1 Figure 1:
+    //   bits 7..3 = config (5 bits)
+    //   bit  2   = s      (1 bit)
+    //   bits 1..0 = c      (2 bits — the "code" 0..3)
+    const std::uint8_t config = static_cast<std::uint8_t>((toc >> 3) & 0x1F);
+    const std::uint8_t s_field = static_cast<std::uint8_t>((toc >> 2) & 0x01);
+    const std::uint8_t code = static_cast<std::uint8_t>(toc & 0x03);
+    const std::uint16_t frame_size_ms = frame_size_ms_for_config(config);
+
+    // ------------------------------------------------------------------
+    // Code 0: single frame (RFC 6716 §3.2.2, Figure 2).
+    //   Layout: [TOC][N-1 bytes]. No length encoding — the whole rest is
+    //   the frame.
+    // ------------------------------------------------------------------
+    if (code == kCode0_SingleFrame) {
+        if (views_capacity < 1) return 0;
+        views[0].data          = payload + 1;
+        views[0].size          = payload_len - 1;
+        views[0].config        = config;
+        views[0].s             = s_field;
+        views[0].code          = code;
+        views[0].frame_size_ms = frame_size_ms;
+        *num_views = 1;
+        return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 1: two frames, equal compressed size (RFC 6716 §3.2.3).
+    //   Layout: [TOC][frame1 (N-1)/2 bytes][frame2 (N-1)/2 bytes].
+    //   [R3]: N-1 must be even.
+    // ------------------------------------------------------------------
+    if (code == kCode1_TwoEqualFrames) {
+        const std::size_t after_toc = payload_len - 1;
+        if ((after_toc & 0x1u) != 0) return 0;  // [R3]
+        const std::size_t per = after_toc / 2;
+        if (views_capacity < 2) return 0;
+        views[0].data          = payload + 1;
+        views[0].size          = per;
+        views[0].config        = config;
+        views[0].s             = s_field;
+        views[0].code          = code;
+        views[0].frame_size_ms = frame_size_ms;
+        views[1].data          = payload + 1 + per;
+        views[1].size          = per;
+        views[1].config        = config;
+        views[1].s             = s_field;
+        views[1].code          = code;
+        views[1].frame_size_ms = frame_size_ms;
+        *num_views = 2;
+        return 2;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 2: two frames with different compressed sizes (RFC 6716 §3.2.4).
+    //   Layout: [TOC][N1 length 1-2 bytes][frame1 N1 bytes][frame2].
+    //   [R4]: N1 must fit in the remaining payload.
+    // ------------------------------------------------------------------
+    if (code == kCode2_TwoUnequalFrames) {
+        if (payload_len < 2) return 0;          // need at least 1 len byte
+        if (views_capacity < 2) return 0;
+        std::size_t pos = 1;
+        const std::uint16_t n1 = decode_frame_length(payload, payload_len, &pos);
+        if (n1 == 0xFFFF) return 0;
+        if (n1 > payload_len - pos) return 0;   // [R4]
+        views[0].data          = payload + pos;
+        views[0].size          = n1;
+        views[0].config        = config;
+        views[0].s             = s_field;
+        views[0].code          = code;
+        views[0].frame_size_ms = frame_size_ms;
+        const std::size_t off2 = pos + n1;
+        if (off2 > payload_len) return 0;
+        views[1].data          = payload + off2;
+        views[1].size          = payload_len - off2;
+        views[1].config        = config;
+        views[1].s             = s_field;
+        views[1].code          = code;
+        views[1].frame_size_ms = frame_size_ms;
+        *num_views = 2;
+        return 2;
+    }
+
+    // ------------------------------------------------------------------
+    // Code 3: M >= 1 frames, signalled count (RFC 6716 §3.2.5).
+    //   Layout: [TOC][fc byte (v|p|M)][optional padding length bytes]
+    //           [M-1 length entries (VBR only)][frame 1]...[frame M][pad]
+    //   CBR uses fixed per-frame length R/M (no length table).
+    //   VBR uses M-1 length entries; last frame consumes remainder.
+    // ------------------------------------------------------------------
+    if (code == kCode3_NFrames) {
+        if (payload_len < 2) return 0;  // RFC 6716 [R6,R7] — at least 2 bytes
+        const std::uint8_t fc = payload[1];
+        const std::uint8_t v_bit = static_cast<std::uint8_t>(fc & 0x01);
+        const std::uint8_t p_bit = static_cast<std::uint8_t>((fc >> 1) & 0x01);
+        const std::uint8_t m_field = static_cast<std::uint8_t>((fc >> 2) & 0x3F);
+        if (m_field == 0) return 0;        // RFC 6716 [R5]
+        const std::size_t m = m_field;
+
+        std::size_t pos = 2;
+
+        // Optional padding-length bytes. Skip them; we don't strip padding.
+        // p_bit == 1 ⇒ at least one byte follows indicating padding.
+        // p_bit == 0 ⇒ no padding-length byte.
+        // For 1-byte form: value ∈ [0..254] means that many bytes of padding
+        // (in addition to the byte itself). Value 255 ⇒ a second byte follows.
+        // We skip the entire padding block.
+        std::size_t padding_header_bytes = 0;
+        std::size_t padding_size = 0;
+        if (p_bit) {
+            if (pos >= payload_len) return 0;
+            const std::uint8_t b0 = payload[pos];
+            if (b0 == 255) {
+                if (pos + 1 >= payload_len) return 0;
+                padding_size = 254u + static_cast<std::size_t>(payload[pos + 1]);
+                padding_header_bytes = 2;
+            } else {
+                padding_size = static_cast<std::size_t>(b0);
+                padding_header_bytes = 1;
+            }
+        }
+        pos += padding_header_bytes;
+
+        // RFC 6716 [R6,R7]: padding must fit in the remaining payload.
+        if (pos + padding_size > payload_len) return 0;
+
+        const std::size_t data_end = payload_len - padding_size;
+
+        if (v_bit) {
+            // VBR: M-1 length entries, last frame consumes remainder.
+            // Per RFC 6716 §3.2.5 Figure 7, the lengths table precedes all
+            // frame data; once the table is consumed we slice frame data
+            // sequentially.
+            if (views_capacity < m) return 0;
+            std::size_t lengths[kMaxFramesPerPacket];
+            for (std::size_t i = 0; i + 1 < m; ++i) {
+                const std::uint16_t n = decode_frame_length(payload, data_end, &pos);
+                if (n == 0xFFFF) return 0;
+                lengths[i] = n;
+            }
+            const std::size_t data_start = pos;
+            std::size_t total = 0;
+            for (std::size_t i = 0; i + 1 < m; ++i) total += lengths[i];
+            if (total > data_end - data_start) return 0;  // RFC 6716 [R7]
+            const std::size_t last = data_end - data_start - total;
+            std::size_t cursor = data_start;
+            for (std::size_t i = 0; i + 1 < m; ++i) {
+                views[i].data          = payload + cursor;
+                views[i].size          = lengths[i];
+                views[i].config        = config;
+                views[i].s             = s_field;
+                views[i].code          = code;
+                views[i].frame_size_ms = frame_size_ms;
+                cursor += lengths[i];
+            }
+            views[m - 1].data          = payload + cursor;
+            views[m - 1].size          = last;
+            views[m - 1].config        = config;
+            views[m - 1].s             = s_field;
+            views[m - 1].code          = code;
+            views[m - 1].frame_size_ms = frame_size_ms;
+        } else {
+            // CBR: each frame has equal size R/M, where R = data_end - pos.
+            const std::size_t r = data_end - pos;
+            if (r % m != 0) return 0;  // RFC 6716 [R6]
+            const std::size_t per = r / m;
+            if (views_capacity < m) return 0;
+            for (std::size_t i = 0; i < m; ++i) {
+                views[i].data          = payload + pos + i * per;
+                views[i].size          = per;
+                views[i].config        = config;
+                views[i].s             = s_field;
+                views[i].code          = code;
+                views[i].frame_size_ms = frame_size_ms;
+            }
+        }
+
+        *num_views = m;
+        return m;
+    }
+
+    return 0;  // unreachable
 }
 
 } // namespace nimrtc::opus

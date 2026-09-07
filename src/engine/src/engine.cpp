@@ -38,6 +38,19 @@
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
 
+// Concrete module headers — required by NimRTCEngine::Impl which lives in
+// this translation unit.  The public header (engine.hpp) does NOT include
+// any of these; consumers only need the plugin interfaces.
+#include <nimrtc/sdp/session_description.hpp>
+#include <nimrtc/rtp/packet.hpp>
+#include <nimrtc/jb/jitter_buffer.hpp>
+#include <nimrtc/audio3a/audio3a.hpp>
+#include <nimrtc/dtls/dtls.hpp>
+#include <nimrtc/srtp/srtp.hpp>
+#ifdef NIMRTC_HAS_OPUS
+#include <nimrtc/opus/opus.hpp>
+#endif
+
 namespace nimrtc::engine {
 
 namespace {
@@ -120,9 +133,44 @@ std::vector<std::uint8_t> hex_colon_decode(std::string_view sv) {
 
 } // anonymous namespace
 
-struct NimRTCEngine::SdpImpl {
-    std::unique_ptr<sdp::Parser> parser = std::make_unique<sdp::Parser>();
-    std::unique_ptr<sdp::Munger> munger = std::make_unique<sdp::Munger>();
+// ---------------------------------------------------------------------------
+// NimRTCEngine::Impl — all concrete-module state lives here.
+//
+// Layout Invariant 4 forbids NimRTCEngine from depending on concrete
+// module headers in its public API.  engine.hpp forward-declares the
+// concrete types it exposes in the public surface (e.g. dtls::DtlsState)
+// and the accessors that need them are out-of-line; the rest of the
+// concrete state (JitterBuffers, Audio3A fallback, SRTP, Opus, DTLS, SDP)
+// lives in this Impl struct compiled together with engine.cpp.
+// ---------------------------------------------------------------------------
+struct NimRTCEngine::Impl {
+    // SDP: Parser/Munger are concrete classes.
+    std::unique_ptr<sdp::Parser>    sdp_parser = std::make_unique<sdp::Parser>();
+    std::unique_ptr<sdp::Munger>    sdp_munger = std::make_unique<sdp::Munger>();
+
+    // Jitter buffers — keyed by SSRC.
+    std::map<std::uint32_t, std::unique_ptr<jb::JitterBuffer>> jitter_buffers;
+
+    // Concrete fallback classes (when no plugin adapter is registered).
+    std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
+
+    // SRTP / DTLS / Opus — not yet plugin-exposed.
+    std::unique_ptr<dtls::DtlsSession> dtls;
+    std::unique_ptr<srtp::SrtpContext> srtp;
+#ifdef NIMRTC_HAS_OPUS
+    std::unique_ptr<opus::Encoder>     opus_encoder;
+    std::unique_ptr<opus::Decoder>     opus_decoder;
+#endif
+
+    bool            dtls_active_inbound = false;
+    bool            srtp_installed      = false;
+    int             srtp_stats_drop     = 0;
+    dtls::DtlsState last_dtls_state     = dtls::DtlsState::Closed;
+
+    // Local SDP (after create_offer / process_remote_sdp).
+    std::optional<sdp::SessionDescription> local_sdp;
+
+    uint32_t        last_open_rc = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -130,12 +178,14 @@ struct NimRTCEngine::SdpImpl {
 // ---------------------------------------------------------------------------
 
 NimRTCEngine::NimRTCEngine(EngineConfig config)
-    : config_(std::move(config)) {}
+    : config_(std::move(config)), impl_(new Impl()) {}
 
 NimRTCEngine::~NimRTCEngine() {
     if (state_ == State::kOpen) {
         close();
     }
+    delete impl_;
+    impl_ = nullptr;
 }
 
     uint32_t NimRTCEngine::pre_open() noexcept {
@@ -163,9 +213,9 @@ NimRTCEngine::~NimRTCEngine() {
     } else {
         const plugins::ITransportFactory* tfactory =
             reg.get_transport(config_.transport_name);
-        if (!tfactory) { last_open_rc_ = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport plugin not found"); return 0x1FFF; }
+        if (!tfactory) { impl_->last_open_rc = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport plugin not found"); return 0x1FFF; }
         plugins::ITransport* raw = tfactory->create();
-        if (!raw) { last_open_rc_ = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport factory returned null"); return 0x1FFF; }
+        if (!raw) { impl_->last_open_rc = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport factory returned null"); return 0x1FFF; }
         // Last-resort safety net: a generic ITransport that also happens
         // to implement IICETransport.  This is the only place the engine
         // still does a cross-class dynamic_cast, and it's intentional —
@@ -173,7 +223,7 @@ NimRTCEngine::~NimRTCEngine() {
         // without registering the ICE-specific factory.
         ice_t_.reset(dynamic_cast<plugins::IICETransport*>(raw));
         if (!ice_t_) {
-            last_open_rc_ = 0x1FFF;
+            impl_->last_open_rc = 0x1FFF;
             if (on_error_) on_error_(0x1FFF, "transport plugin does not implement IICETransport");
             delete raw;
             return 0x1FFF;
@@ -205,12 +255,12 @@ NimRTCEngine::~NimRTCEngine() {
         }
     }
     if (!audio3a_plugin_) {
-        audio3a_concrete_ = std::make_unique<audio3a::NullAudio3A>();
+        impl_->audio3a_concrete = std::make_unique<audio3a::NullAudio3A>();
         audio3a::Config a3a;
         a3a.sample_rate_hz    = config_.pcm_sample_rate_hz;
         a3a.capture_channels = config_.pcm_channels;
         a3a.render_channels   = config_.pcm_channels;
-        audio3a_concrete_->init(a3a);
+        impl_->audio3a_concrete->init(a3a);
     }
 
     {
@@ -238,27 +288,25 @@ NimRTCEngine::~NimRTCEngine() {
             opus::EncoderConfig ec;
             ec.sample_rate_hz = config_.pcm_sample_rate_hz;
             ec.channels       = config_.pcm_channels;
-            opus_encoder_ = std::make_unique<opus::Encoder>(ec);
+            impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
             opus::DecoderConfig dc;
             dc.sample_rate_hz = config_.pcm_sample_rate_hz;
             dc.channels       = config_.pcm_channels;
-            opus_decoder_ = std::make_unique<opus::Decoder>(dc);
+            impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
 #endif
         }
     }
 
-    srtp_ = std::make_unique<srtp::SrtpContext>();
+    impl_->srtp = std::make_unique<srtp::SrtpContext>();
     core::log::Logger::instance().debug("engine: srtp_ created, about to create dtls_");
 
     dtls::Config dcfg;
     dcfg.role = dtls::DtlsRole::Server;
     dcfg.srtp_profile = dtls::SrtpProfile::Aes128CmSha1_80;
-    dtls_ = std::make_unique<dtls::DtlsSession>(dcfg);
+    impl_->dtls = std::make_unique<dtls::DtlsSession>(dcfg);
     core::log::Logger::instance().debug("engine: dtls_ created, calling dtls_->open()");
-    if (!dtls_->open()) { last_open_rc_ = 0x2000; core::log::Logger::instance().error("pre_open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
+    if (!impl_->dtls->open()) { impl_->last_open_rc = 0x2000; core::log::Logger::instance().error("pre_open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
     core::log::Logger::instance().debug("pre_open: dtls_->open() returned ok");
-
-    sdp_impl_ = std::make_unique<SdpImpl>();
 
     ice_t_->set_callbacks(
         [this](plugins::BufferView bv) { on_transport_recv(bv); },
@@ -326,12 +374,12 @@ uint32_t NimRTCEngine::open() noexcept {
             }
         }
         if (!audio3a_plugin_) {
-            audio3a_concrete_ = std::make_unique<audio3a::NullAudio3A>();
+            impl_->audio3a_concrete = std::make_unique<audio3a::NullAudio3A>();
             audio3a::Config a3a;
             a3a.sample_rate_hz    = config_.pcm_sample_rate_hz;
             a3a.capture_channels = config_.pcm_channels;
             a3a.render_channels   = config_.pcm_channels;
-            audio3a_concrete_->init(a3a);
+            impl_->audio3a_concrete->init(a3a);
         }
 
         {
@@ -359,27 +407,25 @@ uint32_t NimRTCEngine::open() noexcept {
                 opus::EncoderConfig ec;
                 ec.sample_rate_hz = config_.pcm_sample_rate_hz;
                 ec.channels       = config_.pcm_channels;
-                opus_encoder_ = std::make_unique<opus::Encoder>(ec);
+                impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
                 opus::DecoderConfig dc;
                 dc.sample_rate_hz = config_.pcm_sample_rate_hz;
                 dc.channels       = config_.pcm_channels;
-                opus_decoder_ = std::make_unique<opus::Decoder>(dc);
+                impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
 #endif
             }
         }
 
-        srtp_ = std::make_unique<srtp::SrtpContext>();
+        impl_->srtp = std::make_unique<srtp::SrtpContext>();
         core::log::Logger::instance().debug("engine.open: srtp_ created, about to create dtls_");
 
         dtls::Config dcfg;
         dcfg.role = dtls::DtlsRole::Server;
         dcfg.srtp_profile = dtls::SrtpProfile::Aes128CmSha1_80;
-        dtls_ = std::make_unique<dtls::DtlsSession>(dcfg);
+        impl_->dtls = std::make_unique<dtls::DtlsSession>(dcfg);
         core::log::Logger::instance().debug("engine.open: dtls_ created, calling dtls_->open()");
-        if (!dtls_->open()) { last_open_rc_ = 0x2000; core::log::Logger::instance().error("engine.open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
+        if (!impl_->dtls->open()) { impl_->last_open_rc = 0x2000; core::log::Logger::instance().error("engine.open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
         core::log::Logger::instance().debug("engine.open: dtls_->open() returned ok");
-
-        sdp_impl_ = std::make_unique<SdpImpl>();
 
         ice_t_->set_callbacks(
             [this](plugins::BufferView bv) { on_transport_recv(bv); },
@@ -401,7 +447,7 @@ uint32_t NimRTCEngine::open() noexcept {
         char err[64];
         std::snprintf(err, sizeof(err), "transport open failed rc=%d",
                       static_cast<int>(ice_open_rc));
-        last_open_rc_ = 0x1FFF;
+        impl_->last_open_rc = 0x1FFF;
         core::log::Logger::instance().error(std::string(err));
         if (on_error_) on_error_(0x1FFF, err);
         ice_t_.reset();
@@ -594,17 +640,16 @@ void NimRTCEngine::close() noexcept {
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
     ice_t_.reset();
-    jitter_buffers_.clear();
-    sdp_impl_.reset();
+    impl_->jitter_buffers.clear();
     audio3a_plugin_.reset();
-    audio3a_concrete_.reset();
+    impl_->audio3a_concrete.reset();
     codec_plugin_.reset();
 #ifdef NIMRTC_HAS_OPUS
-    opus_encoder_.reset();
-    opus_decoder_.reset();
+    impl_->opus_encoder.reset();
+    impl_->opus_decoder.reset();
 #endif
-    dtls_.reset();
-    srtp_.reset();
+    impl_->dtls.reset();
+    impl_->srtp.reset();
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
 }
@@ -637,9 +682,9 @@ std::string NimRTCEngine::create_offer() noexcept {
     audio.ice_options     = "trickle";
     audio.dtls_setup      = "actpass";
 
-    if (dtls_) {
+    if (impl_->dtls) {
         audio.dtls_fingerprint_algo  = "sha-256";
-        audio.dtls_fingerprint_value = dtls_->local_fingerprint().hex_colon;
+        audio.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
     }
 
     sdp::MediaDescription::RtpMap codec_map;
@@ -671,18 +716,18 @@ std::string NimRTCEngine::create_offer() noexcept {
 
     sdp.media.push_back(std::move(audio));
 
-    auto sdp_str = sdp_impl_->munger->to_sdp(sdp);
+    auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
     if (!sdp_str) {
         if (on_error_) on_error_(0x1004, "SDP munger failed");
         return {};
     }
-    local_sdp_ = std::move(sdp);
+    impl_->local_sdp = std::move(sdp);
     return sdp_str.value();
 }
 
 std::optional<std::string>
 NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
-    auto parsed = sdp_impl_->parser->parse(remote_sdp);
+    auto parsed = impl_->sdp_parser->parse(remote_sdp);
     if (!parsed) {
         if (on_error_) on_error_(0x1004, "SDP parse failed");
         return std::nullopt;
@@ -732,7 +777,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // Note: `sdp::SessionDescription::media[i]` is the concrete MediaDescription
     // (NOT the plugins::SdpMedia wrapper), which exposes dedicated ice_ufrag,
     // ice_pwd and candidates fields.  This is the engine's internal parser
-    // (sdp_impl_->parser), not the ISDP plugin.
+    // (impl_->sdp_parser), not the ISDP plugin.
     for (const auto& m : remote.media) {
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: media ice_ufrag='") + m.ice_ufrag
@@ -765,12 +810,12 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // machine when the role changes (e.g., answerer promoting Server -> Client).
     for (const auto& rm : remote.media) {
         if (rm.type != sdp::MediaType::Audio) continue;
-        if (dtls_) {
+        if (impl_->dtls) {
             dtls::DtlsRole desired_role = dtls::DtlsRole::Server;
             if      (rm.dtls_setup == "active")  desired_role = dtls::DtlsRole::Server;
             else if (rm.dtls_setup == "passive") desired_role = dtls::DtlsRole::Client;
             else                                 desired_role = dtls::DtlsRole::Client;
-            dtls_->set_role(desired_role);
+            impl_->dtls->set_role(desired_role);
 
             if (!rm.dtls_fingerprint_algo.empty() &&
                 !rm.dtls_fingerprint_value.empty()) {
@@ -781,7 +826,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 if (bytes.empty()) {
                     bytes = base64_decode(rm.dtls_fingerprint_value);
                 }
-                dtls_->set_peer_fingerprint(rm.dtls_fingerprint_algo, std::move(bytes));
+                impl_->dtls->set_peer_fingerprint(rm.dtls_fingerprint_algo, std::move(bytes));
             }
         }
         break;
@@ -812,9 +857,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.ice_ufrag       = local_ufrag();
         am.ice_pwd         = local_password();
         am.dtls_setup      = (rm.dtls_setup == "active") ? "passive" : "active";
-        if (dtls_) {
+        if (impl_->dtls) {
             am.dtls_fingerprint_algo  = "sha-256";
-            am.dtls_fingerprint_value = dtls_->local_fingerprint().hex_colon;
+            am.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
         }
         am.rtpmap = rm.rtpmap;
         am.fmtp   = rm.fmtp;
@@ -841,7 +886,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         ans.media.push_back(std::move(am));
     }
 
-    auto ans_str = sdp_impl_->munger->to_sdp(ans);
+    auto ans_str = impl_->sdp_munger->to_sdp(ans);
     if (!ans_str) {
         if (on_error_) on_error_(0x1004, "SDP munger failed");
         return std::nullopt;
@@ -860,13 +905,13 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
             const_cast<float*>(pcm_samples),
             num_samples,
             config_.pcm_channels);
-    } else if (audio3a_concrete_) {
+    } else if (impl_->audio3a_concrete) {
         audio3a::Frame frame;
         frame.samples        = const_cast<float*>(pcm_samples);
         frame.num_samples    = num_samples;
         frame.num_channels   = config_.pcm_channels;
         frame.sample_rate_hz = config_.pcm_sample_rate_hz;
-        audio3a_concrete_->process_capture(frame);
+        impl_->audio3a_concrete->process_capture(frame);
     }
 
     static thread_local std::vector<std::uint8_t> codec_pkt;
@@ -877,8 +922,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         codec_len = codec_plugin_->encode(pcm_samples, num_samples,
                                          codec_pkt.data(), codec_pkt.size());
 #ifdef NIMRTC_HAS_OPUS
-    } else if (opus_encoder_) {
-        codec_len = opus_encoder_->encode(pcm_samples, num_samples,
+    } else if (impl_->opus_encoder) {
+        codec_len = impl_->opus_encoder->encode(pcm_samples, num_samples,
                                          codec_pkt.data(), codec_pkt.size());
 #endif
     }
@@ -902,8 +947,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
 
     std::vector<std::uint8_t> send_buf;
     core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
-    if (srtp_installed_ && srtp_) {
-        auto* sess = srtp_->get_session(curr_ssrc);
+    if (impl_->srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(curr_ssrc);
         if (sess) {
             auto enc = sess->protect_rtp(out_payload, curr_ssrc, cur_ts);
             if (enc) {
@@ -958,14 +1003,14 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     if (pkt.empty() || pkt.size() < 1) return;
     std::uint8_t b0 = pkt.data()[0];
     bool looks_like_dtls = (b0 == 22 || b0 == 23 || b0 == 21);
-    if (looks_like_dtls && dtls_) {
+    if (looks_like_dtls && impl_->dtls) {
         core::log::Logger::instance().info(
             std::string("engine[dtls]: rx dtls ct=") + std::to_string(b0) +
             " len=" + std::to_string(pkt.size()) +
-            " state=" + std::string(dtls::DtlsSession::state_name(dtls_->state())));
+            " state=" + std::string(dtls::DtlsSession::state_name(impl_->dtls->state())));
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
         dtls::DtlsAddr from;
-        dtls_->feed_inbound(bytes, from);
+        impl_->dtls->feed_inbound(bytes, from);
         // Only flush outbound DTLS records once ICE has selected a pair,
         // mirroring the gate in tick().  Without this, the first inbound
         // ClientHello (which arrives as soon as the peer's ICE connectivity
@@ -980,10 +1025,10 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     }
     // CCS (content type 20) isn't recognised as DTLS above; process it so
     // the receiving side can complete its state machine.
-    if (b0 == dtls::kDtlsChangeCipherSpec && dtls_) {
+    if (b0 == dtls::kDtlsChangeCipherSpec && impl_->dtls) {
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
         dtls::DtlsAddr from;
-        dtls_->feed_inbound(bytes, from);
+        impl_->dtls->feed_inbound(bytes, from);
         if (is_ice_connected()) {
             drain_dtls();
         }
@@ -992,15 +1037,15 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     std::vector<std::uint8_t> plaintext;
     core::ByteSpan view(pkt.data(), pkt.size());
     bool tried_srtp = false;
-    if (srtp_installed_ && srtp_) {
-        auto* sess = srtp_->get_session(0);
+    if (impl_->srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(0);
         if (sess) {
             auto r = sess->unprotect_rtp(view, nullptr, nullptr);
             if (r) {
                 view = r.value();
                 tried_srtp = true;
             } else {
-                ++srtp_stats_drop_;
+                ++impl_->srtp_stats_drop;
                 return;
             }
         }
@@ -1018,8 +1063,8 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
 }
 
 int NimRTCEngine::drain_dtls() noexcept {
-    if (!dtls_) return 0;
-    auto recs = dtls_->take_outbound();
+    if (!impl_->dtls) return 0;
+    auto recs = impl_->dtls->take_outbound();
     int sent = 0;
     for (auto& rec : recs) {
         plugins::BufferView bv{rec.bytes.data(), rec.bytes.size()};
@@ -1029,13 +1074,13 @@ int NimRTCEngine::drain_dtls() noexcept {
     // Trace DTLS state transitions for debuggability.  Uses a per-engine
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
-    const auto new_state = dtls_->state();
-    if (new_state != last_dtls_state_) {
+    const auto new_state = impl_->dtls->state();
+    if (new_state != impl_->last_dtls_state) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
-            std::string(dtls::DtlsSession::state_name(last_dtls_state_)) + " → " +
+            std::string(dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " → " +
             std::string(dtls::DtlsSession::state_name(new_state)));
-        last_dtls_state_ = new_state;
+        impl_->last_dtls_state = new_state;
     }
 
     if (new_state == dtls::DtlsState::Connected) {
@@ -1051,17 +1096,17 @@ int NimRTCEngine::drain_dtls() noexcept {
 
 void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // Idempotency: only install once per DTLS connection.
-    if (srtp_installed_) {
+    if (impl_->srtp_installed) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: already installed, skipping");
         return;
     }
-    if (!dtls_) {
+    if (!impl_->dtls) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: dtls_ is null, skipping");
         return;
     }
-    if (!srtp_) {
+    if (!impl_->srtp) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: srtp_ is null, skipping");
         return;
@@ -1070,7 +1115,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // Pre-condition: DTLS MUST be Connected (RFC 5764 §4.2 — keying material
     // is only available after the Finished message).  Re-check inside this
     // function to avoid races between drain_dtls()'s state read and our own.
-    const auto dtls_state = dtls_->state();
+    const auto dtls_state = impl_->dtls->state();
     if (dtls_state != dtls::DtlsState::Connected) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: dtls_state=" +
@@ -1079,7 +1124,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
         return;
     }
 
-    auto km = dtls_->srtp_keying_material();
+    auto km = impl_->dtls->srtp_keying_material();
     if (!km) {
         core::log::Logger::instance().warn(
             "engine[dtls→srtp]: dtls reports Connected but no keying material");
@@ -1123,10 +1168,10 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     }
 
     // Install on the SrtpContext (used for inbound unprotect).
-    srtp_->derive_keys_for_remote(ck, cs, srtp::CryptoSuite::Aes128CmSha1_80);
+    impl_->srtp->derive_keys_for_remote(ck, cs, srtp::CryptoSuite::Aes128CmSha1_80);
 
     // Mark installed; subsequent calls will short-circuit.
-    srtp_installed_ = true;
+    impl_->srtp_installed = true;
 
     log.info("engine[dtls→srtp]: SRTP keys INSTALLED ✓ "
              "(state=" + std::string(state_ == State::kOpen ? "Open" : "Other") +
@@ -1134,8 +1179,8 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
 }
 
 uint32_t NimRTCEngine::feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept {
-    if (!srtp_packet || len == 0 || !srtp_) return 0x1001;
-    auto sess = srtp_->get_session(0);
+    if (!srtp_packet || len == 0 || !impl_->srtp) return 0x1001;
+    auto sess = impl_->srtp->get_session(0);
     if (!sess) return 0;
     core::ByteSpan span(srtp_packet, len);
     auto un = sess->unprotect_rtp(span, nullptr, nullptr);
@@ -1151,7 +1196,7 @@ bool NimRTCEngine::set_remote_ice(std::string_view ice_block) noexcept {
 }
 
 void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
-    auto& jb = jitter_buffers_[pv.ssrc];
+    auto& jb = impl_->jitter_buffers[pv.ssrc];
     if (!jb) {
         jb::Config jc;
         jc.initial_delay = core::Milliseconds{config_.jb_initial_delay_ms};
@@ -1174,6 +1219,42 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept {
     core::log::Logger::instance().error(
         std::format("ERROR 0x{:04X}: {}", err, msg));
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-line inspection accessors
+//
+// These used to be `inline` in the public header.  They reference concrete
+// module state (DTLS, SRTP, ICE plugin) and therefore pull in concrete
+// module headers — keeping them out-of-line lets engine.hpp stay free of
+// those headers (Layout Invariant 4).
+// ---------------------------------------------------------------------------
+
+dtls::DtlsState NimRTCEngine::dtls_state() const noexcept {
+    return impl_->dtls ? impl_->dtls->state() : dtls::DtlsState::Closed;
+}
+
+bool NimRTCEngine::dtls_connected() const noexcept {
+    return impl_->dtls && impl_->dtls->is_connected();
+}
+
+bool NimRTCEngine::is_ice_connected() const noexcept {
+    if (!ice_t_) return false;
+    const auto s = ice_t_->state();
+    return s == plugins::IceState::Connected ||
+           s == plugins::IceState::Completed;
+}
+
+bool NimRTCEngine::srtp_installed() const noexcept {
+    return impl_->srtp_installed;
+}
+
+uint32_t NimRTCEngine::last_open_rc() const noexcept {
+    return impl_->last_open_rc;
+}
+
+NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
+    return Stats{impl_->srtp_stats_drop};
 }
 
 } // namespace nimrtc::engine

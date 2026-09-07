@@ -69,6 +69,8 @@ class IVideoSourceFactory;
 class IVideoSinkFactory;
 class IVideoReceiverFactory;
 class IVideoSenderFactory;
+class IBweFactory;
+class ISchedulerFactory;
 } // namespace plugins
 
 // ---------------------------------------------------------------------------
@@ -102,6 +104,8 @@ namespace video_pipeline  { void register_default_plugins() noexcept; }
 #ifdef NIMRTC_HAS_VIDEO_SINK
 namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
+namespace bwe             { void register_default_plugins() noexcept; }
+namespace sched           { void register_default_plugins() noexcept; }
 } // namespace nimrtc
 
 namespace nimrtc::core {
@@ -327,6 +331,32 @@ public:
         return video_sender_.list_ids();
     }
 
+    // -- BWE (bandwidth estimator) -----------------------------------------
+    void register_bwe(std::string_view id,
+                      const plugins::IBweFactory* f) {
+        bwe_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IBweFactory*
+    get_bwe(std::string_view id) const {
+        return bwe_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_bwes() const {
+        return bwe_.list_ids();
+    }
+
+    // -- Scheduler (unified sending) ---------------------------------------
+    void register_scheduler(std::string_view id,
+                            const plugins::ISchedulerFactory* f) {
+        scheduler_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::ISchedulerFactory*
+    get_scheduler(std::string_view id) const {
+        return scheduler_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_schedulers() const {
+        return scheduler_.list_ids();
+    }
+
 private:
     TypedRegistry<plugins::ITransportFactory>    transport_;
     TypedRegistry<plugins::IICETransportFactory> ice_transport_;
@@ -340,6 +370,8 @@ private:
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
     TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_;
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
+    TypedRegistry<plugins::IBweFactory>           bwe_;
+    TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
 };
 
 // ---------------------------------------------------------------------------
@@ -446,6 +478,22 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kVideoSender,    \
             #id, factory_ptr }
 
+/** Register a BWE (bandwidth estimator) plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_BWE(id, factory_ptr)                            \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_bwe_){                                   \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kBwe,           \
+            #id, factory_ptr }
+
+/** Register a sending-scheduler plugin by ID and factory pointer. */
+#define NIMRTC_REGISTER_SCHEDULER(id, factory_ptr)                      \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_scheduler_){                             \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kScheduler,     \
+            #id, factory_ptr }
+
 namespace detail {
 
 // Tiny utility macros
@@ -457,7 +505,8 @@ class Registrar {
 public:
     enum class Category {
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
-        kVideoSource, kVideoSink, kVideoReceiver, kVideoSender
+        kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
+        kBwe, kScheduler
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -511,6 +560,14 @@ public:
                 reg.register_video_sender(id,
                     static_cast<const plugins::IVideoSenderFactory*>(factory));
                 break;
+            case Category::kBwe:
+                reg.register_bwe(id,
+                    static_cast<const plugins::IBweFactory*>(factory));
+                break;
+            case Category::kScheduler:
+                reg.register_scheduler(id,
+                    static_cast<const plugins::ISchedulerFactory*>(factory));
+                break;
         }
     }
 };
@@ -555,6 +612,8 @@ inline void register_all_default_plugins() noexcept {
 #ifdef NIMRTC_HAS_VIDEO_SINK
     nimrtc::video_sink::register_default_plugins();
 #endif
+    nimrtc::bwe::register_default_plugins();
+    nimrtc::sched::register_default_plugins();
 }
 
 } // namespace nimrtc::core
@@ -575,6 +634,8 @@ inline void register_all_default_plugins() noexcept {
 #include "nimrtc/plugins/video_source.hpp"
 #include "nimrtc/plugins/video_sink.hpp"
 #include "nimrtc/plugins/video_pipeline.hpp"
+#include "nimrtc/plugins/bwe.hpp"
+#include "nimrtc/plugins/scheduler.hpp"
 
 namespace nimrtc::plugins {
 

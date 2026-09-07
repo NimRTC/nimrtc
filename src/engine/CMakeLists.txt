@@ -15,22 +15,32 @@ add_library(nimrtc_engine STATIC
 )
 
 nimrtc_apply_options(nimrtc_engine)
+# All concrete module deps are PRIVATE — engine.hpp no longer includes
+# any concrete module header (Layout Invariant 4 + ADR-001).  Consumers
+# linking only nimrtc::engine still get the full composition via
+# `core::register_all_default_plugins()`, which is invoked internally
+# by NimRTCEngine::open().
 target_link_libraries(nimrtc_engine
     PUBLIC
-        nimrtc::core           # base types
-        nimrtc::rtp            # RTP parser/builder (P1)
+        nimrtc::core           # base types + PluginRegistry (PUBLIC so callers
+                               # can call register_all_default_plugins() too)
+    PRIVATE
+        nimrtc::rtp            # RTP parser/builder (P1) — Impl in engine.cpp
         nimrtc::sdp            # SDP parser/munger (P1)
         nimrtc::jb             # JitterBuffer (P1)
         nimrtc::audio3a        # Audio 3A Null impl (P1)
         nimrtc::ice            # ICE transport (P1)
         nimrtc::dtls           # DTLS handshake (P1.1)
         nimrtc::srtp           # SRTP protect/unprotect (P1.1)
-    PRIVATE
+        nimrtc::bwe            # AIMD bandwidth estimator (P1; interface-only,
+                               # plugin factory registered by core)
+        nimrtc::sched          # Strict-priority 5-queue scheduler (P1;
+                               # plugin factory registered by core)
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 
 if(NIMRTC_MODULE_OPUS)
-    target_link_libraries(nimrtc_engine PUBLIC nimrtc::opus)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::opus)
 endif()
 
 # Video plugin seam (R3-Batch): the engine resolves video_source / sink /

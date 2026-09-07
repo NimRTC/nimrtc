@@ -15,6 +15,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_bwe STATIC
     src/bwe.cpp
+    src/bwe_plugin.cpp
     )
 
 nimrtc_apply_options(nimrtc_bwe)
@@ -32,5 +33,9 @@ target_include_directories(nimrtc_bwe
         ${CMAKE_BINARY_DIR}/include)
 
 target_compile_definitions(nimrtc_bwe PUBLIC NIMRTC_HAS_BWE=1)
+
+if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+endif()
 
 add_library(nimrtc::bwe ALIAS nimrtc_bwe)

@@ -16,6 +16,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_sched STATIC
     src/scheduler.cpp
+    src/scheduler_plugin.cpp
     )
 
 nimrtc_apply_options(nimrtc_sched)

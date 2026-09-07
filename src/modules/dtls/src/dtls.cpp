@@ -911,6 +911,16 @@ struct DtlsSession::Impl {
     bool                     first_client_hello_seen = true;
     std::uint32_t            hs_start_ms = 0;
 
+    // RFC 7627: when the client offers `extended_master_secret` (type
+    // 0x0017) and the server's ServerHello echoes it, both sides MUST
+    // derive `master_secret` via the EMS PRF — using the running handshake
+    // hash as the seed rather than `client_random || server_random`.
+    // We track the negotiated state in `use_ems_` and consult it in
+    // compute_master_secret().  We default to false (the pre-EMS RFC 5246
+    // PRF) so that peers who don't advertise EMS keep working.
+    bool                     use_ems_ = false;
+    bool                     use_ems_negotiated_ = false;
+
     // -------------------------------------------------------------------------
     // Crypto setup helpers
     // -------------------------------------------------------------------------
@@ -1246,6 +1256,14 @@ struct DtlsSession::Impl {
         hs.insert(hs.end(), body.begin(), body.end());
         const std::size_t hs_size = hs.size();
 
+        // RFC 6347 §4.1.2.1: record sequence numbers reset to 0 at every
+        // epoch boundary.  We track per-epoch record seq in
+        // record_seq_per_epoch_[].  Cap epoch at the size of the table;
+        // higher epochs would require a heap-allocated map (we don't
+        // currently use anything past epoch 1).
+        const std::size_t epoch_idx = (epoch < 2) ? epoch : 1;
+        const std::uint64_t record_seq = record_seq_per_epoch_[epoch_idx]++;
+
         // For epoch >= 1 we must AEAD-encrypt the handshake payload using
         // AES-128-GCM with our write-side key/salt.  The encrypted record
         // layout is:
@@ -1259,7 +1277,7 @@ struct DtlsSession::Impl {
         rec[1] = 0xFE; rec[2] = 0xFD;  // DTLS 1.2
         write_be16(rec.data() + 3, static_cast<std::uint16_t>(epoch));
         for (int i = 0; i < 6; ++i)
-            rec[5 + i] = static_cast<std::uint8_t>(seq >> (8 * (5 - i)));
+            rec[5 + i] = static_cast<std::uint8_t>(record_seq >> (8 * (5 - i)));
 
         std::vector<std::uint8_t> payload;
         std::size_t rec_length = hs_size;
@@ -1762,6 +1780,21 @@ struct DtlsSession::Impl {
             srtp_ext.insert(srtp_ext.end(), srtp_ext_body.begin(), srtp_ext_body.end());
             exts.insert(exts.end(), srtp_ext.begin(), srtp_ext.end());
         }
+
+        // extended_master_secret (RFC 7627) — type 0x0017, empty body.
+        // Chrome's BoringSSL always includes this extension in its
+        // DTLS-SRTP ClientHello and aborts the handshake with
+        // illegal_parameter (alert 47) if the server's ServerHello omits
+        // it.  Per RFC 7627 §5.2: when the client offers EMS, the server
+        // MUST either include the same extension in ServerHello (which
+        // switches the master_secret derivation to the EMS PRF) or alert
+        // and abort.  We opt in by emitting the extension here.
+        {
+            std::vector<std::uint8_t> ems;
+            ems.push_back(0x00); ems.push_back(0x17);  // ext type 0x0017
+            ems.push_back(0x00); ems.push_back(0x00);  // ext length 0
+            exts.insert(exts.end(), ems.begin(), ems.end());
+        }
         // Note: signature_algorithms, supported_versions, supported_groups,
         // and ec_point_formats were all previously emitted but Chrome's
         // strict TLS parser keeps rejecting them with fatal decode_error
@@ -1833,6 +1866,18 @@ struct DtlsSession::Impl {
             exts.insert(exts.end(), sv.begin(), sv.end());
         }
 
+        // extended_master_secret (RFC 7627) — type 0x0017, empty body.
+        // Mirror what we emit in the ClientHello.  Chrome includes this
+        // extension in its ClientHello and refuses to proceed without it
+        // in the ServerHello.  Both sides then derive master_secret via
+        // the EMS PRF (see compute_master_secret_impl() below).
+        {
+            std::vector<std::uint8_t> ems;
+            ems.push_back(0x00); ems.push_back(0x17);  // ext type 0x0017
+            ems.push_back(0x00); ems.push_back(0x00);  // ext length 0
+            exts.insert(exts.end(), ems.begin(), ems.end());
+        }
+
         hello.push_back(static_cast<std::uint8_t>(exts.size() >> 8));
         hello.push_back(static_cast<std::uint8_t>(exts.size() & 0xff));
         hello.insert(hello.end(), exts.begin(), exts.end());
@@ -1892,14 +1937,29 @@ struct DtlsSession::Impl {
         if (off + comp_len > body.size()) return;
         off += comp_len;
 
-        // extensions — none of interest for now (we already chose SRTP profile
-        // via Config)
+        // extensions — we only need to detect the RFC 7627
+        // `extended_master_secret` (EMS) advertisement.  When the
+        // client offers EMS we MUST include it in our ServerHello and
+        // use the EMS PRF for master_secret derivation; without it
+        // Chrome aborts the handshake with illegal_parameter (alert 47).
+        bool client_ems_offered = false;
         if (off + 2 <= body.size()) {
             std::uint16_t ext_len = read_be16(body.data() + off);
             off += 2;
             if (off + ext_len > body.size()) return;
-            // skip extensions
+            std::size_t ext_end = off + ext_len;
+            while (off + 4 <= ext_end) {
+                std::uint16_t et = read_be16(body.data() + off);
+                std::uint16_t el = read_be16(body.data() + off + 2);
+                off += 4;
+                if (off + el > ext_end) return;
+                if (et == 0x0017 && el == 0) {
+                    client_ems_offered = true;
+                }
+                off += el;
+            }
         }
+        use_ems_ = client_ems_offered;  // finalized when we echo EMS in ServerHello
 
         core::log::Logger::instance().info(
             std::string("dtls: handle_client_hello parsed, first=") +
@@ -2044,7 +2104,27 @@ struct DtlsSession::Impl {
             state = DtlsState::Failed;
             return;
         }
-        // (extensions ignored)
+        // Walk the ServerHello extensions and detect RFC 7627
+        // extended_master_secret.  We always advertise EMS in our
+        // ClientHello, so a server that omits it in ServerHello is
+        // rejecting EMS — fall back to the pre-EMS PRF in that case.
+        bool server_ems = false;
+        if (off + 2 <= body.size()) {
+            std::uint16_t ext_len = read_be16(body.data() + off);
+            std::size_t ext_off = off + 2;
+            std::size_t ext_end = ext_off + ext_len;
+            if (ext_end <= body.size()) {
+                while (ext_off + 4 <= ext_end) {
+                    std::uint16_t et = read_be16(body.data() + ext_off);
+                    std::uint16_t el = read_be16(body.data() + ext_off + 2);
+                    ext_off += 4;
+                    if (ext_off + el > ext_end) break;
+                    if (et == 0x0017 && el == 0) server_ems = true;
+                    ext_off += el;
+                }
+            }
+        }
+        use_ems_ = server_ems;
         state = DtlsState::HelloReceived;
     }
 
@@ -2322,6 +2402,7 @@ struct DtlsSession::Impl {
         f << "--- NimRTC DTLS handshake state ---\n"
           << "role:        " << (config.role == DtlsRole::Client ? "client" : "server") << "\n"
           << "curve:       " << curve << "\n"
+          << "use_ems:     " << (use_ems_ ? "true" : "false") << "\n"
           << "client_rand: " << hexline(client_random) << "\n"
           << "server_rand: " << hexline(server_random) << "\n"
           << "pre_master:  " << hexline(pre_master_secret) << "\n"
@@ -2339,11 +2420,28 @@ struct DtlsSession::Impl {
     void compute_master_secret() {
         // master_secret = PRF(pre_master_secret, "master secret",
         //                     ClientHello.random || ServerHello.random)[0..47]
-        std::vector<std::uint8_t> seed;
-        seed.reserve(kRandomLen * 2);
-        seed.insert(seed.end(), client_random.begin(), client_random.end());
-        seed.insert(seed.end(), server_random.begin(), server_random.end());
-        auto ms = tls12_prf(pre_master_secret, "master secret", seed, kMasterSecretLen);
+        //
+        // RFC 7627 §4 (extended master secret): when both sides have
+        // negotiated EMS, the seed is the SHA-256 hash of every handshake
+        // message exchanged up to (but not including) the
+        // ClientKeyExchange — i.e. the same digest used for the Finished
+        // verify_data, but computed at the point where the EMS extension
+        // is the last message seen by both peers.  We snapshot the
+        // running handshake hash *now* (before CKE / CCS / Finished) so
+        // the EMS seed is identical on both sides.
+        std::vector<std::uint8_t> ms;
+        if (use_ems_) {
+            auto handshake_hash = compute_handshake_hash_snapshot();
+            ms = tls12_prf(pre_master_secret, "extended master secret",
+                           handshake_hash, kMasterSecretLen);
+        } else {
+            std::vector<std::uint8_t> seed;
+            seed.reserve(kRandomLen * 2);
+            seed.insert(seed.end(), client_random.begin(), client_random.end());
+            seed.insert(seed.end(), server_random.begin(), server_random.end());
+            ms = tls12_prf(pre_master_secret, "master secret", seed,
+                           kMasterSecretLen);
+        }
         std::memcpy(master_secret.data(), ms.data(),
                     std::min<std::size_t>(master_secret.size(), ms.size()));
 
@@ -2453,6 +2551,17 @@ struct DtlsSession::Impl {
     // -------------------------------------------------------------------------
 
     void enqueue_change_cipher_spec(std::uint16_t epoch, std::uint64_t seq) {
+        // `seq` is retained as part of the public API for callers that
+        // still want to pin a specific record sequence number, but per
+        // RFC 6347 §4.1.2.1 record seq must reset to 0 at every epoch
+        // boundary, so we use the per-epoch counter instead and ignore
+        // the caller's `seq`.  (We keep the parameter for ABI
+        // compatibility — the existing call sites passed values that
+        // *happened* to match the counter, but the new invariant makes
+        // those values wrong by definition.)
+        (void)seq;
+        const std::size_t epoch_idx = (epoch < 2) ? epoch : 1;
+        const std::uint64_t record_seq = record_seq_per_epoch_[epoch_idx]++;
         // DTLS ChangeCipherSpec record (RFC 6347 §4.1.2):
         //   content_type (1) | version (2) | epoch (2) | sequence_number (6) | length (2) | CCS (1)
         std::vector<std::uint8_t> rec;
@@ -2461,7 +2570,7 @@ struct DtlsSession::Impl {
         rec[1] = 0xFE; rec[2] = 0xFD;  // DTLS 1.2
         write_be16(rec.data() + 3, epoch);
         for (int i = 0; i < 6; ++i)
-            rec[5 + i] = static_cast<std::uint8_t>(seq >> (8 * (5 - i)));
+            rec[5 + i] = static_cast<std::uint8_t>(record_seq >> (8 * (5 - i)));
         write_be16(rec.data() + 11, 1);  // CCS payload = 1 byte
         rec[13] = 0x01;
 
@@ -2734,13 +2843,27 @@ struct DtlsSession::Impl {
                     cke_body.assign(local_pub_bytes.begin(),
                                     local_pub_bytes.end());
                 }
+                // RFC 6347 §4.5.2: message_seq is a per-direction counter
+                // starting at 0.  The client's first outbound handshake
+                // message (CKE) MUST be sent at msg_seq=0, and Finished
+                // MUST follow at msg_seq=1.  Chrome's BoringSSL DTLS
+                // state machine strictly enforces this ordering: a
+                // CKE with msg_seq=1 (followed by Finished at msg_seq=2)
+                // causes Chrome to abort with fatal unexpected_message
+                // (alert 10) before it ever checks our verify_data.
+                //
+                // CCS is a DTLS content-type record, NOT a handshake
+                // message — it does not consume a message_seq.  Its
+                // record sequence number is taken from the per-epoch
+                // counter inside enqueue_change_cipher_spec() (resets to
+                // 0 at the epoch boundary per RFC 6347 §4.1.2.1).
                 enqueue_handshake(kHsClientKeyExchange, cke_body, /*epoch=*/0,
-                                  /*seq=*/++message_seq_counter);
-                enqueue_change_cipher_spec(/*epoch=*/1,
-                                            /*seq=*/++message_seq_counter);
+                                  /*seq=*/0);
+                enqueue_change_cipher_spec(/*epoch=*/1, /*seq=*/0);
                 enqueue_handshake(kHsFinished,
                                   make_finished("client finished"),
-                                  /*epoch=*/1, /*seq=*/++message_seq_counter);
+                                  /*epoch=*/1, /*seq=*/1);
+                message_seq_counter = 2;  // next outbound handshake msg_seq
                 // Note: do NOT mark Connected yet — we still have to
                 // receive the Server's Finished (with valid verify_data)
                 // before the handshake is complete.  The Finished case
@@ -2823,6 +2946,18 @@ struct DtlsSession::Impl {
     }
 
     std::uint32_t message_seq_counter = 0;
+
+    // Per-epoch record sequence counter.  RFC 6347 §4.1.2.1: the
+    // record sequence number MUST reset to 0 at every epoch boundary.
+    // We keep a small per-epoch table indexed by epoch (currently only
+    // 0 and 1 are used; the table is fixed-size to avoid heap churn in
+    // the hot record-emit path).  Previously NimRTC used a single
+    // `message_seq_counter` for both the handshake header's message_seq
+    // AND the record-layer sequence_number — which works for the epoch-0
+    // client flight (where they happen to coincide) but breaks for the
+    // epoch-1 CCS+Finished flight because the record sequence numbers
+    // there must start at 0, not at the running handshake msg_seq value.
+    std::uint64_t record_seq_per_epoch_[2] = {0, 0};
 
     // -------------------------------------------------------------------------
     // Convenience: hs_update with pointer + size

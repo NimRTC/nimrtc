@@ -184,8 +184,7 @@ def run_chrome_interop() -> bool:
         # tools/e2e_chrome_interop.py takes care of launching headless Chrome
         # and pulling `window._interopResults`. We run it as a subprocess so
         # its full output appears in build/e2e/case_d_chrome.log.
-        chrome_log = E2E / "case_d_chrome.log"
-        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
+        chrome_log = E2E / "case_d_chrome.log"        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
         with open(chrome_log, "w", encoding="utf-8") as f:
             rc_chrome = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT,
                                         timeout=PROXY_DURATION + 30)

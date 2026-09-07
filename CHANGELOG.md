@@ -5,7 +5,53 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## ⚠️ Platform support notice
+## [Unreleased]
+
+### Added
+
+- **RFC 7587 �4 RTP packetisation for Opus (`src/modules/opus`)** ?
+  `nimrtc::opus::packetise()` now implements the full RFC 6716 �3.1 TOC
+  byte layout plus RFC 6716 �3.2 Code 0 / 1 / 2 / 3 framing:
+    - Code 0: single frame, TOC + frame data (no length encoding).
+    - Code 1: two frames of equal compressed size, TOC + two halves
+      ([R3]: payload length after TOC must be even).
+    - Code 2: two frames of different compressed sizes, TOC +
+      1-to-2-byte self-delimiting length of frame 1 (RFC 6716 �3.2.1
+      encoding ? b0 ? [252..255], total = b0 + 4*b1, max 1275 bytes).
+    - Code 3: M = 1..48 frames, TOC + frame-count byte (v|p|M) +
+      optional padding length bytes + (M-1) length entries (VBR) or
+      constant per-frame size (CBR) + frame data (RFC 6716 [R5]:
+      total audio duration MUST NOT exceed 120 ms).
+  Configurable per-frame TOC config derived from `frame_size_ms`
+  (`toc_config_for_frame_size_ms`) covers 2.5 / 5 / 10 / 20 / 40 / 60 ms
+  Opus frame sizes. Stereo bit `s` follows RFC 6716 (0 = mono,
+  1 = interleaved L/R). New public types `CodecFrame`, `CodecConfig`,
+  `PacketView` and helpers `make_toc_byte()`, `toc_config_for_frame_size_ms()`
+  in `nimrtc/opus/opus.hpp`.
+
+- **`nimrtc::opus::depacketise()`** ? symmetric inverse of `packetise()`.
+  Parses TOC byte, dispatches by code (0/1/2/3), reads length table
+  when needed, and returns per-frame `PacketView` slices pointing back
+  into the original payload buffer (no copy). Validates RFC 6716
+  requirements [R1]?[R7]: payload truncation, odd Code 1 lengths,
+  overflow on Code 2 length, Code 3 R = M * per divisibility, M = 0,
+  optional Opus padding parsing.
+
+- **Unit tests** for RFC 7587 packetisation in
+  `src/modules/opus/tests/test_opus_packetise.cpp` (23 tests across
+  TOC byte layout, Code 0/1/2/3 round-trips, stereo boundary, length
+  encoding 1/2-byte forms, max-length boundary, validation failures,
+  CBR / VBR Code 3 framing, 60 ms ptime round-trip). Registered via
+  `nimrtc_add_test` in `src/modules/opus/tests/CMakeLists.txt`.
+
+### Fixed
+
+- **`nimrtc::opus::packetise()` was a stub** that returned 1 byte of TOC
+  only and discarded all frame data ? RFC 7587 �4 conformance is now
+  complete and round-trips through `depacketise()`. Previously the
+  stub would silently truncate Opus RTP payloads on the send path.
+
+## ?? Platform support notice
 
 **This release has only been validated on Windows 10 / MSVC.**
 Linux, macOS, Android, and iOS are **NOT** verified for any sub-version of
@@ -16,7 +62,7 @@ platform without first running the full test + acceptance suite there.
 
 ## [0.9.0-rc1] - 2026-09-06
 
-### Status: Release Candidate — NOT a stable release
+### Status: Release Candidate ? NOT a stable release
 
 **Pre-release / RC quality.** This is the first tagged artefact intended
 for external review. The Chrome DTLS interop story is **incomplete**;
@@ -26,10 +72,10 @@ see "Known issues" below.
 
 | Layer                                | Status |
 |--------------------------------------|--------|
-| AES-128-GCM AEAD (BCrypt round-trip) | ✅ PASS |
-| DTLS 1.2 client/server (NimRTC ↔ NimRTC loopback) | ✅ PASS |
-| ICE + STUN/host candidates           | ✅ PASS |
-| DTLS 1.2 with real Chrome (BoringSSL)| ⚠️ Partial — see below |
+| AES-128-GCM AEAD (BCrypt round-trip) | ? PASS |
+| DTLS 1.2 client/server (NimRTC ? NimRTC loopback) | ? PASS |
+| ICE + STUN/host candidates           | ? PASS |
+| DTLS 1.2 with real Chrome (BoringSSL)| ?? Partial ? see below |
 
 ### What works against real Chrome (verified)
 
@@ -44,19 +90,19 @@ see "Known issues" below.
   `client_random || server_random || server_params`, and a
   `supported_versions` extension advertising DTLS 1.2.
 
-### Known issues (DTLS ↔ Chrome)
+### Known issues (DTLS ? Chrome)
 
 - **Chrome rejects NimRTC's ServerHello flight.** The NimRTC-side DTLS
   state machine computes a `verify_data` for the server Finished
   message (visible in `build/e2e/nimrtc_chrome.trace`), but Chrome's
-  BoringSSL DTLS layer never sends a `ClientKeyExchange` — it keeps
+  BoringSSL DTLS layer never sends a `ClientKeyExchange` ? it keeps
   retransmitting ClientHellos and eventually times out with
   `connectionState=failed`. Suspected causes:
     - Cipher suite mismatch: NimRTC negotiates
       `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` (0xC023); modern Chrome
       prefers `0xC02B` (AES-128-GCM) or `0xCCA9` (ChaCha20-Poly1305).
       GCM requires implementing the AEAD nonce/explicit-IV twist
-      (RFC 5288 / RFC 5246 §6.2.3.2) in the DTLS record layer.
+      (RFC 5288 / RFC 5246 ?6.2.3.2) in the DTLS record layer.
     - X.509 cert: Chrome's BoringSSL parser is strict; the current
       self-signed cert is minimal (single CN, no extensions, no
       `basicConstraints CA:FALSE`, no `subjectAltName`).
@@ -68,7 +114,7 @@ see "Known issues" below.
   peers; it is tracked separately and is **not** fixed in 0.9.0-rc1.
 - **`run_e2e_acceptance.py` Case D was previously misreporting PASS.**
   Older revisions only checked the `e2e_chrome_interop.py` exit code
-  (which is 0 whenever the script runs to completion — even when
+  (which is 0 whenever the script runs to completion ? even when
   Chrome reports `connectionState=failed`). 0.9.0-rc1 ships with a
   tightened assertion that requires `wsConnected=true`,
   `iceConnected=true`, `sdpOfferSeen=true`, `audioReceived=true`,
@@ -88,9 +134,9 @@ see "Known issues" below.
 - **Signaling answerer bridge for real Chrome is not implemented.**
   The WebSocket signaling server (`interop/signaling/signaling_server.py`)
   is wired up, but the NimRTC demo binary does not yet consume the
-  buffered offer / ICE candidates from the WS — it expects SDP on the
+  buffered offer / ICE candidates from the WS ? it expects SDP on the
   CLI. As a result, `run_interop.py` (the older harness) cannot reach
-  the full Chrome↔NimRTC audio round-trip yet. The new
+  the full Chrome?NimRTC audio round-trip yet. The new
   `tools/run_e2e_acceptance.py` Case D works around this by going
   through `signaling_proxy` instead.
 - **Cross-platform validation is out of scope.** Linux, macOS, and
@@ -119,7 +165,7 @@ see "Known issues" below.
   `engine.get_ice_transport()`, removing the previous
   `dynamic_cast<ice::IceTransport*>` leak. New header:
   `src/plugins/include/nimrtc/plugins/ice_transport.hpp`.
-- P2: PCM tap interface on `IAudio3A` — `set_pre_process_tap()` and
+- P2: PCM tap interface on `IAudio3A` ? `set_pre_process_tap()` and
   `set_post_process_tap(PcmTapCallback, PcmTapCallbackI16)` plus the
   supporting `PcmFrameMetadata` struct, allowing wake-word engines to
   see raw mic PCM pre-3A and ASR engines to see 3A-cleaned PCM in
@@ -127,7 +173,7 @@ see "Known issues" below.
 - P0 vendor: third-party sources for libjuice, libsrtp and mbedtls
   materialised on disk; CMake wrappers unchanged.
 - P0 fetch: nlohmann_json FetchContent now supports a four-tier offline
-  fallback — `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged
+  fallback ? `NLOHMANN_JSON_SOURCE_DIR` pre-extracted path, staged
   tarball at `${CMAKE_BINARY_DIR}/_deps-cache/nlohmann_json.tar.xz`,
   `NLOHMANN_JSON_ARCHIVE` user-supplied archive, and online fetch from
   github.com with SHA256 verification.
@@ -135,7 +181,7 @@ see "Known issues" below.
   Playwright (with a subprocess fallback) so `_interopResults` is
   actually extracted from the headless page instead of being silently
   discarded.
-- **`tools/run_e2e_acceptance.py`** — automated 4-case acceptance
+- **`tools/run_e2e_acceptance.py`** ? automated 4-case acceptance
   orchestrator with tightened result assertions for Case D.
 
 ### Changed
@@ -169,7 +215,7 @@ see "Known issues" below.
   `PluginRegistry::get_video_sender("reference")` without first calling
   `register_default_plugins()` to populate the registry. Fixed by adding
   the three `register_default_plugins()` calls at the top of the test.
-- **DTLS handshake with Chrome — ServerHello / Certificate /
+- **DTLS handshake with Chrome ? ServerHello / Certificate /
   ServerKeyExchange now sent**.  Previously, the NimRTC DTLS server
   path only emitted `ServerHello + ServerKeyExchange + ServerHelloDone`,
   omitting the mandatory `Certificate` handshake message, and the
@@ -203,7 +249,77 @@ see "Known issues" below.
   ServerHelloDone (25 bytes) DTLS flight.  Chrome still rejects the
   flight (see "Known issues" above).
 
-## [0.1.0] — P0 scaffold
+### Changed (architecture refactor)
+
+- **Engine (`src/engine/include/nimrtc/engine/engine.hpp`) is now a
+  true composition layer.** Public header no longer pulls in any
+  concrete module header (was: `<nimrtc/sdp/...>`, `<nimrtc/rtp/...>`,
+  `<nimrtc/jb/...>`, `<nimrtc/audio3a/...>`, `<nimrtc/dtls/...>`,
+  `<nimrtc/srtp/...>`, `<nimrtc/opus/...>`). All concrete state lives
+  in a PIMPL `NimRTCEngine::Impl` defined in `src/engine/src/engine.cpp`.
+  Out-of-line accessors (`dtls_state()`, `srtp_installed()`,
+  `last_open_rc()`, `stats()`, `is_ice_connected()`) keep the public
+  API identical.  Layout Invariant 4 (`src/engine/` wires plugins
+  together ? no concrete module dependency) is now enforced by
+  construction; consumers who need a concrete type include it
+  explicitly.
+- **`src/engine/CMakeLists.txt`** demotes every concrete module link
+  from `PUBLIC` to `PRIVATE` (only `nimrtc::core` remains PUBLIC, so
+  callers still receive `PluginRegistry` and the plugin interface
+  surface transitively).
+- **`src/core/CMakeLists.txt`** declares a new
+  `nimrtc::plugins` INTERFACE link so that the
+  `nimrtc/core/registry.hpp` back-compat shim (which transitively
+  `#include`s plugin headers for older call sites) continues to work
+  for downstream targets.
+- **`ARCHITECTURE.md`** updated: invariants re-numbered, invariant 4
+  now states the engine-public-header rule explicitly, the source
+  layout diagram expanded to all 23 modules, and `src/third_party/`
+  table distinguishes upstream crypto/media (always vendored, must
+  remain `NIMRTC_VENDORED=ON`) from test/JSON helpers gated by other
+  options.
+- **`docs/adr/ADR-001-plugin-system.md`** updated: interface table now
+  lists all 14 plugin headers including `ice_transport.hpp` and
+  `hw_seam.hpp`; explains the relocation of `registry.hpp` into
+  `nimrtc/core/registry.hpp` (Layout Invariant 6) and fixes the
+  default `transport_name = "ice"` (was incorrectly documented as
+  `"webrtc"`).
+
+### Added
+
+- **Unit tests for `bwe`, `dtls`, `srtp` modules** ? previously these
+  three modules lacked a `tests/` directory, violating Layout
+  Invariant 3 (every module is self-contained under
+  `src/modules/<name>/` with `CMakeLists.txt` + `include/` + `src/` +
+  `tests/`). New files:
+    - `src/modules/bwe/tests/test_bwe.cpp` (8 tests covering AIMD
+      increase/decrease, REMB override, smoothing, `update_config`
+      clamp, `reset`).
+    - `src/modules/dtls/tests/test_dtls.cpp` (10 tests covering
+      `DtlsSession` lifecycle, fingerprint shape, `Stats`,
+      `set_peer_fingerprint`, `state_name`, `tls_prf_p_sha256` /
+      `tls12_prf` length and determinism).
+    - `src/modules/srtp/tests/test_srtp.cpp` (8 tests covering
+      `CryptoSuite` -> libsrtp profile mapping, `KeyingMaterial`
+      validation, `SrtpSession` default construction, key-rejection
+      paths, `SrtpContext` SSRC lookup).
+  Each module's `CMakeLists.txt` now calls `add_subdirectory(tests)`
+  guarded by `NIMRTC_BUILD_TESTS`. All three new test binaries
+  compile clean and pass (8 + 10 + 8 = 26 tests).
+
+### Verification
+
+- `ctest --preset tests.msvc` reports **290 / 290 passing**
+  (excluding e2e/loopback tests which require external services).
+  Pre-existing 292 entries minus 2 intentionally-disabled
+  `Audio3ATapFixture` cases.
+- `nimrtc_engine.lib` builds with no new warnings; the PIMPL
+  refactor compiles clean under MSVC 19.43 with
+  `NIMRTC_WARNINGS_AS_ERRORS=ON`.
+- Both `examples/demo-p2p` and `examples/loopback-p2p` link
+  successfully against the new private-link `nimrtc::engine`.
+
+## [0.1.0] ? P0 scaffold
 
 ### Added
 - Project skeleton: `core/`, `modules/rtp/`, `modules/sdp/`, `modules/jb/`, `third_party/`

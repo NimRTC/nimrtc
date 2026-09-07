@@ -1,8 +1,8 @@
 # ADR-008: PCM Tap Interface for AI Agent 3A Bypass
 
-**Status:** Proposed
-**Date:** 2026-09-04
-**Phase:** P2
+**Status:** Accepted
+**Date:** 2026-09-04 (proposed), 2026-09-07 (accepted; interfaces merged)
+**Phase:** P1.5 (interfaces merged ahead of P2 schedule for AI Agent scenarios)
 
 ---
 

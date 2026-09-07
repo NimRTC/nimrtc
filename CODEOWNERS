@@ -15,6 +15,29 @@ src/core/                    @nimrtc/maintainers
 src/modules/rtp/             @nimrtc/agent-rtpcodec
 src/modules/sdp/             @nimrtc/agent-sdp
 src/modules/jb/              @nimrtc/agent-jitterbuffer
+src/modules/bwe/             @nimrtc/agent-rtpcodec
+src/modules/dtls/            @nimrtc/agent-security
+src/modules/srtp/            @nimrtc/agent-security
+src/modules/ice/             @nimrtc/agent-transport
+src/modules/opus/            @nimrtc/agent-rtpcodec
+src/modules/audio3a/         @nimrtc/agent-audio
+src/modules/datachannel/     @nimrtc/agent-transport
+src/modules/session/         @nimrtc/agent-session
+src/modules/sched/           @nimrtc/agent-rtpcodec
+src/modules/assembly/        @nimrtc/agent-assembly
+src/modules/h264/            @nimrtc/agent-video
+src/modules/video_frame/     @nimrtc/agent-video
+src/modules/video_jb/        @nimrtc/agent-video
+src/modules/video_payload/   @nimrtc/agent-video
+src/modules/video_pipeline/  @nimrtc/agent-video
+src/modules/video_rtcp_feedback/ @nimrtc/agent-video
+src/modules/video_sdp_attributes/ @nimrtc/agent-video
+src/modules/video_sink/      @nimrtc/agent-video
+src/modules/video_source/    @nimrtc/agent-video
+src/modules/video_stats/     @nimrtc/agent-video
+
+# ---- Engine ----
+src/engine/                  @nimrtc/agent-assembly
 
 # ---- Build & CI ----
 CMakeLists.txt               @nimrtc/maintainers

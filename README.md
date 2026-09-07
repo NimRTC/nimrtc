@@ -30,7 +30,7 @@ cmake --build build --config Debug -j
 **Run all tests** (after build):
 
 ```bat
-ctest --preset tests --output-on-failure
+ctest --preset tests.msvc --output-on-failure
 ```
 
 **Run the loopback-p2p smoke test** (two in-process agents handshake over real UDP):
@@ -83,7 +83,7 @@ Artifacts land in `build/e2e/`.
 
 ## plugin 接口的目的——一个被低估的架构特色
 
-NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/include/nimrtc/plugins/*.hpp`，ADR-001）暴露：ITransport、IRTP、ISDP、IJB、IAudio3A。
+NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/include/nimrtc/plugins/*.hpp`，ADR-001）暴露：ITransport、IICETransport、IRTP、ISDP、IJB、IAudio3A、ICodec、IVideoSource、IVideoSink、IVideoReceiver/IVideoSender、IDataChannel、IHw*（hw_seam）。
 
 | 维度 | 显式 plugin 接口的价值 | 不做 plugin 接口的代价 |
 |---|---|---|

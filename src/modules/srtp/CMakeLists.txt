@@ -43,4 +43,8 @@ target_include_directories(nimrtc_srtp
 
 target_compile_definitions(nimrtc_srtp PUBLIC NIMRTC_HAS_SRTP=1)
 
+if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+endif()
+
 add_library(nimrtc::srtp ALIAS nimrtc_srtp)

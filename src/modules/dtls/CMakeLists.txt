@@ -42,4 +42,8 @@ target_include_directories(nimrtc_dtls
     PRIVATE
         ${CMAKE_BINARY_DIR}/include)
 
+if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+endif()
+
 add_library(nimrtc::dtls ALIAS nimrtc_dtls)

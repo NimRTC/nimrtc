@@ -11,12 +11,19 @@
  *
  * ## Plugin wiring (ADR-001)
  *
- * Plugins are selected by string ID via EngineConfig fields:
- *   cfg.transport_name = "ice";
- *   cfg.rtp_name      = "webrtc";
- *   cfg.sdp_name      = "webrtc";
- *   cfg.jb_name       = "adaptive";
- *   cfg.audio3a_name  = "webrtc";
+ * Plugins are selected by string ID via EngineConfig fields. The
+ * default IDs match what the built-in plugins register under in their
+ * `register_default_plugins()` entry points:
+ *
+ *   cfg.transport_name = "ice";       // nimrtc::ice::register_default_plugins()
+ *   cfg.rtp_name       = "webrtc";    // nimrtc::rtp::register_default_plugins()
+ *   cfg.sdp_name       = "webrtc";    // nimrtc::sdp::register_default_plugins()
+ *   cfg.jb_name        = "adaptive";  // nimrtc::jb::register_default_plugins()
+ *   cfg.audio3a_name   = "webrtc";    // nimrtc::audio3a::register_default_plugins()
+ *   cfg.codec_name     = "opus";      // nimrtc::opus::register_default_plugins() (if enabled)
+ *
+ * Open() calls `core::register_all_default_plugins()` first, so callers
+ * normally do not need to do anything to populate the registry.
  *
  * @note P1 — DTLS-SRTP keying material is now derived after the DTLS
  *       handshake completes; SRTP protects RTP in both directions.
@@ -33,6 +40,11 @@
 #include <string_view>
 #include <vector>
 
+// Plugin-seam headers only — engine is a composition layer and must NOT
+// pull in concrete module headers (Layout Invariant 4 + ADR-001).
+// Applications get the full set transitively via nimrtc::engine's CMake
+// PUBLIC deps on the concrete modules, so callers that want concrete
+// types can still include them themselves.
 #include <nimrtc/core/registry.hpp>     // PluginRegistry (Layout Invariant 6)
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
@@ -42,21 +54,21 @@
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 
-// Concrete module headers still required (until P1.1 plugin adapters land).
-// NOTE: nimrtc/ice/ice.hpp is intentionally NOT included here. The engine
-// talks to the ICE transport through `plugins::IICETransport*` (see
-// `ice_t_` member and `get_ice_transport()` accessor); including the
-// concrete module header here would re-introduce the leak this refactor
-// was meant to close. Tests that need the concrete class still include
-// `<nimrtc/ice/ice.hpp>` directly.
-#include <nimrtc/sdp/session_description.hpp>
-#include <nimrtc/rtp/packet.hpp>
-#include <nimrtc/jb/jitter_buffer.hpp>
-#include <nimrtc/audio3a/audio3a.hpp>
-#include <nimrtc/dtls/dtls.hpp>
-#include <nimrtc/srtp/srtp.hpp>
+// Forward declarations of concrete module types — full definitions live
+// in module headers (e.g. <nimrtc/dtls/dtls.hpp>) and are pulled in by
+// src/engine/src/engine.cpp.  This keeps engine.hpp free of concrete
+// module dependency surface (Layout Invariant 4).
+namespace nimrtc::sdp {
+struct SessionDescription;
+} // namespace nimrtc::sdp
+
+namespace nimrtc::rtp    { struct PacketView; }
+namespace nimrtc::jb     { class JitterBuffer; }
+namespace nimrtc::audio3a { class IAudio3A; }
+namespace nimrtc::dtls   { enum class DtlsState : std::uint8_t; class DtlsSession; }
+namespace nimrtc::srtp   { class SrtpContext; }
 #ifdef NIMRTC_HAS_OPUS
-#include <nimrtc/opus/opus.hpp>
+namespace nimrtc::opus   { class Encoder; class Decoder; }
 #endif
 
 namespace nimrtc::engine {
@@ -251,35 +263,29 @@ public:
 
     // --- Inspection helpers (for tests / debugging) ---
 
-    /** True iff SRTP keys have been installed (post-DTLS-Connected). */
-    bool srtp_installed() const noexcept { return srtp_installed_; }
+    /** True iff SRTP keys have been installed (post-DTLS-Connected).
+     *  Out-of-line to keep the public header free of <nimrtc/srtp/srtp.hpp>. */
+    bool srtp_installed() const noexcept;
 
-    /** Current DTLS state, or Closed if DTLS not initialised. */
-    dtls::DtlsState dtls_state() const noexcept {
-        return dtls_ ? dtls_->state() : dtls::DtlsState::Closed;
-    }
+    /** Current DTLS state, or Closed if DTLS not initialised.
+     *  Out-of-line so the public header doesn't need <nimrtc/dtls/dtls.hpp>. */
+    dtls::DtlsState dtls_state() const noexcept;
 
     /** True iff DTLS has reached Connected state. */
-    bool dtls_connected() const noexcept {
-        return dtls_ && dtls_->is_connected();
-    }
+    bool dtls_connected() const noexcept;
 
     /** True iff the ICE agent has selected at least one candidate pair
      *  (Connected or Completed).  Used to gate outbound DTLS sends.
      *  Implementation now goes through the plugin seam
      *  (`plugins::IICETransport::state()`), not a dynamic_cast to the
      *  concrete module class. */
-    bool is_ice_connected() const noexcept {
-        if (!ice_t_) return false;
-        const auto s = ice_t_->state();
-        return s == plugins::IceState::Connected ||
-               s == plugins::IceState::Completed;
-    }
+    bool is_ice_connected() const noexcept;
 
     /** Last error code from open()/pre_open() — useful for diagnostics
      *  when the bool result is non-OK but we want to know which subsystem
-     *  failed (e.g. 0x1FFF = ICE, 0x2000 = DTLS, 0x1A00 = audio3a). */
-    uint32_t last_open_rc() const noexcept { return last_open_rc_; }
+     *  failed (e.g. 0x1FFF = ICE, 0x2000 = DTLS, 0x1A00 = audio3a).
+     *  Out-of-line because last_open_rc_ lives in Impl. */
+    uint32_t last_open_rc() const noexcept;
 
     /** Set the remote ICE description (ice-ufrag / ice-pwd / candidates) BEFORE
      *  open() is called.  This is required for the loopback test: the answerer
@@ -366,9 +372,23 @@ public:
     struct Stats {
         int srtp_drops = 0;
     };
-    Stats stats() const noexcept { return {srtp_stats_drop_}; }
+    /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl. */
+    Stats stats() const noexcept;
 
 private:
+    // ---- Engine state ----
+    // Plugin instances live as std::unique_ptr<plugins::I*Interface> in the
+    // header because their headers (under nimrtc/plugins/) ARE plugin-seam
+    // headers — no concrete module dependency is leaked here.
+    //
+    // All concrete-module state (JitterBuffer, Audio3A fallback, DTLS, SRTP,
+    // Opus, parsed SDP) lives inside the opaque `Impl` defined in engine.cpp.
+    // That keeps `nimrtc/engine/engine.hpp` free of concrete module headers
+    // (Layout Invariant 4).
+
+    struct Impl;
+    Impl* impl_ = nullptr;   // pimpl — see src/engine.cpp
+
     EngineConfig                                config_;
 
     // ---- Plugin instances (created via PluginRegistry in open()) ----
@@ -384,50 +404,16 @@ private:
     // **`dynamic_cast<ice::IceTransport*>`** calls from this class — the
     // plugin-seam objective achieved by this refactor.
     std::unique_ptr<plugins::IICETransport>      ice_t_;
-    std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;  // R2.5: prefer over concrete
-    std::unique_ptr<plugins::ICodec>            codec_plugin_;    // R2-Batch1: prefer over concrete
+    std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;
+    std::unique_ptr<plugins::ICodec>            codec_plugin_;
 
-    // ---- Video plugins (R3-Batch: resolved from core::PluginRegistry) ----
-    // All four are created from EngineConfig.{video_source,sink,receiver,sender}_name
-    // in open(). They own their concrete impl (MemoryVideoSource / HeadlessSink /
-    // VideoReceiver / VideoSender) via the adapter layer; the engine only
-    // sees the plugins::IVideo* interfaces.
+    // ---- Video plugins (resolved from core::PluginRegistry) ----
     std::unique_ptr<plugins::IVideoSource>      video_source_;
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
 
-    // ---- Non-plugin concrete modules ----
-    // SDP: Parser/Munger are concrete classes (session module not yet scaffolded).
-    // We hold raw pointers to them via SdpImpl; the plugin interface ISDP wraps these.
-    // TODO(P1.1): Replace with session module once scaffolded.
-    struct SdpImpl;
-    std::unique_ptr<SdpImpl>                    sdp_impl_;
-
-    // Jitter buffers — keyed by SSRC. The concrete jb::JitterBuffer is
-    // used directly (IJB interface is used only for the plugin factory path).
-    // TODO(P1): Expose IJB via assembly module.
-    std::map<std::uint32_t, std::unique_ptr<jb::JitterBuffer>> jitter_buffers_;
-
-    // ---- Concrete fallback classes (when no plugin adapter is registered) ----
-    std::unique_ptr<audio3a::IAudio3A>          audio3a_concrete_;
-
-    // ---- SRTP / DTLS / Opus — not yet plugin-exposed ----
-    std::unique_ptr<dtls::DtlsSession>          dtls_;
-    std::unique_ptr<srtp::SrtpContext>          srtp_;
-#ifdef NIMRTC_HAS_OPUS
-    std::unique_ptr<opus::Encoder>              opus_encoder_;
-    std::unique_ptr<opus::Decoder>              opus_decoder_;
-#endif
-
-    bool                                        dtls_active_inbound_ = false;
-    bool                                        srtp_installed_ = false;
-    int                                         srtp_stats_drop_ = 0;
-    dtls::DtlsState                             last_dtls_state_ = dtls::DtlsState::Closed;
-
-    // Local SDP (after create_offer / process_remote_sdp)
-    std::optional<sdp::SessionDescription>      local_sdp_;
-
+    // ---- Public callbacks (no concrete deps) ----
     AudioFrameCallback  on_audio_frame_;
     VideoFrameCallback  on_video_frame_;
     EngineErrorCallback on_error_;
@@ -435,16 +421,13 @@ private:
 
     enum class State { kConstructed, kOpen, kClosed };
     State state_ = State::kConstructed;
-    uint32_t last_open_rc_ = 0;
 
+    // Out-of-line helpers whose definitions live in engine.cpp and pull in
+    // the concrete module headers.  Public API keeps the header free of
+    // those headers (Layout Invariant 4).
     void on_transport_recv(const plugins::BufferView& pkt) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
-
-    /** Resolve & open the 4 video plugins from core::PluginRegistry using
-     *  EngineConfig.video_*_name. Called by open() and pre_open(). */
     void init_video_plugins() noexcept;
-
-    /** Close and release the 4 video plugins. Called by close(). */
     void shutdown_video_plugins() noexcept;
 
     static void default_on_error(uint32_t err, std::string_view msg) noexcept;

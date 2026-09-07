@@ -37,6 +37,13 @@
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
+#include <nimrtc/plugins/bwe.hpp>
+#include <nimrtc/plugins/scheduler.hpp>
+#include <nimrtc/bwe/bwe.hpp>
+#include <nimrtc/sched/sched.hpp>
+#ifdef NIMRTC_HAS_H264
+#include <nimrtc/h264/codec_plugin.hpp>
+#endif
 
 // Concrete module headers — required by NimRTCEngine::Impl which lives in
 // this translation unit.  The public header (engine.hpp) does NOT include
@@ -188,6 +195,73 @@ NimRTCEngine::~NimRTCEngine() {
     impl_ = nullptr;
 }
 
+void NimRTCEngine::init_bwe_scheduler() noexcept {
+    auto& reg = core::PluginRegistry::instance();
+
+    // ---- BWE plugin -------------------------------------------------------
+    // Created and opened here; injected into ice_t_ via set_bwe().
+    // If bwe_name is empty, BWE is skipped (passthrough — "transport" profile).
+    if (!config_.bwe_name.empty() && !bwe_) {
+        const auto* f = reg.get_bwe(config_.bwe_name);
+        if (f) {
+            bwe_.reset(f->create(config_.bwe_config));
+            if (bwe_) {
+                if (bwe_->open() != plugins::kOk) {
+                    core::log::Logger::instance().warn(
+                        "engine: bwe plugin open failed, skipping BWE");
+                    bwe_.reset();
+                }
+            }
+        } else {
+            core::log::Logger::instance().warn(
+                std::string("engine: bwe plugin not found: ")
+                    .append(config_.bwe_name));
+        }
+    }
+
+    // ---- Scheduler plugin ------------------------------------------------
+    // Created and opened here; injected into ice_t_ via set_scheduler().
+    // If scheduler_config.enabled is false, scheduler is skipped (direct ICE send).
+    if (config_.scheduler_config.enabled && !scheduler_) {
+        const auto* f = reg.get_scheduler(config_.scheduler_name);
+        if (f) {
+            scheduler_.reset(f->create(config_.scheduler_config));
+            if (scheduler_) {
+                if (scheduler_->open() != plugins::kOk) {
+                    core::log::Logger::instance().warn(
+                        "engine: scheduler plugin open failed, falling back to direct send");
+                    scheduler_.reset();
+                }
+            }
+        } else {
+            core::log::Logger::instance().warn(
+                std::string("engine: scheduler plugin not found: ")
+                    .append(config_.scheduler_name));
+        }
+    }
+
+    // ---- Inject into ICE transport ---------------------------------------
+    // ice_t_ is set by the time init_bwe_scheduler() is called
+    // (pre_open / open both create it first).
+    if (ice_t_) {
+        ice_t_->set_bwe(bwe_.get());
+        ice_t_->set_scheduler(scheduler_.get());
+    }
+}
+
+void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
+    auto close_plugin = [](auto& p) {
+        if (p) p->close();
+        p.reset();
+    };
+    close_plugin(bwe_);
+    close_plugin(scheduler_);
+    if (ice_t_) {
+        ice_t_->set_bwe(nullptr);
+        ice_t_->set_scheduler(nullptr);
+    }
+}
+
     uint32_t NimRTCEngine::pre_open() noexcept {
     if (state_ != State::kConstructed) return 0x1002;
     core::log::Logger::instance().debug("pre_open: starting");
@@ -236,6 +310,9 @@ NimRTCEngine::~NimRTCEngine() {
     ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
+
+    // ---- BWE + Scheduler (injected into ice_t_ via set_bwe / set_scheduler) -
+    init_bwe_scheduler();
 
     // ---- Remaining modules (same as open()) -----------------------------
     // Audio3A, Codec, SRTP, DTLS, SDP
@@ -357,6 +434,9 @@ uint32_t NimRTCEngine::open() noexcept {
         ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
         ice_t_->set_local_port_range(config_.local_port_range_begin,
                                       config_.local_port_range_end);
+
+        // ---- BWE + Scheduler (injected into ice_t_) -------------------------
+        init_bwe_scheduler();
 
         const plugins::IAudio3AFactory* a3a_factory = reg.get_audio3a(config_.audio3a_name);
         if (a3a_factory) {
@@ -620,6 +700,37 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     .append(config_.video_sender_name));
         }
     }
+
+    // ---- Video Codec (H.264) -----------------------------------------------
+    // Resolved from PluginRegistry; used by the video pipeline when active.
+    // Empty video_codec_name means no video codec (audio-only mode).
+    if (!config_.video_codec_name.empty() && !video_codec_) {
+        const auto* f = reg.get_video_codec(config_.video_codec_name);
+        if (f) {
+            plugins::VideoCodecConfig cfg{};
+            cfg.width = 640;
+            cfg.height = 480;
+            cfg.fps = 30;
+            cfg.bitrate_bps = 1'000'000;
+            cfg.keyframe_interval = 60;
+            cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+            cfg.codec = plugins::VideoCodecKind::kH264;
+            cfg.payload_type = config_.video_receiver_tuning.payload_type;
+            cfg.name = config_.video_codec_name;
+            video_codec_.reset(f->create(cfg));
+            if (video_codec_) {
+                if (video_codec_->open() != plugins::kOk) {
+                    if (on_error_) on_error_(0x1A30,
+                        "video_codec plugin open failed");
+                    video_codec_.reset();
+                }
+            }
+        } else if (on_error_) {
+            on_error_(0x1A31,
+                std::string("video_codec plugin not found: ")
+                    .append(config_.video_codec_name));
+        }
+    }
 }
 
 void NimRTCEngine::shutdown_video_plugins() noexcept {
@@ -631,6 +742,7 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_sink_);
     close_all(video_receiver_);
     close_all(video_sender_);
+    close_all(video_codec_);
 }
 
 void NimRTCEngine::close() noexcept {
@@ -639,6 +751,7 @@ void NimRTCEngine::close() noexcept {
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
+    shutdown_bwe_scheduler();
     ice_t_.reset();
     impl_->jitter_buffers.clear();
     audio3a_plugin_.reset();
@@ -782,7 +895,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: media ice_ufrag='") + m.ice_ufrag
             + "' ice_pwd.len=" + std::to_string(m.ice_pwd.size())
-            + " candidates=" + std::to_string(m.candidates.size()));
+            + " candidates=" + std::to_string(m.candidates.size())
+            + " dtls_setup='" + m.dtls_setup + "'");
         if (!wrote_creds) {
             wrote_creds = flush_ufrag_pwd(m.ice_ufrag, m.ice_pwd);
         }
@@ -811,11 +925,24 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     for (const auto& rm : remote.media) {
         if (rm.type != sdp::MediaType::Audio) continue;
         if (impl_->dtls) {
-            dtls::DtlsRole desired_role = dtls::DtlsRole::Server;
-            if      (rm.dtls_setup == "active")  desired_role = dtls::DtlsRole::Server;
-            else if (rm.dtls_setup == "passive") desired_role = dtls::DtlsRole::Client;
-            else                                 desired_role = dtls::DtlsRole::Client;
-            impl_->dtls->set_role(desired_role);
+        // DTLS role determined by the remote peer's setup attribute:
+        //
+        //   remote actpass  → the peer did not commit to a role; we decide.
+        //                      WebRTC convention: offerer=client, answerer=server.
+        //                      Chrome as offerer sends actpass (can be either), so we
+        //                      are the answerer → we are the server (passive).
+        //   remote passive  → the peer will send ClientHello (we are server).
+        //   remote active   → the peer will wait for our ClientHello (we are client).
+        dtls::DtlsRole desired_role = dtls::DtlsRole::Server;
+        if (rm.dtls_setup == "passive") {
+            desired_role = dtls::DtlsRole::Server;
+        } else if (rm.dtls_setup == "active") {
+            desired_role = dtls::DtlsRole::Client;
+        } else {
+            // actpass or unknown: offerer convention → we are the server (passive).
+            desired_role = dtls::DtlsRole::Server;
+        }
+        impl_->dtls->set_role(desired_role);
 
             if (!rm.dtls_fingerprint_algo.empty() &&
                 !rm.dtls_fingerprint_value.empty()) {
@@ -856,7 +983,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.rtcp_mux_value  = "rtcp-mux";
         am.ice_ufrag       = local_ufrag();
         am.ice_pwd         = local_password();
-        am.dtls_setup      = (rm.dtls_setup == "active") ? "passive" : "active";
+        am.dtls_setup      = "passive";  // Chrome requires answerer setup to be active or passive (not actpass)
+        core::log::Logger::instance().info(
+            std::string("process_remote_sdp: answer SDP setup='") + am.dtls_setup +
+            "' (peer wanted '" + rm.dtls_setup + "')");
         if (impl_->dtls) {
             am.dtls_fingerprint_algo  = "sha-256";
             am.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
@@ -964,11 +1094,41 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     }
 
     plugins::BufferView bv{send_buf.data(), send_buf.size()};
+
+    // ---- Scheduler: enqueue for priority-drain (if enabled) ---------------
+    // When the scheduler plugin is active, packets go into the priority queue
+    // instead of being sent immediately. tick() drains the queue and calls
+    // ICE send.  The scheduler copies the caller's buffer (via owned_data in
+    // PacketRecord), so the caller does not need to keep the buffer alive
+    // until drain.
+    if (scheduler_) {
+        scheduler_->enqueue(plugins::Priority::kAudio,
+                            core::ByteSpan(send_buf.data(), send_buf.size()),
+                            plugins::Addr{});
+        return 0;
+    }
+
+    // Fallback: no scheduler — send directly through ICE (transport profile).
     return ice_t_->send(bv, {});
 }
 
 int NimRTCEngine::tick() noexcept {
     if (!is_open()) return 0;
+
+    // ---- Drain the scheduler (if enabled) ---------------------------------
+    // The scheduler holds outbound packets (audio / video / control) and
+    // dispatches them in priority order.  drain_with() invokes our callback
+    // for each packet; we send it through ICE.
+    if (scheduler_) {
+        scheduler_->drain_with(64, [this](plugins::Priority,
+                                          core::ByteSpan data) noexcept -> bool {
+            if (!ice_t_) return false;
+            plugins::BufferView bv{data.data(), data.size()};
+            ice_t_->send(bv, {});
+            return true;
+        });
+    }
+
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.

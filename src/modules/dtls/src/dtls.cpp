@@ -923,7 +923,6 @@ struct DtlsSession::Impl {
     std::optional<PendingHs> pending_hs;
 
     // Cookie check pending on first ClientHello
-    bool                     first_client_hello_seen = true;
     std::uint32_t            hs_start_ms = 0;
 
     // RFC 7627: when the client offers `extended_master_secret` (type
@@ -2041,19 +2040,33 @@ struct DtlsSession::Impl {
         use_ems_ = client_ems_offered;  // finalized when we echo EMS in ServerHello
 
         core::log::Logger::instance().info(
-            std::string("dtls: handle_client_hello parsed, first=") +
-            std::to_string(first_client_hello_seen ? 1 : 0));
+            std::string("dtls: handle_client_hello parsed, state=") +
+            std::to_string(static_cast<int>(state)));
 
-        // First contact from a new client: send HelloVerifyRequest with a
-        // fresh cookie.  Subsequent contacts (with cookie) proceed to full
-        // handshake.
-        if (first_client_hello_seen) {
+        // State machine guard: only initiate the cookie exchange (HelloVerify)
+        // when we are in Initial state.  Once we have sent HelloVerifyRequest
+        // (state -> HelloVerify) or completed even a partial handshake
+        // (state -> HelloReceived / Finished / Connected), any further inbound
+        // ClientHello from the same peer is a DTLS retransmit or a
+        // reordered duplicate — discard it.
+        //
+        // The previous guard `first_client_hello_seen` was a one-shot boolean:
+        // it flipped false on the first inbound ClientHello and never toggled
+        // back, so a third (or fourth) ClientHello retransmit from Chrome
+        // would re-enter the full-handshake else-branch and emit a second
+        // ServerHello/Cert/SKE/SHD flight with fresh msg_seq numbers.  Chrome
+        // received duplicate ServerHello (msg_seq already used) and aborted with
+        // fatal illegal_parameter (alert 47).
+        //
+        // Fix: gate on state so only the very first inbound ClientHello
+        // (state == Initial) triggers HelloVerify; all later arrivals are
+        // dropped.
+        if (state == DtlsState::Initial) {
             auto rnd = bcrypt_random(kHelloCookieLen);
             if (rnd.size() == kHelloCookieLen) {
                 std::memcpy(cookie.data(), rnd.data(), kHelloCookieLen);
                 cookie_len = kHelloCookieLen;
             }
-            first_client_hello_seen = false;
 
             // Body: legacy_version(2) + cookie_len(1) + cookie
             std::vector<std::uint8_t> hvr;
@@ -2062,7 +2075,17 @@ struct DtlsSession::Impl {
             hvr.insert(hvr.end(), cookie.begin(), cookie.begin() + cookie_len);
             enqueue_handshake(kHsHelloVerify, hvr, 0, 1);
             state = DtlsState::HelloVerify;
-        } else {
+        } else if (state == DtlsState::HelloVerify) {
+            // ClientHello-with-cookie after our HelloVerifyRequest: emit the
+            // full server flight exactly once.  We must NOT match
+            // "state != Initial" here because subsequent inbound ClientHellos
+            // (Chrome's DTLS retransmits) carry state == HelloReceived and
+            // would re-enter this branch and emit a *second*
+            // ServerHello/Cert/SKE/SHD flight with fresh msg_seq numbers.
+            // Chrome rejects the duplicate ServerHello with fatal
+            // illegal_parameter (alert 47).  Restricting the full handshake
+            // to state == HelloVerify ensures we send the flight exactly
+            // once per connection.
             // Move on to full handshake: ServerHello + Certificate +
             // ServerKeyExchange + ServerHelloDone.  The Certificate message
             // was missing before — without it Chrome aborts with

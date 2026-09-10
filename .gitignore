@@ -117,6 +117,51 @@ test_offer.sdp
 mbedtls-4.2.0.tar.gz
 mbedtls-extract/
 
+# ─────────────────────────────────────────────
+# Node.js / npm dependencies & runtime artifacts
+# ─────────────────────────────────────────────
+# Never commit node_modules or npm runtime logs (wolfssl_dtls test harness,
+# any future JS tools). These get regenerated via `npm install`.
+**/node_modules/
+**/package-lock.json.bak
+
+# ─────────────────────────────────────────────
+# Backup / snapshot directories (created by editor or manual snapshots)
+# Excluded so accidentally-copied "dtls.cpp.bak"-style directories don't
+# leak into the diff. The pre-commit hook checks no .bak files at root.
+# ─────────────────────────────────────────────
+**/backup_*/
+**/.backup/
+**/*.bak
+**/*.orig
+**/*.rej
+
+# ─────────────────────────────────────────────
+# Generated DTLS test certificates (and other interop test data)
+# These are produced by interop/scripts/generate_test_cert.py and must
+# NOT be checked in: containing a real (if test-only) private key.
+# ─────────────────────────────────────────────
+interop/test_data/*.pem
+interop/test_data/*.key
+interop/test_data/*.crt
+interop/test_data/*.csr
+
+# ─────────────────────────────────────────────
+# Interop / test runtime logs (anywhere)
+# Created by signaling proxy, wolfssl_dtls server fixtures, etc.
+# Named *.err / *.log unless otherwise tracked (e.g. CHANGELOG.md).
+# ─────────────────────────────────────────────
+**/server*.log
+**/server*.err
+**/signaling*.log
+**/s.err
+**/s.log
+**/stdout.log
+**/stderr.log
+**/_proxy_*.log
+**/_*.log
+**/_*.err
+
 # CTest scratch
 Testing/
 

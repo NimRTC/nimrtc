@@ -16,6 +16,8 @@
 add_library(nimrtc_dtls STATIC
     src/dtls.cpp
     src/dtls_prf.cpp
+    src/dtls_wolfssl.cpp
+    src/dtls_wolfssl_session.cpp
     )
 
 nimrtc_apply_options(nimrtc_dtls)
@@ -25,14 +27,16 @@ if(WIN32)
         PUBLIC
             nimrtc::core
             bcrypt
+            nimrtc::vendor::wolfssl
         )
-    target_compile_definitions(nimrtc_dtls PUBLIC NIMRTC_HAS_DTLS=1)
+    target_compile_definitions(nimrtc_dtls PUBLIC NIMRTC_HAS_DTLS=1 NIMRTC_USE_WOLFSSL_DTLS=1)
 else()
     target_link_libraries(nimrtc_dtls
         PUBLIC
             nimrtc::core
+            nimrtc::vendor::wolfssl
         )
-    target_compile_definitions(nimrtc_dtls PUBLIC NIMRTC_HAS_DTLS=1)
+    target_compile_definitions(nimrtc_dtls PUBLIC NIMRTC_HAS_DTLS=1 NIMRTC_USE_WOLFSSL_DTLS=1)
     message(STATUS "DTLS: non-Windows build, compiled without BCrypt (stub crypto)")
 endif()
 

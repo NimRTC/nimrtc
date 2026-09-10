@@ -52,6 +52,7 @@ VENDORS = {
     "mbedtls":       ("https://github.com/Mbed-TLS/mbedtls.git",            "4.2.0",   "src"),
     "libopus":       ("https://github.com/xiph/opus.git",                  "v1.6.1",  "src"),
     "nlohmann_json": ("https://github.com/nlohmann/json.git",               "v3.11.3", "include"),
+    "wolfssl":       ("https://github.com/wolfSSL/wolfssl.git",             "v5.9.2-stable", "src"),
 }
 
 

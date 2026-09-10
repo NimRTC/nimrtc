@@ -508,6 +508,21 @@ void IceTransport::set_stun_server(std::string_view host, std::uint16_t port) no
     impl_->config.stun_server_port = port;
 }
 
+void IceTransport::add_turn_server(std::string_view host,
+                                   std::uint16_t port,
+                                   std::string_view username,
+                                   std::string_view password) noexcept {
+    ice::TurnServer ts;
+    ts.host = std::string(host);
+    ts.port = port;
+    ts.username = std::string(username);
+    ts.password = std::string(password);
+    impl_->config.turn_servers.push_back(std::move(ts));
+    core::log::Logger::instance().info(
+        std::string("ice: TURN server added host=") + ts.host +
+        ":" + std::to_string(ts.port));
+}
+
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {
     impl_->config.local_port_range_begin = begin;
     impl_->config.local_port_range_end   = end;
@@ -666,6 +681,39 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
     }
 
     // Agent already exists — apply immediately.
+    // BUT: if we're an answerer receiving an offer, we want the agent to
+    // be CONTROLLED. The agent was created with no remote SDP known, so
+    // it's currently CONTROLLING. The cleanest fix is to recreate the
+    // agent so it sees the remote SDP before gathering — libjuice then
+    // picks the correct role (CONTROLLED for the answerer).
+    //
+    // We destroy the current agent and create a fresh one. This re-runs
+    // gather with the correct role. Any in-progress STUN bindings and
+    // candidate pairs are abandoned; that's fine because the remote
+    // description includes credentials that change the ICE role.
+    bool was_gathered = (impl_->state != IceState::Disconnected);
+    if (was_gathered && !tmp.empty() &&
+        tmp.find("a=ice-ufrag:") != std::string::npos) {
+        // Stash the remote SDP first so create_agent() applies it BEFORE
+        // juice_gather_candidates() is called from open().
+        impl_->pending_remote_sdp_ = tmp;
+
+        // Tear down the old agent.
+        if (impl_->agent) {
+            juice_destroy(impl_->agent);
+            impl_->agent = nullptr;
+        }
+        // Re-create the agent with the pending remote SDP. gather happens
+        // here (from create_agent → ... no, gather is in open()).
+        if (!impl_->create_agent()) {
+            return plugins::kErrInternal;
+        }
+        if (juice_gather_candidates(impl_->agent) != JUICE_ERR_SUCCESS) {
+            return plugins::kErrInternal;
+        }
+        return plugins::kOk;
+    }
+
     const int rc = juice_set_remote_description(impl_->agent, tmp.c_str());
     if (rc != JUICE_ERR_SUCCESS) {
         // Treat any libjuice parse error as a corrupt SDP from our point of

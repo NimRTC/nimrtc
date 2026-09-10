@@ -412,9 +412,12 @@ bool t08_context_multi_ssrc(std::string& err) {
     auto km = make_keys(0x28);
 
     SrtpContext ctx;
+    // DTLS-SRTP installs keys bidirectionally: peer's key for inbound,
+    // our own key for outbound. In loopback both are the same material.
     ctx.derive_keys_for_remote(km.key, km.salt, CryptoSuite::Aes128CmSha1_80);
+    ctx.derive_keys_for_local(km.key, km.salt, CryptoSuite::Aes128CmSha1_80);
 
-    auto* sess = ctx.get_session(0xAA);
+    auto* sess = ctx.get_session(0xAA, /*outgoing=*/true);
     if (!sess) { err = "session creation failed"; return false; }
 
     auto pkt = make_rtp(0xAA, 1, 0x100, 111, 8);

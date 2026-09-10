@@ -160,19 +160,37 @@ void Scheduler::enqueue(plugins::Priority p, core::ByteSpan data,
                         plugins::Addr dst) noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
-    // Remember last non-empty destination address.
-    if (dst.len != 0) {
-        impl_->last_dst_addr_ = dst;
-    } else {
-        dst = impl_->last_dst_addr_;
-    }
+    // Copy path: hand off to the shared helper with an externally-owned
+    // vector.  The vector is freshly allocated (or reused from a
+    // thread_local pool in the caller); the helper consumes it via move.
+    std::vector<std::uint8_t> buf;
+    buf.assign(data.data(), data.data() + data.size());
+    enqueue_locked(p, std::move(buf), dst);
+}
 
+void Scheduler::enqueue_owned(plugins::Priority p,
+                              std::vector<std::uint8_t>&& owned_data,
+                              plugins::Addr dst) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    enqueue_locked(p, std::move(owned_data), dst);
+}
+
+void Scheduler::enqueue_locked(plugins::Priority p,
+                               std::vector<std::uint8_t>&& owned_data,
+                               plugins::Addr dst) noexcept {
     // Helper: total packets in all queues.
     const auto total_queued = [&]() -> std::uint32_t {
         std::uint32_t sum = 0;
         for (const auto& q : impl_->queues_) sum += static_cast<std::uint32_t>(q.size());
         return sum;
     };
+
+    // Remember last non-empty destination address.
+    if (dst.len != 0) {
+        impl_->last_dst_addr_ = dst;
+    } else {
+        dst = impl_->last_dst_addr_;
+    }
 
     // ---- Hard cap: max_queue_depth --------------------------------------
     if (total_queued() >= impl_->config_.max_queue_depth) {
@@ -197,8 +215,8 @@ void Scheduler::enqueue(plugins::Priority p, core::ByteSpan data,
 
     PacketRecord rec;
     rec.priority           = p;
-    // Copy the caller's buffer — the scheduler now owns this memory.
-    rec.owned_data.assign(data.data(), data.data() + data.size());
+    // Caller transferred ownership — move into the queue record.
+    rec.owned_data         = std::move(owned_data);
     rec.dst_addr           = dst;
     rec.enqueue_time       = core::SteadyClock::now();
     rec.estimated_size_bytes = 0;  // use average from config

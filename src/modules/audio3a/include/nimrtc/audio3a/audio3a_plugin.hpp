@@ -49,6 +49,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 #include <nimrtc/audio3a/audio3a.hpp>      // concrete audio3a::IAudio3A / NullAudio3A / Config
@@ -132,7 +133,16 @@ private:
     plugins::AudioErrorCallback on_error_;
 
     /** PCM Tap callbacks (§8.7).  Fired from invoke_pre/post_tap.
-     *  post_tap_i16_ is the int16 variant (ASR/LLM consumers prefer PCM16). */
+     *  post_tap_i16_ is the int16 variant (ASR/LLM consumers prefer PCM16).
+     *
+     *  The IAudio3A spec calls out that set_pre/post_process_tap() may be
+     *  called concurrently with process_capture(); see
+     *  <nimrtc/plugins/audio3a.hpp>.  Without synchronization a tap swap
+     *  mid-frame would race the in-flight process_capture call.  We guard
+     *  the tap setters and tap invocation with `tap_mu_` (a dedicated
+     *  mutex; not the audio path mutex to keep the critical section in
+     *  process_capture as small as possible). */
+    mutable std::mutex         tap_mu_;
     plugins::PcmTapCallback    pre_tap_;
     plugins::PcmTapCallback    post_tap_;
     plugins::PcmTapCallbackI16 post_tap_i16_;
@@ -141,6 +151,14 @@ private:
      *  invoke_pre_tap() to mark the frame boundary; post_tap() uses the
      *  same value (single tick per process_capture call). */
     std::int64_t                tap_timestamp_us_ = 0;
+
+    /** Reusable scratch buffer for the int16_t post-tap (§8.7).  Avoids
+     *  heap allocation on every process_capture() call (audio path runs
+     *  at 50–100 Hz; per-call allocation causes latency jitter and memory
+     *  fragmentation).  Capacity grows monotonically — first call after
+     *  install allocates; subsequent calls within the same capacity reuse
+     *  the storage. */
+    std::vector<std::int16_t>  int16_tap_buf_;
 
     /** Concrete-side config, populated on first process_* call if open()
      *  was called with no explicit config (lazy init). */

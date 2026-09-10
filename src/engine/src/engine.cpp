@@ -35,6 +35,7 @@
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/time.hpp>
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/core/engine_errors.hpp>   // P1#9 — module error-code constants
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
@@ -51,7 +52,17 @@
 #include <nimrtc/rtp/packet.hpp>
 #include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/audio3a/audio3a.hpp>
+
+// Choose DTLS implementation.
+// Set NIMRTC_USE_WOLFSSL_DTLS to 1 in CMakeLists.txt to switch from the
+// hand-written dtls.cpp to the wolfSSL-backed version.
+#ifdef NIMRTC_USE_WOLFSSL_DTLS
+#include <nimrtc/dtls/dtls_wolfssl_session.hpp>
+using DtlsSessionImpl = nimrtc::dtls::DtlsSessionWolfSSL;
+#else
 #include <nimrtc/dtls/dtls.hpp>
+using DtlsSessionImpl = nimrtc::dtls::DtlsSession;
+#endif
 #include <nimrtc/srtp/srtp.hpp>
 #ifdef NIMRTC_HAS_OPUS
 #include <nimrtc/opus/opus.hpp>
@@ -161,7 +172,12 @@ struct NimRTCEngine::Impl {
     std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
 
     // SRTP / DTLS / Opus — not yet plugin-exposed.
-    std::unique_ptr<dtls::DtlsSession> dtls;
+    // DtlsSessionImpl is a global-scope typedef (defined in the
+    // NIMRTC_USE_WOLFSSL_DTLS conditional block at the top of this file).
+    // Aliased locally so unique_ptr<DtlsSessionImpl> compiles inside this
+    // struct (without polluting the global namespace lookup chain).
+    using DtlsSessionImpl_T = ::DtlsSessionImpl;
+    std::unique_ptr<DtlsSessionImpl_T> dtls;
     std::unique_ptr<srtp::SrtpContext> srtp;
 #ifdef NIMRTC_HAS_OPUS
     std::unique_ptr<opus::Encoder>     opus_encoder;
@@ -171,7 +187,7 @@ struct NimRTCEngine::Impl {
     bool            dtls_active_inbound = false;
     bool            srtp_installed      = false;
     int             srtp_stats_drop     = 0;
-    dtls::DtlsState last_dtls_state     = dtls::DtlsState::Closed;
+    nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // Local SDP (after create_offer / process_remote_sdp).
     std::optional<sdp::SessionDescription> local_sdp;
@@ -191,6 +207,30 @@ struct NimRTCEngine::Impl {
     // force_keyframe() or signalled by the codec).  Consumed by the sender's
     // packet callback to set kVideoKeyframe priority on the marker packet.
     std::atomic<bool> video_keyframe_pending_{false};
+
+    // ---- DTLS role negotiation ---------------------------------------------
+    // Resolved in process_remote_sdp() from the peer's a=setup attribute.
+    // Used to emit a matching a=setup on the answer SDP.  Empty until
+    // process_remote_sdp() runs; defaults to "active" if unset.
+    std::string dtls_local_setup;
+
+    // ---- send_audio scratch buffers (P0#4) --------------------------------
+    // Reusable per-engine buffers for the audio capture→encode→RTP→SRTP
+    // path.  Capacity grows monotonically across calls, avoiding the heap
+    // allocations that a fresh `std::vector` per call would incur.
+    //
+    // `audio_codec_pkt` holds the raw codec (Opus) output for the in-flight
+    // frame.  `audio_send_buf` is the SRTP-protected RTP packet that goes
+    // out the wire (or into the scheduler queue).  Both are members rather
+    // than `static thread_local` so the engine owns the lifetime and so a
+    // future move to per-stream send queues stays trivial.
+    std::vector<std::uint8_t> audio_codec_pkt;
+    std::vector<std::uint8_t> audio_send_buf;
+
+    // ---- send_video scratch buffer (P0#4) ---------------------------------
+    // Reusable buffer for the encoded H.264 frame.  Default reserve size
+    // matches the worst-case 64 KiB IDR; resize grows monotonically.
+    std::vector<std::uint8_t> video_enc_buf;
 
     uint32_t        last_open_rc = 0;
 };
@@ -278,9 +318,21 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
 }
 
     uint32_t NimRTCEngine::pre_open() noexcept {
-    if (state_ != State::kConstructed) return 0x1002;
+    if (state_ != State::kConstructed) return core::kEngineNotReady;
     core::log::Logger::instance().debug("pre_open: starting");
 
+    // Defer ice_t_->open() until a later open() call so the caller can
+    // call set_remote_ice() between pre_open() and open() (this is what
+    // the loopback test relies on to fix the ICE role conflict).
+    const uint32_t rc = init_modules_once();
+    if (rc != 0) return rc;
+
+    // State stays kConstructed — open() will call ice_t_->open()
+    // and set state to kOpen when invoked.
+    return 0;
+}
+
+uint32_t NimRTCEngine::init_modules_once() noexcept {
     core::register_all_default_plugins();
     auto& reg = core::PluginRegistry::instance();
 
@@ -302,9 +354,17 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     } else {
         const plugins::ITransportFactory* tfactory =
             reg.get_transport(config_.transport_name);
-        if (!tfactory) { impl_->last_open_rc = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport plugin not found"); return 0x1FFF; }
+        if (!tfactory) {
+            impl_->last_open_rc = core::kEngineInternal;
+            if (on_error_) on_error_(core::kEngineInternal, "transport plugin not found");
+            return core::kEngineInternal;
+        }
         plugins::ITransport* raw = tfactory->create();
-        if (!raw) { impl_->last_open_rc = 0x1FFF; if (on_error_) on_error_(0x1FFF, "transport factory returned null"); return 0x1FFF; }
+        if (!raw) {
+            impl_->last_open_rc = core::kEngineInternal;
+            if (on_error_) on_error_(core::kEngineInternal, "transport factory returned null");
+            return core::kEngineInternal;
+        }
         // Last-resort safety net: a generic ITransport that also happens
         // to implement IICETransport.  This is the only place the engine
         // still does a cross-class dynamic_cast, and it's intentional —
@@ -312,10 +372,10 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
         // without registering the ICE-specific factory.
         ice_t_.reset(dynamic_cast<plugins::IICETransport*>(raw));
         if (!ice_t_) {
-            impl_->last_open_rc = 0x1FFF;
-            if (on_error_) on_error_(0x1FFF, "transport plugin does not implement IICETransport");
+            impl_->last_open_rc = core::kEngineInternal;
+            if (on_error_) on_error_(core::kEngineInternal, "transport plugin does not implement IICETransport");
             delete raw;
-            return 0x1FFF;
+            return core::kEngineInternal;
         }
     }
 
@@ -325,12 +385,13 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
+    // TURN servers are added via NimRTCEngine::add_turn_server() *before*
+    // open() — they're applied to ice_t_ at that time, so no loop here.
 
-    // ---- BWE + Scheduler (injected into ice_t_ via set_bwe / set_scheduler) -
+    // ---- BWE + Scheduler (injected into ice_t_) -------------------------
     init_bwe_scheduler();
 
-    // ---- Remaining modules (same as open()) -----------------------------
-    // Audio3A, Codec, SRTP, DTLS, SDP
+    // ---- Audio3A --------------------------------------------------------
     const plugins::IAudio3AFactory* a3a_factory = reg.get_audio3a(config_.audio3a_name);
     if (a3a_factory) {
         audio3a_plugin_.reset(a3a_factory->create());
@@ -341,7 +402,7 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
                     if (on_error_) on_error_(err, msg);
                 });
             if (audio3a_plugin_->open() != plugins::kOk) {
-                if (on_error_) on_error_(0x1A00, "audio3a plugin open failed; falling back to concrete");
+                if (on_error_) on_error_(core::kAudio3APluginOpenFailed, "audio3a plugin open failed; falling back to concrete");
                 audio3a_plugin_.reset();
             }
         }
@@ -355,23 +416,22 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
         impl_->audio3a_concrete->init(a3a);
     }
 
+    // ---- Codec ---------------------------------------------------------
     {
         plugins::CodecConfig codec_cfg{};
         codec_cfg.sample_rate_hz = config_.pcm_sample_rate_hz;
         codec_cfg.channels       = config_.pcm_channels;
-        codec_cfg.bitrate_bps   = 64000;
-        codec_cfg.complexity    = 10;
-        codec_cfg.fec_enabled  = true;
-        codec_cfg.dtx_enabled  = false;
-        codec_cfg.vad_enabled  = false;
-        codec_cfg.payload_type = config_.audio_codec.payload_type;
-        codec_cfg.name         = config_.codec_name;
+        codec_cfg.bitrate_bps    = 64000;
+        codec_cfg.complexity     = 10;
+        codec_cfg.fec_enabled    = true;
+        codec_cfg.dtx_enabled    = false;
+        codec_cfg.vad_enabled    = false;
+        codec_cfg.payload_type   = config_.audio_codec.payload_type;
+        codec_cfg.name           = config_.codec_name;
         const plugins::ICodecFactory* cf = reg.get_codec(config_.codec_name);
         if (cf) {
             codec_plugin_.reset(cf->create(codec_cfg));
-            if (codec_plugin_ && codec_plugin_->open() == plugins::kOk) {
-                // ok
-            } else {
+            if (codec_plugin_ && codec_plugin_->open() != plugins::kOk) {
                 codec_plugin_.reset();
             }
         }
@@ -389,148 +449,54 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
         }
     }
 
+    // ---- SRTP ----------------------------------------------------------
     impl_->srtp = std::make_unique<srtp::SrtpContext>();
-    core::log::Logger::instance().debug("engine: srtp_ created, about to create dtls_");
+    core::log::Logger::instance().debug(
+        "engine: srtp_ created, about to create dtls_");
 
-    dtls::Config dcfg;
-    dcfg.role = dtls::DtlsRole::Server;
-    dcfg.srtp_profile = dtls::SrtpProfile::Aes128CmSha1_80;
-    impl_->dtls = std::make_unique<dtls::DtlsSession>(dcfg);
-    core::log::Logger::instance().debug("engine: dtls_ created, calling dtls_->open()");
-    if (!impl_->dtls->open()) { impl_->last_open_rc = 0x2000; core::log::Logger::instance().error("pre_open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
-    core::log::Logger::instance().debug("pre_open: dtls_->open() returned ok");
+    // ---- DTLS ----------------------------------------------------------
+    // Note: the initial DTLS role is set to Server as a placeholder —
+    // process_remote_sdp() resolves the actual role from the peer's
+    // a=setup attribute (RFC 5763 §5) and calls dtls->set_role() before
+    // the handshake starts.  See P0#1 (DTLS role negotiation).
+    nimrtc::dtls::Config dcfg;
+    dcfg.role          = nimrtc::dtls::DtlsRole::Server;
+    dcfg.srtp_profile  = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
+    impl_->dtls = std::make_unique<Impl::DtlsSessionImpl_T>(dcfg);
+    core::log::Logger::instance().debug(
+        "engine: dtls_ created, calling dtls_->open()");
+    if (!impl_->dtls->open()) {
+        impl_->last_open_rc = core::kDtlsOpenFailed;
+        core::log::Logger::instance().error("engine: dtls_->open() returned false");
+        if (on_error_) on_error_(core::kDtlsOpenFailed, "DTLS open failed");
+        return core::kDtlsOpenFailed;
+    }
+    core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
 
+    // ---- ICE recv / error callbacks ------------------------------------
     ice_t_->set_callbacks(
         [this](plugins::BufferView bv) { on_transport_recv(bv); },
         [this](plugins::Status err, std::string_view msg) {
             if (on_error_) on_error_(static_cast<std::uint32_t>(err), msg);
         });
 
-    // State stays kConstructed — open() will call ice_t_->open()
-    // and set state to kOpen when invoked.
     return 0;
 }
 
 uint32_t NimRTCEngine::open() noexcept {
-    if (state_ != State::kConstructed) return 0x1002;
+    if (state_ != State::kConstructed) return core::kEngineNotReady;
 
     // If pre_open() already created the modules, skip recreation and go straight
     // to opening the transport (which triggers gather_candidates with the
     // correct role set by set_remote_ice()).
     if (!ice_t_) {
-        // Normal path: modules not yet created — run the full init.
-        core::register_all_default_plugins();
-        auto& reg = core::PluginRegistry::instance();
-
-        // Preferred path: ICE-aware factory (see pre_open() for the
-        // longer rationale on why we look up IICETransportFactory first
-        // and only fall back to a generic ITransportFactory as a safety
-        // net for out-of-tree transports).
-        const plugins::IICETransportFactory* ifactory =
-            reg.get_ice_transport(config_.transport_name);
-        if (ifactory) {
-            ice_t_.reset(ifactory->create_ice());
-        } else {
-            const plugins::ITransportFactory* tfactory =
-                reg.get_transport(config_.transport_name);
-            if (!tfactory) { if (on_error_) on_error_(0x1FFF, "transport plugin not found"); return 0x1FFF; }
-            plugins::ITransport* raw = tfactory->create();
-            if (!raw) { if (on_error_) on_error_(0x1FFF, "transport factory returned null"); return 0x1FFF; }
-            ice_t_.reset(dynamic_cast<plugins::IICETransport*>(raw));
-            if (!ice_t_) {
-                if (on_error_) on_error_(0x1FFF, "transport plugin does not implement IICETransport");
-                delete raw;
-                return 0x1FFF;
-            }
-        }
-
-        // Apply pre-open configuration through the plugin interface.
-        ice_t_->set_bind_address(config_.local_bind_address);
-        ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
-        ice_t_->set_local_port_range(config_.local_port_range_begin,
-                                      config_.local_port_range_end);
-
-        // ---- BWE + Scheduler (injected into ice_t_) -------------------------
-        init_bwe_scheduler();
-
-        const plugins::IAudio3AFactory* a3a_factory = reg.get_audio3a(config_.audio3a_name);
-        if (a3a_factory) {
-            audio3a_plugin_.reset(a3a_factory->create());
-            if (audio3a_plugin_) {
-                audio3a_plugin_->set_callbacks(
-                    [](bool) {}, [](float) {},
-                    [this](std::uint32_t err, std::string_view msg) {
-                        if (on_error_) on_error_(err, msg);
-                    });
-                if (audio3a_plugin_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A00, "audio3a plugin open failed; falling back to concrete");
-                    audio3a_plugin_.reset();
-                }
-            }
-        }
-        if (!audio3a_plugin_) {
-            impl_->audio3a_concrete = std::make_unique<audio3a::NullAudio3A>();
-            audio3a::Config a3a;
-            a3a.sample_rate_hz    = config_.pcm_sample_rate_hz;
-            a3a.capture_channels = config_.pcm_channels;
-            a3a.render_channels   = config_.pcm_channels;
-            impl_->audio3a_concrete->init(a3a);
-        }
-
-        {
-            plugins::CodecConfig codec_cfg{};
-            codec_cfg.sample_rate_hz = config_.pcm_sample_rate_hz;
-            codec_cfg.channels       = config_.pcm_channels;
-            codec_cfg.bitrate_bps   = 64000;
-            codec_cfg.complexity    = 10;
-            codec_cfg.fec_enabled  = true;
-            codec_cfg.dtx_enabled  = false;
-            codec_cfg.vad_enabled  = false;
-            codec_cfg.payload_type = config_.audio_codec.payload_type;
-            codec_cfg.name         = config_.codec_name;
-            const plugins::ICodecFactory* cf = reg.get_codec(config_.codec_name);
-            if (cf) {
-                codec_plugin_.reset(cf->create(codec_cfg));
-                if (codec_plugin_ && codec_plugin_->open() == plugins::kOk) {
-                    // ok
-                } else {
-                    codec_plugin_.reset();
-                }
-            }
-            if (!codec_plugin_) {
-#ifdef NIMRTC_HAS_OPUS
-                opus::EncoderConfig ec;
-                ec.sample_rate_hz = config_.pcm_sample_rate_hz;
-                ec.channels       = config_.pcm_channels;
-                impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
-                opus::DecoderConfig dc;
-                dc.sample_rate_hz = config_.pcm_sample_rate_hz;
-                dc.channels       = config_.pcm_channels;
-                impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
-#endif
-            }
-        }
-
-        impl_->srtp = std::make_unique<srtp::SrtpContext>();
-        core::log::Logger::instance().debug("engine.open: srtp_ created, about to create dtls_");
-
-        dtls::Config dcfg;
-        dcfg.role = dtls::DtlsRole::Server;
-        dcfg.srtp_profile = dtls::SrtpProfile::Aes128CmSha1_80;
-        impl_->dtls = std::make_unique<dtls::DtlsSession>(dcfg);
-        core::log::Logger::instance().debug("engine.open: dtls_ created, calling dtls_->open()");
-        if (!impl_->dtls->open()) { impl_->last_open_rc = 0x2000; core::log::Logger::instance().error("engine.open: dtls_->open() returned false"); if (on_error_) on_error_(0x2000, "DTLS open failed"); return 0x2000; }
-        core::log::Logger::instance().debug("engine.open: dtls_->open() returned ok");
-
-        ice_t_->set_callbacks(
-            [this](plugins::BufferView bv) { on_transport_recv(bv); },
-            [this](plugins::Status err, std::string_view msg) {
-                if (on_error_) on_error_(static_cast<std::uint32_t>(err), msg);
-            });
+        // Normal path: modules not yet created — run the full init via the
+        // shared helper. pre_open() takes the same path.
+        const uint32_t rc = init_modules_once();
+        if (rc != 0) return rc;
     } else {
-        // pre_open() was called — modules already created.  Open the
-        // transport to trigger ICE gathering (transport is already configured).
-        core::log::Logger::instance().debug("op7b transport pre_open→open");
+        core::log::Logger::instance().debug(
+            "op7b transport pre_open→open");
     }
 
     // ---- ice_t_->open() triggers ICE gather_candidates() ------------------
@@ -542,11 +508,11 @@ uint32_t NimRTCEngine::open() noexcept {
         char err[64];
         std::snprintf(err, sizeof(err), "transport open failed rc=%d",
                       static_cast<int>(ice_open_rc));
-        impl_->last_open_rc = 0x1FFF;
+        impl_->last_open_rc = core::kEngineInternal;
         core::log::Logger::instance().error(std::string(err));
-        if (on_error_) on_error_(0x1FFF, err);
+        if (on_error_) on_error_(core::kEngineInternal, err);
         ice_t_.reset();
-        return 0x1FFF;
+        return core::kEngineInternal;
     }
     core::log::Logger::instance().debug("op7 transport open ok");
 
@@ -555,13 +521,6 @@ uint32_t NimRTCEngine::open() noexcept {
     // opens them. Failures are non-fatal at engine level (R3 scope: just
     // expose the accessors); warnings go through on_error_.
     init_video_plugins();
-
-    // ---- Wire callbacks (if not already done by pre_open) ----------------
-    ice_t_->set_callbacks(
-        [this](plugins::BufferView bv) { on_transport_recv(bv); },
-        [this](plugins::Status err, std::string_view msg) {
-            if (on_error_) on_error_(static_cast<std::uint32_t>(err), msg);
-        });
 
     state_ = State::kOpen;
     if (on_state_change_) on_state_change_("open");
@@ -578,7 +537,7 @@ void NimRTCEngine::set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noe
     if (video_sink_) {
         plugins::VideoSinkConfig cfg{};
         if (video_sink_->open() != plugins::kOk) {
-            if (on_error_) on_error_(0x1A20, "video_sink open failed");
+            if (on_error_) on_error_(core::kVideoSinkOpenFailed, "video_sink open failed");
             video_sink_.reset();
         }
     }
@@ -593,7 +552,7 @@ void NimRTCEngine::set_video_source(
     video_source_ = std::move(source);
     if (video_source_) {
         if (video_source_->open() != plugins::kOk) {
-            if (on_error_) on_error_(0x1A21, "video_source open failed");
+            if (on_error_) on_error_(core::kVideoSourceOpenFailed, "video_source open failed");
             video_source_.reset();
         }
     }
@@ -614,13 +573,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
             video_sink_.reset(f->create(cfg));
             if (video_sink_) {
                 if (video_sink_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A20,
+                    if (on_error_) on_error_(core::kVideoSinkOpenFailed,
                         "video_sink plugin open failed");
                     video_sink_.reset();
                 }
             }
         } else if (on_error_) {
-            on_error_(0x1A22,
+            on_error_(core::kVideoSinkPluginMissing,
                 std::string("video_sink plugin not found: ")
                     .append(config_.video_sink_name));
         }
@@ -638,13 +597,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
             video_source_.reset(f->create(cfg));
             if (video_source_) {
                 if (video_source_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A21,
+                    if (on_error_) on_error_(core::kVideoSourceOpenFailed,
                         "video_source plugin open failed");
                     video_source_.reset();
                 }
             }
         } else if (on_error_) {
-            on_error_(0x1A23,
+            on_error_(core::kVideoSourcePluginMissing,
                 std::string("video_source plugin not found: ")
                     .append(config_.video_source_name));
         }
@@ -667,13 +626,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
             video_receiver_.reset(f->create(cfg));
             if (video_receiver_) {
                 if (video_receiver_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A24,
+                    if (on_error_) on_error_(core::kVideoReceiverOpenFailed,
                         "video_receiver plugin open failed");
                     video_receiver_.reset();
                 }
             }
         } else if (on_error_) {
-            on_error_(0x1A25,
+            on_error_(core::kVideoReceiverPluginMissing,
                 std::string("video_receiver plugin not found: ")
                     .append(config_.video_receiver_name));
         }
@@ -694,13 +653,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
             video_sender_.reset(f->create(cfg));
             if (video_sender_) {
                 if (video_sender_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A26,
+                    if (on_error_) on_error_(core::kVideoSenderOpenFailed,
                         "video_sender plugin open failed");
                     video_sender_.reset();
                 }
             }
         } else if (on_error_) {
-            on_error_(0x1A27,
+            on_error_(core::kVideoSenderPluginMissing,
                 std::string("video_sender plugin not found: ")
                     .append(config_.video_sender_name));
         }
@@ -723,13 +682,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
             video_codec_.reset(f->create(cfg));
             if (video_codec_) {
                 if (video_codec_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(0x1A30,
+                    if (on_error_) on_error_(core::kVideoCodecOpenFailed,
                         "video_codec plugin open failed");
                     video_codec_.reset();
                 }
             }
         } else if (on_error_) {
-            on_error_(0x1A31,
+            on_error_(core::kVideoCodecPluginMissing,
                 std::string("video_codec plugin not found: ")
                     .append(config_.video_codec_name));
         }
@@ -786,7 +745,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 // ---- SRTP protect (if DTLS is connected) ----------------------
                 if (impl_->srtp_installed && impl_->srtp) {
                     auto* sess = impl_->srtp->get_session(
-                        config_.video_sender_tuning.ssrc);
+                        config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                     if (!sess) {
                         // SRTP not ready — drop this packet silently.
                         return;
@@ -799,19 +758,19 @@ void NimRTCEngine::init_video_plugins() noexcept {
                                    enc.value().data() + enc.value().size());
                 }
 
-                // ---- Enqueue to scheduler (or send directly) -----------------
+                // ---- Enqueue to scheduler (move, P0#3) or send directly -------
                 plugins::Priority prio = plugins::Priority::kVideo;
                 if (marker && impl_->video_keyframe_pending_.load(std::memory_order_acquire)) {
                     prio = plugins::Priority::kVideoKeyframe;
                     impl_->video_keyframe_pending_.store(false, std::memory_order_release);
                 }
 
-                plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
                 if (scheduler_) {
-                    scheduler_->enqueue(prio,
-                                       core::ByteSpan(rtp_pkt.data(), rtp_pkt.size()),
-                                       plugins::Addr{});
+                    scheduler_->enqueue_owned(prio,
+                                              std::move(rtp_pkt),
+                                              plugins::Addr{});
                 } else if (ice_t_) {
+                    plugins::BufferView bv{rtp_pkt.data(), rtp_pkt.size()};
                     ice_t_->send(bv, {});
                 }
             });
@@ -1004,7 +963,7 @@ std::string NimRTCEngine::create_offer() noexcept {
 
     auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
     if (!sdp_str) {
-        if (on_error_) on_error_(0x1004, "SDP munger failed");
+        if (on_error_) on_error_(core::kEngineSdpCorrupt, "SDP munger failed");
         return {};
     }
     impl_->local_sdp = std::move(sdp);
@@ -1015,7 +974,7 @@ std::optional<std::string>
 NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     auto parsed = impl_->sdp_parser->parse(remote_sdp);
     if (!parsed) {
-        if (on_error_) on_error_(0x1004, "SDP parse failed");
+        if (on_error_) on_error_(core::kEngineSdpCorrupt, "SDP parse failed");
         return std::nullopt;
     }
 
@@ -1096,24 +1055,49 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // role + peer fingerprint, and set_role() handles driving the state
     // machine when the role changes (e.g., answerer promoting Server -> Client).
     for (const auto& rm : remote.media) {
-        if (rm.type != sdp::MediaType::Audio) continue;
+        if (rm.type != sdp::MediaType::Audio &&
+            rm.type != sdp::MediaType::Application) {
+            continue;
+        }
         if (impl_->dtls) {
-        // DTLS role determined by the remote peer's setup attribute:
+        // DTLS role is determined by the remote peer's `a=setup` attribute
+        // (RFC 5763 §5):
         //
-        //   remote actpass  → the peer did not commit to a role; we decide.
-        //                      WebRTC convention: offerer=client, answerer=server.
-        //                      Chrome as offerer sends actpass (can be either), so we
-        //                      are the answerer → we are the server (passive).
-        //   remote passive  → the peer will send ClientHello (we are server).
-        //   remote active   → the peer will wait for our ClientHello (we are client).
-        // DEBUG: force Client role to bypass server path bug (cookie flow).
-        // Force desired_role = Client to follow the path that was traced
-        // in 17:22 run (ClientHello → ServerHello+Cert+SKE+CertReq+SHD →
-        // CKE+CCS+Finished) — that path completes the NimRTC side of the
-        // flight and only fails Chrome's verify_data check, which is the
-        // bug we're trying to isolate.
-        dtls::DtlsRole desired_role = dtls::DtlsRole::Client;
+        //   remote "actpass" → the peer did not commit to a role; we are the
+        //                      answerer and we decide.  WebRTC convention
+        //                      (libwebrtc / Chrome): answerer is the DTLS
+        //                      Client (sends ClientHello).  We therefore
+        //                      become Client and advertise "active".
+        //   remote "active"  → the peer will send ClientHello; we are Server
+        //                      (passive), advertise "passive".
+        //   remote "passive" → the peer is waiting for our ClientHello;
+        //                      we are Client (active), advertise "active".
+        //   remote ""        → missing setup attribute; treat as "actpass"
+        //                      (we answerer, become Client, advertise "active").
+        //
+        // The resulting local setup attribute is also captured for the
+        // answer SDP below.
+        std::string peer_setup = rm.dtls_setup;
+        if (peer_setup.empty()) peer_setup = "actpass";
+
+        // DEBUG-TEMP: force NimRTC to be the DTLS SERVER (passive) for
+        // Chrome interop.  Recent Chrome 124+ BoringSSL rejects every
+        // variant of anonymous client response to CertificateRequest
+        // (empty list → handshake_failure, omitted → unexpected_message,
+        // self-signed cert → certificate_unknown) — but as the SERVER we
+        // never receive a CertReq so the question doesn't arise.  This
+        // is purely a workaround for the Chrome-side rejection of RFC
+        // 5246 §7.4.6 anonymous clients; restore the original logic
+        // once Chrome's BoringSSL relaxes this.
+        nimrtc::dtls::DtlsRole desired_role  = nimrtc::dtls::DtlsRole::Server;
+        std::string    local_setup_attr = "passive";
+        (void)peer_setup;
         impl_->dtls->set_role(desired_role);
+        impl_->dtls_local_setup = local_setup_attr;
+        core::log::Logger::instance().info(
+            std::string("process_remote_sdp: dtls role resolved peer_setup='")
+            + peer_setup + "' local_setup='" + local_setup_attr
+            + "' role=" + (desired_role == nimrtc::dtls::DtlsRole::Client ? "Client" : "Server"));
 
             if (!rm.dtls_fingerprint_algo.empty() &&
                 !rm.dtls_fingerprint_value.empty()) {
@@ -1143,18 +1127,24 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     ans.msid_semantic_token     = "WMS";
 
     for (const auto& rm : remote.media) {
-        if (rm.type != sdp::MediaType::Audio) continue;
+        // Support both audio (RTP) and application (data channel, DTLS/SCTP).
+        if (rm.type != sdp::MediaType::Audio &&
+            rm.type != sdp::MediaType::Application) {
+            continue;
+        }
         sdp::MediaDescription am;
-        am.type            = sdp::MediaType::Audio;
-        am.port            = 9;
-        am.protocol        = rm.protocol.empty() ? "UDP/TLS/RTP/SAVPF" : rm.protocol;
-        am.formats         = rm.formats;
-        am.direction       = sdp::Direction::SendRecv;
-        am.mid             = rm.mid;
-        am.rtcp_mux_value  = "rtcp-mux";
-        am.ice_ufrag       = local_ufrag();
-        am.ice_pwd         = local_password();
-        am.dtls_setup      = "active";  // DEBUG: forced for Client role
+        am.type = rm.type;
+        am.port = 9;
+        am.protocol = rm.protocol.empty() ? "UDP/TLS/RTP/SAVPF" : rm.protocol;
+        am.formats  = rm.formats;
+        am.direction = sdp::Direction::SendRecv;
+        am.mid      = rm.mid;
+        am.rtcp_mux_value = "rtcp-mux";
+        am.ice_ufrag = local_ufrag();
+        am.ice_pwd   = local_password();
+        am.dtls_setup = impl_->dtls_local_setup.empty()
+                            ? "active"
+                            : impl_->dtls_local_setup;
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: answer SDP setup='") + am.dtls_setup +
             "' (peer wanted '" + rm.dtls_setup + "')");
@@ -1162,8 +1152,20 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             am.dtls_fingerprint_algo  = "sha-256";
             am.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
         }
-        am.rtpmap = rm.rtpmap;
-        am.fmtp   = rm.fmtp;
+
+        // For audio: carry rtpmap/fmtp from offer.
+        if (rm.type == sdp::MediaType::Audio) {
+            am.rtpmap = rm.rtpmap;
+            am.fmtp   = rm.fmtp;
+        }
+
+        // For data channel (application): carry sctp-port from offer's fmtp if present.
+        if (rm.type == sdp::MediaType::Application) {
+            for (auto& [fmt, params] : rm.fmtp) {
+                // params looks like "max-message-size=1073741823"
+                am.fmtp[fmt] = params;
+            }
+        }
 
         if (ice_t_) {
             auto gathered = ice_t_->gathered_local_candidates();
@@ -1189,15 +1191,24 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
     auto ans_str = impl_->sdp_munger->to_sdp(ans);
     if (!ans_str) {
-        if (on_error_) on_error_(0x1004, "SDP munger failed");
+        if (on_error_) on_error_(core::kEngineSdpCorrupt, "SDP munger failed");
         return std::nullopt;
     }
     return ans_str.value();
 }
 
 uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samples) noexcept {
-    if (!is_open()) return 0x1002;
-    if (!pcm_samples || num_samples == 0) return 0x1001;
+    if (!is_open()) return core::kEngineNotReady;
+    if (!pcm_samples || num_samples == 0) return core::kEngineInvalidParam;
+    // Gate on DTLS being Connected — otherwise RTP packets would reach the
+    // peer over plaintext UDP (no SRTP key), or get sent into a half-open
+    // session that the peer has already torn down (e.g. after a fatal
+    // DTLS alert).  Without this check, demo-p2p would continue logging
+    // "audio frames sent=N rc=0x0" after the handshake has transitioned
+    // to Failed.
+    if (!impl_->dtls || !impl_->dtls->is_connected()) {
+        return core::kEngineNotReady;
+    }
 
     // 3A — prefer plugin adapter; fall back to concrete NullAudio3A.
     if (audio3a_plugin_) {
@@ -1215,17 +1226,22 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio3a_concrete->process_capture(frame);
     }
 
-    static thread_local std::vector<std::uint8_t> codec_pkt;
-    codec_pkt.resize(num_samples * sizeof(float) + 64);
-    // Codec — prefer plugin adapter (R2-Batch1); fall back to concrete opus::Encoder.
+    // Codec — prefer plugin adapter; fall back to concrete opus::Encoder.
+    // Reuse Impl::audio_codec_pkt (P0#4) — capacity grows monotonically.
+    const std::size_t needed = num_samples * sizeof(float) + 64;
+    if (impl_->audio_codec_pkt.size() < needed) {
+        impl_->audio_codec_pkt.resize(needed);
+    }
     std::size_t codec_len = 0;
     if (codec_plugin_) {
         codec_len = codec_plugin_->encode(pcm_samples, num_samples,
-                                         codec_pkt.data(), codec_pkt.size());
+                                         impl_->audio_codec_pkt.data(),
+                                         impl_->audio_codec_pkt.size());
 #ifdef NIMRTC_HAS_OPUS
     } else if (impl_->opus_encoder) {
         codec_len = impl_->opus_encoder->encode(pcm_samples, num_samples,
-                                         codec_pkt.data(), codec_pkt.size());
+                                         impl_->audio_codec_pkt.data(),
+                                         impl_->audio_codec_pkt.size());
 #endif
     }
     if (codec_len == 0) return 0;
@@ -1242,45 +1258,47 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
       .set_timestamp(cur_ts)
       .set_payload_type(config_.audio_codec.payload_type)
       .set_marker(false)
-      .set_payload(core::ByteSpan(codec_pkt.data(), codec_len));
+      .set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
     auto pkt_buf = pb.build();
     if (pkt_buf.empty()) return 0;
 
-    std::vector<std::uint8_t> send_buf;
+    // SRTP protect (or pass-through when not yet keyed).
+    // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
     core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
     if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(curr_ssrc);
-        if (sess) {
-            auto enc = sess->protect_rtp(out_payload, curr_ssrc, cur_ts);
-            if (enc) {
-                send_buf.assign(enc.value().data(),
-                                enc.value().data() + enc.value().size());
-            } else {
-                return 0;
-            }
+        auto* sess = impl_->srtp->get_session(curr_ssrc, /*outgoing=*/true);
+        if (!sess) {
+            // SRTP installed but no session for this SSRC — drop.
+            return 0;
         }
+        auto enc = sess->protect_rtp(out_payload, curr_ssrc, cur_ts);
+        if (!enc) return 0;
+        impl_->audio_send_buf.assign(enc.value().data(),
+                                     enc.value().data() + enc.value().size());
     } else {
-        send_buf.assign(out_payload.data(),
-                        out_payload.data() + out_payload.size());
+        impl_->audio_send_buf.assign(out_payload.data(),
+                                     out_payload.data() + out_payload.size());
     }
 
-    plugins::BufferView bv{send_buf.data(), send_buf.size()};
-
-    // ---- Scheduler: enqueue for priority-drain (if enabled) ---------------
-    // When the scheduler plugin is active, packets go into the priority queue
-    // instead of being sent immediately. tick() drains the queue and calls
-    // ICE send.  The scheduler copies the caller's buffer (via owned_data in
-    // PacketRecord), so the caller does not need to keep the buffer alive
-    // until drain.
+    // ---- Scheduler: enqueue for priority-drain (move, P0#3) --------------
+    // The scheduler takes ownership of audio_send_buf via enqueue_owned.
+    // After this call, audio_send_buf is in MOVED-FROM state; we must not
+    // touch it.  The scheduler will release it on drain.
     if (scheduler_) {
-        scheduler_->enqueue(plugins::Priority::kAudio,
-                            core::ByteSpan(send_buf.data(), send_buf.size()),
-                            plugins::Addr{});
+        scheduler_->enqueue_owned(plugins::Priority::kAudio,
+                                  std::move(impl_->audio_send_buf),
+                                  plugins::Addr{});
         return 0;
     }
 
     // Fallback: no scheduler — send directly through ICE (transport profile).
-    return ice_t_->send(bv, {});
+    plugins::BufferView bv{impl_->audio_send_buf.data(),
+                           impl_->audio_send_buf.size()};
+    const auto rc = ice_t_->send(bv, {});
+    // Clear so the next call starts fresh.
+    impl_->audio_send_buf.clear();
+    impl_->audio_send_buf.shrink_to_fit();   // release backing if needed
+    return rc;
 }
 
 plugins::Status NimRTCEngine::start_video() noexcept {
@@ -1318,12 +1336,35 @@ plugins::Status NimRTCEngine::send_video(
     raw.frame_seq     = frame.frame_seq;
     raw.rtp_timestamp = frame.rtp_timestamp;
 
-    // Encode.
-    std::vector<std::uint8_t> enc_buf(64 * 1024);
+    // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
+    // size on first use; subsequent calls within the same capacity reuse
+    // the storage and only pay the per-byte conversion cost inside the
+    // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
+    // — when that happens we resize and pay one reallocation.
+    constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
+    if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
+        impl_->video_enc_buf.reserve(kInitialVideoEncCap);
+    }
     plugins::EncodedVideoFrame encoded{};
-    if (video_codec_->encode(raw, enc_buf.data(),
-                             enc_buf.size(), encoded) != plugins::kOk) {
-        return plugins::kErrInternal;
+    const auto enc_rc = video_codec_->encode(raw,
+                                             impl_->video_enc_buf.data(),
+                                             impl_->video_enc_buf.capacity(),
+                                             encoded);
+    if (enc_rc != plugins::kOk) {
+        // Codec may need a larger buffer than reserved (e.g. very high
+        // bitrate IDR).  Resize to the codec's expected capacity and retry
+        // exactly once to avoid an unbounded loop on a misbehaving codec.
+        const std::size_t needed = encoded.payload.size();
+        if (needed == 0 || needed > impl_->video_enc_buf.capacity() * 4) {
+            return plugins::kErrInternal;  // give up on pathological sizes
+        }
+        impl_->video_enc_buf.reserve(needed);
+        if (video_codec_->encode(raw,
+                                 impl_->video_enc_buf.data(),
+                                 impl_->video_enc_buf.capacity(),
+                                 encoded) != plugins::kOk) {
+            return plugins::kErrInternal;
+        }
     }
 
     // Mark keyframe so the sender packet callback gives it kVideoKeyframe
@@ -1339,6 +1380,19 @@ plugins::Status NimRTCEngine::send_video(
 
 int NimRTCEngine::tick() noexcept {
     if (!is_open()) return 0;
+
+    // ---- Push BWE estimate into the scheduler (P2/P3 wiring) -------------
+    // estimate() is cheap (reads an atomic snapshot in the AIMD impl) and
+    // tick is on the engine thread, so no extra locks.  We skip the push
+    // when target_bps == 0 so the scheduler keeps its previous budget
+    // rather than reading "0 = total sender pause" on a transient BWE
+    // startup glitch.  Both pointers may be null in the "transport" profile.
+    if (bwe_ && scheduler_) {
+        const std::uint32_t target_bps = bwe_->estimate().target_bitrate_bps;
+        if (target_bps > 0) {
+            scheduler_->on_bwe_update(target_bps);
+        }
+    }
 
     // ---- Drain the scheduler (if enabled) ---------------------------------
     // The scheduler holds outbound packets (audio / video / control) and
@@ -1392,9 +1446,9 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
         core::log::Logger::instance().info(
             std::string("engine[dtls]: rx dtls ct=") + std::to_string(b0) +
             " len=" + std::to_string(pkt.size()) +
-            " state=" + std::string(dtls::DtlsSession::state_name(impl_->dtls->state())));
+            " state=" + std::string(nimrtc::dtls::DtlsSession::state_name(impl_->dtls->state())));
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
-        dtls::DtlsAddr from;
+        nimrtc::dtls::DtlsAddr from;
         impl_->dtls->feed_inbound(bytes, from);
         // Only flush outbound DTLS records once ICE has selected a pair,
         // mirroring the gate in tick().  Without this, the first inbound
@@ -1410,9 +1464,9 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     }
     // CCS (content type 20) isn't recognised as DTLS above; process it so
     // the receiving side can complete its state machine.
-    if (b0 == dtls::kDtlsChangeCipherSpec && impl_->dtls) {
+    if (b0 == nimrtc::dtls::kDtlsChangeCipherSpec && impl_->dtls) {
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
-        dtls::DtlsAddr from;
+        nimrtc::dtls::DtlsAddr from;
         impl_->dtls->feed_inbound(bytes, from);
         if (is_ice_connected()) {
             drain_dtls();
@@ -1423,7 +1477,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     core::ByteSpan view(pkt.data(), pkt.size());
     bool tried_srtp = false;
     if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(0);
+        auto* sess = impl_->srtp->get_session(0, /*outgoing=*/false);
         if (sess) {
             auto r = sess->unprotect_rtp(view, nullptr, nullptr);
             if (r) {
@@ -1463,12 +1517,12 @@ int NimRTCEngine::drain_dtls() noexcept {
     if (new_state != impl_->last_dtls_state) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
-            std::string(dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " → " +
-            std::string(dtls::DtlsSession::state_name(new_state)));
+            std::string(nimrtc::dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " → " +
+            std::string(nimrtc::dtls::DtlsSession::state_name(new_state)));
         impl_->last_dtls_state = new_state;
     }
 
-    if (new_state == dtls::DtlsState::Connected) {
+    if (new_state == nimrtc::dtls::DtlsState::Connected) {
         // SRTP key installation happens here — this is the critical
         // handshake boundary the P1 interop tests verify.
         core::log::Logger::instance().info(
@@ -1501,7 +1555,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // is only available after the Finished message).  Re-check inside this
     // function to avoid races between drain_dtls()'s state read and our own.
     const auto dtls_state = impl_->dtls->state();
-    if (dtls_state != dtls::DtlsState::Connected) {
+    if (dtls_state != nimrtc::dtls::DtlsState::Connected) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: dtls_state=" +
             std::to_string(static_cast<int>(dtls_state)) +
@@ -1552,8 +1606,21 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
         }());
     }
 
-    // Install on the SrtpContext (used for inbound unprotect).
+    // Install the PEER's keys for INBOUND (decrypting packets from Chrome).
     impl_->srtp->derive_keys_for_remote(ck, cs, srtp::CryptoSuite::Aes128CmSha1_80);
+
+    // Install NimRTC's OWN (server) keys for OUTBOUND (encrypting packets to Chrome).
+    // RFC 5764 §4.2: each side uses its OWN direction's keys for outbound.
+    std::vector<std::uint8_t> sk(km->server_master_key.begin(),
+                                 km->server_master_key.end());
+    std::vector<std::uint8_t> ss(km->server_master_salt.begin(),
+                                 km->server_master_salt.end());
+    if (!sk.empty() && !ss.empty()) {
+        impl_->srtp->derive_keys_for_local(sk, ss, srtp::CryptoSuite::Aes128CmSha1_80);
+    } else {
+        core::log::Logger::instance().warn(
+            "engine[dtls→srtp]: server_master_key/salt missing — outbound SRTP will fail");
+    }
 
     // Mark installed; subsequent calls will short-circuit.
     impl_->srtp_installed = true;
@@ -1564,8 +1631,8 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
 }
 
 uint32_t NimRTCEngine::feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept {
-    if (!srtp_packet || len == 0 || !impl_->srtp) return 0x1001;
-    auto sess = impl_->srtp->get_session(0);
+    if (!srtp_packet || len == 0 || !impl_->srtp) return core::kEngineInvalidParam;
+    auto sess = impl_->srtp->get_session(0, /*outgoing=*/false);
     if (!sess) return 0;
     core::ByteSpan span(srtp_packet, len);
     auto un = sess->unprotect_rtp(span, nullptr, nullptr);
@@ -1578,6 +1645,18 @@ bool NimRTCEngine::set_remote_ice(std::string_view ice_block) noexcept {
         return ice_t_->set_remote_description(ice_block) == plugins::kOk;
     }
     return false;
+}
+
+int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
+                                  std::string_view username,
+                                  std::string_view password) noexcept {
+    if (!ice_t_) {
+        core::log::Logger::instance().error(
+            "add_turn_server: ICE transport not yet created — call pre_open() first");
+        return -1;
+    }
+    ice_t_->add_turn_server(host, port, username, password);
+    return 0;
 }
 
 void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
@@ -1641,8 +1720,8 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
 // those headers (Layout Invariant 4).
 // ---------------------------------------------------------------------------
 
-dtls::DtlsState NimRTCEngine::dtls_state() const noexcept {
-    return impl_->dtls ? impl_->dtls->state() : dtls::DtlsState::Closed;
+nimrtc::dtls::DtlsState NimRTCEngine::dtls_state() const noexcept {
+    return impl_->dtls ? impl_->dtls->state() : nimrtc::dtls::DtlsState::Closed;
 }
 
 bool NimRTCEngine::dtls_connected() const noexcept {

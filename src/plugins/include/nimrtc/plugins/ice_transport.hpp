@@ -141,6 +141,22 @@ public:
     /** Override the local UDP port range (begin..end, inclusive). */
     virtual void set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept = 0;
 
+    /** Add a TURN server for relay candidate gathering.
+     *
+     *  Pass `host` (IPv4, IPv6, or hostname), `port`, and the credentials
+     *  used to allocate a relay.  Empty username/password are allowed for
+     *  TURN servers with anonymous allocation.  Must be called before
+     *  open() so libjuice can begin the Allocate request when gathering
+     *  candidates.
+     *
+     *  Thread-safety: not safe to call concurrently with open(); intended
+     *  for use during the same setup phase as set_stun_server().
+     */
+    virtual void add_turn_server(std::string_view host,
+                                std::uint16_t port,
+                                std::string_view username,
+                                std::string_view password) noexcept = 0;
+
     // ---- BWE / Scheduler injection -------------------------------------------
     //
     // The engine creates BWE and Scheduler plugin instances at open() time

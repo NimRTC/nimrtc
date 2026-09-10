@@ -43,6 +43,7 @@
 #include <cstddef>
 #include <functional>
 #include <string_view>
+#include <vector>
 
 #include <nimrtc/core/bytes.hpp>   // core::ByteSpan
 
@@ -128,8 +129,13 @@ using DrainCallback = std::function<bool(Priority, core::ByteSpan)>;
 
 /** Pluggable sending scheduler.
  *
- *  - `enqueue()` is zero-copy (takes a `ByteSpan` view of the caller-owned
- *    buffer; caller must keep it alive until `drain()` copies the data).
+ *  - `enqueue()` takes a `ByteSpan` view of the caller-owned buffer and
+ *    copies it.  Use this when the caller's buffer is short-lived or shared.
+ *  - `enqueue_owned()` takes ownership of a `std::vector<uint8_t>` via
+ *    move (zero-copy).  Use this when the caller has just allocated the
+ *    buffer for the sole purpose of sending it (the engine's send_audio
+ *    / send_video paths use this overload to avoid one heap allocation
+ *    and one buffer copy per outbound packet).
  *  - `drain()` / `drain_with()` remove packets in strict priority order
  *    (highest first) under the configured `max_queue_depth` and BWE budget.
  *  - `on_bwe_update()` is the input from the BWE plugin; implementations
@@ -147,8 +153,30 @@ public:
     // Scheduler contract ------------------------------------------------
 
     /** Enqueue one packet. Empty `dst` = use the most recent non-empty
-     *  destination from a prior `enqueue()`. Thread-safe. */
+     *  destination from a prior `enqueue()`. Thread-safe.
+     *
+     *  This overload **copies** `data` into an internal buffer.  Use when
+     *  the caller's buffer is short-lived or shared with another consumer
+     *  (e.g. logging, async error tracking).  For the zero-copy path, see
+     *  `enqueue_owned()` below. */
     virtual void enqueue(Priority p, core::ByteSpan data, Addr dst) noexcept = 0;
+
+    /** Zero-copy enqueue.  Transfers ownership of `owned_data` into the
+     *  scheduler.  After this call returns the caller must NOT touch the
+     *  vector — its storage is now owned by the scheduler queue and will
+     *  be freed when the packet is drained and dispatched.
+     *
+     *  Use this from hot paths (engine send_audio / send_video) to avoid
+     *  one heap allocation + one buffer copy per outbound packet.  Empty
+     *  `dst` = use the most recent non-empty destination.
+     *
+     *  Thread-safe.  Default implementation falls back to copying `data`
+     *  via `enqueue()` for plugins that haven't implemented the move
+     *  fast-path — see Scheduler::enqueue_owned for the default behavior
+     *  in the built-in strict_priority scheduler. */
+    virtual void enqueue_owned(Priority p,
+                               std::vector<std::uint8_t>&& owned_data,
+                               Addr dst) noexcept = 0;
 
     /** Drain up to `max_packets` packets in priority order. Returns the
      *  number actually drained. Thread-safe. */

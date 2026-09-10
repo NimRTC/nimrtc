@@ -49,6 +49,7 @@ public:
 
     // IScheduler -------------------------------------------------------
     void              enqueue(Priority, core::ByteSpan, plugins::Addr) noexcept override {}
+    void              enqueue_owned(Priority, std::vector<std::uint8_t>&&, plugins::Addr) noexcept override {}
     int               drain(int)                                  noexcept override { return 0; }
     int               drain_with(int, plugins::DrainCallback)      noexcept override { return 0; }
     void              on_bwe_update(std::uint32_t)                 noexcept override {}

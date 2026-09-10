@@ -100,12 +100,12 @@ class Result<void> {
 public:
     // Named `make_ok()` to avoid signature collision with `bool ok() const noexcept`
     // on MSVC (C2686) in template specializations.
-    static Result make_ok() { return Result(); }
+    static Result make_ok() { return Result(ok_tag{}); }
     static Result fail(ErrorCode code, std::string message) {
-        Result r;
-        r.has_value_ = false;
-        r.error_     = Error{code, std::move(message)};
-        return r;
+        return Result(Error{code, std::move(message)}, err_tag{});
+    }
+    static Result fail(const Error& e) {
+        return Result(e, err_tag{});
     }
 
     bool ok() const noexcept { return has_value_; }
@@ -115,7 +115,16 @@ public:
     const Error& error() const &  { return error_; }
 
 private:
-    Result() : has_value_(true) {}
+    // Tag-dispatch constructors — mirror Result<T>'s pattern so the ok and
+    // err paths are symmetric.  The default constructor is private and only
+    // callable through the explicit make_ok() factory.
+    struct ok_tag {};
+    struct err_tag {};
+
+    Result(ok_tag) noexcept : has_value_(true) {}
+    Result(Error e, err_tag) noexcept
+        : has_value_(false), error_(std::move(e)) {}
+
     bool  has_value_ = true;
     Error error_{};
 };

@@ -33,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include <nimrtc/core/bytes.hpp>    // core::ByteSpan / core::ByteBuffer
 #include <nimrtc/core/time.hpp>     // core::TimePoint / core::SteadyClock
@@ -92,6 +93,9 @@ public:
     // plugins::IScheduler -----------------------------------------------
     void              enqueue(plugins::Priority p, core::ByteSpan data,
                               plugins::Addr dst) noexcept override;
+    void              enqueue_owned(plugins::Priority p,
+                                    std::vector<std::uint8_t>&& owned_data,
+                                    plugins::Addr dst) noexcept override;
     int               drain(int max_packets) noexcept override;
     int               drain_with(int max_packets,
                                 plugins::DrainCallback cb) noexcept override;
@@ -103,6 +107,13 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    /** Locked (caller holds impl_->mu_) enqueue helper.  Used by both
+     *  the public `enqueue()` (copy) and `enqueue_owned()` (move) paths
+     *  after acquiring the mutex.  Consumes `owned_data` via move. */
+    void enqueue_locked(plugins::Priority p,
+                        std::vector<std::uint8_t>&& owned_data,
+                        plugins::Addr dst) noexcept;
 };
 
 } // namespace nimrtc::sched

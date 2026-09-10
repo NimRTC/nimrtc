@@ -109,13 +109,13 @@ TEST(SrtpSessionTest, InitFromSessionKeysRequiresConfig) {
 // -----------------------------------------------------------------------------
 TEST(SrtpContextTest, GetSessionReturnsNullForUnknownSsrc) {
     SrtpContext ctx;
-    EXPECT_EQ(ctx.get_session(0xDEADBEEF), nullptr);
+    EXPECT_EQ(ctx.get_session(0xDEADBEEF, /*outgoing=*/true), nullptr);
 }
 
 TEST(SrtpContextTest, RemoveSessionIsNoopForUnknownSsrc) {
     SrtpContext ctx;
     ctx.remove_session(0xCAFEBABE);   // must not crash
-    EXPECT_EQ(ctx.get_session(0xCAFEBABE), nullptr);
+    EXPECT_EQ(ctx.get_session(0xCAFEBABE, /*outgoing=*/true), nullptr);
 }
 
 TEST(SrtpContextTest, TotalStatsStartAtZero) {

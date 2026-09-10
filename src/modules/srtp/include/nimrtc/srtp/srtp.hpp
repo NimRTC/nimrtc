@@ -191,14 +191,25 @@ public:
     SrtpContext();
     ~SrtpContext();
 
-    // Derive keys for a remote participant (DTLS-SRTP key derivation).
+    // Derive keys for the REMOTE participant (DTLS-SRTP key derivation).
+    // Stores the peer's master key/salt for INBOUND session creation.
     void derive_keys_for_remote(std::span<const std::uint8_t> srtp_master_key,
                                std::span<const std::uint8_t> srtp_master_salt,
                                CryptoSuite suite);
 
-    // Get or create session for given SSRC.
+    // Derive keys for the LOCAL side — the server master key/salt from the
+    // DTLS-SRTP handshake is NimRTC's OWN key for OUTBOUND SRTP.
+    // Must be called IN ADDITION TO derive_keys_for_remote to fully install
+    // a bidirectional SRTP context.
+    void derive_keys_for_local(std::span<const std::uint8_t> srtp_master_key,
+                               std::span<const std::uint8_t> srtp_master_salt,
+                               CryptoSuite suite);
+
+    // Get or create a session for given SSRC and direction.
+    // direction=true  → OUTBOUND: uses our own (local) master key.
+    // direction=false → INBOUND : uses the remote peer's master key.
     // Creates session with ROC=0 if not exists.
-    SrtpSession* get_session(std::uint32_t ssrc);
+    SrtpSession* get_session(std::uint32_t ssrc, bool outgoing);
 
     // Remove session for given SSRC (e.g., on BYE).
     void remove_session(std::uint32_t ssrc);

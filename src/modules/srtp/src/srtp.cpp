@@ -421,16 +421,24 @@ struct SrtpContext::Impl {
                                std::span<const std::uint8_t> master_salt,
                                CryptoSuite suite) {
         default_suite = suite;
-        // For AES-CM-128: outbound key == master_key (we write with it),
-        //                    inbound key == master_key (same — sym).
-        // libsrtp re-derives session keys per-direction internally from
-        // key||salt; we just stash whatever the DTLS produced.
+        // The remote peer's keys are used for INBOUND (decryption of peer's SRTP).
+        inbound_key.assign(master_key.begin(), master_key.end());
+        inbound_salt.assign(master_salt.begin(), master_salt.end());
+        core::log::Logger::instance().info(
+            "SRTP context: derived INBOUND keys (suite=" +
+            std::to_string(static_cast<int>(suite)) + ")");
+    }
+
+    void derive_keys_for_local(std::span<const std::uint8_t> master_key,
+                               std::span<const std::uint8_t> master_salt,
+                               CryptoSuite suite) {
+        default_suite = suite;
+        // NimRTC's own server keys are used for OUTBOUND (encryption to peer).
         outbound_key.assign(master_key.begin(), master_key.end());
         outbound_salt.assign(master_salt.begin(), master_salt.end());
-        inbound_key  = outbound_key;
-        inbound_salt = outbound_salt;
         core::log::Logger::instance().info(
-            "SRTP context: derived keys (suite=" + std::to_string(static_cast<int>(suite)) + ")");
+            "SRTP context: derived OUTBOUND keys (suite=" +
+            std::to_string(static_cast<int>(suite)) + ")");
     }
 };
 
@@ -444,8 +452,15 @@ void SrtpContext::derive_keys_for_remote(
     impl_->derive_keys_for_remote(srtp_master_key, srtp_master_salt, suite);
 }
 
-SrtpSession* SrtpContext::get_session(std::uint32_t ssrc) {
-    if (auto* sess = impl_->install(ssrc, /*outgoing=*/true)) {
+void SrtpContext::derive_keys_for_local(
+        std::span<const std::uint8_t> srtp_master_key,
+        std::span<const std::uint8_t> srtp_master_salt,
+        CryptoSuite suite) {
+    impl_->derive_keys_for_local(srtp_master_key, srtp_master_salt, suite);
+}
+
+SrtpSession* SrtpContext::get_session(std::uint32_t ssrc, bool outgoing) {
+    if (auto* sess = impl_->install(ssrc, outgoing)) {
         return sess;
     }
     return nullptr;

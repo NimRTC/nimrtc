@@ -10,9 +10,23 @@
  *
  * libopus requires frames of 2.5, 5, 10, 20, 40, or 60 ms.  At 48 kHz these
  * correspond to 120 / 240 / 480 / 960 / 1920 / 2880 samples per channel.
- * NimRTC targets 20 ms frames by default (960 samples @ 48 kHz) — the most
- * common choice for WebRTC voice.  Callers that submit other sizes will get
- * an encode failure (we return 0).
+ * NimRTC accepts all six sizes (see is_valid_frame_size() below); the
+ * default config targets 20 ms frames (960 samples @ 48 kHz) — the most
+ * common choice for WebRTC voice.  Callers that submit other sizes will
+ * get an encode failure (we return 0).
+ *
+ * ## Application mode (P2#10)
+ *
+ * The encoder's libopus application mode is configurable via
+ * EncoderConfig::application.  NimRTC exposes two values without pulling
+ * in <opus.h> at the public-header level:
+ *
+ *   - OPUS_APPLICATION_VOIP  (1) — default.  Optimised for voice /
+ *     interactive speech; best for the WebRTC peer path.
+ *   - OPUS_APPLICATION_AUDIO (2) — for music / non-interactive audio;
+ *     better for ASR pipelines and agent-gateway music streaming.
+ *
+ * Any other value falls back to VOIP for forward-compatibility.
  *
  * ## PLC
  *
@@ -45,8 +59,17 @@ constexpr std::size_t kSamplesPer20Ms48K = 960;   // 48 kHz × 20 ms
 constexpr std::size_t kSamplesPer10Ms48K = 480;   // 48 kHz × 10 ms
 constexpr std::size_t kSamplesPerFrame   = kSamplesPer20Ms48K;  // P1 default
 
-// Map sample rate → libopus application mode (voice is best for WebRTC).
-constexpr int kOpusApplication = OPUS_APPLICATION_VOIP;
+// libopus allows 120, 240, 480, 960, 1920, 2880 (i.e. 2.5, 5, 10, 20, 40, 60 ms).
+
+// Resolve EncoderConfig.application → libopus OPUS_APPLICATION_* value.
+// libopus defines these as 2048 (VOIP) and 2049 (AUDIO) since libopus 1.1;
+// older releases used 1 / 2.  We accept either form so that existing callers
+// (which sometimes still use the legacy 1 / 2 mapping) keep working.
+inline int resolve_opus_application(int user_choice) noexcept {
+    if (user_choice == 2049 || user_choice == 2) return 2049;
+    if (user_choice == 2048 || user_choice == 1) return 2048;
+    return 2048;  // safe default for any unknown value
+}
 
 inline bool is_valid_frame_size(std::size_t samples_per_channel) noexcept {
     // libopus allows 120, 240, 480, 960, 1920, 2880 (i.e. 2.5, 5, 10, 20, 40, 60 ms).
@@ -89,7 +112,7 @@ struct Encoder::Impl {
         , enc(opus_encoder_create(
               static_cast<opus_int32>(config.sample_rate_hz),
               static_cast<int>(config.channels),
-              kOpusApplication,
+              resolve_opus_application(config.application),
               &error))
     {
         if (error != OPUS_OK || enc == nullptr) {
@@ -142,9 +165,11 @@ std::size_t Encoder::encode(const float* pcm,
     if (num_samples == 0 || output_capacity == 0) return 0;
     if (!impl_ || !impl_->enc) return 0;
 
-    // libopus requires a fixed frame size; if the caller submitted something
-    // else, we accept 480 or 960 at 48 kHz as the common case and reject
-    // anything else (callers should chunk their PCM into frames).
+    // libopus requires a fixed frame size.  We accept any of the six
+    // permitted Opus frame sizes (2.5, 5, 10, 20, 40, 60 ms — i.e.
+    // 120, 240, 480, 960, 1920, 2880 samples per channel at 48 kHz) and
+    // reject anything else (callers should chunk their PCM into frames
+    // before encoding).  See is_valid_frame_size() above for the full list.
     if (!is_valid_frame_size(num_samples)) return 0;
 
     const opus_int32 frame_size = static_cast<opus_int32>(num_samples

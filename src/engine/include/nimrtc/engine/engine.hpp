@@ -73,7 +73,11 @@ struct SessionDescription;
 namespace nimrtc::rtp    { struct PacketView; }
 namespace nimrtc::jb     { class JitterBuffer; }
 namespace nimrtc::audio3a { class IAudio3A; }
-namespace nimrtc::dtls   { enum class DtlsState : std::uint8_t; class DtlsSession; }
+namespace nimrtc::dtls   {
+enum class DtlsState : std::uint8_t;
+class DtlsSession;
+class DtlsSessionWolfSSL;
+}
 namespace nimrtc::srtp   { class SrtpContext; }
 #ifdef NIMRTC_HAS_OPUS
 namespace nimrtc::opus   { class Encoder; class Decoder; }
@@ -387,6 +391,22 @@ public:
      *  immediately). */
     bool set_remote_ice(std::string_view ice_block) noexcept;
 
+    /** Add a TURN server for relay candidate gathering.
+     *
+     *  Must be called BEFORE open() — after pre_open() creates the ICE transport
+     *  but before open() triggers candidate gathering.  The engine forwards the
+     *  call to `ice_t_->add_turn_server()`.
+     *
+     *  Thread-safety: not thread-safe; call from the same thread that will
+     *  call open().
+     *
+     *  @return  0 on success; non-zero if the ICE transport is not yet created
+     *            (call pre_open() first).
+     */
+    int add_turn_server(std::string_view host, std::uint16_t port,
+                        std::string_view username,
+                        std::string_view password) noexcept;
+
     /** Inbound raw bytes — alternative entry point for test injection. */
     uint32_t feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept;
 
@@ -556,6 +576,21 @@ private:
     void shutdown_video_plugins() noexcept;
 
     static void default_on_error(uint32_t err, std::string_view msg) noexcept;
+
+    /** One-time module initialisation shared by pre_open() and the
+     *  "modules not yet created" branch of open().
+     *
+     *  Builds the ICE transport + BWE + Scheduler + Audio3A + Codec +
+     *  SRTP + DTLS, applies pre-open config through the plugin seam, and
+     *  wires ICE recv callbacks.  Does NOT call ice_t_->open() — callers
+     *  decide when to start ICE gathering (pre_open leaves it for a later
+     *  open(); open() calls it immediately after).
+     *
+     *  @return 0 on success, or a non-zero plugins::Status-derived code on
+     *          failure (0x1FFF = transport, 0x2000 = DTLS, 0x1A00 = audio3a,
+     *          etc.).  On failure, partial state is rolled back enough to
+     *          leave the engine re-callable. */
+    uint32_t init_modules_once() noexcept;
 };
 
 } // namespace nimrtc::engine

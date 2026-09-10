@@ -340,6 +340,16 @@ public:
      *  IDR slice) at that point. */
     virtual void force_keyframe() noexcept = 0;
 
+    /** P3 — interface stable; implementation lands in 1.0.
+     *  Sets the timeline reference frame metadata for the next encode call.
+     *  capture_ts_us : monotonic capture timestamp in microseconds.
+     *  frame_id      : monotonically-increasing per-stream frame counter.
+     *  rtp_timestamp: 90kHz RTP clock value pinned to capture_ts_us.
+     *  Default impl in adapters is a no-op stub; see ADR-NNN. */
+    virtual void set_ref_frame(std::int64_t capture_ts_us,
+                               std::uint32_t frame_id,
+                               std::uint32_t rtp_timestamp) noexcept = 0;
+
     /** Snapshot of sender counters. */
     virtual VideoSenderStats stats() const noexcept = 0;
 

@@ -179,6 +179,11 @@ public:
         return np::kOk;
     }
     void force_keyframe() noexcept override { keyframe_calls_++; }
+    void set_ref_frame(std::int64_t /*capture_ts_us*/,
+                       std::uint32_t /*frame_id*/,
+                       std::uint32_t /*rtp_timestamp*/) noexcept override {
+        // P3 stub — see ADR-NNN.
+    }
     np::VideoSenderStats stats() const noexcept override {
         return {frames_pushed_, 0, 0, 0, 0, keyframe_calls_, 0};
     }

@@ -35,18 +35,33 @@ constexpr std::uint32_t kDefaultSampleRate = 48000;
 constexpr std::uint8_t  kDefaultChannels   = 1;
 constexpr std::uint8_t  kDefaultPayloadType = 111;  // RFC 7587
 
+// ---------------------------------------------------------------------------
+// Opus application mode — mirrors libopus's OPUS_APPLICATION_* macros
+// (opus_defines.h: 2048 = VOIP, 2049 = AUDIO).  Exposed at the public
+// header level so callers don't need to pull in <opus.h>.
+// ---------------------------------------------------------------------------
+inline constexpr int kOpusApplicationVoip  = 2048;
+inline constexpr int kOpusApplicationAudio = 2049;
+
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
 
 struct EncoderConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
-    std::uint8_t  channels     = kDefaultChannels;
-    int            bitrate_bps   = 64000;
+    std::uint8_t  channels       = kDefaultChannels;
+    int            bitrate_bps    = 64000;
     int            complexity     = 10;     // 0-10, 10 = best quality
     bool           vad_enabled    = false;
-    bool           fec_enabled   = true;    // forward error correction
-    bool           dtx_enabled   = false;   // discontinuous transmission
+    bool           fec_enabled    = true;    // forward error correction
+    bool           dtx_enabled    = false;   // discontinuous transmission
+
+    /** Opus application mode.  Use the named constants exposed by
+     *  nimrtc::opus (OPUS_APPLICATION_VOIP / OPUS_APPLICATION_AUDIO) rather
+     *  than raw integers; those map to libopus's own OPUS_APPLICATION_*
+     *  macros (which happen to be 2048/2049 in libopus ≥ 1.1).  See
+     *  nimrtc/opus/opus.hpp for the canonical values. */
+    int            application    = kOpusApplicationVoip;
 };
 
 struct DecoderConfig {

@@ -357,6 +357,14 @@ void SenderAdapter::force_keyframe() noexcept {
     if (concrete_) concrete_->force_keyframe();
 }
 
+void SenderAdapter::set_ref_frame(std::int64_t /*capture_ts_us*/,
+                                   std::uint32_t /*frame_id*/,
+                                   std::uint32_t /*rtp_timestamp*/) noexcept {
+    // P3 stub — see ADR-NNN.  Concrete VideoSender has no ref-frame
+    // timeline yet; default impl is a no-op so the plugin seam stays
+    // ABI-stable for the 1.0 interface freeze.
+}
+
 plugins::VideoSenderStats SenderAdapter::stats() const noexcept {
     if (!concrete_) return {};
     return to_plugin_sender_stats(concrete_->stats());

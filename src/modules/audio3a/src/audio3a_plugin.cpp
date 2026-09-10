@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -215,19 +216,31 @@ void PluginAdapter::maybe_fire_callbacks() noexcept {
 
 void PluginAdapter::invoke_pre_tap(float* samples, std::size_t num_samples,
                                    std::size_t num_channels) noexcept {
-    if (!pre_tap_) return;
+    plugins::PcmTapCallback cb;
+    {
+        std::lock_guard<std::mutex> lk(tap_mu_);
+        cb = pre_tap_;
+    }
+    if (!cb) return;
     plugins::PcmFrameMetadata meta{};
     meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
     meta.num_samples     = num_samples;
     meta.num_channels   = static_cast<std::uint8_t>(num_channels);
     meta.timestamp_us    = tap_timestamp_us_;
     tap_timestamp_us_ += static_cast<std::int64_t>(num_samples * 1000000ULL / meta.sample_rate_hz);
-    pre_tap_(samples, meta);
+    cb(samples, meta);
 }
 
 void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
                                     std::size_t num_channels) noexcept {
-    if (!post_tap_ && !post_tap_i16_) return;
+    plugins::PcmTapCallback    cb_f32;
+    plugins::PcmTapCallbackI16 cb_i16;
+    {
+        std::lock_guard<std::mutex> lk(tap_mu_);
+        cb_f32 = post_tap_;
+        cb_i16 = post_tap_i16_;
+    }
+    if (!cb_f32 && !cb_i16) return;
     plugins::PcmFrameMetadata meta{};
     meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
     meta.num_samples     = num_samples;
@@ -236,28 +249,45 @@ void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
     // Note: tap_timestamp_us_ is NOT advanced here — the frame boundary
     // is the same as the pre-tap; only one tick per process_capture call.
 
-    if (post_tap_) {
-        post_tap_(samples, meta);
+    if (cb_f32) {
+        cb_f32(samples, meta);
     }
-    if (post_tap_i16_) {
+    if (cb_i16) {
         // Convert float → int16_t inline for ASR consumers.
-        // Only convert the samples we need (no extra copy for the float tap).
-        std::vector<std::int16_t> i16_buf(num_samples * num_channels);
-        for (std::size_t i = 0; i < num_samples * num_channels; ++i) {
+        //
+        // Reuse int16_tap_buf_ (PluginAdapter member) to avoid heap
+        // allocation on every process_capture() call.  Capacity grows
+        // monotonically — first call after install allocates; subsequent
+        // calls within the same capacity reuse the storage.  std::vector
+        // guarantees no reallocation while size() <= capacity() and the
+        // capacity itself doesn't shrink on resize() to a smaller value.
+        const std::size_t needed = num_samples * num_channels;
+        if (int16_tap_buf_.size() < needed) {
+            // resize (not reserve) so size() == needed and data() returns
+            // exactly N valid int16_t values below.  When the first frame
+            // is the largest typical frame (e.g. 480 samples @ 48 kHz mono
+            // = 20 ms), subsequent frames within capacity reuse storage
+            // and incur only the per-sample conversion loop below.
+            int16_tap_buf_.resize(needed);
+        }
+        std::int16_t* out = int16_tap_buf_.data();
+        for (std::size_t i = 0; i < needed; ++i) {
             float v = samples[i] * 32767.0f;
             v = std::max(-32768.0f, std::min(32767.0f, v));
-            i16_buf[i] = static_cast<std::int16_t>(v);
+            out[i] = static_cast<std::int16_t>(v);
         }
-        post_tap_i16_(i16_buf.data(), meta);
+        cb_i16(out, meta);
     }
 }
 
 void PluginAdapter::set_pre_process_tap(plugins::PcmTapCallback tap) noexcept {
+    std::lock_guard<std::mutex> lk(tap_mu_);
     pre_tap_ = std::move(tap);
 }
 
 void PluginAdapter::set_post_process_tap(plugins::PcmTapCallback    tap,
                                         plugins::PcmTapCallbackI16 tap_i16) noexcept {
+    std::lock_guard<std::mutex> lk(tap_mu_);
     post_tap_   = std::move(tap);
     post_tap_i16_ = std::move(tap_i16);
 }

@@ -162,6 +162,16 @@ interop/test_data/*.csr
 **/_*.log
 **/_*.err
 
+# ─────────────────────────────────────────────
+# wolfSSL DTLS test harness runtime artifacts
+# Created by dtls_client/dtls_server/main/minimal_test when run locally.
+# Tests themselves are committed (see the same dir for *.cpp / *.html / *.js).
+# ─────────────────────────────────────────────
+tests/wolfssl_dtls/*.log
+tests/wolfssl_dtls/*.err
+tests/wolfssl_dtls/certs/
+tests/wolfssl_dtls/fingerprint.txt
+
 # CTest scratch
 Testing/
 

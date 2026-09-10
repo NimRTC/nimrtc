@@ -58,7 +58,9 @@ class NimRTCSubprocess:
 
     def __init__(self, binary: Path, answerer: bool, duration: int,
                  bind: str = "", stun_host: str = "", stun_port: int = 0,
-                 no_stun: bool = False):
+                 no_stun: bool = False,
+                 turn_host: str = "", turn_port: int = 3478,
+                 turn_user: str = "", turn_pass: str = ""):
         self.binary = binary
         self.answerer = answerer
         self.duration = duration
@@ -66,6 +68,10 @@ class NimRTCSubprocess:
         self.stun_host = stun_host
         self.stun_port = stun_port
         self.no_stun = no_stun
+        self.turn_host = turn_host
+        self.turn_port = turn_port
+        self.turn_user = turn_user
+        self.turn_pass = turn_pass
         self.proc: Optional[subprocess.Popen] = None
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._closed = False
@@ -86,13 +92,51 @@ class NimRTCSubprocess:
             cmd += ["--stun-host", self.stun_host]
             if self.stun_port:
                 cmd += ["--stun-port", str(self.stun_port)]
+        if self.turn_host:
+            cmd += ["--turn-host", self.turn_host,
+                    "--turn-port", str(self.turn_port)]
+            if self.turn_user:
+                cmd += ["--turn-user", self.turn_user,
+                        "--turn-pass", self.turn_pass]
         logger.info("Spawning demo-p2p: %s", shlex.join(cmd))
+        # Send demo-p2p's stderr to a dedicated file so we can inspect the
+        # engine's answerer logs after the run.  Without this, demo-p2p's
+        # [demo-p2p] answer SDP ... trace goes nowhere.
+        # Merge demo-p2p stderr into stdout so the test harness (which reads
+        # the proxy's merged stderr) can see demo-p2p's DTLS/ICE state logs.
+        # Lines from stderr are prefixed with "[p2p] " to distinguish them from
+        # the proxy's own log lines.
+        self._stderr_path = Path(os.environ.get(
+            "NIMRTC_PROXY_STDERR",
+            str(Path(__file__).parent / "_proxy_demo_stderr.log")))
+        try:
+            self._stderr_file = open(self._stderr_path, "wb", buffering=0)
+        except OSError as e:
+            logger.warning("could not open stderr file: %s — falling back to merged stdout", e)
+            self._stderr_file = subprocess.STDOUT  # merge into stdout so test sees it
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=sys.stdout,       # merge engine stderr into our stdout
+            stderr=self._stderr_file,
             bufsize=0,                 # unbuffered for line-by-line read
+            # Inherit the proxy's environment and add optional debug toggles
+            # so we can dump DTLS verify_data traces for Chrome interop
+            # debugging without touching the test runner.  Set
+            # NIMRTC_DTLS_TRACE=/path/to/trace to enable.
+            env={**os.environ,
+                 "NIMRTC_DTLS_TRACE": os.environ.get(
+                     "NIMRTC_DTLS_TRACE",
+                     str(Path(__file__).parent.parent / "build" / "nimrtc_dtls_trace.log")),
+                 "NIMRTC_DTLS_KEYLOG": os.environ.get(
+                     "NIMRTC_DTLS_KEYLOG",
+                     str(Path(__file__).parent.parent / "build" / "nimrtc_dtls_keylog.txt")),
+                 "NIMRTC_DTLS_SPKI_FILE": os.environ.get(
+                     "NIMRTC_DTLS_SPKI_FILE",
+                     str(Path(__file__).parent.parent / "build" / "nimrtc_spki.txt")),
+                 } if os.environ.get("NIMRTC_DTLS_TRACE") or
+                    os.environ.get("NIMRTC_DTLS_KEYLOG") or
+                    os.environ.get("NIMRTC_DTLS_SPKI_FILE") else None,
         )
         # Reader thread for stdout → asyncio queue.
         t = threading.Thread(target=self._read_stdout, daemon=True)
@@ -143,6 +187,12 @@ class NimRTCSubprocess:
                 self.proc.wait(2)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        try:
+            if hasattr(self, "_stderr_file") and self._stderr_file not in (
+                    None, subprocess.DEVNULL):
+                self._stderr_file.close()
+        except Exception:
+            pass
 
 
 # -----------------------------------------------------------------------------
@@ -263,6 +313,14 @@ async def main() -> int:
                     help="STUN server port override")
     ap.add_argument("--no-stun", action="store_true",
                     help="Disable STUN candidate gathering")
+    ap.add_argument("--turn-host", default="",
+                    help="TURN server hostname (enables TURN relay candidates)")
+    ap.add_argument("--turn-port", type=int, default=3478,
+                    help="TURN server port (default: 3478)")
+    ap.add_argument("--turn-user", default="",
+                    help="TURN username")
+    ap.add_argument("--turn-pass", default="",
+                    help="TURN password")
     args = ap.parse_args()
 
     binary = Path(args.binary)
@@ -283,7 +341,9 @@ async def main() -> int:
 
     sub = NimRTCSubprocess(binary, args.answerer, args.duration,
                            bind=args.bind, stun_host=args.stun_host,
-                           stun_port=args.stun_port, no_stun=args.no_stun)
+                           stun_port=args.stun_port, no_stun=args.no_stun,
+                           turn_host=args.turn_host, turn_port=args.turn_port,
+                           turn_user=args.turn_user, turn_pass=args.turn_pass)
     await sub.start()
 
     logger.info("Connecting to signaling server: %s", args.signaling)

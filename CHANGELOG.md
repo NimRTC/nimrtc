@@ -9,14 +9,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **RFC 7587 ß4 RTP packetisation for Opus (`src/modules/opus`)** ?
-  `nimrtc::opus::packetise()` now implements the full RFC 6716 ß3.1 TOC
-  byte layout plus RFC 6716 ß3.2 Code 0 / 1 / 2 / 3 framing:
+- **RFC 7587 ù4 RTP packetisation for Opus (`src/modules/opus`)** ?
+  `nimrtc::opus::packetise()` now implements the full RFC 6716 ù3.1 TOC
+  byte layout plus RFC 6716 ù3.2 Code 0 / 1 / 2 / 3 framing:
     - Code 0: single frame, TOC + frame data (no length encoding).
     - Code 1: two frames of equal compressed size, TOC + two halves
       ([R3]: payload length after TOC must be even).
     - Code 2: two frames of different compressed sizes, TOC +
-      1-to-2-byte self-delimiting length of frame 1 (RFC 6716 ß3.2.1
+      1-to-2-byte self-delimiting length of frame 1 (RFC 6716 ù3.2.1
       encoding ? b0 ? [252..255], total = b0 + 4*b1, max 1275 bytes).
     - Code 3: M = 1..48 frames, TOC + frame-count byte (v|p|M) +
       optional padding length bytes + (M-1) length entries (VBR) or
@@ -47,7 +47,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`nimrtc::opus::packetise()` was a stub** that returned 1 byte of TOC
-  only and discarded all frame data ? RFC 7587 ß4 conformance is now
+  only and discarded all frame data ? RFC 7587 ù4 conformance is now
   complete and round-trips through `depacketise()`. Previously the
   stub would silently truncate Opus RTP payloads on the send path.
 
@@ -98,11 +98,17 @@ see "Known issues" below.
   BoringSSL DTLS layer never sends a `ClientKeyExchange` ? it keeps
   retransmitting ClientHellos and eventually times out with
   `connectionState=failed`. Suspected causes:
-    - Cipher suite mismatch: NimRTC negotiates
-      `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` (0xC023); modern Chrome
-      prefers `0xC02B` (AES-128-GCM) or `0xCCA9` (ChaCha20-Poly1305).
-      GCM requires implementing the AEAD nonce/explicit-IV twist
-      (RFC 5288 / RFC 5246 ?6.2.3.2) in the DTLS record layer.
+    - Cipher suite mismatch (superseded): the changelog previously claimed
+      NimRTC negotiated `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` (0xC023)
+      and that Chrome therefore rejected the flight. The actual code now
+      offers `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B) first in
+      ClientHello (with `0xCCA9` ChaCha20-Poly1305 and `0xC02C` AES-256-GCM
+      as fallbacks); the BCrypt AES-GCM AEAD seal/open pair is fully
+      implemented in `dtls.cpp` (`aes_gcm_seal`/`aes_gcm_open`); and the
+      cert builder emits SKI / KeyUsage / EKU / BasicConstraints.
+      Remaining gap: `TODO(P1.1)` at `dtls.cpp:2536` - peer-cert fingerprint
+      verification is deferred to P1.1; until then, the SDP-pinned
+      fingerprint is verified at the application layer above DTLS.
     - X.509 cert: Chrome's BoringSSL parser is strict; the current
       self-signed cert is minimal (single CN, no extensions, no
       `basicConstraints CA:FALSE`, no `subjectAltName`).

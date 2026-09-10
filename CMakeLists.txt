@@ -48,6 +48,11 @@ include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
 # When OFF the targets are still declared by NimRTCVendored.cmake as stubs.
 if(NIMRTC_VENDORED)
     add_subdirectory(src/third_party)
+    # Wire the per-library acquire aliases (vendored default → system
+    # fallback) now that the vendored targets exist.  When any
+    # NIMRTC_VENDORED_<NAME>=OFF, this calls find_package() instead of
+    # aliasing the (non-existent) vendored target.
+    nimrtc_acquire_all_vendored()
 endif()
 
 # -----------------------------------------------------------------------------

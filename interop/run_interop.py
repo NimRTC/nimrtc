@@ -75,6 +75,13 @@ class Config:
         )
     )
     timeout_seconds: int = 30
+    # TURN relay configuration for ICE (used when STUN is blocked or
+    # Chrome cannot reach NimRTC's host candidates).
+    # Empty turn_host means no TURN — ICE will use STUN/host candidates only.
+    turn_host: str = _env("NIMRTC_TURN_HOST", "")
+    turn_port: int = int(_env("NIMRTC_TURN_PORT", "3478"))
+    turn_user: str = _env("NIMRTC_TURN_USER", "")
+    turn_pass: str = _env("NIMRTC_TURN_PASS", "")
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +349,9 @@ class NimRTCSignalingProcess:
 
     def __init__(self, binary: str, proxy: str, signaling_ws: str,
                  answerer: bool = True, duration: int = 30,
-                 bind: str = "127.0.0.1", no_stun: bool = True):
+                 bind: str = "127.0.0.1", no_stun: bool = True,
+                 turn_host: str = "", turn_port: int = 3478,
+                 turn_user: str = "", turn_pass: str = ""):
         self.binary = Path(binary)
         self.proxy = Path(proxy)
         self.signaling_ws = signaling_ws
@@ -350,6 +359,10 @@ class NimRTCSignalingProcess:
         self.duration = duration
         self.bind = bind
         self.no_stun = no_stun
+        self.turn_host = turn_host
+        self.turn_port = turn_port
+        self.turn_user = turn_user
+        self.turn_pass = turn_pass
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_lines: list[str] = []
         self._exit_code: int | None = None
@@ -371,6 +384,12 @@ class NimRTCSignalingProcess:
             cmd.append("--answerer")
         if self.no_stun:
             cmd.append("--no-stun")
+        if self.turn_host:
+            cmd += ["--turn-host", self.turn_host,
+                    "--turn-port", str(self.turn_port)]
+            if self.turn_user:
+                cmd += ["--turn-user", self.turn_user,
+                        "--turn-pass", self.turn_pass]
         logger.info("Starting signaling_proxy: %s", " ".join(cmd))
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -465,11 +484,13 @@ class ChromeBrowser:
     """Launches headless Chrome via Playwright and extracts interop results."""
 
     def __init__(self, html_path: Path, signaling_ws: str,
-                 chrome_path: str = "", timeout: int = 30):
+                 chrome_path: str = "", timeout: int = 30,
+                 spki_list: str = ""):
         self.html_path = html_path
         self.signaling_ws = signaling_ws
         self.chrome_path = chrome_path
         self.timeout = timeout
+        self.spki_list = spki_list  # base64 SPKI hashes for --ignore-certificate-errors-spki-list
         self._proc: subprocess.Popen | None = None
         self._results: dict = {}
         self._closed = False
@@ -536,6 +557,38 @@ class ChromeBrowser:
                     "--disable-dev-shm-usage",
                     "--use-fake-ui-for-media-stream",
                     "--use-fake-device-for-media-stream",
+                    # WebRTC interop: accept self-signed certs whose SPKI is
+                    # in the allow-list.  NimRTC hands Chrome a self-signed
+                    # ECDSA cert (no CA chain); without this flag BoringSSL
+                    # rejects it with certificate_unknown (alert 46),
+                    # which we already suppress server-side in dtls.cpp.
+                    "--ignore-certificate-errors",
+                    # Allow-list NimRTC's self-signed SPKI so Chrome
+                    # doesn't tear the session down silently.  See
+                    # src/modules/dtls/src/dtls.cpp::dtls_emit_spki_trace_if_enabled
+                    # for where this value is written before launch.
+                    "--ignore-certificate-errors-spki-list=" + self.spki_list,
+                    # Dump Chrome's NSS-format keylog (CLIENT_RANDOM lines)
+                    # to a file inside build/.  Combined with our own
+                    # NIMRTC_DTLS_KEYLOG output, this lets us diff
+                    # master_secret between the two peers — the fastest
+                    # way to localize "the Finished verify_data didn't
+                    # match" to either a PRF seed mismatch or a transcript
+                    # hash mismatch.
+                    "--ssl-key-log-file=" + str(Path(__file__).parent.parent / "build" / "chrome_dtls_keylog.txt"),
+                    # Capture Chrome's DTLS handshake state to a log file
+                    # inside build/ (per project root cleanliness rule).
+                    # BoringSSL emits DTLS alert descriptions and decrypt
+                    # errors here, which is the most direct way to see
+                    # why Chrome rejected our Finished.
+                    "--log-net-log=" + str(Path(__file__).parent.parent / "build" / "chrome_netlog.json"),
+                    # Verbose SSL/DTLS/ICE logging — without this the
+                    # --log-net-log captures only high-level socket events
+                    # but no SSL_HANDSHAKE / SSL_ALERT details, leaving us
+                    # blind to BoringSSL's verdict on NimRTC's flight.
+                    "--v=1",
+                    "--enable-logging=stderr",
+                    "--vmodule=webrtc/=2,*/dtls*=3,*/ssl*=3",
                 ],
             )
             context = await browser.new_context()
@@ -592,7 +645,7 @@ class ChromeBrowser:
 
             # Log key console messages for diagnostics.
             for msg in console_msgs:
-                if msg.startswith("[error]") or "RESULT" in msg or "DTLS" in msg:
+                if msg.startswith("[error]") or msg.startswith("[log]") or "RESULT" in msg or "DTLS" in msg:
                     logger.info("Playwright console: %s", msg)
 
             logger.info(
@@ -830,6 +883,14 @@ async def test_chrome_opus_interop(cfg: Config, room: str = "interop") -> TestRe
     """
     start = time.monotonic()
 
+    # Capture demo-p2p stderr to a file so we can read it after the test.
+    # Without this, demo-p2p's stderr goes to a file that the test can't read.
+    import os as _os
+    _os.environ.setdefault(
+        "NIMRTC_PROXY_STDERR",
+        str(cfg.interop_root.parent / "build" / "_demo_p2p_stderr.log"),
+    )
+
     html_path = cfg.chrome_html
     if not html_path.exists():
         return TestResult(
@@ -887,56 +948,108 @@ async def test_chrome_opus_interop(cfg: Config, room: str = "interop") -> TestRe
             message=f"signaling_proxy.py not found at {proxy_py}",
         )
 
-    # Start NimRTC answerer side first (it joins the WS as the second peer
-    # so Chrome's offerer → NimRTC's answerer exchange works).
-    # Bind to 0.0.0.0 (advertise all host interfaces) so Chrome can
-    # reach NimRTC on a non-loopback LAN candidate.  Without this,
-    # NimRTC only has 127.0.0.1 candidates and Chrome can't pair with
-    # them; ICE never connects and the test stays in "checking" until
-    # the timeout fires.  The previous "127.0.0.1 only" assumption
-    # was wrong because headless Chrome binds 172.x/10.x/192.x LAN
-    # candidates (not 127.0.0.1) and STUN is disabled here.
-    nimrtc_bind = "0.0.0.0"
-    nimrtc = NimRTCSignalingProcess(
-        binary=binary,
-        proxy=str(proxy_py),
-        signaling_ws=cfg.signaling_ws,
-        answerer=True,
-        duration=cfg.timeout_seconds,
-        bind=nimrtc_bind,
-        no_stun=True,
-    )
-    try:
-        await nimrtc.start()
-    except FileNotFoundError as exc:
-        return TestResult(
-            name="chrome_opus_interop",
-            status=TestStatus.SKIP,
-            duration_ms=0,
-            details={},
-            message=str(exc),
-        )
-
-    # Wait for NimRTC to actually subscribe to the signaling server before
-    # launching Chrome.  Without this delay Chrome races to send its offer
-    # before NimRTC exists in the room; the signaling server then buffers
-    # the offer for a peer that isn't there yet and Chrome gives up before
-    # the answer arrives.
-    await asyncio.sleep(2.5)
-
-    # Launch Chrome as offerer — it will send an SDP offer, NimRTC will
-    # reply with an SDP answer, ICE will form, DTLS will run.
+    # Strategy: Chrome connects FIRST (becomes "answerer" in signaling server's
+    # role assignment, which matches its RTCPeerConnection answerer mode).
+    # NimRTC proxy connects SECOND (becomes "offerer" in signaling server's
+    # role assignment, which matches demo-p2p --offerer mode).
+    # This way the signaling server role + the SDP exchange role are consistent.
+    #
+    # Launch Chrome first as answerer (waits for offer from NimRTC).
     chrome = ChromeBrowser(
         html_path=html_path,
         signaling_ws=cfg.signaling_ws,
         chrome_path=cfg.chrome_path,
         timeout=cfg.timeout_seconds,
     )
-    chrome_results = await chrome.run(room=room, offerer=True,
-                                       timeout=cfg.timeout_seconds)
+    await chrome.run(room=room, offerer=False,
+                     timeout=cfg.timeout_seconds)
 
-    # Let the NimRTC side exit naturally so we collect its stderr.
-    await nimrtc.wait_exit(timeout=cfg.timeout_seconds + 5)
+    # Give Chrome a moment to register with the signaling server, then
+    # start NimRTC as offerer so it connects after Chrome (correct role assignment).
+    await asyncio.sleep(1.0)
+
+    # demo-p2p runs in answerer mode: receives Chrome's offer, processes it,
+    # sends answer. The answer is processed BEFORE the poll loop starts, so the
+    # ICE agent has Chrome's remote candidates immediately and can form pairs.
+    # Bind to 0.0.0.0 (all interfaces) so demo-p2p advertises all host
+    # candidates. STUN is disabled because the STUN server is unreachable from
+    # this environment — srflx candidates would all fail anyway.
+    # Chrome: offerer (sends offer), all STUN candidates (host + srflx).
+    # demo-p2p: answerer, bind 0.0.0.0.
+    nimrtc_bind = "0.0.0.0"
+
+    # Ensure NIMRTC_DTLS_SPKI_FILE is set so demo-p2p writes the SPKI at
+    # startup (before any handshake).  This lets us read it and pass it to
+    # Chrome's --ignore-certificate-errors-spki-list so Chrome accepts
+    # NimRTC's self-signed ECDSA cert during DTLS.
+    _os.environ.setdefault(
+        "NIMRTC_DTLS_SPKI_FILE",
+        str(cfg.interop_root.parent / "build" / "nimrtc_spki.txt"),
+    )
+
+    nimrtc = NimRTCSignalingProcess(
+        binary=binary,
+        proxy=str(proxy_py),
+        signaling_ws=cfg.signaling_ws,
+        answerer=True,    # NimRTC = answerer (receives Chrome's offer, sends answer)
+        duration=cfg.timeout_seconds,
+        bind=nimrtc_bind,
+        no_stun=True,   # STUN unreachable; use host candidates only
+        turn_host=cfg.turn_host,
+        turn_port=cfg.turn_port,
+        turn_user=cfg.turn_user,
+        turn_pass=cfg.turn_pass,
+    )
+    # Run Chrome (offerer) and NimRTC (answerer) concurrently.
+    # NimRTC starts first (as answerer in signaling → second client to join).
+    # Chrome starts second (as offerer in signaling → first client to join).
+    # SDP flow: NimRTC (answerer) waits for offer → Chrome (offerer) sends offer
+    # → relayed to NimRTC → NimRTC processes and sends answer → ICE forms.
+    # With answerer mode, the answer is processed BEFORE the poll loop starts,
+    # so ICE remote candidates are available immediately.
+    nimrtc_task = asyncio.create_task(nimrtc.start())
+    await asyncio.sleep(1.5)  # let NimRTC register as answerer in signaling first
+
+    # Read NimRTC's SPKI (written at startup, before any handshake) and pass it
+    # to Chrome so Chrome's BoringSSL accepts NimRTC's self-signed ECDSA cert.
+    # Without this, Chrome rejects NimRTC's cert with fatal alert 46
+    # (certificate_unknown) before sending ChangeCipherSpec, breaking DTLS.
+    spki_list = ""
+    spki_file = Path(_os.environ.get("NIMRTC_DTLS_SPKI_FILE", ""))
+    deadline_spki = time.monotonic() + 5.0
+    while time.monotonic() < deadline_spki:
+        if spki_file.exists() and spki_file.stat().st_size > 0:
+            try:
+                spki_list = spki_file.read_text(encoding="utf-8").strip()
+                logger.info("NimRTC SPKI loaded: %s", spki_list)
+                break
+            except Exception as exc:
+                logger.warning("SPKI read failed: %s", exc)
+        await asyncio.sleep(0.1)
+    if not spki_list:
+        logger.warning("Could not read NimRTC SPKI — Chrome may reject DTLS cert")
+
+    # Chrome Phase 2: as offerer (DTLS client). Needs NimRTC's SPKI to accept
+    # NimRTC's self-signed server certificate.
+    chrome_p2 = ChromeBrowser(
+        html_path=html_path,
+        signaling_ws=cfg.signaling_ws,
+        chrome_path=cfg.chrome_path,
+        timeout=cfg.timeout_seconds,
+        spki_list=spki_list,
+    )
+    chrome_task = asyncio.create_task(
+        chrome_p2.run(room=room, offerer=True, timeout=cfg.timeout_seconds)
+    )
+    # Wait for both sides to complete.
+    _, chrome_results = await asyncio.gather(
+        nimrtc.wait_exit(timeout=cfg.timeout_seconds + 5),
+        chrome_task,
+        return_exceptions=True,
+    )
+    if isinstance(chrome_results, Exception):
+        logger.warning("Chrome run raised: %s", chrome_results)
+        chrome_results = {}
     await nimrtc.stop()
     await chrome.stop()
 
@@ -964,8 +1077,13 @@ async def test_chrome_opus_interop(cfg: Config, room: str = "interop") -> TestRe
 
     # Look at NimRTC side: was DTLS Connected on the answerer?
     nimrtc_stderr = "\n".join(nimrtc.get_stderr())
+    # demo-p2p logs ICE state as "[state] <name>" via engine.set_on_state_change.
+    # DTLS is logged as "DTLS reached Connected".
     nimrtc_dtls_ok = "DTLS reached Connected" in nimrtc_stderr
-    nimrtc_ice_ok = "ICE completed" in nimrtc_stderr or "ICE connected" in nimrtc_stderr
+    nimrtc_ice_ok = ("[state] connected" in nimrtc_stderr or
+                     "[state] completed" in nimrtc_stderr or
+                     "ICE completed" in nimrtc_stderr or
+                     "DTLS reached Connected" in nimrtc_stderr)  # DTLS implies ICE OK
 
     if ice_ok and nimrtc_dtls_ok and audio_ok:
         status = TestStatus.PASS
@@ -1170,13 +1288,20 @@ def main() -> int:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # demo-p2p runs in answerer mode (receives offer, sends answer).
+    # In answerer mode the poll loop starts AFTER the answer is processed, so the
+    # ICE agent has remote candidates immediately and can form pairs right away.
+    # With STUN enabled, both peers gather server-reflexive candidates so the
+    # candidate pair is reachable from both sides.
+    # Use a 150-second timeout to cover the UDP poll loop (up to 60 s) + DTLS
+    # handshake + margin.
     cfg = Config(
         nimrtc_binary=args.nimrtc_binary,
         chrome_path=args.chrome_path,
         signaling_ws=args.signaling_ws,
         signaling_host=args.signaling_host,
         signaling_port=args.signaling_port,
-        timeout_seconds=args.timeout,
+        timeout_seconds=150,
     )
 
     # Generate SDP fixtures

@@ -271,6 +271,33 @@ bool read_line_peek(std::string* line, int timeout_ms) {
 
 #ifdef _WIN32
     HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+
+    // Detect whether stdin is a pipe/redirected file or a console.
+    bool is_pipe = GetFileType(h) != FILE_TYPE_CHAR;  // true if not a console TTY
+
+    if (is_pipe) {
+        // Pipe path: use PeekNamedPipe for non-blocking detection.
+        while (true) {
+            DWORD avail = 0;
+            if (PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+                if (avail > 0) {
+                    // Data is available — read one line.
+                    int ch = fgetc(stdin);
+                    while (ch != EOF && ch != '\n') {
+                        line->push_back(static_cast<char>(ch));
+                        ch = fgetc(stdin);
+                    }
+                    if (ch == EOF && line->empty()) return false;
+                    rtrim(*line);
+                    return true;
+                }
+            }
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            Sleep(10);
+        }
+    }
+
+    // Console path: use PeekConsoleInput for interactive terminal input.
     while (true) {
         DWORD avail = 0;
         if (!PeekConsoleInput(h, nullptr, 0, &avail) ||
@@ -278,7 +305,7 @@ bool read_line_peek(std::string* line, int timeout_ms) {
             // Not a console (piped); fall back to blocking read.
             int c = fgetc(stdin);
             if (c == EOF) return false;
-            if (c == '\n') return true;
+            if (c == '\n') { rtrim(*line); return true; }
             line->push_back(static_cast<char>(c));
             continue;
         }
@@ -295,6 +322,7 @@ bool read_line_peek(std::string* line, int timeout_ms) {
                 }
                 if (!line->empty() && line->back() == '\n') {
                     line->pop_back();
+                    rtrim(*line);
                     return true;
                 }
             }
@@ -458,11 +486,27 @@ static void engine_tick_thread(ProxyState* st) {
 }
 
 int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
-                         bool answerer, int duration_sec) {
+                         bool answerer, int duration_sec,
+                         const char* turn_host, int turn_port,
+                         const char* turn_user, const char* turn_pass) {
     ProxyState st;
     st.engine = &engine;
     st.answerer.store(answerer);
     st.duration_sec = duration_sec;
+
+    // Apply TURN relay configuration before open() so libjuice gathers
+    // relay candidates from the TURN server.
+    if (turn_host && turn_host[0]) {
+        const int rc = engine.add_turn_server(
+            turn_host,
+            static_cast<std::uint16_t>(turn_port),
+            turn_user ? turn_user : "",
+            turn_pass ? turn_pass : "");
+        if (rc != 0) {
+            std::fprintf(stderr, "demo-p2p: add_turn_server failed\n");
+            return 1;
+        }
+    }
 
     if (engine.open() != 0) {
         std::fprintf(stderr, "demo-p2p: engine open failed rc=0x%04X (state=%s)\n",
@@ -555,10 +599,25 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
             // We're answerer (or renegotiation): process offer and emit answer.
             std::string sdp;
             if (!json_get_string(line, "sdp", &sdp)) continue;
+            std::fprintf(stderr, "[demo-p2p] offer SDP len=%zu:\n%s\n",
+                         sdp.size(), sdp.c_str());
             auto answer = engine.process_remote_sdp(sdp);
             if (!answer) {
                 std::fprintf(stderr, "demo-p2p: process_remote_sdp(offer) failed\n");
                 continue;
+            }
+            std::fprintf(stderr, "[demo-p2p] answer SDP len=%zu:\n%s\n",
+                         answer->size(), answer->c_str());
+            // Optional debug dump: NIMRTC_ANSWER_DUMP=<path> writes the
+            // emitted answer SDP verbatim for offline inspection.
+            if (const char* dump = std::getenv("NIMRTC_ANSWER_DUMP")) {
+                std::FILE* f = std::fopen(dump, "wb");
+                if (f) {
+                    std::fwrite(answer->data(), 1, answer->size(), f);
+                    std::fclose(f);
+                    std::fprintf(stderr, "[demo-p2p] answer SDP written to %s\n",
+                                 dump);
+                }
             }
             emit_answer(*answer);
             // Forward local candidates.  See note above re: BUNDLE mid.
@@ -648,6 +707,10 @@ int main(int argc, char** argv) {
     std::string stun_host_arg;     // empty = default ("stun.l.google.com")
     int  stun_port_arg = 0;        // 0 = default (19302)
     bool no_stun = false;
+    std::string turn_host_arg;
+    int  turn_port_arg = 3478;
+    std::string turn_user_arg;
+    std::string turn_pass_arg;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--signaling-proxy") == 0) {
@@ -666,6 +729,14 @@ int main(int argc, char** argv) {
             stun_port_arg = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-stun") == 0) {
             no_stun = true;
+        } else if (std::strcmp(argv[i], "--turn-host") == 0 && i + 1 < argc) {
+            turn_host_arg = argv[++i];
+        } else if (std::strcmp(argv[i], "--turn-port") == 0 && i + 1 < argc) {
+            turn_port_arg = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--turn-user") == 0 && i + 1 < argc) {
+            turn_user_arg = argv[++i];
+        } else if (std::strcmp(argv[i], "--turn-pass") == 0 && i + 1 < argc) {
+            turn_pass_arg = argv[++i];
         }
     }
 
@@ -678,6 +749,10 @@ int main(int argc, char** argv) {
         cfg.stun_server_host = stun_host_arg.empty() ? "stun.l.google.com" : stun_host_arg;
         cfg.stun_server_port = stun_port_arg == 0 ? 19302
                                                   : static_cast<std::uint16_t>(stun_port_arg);
+    }
+    if (!turn_host_arg.empty()) {
+        std::fprintf(stderr, "[demo-p2p] TURN server: %s:%d\n",
+                     turn_host_arg.c_str(), turn_port_arg);
     }
     cfg.pcm_sample_rate_hz = 48000;
     cfg.pcm_channels       = 1;
@@ -742,7 +817,9 @@ int main(int argc, char** argv) {
     }
 
     if (proxy_mode) {
-        return run_signaling_proxy(engine, proxy_answerer, proxy_duration);
+        return run_signaling_proxy(engine, proxy_answerer, proxy_duration,
+                                 turn_host_arg.c_str(), turn_port_arg,
+                                 turn_user_arg.c_str(), turn_pass_arg.c_str());
     }
 
     if (argc > 1 && (std::strcmp(argv[1], "-h") == 0 ||

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>wolfSSL Chrome Test</title>
+<style>
+body { font-family: monospace; padding: 20px; }
+.log { background: #000; color: #0f0; padding: 10px; max-height: 400px; overflow: auto; }
+.ok { color: #0f0; }
+.err { color: #f00; }
+</style>
+</head>
+<body>
+<h1>wolfSSL &harr; Chrome DTLS Interop Test</h1>
+<div>
+  <button id="start">Start Test</button>
+  <button id="clear">Clear Log</button>
+</div>
+<div id="log" class="log"></div>
+
+<script>
+const log = document.getElementById('log');
+function append(msg, cls='') {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = msg;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  console.log(msg);
+}
+document.getElementById('clear').onclick = () => { log.innerHTML = ''; };
+
+// Step 1: Find the wolfSSL server (we need a signaling mechanism for full WebRTC)
+// Since this is a DTLS-only test, we'll just do UDP DTLS to wolfSSL on port 9999.
+
+document.getElementById('start').onclick = async function() {
+  append('=== Starting DTLS interop test ===');
+  append('Using WebRTC to establish DTLS connection');
+
+  const pc = new RTCPeerConnection({
+    iceServers: [{urls: 'stun:stun.l.google.com:19302'}]
+  });
+
+  pc.addEventListener('datachannel', e => {
+    append('[datachannel] Received: ' + e.channel.label);
+    e.channel.addEventListener('open', () => {
+      append('[datachannel] Opened', 'ok');
+      e.channel.send('Hello from Chrome via DTLS!');
+    });
+    e.channel.addEventListener('message', msg => {
+      append('[datachannel] Message: ' + msg.data, 'ok');
+    });
+  });
+
+  pc.addEventListener('iceconnectionstatechange', () => {
+    append('[ICE] State: ' + pc.iceConnectionState);
+  });
+
+  pc.addEventListener('connectionstatechange', () => {
+    append('[PC] State: ' + pc.connectionState);
+  });
+
+  // Create datachannel
+  const dc = pc.createDataChannel('test');
+  dc.addEventListener('open', () => {
+    append('[datachannel] DC opened', 'ok');
+    dc.send('Hello wolfSSL!');
+  });
+  dc.addEventListener('message', msg => {
+    append('[datachannel] Got: ' + msg.data, 'ok');
+  });
+
+  // We need a signaling mechanism. For now, just show SDP.
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  append('[SDP] Offer generated');
+  append('  type=' + offer.type);
+  append('  sdp lines: ' + offer.sdp.split('\n').length);
+  append('');
+  append('To complete the test, you need a WebRTC signaling server.');
+  append('For now, this page tests DTLS setup only.');
+  append('');
+  append('The fingerprint of the local DTLS certificate (Chrome):');
+
+  // Try to get cert fingerprint via getStats (limited)
+  try {
+    const stats = await pc.getStats();
+    stats.forEach(report => {
+      if (report.type === 'certificate') {
+        append('[CERT] Local certificate fingerprint:');
+        if (report.fingerprint) {
+          append('  algo: ' + report.fingerprintAlgorithm);
+          append('  value: ' + report.fingerprint);
+        }
+      }
+    });
+  } catch (e) {
+    append('[ERR] getStats failed: ' + e.message, 'err');
+  }
+};
+
+append('Page loaded. Click "Start Test" to begin.');
+</script>
+</body>
+</html>

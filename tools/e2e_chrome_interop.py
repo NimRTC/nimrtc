@@ -201,8 +201,9 @@ async def run_e2e() -> int:
 
 
 def summarize() -> None:
-    print("\n=== NimRTC ↔ Chrome DTLS post-mortem ===")
-    show_file_state()
+    try:
+        print("\n=== NimRTC <-> Chrome DTLS post-mortem ===")
+        show_file_state()
 
     # Show NimRTC trace tail (master_sec + verify_data lines).
     trace = E2E / "nimrtc_chrome.trace"
@@ -238,6 +239,8 @@ def summarize() -> None:
                            check=False)
         except Exception as exc:
             print(f"[WARN] verify run failed: {exc}")
+    except Exception as exc:
+        print(f"[WARN] summarize() crashed: {exc}")
 
 
 if __name__ == "__main__":

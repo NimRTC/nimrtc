@@ -49,11 +49,7 @@ python tools\run_e2e_acceptance.py
 
 Artifacts land in `build/e2e/`.
 
-> **First-build note**: `libopus` is shipped as a stub `CMakeLists.txt` (see
-> `src/third_party/libopus/`). Until `git clone https://github.com/xiph/opus.git
-> src/third_party/libopus/src`, only the loopback example builds (no audio
-> path). The vendored versions of `libjuice`, `libsrtp`, and `mbedtls` are
-> pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS).
+> **First-build note**: libopus 1.6.1 is fully vendored under `src/third_party/libopus/src/`. No external download required. The vendored versions of `libjuice`, `libsrtp`, and `mbedtls` are pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS).
 
 ---
 
@@ -203,7 +199,7 @@ nimrtc/
 │   │   ├── jb/                # Jitter buffer
 │   │   └── audio3a/           # 3A (AEC/ANS/AGC) audio processing
 │   ├── plugins/               # Public plugin interfaces (see ADR-001)
-│   └── third_party/           # Vendored: libjuice, libsrtp, mbedtls; libopus is a stub
+│   └── third_party/           # Vendored: libjuice, libsrtp, mbedtls, libopus (1.6.1)
 ├── tests/                     # Cross-module gtest integration tests
 ├── interop/                   # Chrome / Firefox baseline interop harness
 ├── cmake/                     # Shared CMake helpers (NimRTCOptions, NimRTCTest, …)
@@ -221,7 +217,7 @@ Pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS):
 | `libjuice` | `77daa8b` (master) | github.com/paullouisageneau/libjuice |
 | `libsrtp`  | `2f82ec0` (master) | github.com/cisco/libsrtp |
 | `mbedtls`  | `4.2.0` (release)   | github.com/Mbed-TLS/mbedtls |
-| `libopus`  | (stub)              | github.com/xiph/opus — clone required before building audio path |
+| `libopus`  | `1.6.1` (release)      | github.com/xiph/opus — fully vendored |
 
 ---
 

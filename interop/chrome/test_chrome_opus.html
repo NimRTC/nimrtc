@@ -84,7 +84,7 @@ function reportError(code, msg) {
 
 function makePc() {
     const config = {
-        // STUN server for ICE (same as NimRTC uses)
+        // STUN server for ICE.
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     };
     log("RTC", "Creating RTCPeerConnection: " + JSON.stringify(config));
@@ -118,13 +118,17 @@ function makePc() {
 
     peer.onicecandidate = (event) => {
         if (event.candidate === null) {
-            // ICE gathering complete
             log("ICE", "ICE gathering complete (null candidate)");
             return;
         }
-        const cand = event.candidate;
-        log("ICE", `candidate: ${cand.candidate}`);
-        sendWs({ type: "candidate", candidate: cand.candidate });
+        const candStr = event.candidate.candidate;
+        if (!candStr) { log("ICE", "onicecandidate: no candidate string"); return; }
+        // Send all candidates (host, srflx, relay).  ICE agents on both sides
+        // will form candidate pairs and select the best working one.
+        // On the same Windows host with NAT, srflx candidates allow demo-p2p
+        // to receive STUN binding requests from Chrome via the NAT gateway.
+        log("ICE", "candidate: " + candStr);
+        sendWs({ type: "candidate", candidate: candStr });
     };
 
     // Receive audio track from NimRTC

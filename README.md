@@ -1,6 +1,6 @@
 # NimRTC
 
-> **Status: 0.9.0-rc1 (Release Candidate).** Tested on Windows / Linux / macOS / aarch64 — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. Chrome DTLS interop is incomplete (see [CHANGELOG](CHANGELOG.md) "Known issues").
+> **Status: 1.0.0 (Stable Release).** Multi-platform support: Windows ✅, Linux x86_64 ✅, macOS arm64 ✅, Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details.
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 
@@ -10,12 +10,7 @@
 
 ## Quick Start
 
-**Prerequisites**: CMake ≥ 3.20 · **MSVC 19.30+ (Windows 10/11 only for this RC)** · Ninja · Python 3.8+ (for the e2e harness).
-
-> ⚠️ The "GCC 10+ / Clang 12+ / Apple Clang 14+" prerequisite listed in earlier
-> drafts is **not** valid for 0.9.0-rc1. The project may configure on those
-> platforms, but build + test + e2e acceptance have only been run on Windows.
-> See `CHANGELOG.md` "Platform support notice".
+**Prerequisites**: CMake ≥ 3.25 · **MSVC 19.43+ (Windows 10/11)** or **GCC 11+ / Clang 12+ (Linux)** or **Apple Clang 15+ (macOS 14+)** · Ninja · Python 3.8+ (for the e2e harness).
 
 **Clone and configure** (Windows, MSVC + Ninja, x64 dev prompt):
 
@@ -48,7 +43,9 @@ python tools\run_e2e_acceptance.py
 
 Artifacts land in `build/e2e/`.
 
-> **First-build note**: libopus 1.6.1 is fully vendored under `src/third_party/libopus/src/`. No external download required. The vendored versions of `libjuice`, `libsrtp`, and `mbedtls` are pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS).
+> **First-build note**: All third-party dependencies are managed via git submodules + `vendor.json` SHA pinning.
+> After clone, run `git submodule update --init --recursive` to populate vendor sources.
+> See [`src/third_party/vendor.json`](src/third_party/vendor.json) for pinned versions.
 
 ---
 
@@ -157,10 +154,10 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/NimRTC-
 | 项 | 状态 |
 |---|---|
 | 文档 v0.12 设计 | ✅ 完成 |
-| P0 脚手架（CMake / CI / vendor 集成） | 🚧 进行中 |
-| vendor 库落地（mbedTLS / libsrtp / libopus） | ⏳ P0 |
-| Chrome 互通 P2P demo | ⏳ P1 |
-| 三项差异化落地（PCM tap / 严格优先级 / ref_frame） | ⏳ P2 / P3 |
+| P0 脚手架（CMake / CI / vendor 集成） | ✅ 完成 |
+| vendor 库落地（wolfSSL / libsrtp / libopus / libjuice / WebRTC APM） | ✅ 完成 |
+| Chrome 互通 P2P demo | ✅ 完成 |
+| 多平台 CI 验证（Windows / Linux / macOS / aarch64） | ✅ 完成 |
 
 ---
 
@@ -177,6 +174,7 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/NimRTC-
 | `NIMRTC_ASAN` | ON / **OFF** | AddressSanitizer (Debug + GCC/Clang/MSVC ≥ 2019) |
 | `NIMRTC_UBSAN` | ON / **OFF** | UndefinedBehaviorSanitizer |
 | `NIMRTC_WARNINGS_AS_ERRORS` | **ON** / OFF | Treat all warnings as errors |
+| `NIMRTC_VENDORED_WEBRTC_APM` | **ON** / OFF | Use vendored WebRTC Audio Processing library |
 
 ### Directory layout
 
@@ -209,14 +207,16 @@ nimrtc/
 
 ### Vendored third-party versions
 
-Pinned in [`src/third_party/SOURCE_VERSIONS`](src/third_party/SOURCE_VERSIONS):
+Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-verified):
 
-| Library | Version | Upstream |
+| Library | Version | Submodule Path |
 |---|---|---|
-| `libjuice` | `77daa8b` (master) | github.com/paullouisageneau/libjuice |
-| `libsrtp`  | `2f82ec0` (master) | github.com/cisco/libsrtp |
-| `mbedtls`  | `4.2.0` (release)   | github.com/Mbed-TLS/mbedtls |
-| `libopus`  | `1.6.1` (release)      | github.com/xiph/opus — fully vendored |
+| `wolfssl` | v5.9.2 | `src/third_party/wolfssl/src` |
+| `libopus` | v1.6.1 | `src/third_party/libopus/src` |
+| `libjuice` | master | `src/third_party/libjuice/src` |
+| `libsrtp` | master | `src/third_party/libsrtp/src` |
+| `webrtc_audio_processing` | master | `src/third_party/webrtc_audio_processing/src` |
+| `googletest` | v1.12.1 | `src/third_party/googletest/src` |
 
 ---
 

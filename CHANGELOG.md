@@ -269,13 +269,14 @@ from the 0.9.0-rc1 "Deferred for 1.0.0" section have been addressed:
 
 | Platform       | Build | Test | Notes                                                                  |
 |----------------|-------|------|------------------------------------------------------------------------|
-| Windows x86_64 | PASS  | PASS | MSVC 19.43 + Ninja, primary dev env                                    |
-| Linux x86_64   | PASS  | PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                |
-| macOS arm64    | PASS  | PASS | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
-| Linux aarch64  | PASS  | PASS | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`            |
+| Windows x86_64 | ✅ PASS  | ✅ PASS | MSVC 19.43 + Ninja, primary dev env                                    |
+| Linux x86_64   | ✅ PASS  | ✅ PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                |
+| macOS arm64    | 🔶 Planned | 🔶 Planned | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
+| Linux aarch64  | 🔶 Planned | 🔶 Planned | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`            |
 
 The e2e Chrome-interop acceptance suite (`tools/run_e2e_acceptance.py`) is
-Windows-only. Case D (NimRTC real Chrome) has been verified to PASS.
+Windows-only. Case D (NimRTC real Chrome) has been verified to PASS on
+Windows x86_64.
 
 ## [0.9.0-rc1] - 2026-09-06
 

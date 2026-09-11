@@ -6,8 +6,8 @@ This script clones the WebRTC APM source into:
     src/third_party/webrtc_audio_processing/src/
 
 Then it either:
-  - Windows: invokes build/build_webrtc_apm.cmd
-  - Linux/macOS: invokes build/build_webrtc_apm.sh
+  - Windows: invokes tools/build_webrtc_apm.cmd
+  - Linux/macOS: invokes tools/build_webrtc_apm.sh
 
 WebRTC APM provides:
     - AEC:  Acoustic Echo Cancellation (desktop AEC3, mobile AECm)
@@ -133,13 +133,22 @@ def clone_source(source_dir, mirror_url, branch):
 def find_build_script(project_root):
     """Locate the appropriate build script for the current OS."""
     if platform.system() == "Windows":
-        script = project_root / "build" / "build_webrtc_apm.cmd"
+        script = project_root / "tools" / "build_webrtc_apm.cmd"
         if script.exists():
             return script, "cmd.exe"
     else:
-        script = project_root / "build" / "build_webrtc_apm.sh"
+        script = project_root / "tools" / "build_webrtc_apm.sh"
         if script.exists():
             return script, "bash"
+    # Legacy fallback: a copy may still live under build/ (gitignored, not
+    # tracked). Prefer tools/ but accept build/ for older checkouts.
+    if platform.system() == "Windows":
+        legacy = project_root / "build" / "build_webrtc_apm.cmd"
+    else:
+        legacy = project_root / "build" / "build_webrtc_apm.sh"
+    if legacy.exists():
+        print(f"[INFO] Using legacy script at {legacy}; consider moving it to tools/.")
+        return legacy, "cmd.exe" if platform.system() == "Windows" else "bash"
     return None, None
 
 
@@ -247,8 +256,8 @@ def main():
     if args.skip_build:
         print("[INFO] --skip-build: stopping after clone.")
         print("  To build:")
-        print("    Windows: build\\build_webrtc_apm.cmd")
-        print("    Linux:   bash build/build_webrtc_apm.sh")
+        print("    Windows: tools\\build_webrtc_apm.cmd")
+        print("    Linux:   bash tools/build_webrtc_apm.sh")
         return 0
 
     # Step 3: build
@@ -257,12 +266,12 @@ def main():
     if not script_path:
         print("[WARN] Build script not found.")
         print("  Expected:")
-        print("    Windows: build\\build_webrtc_apm.cmd")
-        print("    Linux:   build/build_webrtc_apm.sh")
+        print("    Windows: tools\\build_webrtc_apm.cmd")
+        print("    Linux:   tools/build_webrtc_apm.sh")
         print()
         print("  Build manually:")
-        print("    Windows: build\\build_webrtc_apm.cmd")
-        print("    Linux:   bash build/build_webrtc_apm.sh")
+        print("    Windows: tools\\build_webrtc_apm.cmd")
+        print("    Linux:   bash tools/build_webrtc_apm.sh")
         print()
         print("  Or configure NimRTC and it will auto-detect the pre-built library:")
         print(f"    cmake -B build -S {project_root}")

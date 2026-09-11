@@ -65,6 +65,20 @@ set(WOLFSSL_CHECK_PRIVATE_KEY "no" CACHE BOOL "Disable check private key")
 # <wolfssl/ssl.h> sees `HAVE_EXTENDED_MASTER_SECRET` defined.
 set(WOLFSSL_EXTENDED_MASTER_SECRET "yes" CACHE BOOL "Enable EMS (RFC 7627)" FORCE)
 
+# Enable HAVE_SECRET_CALLBACK — pulls in wolfSSL_CTX_set_keylog_callback()
+# so NimRTC's dtls_wolfssl_session.cpp can register a NSS-format keylog
+# callback via wolfSSL_CTX_set_keylog_callback().  Without this,
+# wolfSSL doesn't expose the master_secret to us, which means we can't
+# dump CLIENT_RANDOM lines for Wireshark to decrypt the DTLS stream.
+# It's only active when NIMRTC_DTLS_KEYLOG is set (the C++ code gates
+# the callback registration on the env var), so production builds pay
+# a single function-pointer write cost and otherwise zero overhead.
+# WOLFSSL_KEYLOG_EXPORT enables HAVE_SECRET_CALLBACK + SHOW_SECRETS +
+# WOLFSSL_SSLKEYLOGFILE internally (see wolfSSL CMakeLists.txt:2685).
+# We also export HAVE_SECRET_CALLBACK publicly so our dtls TU that
+# gates the callback registration on the #ifdef sees the macro.
+set(WOLFSSL_KEYLOG_EXPORT "yes" CACHE BOOL "Enable NSS keylog export (Chrome interop debug)" FORCE)
+
 # Enable KEEP_PEER_CERT so we can call wolfSSL_get_peer_certificate() after
 # a successful handshake to extract and SPKI-pin the peer cert fingerprint.
 # This is required by WebRTC's SDP "a=fingerprint" semantics (RFC 8122).
@@ -93,6 +107,15 @@ add_subdirectory(${_src_dir} wolfssl_build)
 # 其他 include <wolfssl/ssl.h> 的 .cpp（如 nimrtc_dtls）仍按未定义编译，
 # 就会找不到 wolfSSL_get_peer_certificate/wolfSSL_X509_free/wolfSSL_X509_get_der。
 target_compile_definitions(wolfssl PUBLIC KEEP_PEER_CERT)
+
+# Public re-export of HAVE_SECRET_CALLBACK so NimRTC's dtls TU sees the
+# same macro as wolfSSL itself and can gate its keylog-callback
+# registration block on `#ifdef HAVE_SECRET_CALLBACK`.  This is only
+# active when the WOLFSSL_KEYLOG_EXPORT option above is "yes" (set via
+# this CMakeLists.txt).  We deliberately don't also re-export
+# SHOW_SECRETS — that one prints plaintext secrets to stderr from
+# inside wolfSSL and we don't want it leaking into normal builds.
+target_compile_definitions(wolfssl PUBLIC HAVE_SECRET_CALLBACK)
 
 # 创建项目规范的目标名
 if(NOT TARGET nimrtc_vendor_wolfssl)

@@ -29,7 +29,10 @@
  *   WebSocket signaling server.
  */
 
-#define _CRT_SECURE_NO_WARNINGS
+/* _CRT_SECURE_NO_WARNINGS is now provided globally via
+ * cmake/NimRTCOptions.cmake → target_compile_definitions.
+ * Defining it here would trigger C4005 ("macro redefinition")
+ * under MSVC. */
 
 #ifdef _WIN32
     #include <windows.h>
@@ -669,18 +672,32 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
         constexpr int         kAudioMLine = 0;
 
         for (const auto& c : st.ice->gathered_local_candidates()) {
-            std::string stripped = c;
-            constexpr std::string_view kA = "a=candidate:";
-            constexpr std::string_view kC = "candidate:";
-            if (stripped.size() >= kA.size() &&
-                stripped.compare(0, kA.size(), kA) == 0) {
-                stripped = stripped.substr(kA.size());
-            } else if (stripped.size() >= kC.size() &&
-                       stripped.compare(0, kC.size(), kC) == 0) {
-                stripped = stripped.substr(kC.size());
-            }
-            std::string line = std::string("candidate:") + stripped;
-            emit_candidate(line, kAudioMLine, kAudioMid);
+            // libjuice emits each candidate as a single-line SDP attribute
+            // line, with the "a=candidate:" prefix and NO trailing CRLF:
+            //
+            //   a=candidate:<foundation> <component> UDP <priority>
+            //            <host> <port> typ <type> [raddr ...]
+            //
+            // We forward each line as-is to the peer.  DO NOT strip the
+            // "a=" prefix (which is what older versions of this code did)
+            // because the foundation and transport tokens immediately
+            // follow the colon — stripping "a=candidate:" (11 chars) would
+            // drop the foundation, and stripping "candidate:" (10 chars)
+            // would corrupt the foundation number.  Either form produces
+            // an "Unsupported candidate type" SDP parse error in Chrome
+            // because the line then reads as:
+            //
+            //   candidate:1 UDP ... typ host     (missing foundation)
+            //
+            // and on top of that the trailing `a=ssrc:...` line (which
+            // we inject right after this) ends up glued to the candidate
+            // line, e.g.
+            //
+            //   candidate:1 UDP ... typ hosta=ssrc:3735928559 ...
+            //
+            // Just forward the raw libjuice line; the signaling server
+            // passes JSON strings through unchanged.
+            emit_candidate(c, kAudioMLine, kAudioMid);
         }
         st.sent_local_candidates.store(true);
     } else {
@@ -740,15 +757,33 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
                     std::snprintf(buf, sizeof(buf),
                                   "a=ssrc:%u cname:nimrtc-audio\r\n",
                                   static_cast<unsigned>(kAudioSsrc));
-                    // Append at the end of the SDP.  The SDP is a CRLF-
-                    // separated blob; appending an extra line before the
-                    // terminating CRLF is conformant.
-                    // Strip any trailing \r\n, append our line, then add
-                    // a final \r\n so the result is well-formed.
-                    while (!s.empty() &&
-                           (s.back() == '\n' || s.back() == '\r')) {
-                        s.pop_back();
-                    }
+                    // Append the ssrc line to the end of the SDP.
+                    //
+                    // BUGFIX: the previous implementation ran a `while` loop
+                    // that popped EVERY trailing '\r' / '\n' before appending
+                    // `buf`.  Because `buf` itself ends with "\r\n", the
+                    // pop-then-append sequence consumed the CRLF that
+                    // separated the munger's last emitted line from our new
+                    // `a=ssrc:` line, producing malformed SDP like:
+                    //
+                    //   ...a=candidate:4 1 UDP ... 172.25.80.1 55363 typ
+                    //   hosta=ssrc:3735928559 cname:nimrtc-audio
+                    //
+                    // Chrome rejects this with "Unsupported candidate type"
+                    // because it parses the whole blob as a single
+                    // `a=candidate:` line whose `typ` token is
+                    // "hosta=ssrc:3735928559" — which isn't a known ICE
+                    // candidate type.  setRemoteDescription then fails
+                    // BEFORE the DTLS handshake ever starts, so
+                    // `audioReceived=false`, `rtpPackets=0`,
+                    // `connectionState=failed` even though NimRTC's DTLS
+                    // stack and certificate are perfectly healthy.
+                    //
+                    // The munger already terminates every emitted line
+                    // (including the last one) with "\r\n" (see
+                    // `src/modules/sdp/src/munger.cpp`), so the cleanest
+                    // fix is to simply concatenate `buf` — its own trailing
+                    // "\r\n" becomes the separator between the two lines.
                     s.append(buf);
                     std::fprintf(stderr,
                                  "[demo-p2p] appended a=ssrc:%u to answer SDP\n",
@@ -772,18 +807,11 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
             constexpr const char* kAudioMid   = "0";
             constexpr int         kAudioMLine = 0;
             for (const auto& c : st.ice->gathered_local_candidates()) {
-                std::string stripped = c;
-                constexpr std::string_view kA = "a=candidate:";
-                constexpr std::string_view kC = "candidate:";
-                if (stripped.size() >= kA.size() &&
-                    stripped.compare(0, kA.size(), kA) == 0) {
-                    stripped = stripped.substr(kA.size());
-                } else if (stripped.size() >= kC.size() &&
-                           stripped.compare(0, kC.size(), kC) == 0) {
-                    stripped = stripped.substr(kC.size());
-                }
-                std::string cand = std::string("candidate:") + stripped;
-                emit_candidate(cand, kAudioMLine, kAudioMid);
+                // libjuice already returns a complete "a=candidate:..." SDP
+                // attribute line — pass it through verbatim (see long
+                // comment in the offerer path above for why stripping the
+                // prefix corrupts the candidate).
+                emit_candidate(c, kAudioMLine, kAudioMid);
             }
             st.sent_local_candidates.store(true);
 

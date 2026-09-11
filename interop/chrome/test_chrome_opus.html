@@ -212,6 +212,7 @@ function connectWs() {
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 log("SDP", "createAnswer + setLocalDescription OK");
+                log("SDP_ANSWER_FULL", pc.localDescription.sdp);
                 window._interopResults.sdpAnswerSent = true;
                 setStatus("SDP Answer sent, waiting for ICE…");
                 sendWs({ type: "answer", sdp: answer.sdp });
@@ -222,6 +223,7 @@ function connectWs() {
 
         } else if (t === "answer") {
             log("SDP", "answer received");
+            log("SDP_ANSWER_FULL", msg.sdp);
             // In OFFERER mode the engine NEVER creates an answer — it
             // receives one from the peer.  The harness used to only
             // mark sdpAnswerSent true when the page created an answer
@@ -298,6 +300,7 @@ async function createAndSendOffer() {
     try { pc.addTransceiver("audio", { direction: "recvonly" }); } catch (_) {}
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    log("SDP_OFFER_FULL", pc.localDescription.sdp);
     log("SDP", "Offer created, sending to server…");
     if (offer.sdp.includes("111")) {
         window._interopResults.sdpOfferSeen = true;  // offer includes Opus PT 111

@@ -30,10 +30,17 @@ function(add_e2e_test name source)
     # Test exe paths differ between single-config (Linux Makefile) and multi-
     # config (MSVC) generators.  On Linux the exe lives at tests/<name>; on
     # MSVC the multi-config generator places it under tests/<CONFIG>/<name>.exe.
-    # This generator expression handles both layouts without hardcoding a
-    # single platform's path style.
+    #
+    # We used to hardcode "$<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:...>" here,
+    # but that double-prefixed the path: $<TARGET_FILE> under MSVC already
+    # resolves to "tests/Debug/test.exe" (the absolute path), and the gen-expr
+    # appended "Debug/" in front of it, producing "Debug/D:/MyOpen/.../tests/
+    # Debug/test.exe" which ctest reports as NOT_AVAILABLE.  Just use
+    # $<TARGET_FILE> directly and require `-C <config>` to be passed to ctest
+    # (or rely on the default Debug selection when invoked from VS Test
+    # Explorer).  This is the standard CMake convention for add_test().
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 
@@ -66,8 +73,9 @@ function(add_srtp_test name source)
     # Mirror the private definition on the srtp target so the test sees it.
     target_compile_definitions(${name} PRIVATE NIMRTC_USE_LIBSRTP=1)
     nimrtc_apply_options(${name})
+    # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 
@@ -75,6 +83,52 @@ endfunction()
 if(TARGET nimrtc::vendor::libsrtp)
     add_srtp_test(test_srtp test_srtp.cpp)
 endif()
+
+# ----------------------------------------------------------------------------
+# P2.4 DTLS handshake end-to-end test.
+# Two in-process DtlsSession objects (one Client, one Server) drive a real
+# wolfSSL handshake over the byte-buffer I/O pipe.  Validates the fix for
+# the KEEP_PEER_CERT + WOLFSSL_VERIFY_PEER path that lets
+# wolfSSL_get_peer_certificate() return a non-NULL X509 so the SPKI pin
+# check at the end of the handshake can compare against the SDP-declared
+# fingerprint.
+# ----------------------------------------------------------------------------
+function(add_dtls_handshake_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE nimrtc::dtls)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name})
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    nimrtc_copy_wolfssl_certs(${name})
+endfunction()
+add_dtls_handshake_test(test_dtls_handshake_e2e test_dtls_handshake_e2e.cpp)
+
+# ----------------------------------------------------------------------------
+# P2.4-DTLS-regression: handshake-flight double-emission guard.
+#
+# Exercises a single retransmit cycle in isolation and asserts that
+# take_outbound() yields at most ONE record per timer fire (the fix for
+# the Case D "intermittent Chrome failure" caused by tick() + take_outbound()
+# both calling pump_handshake()).  Runs for ~3.6 s (drives two retransmit
+# cycles: 1 s initial timer, then 2 s after the first retransmit).
+#
+# Timeout bumped to 30 s — the test itself is ~4 s, leaving headroom for
+# cold-start cert path resolution on Windows where NimRTC's wolfSSL
+# cert fallback chain walks `certs/`, `tests/wolfssl_dtls/certs/`, etc.
+# ----------------------------------------------------------------------------
+add_dtls_handshake_test(test_dtls_retransmit_no_duplicate
+                        test_dtls_retransmit_no_duplicate.cpp)
+set_tests_properties(test_dtls_retransmit_no_duplicate
+    PROPERTIES TIMEOUT 30)
 
 # ----------------------------------------------------------------------------
 # Cross-module DTLS↔SRTP timing integration test.
@@ -100,8 +154,9 @@ function(add_dtls_srtp_test name source)
     endif()
     target_compile_definitions(${name} PRIVATE NIMRTC_USE_LIBSRTP=1)
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 60)
     nimrtc_copy_wolfssl_certs(${name})
 endfunction()
@@ -128,8 +183,9 @@ function(add_dtls_gcm_aead_test name source)
         set_target_properties(${name} PROPERTIES WIN32_EXECUTABLE OFF)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 if(WIN32)
@@ -165,8 +221,9 @@ function(add_dtls_prf_kat_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 # add_dtls_prf_kat_test(test_dtls_prf_kat test_dtls_prf_kat.cpp)  # disabled: PRF moved to wolfSSL
@@ -190,8 +247,9 @@ function(add_dtls_x25519_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
 if(WIN32)
@@ -232,11 +290,9 @@ function(nimrtc_add_engine_test name source)
     set_target_properties(${name} PROPERTIES
         VS_LINK_LIBRARY_DEPENDENCIES TRUE)
     nimrtc_apply_options(${name})
-    # Hardcode the Debug path to avoid CMake 4.0's broken
-    # CTEST_CONFIGURATION_TYPE conditional marking this wrapper test as
-    # NOT_AVAILABLE when ctest is invoked without `-C <config>`.
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -266,8 +322,9 @@ function(nimrtc_add_plugin_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -308,8 +365,9 @@ function(nimrtc_add_video_plugin_adapter_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -348,8 +406,9 @@ function(nimrtc_add_engine_video_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -394,8 +453,9 @@ function(nimrtc_add_engine_codec_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -432,8 +492,9 @@ function(nimrtc_add_hw_seam_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     nimrtc_apply_options(${name})
+    # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
-        COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${name}>)
+        COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
@@ -482,4 +543,37 @@ if(NIMRTC_BUILD_BRIDGE_TESTS)
     message(STATUS "NIMRTC_BUILD_BRIDGE_TESTS=ON — adding "
                    "tests/wolfssl_dtls/bridge/ (interoperability responder)")
     add_subdirectory(wolfssl_dtls/bridge EXCLUDE_FROM_ALL)
+endif()
+
+# ---------------------------------------------------------------------------
+# P3 NVENC hardware encoder smoke test.
+#
+# Talks directly to the NVIDIA Video Codec SDK 13.1 — opens a D3D11 device,
+# configures an H.264 session, encodes 30 frames of a synthetic gradient,
+# and verifies the output bitstream is valid Annex B (00 00 00 01 prefix
+# + IDR NAL unit).  Skipped (ctest code 77) when no NVIDIA GPU / SDK is
+# detected; fails with code 1 if NVENC was detected but produced 0 bytes.
+#
+# Run on any machine with an RTX/Ampere/Hopper card and the driver installed.
+# Headers must be downloaded once into the build tree:
+#   https://developer.nvidia.com/nvidia-video-codec-sdk
+# (Header-only download: video_codec_interface_13.1.15.zip).  The
+# FindNVENC.cmake module falls back to nvEncodeAPI64.dll as the import lib
+# so the CUDA Toolkit isn't required.
+# ---------------------------------------------------------------------------
+if(NIMRTC_HW_HAVE_NVENC)
+    add_executable(test_nvenc_probe nvenc_probe.cpp)
+    target_compile_definitions(test_nvenc_probe PRIVATE NIMRTC_PLUGINS_NVENC_ON=1)
+    if(WIN32)
+        target_link_libraries(test_nvenc_probe PRIVATE d3d11)
+        target_compile_definitions(test_nvenc_probe PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    target_include_directories(test_nvenc_probe PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${NVENC_INCLUDE_DIR}")
+    nimrtc_apply_options(test_nvenc_probe)
+    # See add_e2e_test() for the rationale on the COMMAND expression.
+    add_test(NAME test_nvenc_probe
+        COMMAND $<TARGET_FILE:test_nvenc_probe>)
+    set_tests_properties(test_nvenc_probe PROPERTIES TIMEOUT 60)
 endif()

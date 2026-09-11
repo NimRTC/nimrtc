@@ -14,12 +14,17 @@
 #   - Transient Suppression (keyboard, mouse clicks)
 #
 # IMPORTANT: This module is pre-built separately with Meson (the upstream
-# CMakeLists.txt is incomplete and Google uses GN). The build script is:
-#     build/build_webrtc_apm.cmd  (Windows)
-#     build/build_webrtc_apm.sh   (Linux/macOS — see docs)
+# CMakeLists.txt is incomplete and Google uses GN). The canonical build
+# script lives at tools/build_webrtc_apm.cmd (Windows) or
+# tools/build_webrtc_apm.sh (Linux/macOS) and is invoked via:
 #
-# This CMakeLists only locates the pre-built static libraries and exposes
-# the include directories needed by audio3a.
+#     python tools/fetch_webrtc_apm.py    # clone + meson build (one-shot)
+#
+# On Windows the legacy path build\build_webrtc_apm.cmd is also recognised
+# by the Python helper but is gitignored and will be removed.  The
+# audio3a module's CMakeLists only locates the resulting pre-built static
+# libraries below; it does not invoke the build script itself.
+#
 # =============================================================================
 
 cmake_minimum_required(VERSION 3.22)

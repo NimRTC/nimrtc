@@ -145,18 +145,20 @@ function(nimrtc_add_test source)
     target_include_directories(${test_target} PRIVATE ${test_includes})
 
     if(DEFINED module_name)
-        # Module-level test. Use generator expression so the test command
-        # works on both single-config (Linux Makefile → tests/<target>)
-        # and multi-config (Windows MSVC → tests/<CONFIG>/<target>.exe)
-        # generators. The trailing `.exe` is harmless on POSIX (the
-        # binary just doesn't have it, but the binary is resolved by
-        # `$<TARGET_FILE:...>` which drops the suffix on non-Windows).
+        # Module-level test.  Use $<TARGET_FILE> directly — it resolves to
+        # `tests/<target>` on single-config (Linux Makefile) and
+        # `tests/<CONFIG>/<target>.exe` on multi-config (Windows MSVC).
+        # Earlier revisions prefixed "Debug/" via gen-expr, which doubled
+        # the path under MSVC ($<TARGET_FILE> already includes the config
+        # subdir) and made every wrapper test resolve to NOT_AVAILABLE.
+        # Rely on `-C <config>` being passed to ctest (the standard CMake
+        # convention) for multi-config builds.
         add_test(NAME ${test_name}
-            COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${test_target}>)
+            COMMAND $<TARGET_FILE:${test_target}>)
     else()
-        # Top-level test — same generator expression.
+        # Top-level test — same convention.
         add_test(NAME ${test_name}
-            COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${test_target}>)
+            COMMAND $<TARGET_FILE:${test_target}>)
     endif()
 
     # gtest_discover_tests where supported

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -1576,7 +1577,31 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
             " len=" + std::to_string(pkt.size()) +
             " state=" + std::string(nimrtc::dtls::DtlsSession::state_name(impl_->dtls->state())));
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
+        // The ITransport::RecvCallback interface carries only the payload, no
+        // source address.  For DTLS over ICE there is only one peer at a time
+        // (the selected ICE candidate pair), so we derive the peer address from
+        // the ICE transport's current selected remote endpoint.  This is correct
+        // for both the initial ClientHello and all subsequent handshake records.
+        //
+        // NOTE: `ice_t_->remote_addr()` returns a text-encoded "host:port"
+        // string packed into a plugins::Addr structure.  The DtlsAddr uses
+        // plain "host" + port fields — the parsing below extracts those fields.
         nimrtc::dtls::DtlsAddr from;
+        if (ice_t_) {
+            plugins::Addr raw = ice_t_->remote_addr();
+            // Text encoding: "host\0port\0" packed in raw.data[0..len-1].
+            std::string_view sv(reinterpret_cast<const char*>(raw.data), raw.len);
+            std::size_t colon = sv.find(':');
+            if (colon != std::string_view::npos) {
+                from.host.assign(sv.data(), colon);
+                auto port_str = sv.substr(colon + 1);
+                if (!port_str.empty()) {
+                    // NOLINTNEXTLINE(cert-env33-c): port is always numeric here
+                    int p = std::atoi(std::string(port_str).c_str());
+                    from.port = static_cast<std::uint16_t>(p);
+                }
+            }
+        }
         impl_->dtls->feed_inbound(bytes, from);
         // Only flush outbound DTLS records once ICE has selected a pair,
         // mirroring the gate in tick().  Without this, the first inbound
@@ -1594,7 +1619,21 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     // the receiving side can complete its state machine.
     if (b0 == nimrtc::dtls::kDtlsChangeCipherSpec && impl_->dtls) {
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
+        // Same peer-address derivation as the DTLS path above.
         nimrtc::dtls::DtlsAddr from;
+        if (ice_t_) {
+            plugins::Addr raw = ice_t_->remote_addr();
+            std::string_view sv(reinterpret_cast<const char*>(raw.data), raw.len);
+            std::size_t colon = sv.find(':');
+            if (colon != std::string_view::npos) {
+                from.host.assign(sv.data(), colon);
+                auto port_str = sv.substr(colon + 1);
+                if (!port_str.empty()) {
+                    int p = std::atoi(std::string(port_str).c_str()); // NOLINT(cert-env33-c)
+                    from.port = static_cast<std::uint16_t>(p);
+                }
+            }
+        }
         impl_->dtls->feed_inbound(bytes, from);
         if (is_ice_connected()) {
             drain_dtls();

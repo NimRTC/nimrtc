@@ -29,8 +29,8 @@
   "rtp_name": "webrtc",
   // JitterBuffer: "adaptive" = adaptive depth to track network jitter.
   "jb_name": "adaptive",
-  // Audio 3A: "webrtc" = WebRTC APM (AEC / ANR / AGC). "" = disable.
-  "audio3a_name": "webrtc",
+  // Audio 3A: "webrtc_apm" = real WebRTC Audio Processing Module (AEC / ANS / AGC / VAD). "" = disable.
+  "audio3a_name": "webrtc_apm",
   // Audio codec: "opus" is the primary; "pcmu"/"pcma" for legacy interop.
   "codec_name": "opus",
   // Bandwidth estimator: "aimd" (P1); "googcc" (P3).

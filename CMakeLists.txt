@@ -31,6 +31,47 @@ option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
 option(NIMRTC_WARNINGS_AS_ERRORS "Treat warnings as errors"        ON)
 
+# -----------------------------------------------------------------------------
+# HW codec plugin switches (default OFF — opt-in per host platform)
+# -----------------------------------------------------------------------------
+# When a flag is ON, NimRTC builds the corresponding plugin object file and
+# wires it into the `nimrtc_h264` library's HW backend table.  When OFF,
+# the backend entry is still registered (so the selector compiles cleanly)
+# but its `available()` always returns false and `create()` falls back to
+# the stub codec.
+#
+# Per-platform availability (compile-time):
+#   - NVENC        : Windows + Linux (NVIDIA drivers)
+#   - AMF          : Windows (AMD drivers)
+#   - QSV/libvpl   : Windows + Linux (Intel GPU + driver)
+#   - DXVA         : Windows only
+#   - VA-API       : Linux only
+#   - NVDEC        : Windows + Linux (decoupled from NVENC — driver-only)
+#
+# Each switch is a *runtime* decision (you can flip it on/off without
+# touching CMake) — see HW codec plugin docs.  The CMake flag controls
+# whether the SDK is even *attempted* to be located on the build host.
+# -----------------------------------------------------------------------------
+option(NIMRTC_PLUGINS_NVENC  "Build NVIDIA NVENC H.264 encoder + NVDEC decoder"        OFF)
+option(NIMRTC_PLUGINS_AMF    "Build AMD AMF H.264 encoder"                             OFF)
+option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 encoder"  OFF)
+option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                      OFF)
+option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder + decoder (Linux Intel/AMD)"  OFF)
+option(NIMRTC_PLUGINS_NVDEC  "Build NVIDIA NVDEC H.264 decoder (without NVENC)"        OFF)
+option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                 OFF)
+
+# Helper that prints a one-liner summary at the end of CMake configure.
+set(_nimrtc_hw_summary "")
+foreach(_hw NVENC AMF QSV DXVA VAAPI NVDEC OPENH264)
+    if(NIMRTC_PLUGINS_${_hw})
+        set(_nimrtc_hw_summary "${_nimrtc_hw_summary} ${_hw}")
+    endif()
+endforeach()
+if(_nimrtc_hw_summary STREQUAL "")
+    set(_nimrtc_hw_summary "(none)")
+endif()
+message(STATUS "  HW plugins enabled:${_nimrtc_hw_summary}")
+
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a
 # Debug /MDd consumer it trips LNK2038 mismatch errors.  Override the
@@ -81,6 +122,12 @@ endif()
 include(NimRTCOptions)        # sets C++ standard + warnings + visibility
 include(NimRTCVendored)       # declares vendor library targets (no-op if unused)
 include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
+
+# HW codec plugin SDK detection (NVENC/AMF/QSV/DXVA/VA-API/NVDEC).
+# Silent when the relevant NIMRTC_PLUGINS_<NAME>=OFF; otherwise probes
+# standard install paths and reports "not found" without failing the build.
+include(NimRTHwPlugins)
+nimrtc_locate_hw_plugins()
 
 # Vendored third-party sources — only added when NIMRTC_VENDORED is ON.
 # When OFF the targets are still declared by NimRTCVendored.cmake as stubs.

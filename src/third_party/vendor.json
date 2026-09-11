@@ -1,0 +1,117 @@
+{
+  "_comment_top": "NimRTC vendor manifest. Locks every third-party dependency to a specific commit/tag/SHA so reproducible builds are possible without 280+ MB of vendored source. Migration is in progress; see docs/plan/vendor-migration.md.",
+
+  "schema_version": "1",
+  "policy": {
+    "_comment_policy": "Submodules with pinned SHAs are the source of truth. This file is read by tools/check_vendor.py to verify local submodules match. Update by running `python tools/vendor_update.py <name>`.",
+    "hash_algorithm": "sha256",
+    "lockfile_format": "gitmodules+manifest"
+  },
+
+  "vendors": [
+    {
+      "name": "wolfssl",
+      "upstream_url": "https://github.com/wolfSSL/wolfssl.git",
+      "upstream_version": "v5.9.2",
+      "commit_sha": "ac01707f552c611fbd135cc723b2682b3e7f80f2",
+      "submodule_path": "src/third_party/wolfssl/src",
+      "license": "GPL-2.0-only OR (Apache-2.0 AND MIT)",
+      "build": "add_subdirectory(src) — see src/third_party/wolfssl/CMakeLists.txt",
+      "notes": "DTLS production backend. Submodule path is /src because CMakeLists.txt add_subdirectory(src wolfssl_build) is the layout wolfSSL ships.",
+      "size_estimate": "123 MB / 3.6k files"
+    },
+    {
+      "name": "webrtc_audio_processing",
+      "upstream_url": "https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git",
+      "upstream_version": "master",
+      "commit_sha": "d0569cfa50c1858ee279d77b3fc8870be6902441",
+      "submodule_path": "src/third_party/webrtc_audio_processing/src",
+      "license": "BSD-3-Clause",
+      "build": "external (Meson) — see tools/build_webrtc_apm.{cmd,sh}; CMake only consumes pre-built artifacts under build_meson/",
+      "notes": "WebRTC APM. Built out-of-tree via Meson (not CMake) because upstream is Meson-first. After clone, run tools/build_webrtc_apm.sh (Linux/macOS) or tools/build_webrtc_apm.cmd (Windows).",
+      "size_estimate": "121 MB / 2.7k files"
+    },
+    {
+      "name": "mbedtls",
+      "upstream_url": "https://github.com/Mbed-TLS/mbedtls.git",
+      "upstream_version": "4.2.0",
+      "commit_sha": "023aca86208a4f1e602b4098fb46d936adb4657a",
+      "submodule_path": "src/third_party/mbedtls/src",
+      "license": "Apache-2.0",
+      "build": "HISTORICAL ONLY — DTLS production path migrated to wolfSSL. CMake wrapper at src/third_party/mbedtls/CMakeLists.txt only exposes headers via INTERFACE.",
+      "notes": "No longer linked into nimrtc_dtls. Retained as archival source per CHANGELOG.md [0.9.0-rc1] Deferred-for-1.0 note; full removal is its own PR.",
+      "size_estimate": "37 MB / 2k files",
+      "submodule_optional": true
+    },
+    {
+      "name": "libopus",
+      "upstream_url": "https://github.com/xiph/opus.git",
+      "upstream_version": "v1.6.1",
+      "commit_sha": "7030c73010a3c1372e92eb4cc2f0ced3080a9c07",
+      "submodule_path": "src/third_party/libopus/src",
+      "license": "BSD-3-Clause",
+      "build": "add_subdirectory(src) — see src/third_party/libopus/CMakeLists.txt",
+      "notes": "Audio codec.",
+      "size_estimate": "29 MB / 483 files"
+    },
+    {
+      "name": "libjuice",
+      "upstream_url": "https://github.com/paullouisageneau/libjuice.git",
+      "upstream_version": "master",
+      "commit_sha": "77daa8befd828046169adbb012d8de928bfdcdd4",
+      "submodule_path": "src/third_party/libjuice/src",
+      "license": "MIT",
+      "build": "add_subdirectory(src) — see src/third_party/libjuice/CMakeLists.txt",
+      "notes": "ICE transport.",
+      "size_estimate": "0.5 MB / 78 files"
+    },
+    {
+      "name": "libsrtp",
+      "upstream_url": "https://github.com/cisco/libsrtp.git",
+      "upstream_version": "master",
+      "commit_sha": "2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2",
+      "submodule_path": "src/third_party/libsrtp/src",
+      "license": "BSD-3-Clause",
+      "build": "add_subdirectory(src) — see src/third_party/libsrtp/CMakeLists.txt",
+      "notes": "SRTP crypto with CRYPTO_LIBRARY=internal.",
+      "size_estimate": "2.9 MB / 2.4k files"
+    },
+    {
+      "name": "googletest",
+      "upstream_url": "https://github.com/google/googletest.git",
+      "upstream_version": "v1.12.1",
+      "commit_sha": "58d77fa8070e8cec2dc1ed015d66b454c8d78850",
+      "submodule_path": "src/third_party/googletest/src",
+      "license": "BSD-3-Clause",
+      "build": "add_subdirectory(src) — see src/third_party/googletest/CMakeLists.txt",
+      "notes": "Test framework. Could be replaced by FetchContent later but currently vendored for offline builds.",
+      "size_estimate": "3.4 MB / 205 files",
+      "submodule_optional": true
+    },
+    {
+      "name": "nlohmann_json",
+      "upstream_url": "https://github.com/nlohmann/json.git",
+      "upstream_version": "v3.11.3",
+      "commit_sha": "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03",
+      "submodule_path": "src/third_party/nlohmann_json/src",
+      "license": "MIT",
+      "build": "Single-header INTERFACE library — only the header is needed. The 3 .h files in src/ are already trimmed; submodule only adds ~10 KB.",
+      "notes": "Single-header JSON. Trivial size, may stay vendored.",
+      "size_estimate": "0.9 MB / 3 files (header-only)",
+      "submodule_optional": true
+    }
+  ],
+
+  "tools": [
+    {
+      "name": "tools/check_vendor.py",
+      "_comment": "Verifies every submodule SHA matches this manifest. Add to CI.",
+      "_status": "PLANNED — see docs/plan/vendor-migration.md §4"
+    },
+    {
+      "name": "tools/vendor_update.py",
+      "_comment": "Pulls a new upstream tag, updates the submodule, and rewrites vendor.json.",
+      "_status": "PLANNED"
+    }
+  ]
+}

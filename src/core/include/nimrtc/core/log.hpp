@@ -81,3 +81,29 @@ inline void critical(std::string_view m) noexcept{ Logger::instance().critical(m
 inline void set_sink(SinkPtr s) noexcept         { Logger::instance().set_sink(std::move(s)); }
 
 } // namespace nimrtc::core::log
+
+// -----------------------------------------------------------------------------
+// Convenience macros — `NIMRTC_LOG_<LEVEL>(fmt, args...)` builds a string via
+// a local std::ostringstream and forwards to the level-specific log function.
+// These were originally defined in the Video Plugin SDK; centralised here so
+// every backend (AMF, NVENC, VA-API, DXVA, OpenH264) uses the same macros.
+//
+// Usage:
+//     NIMRTC_LOG_INFO("opened session {}x{}", w, h);
+//     NIMRTC_LOG_ERROR("encode failed: status={}", code);
+// -----------------------------------------------------------------------------
+#include <sstream>
+
+#define NIMRTC_LOG_IMPL(level, expr)                                          \
+    do {                                                                        \
+        std::ostringstream _nimrtc_log_oss;                                     \
+        _nimrtc_log_oss << expr;                                               \
+        ::nimrtc::core::log::Logger::instance().log(level, _nimrtc_log_oss.str());\
+    } while (0)
+
+#define NIMRTC_LOG_TRACE(expr)   NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Trace,    expr)
+#define NIMRTC_LOG_DEBUG(expr)   NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Debug,    expr)
+#define NIMRTC_LOG_INFO(expr)    NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Info,     expr)
+#define NIMRTC_LOG_WARN(expr)    NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Warn,     expr)
+#define NIMRTC_LOG_ERROR(expr)   NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Error,    expr)
+#define NIMRTC_LOG_CRITICAL(expr)NIMRTC_LOG_IMPL(::nimrtc::core::log::Level::Critical, expr)

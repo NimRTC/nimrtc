@@ -20,7 +20,7 @@
  *   1  ICE never Connected
  */
 
-#define _CRT_SECURE_NO_WARNINGS
+/* _CRT_SECURE_NO_WARNINGS is provided globally by cmake/NimRTCOptions.cmake. */
 
 #include <atomic>
 #include <chrono>
@@ -148,13 +148,15 @@ int run_loopback(double seconds) {
         if (sa == "connected" || sa == "completed") a_ice_up = 1;
         if (sb == "connected" || sb == "completed") b_ice_up = 1;
 
-        if (last_a_state != (int)(sa == "connected" || sa == "completed")) {
+        const int a_connected = static_cast<int>(sa == "connected" || sa == "completed");
+        if (last_a_state != a_connected) {
             std::fprintf(stderr, "[A ice] %s\n", sa.c_str());
-            last_a_state = (int)(sa == "connected" || sa == "completed");
+            last_a_state = a_connected;
         }
-        if (last_b_state != (int)(sb == "connected" || sb == "completed")) {
+        const int b_connected = static_cast<int>(sb == "connected" || sb == "completed");
+        if (last_b_state != b_connected) {
             std::fprintf(stderr, "[B ice] %s\n", sb.c_str());
-            last_b_state = (int)(sb == "connected" || sb == "completed");
+            last_b_state = b_connected;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

@@ -1,5 +1,28 @@
 # NimRTC wolfSSL 集成方案
 
+> **SUPERSEDED — historical design draft.**
+>
+> This document was authored before the wolfSSL-only migration landed in
+> `src/modules/dtls/`.  The actual current state is:
+>
+> - `dtls.cpp` and `dtls_wolfssl.cpp` **do not exist any more**; the
+>   only DTLS provider is `DtlsSessionWolfSSL` defined in
+>   `src/modules/dtls/src/dtls_wolfssl_session.cpp` (and its header
+>   `dtls_wolfssl_session.hpp`).  See CHANGELOG.md `[0.9.0-rc1]` for
+>   the migration history.
+> - Nim is no longer the implementation language; NimRTC is pure C++20.
+>   References to `nimrtc_dtls.nim` and the Nim FFI bindings below are
+>   obsolete.
+> - The "保留 / 回滚用" preservation plan was never executed; the
+>   hand-written DTLS state machine was removed because it could not
+>   match BoringSSL's strict parsing.  This document is kept for
+>   archaeology only — do not follow its build steps or directory
+>   layout.
+>
+> For the current wolfSSL configuration see
+> `src/third_party/wolfssl/CMakeLists.txt` and the public headers
+> under `src/modules/dtls/include/nimrtc/dtls/`.
+
 ## 问题根源
 
 NimRTC 当前 dtls.cpp 实现与 Chrome/BoringSSL 握手失败，原因是：

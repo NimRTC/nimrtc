@@ -6,17 +6,90 @@
  * least one entry (the stub), plus conditionally-compiled entries for
  * the platform HW encoder.
  *
- * The actual HW backends (MediaCodec / VideoToolbox / NVENC / AMF /
- * VAAPI / QSV / DXVA / V4l2 / MMAL) live in OUT-OF-TREE plugins; this
- * file declares the probe lambdas and creates the dispatch entries for
- * them. A future PR may inline these when the SDKs are available in
- * the vendor tree.
+ * The actual HW backends live in individual source files under
+ * src/modules/h264/src/:
+ *   - nvenc_encoder.cpp  : NVIDIA NVENC + NVDEC   (NIMRTC_PLUGINS_NVENC_ON)
+ *   - amf_encoder.cpp    : AMD AMF                (NIMRTC_PLUGINS_AMF_ON, Win)
+ *   - qsv_encoder.cpp    : Intel QSV / libvpl     (NIMRTC_PLUGINS_QSV_ON)
+ *   - dxva_decoder.cpp   : Microsoft DXVA/MF        (NIMRTC_PLUGINS_DXVA_ON, Win)
+ *   - vaapi_encoder.cpp  : Linux VA-API           (NIMRTC_PLUGINS_VAAPI_ON, Linux)
+ *   - openh264_encoder.cpp: OpenH264              (NIMRTC_PLUGINS_OPENH264_ON)
+ *
+ * Each source file exposes two symbols (stub when SDK absent):
+ *   bool    <backend>_h264_available() noexcept;
+ *   unique_ptr<IVideoCodec> make_<backend>_h264_codec(VideoCodecConfig);
+ *
+ * This file wires those symbols into the HwVideoBackendRegistry entries.
+ * Priority values follow Sunshine's table.
  */
 
 #include <nimrtc/h264/hw_backends.hpp>
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/h264/codec_plugin.hpp>
+#include <nimrtc/plugins/video_codec.hpp>
+
+// Forward-declare the HW backend entry points exported by each source file.
+// When the corresponding NIMRTC_PLUGINS_<NAME>_ON macro is defined, the
+// source file compiles the real implementation; otherwise the stub (returning
+// nullptr / false) is used.
+
+#if defined(NIMRTC_PLUGINS_NVENC_ON)
+extern bool nvenc_h264_available() noexcept;
+extern std::unique_ptr<nimrtc::plugins::IVideoCodec>
+make_nvenc_h264_codec(nimrtc::plugins::VideoCodecConfig cfg);
+extern bool nvdec_h264_available() noexcept;
+extern std::unique_ptr<nimrtc::plugins::IVideoCodec>
+make_nvdec_h264_codec(nimrtc::plugins::VideoCodecConfig cfg);
+#define HAS_NVENC 1
+#else
+#define HAS_NVENC 0
+#endif
+
+#if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
+extern bool amf_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_amf_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_AMF 1
+#else
+#define HAS_AMF 0
+#endif
+
+#if defined(NIMRTC_PLUGINS_QSV_ON)
+extern bool qsv_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_qsv_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_QSV 1
+#else
+#define HAS_QSV 0
+#endif
+
+#if defined(NIMRTC_PLUGINS_DXVA_ON) && defined(_WIN32)
+extern bool dxva_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_dxva_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_DXVA 1
+#else
+#define HAS_DXVA 0
+#endif
+
+#if defined(NIMRTC_PLUGINS_VAAPI_ON) && defined(__linux__)
+extern bool vaapi_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_vaapi_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_VAAPI 1
+#else
+#define HAS_VAAPI 0
+#endif
+
+#if defined(NIMRTC_PLUGINS_OPENH264_ON)
+extern bool openh264_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_openh264_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_OPENH264 1
+#else
+#define HAS_OPENH264 0
+#endif
 
 namespace nimrtc::h264 {
 
@@ -69,12 +142,10 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// OpenH264 software (placeholder) —registers with low priority but high
-// enough to beat the stub when libopenh264 is linked in. Available only
-// when NIMRTC_H264_OPENH264_ON is defined at build time.
+// OpenH264 software —high enough to beat the stub when linked in.
 // ---------------------------------------------------------------------------
 
-#ifdef NIMRTC_H264_OPENH264_ON
+#if HAS_OPENH264
 plugins::VideoEncoderBackend make_openh264_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "openh264_h264";
@@ -84,25 +155,22 @@ plugins::VideoEncoderBackend make_openh264_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = false;
     be.zero_copy_supported = false;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { return true; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return openh264_h264_available();
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        // Real OpenH264 binding will live in a separate out-of-tree plugin
-        // until libopenh264 is added to the vendor tree. Stub for now.
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_openh264_h264_codec(std::move(cfg));
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// NVENC —NVIDIA. Only compiled in on Windows + Linux x86_64. Probe uses
-// the runtime NVENC API (NvEncCreateInstance) —kept inline here for
-// brevity; production would defer to the out-of-tree nvenc plugin.
+// NVENC —NVIDIA. Priority 450. available() probes the SDK directly.
 // ---------------------------------------------------------------------------
 
-#if (defined(_WIN32) || defined(__linux__)) && defined(NIMRTC_PLUGINS_NVENC_ON)
+#if HAS_NVENC
 plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "nvenc_h264";
@@ -112,27 +180,38 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool {
-        // Real probe: try NvEncOpenEncodeSessionEx. Out-of-tree plugin
-        // overrides this; here we return false so the selector falls
-        // through to the next backend when the SDK isn't linked.
-        (void)cfg;
-        return false;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return nvenc_h264_available();
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        // Real NVENC binding is out-of-tree. Fall back to the stub so the
-        // engine can still run while the plugin is being loaded.
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_nvenc_h264_codec(std::move(cfg));
+    };
+    return be;
+}
+
+plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "nvdec_h264";
+    be.description    = "NVIDIA NVDEC H.264 decoder";
+    be.backend        = plugins::HwBackend::Nvdec;
+    be.priority       = 430;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = true;
+    be.zero_copy_supported = true;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return nvdec_h264_available();
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoCodec> {
+        return make_nvdec_h264_codec(std::move(cfg));
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// VideoToolbox —Apple. Probe uses VTCompressionSessionCreate to verify
-// the HW is reachable. Compiled only when __APPLE__ is defined.
+// VideoToolbox —Apple. Priority 400. macOS only.
 // ---------------------------------------------------------------------------
 
 #ifdef __APPLE__
@@ -145,21 +224,23 @@ plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        // VTCompressionSessionCreate probe — TODO: implement when targeting macOS.
+        return false;
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return nullptr;   // TODO: wire VideoToolbox encoder when macOS target
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// VA-API —Linux Intel/AMD. Conditional on __linux__ and NIMRTC_PLUGINS_VAAPI_ON.
+// VA-API —Linux Intel/AMD. Priority 360. available() probes vaInitialize.
 // ---------------------------------------------------------------------------
 
-#if defined(__linux__) && defined(NIMRTC_PLUGINS_VAAPI_ON)
+#if HAS_VAAPI
 plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "vaapi_h264";
@@ -169,18 +250,19 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return vaapi_h264_available();
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_vaapi_h264_codec(std::move(cfg));
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// MediaCodec —Android. Conditional on __ANDROID__.
+// MediaCodec —Android. Priority 420. Android only.
 // ---------------------------------------------------------------------------
 
 #ifdef __ANDROID__
@@ -193,21 +275,24 @@ plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        // Android MediaCodec: check if MediaCodecList returns an H.264 encoder.
+        // TODO: implement when targeting Android.
+        return false;
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return nullptr;   // TODO: wire Android MediaCodec when Android target
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// AMF —Windows AMD. Conditional on _WIN32 + NIMRTC_PLUGINS_AMF_ON.
+// AMF —Windows AMD. Priority 380. available() probes AMFInit.
 // ---------------------------------------------------------------------------
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_AMF_ON)
+#if HAS_AMF
 plugins::VideoEncoderBackend make_amf_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "amf_h264";
@@ -217,21 +302,22 @@ plugins::VideoEncoderBackend make_amf_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return amf_h264_available();
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_amf_h264_codec(std::move(cfg));
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// Intel Quick Sync —Windows. Conditional on _WIN32 + NIMRTC_PLUGINS_QSV_ON.
+// Intel Quick Sync —Windows + Linux. Priority 340. available() probes MFXInit.
 // ---------------------------------------------------------------------------
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_QSV_ON)
+#if HAS_QSV
 plugins::VideoEncoderBackend make_qsv_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "quicksync_h264";
@@ -241,23 +327,23 @@ plugins::VideoEncoderBackend make_qsv_encoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return qsv_h264_available();
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_qsv_h264_codec(std::move(cfg));
     };
     return be;
 }
 #endif
 
 // ---------------------------------------------------------------------------
-// DXVA / MediaFoundation decoder —Windows fallback when no encoder is
-// available but the GPU can still decode. Lower priority than encoder HW
-// because decode is rarely the bottleneck; priority matches WebRTC.
+// DXVA / MediaFoundation decoder —Windows fallback. Priority 320.
+// available() probes CLSID_CMSH264DecoderMFT COM creation.
 // ---------------------------------------------------------------------------
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_DXVA_ON)
+#if HAS_DXVA
 plugins::VideoDecoderBackend make_dxva_decoder_backend() {
     plugins::VideoDecoderBackend be;
     be.id             = "dxva_h264";
@@ -267,35 +353,12 @@ plugins::VideoDecoderBackend make_dxva_decoder_backend() {
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
     be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
-    be.create = [](plugins::VideoCodecConfig cfg)
-                -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return dxva_h264_available();
     };
-    return be;
-}
-#endif
-
-// ---------------------------------------------------------------------------
-// NVDEC decoder —NVIDIA (Win/Linux). Priority 360.
-// ---------------------------------------------------------------------------
-
-#if (defined(_WIN32) || defined(__linux__)) && defined(NIMRTC_PLUGINS_NVENC_ON)
-plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
-    plugins::VideoDecoderBackend be;
-    be.id             = "nvdec_h264";
-    be.description    = "NVIDIA NVDEC H.264 decoder";
-    be.backend        = plugins::HwBackend::Nvdec;
-    be.priority       = 430;
-    be.codec_kind     = plugins::VideoCodecKind::kH264;
-    be.is_hw          = true;
-    be.zero_copy_supported = true;
-    be.available = [](const plugins::VideoCodecConfig& cfg)
-                    noexcept -> bool { (void)cfg; return false; };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return make_dxva_h264_codec(std::move(cfg));
     };
     return be;
 }
@@ -316,11 +379,11 @@ void register_default_video_backends() noexcept {
     reg.register_encoder(make_stub_encoder_backend());
     reg.register_decoder(make_stub_decoder_backend());
 
-#ifdef NIMRTC_H264_OPENH264_ON
+#if HAS_OPENH264
     reg.register_encoder(make_openh264_encoder_backend());
 #endif
 
-#if (defined(_WIN32) || defined(__linux__)) && defined(NIMRTC_PLUGINS_NVENC_ON)
+#if HAS_NVENC
     reg.register_encoder(make_nvenc_encoder_backend());
     reg.register_decoder(make_nvdec_decoder_backend());
 #endif
@@ -329,7 +392,7 @@ void register_default_video_backends() noexcept {
     reg.register_encoder(make_videotoolbox_encoder_backend());
 #endif
 
-#if defined(__linux__) && defined(NIMRTC_PLUGINS_VAAPI_ON)
+#if HAS_VAAPI
     reg.register_encoder(make_vaapi_encoder_backend());
 #endif
 
@@ -337,15 +400,15 @@ void register_default_video_backends() noexcept {
     reg.register_encoder(make_mediacodec_encoder_backend());
 #endif
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_AMF_ON)
+#if HAS_AMF
     reg.register_encoder(make_amf_encoder_backend());
 #endif
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_QSV_ON)
+#if HAS_QSV
     reg.register_encoder(make_qsv_encoder_backend());
 #endif
 
-#if defined(_WIN32) && defined(NIMRTC_PLUGINS_DXVA_ON)
+#if HAS_DXVA
     reg.register_decoder(make_dxva_decoder_backend());
 #endif
 

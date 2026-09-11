@@ -1,15 +1,19 @@
 /**
  * @file src/modules/audio3a/src/audio3a_plugin.cpp
- * @brief PluginAdapter + NullPluginFactory implementation.
+ * @brief PluginAdapter + NullPluginFactory / WebRtcPluginFactory implementation.
  *
  * Per ADR-001:
  *   "Concrete implementations (built-in 'standard' plugins) live in their
  *    respective src/modules/. Those modules link nimrtc_plugins PUBLIC so
  *    users who link any module transitively get the interface headers."
  *
- * This file registers NullPluginFactory with core::PluginRegistry under the
- * id "webrtc" so EngineConfig::audio3a_name = "webrtc" (default) resolves to
- * a PluginAdapter wrapping NullAudio3A.
+ * This file registers two built-in audio3a factories with core::PluginRegistry:
+ *   - "webrtc":     NullPluginFactory  → NullAudio3A (passthrough stub)
+ *   - "webrtc_apm": WebRtcPluginFactory → WebRtcAudio3A (real WebRTC APM)
+ *
+ * The engine default `EngineConfig::audio3a_name = "webrtc_apm"` resolves to
+ * the real WebRTC APM-backed implementation. To revert to the stub pass
+ * `engine.cfg.audio3a_name = "webrtc"` instead.
  *
  * @note P1.1 (R2). Engine-side wiring (replace direct `audio3a::NullAudio3A`
  *       instantiation with registry lookup) is a separate step.
@@ -298,11 +302,11 @@ void PluginAdapter::set_post_process_tap(plugins::PcmTapCallback    tap,
 // ---------------------------------------------------------------------------
 
 std::string_view NullPluginFactory::id() const noexcept {
-    return "webrtc";   // matches EngineConfig::audio3a_name default
+    return "webrtc";   // retained for back-compat; EngineConfig default switched to "webrtc_apm"
 }
 
 std::string_view NullPluginFactory::display_name() const noexcept {
-    return "Audio 3A — WebRTC APM (stub: NullAudio3A until NIMRTC_VENDOR_WEBRTC_APM=ON)";
+    return "Audio 3A — Null stub (Passthrough; back-compat alias for EngineConfig.audio3a_name=\"webrtc\")";
 }
 
 plugins::IAudio3A* NullPluginFactory::create() const {
@@ -325,7 +329,7 @@ std::string_view WebRtcPluginFactory::id() const noexcept {
 }
 
 std::string_view WebRtcPluginFactory::display_name() const noexcept {
-    return "Audio 3A — WebRTC APM (AEC/ANS/AGC/VAD)";
+    return "Audio 3A — WebRTC APM (AEC/ANS/AGC2/VAD/HPF) — default since 0.9.0+";
 }
 
 plugins::IAudio3A* WebRtcPluginFactory::create() const {

@@ -29,7 +29,8 @@
   "rtp_name": "webrtc",
   "jb_name": "adaptive",
   // 3A is often already applied on the broadcaster side. "" disables receive-side 3A.
-  "audio3a_name": "webrtc",
+  // WebRTC APM (real: AEC / ANS / AGC / VAD via webrtc-audio-processing).
+  "audio3a_name": "webrtc_apm",
   "codec_name": "opus",
   "bwe_name": "aimd",
   "scheduler_name": "default",

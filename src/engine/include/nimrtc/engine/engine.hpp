@@ -22,7 +22,7 @@
  *   cfg.rtp_name        = "webrtc";    // nimrtc::rtp::register_default_plugins()
  *   cfg.sdp_name        = "webrtc";    // nimrtc::sdp::register_default_plugins()
  *   cfg.jb_name         = "adaptive";   // nimrtc::jb::register_default_plugins()
- *   cfg.audio3a_name    = "webrtc";    // nimrtc::audio3a::register_default_plugins()
+ *   cfg.audio3a_name    = "webrtc_apm";// nimrtc::audio3a::register_default_plugins()
  *   cfg.codec_name      = "opus";      // nimrtc::opus::register_default_plugins() (if enabled)
  *   cfg.bwe_name        = "aimd";      // nimrtc::bwe::register_default_plugins()
  *   cfg.scheduler_name   = "strict_priority"; // nimrtc::sched::register_default_plugins()
@@ -130,8 +130,14 @@ struct EngineConfig {
     /** IJB plugin name. Default = "adaptive". */
     std::string_view jb_name = "adaptive";
 
-    /** IAudio3A plugin name. Default = "webrtc". */
-    std::string_view audio3a_name = "webrtc";
+    /** IAudio3A plugin name.
+     *  Default = "webrtc_apm" (real WebRTC Audio Processing Module —
+     *  AEC/ANS/AGC2/VAD/HPF via webrtc_audio_processing).
+     *  When NIMRTC_VENDORED_WEBRTC_APM is OFF or the prebuilt `.a` is
+     *  missing, WebRtcPluginFactory transparently falls back to
+     *  NullAudio3A so the engine still works.  Set to "" to disable 3A
+     *  entirely (raw passthrough). */
+    std::string_view audio3a_name = "webrtc_apm";
 
     /** ICodec plugin name. Default = "opus". */
     std::string_view codec_name = "opus";

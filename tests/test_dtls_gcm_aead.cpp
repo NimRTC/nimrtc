@@ -2,7 +2,10 @@
 // exact (salt, nonce, AAD, tag-length) layout so we can isolate whether
 // the GCM impl actually opens what NimRTC's seal emits.
 
-#define _CRT_SECURE_NO_WARNINGS
+// NOTE: nimrtc_apply_options() already adds _CRT_SECURE_NO_WARNINGS via
+// target_compile_definitions(); do NOT #define it here or MSVC warns
+// "macro redefinition" which /WX promotes to a hard error.
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>

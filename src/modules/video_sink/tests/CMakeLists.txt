@@ -15,12 +15,12 @@ if(WIN32)
     target_compile_definitions(test_video_sink PRIVATE _WIN32_WINNT=0x0601)
 endif()
 nimrtc_apply_options(test_video_sink)
-# Generator expression: on Windows multi-config generators the binary
-# lives under tests/<CONFIG>/<target>.exe; on Linux single-config it
-# lives at tests/<target> (no extension). `$<TARGET_FILE:...>` resolves
-# the correct path on both layouts.
+# See tests/CMakeLists.txt add_e2e_test() for the rationale on the COMMAND
+# expression.  Just use $<TARGET_FILE> directly — the previous
+# "Debug/" gen-expr prefix doubled the path under MSVC and made this
+# test resolve to NOT_AVAILABLE.
 add_test(NAME test_video_sink
-    COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:test_video_sink>)
+    COMMAND $<TARGET_FILE:test_video_sink>)
 set_tests_properties(test_video_sink PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_video_sink

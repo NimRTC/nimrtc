@@ -1024,6 +1024,105 @@ std::string_view select_best_video_sender() {
 
 ## 10. References
 
+---
+
+## 11. In-Tree HW Backends (P3-Batch)
+
+As of P3-Batch, NimRTC ships **real SDK bindings** for six HW backends,
+not just placeholder stubs. Each backend lives in its own source file under
+`src/modules/h264/src/` and is gated by a `NIMRTC_PLUGINS_<NAME>_ON` compile
+flag plus a corresponding SDK detection step in `cmake/NimRTHwPlugins.cmake`.
+
+### 11.1 Backend matrix
+
+| Backend    | File                          | Platforms       | SDK / library                | Priority |
+|------------|-------------------------------|-----------------|------------------------------|----------|
+| NVENC      | `nvenc_encoder.cpp`           | Win + Linux     | NVIDIA Video Codec SDK       | 450      |
+| NVDEC      | `nvenc_encoder.cpp` (decoder) | Win + Linux     | NVIDIA Video Codec SDK       | 430      |
+| AMF        | `amf_encoder.cpp`             | Windows only    | AMD AMF SDK                  | 380      |
+| VA-API     | `vaapi_encoder.cpp`           | Linux only      | libva + libva-drm            | 360      |
+| QSV        | `qsv_encoder.cpp`             | Win + Linux     | Intel libvpl / oneVPL        | 340      |
+| DXVA       | `dxva_decoder.cpp`            | Windows only    | Windows SDK d3d11 + MF       | 320      |
+| OpenH264   | `openh264_encoder.cpp`        | Win + Linux     | libopenh264                  | 50       |
+| Stub       | `codec_plugin.cpp`            | all             | (none)                       | 0        |
+
+### 11.2 CMake flags
+
+```sh
+# Default: all HW plugins OFF (clean tree build).
+cmake -S . -B build -DNIMRTC_BUILD_TESTS=ON
+
+# Enable NVIDIA NVENC + NVDEC:
+cmake -S . -B build -DNIMRTC_PLUGINS_NVENC=ON
+# (CMake auto-probes NVIDIA Video Codec SDK / CUDA include dirs)
+
+# Enable AMD AMF (Windows only):
+cmake -S . -B build -DNIMRTC_PLUGINS_AMF=ON
+# (CMake auto-probes AMD AMF SDK)
+
+# Enable Intel QSV via libvpl:
+cmake -S . -B build -DNIMRTC_PLUGINS_QSV=ON
+# (CMake auto-probes Intel oneVPL / MediaSDK)
+
+# Enable Microsoft DXVA decoder (Windows only):
+cmake -S . -B build -DNIMRTC_PLUGINS_DXVA=ON
+
+# Enable Linux VA-API encoder + decoder:
+cmake -S . -B build -DNIMRTC_PLUGINS_VAAPI=ON
+
+# Enable OpenH264 software fallback:
+cmake -S . -B build -DNIMRTC_PLUGINS_OPENH264=ON
+```
+
+CMake honours the following environment variables for path overrides:
+
+| Variable                       | Effect                          |
+|--------------------------------|---------------------------------|
+| `NVIDIA_VIDEO_CODEC_SDK_DIR`   | NVENC include/lib root          |
+| `CUDA_PATH` / `CUDA_HOME`      | CUDA include / lib64            |
+| `AMF_SDK_DIR`                  | AMD AMF header root             |
+| `LIBVPL_SDK_DIR` / `MFX_HOME`  | Intel libvpl / MediaSDK root    |
+| `LIBVA_INCLUDE_DIR` / `LIBVA_LIBRARY` | VA-API header + lib root   |
+
+### 11.3 How `available()` works
+
+Each backend exposes two symbols:
+
+```cpp
+namespace nimrtc::h264 {
+    bool <backend>_h264_available() noexcept;
+    std::unique_ptr<plugins::IVideoCodec>
+    make_<backend>_h264_codec(plugins::VideoCodecConfig cfg);
+}
+```
+
+`hw_backends.cpp` wires those into the `HwVideoBackendRegistry` table
+(`register_default_video_backends()`). The selector
+(`select_encoder_backend()` / `select_decoder_backend()`) probes each
+backend in priority order; the first one whose `available()` returns true
+is selected. When the SDK is absent, the stub backend (priority 0) wins.
+
+### 11.4 Testing HW backends
+
+The unit test suite `tests/test_hw_backends.cpp` validates the dispatch
+surface (registration, priority ordering, helper functions in
+`hw_backend_base.hpp`) on **any host** — no GPU required. Integration
+tests that actually exercise each SDK live in the SDK's vendor package
+(sunshine's `tests/hw/` for NVENC, etc.) and are out of scope here.
+
+### 11.5 Adding a new backend
+
+1. Create `Find<X>.cmake` in `cmake/` (search pattern, env vars, fallback).
+2. Add a `NIMRTC_PLUGINS_<X>` cache option to the top-level
+   `CMakeLists.txt`.
+3. Add a `_nimrtc_locate_<x>` function and a `nimrtc_link_<x>` helper to
+   `cmake/NimRTHwPlugins.cmake`.
+4. Implement `<x>_encoder.cpp` (and/or `<x>_decoder.cpp`) in
+   `src/modules/h264/src/`, exporting the `<x>_h264_available()` /
+   `make_<x>_h264_codec()` symbols.
+5. Wire the backend entry into `hw_backends.cpp::register_default_video_backends()`.
+6. Add a unit test in `tests/test_hw_backends.cpp`.
+
 核心头文件（本文所有片段的来源）：
 
 - `src/plugins/include/nimrtc/plugins/hw_seam.hpp` — `HwBackend` 枚举、
@@ -1062,3 +1161,88 @@ std::string_view select_best_video_sender() {
 
 > 最后修订：R3-Batch。接口稳定但二进制布局 TBD P3；新增 `HwBackend`
 > 枚举值时记得同步更新 `hw_backend_name()` 与本文第 2.2 节。
+
+---
+
+## 12. Known driver/runtime issues
+
+This section records *specific* NVENC / driver combinations we have
+debugged on the bench, so the next person to hit them doesn't lose an
+afternoon.
+
+### 12.1 Driver 591.86 / nvEncodeAPI64.dll v32.0.15.9186 (RTX 3060)
+
+Symptom: `tests/nvenc_probe.cpp` exits 77 with
+`"nvEncOpenEncodeSessionEx failed (status=15)"`. Status 15 is
+`NV_ENC_ERR_INVALID_VERSION`.
+
+Findings (verified on this machine):
+
+1. The driver DLL only exports **10** symbols:
+   - `NvEncodeAPICreateInstance`
+   - `NvEncodeAPIGetMaxSupportedVersion`
+   - Eight legacy `NvTool*` helpers
+
+   The pre-CUDA-11 direct exports (`NvEncOpenEncodeSessionEx`,
+   `NvEncInitializeEncoder`, …) are gone — anyone trying
+   `GetProcAddress(dll, "NvEncOpenEncodeSessionEx")` fails with
+   `GetLastError() == 127`. The fix is to use
+   `NvEncodeAPICreateInstance(&fnList)` and call through `fnList.*`.
+
+2. `NvEncodeAPIGetMaxSupportedVersion()` returns `0x000000D0` from this
+   driver — this **does not** match `NVENCAPI_VERSION = (MAJOR) |
+   (MINOR << 24)` for any documented SDK. Treat that value as
+   driver-internal and don't rely on it for compatibility gating.
+
+3. `NvEncodeAPICreateInstance()` succeeds and populates a 43-entry
+   `NV_ENCODE_API_FUNCTION_LIST`. The function at struct offset `0x0F0`
+   (our `nvEncOpenEncodeSessionEx`) **still** rejects every
+   `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS` struct version we tried — SDK
+   8/9/10/11/12/13/14, both raw major-only and
+   `(MAJOR | (MINOR << 24))` forms, plus 28-byte SDK 11.0 minimal
+   layouts and the full 1552-byte SDK 13.1 layout. All return
+   `NV_ENC_ERR_INVALID_VERSION` (15).
+
+   The deprecated `nvEncOpenEncodeSession` (offset `0x008`) returns
+   `NV_ENC_ERR_INVALID_CALL` (9) — its SDK-doc contract is "deprecated,
+   use Ex", so it will never succeed through the function-table path.
+
+Root cause hypothesis: this driver 32.0.15.9186 (Studio 591.86) bundles
+an **NVENC SDK 11.0 runtime** internally. `NvEncodeAPICreateInstance`
+accepts any SDK 12/13 function-table version (we get a populated
+table), but the underlying NVENC dispatch is hard-wired to the SDK 11.0
+struct ABI, so it rejects any `OPEN_ENCODE_SESSION_EX_PARAMS` whose
+`version` field encodes a non-11.x SDK.
+
+Fix paths (in increasing order of pain):
+
+- **A. Update the driver.** Studio / Game Ready 560+ ships an NVENC
+  runtime whose ABI matches SDK 12.x headers. This is the right answer
+  for a normal development machine; the RTX 3060 supports up to SDK 13.x.
+- **B. Vendor SDK 11.0 headers.** The legacy SDK 11.1.5 ZIP is on
+  NVIDIA's archive page; place it under
+  `build/nv_sdk/Video_Codec_Interface_11.1.5/Interface/`, redefine
+  `NVENCAPI_VERSION = 11`, and use the smaller SDK 11.0
+  `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS` (no `reserved1[253]` /
+  `reserved2[64]`). Then update `FindNVENC.cmake` to prefer the 11.x
+  include dir.
+- **C. Auto-detect the bundled ABI at runtime.** Load `nvEncodeAPI64.dll`,
+  call `NvEncodeAPICreateInstance`, then probe a small set of struct
+  versions (0x7000000B, 0x7001000B, …, 0x7101000D) against
+  `nvEncOpenEncodeSessionEx` with a stub device and pick the first one
+  that doesn't return `INVALID_VERSION`. This is what production
+  tooling like OBS / FFmpeg / sunshine does.
+
+For now, `nvenc_encoder.cpp` correctly returns `nullptr` from
+`make_nvenc_h264_codec()`, so the engine falls through to the next
+backend in priority order — no risk of a runtime crash.
+
+### 12.2 Ad-hoc probe binaries
+
+`build/nvenc_probe_v2.exe`, `build/nvenc_maxver.exe`,
+`build/nvenc_walk_versions.exe`, `build/nvenc_session_open.exe`,
+`build/nvenc_real_device.exe`, `build/nvenc_struct_ver.exe`,
+`build/nvenc_sdk11_struct.exe`, `build/nvenc_deprecated.exe`, and the
+accompanying `*.cpp` / `*.ps1` / `*.bat` files are **diagnostic
+artefacts only** and should be deleted before commit (`rm build/nvenc_*
+build/*.ps1`). The committed probe is `tests/nvenc_probe.cpp`.

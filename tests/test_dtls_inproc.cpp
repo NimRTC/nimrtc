@@ -9,7 +9,10 @@
 
 #ifdef _WIN32
 
-#define _CRT_SECURE_NO_WARNINGS
+// NOTE: nimrtc_apply_options() already adds _CRT_SECURE_NO_WARNINGS via
+// target_compile_definitions(); do NOT #define it here or MSVC warns
+// "macro redefinition" which /WX promotes to a hard error.
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>

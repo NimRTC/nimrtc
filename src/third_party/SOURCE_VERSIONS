@@ -2,18 +2,18 @@
 #
 # Format: <name>   <release-or-tag>   <short-sha>   <full-sha>   <vendored-on>   <url>
 #
-# These libraries are vendored as source (not submodules). To update:
-#   1. rm -rf <dir>/src
-#   2. git clone --depth=1 <url> <dir>/src
-#   3. update this file with the new SHA
-#   4. add the change to src/third_party/<name>/SOURCE_VERSIONS update commit
-#
-# Do NOT delete this file even if you update the libraries — the SHA is the
-# only ground truth for what the consumer (us) tested against.
+# This file is the human-readable companion to src/third_party/vendor.json.
+# During the 1.0.0 vendor migration (docs/plan/vendor-migration.md) the
+# SHAs here are copied verbatim from `vendor.json` `commit_sha` fields,
+# which are the source of truth (and gated by tools/check_vendor.py in
+# CI). When the migration completes, this file is deleted (PR L in
+# docs/plan/vendor-migration.md §6).
 
-libjuice             master       77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
-libsrtp              master       2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
-mbedtls              4.2.0        023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
-libopus              v1.6.1       7030c73   7030c73010a3c1372e92eb4cc2f0ced3080a9c07   2026-09-04   https://github.com/xiph/opus
-wolfssl              v5.9.2       unknown   unknown                                2026-09-09   https://github.com/wolfSSL/wolfssl
-webrtc_audio_processing  webrtc-m129  unknown   unknown                                TBD           https://chromium.googlesource.com/webrtc/modules/audio_processing
+libjuice                  master         77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
+libsrtp                   master         2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
+mbedtls                   4.2.0          023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
+libopus                   v1.6.1         7030c73   7030c73010a3c1372e92eb4cc2f0ced3080a9c07   2026-09-04   https://github.com/xiph/opus
+googletest                v1.12.1        58d77fa   58d77fa8070e8cec2dc1ed015d66b454c8d78850   2026-09-09   https://github.com/google/googletest
+nlohmann_json             v3.11.3        9cca280   9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03   2026-09-09   https://github.com/nlohmann/json
+wolfssl                   v5.9.2         ac01707   ac01707f552c611fbd135cc723b2682b3e7f80f2   2026-09-09   https://github.com/wolfSSL/wolfssl
+webrtc_audio_processing   master         d0569cf   d0569cfa50c1858ee279d77b3fc8870be6902441   2026-09-11   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing

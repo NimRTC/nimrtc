@@ -38,6 +38,14 @@ jobs:
         with:
           submodules: recursive
 
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      # Pre-1.0: warn-only so e2e is not blocked.
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        shell: pwsh
+        run: python tools/check_vendor.py
+
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -71,6 +79,13 @@ jobs:
         with:
           submodules: recursive
 
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        shell: pwsh
+        run: python tools/check_vendor.py
+
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -97,16 +112,16 @@ jobs:
       - name: Run e2e acceptance
         id: e2e
         shell: pwsh
-        # Case D (NimRTC↔real Chrome) is expected to FAIL until the
-        # DTLS↔Chrome server flight issue is fixed (see CHANGELOG.md).
-        # We use `|| true` so a Case D failure does not turn this job
-        # red and block unrelated PRs; the per-case check below
-        # surfaces the real status in the Step Summary.
+        # All four cases (A/B/C/D) are expected to PASS at HEAD now that
+        # the Case D DTLS↔Chrome alert 46 is fixed (see CHANGELOG.md
+        # "Fixed — Chrome interop: fatal alert 46"). A failure in any
+        # case therefore fails the job, instead of the prior
+        # `|| true` + step-summary workaround.
         run: |
           python tools/run_e2e_acceptance.py 2>&1 | Tee-Object -FilePath build/e2e/orchestrator_ci.log
           $rc = $LASTEXITCODE
           echo "rc=$rc" >> $env:GITHUB_OUTPUT
-          exit 0   # never fail the step on case D
+          exit $rc
 
       - name: Surface case-D status in Step Summary
         if: always()
@@ -114,10 +129,11 @@ jobs:
         run: |
           $summary = @"
           ## E2E acceptance summary
-          Case A (BCrypt AES-GCM round-trip) and Case B (in-process
-          DTLS) and Case C (NimRTC↔NimRTC loopback) are expected to
-          PASS. Case D (NimRTC↔real Chrome) is **expected to FAIL**
-          at HEAD — see CHANGELOG.md "Known issues (DTLS ↔ Chrome)".
+          Case A (BCrypt AES-GCM round-trip), Case B (in-process DTLS),
+          Case C (NimRTC↔NimRTC loopback), and Case D (NimRTC↔real Chrome
+          DTLS handshake) are all expected to PASS. The Case D
+          certificate_unknown alert that blocked 0.9.0-rc1 is fixed
+          (see CHANGELOG.md "Fixed — Chrome interop: fatal alert 46").
           "@
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 

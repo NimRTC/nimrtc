@@ -36,9 +36,17 @@ E2E.mkdir(parents=True, exist_ok=True)
 NIMRTC_BUILD_DIR = Path(os.environ.get("NIMRTC_BUILD_DIR", ROOT / "build"))
 
 def _resolve(cfg: str, sub: str) -> Path:
-    multi = NIMRTC_BUILD_DIR / cfg / sub
-    single = NIMRTC_BUILD_DIR / sub
-    return multi if multi.exists() else single
+    """Locate <build>/<sub>/<cfg>/ for MSVC multi-config, or
+    <build>/<sub>/ for single-config (cmake --preset debug on Linux/macOS).
+    Tries both orders so a partial rebuild that left files in only one of
+    the two possible layouts still finds the binary."""
+    multi_first  = NIMRTC_BUILD_DIR / sub / cfg      # Visual Studio default
+    multi_second = NIMRTC_BUILD_DIR / cfg / sub      # older / some presets
+    single       = NIMRTC_BUILD_DIR / sub
+    for candidate in (multi_first, multi_second, single):
+        if candidate.exists():
+            return candidate
+    return multi_first   # best guess so the error message points somewhere
 
 BIN_TESTS    = _resolve("Debug", "tests")
 BIN_EXAMPLES = _resolve("Debug", "examples")
@@ -159,6 +167,15 @@ def run_chrome_interop() -> bool:
         os.environ["NIMRTC_DTLS_KEYLOG"] = str(E2E / "nimrtc_chrome.keylog")
         os.environ["NIMRTC_DTLS_TRACE"]  = str(E2E / "nimrtc_chrome.trace")
         os.environ["NIMRTC_DTLS_DUMP"]   = "1"
+        # Without this, demo-p2p writes the SPKI to its fallback path
+        # (interop/build/nimrtc_spki.txt) and the orchestrator can't
+        # reliably locate it before launching Chrome.  Demo-p2p opens
+        # (which loads the cert into wolfSSL) happens BEFORE the proxy
+        # Popen, so we seed the file as empty and let demo-p2p overwrite
+        # it once the engine is ready.
+        os.environ["NIMRTC_DTLS_SPKI_FILE"] = str(E2E / "nimrtc_chrome_spki.b64")
+        if not (E2E / "nimrtc_chrome_spki.b64").exists():
+            (E2E / "nimrtc_chrome_spki.b64").write_text("")
 
         # 1) Signaling server
         _start(

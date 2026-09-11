@@ -1,0 +1,60 @@
+# Submodules for NimRTC's third-party dependencies.
+#
+# This file replaces the ~280 MB of vendored source trees that currently
+# live under src/third_party/<name>/src/.  When the migration completes
+# (see docs/plan/vendor-migration.md), the submodule paths below will
+# contain fresh git clones and the source trees will be git-tracked
+# only as submodule pointers (40 bytes per entry instead of 280 MB).
+#
+# Until the migration lands, the source trees are still checked in
+# directly.  Adding a new entry here does NOT remove the existing
+# source — that requires running `git rm --cached <path>` and committing
+# the deletion in the same PR that adds the submodule.
+
+[submodule "src/third_party/wolfssl/src"]
+	path = src/third_party/wolfssl/src
+	url = https://github.com/wolfSSL/wolfssl.git
+	# Pinned: v5.9.2 — see src/third_party/vendor.json
+	branch = v5.9.2
+
+[submodule "src/third_party/webrtc_audio_processing/src"]
+	path = src/third_party/webrtc_audio_processing/src
+	url = https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git
+	# WebRTC APM: built out-of-tree via Meson (see tools/build_webrtc_apm.sh).
+	branch = master
+
+[submodule "src/third_party/mbedtls/src"]
+	path = src/third_party/mbedtls/src
+	url = https://github.com/Mbed-TLS/mbedtls.git
+	# Pinned: 4.2.0 — historical only; DTLS production path is wolfSSL.
+	branch = mbedtls-4.2.0
+
+[submodule "src/third_party/libopus/src"]
+	path = src/third_party/libopus/src
+	url = https://github.com/xiph/opus.git
+	# Pinned: v1.6.1
+	branch = v1.6.1
+
+[submodule "src/third_party/libjuice/src"]
+	path = src/third_party/libjuice/src
+	url = https://github.com/paullouisageneau/libjuice.git
+	# Branch: master (last updated 2026-09-04 in SOURCE_VERSIONS)
+	branch = master
+
+[submodule "src/third_party/libsrtp/src"]
+	path = src/third_party/libsrtp/src
+	url = https://github.com/cisco/libsrtp.git
+	# Branch: master
+	branch = master
+
+[submodule "src/third_party/googletest/src"]
+	path = src/third_party/googletest/src
+	url = https://github.com/google/googletest.git
+	# Pinned: v1.12.1
+	branch = v1.12.1
+
+[submodule "src/third_party/nlohmann_json/src"]
+	path = src/third_party/nlohmann_json/src
+	url = https://github.com/nlohmann/json.git
+	# Pinned: v3.11.3 (single-header; submodule is optional)
+	branch = v3.11.3

@@ -75,6 +75,15 @@ function(nimrtc_apply_options target)
             /utf-8              # source encoding
             $<$<CONFIG:Debug>:/Od /Z7 /RTC1>
             $<$<CONFIG:Release>:/O2 /GL>)
+        # Suppress MSVC C4996 'getenv is unsafe' — pre-existing code uses
+        # std::getenv for feature-flag lookups (e.g. NIMRTC_DTLS_TRACE,
+        # NIMRTC_ANSWER_DUMP); replacing every site with _dupenv_s would
+        # be invasive churn for no real safety gain (env vars come from
+        # trusted process-local configuration, not untrusted input).  This
+        # define must be set BEFORE any standard headers are included,
+        # hence it's a compile_definition (not just /D) so the project
+        # build lines carry it consistently.
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()
         target_compile_options(${target} PRIVATE
             -Wall -Wextra -Wpedantic

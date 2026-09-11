@@ -680,40 +680,22 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
         return plugins::kOk;
     }
 
-    // Agent already exists — apply immediately.
-    // BUT: if we're an answerer receiving an offer, we want the agent to
-    // be CONTROLLED. The agent was created with no remote SDP known, so
-    // it's currently CONTROLLING. The cleanest fix is to recreate the
-    // agent so it sees the remote SDP before gathering — libjuice then
-    // picks the correct role (CONTROLLED for the answerer).
+    // Agent already exists — apply immediately via juice_set_remote_description().
     //
-    // We destroy the current agent and create a fresh one. This re-runs
-    // gather with the correct role. Any in-progress STUN bindings and
-    // candidate pairs are abandoned; that's fine because the remote
-    // description includes credentials that change the ICE role.
-    bool was_gathered = (impl_->state != IceState::Disconnected);
-    if (was_gathered && !tmp.empty() &&
-        tmp.find("a=ice-ufrag:") != std::string::npos) {
-        // Stash the remote SDP first so create_agent() applies it BEFORE
-        // juice_gather_candidates() is called from open().
-        impl_->pending_remote_sdp_ = tmp;
-
-        // Tear down the old agent.
-        if (impl_->agent) {
-            juice_destroy(impl_->agent);
-            impl_->agent = nullptr;
-        }
-        // Re-create the agent with the pending remote SDP. gather happens
-        // here (from create_agent → ... no, gather is in open()).
-        if (!impl_->create_agent()) {
-            return plugins::kErrInternal;
-        }
-        if (juice_gather_candidates(impl_->agent) != JUICE_ERR_SUCCESS) {
-            return plugins::kErrInternal;
-        }
-        return plugins::kOk;
-    }
-
+    // libjuice has built-in ICE role-conflict resolution: if both agents
+    // started as CONTROLLING (because no remote SDP was set before gathering),
+    // each side's STUN Binding Request carries the peer's ice_controlling
+    // attribute.  On receipt, libjuice compares the two ice_tiebreaker values
+    // (RFC 8445 §6.1.2) and the agent with the lower tiebreaker switches to
+    // CONTROLLED.  No agent destruction is needed — only juice_set_remote_description
+    // must be called so libjuice knows the remote ufrag/pwd.
+    //
+    // Previously this function destroyed and recreated the agent whenever it was
+    // already gathered.  That caused a new ufrag/pwd to be generated on the
+    // local side, invalidating every in-flight STUN Binding Request in flight
+    // (the peer still used the old ufrag).  The result was "STUN remote ufrag
+    // check failed" and ICE connectivity checks cycling forever, never stabilising.
+    // Deleting the destroy/recreate branch fixes that regression.
     const int rc = juice_set_remote_description(impl_->agent, tmp.c_str());
     if (rc != JUICE_ERR_SUCCESS) {
         // Treat any libjuice parse error as a corrupt SDP from our point of

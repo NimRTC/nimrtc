@@ -30,12 +30,26 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent
 E2E  = ROOT / "build" / "e2e"
 CHROME_HTML = ROOT / "interop" / "chrome" / "test_chrome_opus.html"
 CHROME_EXE  = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
 
 WS_URL = "ws://localhost:8765/interop"
+
+# Path to the file demo-p2p writes its local DTLS SPKI (base64 SHA-256 of
+# the server certificate's SubjectPublicKeyInfo) to once the engine is
+# open.  tools/run_e2e_acceptance.py sets NIMRTC_DTLS_SPKI_FILE to this
+# path on the proxy / demo-p2p subprocess so demo-p2p populates it before
+# we poll.  We honour an explicit override here so that the script can
+# also be run standalone (point it at any base64 file produced by the
+# wolfSSL DTLS module).
+NIMRTC_SPKI_FILE = Path(
+    os.environ.get(
+        "NIMRTC_SPKI_FILE",
+        str(E2E / "nimrtc_chrome_spki.b64"),
+    )
+)
 
 
 def grep(path: Path, pattern: str) -> list[str]:
@@ -77,6 +91,30 @@ async def run_e2e() -> int:
     url = CHROME_HTML.as_uri() + "?ws=" + WS_URL + "&room=interop&offerer=1"
     print(f"[E2E] Loading: {url}")
 
+    # BoringSSL's DTLS path runs WebRTC's self-signed cert through the
+    # same verifier as HTTPS; without an explicit allow-list Chrome
+    # rejects the NimRTC certificate with fatal alert 46 during the
+    # ServerHello flight, regardless of whether the cert carries SAN.
+    # demo-p2p's SPKI file is written by run_e2e_acceptance.py via
+    # NIMRTC_DTLS_SPKI_FILE before this script runs.  We poll briefly
+    # because demo-p2p needs a moment to open() the engine and derive
+    # the fingerprint.
+    nimrtc_spki: list[str] = []
+    if NIMRTC_SPKI_FILE.exists():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            spki_text = NIMRTC_SPKI_FILE.read_text(errors="replace").strip()
+            if spki_text:
+                nimrtc_spki = spki_text.splitlines()
+                break
+            time.sleep(0.2)
+    if nimrtc_spki:
+        print(f"[E2E] NimRTC SPKI allow-list: {len(nimrtc_spki)} entry"
+              f"{'ies' if len(nimrtc_spki) != 1 else ''}")
+    else:
+        print("[E2E] [warn] nimrtc_spki.b64 not yet populated — "
+              "Chrome will reject NimRTC's self-signed cert (alert 46)")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -102,6 +140,13 @@ async def run_e2e() -> int:
                 # Pin Chrome's verbose logs to a file we can read after the
                 # run (Playwright discards Chrome's stderr).
                 f"--log-file={E2E / 'chrome_verbose.log'}",
+                # Whitelist NimRTC's local cert so BoringSSL accepts the
+                # self-signed handshake.  Empty list = key unchanged from
+                # previous runs; if the file is missing or empty we omit
+                # the flag (Chrome falls back to default rejection, which
+                # is what we want to surface as alert 46).
+                *( ["--ignore-certificate-errors-spki-list=" + ",".join(nimrtc_spki)]
+                   if nimrtc_spki else [] ),
             ],
         )
         context = await browser.new_context()
@@ -205,40 +250,40 @@ def summarize() -> None:
         print("\n=== NimRTC <-> Chrome DTLS post-mortem ===")
         show_file_state()
 
-    # Show NimRTC trace tail (master_sec + verify_data lines).
-    trace = E2E / "nimrtc_chrome.trace"
-    if trace.exists():
-        print("\n--- NimRTC DTLS TRACE (last 20 lines) ---")
-        lines = trace.read_text(errors="replace").splitlines()
-        for ln in lines[-20:]:
-            print(f"  {ln}")
-    else:
-        print("  [no trace file written]")
+        # Show NimRTC trace tail (master_sec + verify_data lines).
+        trace = E2E / "nimrtc_chrome.trace"
+        if trace.exists():
+            print("\n--- NimRTC DTLS TRACE (last 20 lines) ---")
+            lines = trace.read_text(errors="replace").splitlines()
+            for ln in lines[-20:]:
+                print(f"  {ln}")
+        else:
+            print("  [no trace file written]")
 
-    # Show both keylogs side by side.
-    print("\n--- NimRTC keylog ---")
-    p_n = E2E / "nimrtc_chrome.keylog"
-    if p_n.exists() and p_n.stat().st_size:
-        print(p_n.read_text(errors="replace"))
-    else:
-        print("  (empty — NimRTC has not yet derived master_secret)")
+        # Show both keylogs side by side.
+        print("\n--- NimRTC keylog ---")
+        p_n = E2E / "nimrtc_chrome.keylog"
+        if p_n.exists() and p_n.stat().st_size:
+            print(p_n.read_text(errors="replace"))
+        else:
+            print("  (empty — NimRTC has not yet derived master_secret)")
 
-    print("\n--- Chrome keylog (BoringSSL --ssl-key-log-file) ---")
-    p_c = E2E / "chrome_chrome.keylog"
-    if p_c.exists() and p_c.stat().st_size:
-        print(p_c.read_text(errors="replace"))
-    else:
-        print("  (empty — BoringSSL hasn't emitted DTLS secrets yet)")
+        print("\n--- Chrome keylog (BoringSSL --ssl-key-log-file) ---")
+        p_c = E2E / "chrome_chrome.keylog"
+        if p_c.exists() and p_c.stat().st_size:
+            print(p_c.read_text(errors="replace"))
+        else:
+            print("  (empty — BoringSSL hasn't emitted DTLS secrets yet)")
 
-    # Run verify_dtls_handshake.py against the NimRTC pair if both have data.
-    tool = ROOT / "tools" / "verify_dtls_handshake.py"
-    if p_n.exists() and p_n.stat().st_size > 0:
-        print("\n--- verify_dtls_handshake.py (NimRTC keylog <-> trace) ---")
-        try:
-            subprocess.run([sys.executable, str(tool), str(p_n), str(trace)],
-                           check=False)
-        except Exception as exc:
-            print(f"[WARN] verify run failed: {exc}")
+        # Run verify_dtls_handshake.py against the NimRTC pair if both have data.
+        tool = ROOT / "tools" / "verify_dtls_handshake.py"
+        if p_n.exists() and p_n.stat().st_size > 0:
+            print("\n--- verify_dtls_handshake.py (NimRTC keylog <-> trace) ---")
+            try:
+                subprocess.run([sys.executable, str(tool), str(p_n), str(trace)],
+                               check=False)
+            except Exception as exc:
+                print(f"[WARN] verify run failed: {exc}")
     except Exception as exc:
         print(f"[WARN] summarize() crashed: {exc}")
 

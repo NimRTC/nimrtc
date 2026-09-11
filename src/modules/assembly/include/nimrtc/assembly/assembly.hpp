@@ -212,7 +212,10 @@ struct Profile {
     std::string jb_name = "adaptive";
 
     /// Audio 3A plugin name. Empty string means no 3A (passthrough).
-    std::string audio3a_name = "webrtc";
+    /// Default = "webrtc_apm" — real WebRTC Audio Processing Module
+    /// (AEC/ANS/AGC2/VAD/HPF).  WebRtcPluginFactory transparently falls
+    /// back to NullAudio3A when NIMRTC_VENDORED_WEBRTC_APM is OFF.
+    std::string audio3a_name = "webrtc_apm";
 
     /// Audio codec plugin name.
     std::string codec_name = "opus";

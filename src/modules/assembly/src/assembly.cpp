@@ -187,7 +187,7 @@ Profile profile_from_json_file(const std::string& file_path) {
     p.sdp_name        = json_to_string(root.value("sdp_name",         "webrtc"));
     p.rtp_name        = json_to_string(root.value("rtp_name",         "webrtc"));
     p.jb_name         = json_to_string(root.value("jb_name",          "adaptive"));
-    p.audio3a_name    = json_to_string(root.value("audio3a_name",      "webrtc"));
+    p.audio3a_name    = json_to_string(root.value("audio3a_name",      "webrtc_apm"));
     p.codec_name      = json_to_string(root.value("codec_name",        "opus"));
     p.bwe_name        = json_to_string(root.value("bwe_name",          "aimd"));
     p.scheduler_name  = json_to_string(root.value("scheduler_name",    "default"));

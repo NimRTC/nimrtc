@@ -1,11 +1,8 @@
 # =============================================================================
 # NimRTC CI — Windows MSVC only (0.9.0-rc1)
 #
-# PLATFORM NOTE: This RC has only been validated on Windows 10 / MSVC.
-# Linux and macOS runners are intentionally NOT used here because we have
-# no Windows-validated signal that the build works elsewhere. Adding
-# Linux/macOS jobs would silently produce false-positive green ticks.
-# Cross-platform CI is a post-1.0 task.
+# Windows-only: requires headless Chrome via Playwright; Linux/macOS support
+# is in `ci.yml`.
 #
 # What runs:
 #   1. configure            — `cmake --preset dev.msvc`

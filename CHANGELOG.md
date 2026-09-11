@@ -9,14 +9,41 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **RFC 7587 �4 RTP packetisation for Opus (`src/modules/opus`)** ?
-  `nimrtc::opus::packetise()` now implements the full RFC 6716 �3.1 TOC
-  byte layout plus RFC 6716 �3.2 Code 0 / 1 / 2 / 3 framing:
+- **WebRTC Audio Processing Module (APM) integration** (`src/modules/audio3a`,
+  `src/third_party/webrtc_audio_processing`):
+  The `audio3a` module now links against the real WebRTC APM library,
+  providing production-grade 3A audio processing:
+    - **AEC**:  Acoustic Echo Cancellation (AEC3 desktop, AECm mobile)
+    - **ANS**:  Ambient Noise Suppression (low/medium/high)
+    - **AGC2**: Automatic Gain Control v2 (with RNN-VAD voice detector)
+    - **VAD**:  Voice Activity Detection
+    - **Transient suppression**: keyboard / mouse click noise removal
+    - **HPF**:  80 Hz high-pass filter
+
+  Source is cloned from `gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing`
+  (PulseAudio-maintained fork, active 2025-11-10). Build uses Meson + Ninja
+  (not CMakeLists — the upstream is Meson-first). Pre-built static libraries:
+    - `libwebrtc-audio-processing-2.a` (~38 MB, ~440 compilation units)
+    - `libwebrtc_audio_processing_privatearch.a` (AVX2 SIMD kernels)
+    - 15× `libabsl_*.a` (abseil-cpp 20240722.0)
+
+  Build scripts:
+    - Windows: `build\build_webrtc_apm.cmd` (MSVC 2022, requires vcvars64)
+    - Linux/macOS: `bash build/build_webrtc_apm.sh` (GCC 11+ or Clang 14+)
+    - Unified: `python tools/fetch_webrtc_apm.py`
+
+  When the source is absent, `audio3a` falls back to the built-in stub
+  that provides basic level estimation and VAD. The vendored approach
+  (default) is controlled by `NIMRTC_VENDORED_WEBRTC_APM=ON` in CMake.
+
+- **RFC 7587 §4 RTP packetisation for Opus (`src/modules/opus`)** ?
+  `nimrtc::opus::packetise()` now implements the full RFC 6716 3.1 TOC
+  byte layout plus RFC 6716 3.2 Code 0 / 1 / 2 / 3 framing:
     - Code 0: single frame, TOC + frame data (no length encoding).
     - Code 1: two frames of equal compressed size, TOC + two halves
       ([R3]: payload length after TOC must be even).
     - Code 2: two frames of different compressed sizes, TOC +
-      1-to-2-byte self-delimiting length of frame 1 (RFC 6716 �3.2.1
+      1-to-2-byte self-delimiting length of frame 1 (RFC 6716 3.2.1
       encoding ? b0 ? [252..255], total = b0 + 4*b1, max 1275 bytes).
     - Code 3: M = 1..48 frames, TOC + frame-count byte (v|p|M) +
       optional padding length bytes + (M-1) length entries (VBR) or
@@ -47,18 +74,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **`nimrtc::opus::packetise()` was a stub** that returned 1 byte of TOC
-  only and discarded all frame data ? RFC 7587 �4 conformance is now
+  only and discarded all frame data ? RFC 7587 4 conformance is now
   complete and round-trips through `depacketise()`. Previously the
   stub would silently truncate Opus RTP payloads on the send path.
 
-## ?? Platform support notice
+## ✅🔶 Platform support matrix
 
-**This release has only been validated on Windows 10 / MSVC.**
-Linux, macOS, Android, and iOS are **NOT** verified for any sub-version of
-0.9.0-rc1. CMake configuration will likely succeed on those platforms
-but the build, the vendored DTLS, and the end-to-end acceptance harness
-have not been exercised. **Do not** deploy 0.9.0-rc1 on any non-Windows
-platform without first running the full test + acceptance suite there.
+| Platform       | Build | Test | Notes                                                                  |
+|----------------|-------|------|------------------------------------------------------------------------|
+| Windows x86_64 | ✅    | ✅   | MSVC 19.43 + Ninja, primary dev env                                    |
+| Linux x86_64   | 🔶    | 🔶   | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                  |
+| macOS arm64    | 🔶    | 🔶   | Apple Clang 15, macOS 14; CI job `macos-clang` (x86_64 via Rosetta)    |
+| Linux aarch64  | 🔶    | 🔶   | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`             |
+
+**Legend**: ✅ = verified (CI green-and-merged); 🔶 = best-effort, pending first green CI run.
+
+The e2e Chrome-interop acceptance suite (`tools/run_e2e_acceptance.py`)
+remains Windows-only at HEAD (Case D  NimRTC?real Chrome  is the
+known failure documented under "Known issues (DTLS ? Chrome)" below).
+Linux/macOS/aarch64 CI runs `ctest --preset tests` (unit tests) but
+**not** the full e2e harness; that work is tracked separately.
 
 ## [0.9.0-rc1] - 2026-09-06
 

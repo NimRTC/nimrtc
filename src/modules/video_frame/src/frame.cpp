@@ -153,8 +153,8 @@ struct OwnedFrameControl : public FrameBufferControl {
 };
 
 struct WrappedFrameControl : public FrameBufferControl {
-    WrappedFrameControl(VideoFrameLayout layout, std::size_t capacity) {
-        this->capacity = capacity;
+    WrappedFrameControl(VideoFrameLayout layout, std::size_t cap) {
+        this->capacity = cap;
         this->width    = layout.width;
         this->height   = layout.height;
         this->format   = layout.format;
@@ -181,6 +181,16 @@ VideoFrameBuffer::VideoFrameBuffer(std::uint8_t* external_data,
     // a non-owning vector to keep data() returning a valid pointer.
     storage_.assign(external_data, external_data + external_capacity);
     ctrl_ = std::move(ctrl);
+}
+
+// Out-of-line virtual destructor — emits the vtable and typeinfo once
+// for the entire library. Body decrements the application-level ref
+// counter in FrameBufferControl so shared-ownership diagnostics work
+// correctly under `shared_ptr<VideoFrameBuffer>`.
+VideoFrameBuffer::~VideoFrameBuffer() noexcept {
+    if (ctrl_) {
+        ctrl_->ref_count.fetch_sub(1, std::memory_order_acq_rel);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,10 +225,10 @@ void convert_i420_to_bgra(std::uint32_t width,
             std::int32_t g = (c - 100 * u - 208 * v) >> 8;
             std::int32_t b = (c + 516 * u          ) >> 8;
 
-            auto clamp = [](std::int32_t v) -> std::uint8_t {
-                if (v < 0)   return 0;
-                if (v > 255) return 255;
-                return static_cast<std::uint8_t>(v);
+            auto clamp = [](std::int32_t val) -> std::uint8_t {
+                if (val < 0)   return 0;
+                if (val > 255) return 255;
+                return static_cast<std::uint8_t>(val);
             };
 
             dst[i * 4 + 0] = clamp(b);   // B

@@ -459,6 +459,7 @@ ReportBlock parse_report_block(const std::uint8_t* p) {
     return rb;
 }
 
+[[maybe_unused]]
 void serialise_report_block(std::uint8_t* p, const ReportBlock& rb) {
     write_be32(p,      rb.ssrc);
     p[4] = rb.fraction_lost;

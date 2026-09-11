@@ -148,6 +148,27 @@ struct VideoReceiverStats {
 using VideoReceiverFrameCallback =
     std::function<void(const EncodedVideoFrame& frame, TimestampUs now_us)>;
 
+/** Decoded frame callback: invoked once a frame has been fully decoded
+ *  into a VideoFrame (CPU pixels or GPU surface — see VideoFrame::has_gpu).
+ *
+ *  Zero-copy contract:
+ *   - The receiver holds a ref on the underlying GpuBuffer / VideoFrameBuffer.
+ *   - The callback may do `out_frame.buffer->acquire_ref()` to keep it alive
+ *     past the call (release_ref() returns it to the pool).
+ *   - When the callback returns, the receiver drops its ref; if no one
+ *     else holds a ref, the buffer is recycled to the backend's pool.
+ *
+ *  HW backends will surface the decoded picture as a GPU handle; software
+ *  backends surface it as a VideoFrameBuffer (CPU pixels). The callback
+ *  SHOULD branch on `frame.has_gpu()` to pick the appropriate consumer
+ *  (e.g. DirectXTexture path vs BGRA → window blit path).
+ *
+ *  Default receivers don't decode — they emit the encoded callback only.
+ *  Set `set_decoded_callback` to opt into decoding + zero-copy display.
+ */
+using VideoReceiverDecodedCallback =
+    std::function<void(const VideoFrame& frame, TimestampUs now_us)>;
+
 /** Callback fired when the receiver decides a packet should be requested
  *  via NACK.  Defaults: implementers populate a seq list and the engine
  *  sends a NACK RTCP FB for each entry. */
@@ -177,6 +198,22 @@ public:
     /** Register an optional push-style NACK callback. Default = no-op. */
     virtual void set_nack_callback(VideoReceiverNackCallback cb) noexcept {
         (void)cb;   // default: implementations that don't push NACKs ignore this
+    }
+
+    /** Register the decoded-frame callback for zero-copy display path.
+     *  Default = no-op (decoded frames are dropped). Receivers that
+     *  don't decode at all (e.g. depacketizer-only) leave this as the
+     *  default; receivers with a HW decoder override and fire the
+     *  callback once per decoded picture.
+     *
+     *  When the receiver supports zero-copy, the callback receives a
+     *  VideoFrame whose `has_gpu()` is true and whose `gpu_buffer()`
+     *  points at a backend-specific surface (CVPixelBuffer, ID3D11Texture,
+     *  VASurface, …). When the receiver is CPU-only (no HW decoder),
+     *  `has_gpu()` is false and `cpu_buffer()` points at an I420 frame.
+     */
+    virtual void set_decoded_callback(VideoReceiverDecodedCallback cb) noexcept {
+        (void)cb;
     }
 
     /** Feed a parsed RTP packet. The receiver extracts seq, marker, ssrc,

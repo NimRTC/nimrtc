@@ -43,8 +43,42 @@ if(NOT GTEST_FOUND)
 endif()
 
 # -----------------------------------------------------------------------------
+# WolfSSL test certificates
+#
+# DTLS tests need server-ecc.pem and ecc-key.pem at runtime. The search paths
+# in dtls_wolfssl_session.cpp are relative to the CWD when the test runs, which
+# is the test output directory.  This helper appends a POST_BUILD custom command
+# to the given test target that copies the two cert files from the wolfssl source
+# tree into the test's output directory at build time.
+# Call it from any test function that links nimrtc::dtls.
+# -----------------------------------------------------------------------------
+set(_nimrtc_wolfssl_cert_dir
+    "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs")
+
+function(nimrtc_copy_wolfssl_certs target)
+    # Guard against double-call (this file may be included multiple times across
+    # different test subdirectory includes).
+    if(TARGET _nimrtc_cert_copier_${target})
+        return()
+    endif()
+    # POST_BUILD copies the two wolfssl certs into <target-dir>/certs/ at build time.
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${target}>/certs"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/server-ecc.pem"
+            "$<TARGET_FILE_DIR:${target}>/certs/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/ecc-key.pem"
+            "$<TARGET_FILE_DIR:${target}>/certs/"
+        COMMENT "Copy wolfssl certs to test output directory"
+        VERBATIM)
+endfunction()
+
+# -----------------------------------------------------------------------------
 # Standardised test target
 # -----------------------------------------------------------------------------
+
 function(nimrtc_add_test source)
     # Args after source are additional sources / dep targets
     set(multi_value_args DEPS)
@@ -111,13 +145,18 @@ function(nimrtc_add_test source)
     target_include_directories(${test_target} PRIVATE ${test_includes})
 
     if(DEFINED module_name)
-        # Module-level test — hardcode the path under src/modules/<name>/tests/Debug/.
+        # Module-level test. Use generator expression so the test command
+        # works on both single-config (Linux Makefile → tests/<target>)
+        # and multi-config (Windows MSVC → tests/<CONFIG>/<target>.exe)
+        # generators. The trailing `.exe` is harmless on POSIX (the
+        # binary just doesn't have it, but the binary is resolved by
+        # `$<TARGET_FILE:...>` which drops the suffix on non-Windows).
         add_test(NAME ${test_name}
-            COMMAND ${CMAKE_BINARY_DIR}/src/modules/${module_name}/tests/Debug/${test_target}.exe)
+            COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${test_target}>)
     else()
-        # Top-level test — fall back to top-level build dir.
+        # Top-level test — same generator expression.
         add_test(NAME ${test_name}
-            COMMAND ${CMAKE_BINARY_DIR}/Debug/${test_target}.exe)
+            COMMAND $<$<BOOL:${WIN32}>:Debug/>$<TARGET_FILE:${test_target}>)
     endif()
 
     # gtest_discover_tests where supported

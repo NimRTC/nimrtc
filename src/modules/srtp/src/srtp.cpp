@@ -319,7 +319,7 @@ core::Result<core::ByteSpan> SrtpSession::unprotect_rtp(
 
     // Stash output for return (work_buf_ reused for protect — use a stack-copy).
     static thread_local std::vector<std::uint8_t> tls_buf;
-    tls_buf.assign(out_buf.begin(), out_buf.begin() + out_len);
+    tls_buf.assign(out_buf.begin(), out_buf.begin() + static_cast<std::ptrdiff_t>(out_len));
     return core::Result<core::ByteSpan>::ok(
         core::ByteSpan(tls_buf.data(), tls_buf.size()));
 }
@@ -359,7 +359,7 @@ core::Result<core::ByteSpan> SrtpSession::unprotect_rtcp(core::ByteSpan srtcp_pa
     }
     ++impl_->stats_.rtcp_packets_decrypted;
     static thread_local std::vector<std::uint8_t> tls_buf;
-    tls_buf.assign(out_buf.begin(), out_buf.begin() + out_len);
+    tls_buf.assign(out_buf.begin(), out_buf.begin() + static_cast<std::ptrdiff_t>(out_len));
     return core::Result<core::ByteSpan>::ok(
         core::ByteSpan(tls_buf.data(), tls_buf.size()));
 }

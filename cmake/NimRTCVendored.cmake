@@ -26,11 +26,11 @@
 # -----------------------------------------------------------------------------
 # Per-library vendor switches (default ON — vendored is the default path).
 # -----------------------------------------------------------------------------
-option(NIMRTC_VENDORED_OPUS    "Use vendored libopus (default ON)"  ON)
-option(NIMRTC_VENDORED_SRTP    "Use vendored libsrtp (default ON)"  ON)
-option(NIMRTC_VENDORED_MBEDTLS "Use vendored mbedtls (default ON)"  ON)
-option(NIMRTC_VENDORED_JUICE   "Use vendored libjuice (default ON)" ON)
-option(NIMRTC_VENDORED_WOLFSSL "Use vendored wolfSSL (default ON)"  ON)
+option(NIMRTC_VENDORED_OPUS        "Use vendored libopus (default ON)"  ON)
+option(NIMRTC_VENDORED_SRTP        "Use vendored libsrtp (default ON)"  ON)
+option(NIMRTC_VENDORED_JUICE        "Use vendored libjuice (default ON)" ON)
+option(NIMRTC_VENDORED_WOLFSSL      "Use vendored wolfSSL (default ON)"  ON)
+option(NIMRTC_VENDORED_WEBRTC_APM   "Use vendored WebRTC APM (default ON)" ON)
 
 # -----------------------------------------------------------------------------
 # Public target names (primary)
@@ -38,14 +38,13 @@ option(NIMRTC_VENDORED_WOLFSSL "Use vendored wolfSSL (default ON)"  ON)
 set(NIMRTC_VENDOR_LIBS
     nimrtc_vendor_libsrtp
     nimrtc_vendor_libopus
-    nimrtc_vendor_mbedtls
     nimrtc_vendor_libjuice
     nimrtc_vendor_wolfssl
+    nimrtc_vendor_webrtc_apm
     # P1+
     # nimrtc_vendor_libvpx
     # P2+
     # nimrtc_vendor_usrsctp
-    # nimrtc_vendor_webrtc_apm
 )
 
 # Convenience aliases (nimrtc::vendor::<name>) — created by src/third_party/CMakeLists.txt
@@ -63,7 +62,7 @@ function(nimrtc_require_vendor name)
             "Vendor library '${name}' not found at ${vendor_dir}.\n"
             "Either populate it (see docs/zh/NimRTC-V2-技术文档.md §11), "
             "or set NIMRTC_VENDORED_<NAME>=OFF (use the canonical name "
-            "OPUS / SRTP / MBEDTLS / JUICE) to fall back to find_package().")
+            "OPUS / SRTP / JUICE) to fall back to find_package().")
     endif()
 endfunction()
 
@@ -73,7 +72,7 @@ endfunction()
 #
 #   nimrtc_acquire_target(<NAME> <vendored_target>)
 #
-# NAME            : one of OPUS, SRTP, MBEDTLS, JUICE (uppercase — selects
+# NAME            : one of OPUS, SRTP, JUICE, WOLFSSL (uppercase — selects
 #                   the matching NIMRTC_VENDORED_<NAME> cache option and
 #                   the system-target mapping).
 # vendored_target : the in-tree STATIC/INTERFACE target created by the
@@ -102,16 +101,16 @@ function(nimrtc_acquire_target name vendored_target)
             set(_vendor_subdir libopus)
         elseif(${name} STREQUAL "SRTP")
             set(_vendor_subdir libsrtp)
-        elseif(${name} STREQUAL "MBEDTLS")
-            set(_vendor_subdir mbedtls)
         elseif(${name} STREQUAL "JUICE")
             set(_vendor_subdir libjuice)
         elseif(${name} STREQUAL "WOLFSSL")
             set(_vendor_subdir wolfssl)
+        elseif(${name} STREQUAL "WEBRTC_APM")
+            set(_vendor_subdir webrtc_audio_processing)
         else()
             message(FATAL_ERROR
                 "nimrtc_acquire_target: unknown library '${name}'. "
-                "Expected one of OPUS, SRTP, MBEDTLS, JUICE, WOLFSSL.")
+                "Expected one of OPUS, SRTP, JUICE, WOLFSSL, WEBRTC_APM.")
         endif()
         nimrtc_require_vendor(${_vendor_subdir})
         if(NOT TARGET ${vendored_target})
@@ -121,7 +120,21 @@ function(nimrtc_acquire_target name vendored_target)
                 "fail to create it?")
         endif()
         if(NOT TARGET nimrtc_${name}_acquired)
-            add_library(nimrtc_${name}_acquired ALIAS ${vendored_target})
+            # Resolve ALIAS chains.  Some vendored wrappers (e.g. wolfssl)
+            # create an ALIAS like `add_library(nimrtc_vendor_wolfssl ALIAS wolfssl)`.
+            # CMake 3.20+ forbids `ALIAS -> ALIAS`, so we have to alias the
+            # ultimate (non-ALIAS) target.  Walk the chain until we hit a
+            # target that has no ALIASED_TARGET property.
+            set(_root ${vendored_target})
+            while(TRUE)
+                get_target_property(_aliased ${_root} ALIASED_TARGET)
+                if(_aliased)
+                    set(_root ${_aliased})
+                else()
+                    break()
+                endif()
+            endwhile()
+            add_library(nimrtc_${name}_acquired ALIAS ${_root})
         endif()
     else()
         # System path: dispatch on library name because the imported-target
@@ -140,22 +153,6 @@ function(nimrtc_acquire_target name vendored_target)
                 add_library(srtp2_imported UNKNOWN IMPORTED)
                 set_target_properties(srtp2_imported PROPERTIES IMPORTED_LOCATION "${SRTP_LIB}" INTERFACE_INCLUDE_DIRECTORIES "${SRTP_INCLUDE_DIR}")
                 add_library(nimrtc_${name}_acquired ALIAS srtp2_imported)
-            endif()
-        elseif(${name} STREQUAL "MBEDTLS")
-            find_package(mbedtls ${ARGN} CONFIG QUIET)
-            if(TARGET mbedtls::mbedtls)
-                if(NOT TARGET nimrtc_${name}_acquired)
-                    add_library(nimrtc_${name}_acquired INTERFACE IMPORTED)
-                    set_target_properties(nimrtc_${name}_acquired PROPERTIES
-                        INTERFACE_LINK_LIBRARIES "mbedtls::mbedtls;mbedtls::mbedcrypto;mbedtls::mbedx509")
-                endif()
-            else()
-                find_library(MBEDTLS_LIB NAMES mbedtls mbedcrypto)
-                find_library(MBEDX509_LIB NAMES mbedx509)
-                find_library(MBEDCRYPTO_LIB NAMES mbedcrypto)
-                add_library(mbedtls_imported UNKNOWN IMPORTED)
-                set_target_properties(mbedtls_imported PROPERTIES IMPORTED_LOCATION "${MBEDTLS_LIB}")
-                add_library(nimrtc_${name}_acquired ALIAS mbedtls_imported)
             endif()
         elseif(${name} STREQUAL "JUICE")
             find_library(JUICE_LIB NAMES juice)
@@ -196,9 +193,15 @@ endfunction()
 function(nimrtc_acquire_all_vendored)
     nimrtc_acquire_target(OPUS    nimrtc_vendor_libopus)
     nimrtc_acquire_target(SRTP    nimrtc_vendor_libsrtp)
-    nimrtc_acquire_target(MBEDTLS nimrtc_vendor_mbedtls)
     nimrtc_acquire_target(JUICE   nimrtc_vendor_libjuice)
     nimrtc_acquire_target(WOLFSSL nimrtc_vendor_wolfssl)
+    # WEBRTC APM is optional — its git submodule must be populated manually
+    # (git clone of the webrtc-audio-processing tree is ~100 MB).  Skip it
+    # gracefully if the source directory is absent so Linux builds without
+    # the submodule still succeed.
+    if(EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/webrtc_audio_processing/src/CMakeLists.txt")
+        nimrtc_acquire_target(WEBRTC_APM nimrtc_vendor_webrtc_apm)
+    endif()
 endfunction()
 
 # -----------------------------------------------------------------------------
@@ -217,11 +220,6 @@ function(nimrtc_link_libopus target)
     target_compile_definitions(${target} PRIVATE NIMRTC_USE_LIBOPUS=1)
 endfunction()
 
-function(nimrtc_link_mbedtls target)
-    target_link_libraries(${target} PRIVATE nimrtc_MBEDTLS_acquired)
-    target_compile_definitions(${target} PRIVATE NIMRTC_USE_MBEDTLS=1)
-endfunction()
-
 function(nimrtc_link_libjuice target)
     target_link_libraries(${target} PRIVATE nimrtc_JUICE_acquired)
     target_compile_definitions(${target} PRIVATE NIMRTC_USE_LIBJUICE=1)
@@ -236,5 +234,8 @@ endfunction()
 
 # Future:
 # function(nimrtc_link_usrsctp target) ...
-# function(nimrtc_link_webrtc_apm target) ...
+function(nimrtc_link_webrtc_apm target)
+    target_link_libraries(${target} PRIVATE nimrtc_WEBRTC_APM_acquired)
+    target_compile_definitions(${target} PRIVATE NIMRTC_USE_WEBRTC_APM=1)
+endfunction()
 # function(nimrtc_link_libvpx target) ...

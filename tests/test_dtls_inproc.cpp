@@ -2,6 +2,12 @@
 // NimRTC aes_gcm_seal / aes_gcm_open implementation, to isolate whether
 // the AEAD primitives themselves are broken (vs. e.g. wrong key derivation
 // between two engines).
+//
+// Windows-only: this test drives BCrypt's AES-GCM directly to validate the
+// expected tag layout.  On Linux the same coverage is provided by
+// test_engine_plugin_loading and the wolfssl-backed dtls session tests.
+
+#ifdef _WIN32
 
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
@@ -165,3 +171,14 @@ int main() {
     std::fflush(stdout);
     return match ? 0 : 1;
 }
+
+#else  // !_WIN32
+
+#include <cstdio>
+
+int main() {
+    std::printf("[test_dtls_inproc] skipped on Linux (Windows-only BCrypt test).\n");
+    return 0;
+}
+
+#endif  // _WIN32

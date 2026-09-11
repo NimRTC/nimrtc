@@ -195,9 +195,19 @@ struct Config {
 };
 
 // -----------------------------------------------------------------------------
-// DtlsSession — one peer connection
+// DtlsSession — one peer connection.
+//
+// As of the Linux-adaptation refactor, the only DtlsSession implementation
+// is `DtlsSessionWolfSSL` (defined in dtls_wolfssl_session.hpp).  We still
+// expose `class DtlsSession` here so that downstream code (engine.cpp,
+// tests) can keep referring to `nimrtc::dtls::DtlsSession` uniformly.
+// `DtlsSession` is implemented as a thin wrapper around
+// `DtlsSessionWolfSSL` via delegation (see dtls_wolfssl_session.cpp for
+// the out-of-line definitions).
+//
+// The hand-written DTLS state machine (the original `dtls.cpp`) was
+// removed; the only DTLS provider now is wolfSSL.
 // -----------------------------------------------------------------------------
-
 class DtlsSession {
 public:
     explicit DtlsSession(Config config);
@@ -227,6 +237,11 @@ public:
 
     /** Drain handshake-generated outbound records. */
     std::vector<DtlsRecord> take_outbound() noexcept;
+
+    /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).  Call from the
+     *  engine tick loop at ~50 ms cadence while the handshake has not
+     *  yet completed.  Safe no-op once state() is Connected/Failed/Closed. */
+    void tick() noexcept;
 
     // ---- Status -----------------------------------------------------------
 
@@ -271,6 +286,10 @@ public:
     Stats stats() const noexcept;
 
 private:
+    /** Holds the actual wolfSSL-backed implementation (DtlsSessionWolfSSL).
+     *  We use a pImpl idiom so that callers (engine.cpp) only need the
+     *  forward declarations of DtlsSession + DtlsSessionWolfSSL — the
+     *  wolfSSL headers never leak through this public header. */
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

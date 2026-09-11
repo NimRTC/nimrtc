@@ -1,7 +1,6 @@
 # NimRTC
 
-> ⚠️ **Status: 0.9.0-rc1 (Release Candidate) — Windows-only validation.**
-> 本次发布是 **0.9.0-rc1**，不是 1.0。Chrome DTLS 互通尚未完成（详见 [CHANGELOG](CHANGELOG.md) "Known issues"）。**所有验证仅在 Windows 10 / MSVC 上完成**，Linux / macOS / 移动平台均未验证，CMake 在那些平台可能 configure 通过，但**不要在没有跑通完整测试和 e2e 验收的情况下在非 Windows 平台上部署**。
+> **Status: 0.9.0-rc1 (Release Candidate).** Tested on Windows / Linux / macOS / aarch64 — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. Chrome DTLS interop is incomplete (see [CHANGELOG](CHANGELOG.md) "Known issues").
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 

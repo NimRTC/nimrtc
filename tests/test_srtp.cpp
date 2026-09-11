@@ -57,11 +57,8 @@ KeyMaterial make_keys(std::uint32_t seed) {
     for (auto& b : km.key)      b = static_cast<std::uint8_t>(rng() & 0xFF);
     for (auto& b : km.salt)     b = static_cast<std::uint8_t>(rng() & 0xFF);
     // Wrong key/salt: differ in all bytes from correct.
-    for (auto& b : km.wrong_key) b = static_cast<std::uint8_t>(~km.key[&b - km.wrong_key.data()] & 0xFF);
-    for (auto& b : km.wrong_salt) {
-        std::size_t idx = &b - km.wrong_salt.data();
-        b = static_cast<std::uint8_t>(~km.salt[idx] & 0xFF);
-    }
+    for (std::size_t i = 0; i < 16; ++i) km.wrong_key[i]  = static_cast<std::uint8_t>(~km.key[i]  & 0xFF);
+    for (std::size_t i = 0; i < 14; ++i) km.wrong_salt[i] = static_cast<std::uint8_t>(~km.salt[i] & 0xFF);
     return km;
 }
 

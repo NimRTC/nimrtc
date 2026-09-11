@@ -23,15 +23,53 @@ project(nimrtc
 option(NIMRTC_BUILD_TESTS      "Build unit tests"                  ON)
 option(NIMRTC_BUILD_EXAMPLES   "Build examples"                    OFF)
 option(NIMRTC_BUILD_DOCS       "Build API documentation (Doxygen)" OFF)
+option(NIMRTC_BUILD_BRIDGE_TESTS
+       "Build Chrome↔NimRTC interop bridge (tests/wolfssl_dtls/bridge/)"
+       OFF)
 option(NIMRTC_VENDORED         "Use vendored third-party libraries" ON)
 option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
 option(NIMRTC_WARNINGS_AS_ERRORS "Treat warnings as errors"        ON)
 
+# Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
+# pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a
+# Debug /MDd consumer it trips LNK2038 mismatch errors.  Override the
+# MSVC runtime that all test targets use to /MD so the link succeeds
+# regardless of the host build type.  Set to "DEFAULT" to use CMake's
+# per-config default (/MDd in Debug, /MD in Release).
+# MSVC_RUNTIME_LIBRARY values are logical names (MultiThreadedDLL), not
+# compiler flags (like /MD). Translate the user-friendly alias here.
+if(DEFINED NIMRTC_TEST_RUNTIME_LIB AND NOT "${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "DEFAULT")
+    if("${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "/MD")
+        set(NIMRTC_TEST_RUNTIME_LIB_NAME "MultiThreadedDLL")
+    elseif("${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "/MDd")
+        set(NIMRTC_TEST_RUNTIME_LIB_NAME "MultiThreadedDebugDLL")
+    elseif("${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "/MT")
+        set(NIMRTC_TEST_RUNTIME_LIB_NAME "MultiThreaded")
+    elseif("${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "/MTd")
+        set(NIMRTC_TEST_RUNTIME_LIB_NAME "MultiThreadedDebug")
+    else()
+        set(NIMRTC_TEST_RUNTIME_LIB_NAME "${NIMRTC_TEST_RUNTIME_LIB}")
+    endif()
+else()
+    set(NIMRTC_TEST_RUNTIME_LIB_NAME "")
+endif()
+
 # -----------------------------------------------------------------------------
 # Project-wide compile settings (compiler-independent base)
 # -----------------------------------------------------------------------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# Force the MSVC runtime library to MultiThreadedDLL (/MD) for every
+# configuration. The vendored audio3a webrtc_apm archive is built with
+# MinGW/gcc in /MD mode; consumers that link it must use the same
+# runtime to avoid LNK2038 mismatch errors. /MD is used regardless of
+# build type (Debug/Release). Set NIMRTC_TEST_RUNTIME_LIB=DEFAULT to
+# revert to CMake's per-config default.
+if(MSVC AND NOT (DEFINED NIMRTC_TEST_RUNTIME_LIB AND
+                 "${NIMRTC_TEST_RUNTIME_LIB}" STREQUAL "DEFAULT"))
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
 
 # Initialise the GTest fetch switch BEFORE NimRTCTest runs find_package, so
 # the FetchContent branch is reachable on a clean configure.
@@ -137,6 +175,7 @@ message(STATUS "  Vendor libs      : ${NIMRTC_VENDORED}")
 message(STATUS "  Tests            : ${NIMRTC_BUILD_TESTS}")
 message(STATUS "  Examples         : ${NIMRTC_BUILD_EXAMPLES}")
 message(STATUS "  API docs         : ${NIMRTC_BUILD_DOCS}")
+message(STATUS "  Bridge tests     : ${NIMRTC_BUILD_BRIDGE_TESTS}")
 message(STATUS "  ASan / UBSan     : ${NIMRTC_ASAN} / ${NIMRTC_UBSAN}")
 message(STATUS "  Warnings→errors  : ${NIMRTC_WARNINGS_AS_ERRORS}")
 message(STATUS "==================================================")

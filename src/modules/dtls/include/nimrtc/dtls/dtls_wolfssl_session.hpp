@@ -63,6 +63,19 @@ public:
     /** Drain outbound DTLS records produced by wolfSSL. */
     std::vector<DtlsRecord> take_outbound() noexcept;
 
+    /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).
+     *
+     *  wolfSSL's non-blocking DTLS code defers retransmits to an external
+     *  caller via `wolfSSL_dtls_got_timeout()`; without this pump, the
+     *  handshake can stall indefinitely when the peer is slow or any
+     *  HelloVerifyRequest cookie exchange is in flight.  Call this from
+     *  the engine tick loop at ~50 ms cadence while the handshake has
+     *  not yet completed.
+     *
+     *  Safe to call when state() is Connected / Failed / Closed — becomes
+     *  a no-op. */
+    void tick() noexcept;
+
     DtlsState state() const noexcept;
     bool is_connected() const noexcept;
 

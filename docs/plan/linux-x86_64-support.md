@@ -4,7 +4,7 @@
 |---|---|
 | 版本 | v1.0（草案） |
 | 日期 | 2026-09-08 |
-| 状态 | **experimental** — 待阶段 1 完成后回填验证细节 |
+| 状态 | **SUPERSEDED** — 阶段 1 (chore/cleanup-onboarding) + 阶段 2 + 阶段 4 (CI 接入) 已在 [PR #B3] 落地：新增 `linux-gcc` / `linux-aarch64` / `macos-clang` CI jobs（见 `.github/workflows/ci.yml`）、新增 `debug.aarch64` / `tests.aarch64` preset 与 `cmake/toolchains/aarch64-linux-gnu.cmake`、CHANGELOG 平台矩阵从 "Windows-only" 切换到 ✅/🔶 状态。**本文档保留为审计归档**：§3.1 / §3.2 / §3.3 的 R1 审计记录仍然有用，§阶段 1.0 前置（mbedTLS build 集成打通）已随 wolfSSL 迁移整体作废——见文档内 OBSOLETE 标记。1.0 实际准入门槛见 `CHANGELOG.md` "Platform support matrix"。 |
 | 目标 | Linux x86_64 (GCC + Clang) 编译 + 单元测试 + loopback-p2p smoke 全链路通过 |
 
 > **纪律**：本文档对齐 `docs/zh/NimRTC-V2-技术文档.md` §13 路线图（1.0.0 准入门槛），不写"生产级"措辞。本计划不替代 §13 roadmap，是它的 Linux x86_64 子项。
@@ -27,7 +27,7 @@
 
 - **e2e Chrome 互通验证**——仍以 Windows x86_64 + 桌面 Chrome 为主战场（与 §13.1 口径一致）
 - macOS / aarch64 / Android / iOS / 信创平台（独立 PR）
-- 不引入新的 vendored 依赖；mbedTLS 4.2.0 源码已在 `src/third_party/mbedtls/`，但仅作为"源码 vendor"，**build 集成尚未打通**（见 §3 与阶段 1.0 前置）
+- 不引入新的 vendored 依赖；mbedTLS 4.2.0 源码仍在 `src/third_party/mbedtls/`，但 DTLS 生产路径自 `chore/cleanup-onboarding` 切换至 wolfSSL，mbedTLS 仅作为历史源码 vendor（**build 未集成也不再集成**）
 - 不重构现有 plugin 抽象层（§ADR-001），仅在加密学子模块下沉一层轻抽象
 - **peer ECDSA 签名验证** —— 计划 §1.1 不包含 `crypto::verify_p256` 的实现；当前 NimRTC 跳过 peer 签名验证，靠 SDP fingerprint + TLS Finished verify_data 保证完整性，此口径不变
 
@@ -42,19 +42,24 @@
 | `NIMRTC_ASAN` / `NIMRTC_UBSAN` 选项 | ✅ 已实现 | `cmake/` | Linux 默认 ON/OFF 切换 |
 | libjuice | 1.6.0 | `src/third_party/libjuice/` | `add_subdirectory` 上游 + INTERFACE wrapper，`juice` STATIC |
 | libsrtp | 3.0.0-dev | `src/third_party/libsrtp/` | `add_subdirectory` 上游 + INTERFACE wrapper，`CRYPTO_LIBRARY=internal` |
-| mbedtls | **4.2.0（仅源码 vendor，build 未集成）** | `src/third_party/mbedtls/src/` | ⚠️ NimRTC wrapper 仅暴露 INTERFACE header path，**不**调用上游 `add_subdirectory`；阶段 1.0 前置需打开 |
+| mbedtls | 4.2.0（**历史源码 vendor，仅作 archive；DTLS 生产路径已切至 wolfSSL**） | `src/third_party/mbedtls/src/` | 不再调上游 `add_subdirectory`；阶段 1 中所有"打通 mbedTLS build 集成"目标作废 |
 | libopus | 1.6.1 | `src/third_party/libopus/` | `add_subdirectory` 上游，`NO_ASSERTS=1` |
 | googletest | 1.12.1 | `src/third_party/googletest/` | 离线构建 |
 | nlohmann_json | 3.11.3 | `src/third_party/nlohmann_json/` | INTERFACE 单头 |
-| `nimrtc_link_mbedtls(target)` CMake helper | ✅ 已写好但未挂载 | `cmake/NimRTCVendored.cmake:200-203` | 阶段 1 只需在 DTLS 模块 CMakeLists 加一行调用 |
+| `nimrtc_link_wolfssl(target)` CMake helper | ✅ 已挂载 | `cmake/NimRTCVendored.cmake` | DTLS 模块 CMakeLists 调用（wolfssl 当前为生产路径） |
 
 ## 3. 当前阻断 Linux 构建的关键障碍
 
-经全局 grep `WIN32` / `BCrypt` / `WSA` / `GetLastError`，**主障碍在 `src/modules/dtls/src/dtls.cpp`**；**次级障碍是 mbedTLS build 集成未打通**（见阶段 1.0 前置）。
+> **重要更新（commit `chore/cleanup-onboarding`）**：本节 §3.1 / §3.2 / §3.3 撰写时假设 `src/modules/dtls/src/dtls.cpp` + `dtls_prf.cpp` 仍以 BCrypt 直写方式实现 DTLS。**wolfSSL 迁移 WIP 已删除这两个文件**（现在 DTLS 仅走 `DtlsSessionWolfSSL` 封装 wolfSSL），故 §3.1 中所述的"89 处 BCrypt 调用点"现在为 **0**——本节后续表格保留为 R1 审计的归档记录，不再反映当前代码状态。
+> 阶段 1 实际工作已简化为：**§1.0 前置的 mbedTLS build 集成目标整体作废**，转而验证 `src/third_party/wolfssl/` 的 vendored 产物在 Linux 上能正确 link（已在 WIP `cmake/NimRTCVendored.cmake` 中接入 wolfSSL 分支，见 §2 已挂载项）。
 
-#### 3.1 `dtls.cpp` 内 BCrypt 调用清单（R1 审计结果）
+#### 3.1 ~~`dtls.cpp` 内 BCrypt 调用清单（R1 审计结果）~~ — OBSOLETE (post wolfSSL migration)
 
-**总调用点 ≈ 89 处**，全部位于 `src/modules/dtls/src/dtls.cpp`（84 处）+ `src/modules/dtls/src/dtls_prf.cpp`（5 处）。guard 边界：100% 在 `#if NIMRTC_HAS_BCRYPT` 之下（不是 `#ifdef _WIN32`）；其中：
+**原 R1 审计结论**：`src/modules/dtls/src/dtls.cpp` 中 84 处 + `dtls_prf.cpp` 中 5 处，合计 89 处 BCrypt 调用点（文件已被 `chore/cleanup-onboarding` 删除）。
+
+**当前实际状态**：上述两文件已不存在；DTLS 唯一实现是 `src/modules/dtls/src/dtls_wolfssl_session.cpp`（封装 wolfSSL DTLS 1.2 + SRTP + ECDSA + AES-GCM），头文件 `src/modules/dtls/include/nimrtc/dtls/dtls_wolfssl_session.hpp` 定义 `DtlsSessionWolfSSL` API。**BCrypt 调用点总数 = 0**。
+
+下表保留为 R1 audit 的历史归档（不在 1.0 范围内重新审计）：
 
 - **无 `#else` 分支**（函数在 Linux 下整体消失）：`bcrypt_random`、`bcrypt_sha256`、`bcrypt_sha256_concat`、`bcrypt_ecdsa_sign_der`、`bcrypt_import_aes_gcm_key`、`aes_gcm_seal`、`aes_gcm_open`、`Impl::teardown_crypto`、`Impl::enqueue_handshake` 内 epoch≥1 BCrypt 调用、`Impl::process_record` 内 epoch≥1 BCrypt 调用、`Impl::make_server_hello` 内 random 调用、`Impl::handle_client_hello` 内 random 调用、`DtlsSession::open` 内 client_random 调用
 - **有 `#else` 分支但返回占位值**（编译过但跑不动）：`Impl::init_crypto`（0xAA pubkey）、`Impl::hs_update`（空）、`Impl::hs_clone_digest`（32B 0）、`Impl::build_self_signed_cert`（return false）、`Impl::derive_pre_master_secret`（32B 0）、`Impl::compute_handshake_hash_snapshot`（32B 0）
@@ -111,9 +116,13 @@
 
 它们**不**链接进 `nimrtc_dtls.a`，是 Windows-only 独立 sanity-check。
 
-#### 3.5 mbedTLS 4.2.0 build 集成未打通（隐藏的关键障碍）
+#### 3.5 ~~mbedTLS 4.2.0 build 集成未打通（隐藏的关键障碍）~~ — OBSOLETE
 
-**这是 R2 揭示的事实**：mbedTLS 4.2.0 源码确实已下载到 `src/third_party/mbedtls/src/`（git clone + `.git\`），但 NimRTC 自带的 wrapper CMakeLists.txt `src/third_party/mbedtls/CMakeLists.txt` 当前**只声明一个 INTERFACE 库**：
+**原始 R2 阻塞**：mbedTLS 4.2.0 源码已 git clone 到 `src/third_party/mbedtls/src/`，但 NimRTC wrapper `src/third_party/mbedtls/CMakeLists.txt` 仅声明 INTERFACE 库、未真正编译上层 `add_subdirectory`。
+
+**当前决定（wolfSSL 迁移后）**：mbedTLS 不再作为生产 DTLS 路径；R2 揭示的"打开 mbedTLS build 集成"目标整体作废，Perl / `framework/` git submodule / `find_package(mbedtls CONFIG)` 等前置全部从 1.0 退出准则删除。`src/third_party/mbedtls/` 保留为历史源码 vendor（不再被 link、不再被 include），删除该目录需要独立 PR（archive 决策），不在本计划范围内。
+
+wolfSSL 作为生产 DTLS 后端的 Linux build 验证落在 §阶段 2（同 `cmake --preset debug` / `--build` / `ctest` 流程），export 阶段无新增 Perl / framework 依赖。
 
 ```cmake
 # 当前 wrapper 行为（src/third_party/mbedtls/CMakeLists.txt）

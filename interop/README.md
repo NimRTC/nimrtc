@@ -15,6 +15,9 @@ interop/
 ├── fixtures/
 │   ├── chrome_opus_offer.sdp         ← Chrome 生成的 Opus SDP offer 样本
 │   └── chrome_opus_offer.expected.md ← NimRTC 解析该 SDP 的期望结果
+├── docker/
+│   ├── Dockerfile              ← 完整的 NimRTC + Chrome 测试容器镜像
+│   └── docker-compose.yml      ← 一键启动 signaling + NimRTC + Chrome 容器
 ├── run_interop.py              ← Python 测试运行器（所有测试用例）
 └── .github/
     └── workflows/
@@ -102,6 +105,25 @@ CI 运行内容：
 - Chrome → NimRTC 的音频（需要 `demo-p2p` 接入麦克风）
 - DataChannel（属于 P2 范畴）
 - 视频（属于 P1 范畴）
+
+## Docker 隔离环境
+
+如果不想在 host 装 Chromium + Playwright，可以用 docker-compose 跑完整测试：
+
+```bash
+# 一次性构建镜像 (5-10 分钟，包括编译 demo-p2p)
+docker compose -f interop/docker/docker-compose.yml build
+
+# 运行 Chrome interop 测试 (signaling + NimRTC + Chrome 三容器)
+docker compose -f interop/docker/docker-compose.yml up \
+    --abort-on-container-exit --exit-code-from nimrtc
+```
+
+容器内会自动：
+1. 编译 NimRTC `demo-p2p` (Debug 配置)
+2. 启动 `signaling_server.py` 健康检查
+3. 启动 `nimrtc` 容器跑 `chrome_opus_interop` 测试
+4. 结果写入 stderr；非零退出码表示失败
 
 ## 预期失败项（P1 完成前）
 

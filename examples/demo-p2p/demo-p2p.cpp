@@ -78,8 +78,10 @@ void print_usage(const char* prog) {
                  "                           use 0.0.0.0 to advertise all host interfaces)\n"
                  "  %s --stun-host <h>        STUN server hostname (default: stun.l.google.com)\n"
                  "  %s --stun-port <p>        STUN server port     (default: 19302)\n"
-                 "  %s --no-stun              Disable STUN candidate gathering\n",
-                 prog, prog, prog, prog, prog, prog, prog, prog, prog);
+                 "  %s --no-stun              Disable STUN candidate gathering\n"
+                 "  %s --video                Enable synthetic H.264 video stream\n"
+                 "                           (640x480 @ 15 fps, stub encoder; off by default)\n",
+                 prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 std::string slurp_file(const char* path) {
@@ -166,9 +168,9 @@ static void json_unescape(std::string& s) {
                 bool ok = true;
                 for (char h : hex) {
                     cp <<= 4;
-                    if      (h >= '0' && h <= '9') cp |= (h - '0');
-                    else if (h >= 'a' && h <= 'f') cp |= (h - 'a' + 10);
-                    else if (h >= 'A' && h <= 'F') cp |= (h - 'A' + 10);
+                    if      (h >= '0' && h <= '9') cp |= static_cast<unsigned>(h - '0');
+                    else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
                     else { ok = false; break; }
                 }
                 if (ok) {
@@ -204,7 +206,11 @@ static void json_unescape(std::string& s) {
 // Tolerates whitespace after the colon (Python's json.dumps adds a space).
 bool json_get_string(std::string_view json, std::string_view key,
                       std::string* out) {
-    std::string needle = std::format("\"{}\":", key);
+    // Build the needle manually (avoids requiring C++23 std::format on
+    // compilers older than GCC 13).
+    std::string needle;
+    needle.reserve(key.size() + 3);
+    needle.append("\"").append(key).append("\":");
     auto pos = json.find(needle);
     if (pos == std::string::npos) return false;
     pos += needle.size();
@@ -228,20 +234,27 @@ bool json_get_string_field(std::string_view json, std::string_view key,
                             std::string* out) {
     return json_get_string(json, key, out);
 }
+[[maybe_unused]] static auto _unused_anchor = &json_get_string_field;
 
 // Emit a JSON line to stdout (flushed) and stderr log it.
 void emit_json(std::string_view type, std::string_view body) {
-    std::string msg = std::format("{{\"type\":\"{}\",{}}}", type, body);
-    std::fprintf(stdout, "%s\n", msg.c_str());
+    std::ostringstream oss;
+    oss << "{\"type\":\"" << type << "\"," << body << "}\n";
+    std::string msg = oss.str();
+    std::fprintf(stdout, "%s", msg.c_str());
     std::fflush(stdout);
     std::fprintf(stderr, "[demo-p2p] >> %s\n", type.data());
 }
 
 void emit_offer(std::string_view sdp) {
-    emit_json("offer", std::format("\"sdp\":\"{}\"", json_escape(sdp)));
+    std::ostringstream oss;
+    oss << "\"sdp\":\"" << json_escape(sdp) << "\"";
+    emit_json("offer", oss.str());
 }
 void emit_answer(std::string_view sdp) {
-    emit_json("answer", std::format("\"sdp\":\"{}\"", json_escape(sdp)));
+    std::ostringstream oss;
+    oss << "\"sdp\":\"" << json_escape(sdp) << "\"";
+    emit_json("answer", oss.str());
 }
 void emit_candidate(std::string_view cand,
                      int sdp_m_line_index,
@@ -266,7 +279,7 @@ void emit_candidate(std::string_view cand,
 // timeout.  Returns false on EOF (line will be partial).
 bool read_line_peek(std::string* line, int timeout_ms) {
     line->clear();
-    auto deadline = std::chrono::steady_clock::now()
+    [[maybe_unused]] auto deadline = std::chrono::steady_clock::now()
                   + std::chrono::milliseconds(timeout_ms);
 
 #ifdef _WIN32
@@ -410,6 +423,18 @@ struct ProxyState {
     std::atomic<bool> answerer{false};
     std::atomic<bool> sent_local_candidates{false};
     int duration_sec = 60;
+
+    // ---- Video driver (single-threaded; runs on the tick thread) --------
+    // We use the engine's own `video_source_` plugin instance and drive
+    // it manually with `produce_one()` from the tick loop.  The source's
+    // frame callback is wired to `engine.send_video()`.  This keeps all
+    // video codec / sender access on a single thread (the tick thread),
+    // avoiding the IVideoCodec / IVideoSender thread-safety hazard called
+    // out in engine.cpp::init_video_plugins().
+    std::atomic<std::uint64_t> video_tx_frames{0};
+    std::atomic<std::uint64_t> video_rx_nals{0};
+    std::int64_t              next_video_emit_us = 0;
+    int                       video_fps = 0;     // 0 = video disabled
 };
 
 // Drain transport every 10 ms; emit ICE candidates once when gathering completes.
@@ -478,6 +503,41 @@ static void engine_tick_thread(ProxyState* st) {
                     st->engine->config().pcm_sample_rate_hz,
                     static_cast<unsigned>(rc));
             }
+
+            // ---- Video drive loop ---------------------------------------
+            // Pull a frame from the engine's video source at the
+            // configured cadence; the source callback (wired in
+            // run_signaling_proxy below) forwards the frame into
+            // engine.send_video().  The cadence here is wall-clock,
+            // independent of audio — so audio at 48 kHz / 20 ms and
+            // video at e.g. 15 fps / 66 ms coexist.
+            if (st->video_fps > 0) {
+                const std::int64_t now_us = std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (now_us >= st->next_video_emit_us) {
+                    if (auto* src = st->engine->video_source()) {
+                        src->produce_one();
+                        st->video_tx_frames.fetch_add(1);
+                        if (st->video_tx_frames.load() % 30 == 0) {
+                            std::fprintf(stderr,
+                                "[demo-p2p] video frames sent=%llu (rx_nals=%llu)\n",
+                                static_cast<unsigned long long>(
+                                    st->video_tx_frames.load()),
+                                static_cast<unsigned long long>(
+                                    st->video_rx_nals.load()));
+                        }
+                    }
+                    const std::int64_t interval_us =
+                        1'000'000 / st->video_fps;
+                    // Catch-up if we fell behind (avoid burst-stacking
+                    // when the thread was stalled on a slow tick).
+                    st->next_video_emit_us = now_us + interval_us;
+                    if (st->next_video_emit_us < now_us) {
+                        st->next_video_emit_us = now_us + interval_us;
+                    }
+                }
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -493,6 +553,7 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
     st.engine = &engine;
     st.answerer.store(answerer);
     st.duration_sec = duration_sec;
+    st.video_fps = (engine.video_source() != nullptr) ? 15 : 0;
 
     // Apply TURN relay configuration before open() so libjuice gathers
     // relay candidates from the TURN server.
@@ -533,6 +594,55 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
         std::fprintf(stderr, "[error 0x%04X] %.*s\n", e,
                      static_cast<int>(m.size()), m.data());
     });
+
+    // ---- Video source wiring ---------------------------------------------
+    // The video source's frame callback fires synchronously inside
+    // produce_one(); we forward the frame into engine.send_video().
+    // The codec adapter in init_video_plugins() picks the I420 planes
+    // up and feeds the H.264 stub encoder → video sender → RTP.
+    if (auto* src = engine.video_source()) {
+        src->set_callback([&engine](
+                const nimrtc::plugins::VideoSourceFrame& f) {
+            // Called on the tick thread (single-threaded driver).
+            engine.send_video(f);
+        });
+    }
+    // Increment RX counter from the NAL callback.  We capture `&st` (a
+    // stack-stable pointer — ProxyState outlives the engine) so the
+    // callback does NOT need to live on the engine.
+    engine.set_on_video_frame([&st](const std::uint8_t* /*nal*/,
+                                    std::size_t /*len*/,
+                                    bool /*keyframe*/) {
+        st.video_rx_nals.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    // If NIMRTC_DTLS_SPKI_FILE is set, write the local DTLS fingerprint
+    // (base64 SPKI hash) to it now that the engine is open.  Chrome's
+    // --ignore-certificate-errors-spki-list flag expects this format and
+    // the signaling_proxy uses the file to launch Chrome with the right
+    // allow-list entry.  See interop/signaling/signaling_proxy.py.
+    if (const char* spki_path = std::getenv("NIMRTC_DTLS_SPKI_FILE")) {
+        std::string b64 = engine.local_dtls_fingerprint_sha256_base64();
+        if (!b64.empty()) {
+            std::FILE* f = std::fopen(spki_path, "wb");
+            if (f) {
+                std::fwrite(b64.data(), 1, b64.size(), f);
+                std::fclose(f);
+                std::fprintf(stderr,
+                             "[demo-p2p] wrote DTLS SPKI (base64 SHA-256) "
+                             "to %s (len=%zu)\n",
+                             spki_path, b64.size());
+            } else {
+                std::fprintf(stderr,
+                             "[demo-p2p] failed to open %s for SPKI write\n",
+                             spki_path);
+            }
+        } else {
+            std::fprintf(stderr,
+                         "[demo-p2p] NIMRTC_DTLS_SPKI_FILE set but local "
+                         "fingerprint unavailable yet (engine not open?)\n");
+        }
+    }
 
     // Tick thread drives ICE + drains transport.
     std::thread tick_t(engine_tick_thread, &st);
@@ -608,6 +718,44 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
             }
             std::fprintf(stderr, "[demo-p2p] answer SDP len=%zu:\n%s\n",
                          answer->size(), answer->c_str());
+
+            // Append a=ssrc:<SSRC> cname:<cname> to the last media section
+            // of the answer SDP if not already present.  This is required
+            // for Chrome interop (see notes in interop/signaling/signaling_proxy.py
+            // — Chrome refuses to count inbound RTP packets in
+            // `inbound-rtp` reports and treats the audio track as silent
+            // until the answer SDP carries at least one a=ssrc line that
+            // matches the RTP-header SSRC on the wire).
+            //
+            // The SSRC must match what src/engine/src/engine.cpp::tick_audio
+            // stamps into the RTP header: static std::atomic<uint32_t>
+            // ssrc_val{0xDEADBEEF}.  If that value ever changes, this
+            // constant must be updated in lockstep.
+            static constexpr std::uint32_t kAudioSsrc = 0xDEADBEEFu;
+            {
+                std::string& s = *answer;
+                bool has_ssrc = s.find("a=ssrc:") != std::string::npos;
+                if (!has_ssrc) {
+                    char buf[96];
+                    std::snprintf(buf, sizeof(buf),
+                                  "a=ssrc:%u cname:nimrtc-audio\r\n",
+                                  static_cast<unsigned>(kAudioSsrc));
+                    // Append at the end of the SDP.  The SDP is a CRLF-
+                    // separated blob; appending an extra line before the
+                    // terminating CRLF is conformant.
+                    // Strip any trailing \r\n, append our line, then add
+                    // a final \r\n so the result is well-formed.
+                    while (!s.empty() &&
+                           (s.back() == '\n' || s.back() == '\r')) {
+                        s.pop_back();
+                    }
+                    s.append(buf);
+                    std::fprintf(stderr,
+                                 "[demo-p2p] appended a=ssrc:%u to answer SDP\n",
+                                 static_cast<unsigned>(kAudioSsrc));
+                }
+            }
+
             // Optional debug dump: NIMRTC_ANSWER_DUMP=<path> writes the
             // emitted answer SDP verbatim for offline inspection.
             if (const char* dump = std::getenv("NIMRTC_ANSWER_DUMP")) {
@@ -712,6 +860,9 @@ int main(int argc, char** argv) {
     std::string turn_user_arg;
     std::string turn_pass_arg;
 
+    // ---- Video flag (defaults to off; H.264 stub @ 640x480 / 15 fps) -----
+    bool video_enabled = false;
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--signaling-proxy") == 0) {
             proxy_mode = true;
@@ -737,6 +888,8 @@ int main(int argc, char** argv) {
             turn_user_arg = argv[++i];
         } else if (std::strcmp(argv[i], "--turn-pass") == 0 && i + 1 < argc) {
             turn_pass_arg = argv[++i];
+        } else if (std::strcmp(argv[i], "--video") == 0) {
+            video_enabled = true;
         }
     }
 
@@ -756,6 +909,22 @@ int main(int argc, char** argv) {
     }
     cfg.pcm_sample_rate_hz = 48000;
     cfg.pcm_channels       = 1;
+
+    // ---- Video config (when --video is passed) ---------------------------
+    if (video_enabled) {
+        cfg.video_source_name   = "memory";
+        cfg.video_sink_name     = "headless";
+        cfg.video_receiver_name = "reference";
+        cfg.video_sender_name   = "reference";
+        cfg.video_codec_name    = "h264";
+        cfg.video_sender_tuning.ssrc         = 0xCAFEBABEu;
+        cfg.video_sender_tuning.payload_type = 102;
+        cfg.video_sender_tuning.mtu          = 1200;
+        cfg.video_receiver_tuning.ssrc         = cfg.video_sender_tuning.ssrc;
+        cfg.video_receiver_tuning.payload_type = cfg.video_sender_tuning.payload_type;
+        std::fprintf(stderr,
+                     "[demo-p2p] video: enabled (640x480 @ 15 fps, H.264 stub)\n");
+    }
 
     // Codec selection: user-specified takes priority; otherwise auto-fallback.
     // opus: RFC 7587, payload type 111, 48 kHz stereo.
@@ -839,6 +1008,20 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[error 0x%04X] %.*s\n", e,
                      static_cast<int>(m.size()), m.data());
     });
+    if (const char* spki_path = std::getenv("NIMRTC_DTLS_SPKI_FILE")) {
+        std::string b64 = engine.local_dtls_fingerprint_sha256_base64();
+        if (!b64.empty()) {
+            std::FILE* f = std::fopen(spki_path, "wb");
+            if (f) {
+                std::fwrite(b64.data(), 1, b64.size(), f);
+                std::fclose(f);
+                std::fprintf(stderr,
+                             "[demo-p2p] wrote DTLS SPKI (base64 SHA-256) "
+                             "to %s (len=%zu)\n",
+                             spki_path, b64.size());
+            }
+        }
+    }
 
     int rc = 0;
     // Valid positional sub-commands are: [no args] → offerer, "offer <file>", "answer <file>".

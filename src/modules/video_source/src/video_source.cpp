@@ -131,7 +131,7 @@ void overlay_frame_count(std::uint32_t frame_seq, std::uint8_t* y_plane,
     for (int digit = 3; digit >= 0; --digit) {
         std::uint32_t d = frame_seq % 10;
         frame_seq /= 10;
-        std::uint32_t x0 = (3 - digit) * 8;
+        std::uint32_t x0 = static_cast<std::uint32_t>(3 - digit) * 8u;
         for (std::uint32_t y = 0; y < 8; ++y) {
             std::uint8_t row = kGlyph[d][y];
             for (std::uint32_t x = 0; x < 8; ++x) {

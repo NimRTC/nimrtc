@@ -123,8 +123,9 @@ std::vector<std::vector<std::uint8_t>> parse_annex_b(core::ByteSpan bs) noexcept
         std::size_t next  = (next4 < next3) ? next4 : next3;
         std::size_t end   = (next == bs.size()) ? bs.size() : next;
         if (end > cursor) {
-            std::vector<std::uint8_t> nalu(bs.begin() + cursor,
-                                           bs.begin() + end);
+            std::vector<std::uint8_t> nalu(
+                bs.begin() + static_cast<std::ptrdiff_t>(cursor),
+                bs.begin() + static_cast<std::ptrdiff_t>(end));
             if (!nalu.empty()) out.push_back(std::move(nalu));
         }
         if (next == bs.size()) break;
@@ -149,8 +150,9 @@ std::vector<std::vector<std::uint8_t>> parse_length_prefixed(core::ByteSpan bs) 
              static_cast<std::uint32_t>(bs[cursor + 3]);
         cursor += 4;
         if (len == 0 || cursor + len > bs.size()) break;
-        std::vector<std::uint8_t> nalu(bs.begin() + cursor,
-                                       bs.begin() + cursor + len);
+        std::vector<std::uint8_t> nalu(
+            bs.begin() + static_cast<std::ptrdiff_t>(cursor),
+            bs.begin() + static_cast<std::ptrdiff_t>(cursor + len));
         out.push_back(std::move(nalu));
         cursor += len;
     }

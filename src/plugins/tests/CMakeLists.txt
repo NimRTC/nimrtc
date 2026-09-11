@@ -21,3 +21,8 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_bwe_plugin_seam.cpp
 
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_plugin_seam.cpp
     DEPS nimrtc::plugins)
+
+# Zero-copy GPU surface path — verifies the GpuBuffer / GpuBufferPool /
+# HwVideoBackendRegistry contracts independently of any platform SDK.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_zero_copy_surface_path.cpp
+    DEPS nimrtc::plugins)

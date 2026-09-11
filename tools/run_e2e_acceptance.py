@@ -30,8 +30,18 @@ ROOT = Path(__file__).resolve().parent.parent
 E2E  = ROOT / "build" / "e2e"
 E2E.mkdir(parents=True, exist_ok=True)
 
-BIN_TESTS    = ROOT / "build" / "tests"   / "Debug"
-BIN_EXAMPLES = ROOT / "build" / "examples" / "Debug"
+# Honor NIMRTC_BUILD_DIR so callers can point at out-of-tree builds.
+# single-config (cmake --preset debug on Linux/macOS) puts binaries directly
+# under the build dir; multi-config (MSVC) nests them under <Config>/.
+NIMRTC_BUILD_DIR = Path(os.environ.get("NIMRTC_BUILD_DIR", ROOT / "build"))
+
+def _resolve(cfg: str, sub: str) -> Path:
+    multi = NIMRTC_BUILD_DIR / cfg / sub
+    single = NIMRTC_BUILD_DIR / sub
+    return multi if multi.exists() else single
+
+BIN_TESTS    = _resolve("Debug", "tests")
+BIN_EXAMPLES = _resolve("Debug", "examples")
 
 EXE_GCM     = BIN_TESTS  / "test_dtls_gcm_aead.exe"
 EXE_INPROC  = BIN_TESTS  / "test_dtls_inproc.exe"

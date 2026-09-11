@@ -37,6 +37,7 @@ namespace {
 
 /** Translate plugins::Audio3AConfig → audio3a::Config (concrete side).
  *  Field rename: aec_delay_est_ms → aec_delay_headroom_ms. */
+[[maybe_unused]]
 audio3a::Config to_concrete_config(const plugins::Audio3AConfig& p) noexcept {
     audio3a::Config c;
     c.sample_rate_hz          = p.sample_rate_hz;
@@ -309,6 +310,39 @@ plugins::IAudio3A* NullPluginFactory::create() const {
 }
 
 // ---------------------------------------------------------------------------
+// WebRtcPluginFactory
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Factory producing PluginAdapter instances that wrap a WebRtcAudio3A.
+ *
+ * Registered as id "webrtc_apm". Requires NIMRTC_VENDORED_WEBRTC_APM=ON.
+ * Falls back to NullAudio3A if WebRTC APM source is not populated.
+ */
+
+std::string_view WebRtcPluginFactory::id() const noexcept {
+    return "webrtc_apm";
+}
+
+std::string_view WebRtcPluginFactory::display_name() const noexcept {
+    return "Audio 3A — WebRTC APM (AEC/ANS/AGC/VAD)";
+}
+
+plugins::IAudio3A* WebRtcPluginFactory::create() const {
+    // Try to create WebRtcAudio3A; fall back to NullAudio3A if APM unavailable
+    auto webrtc_impl = audio3a::create_webrtc_audio3a();
+    // Check if WebRTC APM is actually available by trying to init
+    audio3a::Config default_config{};
+    if (!webrtc_impl->init(default_config)) {
+        // APM not available, use null impl
+        core::log::Logger::instance().warn(
+            "WebRtcPluginFactory: WebRTC APM not available, falling back to NullAudio3A");
+        return new PluginAdapter(new NullAudio3A());
+    }
+    return new PluginAdapter(webrtc_impl.release());
+}
+
+// ---------------------------------------------------------------------------
 // Public registration entry point — replaces the anonymous-namespace static
 // registrar that MSVC strips from static libraries (MSVC linker only pulls
 // .objs from a .lib when symbols are ODR-used; anonymous-namespace globals
@@ -330,9 +364,11 @@ void do_register_default_plugins() noexcept {
     // static ⇒ address stable for process lifetime; runs once at first call.
     static const struct Registrar {
         Registrar() {
-            static nimrtc::audio3a::NullPluginFactory s_factory{};
-            nimrtc::core::PluginRegistry::instance().register_audio3a(
-                std::string_view{s_factory.id()}, &s_factory);
+            static nimrtc::audio3a::NullPluginFactory s_null_factory{};
+            static nimrtc::audio3a::WebRtcPluginFactory s_webrtc_factory{};
+            auto& registry = nimrtc::core::PluginRegistry::instance();
+            registry.register_audio3a(std::string_view{s_null_factory.id()}, &s_null_factory);
+            registry.register_audio3a(std::string_view{s_webrtc_factory.id()}, &s_webrtc_factory);
         }
     } s_registrar;
     (void)s_registrar;

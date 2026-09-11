@@ -18,6 +18,21 @@
 //   - NullAudio3A stub (for testing without DSP)
 //   - Metrics: VAD, TX/RX levels
 //
+// ## Cross-Platform Support
+//
+// This module is cross-platform and supports:
+//   - Windows: MSVC 2022+, x64
+//   - Linux: GCC 11+, Clang 14+, x64 and ARM64
+//   - macOS: Xcode 14+, Clang, x64 and ARM64 (Apple Silicon)
+//
+// The WebRTC APM source is optional. When not available, a functional
+// stub implementation provides:
+//   - Level estimation (RMS in dBFS)
+//   - Simple noise gate (VAD)
+//   - Basic AGC simulation
+//   - High-pass filter (80 Hz cutoff)
+//   - Simple noise suppression
+//
 // Thread safety:
 //   - Audio3A is NOT thread-safe. Caller must ensure push_render and
 //     push_capture are called from the same thread, or serialize access.
@@ -128,16 +143,32 @@ private:
 
 // -----------------------------------------------------------------------------
 // WebRtcAudio3A — WebRTC APM integration
-// Requires NIMRTC_VENDOR_WEBRTC_APM to be enabled.
+// Requires NIMRTC_VENDORED_WEBRTC_APM=ON and source populated.
 // -----------------------------------------------------------------------------
-// #ifdef NIMRTC_VENDOR_WEBRTC_APM
-// class WebRtcAudio3A : public IAudio3A { ... };
-// #endif
+class WebRtcAudio3A : public IAudio3A {
+public:
+    WebRtcAudio3A();
+    ~WebRtcAudio3A() override;
+
+    bool init(const Config& config) override;
+    void process_capture(Frame& frame) override;
+    void process_render(const Frame& frame) override;
+    void on_render_delivered(std::size_t num_samples) override;
+    void request_vad_report() override;
+    void request_level_report() override;
+    LevelStats stats() const override;
+    void reset() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // -----------------------------------------------------------------------------
 // Factory
 // -----------------------------------------------------------------------------
 std::unique_ptr<IAudio3A> create_null_audio3a();
+std::unique_ptr<IAudio3A> create_webrtc_audio3a();
 std::unique_ptr<IAudio3A> create_audio3a(std::string_view type);
 
 } // namespace nimrtc::audio3a

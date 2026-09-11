@@ -53,132 +53,53 @@
 #include <string_view>
 
 #include <nimrtc/core/bytes.hpp>
+#include <nimrtc/video_frame/frame.hpp>  // VideoFrame / EncodedVideoFrame — single source of truth
 
 namespace nimrtc::plugins {
 
 // ---------------------------------------------------------------------------
-// Video codec configuration (mirrors concrete modules when present)
+// Pixel format / codec kind — re-exported from video_frame so plugin code
+// can stay in the `nimrtc::plugins` namespace.
 // ---------------------------------------------------------------------------
 
-/** Pixel format of raw VideoFrame data. Codecs report which formats they
- *  accept / produce via IVideoCodec::supported_pixel_format(). */
-enum class VideoPixelFormat : std::uint8_t {
-    kUnknown = 0,
-    kI420    = 1,   ///< YUV 4:2:0 planar (YYYY... UUU... VVV...)
-    kNV12    = 2,   ///< YUV 4:2:0 semi-planar (YYYY... UVUVUV...)
-    kYV12    = 3,   ///< YUV 4:2:0 planar (YYYY... VVV... UUU...)
-    kBGRA    = 4,   ///< 32-bit BGRA (used by some HW decoders)
-    kRGBA    = 5,   ///< 32-bit RGBA
-};
+using VideoPixelFormat = video_frame::PixelFormat;
+using VideoCodecKind   = video_frame::CodecKind;
+using NaluFormat       = video_frame::NaluFormat;
+using GpuBackend       = video_frame::GpuBackend;
+using GpuHandle        = video_frame::GpuHandle;
+using GpuBuffer        = video_frame::GpuBuffer;
+using GpuBufferPool    = video_frame::GpuBufferPool;
 
-/** Human-readable pixel format name (for logging). */
 inline std::string_view pixel_format_name(VideoPixelFormat f) noexcept {
-    switch (f) {
-        case VideoPixelFormat::kI420:  return "I420";
-        case VideoPixelFormat::kNV12:  return "NV12";
-        case VideoPixelFormat::kYV12:  return "YV12";
-        case VideoPixelFormat::kBGRA:  return "BGRA";
-        case VideoPixelFormat::kRGBA:  return "RGBA";
-        default:                       return "Unknown";
-    }
+    return video_frame::pixel_format_name(f);
 }
-
-/** Logical codec family (independent of bitstream framing). */
-enum class VideoCodecKind : std::uint8_t {
-    kUnknown = 0,
-    kH264    = 1,
-    kH265    = 2,
-    kVP8     = 3,
-    kVP9     = 4,
-    kAV1     = 5,
-};
-
 inline std::string_view video_codec_name(VideoCodecKind k) noexcept {
-    switch (k) {
-        case VideoCodecKind::kH264:  return "H264";
-        case VideoCodecKind::kH265:  return "H265";
-        case VideoCodecKind::kVP8:   return "VP8";
-        case VideoCodecKind::kVP9:   return "VP9";
-        case VideoCodecKind::kAV1:   return "AV1";
-        default:                     return "Unknown";
-    }
+    return video_frame::codec_name(k);
+}
+inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
+    return video_frame::gpu_backend_name(b);
 }
 
-/** Raw (uncompressed) video frame. The codec reads `pixels` according to
- *  `format`; the buffer must remain valid for the duration of `encode()`. */
-struct VideoFrame {
-    std::uint32_t width  = 0;
-    std::uint32_t height = 0;
-    VideoPixelFormat format = VideoPixelFormat::kUnknown;
+/** Per-pixel-format compatibility shims — video_frame uses PixelFormat,
+ *  but old plugin code may still reference VideoPixelFormat (same values). */
 
-    /** Stride (bytes per row) for plane 0 (Y / R). Must be >= width. */
-    std::int32_t stride_y = 0;
+// ---------------------------------------------------------------------------
+// VideoFrame — unified frame reference (CPU + GPU + info)
+// ---------------------------------------------------------------------------
+//
+// Canonical definition lives in video_frame::VideoFrame (with GpuBuffer,
+// GpuHandle, etc.). `plugins::VideoFrame` is a typedef so all plugin code
+// can keep using `plugins::VideoFrame`.
+//
+// Plugins SHOULD now access GPU zero-copy via VideoFrame::has_gpu() and
+// VideoFrame::gpu_buffer(); CPU fallback via VideoFrame::cpu_buffer().
+//
+// The old CPU-only fields (plane_y/u/v, stride_y/u/v) are gone — use the
+// GpuBuffer's `cpu_mirror` plane pointers instead. See codec_plugin.cpp's
+// StubEncoder below for a migration example.
 
-    /** Stride for plane 1 (U / V / UV). 0 if not applicable (e.g. BGRA). */
-    std::int32_t stride_u = 0;
-
-    /** Stride for plane 2 (V / second chroma). 0 if not applicable. */
-    std::int32_t stride_v = 0;
-
-    /** Pointer to plane 0 bytes (Y or BGRA). Owned by caller. */
-    const std::uint8_t* plane_y = nullptr;
-
-    /** Pointer to plane 1 bytes (U for I420, UV for NV12). nullptr if N/A. */
-    const std::uint8_t* plane_u = nullptr;
-
-    /** Pointer to plane 2 bytes (V for I420). nullptr if N/A. */
-    const std::uint8_t* plane_v = nullptr;
-
-    /** Capture timestamp (microseconds, monotonic clock). Required for
-     *  timeline alignment per §8.4. */
-    std::int64_t capture_ts_us = 0;
-
-    /** Per-stream frame sequence number (strictly increasing per SSRC).
-     *  Encoders attach it to the output EncodedVideoFrame. */
-    std::uint32_t frame_seq = 0;
-
-    /** Rotation in degrees (0, 90, 180, 270). Some codecs ignore this. */
-    std::uint16_t rotation_deg = 0;
-
-    /** Wall-clock NTP↔RTP mapping at capture time (mid-32 bits of NTP). */
-    std::uint32_t rtp_timestamp = 0;
-};
-
-/** Compressed (encoded) video frame. For H.264 the payload is the
- *  concatenated NAL unit bitstream in Annex B format (length-prefixed or
- *  start-code-prefixed, depending on `nalu_format`). For VP8/VP9/AV1 the
- *  payload is the raw bitstream (no descriptor — descriptors are part of
- *  the RTP payload framing, which lives in the video_payload module). */
-struct EncodedVideoFrame {
-    VideoCodecKind codec = VideoCodecKind::kUnknown;
-
-    /** Concatenated encoded bitstream. Owned by caller. */
-    core::ByteSpan payload;
-
-    /** RTP payload type (e.g. 96 for dynamic, 102 for H264 in WebRTC). */
-    std::uint8_t payload_type = 0;
-
-    /** Whether this is a key frame (IDR for H.264, keyframe for VP8/VP9). */
-    bool is_keyframe = false;
-
-    /** NAL unit format inside `payload` (only meaningful for H.264). */
-    enum class NaluFormat : std::uint8_t {
-        kUnknown = 0,
-        kAnnexB  = 1,   ///< start codes (0x00000001) between NAL units
-        kLengthPrefixed = 2, ///< 4-byte big-endian length prefix per NAL unit
-    };
-    NaluFormat nalu_format = NaluFormat::kUnknown;
-
-    /** Per-frame timeline metadata (capture_ts, frame_seq, rtp_timestamp).
-     *  Mirrors the same fields in video_frame::VideoFrameInfo; we duplicate
-     *  the struct here so plugins/video_codec.hpp doesn't drag the
-     *  video_frame module into every codec plugin. */
-    struct Info {
-        std::int64_t  capture_ts_us   = 0;
-        std::uint32_t frame_seq       = 0;
-        std::uint32_t rtp_timestamp   = 0;
-    } info;
-};
+using VideoFrame       = video_frame::VideoFrame;
+using EncodedVideoFrame = video_frame::EncodedVideoFrame;
 
 /** Video codec configuration (passed at open() time). Mirrors the
  *  concrete module's `EncoderConfig` / `DecoderConfig`. */
@@ -296,6 +217,70 @@ public:
      *  Used by PLI / FIR feedback handlers. No-op for decoder-only
      *  implementations. */
     virtual Status force_keyframe() noexcept = 0;
+
+    // ---- Zero-copy (HW surface) path --------------------------------------
+    //
+    // Per ARCHITECTURE.md §6.4 the zero-copy path is:
+    //
+    //   capture_src ──► GpuBuffer ──► encode_zero_copy ──► bitstream
+    //   bitstream   ──► decode_zero_copy ──► GpuBuffer ──► display_sink
+    //
+    // Default implementations of the methods below operate in CPU-staging
+    // mode (read from `gpu_y/u/v` mirrors or call the regular encode/decode
+    // with a CPU-backed VideoFrame). Concrete HW codecs override them with
+    // implementations that pass the GPU handle directly to the HW encoder/
+    // decoder API without staging to RAM.
+    //
+    // When the backend's `zero_copy_supported = true`, the engine uses
+    // these entry points instead of the CPU `encode`/`decode`. When
+    // false (or for software codecs), the engine stays on the CPU path.
+    //
+    // **Lifetime contract**:
+    //   - For `encode_zero_copy`, the caller (capture pipeline) keeps the
+    //     `GpuBuffer*` alive (ref-counted) until the encoder returns.
+    //   - For `decode_zero_copy`, the callee (decoder) acquires one ref
+    //     on `out_surface` (decoded picture ready to be consumed) and
+    //     releases it when the next decode is submitted / the codec is
+    //     destroyed. Caller must therefore acquire an additional ref
+    //     before holding onto the surface past the call.
+
+    /// True if this codec instance can accept a GPU handle directly. When
+    /// false, the engine must stage CPU pixels via `encode()` instead.
+    virtual bool supports_zero_copy_encode() const noexcept { return false; }
+
+    /// True if this codec instance can output a GPU surface. When false,
+    /// the engine must call `decode()` and consume `cpu_y/u/v` mirrors.
+    virtual bool supports_zero_copy_decode() const noexcept { return false; }
+
+    /** Encode one GPU-handle frame. Caller MUST keep `gpu` alive until
+     *  this returns. Default implementation returns kErrUnsupported. */
+    virtual Status encode_zero_copy(const GpuBuffer& gpu,
+                                    EncodedVideoFrame& encoded_out) noexcept {
+        (void)gpu; (void)encoded_out;
+        return kErrUnsupported;
+    }
+
+    /** Decode one bitstream frame into a GPU surface. `out_surface` must
+     *  come from `pool_for_encode().acquire(w,h,format)` and is filled
+     *  by the decoder. Default implementation returns kErrUnsupported. */
+    virtual Status decode_zero_copy(const EncodedVideoFrame& encoded,
+                                    GpuBuffer& out_surface) noexcept {
+        (void)encoded; (void)out_surface;
+        return kErrUnsupported;
+    }
+
+    /** Pool used by this codec for zero-copy decode output. May be null
+     *  for codecs that don't support zero-copy. The engine uses this pool
+     *  to pre-allocate output surfaces in the steady state. */
+    virtual std::shared_ptr<GpuBufferPool> output_pool() const noexcept {
+        return nullptr;
+    }
+
+    /** Pool used by this codec to acquire zero-copy input surfaces
+     *  (e.g. for encoder input pre-allocation). May be null. */
+    virtual std::shared_ptr<GpuBufferPool> input_pool() const noexcept {
+        return nullptr;
+    }
 
     // ---- Configuration / stats --------------------------------------------
 

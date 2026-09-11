@@ -41,11 +41,11 @@ float calculate_rms_dbfs(const float* samples, std::size_t count) {
         return kDbfsMin;
     }
 
-    double sum = 0.0;
+    float sum = 0.0f;
     for (std::size_t i = 0; i < count; ++i) {
         sum += samples[i] * samples[i];
     }
-    double rms = std::sqrt(sum / count);
+    double rms = std::sqrt(static_cast<double>(sum) / static_cast<double>(count));
     if (rms < 1e-10) {
         return kDbfsMin;
     }
@@ -58,11 +58,11 @@ bool simple_vad(const float* samples, std::size_t count) {
         return false;
     }
 
-    double energy = 0.0;
+    float energy = 0.0f;
     for (std::size_t i = 0; i < count; ++i) {
         energy += std::abs(samples[i]);
     }
-    double avg = energy / count;
+    double avg = static_cast<double>(energy) / static_cast<double>(count);
 
     // Threshold: consider speech if average amplitude > 0.01
     return avg > 0.01;
@@ -100,8 +100,8 @@ void NullAudio3A::process_capture(Frame& frame) {
     float level = calculate_rms_dbfs(frame.samples, total_samples);
 
     // Apply gain if AGC enabled (simple implementation)
-    if (config_.enable_agc && level < config_.agc_target_dbfs) {
-        float gain_db = config_.agc_target_dbfs - level;
+    if (config_.enable_agc && level < static_cast<float>(config_.agc_target_dbfs)) {
+        float gain_db = static_cast<float>(config_.agc_target_dbfs) - level;
         apply_gain(frame.samples, total_samples, gain_db * 0.5f);  // conservative gain
         level = calculate_rms_dbfs(frame.samples, total_samples);
     }
@@ -155,12 +155,7 @@ std::unique_ptr<IAudio3A> create_null_audio3a() {
     return std::make_unique<NullAudio3A>();
 }
 
-std::unique_ptr<IAudio3A> create_audio3a(std::string_view type) {
-    if (type == "null" || type == "stub") {
-        return create_null_audio3a();
-    }
-    // Default to null if type not recognized
-    return create_null_audio3a();
-}
+// Note: create_audio3a() is defined in webrtc_audio3a.cpp (which also covers
+// the "null" / "stub" branches via create_null_audio3a() above).
 
 } // namespace nimrtc::audio3a

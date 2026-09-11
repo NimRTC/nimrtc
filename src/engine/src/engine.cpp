@@ -28,7 +28,6 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
-#include <format>
 #include <random>
 #include <vector>
 
@@ -240,7 +239,7 @@ struct NimRTCEngine::Impl {
 // ---------------------------------------------------------------------------
 
 NimRTCEngine::NimRTCEngine(EngineConfig config)
-    : config_(std::move(config)), impl_(new Impl()) {}
+    : impl_(new Impl()), config_(std::move(config)) {}
 
 NimRTCEngine::~NimRTCEngine() {
     if (state_ == State::kOpen) {
@@ -535,7 +534,6 @@ void NimRTCEngine::set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noe
     }
     video_sink_ = std::move(sink);
     if (video_sink_) {
-        plugins::VideoSinkConfig cfg{};
         if (video_sink_->open() != plugins::kOk) {
             if (on_error_) on_error_(core::kVideoSinkOpenFailed, "video_sink open failed");
             video_sink_.reset();
@@ -826,18 +824,9 @@ void NimRTCEngine::init_video_plugins() noexcept {
 
                 // Decode.
                 plugins::VideoFrame raw_out{};
-                raw_out.width   = w;
-                raw_out.height  = h;
-                raw_out.format  = plugins::VideoPixelFormat::kI420;
-                raw_out.stride_y = static_cast<std::int32_t>(stride_y);
-                raw_out.stride_u = static_cast<std::int32_t>(stride_uv);
-                raw_out.stride_v = static_cast<std::int32_t>(stride_uv);
-                raw_out.plane_y  = planes[0];
-                raw_out.plane_u  = planes[1];
-                raw_out.plane_v  = planes[2];
-                raw_out.capture_ts_us = enc.info.capture_ts_us;
-                raw_out.frame_seq     = enc.info.frame_seq;
-                raw_out.rtp_timestamp = enc.info.rtp_timestamp;
+                raw_out.info.capture_ts_us = enc.info.capture_ts_us;
+                raw_out.info.frame_seq     = enc.info.frame_seq;
+                raw_out.info.rtp_timestamp = enc.info.rtp_timestamp;
 
                 if (video_codec_->decode(enc, raw_out, planes) != plugins::kOk) {
                     return;
@@ -940,26 +929,103 @@ std::string NimRTCEngine::create_offer() noexcept {
     if (!config_.audio_codec.fmtp.empty())
         audio.fmtp[pt] = config_.audio_codec.fmtp;
 
-    if (ice_t_) {
+    // Helper: append ICE candidates stripped of any prefix the libjuice
+    // collector added (the munger re-emits "a=candidate:" itself).
+    auto push_candidates_into = [&](sdp::MediaDescription& m) {
+        if (!ice_t_) return;
         auto gathered = ice_t_->gathered_local_candidates();
+        constexpr std::string_view kFullPrefix = "a=candidate:";
+        constexpr std::string_view kHalfPrefix = "candidate:";
         for (auto& c : gathered) {
-            // libjuice emits candidates with the "a=candidate:" prefix.
-            // The munger adds its own "a=candidate:" so strip the prefix.
-            constexpr std::string_view kFullPrefix = "a=candidate:";
-            constexpr std::string_view kHalfPrefix = "candidate:";
             if (c.size() >= kFullPrefix.size() &&
                 c.substr(0, kFullPrefix.size()) == kFullPrefix) {
-                audio.candidates.push_back(std::string(c.substr(kFullPrefix.size())));
+                m.candidates.push_back(std::string(c.substr(kFullPrefix.size())));
             } else if (c.size() >= kHalfPrefix.size() &&
                        c.substr(0, kHalfPrefix.size()) == kHalfPrefix) {
-                audio.candidates.push_back(std::string(c.substr(kHalfPrefix.size())));
+                m.candidates.push_back(std::string(c.substr(kHalfPrefix.size())));
             } else {
-                audio.candidates.push_back(c);
+                m.candidates.push_back(c);
             }
         }
-    }
+    };
+    push_candidates_into(audio);
 
     sdp.media.push_back(std::move(audio));
+
+    // ---- Video m-line (RFC 8829 §5, H.264 via RFC 6184) -----------------
+    // Emit a video m-line only when at least one video plugin was resolved
+    // (video_receiver_ / video_sender_ / video_codec_).  The default H.264
+    // codec plugin is decoder-only — for encode we'd need a real codec
+    // plugin — but the SDP/SDP-answer plumbing is correct regardless so
+    // that browsers see the negotiation succeed even on a one-way demo.
+    if (video_receiver_ || video_sender_) {
+        sdp::MediaDescription video;
+        video.type     = sdp::MediaType::Video;
+        video.port     = 9;
+        video.protocol = "UDP/TLS/RTP/SAVPF";
+        const std::string vpt =
+            std::to_string(config_.video_receiver_tuning.payload_type);
+        video.formats         = {vpt};
+        video.direction       = sdp::Direction::SendRecv;
+        video.mid             = "1";           // second BUNDLE mid
+        video.rtcp_mux_value  = "rtcp-mux";
+        video.ice_ufrag       = ice_t_ ? ice_t_->local_ufrag() : "";
+        video.ice_pwd         = ice_t_ ? ice_t_->local_password() : "";
+        video.ice_options     = "trickle";
+        video.dtls_setup      = "actpass";
+
+        if (impl_->dtls) {
+            video.dtls_fingerprint_algo  = "sha-256";
+            video.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+        }
+
+        // a=rtpmap:<vpt> H264/90000  (RFC 6184 §5.6)
+        sdp::MediaDescription::RtpMap video_map;
+        video_map.encoding   = "H264";
+        video_map.clock_rate = 90000;
+        video_map.channels   = 1;             // H.264 clock is 90 kHz, no audio channels
+        video.rtpmap[vpt]    = video_map;
+
+        // a=fmtp:<vpt> profile-level-id=42E01F;packetization-mode=1;
+        //                  sprop-parameter-sets=Z0LAHtkA,aM4G4g==
+        // Baseline profile, level 3.1 — matches the synthetic SPS/PPS our
+        // H.264 stub encoder emits (see h264::StubEncoder::encode).  When
+        // a real codec plugin replaces the stub, the codec should override
+        // these via a getter or config (out of scope for this round).
+        if (video_codec_) {
+            video.fmtp[vpt] =
+                "profile-level-id=42E01F;"
+                "packetization-mode=1;"
+                "level-asymmetry-allowed=1;"
+                "sprop-parameter-sets=Z0LAHtkA,aM4G4g==";
+        } else {
+            video.fmtp[vpt] =
+                "profile-level-id=42E01F;packetization-mode=1";
+        }
+
+        // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
+        // NACK + Picture Loss Indication are the two feedbacks Chrome's
+        // SFU expects on a recvonly/sendrecv video track.  We add both
+        // unconditionally so the answer side mirrors them verbatim.
+        video.rtcp_fb.push_back(vpt + " nack");
+        video.rtcp_fb.push_back(vpt + " nack pli");
+        video.rtcp_fb.push_back(vpt + " goog-remb");
+
+        // a=ssrc:<video_ssrc> cname:nimrtc-video  (RFC 5576 §4.1)
+        // WebRTC browsers count inbound-rtp only when the answer SDP
+        // carries an a=ssrc line that matches the wire SSRC.  Emit it
+        // here on the offer side as well so we have it for renegotiation.
+        char ssrc_line[96];
+        std::snprintf(ssrc_line, sizeof(ssrc_line),
+                      "%u cname:nimrtc-video",
+                      static_cast<unsigned>(config_.video_sender_tuning.ssrc));
+        video.extra_attrs.emplace_back("ssrc", ssrc_line);
+
+        push_candidates_into(video);
+        sdp.media.push_back(std::move(video));
+        // Make sure both mids are in the BUNDLE group.
+        sdp.bundle_mids = {"0", "1"};
+    }
 
     auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
     if (!sdp_str) {
@@ -1047,15 +1113,13 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         ice_t_->set_remote_description(ice_block);
     }
 
-    // Configure DTLS role + peer fingerprint from the first audio m-line.
-    // IMPORTANT: do NOT recreate the DtlsSession here.  The local certificate
-    // (and therefore the advertised local fingerprint) is generated once at
-    // pre_open(); recreating it would invalidate the fingerprint already
-    // advertised in our SDP and break the handshake.  We only update the
-    // role + peer fingerprint, and set_role() handles driving the state
-    // machine when the role changes (e.g., answerer promoting Server -> Client).
+    // Configure DTLS role + peer fingerprint from the FIRST m-line we
+    // recognise (audio / video / application).  The DTLS session is
+    // BUNDLE-shared, so all m= lines use the same DTLS role + fingerprint
+    // — we only need to read the offer's setup once.
     for (const auto& rm : remote.media) {
         if (rm.type != sdp::MediaType::Audio &&
+            rm.type != sdp::MediaType::Video &&
             rm.type != sdp::MediaType::Application) {
             continue;
         }
@@ -1127,8 +1191,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     ans.msid_semantic_token     = "WMS";
 
     for (const auto& rm : remote.media) {
-        // Support both audio (RTP) and application (data channel, DTLS/SCTP).
+        // Support audio (RTP), video (RTP/H.264), and application (data
+        // channel, DTLS/SCTP).  Skipping other types avoids leaking
+        // unknown m= sections into the answer.
         if (rm.type != sdp::MediaType::Audio &&
+            rm.type != sdp::MediaType::Video &&
             rm.type != sdp::MediaType::Application) {
             continue;
         }
@@ -1138,7 +1205,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.protocol = rm.protocol.empty() ? "UDP/TLS/RTP/SAVPF" : rm.protocol;
         am.formats  = rm.formats;
         am.direction = sdp::Direction::SendRecv;
-        am.mid      = rm.mid;
+        // Preserve the remote mid when present (BUNDLE); fall back to a
+        // positional assignment by index for the legacy single-m-line case.
+        am.mid      = rm.mid.empty() ? std::to_string(remote.media.size()) : rm.mid;
         am.rtcp_mux_value = "rtcp-mux";
         am.ice_ufrag = local_ufrag();
         am.ice_pwd   = local_password();
@@ -1157,6 +1226,23 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         if (rm.type == sdp::MediaType::Audio) {
             am.rtpmap = rm.rtpmap;
             am.fmtp   = rm.fmtp;
+        }
+
+        // For video: carry rtpmap/fmtp/rtcp-fb from offer verbatim.  The
+        // remote codec params (profile-level-id, packetization-mode, etc.)
+        // are what the remote decoder expects to see in our answer; the
+        // engine doesn't renegotiate them.  We also append the a=ssrc
+        // line so Chrome's inbound-rtp counter advances on the wire SSRC
+        // we emit.
+        if (rm.type == sdp::MediaType::Video) {
+            am.rtpmap   = rm.rtpmap;
+            am.fmtp     = rm.fmtp;
+            am.rtcp_fb  = rm.rtcp_fb;
+            char ssrc_line[96];
+            std::snprintf(ssrc_line, sizeof(ssrc_line),
+                          "%u cname:nimrtc-video",
+                          static_cast<unsigned>(config_.video_sender_tuning.ssrc));
+            am.extra_attrs.emplace_back("ssrc", ssrc_line);
         }
 
         // For data channel (application): carry sctp-port from offer's fmtp if present.
@@ -1187,6 +1273,18 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
 
         ans.media.push_back(std::move(am));
+    }
+
+    // Rebuild BUNDLE mids from the answer's media sections so a remote
+    // multi-m-line BUNDLE offer produces a matching multi-m-line answer.
+    if (!ans.media.empty()) {
+        ans.bundle_mids.clear();
+        for (const auto& m : ans.media) {
+            if (!m.mid.empty()) ans.bundle_mids.push_back(m.mid);
+        }
+        if (ans.bundle_mids.empty()) {
+            ans.bundle_mids = {"0"};
+        }
     }
 
     auto ans_str = impl_->sdp_munger->to_sdp(ans);
@@ -1322,19 +1420,12 @@ plugins::Status NimRTCEngine::send_video(
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
 
     // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
+    // P0: only the metadata is propagated; the actual pixel storage is
+    // owned by `frame.plane_y/u/v` and must outlive the encode call.
     plugins::VideoFrame raw{};
-    raw.width          = frame.width;
-    raw.height         = frame.height;
-    raw.format        = frame.format;
-    raw.stride_y      = frame.stride_y;
-    raw.stride_u      = frame.stride_u;
-    raw.stride_v      = frame.stride_v;
-    raw.plane_y       = frame.plane_y;
-    raw.plane_u       = frame.plane_u;
-    raw.plane_v       = frame.plane_v;
-    raw.capture_ts_us = frame.capture_ts_us;
-    raw.frame_seq     = frame.frame_seq;
-    raw.rtp_timestamp = frame.rtp_timestamp;
+    raw.info.capture_ts_us = frame.capture_ts_us;
+    raw.info.frame_seq     = frame.frame_seq;
+    raw.info.rtp_timestamp = frame.rtp_timestamp;
 
     // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
     // size on first use; subsequent calls within the same capacity reuse
@@ -1438,6 +1529,43 @@ std::string NimRTCEngine::local_password() const noexcept {
     return ice_t_ ? ice_t_->local_password() : std::string{};
 }
 
+std::string NimRTCEngine::local_dtls_fingerprint_sha256_base64() const noexcept {
+    // Pointer stability: dtls_ is owned by the engine and never replaced
+    // after open(), so reading it from a const method is safe.
+    auto* d = impl_ ? impl_->dtls.get() : nullptr;
+    if (!d) return {};
+    const auto& fp = d->local_fingerprint();
+    if (fp.bytes.empty()) return {};
+    static const char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((fp.bytes.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    while (i + 3 <= fp.bytes.size()) {
+        std::uint32_t v = (std::uint32_t(fp.bytes[i]) << 16)
+                        | (std::uint32_t(fp.bytes[i + 1]) <<  8)
+                        |  std::uint32_t(fp.bytes[i + 2]);
+        out.push_back(kAlphabet[(v >> 18) & 0x3f]);
+        out.push_back(kAlphabet[(v >> 12) & 0x3f]);
+        out.push_back(kAlphabet[(v >>  6) & 0x3f]);
+        out.push_back(kAlphabet[ v        & 0x3f]);
+        i += 3;
+    }
+    if (i < fp.bytes.size()) {
+        std::uint32_t v = std::uint32_t(fp.bytes[i]) << 16;
+        if (i + 1 < fp.bytes.size()) v |= std::uint32_t(fp.bytes[i + 1]) << 8;
+        out.push_back(kAlphabet[(v >> 18) & 0x3f]);
+        out.push_back(kAlphabet[(v >> 12) & 0x3f]);
+        if (i + 1 < fp.bytes.size()) {
+            out.push_back(kAlphabet[(v >> 6) & 0x3f]);
+        } else {
+            out.push_back('=');
+        }
+        out.push_back('=');
+    }
+    return out;
+}
+
 void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     if (pkt.empty() || pkt.size() < 1) return;
     std::uint8_t b0 = pkt.data()[0];
@@ -1503,6 +1631,13 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
 
 int NimRTCEngine::drain_dtls() noexcept {
     if (!impl_->dtls) return 0;
+
+    // Drive the wolfSSL retransmit timer (RFC 6347 §4.2.4).  Without
+    // this pump, a stalled handshake (e.g. lost HelloVerifyRequest
+    // cookie exchange) hangs forever.  tick() is a no-op once the
+    // session reaches Connected/Failed/Closed.
+    impl_->dtls->tick();
+
     auto recs = impl_->dtls->take_outbound();
     int sent = 0;
     for (auto& rec : recs) {
@@ -1708,7 +1843,11 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 
 void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept {
     core::log::Logger::instance().error(
-        std::format("ERROR 0x{:04X}: {}", err, msg));
+        "ERROR 0x" + ([err, msg] {
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "%04X", static_cast<unsigned>(err));
+            return std::string(hex) + ": " + std::string(msg);
+        })());
 }
 
 // ---------------------------------------------------------------------------

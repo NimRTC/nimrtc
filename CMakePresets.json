@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 4,
   "configurePresets": [
     {
       "name": "dev",
@@ -116,6 +116,21 @@
       }
     },
     {
+      "name": "debug.aarch64",
+      "displayName": "Debug (GCC/Clang, aarch64-Linux)",
+      "description": "Debug build targeting aarch64-linux-gnu (cross or native arm64)",
+      "inherits": ["dev.gcc"],
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Linux",
+        "CMAKE_SYSTEM_PROCESSOR": "aarch64",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
       "name": "release",
       "displayName": "Release (GCC/Clang, Linux)",
       "description": "Optimised release build using the host's default Linux toolchain",
@@ -200,6 +215,11 @@
       "configurePreset": "debug.macos"
     },
     {
+      "name": "debug.aarch64",
+      "displayName": "Build: Debug (aarch64-Linux)",
+      "configurePreset": "debug.aarch64"
+    },
+    {
       "name": "release",
       "displayName": "Build: Release (Linux)",
       "configurePreset": "release"
@@ -256,6 +276,18 @@
       "name": "tests.macos",
       "displayName": "Run all tests (Debug/macOS)",
       "configurePreset": "debug.macos",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.aarch64",
+      "displayName": "Run all tests (Debug/aarch64)",
+      "configurePreset": "debug.aarch64",
       "output": {
         "outputOnFailure": true
       },

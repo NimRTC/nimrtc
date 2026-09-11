@@ -49,9 +49,9 @@ CodecPluginAdapter::to_decoder_config(const ::nimrtc::plugins::CodecConfig& p) n
 // ---------------------------------------------------------------------------
 
 CodecPluginAdapter::CodecPluginAdapter(::nimrtc::plugins::CodecConfig cfg)
-    : plugin_cfg_(std::move(cfg)),
-      enc_cfg_(to_encoder_config(plugin_cfg_)),
-      dec_cfg_(to_decoder_config(plugin_cfg_)) {
+    : enc_cfg_(to_encoder_config(cfg)),
+      dec_cfg_(to_decoder_config(cfg)),
+      plugin_cfg_(std::move(cfg)) {
     core::log::Logger::instance().debug(
         "opus::CodecPluginAdapter created");
 }

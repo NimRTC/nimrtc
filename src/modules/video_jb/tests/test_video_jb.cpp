@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include <nimrtc/video_jb/video_jitter_buffer.hpp>

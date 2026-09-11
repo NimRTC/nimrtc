@@ -200,6 +200,24 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// WebRtcPluginFactory
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Factory producing PluginAdapter instances that wrap a WebRtcAudio3A.
+ *
+ * Registered as id "webrtc_apm". Requires NIMRTC_VENDORED_WEBRTC_APM=ON.
+ * Falls back to NullAudio3A if WebRTC APM source is not populated.
+ */
+class WebRtcPluginFactory : public plugins::IAudio3AFactory {
+public:
+    std::string_view id()           const noexcept override;
+    std::string_view display_name() const noexcept override;
+    plugins::IAudio3A* create()    const override;
+};
+
+
+// ---------------------------------------------------------------------------
 // Public registration entry point (MSVC static-link workaround)
 // ---------------------------------------------------------------------------
 
@@ -217,6 +235,10 @@ void do_register_default_plugins() noexcept;
  *
  * Typical placement: main() entry, or any first call into the audio3a plugin
  * path.
+ *
+ * Registers:
+ *   - "webrtc": NullAudio3A (stub, always available)
+ *   - "webrtc_apm": WebRtcAudio3A (requires NIMRTC_VENDORED_WEBRTC_APM=ON)
  *
  * @note Not `inline` because the static-local latch would otherwise be
  *       emitted as a weak external symbol that the static lib doesn't

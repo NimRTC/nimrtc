@@ -118,6 +118,14 @@ mbedtls-4.2.0.tar.gz
 mbedtls-extract/
 
 # ─────────────────────────────────────────────
+# WebRTC Audio Processing (APM) — fetched at build time by
+# tools/fetch_webrtc_apm.py (not vendored into git). The build_meson/
+# tree is the meson build output (static .a archives + abseil-cpp).
+# ─────────────────────────────────────────────
+src/third_party/webrtc_audio_processing/src/
+src/third_party/webrtc_audio_processing/build_meson/
+
+# ─────────────────────────────────────────────
 # Node.js / npm dependencies & runtime artifacts
 # ─────────────────────────────────────────────
 # Never commit node_modules or npm runtime logs (wolfssl_dtls test harness,
@@ -167,10 +175,12 @@ interop/test_data/*.csr
 # Created by dtls_client/dtls_server/main/minimal_test when run locally.
 # Tests themselves are committed (see the same dir for *.cpp / *.html / *.js).
 # ─────────────────────────────────────────────
+tests/wolfssl_dtls/*.exe
+tests/wolfssl_dtls/*.obj
+tests/wolfssl_dtls/*.txt
 tests/wolfssl_dtls/*.log
 tests/wolfssl_dtls/*.err
 tests/wolfssl_dtls/certs/
-tests/wolfssl_dtls/fingerprint.txt
 
 # CTest scratch
 Testing/

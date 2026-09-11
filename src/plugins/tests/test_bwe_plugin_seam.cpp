@@ -42,6 +42,7 @@ namespace {
 using namespace nimrtc;
 
 // Build a feedback sample with given loss rate.
+[[maybe_unused]]
 plugins::BweFeedback make_feedback(double loss_rate,
                                    core::TimePoint ts,
                                    std::uint32_t packets_lost = 5,

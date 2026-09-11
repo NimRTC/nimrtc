@@ -157,7 +157,21 @@ protected:
  */
 class VideoFrameBuffer {
 public:
-    /** Construct an empty buffer (zero width / height). */
+    /** Probe used by `VideoFrame::has_gpu()` to disambiguate the type-
+     *  erased buffer. Default CPU-side implementation returns false.
+     *  A derived / re-typed buffer (e.g. a GpuBuffer viewed through a
+     *  shared_ptr<void>) overrides this to return true when a real
+     *  GPU handle is attached. */
+    [[nodiscard]] virtual bool has_gpu_handle() const noexcept {
+        return false;
+    }
+    /// Virtual destructor — required so derived (GpuBuffer) and base
+    /// (VideoFrameBuffer) can coexist in a shared_ptr<void> storage and
+    /// delete via the right vtable entry. Out-of-line empty body in
+    /// frame.cpp so the vtable and typeinfo are emitted in exactly one
+    /// translation unit (the library's).
+    virtual ~VideoFrameBuffer() noexcept;
+
     VideoFrameBuffer() noexcept = default;
 
     /** Allocate a new buffer with the given layout. */
@@ -170,16 +184,6 @@ public:
                      std::size_t  external_capacity,
                      VideoFrameLayout layout,
                      std::shared_ptr<FrameBufferControl> ctrl);
-
-    ~VideoFrameBuffer() {
-        // Decrement our application-level ref count when this buffer goes
-        // out of scope. The shared_ptr<FrameBufferControl> has its own
-        // ref count that handles actual deallocation; this counter is for
-        // diagnostics and tests that want to observe shared ownership.
-        if (ctrl_) {
-            ctrl_->ref_count.fetch_sub(1, std::memory_order_acq_rel);
-        }
-    }
 
     // Copy / move: must update ctrl_->ref_count manually because the
     // default-generated operator= only copies the shared_ptr (which has
@@ -289,8 +293,17 @@ public:
         if (ctrl_) ctrl_->frame_seq = v;
     }
 
-    /** Drop our ref — caller can keep using their own shared_ptr. */
-    void reset() noexcept { ctrl_.reset(); storage_.clear(); layout_ = {}; }
+    /** Drop our ref — caller can keep using their own shared_ptr.
+     *  Also decrements the application-level ref counter so external
+     *  diagnostics see the same lifetime the shared_ptr observes. */
+    void reset() noexcept {
+        if (ctrl_) {
+            ctrl_->ref_count.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        ctrl_.reset();
+        storage_.clear();
+        layout_ = {};
+    }
 
 private:
     VideoFrameLayout layout_{};
@@ -299,7 +312,284 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// VideoFrameInfo — timeline / capture metadata
+// GPU handle — platform-agnostic wrapper around HW surface / texture / buffer
+// ---------------------------------------------------------------------------
+//
+// Per ARCHITECTURE.md §6.4 (zero-copy HW path):
+//   - capture (camera/screen)   → HW encoder → bitstream over the wire
+//   - bitstream over the wire    → HW decoder → HW surface/texture → display
+//
+// `GpuHandle` is a `void*` + `GpuBackend` enum — it does NOT depend on any
+// platform SDK. Concrete plugins cast it to:
+//   - ANativeWindow*          (Android MediaCodec / Camera2)
+//   - CVPixelBufferRef        (Apple VideoToolbox / AVFoundation)
+//   - ID3D11Texture2D* / IMFSample  (Windows MediaFoundation / DXVA / NVENC)
+//   - VASurfaceID / VAImage   (Linux VAAPI)
+//   - CUarray / CUdeviceptr   (NVIDIA NVDEC/NVENC)
+//   - MMAL_BUFFER_HEADER_T*   (Raspberry Pi MMAL)
+//   - AHardwareBuffer*        (Android Vulkan / cross-API zero-copy)
+//
+// The handle's lifetime is managed by a shared `GpuBuffer` (next section).
+// `GpuBufferPool` is the per-backend arena that allocates + recycles handles.
+
+/** Platform-specific GPU resource identifier. */
+enum class GpuBackend : std::uint8_t {
+    kNone           = 0,   ///< CPU path (no GPU handle); `handle` is nullptr.
+    kAndroidNativeWindow = 1,  ///< ANativeWindow* (Android)
+    kAndroidSurfaceTexture = 2, ///< ASurfaceTexture (Android Vulkan / GL)
+    kAndroidHardwareBuffer = 3,///< AHardwareBuffer* (Android Vulkan / cross-API)
+    kAppleCFPixelBuffer = 4,   ///< CVPixelBufferRef (Apple)
+    kAppleMTLTexture    = 5,   ///< id<MTLTexture> (Apple Metal)
+    kWindowsD3D11Texture = 6,  ///< ID3D11Texture2D* (Windows DXVA / NVENC)
+    kWindowsMFTransform  = 7,  ///< IMFSample* / IMFTransform* (Windows MF)
+    kLinuxVaapiSurface   = 8,  ///< VASurfaceID (Linux VAAPI)
+    kLinuxVaapiDRM       = 9,  ///< VASurfaceID + DRM fd (Linux DMABUF)
+    kNvidiaCudaArray     = 10, ///< CUarray (NVIDIA NVDEC/NVENC)
+    kNvidiaCudaDevicePtr = 11, ///< CUdeviceptr (NVIDIA video memory)
+    kLinuxV4l2Buffer     = 12, ///< V4L2 DMA-buf fd (Linux V4L2 M2M)
+    kRpiMmalBuffer       = 13, ///< MMAL_BUFFER_HEADER_T* (Raspberry Pi)
+    kOpenGLTexture       = 14, ///< GLuint texture name (cross-API shared)
+    kVulkanImage         = 15, ///< VkImage + VkDeviceMemory (cross-API)
+    kMetalIOSurface      = 16, ///< IOSurfaceRef (Apple cross-API)
+    kCustom              = 254,///< vendor-private
+};
+
+/** One GPU resource handle. Owned by a GpuBuffer; never standalone. */
+struct GpuHandle {
+    GpuBackend backend = GpuBackend::kNone;
+    void*      handle  = nullptr;  ///< type per `backend`
+    /** Native row stride / pitch in bytes (0 if not applicable). Some
+     *  backends (D3D11, Metal, Vulkan) have implicit layout; some
+     *  (VAAPI, CUDA) expose explicit pitch. */
+    std::uint32_t native_pitch_bytes = 0;
+    /** DMA-buf fd for cross-process / cross-API sharing (Linux only,
+     *  Android AHardwareBuffer). -1 if not applicable. */
+    int native_fd = -1;
+};
+
+/** Human-readable GpuBackend name (for logging). */
+inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
+    switch (b) {
+        case GpuBackend::kNone:                  return "none";
+        case GpuBackend::kAndroidNativeWindow:   return "android-surface";
+        case GpuBackend::kAndroidSurfaceTexture: return "android-st";
+        case GpuBackend::kAndroidHardwareBuffer: return "android-hwbuf";
+        case GpuBackend::kAppleCFPixelBuffer:    return "apple-cvpx";
+        case GpuBackend::kAppleMTLTexture:       return "apple-mtl";
+        case GpuBackend::kWindowsD3D11Texture:   return "win-d3d11";
+        case GpuBackend::kWindowsMFTransform:    return "win-mf";
+        case GpuBackend::kLinuxVaapiSurface:     return "vaapi";
+        case GpuBackend::kLinuxVaapiDRM:         return "vaapi-drm";
+        case GpuBackend::kNvidiaCudaArray:       return "cuda-array";
+        case GpuBackend::kNvidiaCudaDevicePtr:   return "cuda-ptr";
+        case GpuBackend::kLinuxV4l2Buffer:       return "v4l2";
+        case GpuBackend::kRpiMmalBuffer:         return "rpi-mmal";
+        case GpuBackend::kOpenGLTexture:         return "gl-texture";
+        case GpuBackend::kVulkanImage:           return "vk-image";
+        case GpuBackend::kMetalIOSurface:        return "iosurface";
+        case GpuBackend::kCustom:                return "custom";
+    }
+    return "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// GpuBuffer — refcounted GPU surface / texture with optional CPU mirror
+// ---------------------------------------------------------------------------
+//
+// One GpuBuffer corresponds to one decoded picture. Two access modes:
+//   1. **GPU-only** — handle is set, `cpu_mirror` is null. Used in the
+//      zero-copy path: camera → encoder → network → decoder → display,
+//      where every hop stays in GPU memory.
+//   2. **CPU mirror** — handle is set AND `cpu_mirror` is a valid I420/BGRA
+//      pointer (for fallback rendering, snapshot for analytics, or when
+//      the next consumer doesn't know how to consume the GPU handle).
+//
+// The `cpu_mirror` is a **lazy** write-through: a consumer may populate it
+// once (e.g. a software decoder that always produces CPU pixels). A
+// subsequent GPU consumer may still read the handle without going through
+// `cpu_mirror`. The mirror is invalidated (set to null) on the next frame
+// recycle from the pool — see GpuBufferPool.
+
+/// `GpuBuffer` carries the platform-native GPU handle (CVPixelBuffer,
+/// VASurface, ID3D11Texture, …). Pool-allocated, refcounted, and tied
+/// to a backend-specific `GpuBufferPool`. Subclass of `VideoFrameBuffer`
+/// so `dynamic_pointer_cast<GpuBuffer>` works correctly inside the
+/// type-erased `VideoFrame::buffer` slot.
+class GpuBuffer : public VideoFrameBuffer {
+public:
+    /// Inherit the virtual destructor so the polymorphic type stays
+    /// polymorphic when deleted through a `shared_ptr<VideoFrameBuffer>`.
+    ~GpuBuffer() override = default;
+
+    GpuBuffer() noexcept = default;
+    GpuBuffer(GpuBackend backend, void* handle, std::uint32_t width,
+              std::uint32_t height, PixelFormat format) noexcept
+        : handle_{backend, handle, 0, -1},
+          width_(width), height_(height), format_(format) {}
+
+    /// Construct with a pre-filled handle (for sharing DMABUF / pitch).
+    GpuBuffer(GpuHandle h, std::uint32_t width, std::uint32_t height,
+              PixelFormat format) noexcept
+        : handle_(h), width_(width), height_(height), format_(format) {}
+
+    // ---- Pool refcount -----------------------------------------------------
+
+    /** Refcount. Decoders/encoders call `acquire_ref()` when reusing the
+     *  buffer; the last to call `release_ref()` returns it to the pool. */
+    void acquire_ref() noexcept {
+        ref_count_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    void release_ref() noexcept {
+        if (ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            // Last ref — recycle to pool via the pool's `recycle(this)`.
+            if (recycle_callback_) recycle_callback_(this);
+        }
+    }
+    [[nodiscard]] std::uint32_t ref_count() const noexcept {
+        return ref_count_.load(std::memory_order_acquire);
+    }
+
+    /** Install a pool-side callback fired when ref_count drops to zero.
+     *  Called by GpuBufferPool::recycle_buffer() at construction. */
+    using RecycleFn = void(*)(GpuBuffer*);
+    void set_recycle_callback(RecycleFn fn) noexcept { recycle_callback_ = fn; }
+
+    // ---- GPU handle --------------------------------------------------------
+
+    [[nodiscard]] const GpuHandle& handle() const noexcept { return handle_; }
+    void set_handle(GpuHandle h) noexcept { handle_ = h; }
+    void clear_handle() noexcept { handle_ = {}; }
+
+    /** True iff this buffer carries a live GPU handle (zero-copy path
+     *  is available). */
+    [[nodiscard]] bool has_gpu_handle() const noexcept override {
+        return handle_.backend != GpuBackend::kNone && handle_.handle != nullptr;
+    }
+
+    // ---- Dimensions / format ----------------------------------------------
+
+    [[nodiscard]] std::uint32_t width()  const noexcept { return width_; }
+    [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+    [[nodiscard]] PixelFormat   format() const noexcept { return format_; }
+
+    void set_dimensions(std::uint32_t w, std::uint32_t h) noexcept {
+        width_ = w; height_ = h;
+    }
+    void set_format(PixelFormat f) noexcept { format_ = f; }
+
+    // ---- CPU mirror (optional, for software fallback / snapshot) ----------
+
+    /** Set the CPU mirror — caller owns the memory until reset. */
+    void set_cpu_mirror(std::uint8_t* y, std::uint8_t* u, std::uint8_t* v,
+                        std::int32_t stride_y, std::int32_t stride_u,
+                        std::int32_t stride_v) noexcept {
+        cpu_y_ = y; cpu_u_ = u; cpu_v_ = v;
+        stride_y_ = stride_y; stride_u_ = stride_u; stride_v_ = stride_v;
+    }
+    void clear_cpu_mirror() noexcept {
+        cpu_y_ = cpu_u_ = cpu_v_ = nullptr;
+        stride_y_ = stride_u_ = stride_v_ = 0;
+    }
+    [[nodiscard]] bool has_cpu_mirror() const noexcept {
+        return cpu_y_ != nullptr;
+    }
+    [[nodiscard]] std::uint8_t* cpu_y() const noexcept { return cpu_y_; }
+    [[nodiscard]] std::uint8_t* cpu_u() const noexcept { return cpu_u_; }
+    [[nodiscard]] std::uint8_t* cpu_v() const noexcept { return cpu_v_; }
+    [[nodiscard]] std::int32_t stride_y() const noexcept { return stride_y_; }
+    [[nodiscard]] std::int32_t stride_u() const noexcept { return stride_u_; }
+    [[nodiscard]] std::int32_t stride_v() const noexcept { return stride_v_; }
+
+    // ---- Zero-copy statistics (for benchmarks / monitoring) ----------------
+
+    /** Total bytes copied CPU↔GPU over this buffer's lifetime (0 if path
+     *  was fully zero-copy). Set by HW backends when they fall back to
+     *  CPU staging. */
+    [[nodiscard]] std::uint64_t bytes_copied() const noexcept {
+        return bytes_copied_.load(std::memory_order_acquire);
+    }
+    void add_bytes_copied(std::uint64_t n) noexcept {
+        bytes_copied_.fetch_add(n, std::memory_order_acq_rel);
+    }
+
+private:
+    GpuHandle handle_{};
+    std::uint32_t width_  = 0;
+    std::uint32_t height_ = 0;
+    PixelFormat   format_ = PixelFormat::kUnknown;
+
+    // CPU mirror (optional)
+    std::uint8_t* cpu_y_ = nullptr;
+    std::uint8_t* cpu_u_ = nullptr;
+    std::uint8_t* cpu_v_ = nullptr;
+    std::int32_t  stride_y_ = 0;
+    std::int32_t  stride_u_ = 0;
+    std::int32_t  stride_v_ = 0;
+
+    // Refcount + recycle
+    std::atomic<std::uint32_t> ref_count_{1};
+    RecycleFn recycle_callback_ = nullptr;
+
+    // Diagnostics
+    std::atomic<std::uint64_t> bytes_copied_{0};
+};
+
+// ---------------------------------------------------------------------------
+// GpuBufferPool — per-backend arena that owns the actual GPU resources
+// ---------------------------------------------------------------------------
+//
+// Each HW backend (MediaCodec / VideoToolbox / D3D11 / VAAPI / CUDA / MMAL)
+// provides its own pool implementation; this base class is the contract:
+//
+//   - `acquire(width, height, format)` returns a buffer ready for the
+//     encoder/decoder to write into (or for a fresh capture frame).
+//   - `recycle` is called by the buffer's last `release_ref()`.
+//   - `preallocate(n)` ensures N buffers are GPU-allocated up-front so
+//     the first frame doesn't stall on driver-side allocation.
+//
+// The base class is abstract — concrete plugins subclass with the platform
+// SDK call (cuArrayCreate, AMediaCodec_createSurface, ID3D11Device_Create
+// Texture2D, vaCreateSurfaces, MMAL_PORT_ENABLE, etc.).
+
+class GpuBufferPool {
+public:
+    virtual ~GpuBufferPool() = default;
+
+    /// Get the backend identifier this pool serves.
+    [[nodiscard]] virtual GpuBackend backend() const noexcept = 0;
+
+    /// Pre-allocate `count` buffers of the given layout. Returns the
+    /// number actually allocated (may be < `count` if driver is OOM).
+    [[nodiscard]] virtual std::uint32_t preallocate(
+        std::uint32_t count, std::uint32_t width,
+        std::uint32_t height, PixelFormat format) noexcept = 0;
+
+    /// Acquire one buffer. If the pool is empty, the implementation may
+    /// allocate a new one on the fly (acceptable but undesirable in
+    /// steady state — call `preallocate` to avoid). Returns nullptr only
+    /// if hardware is exhausted.
+    [[nodiscard]] virtual GpuBuffer* acquire(
+        std::uint32_t width, std::uint32_t height,
+        PixelFormat format) noexcept = 0;
+
+    /// Return a buffer to the pool (called by GpuBuffer::release_ref()).
+    virtual void recycle(GpuBuffer* buf) noexcept = 0;
+
+    /// Number of buffers currently available (idle) in the pool.
+    [[nodiscard]] virtual std::uint32_t available() const noexcept = 0;
+
+    /// Number of buffers currently checked out (ref_count > 0 minus idle).
+    [[nodiscard]] virtual std::uint32_t in_flight() const noexcept = 0;
+
+    /// Total number of buffer allocations (cumulative). Useful to detect
+    /// pool leaks / sizing issues.
+    [[nodiscard]] virtual std::uint64_t total_allocations() const noexcept = 0;
+};
+
+// ---------------------------------------------------------------------------
+// VideoFrameInfo — timeline / capture metadata (used by VideoFrame.info and
+// EncodedVideoFrame.info — declared here, BEFORE VideoFrame, so VideoFrame's
+// by-value `info` member has a complete type).
 // ---------------------------------------------------------------------------
 
 /** Capture-time and presentation metadata (per §8.4 timeline). */
@@ -320,6 +610,95 @@ struct VideoFrameInfo {
     /** NTP↔RTP mapping at capture (mid-32 bits of NTP, from latest SR).
      *  Used to reconstruct absolute capture time on the receiver. */
     std::uint32_t ntp_mid_32      = 0;
+};
+
+// ---------------------------------------------------------------------------
+// VideoFrame — unified frame reference (CPU + GPU + info)
+// ---------------------------------------------------------------------------
+//
+// This replaces the old CPU-only `struct VideoFrame { plane_y/u/v ... }`.
+// A VideoFrame is now a lightweight wrapper:
+//   - `buffer`     — refcounted buffer (VideoFrameBuffer or GpuBuffer).
+//   - `info`       — capture metadata.
+//   - `gpu_handle` — convenience: shortcut to buffer's GPU handle when
+//                    `buffer` is a GpuBuffer; otherwise null.
+//
+// `VideoFrame` is the canonical handle that flows through the entire
+// pipeline. Each hop (encoder input, decoder output, SFU forward,
+// display sink) reads either `gpu_handle` or `cpu_y/u/v` based on its
+// capability, **never both** — the chosen path is fully zero-copy.
+//
+// `VideoFrameInfo` (capture / timeline metadata) is declared above this
+// struct so the by-value `info` member has a complete type. Both
+// `VideoFrame::info` and `EncodedVideoFrame::info` reuse the same type.
+
+struct VideoFrame {
+    /** Either a `VideoFrameBuffer` (CPU-only) or a `GpuBuffer` (GPU-first
+     *  with optional CPU mirror). We use `std::shared_ptr<void>` so
+     *  both shapes share one slot; concrete plugins cast based on the
+     *  type-id attached to the buffer. The frame itself is a plain POD
+     *  so copying is cheap. */
+    std::shared_ptr<void> buffer;
+
+    /** Capture metadata. */
+    VideoFrameInfo info;
+
+    /** True iff `buffer` carries a live GPU handle. Set during decode /
+     *  capture — does NOT require the caller to inspect the buffer's
+     *  dynamic type.
+     *
+     *  Implementation note: `buffer` is `shared_ptr<void>`. We probe the
+     *  handle via `cpu_buffer()->has_gpu_handle()` — both GpuBuffer and
+     *  VideoFrameBuffer expose this method (it's a no-op on the CPU side
+     *  and returns true only when a real GPU handle is attached). When
+     *  the caller's `buffer` is a `shared_ptr<GpuBuffer>` it still goes
+     *  through `cpu_buffer()` because the underlying storage is a void*
+     *  shared_ptr; the probe returns true exactly when the buffer is a
+     *  GpuBuffer with a non-null handle. */
+    [[nodiscard]] bool has_gpu() const noexcept {
+        if (!buffer) return false;
+        // Type-erased dispatch: `buffer` is shared_ptr<void>. Cast to the
+        // common base first (VideoFrameBuffer), then dynamic_pointer_cast
+        // to GpuBuffer. The latter returns null when the underlying object
+        // is a CPU-only VideoFrameBuffer; in that case we report `false`.
+        auto base = std::static_pointer_cast<VideoFrameBuffer>(buffer);
+        auto gb   = std::dynamic_pointer_cast<GpuBuffer>(base);
+        if (!gb) return false;
+        return gb->has_gpu_handle();
+    }
+
+    /** Resolve to a GpuBuffer (returns null if buffer is CPU-only). */
+    [[nodiscard]] std::shared_ptr<GpuBuffer> gpu_buffer() const noexcept {
+        if (!buffer) return nullptr;
+        auto base = std::static_pointer_cast<VideoFrameBuffer>(buffer);
+        return std::dynamic_pointer_cast<GpuBuffer>(base);
+    }
+
+    /** Resolve to a VideoFrameBuffer (returns null only if `buffer` is
+     *  null). For a GpuBuffer this returns the same control block typed
+     *  as the base; the caller can downcast back to GpuBuffer via
+     *  `gpu_buffer()` if needed. */
+    [[nodiscard]] std::shared_ptr<VideoFrameBuffer> cpu_buffer() const noexcept {
+        if (!buffer) return nullptr;
+        return std::static_pointer_cast<VideoFrameBuffer>(buffer);
+    }
+
+    /// Width/height/format passthrough — convenience that probes the buffer.
+    [[nodiscard]] std::uint32_t width() const noexcept {
+        if (auto gb = gpu_buffer(); gb && gb.use_count()) return gb->width();
+        if (auto cb = cpu_buffer(); cb && cb.use_count()) return cb->layout().width;
+        return 0;
+    }
+    [[nodiscard]] std::uint32_t height() const noexcept {
+        if (auto gb = gpu_buffer(); gb && gb.use_count()) return gb->height();
+        if (auto cb = cpu_buffer(); cb && cb.use_count()) return cb->layout().height;
+        return 0;
+    }
+    [[nodiscard]] PixelFormat format() const noexcept {
+        if (auto gb = gpu_buffer(); gb && gb.use_count()) return gb->format();
+        if (auto cb = cpu_buffer(); cb && cb.use_count()) return cb->layout().format;
+        return PixelFormat::kUnknown;
+    }
 };
 
 // ---------------------------------------------------------------------------

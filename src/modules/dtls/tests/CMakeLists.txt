@@ -2,5 +2,7 @@
 # =============================================================================
 # DTLS module unit tests.
 # =============================================================================
-nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_dtls.cpp
-    DEPS nimrtc::dtls)
+# All DtlsSession (BCrypt) tests were removed as part of the wolfSSL-only
+# migration (dtls.cpp deletion).  BCrypt-direct tests (GCM/INPROC/X25519)
+# that do NOT depend on DtlsSession class are retained as standalone targets.
+#

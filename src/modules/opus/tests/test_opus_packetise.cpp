@@ -356,7 +356,7 @@ TEST(OpusPacketiseCode3, CbrFourFramesRoundTrip) {
     EXPECT_EQ(payload[1], 0x10);
     // 4 frames back-to-back, no length table.
     for (int i = 0; i < 4; ++i) {
-        EXPECT_TRUE(bytes_equal(payload + 2 + i * sizeof(f[0]),
+        EXPECT_TRUE(bytes_equal(payload + 2 + static_cast<std::size_t>(i) * sizeof(f[0]),
                                 f[i], sizeof(f[i])));
     }
 

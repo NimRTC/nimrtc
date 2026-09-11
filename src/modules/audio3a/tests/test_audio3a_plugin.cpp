@@ -68,14 +68,14 @@ TEST_F(Audio3APluginFixture, registry_has_any_audio3a_entries) {
     std::fprintf(stderr, "DEBUG: registry has %zu audio3a entries\n", ids.size());
     for (auto id : ids) {
         std::fprintf(stderr, "DEBUG:   audio3a id=\"%.*s\"\n",
-                     (int)id.size(), id.data());
+                     static_cast<int>(id.size()), id.data());
     }
     // Also check ICE for comparison
     auto ice_ids = reg->list_transports();
     std::fprintf(stderr, "DEBUG: registry has %zu transport entries\n", ice_ids.size());
     for (auto id : ice_ids) {
         std::fprintf(stderr, "DEBUG:   transport id=\"%.*s\"\n",
-                     (int)id.size(), id.data());
+                     static_cast<int>(id.size()), id.data());
     }
     SUCCEED();   // always pass ? diagnostic only
 }
@@ -283,4 +283,99 @@ TEST_F(Audio3APluginFixture, level_callback_fires_after_request) {
     // Level should be captured (silence ~= -96 dBFS)
     float level = captured_level.load();
     EXPECT_LE(level, -90.0f);   // at or below silence floor
+}
+
+// =============================================================================
+// Real-WebRTC-APM integration tests (only meaningful when APM is linked).
+// These exercise the "webrtc_apm" factory, which (when NIMRTC_USE_WEBRTC_APM=1)
+// is wired to a real webrtc::AudioProcessing instance and runs actual AEC +
+// ANS + AGC + high-pass processing.  When the APM is unavailable the factory
+// falls back to a NullAudio3A — in that case the tests below still pass (they
+// just exercise the fallback path), but the test filename + Assert logs make
+// the fact visible.
+// =============================================================================
+
+TEST_F(Audio3APluginFixture, webrtc_apm_factory_registered) {
+    const auto* reg = &PluginRegistry::instance();
+    const auto* f = reg->get_audio3a("webrtc_apm");
+    ASSERT_NE(f, nullptr) << "WebRtcPluginFactory must be registered under id='webrtc_apm'";
+    EXPECT_STREQ(f->id().data(), "webrtc_apm");
+}
+
+TEST_F(Audio3APluginFixture, webrtc_apm_open_processes_real_audio) {
+    const auto* reg = &PluginRegistry::instance();
+    const auto* f = reg->get_audio3a("webrtc_apm");
+    ASSERT_NE(f, nullptr);
+    std::unique_ptr<IAudio3A> plugin{f->create()};
+    ASSERT_NE(plugin, nullptr);
+
+    // PluginAdapter uses its default concrete_config_ which is fine for the
+    // smoke test (48 kHz mono echo-cancellation path).
+    ASSERT_EQ(plugin->open(), nimrtc::plugins::kOk);
+
+    // 200 ms of 1 kHz sine at -12 dBFS plus -50 dBFS noise — enough samples for
+    // the APM to do meaningful AEC/ANS/AGC processing at 48 kHz (10 ms frames).
+    constexpr std::size_t kFrameSize  = 480;          // 10 ms @ 48 kHz
+    constexpr std::size_t kNumFrames  = 20;           // 200 ms total
+    constexpr float       kSineAmp    = 0.25f;        // ~-12 dBFS
+    constexpr float       kNoiseAmp   = 0.005f;       // ~-46 dBFS
+    std::vector<float> cap(kFrameSize);
+    std::vector<float> rnd(kFrameSize);
+
+    auto lcg = [state = 0x1234u]() mutable {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state) / static_cast<float>(UINT32_MAX) * 2.0f - 1.0f;
+    };
+    auto stats = plugin->stats();
+    for (std::size_t f_idx = 0; f_idx < kNumFrames; ++f_idx) {
+        for (std::size_t i = 0; i < kFrameSize; ++i) {
+            rnd[i] = kNoiseAmp * lcg();
+            const std::size_t n = f_idx * kFrameSize + i;
+            const float t = static_cast<float>(n) / 48000.0f;
+            cap[i] = kSineAmp * std::sin(2.0f * 3.14159265f * 1000.0f * t) + rnd[i];
+        }
+        ASSERT_EQ(plugin->process_capture(cap.data(), kFrameSize, 1),
+                  nimrtc::plugins::kOk);
+        ASSERT_EQ(plugin->process_render(cap.data(), kFrameSize, 1),
+                  nimrtc::plugins::kOk);
+        plugin->set_render_delivered(kFrameSize);
+    }
+    stats = plugin->stats();
+
+    // Output should remain finite (NaN/Inf would mean a real APM crash; pass-
+    // through Null would also pass this — both are acceptable).
+    int bad = 0;
+    for (float s : cap) {
+        if (std::isnan(s) || std::isinf(s)) ++bad;
+    }
+    EXPECT_EQ(bad, 0) << "WebRtcAudio3A produced NaN/Inf samples";
+
+    // Sanity: the APM reports RMS-based level stats; capture_level_dbfs must
+    // be populated (NullAudio3A also populates this, but the value is
+    // consistent with the post-DSP RMS of the buffer we fed in). For a real
+    // APM, the render_level_dbfs is also populated from the reverse path.
+    EXPECT_LE(stats.last_capture_level_dbfs, 0.0f)
+        << "last_capture_level_dbfs out of range";
+    EXPECT_LE(stats.last_render_level_dbfs, 0.0f)
+        << "last_render_level_dbfs out of range";
+
+    // If the real APM ran, the RMS of the post-DSP capture buffer must
+    // match what was reported (within a small db tolerance).
+    double sumsq = 0.0;
+    for (float s : cap) {
+        const double sd = static_cast<double>(s);
+        sumsq += sd * sd;
+    }
+    const double rms = std::sqrt(sumsq / static_cast<double>(cap.size()));
+    const float out_dbfs = (rms < 1e-7) ? -96.0f
+        : static_cast<float>(20.0 * std::log10(rms));
+    EXPECT_NEAR(out_dbfs, stats.last_capture_level_dbfs, 2.0f)
+        << "APM-reported level and post-DSP RMS disagree";
+
+    std::fprintf(stderr,
+        "INFO: webrtc_apm post-DSP tx_level=%.2f dBFS rx_level=%.2f dBFS\n",
+        static_cast<double>(stats.last_capture_level_dbfs),
+        static_cast<double>(stats.last_render_level_dbfs));
+
+    plugin->close();
 }

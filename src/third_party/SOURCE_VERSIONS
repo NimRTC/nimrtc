@@ -11,8 +11,9 @@
 # Do NOT delete this file even if you update the libraries — the SHA is the
 # only ground truth for what the consumer (us) tested against.
 
-libjuice    master      77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
-libsrtp     master      2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
-mbedtls     4.2.0       023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
-libopus     v1.6.1      7030c73   7030c73010a3c1372e92eb4cc2f0ced3080a9c07   2026-09-04   https://github.com/xiph/opus
-wolfssl     v5.9.2      unknown   unknown                                2026-09-09   https://github.com/wolfSSL/wolfssl
+libjuice             master       77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
+libsrtp              master       2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
+mbedtls              4.2.0        023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
+libopus              v1.6.1       7030c73   7030c73010a3c1372e92eb4cc2f0ced3080a9c07   2026-09-04   https://github.com/xiph/opus
+wolfssl              v5.9.2       unknown   unknown                                2026-09-09   https://github.com/wolfSSL/wolfssl
+webrtc_audio_processing  webrtc-m129  unknown   unknown                                TBD           https://chromium.googlesource.com/webrtc/modules/audio_processing

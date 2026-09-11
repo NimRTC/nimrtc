@@ -49,7 +49,7 @@ public:
 
     // ---- plugins::IVideoCodec ----------------------------------------------
 
-    bool can_encode() const noexcept override { return false; }   // stub is decoder-only
+    bool can_encode() const noexcept override { return true; }    // stub now emits a synthetic H.264 bitstream
     bool can_decode() const noexcept override { return true; }
 
     plugins::VideoCodecKind kind() const noexcept override {
@@ -66,6 +66,16 @@ public:
                            std::uint8_t* const* output_buffers) noexcept override;
 
     plugins::Status force_keyframe() noexcept override { return plugins::kOk; }
+
+    /** Fill an I420 (or NV12) framebuffer with a recognisable synthetic
+     *  pattern derived from @p frame_seq.  Used by the stub decoder so
+     *  round-tripped frames are visually identifiable on the wire /
+     *  on screen.  @p y, @p u, @p v are caller-owned. */
+    static void paint_i420(std::uint8_t* y,
+                           std::uint8_t* u,
+                           std::uint8_t* v,
+                           std::uint32_t width, std::uint32_t height,
+                           std::uint32_t frame_seq) noexcept;
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override;

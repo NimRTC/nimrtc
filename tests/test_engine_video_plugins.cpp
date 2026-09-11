@@ -116,9 +116,11 @@ TEST_F(EngineVideoPlugins, source_can_produce_and_sink_can_render) {
     // The test demonstrates: source frames flow through user callback →
     // sink render(). We swap to headless explicitly so this test is
     // independent of the EngineConfig default.
-    const auto* f = PluginRegistry::instance().get_video_sink("headless");
-    ASSERT_NE(f, nullptr);
-    auto new_sink = std::unique_ptr<np::IVideoSink>(f->create(np::VideoSinkConfig{}));
+    const auto* sink_factory =
+        PluginRegistry::instance().get_video_sink("headless");
+    ASSERT_NE(sink_factory, nullptr);
+    auto new_sink = std::unique_ptr<np::IVideoSink>(
+        sink_factory->create(np::VideoSinkConfig{}));
     ASSERT_NE(new_sink, nullptr);
     engine.set_video_sink(std::move(new_sink));
     EXPECT_NE(engine.video_sink(), nullptr);
@@ -127,10 +129,10 @@ TEST_F(EngineVideoPlugins, source_can_produce_and_sink_can_render) {
     // it's open and that frames round-trip end-to-end.
     std::atomic<int> src_frame_count{0};
     engine.video_source()->set_callback(
-        [&](const np::VideoSourceFrame& f) {
+        [&](const np::VideoSourceFrame& frame) {
             src_frame_count.fetch_add(1);
             if (engine.video_sink()) {
-                engine.video_sink()->render(f);
+                engine.video_sink()->render(frame);
             }
         });
 
@@ -205,7 +207,7 @@ TEST_F(EngineVideoPlugins, sender_pushes_frames_and_receiver_counts_packets) {
     frame.codec        = np::VideoCodecKind::kH264;
     frame.payload_type = cfg.video_sender_tuning.payload_type;
     frame.is_keyframe  = true;
-    frame.nalu_format  = np::EncodedVideoFrame::NaluFormat::kAnnexB;
+    frame.nalu_format  = nimrtc::video_frame::NaluFormat::kAnnexBStartCode;
     static const std::uint8_t kIdrSlice[] = {
         0x00, 0x00, 0x00, 0x01,
         0x65,

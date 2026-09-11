@@ -63,7 +63,7 @@ parse_uint16(std::string_view s) noexcept {
     std::uint16_t result = 0;
     for (char c : s) {
         if (!is_digit(c)) return std::nullopt;
-        result = result * 10 + static_cast<std::uint16_t>(c - '0');
+        result = static_cast<std::uint16_t>(result * 10 + (c - '0'));
     }
     return result;
 }
@@ -142,7 +142,7 @@ void parse_bandwidth(std::string_view value,
     value_out = 0;
     for (char c : val_str) {
         if (is_digit(c)) {
-            value_out = value_out * 10 + (c - '0');
+            value_out = value_out * 10 + static_cast<std::uint64_t>(c - '0');
         }
     }
 }

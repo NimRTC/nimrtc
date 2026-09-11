@@ -181,7 +181,7 @@ struct Bwe::Impl {
 
                     if (elapsed_ms >= config_.change_interval.count()) {
                         const double increase_amount =
-                            (elapsed_ms / 1000.0) * config_.increase_bps;
+                            (static_cast<double>(elapsed_ms) / 1000.0) * config_.increase_bps;
 
                         std::uint32_t new_rate = current_bps_ +
                             static_cast<std::uint32_t>(increase_amount);
@@ -189,7 +189,7 @@ struct Bwe::Impl {
                         // Also consider per-RTT increase (CC-style boost).
                         if (feedback.rtt.count() > 0) {
                             const double rtt_factor =
-                                feedback.rtt.count() / 1000.0;  // seconds
+                                static_cast<double>(feedback.rtt.count()) / 1000.0;  // seconds
                             const double rtt_increase =
                                 current_bps_ * kIncreasePerRtt * rtt_factor;
                             new_rate += static_cast<std::uint32_t>(rtt_increase);

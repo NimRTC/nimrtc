@@ -55,12 +55,12 @@ plugins::VideoCodecKind to_plugin_codec_kind(video_frame::CodecKind k) noexcept 
 }
 
 /** Translate concrete NaluFormat → plugin NaluFormat. */
-plugins::EncodedVideoFrame::NaluFormat
+plugins::NaluFormat
 to_plugin_nalu_format(video_frame::NaluFormat f) noexcept {
     using ConcreteF = video_frame::NaluFormat;
-    using PluginF   = plugins::EncodedVideoFrame::NaluFormat;
+    using PluginF   = plugins::NaluFormat;
     switch (f) {
-        case ConcreteF::kAnnexBStartCode: return PluginF::kAnnexB;
+        case ConcreteF::kAnnexBStartCode: return PluginF::kAnnexBStartCode;
         case ConcreteF::kLengthPrefixed:  return PluginF::kLengthPrefixed;
         default:                          return PluginF::kUnknown;
     }
@@ -69,7 +69,7 @@ to_plugin_nalu_format(video_frame::NaluFormat f) noexcept {
 /** Translate plugin-level EncodedVideoFrame → concrete video_frame::EncodedVideoFrame. */
 video_frame::EncodedVideoFrame
 to_concrete_frame(const plugins::EncodedVideoFrame& p) noexcept {
-    using PluginF = plugins::EncodedVideoFrame::NaluFormat;
+    using PluginF = plugins::NaluFormat;
     video_frame::EncodedVideoFrame c{};
     c.codec         = to_concrete_codec(p.codec);
     c.payload       = p.payload;
@@ -79,7 +79,7 @@ to_concrete_frame(const plugins::EncodedVideoFrame& p) noexcept {
     c.info.frame_seq     = p.info.frame_seq;
     c.info.rtp_timestamp = p.info.rtp_timestamp;
     switch (p.nalu_format) {
-        case PluginF::kAnnexB:
+        case PluginF::kAnnexBStartCode:
             c.nalu_format = video_frame::NaluFormat::kAnnexBStartCode; break;
         case PluginF::kLengthPrefixed:
             c.nalu_format = video_frame::NaluFormat::kLengthPrefixed; break;

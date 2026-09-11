@@ -421,6 +421,13 @@ public:
     std::string local_ufrag()    const noexcept;
     std::string local_password() const noexcept;
 
+    /** Local DTLS fingerprint advertised in our SDP, as a base64-encoded
+     *  SHA-256 SPKI hash (the format Chrome's
+     *  --ignore-certificate-errors-spki-list expects).  Returns an empty
+     *  string if the DTLS session is not yet open or self-signed certs
+     *  are disabled.  Computed lazily from the underlying DtlsSession. */
+    std::string local_dtls_fingerprint_sha256_base64() const noexcept;
+
     /** Underlying ITransport (ICE by default).  Useful for tests and demos that
      *  need direct access to the transport — e.g. for ICE candidate forwarding
      *  in the WebSocket signaling proxy.  Returns nullptr if not yet open().

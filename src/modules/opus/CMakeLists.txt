@@ -17,6 +17,17 @@ add_library(nimrtc_opus STATIC
     )
 
 nimrtc_apply_options(nimrtc_opus)
+
+# Vendored libopus headers use C-style casts in their public macros
+# (e.g. opus_check_int(x) → (opus_int32)(x)).  Suppress the resulting
+# -Wold-style-cast warning for this module — we can't modify upstream.
+if(NOT MSVC)
+    target_compile_options(nimrtc_opus PRIVATE
+        -Wno-old-style-cast
+        -Wno-double-promotion
+        -Wno-conversion
+        -Wno-sign-conversion)
+endif()
 target_link_libraries(nimrtc_opus
     PUBLIC
         nimrtc::core

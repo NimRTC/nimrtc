@@ -77,8 +77,8 @@ TEST_F(VideoPluginAdapters, video_source_memory_is_registered) {
 }
 
 TEST_F(VideoPluginAdapters, video_source_factory_round_trip) {
-    const auto* f = PluginRegistry::instance().get_video_source("memory");
-    ASSERT_NE(f, nullptr);
+    const auto* factory = PluginRegistry::instance().get_video_source("memory");
+    ASSERT_NE(factory, nullptr);
 
     np::VideoSourceConfig cfg{};
     cfg.width  = 320;
@@ -88,7 +88,7 @@ TEST_F(VideoPluginAdapters, video_source_factory_round_trip) {
     cfg.format = np::VideoPixelFormat::kI420;
     cfg.pattern = np::VideoSourcePattern::kColorBars;
 
-    std::unique_ptr<np::IVideoSource> src(f->create(cfg));
+    std::unique_ptr<np::IVideoSource> src(factory->create(cfg));
     ASSERT_NE(src, nullptr);
 
     EXPECT_STREQ(src->name(), "nimrtc::video_source::PluginAdapter (wraps concrete IVideoSource)");
@@ -97,9 +97,9 @@ TEST_F(VideoPluginAdapters, video_source_factory_round_trip) {
 
     std::atomic<int> frame_count{0};
     std::atomic<np::TimestampUs> last_capture_ts{0};
-    src->set_callback([&](const np::VideoSourceFrame& f) {
+    src->set_callback([&](const np::VideoSourceFrame& frame) {
         frame_count.fetch_add(1);
-        last_capture_ts.store(f.capture_ts_us);
+        last_capture_ts.store(frame.capture_ts_us);
     });
 
     ASSERT_EQ(src->start(), np::kOk);
@@ -197,23 +197,23 @@ TEST_F(VideoPluginAdapters, video_sender_reference_is_registered) {
 }
 
 TEST_F(VideoPluginAdapters, video_receiver_push_rtp_works) {
-    const auto* f = PluginRegistry::instance().get_video_receiver("reference");
-    ASSERT_NE(f, nullptr);
+    const auto* factory = PluginRegistry::instance().get_video_receiver("reference");
+    ASSERT_NE(factory, nullptr);
 
     np::VideoReceiverConfig cfg{};
     cfg.codec = np::VideoCodecKind::kH264;
     cfg.ssrc  = 0xCAFEBABE;
     cfg.payload_type = 102;
 
-    std::unique_ptr<np::IVideoReceiver> rx(f->create(cfg));
+    std::unique_ptr<np::IVideoReceiver> rx(factory->create(cfg));
     ASSERT_NE(rx, nullptr);
     ASSERT_EQ(rx->open(), np::kOk);
 
     std::atomic<int> frame_count{0};
-    rx->set_frame_callback([&](const np::EncodedVideoFrame& f,
+    rx->set_frame_callback([&](const np::EncodedVideoFrame& frame,
                                np::TimestampUs /*now_us*/) {
         frame_count.fetch_add(1);
-        (void)f;
+        (void)frame;
     });
 
     // Push one RTP packet — at minimum the receiver records the packet
@@ -261,7 +261,7 @@ TEST_F(VideoPluginAdapters, video_sender_push_frame_works) {
     frame.codec        = np::VideoCodecKind::kH264;
     frame.payload_type = cfg.payload_type;
     frame.is_keyframe  = true;
-    frame.nalu_format  = np::EncodedVideoFrame::NaluFormat::kAnnexB;
+    frame.nalu_format  = np::NaluFormat::kAnnexBStartCode;
     // Real Annex B start code (0x00 0x00 0x00 0x01) + IDR NAL header + payload.
     static const std::uint8_t kIdrSlice[] = {
         0x00, 0x00, 0x00, 0x01,   // Annex B start code
@@ -348,7 +348,7 @@ TEST(VideoPluginAdaptersDirect, SenderAdapter_is_forwarder) {
     frame.codec        = np::VideoCodecKind::kH264;
     frame.payload_type = 102;
     frame.is_keyframe  = true;
-    frame.nalu_format  = np::EncodedVideoFrame::NaluFormat::kAnnexB;
+    frame.nalu_format  = np::NaluFormat::kAnnexBStartCode;
     static const std::uint8_t kIdrSlice[] = {
         0x00, 0x00, 0x00, 0x01,
         0x65,

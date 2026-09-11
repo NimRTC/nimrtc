@@ -239,22 +239,72 @@ TEST(StubDecoder, RejectsEmpty) {
 // CodecPluginAdapter
 // -----------------------------------------------------------------------------
 
-TEST(CodecPluginAdapter, EncodeUnsupported) {
-    nimrtc::h264::CodecPluginAdapter adapter({});
+TEST(CodecPluginAdapter, EncodeProducesSyntheticBitstream) {
+    // The shipped H.264 plugin is a *stub* encoder that emits a synthetic
+    // Annex B bitstream (SPS + PPS + IDR) suitable for exercising the
+    // send_video() → RTP → SRTP → ICE → recv → FU-A reassembly → decode
+    // → render pipeline without dragging in libopenh264/x264.  A real
+    // codec plugin should replace this via a different id.
+    nimrtc::plugins::VideoCodecConfig cfg;
+    cfg.width  = 320;
+    cfg.height = 240;
+    nimrtc::h264::CodecPluginAdapter adapter(cfg);
     EXPECT_EQ(adapter.open(), nimrtc::plugins::kOk);
-    EXPECT_FALSE(adapter.can_encode());
-    EXPECT_TRUE (adapter.can_decode());
+    EXPECT_TRUE(adapter.can_encode());
+    EXPECT_TRUE(adapter.can_decode());
 
     nimrtc::plugins::VideoFrame raw;
-    std::uint8_t buf[64] = {0};
+    raw.info.frame_seq = 7;
+
+    std::uint8_t buf[2048] = {0};
     nimrtc::plugins::EncodedVideoFrame out;
     EXPECT_EQ(adapter.encode(raw, buf, sizeof(buf), out),
-              nimrtc::plugins::kErrUnsupported);
+              nimrtc::plugins::kOk);
+    EXPECT_GT(out.payload.size(), 0u);
+    EXPECT_TRUE(out.is_keyframe);
+    EXPECT_EQ(out.codec, nimrtc::plugins::VideoCodecKind::kH264);
+    EXPECT_EQ(out.nalu_format,
+              nimrtc::plugins::NaluFormat::kAnnexBStartCode);
+    // Bitstream must contain at least SPS, PPS and IDR NAL units.
+    h264::BitstreamParser parser;
+    auto nalus = parser.parse_all(out.payload);
+    ASSERT_GE(nalus.size(), 3u);
+    bool saw_sps = false, saw_pps = false, saw_idr = false;
+    for (const auto& n : nalus) {
+        if (n.type == nimrtc::video_payload::h264::NaluType::kSPS)  saw_sps = true;
+        if (n.type == nimrtc::video_payload::h264::NaluType::kPPS)  saw_pps = true;
+        if (n.type == nimrtc::video_payload::h264::NaluType::kSliceIDR) saw_idr = true;
+    }
+    EXPECT_TRUE(saw_sps);
+    EXPECT_TRUE(saw_pps);
+    EXPECT_TRUE(saw_idr);
+
+    auto s = adapter.stats();
+    EXPECT_EQ(s.frames_encoded, 1u);
+    EXPECT_GT(s.bytes_encoded,  out.payload.size() - 1u);
+
+    // Missing dimensions still yields kErrInvalidParam.
+    nimrtc::h264::CodecPluginAdapter empty_adapter({});
+    ASSERT_EQ(empty_adapter.open(), nimrtc::plugins::kOk);
+    nimrtc::plugins::VideoFrame raw_empty;     // width=0, height=0
+    std::uint8_t small_buf[64] = {0};
+    nimrtc::plugins::EncodedVideoFrame empty_out;
+    EXPECT_EQ(empty_adapter.encode(raw_empty, small_buf, sizeof(small_buf), empty_out),
+              nimrtc::plugins::kErrInvalidParam);
+
     adapter.close();
 }
 
-TEST(CodecPluginAdapter, DecodeProducesEmptyPixels) {
-    nimrtc::h264::CodecPluginAdapter adapter({});
+TEST(CodecPluginAdapter, DecodePaintsSyntheticI420) {
+    // The shipped H.264 decoder is a *stub*: it consumes the bitstream,
+    // propagates the metadata, and paints each output frame with a
+    // synthetic I420 pattern (3 horizontal bands whose brightness
+    // depends on frame_seq).  This is enough to validate the full
+    // pipeline and make round-tripped frames visually identifiable.
+    nimrtc::plugins::VideoCodecConfig cfg;
+    cfg.width  = 320;
+    cfg.height = 240;
+    nimrtc::h264::CodecPluginAdapter adapter(cfg);
     ASSERT_EQ(adapter.open(), nimrtc::plugins::kOk);
 
     std::vector<std::uint8_t> bs;
@@ -264,7 +314,7 @@ TEST(CodecPluginAdapter, DecodeProducesEmptyPixels) {
 
     nimrtc::plugins::EncodedVideoFrame encoded;
     encoded.codec         = nimrtc::plugins::VideoCodecKind::kH264;
-    encoded.nalu_format   = nimrtc::plugins::EncodedVideoFrame::NaluFormat::kAnnexB;
+    encoded.nalu_format   = nimrtc::plugins::NaluFormat::kAnnexBStartCode;
     encoded.payload       = core::ByteSpan{bs.data(), bs.size()};
     encoded.is_keyframe   = true;
     encoded.payload_type  = 102;
@@ -273,13 +323,32 @@ TEST(CodecPluginAdapter, DecodeProducesEmptyPixels) {
     encoded.info.rtp_timestamp  = 9999;
 
     nimrtc::plugins::VideoFrame raw_out;
-    std::uint8_t dummy_buffers[3][1] = {};
-    std::uint8_t* buffers[3] = {dummy_buffers[0], dummy_buffers[1], dummy_buffers[2]};
+    const std::uint32_t w = cfg.width;
+    const std::uint32_t h = cfg.height;
+    std::vector<std::uint8_t> y_plane(static_cast<std::size_t>(w) * h);
+    std::vector<std::uint8_t> u_plane(static_cast<std::size_t>(w / 2) * (h / 2));
+    std::vector<std::uint8_t> v_plane(static_cast<std::size_t>(w / 2) * (h / 2));
+    std::uint8_t* buffers[3] = {y_plane.data(), u_plane.data(), v_plane.data()};
 
     EXPECT_EQ(adapter.decode(encoded, raw_out, buffers), nimrtc::plugins::kOk);
-    EXPECT_EQ(raw_out.format, nimrtc::plugins::VideoPixelFormat::kI420);
-    EXPECT_EQ(raw_out.frame_seq, 1u);
-    EXPECT_TRUE(raw_out.plane_y == nullptr);
+    EXPECT_EQ(raw_out.format(), nimrtc::plugins::VideoPixelFormat::kI420);
+    EXPECT_EQ(raw_out.info.frame_seq,     1u);
+    EXPECT_EQ(raw_out.info.capture_ts_us, 1234);
+    EXPECT_EQ(raw_out.info.rtp_timestamp, 9999u);
+    EXPECT_EQ(raw_out.width(),  w);
+    EXPECT_EQ(raw_out.height(), h);
+    // The frame buffer is type-erased; check it carries CPU pixel data
+    // via a VideoFrameBuffer rather than accessing the removed plane_y/u/v
+    // fields directly.
+    auto cpu = raw_out.cpu_buffer();
+    EXPECT_NE(cpu, nullptr);
+    EXPECT_NE(cpu->plane(0), nullptr);
+    EXPECT_NE(cpu->plane(1), nullptr);
+    EXPECT_NE(cpu->plane(2), nullptr);
+    // paint_i420() writes non-zero bytes to every Y pixel (ramp derived
+    // from frame_seq) — verify a few samples are not pristine zero.
+    EXPECT_NE(y_plane[0], 0u);
+    EXPECT_NE(y_plane[(w * h) / 2], 0u);
 
     auto s = adapter.stats();
     EXPECT_EQ(s.frames_decoded, 1u);

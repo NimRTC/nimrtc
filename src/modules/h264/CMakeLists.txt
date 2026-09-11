@@ -18,6 +18,7 @@ add_library(nimrtc_h264 STATIC
     src/bitstream.cpp
     src/decoder.cpp
     src/codec_plugin.cpp
+    src/hw_backends.cpp
     )
 
 nimrtc_apply_options(nimrtc_h264)

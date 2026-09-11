@@ -387,7 +387,7 @@ TEST(RtpRoundTrip, PacketWithPadding) {
 TEST(Rtcp, SrRoundTrip) {
     SrBuilder b;
     b.set_ssrc(0xAABBCCDD)
-        .set_ntp_timestamp(((std::uint64_t)0x12345678 << 32) | 0x9ABCDEF0u)
+        .set_ntp_timestamp((static_cast<std::uint64_t>(0x12345678) << 32) | 0x9ABCDEF0u)
         .set_rtp_timestamp(0xDEADBEEFu)
         .set_sender_packet_count(12345)
         .set_sender_octet_count(987654321);
@@ -402,7 +402,7 @@ TEST(Rtcp, SrRoundTrip) {
     const auto& sr = r.value();
     EXPECT_EQ(sr.ssrc, 0xAABBCCDDu);
     EXPECT_EQ(sr.ntp_timestamp,
-              ((std::uint64_t)0x12345678 << 32) | 0x9ABCDEF0u);
+              (static_cast<std::uint64_t>(0x12345678) << 32) | 0x9ABCDEF0u);
     EXPECT_EQ(sr.rtp_timestamp, 0xDEADBEEFu);
     EXPECT_EQ(sr.sender_packet_count, 12345u);
     EXPECT_EQ(sr.sender_octet_count, 987654321u);

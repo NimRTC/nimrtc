@@ -631,7 +631,8 @@ TEST(VideoPipeline, SenderMonotonicSeq) {
     f.payload     = core::ByteSpan{ann.data(), ann.size()};
 
     for (int i = 0; i < 3; ++i) {
-        ASSERT_TRUE(tx.push_frame(f, 0, 1000 + i * 3000,
+        ASSERT_TRUE(tx.push_frame(f, 0,
+                                  static_cast<std::uint32_t>(1000 + i * 3000),
                                   static_cast<std::uint32_t>(i))
                         .ok());
     }

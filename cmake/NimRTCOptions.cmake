@@ -79,7 +79,7 @@ function(nimrtc_apply_options target)
         target_compile_options(${target} PRIVATE
             -Wall -Wextra -Wpedantic
             -Wshadow -Wnon-virtual-dtor -Wold-style-cast
-            -Wcast-align -Wunused -Woverloaded-parse-virtual
+            -Wcast-align -Wunused -Woverloaded-virtual
             -Wconversion -Wsign-conversion
             -Wnull-dereference -Wdouble-promotion
             -Wformat=2 -Wformat-security
@@ -96,6 +96,13 @@ function(nimrtc_apply_options target)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
     endif()
+
+    # -------------------------------------------------------------------------
+    # MSVC runtime library — handled project-wide via
+    # CMAKE_MSVC_RUNTIME_LIBRARY in the top-level CMakeLists.txt.  Nothing
+    # per-target needs to be set here because the variable cascades to
+    # every target (including third_party via add_subdirectory).
+    # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
     # Sanitizers (debug builds)

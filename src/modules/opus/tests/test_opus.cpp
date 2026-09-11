@@ -27,15 +27,19 @@ constexpr std::size_t   kFrameSamples = 960;  // 20 ms @ 48 kHz, libopus sweet s
 
 double rms_energy(const float* pcm, std::size_t n) {
     double sum = 0.0;
-    for (std::size_t i = 0; i < n; ++i) sum += static_cast<double>(pcm[i]) * pcm[i];
+    for (std::size_t i = 0; i < n; ++i) {
+        const double v = static_cast<double>(pcm[i]);
+        sum += v * v;
+    }
     return std::sqrt(sum / static_cast<double>(n));
 }
 
 std::vector<float> make_sine(std::size_t n, float freq_hz, std::uint32_t rate) {
     std::vector<float> pcm(n);
-    const double phase_step = 2.0 * 3.141592653589793 * freq_hz / rate;
+    const double phase_step =
+        2.0 * 3.141592653589793 * static_cast<double>(freq_hz) / static_cast<double>(rate);
     for (std::size_t i = 0; i < n; ++i) {
-        pcm[i] = 0.5f * static_cast<float>(std::sin(i * phase_step));
+        pcm[i] = 0.5f * static_cast<float>(std::sin(static_cast<double>(i) * phase_step));
     }
     return pcm;
 }

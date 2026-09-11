@@ -1,19 +1,26 @@
 # =============================================================================
-# NimRTC continuous integration — Windows MSVC only (0.9.0-rc1)
+# NimRTC continuous integration
 #
-# PLATFORM NOTE: 0.9.0-rc1 has ONLY been validated on Windows 10 / MSVC.
-# Linux, macOS, and aarch64 cross-build jobs have been removed because
-# they produced false-positive green ticks — the build had not actually
-# been verified on those platforms and the project may not even configure
-# there. Re-introduce those runners only after they have been validated
-# locally and the build+test+acceptance loop is known to work end-to-end.
+# Matrix (1.0.0):
+#   - windows       : MSVC 19.43 on windows-2022        (primary dev env)
+#   - linux-gcc     : GCC 11 on ubuntu-22.04            (x86_64)
+#   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64      (native arm64 runner)
+#   - macos-clang   : Apple Clang 15 on macos-14        (arm64; runs x86_64 binaries
+#                                                          under Rosetta)
 #
-# Goals (0.9.0-rc1):
-#   1. Library + tests + loopback example build on Windows / MSVC.
-#   2. All gtest unit tests pass.
-#   3. Loopback-p2p smoke (NimRTC↔NimRTC over loopback UDP) exits 0.
+# Goals:
+#   1. Library + tests + loopback example build on every supported platform.
+#   2. All gtest unit tests pass on every supported platform.
+#   3. Loopback-p2p smoke (NimRTC↔NimRTC over loopback UDP) exits 0 on
+#      Windows; Linux/macOS run ctest only at this stage.
 #
 # End-to-end Chrome interop lives in `interop.yml`.
+#
+# PLATFORM NOTE: cross-platform jobs in this matrix are intentionally
+# fail-fast=false and per-job so a regression on one platform does not
+# hide the others. See CHANGELOG.md "Platform support matrix" for the
+# current support status of each (✅ = CI green-and-merged, 🔶 = best-effort,
+# pending first green run).
 # =============================================================================
 
 name: ci
@@ -24,6 +31,9 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same ref (branch or PR). Each job below
+# overrides `concurrency.group` so the macOS runner doesn't gate the Linux
+# runner, etc.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,6 +48,9 @@ jobs:
   windows:
     name: windows / msvc
     runs-on: windows-2022
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-windows
+      cancel-in-progress: true
     defaults:
       run:
         shell: pwsh
@@ -54,6 +67,16 @@ jobs:
         with:
           arch: x64
 
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            build
+          key: ${{ runner.os }}-cmake-debug.msvc-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.msvc-
+
       - name: Configure
         run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON
 
@@ -69,3 +92,152 @@ jobs:
           if exist build\examples\loopback-p2p\Debug\loopback-p2p.exe (
             build\examples\loopback-p2p\Debug\loopback-p2p.exe
           )
+
+  # ---------------------------------------------------------------------------
+  # Linux x86_64: GCC on ubuntu-22.04
+  # ---------------------------------------------------------------------------
+  linux-gcc:
+    name: linux-gcc / x86_64
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-gcc
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
+      # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
+      - name: Install ninja + Python (CMake via pip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            ~/.local/lib/python*/site-packages/cmake
+            build
+          key: ${{ runner.os }}-cmake-debug-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug-
+
+      - name: Configure
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build --preset debug -j 2
+
+      - name: Test
+        run: ctest --preset tests --output-on-failure -j 2
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-gcc-${{ github.run_id }}
+          path: build/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Linux aarch64: GCC cross (or native) on ubuntu-22.04-arm64
+  # ---------------------------------------------------------------------------
+  linux-aarch64:
+    name: linux-gcc / aarch64
+    runs-on: ubuntu-22.04-arm64
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-aarch64
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja + g++ + aarch64 cross toolchain + Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3 g++-aarch64-linux-gnu
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            ~/.local/lib/python*/site-packages/cmake
+            build
+          key: ${{ runner.os }}-cmake-debug.aarch64-${{ hashFiles('CMakeLists.txt', 'cmake/toolchains/aarch64-linux-gnu.cmake', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.aarch64-
+
+      - name: Configure
+        run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build --preset debug.aarch64 -j 2
+
+      - name: Test
+        run: ctest --preset tests.aarch64 --output-on-failure -j 2
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-aarch64-${{ github.run_id }}
+          path: build/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # macOS: Apple Clang on macos-14 (arm64)
+  # ---------------------------------------------------------------------------
+  macos-clang:
+    name: macos-clang / arm64
+    runs-on: macos-14
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-macos-clang
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # macos-14 ships CMake 3.27.x (≥ 3.25). Only Python is added here.
+      - name: Install Python
+        run: |
+          brew update
+          brew install python@3.12
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CMake
+            build
+          key: ${{ runner.os }}-cmake-debug.macos-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.macos-
+
+      - name: Configure
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build --preset debug.macos -j 2
+
+      - name: Test
+        run: ctest --preset tests.macos --output-on-failure -j 2
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-macos-clang-${{ github.run_id }}
+          path: build/
+          retention-days: 7

@@ -1,0 +1,92 @@
+# docker-compose.yml — full Chrome interop test stack
+#
+# Spins up three services:
+#   1. nimrtc          — compiles demo-p2p from source and runs it
+#   2. chrome          — headless Chromium that opens the WebRTC test harness
+#   3. signaling-server — Python WebSocket signaling broker
+#
+# Run with:
+#   docker compose -f interop/docker/docker-compose.yml up --abort-on-container-exit
+#
+# Result: a non-zero exit code on any test failure.
+
+services:
+  signaling-server:
+    build:
+      context: ../..
+      dockerfile: interop/docker/Dockerfile
+    command:
+      - python3
+      - interop/signaling/signaling_server.py
+      - --port
+      - "8765"
+      - --host
+      - "0.0.0.0"
+    ports:
+      - "8765:8765"
+    healthcheck:
+      # Plain HTTP GET to a WS server returns 426 Upgrade Required — which
+      # is the signal that the server is alive.
+      test: ["CMD", "python3", "-c",
+             "import urllib.request, urllib.error, sys;\n"
+             "try: urllib.request.urlopen('http://localhost:8765/', timeout=1)\n"
+             "except urllib.error.HTTPError as e:\n"
+             "    sys.exit(0 if e.code == 426 else 1)\n"
+             "except Exception: sys.exit(1)"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  nimrtc:
+    build:
+      context: ../..
+      dockerfile: interop/docker/Dockerfile
+    depends_on:
+      signaling-server:
+        condition: service_healthy
+    command:
+      - python3
+      - interop/run_interop.py
+      - --test
+      - chrome_opus_interop
+      - --signaling-ws
+      - ws://signaling-server:8765/interop
+      - --timeout
+      - "90"
+    environment:
+      NIMRTC_BINARY: /src/build/examples/Debug/demo-p2p
+      NIMRTC_PROXY_STDERR: /src/build/_demo_p2p_stderr.log
+      NIMRTC_DTLS_SPKI_FILE: /src/build/nimrtc_spki.txt
+    volumes:
+      - ../..:/src
+    working_dir: /src
+
+  # Optional: a standalone Chrome container that just runs the harness and
+  # prints results.  Useful for manual smoke tests.
+  chrome:
+    build:
+      context: ../..
+      dockerfile: interop/docker/Dockerfile
+    depends_on:
+      signaling-server:
+        condition: service_healthy
+    command:
+      - python3
+      - -c
+      - |
+        import asyncio
+        from interop.run_interop import ChromeBrowser, Config
+        async def main():
+            cfg = Config(
+                signaling_ws="ws://signaling-server:8765/interop",
+                timeout_seconds=60,
+            )
+            cb = ChromeBrowser(
+                html_path=cfg.chrome_html,
+                signaling_ws=cfg.signaling_ws,
+                timeout=cfg.timeout_seconds,
+            )
+            results = await cb.run(room="interop", offerer=False)
+            print("RESULTS:", results)
+        asyncio.run(main())
+    working_dir: /src

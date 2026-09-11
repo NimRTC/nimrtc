@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <mutex>
 #include <shared_mutex>
 
 #include <nimrtc/session/session.hpp>

@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <utility>

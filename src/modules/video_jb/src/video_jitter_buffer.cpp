@@ -339,7 +339,7 @@ private:
         out->ssrc          = b.ssrc;
         out->rtp_timestamp = b.rtp_timestamp;
         out->frame_seq     = ++frame_seq_counter_;
-        out->capture_ts_us = b.first_arrival_us;   // simplified; real impl
+        out->capture_ts_us = static_cast<std::uint64_t>(b.first_arrival_us);   // simplified; real impl
                                                     // uses RTCP-SR NTP↔RTP
         out->bitstream     = std::move(b.bitstream);
         out->complete      = b.marker_seen;

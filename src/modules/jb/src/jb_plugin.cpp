@@ -196,9 +196,8 @@ plugins::IJB::Stats PluginAdapter::stats() const noexcept {
     return s;
 }
 
-int PluginAdapter::estimated_delay_ms(plugins::TimestampUs now_us) const noexcept {
+int PluginAdapter::estimated_delay_ms(plugins::TimestampUs /*now_us*/) const noexcept {
     if (!concrete_) return 0;
-    auto now = us_to_time_point(now_us);
     return static_cast<int>(concrete_->stats().current_delay.count());
 }
 

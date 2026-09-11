@@ -20,12 +20,21 @@
  *   1  = encode error — NVENC session opened but produced no output
  *  77  = skip  — no GPU / driver issue, or SDK not configured
  *
- * KNOWN ISSUE (driver 591.86 / nvEncodeAPI64.dll v32.0.15.9186):
- *   The bundled runtime is built against NVENC SDK 11.0 and rejects every
- *   SDK 13.1 struct version we try with NV_ENC_ERR_INVALID_VERSION (15).
- *   See docs/hw_plugin_seam.md for the full diagnosis.  The fix path is
- *   either to update the driver to a version that ships with the SDK 13.x
- *   runtime (R570+) or to ship our own minimal SDK 11.0 struct shims.
+ * AUTO-PROBE DESIGN (v2):
+ *   Driver 32.0.16.1692 opens sessions with SDK 13.1 API version, but its
+ *   internal NVENC dispatch is based on an older SDK ABI (SDK 12.x).  The
+ *   struct versions in SDK 13.1 (struct ver 5/7/9) do not match the driver,
+ *   causing NV_ENC_ERR_INVALID_PTR on preset-config calls.
+ *
+ *   The probe now probes a sorted list of API-version / struct-version pairs
+ *   after opening the session.  The first pair that lets
+ *   nvEncGetEncodePresetConfig succeed is used for all subsequent calls.
+ *   Known pairs (verified / plausible):
+ *     (0x0100000D, 0x8703000D) = SDK 13.1  (struct ver 3/5/9)
+ *     (0x0100000C, 0x8703000C) = SDK 12.0  (struct ver 3/5/9) -- expected for R560
+ *     (0x0000000C, 0x8703000C) = SDK 12.0  (raw major=12, struct ver 3/5/9)
+ *     (0x0000000B, 0x8703000B) = SDK 11.x  (struct ver 1/3/7)
+ *   See docs/hw_plugin_seam.md §12 for full diagnosis.
  */
 
 #include <cstdint>

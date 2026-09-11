@@ -576,4 +576,17 @@ if(NIMRTC_HW_HAVE_NVENC)
     add_test(NAME test_nvenc_probe
         COMMAND $<TARGET_FILE:test_nvenc_probe>)
     set_tests_properties(test_nvenc_probe PROPERTIES TIMEOUT 60)
+
+    # Version probe: auto-detects the correct API / struct version combination.
+    add_executable(test_nvenc_version_probe nvenc_version_probe.cpp)
+    target_compile_definitions(test_nvenc_version_probe PRIVATE NIMRTC_PLUGINS_NVENC_ON=1)
+    if(WIN32)
+        target_link_libraries(test_nvenc_version_probe PRIVATE d3d11)
+        target_compile_definitions(test_nvenc_version_probe PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    target_include_directories(test_nvenc_version_probe PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${NVENC_INCLUDE_DIR}")
+    nimrtc_apply_options(test_nvenc_version_probe)
+    # Not registered with ctest — run manually as: cmake --build --target test_nvenc_version_probe && build/tests/Debug/test_nvenc_version_probe.exe
 endif()

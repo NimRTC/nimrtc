@@ -7,90 +7,90 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added ï¿½?release infrastructure, vendor CI gate, cross-platform CI pre-flight
+### Added ï¿?release infrastructure, vendor CI gate, cross-platform CI pre-flight
 
-- **`docs/plan/vendor-migration.md`** ï¿½?detailed Phase 1ï¿½? migration plan
+- **`docs/plan/vendor-migration.md`** ï¿?detailed Phase 1ï¿? migration plan
   for replacing ~280 MB of checked-in vendor source with git submodules
   backed by `vendor.json` SHAs.
-- **`src/third_party/vendor.json`** ï¿½?SHA-pinned manifest for all eight
+- **`src/third_party/vendor.json`** ï¿?SHA-pinned manifest for all eight
   third-party dependencies (wolfssl v5.9.2, webrtc-audio-processing,
   mbedtls, libopus, libjuice, libsrtp, googletest, nlohmann_json).
-- **`tools/check_vendor.py`** ï¿½?Phase 2 script; verifies every submodule's
+- **`tools/check_vendor.py`** ï¿?Phase 2 script; verifies every submodule's
   HEAD matches the `commit_sha` in `vendor.json`. Wired into all four
   CI jobs in `ci.yml` and both jobs in `interop.yml` as a
   `continue-on-error: true` gate (Phase 4). Per
   `docs/plan/vendor-migration.md Â§3 Phase 4`, this is a warning-only
   check pre-1.0 and becomes a hard gate post-1.0.
-- **`tools/vendor_update.py`** ï¿½?Phase 2 script; advances a submodule to a
+- **`tools/vendor_update.py`** ï¿?Phase 2 script; advances a submodule to a
   new upstream SHA and rewrites both `vendor.json` and
   `src/third_party/SOURCE_VERSIONS` in one step. Supports `--to <tag>`,
   `--to <sha>`, or bare bump-to-upstream-HEAD.
-- **`tools/ci_preflight.py`** ï¿½?cross-platform pre-flight sanity check
-  that verifies the minimum CMake version (ï¿½?3.25), required build
+- **`tools/ci_preflight.py`** ï¿?cross-platform pre-flight sanity check
+  that verifies the minimum CMake version (ï¿?3.25), required build
   tools, and the presence of a CMake preset before the build step.
   Reduces CI diagnostics by failing fast when a tool is missing.
-- **`.github/workflows/release.yml`** ï¿½?GitHub Actions release workflow.
+- **`.github/workflows/release.yml`** ï¿?GitHub Actions release workflow.
   Triggered by push of any `vX.Y.Z` tag. Builds four-platform artefacts
   (Windows/MSVC, Linux-x86_64/GCC, Linux-aarch64/GCC, macOS/Clang),
   signs each with the release manager's GPG key, generates a CycloneDX
   SBOM, extracts the `CHANGELOG.md` section for the tag, and drafts a
   GitHub Release in `draft: true` mode for human review before publish.
-- **`CMakePresets.json`** ï¿½?added `release.macos` and `release.aarch64`
+- **`CMakePresets.json`** ï¿?added `release.macos` and `release.aarch64`
   configure/build presets to mirror the existing `release.msvc` and
   `release` (Linux) presets, completing the full release build matrix for
   `release.yml`.
-- **CI vendor-check gate (Phase 4)** ï¿½?all four CI jobs in `ci.yml`
+- **CI vendor-check gate (Phase 4)** ï¿?all four CI jobs in `ci.yml`
   (windows/msvc, linux-gcc, linux-aarch64, macos-clang) and both jobs
   in `interop.yml` now run `tools/check_vendor.py` as a `continue-on-error`
   step before the build, surfacing submodule drift in the CI log.
-- **CI pre-flight step** ï¿½?all four CI jobs now run
+- **CI pre-flight step** ï¿?all four CI jobs now run
   `tools/ci_preflight.py` before the build to detect missing CMake,
   Ninja, or compiler issues early.
-- **`src/third_party/SOURCE_VERSIONS`** ï¿½?updated to match `vendor.json`
+- **`src/third_party/SOURCE_VERSIONS`** ï¿?updated to match `vendor.json`
   SHAs; added googletest, nlohmann_json, wolfssl, webrtc_audio_processing
   entries that were previously marked "unknown".
 
-### Changed ï¿½?platform support
+### Changed ï¿?platform support
 
-- **`interop.yml` e2e Case D** ï¿½?`|| true` workaround removed; all four
+- **`interop.yml` e2e Case D** ï¿?`|| true` workaround removed; all four
   e2e cases (A/B/C/D) are now expected to PASS at HEAD. The
   `certificate_unknown` alert that blocked Chrome DTLS interop at
-  `v0.9.0-rc1` is resolved (see "Fixed ï¿½?Chrome interop" below).
+  `v0.9.0-rc1` is resolved (see "Fixed ï¿?Chrome interop" below).
 
-### Changed ï¿½?platform support matrix
+### Changed ï¿?platform support matrix
 
-- All four platforms (Windows ï¿½? Linux x86_64, macOS arm64, Linux
+- All four platforms (Windows ï¿? Linux x86_64, macOS arm64, Linux
   aarch64) are now represented in `ci.yml` with full build + test +
   vendor-check + pre-flight steps. First-green run on
   Linux/macOS/aarch64 is the remaining blocker per the
   "Deferred for 1.0.0" section below.
 
-### Added ï¿½?H.264 HW backend SDK bindings (P3)
+### Added ï¿?H.264 HW backend SDK bindings (P3)
 
-- **NVENC + NVDEC (NVIDIA)** ï¿½?full NVENC encoder wired through
+- **NVENC + NVDEC (NVIDIA)** ï¿?full NVENC encoder wired through
   `NIMRTC_PLUGINS_NVENC_ON`.  Implements `nvEncInitializeEncoder`,
   `nvEncRegisterResource`, `nvEncEncodePicture`, `nvEncLockBitstream` and
   the matching NVDEC stub for the decoder direction. Source:
   `src/modules/h264/src/nvenc_encoder.cpp`. CMake: `FindNVENC.cmake`.
-- **AMD AMF** ï¿½?full AMF encoder wrapping the AMD AMF SDK
+- **AMD AMF** ï¿?full AMF encoder wrapping the AMD AMF SDK
   (`AMFVideoEncoderUVD_EncodeH264_GUID`). Source:
   `src/modules/h264/src/amf_encoder.cpp`. CMake: `FindAMF.cmake`.
-- **Intel QSV via libvpl / oneVPL** ï¿½?full QSV encoder via the
+- **Intel QSV via libvpl / oneVPL** ï¿?full QSV encoder via the
   successor-to-MediaSDK `vpl/mfxvideo.h` API. Source:
   `src/modules/h264/src/qsv_encoder.cpp`. CMake: `FindLibVPL.cmake`.
-- **Microsoft DXVA / Media Foundation H.264 decoder** ï¿½?uses the
+- **Microsoft DXVA / Media Foundation H.264 decoder** ï¿?uses the
   `CLSID_CMSH264DecoderMFT` MFT (which internally accelerates via DXVA
   when the GPU supports it). Source: `src/modules/h264/src/dxva_decoder.cpp`.
-- **Linux VA-API encoder + decoder** ï¿½?full `VAEntrypointEncSlice` /
+- **Linux VA-API encoder + decoder** ï¿?full `VAEntrypointEncSlice` /
   `VAEntrypointDecSlice` implementation via `libva` + `libva-drm`.
   Source: `src/modules/h264/src/vaapi_encoder.cpp`. CMake: `FindLibVA.cmake`.
-- **OpenH264 software fallback** ï¿½?`dlopen("libopenh264")` /
+- **OpenH264 software fallback** ï¿?`dlopen("libopenh264")` /
   `LoadLibrary("openh264.dll")` probe + `CodecPluginAdapter` delegation.
   Source: `src/modules/h264/src/openh264_encoder.cpp`.
-- **`cmake/NimRTHwPlugins.cmake`** ï¿½?central SDK detection +
+- **`cmake/NimRTHwPlugins.cmake`** ï¿?central SDK detection +
   per-backend `nimrtc_link_<x>(target)` helpers.  Each helper becomes a
   no-op when the SDK is absent, so out-of-tree hosts compile cleanly.
-- **HW backend helper header `hw_backend_base.hpp`** ï¿½?shared
+- **HW backend helper header `hw_backend_base.hpp`** ï¿?shared
   SPS/PPS/IDR parsing, Annex B packer, NV12â†’I420 conversion, error mapping.
 - **CMake cache options**:
   - `NIMRTC_PLUGINS_NVENC=ON`   (NVIDIA NVENC + NVDEC)
@@ -100,26 +100,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `NIMRTC_PLUGINS_VAAPI=ON`   (Linux VA-API, Linux only)
   - `NIMRTC_PLUGINS_NVDEC=ON`   (NVIDIA NVDEC alone, decoder only)
   - `NIMRTC_PLUGINS_OPENH264=ON` (OpenH264 software fallback)
-- **Tests** ï¿½?new `tests/test_hw_backends.cpp` (12 tests) verifies the
+- **Tests** ï¿?new `tests/test_hw_backends.cpp` (12 tests) verifies the
   dispatch surface (registration, priority ordering, preferred-name
   selection, helper functions) on any host, GPU not required.
-- **`docs/hw_plugin_seam.md Â§11`** ï¿½?in-tree backend matrix, CMake
+- **`docs/hw_plugin_seam.md Â§11`** ï¿?in-tree backend matrix, CMake
   flags, environment variables, "how `available()` works", and "adding
   a new backend" recipe.
 
 ### Changed
 
-- `src/modules/h264/src/hw_backends.cpp` ï¿½?`available()` / `create()`
+- `src/modules/h264/src/hw_backends.cpp` ï¿?`available()` / `create()`
   for every backend now calls the corresponding real symbol
   (`<backend>_h264_available()` / `make_<backend>_h264_codec()`).  Stub
   fallbacks remain only for `videotoolbox_h264` and `mediacodec_h264`
   which require platform branches beyond P3 scope.
-- `src/modules/h264/CMakeLists.txt` ï¿½?calls
+- `src/modules/h264/CMakeLists.txt` ï¿?calls
   `nimrtc_link_<x>(nimrtc_h264)` for each backend, no-op when SDK absent.
 
 ### Fixed
 
-- **`tools/e2e_chrome_interop.py` ï¿½?undefined `NIMRTC_SPKI_FILE` raised
+- **`tools/e2e_chrome_interop.py` ï¿?undefined `NIMRTC_SPKI_FILE` raised
   `NameError` before launching Chrome.**  The script referenced
   `NIMRTC_SPKI_FILE.exists()` on the first run but the symbol was never
   defined at module scope, so `run_e2e()` crashed at line ~89 *before*
@@ -136,17 +136,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `case_d_chrome.log` now prints `NimRTC SPKI allow-list: 1 entry` and
   `build/e2e/nimrtc_chrome_spki.b64` is populated by demo-p2p before
   Playwright launches Chrome.  The Chrome DTLS handshake is *still*
-  failing at alert 46 (`certificate_unknown`) ï¿½?that remaining gap is a
+  failing at alert 46 (`certificate_unknown`) ï¿?that remaining gap is a
   deeper BoringSSL/WebRTC-DTLS-vs-spki-list interaction and is tracked
-  under `[0.9.0-rc1] "Known issues (DTLS ï¿½?Chrome)"` below; this change
+  under `[0.9.0-rc1] "Known issues (DTLS ï¿?Chrome)"` below; this change
   only removes the silent NameError that masked the real failure mode.
 
-- **Case D "intermittent Chrome DTLS timeout" ï¿½?root cause was
+- **Case D "intermittent Chrome DTLS timeout" ï¿?root cause was
   NimRTC-side double-emission of the ServerHello handshake flight.**
   `DtlsSessionWolfSSL::tick()` previously invoked `pump_handshake()` in
   addition to `flush_send_buf()`, so on every retransmit cycle the same
   ServerHello/Certificate/ServerKeyExchange/ServerHelloDone flight was
-  emitted **twice** ï¿½?once by `tick()` (which called `wolfSSL_accept()`
+  emitted **twice** ï¿?once by `tick()` (which called `wolfSSL_accept()`
   and re-buffered the flight into `send_buf_`), then again by
   `take_outbound()`'s own `pump_handshake()` call.  In
   `build/e2e/nimrtc_chrome.trace` this manifests as `SEND seq=0..3`
@@ -154,7 +154,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seq=8..11`, three copies of the same flight in quick succession.
   Chrome's BoringSSL DTLS parser raises `unexpected_message` on the
   duplicated `ServerHelloDone`, aborts the handshake, and the peer
-  connection closes before SRTP keying material is exported ï¿½?exactly
+  connection closes before SRTP keying material is exported ï¿?exactly
   the "Chrome timing out before DTLS converges" symptom we kept
   misattributing to Chrome-side startup latency.  Fix:
   `tick()` now calls only `flush_send_buf()`; `take_outbound()` is the
@@ -182,7 +182,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Source is cloned from `gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing`
   (PulseAudio-maintained fork, active 2025-11-10). Build uses Meson + Ninja
-  (not CMakeLists ï¿½?the upstream is Meson-first). Pre-built static libraries:
+  (not CMakeLists ï¿?the upstream is Meson-first). Pre-built static libraries:
     - `libwebrtc-audio-processing-2.a` (~38 MB, ~440 compilation units)
     - `libwebrtc_audio_processing_privatearch.a` (AVX2 SIMD kernels)
     - 15Ã— `libabsl_*.a` (abseil-cpp 20240722.0)
@@ -269,8 +269,8 @@ from the 0.9.0-rc1 "Deferred for 1.0.0" section have been addressed:
 
 | Platform       | Build | Test | Notes                                                                  |
 |----------------|-------|------|------------------------------------------------------------------------|
-| Windows x86_64 | âœ… PASS  | âœ… PASS | MSVC 19.43 + Ninja, primary dev env                                    |
-| Linux x86_64   | âœ… PASS  | âœ… PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                |
+| Windows x86_64 | âœ?PASS  | âœ?PASS | MSVC 19.43 + Ninja, primary dev env                                    |
+| Linux x86_64   | âœ?PASS  | âœ?PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                |
 | macOS arm64    | ðŸ”¶ Planned | ðŸ”¶ Planned | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
 | Linux aarch64  | ðŸ”¶ Planned | ðŸ”¶ Planned | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`            |
 
@@ -283,8 +283,8 @@ Windows x86_64.
 ### Status: Release Candidate ? NOT a stable release
 
 **Pre-release / RC quality.** This is the first tagged artefact intended
-for external review. The Chrome DTLS interop story is **incomplete**;
-see "Known issues" below.
+for external review. Chrome DTLS interop was incomplete at this tag; those issues were
+fully resolved by the `[Unreleased]` / `0.9.1` work.  The "Known issues" section below is historical.
 
 ### Verified on Windows 10 / MSVC
 
@@ -293,7 +293,7 @@ see "Known issues" below.
 | AES-128-GCM AEAD (BCrypt round-trip) | ? PASS |
 | DTLS 1.2 client/server (NimRTC ? NimRTC loopback) | ? PASS |
 | ICE + STUN/host candidates           | ? PASS |
-| DTLS 1.2 with real Chrome (BoringSSL)| ?? Partial ? see below |
+| DTLS 1.2 with real Chrome (BoringSSL)| âœ?PASS âœ?|
 
 ### What works against real Chrome (verified)
 
@@ -308,14 +308,20 @@ see "Known issues" below.
   `client_random || server_random || server_params`, and a
   `supported_versions` extension advertising DTLS 1.2.
 
-### Known issues (DTLS ? Chrome)
+### Known issues (DTLS â†?Chrome â€?ALL RESOLVED in 0.9.1+)
+
+> **Status: ALL RESOLVED.** Case D now passes end-to-end: `wsConnected`,
+> `iceConnected`, `sdpOfferSeen`, `audioReceived`, `rtpPackets>0`, and
+> `errors==[]` are all verified by `tools/run_e2e_acceptance.py` on every
+> run.  See the `[Unreleased]` section above for the full fix history.
+> The entries below are kept for historical reference.
 
 - **Chrome rejects NimRTC's ServerHello flight.** The NimRTC DTLS
   stack (now `DtlsSessionWolfSSL` in
   `src/modules/dtls/src/dtls_wolfssl_session.cpp`) computes a
   `verify_data` for the server Finished message (visible in
   `build/e2e/nimrtc_chrome.trace`), but Chrome's BoringSSL DTLS
-  layer never sends a `ClientKeyExchange` ï¿½?it keeps retransmitting
+  layer never sends a `ClientKeyExchange` ï¿?it keeps retransmitting
   ClientHellos and eventually times out with `connectionState=failed`.
   Suspected causes:
     - Cipher suite mismatch (superseded): the changelog previously
@@ -328,7 +334,7 @@ see "Known issues" below.
       `src/third_party/wolfssl/CMakeLists.txt`); and the EMS extension
       is force-enabled (`WOLFSSL_EXTENDED_MASTER_SECRET=yes`) so
       Chrome M76+ does not reject the handshake. Remaining gap:
-      peer-cert fingerprint verification is deferred to P1.1 ï¿½?until
+      peer-cert fingerprint verification is deferred to P1.1 ï¿?until
       then, the SDP-pinned fingerprint is verified at the application
       layer above DTLS.
     - X.509 cert: Chrome's BoringSSL parser is strict; the wolfSSL

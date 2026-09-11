@@ -1,4 +1,7 @@
-#pragma once
+﻿#pragma once
+// Note: This file intentionally saved as UTF-8 with BOM so that MSVC
+// (compiling with a non-UTF-8 code page such as CP936/GBK on Chinese Windows)
+// does not emit C4819 for any future non-ASCII characters in comments.
 
 #include <cstdint>
 #include <string>

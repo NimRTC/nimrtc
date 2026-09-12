@@ -141,6 +141,35 @@ if(NIMRTC_VENDORED)
 endif()
 
 # -----------------------------------------------------------------------------
+# WebRTC APM guidance
+# -----------------------------------------------------------------------------
+# The webrtc_audio_processing source (meson.build) may already be cloned via
+# git submodule, but its pre-built static library requires an extra build step
+# (Meson → static .a).  We detect this state and emit actionable guidance.
+set(_webrtc_apm_src "${CMAKE_SOURCE_DIR}/src/third_party/webrtc_audio_processing/src/meson.build")
+set(_webrtc_apm_cmake "${CMAKE_SOURCE_DIR}/src/third_party/webrtc_audio_processing/CMakeLists.txt")
+if(NIMRTC_VENDORED_WEBRTC_APM AND EXISTS "${_webrtc_apm_src}" AND NOT EXISTS "${_webrtc_apm_cmake}")
+    message(WARNING
+        "\n"
+        "  WebRTC Audio Processing (3A: AEC/ANS/AGC) source is present\n"
+        "  but the pre-built static library has not been compiled yet.\n"
+        "\n"
+        "  Without it, audio3a uses a stub implementation (no 3A processing).\n"
+        "\n"
+        "  To enable full 3A support, run:\n"
+        "\n"
+        "    Windows:  python tools\\fetch_webrtc_apm.py\n"
+        "    Linux:    python3 tools/fetch_webrtc_apm.py\n"
+        "    macOS:    python3 tools/fetch_webrtc_apm.py\n"
+        "\n"
+        "  To skip 3A entirely (no action needed):\n"
+        "\n"
+        "    cmake -DNIMRTC_VENDORED_WEBRTC_APM=OFF ...\n"
+        "\n"
+    )
+endif()
+
+# -----------------------------------------------------------------------------
 # Targets (in dependency order)
 # -----------------------------------------------------------------------------
 add_subdirectory(src/log)      # Logger implementation (nimrtc_log) — before core

@@ -12,7 +12,28 @@
 
 **Prerequisites**: CMake ≥ 3.25 · **MSVC 19.43+ (Windows 10/11)** or **GCC 11+ / Clang 12+ (Linux)** or **Apple Clang 15+ (macOS 14+)** · Ninja · Python 3.8+ (for the e2e harness).
 
-**Clone and configure** (Windows, MSVC + Ninja, x64 dev prompt):
+**First, verify your toolchain**:
+```bash
+python tools/check_prerequisites.py
+```
+
+**Option A — Use the interactive build script** (recommended for new users):
+
+```bat
+# Windows
+.\scripts\build.bat
+.\scripts\build.bat --rebuild    # clean and rebuild
+.\scripts\build.bat --release     # Release config
+```
+
+```bash
+# Linux / macOS
+bash scripts/build.sh
+bash scripts/build.sh --rebuild   # clean and rebuild
+bash scripts/build.sh --preset=release  # Release config
+```
+
+**Option B — Manual CMake commands** (full control):
 
 ```bat
 git clone --recurse-submodules https://github.com/NimRTC/nimrtc.git
@@ -226,6 +247,175 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 - **第三方依赖**: 见 `NOTICE` 与 `docs/zh/NimRTC-V2-技术文档.md` §11（借用策略）
 - **借用策略**: 密码件 / 编解码 / SCTP / 3A 等成熟模块一律 vendor；RTP / RTCP / SDP / JB / BWE / ICE 状态机 / timeline 调度等核心协议层一律自研。详见 `docs/zh/NimRTC-V2-技术文档.md` §11。
 - **贡献合规**: DCO 签名（`git commit -s`），不采用 CLA。详见 `CONTRIBUTING.md`。
+
+---
+
+## 常见错误排查（FAQ）
+
+### Q: CMake 配置时报错 "Could not find Ninja"
+
+**Windows**: Ninja 未安装或不在 PATH。
+```bat
+choco install ninja
+# 或
+scoop install ninja
+```
+然后重新打开命令行窗口。
+
+**Linux/macOS**: 大多数发行版自带 make，Ninja 可选。
+```bash
+sudo apt install ninja-build   # Ubuntu/Debian
+sudo dnf install ninja-build   # Fedora/RHEL
+```
+
+---
+
+### Q: MSVC 编译报错 "MSB8020" 或找不到 v143 生成工具
+
+说明你在 VS 2022 以外的 Developer Command Prompt 中运行。
+
+打开 **"x64 Native Tools Command Prompt for VS 2022"**（或 VS 2022 的任意 Developer Prompt），然后重新配置：
+```bat
+cmake --preset dev.msvc
+```
+
+---
+
+### Q: CMake 报错 "WebRTC APM pre-built library not found"
+
+WebRTC APM 需要额外构建步骤。如果不需要 3A（AEC/ANS/AGC）功能，可以跳过：
+```bat
+cmake --preset dev.msvc -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+```
+
+要启用 3A 功能：
+```bat
+python tools\fetch_webrtc_apm.py
+```
+构建完成后，重新运行 CMake 配置即可自动检测到预编译库。
+
+---
+
+### Q: GCC 版本过低，报 "unrecognized command line option '-std=c++20'"
+
+你的 GCC 版本低于 11。需要升级编译器：
+
+| 发行版 | 默认 GCC | 升级命令 |
+|---|---|---|
+| Ubuntu 20.04 | GCC 9 | `sudo apt install gcc-11 g++-11 && export CC=gcc-11 CXX=g++-11` |
+| Ubuntu 22.04 | GCC 11 | ✅ 可直接用 |
+| Debian 11 | GCC 10 | `sudo apt install gcc-11 g++-11 && export CC=gcc-11 CXX=g++-11` |
+| Debian 12 | GCC 12 | ✅ 可直接用 |
+| Fedora 36+ | GCC 12+ | ✅ 可直接用 |
+| RHEL 8 / Rocky 8 | GCC 8 | `sudo dnf install gcc-toolset-11 && source /opt/rh/gcc-toolset-11/enable` |
+| CentOS 7 | GCC 4.8 | ❌ 不支持，升级系统或使用容器 |
+| Arch Linux | GCC 13+ | ✅ 可直接用 |
+| macOS | Apple Clang | 确保 Xcode >= 15（`clang++ --version` 确认 >= 15） |
+
+**永久设置**：将以下行加入 `~/.bashrc`：
+```bash
+export CC=gcc-11
+export CXX=g++-11
+```
+
+---
+
+### Q: 编译时报大量 "undefined reference" 或链接失败
+
+可能原因：
+
+1. **vendor 子模块未初始化**——所有子模块必须已拉取：
+   ```bash
+   git submodule update --init --recursive
+   ```
+
+2. **使用 GCC 10 及以下编译含 C++20 特性的代码**——升级 GCC（见上表）。
+
+3. **构建缓存残留**——删除 `build/` 目录后重新配置：
+   ```bash
+   rm -rf build
+   cmake --preset dev
+   cmake --build build -j
+   ```
+
+---
+
+### Q: 首次 clone 后直接 cmake 报错找不到头文件
+
+确认子模块已完整拉取：
+```bash
+git submodule update --init --recursive
+# 验证
+git submodule status
+```
+
+确认所有子模块前面没有 `-` 号（`-` 表示未初始化）。
+
+---
+
+### Q: 如何验证工具链配置是否正确？
+
+运行前置检查脚本（无需 CMake）：
+```bash
+python tools/check_prerequisites.py
+```
+
+只检查编译器：
+```bash
+python tools/check_prerequisites.py --compiler
+```
+
+---
+
+## Linux 工具链升级指南
+
+### Ubuntu / Debian
+
+```bash
+# Ubuntu 20.04 / Debian 11 及以下：需要 GCC 11+
+sudo apt update
+sudo apt install software-properties-common
+sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+sudo apt install gcc-11 g++-11
+
+# 验证
+gcc-11 --version
+
+# 方式一：全局默认（影响系统其他程序）
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
+sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
+
+# 方式二：仅当前会话（推荐）
+export CC=gcc-11
+export CXX=g++-11
+```
+
+### Fedora / RHEL / Rocky / AlmaLinux
+
+```bash
+# RHEL 8 / Rocky 8 / AlmaLinux 8：使用 DevToolset
+sudo dnf install centos-release-scl
+sudo dnf install devtoolset-11-gcc devtoolset-11-gcc-c++
+source /opt/rh/devtoolset-11/enable
+```
+
+### Arch Linux
+
+✅ 默认 GCC 已足够（Arch 始终随rolling release更新）。
+
+### macOS
+
+确保 Xcode 已更新到最新：
+```bash
+# 检查版本
+clang++ --version
+# 需要 Apple Clang >= 15
+
+# 更新 Xcode
+# App Store > Xcode > 更新
+# 或
+xcode-select --install
+```
 
 ---
 

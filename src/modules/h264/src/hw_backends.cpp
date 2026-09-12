@@ -29,18 +29,22 @@
 #include <nimrtc/h264/codec_plugin.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
+namespace nimrtc::h264 {
+
 // Forward-declare the HW backend entry points exported by each source file.
 // When the corresponding NIMRTC_PLUGINS_<NAME>_ON macro is defined, the
-// source file compiles the real implementation; otherwise the stub (returning
-// nullptr / false) is used.
+// source file compiles the real implementation; otherwise the stub
+// (returning nullptr / false) is used.  Declared inside the
+// `nimrtc::h264` namespace so they match the definitions in
+// nvenc_encoder.cpp / amf_encoder.cpp / etc.
 
 #if defined(NIMRTC_PLUGINS_NVENC_ON)
 extern bool nvenc_h264_available() noexcept;
-extern std::unique_ptr<nimrtc::plugins::IVideoCodec>
-make_nvenc_h264_codec(nimrtc::plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoCodec>
+make_nvenc_h264_codec(plugins::VideoCodecConfig cfg);
 extern bool nvdec_h264_available() noexcept;
-extern std::unique_ptr<nimrtc::plugins::IVideoCodec>
-make_nvdec_h264_codec(nimrtc::plugins::VideoCodecConfig cfg);
+extern std::unique_ptr<plugins::IVideoCodec>
+make_nvdec_h264_codec(plugins::VideoCodecConfig cfg);
 #define HAS_NVENC 1
 #else
 #define HAS_NVENC 0
@@ -90,8 +94,6 @@ make_openh264_h264_codec(plugins::VideoCodecConfig cfg);
 #else
 #define HAS_OPENH264 0
 #endif
-
-namespace nimrtc::h264 {
 
 // ---------------------------------------------------------------------------
 // Stub backend —always available, zero-copy NOT supported, CPU only.

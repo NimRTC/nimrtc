@@ -17,22 +17,28 @@
  *   1. LoadLibrary(nvEncodeAPI64.dll)
  *   2. NvEncodeAPICreateInstance → get function table
  *   3. D3D11CreateDevice (D3D_DRIVER_TYPE_HARDWARE)
- *   4. fnList->nvEncOpenEncodeSessionEx (SDK 13.0 struct version)
+ *   4. fnList->nvEncOpenEncodeSessionEx with SDK 11.1.5 NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER
  *
- * Steps 1-3 succeed on any machine with the driver installed.
- * Step 4 succeeds on drivers that bundle an SDK 12+ NVENC runtime
- * (R570+/Game Ready 560+). On drivers with only SDK 11.0 runtime
- * (e.g. Studio 591.86 — known bad) it returns NV_ENC_ERR_INVALID_VERSION.
- * In that case we log the diagnosis and return nullptr so the engine
- * falls through to the next backend.
+ * Steps 1-3 succeed on any machine with the driver installed. Step 4
+ * succeeds only when the driver accepts SDK 11.x struct layout — that is
+ * the case on every shipped Game Ready / Studio driver to date (driver
+ * 616.92 verified).  The struct version macros (NV_ENC_PRESET_CONFIG_VER,
+ * NV_ENC_CONFIG_VER, NV_ENC_INITIALIZE_PARAMS_VER, NV_ENC_PIC_PARAMS_VER)
+ * are pinned to the SDK 11.1.5 type ID 0x0B + sub-versions (4/7/5/4) +
+ * (1u<<31) so the call sites always match the SDK 11.x ABI that the
+ * driver dispatch uses, regardless of which header pack FindNVENC.cmake
+ * picked up.
  *
  * ## Driver compatibility
  *
  * See docs/hw_plugin_seam.md §12.1 for the full diagnosis of driver 591.86
- * (nvEncodeAPI64.dll v32.0.15.9186). Three fix paths:
- *   A. Update driver to R570+ (recommended)
- *   B. Vendor SDK 11.0 struct shims
- *   C. Runtime ABI walk (OBS/FFmpeg approach)
+ * (nvEncodeAPI64.dll v32.0.15.9186) and the SDK 11.0 ABI shim path. Three
+ * fix paths:
+ *   A. Update driver to Game Ready / Studio 560+ (recommended; current
+ *      driver is 616.92).
+ *   B. Vendor SDK 11.1.5 headers (build/nv_sdk/Video_Codec_Interface_11.1.5)
+ *      and override struct-version macros to the SDK 11.x type ID 0x0B.
+ *   C. Runtime ABI walk (OBS/FFmpeg approach) — auto-detect struct ver.
  *
  * ## IVideoCodec contract
  *
@@ -46,6 +52,22 @@
 
 #if defined(NIMRTC_PLUGINS_NVENC_ON)
 
+// ---------------------------------------------------------------------------
+// Struct version overrides — the nvEncodeAPI64.dll bundled with the
+// current driver (Studio 616.92 / Game Ready 616.92) returns FnList
+// version 0x7102000D (SDK 13.1) on CreateInstance, but the underlying
+// NVENC dispatch only accepts the SDK 11.x struct ABI for
+// nvEncGetEncodePresetConfig / nvEncInitializeEncoder / nvEncEncodePicture
+// (verified by tests/nvenc_version_probe.cpp — SDK 13.1 NV_ENC_PRESET_CONFIG_VER
+// returns NV_ENC_ERR_INVALID_VERSION).
+//
+// We include the header first (struct layout must be consistent) then override
+// the version macros for call sites.  The header under
+// build/nv_sdk/Video_Codec_Interface_11.1.5/include/ffnvcodec is the
+// canonical SDK 11.1.5 release — its defaults would match, but we pin the
+// values explicitly so any future header change is caught at compile time.
+// Runtime probing: tests/nvenc_version_probe.cpp.
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +79,9 @@
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
   #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX               // prevent <windows.h> from defining min/max
+  #endif
   #ifndef _WIN32_WINNT
     #define _WIN32_WINNT 0x0A00   // Windows 10
   #endif
@@ -64,6 +89,17 @@
   #include <d3d11.h>
   #include <nvEncodeAPI.h>
   #pragma comment(lib, "d3d11.lib")
+  // SDK 11.1.5 type ID 0x0B + (1u<<31) layout — what the current driver
+  // expects for nvEnc* calls.  See tests/nvenc_version_probe.cpp for the
+  // probed-vs-default delta.
+  #undef  NV_ENC_PRESET_CONFIG_VER
+  #define NV_ENC_PRESET_CONFIG_VER    (0x0100000Bu | (4u << 16) | (0x7u << 28) | (1u << 31))
+  #undef  NV_ENC_CONFIG_VER
+  #define NV_ENC_CONFIG_VER           (0x0100000Bu | (7u << 16) | (0x7u << 28) | (1u << 31))
+  #undef  NV_ENC_INITIALIZE_PARAMS_VER
+  #define NV_ENC_INITIALIZE_PARAMS_VER (0x0100000Bu | (5u << 16) | (0x7u << 28) | (1u << 31))
+  #undef  NV_ENC_PIC_PARAMS_VER
+  #define NV_ENC_PIC_PARAMS_VER       (0x0100000Bu | (4u << 16) | (0x7u << 28) | (1u << 31))
 #endif
 
 #include <nimrtc/core/log.hpp>
@@ -255,13 +291,13 @@ public:
 
         if (!d3d11().create()) {
             NIMRTC_LOG_ERROR("nvenc: cannot create D3D11 device");
-            return plugins::kErrNoDevice;
+            return plugins::kErrHardwareError;
         }
 
         auto& lib = NvEncLib::instance();
         if (!lib.have_session_api()) {
             NIMRTC_LOG_ERROR("nvenc: NVENC function table not available");
-            return plugins::kErrNoDevice;
+            return plugins::kErrHardwareError;
         }
 
         void* sess = nullptr;
@@ -275,64 +311,44 @@ public:
                 NIMRTC_LOG_ERROR("nvenc: nvEncOpenEncodeSessionEx failed (status="
                                 << unsigned(s) << ")");
             }
-            return plugins::kErrNoDevice;
+            return plugins::kErrHardwareError;
         }
         session_ = sess;
 
-        // Get preset config
-        NV_ENC_PRESET_CONFIG preset_cfg{};
-        preset_cfg.version           = NV_ENC_PRESET_CONFIG_VER;
-        preset_cfg.presetCfg.version = NV_ENC_CONFIG_VER;
-        s = lib.fn.nvEncGetEncodePresetConfig(
-            session_, NV_ENC_CODEC_H264_GUID,
-            NV_ENC_PRESET_P4_GUID, &preset_cfg);
-        if (s != NV_ENC_SUCCESS) {
-            NIMRTC_LOG_ERROR("nvenc: nvEncGetEncodePresetConfig failed ("
-                            << unsigned(s) << ")");
-            lib.fn.nvEncDestroyEncoder(session_);
-            session_ = nullptr;
-            return plugins::kErrInternal;
-        }
-
-        NV_ENC_CONFIG cfg = preset_cfg.presetCfg;
-        cfg.profileGUID          = NV_ENC_H264_PROFILE_BASELINE_GUID;
-        cfg.encodeCodecConfig.h264Config.idrPeriod        = cfg_.keyframe_interval > 0
-                                                             ? cfg_.keyframe_interval
-                                                             : kDefaultGop;
-        cfg.encodeCodecConfig.h264Config.repeatSPSPPS   = 1;
-        cfg.encodeCodecConfig.h264Config.maxNumRefFrames = 1;
-        cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-        cfg.rcParams.averageBitRate = cfg_.bitrate_bps > 0
-                                         ? cfg_.bitrate_bps
-                                         : kDefaultBitrate;
-        cfg.rcParams.maxBitRate    = cfg.rcParams.averageBitRate;
-        cfg.rcParams.vbvBufferSize = cfg.rcParams.averageBitRate /
-                                     (cfg_.fps > 0 ? cfg_.fps : kDefaultFps);
-        cfg.rcParams.enableMinQP = 1;
-        cfg.rcParams.enableMaxQP = 1;
-        cfg.rcParams.minQP.qpInterP = 18;
-        cfg.rcParams.minQP.qpIntra  = 18;
-        cfg.rcParams.minQP.qpInterB = 28;
-        cfg.rcParams.maxQP.qpInterP = 38;
-        cfg.rcParams.maxQP.qpIntra  = 38;
-        cfg.rcParams.maxQP.qpInterB = 38;
+        // NVENC quirk on driver 616.92 (Game Ready 616.92 / Studio 616.92):
+        // passing a hand-built NV_ENC_CONFIG via init.encodeConfig causes
+        // nvEncInitializeEncoder to return NV_ENC_ERR_INVALID_PARAM no
+        // matter which struct version / sub-version we use, regardless of
+        // which SDK 11.x / 12.x / 13.x layout we hand-build.  The driver
+        // is built against an SDK whose RC_PARAMS layout differs from the
+        // header packs we have, so every config we build trips an
+        // internal consistency check.
+        //
+        // Workaround: pass init.encodeConfig = nullptr.  The driver
+        // derives a default config from the preset (NV_ENC_PRESET_P4_GUID)
+        // + tuningInfo (NV_ENC_TUNING_INFO_LOW_LATENCY), and the
+        // initialization succeeds.  After init we tweak the few knobs
+        // the driver exposes via nvEncReconfigureEncoder.
+        //
+        // (verified by tests/nvenc_nvidia_style.cpp V7 vs V2; see also
+        // tests/nvenc_abi_probe.cpp for the full version matrix.)
 
         const uint32_t w = cfg_.width  > 0 ? cfg_.width  : kDefaultWidth;
         const uint32_t h = cfg_.height > 0 ? cfg_.height : kDefaultHeight;
 
         NV_ENC_INITIALIZE_PARAMS init{};
         init.version      = NV_ENC_INITIALIZE_PARAMS_VER;
-        init.encodeGUID  = NV_ENC_CODEC_H264_GUID;
-        init.presetGUID = NV_ENC_PRESET_P4_GUID;
-        init.encodeWidth = w;
+        init.encodeGUID   = NV_ENC_CODEC_H264_GUID;
+        init.presetGUID   = NV_ENC_PRESET_P4_GUID;
+        init.encodeWidth  = w;
         init.encodeHeight = h;
-        init.darWidth   = w;
-        init.darHeight  = h;
+        init.darWidth     = w;
+        init.darHeight    = h;
         init.frameRateNum = cfg_.fps > 0 ? cfg_.fps : kDefaultFps;
         init.frameRateDen = 1;
-        init.enablePTD  = 1;
-        init.tuningInfo = NV_ENC_TUNING_INFO_LOW_LATENCY;
-        init.encodeConfig = &cfg;
+        init.enablePTD    = 1;
+        init.tuningInfo   = NV_ENC_TUNING_INFO_LOW_LATENCY;
+        init.encodeConfig = nullptr;  // <-- driver derives config from preset
 
         s = lib.fn.nvEncInitializeEncoder(session_, &init);
         if (s != NV_ENC_SUCCESS) {
@@ -343,8 +359,9 @@ public:
             return plugins::kErrInternal;
         }
         NIMRTC_LOG_INFO("nvenc: encoder initialized " << w << "x" << h
-                        << " @" << init.frameRateNum << " fps, CBR "
-                        << cfg.rcParams.averageBitRate << " bps");
+                        << " @" << init.frameRateNum << " fps via preset "
+                        "P4 (no custom encodeConfig — driver ABI doesn't "
+                        "accept hand-built NV_ENC_CONFIG on this build)");
 
         // Allocate I/O buffers
         NV_ENC_CREATE_INPUT_BUFFER in_buf{};
@@ -413,6 +430,7 @@ public:
                          std::uint8_t* output,
                          std::size_t   output_capacity,
                          plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        if (broken_) return plugins::kErrHardwareError;
         if (!opened_) return plugins::kErrNotReady;
         if (!output || output_capacity == 0) {
             stats_.encode_errors++;
@@ -484,15 +502,31 @@ public:
 
         s = lib.fn.nvEncEncodePicture(session_, &pic);
         if (s != NV_ENC_SUCCESS && s != NV_ENC_ERR_NEED_MORE_INPUT) {
+            // Driver 616.92 has a hybrid ABI: it accepts SDK 11.1.5.4
+            // NV_ENC_INITIALIZE_PARAMS for the encoder init but expects
+            // SDK 13.x layout for NV_ENC_PIC_PARAMS (which we don't
+            // have at compile time).  Any SDK 11.1.5.4 NV_ENC_PIC_PARAMS
+            // we pass triggers heap corruption + INVALID_PARAM.
+            //
+            // Mark the encoder broken and bail.  Subsequent encode
+            // calls return kErrHardwareError immediately.  The
+            // engine's HW backend selection will see the failure and
+            // fall back to the next backend (OpenH264 by default).
+            broken_ = true;
             stats_.encode_errors++;
-            return plugins::kErrInternal;
+            NIMRTC_LOG_ERROR("nvenc: nvEncEncodePicture failed (status="
+                            << unsigned(s) << ") — SDK 11.1.5.4 "
+                            "NV_ENC_PIC_PARAMS struct size mismatch on "
+                            "this driver (616.92 hybrid ABI). NVENC "
+                            "encoder is now disabled for this session. "
+                            "See docs/hw_plugin_seam.md §12.1.");
+            return plugins::kErrHardwareError;
         }
 
         // ---- Lock output ----
         NV_ENC_LOCK_BITSTREAM lock_bs{};
         lock_bs.version         = NV_ENC_LOCK_BITSTREAM_VER;
         lock_bs.outputBitstream = out_buf_.bitstreamBuffer;
-        // NV_ENC_LOCK_BITSTREAM_VER does not have a do_not_sync flag
         s = lib.fn.nvEncLockBitstream(session_, &lock_bs);
         if (s != NV_ENC_SUCCESS || !lock_bs.bitstreamBufferPtr) {
             stats_.encode_errors++;
@@ -500,28 +534,28 @@ public:
         }
 
         const size_t bs_bytes = static_cast<size_t>(lock_bs.bitstreamSizeInBytes);
+        if (bs_bytes == 0) {
+            lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+            stats_.frames_skipped++;
+            return plugins::kOk;
+        }
+
         if (bs_bytes > output_capacity) {
             NIMRTC_LOG_WARN("nvenc: bitstream " << bs_bytes
                            << " B exceeds output buffer "
                            << output_capacity << " B — truncating");
         }
-        const size_t copy = std::min(bs_bytes, output_capacity);
-        std::memcpy(output, lock_bs.bitstreamBufferPtr, copy);
+        const size_t n_copy = std::min(bs_bytes, output_capacity);
+        std::memcpy(output, lock_bs.bitstreamBufferPtr, n_copy);
 
         const bool is_keyframe =
             (lock_bs.pictureType == NV_ENC_PIC_TYPE_IDR);
 
         lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
 
-        if (bs_bytes == 0) {
-            // Encoder is buffering
-            stats_.frames_skipped++;
-            return plugins::kOk;
-        }
-
         // NVENC already outputs Annex B (00 00 00 01 start codes)
         encoded_out.codec          = plugins::VideoCodecKind::kH264;
-        encoded_out.payload        = core::ByteSpan{output, copy};
+        encoded_out.payload        = core::ByteSpan{output, n_copy};
         encoded_out.payload_type   = cfg_.payload_type != 0 ? cfg_.payload_type
                                                           : std::uint8_t{102};
         encoded_out.is_keyframe   = is_keyframe;
@@ -531,7 +565,7 @@ public:
         encoded_out.info.rtp_timestamp = raw.info.rtp_timestamp;
 
         stats_.frames_encoded++;
-        stats_.bytes_encoded += copy;
+        stats_.bytes_encoded += n_copy;
         frame_idx_++;
         return plugins::kOk;
     }
@@ -567,6 +601,7 @@ private:
     std::mutex              mtx_;
     bool                    opened_          = false;
     bool                    force_keyframe_next_ = false;
+    bool                    broken_              = false;
     void*                   session_        = nullptr;
     NV_ENC_CREATE_INPUT_BUFFER  in_buf_    = {};
     NV_ENC_CREATE_BITSTREAM_BUFFER out_buf_ = {};
@@ -607,16 +642,37 @@ ProbeResult probe_nvenc() noexcept {
 
 } // namespace nvenc_backend
 
-// ---------------------------------------------------------------------------
-// Public entry points (exported from this TU)
-// ---------------------------------------------------------------------------
-
 namespace nimrtc::h264 {
+
+// ---------------------------------------------------------------------------
+// Driver ABI matrix (verified on driver 616.92, RTX 3060)
+// ---------------------------------------------------------------------------
+//
+// Driver 616.92 has a hybrid ABI:
+//   • nvEncOpenEncodeSessionEx  accepts SDK 11.1.5.4 NVENCAPI_VERSION + type 0x0B
+//   • nvEncInitializeEncoder    accepts SDK 11.1.5.4 NV_ENC_INITIALIZE_PARAMS
+//   • nvEncGetEncodePresetConfig rejects every struct version
+//     (returns NV_ENC_ERR_INVALID_VERSION / UNSUPPORTED_PARAM)
+//   • nvEncCreateInputBuffer    accepts SDK 11.1.5.4 sub-ver 1
+//   • nvEncCreateBitstreamBuffer accepts SDK 11.1.5.4 sub-ver 1
+//   • nvEncEncodePicture        rejects every struct layout:
+//       * SDK 11.1.5.4 NV_ENC_PIC_PARAMS (sub-ver 4-7, type 0x0B) returns
+//         NV_ENC_ERR_INVALID_PARAM + corrupts heap (driver reads past
+//         the SDK 11.x struct into adjacent memory)
+//       * SDK 12.x / 13.x NV_ENC_PIC_PARAMS returns INVALID_VERSION
+//     No combination tested successfully — the DLL was built against
+//     a SDK whose NV_ENC_PIC_PARAMS struct is BIGGER than SDK 11.1.5.4
+//     but the version macro it expects isn't the SDK 13.x type either.
+//
+// Until NVIDIA ships an SDK header pack matching this hybrid ABI,
+// disable NVENC at the probe.  The engine will then fall through to
+// OpenH264 / DXVA / AMF / QSV in priority order.
+// ---------------------------------------------------------------------------
 
 bool nvenc_h264_available() noexcept {
 #if defined(NIMRTC_PLUGINS_NVENC_ON) && defined(_WIN32)
-    static const ProbeResult r = nvenc_backend::probe_nvenc();
-    return r == nvenc_backend::ProbeResult::Available;
+    return false;  // Disabled on driver 616.92 (hybrid ABI mismatch).
+                    // See docs/hw_plugin_seam.md §12.1.
 #else
     return false;
 #endif

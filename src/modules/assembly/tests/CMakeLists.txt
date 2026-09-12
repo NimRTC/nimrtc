@@ -8,7 +8,7 @@
 #   - ProfileRegistry::all_names() includes all built-in profiles
 #   - ProfileRegistry::register_profile() overwrite semantics
 #   - Builder.load_profile() + override chain
-#   - JSON round-trip (profile_to_json_string â†?profile_from_json_file)
+#   - JSON round-trip (profile_to_json_string â†’profile_from_json_file)
 #   - Per-profile invariants (empty plugin names, feature flags)
 #
 # Uses GoogleTest (FetchContent if not installed).
@@ -36,7 +36,7 @@ endif()
 
 add_executable(test_assembly test_assembly.cpp)
 
-# Suppress MSVC C4996 (deprecated getenv) â€?std::getenv is portable and
+# Suppress MSVC C4996 (deprecated getenv) â€”std::getenv is portable and
 # intentionally used here to locate the build dir.
 target_compile_definitions(test_assembly PRIVATE _CRT_SECURE_NO_WARNINGS)
 
@@ -53,11 +53,11 @@ target_link_libraries(test_assembly PRIVATE
     GTest::gtest)
 
 # Copy JSON profiles into the build directory for the tests.
-# Ensure target directory exists â€?configure_file's COPYONLY mode doesn't
+# Ensure target directory exists â€”configure_file's COPYONLY mode doesn't
 # create missing parent directories, which silently skips the copy on
 # fresh builds.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/profiles")
-# Source layout: src/modules/assembly/tests/CMakeLists.txt â†?profiles/ is at
+# Source layout: src/modules/assembly/tests/CMakeLists.txt â†’profiles/ is at
 # the repo root, i.e. ../../../../profiles/ from this file.
 file(GLOB profile_jsons "${CMAKE_CURRENT_SOURCE_DIR}/../../../../profiles/*.json")
 foreach(json_file IN LISTS profile_jsons)

@@ -61,7 +61,7 @@ target_link_libraries(test_consent_freshness_test PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
-# NOTE: No top-level add_test() â€?see modules/audio3a/tests/CMakeLists.txt
+# NOTE: No top-level add_test() â€”see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_ice_test

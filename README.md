@@ -1,8 +1,6 @@
 # NimRTC
 
-> **Looking for the stable release?** This is the development branch. For the latest stable version, see the [`main`](https://github.com/NimRTC/nimrtc/tree/main) branch.
-
-> **Status: 1.0.0 (Stable Release).** Multi-platform support: Windows ✅, Linux x86_64 ✅, macOS arm64 ✅, Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details.
+> **Status: v0.9 (RC — multi-platform CI green).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/NimRTC-V2-技术文档.md) §13.
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 
@@ -88,7 +86,7 @@ Artifacts land in `build/e2e/`.
 下面这些**单点都不新**，但**组合在一起**在 2026 年的开源 WebRTC 生态里是少见的：
 
 1. **分层剪裁 + Profile 组合**——L0/L1/L2/L3 模块化，编译时选层。同一份代码既能发出 P2P 客户端（全栈），也能发出 SFU 网关（**跳过 L2**）。LiveKit / mediasoup 是 server-only，libwebrtc 是 monolithic，不能切层切到这个粒度。
-2. **首期平台：Windows-only（0.9.0-rc1）** —— 0.9.0-rc1 阶段只在 Windows 10 / MSVC 上验证过构建、单测、e2e 互通（含真实 Chrome）。Linux/macOS/aarch64 路线图上是 P1/P2 目标，**当前 RC 不要在那上面部署**。
+2. **多平台 CI 已通（v0.9 RC）** —— Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台 CI 均已绿色通过构建和单元测试。loopback-p2p 冒烟测试在 Windows 验证，Linux/macOS 运行 ctest；Chrome 端到端互通由 `interop/` harness 覆盖。aarch64 交叉编译可过，但**嵌入式部署请先在目标硬件上自行验证**。
 3. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
 4. **三层 + Profile 显式公开**——`docs/zh/NimRTC-V2-技术文档.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
 
@@ -172,15 +170,15 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/NimRTC-
 
 ---
 
-## 当前进度（P0 真实状态）
+## 当前进度（v0.9 RC 真实状态）
 
 | 项 | 状态 |
 |---|---|
-| 文档 v0.12 设计 | ✅ 完成 |
-| P0 脚手架（CMake / CI / vendor 集成） | ✅ 完成 |
+| 文档 v0.9 设计 | ✅ 完成 |
+| 脚手架（CMake / CI / vendor 集成） | ✅ 完成 |
 | vendor 库落地（wolfSSL / libsrtp / libopus / libjuice / WebRTC APM） | ✅ 完成 |
 | Chrome 互通 P2P demo | ✅ 完成 |
-| 多平台 CI 验证（Windows / Linux / macOS / aarch64） | ✅ 完成 |
+| 多平台 CI 验证（Windows / Linux x86_64 / macOS arm64 / Linux aarch64） | ✅ 完成 |
 
 ---
 

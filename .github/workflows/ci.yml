@@ -48,6 +48,7 @@ jobs:
   windows:
     name: windows / msvc
     runs-on: windows-2022
+    timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-windows
       cancel-in-progress: true
@@ -113,6 +114,7 @@ jobs:
   linux-gcc:
     name: linux-gcc / x86_64
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-gcc
       cancel-in-progress: true
@@ -177,6 +179,7 @@ jobs:
   linux-aarch64:
     name: linux-gcc / aarch64
     runs-on: ubuntu-22.04-arm64
+    timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-aarch64
       cancel-in-progress: true
@@ -237,6 +240,7 @@ jobs:
   macos-clang:
     name: macos-clang / arm64
     runs-on: macos-14
+    timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-macos-clang
       cancel-in-progress: true

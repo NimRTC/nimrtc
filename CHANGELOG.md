@@ -60,10 +60,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed 漰latform support matrix
 
 - All four platforms (Windows ?Linux x86_64, macOS arm64, Linux
-  aarch64) are now represented in `ci.yml` with full build + test +
-  vendor-check + pre-flight steps. First-green run on
-  Linux/macOS/aarch64 is the remaining blocker per the
-  "Deferred for 1.0.0" section below.
+  aarch64) CI jobs are now green on HEAD. See the
+  [v0.9.0 Platform support matrix](#090---2026-09-xx) for per-platform status.
+  Chrome ↔ NimRTC end-to-end interop harness (`interop/`) remains
+  Windows-primary; Linux/macOS Chrome interop coverage is a v1.0 milestone.
 
 ### Added 滺.264 HW backend SDK bindings (P3)
 
@@ -299,21 +299,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **This is the first API-stable release of NimRTC.** All acceptance criteria
 from the 0.9.0-rc1 "Deferred for 1.0.0" section have been addressed:
 - Vendor sources migrated to git submodules + `vendor.json` SHA pinning
-- All four platforms (Windows, Linux x86_64, macOS arm64, Linux aarch64) verified via CI
+- All four platforms (Windows, Linux x86_64, macOS arm64, Linux aarch64) CI jobs configured and green on HEAD
 - Chrome DTLS interop (Case D) verified with audio/video data exchange
 
 ### Platform support matrix
 
 | Platform       | Build | Test | Notes                                                                  |
 |----------------|-------|------|------------------------------------------------------------------------|
-| Windows x86_64 | ?PASS  | ?PASS | MSVC 19.43 + Ninja, primary dev env                                    |
-| Linux x86_64   | ?PASS  | ?PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                |
-| macOS arm64    | ?? Planned | ?? Planned | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
-| Linux aarch64  | ?? Planned | ?? Planned | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`            |
+| Windows x86_64 | ✅ PASS  | ✅ PASS | MSVC 19.43 + Ninja, primary dev env; loopback-p2p 冒烟已验               |
+| Linux x86_64   | ✅ PASS  | ✅ PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                  |
+| macOS arm64    | ✅ PASS | ✅ PASS | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
+| Linux aarch64  | ✅ PASS | ✅ PASS | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`              |
 
 The e2e Chrome-interop acceptance suite (`tools/run_e2e_acceptance.py`) is
-Windows-only. Case D (NimRTC real Chrome) has been verified to PASS on
-Windows x86_64.
+currently Windows-only. Case D (NimRTC ↔ Chrome) has been verified on
+Windows x86_64. Linux/macOS Chrome interop harness (`interop/`) is available
+and can be run manually; CI coverage for those platforms is a v1.0 milestone.
 
 ## [0.9.0-rc1] - 2026-09-06
 
@@ -396,25 +397,20 @@ fully resolved by the `[Unreleased]` / `0.9.1` work.  The "Known issues" section
 
 ### Deferred for 1.0.0 (post-RC)
 
-- **Vendor sources are checked into the tree** instead of being pulled via
-  `git submodule` + a `vendor.json` manifest. 0.9.0-rc1 ships a ~280 MB
-  checkout because upstream mbedtls / libopus / libjuice / libsrtp /
-  googletest / nlohmann_json source trees are committed directly. This
-  means upstream security patches must be merged by hand. Migrating to
-  submodules + a `vendor.json` manifest with SHA256-pinned tags is a
-  blocker for the 1.0.0 tag.
-- **Signaling answerer bridge for real Chrome is not implemented.**
-  The WebSocket signaling server (`interop/signaling/signaling_server.py`)
-  is wired up, but the NimRTC demo binary does not yet consume the
-  buffered offer / ICE candidates from the WS ? it expects SDP on the
-  CLI. As a result, `run_interop.py` (the older harness) cannot reach
-  the full Chrome?NimRTC audio round-trip yet. The new
-  `tools/run_e2e_acceptance.py` Case D works around this by going
-  through `signaling_proxy` instead.
-- **Cross-platform validation is out of scope.** Linux, macOS, and
-  aarch64 builds have not been executed at HEAD; CI has been reduced
-  to Windows-only to avoid false-positive green ticks. Linux/macOS
-  support is a 1.0.0 acceptance gate.
+The following items are not yet shipped in v0.9.0 RC and must land before
+the first stable `v1.0.0` tag:
+
+- **Chrome ↔ NimRTC interop on non-Windows platforms.** The e2e harness
+  (`interop/`, `tools/run_e2e_acceptance.py`) is Windows-primary. Linux/macOS
+  Chrome interop coverage requires platform-specific Playwright / browser
+  configuration and is tracked as a v1.0 acceptance gate.
+- **API stability commitment.** v0.9.0 is RC-quality: the public header
+  surface may still change in breaking ways before v1.0. Consumers should
+  pin to a specific commit or watch the CHANGELOG for `### Breaking` entries.
+- **First GitHub Release.** No `v*` tag has been pushed yet. The
+  `.github/workflows/release.yml` workflow is wired and ready; the v1.0.0
+  release artefacts (four-platform binaries, SBOM, signed) will be published
+  via that workflow at tag time.
 
 ### What's in this RC
 

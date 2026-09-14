@@ -59,6 +59,7 @@ jobs:
   preflight:
     name: release / preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -109,6 +110,7 @@ jobs:
     name: release / build / windows
     needs: preflight
     runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -161,6 +163,7 @@ jobs:
     name: release / build / linux-gcc
     needs: preflight
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -210,6 +213,7 @@ jobs:
     name: release / build / linux-aarch64
     needs: preflight
     runs-on: ubuntu-22.04-arm64
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -259,6 +263,7 @@ jobs:
     name: release / build / macos-clang
     needs: preflight
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -314,6 +319,7 @@ jobs:
       - build-linux-aarch64
       - build-macos-clang
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:

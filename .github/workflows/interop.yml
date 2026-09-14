@@ -1,8 +1,9 @@
 # =============================================================================
-# NimRTC CI — Windows MSVC only (0.9.0-rc1)
+# NimRTC e2e acceptance CI — Windows MSVC
 #
-# Windows-only: requires headless Chrome via Playwright; Linux/macOS support
-# is in `ci.yml`.
+# Multi-platform build is covered by `ci.yml`. This workflow is the e2e
+# smoke and acceptance suite (unit tests + Chrome interop) on Windows only,
+# because the Playwright/Chrome harness is Windows-primary at v0.9 RC.
 #
 # What runs:
 #   1. configure            — `cmake --preset dev.msvc`
@@ -33,6 +34,7 @@ jobs:
   windows-build:
     name: windows / build
     runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,6 +74,7 @@ jobs:
   windows-e2e:
     name: windows / e2e acceptance
     runs-on: windows-2022
+    timeout-minutes: 30
     # Skip on draft PRs; full e2e is slow (~1min per case)
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     steps:

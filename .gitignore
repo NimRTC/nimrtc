@@ -178,6 +178,10 @@ interop/test_data/*.csr
 # TLS keylog (set by SSLKEYLOGFILE env var; used for Wireshark debugging)
 sslkeylog.log
 
+# Debug / temp scripts that must never appear at project root
+_findline.py
+_run_server.py
+
 tests/wolfssl_dtls/*.exe
 tests/wolfssl_dtls/*.obj
 tests/wolfssl_dtls/*.txt

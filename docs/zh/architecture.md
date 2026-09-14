@@ -231,7 +231,7 @@ nimrtc/
 | sfu | 服务端转发 | 无（转发跳过 L2） | 无 | 无 | 转发公平 | 关 | 国际 |
 | transport | 嵌入式 / 传输网关 | 无（`L0+L1`） | 无 | 无 | 极简 | 关 | 国际 / 国密可选 |
 
-- Profile 是**默认推荐 + 可覆盖**：上层可继承官方 Profile 再单点覆盖某条接缝（"teleop 但 3A 用第三方"），不设硬编码模式。
+- Profile 是**默认推荐 + 可覆盖**：上层可继承官方 Profile 再单点覆盖某条接缝（"teleop 但 3A 用第三方"），不设硬编码模式。**Profile JSON schema 见 [ADR-010](docs/adr/ADR-010-profile-json-format.md)**；接缝后端由 PAL resolver 注入（Slice 1 见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)）。
 - 落点：机制在 `assembly` 模块（Profile 注册表 + Builder）；`profiles/` 目录放声明式示例（JSON / TOML），C++ Builder 为第一形态。
 - **防呆（呼应 D2）**：每个 Profile 的官方组合**只有一条高质量主线**；可覆盖项是"专家模式"，README 不宣传为默认。
 - **cloudgame 与 teleop 的差异**（同属「画面下行 + 控制输入上行」族，仅 4 处覆盖，官方组合不另起炉灶）：
@@ -259,6 +259,10 @@ nimrtc/
 | D8 | **数据面发送严格优先级调度**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽，绝不让媒体排挤控制 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
 | D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `sfu-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明） |
 | D10 | **场景装配与切换纪律**：实现选择只发生在 构建期 / 装配期 / 会话边界 三处 + 运行期显式 `Reconfigure`；有内部状态的模块（JB / BWE / 3A）禁止静默热换（走 Pause→Drain→Rebind→Resume 或流重建）；Profile 官方组合每场景仅一条高质量主线 | "多场景 = 多实现"若无纪律会退化成组合爆炸，运行期乱换实现会静默丢状态 | 集中在 assembly 模块 + 显式 API；切换事件全部进统计（§9） |
+| D11 | **PAL Slice 1 — engine plugin resolver seam**：`engine.cpp` 通过 `pal::resolve_*` 内联 forwarder 走 `core::PluginRegistry`，公开 API 字节一致；Slice 2/3 进 v0.10.x 补丁轨道 | 详 [ADR-009](docs/adr/ADR-009-pal-slice-1.md) + [PAL 架构](docs/plan/pal-architecture.md) §4 | Slice 1 是 ~50 LOC 薄 alias，后续 API 演化成本随 transitive 依赖放大 → header-only + 字节级向后兼容 |
+| D12 | **JSON 作为声明式 Profile 一等公民**：与 C++ Builder 同等 first-class；现有 `profiles/*.json` 固定 schema v1.0；schema 变更遵循 SemVer（任何 break → 升 MINOR） | 详 [ADR-010](docs/adr/ADR-010-profile-json-format.md) + §2.6 Profile 表 | 双格式长期维护成本（CI 校验 json↔builder 一致） |
+| D13 | **遥操作指标 caliber = single-hop 预算**：引擎只承担端到端单跳；多跳端到端验收标准（DB31/T 1505—2024 / T/SSITS 2003—2023）是积分商责任 | 详 [ADR-011](docs/adr/ADR-011-teleop-metrics-caliber.md) + §8.5 引擎边界表 | 上层若需端到端指标须自行组合多段预算 |
+| D14 | **中文文档归口 `docs/zh/`**：本文即 `docs/zh/architecture.md` 主版本；旧 `NimRTC-V2-技术文档.md` 改 32 行重定向 stub 保留外链兼容；独立中文站点 docs-zh.nimrtc.dev 推迟到 v1.0+ | 详 [ADR-012](docs/adr/ADR-012-zh-docs-layout.md) + §16.5 | 旧 stub 需长期保留至外链收敛 |
 
 ---
 
@@ -321,7 +325,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 - **JitterBuffer**：音/视频策略抽象（低延迟通话 / 直播 / 对讲三档默认策略），P1 先交付**固定窗口实现**，P3 替换为**自适应 JB**；三档与各场景 Profile 的对应关系见 §2.6。
 - **BWE**：P1 交付**简单 AIMD 默认实现**，接口完整、可插拔；P3 替换为 **Goog-CC 兼容主线**作为对外承诺主线；**BBR 不写入对外文档**（RTC over UDP 用 BBR 仍属实验，写出去会被懂行的人抓），仅作内部实验项。
 - **3A**：接口支持 内置实现 / 第三方 AEC·ANS·AGC / 直接关闭（信创设备常自带算法）；P1 交付 passthrough + 基础降噪（开箱即用），P3 补完整 3A。
-- **Codec**：解码器接入抽象 + 统一封装；编 / 解码器一律由宿主或插件提供、core 不捆绑。payload 打包 / 解析归 rtp 模块（P1 即含 Opus / H.264，支撑 Tier 0 互通；见 §5）。
+- **Codec**：解码器接入抽象 + 统一封装；编 / 解码器一律由宿主或插件提供、core 不捆绑。payload 打包 / 解析归 rtp 模块（P1 即含 Opus / H.264，支撑 Tier 0 互通；见 §5）。PAL Slice 1 引入 `pal::resolve_codec()` / `pal::resolve_video_codec()` 走 `core::PluginRegistry`（详 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)）。
 
 > **P1 体验可用 ≠ P3 生产质量**：P1 交付是"能打电话"，P3 交付是"在 30% 丢包 / 弱网下画面不崩、控制不丢"。社区不要把 P1 当生产指标看待，文档与 README 一律标注 experimental（呼应 §11.1）。
 
@@ -411,6 +415,8 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 - **按场景开启 / 关闭**：timeline 接口在架构中默认就位（D9），按 Profile 开启——`call` / `live` / `ptt` / `sfu` / `transport` 默认关；`agent` / `agent-gateway` / `sfu-agent` / `teleop` / `takeover` / `cloudgame` 默认开。关闭路径仍可编译通过、零运行时开销（不解析 SR、不挂帧级事件）。
 
 ### 8.5 遥操作可靠性与接管（引擎边界）
+
+> **caliber 边界**：引擎指标口径收敛为 single-hop 预算；多跳端到端验收标准（DB31/T 1505—2024 / T/SSITS 2003—2023）属于积分商责任，不写入引擎 SLA。详见 [ADR-011](docs/adr/ADR-011-teleop-metrics-caliber.md)。
 
 | 能力 | 归属 |
 |---|---|
@@ -947,7 +953,7 @@ backend at build or assembly time.
 | RFC / ADR | **一律英文** |
 | GitHub Discussions `zh-CN` 分类 | 中文社区板块，英文主分类外另设 |
 
-**维护纪律**：英文主版本更新时，中文镜像至多延后 1 个版本；CI 检查中英文链接互引完整性。
+**维护纪律**：英文主版本更新时，中文镜像至多延后 1 个版本；CI 检查中英文链接互引完整性。**中文文档归口 `docs/zh/`（本文件即主版本，旧 `NimRTC-V2-技术文档.md` 为重定向 stub），详见 [ADR-012](docs/adr/ADR-012-zh-docs-layout.md)**。
 
 ### 16.6 包管理与分发
 

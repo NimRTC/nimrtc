@@ -55,7 +55,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -82,7 +82,7 @@ jobs:
           arch: x64
 
       - name: Cache CMake + build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cmake
@@ -117,7 +117,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-gcc
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -144,7 +144,7 @@ jobs:
         run: python3 tools/ci_preflight.py
 
       - name: Cache CMake + build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cmake
@@ -165,7 +165,7 @@ jobs:
 
       - name: Upload build directory on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-linux-gcc-${{ github.run_id }}
           path: build/
@@ -181,7 +181,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-aarch64
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -204,7 +204,7 @@ jobs:
         run: python3 tools/ci_preflight.py
 
       - name: Cache CMake + build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cmake
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload build directory on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-linux-aarch64-${{ github.run_id }}
           path: build/
@@ -241,7 +241,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-macos-clang
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -262,7 +262,7 @@ jobs:
         run: python3 tools/ci_preflight.py
 
       - name: Cache CMake + build directory
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/CMake
@@ -282,7 +282,7 @@ jobs:
 
       - name: Upload build directory on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-macos-clang-${{ github.run_id }}
           path: build/

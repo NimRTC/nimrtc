@@ -34,7 +34,7 @@ jobs:
     name: windows / build
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -75,7 +75,7 @@ jobs:
     # Skip on draft PRs; full e2e is slow (~1min per case)
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -139,7 +139,7 @@ jobs:
 
       - name: Upload e2e artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ github.run_id }}
           path: build/e2e/

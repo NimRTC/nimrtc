@@ -60,7 +60,7 @@ jobs:
     name: release / preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -110,7 +110,7 @@ jobs:
     needs: preflight
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -149,7 +149,7 @@ jobs:
           Get-FileHash $bundle | Tee-Object -FilePath "$bundle.sha256"
 
       - name: Upload artefact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nimrtc-windows-x86_64-msvc
           path: |
@@ -162,7 +162,7 @@ jobs:
     needs: preflight
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -198,7 +198,7 @@ jobs:
             > "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nimrtc-linux-x86_64-gcc
           path: |
@@ -211,7 +211,7 @@ jobs:
     needs: preflight
     runs-on: ubuntu-22.04-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -247,7 +247,7 @@ jobs:
             > "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz.sha256"
 
       - name: Upload artefact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nimrtc-linux-aarch64-gcc
           path: |
@@ -260,7 +260,7 @@ jobs:
     needs: preflight
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -293,7 +293,7 @@ jobs:
             > "build/nimrtc-${version}-macos-arm64-clang.tar.xz.sha256"
 
       - name: Upload artefact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nimrtc-macos-arm64-clang
           path: |
@@ -315,7 +315,7 @@ jobs:
       - build-macos-clang
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -341,7 +341,7 @@ jobs:
           fi
 
       - name: Download all four artefact bundles
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -404,7 +404,7 @@ jobs:
           echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Draft GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "NimRTC ${{ github.ref_name }}"

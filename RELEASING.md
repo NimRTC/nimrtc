@@ -3,7 +3,7 @@
 This document describes how NimRTC versions its releases, tags source-tree
 milestones, and ships binaries. It is the single source of truth for release
 managers and the source for the §16.3 DoD checklist in
-`docs/zh/NimRTC-V2-技术文档.md`.
+`docs/zh/architecture.md`.
 
 If you are looking for how to **contribute** a change, see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) instead. This document is about how a
@@ -141,7 +141,7 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
 
 ### 3.1 Pre-flight (T-7 days)
 
-1. Confirm the milestone's DoD items in `docs/zh/NimRTC-V2-技术文档.md` §16.3
+1. Confirm the milestone's DoD items in `docs/zh/architecture.md` §16.3
    and the matching release-plan table row are green.
 2. Open a tracking issue titled `Release: vX.Y.Z` and assign the release
    manager.
@@ -304,7 +304,7 @@ after Phase 3 completes.
   matrix used by §3.5.
 - [`CODEOWNERS`](CODEOWNERS) — per-module reviewers who must approve
   release-blocker PRs.
-- `docs/zh/NimRTC-V2-技术文档.md` §13 (release plan) and §16.3 (release
+- `docs/zh/architecture.md` §13 (release plan) and §16.3 (release
   hygiene DoD).
 - `docs/plan/vendor-migration.md` — submodule + `vendor.json` migration that
   is a **blocker** for `v1.0.0` (see CHANGELOG "Deferred for 1.0.0").

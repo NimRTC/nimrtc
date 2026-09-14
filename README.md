@@ -1,6 +1,6 @@
 # NimRTC
 
-> **Status: v0.9 (RC — multi-platform CI green).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/NimRTC-V2-技术文档.md) §13.
+> **Status: v0.9 (RC — multi-platform CI green).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/architecture.md) §13.
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 
@@ -88,7 +88,7 @@ Artifacts land in `build/e2e/`.
 1. **分层剪裁 + Profile 组合**——L0/L1/L2/L3 模块化，编译时选层。同一份代码既能发出 P2P 客户端（全栈），也能发出 SFU 网关（**跳过 L2**）。LiveKit / mediasoup 是 server-only，libwebrtc 是 monolithic，不能切层切到这个粒度。
 2. **多平台 CI 已通（v0.9 RC）** —— Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台 CI 均已绿色通过构建和单元测试。loopback-p2p 冒烟测试在 Windows 验证，Linux/macOS 运行 ctest；Chrome 端到端互通由 `interop/` harness 覆盖。aarch64 交叉编译可过，但**嵌入式部署请先在目标硬件上自行验证**。
 3. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
-4. **三层 + Profile 显式公开**——`docs/zh/NimRTC-V2-技术文档.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
+4. **三层 + Profile 显式公开**——`docs/zh/architecture.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
 
 > **plugin 接口是这套架构的"接缝"设计**——和上面四条组合搭配才出差异化。详见下面 [§ plugin 接口的目的](#plugin-接口的目的--一个被低估的架构特色)。
 
@@ -130,7 +130,7 @@ plugin 是 NimRTC **可演进性**的核心机制：P0–P1 主线用内置实�
 
 **给使用者的结论**：
 - **新代码 / 新项目用 NimRTC → 直接 C++20**，无成本。
-- **如果你的环境锁死 C++17**（如某些信创 GCC 8.x）→ 暂时不可用，P2 才会做"降级到 C++17 的"shim"。这条已经写进 `docs/zh/NimRTC-V2-技术文档.md` §15.2 待决问题。
+- **如果你的环境锁死 C++17**（如某些信创 GCC 8.x）→ 暂时不可用，P2 才会做"降级到 C++17 的"shim"。当前以 C++20 为基线（[§13](docs/zh/architecture.md#13-里程碑与发布节奏)）。
 
 ---
 
@@ -155,7 +155,7 @@ plugin 是 NimRTC **可演进性**的核心机制：P0–P1 主线用内置实�
 | `agent-gateway` | L0 + L1 + L2(tap 打开) | AI Agent 接入（PCM 双 tap + 旁路） |
 | `cloudgame` | L0 + L1 + L2 + L3（高码率主线 + 输入渲染对齐）| 遥操作 / 云游戏（v0.10 列为远期候选） |
 
-Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/NimRTC-V2-技术文档.md` §2.6。
+Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/architecture.md` §2.6。
 
 ---
 
@@ -166,7 +166,7 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/NimRTC-
 - **P3 客户端质量 + ref_frame**：自适应 JB + Goog-CC 风格 BWE；ref_frame 时间线完整实现；首个付费标杆客户
 - **P4 生产化 + 国密企版**：双链路 / 接管框架企版；国密后端落地；首份商业合同
 
-详细路线图见 `docs/zh/NimRTC-V2-技术文档.md` §13。
+详细路线图见 `docs/zh/architecture.md` §13。
 
 ---
 
@@ -244,8 +244,8 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 ## 协议 / License
 
 - **License**: Apache-2.0（见 `LICENSE`）
-- **第三方依赖**: 见 `NOTICE` 与 `docs/zh/NimRTC-V2-技术文档.md` §11（借用策略）
-- **借用策略**: 密码件 / 编解码 / SCTP / 3A 等成熟模块一律 vendor；RTP / RTCP / SDP / JB / BWE / ICE 状态机 / timeline 调度等核心协议层一律自研。详见 `docs/zh/NimRTC-V2-技术文档.md` §11。
+- **第三方依赖**: 见 `NOTICE` 与 `docs/zh/architecture.md` §11（借用策略）
+- **借用策略**: 密码件 / 编解码 / SCTP / 3A 等成熟模块一律 vendor；RTP / RTCP / SDP / JB / BWE / ICE 状态机 / timeline 调度等核心协议层一律自研。详见 `docs/zh/architecture.md` §11。
 - **贡献合规**: DCO 签名（`git commit -s`），不采用 CLA。详见 `CONTRIBUTING.md`。
 
 ---
@@ -427,4 +427,4 @@ xcode-select --install
 - **安全报告**: 私密渠道——`SECURITY.md`
 - **品牌反馈**: 商标 / 命名相关走 `SECURITY.md` 同渠道
 
-详细贡献流程与治理纪律见 `docs/zh/NimRTC-V2-技术文档.md` §16。
+详细贡献流程与治理纪律见 `docs/zh/architecture.md` §16。

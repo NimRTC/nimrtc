@@ -7,7 +7,7 @@
 | 状态 | **SUPERSEDED** — 阶段 1 (chore/cleanup-onboarding) + 阶段 2 + 阶段 4 (CI 接入) 已在 [PR #B3] 落地：新增 `linux-gcc` / `linux-aarch64` / `macos-clang` CI jobs（见 `.github/workflows/ci.yml`）、新增 `debug.aarch64` / `tests.aarch64` preset 与 `cmake/toolchains/aarch64-linux-gnu.cmake`、CHANGELOG 平台矩阵从 "Windows-only" 切换到 ✅/🔶 状态。**本文档保留为审计归档**：§3.1 / §3.2 / §3.3 的 R1 审计记录仍然有用，§阶段 1.0 前置（mbedTLS build 集成打通）已随 wolfSSL 迁移整体作废——见文档内 OBSOLETE 标记。1.0 实际准入门槛见 `CHANGELOG.md` "Platform support matrix"。 |
 | 目标 | Linux x86_64 (GCC + Clang) 编译 + 单元测试 + loopback-p2p smoke 全链路通过 |
 
-> **纪律**：本文档对齐 `docs/zh/NimRTC-V2-技术文档.md` §13 路线图（1.0.0 准入门槛），不写"生产级"措辞。本计划不替代 §13 roadmap，是它的 Linux x86_64 子项。
+> **纪律**：本文档对齐 `docs/zh/architecture.md` §13 路线图（1.0.0 准入门槛），不写"生产级"措辞。本计划不替代 §13 roadmap，是它的 Linux x86_64 子项。
 
 ---
 

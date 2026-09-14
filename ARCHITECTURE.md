@@ -2,7 +2,7 @@
 
 This document describes the directory layout of NimRTC. For high-level
 project context, see [`README.md`](README.md) and
-[`docs/zh/NimRTC-V2-技术文档.md`](docs/zh/NimRTC-V2-技术文档.md).
+[`docs/zh/architecture.md`](docs/zh/architecture.md).
 
 > **Reminder:** P0 = scaffold only (no implementations yet). Implementation
 > lands P1..P4 per §13 of the technical document.

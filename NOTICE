@@ -133,4 +133,4 @@ sources; only protocol definitions and interface conventions are reused
 
 For the complete borrowing policy, see:
   - docs/license/borrowing.md (when published)
-  - §11.8 of docs/NimRTC-V2-技术文档.md
+  - §11.8 of docs/zh/architecture.md

@@ -27,6 +27,10 @@ Write an ADR when a decision:
 |--------|-------|-------|
 | [ADR-001](ADR-001-plugin-system.md) | Pluggable Module Architecture | P0 |
 | [ADR-008](ADR-008-pcm-tap.md) | PCM audio tap insertion point | P1 |
+| [ADR-009](ADR-009-pal-slice-1.md) | PAL Slice 1 — engine plugin resolver seam | P1.1 |
+| [ADR-010](ADR-010-profile-json-format.md) | JSON as first-class declarative Profile format | P1.1 |
+| [ADR-011](ADR-011-teleop-metrics-caliber.md) | 遥操作指标口径 — engine 单跳预算，端到端由集成方负责 | P1.1 |
+| [ADR-012](ADR-012-zh-docs-layout.md) | 中文文档布局 — `docs/zh/` 子目录先行，独立站点延后 | P1.1 |
 
 ## Process
 

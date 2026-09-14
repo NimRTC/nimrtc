@@ -49,4 +49,4 @@ patch release of the previous minor version.
 - **SRTP**: libsrtp handles all SRTP operations; key material is never
   logged or exposed in debug output.
 
-For the full threat model, see §11 of `docs/zh/NimRTC-V2-技术文档.md`.
+For the full threat model, see §11 of `docs/zh/architecture.md`.

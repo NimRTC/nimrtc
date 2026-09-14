@@ -14,7 +14,7 @@
 #                              flight is fully verified — see CHANGELOG.md)
 # =============================================================================
 
-name: ci
+name: ci-e2e
 
 on:
   push:

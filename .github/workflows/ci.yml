@@ -27,7 +27,7 @@ name: ci
 
 on:
   push:
-    branches: [main, feat/**, fix/**, chore/**]
+    branches: [main, feat/**, fix/**, chore/**, release/**]
   pull_request:
     branches: [main]
 

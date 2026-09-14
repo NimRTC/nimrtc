@@ -1,5 +1,7 @@
 # NimRTC
 
+> **Looking for the stable release?** This is the development branch. For the latest stable version, see the [`main`](https://github.com/NimRTC/nimrtc/tree/main) branch.
+
 > **Status: 1.0.0 (Stable Release).** Multi-platform support: Windows ✅, Linux x86_64 ✅, macOS arm64 ✅, Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details.
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**

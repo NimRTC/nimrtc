@@ -36,6 +36,7 @@
 #include <nimrtc/core/time.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/engine_errors.hpp>   // P1#9 — module error-code constants
+#include <nimrtc/engine/pal/engine_plugin_resolver.hpp>
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
@@ -392,7 +393,7 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     init_bwe_scheduler();
 
     // ---- Audio3A --------------------------------------------------------
-    const plugins::IAudio3AFactory* a3a_factory = reg.get_audio3a(config_.audio3a_name);
+    const plugins::IAudio3AFactory* a3a_factory = pal::resolve_audio3a(config_.audio3a_name);
     if (a3a_factory) {
         audio3a_plugin_.reset(a3a_factory->create());
         if (audio3a_plugin_) {
@@ -428,7 +429,7 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
         codec_cfg.vad_enabled    = false;
         codec_cfg.payload_type   = config_.audio_codec.payload_type;
         codec_cfg.name           = config_.codec_name;
-        const plugins::ICodecFactory* cf = reg.get_codec(config_.codec_name);
+        const plugins::ICodecFactory* cf = pal::resolve_codec(config_.codec_name);
         if (cf) {
             codec_plugin_.reset(cf->create(codec_cfg));
             if (codec_plugin_ && codec_plugin_->open() != plugins::kOk) {
@@ -666,7 +667,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
 
     // ---- Video Codec (H.264) -----------------------------------------------
     if (!config_.video_codec_name.empty() && !video_codec_) {
-        const auto* f = reg.get_video_codec(config_.video_codec_name);
+        const auto* f = pal::resolve_video_codec(config_.video_codec_name);
         if (f) {
             plugins::VideoCodecConfig cfg{};
             cfg.width = 640;

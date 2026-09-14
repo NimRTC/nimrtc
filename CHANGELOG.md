@@ -7,6 +7,84 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+---
+
+## [0.10.0] - 2026-09-14
+
+### Status: Tech Preview consolidation
+
+This release closes the v0.9 tail and lands one structural refactor.
+**No new protocol or content features.** P2 content (DataChannel interop,
+SFU relay, PCM tap landing, Profile library officialisation) is queued for v0.11.0.
+
+### Highlights
+
+- **PAL Slice 1** (Plugin Adaptation Layer): engine now resolves audio3a /
+  codec / video_codec plugins through a single `pal::*` seam. Zero runtime
+  overhead; public API unchanged. Sets up Slices 2 + 3 (self-registration
+  table + compile-time id validation) for v0.10.x patches. Bound by
+  `docs/adr/ADR-009-pal-slice-1.md`.
+- **CHANGELOG hygiene**: the historical detail of v0.9.2's vendor tooling,
+  release workflow, HW backends, Opus RFC 7587 implementation, DTLS Chrome
+  fixes, engine PIMPL refactor, and ~26 module tests is now correctly
+  attributed to v0.9.2 (previously sitting under `[Unreleased]`).
+- **v0.9 open decisions closed** (each as a doc-only ADR):
+    - ADR-009 — PAL Slice 1 (engine plugin resolver seam).
+    - ADR-010 — JSON is the first-class declarative Profile format; C++
+      Builder remains first-class alongside. Existing `profiles/*.json`
+      pinned as schema v1.0.
+    - ADR-011 — engine owns only the single-hop budget; end-to-end
+      acceptance references (DB31/T 1505-2024 / T/SSITS 2003-2023) are
+      the integrator's responsibility.
+    - ADR-012 — `docs/zh/` is the canonical Chinese home; single-file
+      `architecture.md` replaces the v0.9 `NimRTC-V2-技术文档.md`
+      (preserved as a redirect stub for external links). Independent
+      site (docs-zh.nimrtc.dev) deferred to v1.0+.
+
+### Notes
+
+- **国密后端** (SM2/SM4) remains P4 / Enterprise - not in v0.10.0.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- README status header bumped: "v0.9 (RC - multi-platform CI green)" ->
+  "v0.10 (Tech Preview - consolidating v0.9)".
+
+---
+
+## [0.9.2] - 2026-09-14
+
+### Status: First feature-complete release candidate
+
+**This is the first API-stable release of NimRTC.** All acceptance criteria
+from the 0.9.0-rc1 "Deferred for 1.0.0" section have been addressed:
+- Vendor sources migrated to git submodules + `vendor.json` SHA pinning
+- All four platforms (Windows, Linux x86_64, macOS arm64, Linux aarch64) CI jobs configured and green on HEAD
+- Chrome DTLS interop (Case D) verified with audio/video data exchange
+
+### Platform support matrix
+
+| Platform       | Build | Test | Notes                                                                  |
+|----------------|-------|------|------------------------------------------------------------------------|
+| Windows x86_64 | ✅ PASS  | ✅ PASS | MSVC 19.43 + Ninja, primary dev env; loopback-p2p 冒烟已验               |
+| Linux x86_64   | ✅ PASS  | ✅ PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                  |
+| macOS arm64    | ✅ PASS | ✅ PASS | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
+| Linux aarch64  | ✅ PASS | ✅ PASS | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`              |
+
+The e2e Chrome-interop acceptance suite (`tools/run_e2e_acceptance.py`) is
+currently Windows-only. Case D (NimRTC ↔ Chrome) has been verified on
+Windows x86_64. Linux/macOS Chrome interop harness (`interop/`) is available
+and can be run manually; CI coverage for those platforms is a v1.0 milestone.
+
+### Detailed change history
+
+> **Note:** the subsections below were moved here from `[Unreleased]`
+> during the v0.10.0 CHANGELOG hygiene pass. They describe work that
+> landed in v0.9.2 but was never moved off `[Unreleased]` before the
+> v0.9.2 tag.
+
+
 ### Added 漴elease infrastructure, vendor CI gate, cross-platform CI pre-flight
 
 - **`docs/plan/vendor-migration.md`** 漝etailed Phase 1?migration plan
@@ -292,29 +370,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complete and round-trips through `depacketise()`. Previously the
   stub would silently truncate Opus RTP payloads on the send path.
 
-## [0.9.2] - 2026-09-14
-
-### Status: First feature-complete release candidate
-
-**This is the first API-stable release of NimRTC.** All acceptance criteria
-from the 0.9.0-rc1 "Deferred for 1.0.0" section have been addressed:
-- Vendor sources migrated to git submodules + `vendor.json` SHA pinning
-- All four platforms (Windows, Linux x86_64, macOS arm64, Linux aarch64) CI jobs configured and green on HEAD
-- Chrome DTLS interop (Case D) verified with audio/video data exchange
-
-### Platform support matrix
-
-| Platform       | Build | Test | Notes                                                                  |
-|----------------|-------|------|------------------------------------------------------------------------|
-| Windows x86_64 | ✅ PASS  | ✅ PASS | MSVC 19.43 + Ninja, primary dev env; loopback-p2p 冒烟已验               |
-| Linux x86_64   | ✅ PASS  | ✅ PASS | GCC 11 / Clang 14+, Ubuntu 22.04; CI job `linux-gcc`                  |
-| macOS arm64    | ✅ PASS | ✅ PASS | Apple Clang 15, macOS 14; CI job `macos-clang`                        |
-| Linux aarch64  | ✅ PASS | ✅ PASS | GCC 11 cross / native arm64 runner; CI job `linux-aarch64`              |
-
-The e2e Chrome-interop acceptance suite (`tools/run_e2e_acceptance.py`) is
-currently Windows-only. Case D (NimRTC ↔ Chrome) has been verified on
-Windows x86_64. Linux/macOS Chrome interop harness (`interop/`) is available
-and can be run manually; CI coverage for those platforms is a v1.0 milestone.
 
 ## [0.9.0-rc1] - 2026-09-06
 

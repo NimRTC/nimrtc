@@ -1,6 +1,6 @@
 # NimRTC
 
-> **Status: v0.9 (RC — multi-platform CI green).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/architecture.md) §13.
+> **Status: v0.10 (Tech Preview — consolidating v0.9).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/architecture.md) §13.
 
 **Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
 

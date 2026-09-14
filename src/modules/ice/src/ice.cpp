@@ -20,12 +20,16 @@
 
 #include <nimrtc/ice/ice.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #include <juice/juice.h>
@@ -46,7 +50,7 @@ std::atomic<bool> g_log_hooked{false};
 void hook_libjuice_logging_once() noexcept {
     if (g_log_hooked.exchange(true)) return;
 
-    juice_set_log_level(JUICE_LOG_LEVEL_WARN);
+    juice_set_log_level(JUICE_LOG_LEVEL_VERBOSE);
 
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
         auto& logger = core::log::Logger::instance();
@@ -59,11 +63,11 @@ void hook_libjuice_logging_once() noexcept {
                 logger.warn(message);
                 break;
             case JUICE_LOG_LEVEL_INFO:
-                logger.info(message);
-                break;
             case JUICE_LOG_LEVEL_DEBUG:
             case JUICE_LOG_LEVEL_VERBOSE:
-                logger.debug(message);
+                // Route everything else through info() so it bypasses the
+                // default Debug-level filter and shows up in test output.
+                logger.info(message);
                 break;
             default:
                 break;
@@ -80,16 +84,16 @@ struct Packet {
     plugins::Addr             src;     // best-effort source (may be empty)
 };
 
-IceState map_juice_state(juice_state_t s) noexcept {
+plugins::IceState map_juice_state(juice_state_t s) noexcept {
     switch (s) {
-        case JUICE_STATE_DISCONNECTED: return IceState::Disconnected;
-        case JUICE_STATE_GATHERING:    return IceState::Gathering;
-        case JUICE_STATE_CONNECTING:   return IceState::Connecting;
-        case JUICE_STATE_CONNECTED:    return IceState::Connected;
-        case JUICE_STATE_COMPLETED:    return IceState::Completed;
-        case JUICE_STATE_FAILED:       return IceState::Failed;
+        case JUICE_STATE_DISCONNECTED: return plugins::IceState::Disconnected;
+        case JUICE_STATE_GATHERING: return plugins::IceState::Gathering;
+        case JUICE_STATE_CONNECTING: return plugins::IceState::Connecting;
+        case JUICE_STATE_CONNECTED: return plugins::IceState::Connected;
+        case JUICE_STATE_COMPLETED: return plugins::IceState::Completed;
+        case JUICE_STATE_FAILED: return plugins::IceState::Failed;
     }
-    return IceState::Disconnected;
+    return plugins::IceState::Disconnected;
 }
 
 juice_concurrency_mode_t map_mode(IceConfig::Mode m) noexcept {
@@ -183,7 +187,7 @@ struct IceTransport::Impl {
     std::vector<std::string>             local_candidates;
     bool                                gathering_done = false;
 
-    IceState                             state = IceState::Disconnected;
+    plugins::IceState                             state = plugins::IceState::Disconnected;
     std::deque<Packet>                   rx_queue;
     plugins::RecvCallback                recv_cb_;     // renamed to avoid collision with static on_recv
     plugins::ErrorCallback               on_error;
@@ -195,6 +199,40 @@ struct IceTransport::Impl {
     // Cached credentials parsed from the remote SDP (for diagnostics).
     std::string                          remote_ufrag_str;
     std::string                          remote_pwd_str;
+
+    // Remote SDP set before the agent was created.  Applied in create_agent()
+    // before agent_gather_candidates() so libjuice knows the peer credentials
+    // and sets the correct mode (CONTROLLED instead of CONTROLLING).
+    std::string                          pending_remote_sdp_;
+
+    // ---- ICE consent freshness (RFC 7675 / RFC 8445 §10) ----------------
+    //
+    // App-level tracker layered on top of libjuice. libjuice owns the
+    // protocol side (sends STUN Binding requests on its own schedule and
+    // maintains `consent_expiry` per candidate pair). The NimRTC wrapper
+    // adds:
+    //   - a single OnConsentLost callback that the application can hook;
+    //   - a `notify_binding_received()` entry point that resets the timer;
+    //   - test-friendly observability via consent_lost_pending().
+    //
+    // All timestamps are wall-clock microseconds since the steady_clock
+    // epoch (monotonic, no leap-second issues).
+    std::atomic<std::int64_t>            last_binding_received_us_{0};
+    std::atomic<bool>                    consent_lost_fired_{false};
+    std::atomic<bool>                    consent_thread_should_stop_{false};
+    std::atomic<bool>                    consent_thread_running_{false};
+    /** Test-only override: arm the tracker as if Connected. */
+    std::atomic<bool>                    consent_force_armed_{false};
+    std::thread                          consent_thread_;
+    std::mutex                           consent_mu_;        // protects on_consent_lost_
+    plugins::OnConsentLost               on_consent_lost_;
+
+    // ---- Plugin injection (BWE + Scheduler) --------------------------------
+    // Non-owning raw pointers set by set_bwe() / set_scheduler().
+    // The engine owns the plugin instances; the ICE transport merely
+    // references them to call bwe->on_feedback() and sched->drain_with().
+    plugins::IBwe*         bwe_         = nullptr;
+    plugins::IScheduler*    scheduler_   = nullptr;
 
     // ---- libjuice static callbacks ---------------------------------------
 
@@ -305,7 +343,143 @@ struct IceTransport::Impl {
                                            config.local_ufrag.c_str(),
                                            config.local_password.c_str());
         }
+
+        // Apply any remote SDP set before the agent was created.  This is the
+        // key fix for the ICE role conflict on loopback: if the remote ufrag/pwd
+        // are known BEFORE agent_gather_candidates() is called, libjuice sets
+        // the agent's mode to CONTROLLED (answerer) instead of CONTROLLING.
+        if (!pending_remote_sdp_.empty()) {
+            std::string sdp_copy{pending_remote_sdp_};
+            juice_set_remote_description(agent, sdp_copy.c_str());
+            pending_remote_sdp_.clear();
+        }
+
         return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // ICE consent freshness tracker (RFC 7675 / RFC 8445 §10)
+    // ---------------------------------------------------------------------
+
+    /** Monotonic microseconds since the steady_clock epoch. */
+    static std::int64_t now_us() noexcept {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
+    /** Start the consent freshness tracker background thread. Idempotent.
+     *  Safe to call before libjuice has reached Connected; the thread just
+     *  waits armed and starts ticking when state allows. */
+    void start_consent_tracker_if_needed() {
+        if (!config.enable_consent_freshness) return;
+        bool expected = false;
+        if (!consent_thread_running_.compare_exchange_strong(expected, true)) {
+            return;   // already running
+        }
+        consent_thread_should_stop_.store(false);
+        consent_thread_ = std::thread([this] {
+            this->consent_thread_main();
+        });
+    }
+
+    /** Stop the consent freshness tracker (joins the thread). Idempotent.
+     *  Called from close() and when consent tracking is disabled. */
+    void stop_consent_tracker() {
+        if (!consent_thread_running_.exchange(false)) return;
+        consent_thread_should_stop_.store(true);
+        if (consent_thread_.joinable()) {
+            consent_thread_.join();
+        }
+    }
+
+    /** Main loop of the consent tracker. Ticks at `consent_interval_ms`
+     *  granularity, never tighter than 1s, never wider than 1s. Each tick:
+     *
+     *  1. If state is Connected/Completed, check
+     *       (now - last_binding_received_us) >= consent_timeout_ms
+     *     and if so, fire on_consent_lost() atomically (once per loss
+     *     event) and arm the next expiry at the same point.
+     *
+     *  2. Refresh last_binding_received_us if libjuice hasn't reported
+     *     a binding request in the last interval (delegates to libjuice
+     *     for protocol-level consent); we only ever fire on_consent_lost
+     *     when explicitly notified (or, in production, when libjuice's
+     *     consent state has clearly failed) — see comment in
+     *     check_expiry() below. */
+    void consent_thread_main() {
+        using namespace std::chrono_literals;
+        // 100ms tick is plenty for ms-level timeouts without burning CPU.
+        // consent_interval_ms is used to cap work, not to drive ticks.
+        constexpr auto kTick = 100ms;
+
+        std::int64_t interval_ms =
+            std::clamp(config.consent_interval_ms,
+                       static_cast<std::int64_t>(100),
+                       static_cast<std::int64_t>(1000));
+        std::int64_t timeout_ms = std::max<std::int64_t>(
+            config.consent_timeout_ms, interval_ms);
+
+        while (!consent_thread_should_stop_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(kTick);
+
+            // Only meaningful while ICE is up. Treating Failed/Disconnected
+            // as "no consent expected" means we shouldn't fire the callback
+            // until the application gets the agent back into a selected
+            // state and indicates peer activity again.
+            //
+            // Tests can override via force_consent_armed_for_testing().
+            bool armed = consent_force_armed_.load(std::memory_order_acquire);
+            if (!armed) {
+                plugins::IceState cur_state;
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    cur_state = state;
+                }
+                if (cur_state != plugins::IceState::Connected &&
+                    cur_state != plugins::IceState::Completed) {
+                    continue;
+                }
+            }
+
+            const std::int64_t now     = now_us();
+            const std::int64_t last_us = last_binding_received_us_.load(
+                std::memory_order_acquire);
+            if (last_us == 0) continue;   // not yet primed
+            const std::int64_t age_us = now - last_us;
+            if (age_us < timeout_ms * 1000) continue;
+
+            // Past timeout — fire (once), then rearm so a subsequent loss
+            // event can be observed (matches the docstring: "may fire again
+            // on a subsequent loss event").
+            plugins::OnConsentLost cb_copy;
+            {
+                std::lock_guard<std::mutex> lk(consent_mu_);
+                cb_copy = on_consent_lost_;
+            }
+            if (cb_copy) {
+                try {
+                    cb_copy();
+                } catch (...) {
+                    // Swallow user-callback exceptions; the tracker must
+                    // never die on a misbehaving consumer.
+                }
+            }
+            consent_lost_fired_.store(true, std::memory_order_release);
+            // Rearm: pretend we just received a binding request so we
+            // won't re-fire until another full timeout window passes
+            // without a notify_binding_received().
+            last_binding_received_us_.store(now_us(),
+                                            std::memory_order_release);
+        }
+    }
+
+    /** Reset the consent freshness clock to "now". Called by the public
+     *  notify_binding_received() to simulate peer STUN Binding traffic. */
+    void record_binding_received() {
+        last_binding_received_us_.store(now_us(), std::memory_order_release);
+        // Clear the "lost" flag so a re-fired callback is observed.
+        consent_lost_fired_.store(false, std::memory_order_release);
     }
 };
 
@@ -334,9 +508,32 @@ void IceTransport::set_stun_server(std::string_view host, std::uint16_t port) no
     impl_->config.stun_server_port = port;
 }
 
+void IceTransport::add_turn_server(std::string_view host,
+                                   std::uint16_t port,
+                                   std::string_view username,
+                                   std::string_view password) noexcept {
+    ice::TurnServer ts;
+    ts.host = std::string(host);
+    ts.port = port;
+    ts.username = std::string(username);
+    ts.password = std::string(password);
+    impl_->config.turn_servers.push_back(std::move(ts));
+    core::log::Logger::instance().info(
+        std::string("ice: TURN server added host=") + ts.host +
+        ":" + std::to_string(ts.port));
+}
+
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {
     impl_->config.local_port_range_begin = begin;
     impl_->config.local_port_range_end   = end;
+}
+
+void IceTransport::set_bwe(plugins::IBwe* bwe) noexcept {
+    impl_->bwe_ = bwe;
+}
+
+void IceTransport::set_scheduler(plugins::IScheduler* sched) noexcept {
+    impl_->scheduler_ = sched;
 }
 
 IceTransport::~IceTransport() {
@@ -360,17 +557,27 @@ plugins::Status IceTransport::open() noexcept {
     if (juice_gather_candidates(impl_->agent) != JUICE_ERR_SUCCESS) {
         return plugins::kErrInternal;
     }
+    // Start the consent freshness tracker only after a successful open().
+    // The thread stays alive until close(); consent_lost_fired_ resets on
+    // each notify_binding_received() to support multiple loss events.
+    impl_->record_binding_received();      // prime the clock at t=open
+    impl_->start_consent_tracker_if_needed();
     return plugins::kOk;
 }
 
 void IceTransport::close() noexcept {
+    impl_->stop_consent_tracker();
     if (impl_->agent) {
         juice_destroy(impl_->agent);
         impl_->agent = nullptr;
     }
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->rx_queue.clear();
-    impl_->state = IceState::Disconnected;
+    impl_->state = plugins::IceState::Disconnected;
+    // Clear the consent "lost" flag and reset the clock so a re-opened
+    // transport starts from a clean slate.
+    impl_->consent_lost_fired_.store(false, std::memory_order_release);
+    impl_->last_binding_received_us_.store(0, std::memory_order_release);
 }
 
 void IceTransport::set_callbacks(plugins::RecvCallback on_recv,
@@ -378,6 +585,25 @@ void IceTransport::set_callbacks(plugins::RecvCallback on_recv,
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->recv_cb_ = std::move(on_recv);
     impl_->on_error = std::move(on_error);
+}
+
+void IceTransport::set_on_consent_lost(plugins::OnConsentLost cb) noexcept {
+    std::lock_guard<std::mutex> lk(impl_->consent_mu_);
+    impl_->on_consent_lost_ = std::move(cb);
+}
+
+void IceTransport::notify_binding_received() noexcept {
+    impl_->record_binding_received();
+}
+
+bool IceTransport::consent_lost_pending() const noexcept {
+    return impl_->consent_lost_fired_.load(std::memory_order_acquire);
+}
+
+void IceTransport::force_consent_armed_for_testing() noexcept {
+    impl_->consent_force_armed_.store(true, std::memory_order_release);
+    // Reset the clock to "now" so the timer has a clean baseline.
+    impl_->record_binding_received();
 }
 
 plugins::Status IceTransport::send(plugins::BufferView view,
@@ -422,7 +648,7 @@ plugins::Addr IceTransport::remote_addr() const noexcept {
     return impl_->encode_addr(impl_->selected_remote_str);
 }
 
-IceState IceTransport::state() const noexcept {
+plugins::IceState IceTransport::state() const noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->state;
 }
@@ -442,10 +668,42 @@ std::string IceTransport::local_description() const {
 }
 
 plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexcept {
-    if (!impl_->agent) return plugins::kErrNotReady;
     // juice_set_remote_description expects a NUL-terminated C string.
     std::string tmp{sdp};
+
+    if (!impl_->agent) {
+        // Agent not yet created — store for apply in create_agent() before
+        // agent_gather_candidates().  This is the preferred path for loopback
+        // tests: the answerer knows the offerer's ICE credentials before its
+        // ICE transport opens, so libjuice sets the agent to CONTROLLED.
+        impl_->pending_remote_sdp_ = tmp;
+        return plugins::kOk;
+    }
+
+    // Agent already exists — apply immediately via juice_set_remote_description().
+    //
+    // libjuice has built-in ICE role-conflict resolution: if both agents
+    // started as CONTROLLING (because no remote SDP was set before gathering),
+    // each side's STUN Binding Request carries the peer's ice_controlling
+    // attribute.  On receipt, libjuice compares the two ice_tiebreaker values
+    // (RFC 8445 §6.1.2) and the agent with the lower tiebreaker switches to
+    // CONTROLLED.  No agent destruction is needed — only juice_set_remote_description
+    // must be called so libjuice knows the remote ufrag/pwd.
+    //
+    // Previously this function destroyed and recreated the agent whenever it was
+    // already gathered.  That caused a new ufrag/pwd to be generated on the
+    // local side, invalidating every in-flight STUN Binding Request in flight
+    // (the peer still used the old ufrag).  The result was "STUN remote ufrag
+    // check failed" and ICE connectivity checks cycling forever, never stabilising.
+    // Deleting the destroy/recreate branch fixes that regression.
     const int rc = juice_set_remote_description(impl_->agent, tmp.c_str());
+    if (rc != JUICE_ERR_SUCCESS) {
+        // Treat any libjuice parse error as a corrupt SDP from our point of
+        // view — the wrapper contract is "give me an SDP, I'll apply it";
+        // libjuice's specific error category is opaque to callers.
+        return plugins::kErrCorrupt;
+    }
+
     // Cache the parsed credentials so callers can read them back via
     // remote_ufrag() / remote_password() without going through libjuice.
     auto ufrag_pos = tmp.find("a=ice-ufrag:");
@@ -474,7 +732,7 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
             impl_->remote_pwd_str.pop_back();
         }
     }
-    return rc == JUICE_ERR_SUCCESS ? plugins::kOk : plugins::kErrInvalidParam;
+    return plugins::kOk;
 }
 
 plugins::Status IceTransport::add_remote_candidate(std::string_view sdp) noexcept {
@@ -561,19 +819,19 @@ plugins::Status IceTransport::gather_candidates() noexcept {
 }
 
 std::vector<std::string>
-IceTransport::gathered_local_candidates() const {
+IceTransport::gathered_local_candidates() const noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->local_candidates;
 }
 
-bool IceTransport::wait_for_gathering(std::int64_t timeout_ms) noexcept {
+bool IceTransport::wait_for_gathering(int timeout_ms) noexcept {
     if (!impl_->agent) return false;
     std::unique_lock<std::mutex> lk(impl_->mu);
     // Treat Connected/Completed state as gathering-is-sufficient too.
     auto already = [&] {
         return impl_->gathering_done ||
-               impl_->state == IceState::Connected ||
-               impl_->state == IceState::Completed;
+               impl_->state == plugins::IceState::Connected ||
+               impl_->state == plugins::IceState::Completed;
     };
     if (already()) return true;
 
@@ -598,7 +856,7 @@ std::string_view IceTransportFactory::display_name() const noexcept {
     return "ICE (libjuice, RFC 8445)";
 }
 
-plugins::ITransport* IceTransportFactory::create() const {
+plugins::IICETransport* IceTransportFactory::create_ice() const {
     return new IceTransport(default_config_);
 }
 
@@ -615,13 +873,36 @@ void do_register_default_plugins() noexcept {
     static const struct Registrar {
         Registrar() {
             static nimrtc::ice::IceTransportFactory s_factory{};
+            // The same factory instance is published under both the generic
+            // transport registry and the ICE-specific one. `register_transport`
+            // takes `const ITransportFactory*`; `register_ice_transport`
+            // takes `const IICETransportFactory*` — `IceTransportFactory`
+            // publicly inherits from `IICETransportFactory` (which virtually
+            // inherits from `ITransportFactory`), so a single `&s_factory`
+            // pointer satisfies both. Consumers can then resolve the
+            // strongest typed view through either `get_transport("ice")`
+            // or `get_ice_transport("ice")`.
+            const auto* tfactory = static_cast<const plugins::ITransportFactory*>(&s_factory);
+            const auto* ifactory = static_cast<const plugins::IICETransportFactory*>(&s_factory);
             nimrtc::core::PluginRegistry::instance().register_transport(
-                std::string_view{s_factory.id()}, &s_factory);
+                std::string_view{s_factory.id()}, tfactory);
+            nimrtc::core::PluginRegistry::instance().register_ice_transport(
+                std::string_view{s_factory.id()}, ifactory);
         }
     } s_registrar;
     (void)s_registrar;
 }
 
 } // namespace detail
+
+// Non-inline (declared in ice.hpp) so the symbol is guaranteed
+// in nimrtc_ice.lib for consumers that link via static lib + PluginRegistry.
+void register_default_plugins() noexcept {
+    static const int once = []() {
+        detail::do_register_default_plugins();
+        return 1;
+    }();
+    (void)once;
+}
 
 } // namespace nimrtc::ice

@@ -1,0 +1,274 @@
+/**
+ * @file test_dtls_chrome.html
+ * @brief Chrome ↔ wolfSSL WebRTC DTLS 互通测试页面
+ * 
+ * 使用方式:
+ * 1. 启动 Node.js 信令服务器: node signaling_server.js
+ * 2. 打开两个 Chrome 标签页，都访问本页面
+ * 3. 第一个标签点击"作为发起方"，第二个点击"作为应答方"
+ * 4. 观察握手结果
+ */
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>wolfSSL DTLS Chrome Interop</title>
+<style>
+body { font-family: 'Consolas', monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+h1 { color: #00d4ff; font-size: 1.3em; }
+.log { background: #000; border: 1px solid #333; padding: 10px; max-height: 500px; overflow-y: auto; margin-bottom: 15px; font-size: 13px; }
+.log-line { margin: 2px 0; }
+.ok { color: #0f0; }
+.err { color: #f55; }
+.info { color: #aaa; }
+.warn { color: #fa0; }
+button { background: #00d4ff; color: #000; border: none; padding: 8px 16px; cursor: pointer; margin: 4px 2px; font-family: inherit; }
+button:disabled { background: #555; color: #888; cursor: not-allowed; }
+.info-box { background: #16213e; border: 1px solid #0f3460; padding: 12px; margin: 8px 0; border-radius: 4px; }
+.label { color: #00d4ff; }
+</style>
+</head>
+<body>
+
+<h1>🐺 wolfSSL ↔ Chrome DTLS 互通测试</h1>
+
+<div class="info-box">
+  <span class="label">服务器:</span> <input id="wsUrl" value="ws://127.0.0.1:9000" style="width:250px; background:#000; color:#0f0; border:1px solid #333; padding:4px; font-family:inherit">
+</div>
+
+<div>
+  <button id="btnInit" onclick="initPeer()">初始化连接</button>
+  <button id="btnOffer" onclick="createOffer()" disabled>作为发起方 (Offer)</button>
+  <button id="btnAnswer" onclick="createAnswer()" disabled>作为应答方 (Answer)</button>
+  <button id="btnClose" onclick="closeAll()" disabled>关闭</button>
+</div>
+
+<div id="fingerprintBox" class="info-box" style="display:none">
+  <span class="label">本地证书指纹:</span> <span id="fpValue" style="color:#0f0"></span>
+</div>
+
+<div class="log" id="log"></div>
+
+<script>
+// -----------------------------------------------------------------------
+// Logging
+// -----------------------------------------------------------------------
+const logEl = document.getElementById('log');
+
+function log(msg, cls = '') {
+  const div = document.createElement('div');
+  div.className = 'log-line' + (cls ? ' ' + cls : '');
+  div.textContent = new Date().toISOString().substr(11, 12) + '  ' + msg;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// -----------------------------------------------------------------------
+// WebSocket signaling
+// -----------------------------------------------------------------------
+let ws = null;
+
+function connectWS() {
+  return new Promise((resolve, reject) => {
+    const url = document.getElementById('wsUrl').value;
+    log('Connecting to signaling server: ' + url, 'info');
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      log('[WS] Connected', 'ok');
+      resolve();
+    };
+
+    ws.onerror = (e) => {
+      log('[WS] Error: ' + (e.message || 'connection failed'), 'err');
+      reject(e);
+    };
+
+    ws.onclose = () => {
+      log('[WS] Disconnected', 'warn');
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        handleSignal(msg);
+      } catch (e) {
+        log('[WS] Invalid message: ' + e.message, 'err');
+      }
+    };
+  });
+}
+
+function wsSend(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  }
+}
+
+// -----------------------------------------------------------------------
+// PeerConnection
+// -----------------------------------------------------------------------
+let pc = null;
+let dc = null;
+let role = null; // 'offerer' or 'answerer'
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+
+function initPeer() {
+  log('Initializing PeerConnection...', 'info');
+
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      wsSend({ type: 'candidate', candidate: e.candidate });
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    log('[ICE] ' + pc.iceConnectionState, 
+        pc.iceConnectionState === 'connected' ? 'ok' : 
+        pc.iceConnectionState === 'failed' ? 'err' : 'info');
+  };
+
+  pc.onconnectionstatechange = () => {
+    log('[PC]  ' + pc.connectionState,
+        pc.connectionState === 'complete' || pc.connectionState === 'connected' ? 'ok' :
+        pc.connectionState === 'failed' ? 'err' : 'info');
+  };
+
+  pc.ondatachannel = (e) => {
+    log('[DC]  Received datachannel: ' + e.channel.label, 'ok');
+    dc = e.channel;
+    setupDataChannel(dc);
+  };
+
+  // Collect local certificate fingerprint
+  pc.addEventListener('icegatheringstatechange', async () => {
+    if (pc.iceGatheringState === 'complete') {
+      const certs = pc.getLocalDescription().sdp.match(/a=fingerprint:([^\s]+)/gi);
+      if (certs) {
+        document.getElementById('fingerprintBox').style.display = 'block';
+        document.getElementById('fpValue').textContent = certs[0].replace('a=', '');
+        log('[FP] Local: ' + certs[0], 'ok');
+      }
+    }
+  });
+
+  // Create data channel for testing
+  dc = pc.createDataChannel('test', { ordered: false });
+  setupDataChannel(dc);
+
+  log('[PC]  PeerConnection created', 'ok');
+  document.getElementById('btnOffer').disabled = false;
+  document.getElementById('btnAnswer').disabled = false;
+  document.getElementById('btnInit').disabled = true;
+}
+
+function setupDataChannel(channel) {
+  channel.onopen = () => {
+    log('[DC]  ★ DataChannel OPENED ★', 'ok');
+    const start = Date.now();
+    // Send test message
+    channel.send('Hello from Chrome via DTLS-SRTP!');
+    log('[DC]  Sent test message', 'info');
+  };
+
+  channel.onmessage = (e) => {
+    log('[DC]  ★ Received: ' + e.data + ' ★', 'ok');
+    // Echo back
+    channel.send('Echo: ' + e.data);
+    log('[DC]  Echoed back', 'info');
+  };
+
+  channel.onclose = () => {
+    log('[DC]  Closed', 'warn');
+  };
+
+  channel.onerror = (e) => {
+    log('[DC]  Error: ' + JSON.stringify(e), 'err');
+  };
+}
+
+async function createOffer() {
+  role = 'offerer';
+  log('[ROLE] Acting as OFFERER', 'info');
+  
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  
+  log('[SDP] Offer created, type: ' + offer.type, 'ok');
+  wsSend({ type: 'offer', sdp: offer.sdp });
+}
+
+async function createAnswer() {
+  role = 'answerer';
+  log('[ROLE] Acting as ANSWERER', 'info');
+  
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  
+  log('[SDP] Answer created, type: ' + answer.type, 'ok');
+  wsSend({ type: 'answer', sdp: answer.sdp });
+}
+
+async function handleSignal(msg) {
+  log('[SIG] ' + msg.type, 'info');
+
+  try {
+    if (msg.type === 'offer') {
+      if (!pc) initPeer();
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
+      log('[SDP] Offer set as remote description', 'ok');
+      if (!role) {
+        role = 'answerer';
+        log('[ROLE] Auto-set as ANSWERER', 'info');
+      }
+      await createAnswer();
+    } else if (msg.type === 'answer') {
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+      log('[SDP] Answer set as remote description', 'ok');
+    } else if (msg.type === 'candidate') {
+      if (pc) {
+        await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        log('[ICE] Added candidate: ' + msg.candidate?.candidate?.substr(0, 40), 'info');
+      }
+    } else if (msg.type === 'peers') {
+      log('[SIG] Peers connected: ' + msg.count, msg.count >= 2 ? 'ok' : 'warn');
+    } else if (msg.type === 'role') {
+      log('[SIG] Peer role: ' + msg.role, 'info');
+    }
+  } catch (e) {
+    log('[ERR] Signal handling: ' + e.message, 'err');
+  }
+}
+
+function closeAll() {
+  if (dc) { dc.close(); dc = null; }
+  if (pc) { pc.close(); pc = null; }
+  if (ws) { ws.close(); ws = null; }
+  role = null;
+  log('[CLOSE] All closed', 'warn');
+  document.getElementById('btnOffer').disabled = true;
+  document.getElementById('btnAnswer').disabled = true;
+  document.getElementById('btnInit').disabled = false;
+  document.getElementById('fingerprintBox').style.display = 'none';
+}
+
+// Auto-connect on load
+window.addEventListener('load', async () => {
+  log('Page loaded. wolfSSL ↔ Chrome WebRTC test.', 'info');
+  try {
+    await connectWS();
+    initPeer();
+  } catch (e) {
+    log('[WARN] Cannot connect to signaling server (start it with: node signaling_server.js)', 'warn');
+  }
+});
+</script>
+</body>
+</html>

@@ -52,7 +52,7 @@ function(nimrtc_apply_options target)
 
     target_compile_features(${target} PUBLIC
         cxx_std_${NIMRTC_CXX_STANDARD}
-        c_std_${NIMRTC_C_STANDARD})
+        c_std_11)
 
     # Default visibility: only the public headers' symbols are exported.
     # Each module is responsible for marking its API with NIMRTC_API.
@@ -75,11 +75,20 @@ function(nimrtc_apply_options target)
             /utf-8              # source encoding
             $<$<CONFIG:Debug>:/Od /Z7 /RTC1>
             $<$<CONFIG:Release>:/O2 /GL>)
+        # Suppress MSVC C4996 'getenv is unsafe' — pre-existing code uses
+        # std::getenv for feature-flag lookups (e.g. NIMRTC_DTLS_TRACE,
+        # NIMRTC_ANSWER_DUMP); replacing every site with _dupenv_s would
+        # be invasive churn for no real safety gain (env vars come from
+        # trusted process-local configuration, not untrusted input).  This
+        # define must be set BEFORE any standard headers are included,
+        # hence it's a compile_definition (not just /D) so the project
+        # build lines carry it consistently.
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()
         target_compile_options(${target} PRIVATE
             -Wall -Wextra -Wpedantic
             -Wshadow -Wnon-virtual-dtor -Wold-style-cast
-            -Wcast-align -Wunused -Woverloaded-parse-virtual
+            -Wcast-align -Wunused -Woverloaded-virtual
             -Wconversion -Wsign-conversion
             -Wnull-dereference -Wdouble-promotion
             -Wformat=2 -Wformat-security
@@ -96,6 +105,13 @@ function(nimrtc_apply_options target)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
     endif()
+
+    # -------------------------------------------------------------------------
+    # MSVC runtime library — handled project-wide via
+    # CMAKE_MSVC_RUNTIME_LIBRARY in the top-level CMakeLists.txt.  Nothing
+    # per-target needs to be set here because the variable cascades to
+    # every target (including third_party via add_subdirectory).
+    # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
     # Sanitizers (debug builds)

@@ -6,12 +6,17 @@
  *
  * - **AIMD** (Additive Increase / Multiplicative Decrease):
  *   - No loss: increase bitrate by `increase_bps` per second
- *   - Loss detected: decrease bitrate by `decrease_factor` (multiply)
+ *   - Loss event (RFC 8698 §5.1): one multiplicative decrease per loss event,
+ *     triggered on the rising edge of the loss rate crossing the 2% threshold
+ *     — *not* on every feedback with loss>0 (avoids geometric decay under
+ *     persistent loss; P1#7).
+ *   - Cooldown (500 ms) before resuming additive increase.
  *
  * - **REMB passthrough**: if receiver reports higher bandwidth, adopt it
- *   (after sanity check against min/max)
+ *   (after sanity check against min/max); ignored while a loss event is
+ *   pending (receiver's estimate is stale during congestion).
  *
- * - **Smoothing**: exponential moving average to avoid oscillation
+ * - **Smoothing**: exponential moving average to avoid oscillation.
  *
  * @note P1 — simple AIMD. Goog-CC mainline lands in P3.
  */
@@ -34,7 +39,6 @@ namespace {
 constexpr double kRembTrustFactor = 0.8;
 
 // How much to increase per RTT when in increase phase
-// This is an alternative to per-second increase
 constexpr double kIncreasePerRtt = 0.05;  // 5% per RTT
 
 constexpr auto kLog = core::log::Level::Debug;
@@ -57,7 +61,7 @@ inline void bwe_debug(const char* fmt, ...) {
 // -----------------------------------------------------------------------------
 
 struct Bwe::Impl {
-    explicit Impl(Config config)
+    explicit Impl(plugins::BweConfig config)
         : config_(config)
         , current_bps_(config.initial_bitrate_bps)
         , smoothed_bps_(config.initial_bitrate_bps)
@@ -65,105 +69,138 @@ struct Bwe::Impl {
         , state_(State::kIncrease)  // start in increase mode
     {}
 
-    Config config_;
+    plugins::BweConfig config_;
     std::uint32_t current_bps_;
     std::uint32_t smoothed_bps_;
     std::optional<core::TimePoint> last_update_time_;
     std::optional<core::TimePoint> last_change_time_;
-    Estimate::Reason last_reason_ = Estimate::Reason::Initial;
+    plugins::BweEstimate::Reason last_reason_ = plugins::BweEstimate::Reason::Initial;
 
     // Loss history (for trend detection)
     double last_loss_rate_ = 0.0;
 
+    // Loss-event detection (RFC 8698 §5.1 — AIMD applies the multiplicative
+    // decrease *once per loss event*, not once per feedback with loss>0).
+    // A "loss event" is the rising-edge transition from no-loss (loss_rate
+    // below the 2% threshold) to lossy (loss_rate above the threshold).
+    // We latch `loss_event_pending_` on that rising edge and clear it once
+    // the decrease has fired or the network returns to clean.
+    //
+    // Without this latch the original code applied the multiplicative
+    // decrease on every RTCP feedback that reported loss>0; persistent
+    // loss would drop the rate geometrically to zero.  With the latch the
+    // decrease fires exactly once per observed congestion event and the
+    // increase phase resumes after the cooldown.
+    static constexpr double kLossEventThreshold = 0.02;
+    bool loss_event_pending_ = false;
+
     enum class State {
         kIncrease,  // probing, no recent loss
         kDecrease,  // loss detected, backing off
-        kHold,      // waiting for cooldown before increasing again
     };
     State state_ = State::kIncrease;
 
     // Time we entered decrease state
     std::optional<core::TimePoint> decrease_start_;
 
-    void on_feedback(Feedback feedback) {
-        // Clamp REMB if provided
-        if (feedback.remb_bps.has_value()) {
+    void on_feedback(plugins::BweFeedback feedback) {
+        // ---- Loss event detection (P1#7 fix) --------------------------------
+        // Edge-triggered: a "loss event" fires when the loss rate crosses the
+        // threshold from below.  Subsequent feedback samples at the same or
+        // higher loss rate do NOT retrigger the decrease — only one
+        // multiplicative decrease per event (RFC 8698 §5.1).
+        const bool was_no_loss = (last_loss_rate_ < kLossEventThreshold);
+        const bool is_loss_now = (feedback.loss_rate >= kLossEventThreshold);
+        if (was_no_loss && is_loss_now) {
+            loss_event_pending_ = true;
+        }
+        // Clear the latch on a clean (sub-low) feedback so a future loss
+        // event retriggers the decrease path.
+        if (!is_loss_now && last_loss_rate_ >= kLossEventThreshold) {
+            loss_event_pending_ = false;
+        }
+
+        // ---- REMB override (P1#7 fix: skip during loss events) ------------
+        // REMB during an active loss event is suspect (the receiver's
+        // estimate is also stale), so we ignore REMB while a decrease is
+        // pending and let the loss-event path own the rate update.
+        if (feedback.remb_bps.has_value() && !loss_event_pending_) {
             std::uint32_t remb = *feedback.remb_bps;
             // Apply trust factor and clamp
             remb = static_cast<std::uint32_t>(remb * kRembTrustFactor);
             if (remb > config_.max_bitrate_bps) remb = config_.max_bitrate_bps;
             if (remb < config_.min_bitrate_bps) remb = config_.min_bitrate_bps;
 
-            // If REMB suggests we should go higher, consider it
+            // If REMB suggests we should go higher, adopt it.
             if (remb > smoothed_bps_) {
-                // Use REMB as target if it's higher than our current estimate
-                current_bps_ = remb;
-                last_reason_ = Estimate::Reason::REMBOverride;
+                current_bps_  = remb;
+                last_reason_  = plugins::BweEstimate::Reason::REMBOverride;
                 bwe_debug("BWE: REMB override: %u bps", remb);
             }
         }
 
-        // Update based on loss
-        if (feedback.loss_rate > 0.0) {
-            // Loss detected: multiplicative decrease
+        // ---- Apply multiplicative decrease on loss event -------------------
+        if (loss_event_pending_) {
+            // Compute new rate and clamp.
             std::uint32_t new_rate = static_cast<std::uint32_t>(
                 current_bps_ * config_.decrease_factor);
-
-            // Clamp
             new_rate = std::max(new_rate, config_.min_bitrate_bps);
             new_rate = std::min(new_rate, config_.max_bitrate_bps);
 
             if (new_rate != current_bps_) {
-                current_bps_ = new_rate;
-                last_reason_ = Estimate::Reason::AIMDDecrease;
+                current_bps_    = new_rate;
+                last_reason_    = plugins::BweEstimate::Reason::AIMDDecrease;
                 decrease_start_ = feedback.timestamp;
-                state_ = State::kDecrease;
-                bwe_debug("BWE: loss %.1f%%, decreased to %u bps",
-                         feedback.loss_rate * 100.0, current_bps_);
+                state_          = State::kDecrease;
+                bwe_debug("BWE: loss event (rate %.1f%%, was %.1f%%), "
+                         "decreased to %u bps",
+                         feedback.loss_rate * 100.0,
+                         last_loss_rate_ * 100.0, current_bps_);
             }
+            // One decrease per loss event — clear the latch so a second
+            // feedback at the same loss rate does not decrease again.
+            loss_event_pending_ = false;
         } else {
-            // No loss: increase phase
+            // ---- No loss event: cooldown check + additive increase ---------
             if (state_ == State::kDecrease) {
-                // Was decreasing, check if cooldown passed
-                auto cooldown = core::Milliseconds{500};
+                // Was decreasing, check if cooldown passed.
+                constexpr core::Milliseconds kDecreaseCooldown{500};
                 if (decrease_start_.has_value() &&
-                    feedback.timestamp - *decrease_start_ >= cooldown) {
+                    feedback.timestamp - *decrease_start_ >= kDecreaseCooldown) {
                     state_ = State::kIncrease;
                     bwe_debug("BWE: cooldown complete, resuming increase");
                 }
             }
 
-            if (state_ == State::kIncrease || state_ == State::kHold) {
-                // Additive increase: add increase_bps proportional to elapsed time
+            if (state_ == State::kIncrease) {
+                // Additive increase: add increase_bps proportional to elapsed time.
                 if (last_change_time_.has_value()) {
-                    auto elapsed = feedback.timestamp - *last_change_time_;
-                    auto elapsed_ms = std::chrono::duration_cast<core::Milliseconds>(elapsed).count();
+                    const auto elapsed = feedback.timestamp - *last_change_time_;
+                    const auto elapsed_ms =
+                        std::chrono::duration_cast<core::Milliseconds>(elapsed).count();
 
-                    // Ensure minimum interval between changes
                     if (elapsed_ms >= config_.change_interval.count()) {
-                        // Calculate increase amount
-                        double increase_amount = (elapsed_ms / 1000.0) *
-                                                 config_.increase_bps;
+                        const double increase_amount =
+                            (static_cast<double>(elapsed_ms) / 1000.0) * config_.increase_bps;
 
                         std::uint32_t new_rate = current_bps_ +
-                                                 static_cast<std::uint32_t>(increase_amount);
+                            static_cast<std::uint32_t>(increase_amount);
 
-                        // Also consider per-RTT increase
+                        // Also consider per-RTT increase (CC-style boost).
                         if (feedback.rtt.count() > 0) {
-                            double rtt_factor = feedback.rtt.count() / 1000.0;  // convert to seconds
-                            double rtt_increase = current_bps_ * kIncreasePerRtt * rtt_factor;
-                            new_rate = static_cast<std::uint32_t>(
-                                new_rate + static_cast<std::uint32_t>(rtt_increase));
+                            const double rtt_factor =
+                                static_cast<double>(feedback.rtt.count()) / 1000.0;  // seconds
+                            const double rtt_increase =
+                                current_bps_ * kIncreasePerRtt * rtt_factor;
+                            new_rate += static_cast<std::uint32_t>(rtt_increase);
                         }
 
-                        // Clamp
                         new_rate = std::min(new_rate, config_.max_bitrate_bps);
 
                         if (new_rate > current_bps_) {
-                            current_bps_ = new_rate;
-                            last_reason_ = Estimate::Reason::AIMDIncrease;
+                            current_bps_    = new_rate;
+                            last_reason_    = plugins::BweEstimate::Reason::AIMDIncrease;
                             last_change_time_ = feedback.timestamp;
-                            state_ = State::kIncrease;
                             bwe_debug("BWE: increased to %u bps", current_bps_);
                         }
                     }
@@ -173,17 +210,17 @@ struct Bwe::Impl {
             }
         }
 
-        // Apply smoothing
+        // ---- Smoothing ---------------------------------------------------
         smoothed_bps_ = static_cast<std::uint32_t>(
             config_.smoothing_alpha * current_bps_ +
             (1.0 - config_.smoothing_alpha) * smoothed_bps_);
 
         last_update_time_ = feedback.timestamp;
-        last_loss_rate_ = feedback.loss_rate;
+        last_loss_rate_   = feedback.loss_rate;
     }
 
-    Estimate estimate() const {
-        Estimate e;
+    plugins::BweEstimate estimate() const {
+        plugins::BweEstimate e;
         e.target_bitrate_bps = smoothed_bps_;
         // Pacing slightly higher for burst smoothing
         e.pacing_bitrate_bps = static_cast<std::uint32_t>(smoothed_bps_ * 1.1);
@@ -195,7 +232,7 @@ struct Bwe::Impl {
         return e;
     }
 
-    void update_config(Config config) {
+    void update_config(plugins::BweConfig config) {
         config_ = config;
         // Clamp current values to new limits
         current_bps_ = std::clamp(current_bps_,
@@ -206,7 +243,7 @@ struct Bwe::Impl {
                                    config_.max_bitrate_bps);
     }
 
-    Config config() const { return config_; }
+    plugins::BweConfig config() const { return config_; }
 
     void reset() {
         current_bps_ = config_.initial_bitrate_bps;
@@ -214,17 +251,18 @@ struct Bwe::Impl {
         last_update_time_ = std::nullopt;
         last_change_time_ = std::nullopt;
         last_loss_rate_ = 0.0;
+        loss_event_pending_ = false;
         state_ = State::kIncrease;
         decrease_start_ = std::nullopt;
-        last_reason_ = Estimate::Reason::Initial;
+        last_reason_ = plugins::BweEstimate::Reason::Initial;
     }
 };
 
 // -----------------------------------------------------------------------------
-// Bwe public interface
+// Bwe public interface (plugins::IBwe)
 // -----------------------------------------------------------------------------
 
-Bwe::Bwe(Config config)
+Bwe::Bwe(plugins::BweConfig config)
     : impl_(std::make_unique<Impl>(config)) {}
 
 Bwe::~Bwe() = default;
@@ -232,23 +270,35 @@ Bwe::~Bwe() = default;
 Bwe::Bwe(Bwe&&) noexcept = default;
 Bwe& Bwe::operator=(Bwe&&) noexcept = default;
 
-void Bwe::on_feedback(Feedback feedback) {
+const char* Bwe::name() const noexcept {
+    return "nimrtc::bwe::Bwe (AIMD bandwidth estimator)";
+}
+
+plugins::Status Bwe::open() noexcept {
+    return plugins::kOk;
+}
+
+void Bwe::close() noexcept {
+    // No-op — Bwe holds no external resources.
+}
+
+void Bwe::on_feedback(plugins::BweFeedback feedback) noexcept {
     impl_->on_feedback(feedback);
 }
 
-Estimate Bwe::estimate() const {
+plugins::BweEstimate Bwe::estimate() const noexcept {
     return impl_->estimate();
 }
 
-void Bwe::update_config(Config config) {
+void Bwe::update_config(plugins::BweConfig config) noexcept {
     impl_->update_config(config);
 }
 
-Config Bwe::config() const {
+plugins::BweConfig Bwe::config() const noexcept {
     return impl_->config();
 }
 
-void Bwe::reset() {
+void Bwe::reset() noexcept {
     impl_->reset();
 }
 

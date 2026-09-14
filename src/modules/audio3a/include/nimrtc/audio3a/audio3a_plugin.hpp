@@ -49,6 +49,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 #include <nimrtc/audio3a/audio3a.hpp>      // concrete audio3a::IAudio3A / NullAudio3A / Config
@@ -111,6 +112,17 @@ public:
 
     plugins::IAudio3A::Stats stats() const noexcept override;
 
+    // -------------------------------------------------------------------------
+    // PCM Taps (pre/post 3A, §8.7)
+    // -------------------------------------------------------------------------
+
+    /** @see plugins::IAudio3A::set_pre_process_tap */
+    void set_pre_process_tap(plugins::PcmTapCallback tap) noexcept override;
+
+    /** @see plugins::IAudio3A::set_post_process_tap */
+    void set_post_process_tap(plugins::PcmTapCallback    tap,
+                             plugins::PcmTapCallbackI16 tap_i16) noexcept override;
+
 private:
     /** Concrete audio3a impl (audio3a::IAudio3A, NOT the plugin interface). */
     std::unique_ptr<audio3a::IAudio3A> concrete_;
@@ -119,6 +131,34 @@ private:
     plugins::VadCallback       on_vad_;
     plugins::LevelCallback     on_level_;
     plugins::AudioErrorCallback on_error_;
+
+    /** PCM Tap callbacks (§8.7).  Fired from invoke_pre/post_tap.
+     *  post_tap_i16_ is the int16 variant (ASR/LLM consumers prefer PCM16).
+     *
+     *  The IAudio3A spec calls out that set_pre/post_process_tap() may be
+     *  called concurrently with process_capture(); see
+     *  <nimrtc/plugins/audio3a.hpp>.  Without synchronization a tap swap
+     *  mid-frame would race the in-flight process_capture call.  We guard
+     *  the tap setters and tap invocation with `tap_mu_` (a dedicated
+     *  mutex; not the audio path mutex to keep the critical section in
+     *  process_capture as small as possible). */
+    mutable std::mutex         tap_mu_;
+    plugins::PcmTapCallback    pre_tap_;
+    plugins::PcmTapCallback    post_tap_;
+    plugins::PcmTapCallbackI16 post_tap_i16_;
+
+    /** Monotonic frame timestamp for tap callbacks. Advanced by
+     *  invoke_pre_tap() to mark the frame boundary; post_tap() uses the
+     *  same value (single tick per process_capture call). */
+    std::int64_t                tap_timestamp_us_ = 0;
+
+    /** Reusable scratch buffer for the int16_t post-tap (§8.7).  Avoids
+     *  heap allocation on every process_capture() call (audio path runs
+     *  at 50–100 Hz; per-call allocation causes latency jitter and memory
+     *  fragmentation).  Capacity grows monotonically — first call after
+     *  install allocates; subsequent calls within the same capacity reuse
+     *  the storage. */
+    std::vector<std::int16_t>  int16_tap_buf_;
 
     /** Concrete-side config, populated on first process_* call if open()
      *  was called with no explicit config (lazy init). */
@@ -133,6 +173,12 @@ private:
 
     /** Lazy init: apply concrete_config_ to the concrete impl if not yet done. */
     plugins::Status ensure_configured() noexcept;
+
+    /** Fire pre-/post-3A PCM taps (§8.7).  Called from process_capture. */
+    void invoke_pre_tap(float* samples, std::size_t num_samples,
+                         std::size_t num_channels) noexcept;
+    void invoke_post_tap(float* samples, std::size_t num_samples,
+                          std::size_t num_channels) noexcept;
 };
 
 
@@ -154,13 +200,29 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// WebRtcPluginFactory
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Factory producing PluginAdapter instances that wrap a WebRtcAudio3A.
+ *
+ * Registered as id "webrtc_apm". Requires NIMRTC_VENDORED_WEBRTC_APM=ON.
+ * Falls back to NullAudio3A if WebRTC APM source is not populated.
+ */
+class WebRtcPluginFactory : public plugins::IAudio3AFactory {
+public:
+    std::string_view id()           const noexcept override;
+    std::string_view display_name() const noexcept override;
+    plugins::IAudio3A* create()    const override;
+};
+
+
+// ---------------------------------------------------------------------------
 // Public registration entry point (MSVC static-link workaround)
 // ---------------------------------------------------------------------------
 
 namespace detail {
-/** Defined in audio3a_plugin.cpp. Calling this ODR-uses the symbol, which
- *  forces the .obj (and its static Audio3APluginRegistrar) to be linked
- *  into any consumer that calls register_default_plugins(). */
+/** Defined in audio3a_plugin.cpp. Forces .obj linkage on consumer call. */
 void do_register_default_plugins() noexcept;
 } // namespace detail
 
@@ -173,16 +235,15 @@ void do_register_default_plugins() noexcept;
  *
  * Typical placement: main() entry, or any first call into the audio3a plugin
  * path.
+ *
+ * Registers:
+ *   - "webrtc": NullAudio3A (stub, always available)
+ *   - "webrtc_apm": WebRtcAudio3A (requires NIMRTC_VENDORED_WEBRTC_APM=ON)
+ *
+ * @note Not `inline` because the static-local latch would otherwise be
+ *       emitted as a weak external symbol that the static lib doesn't
+ *       carry; non-inline ensures the symbol is in `nimrtc_audio3a.lib`.
  */
-inline void register_default_plugins() noexcept {
-    // Latch via static-init in the body. The reference to
-    // detail::do_register_default_plugins() ensures the .obj containing
-    // the actual registration work is pulled into the link.
-    static const int once = []() {
-        detail::do_register_default_plugins();
-        return 1;
-    }();
-    (void)once;
-}
+void register_default_plugins() noexcept;
 
 } // namespace nimrtc::audio3a

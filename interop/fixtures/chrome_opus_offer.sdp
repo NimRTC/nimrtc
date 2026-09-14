@@ -1,0 +1,26 @@
+v=0
+o=- 1234567890 1234567890 IN IP4 0.0.0.0
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=msid-semantic: WMS *
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+c=IN IP4 0.0.0.0
+a=rtcp:9 IN IP4 0.0.0.0
+a=ice-ufrag=ChromeUfrag
+a=ice-pwd=ChromePassword123456789012345678
+a=ice-options:trickle
+a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66
+a=setup:actpass
+a=mid:0
+a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+a=recvonly
+a=rtcp-mux
+a=rtcp-rsize
+a=rtpmap:111 opus/48000/2
+a=fmtp:111 minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0
+a=ssrc:1000 cname:chrome-cname
+a=ssrc:1000 msid:chrome-audio audio-track
+a=ssrc:1000 mslabel:chrome-audio
+a=ssrc:1000 label:audio-track

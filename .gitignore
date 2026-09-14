@@ -1,7 +1,4 @@
 # CMake / build system
-build/
-build_*/
-build-*/
 build*/
 out/
 cmake-configure.log
@@ -19,7 +16,7 @@ CMakeUserPresets.json
 .ninja_log
 .ninja_deps
 
-# MSVC / VS
+# MSVC / VS / generic binary build artifacts
 .vs/
 *.sln
 *.vcxproj
@@ -35,21 +32,82 @@ CMakeUserPresets.json
 *.aps
 *.res
 *.tlog
-*.log
+*.bak
 *.bak
 *.exe
 *.dll
 *.lib
 *.o
 *.a
-CTestTestfile.cmake
 
-# Tooling lock / unlock helpers (development-time only)
-force_write.ps1
-write_engine.ps1
-write_via_rename.ps1
-find_lock.ps1
-delete_locked.ps1
+# ─────────────────────────────────────────────
+# Dev / tooling helpers: keep ALL under scripts/ or tools/
+# Rule: no .ps1 / .sh / .bat / .cmd / .py scripts at the project root.
+#       Put helpers in scripts/ or tools/ — they are excluded below.
+#       A pre-commit hook (scripts/check-root-clean.sh) also enforces this.
+# ─────────────────────────────────────────────
+# Block scripts only at the project root (/*. matches root, not subdirs)
+# Note: CMakeLists.txt / CMakePresets.json / .github are allow-listed
+#       by the pre-commit hook, not by gitignore.
+/*.ps1
+/*.sh
+/*.bat
+/*.cmd
+/*.py
+
+# ─────────────────────────────────────────────
+# Project root MUST stay clean (only allowed: CMake config, docs, .git metadata).
+# Block scratch logs / output captures / downloaded archives / etc. that
+# prior build/test sessions may dump at the repo root.
+# ─────────────────────────────────────────────
+# Build & configure logs at the repo root (writes are usually redirected to
+# build/ via tee, but guard against accidents).
+/build_output*.txt
+/rebuild*.txt
+/rebuild*.log
+/reconfigure*.log
+/_cmake_reconf*.log
+/final_build.log
+/full_build*.log
+/test_opus_build*.log
+/opus_build*.log
+/opus_test_build*.log
+
+# Test/script capture output at the repo root
+/_loopback*.log
+/_loopback*.err
+/_looperr.txt
+/_loopout.txt
+/_loopback_test.*
+/_server_wrap.*
+/_signaling_server.log
+/_last_*.txt
+/_last_*.log
+
+# Throwaway helper scripts at the repo root (canonical versions live in
+# scripts/ or interop/)
+/_run_server.py
+/_test_*.py
+/_test_*.ps1
+/_wait_subagents.ps1
+/_run_all_video_tests.ps1
+/_build_*.log
+/_build_*.ps1
+/_full_build.log
+/_full_build.ps1
+/_reconf*.log
+/_reconf*.ps1
+/_reconf*.bat
+/_cmake*.log
+/_cmake*.txt
+/check_encoding.ps1
+
+# Downloaded third-party archives at the repo root (already extracted into
+# build/_deps/ when needed)
+/*.zip
+/*.tar.gz
+/*.tar.bz2
+/*.tar.xz
 
 # Captured stdio / dangling test artifacts
 stderr.txt
@@ -59,6 +117,74 @@ test_offer.sdp
 mbedtls-4.2.0.tar.gz
 mbedtls-extract/
 
+# ─────────────────────────────────────────────
+# WebRTC Audio Processing (APM) — fetched at build time by
+# tools/fetch_webrtc_apm.py (not vendored into git). The build_meson/
+# tree is the meson build output (static .a archives + abseil-cpp).
+# ─────────────────────────────────────────────
+src/third_party/webrtc_audio_processing/src/
+src/third_party/webrtc_audio_processing/build_meson/
+
+# ─────────────────────────────────────────────
+# Node.js / npm dependencies & runtime artifacts
+# ─────────────────────────────────────────────
+# Never commit node_modules or npm runtime logs (wolfssl_dtls test harness,
+# any future JS tools). These get regenerated via `npm install`.
+**/node_modules/
+**/package-lock.json.bak
+
+# ─────────────────────────────────────────────
+# Backup / snapshot directories (created by editor or manual snapshots)
+# Excluded so accidentally-copied "dtls.cpp.bak"-style directories don't
+# leak into the diff. The pre-commit hook checks no .bak files at root.
+# ─────────────────────────────────────────────
+**/backup_*/
+**/.backup/
+**/*.bak
+**/*.orig
+**/*.rej
+
+# ─────────────────────────────────────────────
+# Generated DTLS test certificates (and other interop test data)
+# These are produced by interop/scripts/generate_test_cert.py and must
+# NOT be checked in: containing a real (if test-only) private key.
+# ─────────────────────────────────────────────
+interop/test_data/*.pem
+interop/test_data/*.key
+interop/test_data/*.crt
+interop/test_data/*.csr
+
+# ─────────────────────────────────────────────
+# Interop / test runtime logs (anywhere)
+# Created by signaling proxy, wolfssl_dtls server fixtures, etc.
+# Named *.err / *.log unless otherwise tracked (e.g. CHANGELOG.md).
+# ─────────────────────────────────────────────
+**/server*.log
+**/server*.err
+**/signaling*.log
+**/s.err
+**/s.log
+**/stdout.log
+**/stderr.log
+**/_proxy_*.log
+**/_*.log
+**/_*.err
+
+# ─────────────────────────────────────────────
+# wolfSSL DTLS test harness runtime artifacts
+# Created by dtls_client/dtls_server/main/minimal_test when run locally.
+# Tests themselves are committed (see the same dir for *.cpp / *.html / *.js).
+# ─────────────────────────────────────────────
+# TLS keylog (set by SSLKEYLOGFILE env var; used for Wireshark debugging)
+sslkeylog.log
+
+tests/wolfssl_dtls/*.exe
+tests/wolfssl_dtls/*.obj
+tests/wolfssl_dtls/*.txt
+tests/wolfssl_dtls/*.log
+tests/wolfssl_dtls/*.err
+tests/wolfssl_dtls/certs/
+
 # CTest scratch
 Testing/
 
@@ -67,3 +193,14 @@ Thumbs.db
 *.swp
 *~
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

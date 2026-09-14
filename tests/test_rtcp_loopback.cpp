@@ -13,6 +13,28 @@
 //   v01_sr_3rb   - SR with 3 report blocks
 //   v02_rr_1rb   - RR with 1 report block (boundary: cumulative_lost = -1)
 //   v03_nack_4   - Generic NACK with 4 FCI entries
+//
+// Windows-only: this test uses Winsock2 for the loopback socket.  The RTCP
+// round-trip itself is verified by `test_rtcp_loopback`-equivalent in-memory
+// tests on Linux via `test_rtp_test`.  See test_udp_loopback.cpp for the
+// same Windows/Linux split.
+//
+// ============================================================================
+
+#ifdef _WIN32
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <future>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
 //   v04_sr_0rb   - SR with RC=0 (minimum legal: 28 bytes)
 //   v05_nack_1   - NACK with 1 FCI entry (boundary: 16 bytes)
 //   v06_nack_32  - NACK with 32 FCI entries (large)
@@ -350,3 +372,14 @@ int main() {
                 passed, failed, passed + failed);
     return failed == 0 ? 0 : 1;
 }
+
+#else  // !_WIN32
+
+#include <cstdio>
+
+int main() {
+    std::printf("[test_rtcp_loopback] skipped on Linux (Windows-only Winsock test).\n");
+    return 0;
+}
+
+#endif  // _WIN32

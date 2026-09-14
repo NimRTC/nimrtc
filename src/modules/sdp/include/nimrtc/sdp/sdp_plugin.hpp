@@ -104,6 +104,8 @@ private:
     mutable std::string cached_session_name_;
     mutable std::vector<std::string> cached_attrs_kv_;   // serialized "k:v"
     mutable std::vector<plugins::SdpMedia> cached_medias_;
+    mutable std::vector<std::pair<std::string_view, std::string_view>>
+        cached_session_attrs_;  // mirrors last_parsed_.extra_attrs
     mutable plugins::SdpSession cached_view_;
 };
 
@@ -132,12 +134,13 @@ namespace detail {
 void do_register_default_plugins() noexcept;
 } // namespace detail
 
-inline void register_default_plugins() noexcept {
-    static const int once = []() {
-        detail::do_register_default_plugins();
-        return 1;
-    }();
-    (void)once;
-}
+/**
+ * @brief Register all built-in SDP plugins with core::PluginRegistry.
+ *
+ * @note Not `inline` because the static-local latch would otherwise be
+ *       emitted as a weak external symbol that the static lib doesn't
+ *       carry; non-inline ensures the symbol is in `nimrtc_sdp.lib`.
+ */
+void register_default_plugins() noexcept;
 
 } // namespace nimrtc::sdp

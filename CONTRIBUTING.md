@@ -33,8 +33,9 @@ cmake --preset debug
 # Build
 cmake --build --preset debug
 
-# Run tests
-ctest --preset tests
+# Run tests (substitute `tests.msvc` on Windows / MSVC)
+ctest --preset tests          # Linux/macOS
+ctest --preset tests.msvc     # Windows / MSVC
 ```
 
 ### Code formatting
@@ -69,7 +70,8 @@ find src -name '*.cpp' -o -name '*.hpp' | xargs clang-format -i
 4. **Run locally** before pushing:
    ```bash
    cmake --build --preset asan
-   ctest --preset tests
+   ctest --preset tests          # Linux/macOS
+   ctest --preset tests.msvc     # Windows / MSVC
    ```
 5. **Push** and open a Pull Request against `main`.
 6. A maintainer will review. Address feedback by amending or adding commits.

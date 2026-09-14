@@ -42,7 +42,7 @@ namespace {
 inline void append_int(std::string& out, std::uint64_t v) {
     char buf[24];
     auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v);
-    out.append(buf, ptr - buf);
+    out.append(buf, static_cast<std::size_t>(ptr - buf));
 }
 
 /** Append a single "a=<key><value>\r\n" line. The caller provides the

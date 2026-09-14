@@ -1,0 +1,84 @@
+# =============================================================================
+# Dependabot configuration for NimRTC.
+#
+# Weekly PRs for:
+#   - github-actions: pins on the GitHub Actions we use (actions/checkout@v4,
+#                     ilammy/msvc-dev-cmd@v1, actions/cache@v4,
+#                     actions/upload-artifact@v4). Lets us track upstream
+#                     security patches on runners and the MSVC dev-cmd action.
+#   - pip:           Python deps used by `interop/` (websockets) and the
+#                    e2e acceptance harness (`tools/run_e2e_acceptance.py`,
+#                    which additionally needs `playwright` at runtime but is
+#                    installed inline by interop.yml). `requirements.txt`
+#                    lives at `interop/requirements.txt`.
+#
+# The CMake build itself has no Python dependency, so by separating `pip`
+# into its own ecosystem entry we keep build-only PRs from being tagged
+# alongside Python-runtime PRs.
+# =============================================================================
+
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # GitHub Actions
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # Python (interop/requirements.txt + e2e harness)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "pip"
+    directory: "/interop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+      - "python"
+    commit-message:
+      prefix: "deps(python)"
+    groups:
+      python-interop:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/tools"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+      - "python"
+    commit-message:
+      prefix: "deps(python)"
+    # tools/ may have no requirements*.txt (most deps are pip-installed
+    # inline by CI). dependabot tolerates a missing file, but if you ever
+    # add one, this block will pick it up automatically.
+    groups:
+      python-tools:
+        patterns:
+          - "*"

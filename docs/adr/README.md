@@ -26,6 +26,7 @@ Write an ADR when a decision:
 | Number | Title | Phase |
 |--------|-------|-------|
 | [ADR-001](ADR-001-plugin-system.md) | Pluggable Module Architecture | P0 |
+| [ADR-008](ADR-008-pcm-tap.md) | PCM audio tap insertion point | P1 |
 
 ## Process
 

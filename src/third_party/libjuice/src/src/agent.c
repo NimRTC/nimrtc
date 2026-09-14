@@ -831,11 +831,24 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
 	timestamp_t now = current_timestamp();
 	*next_timestamp = now + 6000000;
 
+	// TEMP-DIAG
+	JLOG_INFO("STUN-DIAG: bookkeeping called state=%d entries_count=%d",
+	          agent->state, agent->entries_count);
+
 	if (agent->state == JUICE_STATE_DISCONNECTED || agent->state == JUICE_STATE_GATHERING)
 		return 0;
 
 	for (int i = 0; i < agent->entries_count; ++i) {
 		agent_stun_entry_t *entry = agent->entries + i;
+
+		// TEMP-DIAG
+		{
+			char record_str[ADDR_MAX_STRING_LEN];
+			addr_record_to_string(&entry->record, record_str, ADDR_MAX_STRING_LEN);
+			JLOG_INFO("STUN-DIAG: entry[%d] state=%d retransmissions=%d next_tx=%lld now=%lld",
+			          i, entry->state, entry->retransmissions,
+			          (long long)entry->next_transmission, (long long)now);
+		}
 
 		// STUN requests transmission or retransmission
 		if (entry->state == AGENT_STUN_ENTRY_STATE_PENDING) {
@@ -849,6 +862,13 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
 					JLOG_DEBUG("STUN entry %d: Sending request to %s (%d retransmission%s left)", i,
 					           record_str, entry->retransmissions,
 					           entry->retransmissions >= 2 ? "s" : "");
+				}
+				// TEMP: force INFO logging to diagnose retransmit
+				{
+					char record_str[ADDR_MAX_STRING_LEN];
+					addr_record_to_string(&entry->record, record_str, ADDR_MAX_STRING_LEN);
+					JLOG_INFO("STUN-DIAG: sending retransmit to %s (%d left)",
+					          record_str, entry->retransmissions);
 				}
 				if (entry->transaction_id_expired) {
 					juice_random(entry->transaction_id, STUN_TRANSACTION_ID_SIZE);

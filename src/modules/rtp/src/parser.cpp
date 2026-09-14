@@ -459,6 +459,7 @@ ReportBlock parse_report_block(const std::uint8_t* p) {
     return rb;
 }
 
+[[maybe_unused]]
 void serialise_report_block(std::uint8_t* p, const ReportBlock& rb) {
     write_be32(p,      rb.ssrc);
     p[4] = rb.fraction_lost;
@@ -609,6 +610,172 @@ core::Result<NackPacket> Parser::parse_nack(core::ByteSpan raw) const {
         nk.entries.push_back(e);
     }
     return core::Result<NackPacket>::ok(std::move(nk));
+}
+
+core::Result<void> Parser::parse_abs_send_time_extension(core::ByteSpan d, AbsSendTime& o) const {
+    // Per RFC 5285 one-byte-form layout, the on-wire abs-send-time element
+    // is 4 bytes total: 1 byte header (id+len nibbles) + 3 data bytes.
+    // Accept either the full 4-byte element (most common) or the raw 3-byte
+    // payload (advanced callers who already stripped the header).
+    if (d.size() == 3) {
+        o.send_time_24mhz =
+            (static_cast<std::uint32_t>(d[0]) << 16) |
+            (static_cast<std::uint32_t>(d[1]) <<  8) |
+             static_cast<std::uint32_t>(d[2]);
+        return core::Result<void>::make_ok();
+    }
+    if (d.size() == 4) {
+        // Validate the 1-byte header: local id 1 (high nibble), len = 2
+        // (low nibble = (3 bytes data) - 1).
+        const std::uint8_t hdr = d[0];
+        const std::uint8_t id  = (hdr >> 4) & 0x0Fu;
+        const std::uint8_t len =  hdr       & 0x0Fu;
+        if (id != 1 || len != 2) {
+            return core::Result<void>::fail(
+                core::ErrorCode::ProtocolError,
+                "abs-send-time header invalid: id=" + std::to_string(id) +
+                    " len=" + std::to_string(len));
+        }
+        o.send_time_24mhz =
+            (static_cast<std::uint32_t>(d[1]) << 16) |
+            (static_cast<std::uint32_t>(d[2]) <<  8) |
+             static_cast<std::uint32_t>(d[3]);
+        return core::Result<void>::make_ok();
+    }
+    return core::Result<void>::fail(
+        core::ErrorCode::ProtocolError,
+        "abs-send-time element must be 3 or 4 bytes; got " +
+            std::to_string(d.size()));
+}
+core::Result<std::size_t> Parser::build_abs_send_time_extension(AbsSendTime t, core::MutableByteSpan out) const {
+    if (out.size() < 3) return core::Result<std::size_t>::fail(core::ErrorCode::InvalidArgument, "output too small");
+    out[0]=static_cast<std::uint8_t>(t.send_time_24mhz>>16); out[1]=static_cast<std::uint8_t>(t.send_time_24mhz>>8); out[2]=static_cast<std::uint8_t>(t.send_time_24mhz); return core::Result<std::size_t>::ok(3);
+}
+
+core::Result<TransportCcFeedback> Parser::parse_transport_cc(core::ByteSpan raw) const {
+    // Header: V=2 P=0 FMT=15 PT=205 length=...
+    auto h = parse_rtcp_header(raw,
+                               static_cast<std::uint8_t>(RtcpType::RTPFB),
+                               /*min body*/ kRtcpHeaderSize + 16);
+    if (!h.ok()) {
+        return core::Result<TransportCcFeedback>::fail(h.error().code(),
+                                                      h.error().message());
+    }
+    if (h.value().rc_or_fmt != 15) {
+        return core::Result<TransportCcFeedback>::fail(
+            core::ErrorCode::ProtocolError,
+            "RTCP RTPFB FMT != 15 (transport-cc): got " +
+                std::to_string(h.value().rc_or_fmt));
+    }
+    if (raw.size() < kRtcpHeaderSize + 16) {
+        return core::Result<TransportCcFeedback>::fail(
+            core::ErrorCode::ProtocolError,
+            "RTCP transport-cc body truncated: " + std::to_string(raw.size()));
+    }
+
+    const std::uint8_t* p = raw.data();
+    TransportCcFeedback f;
+    f.sender_ssrc         = read_be32_at(p + kRtcpHeaderSize);
+    f.media_ssrc          = read_be32_at(p + kRtcpHeaderSize + 4);
+    f.base_seq            = read_be16_at(p + kRtcpHeaderSize + 8);
+    f.packet_status_count = read_be16_at(p + kRtcpHeaderSize + 10);
+    // Reference time is a 24-bit field carrying the reference time at 1 kHz
+    // tick (RFC 9143 §7.1: lower 8 bits of NTP timestamp at 1ms resolution).
+    f.reference_time_24mhz =
+        (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 12]) << 16) |
+        (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 13]) <<  8) |
+         static_cast<std::uint32_t>(p[kRtcpHeaderSize + 14]);
+
+    // Walk packet-status chunks starting after the 16-byte feedback header.
+    std::size_t off = kRtcpHeaderSize + 16;
+    f.packets.reserve(f.packet_status_count);
+
+    while (f.packets.size() < f.packet_status_count && off + 2 <= raw.size()) {
+        const std::uint16_t word = read_be16_at(p + off);
+        off += 2;
+
+        const bool T = (word & 0x8000u) != 0;
+        if (!T) {
+            // Run length chunk: T=0 — 2-bit status + 14-bit run length.
+            const auto s = static_cast<PacketStatus>((word >> 13) & 0x3u);
+            const std::size_t run = static_cast<std::size_t>(word & 0x1FFFu);
+            for (std::size_t i = 0; i < run &&
+                   f.packets.size() < f.packet_status_count; ++i) {
+                f.packets.push_back({s, 0});
+            }
+            continue;
+        }
+
+        // T=1 chunk.
+        const bool S_bit = (word & 0x4000u) != 0;   // 0=1-bit sym; 1=2-bit sym
+        const std::size_t symbol_count = static_cast<std::size_t>(word & 0x3FFFu);
+        const std::size_t sym_bits = S_bit ? 2u : 1u;
+        const std::size_t total_status_bits = symbol_count * sym_bits;
+
+        // Read the packed status list byte-by-byte.
+        std::vector<PacketStatus> symbols;
+        symbols.reserve(symbol_count);
+        std::size_t bits_read = 0;
+        while (bits_read < total_status_bits) {
+            if (off >= raw.size()) break;
+            const std::uint8_t byte = p[off++];
+            for (std::uint8_t m = 0; m < 8 && bits_read < total_status_bits;
+                 m += static_cast<std::uint8_t>(sym_bits)) {
+                std::uint8_t bits;
+                if (sym_bits == 1) {
+                    bits = (byte >> (7 - m)) & 0x1u;
+                } else {
+                    bits = (byte >> (6 - m)) & 0x3u;
+                }
+                symbols.push_back(static_cast<PacketStatus>(bits));
+                bits_read += sym_bits;
+            }
+        }
+
+        // Read deltas (only when S_bit=1): one 14-bit delta per "received"
+        // packet (status != NotReceived). NotReceived symbols carry delta=0.
+        std::vector<std::int16_t> deltas;
+        if (S_bit) {
+            deltas.reserve(symbol_count);
+            std::size_t bits_left = 0;
+            std::uint32_t acc = 0;
+            for (std::size_t i = 0; i < symbol_count; ++i) {
+                while (bits_left < 14) {
+                    if (off >= raw.size()) { off = raw.size(); break; }
+                    acc = (acc << 8) | p[off++];
+                    bits_left += 8;
+                }
+                if (bits_left < 14) {
+                    deltas.push_back(0);
+                    continue;
+                }
+                const std::uint32_t delta14 =
+                    (acc >> (bits_left - 14)) & 0x3FFFu;
+                bits_left -= 14;
+                acc &= (bits_left == 0) ? 0u
+                                        : ((1u << bits_left) - 1u);
+                if (symbols[i] == PacketStatus::NotReceived) {
+                    deltas.push_back(0);
+                } else {
+                    // Sign-extend 14-bit to 16-bit.
+                    const std::int32_t sign =
+                        (delta14 & 0x2000u)
+                            ? static_cast<std::int32_t>(delta14 | 0xFFFFC000u)
+                            : static_cast<std::int32_t>(delta14);
+                    deltas.push_back(static_cast<std::int16_t>(sign));
+                }
+            }
+        }
+
+        for (std::size_t i = 0; i < symbols.size() &&
+               f.packets.size() < f.packet_status_count; ++i) {
+            f.packets.push_back(
+                {symbols[i],
+                 S_bit ? deltas[i] : static_cast<std::int16_t>(0)});
+        }
+    }
+
+    return core::Result<TransportCcFeedback>::ok(std::move(f));
 }
 
 } // namespace nimrtc::rtp

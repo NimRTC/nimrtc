@@ -37,7 +37,7 @@ cmake_policy(SET CMP0011 NEW)
 # is deprecated and will be removed in future versions.
 cmake_policy(SET CMP0012 NEW)
 
-set(TF_PSA_CRYPTO_VERSION 1.1.0)
+set(TF_PSA_CRYPTO_VERSION 1.2.0)
 set(TF_PSA_CRYPTO_SOVERSION 2)
 
 if(TEST_CPP)
@@ -71,12 +71,12 @@ set(version_number_files
         doxygen/tfpsacrypto.doxyfile)
 foreach(file ${version_number_files})
     configure_file(${file}.in
-                   ${PROJECT_SOURCE_DIR}/${file})
+                   ${PROJECT_BINARY_DIR}/${file})
 endforeach(file)
 
 ADD_CUSTOM_TARGET(${TF_PSA_CRYPTO_TARGET_PREFIX}tfpsacrypto-apidoc
     COMMAND doxygen tfpsacrypto.doxyfile
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/doxygen)
+    WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/doxygen)
 
 option(ENABLE_PROGRAMS "Build TF-PSA-Crypto programs." ON)
 
@@ -143,7 +143,7 @@ endif()
 # We now potentially need to link all executables against PThreads, if available
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
-find_package(Threads)
+find_package(Threads QUIET)
 
 # If this is the root project add longer list of available CMAKE_BUILD_TYPE values
 if(NOT TF_PSA_CRYPTO_AS_SUBPROJECT)
@@ -152,16 +152,27 @@ if(NOT TF_PSA_CRYPTO_AS_SUBPROJECT)
         FORCE)
 endif()
 
-# Make TF_PSA_CRYPTO_CONFIG_FILE and TF_PSA_CRYPTO_USER_CONFIG_FILE into PATHs
+# Make configuration file options into PATHs
 set(TF_PSA_CRYPTO_CONFIG_FILE "" CACHE FILEPATH "TF-PSA-Crypto config file (overrides default).")
 set(TF_PSA_CRYPTO_USER_CONFIG_FILE "" CACHE FILEPATH "TF-PSA-Crypto user config file (appended to default).")
-set(TF_PSA_CRYPTO_CONFIG_NAME "" CACHE STRING "Name of the configuration to use (see config.py documentation)")
+set(TF_PSA_CRYPTO_CONFIG_BASE_FILE "" CACHE FILEPATH "TF-PSA-Crypto config to copy and optionally transform.")
+set(TF_PSA_CRYPTO_CONFIG_NAME "" CACHE STRING "Named TF-PSA-Crypto configuration (see config.py).")
+set(TF_PSA_CRYPTO_CONFIG_SET "" CACHE STRING "Options to set, separated by semicolons (OPTION or OPTION=VALUE).")
+set(TF_PSA_CRYPTO_CONFIG_UNSET "" CACHE STRING "Options to unset, separated by semicolons.")
 
-if(NOT "${TF_PSA_CRYPTO_CONFIG_NAME}" STREQUAL "")
-    if(NOT "${TF_PSA_CRYPTO_CONFIG_FILE}" STREQUAL "")
-        message(FATAL_ERROR "TF_PSA_CRYPTO_CONFIG_NAME and TF_PSA_CRYPTO_CONFIG_FILE are incompatible.")
-    endif()
-endif(NOT "${TF_PSA_CRYPTO_CONFIG_NAME}" STREQUAL "")
+if(NOT "${TF_PSA_CRYPTO_CONFIG_FILE}" STREQUAL "" AND
+   (NOT "${TF_PSA_CRYPTO_CONFIG_BASE_FILE}" STREQUAL "" OR
+    NOT "${TF_PSA_CRYPTO_CONFIG_BASE_FILE_OVERRIDE}" STREQUAL "" OR
+    NOT "${TF_PSA_CRYPTO_CONFIG_NAME}" STREQUAL "" OR
+    NOT "${TF_PSA_CRYPTO_CONFIG_SET}" STREQUAL "" OR
+    NOT "${TF_PSA_CRYPTO_CONFIG_UNSET}" STREQUAL ""))
+    message(FATAL_ERROR
+        "TF_PSA_CRYPTO_CONFIG_FILE cannot be combined with "
+        "TF_PSA_CRYPTO_CONFIG_BASE_FILE, "
+        "TF_PSA_CRYPTO_CONFIG_BASE_FILE_OVERRIDE, "
+        "TF_PSA_CRYPTO_CONFIG_NAME, TF_PSA_CRYPTO_CONFIG_SET or "
+        "TF_PSA_CRYPTO_CONFIG_UNSET.")
+endif()
 
 # Create a symbolic link from ${base_name} in the binary directory
 # to the corresponding path in the source directory.
@@ -408,6 +419,8 @@ endif()
 # drivers, that are appended in `drivers/CMakeLists.txt`.
 #
 set(TF_PSA_CRYPTO_PRIVATE_INCLUDE_DIRS
+        # psa_crypto_driver_wrappers.h is generated, so it may be in the build tree.
+        ${CMAKE_CURRENT_BINARY_DIR}/core
         ${CMAKE_CURRENT_SOURCE_DIR}/core
         ${CMAKE_CURRENT_SOURCE_DIR}/dispatch
         ${CMAKE_CURRENT_SOURCE_DIR}/extras
@@ -423,6 +436,10 @@ set(TF_PSA_CRYPTO_PRIVATE_INCLUDE_DIRS
 #
 add_subdirectory(framework)
 add_subdirectory(include)
+if(TF_PSA_CRYPTO_AS_SUBPROJECT AND TF_PSA_CRYPTO_CONFIG_TRANSFORMED)
+    set(TF_PSA_CRYPTO_CONFIG_FILE "${TF_PSA_CRYPTO_CONFIG_FILE}"
+        PARENT_SCOPE)
+endif()
 add_subdirectory(drivers)   # must precede core
 add_subdirectory(extras)
 add_subdirectory(platform)

@@ -37,6 +37,7 @@ constexpr Status kErrNotReady     = 0x1002;
 constexpr Status kErrBufferTooSmall= 0x1003;
 constexpr Status kErrCorrupt      = 0x1004;
 constexpr Status kErrUnsupported   = 0x1005;
+constexpr Status kErrHardwareError = 0x1006;  // GPU SDK / driver failure
 constexpr Status kErrInternal      = 0x1FFF;
 
 /** Human-readable status message, may be nullptr. */
@@ -48,6 +49,7 @@ inline const char* status_string(Status s) noexcept {
         case kErrBufferTooSmall:return "buffer too small";
         case kErrCorrupt:       return "corrupt data";
         case kErrUnsupported:   return "unsupported operation";
+        case kErrHardwareError: return "hardware/driver error";
         default:                return "unknown error";
     }
 }
@@ -163,6 +165,25 @@ public:
     /** Tear-down. Called when the engine stops or plugin is swapped.
      *  After close(), the plugin may be re-opened. */
     virtual void close() noexcept = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Plugin factory base (per §8.6 P1)
+// ---------------------------------------------------------------------------
+
+/** Base class for all plugin factories.
+ *  Concrete factories (e.g. IDataChannelFactory) inherit from this so
+ *  the PluginRegistry can hold heterogeneous factory types uniformly.
+ *  @note P1 scaffold — stable interface, binary layout TBD P4. */
+class IPluginFactory {
+public:
+    virtual ~IPluginFactory() = default;
+
+    /** Unique identifier, e.g. "sctp", "quic". */
+    virtual std::string_view id() const noexcept = 0;
+
+    /** Short human-readable name, e.g. "SCTP (usrsctp)". */
+    virtual std::string_view display_name() const noexcept = 0;
 };
 
 } // namespace nimrtc::plugins

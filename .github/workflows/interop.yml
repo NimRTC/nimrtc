@@ -1,0 +1,146 @@
+# =============================================================================
+# NimRTC CI — Windows MSVC only (0.9.0-rc1)
+#
+# Windows-only: requires headless Chrome via Playwright; Linux/macOS support
+# is in `ci.yml`.
+#
+# What runs:
+#   1. configure            — `cmake --preset dev.msvc`
+#   2. build                — `cmake --build`
+#   3. unit tests           — `ctest --preset tests`
+#   4. e2e acceptance       — `python tools/run_e2e_acceptance.py`
+#                             (Cases A/B/C expected PASS; Case D
+#                              EXPECTED FAIL until Chrome DTLS server
+#                              flight is fully verified — see CHANGELOG.md)
+# =============================================================================
+
+name: ci
+
+on:
+  push:
+    branches: [main, feat/**, fix/**, chore/**]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows MSVC: configure + build + unit tests
+  # ---------------------------------------------------------------------------
+  windows-build:
+    name: windows / build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      # Pre-1.0: warn-only so e2e is not blocked.
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        shell: pwsh
+        run: python tools/check_vendor.py
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --preset dev.msvc `
+            -DNIMRTC_BUILD_EXAMPLES=ON `
+            -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Debug -j
+
+      - name: Run unit tests
+        shell: pwsh
+        run: ctest --preset tests --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Windows MSVC: end-to-end acceptance (NimRTC↔NimRTC + NimRTC↔Chrome)
+  # ---------------------------------------------------------------------------
+  windows-e2e:
+    name: windows / e2e acceptance
+    runs-on: windows-2022
+    # Skip on draft PRs; full e2e is slow (~1min per case)
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        shell: pwsh
+        run: python tools/check_vendor.py
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --preset dev.msvc `
+            -DNIMRTC_BUILD_EXAMPLES=ON `
+            -DNIMRTC_BUILD_TESTS=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Debug -j
+
+      - name: Install Python deps for e2e
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install websockets playwright
+          python -m playwright install chromium
+
+      - name: Run e2e acceptance
+        id: e2e
+        shell: pwsh
+        # All four cases (A/B/C/D) are expected to PASS at HEAD now that
+        # the Case D DTLS↔Chrome alert 46 is fixed (see CHANGELOG.md
+        # "Fixed — Chrome interop: fatal alert 46"). A failure in any
+        # case therefore fails the job, instead of the prior
+        # `|| true` + step-summary workaround.
+        run: |
+          python tools/run_e2e_acceptance.py 2>&1 | Tee-Object -FilePath build/e2e/orchestrator_ci.log
+          $rc = $LASTEXITCODE
+          echo "rc=$rc" >> $env:GITHUB_OUTPUT
+          exit $rc
+
+      - name: Surface case-D status in Step Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = @"
+          ## E2E acceptance summary
+          Case A (BCrypt AES-GCM round-trip), Case B (in-process DTLS),
+          Case C (NimRTC↔NimRTC loopback), and Case D (NimRTC↔real Chrome
+          DTLS handshake) are all expected to PASS. The Case D
+          certificate_unknown alert that blocked 0.9.0-rc1 is fixed
+          (see CHANGELOG.md "Fixed — Chrome interop: fatal alert 46").
+          "@
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: Upload e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ github.run_id }}
+          path: build/e2e/
+          retention-days: 14

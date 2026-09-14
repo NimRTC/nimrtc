@@ -1,0 +1,47 @@
+---
+description: Keep project root free of build/test artifacts and temp scripts
+alwaysApply: true
+---
+
+# Project Root Cleanliness
+
+The project root (`/`) must stay clean. Do not create any temporary files at the project root.
+
+## Allowed at root
+
+Only these file types are allowed at the project root:
+
+- CMake config files: `CMakeLists.txt`, `CMakePresets.json`, `CMakeUserPresets.json`
+- Markdown docs: `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`
+- Config files: `.gitignore`, `.gitattributes`, `.clang-format`, `.editorconfig`, `CODEOWNERS`, `LICENSE`, `NOTICE`
+- Git metadata: `.git/` directory
+
+## Forbidden at root
+
+Do NOT create any of the following at the project root:
+
+- **Scripts**: `*.ps1`, `*.py`, `*.sh`, `*.bat`, `*.cmd` — put them in `scripts/` or `tools/`
+- **Build output logs**: `build_output.txt`, `rebuild*.txt`, `rebuild*.log`, `reconfigure*.log`, `test_opus_build*.log`, `opus_build*.log`, `_cmake_reconf.log`
+- **Test output**: `_loopback*.log`, `_loopback*.err`, `_looperr.txt`, `_loopout.txt`, `_loopback_test.*`
+- **Server/test scripts**: `_run_server.py`, `_test_*.py`, `_test_*.ps1`, `_server_wrap.*`, `check_encoding.ps1`
+- **Signaling logs**: `_signaling_server.log`
+- **Captured stdio**: `stdout.txt`, `stderr.txt`
+- **Downloaded archives**: `*.tar.gz`, `*.zip` (already downloaded third-party sources)
+
+## Redirect output
+
+When capturing build/test output, write to the `build/` directory or a subdirectory:
+
+```
+# Good
+... > build/output.txt
+... | tee build/rebuild1.txt
+
+# Bad
+... > build_output.txt
+... | tee rebuild1.txt
+```
+
+## Why this matters
+
+The `.gitignore` blocks these files from version control, but they still pollute the local working tree. Enforcing this rule keeps the project root clean and discoverable for all contributors.

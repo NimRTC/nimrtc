@@ -1,0 +1,100 @@
+{
+  // ==========================================================================
+  // profiles/call.json — 1:1 bidirectional voice/video call profile
+  // ==========================================================================
+  //
+  // Use case: standard interactive phone call between two participants.
+  //
+  // Design rationale (see §2.6 Profile Table):
+  //   - jitter_buffer.mode = "low_latency": minimises mouth-to-ear delay.
+  //   - audio3a_name = "webrtc": enables AEC / ANR / AGC for clean audio.
+  //   - bwe = "aimd": TCP-friendly congestion control; well-understood.
+  //   - timeline_enabled = false: no frame-level timestamps (reduces overhead).
+  //   - datachannel_enabled = false: not needed for standard VoIP call.
+  //
+  // Override tips:
+  //   - Increase audio_channels to 2 for stereo calls.
+  //   - Increase bwe.initial_bitrate_bps for video-heavy calls.
+  //   - Switch jitter_buffer.mode to "live" on high-jitter networks.
+  // ==========================================================================
+
+  "name": "call",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  // Transport: ICE (STUN/TURN); may be "udp" in lab environments.
+  "transport_name": "ice",
+  // SDP parser: WebRTC-compatible SDP generation / parsing.
+  "sdp_name": "webrtc",
+  // RTP stack: WebRTC-compatible (with extensions: abs-send-time, transport-cc).
+  "rtp_name": "webrtc",
+  // JitterBuffer: "adaptive" = adaptive depth to track network jitter.
+  "jb_name": "adaptive",
+  // Audio 3A: "webrtc_apm" = real WebRTC Audio Processing Module (AEC / ANS / AGC / VAD). "" = disable.
+  "audio3a_name": "webrtc_apm",
+  // Audio codec: "opus" is the primary; "pcmu"/"pcma" for legacy interop.
+  "codec_name": "opus",
+  // Bandwidth estimator: "aimd" (P1); "googcc" (P3).
+  "bwe_name": "aimd",
+  // Packet scheduler: "default" uses priority queuing based on payload type.
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Enable per-frame timeline instrumentation (for latency profiling).
+  // Set to true for agent/teleop scenarios; false for production call to save CPU.
+  "timeline_enabled": false,
+  // Enable WebRTC DataChannel for out-of-band data (chat, file transfer).
+  "datachannel_enabled": false,
+
+  // ---- Audio format --------------------------------------------------------
+  // Sample rate in Hz. 48000 = standard WebRTC audio path.
+  "audio_sample_rate_hz": 48000,
+  // 1 = mono (recommended for voice); 2 = stereo.
+  "audio_channels": 1,
+  // RTP payload type for Opus. RFC 5761 assigns 111 for Opus in RTP/SAVPF.
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  "bwe": {
+    // Implementation: "aimd" (P1), "googcc" (P3 planned).
+    "impl": "aimd",
+    // Initial target bitrate in bits per second. 1 Mbps = ~100 kbps audio + video.
+    "initial_bitrate_bps": 1000000,
+    // Maximum bitrate ceiling. Increase for high-quality 1080p video calls.
+    "max_bitrate_bps": 10000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  "jitter_buffer": {
+    // Implementation: "adaptive" (P1). Future: "fixed" (no adaptation).
+    "impl": "adaptive",
+    // Buffer mode:
+    //   "low_latency"   — minimum delay; best for interactive call (default here).
+    //   "live"          — higher depth; good for CDN push / live streaming.
+    //   "interactive"   — maximum robustness; for very hostile networks.
+    "mode": "low_latency",
+    // Initial buffer depth in milliseconds. Lower = less latency, more artefacts.
+    "initial_delay_ms": 40,
+    // Minimum buffer depth (lower bound). JitterBuffer may shrink below this if
+    // the network is stable, but will not stay below this for long.
+    "min_delay_ms": 10,
+    // Maximum buffer depth (upper bound). JitterBuffer will never exceed this
+    // even on very bursty connections, at the cost of higher latency.
+    "max_delay_ms": 200
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  "scheduler": {
+    // Enable the priority scheduler. When false, packets are sent FIFO.
+    "enabled": true,
+    // Scheduling strategy:
+    //   "strict_priority" — high-priority packets always preempt low-priority.
+    //   "weighted_fair"   — weighted fair queuing across priority bands.
+    //   "fixed_rate"      — fixed bandwidth reservation per priority band.
+    "strategy": "strict_priority",
+    // Per-priority-band weight (used when strategy = "weighted_fair").
+    "control_weight": 10,      // RTCP / STUN / signaling: highest priority.
+    "audio_weight": 8,         // Audio frames: second priority.
+    "video_weight": 4,          // Video frames: third priority.
+    "best_effort_weight": 1    // Background / bulk data: lowest priority.
+  }
+}

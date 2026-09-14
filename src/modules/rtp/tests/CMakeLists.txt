@@ -5,3 +5,6 @@
 # =============================================================================
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_rtp.cpp
     DEPS nimrtc::rtp)
+
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_transport_cc.cpp
+    DEPS nimrtc::rtp)

@@ -81,6 +81,15 @@ using RecvCallback = std::function<void(BufferView)>;
 /** Notifies the engine of an asynchronous error. */
 using ErrorCallback = std::function<void(Status err, std::string_view msg)>;
 
+/** Notifies the engine that ICE consent freshness (RFC 7675 / RFC 8445 §10)
+ *  has been lost — i.e. no STUN Binding request received from the peer
+ *  within the configured timeout window.
+ *
+ *  Fired exactly once per loss event by transports that implement consent
+ *  tracking. After firing, the tracker is automatically rearmed; the
+ *  callback may fire again on a subsequent loss event. */
+using OnConsentLost = std::function<void()>;
+
 // ---------------------------------------------------------------------------
 // ITransport
 // ---------------------------------------------------------------------------
@@ -109,6 +118,19 @@ public:
 
     /** Returns the resolved remote address, or empty. */
     virtual Addr remote_addr() const noexcept = 0;
+
+    /** Register a one-shot callback fired when ICE consent freshness is lost
+     *  (RFC 7675 / RFC 8445 §10). After firing, the tracker is automatically
+     *  rearmed and the callback may fire again on a subsequent loss event.
+     *
+     *  The default implementation is a no-op — transports without consent
+     *  tracking (e.g. raw UDP, in-process pipes) don't have to do anything.
+     *  ICE-backed transports override this.
+     *
+     *  Passing a null callback clears the previously-registered one.
+     *  @note Thread-safe; the callback fires on the transport's background
+     *        thread — implementers must be thread-safe with respect to it. */
+    virtual void set_on_consent_lost(OnConsentLost cb) noexcept { (void)cb; }
 };
 
 // ---------------------------------------------------------------------------

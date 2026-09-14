@@ -11,26 +11,28 @@
 //   v03_with_ext_one  - RFC 5285 one-byte extension (2 elements)
 //   v04_with_pad      - padding flag + 4-byte padded payload
 //   v05_with_marker   - marker bit set
+//
+// Windows-only: this test uses Winsock2 for the loopback socket. On Linux
+// the Win32-specific WindowsSocket wrappers are replaced with an empty
+// test placeholder; the RTP round-trip itself is covered by test_rtp_test.
 // ============================================================================
 
+#ifdef _WIN32
+
 #include <atomic>
-#include <chrono>
-#include <cstdio>
+#include <string>
+#include <cstddef>
 #include <cstring>
+#include <chrono>
 #include <future>
 #include <mutex>
-#include <string>
 #include <thread>
-#include <vector>
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
 
 #include <nimrtc/core/bytes.hpp>
-#include <nimrtc/core/error.hpp>
 #include <nimrtc/rtp/packet.hpp>
-
-#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -328,3 +330,17 @@ int main() {
                 passed, failed, passed + failed);
     return failed == 0 ? 0 : 1;
 }
+
+#else  // !_WIN32
+
+#include <cstdio>
+
+// Windows-only test stub.  On Linux the RTP packet round-trip is verified
+// by `test_rtp_test` using in-memory buffer views, which provides the
+// same byte-level coverage without requiring OS-level socket plumbing.
+int main() {
+    std::printf("[test_udp_loopback] skipped on Linux (Windows-only Winsock test).\n");
+    return 0;
+}
+
+#endif  // _WIN32

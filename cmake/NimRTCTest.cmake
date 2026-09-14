@@ -25,14 +25,14 @@ find_package(GTest QUIET)
 
 if(NOT GTEST_FOUND)
     if(NIMRTC_FETCH_GTEST)
-        message(STATUS "GoogleTest not found locally — fetching via FetchContent")
-        include(FetchContent)
-        FetchContent_Declare(
-            googletest
-            GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
-            GIT_TAG        release-1.12.1)
+        message(STATUS "GoogleTest not found locally — using vendored copy at src/third_party/googletest")
+        # Upstream googletest CMakeLists exposes these options; we disable
+        # BUILD_GMOCK because tests/ do not use MOCK_METHOD (verified 2026-09-05).
+        # Users who want googlemock can re-enable it via -DBUILD_GMOCK=ON.
+        set(BUILD_GMOCK OFF CACHE BOOL "Build GoogleMock as part of vendored googletest" FORCE)
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-        FetchContent_MakeAvailable(googletest)
+        add_subdirectory(src/third_party/googletest)
     else()
         message(FATAL_ERROR
             "GoogleTest not found. Either:\n"
@@ -43,8 +43,42 @@ if(NOT GTEST_FOUND)
 endif()
 
 # -----------------------------------------------------------------------------
+# WolfSSL test certificates
+#
+# DTLS tests need server-ecc.pem and ecc-key.pem at runtime. The search paths
+# in dtls_wolfssl_session.cpp are relative to the CWD when the test runs, which
+# is the test output directory.  This helper appends a POST_BUILD custom command
+# to the given test target that copies the two cert files from the wolfssl source
+# tree into the test's output directory at build time.
+# Call it from any test function that links nimrtc::dtls.
+# -----------------------------------------------------------------------------
+set(_nimrtc_wolfssl_cert_dir
+    "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs")
+
+function(nimrtc_copy_wolfssl_certs target)
+    # Guard against double-call (this file may be included multiple times across
+    # different test subdirectory includes).
+    if(TARGET _nimrtc_cert_copier_${target})
+        return()
+    endif()
+    # POST_BUILD copies the two wolfssl certs into <target-dir>/certs/ at build time.
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${target}>/certs"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/server-ecc.pem"
+            "$<TARGET_FILE_DIR:${target}>/certs/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/ecc-key.pem"
+            "$<TARGET_FILE_DIR:${target}>/certs/"
+        COMMENT "Copy wolfssl certs to test output directory"
+        VERBATIM)
+endfunction()
+
+# -----------------------------------------------------------------------------
 # Standardised test target
 # -----------------------------------------------------------------------------
+
 function(nimrtc_add_test source)
     # Args after source are additional sources / dep targets
     set(multi_value_args DEPS)
@@ -61,6 +95,9 @@ function(nimrtc_add_test source)
     get_filename_component(src_name ${source} NAME_WLE)
     string(REPLACE "/tests/" "_test_" test_name ${src_dir})
     string(REPLACE "/" "_" test_name ${test_name})
+    # Append the source filename (without .cpp) to ensure unique test names
+    # when multiple test files live in the same directory.
+    set(test_name "${test_name}_${src_name}")
     set(test_target "${src_name}_test")
 
     # -------------------------------------------------------------------------
@@ -102,12 +139,27 @@ function(nimrtc_add_test source)
         # parent = .../src/modules/<name>
         get_filename_component(module_root "${src_dir}" DIRECTORY)
         list(APPEND test_includes "${module_root}/include")
+        get_filename_component(module_name "${module_root}" NAME)
     endif()
 
     target_include_directories(${test_target} PRIVATE ${test_includes})
 
-    add_test(NAME ${test_name} COMMAND ${test_target})
-    set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+    if(DEFINED module_name)
+        # Module-level test.  Use $<TARGET_FILE> directly — it resolves to
+        # `tests/<target>` on single-config (Linux Makefile) and
+        # `tests/<CONFIG>/<target>.exe` on multi-config (Windows MSVC).
+        # Earlier revisions prefixed "Debug/" via gen-expr, which doubled
+        # the path under MSVC ($<TARGET_FILE> already includes the config
+        # subdir) and made every wrapper test resolve to NOT_AVAILABLE.
+        # Rely on `-C <config>` being passed to ctest (the standard CMake
+        # convention) for multi-config builds.
+        add_test(NAME ${test_name}
+            COMMAND $<TARGET_FILE:${test_target}>)
+    else()
+        # Top-level test — same convention.
+        add_test(NAME ${test_name}
+            COMMAND $<TARGET_FILE:${test_target}>)
+    endif()
 
     # gtest_discover_tests where supported
     if(COMMAND gtest_discover_tests)

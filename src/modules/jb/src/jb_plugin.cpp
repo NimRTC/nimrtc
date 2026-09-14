@@ -196,9 +196,8 @@ plugins::IJB::Stats PluginAdapter::stats() const noexcept {
     return s;
 }
 
-int PluginAdapter::estimated_delay_ms(plugins::TimestampUs now_us) const noexcept {
+int PluginAdapter::estimated_delay_ms(plugins::TimestampUs /*now_us*/) const noexcept {
     if (!concrete_) return 0;
-    auto now = us_to_time_point(now_us);
     return static_cast<int>(concrete_->stats().current_delay.count());
 }
 
@@ -243,5 +242,15 @@ void do_register_default_plugins() noexcept {
 }
 
 } // namespace detail
+
+// Non-inline (declared in jb_plugin.hpp) so the symbol is guaranteed
+// in nimrtc_jb.lib for consumers that link via static lib + PluginRegistry.
+void register_default_plugins() noexcept {
+    static const int once = []() {
+        detail::do_register_default_plugins();
+        return 1;
+    }();
+    (void)once;
+}
 
 } // namespace nimrtc::jb

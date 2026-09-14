@@ -206,6 +206,20 @@ PluginAdapter::parse(std::string_view sdp_text,
     cached_view_.session_info = last_parsed_.session_info;
     cached_view_.uri          = last_parsed_.uri;
     cached_view_.medias       = cached_medias_;
+    // Surface session-level a=ice-ufrag / a=ice-pwd / a=ice-options / etc. so
+    // BUNDLE-style SDPs (where ICE credentials live at the session level, not
+    // per-media) remain readable.  The Parser already populates
+    // last_parsed_.extra_attrs for these — we just need to keep the views alive.
+    cached_session_attrs_.clear();
+    cached_session_attrs_.reserve(last_parsed_.extra_attrs.size());
+    for (const auto& kv : last_parsed_.extra_attrs) {
+        cached_attrs_kv_.emplace_back(kv.first);
+        cached_attrs_kv_.emplace_back(kv.second);
+        cached_session_attrs_.emplace_back(
+            cached_attrs_kv_[cached_attrs_kv_.size() - 2],
+            cached_attrs_kv_[cached_attrs_kv_.size() - 1]);
+    }
+    cached_view_.session_attrs = cached_session_attrs_;
     return cached_view_;
 }
 
@@ -314,5 +328,15 @@ void do_register_default_plugins() noexcept {
 }
 
 } // namespace detail
+
+// Non-inline (declared in sdp_plugin.hpp) so the symbol is guaranteed
+// in nimrtc_sdp.lib for consumers that link via static lib + PluginRegistry.
+void register_default_plugins() noexcept {
+    static const int once = []() {
+        detail::do_register_default_plugins();
+        return 1;
+    }();
+    (void)once;
+}
 
 } // namespace nimrtc::sdp

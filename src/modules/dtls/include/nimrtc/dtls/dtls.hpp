@@ -166,7 +166,8 @@ struct SrtpKeyingMaterial {
 struct Fingerprint {
     std::string algorithm;     // "sha-256"
     std::vector<std::uint8_t> bytes;     // raw hash
-    std::string base64;        // SDP-ready
+    std::string base64;        // base64-encoded (kept for legacy/debug; NOT for SDP)
+    std::string hex_colon;     // colon-separated UPPER hex per RFC 8122 (SDP form)
 };
 
 // -----------------------------------------------------------------------------
@@ -194,9 +195,19 @@ struct Config {
 };
 
 // -----------------------------------------------------------------------------
-// DtlsSession — one peer connection
+// DtlsSession — one peer connection.
+//
+// As of the Linux-adaptation refactor, the only DtlsSession implementation
+// is `DtlsSessionWolfSSL` (defined in dtls_wolfssl_session.hpp).  We still
+// expose `class DtlsSession` here so that downstream code (engine.cpp,
+// tests) can keep referring to `nimrtc::dtls::DtlsSession` uniformly.
+// `DtlsSession` is implemented as a thin wrapper around
+// `DtlsSessionWolfSSL` via delegation (see dtls_wolfssl_session.cpp for
+// the out-of-line definitions).
+//
+// The hand-written DTLS state machine (the original `dtls.cpp`) was
+// removed; the only DTLS provider now is wolfSSL.
 // -----------------------------------------------------------------------------
-
 class DtlsSession {
 public:
     explicit DtlsSession(Config config);
@@ -227,13 +238,36 @@ public:
     /** Drain handshake-generated outbound records. */
     std::vector<DtlsRecord> take_outbound() noexcept;
 
+    /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).  Call from the
+     *  engine tick loop at ~50 ms cadence while the handshake has not
+     *  yet completed.  Safe no-op once state() is Connected/Failed/Closed. */
+    void tick() noexcept;
+
     // ---- Status -----------------------------------------------------------
 
     DtlsState state() const noexcept;
     bool is_connected() const noexcept;
 
+    /** Human-readable name for a DtlsState enum value (for tracing). */
+    static const char* state_name(DtlsState s) noexcept;
+
     /** Local certificate fingerprint (advertised in SDP).  Valid after open(). */
     const Fingerprint& local_fingerprint() const noexcept;
+
+    /** Update the SDP-pinned peer fingerprint without recreating the local
+     *  certificate/keypair.  Safe to call any time before the handshake
+     *  completes.  Required because the engine learns the remote fingerprint
+     *  AFTER its own SDP has already advertised the local fingerprint —
+     *  recreating the session here would change the advertised fingerprint
+     *  and break the handshake. */
+    void set_peer_fingerprint(std::string algo,
+                              std::vector<std::uint8_t> value) noexcept;
+
+    /** Update the DTLS role without recreating the local certificate/keypair.
+     *  When transitioning Server -> Client, the state machine also generates
+     *  and enqueues an initial ClientHello.  Safe to call any time before
+     *  the handshake completes. */
+    void set_role(DtlsRole r) noexcept;
 
     /** SRTP keying material — available once state() == Connected. */
     std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
@@ -252,6 +286,10 @@ public:
     Stats stats() const noexcept;
 
 private:
+    /** Holds the actual wolfSSL-backed implementation (DtlsSessionWolfSSL).
+     *  We use a pImpl idiom so that callers (engine.cpp) only need the
+     *  forward declarations of DtlsSession + DtlsSessionWolfSSL — the
+     *  wolfSSL headers never leak through this public header. */
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

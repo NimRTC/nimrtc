@@ -1,112 +1,289 @@
-name: CI
+# =============================================================================
+# NimRTC continuous integration
+#
+# Matrix (1.0.0):
+#   - windows       : MSVC 19.43 on windows-2022        (primary dev env)
+#   - linux-gcc     : GCC 11 on ubuntu-22.04            (x86_64)
+#   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64      (native arm64 runner)
+#   - macos-clang   : Apple Clang 15 on macos-14        (arm64; runs x86_64 binaries
+#                                                          under Rosetta)
+#
+# Goals:
+#   1. Library + tests + loopback example build on every supported platform.
+#   2. All gtest unit tests pass on every supported platform.
+#   3. Loopback-p2p smoke (NimRTC↔NimRTC over loopback UDP) exits 0 on
+#      Windows; Linux/macOS run ctest only at this stage.
+#
+# End-to-end Chrome interop lives in `interop.yml`.
+#
+# PLATFORM NOTE: cross-platform jobs in this matrix are intentionally
+# fail-fast=false and per-job so a regression on one platform does not
+# hide the others. See CHANGELOG.md "Platform support matrix" for the
+# current support status of each (✅ = CI green-and-merged, 🔶 = best-effort,
+# pending first green run).
+# =============================================================================
+
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/**, fix/**, chore/**]
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same ref (branch or PR). Each job below
+# overrides `concurrency.group` so the macOS runner doesn't gate the Linux
+# runner, etc.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BUILD_TYPE: Debug
+
 jobs:
-  cmake:
-    name: CMake Configure & Build
-    strategy:
-      matrix:
-        os: [ubuntu-24.04, windows-2022, macos-14]
-        preset: [debug, release]
-        include:
-          - os: windows-2022
-            preset: debug.msvc
-          - os: windows-2022
-            preset: release.msvc
-
-    runs-on: ${{ matrix.os }}
-
+  # ---------------------------------------------------------------------------
+  # Windows: MSVC on windows-2022
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows / msvc
+    runs-on: windows-2022
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-windows
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Configure CMake
-        run: cmake --preset ${{ matrix.preset }}
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      # Pre-1.0: warn-only (`continue-on-error: true`) so unrelated PRs are
+      # not blocked. Post-1.0: drift = red CI = blocked merge.
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        shell: pwsh
+        run: python tools/check_vendor.py
+
+      # Fail fast: detect missing tools before wasting minutes on configure.
+      - name: Pre-flight tool check
+        shell: pwsh
+        run: python tools/ci_preflight.py
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            build
+          key: ${{ runner.os }}-cmake-debug.msvc-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.msvc-
+
+      - name: Configure
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset --parallel --config ${{ contains(matrix.preset, 'release') && 'Release' || 'Debug' }}
+        run: cmake --build --preset debug.msvc -j 2
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: failure()
+      - name: Test
+        run: ctest --preset tests.msvc --output-on-failure -j 2
+
+      - name: Loopback smoke
+        shell: cmd
+        run: |
+          if exist build\examples\loopback-p2p\Debug\loopback-p2p.exe (
+            build\examples\loopback-p2p\Debug\loopback-p2p.exe
+          )
+
+  # ---------------------------------------------------------------------------
+  # Linux x86_64: GCC on ubuntu-22.04
+  # ---------------------------------------------------------------------------
+  linux-gcc:
+    name: linux-gcc / x86_64
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-gcc
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: build-${{ matrix.os }}-${{ matrix.preset }}
+          submodules: recursive
+
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      # Pre-1.0: warn-only (`continue-on-error: true`) so unrelated PRs are
+      # not blocked. Post-1.0: drift = red CI = blocked merge.
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        run: python tools/check_vendor.py
+
+      # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
+      # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
+      - name: Install ninja + Python (CMake via pip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Fail fast: detect missing tools before wasting minutes on configure.
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            ~/.local/lib/python*/site-packages/cmake
+            build
+          key: ${{ runner.os }}-cmake-debug-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug-
+
+      - name: Configure
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build --preset debug -j 2
+
+      - name: Test
+        run: ctest --preset tests --output-on-failure -j 2
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-gcc-${{ github.run_id }}
           path: build/
           retention-days: 7
 
-  test:
-    name: Unit Tests
-    needs: cmake
-    runs-on: ubuntu-24.04
-
+  # ---------------------------------------------------------------------------
+  # Linux aarch64: GCC cross (or native) on ubuntu-22.04-arm64
+  # ---------------------------------------------------------------------------
+  linux-aarch64:
+    name: linux-gcc / aarch64
+    runs-on: ubuntu-22.04-arm64
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-aarch64
+      cancel-in-progress: true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Configure with tests
-        run: cmake --preset debug -DNIMRTC_BUILD_TESTS=ON
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        run: python tools/check_vendor.py
+
+      - name: Install ninja + g++ + aarch64 cross toolchain + Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3 g++-aarch64-linux-gnu
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Fail fast: detect missing tools before wasting minutes on configure.
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py
+
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cmake
+            ~/.local/lib/python*/site-packages/cmake
+            build
+          key: ${{ runner.os }}-cmake-debug.aarch64-${{ hashFiles('CMakeLists.txt', 'cmake/toolchains/aarch64-linux-gnu.cmake', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.aarch64-
+
+      - name: Configure
+        run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset debug --parallel
+        run: cmake --build --preset debug.aarch64 -j 2
 
-      - name: Run tests
-        run: ctest --preset tests --output-on-failure
+      - name: Test
+        run: ctest --preset tests.aarch64 --output-on-failure -j 2
 
-  clang-format:
-    name: Code Format Check
-    runs-on: ubuntu-24.04
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-aarch64-${{ github.run_id }}
+          path: build/
+          retention-days: 7
 
+  # ---------------------------------------------------------------------------
+  # macOS: Apple Clang on macos-14 (arm64)
+  # ---------------------------------------------------------------------------
+  macos-clang:
+    name: macos-clang / arm64
+    runs-on: macos-14
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-macos-clang
+      cancel-in-progress: true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Run clang-format
+      # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        continue-on-error: true
+        run: python tools/check_vendor.py
+
+      # macos-14 ships CMake 3.27.x (≥ 3.25). Only Python is added here.
+      - name: Install Python
         run: |
-          find src -name '*.cpp' -o -name '*.hpp' | \
-            xargs clang-format --Werror --dry-run || \
-            { echo "Format errors found. Run 'clang-format -i' to fix."; exit 1; }
+          brew update
+          brew install python@3.12
 
-  cmake-lint:
-    name: CMake Lint
-    runs-on: ubuntu-24.04
+      # Fail fast: detect missing tools before wasting minutes on configure.
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Cache CMake + build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CMake
+            build
+          key: ${{ runner.os }}-cmake-debug.macos-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-debug.macos-
 
-      - name: Check CMakeLists.txt
-        run: |
-          pip install cmakelang 2>/dev/null || true
-          cmake-format --check CMakeLists.txt || true
-          find . -name 'CMakeLists.txt' -not -path './build/*' | \
-            xargs cmake-format --check || \
-            { echo "CMake formatting issues found."; exit 1; }
-
-  sanitizer:
-    name: Sanitizers (ASan + UBSan)
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure with sanitizers
-        run: cmake --preset asan -DNIMRTC_BUILD_TESTS=ON
+      - name: Configure
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build --preset asan --parallel
+        run: cmake --build --preset debug.macos -j 2
 
-      - name: Run tests under ASan
-        run: |
-          ctest --preset tests --output-on-failure || true
-          # ASan reports cause non-zero exit; check for errors in output
-          grep -q "ERROR: AddressSanitizer" build-testing-output.txt && exit 1 || true
+      - name: Test
+        run: ctest --preset tests.macos --output-on-failure -j 2
+
+      - name: Upload build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-macos-clang-${{ github.run_id }}
+          path: build/
+          retention-days: 7

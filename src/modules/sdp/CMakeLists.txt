@@ -20,6 +20,14 @@ add_library(nimrtc_sdp STATIC
     )
 
 nimrtc_apply_options(nimrtc_sdp)
+
+# The SDP module passes RFC-specified integer fields (version, ttl, id, …)
+# as uint64_t to its formatting helpers.  Converting a small positive int
+# to uint64_t is safe and intentional — suppress the resulting
+# -Wsign-conversion noise for this module only.
+if(NOT MSVC)
+    target_compile_options(nimrtc_sdp PRIVATE -Wno-sign-conversion)
+endif()
 target_link_libraries(nimrtc_sdp
     PUBLIC
         nimrtc::core

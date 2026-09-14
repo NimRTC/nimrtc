@@ -44,15 +44,46 @@ project context, see [`README.md`](README.md) and
 
 ```
 src/
-├── core/         ← Header-only foundation types (time / error / buffer)
-├── plugins/      ← Header-only plugin interfaces (ITransport, IRTP, ISDP, IJB, IAudio3A)
+├── core/         ← Header-only foundation types (time / error / buffer /
+│                   PluginRegistry singleton — Layout Invariant 6)
+├── plugins/      ← Header-only plugin interfaces (ITransport, IRTP, ISDP, IJB,
+│                   IAudio3A, ICodec, IVideo*, IICETransport, hw_seam, …)
 ├── modules/      ← Concrete implementations (each = cmake + include + src + tests)
 │   ├── rtp/
 │   ├── sdp/
-│   └── jb/
-├── engine/       ← NimRTCEngine (wires plugins together)
-└── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus
+│   ├── jb/
+│   ├── bwe/
+│   ├── dtls/
+│   ├── srtp/
+│   ├── ice/
+│   ├── opus/
+│   ├── audio3a/
+│   ├── video_frame/
+│   ├── video_payload/
+│   ├── video_jb/
+│   ├── video_sink/
+│   ├── video_source/
+│   ├── video_pipeline/
+│   ├── … (see src/modules/CMakeLists.txt for the full list)
+├── engine/       ← NimRTCEngine (wires plugins together; composition layer
+│                   only — no concrete module headers in its public API,
+│                   see Layout Invariant 4)
+├── log/          ← Logger / Sink implementation (nimrtc_log STATIC — the only
+│                   compiled module in src/ besides the engine itself)
+└── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus, libjuice
+                    + special-purpose helpers (googletest, nlohmann_json)
 ```
+
+### `src/third_party/` layout
+
+The third-party tree mixes upstream C libraries (cryptography, media) and
+two helper categories. Each is a leaf CMake subdirectory:
+
+| Subdir | Type | Wired by | Notes |
+|--------|------|----------|-------|
+| `mbedtls/`, `libsrtp/`, `libopus/`, `libjuice/` | Upstream crypto/media libraries | `NIMRTC_VENDORED=ON` (default) | Compiled into NimRTC; `NIMRTC_VENDORED` must remain `ON` in our releases (Layout Invariant 5) |
+| `googletest/` | Test framework | `NIMRTC_BUILD_TESTS=ON` | Vendored to keep CI offline; see `cmake/NimRTCTest.cmake` |
+| `nlohmann_json/` | JSON helper (single-header) | `NIMRTC_MODULE_ASSEMBLY=ON` | Vendored as an INTERFACE library so the assembly module's profile-loading can run fully offline |
 
 ### Docs layout (`docs/`)
 
@@ -99,22 +130,29 @@ See [`docs/adr/ADR-001-plugin-system.md`](docs/adr/ADR-001-plugin-system.md) for
    declare cross-module PUBLIC deps only via documented headers in another
    module's `include/`. No reaching into another module's `src/`.
 
-4. **`src/engine/` wires plugins together.** Applications link `nimrtc::engine`, not individual modules.
+4. **`src/engine/` wires plugins together.** Applications link `nimrtc::engine`,
+   not individual modules. The engine's public header (`engine.hpp`)
+   deliberately does **not** include any concrete module header — all
+   concrete state lives in a PIMPL `Impl` defined inside `engine.cpp`.
+   Consumers who need concrete types (e.g. `nimrtc::dtls::DtlsSession`)
+   include those headers themselves; they aren't dragged in transitively.
 
 5. **`src/third_party/` is the only place vendor code lives.** Nothing may
    link system-installed crypto / DTLS / SRTP libraries — `NIMRTC_VENDORED`
    must always remain `ON` in our releases.
 
-4. **`docs/api/`, `docs/adr/`, and `examples/` are gated by CMake options**, so
+6. **`docs/api/`, `docs/adr/`, and `examples/` are gated by CMake options**, so
    a vanilla `cmake -B build -DNIMRTC_BUILD_TESTS=OFF` produces a clean
    core/modules build with no optional dependencies.
 
-5. **`cmake/` is a tool layer, not part of `src/`**. It lives at the project
+7. **`cmake/` is a tool layer, not part of `src/`**. It lives at the project
    root alongside `CMakeLists.txt` because it is required to configure the build
    before any `src/` content is compiled.
 
-6. **No header in any module exports a global mutable state.** Singletons
-   (Logger, config registries) live under `nimrtc::core::` only.
+8. **No header in any module exports a global mutable state.** Singletons
+   (Logger, PluginRegistry, config registries) live under `nimrtc::core::` only.
+   A back-compat shim in `plugins/registry.hpp` re-exports
+   `core::PluginRegistry` so older call sites continue to work.
 
 ---
 

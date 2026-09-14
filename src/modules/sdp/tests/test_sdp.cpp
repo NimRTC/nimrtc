@@ -464,4 +464,68 @@ TEST(SdpRoundTrip, WebRtcOfferPreservesBundleAndMids) {
     EXPECT_EQ(sdp2.msids[1].track_id,  "");
 }
 
+// -----------------------------------------------------------------------------
+// Debug: parse a real Chrome offer SDP (test_chrome_opus.html with recvonly
+// audio transceiver).  This test prints diagnostic info so we can see whether
+// the parser extracts media-level ICE creds, candidates, DTLS fingerprint, etc.
+// -----------------------------------------------------------------------------
+TEST(SdpDebug, ChromeOffer) {
+    const char* chrome_offer =
+        "v=0\r\n"
+        "o=- 8388600061881731281 2 IN IP4 127.0.0.1\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "a=group:BUNDLE 0\r\n"
+        "a=extmap-allow-mixed\r\n"
+        "a=msid-semantic: WMS\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\r\n"
+        "c=IN IP4 0.0.0.0\r\n"
+        "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+        "a=candidate:2442145044 1 udp 2113937151 d66fb4af-a6e4-430a-a915-aa7651fe79f2.local 64322 typ host generation 0 network-cost 999\r\n"
+        "a=ice-ufrag:IeAH\r\n"
+        "a=ice-pwd:qLnsb7NUyf1NZLO/fKV/ULqY\r\n"
+        "a=ice-options:trickle\r\n"
+        "a=fingerprint:sha-256 80:5A:E3:85:19:90:0F:E2:0C:A8:A5:B2:CA:9E:F7:B0:07:16:77:9D:CB:77:69:E1:E4:2F:D2:40:23:E9:84:A0\r\n"
+        "a=setup:actpass\r\n"
+        "a=mid:0\r\n"
+        "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time\r\n"
+        "a=recvonly\r\n"
+        "a=rtcp-mux\r\n"
+        "a=rtcp-rsize\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n"
+        "a=rtcp-fb:111 transport-cc\r\n"
+        "a=fmtp:111 minptime=10;useinbandfec=1\r\n"
+        "a=rtpmap:63 red/48000/2\r\n";
+    Parser p;
+    auto result = p.parse(chrome_offer);
+    ASSERT_TRUE(result) << "parse failed: " << result.error().message();
+    auto& sd = result.value();
+    std::printf("\n=== SdpDebug::ChromeOffer ===\n");
+    std::printf("  version=%d\n", sd.version);
+    std::printf("  media.size=%zu\n", sd.media.size());
+    std::printf("  bundle_mids.size=%zu\n", sd.bundle_mids.size());
+    std::printf("  dtls_setup='%s'\n", sd.dtls_setup.c_str());
+    std::printf("  dtls_fp_algo='%s' value.len=%zu\n",
+                sd.dtls_fingerprint_algo.c_str(),
+                sd.dtls_fingerprint_value.size());
+    for (size_t i = 0; i < sd.media.size(); ++i) {
+        const auto& m = sd.media[i];
+        std::printf("  media[%zu]: type=%s port=%d proto='%s'\n",
+                    i, to_string(m.type), m.port, m.protocol.c_str());
+        std::printf("    mid='%s' direction=%s\n",
+                    m.mid.c_str(),
+                    to_string(m.direction));
+        std::printf("    ice_ufrag='%s' ice_pwd.len=%zu candidates=%zu\n",
+                    m.ice_ufrag.c_str(), m.ice_pwd.size(), m.candidates.size());
+        std::printf("    rtcp_mux_value='%s'\n", m.rtcp_mux_value.c_str());
+        std::printf("    dtls_fp_algo='%s' value.len=%zu\n",
+                    m.dtls_fingerprint_algo.c_str(),
+                    m.dtls_fingerprint_value.size());
+        std::printf("    rtpmap.size=%zu\n", m.rtpmap.size());
+        std::printf("    connection='%s'\n", m.connection_address.c_str());
+    }
+    std::printf("==============================\n");
+}
+
 }  // namespace

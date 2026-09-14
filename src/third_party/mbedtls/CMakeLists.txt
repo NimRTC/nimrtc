@@ -22,7 +22,6 @@
 set(_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 add_library(nimrtc_vendor_mbedtls INTERFACE)
-add_library(nimrtc::vendor::mbedtls ALIAS nimrtc_vendor_mbedtls)
 
 target_include_directories(nimrtc_vendor_mbedtls
     INTERFACE

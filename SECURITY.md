@@ -34,10 +34,10 @@ Include as much detail as possible:
 Security fixes are applied to the current stable release and the most recent
 patch release of the previous minor version.
 
-| Version | Status |
-|---------|--------|
-| 0.1.x   | ⚠️ Not yet released — no security support |
-| 0.2.x   | Not yet released |
+| Version | Supported          |
+|---------|--------------------|
+| 1.0.x   | ✅ Full support     |
+| 0.9.x   | 🔶 LTS bridge for RC users (security fixes only, until 1.0.0 ships + 90 days) |
 
 ## Security considerations in NimRTC
 

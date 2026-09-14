@@ -30,6 +30,13 @@ struct Config {
     core::Milliseconds min_delay     = core::Milliseconds{20};
     core::Milliseconds max_delay     = core::Milliseconds{400};
 
+    /** Sender's RTP clock rate in Hz.  Used by the RFC 3550 §6.4.1
+     *  interarrival-jitter estimator to convert RTP clock ticks into
+     *  microseconds before subtracting from the wall-clock arrival time.
+     *  Typical values: 48000 for Opus, 90000 for most video codecs, 8000
+     *  for narrowband telephony.  0 = default to 90000 (RFC default). */
+    std::uint32_t      clock_rate_hz = 0;
+
     // Hard cap on buffered packets (FIFO trim from oldest when exceeded).
     std::size_t        max_packets   = 512;
 

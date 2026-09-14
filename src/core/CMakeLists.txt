@@ -27,7 +27,15 @@ target_compile_definitions(nimrtc_core
 # Linking it PRIVATE means consumers of nimrtc::core get it transitively.
 target_link_libraries(nimrtc_core
     INTERFACE
-        nimrtc::log)
+        nimrtc::log
+        # The backward-compat shim at the bottom of nimrtc/core/registry.hpp
+        # transitively includes nimrtc/plugins/*.hpp so that old code which
+        # only included <nimrtc/core/registry.hpp> keeps working.  Declaring
+        # the dependency here (rather than reaching into plugins from a core
+        # source file) keeps the layering explicit and ensures downstream
+        # consumers (engine, examples, tests) get the plugins include path
+        # transitively via nimrtc::core.
+        nimrtc::plugins)
 
 if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)

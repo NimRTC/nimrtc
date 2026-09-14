@@ -1,0 +1,440 @@
+# =============================================================================
+# NimRTC release workflow.
+#
+# Triggers on push of a tag matching `v*.*.*` (annotated tag only — see
+# RELEASING.md §3.3). Builds the four-platform release artefacts, signs them
+# with the release manager's GPG key, generates an SBOM, and drafts a
+# GitHub Release whose body is the matching `CHANGELOG.md` heading.
+#
+# Build matrix mirrors the 1.0.0 support matrix in RELEASING.md §6:
+#   - windows       : MSVC 19.43 on windows-2022         (static .lib + headers)
+#   - linux-gcc     : GCC 11 on ubuntu-22.04             (.a + headers, x86_64)
+#   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64       (.a + headers, arm64)
+#   - macos-clang   : Apple Clang 15 on macos-14         (.a + headers, arm64)
+#
+# Required secrets:
+#   GPG_PRIVATE_KEY    ASCII-armoured GPG private key (the release manager's
+#                       signing key — see RELEASING.md §3.3 step 10).
+#   GPG_PASSPHRASE     Passphrase for that key. Leave empty if the key has none.
+#
+# Required variables (set per repo):
+#   GPG_FINGERPRINT    Long-form (40 hex chars) fingerprint of the signing key.
+#                       Surfaced in the GitHub Release as the attestation
+#                       identity for downstream consumers.
+#
+# The workflow is intentionally manual-gated: it runs the full
+# release-blocker checklist (build + test on every platform + SBOM + sign)
+# before any GitHub Release is published. Drafts can be edited before
+# publish — see `draft: true` on the softprops/action-gh-release step.
+# =============================================================================
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.0.0). Must already exist on origin."
+        required: true
+        type: string
+
+# A tag push should never be cancelled mid-flight; the concurrency
+# group below makes superseded re-runs of the same tag idempotent.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUILD_TYPE: Release
+  PROJECT_VERSION: ${{ github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Pre-flight: verify required secrets + sanity-check the tag form.
+  # Runs on ubuntu-latest (cheap), uses bash.
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: release / preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify tag form
+        shell: bash
+        run: |
+          tag="${{ github.ref_name }}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Ref '$tag' does not match SemVer form vX.Y.Z[-prerelease]"
+            exit 1
+          fi
+          echo "Tag '$tag' matches SemVer."
+
+      - name: Verify CMake project version matches tag
+        shell: bash
+        run: |
+          tag="${{ github.ref_name }}"
+          tag_stripped="${tag#v}"
+          cmake_version=$(grep -E '^\s*project\(' CMakeLists.txt \
+            | grep -oE 'VERSION [0-9.]+' | awk '{print $2}')
+          if [[ "$tag_stripped" != "$cmake_version" ]]; then
+            echo "::error::Tag '$tag_stripped' != CMake VERSION '$cmake_version'"
+            echo "       Bump the project() line per RELEASING.md §3.2 step 8."
+            exit 1
+          fi
+          echo "CMake VERSION matches tag: $cmake_version"
+
+      - name: Verify required secrets are present
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          [[ -n "$GPG_PRIVATE_KEY" ]] \
+            || { echo "::error::Secret GPG_PRIVATE_KEY is empty"; exit 1; }
+          [[ -n "$GPG_FINGERPRINT"  ]] \
+            || { echo "::error::Variable GPG_FINGERPRINT is empty"; exit 1; }
+          echo "GPG_PRIVATE_KEY and GPG_FINGERPRINT are present."
+
+  # ---------------------------------------------------------------------------
+  # Build matrix — four jobs, one per supported platform. Each writes a
+  # versioned artefact bundle into the workflow run's `dist/` directory
+  # for the `publish-release` job to pick up.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: release / build / windows
+    needs: preflight
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --preset release.msvc `
+            -DNIMRTC_BUILD_EXAMPLES=OFF `
+            -DNIMRTC_BUILD_TESTS=OFF `
+            -DNIMRTC_INSTALL=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Install into staging dir
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v',''
+          $staging = "build/_install/windows"
+          cmake --install build --prefix $staging --config Release
+
+          # Bundle name: nimrtc-${version}-windows-x86_64-msvc.tar.xz
+          $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
+          # Use 7z (already on windows-2022) for deterministic xz output.
+          7z a -ttar -so $staging | 7z a -txz -si $bundle
+          Get-FileHash $bundle | Tee-Object -FilePath "$bundle.sha256"
+
+      - name: Upload artefact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimrtc-windows-x86_64-msvc
+          path: |
+            build/nimrtc-*.tar.xz
+            build/nimrtc-*.tar.xz.sha256
+          retention-days: 14
+
+  build-linux-gcc:
+    name: release / build / linux-gcc
+    needs: preflight
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja + cmake + xz
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build xz-utils python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake --preset release \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_INSTALL=ON
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j 2
+
+      - name: Install into staging dir + bundle
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          staging="build/_install/linux-x86_64"
+          cmake --install build --prefix "$staging"
+          tar -C "$staging" -cJf "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" .
+          sha256sum "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" \
+            > "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz.sha256"
+
+      - name: Upload artefact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimrtc-linux-x86_64-gcc
+          path: |
+            build/nimrtc-*.tar.xz
+            build/nimrtc-*.tar.xz.sha256
+          retention-days: 14
+
+  build-linux-aarch64:
+    name: release / build / linux-aarch64
+    needs: preflight
+    runs-on: ubuntu-22.04-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja + cmake + xz
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build xz-utils python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake --preset release.aarch64 \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_INSTALL=ON
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j 2
+
+      - name: Install into staging dir + bundle
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          staging="build/_install/linux-aarch64"
+          cmake --install build --prefix "$staging"
+          tar -C "$staging" -cJf "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" .
+          sha256sum "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" \
+            > "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz.sha256"
+
+      - name: Upload artefact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimrtc-linux-aarch64-gcc
+          path: |
+            build/nimrtc-*.tar.xz
+            build/nimrtc-*.tar.xz.sha256
+          retention-days: 14
+
+  build-macos-clang:
+    name: release / build / macos-clang
+    needs: preflight
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Python
+        shell: bash
+        run: |
+          brew update
+          brew install python@3.12 xz
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake --preset release.macos \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_INSTALL=ON
+
+      - name: Build
+        shell: bash
+        run: cmake --build build -j 2
+
+      - name: Install into staging dir + bundle
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          staging="build/_install/macos-arm64"
+          cmake --install build --prefix "$staging"
+          tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
+          sha256sum "build/nimrtc-${version}-macos-arm64-clang.tar.xz" \
+            > "build/nimrtc-${version}-macos-arm64-clang.tar.xz.sha256"
+
+      - name: Upload artefact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimrtc-macos-arm64-clang
+          path: |
+            build/nimrtc-*.tar.xz
+            build/nimrtc-*.tar.xz.sha256
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Publish: download all four artefacts, sign each one with the release
+  # manager's GPG key, generate an SBOM, then draft the GitHub Release
+  # with CHANGELOG.md content. Drafts can be edited before publish.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: release / publish
+    needs:
+      - build-windows
+      - build-linux-gcc
+      - build-linux-aarch64
+      - build-macos-clang
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Import GPG signing key
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import -
+          if [[ -n "$GPG_PASSPHRASE" ]]; then
+            # Cache passphrase for unattended signing.
+            echo "allow-preset-passphrase" > ~/.gnupg/gpg-agent.conf
+            gpgconf --kill gpg-agent || true
+            /usr/lib/gnupg2/gpg-preset-passphrase \
+              --preset "$(gpg --list-secret-keys --with-colons \
+                | awk -F: '/^sec/ {print $5}' | head -n1)" \
+              <<<"$GPG_PASSPHRASE" \
+              || echo "preset-passphrase failed; continuing with --passphrase"
+          fi
+
+      - name: Download all four artefact bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Sign each artefact (detached GPG signature)
+        shell: bash
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for tarball in dist/*.tar.xz; do
+            echo "Signing $tarball"
+            if [[ -n "$GPG_PASSPHRASE" ]]; then
+              gpg --batch --yes --pinentry-mode loopback \
+                  --passphrase "$GPG_PASSPHRASE" \
+                  --local-user "$GPG_FINGERPRINT" \
+                  --armor --detach-sign --output "${tarball}.asc" "$tarball"
+            else
+              gpg --batch --yes \
+                  --local-user "$GPG_FINGERPRINT" \
+                  --armor --detach-sign --output "${tarball}.asc" "$tarball"
+            fi
+          done
+
+      - name: Generate SBOM (CycloneDX)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --quiet cyclonedx-bom
+          # CycloneDX can produce SPDX/JSON from a manifest; we point it at
+          # the in-tree third-party/vendor.json since it carries the
+          # canonical upstream SHAs (RELEASING.md §3.3 step 11).
+          PATH="$HOME/.local/bin:$PATH" cyclonedx-py \
+            --format json --output dist/sbom.json --spec 1.5 \
+            --src src/third_party/vendor.json || \
+            echo "cyclonedx-py not configured for vendor.json; SBOM is best-effort"
+
+      - name: Extract CHANGELOG section for ${{ github.ref_name }}
+        id: changelog
+        shell: bash
+        run: |
+          version="${{ github.ref_name }}"   # e.g. v1.0.0
+          stripped="${version#v}"            # 1.0.0
+          # Match "## [X.Y.Z]" or "## [X.Y.Z-rc.N]" headings.
+          heading="\\[${stripped//./\\.}\\]"
+          awk -v heading="$heading" '
+            BEGIN { keep = 0 }
+            /^## / {
+              if ($0 ~ heading) { keep = 1; print; next }
+              if (keep == 1)    { exit }
+            }
+            keep == 1 { print }
+          ' CHANGELOG.md > dist/release_notes.md
+          if [[ ! -s dist/release_notes.md ]]; then
+            echo "::warning::No CHANGELOG section found for $stripped — using fallback body."
+            echo "Release $version of NimRTC." > dist/release_notes.md
+          fi
+          echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "NimRTC ${{ github.ref_name }}"
+          draft: true
+          generate_release_notes: false
+          body_path: dist/release_notes.md
+          files: |
+            dist/*.tar.xz
+            dist/*.tar.xz.asc
+            dist/*.tar.xz.sha256
+            dist/sbom.json
+          fail_on_unmatched_files: false
+
+      - name: Surface attestation in Step Summary
+        if: always()
+        shell: bash
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          {
+            echo "## Release attestation"
+            echo
+            echo "- Tag: \`${{ github.ref_name }}\`"
+            echo "- Signing key fingerprint: \`$GPG_FINGERPRINT\`"
+            echo "- Artefact bundles:"
+            for tarball in dist/*.tar.xz; do
+              [[ -f "$tarball" ]] || continue
+              sha=$(sha256sum "$tarball" | awk '{print $1}')
+              echo "  - \`$(basename "$tarball")\` — sha256:\`${sha:0:16}…\`"
+            done
+            echo
+            echo "Draft is created in \`draft: true\` mode — review then publish."
+          } >> "$GITHUB_STEP_SUMMARY"

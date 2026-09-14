@@ -34,15 +34,34 @@ Application
 
 ### Interface files (header-only, `src/plugins/`)
 
+The `nimrtc::plugins` interface layer covers both WebRTC and proprietary
+use cases. Concrete implementations live in their respective modules
+under `src/modules/`. The full surface as of the current phase:
+
 | File | Defines |
 |------|---------|
-| `plugins/base.hpp` | `Status`, `BufferView`, `MediaSample`, `OutPacket`, `Addr`, `IPlugin` |
+| `plugins/base.hpp` | `Status`, `BufferView`, `MediaSample`, `OutPacket`, `Addr`, `IPlugin`, `IPluginFactory` |
 | `plugins/transport.hpp` | `ITransport`, `ITransportFactory`, `TransportConfig` |
+| `plugins/ice_transport.hpp` | `IICETransport`, `IICETransportFactory` (ICE-aware surface; superset of ITransport) |
 | `plugins/rtp.hpp` | `IRTP`, `IRTPFactory`, `RtpHeader`, `RtpPacket`, `RtcpPacket` |
 | `plugins/sdp.hpp` | `ISDP`, `ISDPFactory`, `SdpSession`, `SdpMedia`, `MungOptions` |
 | `plugins/jb.hpp` | `IJB`, `IJBFactory`, `JBConfig` |
 | `plugins/audio3a.hpp` | `IAudio3A`, `IAudio3AFactory`, `Audio3AConfig` |
-| `plugins/registry.hpp` | `PluginRegistry`, registration macros |
+| `plugins/codec.hpp` | `ICodec`, `ICodecFactory` (audio codec plugin surface) |
+| `plugins/video_codec.hpp` | `IVideoCodec`, `IVideoCodecFactory` |
+| `plugins/video_source.hpp` | `IVideoSource`, `IVideoSourceFactory` |
+| `plugins/video_sink.hpp` | `IVideoSink`, `IVideoSinkFactory` |
+| `plugins/video_pipeline.hpp` | `IVideoReceiver`, `IVideoSender` + factories |
+| `plugins/hw_seam.hpp` | Optional hardware-acceleration hooks used by the video pipeline; carries the hardware codec / decoder / encoder factory surface (Windows MF, VideoToolbox, VA-API, etc.) |
+| `plugins/datachannel.hpp` | `IDataChannel`, `IDataChannelFactory` (P1: interface only) |
+
+> **Note on `registry.hpp`**: ADR-001 originally listed `plugins/registry.hpp`
+> as a separate header. That header was merged into
+> [`src/core/include/nimrtc/core/registry.hpp`](src/core/include/nimrtc/core/registry.hpp)
+> because `PluginRegistry` is a global singleton and therefore must live in
+> `nimrtc::core::` (Layout Invariant 6). Consumers that still write
+> `#include <nimrtc/plugins/registry.hpp>` continue to work via a thin
+> back-compat shim that re-exports `core::PluginRegistry`.
 
 ### Include-order rule
 
@@ -87,11 +106,17 @@ NIMRTC_REGISTER_TRANSPORT(my_gateway, &factory);
 
 ```cpp
 struct EngineConfig {
-    std::string_view transport_name = "webrtc";  // look up in registry
+    // Default transport_name = "ice": the default NimRTCEngine resolves
+    // an IICETransportFactory by id and instantiates the ICE-aware
+    // surface.  A user can register a custom ITransportFactory under
+    // the same id (the engine falls back to a dynamic_cast safety net)
+    // or supply a different name entirely.
+    std::string_view transport_name = "ice";
     std::string_view rtp_name       = "standard";
     std::string_view sdp_name       = "webrtc";
     std::string_view jb_name        = "adaptive";
     std::string_view audio3a_name   = "webrtc";
+    std::string_view codec_name     = "opus";
 
     TransportConfig transport_config;
     std::vector<JBConfig> jb_configs;

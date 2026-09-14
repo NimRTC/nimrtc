@@ -29,7 +29,7 @@ option(NIMRTC_MODULE_SESSION "Build session module"  ON)
 option(NIMRTC_MODULE_ASSEMBLY "Build assembly module (Profile/Builder)"  ON)
 
 # Video modules (P1 minimal — standalone, not wired into the engine yet).
-# See docs/zh/NimRTC-V2-技术文档.md §2.3 + §6 + §11.5/11.6.
+# See docs/zh/architecture.md §2.3 + §6 + §11.5/11.6.
 option(NIMRTC_MODULE_VIDEO_FRAME   "Build video frame module (pixel formats, layouts, conversions)" ON)
 option(NIMRTC_MODULE_VIDEO_PAYLOAD "Build video RTP payload module (H.264/VP8/VP9 packetizers)"  ON)
 option(NIMRTC_MODULE_VIDEO_JB      "Build video-aware jitter buffer module (FU-A reassembly)"     ON)

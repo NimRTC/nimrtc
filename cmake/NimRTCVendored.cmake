@@ -60,7 +60,7 @@ function(nimrtc_require_vendor name)
     if(NOT EXISTS "${vendor_dir}/CMakeLists.txt")
         message(FATAL_ERROR
             "Vendor library '${name}' not found at ${vendor_dir}.\n"
-            "Either populate it (see docs/zh/NimRTC-V2-技术文档.md §11), "
+            "Either populate it (see docs/zh/architecture.md §11), "
             "or set NIMRTC_VENDORED_<NAME>=OFF (use the canonical name "
             "OPUS / SRTP / JUICE) to fall back to find_package().")
     endif()

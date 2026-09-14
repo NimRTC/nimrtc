@@ -15,7 +15,7 @@
 // nimrtc::jb
 // -----------------------------------------------------------------------------
 // Adaptive jitter buffer (RFC 3550-style) with NimRTC's ref_frame hook
-// (see docs/zh/NimRTC-V2-技术文档.md §8.4 differentiation #3).
+// (see docs/zh/architecture.md §8.4 differentiation #3).
 //
 // P0 contract: data structures + push/pop API + Stats.
 // Implementation lands in P2 (Agent 3).

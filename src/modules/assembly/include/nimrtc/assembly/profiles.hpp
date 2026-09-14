@@ -6,7 +6,7 @@
 // Pre-defined Profile constants for all built-in NimRTC scenarios.
 //
 // Each constant corresponds to one entry in the §2.6 Profile Table:
-//   https://example.com/docs/zh/NimRTC-V2-技术文档.md#_profile-table
+//   https://example.com/docs/zh/architecture.md#_profile-table
 //
 // These are static objects (link-time constants) that are automatically
 // registered by ProfileRegistry::instance() at static-init time.

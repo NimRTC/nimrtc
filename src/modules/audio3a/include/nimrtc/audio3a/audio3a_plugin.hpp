@@ -35,7 +35,7 @@
  * The inline `register_default_plugins()` body references a function in
  * audio3a_plugin.cpp, which forces that .obj to be linked, which in turn
  * runs the registrar's constructor. This is documented in ARCHITECTURE.md
- * (future revision) and in `docs/zh/NimRTC-V2-技术文档.md` §2.x (TBD).
+ * (future revision) and in `docs/zh/architecture.md` §2.x (TBD).
  *
  * Alternative path (FUTURE — P1.x): engine refactor migrates to a single
  * top-level `nimrtc::core::register_all_default_plugins()` that walks every

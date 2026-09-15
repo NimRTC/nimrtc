@@ -46,6 +46,15 @@ target_compile_definitions(nimrtc_dtls
 target_include_directories(nimrtc_dtls
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        # PAL Slice 4 (v0.11.0) DTLS seam — DtlsSessionWolfSSL now
+        # inherits IDtlsSession from src/dtls/include/nimrtc/dtls/.
+        # Adding it as a PUBLIC include lets the seam module
+        # (src/dtls/) reach IDtlsSession via the existing dtls
+        # module's transitive include path.  No circular link
+        # dependency: src/dtls/CMakeLists.txt links nimrtc::dtls
+        # but does NOT add src/dtls/include/ back into its own
+        # interface.
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
     PRIVATE
         ${CMAKE_BINARY_DIR}/include)
 

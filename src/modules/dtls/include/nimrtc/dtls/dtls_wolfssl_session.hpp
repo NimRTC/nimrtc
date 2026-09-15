@@ -27,6 +27,7 @@
 #pragma once
 
 #include <nimrtc/dtls/dtls.hpp>
+#include <nimrtc/dtls/dtls_session_iface.hpp>   // PAL Slice 4 seam
 
 // Forward declare instead of including wolfSSL headers here to keep the
 // public header clean.  The .cpp file includes the real headers.
@@ -36,8 +37,25 @@ struct WOLFSSL_X509;
 
 namespace nimrtc::dtls {
 
-/** DtlsSession implementation using wolfSSL DTLS 1.2. */
-class DtlsSessionWolfSSL {
+/** DtlsSession implementation using wolfSSL DTLS 1.2.
+ *
+ *  PAL Slice 4 (v0.11.0) refactor: now inherits `IDtlsSession` so the
+ *  factory can hand the engine a `unique_ptr<IDtlsSession>` and the
+ *  wolfSSL specifics stay behind the existing concrete surface that
+ *  engine.cpp and e2e Case D rely on.  See
+ *  `docs/plan/transport-selection.md` §5.2 / §6.1.
+ *
+ *  Existing public surface is preserved verbatim:
+ *    - open/close/feed_inbound/take_outbound/tick
+ *    - state/is_connected/state_name
+ *    - local_fingerprint/set_peer_fingerprint
+ *    - set_role/srtp_keying_material/stats
+ *
+ *  New IDtlsSession methods are layered alongside (they delegate to
+ *  the existing primitives where possible; see the .cpp for the
+ *  dispatch).
+ */
+class DtlsSessionWolfSSL : public IDtlsSession {
 public:
     /** cfg.srtp_profile is ignored — wolfSSL always negotiates
      *  SRTP_AES128_CM_SHA1_80 (RFC 5764 mandatory profile). */
@@ -91,6 +109,44 @@ public:
 
     /** SRTP keying material — valid after state() == Connected. */
     std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
+
+    // -----------------------------------------------------------------
+    // IDtlsSession (PAL Slice 4) — seam methods layered on top of the
+    // existing primitives above.  Kept in a separate block so reviewers
+    // can see at a glance which methods are new seam surface vs.
+    // existing engine-facing surface.
+    // -----------------------------------------------------------------
+
+    /** @override IDtlsSession — accepts the seam Role enum.  Converts
+     *  to DtlsRole and delegates to the existing set_role(DtlsRole). */
+    void set_role(Role role) noexcept override;
+
+    /** @override IDtlsSession — accepts a raw 32-byte SHA-256 span.
+     *  Forwards to set_peer_fingerprint("sha-256", value).  Other
+     *  lengths (including empty) clear the pin and log a warning. */
+    void set_peer_fingerprint(
+        std::span<const std::uint8_t> raw_sha256) noexcept override;
+
+    /** @override IDtlsSession — equivalent to open().  Idempotent. */
+    void start() noexcept override;
+
+    /** @override IDtlsSession — equivalent to tick().  wolfSSL's
+     *  non-blocking DTLS defers retransmits to an external pump; this
+     *  is what the engine tick loop calls at ~50 ms cadence. */
+    void pump() noexcept override;
+
+    /** @override IDtlsSession — registers a one-shot callback fired
+     *  with kOk on Connected, or a non-zero Status on Failed.  The
+     *  callback is invoked at most once per handshake attempt; the
+     *  registration auto-clears on fire. */
+    void on_handshake_complete(
+        IDtlsSession::OnCompleteCb cb) noexcept override;
+
+    /** @override IDtlsSession — writes the 60-byte RFC 5764 §4.2
+     *  keying material into `out`.  Returns kErrNotReady if the
+     *  handshake has not yet reached Connected. */
+    plugins::Status export_srtp_key_material(
+        std::span<std::uint8_t, 60> out) noexcept override;
 
     struct Stats {
         std::uint64_t records_in    = 0;

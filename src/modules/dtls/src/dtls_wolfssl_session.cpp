@@ -395,6 +395,14 @@ struct DtlsSessionWolfSSL::Impl {
     Stats         stats_instance{};
     std::chrono::steady_clock::time_point handshake_start_{};
 
+    // -- PAL Slice 4 seam additions --------------------------------------
+    // One-shot handshake-complete callback installed by
+    // on_handshake_complete().  Fired from pump_handshake() when state
+    // transitions to Connected (with kOk) or Failed (with a non-zero
+    // status).  Auto-clears on fire so a re-armed callback must be
+    // re-registered for the next handshake attempt.
+    IDtlsSession::OnCompleteCb on_complete_cb_;
+
     ~Impl() { teardown(); }
 
     // -- wolfSSL I/O callbacks ----------------------------------------------
@@ -750,10 +758,22 @@ struct DtlsSessionWolfSSL::Impl {
                 state = nimrtc::dtls::DtlsState::Failed;
                 ++stats_instance.errors;
                 flush_send_buf();
+                // PAL Slice 4: fire one-shot callback on failure (if armed).
+                if (on_complete_cb_) {
+                    auto cb = std::move(on_complete_cb_);
+                    on_complete_cb_ = nullptr;
+                    cb(plugins::kErrCorrupt);
+                }
                 return true;
             }
             on_handshake_complete();
             flush_send_buf();
+            // PAL Slice 4: fire one-shot callback on success (if armed).
+            if (on_complete_cb_) {
+                auto cb = std::move(on_complete_cb_);
+                on_complete_cb_ = nullptr;
+                cb(plugins::kOk);
+            }
             return true;
         }
 
@@ -798,6 +818,12 @@ struct DtlsSessionWolfSSL::Impl {
         state = nimrtc::dtls::DtlsState::Failed;
         ++stats_instance.errors;
         flush_send_buf();
+        // PAL Slice 4: fire one-shot callback on failure (if armed).
+        if (on_complete_cb_) {
+            auto cb = std::move(on_complete_cb_);
+            on_complete_cb_ = nullptr;
+            cb(plugins::kErrInternal);
+        }
         return true;
     }
 
@@ -1342,6 +1368,84 @@ DtlsSessionWolfSSL::srtp_keying_material() const noexcept {
 
 DtlsSessionWolfSSL::Stats DtlsSessionWolfSSL::stats() const noexcept {
     return impl_->stats_instance;
+}
+
+// ===========================================================================
+// PAL Slice 4 seam — IDtlsSession overrides.
+//
+// These methods layer the new seam surface on top of the existing
+// primitives (open/tick/set_peer_fingerprint/set_role/srtp_keying_material)
+// so e2e Case D and engine.cpp keep working unchanged.  Each seam method
+// is a one-liner that converts the seam input type to the existing
+// primitive's input type and forwards, except:
+//   - on_handshake_complete() registers a callback stored in Impl that
+//     pump_handshake() fires when state transitions to Connected/Failed.
+//   - export_srtp_key_material() flattens the 4-field SrtpKeyingMaterial
+//     into the 60-byte RFC 5764 §4.2 layout that the seam specifies.
+// ===========================================================================
+
+void DtlsSessionWolfSSL::set_role(Role role) noexcept {
+    // Convert the seam Role enum (Server/Client) to the existing
+    // DtlsRole enum.  Same numeric values, but the conversion keeps
+    // callers from having to know that the dtls module has its own
+    // copy of the enum (avoids accidental coupling between the seam
+    // header and dtls.hpp's DtlsRole alias).
+    const DtlsRole r = (role == Role::Server) ? DtlsRole::Server
+                                              : DtlsRole::Client;
+    this->set_role(r);
+}
+
+void DtlsSessionWolfSSL::set_peer_fingerprint(
+    std::span<const std::uint8_t> raw_sha256) noexcept {
+    // Forward to the existing algorithm+vector overload.  Empty span
+    // is treated as "no pin" (matches the existing overload's behaviour
+    // for value.size() != 32, which already clears the pin and warns).
+    std::vector<std::uint8_t> value(raw_sha256.begin(), raw_sha256.end());
+    this->set_peer_fingerprint("sha-256", std::move(value));
+}
+
+void DtlsSessionWolfSSL::start() noexcept {
+    // IDtlsSession::start is void; the existing open() returns a Result
+    // so the engine can distinguish failures.  The seam swallows the
+    // Result: callers who need the Result can use the concrete
+    // DtlsSessionWolfSSL::open() directly until Slice 8 wires the
+    // engine through the factory.  Errors surface via state() ==
+    // Failed and via the on_handshake_complete callback.
+    (void)this->open();
+}
+
+void DtlsSessionWolfSSL::pump() noexcept {
+    // The existing tick() drives wolfSSL_dtls_got_timeout() and is the
+    // exact primitive the seam exposes as "pump" — RFC 6347 §4.2.4
+    // retransmit timer pump.
+    this->tick();
+}
+
+void DtlsSessionWolfSSL::on_handshake_complete(
+    IDtlsSession::OnCompleteCb cb) noexcept {
+    // Single-slot registration: a fresh call replaces the previous
+    // callback (the latter would be orphaned by state transitions
+    // anyway).  The Impl stores the callback by value; pump_handshake()
+    // std::moves it out at fire time so we don't keep a stale slot.
+    impl_->on_complete_cb_ = std::move(cb);
+}
+
+plugins::Status DtlsSessionWolfSSL::export_srtp_key_material(
+    std::span<std::uint8_t, 60> out) noexcept {
+    // RFC 5764 §4.2 layout (60 bytes total):
+    //   [client master key  : 16 bytes]
+    //   [server master key  : 16 bytes]
+    //   [client master salt : 14 bytes]
+    //   [server master salt : 14 bytes]
+    auto km = this->srtp_keying_material();
+    if (!km.has_value()) {
+        return plugins::kErrNotReady;
+    }
+    std::memcpy(out.data() +  0, km->client_master_key.data(),  16);
+    std::memcpy(out.data() + 16, km->server_master_key.data(),  16);
+    std::memcpy(out.data() + 32, km->client_master_salt.data(), 14);
+    std::memcpy(out.data() + 46, km->server_master_salt.data(), 14);
+    return plugins::kOk;
 }
 
 } // namespace nimrtc::dtls

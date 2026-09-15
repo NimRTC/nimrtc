@@ -77,6 +77,62 @@ find src -name '*.cpp' -o -name '*.hpp' | xargs clang-format -i
 6. A maintainer will review. Address feedback by amending or adding commits.
 7. Once approved, a maintainer will squash-merge your PR.
 
+## Branch protection — `main` is sacred
+
+`main` only contains code that has been **strictly tested** and has cleared all
+required CI checks. This is a hard rule, not a guideline. The build, the unit
+tests, and the linter must all be green on the merge commit before `main`
+advances. No exceptions, no "we'll fix it in a follow-up".
+
+### Why this matters
+
+NimRTC is consumed as a library by downstream projects. A broken `main` propagates
+to every consumer on the next bump. Catching issues at the PR stage is cheap;
+catching them after a release is expensive. The strict rule keeps `git bisect`
+trustworthy and lets users track `main` without fear.
+
+### Required CI gates (all must pass before merge)
+
+| Gate | What it checks | Who owns it |
+|---|---|---|
+| **Linux build + tests** | GCC + Clang, ASan + UBSan, full `ctest` | CI |
+| **Windows build + tests** | MSVC 19.43+, full `ctest` | CI |
+| **clang-format** | C++ style enforcement | Pre-commit hook (planned P1) |
+| **License headers + DCO** | `Signed-off-by` line + SPDX | CI |
+| **Codeowners review** | One reviewer per touched module | CODEOWNERS file |
+
+A PR that turns any of these red stays red until fixed. **Do not bypass**
+branch protection by pushing to `main` directly — `main` is write-protected
+for everyone except release managers.
+
+### The slice workflow (canonical example)
+
+Large refactors that touch many modules are split into **slices**. Each slice:
+
+1. Lands as one PR with a single conventional-commit message
+   (e.g. `refactor(dtls): add DTLS PAL seam (Slice 4)`).
+2. Builds clean and passes 100% of `ctest` **on its own** — no "merge and see".
+3. Does not break tests for slices that already landed (regression bar).
+4. Documents its scope in `docs/plan/<slice-name>.md` so reviewers can
+   audit the rule set before reading the diff.
+
+The `refactor/transport-seam-slices-4-8` branch that landed DTLS (Slice 4),
+SCTP (Slice 5), raw-UDP (Slice 6), and the transport Selector (Slice 7) is
+the canonical worked example. Each slice had its own test target, its own
+build verification, and its own commit — `main` never saw an unbuilt tree.
+
+### When you find a test gap on `main`
+
+You **fix forward** in a new PR, you don't paper over it. Steps:
+
+1. Open an issue describing the gap (or a low-priority backlog ticket).
+2. Write a failing test on a branch.
+3. Land the test (red) plus the fix (green) as one PR.
+4. Merge into `main` once CI is green.
+
+This keeps `main` honest at every commit and avoids the "fix in flight"
+anti-pattern where a PR fixes a regression it didn't introduce.
+
 ## Commit message format
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):

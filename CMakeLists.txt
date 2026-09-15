@@ -175,6 +175,10 @@ endif()
 add_subdirectory(src/log)      # Logger implementation (nimrtc_log) — before core
 add_subdirectory(src/core)     # Header-only: bytes / error / time / log header
 add_subdirectory(src/plugins)  # Interface definitions (header-only)
+add_subdirectory(src/sctp)     # SCTP seam (Transport PAL Slice 5; SEAM ONLY in v0.10)
+add_subdirectory(src/dtls)     # DTLS seam (Transport PAL Slice 4; v0.11.0)
+add_subdirectory(src/raw_udp)  # Raw-UDP bypass seam (Transport PAL Slice 6; v0.11.0)
+add_subdirectory(src/transport) # Transport stack + Selector (Transport PAL Slice 7; v0.11.0)
 add_subdirectory(src/modules)  # Concrete module implementations
 
 # nlohmann_json 3.11.3 (used by the assembly module for JSON profile loading).

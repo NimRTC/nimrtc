@@ -93,7 +93,7 @@ jobs:
             ${{ runner.os }}-cmake-debug.msvc-
 
       - name: Configure
-        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         run: cmake --build --preset debug.msvc -j 2
@@ -157,7 +157,7 @@ jobs:
             ${{ runner.os }}-cmake-debug-
 
       - name: Configure
-        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         run: cmake --build --preset debug -j 2
@@ -218,7 +218,7 @@ jobs:
             ${{ runner.os }}-cmake-debug.aarch64-
 
       - name: Configure
-        run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         run: cmake --build --preset debug.aarch64 -j 2
@@ -276,7 +276,7 @@ jobs:
             ${{ runner.os }}-cmake-debug.macos-
 
       - name: Configure
-        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         run: cmake --build --preset debug.macos -j 2

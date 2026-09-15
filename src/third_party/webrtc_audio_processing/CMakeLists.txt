@@ -63,19 +63,52 @@ set(_abs_root    "${_vendor_root}/subprojects/abseil-cpp-20240722.0")
 set(_include_root "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 if(NOT _apm_lib)
-    message(FATAL_ERROR
-        "WebRTC APM pre-built library not found.  Looked for any of:\n"
-        "  ${_apm_dir}/libwebrtc-audio-processing-2.a\n"
-        "  ${_apm_dir}/libwebrtc-audio-processing-2${CMAKE_STATIC_LIBRARY_SUFFIX}\n"
-        "\n"
-        "Run the build script first:\n"
-        "  Windows: build\\build_webrtc_apm.cmd\n"
-        "  Linux:   ./build/build_webrtc_apm.sh\n"
-        "\n"
-        "The script:\n"
-        "  1. Clones https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing\n"
-        "  2. Configures with meson (with abseil-cpp subproject)\n"
-        "  3. Builds the static library + abseil-cpp")
+    # The prebuilt static library (.a / .lib) is not present.  This is the
+    # normal case on CI runners and in source-only clones.  Behaviour is
+    # controlled by NIMRTC_VENDORED_WEBRTC_APM (default ON):
+    #
+    #   * NIMRTC_VENDORED_WEBRTC_APM=ON  -> the user explicitly opted in to
+    #     the vendored full implementation, so the missing build artifact
+    #     IS an error.  Bail out with FATAL_ERROR plus actionable guidance.
+    #
+    #   * NIMRTC_VENDORED_WEBRTC_APM=OFF -> the user opted out (CI default,
+    #     consumers that don't need 3A).  Define a no-op INTERFACE target so
+    #     downstream `target_link_libraries(... nimrtc_vendor_webrtc_apm)`
+    #     keeps working, and emit a STATUS message so the user sees why
+    #     audio3a will run as the built-in stub.
+    if(NIMRTC_VENDORED_WEBRTC_APM)
+        message(FATAL_ERROR
+            "WebRTC APM pre-built library not found.  Looked for any of:\n"
+            "  ${_apm_dir}/libwebrtc-audio-processing-2.a\n"
+            "  ${_apm_dir}/libwebrtc-audio-processing-2${CMAKE_STATIC_LIBRARY_SUFFIX}\n"
+            "\n"
+            "Run the build script first:\n"
+            "  Windows: build\\build_webrtc_apm.cmd\n"
+            "  Linux:   ./build/build_webrtc_apm.sh\n"
+            "\n"
+            "The script:\n"
+            "  1. Clones https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing\n"
+            "  2. Configures with meson (with abseil-cpp subproject)\n"
+            "  3. Builds the static library + abseil-cpp")
+    else()
+        message(STATUS
+            "WebRTC APM pre-built library not found, and "
+            "NIMRTC_VENDORED_WEBRTC_APM=OFF.  Defining a stub "
+            "nimrtc_vendor_webrtc_apm INTERFACE target so audio3a can "
+            "still link; AEC/ANS/AGC/VAD will fall back to the built-in "
+            "stub implementation.  Run `python tools/fetch_webrtc_apm.py` "
+            "and reconfigure with -DNIMRTC_VENDORED_WEBRTC_APM=ON to "
+            "enable real 3A processing.")
+        if(NOT TARGET nimrtc_vendor_webrtc_apm)
+            add_library(nimrtc_vendor_webrtc_apm INTERFACE)
+        endif()
+        if(NOT TARGET nimrtc::vendor::webrtc_apm)
+            add_library(nimrtc::vendor::webrtc_apm ALIAS nimrtc_vendor_webrtc_apm)
+        endif()
+        # Stop here — the rest of this file defines the real imported
+        # target and would crash if we let it run without an .a path.
+        return()
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

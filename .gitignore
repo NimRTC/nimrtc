@@ -56,6 +56,16 @@ CMakeUserPresets.json
 /*.py
 
 # ─────────────────────────────────────────────
+# Cursor workspace secrets (PATs, tokens, credentials)
+# ─────────────────────────────────────────────
+.cursor/secrets.txt
+
+# ─────────────────────────────────────────────
+# Cursor workspace memory / agent transcripts
+# ─────────────────────────────────────────────
+.cursor/projects/
+
+# ─────────────────────────────────────────────
 # Project root MUST stay clean (only allowed: CMake config, docs, .git metadata).
 # Block scratch logs / output captures / downloaded archives / etc. that
 # prior build/test sessions may dump at the repo root.

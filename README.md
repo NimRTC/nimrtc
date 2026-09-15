@@ -1,213 +1,318 @@
 # NimRTC
 
-> **Status: v0.10 (Tech Preview — consolidating v0.9).** Windows ✅ · Linux x86_64 ✅ · macOS arm64 ✅ · Linux aarch64 ✅ — see [CHANGELOG](CHANGELOG.md) "Platform support matrix" for details. For the full roadmap toward v1.0, see the [technical doc](docs/zh/architecture.md) §13.
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.10-orange.svg)](CHANGELOG.md)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
+[![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
+[![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-**Native C++ WebRTC alternative — C++20, embeddable, scene-assembled.**
+**A native C++ WebRTC alternative — embeddable, scene-assembled, swappable backends.**
 
-一个 codebase 既发 P2P 客户端、又发 SFU 网关、又能跑在 aarch64 嵌入式 Linux 上；DTLS / RTP / 3A 后端可替换，crypto 路径可切国密。
+One codebase that ships a P2P client, an SFU gateway, **and** runs on embedded Linux aarch64.
+DTLS / RTP / 3A codecs are all pluggable; the crypto path can switch to Chinese national crypto (国密).
+
+[Why NimRTC?](#why-nimrtc) · [Who is it for](#who-is-it-for) · [Quick Start](#quick-start) · [Architecture](#architecture-at-a-glance) · [Benchmarks](#benchmarks) · [Roadmap](#roadmap) · [FAQ](#faq)
+
+🌐 **Other languages**: [简体中文](README.zh.md)
+
+---
+
+## TL;DR
+
+- **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, not a fork of libwebrtc.
+- **Not:** A browser engine, a monolithic SDK, or a black-box crypto/codec stack.
+- **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC exposes the same wire-level interop with a layered, plugin-based architecture you can actually inspect, customize, and ship on aarch64.
+- **Current state:** v0.10 Tech Preview — Chrome interop works on Windows, CI is green on Win/Linux x86_64/macOS arm64/Linux aarch64. Production-grade quality lands in P3/P4.
+
+---
+
+## Why NimRTC?
+
+No single feature here is brand new — but the **combination** is rare in the open-source WebRTC ecosystem in 2026:
+
+| # | Differentiator | Why it matters |
+|---|---|---|
+| 1 | **Layered design + Profile composition (L0–L3)** | Compile-time layer selection. The same source tree ships a full P2P client *and* an SFU gateway (SFU skips L2). LiveKit/mediasoup are server-only; libwebrtc is monolithic. |
+| 2 | **Multi-platform CI green** | Windows, Linux x86_64, macOS arm64, Linux aarch64 — all four pass build + unit tests. See [Platform support](#platform-support). |
+| 3 | **PAL (Plugin Adaptation Layer)** | All capability swapping flows through `pal::*` with **zero runtime overhead** and an unchanged public API. See [ADR-009](docs/adr/ADR-009-pal-slice-1.md). |
+| 4 | **Swappable crypto backends** | DTLS backend can be replaced in-tree with OpenSSL / mbedTLS / 国密 (GMSSL, WoTrCrypt). Most OSS WebRTC stacks hard-wire their crypto. |
+| 5 | **P2P client and SFU from the same codebase** | One set of plugin interfaces serves both. In 2026's OSS WebRTC ecosystem, this is rare. |
+
+> **The plugin interfaces are the architectural seam.** They make the five points above work together. See [§ Plugin Architecture](#plugin-architecture) below.
+
+---
+
+## Who is it for?
+
+| If you are… | NimRTC helps you… |
+|---|---|
+| Building a **P2P voice/video app** in C++ | Replace libwebrtc with something you can actually inspect, link statically, and ship at a few MB instead of hundreds. |
+| Operating in a **信创 / 国密** regulated environment | Swap DTLS crypto to GMSSL without forking the engine. |
+| Running on **embedded Linux aarch64** (Raspberry Pi, industrial SBCs, robotics) | Get real RTC on a constrained board with the same codebase that powers your desktop client. |
+| Building **AI Agents / teleop / cloud gaming** | Use the dual PCM tap (pre/post-3A), strict-priority QoS, and ref_frame timeline APIs. |
+| Standing up an **SFU** without rewriting protocol code | Compile the `sfu` profile (L0+L1+L3) — same engine, no L2 codec. |
+
+> **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not P1).
 
 ---
 
 ## Quick Start
 
-**Prerequisites**: CMake ≥ 3.25 · **MSVC 19.43+ (Windows 10/11)** or **GCC 11+ / Clang 12+ (Linux)** or **Apple Clang 15+ (macOS 14+)** · Ninja · Python 3.8+ (for the e2e harness).
+### Prerequisites
 
-**First, verify your toolchain**:
+- **CMake ≥ 3.25**
+- **MSVC 19.43+** (Windows 10/11) · **GCC 11+ / Clang 12+** (Linux) · **Apple Clang 15+** (macOS 14+)
+- **Ninja** (recommended)
+- **Python 3.8+** (for the e2e harness)
+
+Verify your toolchain:
+
 ```bash
 python tools/check_prerequisites.py
 ```
 
-**Option A — Use the interactive build script** (recommended for new users):
+### Clone
+
+```bash
+git clone --recurse-submodules https://github.com/NimRTC/nimrtc.git
+cd nimrtc
+```
+
+### Build (Option A — interactive scripts)
 
 ```bat
-# Windows
+:: Windows
 .\scripts\build.bat
-.\scripts\build.bat --rebuild    # clean and rebuild
-.\scripts\build.bat --release     # Release config
+.\scripts\build.bat --release     :: Release config
 ```
 
 ```bash
 # Linux / macOS
 bash scripts/build.sh
-bash scripts/build.sh --rebuild   # clean and rebuild
-bash scripts/build.sh --preset=release  # Release config
+bash scripts/build.sh --preset=release
 ```
 
-**Option B — Manual CMake commands** (full control):
+### Build (Option B — manual CMake)
 
-```bat
-git clone --recurse-submodules https://github.com/NimRTC/nimrtc.git
-cd nimrtc
-cmake --preset dev.msvc
+```bash
+cmake --preset debug            # or: debug.msvc, debug, release, release.aarch64
 cmake --build build --config Debug -j
 ```
 
-**Run all tests** (after build):
+> **Preset reference:** see [`CMakePresets.json`](CMakePresets.json). The `dev.*` presets are hidden and inherited by visible ones; use `debug.msvc` / `release.msvc` / `debug.aarch64` / `release.aarch64` etc.
 
-```bat
-ctest --preset tests.msvc --output-on-failure
+### Run tests
+
+```bash
+ctest --preset tests --output-on-failure
 ```
 
-**Run the loopback-p2p smoke test** (two in-process agents handshake over real UDP):
+### Run the loopback-p2p smoke test
 
-```bat
+Two in-process agents handshake over real UDP — no signaling server needed.
+
+```bash
 cmake -B build -DNIMRTC_BUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target loopback-p2p
-.\build\examples\Debug\loopback-p2p.exe
+./build/examples/Debug/loopback-p2p        # or .exe on Windows
 ```
 
-**Run the full end-to-end acceptance suite** (includes NimRTC↔Chrome via Playwright):
+### Run the Chrome interop acceptance suite
 
-```bat
-python tools\run_e2e_acceptance.py
+```bash
+python tools/run_e2e_acceptance.py
+ls build/e2e/        # artifacts land here
 ```
 
-Artifacts land in `build/e2e/`.
-
-> **First-build note**: All third-party dependencies are managed via git submodules + `vendor.json` SHA pinning.
-> After clone, run `git submodule update --init --recursive` to populate vendor sources.
-> See [`src/third_party/vendor.json`](src/third_party/vendor.json) for pinned versions.
+> **First-build note:** all third-party deps are managed via git submodules + SHA-pinned `src/third_party/vendor.json`. The `--recurse-submodules` flag on clone handles this.
 
 ---
 
-## 它是什么、不是什么
+## Architecture at a glance
 
-| NimRTC 是 | NimRTC **不是** |
-|---|---|
-| 一个**分层**实时媒体引擎（L0–L3，编译时剪裁） | 一个完整的浏览器内核 |
-| 一个**场景组装器**（Profile = transport / sfu / agent / agent-gateway / cloudgame）| 一个大一统的"万能"协议栈 |
-| 一个**ABI 友好的 native 替代**（libwebrtc 之外的选择，crypto / codec 都不黑盒）| 另一个 libwebrtc 的 fork |
-| 一个**为 AI Agent / 工业遥操作 / 嵌入式**设计的差异化栈 | 一个"通用" WebRTC |
+```mermaid
+flowchart TB
+    subgraph PROF["Profile — compile-time selection"]
+        P1["transport<br/>P2P client"]
+        P2["sfu<br/>forwarding only"]
+        P3["agent-gateway<br/>PCM dual-tap"]
+        P4["cloudgame<br/>high-bitrate + aligned input"]
+    end
+
+    PROF --> L3
+    L3["<b>L3</b> Engine façade<br/>NimRTCEngine"] --> L2["<b>L2</b> Codecs + 3A<br/>(skipped by sfu profile)"]
+    L2 --> L1["<b>L1</b> RTP / RTCP / SDP<br/>ICE / DTLS / SRTP / JB / BWE"]
+    L1 --> L0["<b>L0</b> Bytes / log / time<br/>status codes"]
+
+    L3 -. resolved at build time .-> PAL["<b>PAL</b> Plugin Adaptation Layer<br/>zero-overhead resolver"]
+    PAL --> PLG["Plugin interfaces<br/>ITransport · IICETransport · IRTP<br/>ISDP · IJB · IAudio3A · ICodec<br/>IVideoSource/Sink · IDataChannel · IHw*"]
+
+    classDef profile fill:#fef3c7,stroke:#92400e,color:#1f2937
+    classDef layer fill:#dbeafe,stroke:#1e40af,color:#1f2937
+    classDef pal fill:#dcfce7,stroke:#166534,color:#1f2937
+    classDef plugin fill:#f3e8ff,stroke:#6b21a8,color:#1f2937
+    class P1,P2,P3,P4 profile
+    class L0,L1,L2,L3 layer
+    class PAL pal
+    class PLG plugin
+```
+
+Layers are **compile-time selected**, not runtime dispatched. The `sfu` profile literally omits L2 from the build, producing a smaller, simpler binary. Rendered natively by GitHub — no extra files needed.
+
+Detailed design: [`docs/zh/architecture.md`](docs/zh/architecture.md) (canonical, Chinese) · see ADR-012 for the docs-layout decision. English technical deep-dives are on the roadmap.
 
 ---
 
-## 架构差异化（与同类项目相比）
+## Benchmarks
 
-下面这些**单点都不新**，但**组合在一起**在 2026 年的开源 WebRTC 生态里是少见的：
+The headline reason to choose NimRTC over libwebrtc is **size** — both binary footprint and source-tree complexity.
 
-1. **分层剪裁 + Profile 组合**——L0/L1/L2/L3 模块化，编译时选层。同一份代码既能发出 P2P 客户端（全栈），也能发出 SFU 网关（**跳过 L2**）。LiveKit / mediasoup 是 server-only，libwebrtc 是 monolithic，不能切层切到这个粒度。
-2. **多平台 CI 已通（v0.9.2）** —— Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台 CI 均已绿色通过构建和单元测试。loopback-p2p 冒烟测试在 Windows 验证，Linux/macOS 运行 ctest；Chrome 端到端互通由 `interop/` harness 覆盖。aarch64 交叉编译可过，但**嵌入式部署请先在目标硬件上自行验证**。
-3. **PAL Slice 1 落地（v0.10）** —— engine 通过 `pal::*` 统一解析 audio3a / codec / video_codec plugin，零运行时开销，公共 API 不变。为 v0.10.x 的 Slice 2+3（自注册表 + 编译期 ID 校验）打好基础。详见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。
-4. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
-4. **三层 + Profile 显式公开**——`docs/zh/architecture.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
+### Binary size (Windows x86_64, MSVC, Release)
 
-> **plugin 接口是这套架构的"接缝"设计**——和上面四条组合搭配才出差异化。详见下面 [§ plugin 接口的目的](#plugin-接口的目的--一个被低估的架构特色)。
-
----
-
-## plugin 接口的目的——一个被低估的架构特色
-
-NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/include/nimrtc/plugins/*.hpp`，ADR-001）暴露：ITransport、IICETransport、IRTP、ISDP、IJB、IAudio3A、ICodec、IVideoSource、IVideoSink、IVideoReceiver/IVideoSender、IDataChannel、IHw*（hw_seam）。Engine 通过统一的 PAL（Plugin Adaptation Layer，ADR-009）解析和加载这些 plugin。
-
-| 维度 | 显式 plugin 接口的价值 | 不做 plugin 接口的代价 |
+| Artifact | NimRTC | libwebrtc (reference) |
 |---|---|---|
-| **后端替换** | ICE ↔ QUIC transport、RTP 内核调试器、3A 旁路实现——同一份 engine 业务代码切换 | 每个后端都要 fork engine，违反 OCP（开闭原则） |
-| **测试隔离** | 测试用 `MockTransport` / `NullAudio3A` / `CountingJitterBuffer` 注入，**不需要 mock framework** | 必须用 gmock / virtual mock 类污染生产代码 |
-| **企业版插桩** | 国密 DTLS、3A 旁路、SLA 监控——企版编译时**仅替换 plugin 实现**，核心仓主干不分裂 | 企版要么 fork 主干（漂移），要么用 `#ifdef`（不可维护） |
-| **第三方生态** | 用户可写 `MyAudio3A : plugins::IAudio3A` 注入（`-DNIMRTC_MODULE_AUDIO3A=MyAudio3A`），不需要碰 engine | 用户必须 `#include <nimrtc/audio3a/...>` 才能扩展，破坏封装 |
-| **故障域隔离** | plugin 接口的 status code 是契约，编译期强制实现者处理错误路径 | 错误码五花八门，跨模块失败原因追踪极其痛苦 |
+| Static lib `nimrtc_engine` | **5.63 MB** | 150–250 MB |
+| Example `loopback-p2p` (full client) | **6.61 MB** | 50–80 MB (typical WebRTC sample) |
+| Example `demo-p2p` | **6.66 MB** | — |
+| **Estimated static-link footprint** | **~15.5 MB** | **~100 MB minimum** |
 
-**对比基线**：GStreamer / FFmpeg / OBS / PipeWire 都用 plugin 架构，但那是在多媒体生态里；WebRTC 生态里（libwebrtc / Pion / LiveKit / mediasoup / janus）**只有 Pion 和 libwebrtc 内部**有类似抽象。**P2P 客户端和 SFU 跑在同一个 codebase + 同一套 plugin 接口**——这条线在 2026 年的开源 WebRTC 生态里几乎没有第二家。
+> Measured on: Windows 10 x86_64, MSVC, Release. Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
 
-plugin 是 NimRTC **可演进性**的核心机制：P0–P1 主线用内置实现，P2–P3 引入的"3A 双 tap / 严格优先级 / ref_frame"差异化能力也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
+### Source-tree complexity
 
-详细设计见 `docs/adr/ADR-001-plugin-system.md`（插件系统）与 `docs/adr/ADR-009-pal-slice-1.md`（PAL Slice 1）。
-
----
-
-## C++ 标准：C++20（v0.10 起全面落地）
-
-**当前基线：C++20**。以下说明选型历程和理由：
-
-| 时间点 | 标准 | 触发原因 |
+| Project | Source LoC | Languages |
 |---|---|---|
-| v0.8 文档 | C++17 | 最大编译器覆盖（GCC 9 / Clang 9 / MSVC 19.20+）；嵌入式 / 政企老环境最广 |
-| v0.10 代码 | **C++20** | `std::span` 必须有（`src/core/bytes.hpp` 已用），`<chrono>` C++20 才稳定（P1 起 RTCP NTP / ref_frame 时间线需要） |
+| **NimRTC** | ~30 K (incl. vendored) | C++20 only |
+| libwebrtc | ~5.5 M | C++ (mixed C++03/11/14/17) + internal bindings |
 
-**为什么选 C++20**：整个 RTP / RTCP / SDP / ICE / 3A 的零拷贝视图都基于 `std::span`。C++17 只有 `gsl::span`（非标准）或手写 pointer+length。`std::span` 是 C++20 标准库，是 zero-copy 字节视图的"终态"。同时 P1 起 RTCP NTP 时间戳对齐、ref_frame 时间线（§8.4）需要 C++20 chrono 的精度。
+> Source-LoC numbers are rough, measured via `cloc` excluding vendored dependencies. libwebrtc's number is widely cited and varies by platform/branch.
 
-**给使用者的结论**：
-- **新代码 / 新项目用 NimRTC → 直接 C++20**，无成本。
-- **如果你的环境锁死 C++17**（如某些信创 GCC 8.x）→ 暂时不可用，P2 才会做"降级到 C++17 的"shim"（[§13](docs/zh/architecture.md#13-里程碑与发布节奏)）。
+### What this means in practice
+
+- **Embeddable** — NimRTC links into your host app at a few MB instead of pulling in a 100+ MB blob.
+- **Inspectable** — You can `grep` the entire engine source tree. Auditing a security fix or a regulatory review against libwebrtc is impractical.
+- **Buildable on a laptop** — NimRTC builds end-to-end in minutes on commodity hardware. libwebrtc's source fetch alone is GB-scale.
+- **Embedded-friendly** — On aarch64 with `-Os`, NimRTC's link footprint drops further; libwebrtc's is rarely deployed outside x86_64 / arm64 servers.
+
+### Caveats
+
+- libwebrtc numbers are **public reference values** that vary by platform, branch, and codec set. Re-validate before publishing marketing claims.
+- NimRTC numbers depend on which plugins / codecs you build (`-DNIMRTC_PLUGINS_NVENC=ON` etc.). Run `benchmark_size.py` after any option change.
+- **Throughput, latency, jitter, MOS scores are intentionally not in this section** — those depend heavily on platform, codec choice, network, and target use case. We will publish profile-specific benchmarks once P2 (PCM tap) and P3 (BWE + ref_frame) land.
+
+See [`tools/benchmark_size.py`](tools/benchmark_size.py) for the measurement tool.
 
 ---
 
-## 三个差异化能力（针对 AI Agent / 遥操作 / 嵌入式场景）
+## Plugin Architecture
 
-| 需求 | NimRTC 差异化 | 当前同类项目状态 |
+NimRTC exposes nearly every "swappable" capability through plugin interfaces defined in [`src/plugins/include/nimrtc/plugins/*.hpp`](src/plugins/include/nimrtc/plugins/) ([ADR-001](docs/adr/ADR-001-plugin-system.md)). The engine resolves them through PAL ([ADR-009](docs/adr/ADR-009-pal-slice-1.md)).
+
+| Aspect | Value of explicit plugin interfaces | Cost of *not* having them |
 |---|---|---|
-| **3A 旁路**：Agent 需要把语音喂给 ASR | `pre-3a / post-3a` **双 PCM tap** 原语（§8.7）——3A 不再黑盒，可旁路 | WebRTC APM 不可配置，PCM 中段无 hook |
-| **控制消息不被视频挤占**：遥操作指令不能丢 | 严格优先级调度契约（§8.3）——指令帧可声明 QoS 不被挤带宽 | DTLS-SCTP / DataChannel 仅有尽力而为语义 |
-| **采集-决策对齐**：AI Agent 决策要与视频帧关联 | `ref_frame` 时间线 API（§8.4）——帧号 ↔ 决策时刻对齐 | libwebrtc 无此抽象，application 层必须自建 |
+| **Backend swapping** | ICE ↔ QUIC transport, RTP debugger, 3A bypass — same engine code | Each backend forks the engine → OCP violations |
+| **Test isolation** | `MockTransport` / `NullAudio3A` / `CountingJitterBuffer` injected, no mock framework needed | gmock/virtual mocks leak into production code |
+| **Enterprise customisation** | 国密 DTLS, 3A bypass, SLA instrumentation — compile-time plugin swap, single trunk | Forks drift, `#ifdef` becomes unmaintainable |
+| **Third-party ecosystem** | Write `MyAudio3A : plugins::IAudio3A`, link with `-DNIMRTC_MODULE_AUDIO3A=MyAudio3A` | Users must `#include <nimrtc/audio3a/...>` — encapsulation breaks |
+| **Failure-domain isolation** | Plugin interface status codes are the contract | Errors propagate inconsistently across modules |
 
-这三项是 P2 / P3 的目标交付，不是 P0 已具备。
+**Comparison baseline:** GStreamer / FFmpeg / OBS / PipeWire all use plugin architectures — but in the **WebRTC** ecosystem (libwebrtc / Pion / LiveKit / mediasoup / janus), only Pion and libwebrtc internally have similar abstractions. **NimRTC exposes them publicly and runs both P2P and SFU on the same set of interfaces.**
+
+Plugins are the evolution mechanism: P0–P1 use built-in implementations; P2–P3 differentiating features (dual 3A tap, strict-priority QoS, ref_frame timeline) also ship as plugins (`IJB::set_render_delivered`, `IRTP::set_ref_frame`).
 
 ---
 
-## 场景 Profile（P0 文档规划，P1 起逐步落地）
+## Profiles
 
-| Profile | 包含层 | 用途 |
+Profiles are **compile-time configurations**, not runtime dispatch. Format: see [ADR-010](docs/adr/ADR-010-profile-json-format.md) (JSON is the first-party format).
+
+| Profile | Layers | Use case |
 |---|---|---|
-| `transport` | L0 + L1 + L2 + L3 | 完整 P2P 客户端（Chrome 互通） |
-| `sfu` | L0 + L1 + L3（**跳过 L2**）| 服务器转发（不重编解码） |
-| `agent-gateway` | L0 + L1 + L2(tap 打开) | AI Agent 接入（PCM 双 tap + 旁路） |
-| `cloudgame` | L0 + L1 + L2 + L3（高码率主线 + 输入渲染对齐）| 遥操作 / 云游戏（v0.10 列为远期候选） |
-
-Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/architecture.md` §2.6。声明式 Profile 格式见 ADR-010（JSON 为第一方格式）。
+| `transport` | L0+L1+L2+L3 | Full P2P client (Chrome interop) |
+| `sfu` | L0+L1+L3 (**skips L2**) | Server-side forwarding without re-encoding |
+| `agent-gateway` | L0+L1+L2 (tap enabled) | AI Agent ingress — dual PCM tap + 3A bypass |
+| `cloudgame` | L0+L1+L2+L3 (high-bitrate main + input/render alignment) | Teleop / cloud gaming (long-term candidate) |
 
 ---
 
-## 路线（P1–P4 简化版）
+## Differentiated capabilities (for AI Agent / teleop / embedded)
 
-- **P1 传输 MVP**：Chrome ↔ NimRTC P2P 音视频互通；vendor libsrtp + libopus + mbedTLS + WebRTC APM；**aarch64 编译可过 ≠ 互通可过**（§13.1 口径）
-- **P2 场景差异化**：pre/post-3a 双 PCM tap；严格优先级调度契约；usrsctp DataChannel 基础互通；首批 Profile 库
-- **P3 客户端质量 + ref_frame**：自适应 JB + Goog-CC 风格 BWE；ref_frame 时间线完整实现；首个付费标杆客户
-- **P4 生产化 + 国密企版**：双链路 / 接管框架企版；国密后端落地；首份商业合同
+These are **P2 / P3 targets**, not P0 features — listed here so you can plan ahead.
 
-详细路线图见 `docs/zh/architecture.md` §13。
-
----
-
-## 当前进度（v0.10.0 Tech Preview — consolidating v0.9）
-
-| 项 | 状态 | 版本 |
+| Need | NimRTC differentiation | Status in current OSS WebRTC |
 |---|---|---|
-| 文档 v0.10 设计 + ADR 决策落地 | ✅ 完成 | v0.10 |
-| 脚手架（CMake / CI / vendor 集成） | ✅ 完成 | v0.9.2 |
-| vendor 库落地（wolfSSL / libsrtp / libopus / libjuice / WebRTC APM） | ✅ 完成 | v0.9.2 |
-| Chrome ↔ NimRTC P2P 音视频互通（Case D） | ✅ 完成 | v0.9.2 |
-| 多平台 CI 验证（Windows / Linux x86_64 / macOS arm64 / Linux aarch64） | ✅ 完成 | v0.9.2 |
-| RFC 7587 Opus packetise / depacketise 完整实现 | ✅ 完成 | v0.9.2 |
-| PAL Slice 1（Plugin Adaptation Layer） | ✅ 完成 | v0.10 |
-| H.264 HW backend 批量落地（NVENC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ 完成 | v0.9.2 |
-| ADR-009/010/011/012 决策文档落地 | ✅ 完成 | v0.10 |
-
-> v0.10 关闭了 v0.9 的收尾工作并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、SFU relay、PCM tap、Profile 库官方化）排入 v0.11.0。
+| **3A bypass** — Agent feeds PCM to ASR | `pre-3a / post-3a` dual PCM tap | WebRTC APM is opaque; no PCM mid-pipeline hook |
+| **Control messages never starved by video** — teleop commands must not drop | Strict-priority scheduling contract | DTLS-SCTP / DataChannel is best-effort only |
+| **Capture-to-decision alignment** — Agent decisions tied to video frames | `ref_frame` timeline API | libwebrtc has no such abstraction; apps must build their own |
 
 ---
 
-## Build 配置 / Repository Layout
+## Roadmap (P1–P4, condensed)
 
-### CMake options (defaults in **bold**)
+- **P1 — Transport MVP:** Chrome ↔ NimRTC P2P A/V interop; vendored libsrtp + libopus + mbedTLS + WebRTC APM.
+  - *Note:* aarch64 *compiles* green ≠ *interops* green (see architecture doc §13.1).
+- **P2 — Scene differentiation:** dual pre/post-3A PCM tap; strict-priority QoS; usrsctp DataChannel interop; first Profile library.
+- **P3 — Client quality + ref_frame:** adaptive JB + Goog-CC-style BWE; complete ref_frame timeline; first paid reference customer.
+- **P4 — Production + 国密 enterprise:** dual-link / takeover framework (enterprise); GMSSL crypto backend live; first commercial contract.
 
-| Option | Values | Effect |
+Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
+
+---
+
+## Current progress (v0.10.0 Tech Preview)
+
+| Item | Status | Version |
 |---|---|---|
-| `NIMRTC_BUILD_TESTS` | **ON** / OFF | Build gtest-based unit tests |
-| `NIMRTC_BUILD_EXAMPLES` | ON / **OFF** | Build the `loopback-p2p` smoke example |
-| `NIMRTC_BUILD_DOCS` | ON / **OFF** | Build Doxygen API docs (requires Doxygen installed) |
-| `NIMRTC_VENDORED` | **ON** / OFF | Use vendored `src/third_party/*` libraries |
-| `NIMRTC_ASAN` | ON / **OFF** | AddressSanitizer (Debug + GCC/Clang/MSVC ≥ 2019) |
-| `NIMRTC_UBSAN` | ON / **OFF** | UndefinedBehaviorSanitizer |
-| `NIMRTC_WARNINGS_AS_ERRORS` | **ON** / OFF | Treat all warnings as errors |
-| `NIMRTC_VENDORED_WEBRTC_APM` | **ON** / OFF | Use vendored WebRTC Audio Processing library |
-| `NIMRTC_PLUGINS_NVENC` | ON / **OFF** | NVIDIA NVENC + NVDEC H.264 HW encoder/decoder (Windows/Linux) |
-| `NIMRTC_PLUGINS_AMF` | ON / **OFF** | AMD AMF H.264 encoder (Windows only) |
-| `NIMRTC_PLUGINS_QSV` | ON / **OFF** | Intel QSV H.264 encoder via libvpl/oneVPL (cross-platform) |
-| `NIMRTC_PLUGINS_DXVA` | ON / **OFF** | Microsoft DXVA/Media Foundation H.264 decoder (Windows only) |
-| `NIMRTC_PLUGINS_VAAPI` | ON / **OFF** | Linux VA-API H.264 encoder + decoder (Linux only) |
-| `NIMRTC_PLUGINS_OPENH264` | ON / **OFF** | OpenH264 software fallback (cross-platform) |
+| v0.10 design + ADR decisions landed | ✅ Done | v0.10 |
+| Scaffolding (CMake / CI / vendor) | ✅ Done | v0.9.2 |
+| Vendored libs (wolfSSL / libsrtp / libopus / libjuice / WebRTC APM) | ✅ Done | v0.9.2 |
+| Chrome ↔ NimRTC P2P A/V interop (Case D) | ✅ Done | v0.9.2 |
+| 4-platform CI green (Win / Linux x86_64 / macOS arm64 / Linux aarch64) | ✅ Done | v0.9.2 |
+| RFC 7587 Opus packetise/depacketise complete | ✅ Done | v0.9.2 |
+| PAL Slice 1 (Plugin Adaptation Layer) | ✅ Done | v0.10 |
+| H.264 HW backends (NVENC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ Done | v0.9.2 |
+| ADR-009 / 010 / 011 / 012 decisions landed | ✅ Done | v0.10 |
 
-### Directory layout
+> v0.10 closes v0.9 wrap-up and lands the PAL Slice 1 refactor. P2 content (DataChannel interop, SFU relay, PCM tap, official Profile library) is queued for v0.11.0.
+
+---
+
+## Platform support
+
+| Platform | Arch | Status |
+|---|---|---|
+| Windows | x86_64 | ✅ Supported |
+| Linux | x86_64 | ✅ Supported |
+| macOS | arm64 | ✅ Supported |
+| Linux | aarch64 | ✅ Supported (compile-green; deployment validate on target hardware) |
+
+Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
+
+---
+
+## Build & CI
+
+### CMake options
+
+| Option | Default | Effect |
+|---|---|---|
+| `NIMRTC_BUILD_TESTS` | **ON** | Build gtest unit tests |
+| `NIMRTC_BUILD_EXAMPLES` | OFF | Build the `loopback-p2p` smoke example |
+| `NIMRTC_BUILD_DOCS` | OFF | Build Doxygen API docs |
+| `NIMRTC_VENDORED` | **ON** | Use vendored `src/third_party/*` libraries |
+| `NIMRTC_ASAN` | OFF | AddressSanitizer (Debug + GCC/Clang/MSVC ≥ 2019) |
+| `NIMRTC_UBSAN` | OFF | UndefinedBehaviorSanitizer |
+| `NIMRTC_WARNINGS_AS_ERRORS` | **ON** | Treat warnings as errors |
+| `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | Use vendored WebRTC APM library |
+| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC + NVDEC (Win/Linux) |
+| `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF (Windows) |
+| `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
+| `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF (Windows) |
+| `NIMRTC_PLUGINS_VAAPI` | OFF | Linux VA-API |
+| `NIMRTC_PLUGINS_OPENH264` | OFF | OpenH264 software fallback |
+
+### Repository layout
 
 ```
 nimrtc/
@@ -219,28 +324,21 @@ nimrtc/
 ├── src/
 │   ├── core/                  # bytes.hpp, log, time, status codes (L0)
 │   ├── engine/                # NimRTCEngine façade (top-level entry)
-│   ├── modules/
-│   │   ├── ice/               # ICE state machine
-│   │   ├── sdp/               # SDP offer/answer parser
-│   │   ├── rtp/               # RTP packet builder / parser / munger
-│   │   ├── srtp/              # SRTP encryption (wraps libsrtp)
-│   │   ├── jb/                # Jitter buffer
-│   │   └── audio3a/           # 3A (AEC/ANS/AGC) audio processing
-│   ├── plugins/               # Public plugin interfaces (see ADR-001)
-│   └── third_party/           # Vendored: libjuice, libsrtp, mbedtls, libopus (1.6.1)
+│   ├── modules/{ice,sdp,rtp,srtp,jb,audio3a}/
+│   ├── plugins/               # Public plugin interfaces (ADR-001)
+│   └── third_party/           # Vendored: libjuice, libsrtp, mbedtls, libopus
 ├── tests/                     # Cross-module gtest integration tests
 ├── interop/                   # Chrome / Firefox baseline interop harness
-├── cmake/                     # Shared CMake helpers (NimRTCOptions, NimRTCTest, …)
+├── cmake/                     # Shared CMake helpers
 ├── tools/                     # Vendor scripts, fuzzers, profiling helpers
-└── .github/
-    └── workflows/ci.yml       # CI matrix (linux × gcc/clang, windows × msvc, macos × 2)
+└── .github/workflows/ci.yml   # CI matrix
 ```
 
 ### Vendored third-party versions
 
 Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-verified):
 
-| Library | Version | Submodule Path |
+| Library | Version | Submodule path |
 |---|---|---|
 | `wolfssl` | v5.9.2 | `src/third_party/wolfssl/src` |
 | `libopus` | v1.6.1 | `src/third_party/libopus/src` |
@@ -251,193 +349,88 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 
 ---
 
-## 协议 / License
+## FAQ
 
-- **License**: Apache-2.0（见 `LICENSE`）
-- **第三方依赖**: 见 `NOTICE` 与 `docs/zh/architecture.md` §11（借用策略）
-- **借用策略**: 密码件 / 编解码 / SCTP / 3A 等成熟模块一律 vendor；RTP / RTCP / SDP / JB / BWE / ICE 状态机 / timeline 调度等核心协议层一律自研。详见 `docs/zh/architecture.md` §11。
-- **端到端验收引用标准**: ADR-011 明确了 engine 仅承担单跳预算；引用标准 DB31/T 1505-2024 / T/SSITS 2003-2023 由集成方负责。
-- **贡献合规**: DCO 签名（`git commit -s`），不采用 CLA。详见 `CONTRIBUTING.md`。
+### "Could not find Ninja"
 
----
-
-## 常见错误排查（FAQ）
-
-### Q: CMake 配置时报错 "Could not find Ninja"
-
-**Windows**: Ninja 未安装或不在 PATH。
-```bat
+```bash
+# Ubuntu / Debian
+sudo apt install ninja-build
+# Fedora / RHEL
+sudo dnf install ninja-build
+# macOS
+brew install ninja
+# Windows (Chocolatey)
 choco install ninja
-# 或
-scoop install ninja
 ```
-然后重新打开命令行窗口。
 
-**Linux/macOS**: 大多数发行版自带 make，Ninja 可选。
+### MSVC errors "MSB8020" / "v143 not found"
+
+You're in a non-VS-2022 Developer Prompt. Open **"x64 Native Tools Command Prompt for VS 2022"** and reconfigure.
+
+### "WebRTC APM pre-built library not found"
+
+Skip 3A entirely:
+
 ```bash
-sudo apt install ninja-build   # Ubuntu/Debian
-sudo dnf install ninja-build   # Fedora/RHEL
+cmake --preset dev -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 ```
 
----
+Or fetch the prebuilt:
 
-### Q: MSVC 编译报错 "MSB8020" 或找不到 v143 生成工具
-
-说明你在 VS 2022 以外的 Developer Command Prompt 中运行。
-
-打开 **"x64 Native Tools Command Prompt for VS 2022"**（或 VS 2022 的任意 Developer Prompt），然后重新配置：
-```bat
-cmake --preset dev.msvc
-```
-
----
-
-### Q: CMake 报错 "WebRTC APM pre-built library not found"
-
-WebRTC APM 需要额外构建步骤。如果不需要 3A（AEC/ANS/AGC）功能，可以跳过：
-```bat
-cmake --preset dev.msvc -DNIMRTC_VENDORED_WEBRTC_APM=OFF
-```
-
-要启用 3A 功能：
-```bat
+```bash
 python tools/fetch_webrtc_apm.py
+cmake --build build
 ```
-构建完成后，重新运行 CMake 配置即可自动检测到预编译库。
 
----
+### GCC too old for `-std=c++20`
 
-### Q: GCC 版本过低，报 "unrecognized command line option '-std=c++20'"
-
-你的 GCC 版本低于 11。需要升级编译器：
-
-| 发行版 | 默认 GCC | 升级命令 |
+| Distro | Default GCC | Upgrade |
 |---|---|---|
-| Ubuntu 20.04 | GCC 9 | `sudo apt install gcc-11 g++-11 && export CC=gcc-11 CXX=g++-11` |
-| Ubuntu 22.04 | GCC 11 | ✅ 可直接用 |
-| Debian 11 | GCC 10 | `sudo apt install gcc-11 g++-11 && export CC=gcc-11 CXX=g++-11` |
-| Debian 12 | GCC 12 | ✅ 可直接用 |
-| Fedora 36+ | GCC 12+ | ✅ 可直接用 |
-| RHEL 8 / Rocky 8 | GCC 8 | `sudo dnf install gcc-toolset-11 && source /opt/rh/gcc-toolset-11/enable` |
-| CentOS 7 | GCC 4.8 | ❌ 不支持，升级系统或使用容器 |
-| Arch Linux | GCC 13+ | ✅ 可直接用 |
-| macOS | Apple Clang | 确保 Xcode >= 15（`clang++ --version` 确认 >= 15） |
+| Ubuntu 20.04 / Debian 11 | GCC 9–10 | `sudo apt install gcc-11 g++-11 && export CC=gcc-11 CXX=g++-11` |
+| Ubuntu 22.04 / Debian 12 | GCC 11–12 | ✅ Use as-is |
+| Fedora 36+ | GCC 12+ | ✅ Use as-is |
+| RHEL / Rocky 8 | GCC 8 | `sudo dnf install gcc-toolset-11 && source /opt/rh/gcc-toolset-11/enable` |
+| CentOS 7 | GCC 4.8 | ❌ Not supported — upgrade OS or use a container |
+| Arch Linux | GCC 13+ | ✅ Use as-is |
+| macOS | Apple Clang | Xcode ≥ 15 required (`clang++ --version` to check) |
 
-**永久设置**：将以下行加入 `~/.bashrc`：
+### Linker errors / "undefined reference"
+
+1. Submodules not initialised — `git submodule update --init --recursive`
+2. Compiler < GCC 11 — see table above
+3. Stale build cache — `rm -rf build && cmake --preset dev && cmake --build build -j`
+
+### How do I verify my toolchain without running CMake?
+
 ```bash
-export CC=gcc-11
-export CXX=g++-11
+python tools/check_prerequisites.py             # full check
+python tools/check_prerequisites.py --compiler  # compiler only
 ```
 
 ---
 
-### Q: 编译时报大量 "undefined reference" 或链接失败
+## Documentation & language notes
 
-可能原因：
-
-1. **vendor 子模块未初始化**——所有子模块必须已拉取：
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-2. **使用 GCC 10 及以下编译含 C++20 特性的代码**——升级 GCC（见上表）。
-
-3. **构建缓存残留**——删除 `build/` 目录后重新配置：
-   ```bash
-   rm -rf build
-   cmake --preset dev
-   cmake --build build -j
-   ```
+- **Canonical technical doc:** [`docs/zh/architecture.md`](docs/zh/architecture.md) (Chinese — see [ADR-012](docs/adr/ADR-012-zh-docs-layout.md)).
+- **Architecture decisions:** [`docs/adr/`](docs/adr/) (Chinese summaries, code/identifiers in English).
+- **English deep-dives:** roadmap item for v1.0+.
+- **Standalone docs site:** docs-zh.nimrtc.dev, planned for v1.0+.
 
 ---
 
-### Q: 首次 clone 后直接 cmake 报错找不到头文件
+## Contributing & governance
 
-确认子模块已完整拉取：
-```bash
-git submodule update --init --recursive
-# 验证
-git submodule status
-```
-
-确认所有子模块前面没有 `-` 号（`-` 表示未初始化）。
+- **Issues:** bugs, feature requests, interop compatibility feedback — preferred channel.
+- **Pull Requests:** read [`CONTRIBUTING.md`](CONTRIBUTING.md); commits must be DCO-signed (`git commit -s`). No CLA.
+- **Interop CI:** the `interop/` directory runs continuously. Chrome (pinned stable) and Firefox (pinned stable) are the baseline matrix.
+- **Security:** private channel — see [`SECURITY.md`](SECURITY.md).
+- **Vendoring policy:** crypto / codecs / SCTP / 3A are vendored; RTP / RTCP / SDP / JB / BWE / ICE state machines / timeline scheduling are written in-house. See [`docs/zh/architecture.md`](docs/zh/architecture.md) §11.
+- **End-to-end acceptance standards:** [ADR-011](docs/adr/ADR-011-teleop-metrics-caliber.md) clarifies that the engine carries only single-hop budget; DB31/T 1505-2024 / T/SSITS 2003-2023 are the integrator's responsibility.
 
 ---
 
-### Q: 如何验证工具链配置是否正确？
+## License
 
-运行前置检查脚本（无需 CMake）：
-```bash
-python tools/check_prerequisites.py
-```
-
-只检查编译器：
-```bash
-python tools/check_prerequisites.py --compiler
-```
-
----
-
-## Linux 工具链升级指南
-
-### Ubuntu / Debian
-
-```bash
-# Ubuntu 20.04 / Debian 11 及以下：需要 GCC 11+
-sudo apt update
-sudo apt install software-properties-common
-sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-sudo apt install gcc-11 g++-11
-
-# 验证
-gcc-11 --version
-
-# 方式一：全局默认（影响系统其他程序）
-sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110
-sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 110
-
-# 方式二：仅当前会话（推荐）
-export CC=gcc-11
-export CXX=g++-11
-```
-
-### Fedora / RHEL / Rocky / AlmaLinux
-
-```bash
-# RHEL 8 / Rocky 8 / AlmaLinux 8：使用 DevToolset
-sudo dnf install centos-release-scl
-sudo dnf install devtoolset-11-gcc devtoolset-11-gcc-c++
-source /opt/rh/devtoolset-11/enable
-```
-
-### Arch Linux
-
-✅ 默认 GCC 已足够（Arch 始终随rolling release更新）。
-
-### macOS
-
-确保 Xcode 已更新到最新：
-```bash
-# 检查版本
-clang++ --version
-# 需要 Apple Clang >= 15
-
-# 更新 Xcode
-# App Store > Xcode > 更新
-# 或
-xcode-select --install
-```
-
----
-
-## 加入 / 反馈
-
-- **GitHub Issues**: 报告 bug / 提 feature / 互通兼容性反馈（首选通道）
-- **Pull Requests**: 提交前阅读 `CONTRIBUTING.md`，commit 必须 `-s` DCO 签名
-- **互通测试**: `interop/` 目录常驻 CI，Chrome（fixed stable）+ Firefox（fixed stable）是基准矩阵
-- **安全报告**: 私密渠道——`SECURITY.md`
-- **品牌反馈**: 商标 / 命名相关走 `SECURITY.md` 同渠道
-
-详细贡献流程与治理纪律见 `docs/zh/architecture.md` §16。
-
-> **中文文档约定**：技术文档以 `docs/zh/` 为 canonical 路径，详见 ADR-012。独立文档站（docs-zh.nimrtc.dev）排入 v1.0+。
+- **Project:** [Apache-2.0](LICENSE)
+- **Third-party:** see [`NOTICE`](NOTICE) and [`docs/zh/architecture.md`](docs/zh/architecture.md) §11.

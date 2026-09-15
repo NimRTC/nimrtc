@@ -191,10 +191,35 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
 11. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
       containing headers, CMake config files, and the static `.lib`/`.a`).
-    - Signs the artefacts with the release manager's GPG key.
+    - Signs the artefacts with the release manager's GPG key (see
+      "GPG signing tier" below for the pre-1.0 carve-out).
     - Generates the SBOM (`reuse` + `scancode-toolkit` + `cyclonedx-bom`).
     - Drafts a GitHub Release with `CHANGELOG.md`'s `## [X.Y.Z]` block as the
       body.
+
+#### GPG signing tier (pre-1.0 carve-out)
+
+| Release | GPG requirement |
+|---|---|
+| `v0.x.y` (Tech Preview, current) | **Optional**. If `GPG_PRIVATE_KEY` and `GPG_FINGERPRINT` are not configured in the repo's Secrets/Variables, the release workflow logs a `::warning::` and uploads assets **without** detached `.asc` signatures. The release body and Step Summary carry an explicit "UNSIGNED pre-1.0" banner. Consumers verify integrity via the per-platform `.sha256` files. |
+| `v1.0.0` and later (API-stable) | **Required**. The release will FAIL preflight until the release manager generates a GPG key pair and configures both `GPG_PRIVATE_KEY` (Secret) and `GPG_FINGERPRINT` (Variable) per the workflow header comment. |
+
+Generating the GPG key pair (v1.0.0+):
+
+```bash
+# One-time, on a secure workstation.
+gpg --full-generate-key --default-new-key-algo "ed25519/cert,sign,auth"
+GPG_FPR=$(gpg --list-secret-keys --with-colons \
+  | awk -F: '/^fpr/ {print $10; exit}')
+echo "Fingerprint: $GPG_FPR"
+
+# ASCII-armoured private key → paste into Settings → Secrets → Actions → GPG_PRIVATE_KEY
+gpg --armor --export-secret-keys "$GPG_FPR"
+
+# Same fingerprint → Settings → Variables → Actions → GPG_FINGERPRINT
+# Also upload the public key to a public keyserver so consumers can verify.
+gpg --send-keys "$GPG_FPR"
+```
 
 ### 3.4 Post-tag (T+1 day)
 

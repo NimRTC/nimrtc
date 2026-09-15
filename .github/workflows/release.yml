@@ -3,8 +3,9 @@
 #
 # Triggers on push of a tag matching `v*.*.*` (annotated tag only — see
 # RELEASING.md §3.3). Builds the four-platform release artefacts, signs them
-# with the release manager's GPG key, generates an SBOM, and drafts a
-# GitHub Release whose body is the matching `CHANGELOG.md` heading.
+# with the release manager's GPG key (when configured; see below), generates
+# an SBOM, and drafts a GitHub Release whose body is the matching
+# `CHANGELOG.md` heading.
 #
 # Build matrix mirrors the 1.0.0 support matrix in RELEASING.md §6:
 #   - windows       : MSVC 19.43 on windows-2022         (static .lib + headers)
@@ -12,19 +13,26 @@
 #   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64       (.a + headers, arm64)
 #   - macos-clang   : Apple Clang 15 on macos-14         (.a + headers, arm64)
 #
-# Required secrets:
+# Required secrets (v1.0.0+ only; pre-1.0 Tech Preview can run with these
+# empty — see RELEASING.md §3.3 step 10):
 #   GPG_PRIVATE_KEY    ASCII-armoured GPG private key (the release manager's
-#                       signing key — see RELEASING.md §3.3 step 10).
+#                       signing key).
 #   GPG_PASSPHRASE     Passphrase for that key. Leave empty if the key has none.
 #
-# Required variables (set per repo):
+# Required variables (v1.0.0+ only; pre-1.0 Tech Preview can run with these
+# empty):
 #   GPG_FINGERPRINT    Long-form (40 hex chars) fingerprint of the signing key.
 #                       Surfaced in the GitHub Release as the attestation
 #                       identity for downstream consumers.
 #
+# Pre-1.0 Tech Preview GPG policy: if the secrets above are missing, the
+# preflight job logs a `::warning::` and the publish job uploads the assets
+# WITHOUT detached `.asc` signatures. The release body and the Step Summary
+# carry a banner explaining this. Signed releases resume with v1.0.0.
+#
 # The workflow is intentionally manual-gated: it runs the full
-# release-blocker checklist (build + test on every platform + SBOM + sign)
-# before any GitHub Release is published. Drafts can be edited before
+# release-blocker checklist (build + test on every platform + SBOM + optional
+# sign) before any GitHub Release is published. Drafts can be edited before
 # publish — see `draft: true` on the softprops/action-gh-release step.
 # =============================================================================
 
@@ -103,17 +111,22 @@ jobs:
           fi
           echo "CMake VERSION matches tag: $cmake_version"
 
-      - name: Verify required secrets are present
+      - name: Verify GPG signing prerequisites (optional pre-1.0)
         shell: bash
+        id: gpg-check
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
         run: |
-          [[ -n "$GPG_PRIVATE_KEY" ]] \
-            || { echo "::error::Secret GPG_PRIVATE_KEY is empty"; exit 1; }
-          [[ -n "$GPG_FINGERPRINT"  ]] \
-            || { echo "::error::Variable GPG_FINGERPRINT is empty"; exit 1; }
-          echo "GPG_PRIVATE_KEY and GPG_FINGERPRINT are present."
+          if [[ -n "$GPG_PRIVATE_KEY" && -n "$GPG_FINGERPRINT" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "GPG_PRIVATE_KEY and GPG_FINGERPRINT are present."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPG signing not configured (GPG_PRIVATE_KEY and/or GPG_FINGERPRINT empty)."
+            echo "::warning::Release assets will be uploaded WITHOUT detached signatures."
+            echo "::warning::This is acceptable for pre-1.0 Tech Preview; v1.0.0+ MUST configure GPG per RELEASING.md §3.3 step 10."
+          fi
 
   # ---------------------------------------------------------------------------
   # Build matrix — four jobs, one per supported platform. Each writes a
@@ -340,6 +353,7 @@ jobs:
           submodules: recursive
 
       - name: Import GPG signing key
+        if: needs.preflight.outputs.configured == 'true'
         shell: bash
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -367,6 +381,7 @@ jobs:
           merge-multiple: true
 
       - name: Sign each artefact (detached GPG signature)
+        if: needs.preflight.outputs.configured == 'true'
         shell: bash
         env:
           GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
@@ -421,6 +436,20 @@ jobs:
             echo "::warning::No CHANGELOG section found for $stripped — using fallback body."
             echo "Release $version of NimRTC." > dist/release_notes.md
           fi
+          # Append signing-status footer based on what preflight saw.
+          if [[ "${{ needs.preflight.outputs.configured }}" != "true" ]]; then
+            {
+              echo
+              echo "---"
+              echo
+              echo "> ⚠️ **This is an UNSIGNED pre-1.0 Tech Preview release.**"
+              echo "> The release assets are published without detached GPG"
+              echo "> signatures because the `GPG_PRIVATE_KEY` / `GPG_FINGERPRINT`"
+              echo "> secrets are not configured in this repository."
+              echo "> Verify integrity using the per-platform `.sha256` files only."
+              echo "> Signed releases resume with v1.0.0 (see RELEASING.md §3.3)."
+            } >> dist/release_notes.md
+          fi
           echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Draft GitHub Release
@@ -444,17 +473,35 @@ jobs:
         env:
           GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
         run: |
-          {
-            echo "## Release attestation"
-            echo
-            echo "- Tag: \`${{ github.ref_name }}\`"
-            echo "- Signing key fingerprint: \`$GPG_FINGERPRINT\`"
-            echo "- Artefact bundles:"
-            for tarball in dist/*.tar.xz; do
-              [[ -f "$tarball" ]] || continue
-              sha=$(sha256sum "$tarball" | awk '{print $1}')
-              echo "  - \`$(basename "$tarball")\` — sha256:\`${sha:0:16}…\`"
-            done
-            echo
-            echo "Draft is created in \`draft: true\` mode — review then publish."
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ needs.preflight.outputs.configured }}" == "true" ]]; then
+            {
+              echo "## Release attestation"
+              echo
+              echo "- Tag: \`${{ github.ref_name }}\`"
+              echo "- Signing key fingerprint: \`$GPG_FINGERPRINT\`"
+              echo "- Artefact bundles:"
+              for tarball in dist/*.tar.xz; do
+                [[ -f "$tarball" ]] || continue
+                sha=$(sha256sum "$tarball" | awk '{print $1}')
+                echo "  - \`$(basename "$tarball")\` — sha256:\`${sha:0:16}…\`"
+              done
+              echo
+              echo "Draft is created in \`draft: true\` mode — review then publish."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Release summary (UNSIGNED — pre-1.0 Tech Preview)"
+              echo
+              echo "- Tag: \`${{ github.ref_name }}\`"
+              echo "- GPG signing: **not configured** (assets uploaded without detached signatures)"
+              echo "- Artefact bundles:"
+              for tarball in dist/*.tar.xz; do
+                [[ -f "$tarball" ]] || continue
+                sha=$(sha256sum "$tarball" | awk '{print $1}')
+                echo "  - \`$(basename "$tarball")\` — sha256:\`${sha:0:16}…\`"
+              done
+              echo
+              echo "Acceptable for pre-1.0 Tech Preview. v1.0.0+ MUST configure GPG per RELEASING.md §3.3."
+              echo "Draft is created in \`draft: true\` mode — review then publish."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

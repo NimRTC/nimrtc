@@ -152,6 +152,20 @@ jobs:
         with:
           arch: x64
 
+      # WebRTC APM is built out-of-tree with meson (upstream doesn't ship a
+      # CMakeLists.txt). Run `tools/fetch_webrtc_apm.py` to clone +
+      # `tools/build_webrtc_apm.cmd` to produce the prebuilt static lib,
+      # so the cmake configure step below succeeds with the default
+      # NIMRTC_VENDORED_WEBRTC_APM=ON contract documented in
+      # docs/zh/architecture.md §11.5.5.
+      - name: Install meson (for WebRTC APM prebuild)
+        shell: pwsh
+        run: python -m pip install --user --quiet "meson>=1.10"
+
+      - name: Prebuild WebRTC APM
+        shell: pwsh
+        run: python tools/fetch_webrtc_apm.py
+
       - name: Configure
         shell: pwsh
         run: |
@@ -200,10 +214,26 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build xz-utils python3
+          sudo apt-get install -y ninja-build xz-utils python3 python3-pip
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # WebRTC APM is built out-of-tree with meson (upstream doesn't ship a
+      # CMakeLists.txt). Run `tools/fetch_webrtc_apm.py` to clone +
+      # `tools/build_webrtc_apm.sh` to produce the prebuilt static lib so
+      # the cmake configure step below succeeds with the default
+      # NIMRTC_VENDORED_WEBRTC_APM=ON contract documented in
+      # docs/zh/architecture.md §11.5.5.
+      - name: Install meson (for WebRTC APM prebuild)
+        shell: bash
+        run: |
+          python3 -m pip install --user --quiet "meson>=1.10"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Prebuild WebRTC APM
+        shell: bash
+        run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
@@ -250,10 +280,26 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build xz-utils python3
+          sudo apt-get install -y ninja-build xz-utils python3 python3-pip
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # WebRTC APM is built out-of-tree with meson (upstream doesn't ship a
+      # CMakeLists.txt). Run `tools/fetch_webrtc_apm.py` to clone +
+      # `tools/build_webrtc_apm.sh` to produce the prebuilt static lib so
+      # the cmake configure step below succeeds with the default
+      # NIMRTC_VENDORED_WEBRTC_APM=ON contract documented in
+      # docs/zh/architecture.md §11.5.5.
+      - name: Install meson (for WebRTC APM prebuild)
+        shell: bash
+        run: |
+          python3 -m pip install --user --quiet "meson>=1.10"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Prebuild WebRTC APM
+        shell: bash
+        run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
@@ -301,6 +347,22 @@ jobs:
         run: |
           brew update
           brew install python@3.12 xz
+
+      # WebRTC APM is built out-of-tree with meson (upstream doesn't ship a
+      # CMakeLists.txt). Run `tools/fetch_webrtc_apm.py` to clone +
+      # `tools/build_webrtc_apm.sh` to produce the prebuilt static lib so
+      # the cmake configure step below succeeds with the default
+      # NIMRTC_VENDORED_WEBRTC_APM=ON contract documented in
+      # docs/zh/architecture.md §11.5.5.
+      - name: Install meson (for WebRTC APM prebuild)
+        shell: bash
+        run: |
+          python3 -m pip install --user --quiet "meson>=1.10"
+          echo "$HOME/Library/Python/3.12/bin" >> "$GITHUB_PATH"
+
+      - name: Prebuild WebRTC APM
+        shell: bash
+        run: python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash

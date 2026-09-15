@@ -37,6 +37,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `INTERFACE` stub target and lets `audio3a` run with the built-in
   passthrough stub. CI now passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all
   four platform Configure steps. See `docs/zh/architecture.md` §11.5.5.
+- **Release / WebRTC APM prebuild wiring**: `.github/workflows/release.yml`
+  was missing the `tools/fetch_webrtc_apm.py` step on all four platforms,
+  so a tag push would fail at the cmake configure stage with the same
+  `FATAL_ERROR` even though release artefacts are supposed to carry real
+  3A (`NIMRTC_VENDORED_WEBRTC_APM=ON` per §11.5.5). Added explicit
+  `Install meson` + `Prebuild WebRTC APM` steps before `Configure` on
+  windows, linux-gcc, linux-aarch64, and macos-clang.
 
 ---
 

@@ -43,3 +43,28 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 180      # 100 Hz loopback, skeleton known slow
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# End-to-end loopback test for the real-socket path (Slice 6.5 follow-up).
+# Two ArqRawUdp instances talk via 127.0.0.1 ephemeral ports; this catches
+# any ACK-frame parse / build byte-offset regression that the in-process
+# skeleton test cannot.
+# -----------------------------------------------------------------------------
+add_executable(test_raw_udp_real_loopback test_raw_udp_real_loopback.cpp)
+set_target_properties(test_raw_udp_real_loopback PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_raw_udp_real_loopback)
+
+target_link_libraries(test_raw_udp_real_loopback PRIVATE
+    nimrtc::raw_udp
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_raw_udp_real_loopback
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 15)
+endif()

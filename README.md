@@ -86,8 +86,9 @@ Artifacts land in `build/e2e/`.
 下面这些**单点都不新**，但**组合在一起**在 2026 年的开源 WebRTC 生态里是少见的：
 
 1. **分层剪裁 + Profile 组合**——L0/L1/L2/L3 模块化，编译时选层。同一份代码既能发出 P2P 客户端（全栈），也能发出 SFU 网关（**跳过 L2**）。LiveKit / mediasoup 是 server-only，libwebrtc 是 monolithic，不能切层切到这个粒度。
-2. **多平台 CI 已通（v0.9 RC）** —— Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台 CI 均已绿色通过构建和单元测试。loopback-p2p 冒烟测试在 Windows 验证，Linux/macOS 运行 ctest；Chrome 端到端互通由 `interop/` harness 覆盖。aarch64 交叉编译可过，但**嵌入式部署请先在目标硬件上自行验证**。
-3. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
+2. **多平台 CI 已通（v0.9.2）** —— Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台 CI 均已绿色通过构建和单元测试。loopback-p2p 冒烟测试在 Windows 验证，Linux/macOS 运行 ctest；Chrome 端到端互通由 `interop/` harness 覆盖。aarch64 交叉编译可过，但**嵌入式部署请先在目标硬件上自行验证**。
+3. **PAL Slice 1 落地（v0.10）** —— engine 通过 `pal::*` 统一解析 audio3a / codec / video_codec plugin，零运行时开销，公共 API 不变。为 v0.10.x 的 Slice 2+3（自注册表 + 编译期 ID 校验）打好基础。详见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。
+4. **Crypto 后端可替换**——DTLS 后端接口允许在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL / WoTrCrypt）。这是大多数开源 WebRTC 栈**没有**的设计点——crypto 后端通常直接焊死。
 4. **三层 + Profile 显式公开**——`docs/zh/architecture.md` §2.6 把组合形态写进首版定位，避免"用户拿到 README 不知道能拼出什么"的常见歧途。
 
 > **plugin 接口是这套架构的"接缝"设计**——和上面四条组合搭配才出差异化。详见下面 [§ plugin 接口的目的](#plugin-接口的目的--一个被低估的架构特色)。
@@ -96,7 +97,7 @@ Artifacts land in `build/e2e/`.
 
 ## plugin 接口的目的——一个被低估的架构特色
 
-NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/include/nimrtc/plugins/*.hpp`，ADR-001）暴露：ITransport、IICETransport、IRTP、ISDP、IJB、IAudio3A、ICodec、IVideoSource、IVideoSink、IVideoReceiver/IVideoSender、IDataChannel、IHw*（hw_seam）。
+NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/include/nimrtc/plugins/*.hpp`，ADR-001）暴露：ITransport、IICETransport、IRTP、ISDP、IJB、IAudio3A、ICodec、IVideoSource、IVideoSink、IVideoReceiver/IVideoSender、IDataChannel、IHw*（hw_seam）。Engine 通过统一的 PAL（Plugin Adaptation Layer，ADR-009）解析和加载这些 plugin。
 
 | 维度 | 显式 plugin 接口的价值 | 不做 plugin 接口的代价 |
 |---|---|---|
@@ -110,27 +111,24 @@ NimRTC 几乎所有"可替换"的能力都通过 plugin 接口（`src/plugins/in
 
 plugin 是 NimRTC **可演进性**的核心机制：P0–P1 主线用内置实现，P2–P3 引入的"3A 双 tap / 严格优先级 / ref_frame"差异化能力也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
 
-详细设计见 `docs/adr/ADR-001-plugin-system.md`。
+详细设计见 `docs/adr/ADR-001-plugin-system.md`（插件系统）与 `docs/adr/ADR-009-pal-slice-1.md`（PAL Slice 1）。
 
 ---
 
-## C++ 标准：v0.8 选 C++17，v0.12 实操迁到 C++20
+## C++ 标准：C++20（v0.10 起全面落地）
+
+**当前基线：C++20**。以下说明选型历程和理由：
 
 | 时间点 | 标准 | 触发原因 |
 |---|---|---|
 | v0.8 文档 | C++17 | 最大编译器覆盖（GCC 9 / Clang 9 / MSVC 19.20+）；嵌入式 / 政企老环境最广 |
-| v0.12 代码 | **C++20** | 见下面"为什么迁" |
+| v0.10 代码 | **C++20** | `std::span` 必须有（`src/core/bytes.hpp` 已用），`<chrono>` C++20 才稳定（P1 起 RTCP NTP / ref_frame 时间线需要） |
 
-**v0.12 迁到 C++20 的两个核心理由**：
-
-1. **`std::span` 必须有**——`src/core/bytes.hpp` 已经是 `using ByteSpan = std::span<const std::uint8_t>`，整个 RTP / RTCP / SDP / ICE / 3A 的零拷贝视图都基于它。C++17 里只有 `gsl::span`（非标准）或手写 pointer+length。`std::span` 是 C++20 标准库，是 zero-copy 字节视图的"终态"。
-2. **`<chrono>` 在 C++20 才稳定**——`std::chrono::steady_clock` 的 `to_stream`、calendar types、`hh_mm_ss` 等 P0 暂时用不上，但 P1 起 RTCP NTP 时间戳对齐、ref_frame 时间线（§8.4）会需要 C++20 chrono 的精度和格式化能力。
-
-**为什么 v0.8 当时选 C++17**：当时 P0 还在做 scaffolding，**还没用到 span**，chrono 也不需要 C++20 特性——选 C++17 是保守"先把代码写出来"。**现在（v0.12）P1 已经定型了 `std::span` + C++20 chrono 的使用面**，回退 C++17 收益是负的（要重写 bytes.hpp、改所有 `BufferView` 用法、损失 P3 计划的格式化能力）。
+**为什么选 C++20**：整个 RTP / RTCP / SDP / ICE / 3A 的零拷贝视图都基于 `std::span`。C++17 只有 `gsl::span`（非标准）或手写 pointer+length。`std::span` 是 C++20 标准库，是 zero-copy 字节视图的"终态"。同时 P1 起 RTCP NTP 时间戳对齐、ref_frame 时间线（§8.4）需要 C++20 chrono 的精度。
 
 **给使用者的结论**：
 - **新代码 / 新项目用 NimRTC → 直接 C++20**，无成本。
-- **如果你的环境锁死 C++17**（如某些信创 GCC 8.x）→ 暂时不可用，P2 才会做"降级到 C++17 的"shim"。当前以 C++20 为基线（[§13](docs/zh/architecture.md#13-里程碑与发布节奏)）。
+- **如果你的环境锁死 C++17**（如某些信创 GCC 8.x）→ 暂时不可用，P2 才会做"降级到 C++17 的"shim"（[§13](docs/zh/architecture.md#13-里程碑与发布节奏)）。
 
 ---
 
@@ -155,7 +153,7 @@ plugin 是 NimRTC **可演进性**的核心机制：P0–P1 主线用内置实�
 | `agent-gateway` | L0 + L1 + L2(tap 打开) | AI Agent 接入（PCM 双 tap + 旁路） |
 | `cloudgame` | L0 + L1 + L2 + L3（高码率主线 + 输入渲染对齐）| 遥操作 / 云游戏（v0.10 列为远期候选） |
 
-Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/architecture.md` §2.6。
+Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/architecture.md` §2.6。声明式 Profile 格式见 ADR-010（JSON 为第一方格式）。
 
 ---
 
@@ -170,15 +168,21 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/archite
 
 ---
 
-## 当前进度（v0.9 RC 真实状态）
+## 当前进度（v0.10.0 Tech Preview — consolidating v0.9）
 
-| 项 | 状态 |
-|---|---|
-| 文档 v0.9 设计 | ✅ 完成 |
-| 脚手架（CMake / CI / vendor 集成） | ✅ 完成 |
-| vendor 库落地（wolfSSL / libsrtp / libopus / libjuice / WebRTC APM） | ✅ 完成 |
-| Chrome 互通 P2P demo | ✅ 完成 |
-| 多平台 CI 验证（Windows / Linux x86_64 / macOS arm64 / Linux aarch64） | ✅ 完成 |
+| 项 | 状态 | 版本 |
+|---|---|---|
+| 文档 v0.10 设计 + ADR 决策落地 | ✅ 完成 | v0.10 |
+| 脚手架（CMake / CI / vendor 集成） | ✅ 完成 | v0.9.2 |
+| vendor 库落地（wolfSSL / libsrtp / libopus / libjuice / WebRTC APM） | ✅ 完成 | v0.9.2 |
+| Chrome ↔ NimRTC P2P 音视频互通（Case D） | ✅ 完成 | v0.9.2 |
+| 多平台 CI 验证（Windows / Linux x86_64 / macOS arm64 / Linux aarch64） | ✅ 完成 | v0.9.2 |
+| RFC 7587 Opus packetise / depacketise 完整实现 | ✅ 完成 | v0.9.2 |
+| PAL Slice 1（Plugin Adaptation Layer） | ✅ 完成 | v0.10 |
+| H.264 HW backend 批量落地（NVENC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ 完成 | v0.9.2 |
+| ADR-009/010/011/012 决策文档落地 | ✅ 完成 | v0.10 |
+
+> v0.10 关闭了 v0.9 的收尾工作并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、SFU relay、PCM tap、Profile 库官方化）排入 v0.11.0。
 
 ---
 
@@ -196,6 +200,12 @@ Profile 是**编译期配置**，不是运行时分发。详见 `docs/zh/archite
 | `NIMRTC_UBSAN` | ON / **OFF** | UndefinedBehaviorSanitizer |
 | `NIMRTC_WARNINGS_AS_ERRORS` | **ON** / OFF | Treat all warnings as errors |
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** / OFF | Use vendored WebRTC Audio Processing library |
+| `NIMRTC_PLUGINS_NVENC` | ON / **OFF** | NVIDIA NVENC + NVDEC H.264 HW encoder/decoder (Windows/Linux) |
+| `NIMRTC_PLUGINS_AMF` | ON / **OFF** | AMD AMF H.264 encoder (Windows only) |
+| `NIMRTC_PLUGINS_QSV` | ON / **OFF** | Intel QSV H.264 encoder via libvpl/oneVPL (cross-platform) |
+| `NIMRTC_PLUGINS_DXVA` | ON / **OFF** | Microsoft DXVA/Media Foundation H.264 decoder (Windows only) |
+| `NIMRTC_PLUGINS_VAAPI` | ON / **OFF** | Linux VA-API H.264 encoder + decoder (Linux only) |
+| `NIMRTC_PLUGINS_OPENH264` | ON / **OFF** | OpenH264 software fallback (cross-platform) |
 
 ### Directory layout
 
@@ -246,6 +256,7 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 - **License**: Apache-2.0（见 `LICENSE`）
 - **第三方依赖**: 见 `NOTICE` 与 `docs/zh/architecture.md` §11（借用策略）
 - **借用策略**: 密码件 / 编解码 / SCTP / 3A 等成熟模块一律 vendor；RTP / RTCP / SDP / JB / BWE / ICE 状态机 / timeline 调度等核心协议层一律自研。详见 `docs/zh/architecture.md` §11。
+- **端到端验收引用标准**: ADR-011 明确了 engine 仅承担单跳预算；引用标准 DB31/T 1505-2024 / T/SSITS 2003-2023 由集成方负责。
 - **贡献合规**: DCO 签名（`git commit -s`），不采用 CLA。详见 `CONTRIBUTING.md`。
 
 ---
@@ -290,7 +301,7 @@ cmake --preset dev.msvc -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
 要启用 3A 功能：
 ```bat
-python tools\fetch_webrtc_apm.py
+python tools/fetch_webrtc_apm.py
 ```
 构建完成后，重新运行 CMake 配置即可自动检测到预编译库。
 
@@ -428,3 +439,5 @@ xcode-select --install
 - **品牌反馈**: 商标 / 命名相关走 `SECURITY.md` 同渠道
 
 详细贡献流程与治理纪律见 `docs/zh/architecture.md` §16。
+
+> **中文文档约定**：技术文档以 `docs/zh/` 为 canonical 路径，详见 ADR-012。独立文档站（docs-zh.nimrtc.dev）排入 v1.0+。

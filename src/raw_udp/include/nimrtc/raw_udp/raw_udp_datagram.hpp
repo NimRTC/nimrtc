@@ -32,10 +32,16 @@
  *     arq_raw_udp.cpp comment block);
  *   - ICE-selected-pair reuse — once Slice 7's `ITransportStack::raw_control()`
  *     exposes the ICE-selected endpoints, ArqRawUdp will skip its own
- *     STUN path and consume the stack's pair (transport-selection §8 #4);
- *   - Loss-driven retransmit — only sequence numbering + ACK bookkeeping
- *     are wired up; the actual retransmit timer fires but currently
- *     no-ops (TODO marker in arq_raw_udp.cpp).
+ *     STUN path and consume the stack's pair (transport-selection §8 #4).
+ *
+ * What landed in Slice 6.5 (2026-09 follow-up) and is now exercised
+ * end-to-end by `tests/test_raw_udp_real_loopback.cpp`:
+ *   - Real UDP socket layer (Winsock / Berkeley) — ArqRawUdp opens a
+ *     socket, runs a recv thread that demuxes DATA vs ACK frames, and
+ *     applies the selective-repeat reception state machine.
+ *   - Loss-driven retransmit — the retransmit thread walks tx_pending_
+ *     and retransmits any DATA whose RTO has elapsed, with exponential
+ *     backoff capped at rto_max_ms, up to max_retransmits.
  *
  * ## Threading
  *
@@ -129,6 +135,26 @@ struct RawUdpConfig {
      *  the IDtlsSession PSK extension; for Slice 6 we just store the hint
      *  string so consumers can wire it in once Slice 4 lands. */
     std::string psk_identity_hint;
+
+    /** Enable the real UDP socket layer (slice-6.5 follow-up).
+     *
+     *  When true:
+     *    - open() creates a UDP socket bound to local_host:local_port.
+     *    - send() actually `sendto()`s the framed packet to peer_endpoint.
+     *    - A background recv thread reads from the socket, demuxes DATA
+     *      vs ACK frames, applies the selective-repeat reception state
+     *      machine, and `sendto()`s ACK frames back.
+     *    - The retransmit thread retransmits unacked DATA frames when
+     *      their RTO elapses, with exponential backoff.
+     *
+     *  When false (default for backward compatibility with the slice-6
+     *  in-process tests):
+     *    - send() / recv() run against the in-process mutex/queue path
+     *      driven by the arq_test_* test hooks.
+     *    - No socket is opened; no threads besides the retransmit
+     *      timer are spawned.
+     */
+    bool enable_real_socket = false;
 };
 
 // ---------------------------------------------------------------------------

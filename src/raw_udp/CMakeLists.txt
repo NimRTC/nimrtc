@@ -22,6 +22,7 @@ add_library(nimrtc_raw_udp STATIC
     src/arq_raw_udp.cpp
     src/arq_raw_udp_factory.cpp
     src/raw_udp_plugin.cpp
+    src/udp_socket.cpp      # cross-platform UDP wrapper (slice 6.5 follow-up)
 )
 
 nimrtc_apply_options(nimrtc_raw_udp)

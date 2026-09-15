@@ -28,6 +28,9 @@
 add_library(nimrtc_dtls STATIC
     src/dtls_session.cpp
     src/dtls_wolfssl_session.cpp
+    src/dtls_prf.cpp     # RFC 5246 §5 PRF (wolfSSL HMAC-SHA-256) —
+                         # exported so the KAT + verify_data paths can
+                         # run independently of the live handshake.
     )
 
 nimrtc_apply_options(nimrtc_dtls)

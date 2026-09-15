@@ -199,13 +199,11 @@ nimrtc_copy_wolfssl_certs(test_dtls_inproc)
 
 # ----------------------------------------------------------------------------
 # TLS 1.2 PRF / HMAC-SHA-256 known-answer test.
-# Verifies nimrtc::dtls::tls12_prf against an independent Python reference
-# (see build/gen_kat.py).  Only depends on the dtls library.
 #
-# DISABLED: The pure-RFC5246 PRF implementations were removed when the DTLS
-# stack migrated from mbedTLS to wolfSSL (see CHANGELOG). The PRF is now
-# provided internally by wolfSSL. Re-enable once the test is rewritten to
-# drive wolfSSL_WC_PRF() / wc_HmacSha256() directly.
+# Verifies nimrtc::dtls::tls12_prf against an independent Python reference
+# (see build/gen_kat.py).  Now backed by wolfSSL HMAC-SHA-256
+# (see src/modules/dtls/src/dtls_prf.cpp) instead of BCrypt, so the test
+# runs identically on Windows / Linux / macOS — no `#ifdef _WIN32` gate.
 # ----------------------------------------------------------------------------
 function(add_dtls_prf_kat_test name source)
     add_executable(${name} ${source})
@@ -216,7 +214,8 @@ function(add_dtls_prf_kat_test name source)
         nimrtc::dtls)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
-        "${CMAKE_SOURCE_DIR}/src/plugins/include")
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
@@ -226,7 +225,7 @@ function(add_dtls_prf_kat_test name source)
         COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
 endfunction()
-# add_dtls_prf_kat_test(test_dtls_prf_kat test_dtls_prf_kat.cpp)  # disabled: PRF moved to wolfSSL
+add_dtls_prf_kat_test(test_dtls_prf_kat test_dtls_prf_kat.cpp)
 
 # ----------------------------------------------------------------------------
 # X25519 (RFC 7748) ECDH agreement test — drives BCrypt X25519 directly to

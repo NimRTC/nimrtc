@@ -80,8 +80,22 @@ jobs:
         run: |
           tag="${{ github.ref_name }}"
           tag_stripped="${tag#v}"
-          cmake_version=$(grep -E '^\s*project\(' CMakeLists.txt \
-            | grep -oE 'VERSION [0-9.]+' | awk '{print $2}')
+          # CMakeLists.txt uses a multi-line `project(...VERSION X.Y.Z...)`
+          # block, so a single-line grep won't catch the VERSION.  Anchor on
+          # the literal `project(` line and grab the next few lines, then
+          # pull the first VERSION number out.
+          #
+          # The leading `^project(` anchor is important: CMakeLists.txt has a
+          # comment line `# Enforce C++20 before project() so all targets
+          # inherit it.` which would otherwise be the first match.
+          cmake_version=$(grep -A6 '^project(' CMakeLists.txt \
+            | grep -oE 'VERSION[[:space:]]+[0-9.]+' \
+            | head -n1 \
+            | awk '{print $2}')
+          if [[ -z "$cmake_version" ]]; then
+            echo "::error::Could not parse VERSION from CMakeLists.txt project()"
+            exit 1
+          fi
           if [[ "$tag_stripped" != "$cmake_version" ]]; then
             echo "::error::Tag '$tag_stripped' != CMake VERSION '$cmake_version'"
             echo "       Bump the project() line per RELEASING.md §3.2 step 8."

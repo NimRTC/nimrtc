@@ -5,6 +5,28 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-09-15
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport plugin interface**: new plugin seam with `IPlugin` interface and
+  `TransportSelector`; `raw_udp`, `dtls`, and `sctp` plugin stubs wired.
+  See `docs/plan/transport-selection.md`.
+- **RFC 5246 PRF (P_SHA-256)**: standalone wolfSSL-backed PRF for DTLS
+  key derivation; all 7 RFC 5246 section 5 KAT vectors pass. Replaces the
+  BCrypt-only stub.
+- **ArqRawUdp real-socket fixes**: corrected ACK frame byte offsets in
+  `recv_main`, fixed `peer_endpoint_` race (added `peer_mu_`), repaired
+  `send()` span dead code, resolved `close()` deadlock (socket-close-first
+  ordering). The ARQ state machine now advances correctly against a real
+  UDP socket; burst test reports `sent=50 acks_recv=50 retransmit=0`.
+- **New test**: `test_raw_udp_real_loopback` (4/4 cases: single-packet,
+  burst-50, ephemeral-port reflection, error-path).
+
+---
+
 ## [Unreleased]
 
 _No unreleased changes yet._

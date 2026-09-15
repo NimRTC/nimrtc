@@ -150,6 +150,14 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    CI runners (windows, linux-gcc, linux-aarch64, macos-clang). All four must
    be green before proceeding.
 
+   **CI vs release build differ on WebRTC APM**: `.github/workflows/ci.yml`
+   passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all four Configure steps so
+   the runner doesn't need a `meson`+`abseil-cpp` prebuild. The actual release
+   artefact built by `.github/workflows/release.yml` **must** carry real 3A,
+   so the release pipeline runs `python tools/fetch_webrtc_apm.py` once per
+   platform before Configure, then configures with `-DNIMRTC_VENDORED_WEBRTC_APM=ON`.
+   See `docs/zh/architecture.md` §11.5.5 for the rationale.
+
 ### 3.2 Stabilisation window (T-7 … T-1)
 
 5. Cherry-pick hot-fixes from `main` to `release/X.Y`. Each hot-fix PR must
@@ -292,6 +300,15 @@ Phase 3 and Phase 5 are blocked on the Phase 3 PRs merging. Until then,
 (warning-only) per Phase 4 policy. Phase 5 is a one-line `git rm`
 after Phase 3 completes.
 
+### 7.1 WebRTC APM prebuild (non-migration note)
+
+WebRTC APM is **not** part of the Phase 3 migration — it is already vendored
+in `src/third_party/webrtc_audio_processing/` and built by meson (not CMake).
+Its conditional prebuild guard (`NIMRTC_VENDORED_WEBRTC_APM`) is documented in
+`docs/zh/architecture.md` §11.5.5. The short version: CI uses `=OFF`; the
+release pipeline uses `=ON` after running `python tools/fetch_webrtc_apm.py`
+once per platform.
+
 ---
 
 ## 8. Cross-references
@@ -305,6 +322,6 @@ after Phase 3 completes.
 - [`CODEOWNERS`](CODEOWNERS) — per-module reviewers who must approve
   release-blocker PRs.
 - `docs/zh/architecture.md` §13 (release plan) and §16.3 (release
-  hygiene DoD).
+  hygiene DoD), and §11.5.5 (WebRTC APM conditional prebuild guard).
 - `docs/plan/vendor-migration.md` — submodule + `vendor.json` migration that
   is a **blocker** for `v1.0.0` (see CHANGELOG "Deferred for 1.0.0").

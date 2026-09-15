@@ -615,6 +615,42 @@ third_party/
 - **每次上游 release 后 30 天内评估是否同步**（CVE 优先，新功能可滞后）
 - **Vendor 模块的版本号必须钉死**（commit hash），不在 `master` 上滚动
 
+#### 11.5.5 可选预编译模式：`NIMRTC_VENDORED_WEBRTC_APM`
+
+> **本节是 §11.5.2 "vendor 源码"形式的唯一例外**。所有其他 vendored 模块（libsrtp / libopus / libvpx / usrsctp / mbedtls / nlohmann_json / googletest）一律按 §11.5.2 的"vendor 源码 = 默认"走；只有 WebRTC APM 单独开了 ON/OFF guard。理由如下。
+
+**问题**：WebRTC APM 上游使用 **meson**（非 CMake）构建，且依赖 `abseil-cpp` C++ 子项目，构建一次需要 10–20 分钟 × 4 平台。NimRTC 的 CMake 模块只负责 link 一份**预先构建好的静态库**（`.a` / `.lib`），由 `tools/fetch_webrtc_apm.py` + `tools/build_webrtc_apm.{sh,cmd}` 一次性生成：
+
+- 步骤：clone `https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing` → `meson setup` → `ninja` → 产出 `libwebrtc-audio-processing-2.a` / `.lib`
+- 上游 URL 不在多数 CI 沙箱白名单；`abseil-cpp` 子项目还会触发额外网络请求
+- CI 4 平台 × 20 min ≈ 80 min runner time，单 PR 多 job 累计数小时
+
+**结论**：把 "prebuild 跑通"塞进 `ci.yml` 的 4 平台 Configure 步骤既慢又不稳，会让 NimRTC 的四平台 CI 永远跑不完。**把"是否必须 prebuild"做成编译期开关**，交给配置者按场景选。
+
+**契约**（在 `src/third_party/webrtc_audio_processing/CMakeLists.txt` 中实现）：
+
+| `NIMRTC_VENDORED_WEBRTC_APM` | 默认 | 行为 |
+|---|---|---|
+| `ON`（默认） | ✅ | 必须 prebuild 出 `libwebrtc-audio-processing-2.{a,lib}`；缺失则 `FATAL_ERROR` 并提示运行 `tools/fetch_webrtc_apm.py` / `tools/build_webrtc_apm.{sh,cmd}`。`audio3a` 模块 link 真实静态库，启用 AEC/ANS/AGC/VAD。 |
+| `OFF` | ❌（CI / 纯源码消费者主动设） | 即使 prebuild 缺失也**不报错**；定义一个空的 `INTERFACE` stub target `nimrtc::vendor::webrtc_apm`，`audio3a` 退回到内置 passthrough/基础降噪实现；Configure 阶段打印一条 `STATUS` 提示用户想用真 3A 需重新 `-DNIMRTC_VENDORED_WEBRTC_APM=ON` 重配。 |
+
+**使用规则**：
+
+- **本地开发 / 发布构建**：`=ON`（默认）。先跑一次 `python tools/fetch_webrtc_apm.py`，再 configure。release 产物携带真实 3A。
+- **CI**：`.github/workflows/ci.yml` 4 个平台 Configure 步骤统一加 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`，让 PR matrix 能在合理时间内绿；`audio3a` 模块测试改跑内置 stub 路径（覆盖接口契约 + passthrough，不覆盖真实 APM 算法正确性）。
+- **真 3A 正确性**：`tests/test_audio3a_tap` 的 pre-3a / post-3a PCM tap 接口测试**与 APM 真实实现解耦**——只验证 tap 回调拿到合法 PCM 流；不验证 APM 算法本身。真实 APM 的算法正确性由上游 PulseAudio / Chromium 测试矩阵覆盖，本仓库不重复。
+
+**为什么是 guard 而不是直接 vendored-on-CI**：guard 模式保留了"完整 vendor"对开发者/下游的价值（真 3A），同时把 CI 上的"我不需要 3A 也想 build 跑测试"这条路径打开。**比硬性要求 CI 也跑 prebuild 多花了 ~3 行 CMake**，但把 CI 4-platform × N PR 的稳定性从"依赖 gitlab.freedesktop.org / meson / abseil 网络"解放出来。
+
+**升级路径**：若未来想强制真 3A 上 CI（比如为 PR 拦截算法回归），需要在 `ci.yml` 加一个独立 job（仅 1 平台，比如 linux-gcc），配 `=ON` + prebuild cache；不要把 prebuild 塞进 4 平台 matrix。
+
+**对应代码位置**：
+
+- `src/third_party/webrtc_audio_processing/CMakeLists.txt`：guard 实现（`_apm_lib` 找不到时的 ON→FATAL_ERROR / OFF→INTERFACE stub 分支）
+- `.github/workflows/ci.yml`：4 个 platform Configure 步骤的 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`
+- `tools/fetch_webrtc_apm.py` + `tools/build_webrtc_apm.{sh,cmd}`：prebuild 入口
+- 引入时间：v0.10.1（commit `8f7c756`）
+
 ---
 
 ### 11.6 自研模块清单

@@ -25,6 +25,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **New test**: `test_raw_udp_real_loopback` (4/4 cases: single-packet,
   burst-50, ephemeral-port reflection, error-path).
 
+### Fixed
+
+- **CI / WebRTC APM prebuild guard**: `src/third_party/webrtc_audio_processing/CMakeLists.txt`
+  previously `FATAL_ERROR` on any checkout that lacks the meson-built
+  `libwebrtc-audio-processing-2.{a,lib}`. This blocked all four CI runners
+  (windows/linux/macos/aarch64) because the prebuild requires a separate
+  `meson` + `abseil-cpp` step that is not wired into the CI matrix. Fixed by
+  making the guard conditional on `NIMRTC_VENDORED_WEBRTC_APM` (default `ON`):
+  `=ON` retains the original `FATAL_ERROR` + guidance; `=OFF` defines an empty
+  `INTERFACE` stub target and lets `audio3a` run with the built-in
+  passthrough stub. CI now passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all
+  four platform Configure steps. See `docs/zh/architecture.md` §11.5.5.
+
 ---
 
 ## [Unreleased]

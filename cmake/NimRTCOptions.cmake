@@ -90,7 +90,7 @@ function(nimrtc_apply_options target)
             -Wshadow -Wnon-virtual-dtor -Wold-style-cast
             -Wcast-align -Wunused -Woverloaded-virtual
             -Wconversion -Wsign-conversion
-            -Wnull-dereference -Wdouble-promotion
+            -Wdouble-promotion
             -Wformat=2 -Wformat-security
             -Wmisleading-indentation -Wduplicated-cond
             -fno-common

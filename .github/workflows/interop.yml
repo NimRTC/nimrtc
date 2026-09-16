@@ -56,7 +56,7 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          cmake --preset dev.msvc `
+          cmake --preset debug.msvc `
             -DNIMRTC_BUILD_EXAMPLES=ON `
             -DNIMRTC_BUILD_TESTS=ON
 
@@ -97,7 +97,7 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          cmake --preset dev.msvc `
+          cmake --preset debug.msvc `
             -DNIMRTC_BUILD_EXAMPLES=ON `
             -DNIMRTC_BUILD_TESTS=ON
 

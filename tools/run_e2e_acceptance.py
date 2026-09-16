@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-tools/run_e2e_acceptance.py — Orchestrate the full end-to-end acceptance run.
+tools/run_e2e_acceptance.py - Orchestrate the full end-to-end acceptance run.
 
 Order:
-  1. case_a_gcm_aead       — BCrypt AES-128-GCM round-trip (in-process)
-  2. case_b_dtls_inproc    — NimRTC aes_gcm_seal/open (in-process)
-  3. case_c_loopback       — NimRTC <-> NimRTC DTLS+ICE+SRTP (loopback UDP)
-  4. case_d_chrome         — NimRTC <-> real Chrome via signaling server + Playwright
+  1. case_a_gcm_aead       - BCrypt AES-128-GCM round-trip (in-process)
+  2. case_b_dtls_inproc    - NimRTC aes_gcm_seal/open (in-process)
+  3. case_c_loopback       - NimRTC <-> NimRTC DTLS+ICE+SRTP (loopback UDP)
+  4. case_d_chrome         - NimRTC <-> real Chrome via signaling server + Playwright
 
 All artifacts go to build/e2e/. Output is captured to
 build/e2e/case_<x>_*.log so the project root stays clean.
@@ -69,7 +70,7 @@ PROXY_DURATION   = 30
 
 def run_local(exe: Path, log_name: str, timeout_s: int = 60) -> bool:
     log = E2E / log_name
-    print(f"\n[run] {exe.name} → {log.name}")
+    print(f"\n[run] {exe.name} -> {log.name}")
     if not exe.exists():
         print(f"[FAIL] binary missing: {exe}")
         return False

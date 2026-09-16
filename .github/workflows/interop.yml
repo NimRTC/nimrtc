@@ -58,7 +58,8 @@ jobs:
         run: |
           cmake --preset debug.msvc `
             -DNIMRTC_BUILD_EXAMPLES=ON `
-            -DNIMRTC_BUILD_TESTS=ON
+            -DNIMRTC_BUILD_TESTS=ON `
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         shell: pwsh
@@ -99,7 +100,8 @@ jobs:
         run: |
           cmake --preset debug.msvc `
             -DNIMRTC_BUILD_EXAMPLES=ON `
-            -DNIMRTC_BUILD_TESTS=ON
+            -DNIMRTC_BUILD_TESTS=ON `
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build
         shell: pwsh

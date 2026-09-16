@@ -131,6 +131,68 @@ set_tests_properties(test_dtls_retransmit_no_duplicate
     PROPERTIES TIMEOUT 30)
 
 # ----------------------------------------------------------------------------
+# Slice 6 follow-up: ARQ-UDP transport e2e tests (A/B/C/D).
+#
+# These four tests form a progressive stack-validation sequence:
+#   A. test_dtls_over_udp_loopback
+#        DTLS handshake over raw Winsock/POSIX UDP sockets (no ARQ).
+#   B. test_dtls_over_arq_udp
+#        DTLS handshake over ArqRawUdp (selective-repeat ARQ over UDP).
+#        Proves ARQ framing does not corrupt DTLS records.
+#   C. test_srtp_over_dtls_over_arq_udp
+#        Same as B, plus SRTP protect/unprotect round-trip with one RTP packet.
+#        Proves DTLS-SRTP key derivation + SRTP encrypt/decrypt work through ARQ.
+#   D. test_rtp_srtp_arq_e2e
+#        Full pipeline: 10-packet burst A→B + 5-packet burst B→A.
+#        Proves bidirectional media delivery + ARQ stats + SRTP stats.
+#
+# All four tests are standalone (custom main(), no GoogleTest).  They use
+# raw Winsock/POSIX sockets only — no ICE, no STUN, no libjuice.
+# ----------------------------------------------------------------------------
+function(add_arq_e2e_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    # Link the modules the test needs.
+    target_link_libraries(${name} PRIVATE
+        nimrtc::dtls
+        nimrtc::raw_udp
+        nimrtc::core)
+    # SRTP tests also need the SRTP target + NIMRTC_USE_LIBSRTP=1.
+    # Add SRTP and NIMRTC_USE_LIBSRTP only when the stub impl is not forced.
+    if(TARGET nimrtc::srtp)
+        target_link_libraries(${name} PRIVATE nimrtc::srtp)
+        target_compile_definitions(${name} PRIVATE NIMRTC_USE_LIBSRTP=1)
+    endif()
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
+        "${CMAKE_SOURCE_DIR}/src/raw_udp/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/srtp/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name})
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    # DtlsSession uses wolfSSL certs; copy them into the test binary dir.
+    nimrtc_copy_wolfssl_certs(${name})
+endfunction()
+
+add_arq_e2e_test(test_dtls_over_udp_loopback   test_dtls_over_udp_loopback.cpp)
+add_arq_e2e_test(test_dtls_over_arq_udp        test_dtls_over_arq_udp.cpp)
+add_arq_e2e_test(test_srtp_over_dtls_over_arq_udp
+                                               test_srtp_over_dtls_over_arq_udp.cpp)
+add_arq_e2e_test(test_rtp_srtp_arq_e2e        test_rtp_srtp_arq_e2e.cpp)
+
+# Timeout for the burst test (D): it sends 10+5=15 packets at 5ms intervals,
+# plus 3s receive timeout, plus the initial DTLS handshake.
+set_tests_properties(test_rtp_srtp_arq_e2e PROPERTIES TIMEOUT 60)
+
+# ----------------------------------------------------------------------------
 # Cross-module DTLS↔SRTP timing integration test.
 # Two engines run on loopback, ICE+DTLS handshake; verifies that after
 # DTLS Connected, the engine's maybe_install_srtp_keys() flips

@@ -78,8 +78,17 @@ def run(cmd, cwd=None, check=True, timeout=300):
         if ok:
             print(result.stdout[-1500:] if len(result.stdout) > 1500 else result.stdout)
         else:
+            # CI-only failure modes (e.g. ninja exiting on a non-obvious
+            # compile error inside a deeply-nested WebRTC APM translation
+            # unit) need MUCH more context than the last 1000 chars — the
+            # real diagnostic usually lives 50-200 lines earlier, hidden
+            # behind `[STEP]` banners. Dump the last 8 KiB, and if the
+            # underlying subprocess wrote a separate log file (the cmd
+            # wrapper does, at $LOG_DIR\webrtc_apm_build.log), call it
+            # out so the runner log makes it obvious.
             print(f"[FAIL rc={result.returncode}]")
-            print(result.stdout[-1000:])
+            tail = result.stdout[-8192:] if len(result.stdout) > 8192 else result.stdout
+            print(tail)
         return ok, result.stdout
     except subprocess.TimeoutExpired:
         print(f"[TIMEOUT after {timeout}s]")

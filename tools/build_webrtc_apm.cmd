@@ -130,8 +130,8 @@ set NINJA_RC=!ERRORLEVEL!
 
 if !NINJA_RC! neq 0 (
     echo [ERROR] ninja build failed with rc=!NINJA_RC!
-    echo Last 30 lines of %LOG_DIR%\webrtc_apm_build.log:
-    powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log' -Tail 30"
+    echo Full log: %LOG_DIR%\webrtc_apm_build.log  (last 250 lines shown below)
+    powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log' -Tail 250"
     exit /b 3
 )
 

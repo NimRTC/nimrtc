@@ -110,7 +110,16 @@ if not exist "%BUILD_DIR%\build.ninja" (
         echo         Run tools\fetch_webrtc_apm.py first to clone the source.
         exit /b 1
     )
-    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static
+    REM On MSVC, ensure C++20 designated initializers are recognized even
+    REM when meson's cpp_std=c++20 mapping falls back to /permissive- mode
+    REM (where designated initializers require the explicit MSVC toggle
+    REM /Zc:designated-initializers).  This must come from vcvars to make
+    REM `%VSCMD_ARG_TGT_ARCH%` available, hence the check.
+    set "MSVC_EXTRA_ARGS="
+    if defined VSCMD_ARG_TGT_ARCH (
+        set "MSVC_EXTRA_ARGS=--cpp-args=/Zc:designated-initializers"
+    )
+    meson setup "%BUILD_DIR%" "%SRC_DIR%" --buildtype=%BUILD_TYPE% --default-library=static %MSVC_EXTRA_ARGS%
     if errorlevel 1 (
         echo [ERROR] meson setup failed
         exit /b 2

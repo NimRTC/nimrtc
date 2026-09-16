@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-e2e_chrome_interop.py — End-to-end Chrome ↔ NimRTC DTLS interop test.
+e2e_chrome_interop.py - End-to-end Chrome <-> NimRTC DTLS interop test.
 
 What this verifies
 ------------------
@@ -29,6 +30,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Fix Windows console Unicode output: on Windows (GitHub Actions runner),
+# the console encoding defaults to the system code page (cp1252) which
+# cannot encode many Unicode characters (e.g. U+2192 arrow, U+2014 em-dash)
+# that Chrome's console.log messages often emit.  Reconfiguring stdout
+# to UTF-8 lets our print() pass through those strings without errors.
+if sys.stdout is not None:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass  # CI redirect to file ignores encoding here
 
 ROOT = Path(__file__).resolve().parent.parent
 E2E  = ROOT / "build" / "e2e"
@@ -82,9 +94,9 @@ async def run_e2e() -> int:
         sys.exit(f"Chrome test HTML not found at {CHROME_HTML}")
     if not (E2E / "nimrtc_chrome.keylog").exists():
         # ensure the file exists so we can see the empty-state pre-test
-        (E2E / "nimrtc_chrome.keylog").write_text("")
+        (E2E / "nimrtc_chrome.keylog").write_text("", encoding="utf-8")
     if not (E2E / "nimrtc_chrome.trace").exists():
-        (E2E / "nimrtc_chrome.trace").write_text("")
+        (E2E / "nimrtc_chrome.trace").write_text("", encoding="utf-8")
 
     from playwright.async_api import async_playwright
 
@@ -154,7 +166,7 @@ async def run_e2e() -> int:
 
         # Tee Chrome console to disk for later inspection.
         console_log = E2E / "chrome_console.log"
-        console_log.write_text("")
+        console_log.write_text("", encoding="utf-8")
         msgs: list[str] = []
         page.on("console", lambda m: msgs.append(f"[{m.type}] {m.text}"))
         # Also capture page errors (uncaught JS exceptions, which is where
@@ -235,7 +247,7 @@ async def run_e2e() -> int:
             results = last_results
 
         # Dump console log
-        console_log.write_text("\n".join(msgs))
+        console_log.write_text("\n".join(msgs), encoding="utf-8")
         print(f"[E2E] Wrote {len(msgs)} console lines to {console_log.name}")
 
         await browser.close()

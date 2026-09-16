@@ -27,6 +27,17 @@ import sys
 import time
 from pathlib import Path
 
+# Fix Windows console Unicode output: on Windows (GitHub Actions runner),
+# the console encoding defaults to the system code page (cp1252) which
+# cannot encode many Unicode characters that test binaries emit.  Reconfiguring
+# stdout to UTF-8 lets Python's print() pass through Unicode strings without
+# choking on arrows, box-drawing chars, etc.
+if sys.stdout is not None:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass  # CI redirects stdout to file where encoding doesn't matter
+
 ROOT = Path(__file__).resolve().parent.parent
 E2E  = ROOT / "build" / "e2e"
 E2E.mkdir(parents=True, exist_ok=True)
@@ -176,7 +187,7 @@ def run_chrome_interop() -> bool:
         # it once the engine is ready.
         os.environ["NIMRTC_DTLS_SPKI_FILE"] = str(E2E / "nimrtc_chrome_spki.b64")
         if not (E2E / "nimrtc_chrome_spki.b64").exists():
-            (E2E / "nimrtc_chrome_spki.b64").write_text("")
+            (E2E / "nimrtc_chrome_spki.b64").write_text("", encoding="utf-8")
 
         # 1) Signaling server
         _start(

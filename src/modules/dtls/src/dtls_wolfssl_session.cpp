@@ -312,7 +312,7 @@ inline void hex_dump_record(const char* dir, const void* buf, std::size_t n) {
     std::snprintf(hdr, sizeof(hdr),
         "%s DTLS ct=%u(%s) ver=0x%04x epoch=%u seq=%llu len=%u",
         dir, p[0], ct_name, ver, epoch,
-        (unsigned long long)seq, len);
+        static_cast<unsigned long long>(seq), len);
 
     // Full payload hex-dump (up to 256 bytes to avoid runaway output).
     std::string body;
@@ -1158,12 +1158,15 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
         if (!logged_fp && !fp.bytes.empty()) {
             logged_fp = true;
             // RFC 8122 colon-hex form (for SDP a=fingerprint).
-            char hex[130] = "LOCAL_FP_HEX=";
+            // Built as std::string to dodge glibc 2.38+'s
+            // `-Werror=stringop-truncation` on `strncat(hex, b, 2)` where
+            // `b` is a 3-byte buffer produced by snprintf("%02X").
+            std::string hex = "LOCAL_FP_HEX=";
             for (std::size_t i = 0; i < fp.bytes.size(); ++i) {
                 char b[4];
                 std::snprintf(b, sizeof(b), "%02X", fp.bytes[i]);
-                std::strncat(hex, b, 2);
-                if (i + 1 < fp.bytes.size()) std::strncat(hex, ":", 1);
+                hex += b;
+                if (i + 1 < fp.bytes.size()) hex += ':';
             }
             nimrtc::dtls::diag::trace(hex);
             // base64 form (handy for grep/jq against external scripts).

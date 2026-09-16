@@ -38,9 +38,14 @@ constexpr std::size_t kAckTotalBytes    = kAckHeaderBytes + kAckExtraBytes;
 constexpr std::uint32_t kSelectiveAckBits = 32u;
 
 // Encode the DATA frame.  Returns false if `data.size()` won't fit.
-bool build_data_frame(std::vector<std::uint8_t>& out,
-                      std::uint16_t seq,
-                      std::span<const std::uint8_t> data) {
+//
+// Marked [[maybe_unused]] because the send path currently inlines the
+// 4-byte header; this helper is kept around for a follow-up that will
+// unify DATA / ACK encoding. Suppresses `-Werror=unused-function` on
+// GCC 11+ without changing semantics.
+[[maybe_unused]] bool build_data_frame(std::vector<std::uint8_t>& out,
+                                      std::uint16_t seq,
+                                      std::span<const std::uint8_t> data) {
     out.clear();
     out.reserve(kDataHeaderBytes + data.size());
     out.push_back(static_cast<std::uint8_t>(FrameType::Data));

@@ -24,6 +24,11 @@ target_link_libraries(nimrtc_engine
     PUBLIC
         nimrtc::core           # base types + PluginRegistry (PUBLIC so callers
                                # can call register_all_default_plugins() too)
+        # PAL Slice 2: explicitly link the OBJECT library that holds
+        # `kDefaultRegistrars[]` and `kDefaultRegistrarCount`.  `nimrtc::core`
+        # is INTERFACE-only, so it propagates only include paths; consumers
+        # must link `nimrtc_core_objects` directly to pull in the symbols.
+        nimrtc_core_objects
     PRIVATE
         nimrtc::rtp            # RTP parser/builder (P1) — Impl in engine.cpp
         nimrtc::sdp            # SDP parser/munger (P1)

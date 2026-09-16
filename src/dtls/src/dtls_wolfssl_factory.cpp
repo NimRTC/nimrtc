@@ -27,6 +27,8 @@
 #include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/dtls/dtls_wolfssl_session.hpp>
 
+#include <nimrtc/core/plugin_id.hpp>
+
 namespace nimrtc::dtls {
 
 // ===========================================================================
@@ -46,7 +48,11 @@ public:
         // Profile `transport` segment (Slice 7).  Non-empty by
         // construction so PAL Slice 3's NIMRTC_PLUGIN_ID("wolfssl")
         // compile-time id-literal validator accepts it.
-        return kBackendId;
+        //
+        // PAL Slice 3: route through the compile-time-unique
+        // `PluginIdTag<__LINE__>` wrapper so this callsite is greppable
+        // and the wrapper type is distinct from any other factory id.
+        return NIMRTC_PLUGIN_ID(kBackendId);
     }
 
     std::string_view display_name() const noexcept override {

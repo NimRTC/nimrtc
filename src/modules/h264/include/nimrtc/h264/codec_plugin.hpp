@@ -23,6 +23,8 @@
 #include <memory>
 #include <string_view>
 
+#include <nimrtc/core/plugin_id.hpp>
+
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/h264/decoder.hpp>
 
@@ -98,7 +100,7 @@ private:
  *  `EngineConfig::video_codec_name`. */
 class H264PluginFactory : public plugins::IVideoCodecFactory {
 public:
-    std::string_view id() const noexcept override { return "h264"; }
+    std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("h264"); }
     std::string_view display_name() const noexcept override {
         return "H.264 (RFC 6184) — stub decoder; real decoder via host plugin";
     }

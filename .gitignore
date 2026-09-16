@@ -112,6 +112,14 @@ CMakeUserPresets.json
 /_cmake*.txt
 /check_encoding.ps1
 
+# Tier-B (PAL Slice 2/3) hygiene: stray build/configure logs that prior
+# sessions may have dumped at the project root instead of under build/.
+# Project-root-forbidden patterns remain forbidden at root.
+/build_*_build.log
+/build_*_configure.log
+/release_msvc_full_build_*.log
+/cmake_*_target_*.log
+
 # Downloaded third-party archives at the repo root (already extracted into
 # build/_deps/ when needed)
 /*.zip

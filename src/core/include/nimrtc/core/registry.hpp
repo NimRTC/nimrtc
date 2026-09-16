@@ -501,6 +501,32 @@ namespace detail {
 #define NIMRTC_CONCAT(a, b) NIMRTC_CONCAT2(a, b)
 #define NIMRTC_CONCAT2(a, b) a##b
 
+/**
+ * @brief Function-pointer signature for the per-module `register_default_plugins()`
+ *        entry points listed in `kDefaultRegistrars[]`.
+ *
+ * Defined here (header) so the inline `register_all_default_plugins()`
+ * body in `nimrtc::core` can reference it without an extra include.
+ * The concrete array `detail::kDefaultRegistrars` and its size
+ * `detail::kDefaultRegistrarCount` live in
+ * `src/core/src/pal_default_registrars.cpp` (PAL Slice 2) and are
+ * forward-declared here so the inline body can link them.
+ */
+using RegistrarFn = void(*)() noexcept;
+
+/**
+ * @brief Array of function pointers to every built-in plugin's
+ *        `register_default_plugins()`.  Defined in
+ *        `src/core/src/pal_default_registrars.cpp`.
+ */
+extern const RegistrarFn kDefaultRegistrars[];
+
+/**
+ * @brief Number of entries in `kDefaultRegistrars`.  Defined alongside
+ *        the array in `src/core/src/pal_default_registrars.cpp`.
+ */
+extern const std::size_t kDefaultRegistrarCount;
+
 class Registrar {
 public:
     enum class Category {
@@ -578,42 +604,32 @@ public:
 // Unified registration entry point
 // ---------------------------------------------------------------------------
 //
-// Convenience wrapper that calls every module's `register_default_plugins()`.
-// Idempotent — each module uses Meyer's-singleton latches internally.
+// Iterates `detail::kDefaultRegistrars[]` (defined in
+// `src/core/src/pal_default_registrars.cpp`, PAL Slice 2) and calls every
+// module's `register_default_plugins()`.  Idempotent — each module uses
+// Meyer's-singleton latches internally.
 //
 // MUST be called once at program startup before any PluginRegistry lookup.
 // Consumers linking this function MUST also link every concrete module
-// library (ice, rtp, sdp, jb, audio3a) — the forward declarations above
+// library (audio3a, bwe, h264, ice, jb, opus, rtp, sched, sdp,
+// video_pipeline, video_sink, video_source) — the forward declarations above
 // resolve at link time.
 //
 // If you only need a subset of modules (e.g. a test that just exercises
 // audio3a), call the module-specific entry point directly:
 //   nimrtc::audio3a::register_default_plugins();
+//
+// NOTE: `detail::kDefaultRegistrarCount` is declared in
+// `src/core/src/pal_default_registrars.cpp` and referenced here via the
+// `detail` namespace.  This file is compiled into `nimrtc_core_objects`
+// (an OBJECT library linked INTERFACE by `nimrtc::core`), so both symbols
+// are available at link time without any additional header.
 // ---------------------------------------------------------------------------
 
 inline void register_all_default_plugins() noexcept {
-    nimrtc::ice::register_default_plugins();
-    nimrtc::rtp::register_default_plugins();
-    nimrtc::sdp::register_default_plugins();
-    nimrtc::jb::register_default_plugins();
-    nimrtc::audio3a::register_default_plugins();
-#ifdef NIMRTC_HAS_OPUS
-    nimrtc::opus::register_default_plugins();
-#endif
-#ifdef NIMRTC_HAS_H264
-    nimrtc::h264::register_default_plugins();
-#endif
-#ifdef NIMRTC_HAS_VIDEO_SOURCE
-    nimrtc::video_source::register_default_plugins();
-#endif
-#ifdef NIMRTC_HAS_VIDEO_PIPELINE
-    nimrtc::video_pipeline::register_default_plugins();
-#endif
-#ifdef NIMRTC_HAS_VIDEO_SINK
-    nimrtc::video_sink::register_default_plugins();
-#endif
-    nimrtc::bwe::register_default_plugins();
-    nimrtc::sched::register_default_plugins();
+    for (std::size_t i = 0; i < detail::kDefaultRegistrarCount; ++i) {
+        detail::kDefaultRegistrars[i]();
+    }
 }
 
 } // namespace nimrtc::core

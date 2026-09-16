@@ -49,7 +49,57 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Status: Tech Preview
+
+### Highlights
+
+- **PAL Slice 2 + 3** (`docs/plan/pal-architecture.md` §4): the engine's
+  `register_all_default_plugins()` is now backed by an explicit iterable
+  table (`core::detail::kDefaultRegistrars[]` in
+  `src/core/src/pal_default_registrars.cpp`) instead of an inline
+  statement list, and every built-in plugin factory id literal
+  (`"webrtc"`, `"webrtc_apm"`, `"opus"`, `"h264"`, `"adaptive"`,
+  `"wolfssl"`, …) is wrapped in a compile-time-unique
+  `NIMRTC_PLUGIN_ID()` macro at its `id()` return statement. Both
+  changes are purely additive — no public API or on-the-wire id change.
+  Adds 2 new `EnginePluginLoading` subtests
+  (`pal_default_registrars_table_is_nonempty`,
+  `pal_plugin_id_wrappers_preserve_string_values`); existing 7 subtests
+  stay green.
+
+### Added
+
+- **`src/core/src/pal_default_registrars.cpp`** (PAL Slice 2):
+  `core::detail::kDefaultRegistrars[]` table of all built-in plugin
+  registrar function pointers. `src/core/CMakeLists.txt` adds an
+  `nimrtc_core_objects` OBJECT library that compiles this file and is
+  linked INTERFACE by `nimrtc::core`. Existing `core` Layout Invariant 1
+  (INTERFACE/header-only) is otherwise preserved.
+- **`src/core/include/nimrtc/core/plugin_id.hpp`** (PAL Slice 3):
+  `PluginIdTag<N>` template + `NIMRTC_PLUGIN_ID(x)` macro that wraps a
+  string literal at each plugin factory's `id()` callsite, giving it a
+  compile-time-unique type. Implicit conversion to `std::string_view`
+  preserves all existing `return id_literal;` patterns.
+- **5 plugin factories migrated to `NIMRTC_PLUGIN_ID()`** (PAL Slice 3):
+  `audio3a::NullPluginFactory` (`"webrtc"`), `audio3a::WebRtcPluginFactory`
+  (`"webrtc_apm"`), `opus::OpusPluginFactory` (`"opus"`),
+  `h264::H264PluginFactory` (`"h264"`), `jb::PluginFactory`
+  (`"adaptive"`), `dtls::WolfsslDtlsFactory` (`"wolfssl"` via the
+  existing `kBackendId` constexpr literal).
+- **2 new test subtests** in `tests/test_engine_plugin_loading.cpp`:
+  `pal_default_registrars_table_is_nonempty` (Slice 2 — table iteration
+  registers all 5 unconditional categories) and
+  `pal_plugin_id_wrappers_preserve_string_values` (Slice 3 — `static_assert`
+  enforces distinct per-callsite types; runtime check verifies all 6 known
+  factory ids match their v0.10.1 string values byte-for-byte).
+
+### Notes
+
+- No new protocol or content features.
+- DTLS seam (`"wolfssl"`) remains Slice 4 scope — its id literal now goes
+  through `NIMRTC_PLUGIN_ID()` but registration stays module-local via
+  `test_only::set_wolfssl_factory_for_testing()`. Promoting it to
+  `core::register_all_default_plugins()` is a Slice 7 / Slice 8 concern.
 
 ---
 

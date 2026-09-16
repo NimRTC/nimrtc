@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/plugin_id.hpp>
 #include <nimrtc/core/registry.hpp>
 
 namespace nimrtc::audio3a {
@@ -302,7 +303,7 @@ void PluginAdapter::set_post_process_tap(plugins::PcmTapCallback    tap,
 // ---------------------------------------------------------------------------
 
 std::string_view NullPluginFactory::id() const noexcept {
-    return "webrtc";   // retained for back-compat; EngineConfig default switched to "webrtc_apm"
+    return NIMRTC_PLUGIN_ID("webrtc");   // retained for back-compat; EngineConfig default switched to "webrtc_apm"
 }
 
 std::string_view NullPluginFactory::display_name() const noexcept {
@@ -325,7 +326,7 @@ plugins::IAudio3A* NullPluginFactory::create() const {
  */
 
 std::string_view WebRtcPluginFactory::id() const noexcept {
-    return "webrtc_apm";
+    return NIMRTC_PLUGIN_ID("webrtc_apm");
 }
 
 std::string_view WebRtcPluginFactory::display_name() const noexcept {

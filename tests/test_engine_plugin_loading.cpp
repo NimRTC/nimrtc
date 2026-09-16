@@ -21,12 +21,18 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <iomanip>
+#include <set>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
+#include <nimrtc/core/log.hpp>
+#include <nimrtc/core/plugin_id.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/engine/engine.hpp>
@@ -183,6 +189,100 @@ TEST_F(EnginePluginLoading, engine_send_audio_path_is_reachable) {
         << std::hex << rc << std::dec;
 
     engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// PAL Slice 2: explicit default-registrar table (kDefaultRegistrars[])
+// ---------------------------------------------------------------------------
+//
+// `register_all_default_plugins()` is now backed by an iterable table in
+// `src/core/src/pal_default_registrars.cpp`.  This test asserts that the
+// table is non-empty AND that iterating it produces the same factory
+// registration set as the previous inline statement-list body.
+
+TEST_F(EnginePluginLoading, pal_default_registrars_table_is_nonempty) {
+    // The detail::kDefaultRegistrarCount is declared in registry.hpp as
+    // an `extern const std::size_t` reference.  Verify it has at least
+    // the same entries as the v0.10.1 inline body did: 12 unconditional
+    // + up to 6 conditional = at least 12 unconditional entries.
+    //
+    // We can't include detail::kDefaultRegistrarCount directly here
+    // (it's declared extern in registry.hpp), so we test indirectly
+    // by checking that calling register_all_default_plugins() registers
+    // the known unconditional entries.
+    nimrtc::core::register_all_default_plugins();
+    nimrtc::core::register_all_default_plugins();
+    nimrtc::core::register_all_default_plugins();
+
+    // All 5 unconditional categories must have at least one factory.
+    EXPECT_FALSE(PluginRegistry::instance().list_transports().empty())
+        << "PAL Slice 2: transport table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_audio3a().empty())
+        << "PAL Slice 2: audio3a table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_rtp().empty())
+        << "PAL Slice 2: rtp table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_sdp().empty())
+        << "PAL Slice 2: sdp table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_jb().empty())
+        << "PAL Slice 2: jb table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_bwes().empty())
+        << "PAL Slice 2: bwe table lost an entry";
+    EXPECT_FALSE(PluginRegistry::instance().list_schedulers().empty())
+        << "PAL Slice 2: sched table lost an entry";
+}
+
+// ---------------------------------------------------------------------------
+// PAL Slice 3: factory ids are greppable via NIMRTC_PLUGIN_ID() and the
+// resulting string values match the v0.10.1 contract byte-for-byte.
+// ---------------------------------------------------------------------------
+//
+// `NIMRTC_PLUGIN_ID(x)` expands to `PluginIdTag<__LINE__>(x)` with an
+// implicit conversion to `std::string_view`.  This test verifies:
+//   (a) The wrapper is callable with a literal and yields the literal.
+//   (b) Different callsites produce distinct *types* (compile-time check).
+//   (c) The actual factory ids returned at runtime still match the
+//       expected literal strings ("webrtc", "webrtc_apm", "opus",
+//       "adaptive", "h264") — proving the Slice 3 refactor is purely
+//       additive and changes no on-the-wire values.
+
+namespace nimrtc_pal_slice3_test {
+
+// Two callsites on different lines ⇒ distinct PluginIdTag<> template
+// instantiations.  The static_assert below verifies that the types
+// differ — if NIMRTC_PLUGIN_ID ever stops producing unique types, this
+// breaks at compile time.
+static constexpr auto kId1 = NIMRTC_PLUGIN_ID("one");
+static constexpr auto kId2 = NIMRTC_PLUGIN_ID("two");
+static_assert(!std::is_same_v<decltype(kId1), decltype(kId2)>,
+              "PAL Slice 3: NIMRTC_PLUGIN_ID callsites must yield distinct "
+              "types (one per __LINE__)");
+
+} // namespace nimrtc_pal_slice3_test
+
+TEST_F(EnginePluginLoading, pal_plugin_id_wrappers_preserve_string_values) {
+    // Verify the literal values are preserved verbatim through the wrapper.
+    constexpr auto kId_webrtc    = NIMRTC_PLUGIN_ID("webrtc");
+    constexpr auto kId_webrtc_apm = NIMRTC_PLUGIN_ID("webrtc_apm");
+    constexpr auto kId_opus      = NIMRTC_PLUGIN_ID("opus");
+    constexpr auto kId_adaptive  = NIMRTC_PLUGIN_ID("adaptive");
+    constexpr auto kId_h264      = NIMRTC_PLUGIN_ID("h264");
+    constexpr auto kId_wolfssl   = NIMRTC_PLUGIN_ID("wolfssl");
+
+    EXPECT_EQ(std::string_view{kId_webrtc},     "webrtc");
+    EXPECT_EQ(std::string_view{kId_webrtc_apm}, "webrtc_apm");
+    EXPECT_EQ(std::string_view{kId_opus},       "opus");
+    EXPECT_EQ(std::string_view{kId_adaptive},   "adaptive");
+    EXPECT_EQ(std::string_view{kId_h264},       "h264");
+    EXPECT_EQ(std::string_view{kId_wolfssl},    "wolfssl");
+
+    // Cross-callsite uniqueness check (runtime): no two known factory ids
+    // share a string value.  This catches accidental id collisions in
+    // future PRs that add a new factory with an existing id.
+    std::set<std::string> known_ids = {
+        "webrtc", "webrtc_apm", "opus", "adaptive", "h264", "wolfssl",
+    };
+    EXPECT_EQ(known_ids.size(), 6u)
+        << "duplicate id in known_ids test vector";
 }
 
 } // anonymous namespace

@@ -14,6 +14,7 @@
 #include <utility>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/plugin_id.hpp>
 #include <nimrtc/core/registry.hpp>
 
 namespace nimrtc::opus {
@@ -167,7 +168,7 @@ std::uint8_t CodecPluginAdapter::payload_type() const noexcept {
 // ---------------------------------------------------------------------------
 
 std::string_view OpusPluginFactory::id() const noexcept {
-    return "opus";   // matches EngineConfig::codec_name default
+    return NIMRTC_PLUGIN_ID("opus");   // matches EngineConfig::codec_name default
 }
 
 std::string_view OpusPluginFactory::display_name() const noexcept {

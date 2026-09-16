@@ -17,6 +17,7 @@
 #include <utility>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/plugin_id.hpp>
 #include <nimrtc/core/registry.hpp>
 
 namespace nimrtc::jb {
@@ -206,7 +207,7 @@ int PluginAdapter::estimated_delay_ms(plugins::TimestampUs /*now_us*/) const noe
 // ---------------------------------------------------------------------------
 
 std::string_view PluginFactory::id() const noexcept {
-    return "adaptive";   // matches EngineConfig::jb_name default
+    return NIMRTC_PLUGIN_ID("adaptive");   // matches EngineConfig::jb_name default
 }
 
 std::string_view PluginFactory::display_name() const noexcept {

@@ -374,8 +374,33 @@ jobs:
       - name: Install meson (for WebRTC APM prebuild)
         shell: bash
         run: |
-          python3 -m pip install --user --quiet --break-system-packages "meson>=1.10"
-          echo "$HOME/Library/Python/3.12/bin" >> "$GITHUB_PATH"
+          # Try Homebrew first — the macos-* runner images ship `brew`
+          # pre-installed and meson is a well-known formula. This avoids
+          # the Homebrew/Homebrew-Python version skew problem (different
+          # runner images carry Python 3.10/3.11/3.12/3.13 and the
+          # user-site script dir changes accordingly).
+          if brew install meson ninja 2>/dev/null; then
+            echo "[+] Installed meson + ninja via Homebrew"
+            echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          else
+            # Fallback: user-site pip install with --break-system-packages.
+            # The exact user-site scripts dir depends on the Homebrew
+            # Python version, so query sysconfig rather than hard-coding.
+            python3 -m pip install --user --break-system-packages "meson>=1.10" "ninja"
+            user_scripts=$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme="posix_user"))')
+            echo "[+] Installed meson + ninja via pip user-site"
+            echo "[i] user scripts dir: $user_scripts"
+            echo "$user_scripts" >> "$GITHUB_PATH"
+          fi
+          # Sanity-check before continuing so we fail fast with a
+          # useful message instead of running the whole build first.
+          if ! command -v meson >/dev/null 2>&1; then
+            echo "::error::meson not found on PATH after install attempt"
+            which python3 || true
+            python3 -m meson --version 2>/dev/null || true
+            exit 1
+          fi
+          meson --version
 
       - name: Prebuild WebRTC APM
         shell: bash

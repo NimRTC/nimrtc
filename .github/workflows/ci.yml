@@ -33,7 +33,9 @@ on:
 
 # Cancel superseded runs on the same ref (branch or PR). Each job below
 # overrides `concurrency.group` so the macOS runner doesn't gate the Linux
-# runner, etc.
+# runner, etc.  NB: interop.yml uses "ci-e2e-${{ github.ref }}" so the two
+# workflows do NOT share a concurrency group (avoids cascading cancels on
+# rapid re-pushes).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

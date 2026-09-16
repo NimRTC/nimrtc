@@ -139,8 +139,12 @@ set NINJA_RC=!ERRORLEVEL!
 
 if !NINJA_RC! neq 0 (
     echo [ERROR] ninja build failed with rc=!NINJA_RC!
-    echo Full log: %LOG_DIR%\webrtc_apm_build.log  (last 250 lines shown below)
-    powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log' -Tail 250"
+    set "LOG_SIZE=0"
+    for %%F in ("%LOG_DIR%\webrtc_apm_build.log") do set "LOG_SIZE=%%~zF"
+    echo Full log: %LOG_DIR%\webrtc_apm_build.log  (!LOG_SIZE! bytes) - printing in full for triage
+    powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log'"
+    REM Also surface the first "error C\d+" / "fatal error" / "FAILED:" if any
+    powershell -NoProfile -Command "$lines = Get-Content '%LOG_DIR%\webrtc_apm_build.log' -ErrorAction SilentlyContinue; $lines | Select-String -Pattern 'error C\d+:|fatal error|FAILED: [a-zA-Z0-9=_. -]+' | Select-Object -First 20 | ForEach-Object { $_.Line }"
     exit /b 3
 )
 

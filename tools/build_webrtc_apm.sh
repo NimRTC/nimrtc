@@ -145,8 +145,12 @@ fi
 mkdir -p "${LOG_DIR}"
 echo "[STEP 4] ninja build (logging to ${LOG_DIR}/webrtc_apm_build.log)..."
 if ! ninja -C "${BUILD_DIR}" >"${LOG_DIR}/webrtc_apm_build.log" 2>&1; then
-    echo "[ERROR] ninja build failed; last 30 lines:"
-    tail -30 "${LOG_DIR}/webrtc_apm_build.log"
+    echo "[ERROR] ninja build failed."
+    echo "Full log: ${LOG_DIR}/webrtc_apm_build.log ($(wc -c < "${LOG_DIR}/webrtc_apm_build.log" 2>/dev/null || echo "?") bytes)"
+    echo "--- last 400 lines ---"
+    tail -400 "${LOG_DIR}/webrtc_apm_build.log"
+    echo "--- first error/failure markers found ---"
+    grep -nE 'error C[0-9]+:|fatal error|FAILED:' "${LOG_DIR}/webrtc_apm_build.log" | head -20 || echo "(no error markers detected; build stopped on non-error condition)"
     exit 3
 fi
 

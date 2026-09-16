@@ -82,13 +82,29 @@ def run(cmd, cwd=None, check=True, timeout=300):
             # compile error inside a deeply-nested WebRTC APM translation
             # unit) need MUCH more context than the last 1000 chars — the
             # real diagnostic usually lives 50-200 lines earlier, hidden
-            # behind `[STEP]` banners. Dump the last 8 KiB, and if the
-            # underlying subprocess wrote a separate log file (the cmd
-            # wrapper does, at $LOG_DIR\webrtc_apm_build.log), call it
-            # out so the runner log makes it obvious.
+            # behind `[STEP]` banners. Dump the entire stdout (it's a few
+            # hundred KiB at most for the WebRTC APM build) and also dump
+            # the companion `webrtc_apm_build.log` if it exists, since
+            # that's the file the cmd/ sh wrappers keep on disk for
+            # future triage.
             print(f"[FAIL rc={result.returncode}]")
-            tail = result.stdout[-8192:] if len(result.stdout) > 8192 else result.stdout
-            print(tail)
+            print("--- subprocess stdout (last 200 lines) ---")
+            tail = result.stdout[-200_000:] if len(result.stdout) > 200_000 else result.stdout
+            tail_lines = tail.rsplit("\n", 200)[-200:]
+            print("\n".join(tail_lines))
+            for log_name in ("webrtc_apm_build.log",):
+                for cand_root in (project_root / "build",):
+                    log_path = cand_root / log_name
+                    if log_path.exists() and log_path.is_file():
+                        size = log_path.stat().st_size
+                        print(f"--- {log_path} ({size} bytes, last 400 lines) ---")
+                        try:
+                            with log_path.open("r", encoding="utf-8", errors="replace") as fp:
+                                lines = fp.readlines()
+                                for line in lines[-400:]:
+                                    print(line.rstrip())
+                        except Exception as exc:
+                            print(f"[unable to read {log_path}: {exc}]")
         return ok, result.stdout
     except subprocess.TimeoutExpired:
         print(f"[TIMEOUT after {timeout}s]")

@@ -29,6 +29,7 @@ using socklen_t_ = int;
 #  include <arpa/inet.h>
 #  include <netinet/in.h>
 #  include <sys/socket.h>
+#  include <netdb.h>      // addrinfo, getaddrinfo, freeaddrinfo (POSIX)
 #  include <sys/types.h>
 #  include <unistd.h>
 #  include <fcntl.h>

@@ -92,10 +92,25 @@ function(nimrtc_apply_options target)
             -Wconversion -Wsign-conversion
             -Wdouble-promotion
             -Wformat=2 -Wformat-security
-            -Wmisleading-indentation -Wduplicated-cond
+            -Wmisleading-indentation
             -fno-common
             $<$<CONFIG:Debug>:-O0 -g3>
             $<$<CONFIG:Release>:-O2 -DNDEBUG>)
+
+        # -Wduplicated-cond was added in GCC 10, Clang 13, Apple Clang 15
+        # (Xcode 15). Older Apple Clang rejects the flag under -Werror, so
+        # gate it on compiler version. We require strict mode for our
+        # own code; missing the flag on old toolchains is a small loss.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 10)
+                target_compile_options(${target} PRIVATE -Wduplicated-cond)
+            endif()
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            # Matches both "Clang" and "AppleClang".
+            if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
+                target_compile_options(${target} PRIVATE -Wduplicated-cond)
+            endif()
+        endif()
     endif()
 
     if(NIMRTC_WARNINGS_AS_ERRORS)

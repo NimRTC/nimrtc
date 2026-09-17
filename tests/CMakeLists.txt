@@ -26,7 +26,7 @@ function(add_e2e_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # Test exe paths differ between single-config (Linux Makefile) and multi-
     # config (MSVC) generators.  On Linux the exe lives at tests/<name>; on
     # MSVC the multi-config generator places it under tests/<CONFIG>/<name>.exe.
@@ -72,7 +72,7 @@ function(add_srtp_test name source)
     endif()
     # Mirror the private definition on the srtp target so the test sees it.
     target_compile_definitions(${name} PRIVATE NIMRTC_USE_LIBSRTP=1)
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -104,7 +104,7 @@ function(add_dtls_handshake_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
@@ -174,7 +174,7 @@ function(add_arq_e2e_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
@@ -215,7 +215,7 @@ function(add_dtls_srtp_test name source)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
     target_compile_definitions(${name} PRIVATE NIMRTC_USE_LIBSRTP=1)
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -244,7 +244,7 @@ function(add_dtls_gcm_aead_test name source)
         # Force console subsystem so ctest captures our diagnostic output.
         set_target_properties(${name} PROPERTIES WIN32_EXECUTABLE OFF)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -281,7 +281,7 @@ function(add_dtls_prf_kat_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -307,7 +307,7 @@ function(add_dtls_x25519_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() above for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -340,6 +340,16 @@ function(nimrtc_add_engine_test name source)
         nimrtc::sdp
         nimrtc::jb
         nimrtc::audio3a
+        # Slice 8 (v0.10.2): the four new typed registry hooks
+        # (DTLS / SCTP / raw_udp / transport-stack) require these
+        # modules' register_default_plugins() symbols to be linked.
+        # Without them, the PAL Slice 2 kDefaultRegistrars[] table
+        # would have unresolved symbols and the unified entry point
+        # would fail at link time.
+        nimrtc::dtls_seam
+        nimrtc::sctp
+        nimrtc::raw_udp
+        nimrtc::transport
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -350,7 +360,7 @@ function(nimrtc_add_engine_test name source)
     endif()
     set_target_properties(${name} PROPERTIES
         VS_LINK_LIBRARY_DEPENDENCIES TRUE)
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -382,7 +392,7 @@ function(nimrtc_add_plugin_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -425,7 +435,7 @@ function(nimrtc_add_video_plugin_adapter_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -466,7 +476,7 @@ function(nimrtc_add_engine_video_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -513,7 +523,7 @@ function(nimrtc_add_engine_codec_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -552,7 +562,7 @@ function(nimrtc_add_hw_seam_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name})
+    nimrtc_apply_options(${name} LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
@@ -632,7 +642,7 @@ if(NIMRTC_HW_HAVE_NVENC)
     target_include_directories(test_nvenc_probe PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${NVENC_INCLUDE_DIR}")
-    nimrtc_apply_options(test_nvenc_probe)
+    nimrtc_apply_options(test_nvenc_probe LENIENT)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME test_nvenc_probe
         COMMAND $<TARGET_FILE:test_nvenc_probe>)
@@ -648,6 +658,6 @@ if(NIMRTC_HW_HAVE_NVENC)
     target_include_directories(test_nvenc_abi_probe PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${NVENC_INCLUDE_DIR}")
-    nimrtc_apply_options(test_nvenc_abi_probe)
+    nimrtc_apply_options(test_nvenc_abi_probe LENIENT)
     # Not registered with ctest — run manually as: cmake --build --target test_nvenc_abi_probe && build/tests/Debug/test_nvenc_abi_probe.exe
 endif()

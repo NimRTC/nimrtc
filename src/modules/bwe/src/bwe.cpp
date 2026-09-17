@@ -43,6 +43,14 @@ constexpr double kIncreasePerRtt = 0.05;  // 5% per RTT
 
 constexpr auto kLog = core::log::Level::Debug;
 
+// __attribute__((format(printf, ...))) tells GCC/Clang that `fmt` is a
+// printf-style format string. Without it, vsnprintf(fmt, ...) below
+// trips -Werror=format-nonliteral on Clang (the format string is a
+// parameter, not a string literal). The attribute is harmless on
+// MSVC (which silently ignores __attribute__).
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
 inline void bwe_debug(const char* fmt, ...) {
     if (core::log::Logger::instance().level() <= kLog) {
         char buf[256];

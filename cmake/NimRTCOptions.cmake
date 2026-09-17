@@ -44,11 +44,29 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd / IDE indexing
 
 # -----------------------------------------------------------------------------
 # Helper: apply NimRTC flags to a target
+#
+# Usage:
+#   nimrtc_apply_options(<target>)             # strict (production code)
+#   nimrtc_apply_options(<target> LENIENT)     # test/bench harnesses
+#
+# LENIENT turns off three warnings that are systemic in our test code
+# (legacy C-style casts in fprintf stat dumps, occasional unused helper
+# functions guarded by #ifdef, printf-style varargs in debug helpers):
+#   - -Wno-old-style-cast
+#   - -Wno-unused-function
+#   - -Wno-format-nonliteral
+# Production src/ targets should NOT pass LENIENT — keep the strict set.
 # -----------------------------------------------------------------------------
 function(nimrtc_apply_options target)
     if(NOT TARGET ${target})
         message(FATAL_ERROR "nimrtc_apply_options: target '${target}' does not exist")
     endif()
+
+    cmake_parse_arguments(NIMRTC_OPT
+        "LENIENT"   # options
+        ""          # one-value args
+        ""          # multi-value args
+        ${ARGN})
 
     target_compile_features(${target} PUBLIC
         cxx_std_${NIMRTC_CXX_STANDARD}
@@ -105,6 +123,15 @@ function(nimrtc_apply_options target)
         # warning set. Linux GCC/Clang always get the flag.
         if(NOT APPLE)
             target_compile_options(${target} PRIVATE -Wduplicated-cond)
+        endif()
+
+        # LENIENT mode: relax warnings that are endemic to test harnesses
+        # but never appear in production src/ code. See header comment.
+        if(NIMRTC_OPT_LENIENT)
+            target_compile_options(${target} PRIVATE
+                -Wno-old-style-cast
+                -Wno-unused-function
+                -Wno-format-nonliteral)
         endif()
     endif()
 

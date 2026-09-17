@@ -379,7 +379,8 @@ void SrtpSession::reset() { impl_->stats_ = Stats{}; }
 
 struct SrtpContext::Impl {
     CryptoSuite                              default_suite = CryptoSuite::Aes128CmSha1_80;
-    std::unordered_map<std::uint32_t, std::unique_ptr<SrtpSession>> sessions_;
+    std::unordered_map<std::uint32_t, std::unique_ptr<SrtpSession>> outbound_sessions_;
+    std::unordered_map<std::uint32_t, std::unique_ptr<SrtpSession>> inbound_sessions_;
 
     // DTLS-derived keying material (master key + salt) — used to install
     // a new session per SSRC.
@@ -391,7 +392,21 @@ struct SrtpContext::Impl {
     SrtpSession* install(std::uint32_t ssrc, bool outgoing) {
         ensure_srtp_init();
 
-        auto& slot = sessions_[ssrc];
+        // Separate the inbound and outbound slot maps.  Sharing one map
+        // keyed only by SSRC is wrong: a side that has *received* an
+        // RTP packet from the peer (creating an inbound session for
+        // ssrc=X) and then needs to *send* its own RTP traffic on the
+        // same ssrc=X would otherwise get back the inbound session,
+        // and `srtp_protect()` on an inbound-only session returns
+        // `srtp_err_status_cipher_fail` because the libsrtp stream was
+        // installed with `ssrc_any_inbound` (see Impl::install below).
+        // In a WebRTC PeerConnection this happens on both sides every
+        // time the same SSRC is used for send AND receive — e.g.
+        // when audio RTCP reports arrive on the same SSRC as audio
+        // data, or in tests where the test thread and the recv thread
+        // race to install the session for the same SSRC.
+        auto& slot = outgoing ? outbound_sessions_[ssrc]
+                              : inbound_sessions_[ssrc];
         if (slot) return slot.get();
 
         auto sess = std::make_unique<SrtpSession>();
@@ -407,10 +422,24 @@ struct SrtpContext::Impl {
                 "SRTP context: no key set, session creation will fail");
             return nullptr;
         }
-        auto rc = sess->init_from_master_key(cfg, key, salt);
+        // CRITICAL: `init_from_master_key` ALWAYS installs an OUTBOUND
+        // libsrtp stream (ssrc_any_outbound); the inbound counterpart is
+        // `init_from_master_key_inbound` (ssrc_any_inbound).  Calling the
+        // outbound version when the caller asked for an INBOUND session
+        // produces a wildcard ssrc_any_outbound session on both sides,
+        // and `srtp_unprotect()` then refuses to match the peer's
+        // outbound-encrypted packet — `srtp_err_status_replay_fail`
+        // / `srtp_err_status_auth_fail` and the test prints
+        // "SRTP unprotect failed".  This was masked for a long time
+        // because the SRTP master key was all zeros (the wolfSSL
+        // KeepArrays bug we fixed earlier), which made every direction
+        // symmetric and the wrong polarity invisible.
+        core::Result<void> rc = outgoing
+            ? sess->init_from_master_key(cfg, key, salt)
+            : sess->init_from_master_key_inbound(cfg, key, salt);
         if (!rc) {
             core::log::Logger::instance().error("SRTP install failed for SSRC");
-            sessions_.erase(ssrc);
+            (outgoing ? outbound_sessions_ : inbound_sessions_).erase(ssrc);
             return nullptr;
         }
         slot = std::move(sess);
@@ -467,20 +496,26 @@ SrtpSession* SrtpContext::get_session(std::uint32_t ssrc, bool outgoing) {
 }
 
 void SrtpContext::remove_session(std::uint32_t ssrc) {
-    impl_->sessions_.erase(ssrc);
+    impl_->outbound_sessions_.erase(ssrc);
+    impl_->inbound_sessions_.erase(ssrc);
 }
 
 SrtpSession::Stats SrtpContext::total_stats() const {
     SrtpSession::Stats total{};
-    for (const auto& [ssrc, session] : impl_->sessions_) {
-        auto s = session->stats();
-        total.rtp_packets_encrypted += s.rtp_packets_encrypted;
-        total.rtp_packets_decrypted += s.rtp_packets_decrypted;
-        total.rtcp_packets_encrypted += s.rtcp_packets_encrypted;
-        total.rtcp_packets_decrypted += s.rtcp_packets_decrypted;
-        total.decryption_failures    += s.decryption_failures;
-        total.replay_attacks_dropped += s.replay_attacks_dropped;
-    }
+    auto accumulate = [&](const std::unordered_map<std::uint32_t,
+                              std::unique_ptr<SrtpSession>>& map) {
+        for (const auto& [ssrc, session] : map) {
+            auto s = session->stats();
+            total.rtp_packets_encrypted += s.rtp_packets_encrypted;
+            total.rtp_packets_decrypted += s.rtp_packets_decrypted;
+            total.rtcp_packets_encrypted += s.rtcp_packets_encrypted;
+            total.rtcp_packets_decrypted += s.rtcp_packets_decrypted;
+            total.decryption_failures    += s.decryption_failures;
+            total.replay_attacks_dropped += s.replay_attacks_dropped;
+        }
+    };
+    accumulate(impl_->outbound_sessions_);
+    accumulate(impl_->inbound_sessions_);
     return total;
 }
 

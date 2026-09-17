@@ -677,6 +677,38 @@ struct DtlsSessionWolfSSL::Impl {
 
         wolfSSL_set_using_nonblock(ssl, 1);
 
+        // RFC 5705 keying material export (used by DTLS-SRTP via
+        // `wolfSSL_export_dtls_srtp_keying_material`) requires the
+        // handshake-derived secrets (clientRandom, serverRandom,
+        // masterSecret) to still be available AFTER the handshake
+        // returns WOLFSSL_SUCCESS.  By default wolfSSL frees them as
+        // soon as the Finished message is processed to reclaim memory,
+        // and `wolfSSL_export_keying_material()` (ssl.c:4053) then
+        // bails out with the guard:
+        //
+        //     if (ssl->options.saveArrays == 0 || ssl->arrays == NULL) {
+        //         WOLFSSL_MSG("To export keying material wolfSSL needs "
+        //                     "to keep handshake data. Call "
+        //                     "wolfSSL_KeepArrays before attempting "
+        //                     "to export keyid material.");
+        //         return WOLFSSL_FAILURE;   // ← this is the value 0
+        //     }
+        //
+        // WOLFSSL_FAILURE is defined as 0 in ssl.h:3146, and our
+        // previous `if (rc != 0 && rc != WOLFSSL_SUCCESS)` check
+        // silently swallowed that case — every SRTP key was filled
+        // from the zero-initialized `km` vector, producing all-zero
+        // client_master_key/server_master_key/client_master_salt/
+        // server_master_salt, which libsrtp rejects with bad-packet
+        // errors that surface as "Decrypt failed" / "auth tag mismatch"
+        // downstream.  That was the root cause of all four ARQ-UDP
+        // e2e tests failing despite a clean DTLS handshake.
+        //
+        // MUST be called BEFORE wolfSSL_connect()/accept() — see
+        // ssl.h:3800 ("need to call wolfSSL_KeepArrays before
+        // handshake to save keys").
+        wolfSSL_KeepArrays(ssl);
+
         // Per-SSL I/O callbacks (vs. CTX-level which would apply to all
         // sessions created from this CTX).  We want a different ctx per
         // session.
@@ -1017,9 +1049,17 @@ struct DtlsSessionWolfSSL::Impl {
         nimrtc::core::log::Logger::instance().info(
             std::string("wolfSSL: SRTP needs ") + std::to_string(olen) + " bytes");
 
-        std::vector<std::uint8_t> km(olen);
+        // CRITICAL: zero-init the buffer explicitly.  If the wolfSSL call
+        // fails for ANY reason we want a deterministic, diagnosable
+        // all-zero buffer (which the SRTP layer below will reject with
+        // a clean auth-tag-mismatch error) rather than whatever happens
+        // to be on the heap.  See `create_ssl_object()` for the
+        // WOLFSSL_FAILURE-is-0 foot-gun this guards against.
+        std::vector<std::uint8_t> km(olen, 0);
         rc = wolfSSL_export_dtls_srtp_keying_material(ssl, km.data(), &olen);
-        if (rc != 0 && rc != WOLFSSL_SUCCESS) {
+        // WOLFSSL_FAILURE is 0; WOLFSSL_SUCCESS is 1.  Treat ANY non-1
+        // return as failure (no silent zero-pass-through like before).
+        if (rc != WOLFSSL_SUCCESS) {
             nimrtc::core::log::Logger::instance().error(
                 std::string("wolfSSL: SRTP export failed rc=") +
                 std::to_string(rc) + " olen=" + std::to_string(olen));

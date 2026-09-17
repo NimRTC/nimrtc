@@ -63,6 +63,19 @@ struct ArqDtlsSrtpSide {
     std::uint16_t peer_port = 0;
     std::uint32_t ssrc = 0xDEADBEEF;
 
+    // RFC 5764 §4.2 — the SRTP local/remote key assignment depends on
+    // whether this side is the DTLS client or DTLS server:
+    //   * DTLS Client: local (outbound) = client_master_key,
+    //                 remote (inbound) = server_master_key
+    //   * DTLS Server: local (outbound) = server_master_key,
+    //                 remote (inbound) = client_master_key
+    // Earlier versions of this test unconditionally used
+    // `local = server_master_key` / `remote = client_master_key`,
+    // which is correct only for the DTLS server side — the DTLS
+    // client side sent packets encrypted with the wrong key and the
+    // peer's unprotect_rtp() rejected every one of them.
+    nimrtc::dtls::DtlsRole role = nimrtc::dtls::DtlsRole::Server;
+
     // Inbound queue (filled by ArqRawUdp's recv thread).
     struct {
         std::mutex mtx;
@@ -91,19 +104,26 @@ struct ArqDtlsSrtpSide {
                     drained.swap(inbound.q);
                 }
                 for (auto& bytes : drained) {
-                    // Push to srtp_inbound for the test thread to consume.
-                    // NOTE: keep a copy of the bytes BEFORE moving into the
-                    // srtp_inbound queue — once moved, `bytes` is empty and
-                    // `drained[0]` references the same moved-from vector
-                    // (undefined behavior; previously caused test C's
-                    // DTLS handshake to time out because feed_inbound
-                    // received an empty span).
-                    std::vector<std::uint8_t> dtls_copy = bytes;
-                    {
+                    // Push to srtp_inbound ONLY after the DTLS handshake
+                    // completes and SRTP keys are installed.  Before that
+                    // point the ARQ recv thread delivers DTLS handshake records
+                    // (ClientHello, Certificate, etc.) alongside SRTP packets;
+                    // feeding a 100+ byte DTLS Certificate record to
+                    // unprotect_rtp() makes libsrtp read the DTLS content
+                    // type byte as an RTP header version field, the auth tag
+                    // check fails, and the test reports "unprotect failed".
+                    // The dtls_connected flag is set by the pump thread's
+                    // state-transition check and is true for every iteration
+                    // after the handshake is done, including the iteration
+                    // that calls install_srtp_keys().
+                    if (dtls_connected.load(std::memory_order_acquire)) {
                         std::lock_guard<std::mutex> lk(srtp_inbound.mtx);
-                        srtp_inbound.q.push_back(std::move(bytes));
+                        srtp_inbound.q.push_back(bytes);
                     }
-                    // Feed DTLS with the pre-move copy.
+
+                    // DTLS always gets fed, regardless of handshake state —
+                    // the handshake records drive the state machine forward.
+                    std::vector<std::uint8_t> dtls_copy = bytes;
                     nimrtc::dtls::DtlsAddr addr{"127.0.0.1", peer_port};
                     dtls->feed_inbound(
                         std::span<const std::uint8_t>(dtls_copy.data(),
@@ -166,21 +186,35 @@ struct ArqDtlsSrtpSide {
         std::vector<std::uint8_t> server_salt(km->server_master_salt.begin(),
                                               km->server_master_salt.end());
 
-        // Install peer's keys for inbound (unprotect).
-        if (!client_key.empty() && !client_salt.empty()) {
-            srtp->derive_keys_for_remote(client_key, client_salt,
+        // Install peer's keys for inbound (unprotect), our own keys
+        // for outbound (protect).  The mapping depends on which side
+        // of the DTLS handshake this side played — see `role` above.
+        const std::vector<std::uint8_t>* local_key;
+        const std::vector<std::uint8_t>* local_salt;
+        const std::vector<std::uint8_t>* remote_key;
+        const std::vector<std::uint8_t>* remote_salt;
+        if (role == nimrtc::dtls::DtlsRole::Client) {
+            local_key  = &client_key;  local_salt  = &client_salt;
+            remote_key = &server_key;  remote_salt = &server_salt;
+        } else {
+            local_key  = &server_key;  local_salt  = &server_salt;
+            remote_key = &client_key;  remote_salt = &client_salt;
+        }
+        if (!remote_key->empty() && !remote_salt->empty()) {
+            srtp->derive_keys_for_remote(*remote_key, *remote_salt,
                 nimrtc::srtp::CryptoSuite::Aes128CmSha1_80);
         }
-        // Install our own keys for outbound (protect).
-        if (!server_key.empty() && !server_salt.empty()) {
-            srtp->derive_keys_for_local(server_key, server_salt,
+        if (!local_key->empty() && !local_salt->empty()) {
+            srtp->derive_keys_for_local(*local_key, *local_salt,
                 nimrtc::srtp::CryptoSuite::Aes128CmSha1_80);
         }
 
         srtp_ready.store(true, std::memory_order_release);
         std::fprintf(stderr,
-            "[C] SRTP keys installed  server_key[0]=%02x  client_key[0]=%02x\n",
-            server_key[0], client_key[0]);
+            "[C] SRTP keys installed  server_key[0]=%02x  client_key[0]=%02x "
+            "(role=%s)\n",
+            server_key[0], client_key[0],
+            role == nimrtc::dtls::DtlsRole::Client ? "Client" : "Server");
     }
 
     // Build an RTP packet (12-byte header + payload).
@@ -294,6 +328,7 @@ bool run_test() {
     cfgA.srtp_profile = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
     a.dtls = std::make_unique<nimrtc::dtls::DtlsSession>(cfgA);
     a.srtp = std::make_unique<nimrtc::srtp::SrtpContext>();
+    a.role = nimrtc::dtls::DtlsRole::Client;
     if (auto r = a.dtls->open(); !r) {
         std::fprintf(stderr, "[C] A.dtls open failed\n");
         return false;
@@ -304,6 +339,7 @@ bool run_test() {
     cfgB.srtp_profile = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
     b.dtls = std::make_unique<nimrtc::dtls::DtlsSession>(cfgB);
     b.srtp = std::make_unique<nimrtc::srtp::SrtpContext>();
+    b.role = nimrtc::dtls::DtlsRole::Server;
     if (auto r = b.dtls->open(); !r) {
         std::fprintf(stderr, "[C] B.dtls open failed\n");
         return false;
@@ -417,16 +453,35 @@ bool run_test() {
 
     // ---- Wait for B to receive the SRTP packet ------------------------
     // Drain B's srtp_inbound queue until we get a packet or timeout.
+    // We skip packets that look like DTLS records (content type 20..23
+    // = 0x14..0x17) — these are retransmissions from wolfSSL's
+    // post-handshake retransmit timer, which can still fire for a
+    // while after wolfSSL_accept()/connect() returns SUCCESS, and they
+    // get pushed to srtp_inbound because `dtls_connected` is true by
+    // the time the pump thread drains them.
+    auto is_rtp_shaped = [](std::span<const std::uint8_t> p) {
+        if (p.size() < 12) return false;
+        // RTP v2 with no padding, no extension, no CSRC contributions →
+        // first byte in 0x80..0x80.
+        return (p[0] & 0xC0) == 0x80 && (p[0] & 0x20) == 0;
+    };
     std::vector<std::uint8_t> received_srtp;
     auto recv_deadline = clk::now() + std::chrono::seconds(5);
     while (clk::now() < recv_deadline) {
-        std::deque<std::vector<std::uint8_t>> drained;
+        std::deque<std::vector<std::uint8_t>> local_drained;
         {
             std::lock_guard<std::mutex> lk(b.srtp_inbound.mtx);
-            if (!b.srtp_inbound.q.empty()) {
-                received_srtp = std::move(b.srtp_inbound.q.front());
+            while (!b.srtp_inbound.q.empty()) {
+                local_drained.push_back(std::move(b.srtp_inbound.q.front()));
                 b.srtp_inbound.q.pop_front();
             }
+        }
+        for (auto& pkt : local_drained) {
+            if (received_srtp.empty() && is_rtp_shaped(pkt)) {
+                received_srtp = std::move(pkt);
+                break;
+            }
+            // Else: silent skip of DTLS retransmissions / control frames.
         }
         if (!received_srtp.empty()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -441,8 +496,12 @@ bool run_test() {
     }
 
     std::fprintf(stderr,
-        "[C] B: received SRTP packet: %zu bytes\n",
+        "[C] B: received SRTP packet: %zu bytes  first32=",
         received_srtp.size());
+    for (std::size_t i = 0; i < std::min<std::size_t>(received_srtp.size(), 32u); ++i) {
+        std::fprintf(stderr, "%02x ", received_srtp[i]);
+    }
+    std::fprintf(stderr, "\n");
 
     // ---- SRTP-unprotect on B -------------------------------------------
     // B uses its inbound session (incoming, which is the peer's client keys).

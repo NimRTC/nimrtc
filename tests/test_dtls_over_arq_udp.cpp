@@ -29,11 +29,13 @@
  */
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -316,14 +318,25 @@ bool run_test() {
         b_keys ? "present" : "missing");
 
     if (a_keys && b_keys) {
-        std::fprintf(stderr,
-            "[B] A keys: client_master_key[0]=%02x  server_master_key[0]=%02x\n",
-            a_keys->client_master_key[0],
-            a_keys->server_master_key[0]);
-        std::fprintf(stderr,
-            "[B] B keys: client_master_key[0]=%02x  server_master_key[0]=%02x\n",
-            b_keys->client_master_key[0],
-            b_keys->server_master_key[0]);
+        // Debug: dump all 16 bytes of the client + server master keys so we
+        // can distinguish "single byte happens to be 0" from "keying
+        // material is genuinely all-zero (likely a DTLS export bug)".
+        auto dump_hex = [](const char* label,
+                           const nimrtc::dtls::SrtpKeyingMaterial& km) {
+            auto hex = [](const std::array<std::uint8_t, 16>& key) {
+                std::string s;
+                s.reserve(32);
+                static const char* h = "0123456789abcdef";
+                for (auto b : key) { s.push_back(h[(b >> 4) & 0xF]); s.push_back(h[b & 0xF]); }
+                return s;
+            };
+            std::fprintf(stderr,
+                "[B] %s client_master_key=%s  server_master_key=%s\n",
+                label, hex(km.client_master_key).c_str(),
+                hex(km.server_master_key).c_str());
+        };
+        dump_hex("A", *a_keys);
+        dump_hex("B", *b_keys);
     }
 
     // ARQ stats.

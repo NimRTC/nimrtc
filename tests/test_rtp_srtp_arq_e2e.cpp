@@ -40,6 +40,43 @@ using clk = std::chrono::steady_clock;
 namespace {
 
 // ===========================================================================
+// looks_like_rtp — cheap protocol-shape gate used to keep non-RTP
+// payloads out of the libsrtp unprotect path.
+//
+// ARQ multiplexes our DTLS handshake records and SRTP media packets
+// onto the same UDP socket (the real test runs on 127.0.0.1, so we use
+// a single ARQ instance per side for everything).  After DTLS
+// CONNECTED the test enables `dtls_connected ? push-to-media_q : drop`,
+// but that gate isn't tight enough: a 975-byte DTLS Handshake record
+// (ServerKeyExchange/Certificate flight) that ARQ re-delivers AFTER
+// the handshake has already completed will pass the connected gate
+// and end up at `drain_media`, where libsrtp reads the DTLS
+// content-type byte (0x16) as an RTP version field, fails the auth-tag
+// check, and prints:
+//
+//     [D] unprotect failed: peer_ssrc=00000e02 pkt_sz=975
+//                          first12=16 fe fd 00 00 00 00 00 00 00 0e 02
+//
+// `peer_ssrc=0x0e02` is just the trailing two bytes of the DTLS
+// record's 6-byte sequence number, not a real SSRC.
+//
+// The shape check is exact: RTP byte 0 holds V=2 in the top two bits
+// (RFC 3550 §5.1), so `(pkt[0] & 0xC0) == 0x80`.  DTLS content_type
+// is 0x14..0x17 (always below 0x40) so the two are disjoint.  STUN
+// cookie / ICE / RTCP non-data packets fail this check too, which is
+// the correct behaviour for this test — only SRTP-wrapped media
+// should ever be unprotect'd here.
+//
+// `pkt.size() >= 12` matches the libsrtp guard in
+// `SrtpSession::unprotect_rtp()` so we reject tiny frames one place
+// instead of letting libsrtp do it for us (and report a less-useful
+// error message).
+// ===========================================================================
+inline bool looks_like_rtp(std::span<const std::uint8_t> pkt) noexcept {
+    return pkt.size() >= 12 && (pkt[0] & 0xC0) == 0x80;
+}
+
+// ===========================================================================
 // Shared types (mirrored from test_srtp_over_dtls_over_arq_udp.cpp)
 // ===========================================================================
 
@@ -53,6 +90,19 @@ struct Side {
     std::uint16_t    peer_port = 0;
     std::uint32_t    ssrc = 0;
     std::uint16_t    initial_seq = 0;
+    // RFC 5764 §4.2 — the SRTP local/remote key assignment depends on
+    // whether this side is the DTLS client or DTLS server:
+    //   * DTLS Client: local (outbound) = client_master_key,
+    //                 remote (inbound) = server_master_key
+    //   * DTLS Server: local (outbound) = server_master_key,
+    //                 remote (inbound) = client_master_key
+    // Earlier versions of this test unconditionally used
+    // `local = server_master_key` / `remote = client_master_key`,
+    // which is correct only for the DTLS server side — the DTLS client
+    // side sent packets encrypted with the wrong key and B's
+    // unprotect_rtp() rejected every one of them.  Storing the role
+    // here lets install_srtp_keys() pick the right mapping.
+    nimrtc::dtls::DtlsRole role = nimrtc::dtls::DtlsRole::Server;
 
     struct {
         std::mutex mtx;
@@ -85,14 +135,18 @@ struct Side {
                         addr);
                 }
 
-                // Also drain the dedicated media queue (filled by
-                // recv callback for ALL packets).
-                {
-                    std::lock_guard<std::mutex> lk(inbound.mtx);
-                    drained.swap(inbound.media_q);
-                }
-                // media_q entries are already queued; nothing extra to do
-                // here — the test thread drains media_q separately.
+                // NOTE: do NOT drain `inbound.media_q` here.  The pump and
+                // the main test thread both race to swap `media_q`; if the
+                // pump drains it first, the main thread (which actually
+                // runs srtp_unprotect on the payloads) sees an empty
+                // queue.  In the previous version of this test the pump
+                // swapped `media_q` every iteration and silently dropped
+                // 9 out of every 10 media packets — only the single packet
+                // that happened to arrive between pump iterations made it
+                // to `drain_media`, which is exactly why the burst test
+                // reported "B received 1/10 packets from A".
+                // The pump only owns `inbound.q` (DTLS feed); media
+                // packets are owned end-to-end by `drain_media`.
 
                 dtls->tick();
                 auto outs = dtls->take_outbound();
@@ -127,15 +181,29 @@ struct Side {
                                          km->server_master_key.end());
         std::vector<std::uint8_t> s_salt(km->server_master_salt.begin(),
                                           km->server_master_salt.end());
-        if (!c_key.empty() && !c_salt.empty())
-            srtp->derive_keys_for_remote(c_key, c_salt,
+        // RFC 5764 §4.2 — local/remote key assignment is role-dependent.
+        // See the comment on `Side::role` above for the full rationale.
+        const std::vector<std::uint8_t>* local_key;
+        const std::vector<std::uint8_t>* local_salt;
+        const std::vector<std::uint8_t>* remote_key;
+        const std::vector<std::uint8_t>* remote_salt;
+        if (role == nimrtc::dtls::DtlsRole::Client) {
+            local_key  = &c_key;  local_salt  = &c_salt;
+            remote_key = &s_key;  remote_salt = &s_salt;
+        } else {
+            local_key  = &s_key;  local_salt  = &s_salt;
+            remote_key = &c_key;  remote_salt = &c_salt;
+        }
+        if (!remote_key->empty() && !remote_salt->empty())
+            srtp->derive_keys_for_remote(*remote_key, *remote_salt,
                 nimrtc::srtp::CryptoSuite::Aes128CmSha1_80);
-        if (!s_key.empty() && !s_salt.empty())
-            srtp->derive_keys_for_local(s_key, s_salt,
+        if (!local_key->empty() && !local_salt->empty())
+            srtp->derive_keys_for_local(*local_key, *local_salt,
                 nimrtc::srtp::CryptoSuite::Aes128CmSha1_80);
         srtp_ready.store(true, std::memory_order_release);
         std::fprintf(stderr,
-            "[D] %08x: SRTP keys installed\n", ssrc);
+            "[D] %08x: SRTP keys installed (role=%s)\n",
+            ssrc, role == nimrtc::dtls::DtlsRole::Client ? "Client" : "Server");
     }
 
     // Helper: build RTP packet.
@@ -168,10 +236,19 @@ struct Side {
                   std::uint16_t dst_port) {
         auto rtp = build_rtp(seq, ts, ssrc, 96, payload);
         auto* sess = srtp->get_session(ssrc, /*outgoing=*/true);
-        if (!sess) return false;
+        if (!sess) {
+            std::fprintf(stderr,
+                "[D] send_rtp: get_session(ssrc=%08x, out=true) failed\n",
+                ssrc);
+            return false;
+        }
         nimrtc::core::ByteSpan sp(rtp.data(), rtp.size());
         auto srtp_out = sess->protect_rtp(sp, ssrc, ts);
-        if (!srtp_out) return false;
+        if (!srtp_out) {
+            std::fprintf(stderr,
+                "[D] send_rtp: protect_rtp failed\n");
+            return false;
+        }
         auto& out_span = srtp_out.value();
         std::vector<std::uint8_t> buf(out_span.data(),
                                       out_span.data() + out_span.size());
@@ -192,7 +269,33 @@ struct Side {
                 drained.swap(inbound.media_q);
             }
             for (auto& pkt : drained) {
-                auto* sess = srtp->get_session(ssrc, /*outgoing=*/false);
+                // SRTP sessions are keyed by the SOURCE SSRC (peer's SSRC)
+                // — RFC 5764 §5.3 requires per-SSRC key derivation.  Look
+                // up the inbound session using bytes [8..11] of the RTP
+                // header, NOT `this->ssrc` (our own SSRC).  The previous
+                // code used `ssrc` here and every unprotect failed with
+                // "no session for that SSRC" once the second peer started
+                // sending (dec count stayed at 0).
+                //
+                // Belt-and-braces protocol gate: the on_recv callback
+                // already filters by `looks_like_rtp` before pushing to
+                // `media_q`, but a non-RTP packet could still slip
+                // through (e.g. future test variant that bypasses the
+                // on_recv filter, or a malformed peer).  Calling
+                // libsrtp with a non-RTP payload has the side effect of
+                // CREATING a new inbound SRTP session keyed by whatever
+                // bytes [8..11] happen to be — for a DTLS record those
+                // are part of the sequence number, not an SSRC, and the
+                // bogus session sits in `inbound_sessions_` forever.
+                // The shape check below drops the packet before
+                // `get_session()` can pollute the session table.
+                if (!looks_like_rtp(pkt)) continue;
+                const std::uint32_t peer_ssrc =
+                    (static_cast<std::uint32_t>(pkt[8]) << 24) |
+                    (static_cast<std::uint32_t>(pkt[9]) << 16) |
+                    (static_cast<std::uint32_t>(pkt[10]) <<  8) |
+                     static_cast<std::uint32_t>(pkt[11]);
+                auto* sess = srtp->get_session(peer_ssrc, /*outgoing=*/false);
                 if (!sess) continue;
                 std::uint32_t out_ssrc = 0, out_ts = 0;
                 nimrtc::core::ByteSpan sp(pkt.data(), pkt.size());
@@ -270,9 +373,37 @@ bool run_test() {
         s.arq = std::make_unique<nimrtc::raw_udp::ArqRawUdp>(cfg);
         s.arq->on_recv([&s](nimrtc::plugins::BufferView bv) {
             std::vector<std::uint8_t> copy(bv.data(), bv.data() + bv.size());
-            std::lock_guard<std::mutex> lk(s.inbound.mtx);
-            s.inbound.q.push_back(copy);
-            s.inbound.media_q.push_back(std::move(copy));
+            // Always feed DTLS — handshake records must reach the state
+            // machine regardless of connection state.
+            {
+                std::lock_guard<std::mutex> lk(s.inbound.mtx);
+                s.inbound.q.push_back(copy);
+            }
+            // Only fan-out to media_q AFTER the DTLS handshake is done
+            // and SRTP keys are installed.  Before that point the ARQ
+            // recv thread is delivering DTLS handshake records to side B
+            // (Certificate / ServerKeyExchange / Finished are all 100–300
+            // bytes); feeding those into libsrtp's unprotect makes it
+            // read the DTLS content-type byte as an RTP version field,
+            // the auth tag check fails, and the test reports
+            // "unprotect failed" on every "packet" it pops.
+            //
+            // The `dtls_connected` gate alone is not enough: ARQ may
+            // re-deliver a DTLS handshake record AFTER the handshake has
+            // completed (e.g. an in-flight retransmit that was buffered
+            // by the selective-repeat receiver and only flushed to
+            // `rx_delivered_` once the missing seq arrived).  Those late
+            // DTLS records carry content_type 0x14..0x17, which is
+            // strictly below the RTP-version-2 byte (0x80..0xBF) — see
+            // `looks_like_rtp` for the full rationale.  The shape gate
+            // here is what stops those packets from reaching
+            // `drain_media` and producing false "unprotect failed"
+            // log lines.
+            if (s.dtls_connected.load(std::memory_order_acquire) &&
+                looks_like_rtp(copy)) {
+                std::lock_guard<std::mutex> lk(s.inbound.mtx);
+                s.inbound.media_q.push_back(std::move(copy));
+            }
         });
         return s.arq->open() == nimrtc::plugins::kOk;
     };
@@ -306,9 +437,11 @@ bool run_test() {
     if (!setup_side(a, nimrtc::dtls::DtlsRole::Client)) {
         std::fprintf(stderr, "[D] A setup failed\n"); return false;
     }
+    a.role = nimrtc::dtls::DtlsRole::Client;
     if (!setup_side(b, nimrtc::dtls::DtlsRole::Server)) {
         std::fprintf(stderr, "[D] B setup failed\n"); return false;
     }
+    b.role = nimrtc::dtls::DtlsRole::Server;
 
     // NOW capture fingerprints from the live sessions and pin them
     // as the expected peer SPKI for the opposite side.

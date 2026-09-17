@@ -29,7 +29,7 @@ add_executable(test_raw_udp_arq test_raw_udp_arq.cpp)
 set_target_properties(test_raw_udp_arq PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_raw_udp_arq) LENIENT
+nimrtc_apply_options(test_raw_udp_arq LENIENT)
 
 target_link_libraries(test_raw_udp_arq PRIVATE
     nimrtc::raw_udp
@@ -54,7 +54,7 @@ add_executable(test_raw_udp_real_loopback test_raw_udp_real_loopback.cpp)
 set_target_properties(test_raw_udp_real_loopback PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_raw_udp_real_loopback) LENIENT
+nimrtc_apply_options(test_raw_udp_real_loopback LENIENT)
 
 target_link_libraries(test_raw_udp_real_loopback PRIVATE
     nimrtc::raw_udp

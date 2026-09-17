@@ -30,7 +30,7 @@ add_executable(test_transport_selector test_transport_selector.cpp)
 set_target_properties(test_transport_selector PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_transport_selector) LENIENT
+nimrtc_apply_options(test_transport_selector LENIENT)
 
 target_link_libraries(test_transport_selector PRIVATE
     nimrtc::transport

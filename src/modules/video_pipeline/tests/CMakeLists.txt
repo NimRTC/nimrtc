@@ -26,7 +26,7 @@ add_executable(test_video_pipeline test_video_pipeline.cpp)
 set_target_properties(test_video_pipeline PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_pipeline) LENIENT
+nimrtc_apply_options(test_video_pipeline LENIENT)
 
 target_link_libraries(test_video_pipeline PRIVATE
     nimrtc::video_pipeline

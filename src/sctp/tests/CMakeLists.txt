@@ -38,7 +38,7 @@ add_executable(test_sctp_factory test_sctp_factory.cpp)
 set_target_properties(test_sctp_factory PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_sctp_factory) LENIENT
+nimrtc_apply_options(test_sctp_factory LENIENT)
 
 target_link_libraries(test_sctp_factory PRIVATE
     nimrtc::sctp

@@ -30,7 +30,7 @@ add_executable(test_opus test_opus.cpp)
 set_target_properties(test_opus PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_opus) LENIENT
+nimrtc_apply_options(test_opus LENIENT)
 
 target_link_libraries(test_opus PRIVATE
     nimrtc::opus

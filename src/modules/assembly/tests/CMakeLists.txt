@@ -43,7 +43,7 @@ target_compile_definitions(test_assembly PRIVATE _CRT_SECURE_NO_WARNINGS)
 set_target_properties(test_assembly PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_assembly) LENIENT
+nimrtc_apply_options(test_assembly LENIENT)
 
 target_link_libraries(test_assembly PRIVATE
     nimrtc::assembly

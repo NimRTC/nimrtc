@@ -28,7 +28,7 @@ add_executable(test_video_rtcp_feedback
 set_target_properties(test_video_rtcp_feedback PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_rtcp_feedback) LENIENT
+nimrtc_apply_options(test_video_rtcp_feedback LENIENT)
 
 target_link_libraries(test_video_rtcp_feedback PRIVATE
     nimrtc::video_rtcp_feedback

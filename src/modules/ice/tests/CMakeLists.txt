@@ -41,10 +41,10 @@ set_target_properties(test_ice_test PROPERTIES
 set_target_properties(test_consent_freshness_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_ice_test) LENIENT
+nimrtc_apply_options(test_ice_test LENIENT)
 nimrtc_link_libjuice(test_ice_test)
 
-nimrtc_apply_options(test_consent_freshness_test) LENIENT
+nimrtc_apply_options(test_consent_freshness_test LENIENT)
 nimrtc_link_libjuice(test_consent_freshness_test)
 
 target_link_libraries(test_ice_test PRIVATE

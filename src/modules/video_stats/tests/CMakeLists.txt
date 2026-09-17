@@ -26,7 +26,7 @@ add_executable(test_video_stats test_video_stats.cpp)
 set_target_properties(test_video_stats PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_stats) LENIENT
+nimrtc_apply_options(test_video_stats LENIENT)
 
 target_link_libraries(test_video_stats PRIVATE
     nimrtc::video_stats

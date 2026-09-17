@@ -97,19 +97,14 @@ function(nimrtc_apply_options target)
             $<$<CONFIG:Debug>:-O0 -g3>
             $<$<CONFIG:Release>:-O2 -DNDEBUG>)
 
-        # -Wduplicated-cond was added in GCC 10, Clang 13, Apple Clang 15
-        # (Xcode 15). Older Apple Clang rejects the flag under -Werror, so
-        # gate it on compiler version. We require strict mode for our
-        # own code; missing the flag on old toolchains is a small loss.
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 10)
-                target_compile_options(${target} PRIVATE -Wduplicated-cond)
-            endif()
-        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            # Matches both "Clang" and "AppleClang".
-            if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
-                target_compile_options(${target} PRIVATE -Wduplicated-cond)
-            endif()
+        # -Wduplicated-cond was added in Clang 13. Apple Clang's version
+        # numbering tracks Xcode (not upstream Clang major), and Apple Clang
+        # 15 (the GitHub-hosted macos runner) does NOT actually recognise the
+        # flag — empirically it errors with 'unknown warning option'. Skip
+        # it on Apple to keep -Werror strict; we still get the rest of the
+        # warning set. Linux GCC/Clang always get the flag.
+        if(NOT APPLE)
+            target_compile_options(${target} PRIVATE -Wduplicated-cond)
         endif()
     endif()
 

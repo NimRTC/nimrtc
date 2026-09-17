@@ -157,8 +157,9 @@ TEST_F(EnginePluginLoading, engine_open_uses_registry_for_transport) {
 // and that the audio3a plugin is discoverable in the registry afterwards.
 TEST_F(EnginePluginLoading, engine_send_audio_path_is_reachable) {
     EngineConfig cfg;
-    cfg.local_port_range_begin = 50400;
-    cfg.local_port_range_end   = 50500;
+    // local_port_range_begin/end default to 0 = OS-assigned. The GitHub
+    // Actions Windows runner occasionally rejects binds to fixed ranges
+    // (WSAEACCES on ports around 50400-50500), so let the OS pick.
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 

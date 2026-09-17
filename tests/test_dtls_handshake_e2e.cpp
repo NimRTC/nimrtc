@@ -121,18 +121,18 @@ int main() {
     auto sstats = server.stats();
     std::fprintf(stderr,
         "client stats: rec_in=%llu rec_out=%llu hs_ms=%llu retrans=%llu errs=%llu\n",
-        (unsigned long long)cstats.records_in,
-        (unsigned long long)cstats.records_out,
-        (unsigned long long)cstats.handshake_ms,
-        (unsigned long long)cstats.retransmits,
-        (unsigned long long)cstats.errors);
+        static_cast<unsigned long long>(cstats.records_in),
+        static_cast<unsigned long long>(cstats.records_out),
+        static_cast<unsigned long long>(cstats.handshake_ms),
+        static_cast<unsigned long long>(cstats.retransmits),
+        static_cast<unsigned long long>(cstats.errors));
     std::fprintf(stderr,
         "server stats: rec_in=%llu rec_out=%llu hs_ms=%llu retrans=%llu errs=%llu\n",
-        (unsigned long long)sstats.records_in,
-        (unsigned long long)sstats.records_out,
-        (unsigned long long)sstats.handshake_ms,
-        (unsigned long long)sstats.retransmits,
-        (unsigned long long)sstats.errors);
+        static_cast<unsigned long long>(sstats.records_in),
+        static_cast<unsigned long long>(sstats.records_out),
+        static_cast<unsigned long long>(sstats.handshake_ms),
+        static_cast<unsigned long long>(sstats.retransmits),
+        static_cast<unsigned long long>(sstats.errors));
 
     return (ok && ck && sk) ? 0 : 2;
 }

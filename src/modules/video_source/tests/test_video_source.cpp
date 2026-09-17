@@ -219,8 +219,12 @@ TEST(MemorySource, StartProduceStopLifecycle) {
     src->stop();
     int after_stop = count.load();
     EXPECT_GE(after_stop, 1);
-    // After stop, no more frames.
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    // After stop, no more frames. We wait generously because stop() merely
+    // signals the producer thread (it joins in the destructor); on a busy CI
+    // runner the producer can be preempted past the nominal 33 ms / 30 fps
+    // cadence and emit one final frame after we read after_stop. 500 ms is
+    // ~15 frame intervals, ample headroom for a real "stop took effect".
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     EXPECT_EQ(count.load(), after_stop);
 }
 

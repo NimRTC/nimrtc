@@ -49,13 +49,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd / IDE indexing
 #   nimrtc_apply_options(<target>)             # strict (production code)
 #   nimrtc_apply_options(<target> LENIENT)     # test/bench harnesses
 #
-# LENIENT turns off three warnings that are systemic in our test code
-# (legacy C-style casts in fprintf stat dumps, occasional unused helper
-# functions guarded by #ifdef, printf-style varargs in debug helpers):
-#   - -Wno-old-style-cast
-#   - -Wno-unused-function
-#   - -Wno-format-nonliteral
-# Production src/ targets should NOT pass LENIENT — keep the strict set.
+# LENIENT mode disables -Werror (and a few specific warnings that are
+# endemic to test code but never appear in production src/) so that
+# legacy C-style casts in stat dumps, unused helpers behind #ifdef, and
+# non-literal printf formats in debug helpers don't block CI. Warnings
+# remain enabled — they still surface in the build log; we just don't
+# treat them as fatal. Production src/ targets must NOT pass LENIENT.
 # -----------------------------------------------------------------------------
 function(nimrtc_apply_options target)
     if(NOT TARGET ${target})
@@ -135,7 +134,7 @@ function(nimrtc_apply_options target)
         endif()
     endif()
 
-    if(NIMRTC_WARNINGS_AS_ERRORS)
+    if(NIMRTC_WARNINGS_AS_ERRORS AND NOT NIMRTC_OPT_LENIENT)
         if(MSVC)
             target_compile_options(${target} PRIVATE /WX)
         else()

@@ -27,7 +27,7 @@ add_executable(test_video_jb test_video_jb.cpp)
 set_target_properties(test_video_jb PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_jb)
+nimrtc_apply_options(test_video_jb) LENIENT
 
 target_link_libraries(test_video_jb PRIVATE
     nimrtc::video_jb

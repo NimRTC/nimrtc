@@ -27,7 +27,7 @@ add_executable(test_video_payload test_h264.cpp test_vp8.cpp test_vp9.cpp)
 set_target_properties(test_video_payload PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_payload)
+nimrtc_apply_options(test_video_payload) LENIENT
 
 target_link_libraries(test_video_payload PRIVATE
     nimrtc::video_payload

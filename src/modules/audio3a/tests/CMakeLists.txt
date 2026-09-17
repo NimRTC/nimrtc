@@ -38,7 +38,7 @@ add_executable(test_audio3a_plugin test_audio3a_plugin.cpp)
 set_target_properties(test_audio3a_plugin PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_audio3a_plugin)
+nimrtc_apply_options(test_audio3a_plugin) LENIENT
 
 target_link_libraries(test_audio3a_plugin PRIVATE
     nimrtc::audio3a

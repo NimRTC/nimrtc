@@ -26,7 +26,7 @@ add_executable(test_video_frame test_video_frame.cpp)
 set_target_properties(test_video_frame PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_video_frame)
+nimrtc_apply_options(test_video_frame) LENIENT
 
 target_link_libraries(test_video_frame PRIVATE
     nimrtc::video_frame

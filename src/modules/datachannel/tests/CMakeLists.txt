@@ -26,7 +26,7 @@ add_executable(test_datachannel test_datachannel.cpp)
 set_target_properties(test_datachannel PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_datachannel)
+nimrtc_apply_options(test_datachannel) LENIENT
 
 target_link_libraries(test_datachannel PRIVATE
     nimrtc::datachannel

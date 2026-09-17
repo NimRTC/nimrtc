@@ -109,7 +109,7 @@ function(nimrtc_add_test source)
     # into the generated vcxproj's <AdditionalDependencies> list.
     # -------------------------------------------------------------------------
     add_executable(${test_target} ${src_path})
-    nimrtc_apply_options(${test_target})
+    nimrtc_apply_options(${test_target} LENIENT)
     set_target_properties(${test_target} PROPERTIES
         VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 

@@ -30,7 +30,7 @@ add_executable(test_h264_codec test_h264_codec.cpp)
 set_target_properties(test_h264_codec PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_h264_codec)
+nimrtc_apply_options(test_h264_codec) LENIENT
 
 target_link_libraries(test_h264_codec PRIVATE
     nimrtc::h264
@@ -62,7 +62,7 @@ add_executable(test_hw_backends test_hw_backends.cpp)
 set_target_properties(test_hw_backends PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
-nimrtc_apply_options(test_hw_backends)
+nimrtc_apply_options(test_hw_backends) LENIENT
 
 target_include_directories(test_hw_backends PRIVATE
     "${CMAKE_SOURCE_DIR}/src/modules/h264/src")

@@ -14,7 +14,7 @@ target_include_directories(test_video_sink PRIVATE
 if(WIN32)
     target_compile_definitions(test_video_sink PRIVATE _WIN32_WINNT=0x0601)
 endif()
-nimrtc_apply_options(test_video_sink)
+nimrtc_apply_options(test_video_sink) LENIENT
 # See tests/CMakeLists.txt add_e2e_test() for the rationale on the COMMAND
 # expression.  Just use $<TARGET_FILE> directly — the previous
 # "Debug/" gen-expr prefix doubled the path under MSVC and made this

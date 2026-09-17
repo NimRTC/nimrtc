@@ -72,6 +72,53 @@ if(_nimrtc_hw_summary STREQUAL "")
 endif()
 message(STATUS "  HW plugins enabled:${_nimrtc_hw_summary}")
 
+# -----------------------------------------------------------------------------
+# Module switches
+# -----------------------------------------------------------------------------
+# One option per concrete module under src/modules/. Flip a flag to OFF to
+# skip that module's subdirectory entirely. These are declared at the TOP
+# LEVEL (rather than inside src/modules/CMakeLists.txt) because
+# src/core/CMakeLists.txt runs first in dependency order and reads them to
+# mirror NIMRTC_HAS_* defines into pal_default_registrars.cpp — declaring
+# them here keeps the cache variables initialized before anyone reads them.
+# Defaults are intentionally grouped (audio / video) so the suite each
+# module belongs to is obvious at a glance.
+
+# Audio / RTP / signalling
+option(NIMRTC_MODULE_RTP  "Build RTP module"                         ON)
+option(NIMRTC_MODULE_SDP  "Build SDP module"                         ON)
+option(NIMRTC_MODULE_JB   "Build jitter buffer module"               ON)
+option(NIMRTC_MODULE_BWE  "Build bandwidth estimator module"         ON)
+option(NIMRTC_MODULE_AUDIO3A "Build audio 3A module"                  ON)
+option(NIMRTC_MODULE_ICE  "Build ICE module"                         ON)
+option(NIMRTC_MODULE_SRTP "Build SRTP module"                        ON)
+option(NIMRTC_MODULE_DTLS "Build DTLS module"                        ON)
+option(NIMRTC_MODULE_OPUS "Build Opus codec module"                   ON)
+option(NIMRTC_MODULE_SCHED "Build unified sending scheduler module"  ON)
+option(NIMRTC_MODULE_DATACHANNEL "Build DataChannel module"           ON)
+option(NIMRTC_MODULE_SESSION "Build session module"                  ON)
+option(NIMRTC_MODULE_ASSEMBLY "Build assembly module (Profile/Builder)" ON)
+
+# Video (P1 minimal — standalone, not wired into the engine yet).
+# See docs/zh/architecture.md §2.3 + §6 + §11.5/11.6.
+option(NIMRTC_MODULE_VIDEO_FRAME   "Build video frame module (pixel formats, layouts, conversions)" ON)
+option(NIMRTC_MODULE_VIDEO_PAYLOAD "Build video RTP payload module (H.264/VP8/VP9 packetizers)"  ON)
+option(NIMRTC_MODULE_VIDEO_JB      "Build video-aware jitter buffer module (FU-A reassembly)"     ON)
+option(NIMRTC_MODULE_H264          "Build H.264 module (bitstream + stub decoder + plugin adapter)" ON)
+# Video R2:
+option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
+       "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)
+option(NIMRTC_MODULE_VIDEO_SOURCE
+       "Build video source module (memory frame source for testing/demo)" ON)
+option(NIMRTC_MODULE_VIDEO_STATS
+       "Build video stats module (per-stream statistics)" ON)
+option(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK
+       "Build video RTCP feedback module (PLI/FIR/SLI generation & parsing)" ON)
+option(NIMRTC_MODULE_VIDEO_PIPELINE
+       "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
+option(NIMRTC_MODULE_VIDEO_SINK
+       "Build video sink module (headless / pinned render sinks)" ON)
+
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a
 # Debug /MDd consumer it trips LNK2038 mismatch errors.  Override the

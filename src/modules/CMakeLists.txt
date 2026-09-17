@@ -9,44 +9,13 @@
 # All modules link nimrtc::plugins (header-only) so they can:
 #   - implement plugin interfaces (ITransport, IRTP, etc.)
 #   - register themselves with PluginRegistry
-# ----------------------------------------------------------------------------
-
-# -----------------------------------------------------------------------------
-# Module switch — disable a module to skip its subdirectory entirely.
-# -----------------------------------------------------------------------------
-option(NIMRTC_MODULE_RTP  "Build RTP module"  ON)
-option(NIMRTC_MODULE_SDP  "Build SDP module"  ON)
-option(NIMRTC_MODULE_JB   "Build jitter buffer module"  ON)
-option(NIMRTC_MODULE_BWE  "Build bandwidth estimator module"  ON)
-option(NIMRTC_MODULE_AUDIO3A  "Build audio 3A module"  ON)
-option(NIMRTC_MODULE_ICE  "Build ICE module"  ON)
-option(NIMRTC_MODULE_SRTP  "Build SRTP module"  ON)
-option(NIMRTC_MODULE_DTLS  "Build DTLS module"  ON)
-option(NIMRTC_MODULE_OPUS  "Build Opus codec module"  ON)
-option(NIMRTC_MODULE_SCHED "Build unified sending scheduler module" ON)
-option(NIMRTC_MODULE_DATACHANNEL  "Build DataChannel module"  ON)
-option(NIMRTC_MODULE_SESSION "Build session module"  ON)
-option(NIMRTC_MODULE_ASSEMBLY "Build assembly module (Profile/Builder)"  ON)
-
-# Video modules (P1 minimal — standalone, not wired into the engine yet).
-# See docs/zh/architecture.md §2.3 + §6 + §11.5/11.6.
-option(NIMRTC_MODULE_VIDEO_FRAME   "Build video frame module (pixel formats, layouts, conversions)" ON)
-option(NIMRTC_MODULE_VIDEO_PAYLOAD "Build video RTP payload module (H.264/VP8/VP9 packetizers)"  ON)
-option(NIMRTC_MODULE_VIDEO_JB      "Build video-aware jitter buffer module (FU-A reassembly)"     ON)
-option(NIMRTC_MODULE_H264          "Build H.264 module (bitstream + stub decoder + plugin adapter)" ON)
-# R2 modules (added in this round):
-option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
-       "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)
-option(NIMRTC_MODULE_VIDEO_SOURCE
-       "Build video source module (memory frame source for testing/demo)" ON)
-option(NIMRTC_MODULE_VIDEO_STATS
-       "Build video stats module (per-stream statistics)" ON)
-option(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK
-       "Build video RTCP feedback module (PLI/FIR/SLI generation & parsing)" ON)
-option(NIMRTC_MODULE_VIDEO_PIPELINE
-       "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
-option(NIMRTC_MODULE_VIDEO_SINK
-       "Build video sink module (headless / pinned render sinks)" ON)
+#
+# NOTE: NIMRTC_MODULE_* cache variables are *declared* at the TOP LEVEL
+# (CMakeLists.txt) — not here — so that src/core/CMakeLists.txt, which
+# runs earlier in the dependency order, can read them and propagate
+# NIMRTC_HAS_*=1 into pal_default_registrars.cpp via nimrtc_core_objects.
+# This file only consumes the cache values via the if(add_subdirectory)
+# guards below.
 
 # -----------------------------------------------------------------------------
 # Module targets — order is irrelevant; each is self-contained.

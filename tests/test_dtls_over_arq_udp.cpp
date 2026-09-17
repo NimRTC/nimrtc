@@ -350,10 +350,21 @@ bool run_test() {
     //  - Both sides connected.
     //  - Both have SRTP key material (proves key derivation happened correctly
     //    even with ARQ retransmits in the path).
+    // The previous check `client_master_key[0] != 0` is a probabilistic
+    // assertion: any single byte of a freshly-derived SRTP key can be
+    // 0x00 ~1/256 of the time, causing a spurious test failure.  Verify
+    // that at least ONE byte of the 16-byte master key is non-zero on
+    // each side — proves key derivation ran end-to-end without relying
+    // on a specific byte being non-zero.
+    auto has_nonzero_byte = [](const auto& key) {
+        for (auto b : key) if (b != 0) return true;
+        return false;
+    };
     const bool pass =
         a_ok && b_ok &&
         a_keys.has_value() && b_keys.has_value() &&
-        a_keys->client_master_key[0] != 0;
+        has_nonzero_byte(a_keys->client_master_key) &&
+        has_nonzero_byte(b_keys->client_master_key);
 
     std::fprintf(stderr, "[B] %s\n", pass ? "PASS" : "FAIL");
     return pass;

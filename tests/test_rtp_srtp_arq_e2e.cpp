@@ -287,28 +287,37 @@ bool run_test() {
     std::fprintf(stderr, "[D] A=%u  B=%u\n", portA, portB);
 
     // ---- DtlsSession + SrtpContext -----------------------------------
-    auto setup_side = [](Side& s, nimrtc::dtls::DtlsRole role,
-                         const std::vector<std::uint8_t>& peer_fp) -> bool {
+    // Refactored ordering: create BOTH DtlsSession objects (via setup_side)
+    // BEFORE capturing local fingerprints and BEFORE setting peer pins.
+    // The previous order captured fingerprints from the uninitialized
+    // `a.dtls` / `b.dtls` (nullptr deref → SEGFAULT) and then re-created
+    // the DtlsSession inside setup_side, leaving the captured fingerprints
+    // stale relative to the new sessions.
+    auto setup_side = [](Side& s, nimrtc::dtls::DtlsRole role) -> bool {
         nimrtc::dtls::Config cfg{};
         cfg.role = role;
         cfg.srtp_profile = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
         s.dtls = std::make_unique<nimrtc::dtls::DtlsSession>(cfg);
         s.srtp = std::make_unique<nimrtc::srtp::SrtpContext>();
         if (auto r = s.dtls->open(); !r) return false;
-        s.dtls->set_peer_fingerprint("sha-256", peer_fp);
         return true;
     };
 
-    auto fpA = a.dtls->local_fingerprint();
-    auto fpB = b.dtls->local_fingerprint();
-    if (!setup_side(a, nimrtc::dtls::DtlsRole::Client,
-                    std::vector<std::uint8_t>(fpB.bytes.begin(), fpB.bytes.end()))) {
+    if (!setup_side(a, nimrtc::dtls::DtlsRole::Client)) {
         std::fprintf(stderr, "[D] A setup failed\n"); return false;
     }
-    if (!setup_side(b, nimrtc::dtls::DtlsRole::Server,
-                    std::vector<std::uint8_t>(fpA.bytes.begin(), fpA.bytes.end()))) {
+    if (!setup_side(b, nimrtc::dtls::DtlsRole::Server)) {
         std::fprintf(stderr, "[D] B setup failed\n"); return false;
     }
+
+    // NOW capture fingerprints from the live sessions and pin them
+    // as the expected peer SPKI for the opposite side.
+    auto fpA = a.dtls->local_fingerprint();
+    auto fpB = b.dtls->local_fingerprint();
+    a.dtls->set_peer_fingerprint("sha-256",
+        std::vector<std::uint8_t>(fpB.bytes.begin(), fpB.bytes.end()));
+    b.dtls->set_peer_fingerprint("sha-256",
+        std::vector<std::uint8_t>(fpA.bytes.begin(), fpA.bytes.end()));
 
     // ---- Start pump threads --------------------------------------------
     a.start_pump();

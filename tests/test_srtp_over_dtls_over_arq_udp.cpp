@@ -92,15 +92,22 @@ struct ArqDtlsSrtpSide {
                 }
                 for (auto& bytes : drained) {
                     // Push to srtp_inbound for the test thread to consume.
+                    // NOTE: keep a copy of the bytes BEFORE moving into the
+                    // srtp_inbound queue — once moved, `bytes` is empty and
+                    // `drained[0]` references the same moved-from vector
+                    // (undefined behavior; previously caused test C's
+                    // DTLS handshake to time out because feed_inbound
+                    // received an empty span).
+                    std::vector<std::uint8_t> dtls_copy = bytes;
                     {
                         std::lock_guard<std::mutex> lk(srtp_inbound.mtx);
                         srtp_inbound.q.push_back(std::move(bytes));
                     }
-                    // Also feed into DTLS.
+                    // Feed DTLS with the pre-move copy.
                     nimrtc::dtls::DtlsAddr addr{"127.0.0.1", peer_port};
                     dtls->feed_inbound(
-                        std::span<const std::uint8_t>(drained[0].data(),
-                                                     drained[0].size()),
+                        std::span<const std::uint8_t>(dtls_copy.data(),
+                                                     dtls_copy.size()),
                         addr);
                 }
 

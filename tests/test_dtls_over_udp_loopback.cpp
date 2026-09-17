@@ -220,7 +220,29 @@ struct DtlsSide {
         reader = std::thread([this] {
             std::vector<std::uint8_t> pkt;
             while (!reader_stop.load(std::memory_order_acquire)) {
-                // Drain any pending outbound + push to peer.
+                // Step 1: receive first — give priority to consuming the
+                // incoming half of the handshake before producing new
+                // outbound bytes.  Previously this loop called take_outbound()
+                // first; on a loaded or slow host the 1ms recv window
+                // expired before the peer's response arrived, causing the
+                // handshake to stall with -308 (SOCKET_ERROR_E) when
+                // wolfSSL's internal state became inconsistent.
+                std::uint16_t from_p = 0;
+                if (socket.recv_from(pkt, &from_p,
+                        clk::now() + std::chrono::milliseconds(2))) {
+                    recv_packets.fetch_add(1, std::memory_order_relaxed);
+                    nimrtc::dtls::DtlsAddr from{"127.0.0.1", from_p};
+                    std::size_t consumed = session->feed_inbound(
+                        std::span<const std::uint8_t>(pkt.data(),
+                                                      pkt.size()), from);
+                    feed_bytes.fetch_add(static_cast<int>(consumed),
+                                         std::memory_order_relaxed);
+                }
+
+                // Step 2: advance the state machine (retransmit timer, etc.).
+                session->tick();
+
+                // Step 3: drain any new outbound records and send them.
                 auto outs = session->take_outbound();
                 for (auto& rec : outs) {
                     if (!socket.send_to(peer_port,
@@ -231,28 +253,10 @@ struct DtlsSide {
                     take_records.fetch_add(1, std::memory_order_relaxed);
                     sent_records.fetch_add(1, std::memory_order_relaxed);
                 }
-                if (outs.empty()) {
-                    // Wait up to ~1ms for a UDP packet.
-                    std::uint16_t from_p = 0;
-                    if (socket.recv_from(pkt, &from_p,
-                            clk::now() + std::chrono::milliseconds(1))) {
-                        recv_packets.fetch_add(1, std::memory_order_relaxed);
-                        // feed_inbound returns bytes consumed.  In a
-                        // handshake-loop poll we just keep what's left.
-                        nimrtc::dtls::DtlsAddr from{"127.0.0.1", from_p};
-                        std::size_t consumed = session->feed_inbound(
-                            std::span<const std::uint8_t>(pkt.data(),
-                                                            pkt.size()),
-                            from);
-                        feed_bytes.fetch_add(static_cast<int>(consumed),
-                                                std::memory_order_relaxed);
-                    }
-                }
-                // Pump DTLS retransmit + state machine every iteration.
-                session->tick();
+
+                // Check Connected state.
                 if (session->is_connected() &&
                     !connected.exchange(true, std::memory_order_acq_rel)) {
-                    // First observation of Connected.
                     std::fprintf(stderr,
                         "[side %p] DTLS CONNECTED after %d packets\n",
                         static_cast<const void*>(session.get()),

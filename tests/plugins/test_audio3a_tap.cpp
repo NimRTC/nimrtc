@@ -100,7 +100,9 @@ TEST_F(Audio3ATapFixture, pre_tap_receives_correct_metadata) {
     EXPECT_EQ(m.sample_rate_hz, kSampleRateHz);
 }
 
-TEST_F(Audio3ATapFixture, DISABLED_pre_tap_receives_raw_samples_before_3a) {
+TEST_F(Audio3ATapFixture, pre_tap_receives_raw_samples_before_3a) {
+    // NullAudio3A is a passthrough — pre and post tap see identical PCM.
+    // This test proves the tap receives the unmodified input signal.
     std::vector<float> buf(kSamplesPerFrame);
     for (std::size_t i = 0; i < buf.size(); ++i) {
         float phase = 2.0f * 3.14159265f * 440.0f * static_cast<float>(i) / kSampleRateHz;
@@ -125,8 +127,10 @@ TEST_F(Audio3ATapFixture, DISABLED_pre_tap_receives_raw_samples_before_3a) {
         captured = captured_samples;
     }
     ASSERT_FALSE(captured.empty());
+    // Verify the first 10 samples match the sine input exactly (passthrough).
     for (std::size_t i = 0; i < 10 && i < captured.size(); ++i) {
-        EXPECT_FLOAT_EQ(captured[i], buf[i]) << "pre-tap should see raw samples before 3A";
+        EXPECT_FLOAT_EQ(captured[i], buf[i])
+            << "pre-tap must see unmodified input signal";
     }
 }
 
@@ -208,11 +212,13 @@ TEST_F(Audio3ATapFixture, post_tap_nullptr_uninstalls) {
 // Test: int16_t post-tap
 // ---------------------------------------------------------------------------
 
-TEST_F(Audio3ATapFixture, DISABLED_post_tap_i16_converts_float_to_int16) {
+TEST_F(Audio3ATapFixture, post_tap_i16_converts_float_to_int16) {
+    // Verify: round(s * 32767.0f) saturating to INT16_MIN / INT16_MAX.
+    // Use a ramp so every integer value in [0, 32767] maps to a predictable int16.
     std::vector<float> buf(kSamplesPerFrame);
     for (std::size_t i = 0; i < buf.size(); ++i) {
-        float phase = 2.0f * 3.14159265f * 440.0f * static_cast<float>(i) / kSampleRateHz;
-        buf[i] = 0.5f * std::sin(phase);
+        // Values strictly in [0, 1] — maps 1:1 with int16_t.
+        buf[i] = static_cast<float>(i) / static_cast<float>(kSamplesPerFrame - 1);
     }
 
     std::vector<std::int16_t> captured_i16;
@@ -235,7 +241,16 @@ TEST_F(Audio3ATapFixture, DISABLED_post_tap_i16_converts_float_to_int16) {
         captured = captured_i16;
     }
     ASSERT_FALSE(captured.empty());
-    EXPECT_NEAR(captured[1], 16384, 2) << "float to int16 conversion at 0.5 amplitude";
+
+    // Spot-check: i=240 → buf[240] ≈ 0.5 → expected_i16 ≈ 16384.
+    EXPECT_NEAR(captured[240], 16384, 2)
+        << "float-to-int16 conversion at 0.5 amplitude";
+
+    // i=0 → buf[0] = 0 → expected_i16 = 0.
+    EXPECT_EQ(captured[0], 0) << "zero float maps to zero int16";
+
+    // i=479 → buf[479] ≈ 1.0 → expected_i16 = 32767.
+    EXPECT_EQ(captured[479], 32767) << "1.0 float maps to INT16_MAX";
 }
 
 TEST_F(Audio3ATapFixture, post_tap_i16_clipping_at_boundaries) {
@@ -309,6 +324,121 @@ TEST_F(Audio3ATapFixture, both_taps_fire_together) {
     EXPECT_EQ(pre_seen.load(), 1);
     EXPECT_EQ(post_seen.load(), 1);
     EXPECT_EQ(pre_seen.load(), post_seen.load());
+}
+
+// ---------------------------------------------------------------------------
+// Test: pre tap is invoked before post tap (call order per RFC-001 §2.4)
+// ---------------------------------------------------------------------------
+
+TEST_F(Audio3ATapFixture, pre_tap_before_post_tap_per_frame) {
+    std::vector<std::string> call_order;
+    std::mutex mu;
+
+    plugin_->set_pre_process_tap(
+        [&call_order, &mu](const float*, const PcmFrameMetadata&) {
+            std::lock_guard<std::mutex> lk(mu);
+            call_order.push_back("pre");
+        });
+    plugin_->set_post_process_tap(
+        [&call_order, &mu](const float*, const PcmFrameMetadata&) {
+            std::lock_guard<std::mutex> lk(mu);
+            call_order.push_back("post-f32");
+        },
+        [&call_order, &mu](const std::int16_t*, const PcmFrameMetadata&) {
+            std::lock_guard<std::mutex> lk(mu);
+            call_order.push_back("post-i16");
+        });
+
+    std::vector<float> buf(kSamplesPerFrame, 0.0f);
+    ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+              nimrtc::plugins::kOk);
+
+    ASSERT_EQ(call_order.size(), 3u);
+    EXPECT_EQ(call_order[0], "pre")      << "pre tap must be first";
+    EXPECT_EQ(call_order[1], "post-f32") << "post float tap must be second";
+    EXPECT_EQ(call_order[2], "post-i16") << "post int16 tap must be third";
+}
+
+// ---------------------------------------------------------------------------
+// Test: int16-only tap (no float tap installed)
+// ---------------------------------------------------------------------------
+
+TEST_F(Audio3ATapFixture, int16_tap_without_float_tap) {
+    std::atomic<bool> called{false};
+    plugin_->set_post_process_tap(
+        nullptr,  // no float tap
+        [&called](const std::int16_t* samples, const PcmFrameMetadata& meta) {
+            called = true;
+            EXPECT_NE(samples, nullptr);
+            EXPECT_EQ(meta.num_samples, kSamplesPerFrame);
+        });
+
+    std::vector<float> buf(kSamplesPerFrame, 0.0f);
+    ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+              nimrtc::plugins::kOk);
+    EXPECT_TRUE(called.load()) << "int16 tap must fire even without float tap";
+}
+
+// ---------------------------------------------------------------------------
+// Test: re-install after uninstall
+// ---------------------------------------------------------------------------
+
+TEST_F(Audio3ATapFixture, reinstall_after_uninstall) {
+    std::atomic<int> count{0};
+    plugin_->set_pre_process_tap(
+        [&count](const float*, const PcmFrameMetadata&) { count.fetch_add(1); });
+
+    std::vector<float> buf(kSamplesPerFrame, 0.0f);
+    ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+              nimrtc::plugins::kOk);
+    ASSERT_EQ(count.load(), 1);
+
+    // Uninstall.
+    plugin_->set_pre_process_tap(nullptr);
+    ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+              nimrtc::plugins::kOk);
+    ASSERT_EQ(count.load(), 1);
+
+    // Re-install.
+    plugin_->set_pre_process_tap(
+        [&count](const float*, const PcmFrameMetadata&) { count.fetch_add(1); });
+    ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+              nimrtc::plugins::kOk);
+    EXPECT_EQ(count.load(), 2) << "re-installed tap must fire again";
+}
+
+// ---------------------------------------------------------------------------
+// Test: thread-safety — concurrent install/uninstall vs process calls
+// ---------------------------------------------------------------------------
+
+TEST_F(Audio3ATapFixture, concurrent_install_uninstall_no_crash) {
+    std::atomic<bool> running{true};
+    std::atomic<int>  tap_fired{0};
+
+    std::thread bg([&]() {
+        while (running.load()) {
+            plugin_->set_pre_process_tap(nullptr);
+            plugin_->set_pre_process_tap(
+                [&tap_fired](const float*, const PcmFrameMetadata&) {
+                    tap_fired.fetch_add(1);
+                });
+        }
+    });
+
+    // Main thread: process many frames while bg thread races on tap registration.
+    std::vector<float> buf(kSamplesPerFrame, 0.0f);
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_EQ(plugin_->process_capture(buf.data(), buf.size(), kChannels),
+                  nimrtc::plugins::kOk);
+    }
+
+    running = false;
+    bg.join();
+
+    // No crash, no hang. tap_fired is approximate (race allowed) but > 0
+    // if the install hit at least once before the join.
+    std::fprintf(stderr, "INFO: tap fired %d times during concurrent install/uninstall\n",
+                 tap_fired.load());
 }
 
 }  // namespace

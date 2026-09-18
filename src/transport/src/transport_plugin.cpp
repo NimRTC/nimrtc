@@ -31,12 +31,11 @@ namespace nimrtc::transport {
 
 namespace detail {
 
-// Forward declaration — defined in `default_transport_stack_factory.cpp`.
-// We don't include the .cpp directly; keeping the singleton accessor
-// internal makes the seam module's public surface
-// (`transport_selector.hpp`, `transport_stack.hpp`, `transport_plugin.hpp`)
-// clean.
+// Forward declarations — defined in the respective .cpp files.
+// We keep these internal so the module's public surface
+// (transport_selector.hpp, transport_stack.hpp, transport_plugin.hpp) stays clean.
 const ITransportStackFactory* default_stack_factory_singleton() noexcept;
+const ITransportStackFactory* webrtc_classic_stack_factory_singleton() noexcept;
 
 void do_register_default_selector() noexcept {
     // Process-static Selector instance — see Slice 7 header comment.
@@ -51,10 +50,12 @@ void do_register_default_selector() noexcept {
 }
 
 void do_register_default_plugins() noexcept {
-    // Slice 8: publish the default stack factory through the typed
-    // registry hook so the engine / Selector can resolve it by id
-    // "default". The factory is a shell that wraps the CapabilitySelector
-    // output (see default_transport_stack_factory.cpp for the contract).
+    // Slice 8: publish the shell stack factory (id="default") through the
+    // typed registry hook. Slice 7.5: also publish WebRtcClassicStackFactory
+    // (id="webrtc-classic") so the CapabilitySelector's §5.3 rule 1 resolves
+    // the real factory. Both ids coexist; the Selector picks which to use.
+
+    // ---- Shell factory (id="default") — Slice 8 -----------------------------
     static const struct Registrar {
         Registrar() {
             const ITransportStackFactory* f =
@@ -62,7 +63,7 @@ void do_register_default_plugins() noexcept {
             nimrtc::core::PluginRegistry::instance().register_transport_stack(
                 std::string_view{f->id()}, f);
             nimrtc::core::log::Logger::instance().info(
-                std::string("nimrtc::transport: default stack factory "
+                std::string("nimrtc::transport: shell stack factory "
                             "registered (id=\"") +
                 std::string(f->id()) +
                 "\", via Slice 8 typed registry hook; "
@@ -70,7 +71,26 @@ void do_register_default_plugins() noexcept {
                 "in Slice 7.5)");
         }
     } s_registrar;
+
+    // ---- WebRtcClassicStackFactory (id="webrtc-classic") — Slice 7.5 -----
+    static const struct Registrar2 {
+        Registrar2() {
+            const ITransportStackFactory* f =
+                webrtc_classic_stack_factory_singleton();
+            nimrtc::core::PluginRegistry::instance().register_transport_stack(
+                std::string_view{f->id()}, f);
+            nimrtc::core::log::Logger::instance().info(
+                std::string("nimrtc::transport: WebRtcClassicStackFactory "
+                            "registered (id=\"") +
+                std::string(f->id()) +
+                "\"), via Slice 7.5; "
+                "real ICE/DTLS/RTP/SCTP composition — "
+                " SCTP stub until v0.11.0 adds usrsctp)");
+        }
+    } s_registrar2;
+
     (void)s_registrar;
+    (void)s_registrar2;
 }
 
 } // namespace detail

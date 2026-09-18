@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Version | v1.0（draft — 研究笔记，非 ADR） |
-| Date    | 2026-09-14 |
-| Status  | **Draft** — research note; 待 ADR 化分片（Slice 4–8 各起一个 ADR） |
+| Date    | 2026-09-14; Slice 7.5 落地更新 2026-09-18 |
+| Status  | **Draft** — research note; Slice 4/5/6/7/8 已全部或部分落地；见 §12.5 Slice 7.5 post-mortem |
 | Phase   | P1.1 → P2 入口（v0.10.0 收尾后，v0.11.0 立项前） |
 | Scope   | 传输层 plugin-replaceable 化的"理想态"与 Slice 4–8 落地路径 |
 | Bound   | 无（不绑定具体版本——下面 §7 给出推荐 binding） |
@@ -688,4 +688,53 @@ build logs：`build/slice5_configure.log` / `build/slice5_build.log` / `build/sl
   + `OnSctpRecvCb` / `OnDatagramCb` 提升到 `plugins/base.hpp`，是 Slice 8 的强制交付项
   （不能 deferred 到 v0.12.x patch，因为 `register_default_plugins()` 已经公开，
   没有 registry hook 就只能靠 process-local cache，跨进程查询会失效）。
+
+---
+
+## 12.5 Slice 7.5 post-mortem（2026-09-18）
+
+> `WebRtcClassicStack`（id="webrtc-classic"）+ factory 注册。
+> `default_transport_stack_factory.cpp` 仍保留（shell，id="default"），向后兼容。
+
+### 12.5.1 落地内容
+
+| 文件 | 作用 |
+|---|---|
+| `src/transport/src/webrtc_classic_stack.cpp` | `WebRtcClassicStack` + `WebRtcClassicStackFactory` |
+| `src/transport/src/transport_plugin.cpp` | `do_register_default_plugins()` 同时注册 "default"（shell）+ "webrtc-classic"（真实） |
+| `src/transport/CMakeLists.txt` | `+ webrtc_classic_stack.cpp` |
+| `tests/test_engine_plugin_loading.cpp` | 新增 3 个 subtest：`slice75_webrtc_classic_factory_registered` / `slice75_webrtc_classic_stack_create_and_lifecycle` / `slice75_idempotent_register_does_not_duplicate` |
+
+### 12.5.2 设计决策记录
+
+**Q：engine 是否直接使用 `ITransportStack*`？**
+A：**暂不**。Engine 已在 `engine.cpp` 中通过 registry 直接管理 ICE/DTLS/RTP/SCTP，直接使用 stack 会引入大量改动。Slice 7.5 的价值在于：
+  - 工厂注册路径打通（`get_transport_stack("webrtc-classic")` 现在返回真实工厂）
+  - 生命周期管理已实现（`start()` / `close()` / `tick()`）
+  - SCTP stub 的 wiring 路径已验证
+未来 slice 可让 engine 接受 `ITransportStack*`，而不改 PAL 架构。
+
+**Q：DTLS `close()` 为什么在 stack 的 `close()` 中跳过？**
+A：`IDtlsSession`（seam 接口）没有 `close()` 方法；`DtlsSessionWolfSSL`（concrete）有。
+Engine 仍通过 concrete 类型直接调用 `dtls->close()`。Stack 跳过 `dtls_->close()` 不影响 engine 的生命周期管理。
+
+**Q：SCTP 接口为什么没有 `open()` / `close()`？**
+A：`ISctpSocket` seam 接口本身没有这两个方法（stub 是 always-on）。v0.11.0 的 `UsrsctpSocket` 会扩展接口添加生命周期。
+
+**Q：`demux_last_packet()` 为什么不 wire？**
+A：引擎已直接管理 ICE recv + DTLS feed/drain 路径。在 IICETransport 提供 `last_recv_packet()` 之前，保持 engine 的 demux 不变是最安全的。
+
+### 12.5.3 测试结果
+
+- `tests/test_engine_plugin_loading.cpp`：391/391 全通过（含 3 个新 Slice 7.5 subtest）
+- `ctest -C Debug`：391/391 全通过
+- `nimrtc_engine.lib`：编译干净，无新增 warnings
+
+### 12.5.4 下一步（deferred to future slices）
+
+- Engine 接受 `ITransportStack*`（需 engine.cpp 改动较大）
+- SCTP 生命周期扩展到 seam（`ISctpSocket::open()` / `close()`）
+- IICETransport 提供 `last_recv_packet()` 以支持 stack 内 demux
+- `RawUdpArqStackFactory`（id="raw-udp-arq"）——控制栈实现
+
 

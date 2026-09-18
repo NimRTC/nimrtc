@@ -36,6 +36,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/transport/transport_stack.hpp>   // Slice 7.5: StackConfig, ITransportStack
 
 namespace {
 
@@ -407,7 +408,67 @@ TEST_F(EnginePluginLoading, slice8_transport_stack_registry_hook_populated) {
 // else would silently regress the lookup contract.
 // ---------------------------------------------------------------------------
 
-TEST_F(EnginePluginLoading, slice8_idempotent_register_does_not_duplicate) {
+// ---------------------------------------------------------------------------
+// PAL Slice 7.5 — WebRtcClassicStackFactory
+//
+// Verifies that WebRtcClassicStackFactory (id="webrtc-classic") is
+// registered alongside the shell "default" factory, and that it can
+// create a stack with resolved components.
+// ---------------------------------------------------------------------------
+
+TEST_F(EnginePluginLoading, slice75_webrtc_classic_factory_registered) {
+    // WebRtcClassicStackFactory (id="webrtc-classic") is registered by
+    // nimrtc::transport::register_default_plugins() (called via
+    // core::register_all_default_plugins()).  The factory id "webrtc-classic"
+    // is what the CapabilitySelector resolves for §5.3 rule 1
+    // (needs_browser_interop == true).
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("webrtc-classic");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 7.5: WebRtcClassicStackFactory 'webrtc-classic' "
+           "not found in registry";
+    EXPECT_EQ(factory->id(), "webrtc-classic");
+    EXPECT_FALSE(factory->display_name().empty());
+}
+
+TEST_F(EnginePluginLoading, slice75_webrtc_classic_stack_create_and_lifecycle) {
+    // Verify WebRtcClassicStackFactory::create() produces a non-null stack
+    // whose component accessors are non-null after the factory resolves all
+    // four backends.  The ICE / DTLS / RTP / SCTP factories are all registered
+    // (they were verified in the Slice 1/2/3/8 tests above), so this test
+    // exercises the full wiring path.
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("webrtc-classic");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 7.5: factory 'webrtc-classic' not found";
+
+    nimrtc::StackConfig cfg;
+    cfg.ice_id  = "ice";
+    cfg.dtls_id = "wolfssl";
+    cfg.rtp_id  = "webrtc";
+    cfg.sctp_id = "stub";
+
+    std::unique_ptr<nimrtc::ITransportStack> stack{
+        factory->create(cfg)};
+    ASSERT_NE(stack, nullptr) << "PAL Slice 7.5: factory->create() returned null";
+
+    // Component accessors must be non-null (factory resolved all four backends).
+    EXPECT_NE(&stack->ice(), nullptr)   << "PAL Slice 7.5: ICE not resolved";
+    EXPECT_NE(&stack->dtls(), nullptr)  << "PAL Slice 7.5: DTLS not resolved";
+    EXPECT_NE(&stack->rtp(), nullptr)   << "PAL Slice 7.5: RTP not resolved";
+    EXPECT_NE(&stack->sctp(), nullptr) << "PAL Slice 7.5: SCTP not resolved";
+
+    // raw_control() is nullptr for "webrtc-classic" (control uses SCTP stub;
+    // real control stack lands in Slice 7.5 sibling RawUdpArqStackFactory).
+    EXPECT_EQ(stack->raw_control(), nullptr)
+        << "PAL Slice 7.5: raw_control() should be nullptr for webrtc-classic";
+
+    // Lifecycle: start() / close() must not crash (no-throw contract).
+    EXPECT_NO_THROW(stack->start());
+    EXPECT_NO_THROW(stack->close());
+}
+
+TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
     // Call register_all_default_plugins() three times (the Slice 2
     // idempotency contract).  Each of the four Slice 8 typed slots
     // must end up with exactly one factory entry — the "last writer
@@ -418,14 +479,18 @@ TEST_F(EnginePluginLoading, slice8_idempotent_register_does_not_duplicate) {
     nimrtc::core::register_all_default_plugins();
 
     // Exactly one factory per known Slice 8 id.
+    // NOTE: Slice 7.5 registers BOTH "default" (shell) AND "webrtc-classic"
+    // (real) in the same `register_default_plugins()` call, so the count is 2.
+    // The shell is preserved for backward-compat with Slice 7 tests that use
+    // `get_transport_stack("default")`.
     EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u)
         << "Slice 8: DTLS slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u)
         << "Slice 8: SCTP slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
         << "Slice 8: raw-UDP slot duplicated after repeated registration";
-    EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 1u)
-        << "Slice 8: transport-stack slot duplicated after repeated registration";
+    EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 2u)
+        << "Slice 7.5: transport-stack slot has 2 entries: default (shell) + webrtc-classic (real)";
 }
 
 } // anonymous namespace

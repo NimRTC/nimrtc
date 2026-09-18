@@ -12,7 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_minimum_required(VERSION 3.20)
 
 project(nimrtc
-    VERSION 0.10.1
+    VERSION 0.10.2
     DESCRIPTION "Native C++ WebRTC engine focused on AI Agent and embedded scenarios"
     LANGUAGES CXX C)
 

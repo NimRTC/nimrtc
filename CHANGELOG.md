@@ -5,6 +5,95 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-09-17
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport PAL Slice 8 — registry hooks for DTLS / SCTP / raw_UDP /
+  transport-stack** (`docs/plan/transport-selection.md` §6.5 follow-up
+  gap, closed). Four new typed slots on `core::PluginRegistry`:
+  - `register_dtls_session(id, factory*)` / `get_dtls_session(id)`
+  - `register_sctp_socket(id, factory*)` / `get_sctp_socket(id)`
+  - `register_raw_udp_datagram(id, factory*)` / `get_raw_udp_datagram(id)`
+  - `register_transport_stack(id, factory*)` / `get_transport_stack(id)`
+  Each module's `register_default_plugins()` now publishes its factory
+  through the matching typed slot (was previously a process-local cache
+  or test-only accessor). All four slots participate in the unified
+  `core::register_all_default_plugins()` table (PAL Slice 2).
+- **Engine DTLS lookup via registry** — `engine.cpp` resolves the DTLS
+  factory through `reg.get_dtls_session("wolfssl")` (was direct
+  `make_unique<DtlsSessionWolfSSL>`). `engine.hpp` is **byte-identical**
+  with v0.10.1 — the lookup id is hard-coded to "wolfssl" so the public
+  API surface stays frozen. Non-wolfSSL builds (defensive `else`
+  branch) keep the pre-Slice-8 direct-construction path. Slice 7.5 will
+  widen this to a `cfg.dtls_name` field.
+- **Callback types promoted to `plugins/base.hpp`** (§6.5). The local
+  typedefs in `nimrtc/sctp/sctp_socket_iface.hpp`
+  (`plugins::OnSctpRecvCb`) and `nimrtc/raw_udp/raw_udp_datagram.hpp`
+  (`plugins::Endpoint`, `plugins::OnDatagramCb`) are now canonical in
+  `plugins/base.hpp`. The Slice 5/6 headers no longer re-declare them
+  — a single source of truth. Source-compat: any pre-Slice-8 caller
+  that wrote `plugins::OnSctpRecvCb` etc. continues to compile.
+- **`IRawUdpFactory` interface added** (`src/raw_udp/include/nimrtc/raw_udp/raw_udp_factory_iface.hpp`).
+  `ArqRawUdpFactory` now publicly inherits the interface, parallel to
+  `dtls::IDtlsSessionFactory` and `sctp::ISctpSocketFactory`.
+- **Shell `CapabilitySelectorStackFactory`** (id="default") registered
+  through the new `register_transport_stack()` hook. The factory
+  produces a `CapabilitySelectorStack` whose component accessors
+  return references to null-instance singletons (no-op / kErrNotReady).
+  Slice 7.5 will replace this with `WebRtcClassicStackFactory` (real
+  ICE+DTLS+RTP+SCTP composition).
+
+### Added
+
+- **`nimrtc::transport::register_default_plugins()`** — Slice 8 entry
+  point that publishes `CapabilitySelectorStackFactory` into the
+  `core::PluginRegistry::register_transport_stack()` slot.
+- **`NIMRTC_REGISTER_DTLS_SESSION / NIMRTC_REGISTER_SCTP_SOCKET /
+  NIMRTC_REGISTER_RAW_UDP_DATAGRAM / NIMRTC_REGISTER_TRANSPORT_STACK`**
+  macros — convenience `static ::nimrtc::core::detail::Registrar`
+  wrappers for the four new typed slots, parallel to the existing
+  audio / video / bwe / scheduler macros.
+- **`IRawUdpFactory` interface** — typed factory contract for
+  `IRawUdpDatagram` backends (Slice 6.5 → Slice 8 promotion).
+
+### Changed
+
+- **`dtls::register_default_plugins()`** now publishes
+  `WolfsslDtlsFactory` through `register_dtls_session("wolfssl")`
+  (Slice 8). Legacy `dtls::test_only::get_wolfssl_factory()` is
+  preserved as a back-compat accessor that now reads back through
+  the registry so the typed slot is the single source of truth.
+- **`sctp::register_default_plugins()`** now publishes
+  `SctpStubFactory` through `register_sctp_socket("stub")` (Slice 8).
+  Legacy `sctp::test_only::get_stub_factory()` is preserved similarly.
+- **`raw_udp::register_default_plugins()`** now publishes
+  `ArqRawUdpFactory` through `register_raw_udp_datagram("arq")`.
+- **`pal_default_registrars.cpp` `kDefaultRegistrars[]`** extended
+  with DTLS / SCTP / raw_UDP / transport entries — every transport-
+  layer seam now participates in the unified entry point.
+- **Engine `init_modules_once()` DTLS construction** now goes through
+  the registry (see Highlights).
+
+### Notes
+
+- No public API change (`nimrtc/engine/engine.hpp` is byte-identical
+  with v0.10.1).
+- 7 + 2 PAL Slice 1/2/3 subtests in `test_engine_plugin_loading.cpp`
+  stay green; 5 new Slice 8 subtests verify the four new registry
+  hooks are populated and that `register_all_default_plugins()`
+  remains idempotent under repeated calls.
+- `git log v0.10.1..HEAD --oneline` ≤ 30 commits (Slice 8 landed as a
+  single sequence; CHANGELOG + release notes + tag cut to follow).
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.2.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- 4 new DTLS / SCTP / raw_UDP / transport-stack registry hooks are
+  the §6.5 follow-up gap listed in `docs/plan/transport-selection.md`
+  (was: "Slice 8 必须顺手补"). Closed.
+
 ## [0.10.1] - 2026-09-15
 
 ### Status: Tech Preview

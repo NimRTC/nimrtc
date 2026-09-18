@@ -134,61 +134,133 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Install meson` + `Prebuild WebRTC APM` steps before `Configure` on
   windows, linux-gcc, linux-aarch64, and macos-clang.
 
+### Added retroactively in v0.10.3
+
+> **Note:** These entries describe work that landed in commit `446e8a0
+> refactor(pal): Slice 2 + Slice 3` and shipped with the v0.10.1 tag,
+> but the CHANGELOG `[Unreleased]` block was not promoted at release
+> time (the same hygiene drift that v0.10.0 fixed for v0.9.2). The
+> v0.10.3 tag brings the CHANGELOG into alignment with the code tree
+> at v0.10.1; no new code, no new tests, no public API change are
+> introduced by this hygiene pass.
+
+- **PAL Slice 2 — explicit self-registration table**
+  (`docs/plan/pal-architecture.md` §4 Slice 2). The engine's
+  `core::register_all_default_plugins()` is now backed by an iterable
+  table (`core::detail::kDefaultRegistrars[]` in
+  `src/core/src/pal_default_registrars.cpp`) instead of an inline
+  statement list. Layout Invariant 1 of `docs/architecture.md`
+  ("`src/core/` is the only INTERFACE library") is preserved by
+  compiling this single .cpp into a new `nimrtc_core_objects` OBJECT
+  library that is linked INTERFACE by `nimrtc::core`. The table enables
+  (a) compile-time completeness audits via a test iteration, (b)
+  mechanical grep discoverability, and (c) future extension without
+  editing `registry.hpp`.
+- **PAL Slice 3 — `NIMRTC_PLUGIN_ID()` compile-time-unique id literal
+  wrapper** (`docs/plan/pal-architecture.md` §4 Slice 3). Each plugin
+  factory's `id()` callsite wraps its string literal in a
+  `nimrtc::core::detail::PluginIdTag<__LINE__>` wrapper, giving every
+  callsite a distinct type at compile time. Implicit conversion to
+  `std::string_view` preserves all existing
+  `return NIMRTC_PLUGIN_ID("webrtc_apm");` patterns. Two new
+  `EnginePluginLoading` subtests
+  (`pal_default_registrars_table_is_nonempty`,
+  `pal_plugin_id_wrappers_preserve_string_values`) verify the table
+  iteration registers all 5 unconditional categories and that all 6
+  known factory ids match their v0.10.0 string values byte-for-byte.
+- **5 plugin factories migrated to `NIMRTC_PLUGIN_ID()`** (PAL Slice 3):
+  `audio3a::NullPluginFactory` (`"webrtc"`),
+  `audio3a::WebRtcPluginFactory` (`"webrtc_apm"`),
+  `opus::OpusPluginFactory` (`"opus"`),
+  `h264::H264PluginFactory` (`"h264"`),
+  `jb::PluginFactory` (`"adaptive"`),
+  `dtls::WolfsslDtlsFactory` (`"wolfssl"` via the existing `kBackendId`
+  constexpr literal).
+
+---
+
+## [0.10.3] - 2026-09-18
+
+### Status: Tech Preview
+
+### Highlights
+
+- **PAL Slice 7.5 — `WebRtcClassicStackFactory`** (commit `7d3a92d`,
+  `docs/plan/transport-selection.md` §12.5): the first real factory
+  implementation registered through the v0.10.2
+  `core::PluginRegistry::register_transport_stack()` hook. Composes the
+  four real backend singletons (ICE / DTLS / RTP / SCTP) all resolved
+  through the plugin seam — no concrete-`new` inside the factory. Id
+  = `"webrtc-classic"`. Lifecycle methods (`start()` / `close()` /
+  `tick()`) are wired through. CapabilitySelector rule 1
+  (`needs_browser_interop == true`) now resolves to a real
+  ICE+DTLS+RTP+SCTP composition instead of the Slice 8 shell
+  `CapabilitySelectorStackFactory` (id `"default"`, still registered
+  for backward compatibility).
+- **CHANGELOG retroactive attribution for v0.10.1** (PAL Slice 2 + 3) —
+  see the "Added retroactively in v0.10.3" sub-heading inside
+  `[0.10.1]` above. No new code; documentation alignment.
+- **Root-cleanliness sweep** — defensive `.gitignore` patterns
+  (`*.lock`, `src/engine/src/*.lock`) added. Local-only stray files
+  (`sslkeylog.log`, `Testing/`, `src/engine/src/engine.cpp.lock`)
+  deleted from disk at tag prep time. No tracked files changed.
+
+### Added
+
+- **`src/transport/src/webrtc_classic_stack.cpp`** (Slice 7.5):
+  `WebRtcClassicStack` + `WebRtcClassicStackFactory` with id
+  `"webrtc-classic"`. Registered via
+  `core::PluginRegistry::register_transport_stack()` from
+  `nimrtc::transport::register_default_plugins()`.
+- **2 new `EnginePluginLoading` subtests** in
+  `tests/test_engine_plugin_loading.cpp`:
+  `slice75_webrtc_classic_factory_registered` (factory wired through
+  the Slice 8 registry hook) and
+  `slice75_webrtc_classic_stack_create_and_lifecycle` (the produced
+  stack exposes ICE/DTLS/RTP/SCTP refs through the seam and survives
+  `start()`/`close()` in the right order).
+
+### Changed
+
+- **`src/transport/src/transport_plugin.cpp`**
+  `do_register_default_plugins()` now publishes both
+  `"default"` (Slice 8 shell, retained for back-compat with any
+  v0.10.2 caller) and `"webrtc-classic"` (Slice 7.5 real) through
+  `register_transport_stack()`.
+
+### Notes
+
+- No public API or ABI change. `git diff v0.10.2..v0.10.3 -- src/engine/include/**`
+  shows zero lines.
+- Engine still constructs ICE/DTLS/RTP/SCTP through its direct
+  constructor path; Slice 7.5's value is the factory-side seam, not the
+  engine-side ownership switch (that change is tracked as a future
+  "engine accepts `ITransportStack*`" patch in `transport-selection.md`
+  §12.5.4).
+- `tests/test_engine_plugin_loading`: 15/15 subtests (8 base + 5 Slice 8 +
+  2 Slice 7.5). Full suite: 380/387 ctest pass overall; the 7 failures
+  are pre-existing WSL-localhost UDP-loopback timeouts, unrelated to
+  Slice 7.5 per commit `7d3a92d`. The 2 `Audio3ATapFixture` subtests
+  remain intentionally disabled (pre-existing condition, tracked
+  separately).
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.3.
+- API still **experimental / not for production** through v1.0.0.
+
 ---
 
 ## [Unreleased]
 
 ### Status: Tech Preview
 
-### Highlights
-
-- **PAL Slice 2 + 3** (`docs/plan/pal-architecture.md` §4): the engine's
-  `register_all_default_plugins()` is now backed by an explicit iterable
-  table (`core::detail::kDefaultRegistrars[]` in
-  `src/core/src/pal_default_registrars.cpp`) instead of an inline
-  statement list, and every built-in plugin factory id literal
-  (`"webrtc"`, `"webrtc_apm"`, `"opus"`, `"h264"`, `"adaptive"`,
-  `"wolfssl"`, …) is wrapped in a compile-time-unique
-  `NIMRTC_PLUGIN_ID()` macro at its `id()` return statement. Both
-  changes are purely additive — no public API or on-the-wire id change.
-  Adds 2 new `EnginePluginLoading` subtests
-  (`pal_default_registrars_table_is_nonempty`,
-  `pal_plugin_id_wrappers_preserve_string_values`); existing 7 subtests
-  stay green.
-
-### Added
-
-- **`src/core/src/pal_default_registrars.cpp`** (PAL Slice 2):
-  `core::detail::kDefaultRegistrars[]` table of all built-in plugin
-  registrar function pointers. `src/core/CMakeLists.txt` adds an
-  `nimrtc_core_objects` OBJECT library that compiles this file and is
-  linked INTERFACE by `nimrtc::core`. Existing `core` Layout Invariant 1
-  (INTERFACE/header-only) is otherwise preserved.
-- **`src/core/include/nimrtc/core/plugin_id.hpp`** (PAL Slice 3):
-  `PluginIdTag<N>` template + `NIMRTC_PLUGIN_ID(x)` macro that wraps a
-  string literal at each plugin factory's `id()` callsite, giving it a
-  compile-time-unique type. Implicit conversion to `std::string_view`
-  preserves all existing `return id_literal;` patterns.
-- **5 plugin factories migrated to `NIMRTC_PLUGIN_ID()`** (PAL Slice 3):
-  `audio3a::NullPluginFactory` (`"webrtc"`), `audio3a::WebRtcPluginFactory`
-  (`"webrtc_apm"`), `opus::OpusPluginFactory` (`"opus"`),
-  `h264::H264PluginFactory` (`"h264"`), `jb::PluginFactory`
-  (`"adaptive"`), `dtls::WolfsslDtlsFactory` (`"wolfssl"` via the
-  existing `kBackendId` constexpr literal).
-- **2 new test subtests** in `tests/test_engine_plugin_loading.cpp`:
-  `pal_default_registrars_table_is_nonempty` (Slice 2 — table iteration
-  registers all 5 unconditional categories) and
-  `pal_plugin_id_wrappers_preserve_string_values` (Slice 3 — `static_assert`
-  enforces distinct per-callsite types; runtime check verifies all 6 known
-  factory ids match their v0.10.1 string values byte-for-byte).
-
-### Notes
-
-- No new protocol or content features.
-- DTLS seam (`"wolfssl"`) remains Slice 4 scope — its id literal now goes
-  through `NIMRTC_PLUGIN_ID()` but registration stays module-local via
-  `test_only::set_wolfssl_factory_for_testing()`. Promoting it to
-  `core::register_all_default_plugins()` is a Slice 7 / Slice 8 concern.
+> No unreleased changes yet. The next planned release is **v0.11.0**
+> (P2 kickoff), tracked in `docs/plan/v0.11-preview.md`. Items to land
+> there: DataChannel usrsctp 互通, in-process SFU relay, PCM tap
+> landing on WebRTC APM, AI Agent 接入 demo, pps/Mbps 压测, GitHub
+> Discussions 上线, 首批 RFC 发布, assembly Profile 库官方化
+> (sfu / transport / agent / agent-gateway / sfu-agent), Profile schema
+> v1.1 (additive `transport` 段), `RawUdpArqStackFactory`,
+> `EngineConfig::dtls_name`, `IDataChannel` thin-wrapping
+> `ISctpSocket`.
 
 ---
 

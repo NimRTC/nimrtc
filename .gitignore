@@ -216,6 +216,10 @@ Thumbs.db
 *~
 .DS_Store
 
+# IDE / editor lock files (CLion / Visual Studio / cmake-edit)
+*.lock
+src/engine/src/*.lock
+
 # Python
 __pycache__/
 *.py[cod]

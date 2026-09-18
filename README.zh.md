@@ -1,13 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.10-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.10.3-orange.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#平台支持)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **当前版本**：v0.10 技术预览版 — Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证。
+> **当前版本**：v0.10.3 技术预览版 — Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证。
 > 见 [当前进度](#当前进度v0100-技术预览版) 看今天能做什么；[路线图](#路线图p1p4-简化版) 看下一步。
 >
 > 📖 **本文档为英文 README 的中文版本**。技术 canonical 文档以 [`docs/zh/architecture.md`](docs/zh/architecture.md) 为准（ADR-012）。中文 README 与英文 README 内容同步维护。
@@ -42,7 +42,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 - **是什么**：一个可嵌入的 C++20 媒体引擎，从零开始实现的 WebRTC 替代品，**不是** libwebrtc 的 fork。
 - **存在的原因**：libwebrtc 体积庞大、难以嵌入、加密和编解码不透明。NimRTC 保留同等级协议兼容性的同时，把 monolith 替换成分层 + plugin 适配的引擎，可被检查、可被定制、可被部署在 aarch64 上。
-- **当前状态**：v0.10 技术预览版，Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证通过；CI 在 Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均为绿色。生产级别质量在 P3 / P4 落地。
+- **当前状态**：v0.10.3 技术预览版，Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证通过；CI 在 Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均为绿色。生产级别质量在 P3 / P4 落地。
 
 ---
 
@@ -450,7 +450,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 ---
 
-## 当前进度（v0.10.0 技术预览版）
+## 当前进度（v0.10.3 技术预览版）
 
 master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能力：
 
@@ -463,6 +463,13 @@ master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能�
 | 四平台 CI 绿色 —— Win / Linux x86_64 / macOS arm64 / Linux aarch64 | ✅ | v0.9.2 |
 | RFC 7587 Opus packetise / depacketise 完整实现 | ✅ | v0.9.2 |
 | PAL Slice 1 —— plugin 能力解析，零运行时开销 | ✅ | v0.10 |
+| PAL Slice 2 —— `kDefaultRegistrars[]` 自注册表 | ✅ | v0.10.1（在 v0.10.3 中追溯归位） |
+| PAL Slice 3 —— `NIMRTC_PLUGIN_ID()` 编译期唯一 id 宏 | ✅ | v0.10.1（在 v0.10.3 中追溯归位） |
+| PAL Slice 4 —— DTLS session 工厂走 registry hook（`get_dtls_session("wolfssl")`） | ✅ | v0.10.2 |
+| PAL Slice 5 —— SCTP seam（`SctpStubFactory` id=`"stub"`）+ 接口 wire | ✅ | v0.10.2 |
+| PAL Slice 6 —— Raw UDP bypass（`ArqRawUdp` id=`"arq"`）+ 4/4 真实回环测试 | ✅ | v0.10.2 |
+| PAL Slice 7.5 —— `WebRtcClassicStackFactory`（id=`"webrtc-classic"`） | ✅ | v0.10.3 |
+| PAL Slice 8 —— 4 个传输层 typed registry hook | ✅ | v0.10.2 |
 | H.264 硬件后端（NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ | v0.9.2 |
 
 > v0.10 关闭 v0.9 收尾并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、SFU relay、PCM tap、

@@ -1,13 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.10-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.10.3-orange.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.10 Tech Preview — Chrome ↔ NimRTC P2P A/V interop is green on Windows.
+> **Current:** v0.10.3 Tech Preview — Chrome ↔ NimRTC P2P A/V interop is green on Windows.
 > See [Current progress](#current-progress-v0100-tech-preview) for what ships today, and [Roadmap](#roadmap-p1p4-condensed) for what lands next.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md)
@@ -40,7 +40,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.10 Tech Preview — Chrome ↔ NimRTC P2P A/V interop works on Windows; CI is green on Win / Linux x86_64 / macOS arm64 / Linux aarch64. Production-grade quality lands in P3 / P4.
+- **Current state:** v0.10.3 Tech Preview — Chrome ↔ NimRTC P2P A/V interop works on Windows; CI is green on Win / Linux x86_64 / macOS arm64 / Linux aarch64. Production-grade quality lands in P3 / P4.
 
 ---
 
@@ -448,7 +448,7 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
 
 ---
 
-## Current progress (v0.10.0 Tech Preview)
+## Current progress (v0.10.3 Tech Preview)
 
 What you can do today, in the main trunk, against a stock `cmake --preset release.msvc` build:
 
@@ -461,6 +461,13 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | 4-platform CI green — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | ✅ | v0.9.2 |
 | RFC 7587 Opus packetise / depacketise complete | ✅ | v0.9.2 |
 | PAL Slice 1 — plugin-capability resolution, zero runtime overhead | ✅ | v0.10 |
+| PAL Slice 2 — explicit `kDefaultRegistrars[]` self-registration table | ✅ | v0.10.1 (retroactively attributed in v0.10.3) |
+| PAL Slice 3 — `NIMRTC_PLUGIN_ID()` compile-time-unique plugin id wrapper | ✅ | v0.10.1 (retroactively attributed in v0.10.3) |
+| PAL Slice 4 — DTLS session factory via registry hook (`get_dtls_session("wolfssl")`) | ✅ | v0.10.2 |
+| PAL Slice 5 — SCTP seam (`SctpStubFactory` id=`"stub"`) and interface wiring | ✅ | v0.10.2 |
+| PAL Slice 6 — Raw UDP bypass (`ArqRawUdp` id=`"arq"`) + 4/4 real-loopback test | ✅ | v0.10.2 |
+| PAL Slice 7.5 — `WebRtcClassicStackFactory` (id=`"webrtc-classic"`) | ✅ | v0.10.3 |
+| PAL Slice 8 — 4 typed transport-layer registry hooks | ✅ | v0.10.2 |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
 > v0.10 closes v0.9 wrap-up and lands the PAL Slice 1 refactor. P2 content — DataChannel interop,

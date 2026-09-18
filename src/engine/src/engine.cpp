@@ -456,6 +456,30 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
         "engine: srtp_ created, about to create dtls_");
 
     // ---- DTLS ----------------------------------------------------------
+    //
+    // Slice 8 (v0.10.2): the DTLS factory is now resolved via
+    // `core::PluginRegistry::get_dtls_session(id)` (Transport PAL
+    // Slice 4 / Slice 8 hook) rather than constructing
+    // `DtlsSessionWolfSSL` directly. The built-in id is "wolfssl"
+    // (registered by `nimrtc::dtls::register_default_plugins()`); a
+    // future 国密 backend would register its own id and the engine
+    // would pick it via `config_.dtls_name` (added in v0.11.0 — for
+    // v0.10.2 the engine.cpp change is hard-coded to "wolfssl" so
+    // engine.hpp stays byte-identical with v0.10.1, per the Slice 8
+    // DoD gate).
+    //
+    // Slice 8 also keeps the `impl_->dtls` field typed as
+    // `unique_ptr<DtlsSessionWolfSSL>` (the concrete) so the rest of
+    // the engine — which calls methods that aren't on the seam
+    // interface yet (`local_fingerprint()`, `is_connected()`, etc.) —
+    // continues to work. The factory's `create()` returns an
+    // `IDtlsSession*`; we know the built-in factory returns a
+    // `DtlsSessionWolfSSL` (Slice 4 invariant: `DtlsSessionWolfSSL
+    // : IDtlsSession`), so the static_cast is safe. When the engine
+    // migrates to IDtlsSession (v0.11.0, after extending the seam
+    // interface with `local_fingerprint()` + `is_connected()`) this
+    // cast goes away.
+    //
     // Note: the initial DTLS role is set to Server as a placeholder —
     // process_remote_sdp() resolves the actual role from the peer's
     // a=setup attribute (RFC 5763 §5) and calls dtls->set_role() before
@@ -463,9 +487,67 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     nimrtc::dtls::Config dcfg;
     dcfg.role          = nimrtc::dtls::DtlsRole::Server;
     dcfg.srtp_profile  = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
+
+    // Slice 8 hook: resolve the DTLS factory through the typed registry
+    // slot populated by `nimrtc::dtls::register_default_plugins()`.
+    // The hard-coded "wolfssl" id is intentional — see the engine.hpp
+    // byte-identical constraint note above. A lookup failure here
+    // surfaces as kEngineInternal (matching the pre-Slice-8 behaviour
+    // for a missing transport plugin).
+    const nimrtc::dtls::IDtlsSessionFactory* dtls_factory =
+        reg.get_dtls_session("wolfssl");
+    if (!dtls_factory) {
+        impl_->last_open_rc = core::kEngineInternal;
+        core::log::Logger::instance().error(
+            "engine: DTLS plugin 'wolfssl' not found in "
+            "core::PluginRegistry (Slice 8 registry hook regression — "
+            "did nimrtc::dtls::register_default_plugins() run?)");
+        if (on_error_) on_error_(core::kEngineInternal,
+            "DTLS plugin 'wolfssl' not registered (Slice 8 registry)");
+        return core::kEngineInternal;
+    }
+
+    std::unique_ptr<dtls::IDtlsSession> dtls_seam =
+        dtls_factory->create(dcfg);
+    if (!dtls_seam) {
+        impl_->last_open_rc = core::kEngineInternal;
+        if (on_error_) on_error_(core::kEngineInternal,
+            "DTLS factory returned null session");
+        return core::kEngineInternal;
+    }
+
+    // Slice 8: downcast to the concrete DtlsSessionWolfSSL so the
+    // engine's existing concrete-method calls (local_fingerprint,
+    // is_connected, srtp_keying_material, take_outbound, feed_inbound,
+    // state, etc.) continue to work. The downcast is safe because
+    // the built-in WolfsslDtlsFactory creates DtlsSessionWolfSSL
+    // (Slice 4 refactor: DtlsSessionWolfSSL publicly inherits
+    // IDtlsSession).
+    //
+    // When the engine is built without wolfSSL support
+    // (NIMRTC_USE_WOLFSSL_DTLS undefined — rare; the public DTLS
+    // module always defines it, but the engine is defensively
+    // conditional here), the registry will not have a "wolfssl"
+    // factory and the slice-8 lookup will return nullptr — in that
+    // case we fall back to the pre-Slice-8 direct construction so
+    // the engine still works.
+#ifdef NIMRTC_USE_WOLFSSL_DTLS
+    // Use the fully-qualified `nimrtc::dtls::DtlsSessionWolfSSL` name
+    // because the local `DtlsSessionImpl` alias above is a different
+    // identifier (an alias, not a using-declaration).
+    auto* concrete = static_cast<nimrtc::dtls::DtlsSessionWolfSSL*>(
+        dtls_seam.release());
+    impl_->dtls.reset(concrete);
+#else
+    // Non-wolfSSL build: keep the pre-Slice-8 construction path. The
+    // seam registry hook is irrelevant here because the hand-written
+    // DtlsSession doesn't implement IDtlsSessionFactory.
     impl_->dtls = std::make_unique<Impl::DtlsSessionImpl_T>(dcfg);
+    (void)dtls_seam;  // suppress unused-variable warning
+#endif
     core::log::Logger::instance().debug(
-        "engine: dtls_ created, calling dtls_->open()");
+        "engine: dtls_ created (via Slice 8 registry hook, id=\"wolfssl\"), "
+        "calling dtls_->open()");
     if (!impl_->dtls->open()) {
         impl_->last_open_rc = core::kDtlsOpenFailed;
         core::log::Logger::instance().error("engine: dtls_->open() returned false");

@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <cstring>   // memset, memcmp
+#include <functional>   // Slice 8: std::function for OnDatagramCb / OnSctpRecvCb
 #include <optional>
 
 // Stable buffer types shared by plugin interfaces and concrete modules.
@@ -117,6 +118,52 @@ struct OutPacket {
         return buf.first(len);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Transport-layer callbacks (Transport PAL Slice 8 — promoted from
+// Slice 5/6 local typedefs to plugins/base.hpp)
+// ---------------------------------------------------------------------------
+//
+// §6.5 of `docs/plan/transport-selection.md` calls for the callback
+// types originally defined in Slice 5 (`OnSctpRecvCb` in
+// `nimrtc/sctp/sctp_socket_iface.hpp`) and Slice 6 (`OnDatagramCb` +
+// `Endpoint` in `nimrtc/raw_udp/raw_udp_datagram.hpp`) to be promoted
+// into `plugins/base.hpp` once Slice 4/5/6 settled on the final
+// shape. Slice 8 (v0.10.2) makes that promotion: the typedefs are now
+// canonical here, and the Slice 5/6 headers re-export them as
+// aliases for source-compat (callers that wrote `plugins::OnSctpRecvCb`
+// before Slice 8 keep compiling).
+//
+// Why canonicalise here:
+//   (a) `OnSctpRecvCb` and `OnDatagramCb` are the canonical callback
+//       shapes used across the SCTP / raw_udp seams — they belong in
+//       the same place as `BufferView` / `Status` / `Addr`.
+//   (b) Future Slice 8.5+ code that needs a similar callback (e.g.
+//       for a future QUIC datagram channel) gets the type for free
+//       without having to know which module header it lives in.
+//   (c) `Endpoint` was a local alias of `Addr` in raw_udp; promoting
+//       it removes the local definition so there's a single source of
+//       truth for "raw-UDP endpoint == ITransport endpoint".
+// ---------------------------------------------------------------------------
+
+/** Network endpoint for the raw-UDP bypass seam. Typed alias of
+ *  `plugins::Addr` — raw UDP talks to the same opaque address
+ *  encoding that `ITransport::send` / `recv` already use.
+ *  Promoted from raw_udp_datagram.hpp in Slice 8. */
+using Endpoint = Addr;
+
+/** Per-datagram receive callback used by IRawUdpDatagram::on_recv.
+ *  Fires from the ARQ recv thread on each in-window, in-order
+ *  delivered datagram. Promoted from raw_udp_datagram.hpp in Slice 8. */
+using OnDatagramCb = std::function<void(BufferView)>;
+
+/** Inbound SCTP message callback used by ISctpSocket::set_on_recv.
+ *  `stream` is the SCTP stream id (0..65534) the message arrived on;
+ *  `data` is the message payload (zero-copy view; lifetime ends when
+ *  the callback returns). Promoted from sctp_socket_iface.hpp in
+ *  Slice 8. */
+using OnSctpRecvCb = std::function<void(uint16_t stream,
+                                        core::ByteSpan data)>;
 
 // ---------------------------------------------------------------------------
 // Media sample (aligned to RTP payload)

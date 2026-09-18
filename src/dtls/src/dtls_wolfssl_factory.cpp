@@ -28,6 +28,8 @@
 #include <nimrtc/dtls/dtls_wolfssl_session.hpp>
 
 #include <nimrtc/core/plugin_id.hpp>
+#include <nimrtc/core/registry.hpp>   // Slice 8: registry hook — back-compat
+                                     // accessor reads through it
 
 namespace nimrtc::dtls {
 
@@ -114,16 +116,18 @@ const IDtlsSessionFactory* wolfssl_factory_singleton() noexcept {
 // while still letting tests resolve the factory pointer without going
 // through a registry.
 //
-// Slice 7 will route the canonical lookup through
-// `core::PluginRegistry::register_dtls(...)` / `get_dtls(id)`; for
-// Slice 4 the test path is the seam-local accessor.
+// Slice 7+ / Slice 8: the canonical lookup goes through
+// `core::PluginRegistry::get_dtls_session(id)`. This accessor reads
+// back through the registry so the typed registry hook is the single
+// source of truth — there is no separate cache to drift out of sync.
 // ===========================================================================
 
 namespace test_only {
 
-// Internal pointer (set once by the Registrar in dtls_plugin.cpp).
-// Mutable only inside dtls_plugin.cpp's Registrar; tests should never
-// touch this directly.
+// Internal pointer (set once by the Registrar in dtls_plugin.cpp; Slice 8
+// keeps it for compatibility with external test code that pokes the slot
+// directly via `set_wolfssl_factory_for_testing`). Mutable only inside
+// dtls_plugin.cpp's Registrar; tests should never touch this directly.
 inline const IDtlsSessionFactory*& registered_factory_slot() noexcept {
     static const IDtlsSessionFactory* s_factory = nullptr;
     return s_factory;
@@ -131,8 +135,18 @@ inline const IDtlsSessionFactory*& registered_factory_slot() noexcept {
 
 /** Returns the registered factory pointer, or nullptr if
  *  `register_default_plugins()` has not been called yet.
- *  Test-only — production code MUST NOT call this. */
+ *  Test-only — production code MUST NOT call this.
+ *
+ *  Slice 8: prefers the typed registry slot (`get_dtls_session("wolfssl")`)
+ *  so callers always observe the same factory the engine sees. Falls
+ *  back to the legacy internal slot if the registry has not been
+ *  populated yet (e.g. when a test pokes the slot directly without
+ *  going through `register_default_plugins()`). */
 const IDtlsSessionFactory* get_wolfssl_factory() noexcept {
+    if (const auto* f = nimrtc::core::PluginRegistry::instance()
+                            .get_dtls_session("wolfssl")) {
+        return f;
+    }
     return registered_factory_slot();
 }
 

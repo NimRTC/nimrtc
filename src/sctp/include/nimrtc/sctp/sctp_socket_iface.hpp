@@ -45,25 +45,8 @@
 #include <cstdint>
 #include <functional>
 
-#include <nimrtc/plugins/base.hpp>   // BufferView (= core::ByteSpan), kErrNotReady, ...
-
-namespace nimrtc::plugins {
-
-// ---------------------------------------------------------------------------
-// Inbound callback (Transport PAL Slice 5 contract).
-//
-// `stream` is the SCTP stream id (0..65534) the message arrived on;
-// `data` is the message payload (zero-copy view; lifetime ends when the
-// callback returns).
-//
-// Documented in §5.2 as `plugins::OnSctpRecvCb`; defined here (rather than
-// in a plugins/* header) because the SCTP module owns the seam and we don't
-// want to leak transport-specific types into the shared plugins/base.hpp.
-// ---------------------------------------------------------------------------
-using OnSctpRecvCb = std::function<void(uint16_t stream,
-                                        core::ByteSpan data)>;
-
-} // namespace nimrtc::plugins
+#include <nimrtc/plugins/base.hpp>   // BufferView (= core::ByteSpan), kErrNotReady,
+                                     // OnSctpRecvCb (promoted in Slice 8)
 
 namespace nimrtc::sctp {
 

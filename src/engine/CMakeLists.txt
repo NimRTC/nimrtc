@@ -41,6 +41,17 @@ target_link_libraries(nimrtc_engine
                                # PluginRegistry at open() and injected into ICE
         nimrtc::sched          # Strict-priority 5-queue scheduler — resolved via
                                # PluginRegistry at open(); tick() drains through ICE
+        # Slice 8 (v0.10.2): the four new typed registry hooks (DTLS
+        # seam / SCTP / raw_udp / transport-stack) are populated by
+        # these modules' register_default_plugins() entry points.
+        # Linking them here guarantees the symbols in
+        # `kDefaultRegistrars[]` resolve at link time, and the
+        # Slice 8 registry lookups in init_modules_once() (DTLS in
+        # particular) return non-null factory pointers.
+        nimrtc::dtls_seam      # DTLS factory id="wolfssl" (Slice 4/8)
+        nimrtc::sctp           # SCTP factory id="stub"   (Slice 5/8)
+        nimrtc::raw_udp        # raw-UDP factory id="arq" (Slice 6/8)
+        nimrtc::transport      # transport-stack factory id="default" (Slice 7/8)
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 

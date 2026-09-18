@@ -73,6 +73,21 @@ class IBweFactory;
 class ISchedulerFactory;
 } // namespace plugins
 
+// Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
+// raw_udp / transport-stack. Each module's seam factory inherits its
+// respective interface (IDtlsSessionFactory / ISctpSocketFactory /
+// IRawUdpFactory / ITransportStackFactory) and is published via the
+// matching `register_*` hook on the registry below.
+//
+// Forward-declared here so the registry's TypedRegistry<...> fields and
+// public method signatures can reference them without pulling the seam
+// headers into core (preserves Layout Invariant 1 — core stays header-
+// only + the single .cpp exception in `pal_default_registrars.cpp`).
+namespace nimrtc::dtls    { class IDtlsSessionFactory; }
+namespace nimrtc::sctp     { class ISctpSocketFactory; }
+namespace nimrtc::raw_udp  { class IRawUdpFactory; }
+namespace nimrtc           { class ITransportStackFactory; }
+
 // ---------------------------------------------------------------------------
 // Forward declarations for unified registration entry point.
 //
@@ -106,6 +121,16 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
+// Transport PAL Slice 8 (v0.10.2): module-level entry points for the
+// DTLS / SCTP / raw_udp / transport-stack seams. Each one populates
+// its matching typed registry slot (register_dtls_session /
+// register_sctp_socket / register_raw_udp_datagram /
+// register_transport_stack) so `core::register_all_default_plugins()`
+// can wire every built-in factory through the unified table.
+namespace dtls     { void register_default_plugins() noexcept; }
+namespace sctp     { void register_default_plugins() noexcept; }
+namespace raw_udp  { void register_default_plugins() noexcept; }
+namespace transport { void register_default_plugins() noexcept; }
 } // namespace nimrtc
 
 namespace nimrtc::core {
@@ -357,6 +382,89 @@ public:
         return scheduler_.list_ids();
     }
 
+    // -- DTLS session (Transport PAL Slice 4 / Slice 8 hook) --------------
+    //
+    // Typed slot for `nimrtc::dtls::IDtlsSessionFactory*`. The built-in
+    // factory is `WolfsslDtlsFactory` (id = "wolfssl"); the seam is
+    // open for replacement by OpenSSL / BoringSSL / mbedTLS / 国密
+    // backends (see `docs/plan/transport-selection.md` §5.2 / §6.1).
+    void register_dtls_session(std::string_view id,
+                               const dtls::IDtlsSessionFactory* f) {
+        dtls_session_.register_one(id, f);
+    }
+    [[nodiscard]] const dtls::IDtlsSessionFactory*
+    get_dtls_session(std::string_view id) const {
+        return dtls_session_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_dtls_sessions() const {
+        return dtls_session_.list_ids();
+    }
+
+    // -- SCTP socket (Transport PAL Slice 5 / Slice 8 hook) ---------------
+    //
+    // Typed slot for `nimrtc::sctp::ISctpSocketFactory*`. The Slice 5
+    // default is the stub factory (id = "stub") — every send returns
+    // kErrNotReady so callers can detect the missing usrsctp backend.
+    // v0.11.0 will register the production `UsrsctpSocketFactory`
+    // (id = "usrsctp") alongside the stub (see
+    // `docs/plan/transport-selection.md` §6.2 / §7).
+    void register_sctp_socket(std::string_view id,
+                              const sctp::ISctpSocketFactory* f) {
+        sctp_socket_.register_one(id, f);
+    }
+    [[nodiscard]] const sctp::ISctpSocketFactory*
+    get_sctp_socket(std::string_view id) const {
+        return sctp_socket_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_sctp_sockets() const {
+        return sctp_socket_.list_ids();
+    }
+
+    // -- Raw UDP datagram (Transport PAL Slice 6 / Slice 8 hook) ----------
+    //
+    // Typed slot for `nimrtc::raw_udp::IRawUdpFactory*`. The Slice 6
+    // default is `ArqRawUdpFactory` (id = "arq"); v0.11.0 / Slice 7
+    // will wire the factory into the ITransportStack composition so the
+    // Selector can pick `raw-udp-arq` for the control stack per
+    // `docs/plan/transport-selection.md` §5.3 rule 1.
+    void register_raw_udp_datagram(std::string_view id,
+                                   const raw_udp::IRawUdpFactory* f) {
+        raw_udp_.register_one(id, f);
+    }
+    [[nodiscard]] const raw_udp::IRawUdpFactory*
+    get_raw_udp_datagram(std::string_view id) const {
+        return raw_udp_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_raw_udp_datagrams() const {
+        return raw_udp_.list_ids();
+    }
+
+    // -- Transport stack (Transport PAL Slice 7 / Slice 8 hook) ------------
+    //
+    // Typed slot for `nimrtc::ITransportStackFactory*`. Slice 7 ships
+    // the interface + CapabilitySelector; Slice 7.5 lands the concrete
+    // `WebRtcClassicStackFactory` / `RawUdpArqStackFactory` impls. The
+    // Slice 8 engine integration looks up a factory by id (e.g.
+    // "webrtc-classic") and delegates ICE + DTLS + RTP + SCTP
+    // composition to the resulting `ITransportStack`.
+    //
+    // For v0.10.2 (Slice 8) the slot is registered but the engine does
+    // not yet switch to it — that's a follow-up patch gated on
+    // `WebRtcClassicStackFactory` (Slice 7.5) landing. The hook itself
+    // is in place so the engine.cpp / Profile-loader changes can be
+    // additive (no public API churn when Slice 7.5 lands).
+    void register_transport_stack(std::string_view id,
+                                  const ITransportStackFactory* f) {
+        transport_stack_.register_one(id, f);
+    }
+    [[nodiscard]] const ITransportStackFactory*
+    get_transport_stack(std::string_view id) const {
+        return transport_stack_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_transport_stacks() const {
+        return transport_stack_.list_ids();
+    }
+
 private:
     TypedRegistry<plugins::ITransportFactory>    transport_;
     TypedRegistry<plugins::IICETransportFactory> ice_transport_;
@@ -372,6 +480,14 @@ private:
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
     TypedRegistry<plugins::IBweFactory>           bwe_;
     TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
+    // Transport PAL Slice 8 (v0.10.2) — typed factory slots for the
+    // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
+    // `register_default_plugins()` publishes a single factory into
+    // its matching slot via the `register_*` public methods above.
+    TypedRegistry<dtls::IDtlsSessionFactory>       dtls_session_;
+    TypedRegistry<sctp::ISctpSocketFactory>        sctp_socket_;
+    TypedRegistry<raw_udp::IRawUdpFactory>         raw_udp_;
+    TypedRegistry<ITransportStackFactory>          transport_stack_;
 };
 
 // ---------------------------------------------------------------------------
@@ -494,6 +610,49 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kScheduler,     \
             #id, factory_ptr }
 
+/** Register a DTLS session-factory plugin by ID and factory pointer.
+ *  Transport PAL Slice 4 / Slice 8 (v0.10.2) — typed slot for
+ *  `nimrtc::dtls::IDtlsSessionFactory*`. */
+#define NIMRTC_REGISTER_DTLS_SESSION(id, factory_ptr)                    \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_dtls_session_){                           \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kDtlsSession,   \
+            #id, factory_ptr }
+
+/** Register an SCTP socket-factory plugin by ID and factory pointer.
+ *  Transport PAL Slice 5 / Slice 8 (v0.10.2) — typed slot for
+ *  `nimrtc::sctp::ISctpSocketFactory*`. */
+#define NIMRTC_REGISTER_SCTP_SOCKET(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_sctp_socket_){                            \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kSctpSocket,    \
+            #id, factory_ptr }
+
+/** Register a raw-UDP datagram-factory plugin by ID and factory pointer.
+ *  Transport PAL Slice 6 / Slice 8 (v0.10.2) — typed slot for
+ *  `nimrtc::raw_udp::IRawUdpFactory*`. */
+#define NIMRTC_REGISTER_RAW_UDP_DATAGRAM(id, factory_ptr)                \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_raw_udp_datagram_){                       \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kRawUdpDatagram, \
+            #id, factory_ptr }
+
+/** Register a transport-stack factory plugin by ID and factory pointer.
+ *  Transport PAL Slice 7 / Slice 8 (v0.10.2) — typed slot for
+ *  `nimrtc::ITransportStackFactory*`. The Slice 8 engine integration
+ *  will use this hook when the engine switches to `ITransportStack*`
+ *  composition (gated on Slice 7.5's `WebRtcClassicStackFactory`
+ *  landing — see `docs/plan/transport-selection.md` §6.5). */
+#define NIMRTC_REGISTER_TRANSPORT_STACK(id, factory_ptr)                 \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_transport_stack_){                       \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kTransportStack, \
+            #id, factory_ptr }
+
 namespace detail {
 
 // Tiny utility macros
@@ -532,7 +691,13 @@ public:
     enum class Category {
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
-        kBwe, kScheduler
+        kBwe, kScheduler,
+        // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
+        // DTLS / SCTP / raw_udp / transport-stack seams. See the
+        // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
+        // TRANSPORT_STACK macros above for the matching registration
+        // entry points.
+        kDtlsSession, kSctpSocket, kRawUdpDatagram, kTransportStack
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -594,6 +759,22 @@ public:
                 reg.register_scheduler(id,
                     static_cast<const plugins::ISchedulerFactory*>(factory));
                 break;
+            case Category::kDtlsSession:
+                reg.register_dtls_session(id,
+                    static_cast<const dtls::IDtlsSessionFactory*>(factory));
+                break;
+            case Category::kSctpSocket:
+                reg.register_sctp_socket(id,
+                    static_cast<const sctp::ISctpSocketFactory*>(factory));
+                break;
+            case Category::kRawUdpDatagram:
+                reg.register_raw_udp_datagram(id,
+                    static_cast<const raw_udp::IRawUdpFactory*>(factory));
+                break;
+            case Category::kTransportStack:
+                reg.register_transport_stack(id,
+                    static_cast<const ITransportStackFactory*>(factory));
+                break;
         }
     }
 };
@@ -652,6 +833,18 @@ inline void register_all_default_plugins() noexcept {
 #include "nimrtc/plugins/video_pipeline.hpp"
 #include "nimrtc/plugins/bwe.hpp"
 #include "nimrtc/plugins/scheduler.hpp"
+
+// Transport PAL Slice 8 (v0.10.2): seam headers for the typed factory
+// slots (DTLS / SCTP / raw_udp / transport-stack). Including them here
+// is what makes the back-compat shim work for old code that only
+// includes <nimrtc/core/registry.hpp> and then references the new
+// factory types — the include propagates through the rest of the
+// project's translation units without forcing every TU to add the
+// include itself.
+#include "nimrtc/dtls/dtls_session_factory.hpp"
+#include "nimrtc/sctp/sctp_socket_factory.hpp"
+#include "nimrtc/raw_udp/raw_udp_factory_iface.hpp"
+#include "nimrtc/transport/transport_stack.hpp"
 
 namespace nimrtc::plugins {
 

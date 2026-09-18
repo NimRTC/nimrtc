@@ -66,34 +66,25 @@
 #include <nimrtc/plugins/transport.hpp>
 
 // =============================================================================
-// Slice-6 forward-compat aliases
+// Slice-6 forward-compat note — types promoted to plugins/base.hpp.
 // ----------------------------------------------------------------------------//
-// The transport-selection plan §5.2 sketches `plugins::Endpoint` and
-// `plugins::OnDatagramCb` as the canonical types used by `IRawUdpDatagram`.
-// Those types do not yet exist in `plugins/base.hpp` — this slice defines
-// them locally as aliases over existing plugin-layer types so the interface
-// reads as the doc says it should. A later consolidation ADR can promote
-// them to `plugins/base.hpp` once Slice 4 (DTLS-PSK) and Slice 7 (stack
-// integration) settle on the final shape.
+// `plugins::Endpoint` and `plugins::OnDatagramCb` are now canonical in
+// `<nimrtc/plugins/base.hpp>` (see `docs/plan/transport-selection.md`
+// §6.5 follow-up gap, Slice 8 v0.10.2). This header no longer
+// re-declares them — consumers should include
+// `<nimrtc/plugins/base.hpp>` directly. The `Endpoint` / `OnDatagramCb`
+// aliases below are intentionally REMOVED so the canonical definitions
+// from base.hpp are the single source of truth (a using-alias
+// redefinition in the same namespace would be a compile error).
 //
-//   Endpoint     — network endpoint (alias of plugins::Addr).
-//   OnDatagramCb — per-datagram receive callback (alias of the
-//                  per-buffer callback signature used by ITransport).
-//
-// Implementation note: keeping these as aliases rather than fresh structs
-// means slice 6 introduces zero new ABI surface on the plugin layer; the
-// skeleton compiles standalone and the eventual rename / redefinition will
-// be source-compatible.
+// Slice 8 ABI / source-compat:
+//   - Pre-Slice-8 callers that wrote `plugins::OnDatagramCb` continue
+//     to compile: the type is identical (just relocated to base.hpp).
+//   - Pre-Slice-8 callers that wrote `plugins::Endpoint` continue to
+//     compile for the same reason.
+//   - The only breakage would be code that #defined these symbols
+//     before — none exists in the repo (verified by grep).
 // =============================================================================
-
-namespace nimrtc::plugins {
-
-using Endpoint = Addr;  // raw UDP bypass talks to the same opaque address
-                        // encoding that ITransport::send / recv already use.
-
-using OnDatagramCb = std::function<void(BufferView)>;
-
-} // namespace nimrtc::plugins
 
 // =============================================================================
 // nimrtc::raw_udp — namespace owning the raw-UDP-bypass seam

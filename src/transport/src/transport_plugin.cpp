@@ -1,30 +1,76 @@
 /**
  * @file src/transport/src/transport_plugin.cpp
- * @brief Default Selector registration entry point.
+ * @brief Default Selector + ITransportStackFactory registration entry
+ *        points (Slice 7 + Slice 8).
  *
- * Slice 7 (transport-selection.md §6.4). The Selector registration
- * follows the same Meyer's-singleton latch + process-static-factory
- * pattern as nimrtc::ice::register_default_plugins() so the symbol
- * survives MSVC static-link stripping.
+ * Slice 7 (transport-selection.md §6.4) — `register_default_selector()`
+ * constructs a process-static `CapabilitySelector` so the Symbol has a
+ * defined destructor location. The Selector registration does NOT
+ * publish to `core::PluginRegistry` (the Selector is a separate role
+ * from the Stack factory — it picks which factory id to use, but
+ * doesn't build stacks itself).
  *
- * NOTE: Slice 7 does NOT yet add a `register_selector(id, factory*)` slot
- * on core::PluginRegistry — that lands with Slice 8 (engine integration),
- * which is the right time to extend the registry. For now the function
- * just constructs a process-static CapabilitySelector instance so its
- * destructor has a defined place to live, and logs the registration.
+ * Slice 8 (v0.10.2) — `register_default_plugins()` publishes the
+ * `CapabilitySelectorStackFactory` (id="default") through the typed
+ * `core::PluginRegistry::register_transport_stack(...)` hook so the
+ * Slice 8 engine integration has a non-null factory pointer to
+ * resolve. Slice 7.5 will replace this with concrete
+ * `WebRtcClassicStackFactory` + `RawUdpArqStackFactory` impls.
+ *
+ * Both entry points follow the Meyer's-singleton latch pattern (same
+ * as `nimrtc::ice::register_default_plugins()` in ice.cpp) so the
+ * symbols survive MSVC static-link stripping.
  */
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/registry.hpp>
 #include <nimrtc/transport/transport_plugin.hpp>
 #include <nimrtc/transport/transport_selector.hpp>
+#include <nimrtc/transport/transport_stack.hpp>
 
-namespace nimrtc {
+namespace nimrtc::transport {
 
 namespace detail {
 
+// Forward declaration — defined in `default_transport_stack_factory.cpp`.
+// We don't include the .cpp directly; keeping the singleton accessor
+// internal makes the seam module's public surface
+// (`transport_selector.hpp`, `transport_stack.hpp`, `transport_plugin.hpp`)
+// clean.
+const ITransportStackFactory* default_stack_factory_singleton() noexcept;
+
 void do_register_default_selector() noexcept {
+    // Process-static Selector instance — see Slice 7 header comment.
+    // The Selector is intentionally not registered in
+    // core::PluginRegistry because the registry holds *factories*, not
+    // selectors. Consumers that need to select acquire the Selector
+    // through this module's `register_default_selector()` entry point
+    // (or by linking `nimrtc::transport` and constructing one directly).
     static const CapabilitySelector s_selector{};
     NIMRTC_LOG_INFO("transport: default selector registered "
                     "(id=\"default\", impl=CapabilitySelector)");
+}
+
+void do_register_default_plugins() noexcept {
+    // Slice 8: publish the default stack factory through the typed
+    // registry hook so the engine / Selector can resolve it by id
+    // "default". The factory is a shell that wraps the CapabilitySelector
+    // output (see default_transport_stack_factory.cpp for the contract).
+    static const struct Registrar {
+        Registrar() {
+            const ITransportStackFactory* f =
+                default_stack_factory_singleton();
+            nimrtc::core::PluginRegistry::instance().register_transport_stack(
+                std::string_view{f->id()}, f);
+            nimrtc::core::log::Logger::instance().info(
+                std::string("nimrtc::transport: default stack factory "
+                            "registered (id=\"") +
+                std::string(f->id()) +
+                "\", via Slice 8 typed registry hook; "
+                "shell impl — real ICE/DTLS/RTP/SCTP composition lands "
+                "in Slice 7.5)");
+        }
+    } s_registrar;
+    (void)s_registrar;
 }
 
 } // namespace detail
@@ -37,4 +83,14 @@ void register_default_selector() noexcept {
     (void)once;
 }
 
-} // namespace nimrtc
+void register_default_plugins() noexcept {
+    // Slice 8 — populates the typed registry slot for transport stacks.
+    // Idempotent Meyer's-singleton latch.
+    static const int once = []() {
+        detail::do_register_default_plugins();
+        return 1;
+    }();
+    (void)once;
+}
+
+} // namespace nimrtc::transport

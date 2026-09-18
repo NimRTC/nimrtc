@@ -34,6 +34,18 @@ target_include_directories(nimrtc_core_objects
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/plugins/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/video_frame/include>
+        # Transport PAL Slice 8 (v0.10.2): the TypedRegistry<...> fields
+        # in registry.hpp forward-declare the DTLS / SCTP / raw_udp /
+        # transport-stack factory types but the static_cast calls in
+        # `detail::Registrar::Registrar()` need the full type. The
+        # matching headers live in the seam modules' include dirs;
+        # exposing them here lets pal_default_registrars.cpp compile
+        # the static_cast without each TU needing to add the include
+        # explicitly.
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
         $<INSTALL_INTERFACE:include>
 )
 # PAL Slice 2 — `pal_default_registrars.cpp` preprocessor-guards some entries

@@ -39,9 +39,14 @@
  *
  * ## What is NOT registered here
  *
- * - `nimrtc::dtls::register_default_plugins()` — DTLS registration is
- *   currently seam-local (Slice 4, `test_only` slot).  Promoting it to
- *   `core::register_all_default_plugins()` is a Slice 7 / Slice 8 concern.
+ * None of the transport-layer seams (DTLS / SCTP / raw_udp /
+ * transport-stack) were registered in v0.10.x pre-Slice-8 because
+ * the typed `core::PluginRegistry` slots did not exist. Slice 8
+ * (v0.10.2) added the four slots and the matching entries in this
+ * table — DTLS / SCTP / raw_udp / transport are now registered
+ * alongside the existing audio / video modules, completing the
+ * transport-layer PAL surface per `docs/plan/transport-selection.md`
+ * §6.5.
  */
 
 #include <nimrtc/core/registry.hpp>
@@ -85,6 +90,24 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
     &nimrtc::video_source::register_default_plugins,
 #endif
+    // Transport PAL Slice 8 (v0.10.2): DTLS / SCTP / raw_udp /
+    // transport-stack default-plugins entries. These mirror the
+    // unconditional entries above — there are no `NIMRTC_HAS_*` guards
+    // because every transport-layer backend is now a real Seam:
+    //   - DTLS:  WolfsslDtlsFactory    (id="wolfssl")
+    //   - SCTP:  SctpStubFactory       (id="stub"; v0.11.0 adds
+    //                                    "usrsctp" alongside)
+    //   - raw_udp: ArqRawUdpFactory    (id="arq")
+    //   - transport: CapabilitySelectorStackFactory (id="default")
+    // Adding a new transport-layer backend means adding a new entry
+    // here AND a new typed factory registration in the matching
+    // module's `register_default_plugins()` body. The seam-level
+    // pattern is identical across DTLS / SCTP / raw_udp / transport
+    // (see the Slice 8 commits in the relevant .cpp files).
+    &nimrtc::dtls::register_default_plugins,
+    &nimrtc::sctp::register_default_plugins,
+    &nimrtc::raw_udp::register_default_plugins,
+    &nimrtc::transport::register_default_plugins,
 };
 
 // ---------------------------------------------------------------------------

@@ -286,4 +286,146 @@ TEST_F(EnginePluginLoading, pal_plugin_id_wrappers_preserve_string_values) {
         << "duplicate id in known_ids test vector";
 }
 
+// ---------------------------------------------------------------------------
+// PAL Slice 8 (v0.10.2) — Transport PAL Slice 8 registry hooks.
+//
+// The Slice 8 DoD requires 4 new typed slots on core::PluginRegistry:
+//   - register_dtls_session(id, factory*) / get_dtls_session(id)
+//   - register_sctp_socket(id, factory*)    / get_sctp_socket(id)
+//   - register_raw_udp_datagram(id, factory*) / get_raw_udp_datagram(id)
+//   - register_transport_stack(id, factory*) / get_transport_stack(id)
+//
+// Each slot is populated by its module's `register_default_plugins()`
+// entry point, which the unified `core::register_all_default_plugins()`
+// walks in PAL Slice 2's `kDefaultRegistrars[]` table.  These 4 tests
+// assert that all four slots have non-null lookups after the
+// unified entry point runs at least once — i.e. the Slice 8 wiring
+// is end-to-end functional, not just present in the header.
+// ---------------------------------------------------------------------------
+
+TEST_F(EnginePluginLoading, slice8_dtls_session_registry_hook_populated) {
+    // WolfsslDtlsFactory must register under id "wolfssl" via the typed
+    // registry hook.  Slice 4 used a process-local test_only slot;
+    // Slice 8 promotes the canonical lookup to
+    // `core::PluginRegistry::get_dtls_session(id)`.
+    const auto* factory =
+        PluginRegistry::instance().get_dtls_session("wolfssl");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 8: DTLS factory 'wolfssl' not found in registry";
+    EXPECT_FALSE(factory->id().empty());
+    EXPECT_EQ(factory->id(), "wolfssl");
+
+    // The factory list should be non-empty AND contain the wolfssl id.
+    auto ids = PluginRegistry::instance().list_dtls_sessions();
+    EXPECT_FALSE(ids.empty())
+        << "PAL Slice 8: list_dtls_sessions() is empty";
+    bool found_wolfssl = false;
+    for (auto id : ids) {
+        if (id == "wolfssl") { found_wolfssl = true; break; }
+    }
+    EXPECT_TRUE(found_wolfssl)
+        << "PAL Slice 8: 'wolfssl' not present in list_dtls_sessions()";
+}
+
+TEST_F(EnginePluginLoading, slice8_sctp_socket_registry_hook_populated) {
+    // SctpStubFactory must register under id "stub" via the typed
+    // registry hook.  Slice 5 used a process-local cache;
+    // Slice 8 promotes the canonical lookup to
+    // `core::PluginRegistry::get_sctp_socket(id)`.
+    const auto* factory =
+        PluginRegistry::instance().get_sctp_socket("stub");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 8: SCTP factory 'stub' not found in registry";
+    EXPECT_FALSE(factory->id().empty());
+    EXPECT_EQ(factory->id(), "stub");
+
+    auto ids = PluginRegistry::instance().list_sctp_sockets();
+    EXPECT_FALSE(ids.empty())
+        << "PAL Slice 8: list_sctp_sockets() is empty";
+    bool found_stub = false;
+    for (auto id : ids) {
+        if (id == "stub") { found_stub = true; break; }
+    }
+    EXPECT_TRUE(found_stub)
+        << "PAL Slice 8: 'stub' not present in list_sctp_sockets()";
+}
+
+TEST_F(EnginePluginLoading, slice8_raw_udp_datagram_registry_hook_populated) {
+    // ArqRawUdpFactory must register under id "arq" via the typed
+    // registry hook.  Slice 6 used a process-local singleton;
+    // Slice 8 promotes the canonical lookup to
+    // `core::PluginRegistry::get_raw_udp_datagram(id)`.
+    const auto* factory =
+        PluginRegistry::instance().get_raw_udp_datagram("arq");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 8: raw-UDP factory 'arq' not found in registry";
+    EXPECT_FALSE(factory->id().empty());
+    EXPECT_EQ(factory->id(), "arq");
+
+    auto ids = PluginRegistry::instance().list_raw_udp_datagrams();
+    EXPECT_FALSE(ids.empty())
+        << "PAL Slice 8: list_raw_udp_datagrams() is empty";
+    bool found_arq = false;
+    for (auto id : ids) {
+        if (id == "arq") { found_arq = true; break; }
+    }
+    EXPECT_TRUE(found_arq)
+        << "PAL Slice 8: 'arq' not present in list_raw_udp_datagrams()";
+}
+
+TEST_F(EnginePluginLoading, slice8_transport_stack_registry_hook_populated) {
+    // CapabilitySelectorStackFactory must register under id "default"
+    // via the typed registry hook.  Slice 7 only had the Selector;
+    // Slice 8 adds the stack factory (shell impl — real composition
+    // lands in Slice 7.5) so the engine integration has a non-null
+    // factory pointer to resolve.
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("default");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 8: transport-stack factory 'default' not found in registry";
+    EXPECT_FALSE(factory->id().empty());
+    EXPECT_EQ(factory->id(), "default");
+
+    auto ids = PluginRegistry::instance().list_transport_stacks();
+    EXPECT_FALSE(ids.empty())
+        << "PAL Slice 8: list_transport_stacks() is empty";
+    bool found_default = false;
+    for (auto id : ids) {
+        if (id == "default") { found_default = true; break; }
+    }
+    EXPECT_TRUE(found_default)
+        << "PAL Slice 8: 'default' not present in list_transport_stacks()";
+}
+
+// ---------------------------------------------------------------------------
+// PAL Slice 8 — idempotency + compatibility with the Slice 1-3 tests.
+//
+// Verifies that running register_all_default_plugins() multiple times
+// (the PAL Slice 2 idempotency gate) does not double-register the
+// Slice 8 typed slots.  Also asserts the four new factory ids are
+// exactly the ones listed in the v0.10.2 release notes — anything
+// else would silently regress the lookup contract.
+// ---------------------------------------------------------------------------
+
+TEST_F(EnginePluginLoading, slice8_idempotent_register_does_not_duplicate) {
+    // Call register_all_default_plugins() three times (the Slice 2
+    // idempotency contract).  Each of the four Slice 8 typed slots
+    // must end up with exactly one factory entry — the "last writer
+    // wins" semantics of TypedRegistry::register_one would otherwise
+    // either silently overwrite (idempotent) or accumulate (regression).
+    nimrtc::core::register_all_default_plugins();
+    nimrtc::core::register_all_default_plugins();
+    nimrtc::core::register_all_default_plugins();
+
+    // Exactly one factory per known Slice 8 id.
+    EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u)
+        << "Slice 8: DTLS slot duplicated after repeated registration";
+    EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u)
+        << "Slice 8: SCTP slot duplicated after repeated registration";
+    EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
+        << "Slice 8: raw-UDP slot duplicated after repeated registration";
+    EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 1u)
+        << "Slice 8: transport-stack slot duplicated after repeated registration";
+}
+
 } // anonymous namespace

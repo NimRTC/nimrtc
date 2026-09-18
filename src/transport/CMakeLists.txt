@@ -27,6 +27,7 @@
 add_library(nimrtc_transport STATIC
     src/transport_selector.cpp
     src/transport_plugin.cpp
+    src/default_transport_stack_factory.cpp   # Slice 8: shell ITransportStackFactory
 )
 
 nimrtc_apply_options(nimrtc_transport)
@@ -35,6 +36,15 @@ target_link_libraries(nimrtc_transport
     PUBLIC
         nimrtc::core
         nimrtc::plugins
+        # Slice 8: the default-transport-stack-factory .cpp references
+        # the DTLS / SCTP / raw_udp seam headers. They must be in the
+        # PUBLIC link line so consumers that link only nimrtc::transport
+        # can also resolve the seam types used by ITransportStack's
+        # accessors (slice 7.5 will fold these into a `nimrtc::seam`
+        # umbrella target — for Slice 8 we keep the direct dep list).
+        nimrtc::dtls_seam
+        nimrtc::sctp
+        nimrtc::raw_udp
 )
 
 target_include_directories(nimrtc_transport

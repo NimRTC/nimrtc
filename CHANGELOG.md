@@ -248,19 +248,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.11.0] - TBD
+
+### Status: Beta 前哨
+
+> **Open 2026-09-18.** First minor to ship P2 content (DataChannel interop,
+> in-process SFU relay, PCM tap on WebRTC APM, Profile library, AI Agent demo).
+> Planned release, tracked in `docs/plan/v0.11-plan.md`.
+
+---
+
 ## [Unreleased]
 
-### Status: Tech Preview
-
 > No unreleased changes yet. The next planned release is **v0.11.0**
-> (P2 kickoff), tracked in `docs/plan/v0.11-preview.md`. Items to land
+> (P2 kickoff), tracked in `docs/plan/v0.11-plan.md`. Items to land
 > there: DataChannel usrsctp 互通, in-process SFU relay, PCM tap
 > landing on WebRTC APM, AI Agent 接入 demo, pps/Mbps 压测, GitHub
 > Discussions 上线, 首批 RFC 发布, assembly Profile 库官方化
-> (sfu / transport / agent / agent-gateway / sfu-agent), Profile schema
-> v1.1 (additive `transport` 段), `RawUdpArqStackFactory`,
-> `EngineConfig::dtls_name`, `IDataChannel` thin-wrapping
-> `ISctpSocket`.
+> (sfu / transport / agent / agent-gateway / sfu-agent), PAL Slice 4
+> (DTLS seam), PAL Slice 5 (usrsctp SCTP seam), T-PAL Slice 6
+> (Raw UDP bypass) in patch.
 
 ---
 

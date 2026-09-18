@@ -1,14 +1,14 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.10.3-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.11.0-orange.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.10.3 Tech Preview — Chrome ↔ NimRTC P2P A/V interop is green on Windows.
-> See [Current progress](#current-progress-v0100-tech-preview) for what ships today, and [Roadmap](#roadmap-p1p4-condensed) for what lands next.
+> **Current:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop, in-process SFU relay,
+> PCM tap, AI Agent demo, Profile library now in scope. See [docs/plan/v0.11-plan.md](docs/plan/v0.11-plan.md).
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md)
 

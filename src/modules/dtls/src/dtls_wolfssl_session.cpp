@@ -295,8 +295,8 @@ inline void hex_dump_record(const char* dir, const void* buf, std::size_t n) {
     if (n < 13) return;     // not a full DTLS record header
     const auto* p = static_cast<const std::uint8_t*>(buf);
     // content_type | version | epoch | sequence_number | length | data…
-    std::uint16_t ver    = (std::uint16_t(p[1]) << 8) | p[2];
-    std::uint16_t epoch  = (std::uint16_t(p[3]) << 8) | p[4];
+    std::uint16_t ver    = (static_cast<std::uint16_t>(p[1]) << 8) | p[2];
+    std::uint16_t epoch  = (static_cast<std::uint16_t>(p[3]) << 8) | p[4];
     std::uint64_t seq    = 0;
     for (int i = 0; i < 6; ++i) seq = (seq << 8) | p[5 + i];
     std::uint16_t len    = (std::uint16_t(p[11]) << 8) | p[12];

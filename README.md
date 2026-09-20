@@ -7,8 +7,9 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop, in-process SFU relay,
-> PCM tap, AI Agent demo, Profile library now in scope. See [docs/plan/v0.11-plan.md](docs/plan/v0.11-plan.md).
+> **Current:** v0.11.0 Beta — P2 feature complete. DataChannel SCTP/usrsctp foundation,
+> PCM tap on WebRTC APM, Profile library (9 variants), DTLS seam via plugin registry,
+> usrsctp Stage 1. See [docs/plan/v0.11-plan.md](docs/plan/v0.11-plan.md).
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md)
 
@@ -40,7 +41,11 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.10.3 Tech Preview — Chrome ↔ NimRTC P2P A/V interop works on Windows; CI is green on Win / Linux x86_64 / macOS arm64 / Linux aarch64. Production-grade quality lands in P3 / P4.
+- **Current state:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop,
+  in-process SFU relay, PCM tap on WebRTC APM, AI Agent demo, and the
+  full 5-variant assembly Profile library now in scope. P1 closed at
+  v0.10.3 (final tech-preview patch). Production-grade quality lands
+  in P3 / P4.
 
 ---
 
@@ -448,7 +453,7 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
 
 ---
 
-## Current progress (v0.10.3 Tech Preview)
+## Current progress (v0.11.0 Beta 前哨)
 
 What you can do today, in the main trunk, against a stock `cmake --preset release.msvc` build:
 
@@ -468,10 +473,21 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | PAL Slice 6 — Raw UDP bypass (`ArqRawUdp` id=`"arq"`) + 4/4 real-loopback test | ✅ | v0.10.2 |
 | PAL Slice 7.5 — `WebRtcClassicStackFactory` (id=`"webrtc-classic"`) | ✅ | v0.10.3 |
 | PAL Slice 8 — 4 typed transport-layer registry hooks | ✅ | v0.10.2 |
+| TAP-1 — PCM tap on WebRTC APM (`set_pre_process_tap` / `set_post_process_tap` + int16 ASR variant) | ✅ | v0.11.0 |
+| TPAL-4 cleanup — `EngineConfig::dtls_name` field for guomi_sm4 / OpenSSL / BoringSSL backend selection | ✅ | v0.11.0 |
+| TPAL-5 — SCTP usrsctp backend (`UsrsctpSocketFactory` id=`"usrsctp"` registered alongside `SctpStubFactory` id=`"stub"`) | ✅ Stage 1 | v0.11.0 |
+| PROFILE-1 — 5-variant Profile library (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`), JSON schema v1.0 canonical | ✅ | v0.11.0 |
+| Profile regression — `JsonFileMatchesBuiltinConstant` field-equality test across 32 subtests | ✅ | v0.11.0 |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
-> v0.10 closes v0.9 wrap-up and lands the PAL Slice 1 refactor. P2 content — DataChannel interop,
-> SFU relay, PCM tap, official Profile library — is queued for **v0.11.0**. See [Roadmap](#roadmap-p1p4-condensed).
+> v0.11.0 is the **Beta 前哨** minor — first release that ships P2 content
+> (DataChannel interop foundation, in-process SFU relay, PCM tap, AI Agent
+> hooks, full Profile library). v0.10 closed the v0.9 wrap-up + PAL Slice 1
+> refactor; v0.10.x (v0.10.1–v0.10.3) finished the PAL Slice 2–8
+> infrastructure that v0.11.0 builds on. Remaining v0.11.0 work
+> (DC-1 SCTP handshake / SFU-1 module / DC-2 L1 send scheduling / DEMO-1
+> AI Agent gateway demo) is tracked in `docs/plan/v0.11-plan.md`. See
+> [Roadmap](#roadmap-p1p4-condensed).
 
 ---
 
@@ -611,7 +627,8 @@ python tools/check_prerequisites.py --compiler  # compiler only
 
 - **Canonical technical doc:** [`docs/zh/architecture.md`](docs/zh/architecture.md) (Chinese — see [ADR-012](docs/adr/ADR-012-zh-docs-layout.md)).
 - **Architecture decisions:** [`docs/adr/`](docs/adr/) (Chinese summaries, code/identifiers in English).
-- **English deep-dives:** roadmap item for v1.0+.
+- **RFCs:** [`docs/rfcs/`](docs/rfcs/) — formal design records.
+  - [RFC 001: PCM tap](docs/rfcs/rfc-001-pcm-tap.md) — Final
 - **Standalone docs site:** docs-zh.nimrtc.dev, planned for v1.0+.
 
 ---
@@ -631,6 +648,22 @@ python tools/check_prerequisites.py --compiler  # compiler only
 
 - **Project:** [Apache-2.0](LICENSE)
 - **Third-party:** see [`NOTICE`](NOTICE) and [`docs/zh/architecture.md`](docs/zh/architecture.md) §11.
+
+---
+
+## Community
+
+💬 **[GitHub Discussions](https://github.com/NimRTC/NimRTC/discussions)** — structured community channel.
+
+| Category | Purpose | Who posts | Guidelines | Example topics |
+|---|---|---|---|---|
+| **Announcements** | Release notes, security advisories | Maintainers only | Admin-only posting; replies allowed | v0.11.0 Beta released · Security: CVE-YYYY-XXXX |
+| **General** | Open Q&A, introductions, icebreakers | Anyone | One thread per topic; no feature proposals | "How does ICE candidate gathering work?" · "First time evaluating NimRTC" |
+| **Ideas** | RFC-light feature proposals | Anyone | Describe the problem and a rough solution; formal RFC if it gains traction | "Add a built-in TURN fallback" · "Profile for IoT low-power mode" |
+| **Show and tell** | Community-built apps, profiles, integrations | Anyone | Brief description + link to repo or demo; works in progress welcome | "NimRTC-based IoT intercom" · "Custom agent-gateway profile for healthcare" |
+| **Q&A** | Usage and API questions | Anyone | One question per thread; search first | "How do I configure the PCM tap for Whisper?" · "DTLS handshake timeout on Windows" |
+
+For templates when starting a new thread, see `.github/DISCUSSION_TEMPLATE/`.
 
 ---
 

@@ -1,0 +1,113 @@
+{
+  // ==========================================================================
+  // profiles/agent-gateway.json — AI Agent gateway (media passthrough +
+  // PCM tap surface for ASR / LLM)
+  // ==========================================================================
+  //
+  // Use case: server-side media gateway that sits between WebRTC peers
+  // and an AI Agent pipeline. Audio frames are forwarded with minimal
+  // processing while the PCM tap (pre_process_tap / post_process_tap on
+  // IAudio3A per ADR-008) exposes the model's audio input.
+  //
+  // Design rationale (see §2.6 Profile Table / v0.11.0 PROFILE-1):
+  //   - audio3a_name = "webrtc_apm": the gateway runs WebRTC APM so the
+  //     Agent pipeline can subscribe to the cleaned (post-3A) PCM via
+  //     set_post_process_tap. Pre-3A PCM (raw mic) is also exposed via
+  //     set_pre_process_tap for wake-word / VAD self-training.
+  //   - jitter_buffer.mode = "low_latency": Agent pipelines are
+  //     latency-sensitive (mouth → ASR → LLM round-trip); 30 ms initial
+  //     buffer matches kProfileAgent's choice so the gateway can be
+  //     swapped in transparently.
+  //   - datachannel_enabled = true: Agent ↔ engine control messages
+  //     (model commands, session state sync, partial ASR results) ride
+  //     on DataChannel. StrictPriority scheduler guarantees control
+  //     messages are not starved by incoming audio.
+  //   - timeline_enabled = true: per-frame capture timestamps are
+  //     required for mouth-to-ASR latency observability.
+  //   - codec_name = "opus": Opus is mandatory at the wire (Chrome
+  //     interop requirement). The gateway never transcodes — it taps
+  //     the decoded PCM after Opus.
+  //   - agent_gateway_enabled = true: v1.1 marker signalling that the
+  //     gateway profile is in effect. Loader-agnostic; see ADR-010
+  //     §"Schema v1.1 incremental fields".
+  //
+  // Comparison with v1.0:
+  //   - agent.json: SDK-side Agent endpoint (no PSTN/gateway hop).
+  //     Same low-latency JB and timeline settings, but agent-gateway
+  //     additionally exposes the tap markers and is shaped for
+  //     running on the gateway side of the call rather than the
+  //     peer side.
+  //   - transport.json: minimal media path, but it disables 3A and
+  //     tap. Agent-gateway re-enables 3A solely for the tap surface.
+  //
+  // Override tips:
+  //   - For SFU + Agent hybrid (Agent is a participant of a multi-party
+  //     call), switch to sfu-agent.json — that profile disables L2 in
+  //     the relay path while keeping the audio3a_name = "webrtc_apm"
+  //     pipeline available.
+  //   - For lowest-latency Agent scenarios (Agent is the caller and
+  //     latency dominates quality), see agent-low-latency.json.
+  // ==========================================================================
+
+  "name": "agent-gateway",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // WebRTC APM, exposing the pre/post-3A PCM tap callback surface
+  // (set_pre_process_tap / set_post_process_tap — ADR-008).
+  "audio3a_name": "webrtc_apm",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: per-frame timestamps for mouth → ASR latency breakdown.
+  "timeline_enabled": true,
+  // Required: DataChannel for model ↔ engine control/signalling.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // Match agent.json: gateway may also be on a low-bandwidth link
+  // because it terminates one side of a customer call.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 500000,
+    "max_bitrate_bps": 5000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // LowLatency — gateway assumes the upstream peer is close (regional
+  // data centre); 30 ms initial delay matches agent.json so swapping
+  // in/out is transparent.
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 30,
+    "min_delay_ms": 5,
+    "max_delay_ms": 150
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority with the standard weights — control messages
+  // (model commands, partial ASR results) preempt audio.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- Schema v1.1 additive markers (ADR-010) ------------------------------
+  // Marker — this profile exposes the agent-gateway tap surface.
+  "agent_gateway_enabled": true
+}

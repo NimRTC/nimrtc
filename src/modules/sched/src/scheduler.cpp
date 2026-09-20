@@ -35,6 +35,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -55,6 +56,9 @@ constexpr auto kLog = core::log::Level::Debug;
 // ---------------------------------------------------------------------------
 struct PacketRecord {
     plugins::Priority priority = plugins::Priority::kBestEffort;
+    // stream_id is non-zero when the packet was enqueued via enqueue_for_stream().
+    // Zero means legacy per-packet priority path.
+    std::uint32_t     stream_id = 0;
     // Owned packet data — the scheduler copies the caller's buffer at enqueue
     // time, so the caller does not need to keep it alive until drain().
     std::vector<std::uint8_t> owned_data;
@@ -119,6 +123,12 @@ struct Scheduler::Impl {
     std::uint32_t allowed_per_drain_ = 0;   // max packets drain() may emit
     std::uint32_t packets_sent_this_cycle_ = 0; // reset each drain() call
 
+    // ---- L1 stream-priority state (DC-2) -------------------------------
+    // stream_id → StreamPriority.  Unseen streams default to Normal.
+    std::unordered_map<std::uint32_t, StreamPriority> stream_priority_{};
+    // Three L1 buckets, indexed by StreamPriority rank (High=0, Normal=1, Low=2).
+    std::array<std::deque<PacketRecord>, kStreamPriorityCount> stream_buckets_{};
+
     // ---- Last destination address (for empty dst in enqueue) -----------
     plugins::Addr last_dst_addr_;
 
@@ -126,6 +136,10 @@ struct Scheduler::Impl {
     std::uint32_t dropped_total_   = 0;
     std::uint32_t sent_total_     = 0;
     std::uint64_t sent_bytes_total_ = 0;
+
+    // ---- L1 stream statistics (DC-2) ------------------------------------
+    std::uint32_t stream_dropped_total_ = 0;
+    std::uint32_t stream_sent_total_   = 0;
 
     // ---- Thread safety --------------------------------------------------
     std::mutex mu_;
@@ -387,6 +401,10 @@ void Scheduler::reset() noexcept {
     impl_->dropped_total_       = 0;
     impl_->sent_total_          = 0;
     impl_->sent_bytes_total_    = 0;
+    impl_->stream_priority_.clear();
+    for (auto& bucket : impl_->stream_buckets_) bucket.clear();
+    impl_->stream_dropped_total_ = 0;
+    impl_->stream_sent_total_   = 0;
     impl_->last_dst_addr_       = {};
 }
 
@@ -408,6 +426,262 @@ plugins::SchedulerStats Scheduler::stats() const noexcept {
 plugins::SchedulerConfig Scheduler::config() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
     return impl_->config_;
+}
+
+// ===============================================================================
+// DC-2: L1 stream-priority methods
+// ===============================================================================
+
+void Scheduler::set_stream_priority(std::uint32_t stream_id,
+                                     StreamPriority level) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+
+    // Find the previous priority for this stream (if any).
+    auto it = impl_->stream_priority_.find(stream_id);
+    const StreamPriority prev =
+        (it != impl_->stream_priority_.end()) ? it->second
+                                              : StreamPriority::Normal;
+
+    // If the level didn't change, no-op (preserves FIFO position).
+    if (prev == level) {
+        impl_->stream_priority_[stream_id] = level;
+        return;
+    }
+
+    // Move all already-queued packets for this stream from the old bucket
+    // to the new bucket.  We splice the matching deque entries into the
+    // new bucket in their original order.  This satisfies DC-2's
+    // "set_stream_priority moves the stream between buckets atomically"
+    // contract: subsequent drain() observes the new ordering immediately.
+    auto& old_bucket = impl_->stream_buckets_[stream_priority_rank(prev)];
+    auto& new_bucket = impl_->stream_buckets_[stream_priority_rank(level)];
+
+    // Walk old_bucket, move matching packets to a temporary, then append
+    // them to new_bucket in original order.  We splice in two passes so
+    // new_bucket's existing packets keep their relative order.
+    std::deque<PacketRecord> moved;
+    std::deque<PacketRecord> retained;
+    while (!old_bucket.empty()) {
+        PacketRecord rec = std::move(old_bucket.front());
+        old_bucket.pop_front();
+        if (rec.stream_id == stream_id) {
+            moved.push_back(std::move(rec));
+        } else {
+            retained.push_back(std::move(rec));
+        }
+    }
+    old_bucket = std::move(retained);
+    while (!moved.empty()) {
+        new_bucket.push_back(std::move(moved.front()));
+        moved.pop_front();
+    }
+
+    impl_->stream_priority_[stream_id] = level;
+    sched_debug("Scheduler: stream %u priority %u -> %u, moved %zu packets",
+                stream_id, static_cast<unsigned>(prev),
+                static_cast<unsigned>(level), new_bucket.size());
+}
+
+StreamPriority Scheduler::get_stream_priority(std::uint32_t stream_id) const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    auto it = impl_->stream_priority_.find(stream_id);
+    if (it != impl_->stream_priority_.end()) return it->second;
+    return StreamPriority::Normal;  // default
+}
+
+void Scheduler::enqueue_for_stream_owned(std::uint32_t stream_id,
+                                         std::vector<std::uint8_t>&& owned_data,
+                                         plugins::Addr dst) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+
+    // Resolve the stream's current priority.
+    StreamPriority level = StreamPriority::Normal;
+    auto it = impl_->stream_priority_.find(stream_id);
+    if (it != impl_->stream_priority_.end()) {
+        level = it->second;
+    } else {
+        // First time we see this stream — store Normal so repeated calls
+        // hit the fast map lookup path.
+        impl_->stream_priority_.emplace(stream_id, StreamPriority::Normal);
+    }
+
+    // Remember last non-empty destination.
+    if (dst.len != 0) {
+        impl_->last_dst_addr_ = dst;
+    } else {
+        dst = impl_->last_dst_addr_;
+    }
+
+    PacketRecord rec;
+    rec.priority           = plugins::Priority::kBestEffort;
+    rec.stream_id          = stream_id;
+    rec.owned_data         = std::move(owned_data);
+    rec.dst_addr           = dst;
+    rec.enqueue_time       = core::SteadyClock::now();
+    rec.estimated_size_bytes = 0;
+
+    impl_->stream_buckets_[stream_priority_rank(level)].push_back(std::move(rec));
+    sched_debug("Scheduler: enqueued stream=%u into bucket=%u (total=%zu)",
+                stream_id, static_cast<unsigned>(level),
+                impl_->stream_buckets_[stream_priority_rank(level)].size());
+}
+
+void Scheduler::enqueue_for_stream(std::uint32_t stream_id,
+                                   core::ByteSpan data,
+                                   plugins::Addr dst) noexcept {
+    std::vector<std::uint8_t> buf;
+    buf.assign(data.data(), data.data() + data.size());
+    enqueue_for_stream_owned(stream_id, std::move(buf), dst);
+}
+
+namespace {
+
+/** Helper: drain one stream bucket (called from select_next_packet). */
+int drain_stream_bucket(std::deque<PacketRecord>& bucket,
+                        std::uint32_t& sent_total,
+                        std::uint64_t& sent_bytes_total,
+                        std::uint32_t avg_packet_size,
+                        int max_packets,
+                        plugins::DrainCallback inner_cb,
+                        std::uint32_t stream_id,
+                        StreamPriority bucket_priority) noexcept {
+    int sent = 0;
+    while (!bucket.empty() && sent < max_packets) {
+        PacketRecord rec = std::move(bucket.front());
+        bucket.pop_front();
+
+        if (inner_cb) {
+            core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
+            if (!inner_cb(rec.priority, span)) {
+                return sent;  // veto — stop
+            }
+        }
+
+        ++sent;
+        ++sent_total;
+        const std::uint32_t est_bytes =
+            rec.estimated_size_bytes != 0 ? rec.estimated_size_bytes : avg_packet_size;
+        sent_bytes_total += est_bytes;
+        (void)stream_id;
+        (void)bucket_priority;
+    }
+    return sent;
+}
+
+}  // anonymous namespace
+
+int Scheduler::select_next_packet(int max_packets,
+                                  plugins::DrainCallback cb) noexcept {
+    if (max_packets <= 0) return 0;
+
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+
+    int sent = 0;
+
+    // Walk from highest priority (0 = High) to lowest (2 = Low).
+    for (std::size_t idx = 0; idx < kStreamPriorityCount && sent < max_packets; ++idx) {
+        auto& bucket = impl_->stream_buckets_[idx];
+        if (bucket.empty()) continue;
+
+        // The bucket priority determines the StreamPriority for the C callback.
+        const StreamPriority bucket_prio = static_cast<StreamPriority>(idx);
+
+        // Capture bucket_prio so each packet in this bucket carries it.
+        auto wrapped_cb = cb ? [cb, bucket_prio](plugins::Priority p,
+                                                  core::ByteSpan span) -> bool {
+            return cb(p, span);
+        } : plugins::DrainCallback{};
+
+        // Peek at stream_id from the front of the bucket for the C ABI.
+        std::uint32_t peek_stream_id = bucket.front().stream_id;
+
+        int n = drain_stream_bucket(bucket, impl_->stream_sent_total_,
+                                   impl_->sent_bytes_total_,
+                                   impl_->config_.avg_packet_size_bytes,
+                                   max_packets - sent, wrapped_cb,
+                                   peek_stream_id, bucket_prio);
+        sent += n;
+        if (n == 0) break;  // bucket became empty mid-drain via veto
+    }
+
+    return sent;
+}
+
+// ===============================================================================
+// C ABI wrapper implementations
+// ===============================================================================
+
+// SchedulerHandle is forward-declared in sched.hpp as an opaque type.
+// The full definition lives here so the C ABI functions can dereference
+// it without exposing Scheduler's internals through the header.
+struct SchedulerHandle {
+    std::unique_ptr<Scheduler> sched;
+    explicit SchedulerHandle(plugins::SchedulerConfig cfg)
+        : sched(std::make_unique<Scheduler>(cfg)) {}
+};
+
+SchedulerHandle* sched_create(const plugins::SchedulerConfig* config) noexcept {
+    try {
+        plugins::SchedulerConfig cfg = config ? *config : plugins::SchedulerConfig{};
+        return new SchedulerHandle(cfg);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void sched_destroy(SchedulerHandle* h) noexcept {
+    delete h;
+}
+
+void sched_set_stream_priority(SchedulerHandle* h,
+                               std::uint32_t stream_id,
+                               StreamPriority level) noexcept {
+    if (!h) return;
+    h->sched->set_stream_priority(stream_id, level);
+}
+
+StreamPriority sched_get_stream_priority(const SchedulerHandle* h,
+                                        std::uint32_t stream_id) noexcept {
+    if (!h) return StreamPriority::Normal;
+    return h->sched->get_stream_priority(stream_id);
+}
+
+void sched_enqueue_stream_owned(SchedulerHandle* h,
+                                std::uint32_t stream_id,
+                                const std::uint8_t* data,
+                                std::size_t len,
+                                const plugins::Addr* dst) noexcept {
+    if (!h) return;
+    plugins::Addr addr = dst ? *dst : plugins::Addr{};
+    std::vector<std::uint8_t> buf;
+    if (data && len > 0) buf.assign(data, data + len);
+    h->sched->enqueue_for_stream_owned(stream_id, std::move(buf), addr);
+}
+
+int sched_select_next_packet(SchedulerHandle* h,
+                             int max_packets,
+                             void (*on_packet)(std::uint32_t stream_id,
+                                               StreamPriority level,
+                                               const std::uint8_t* data,
+                                               std::size_t len,
+                                               void* user_data),
+                             void* user_data) noexcept {
+    if (!h) return 0;
+    if (!on_packet) {
+        return h->sched->select_next_packet(max_packets, nullptr);
+    }
+    // Wrap the C function pointer into a DrainCallback.
+    // NOTE: stream_id and bucket priority are not accessible through the
+    // standard DrainCallback interface (which only sees Priority + ByteSpan).
+    // The C ABI caller receives 0u / Normal as placeholders here; for full
+    // stream info, call the C++ API select_next_packet() directly.
+    return h->sched->select_next_packet(max_packets,
+        [on_packet, user_data](plugins::Priority,
+                               core::ByteSpan span) -> bool {
+            on_packet(0u, StreamPriority::Normal,
+                      span.data(), span.size(), user_data);
+            return true;
+        });
 }
 
 }  // namespace nimrtc::sched

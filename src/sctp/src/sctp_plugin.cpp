@@ -40,6 +40,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 #include "sctp_stub_factory.hpp"
+#include <nimrtc/sctp/usrsctp_factory.hpp>
 
 namespace nimrtc::sctp {
 
@@ -67,26 +68,39 @@ void register_default_plugins() noexcept {
     // Static-local latch — runs once, idempotent. Same pattern as
     // `nimrtc::ice::register_default_plugins()` (see ice.cpp).
     static const int once = []() {
-        static const SctpStubFactory s_factory{};
+        static const SctpStubFactory s_stub_factory{};
+        // TPAL-5 (v0.11.0) — production usrsctp backend.
+        // Sibling to the stub; both factories coexist so v0.10.x
+        // callers that picked `id="stub"` continue to work.
+        // See `docs/plan/transport-selection.md` §6.2 / §7.
+        static const UsrsctpSocketFactory s_usrsctp_factory{};
 
         // Canonical path (Slice 8): publish via the typed registry hook.
         // The engine / Selector / future Profile loader will look up the
         // factory by id "stub" through this slot.
         nimrtc::core::PluginRegistry::instance().register_sctp_socket(
-            std::string_view{s_factory.id()}, &s_factory);
+            std::string_view{s_stub_factory.id()}, &s_stub_factory);
+
+        // TPAL-5: register the production backend under id "usrsctp".
+        // Both factories coexist; explicit-id callers get whichever
+        // they ask for, and the typed slot is the canonical source
+        // of truth for both.
+        nimrtc::core::PluginRegistry::instance().register_sctp_socket(
+            std::string_view{s_usrsctp_factory.id()}, &s_usrsctp_factory);
 
         // Legacy: keep the process-local cache in sync for any
         // pre-Slice-8 test code that still pokes the slot directly.
         // `get_stub_factory()` prefers the typed registry slot, so the
         // cache is a back-compat fallback rather than a second source
         // of truth.
-        g_stub_factory = &s_factory;
+        g_stub_factory = &s_stub_factory;
 
         core::log::Logger::instance().info(
-            "nimrtc::sctp: registered default plugin (id=\"" +
-            std::string{s_factory.id()} +
-            "\", via Slice 8 typed registry hook + legacy cache; "
-            "Slice 5 stub; v0.11.0 usrsctp integration pending)");
+            "nimrtc::sctp: registered default plugins "
+            "(id=\"" + std::string{s_stub_factory.id()} +
+            "\" [Slice 5 stub] + id=\"" + std::string{s_usrsctp_factory.id()} +
+            "\" [TPAL-5 usrsctp production backend]; "
+            "Slice 8 typed registry hook + legacy cache)");
         return 1;
     }();
     (void)once;

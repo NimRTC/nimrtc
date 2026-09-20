@@ -64,135 +64,28 @@
 
 #include <nimrtc/core/error.hpp>
 
+// PAL Slice 4 (v0.11.0) DTLS seam — the constants (`kFingerprintHashLen`,
+// `kSrtpKeyLen`, …), enums (`DtlsRole`, `DtlsState`, `SrtpProfile`), and
+// plain types (`DtlsAddr`, `DtlsRecord`, `SrtpKeyingMaterial`,
+// `Fingerprint`, `Config`) now all live in `nimrtc/dtls/dtls_types.hpp`.
+// Including it here keeps the concrete `DtlsSession` class compiling
+// without further changes (callers that include `dtls.hpp` get the
+// shared declarations transitively).  The seam header
+// (`dtls_session_iface.hpp`) ALSO includes `dtls_types.hpp` so the
+// circular-include problem between the seam and the concrete module
+// is fully broken.
+#include <nimrtc/dtls/dtls_types.hpp>
+
+// PAL Slice 4 / TPAL-4 (v0.11.0) seam — DtlsSession publicly inherits
+// `IDtlsSession` (the seam defined in `dtls_session_iface.hpp`,
+// transitively included above).  This means downstream code that holds
+// `unique_ptr<IDtlsSession>` — most importantly `engine.cpp`'s
+// `Impl::dtls` field — can resolve both this class and the
+// wolfSSL-backed subclass via the same factory surface without any
+// downcasting.
+#include <nimrtc/dtls/dtls_session_iface.hpp>
+
 namespace nimrtc::dtls {
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-constexpr std::size_t kFingerprintHashLen = 32;        // SHA-256 = 32 bytes
-constexpr std::size_t kSrtpKeyLen         = 16;        // AES-CM-128
-constexpr std::size_t kSrtpSaltLen        = 14;
-constexpr std::size_t kSrtpMasterKeyLen   = 16;
-constexpr std::size_t kSrtpMasterSaltLen  = 14;
-
-// DTLS record types (RFC 6347 §4.1)
-constexpr std::uint8_t kDtlsHandshakeContentType = 22;
-constexpr std::uint8_t kDtlsAlertContentType     = 21;
-constexpr std::uint8_t kDtlsChangeCipherSpec     = 20;
-constexpr std::uint8_t kDtlsAppData              = 23;
-
-// DTLS handshake message types (subset we care about)
-constexpr std::uint8_t kHsClientHello  = 1;
-constexpr std::uint8_t kHsServerHello  = 2;
-constexpr std::uint8_t kHsHelloVerify  = 3;
-constexpr std::uint8_t kHsCertificate  = 11;
-constexpr std::uint8_t kHsServerKeyExchange = 12;
-constexpr std::uint8_t kHsCertificateRequest = 13;
-constexpr std::uint8_t kHsServerHelloDone = 14;
-constexpr std::uint8_t kHsCertificateVerify = 15;
-constexpr std::uint8_t kHsClientKeyExchange = 16;
-constexpr std::uint8_t kHsFinished = 20;
-
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
-
-enum class DtlsRole : std::uint8_t {
-    Server,    // answering offer
-    Client,    // initiating offer
-};
-
-enum class DtlsState : std::uint8_t {
-    Closed,
-    Initial,
-    HelloVerify,
-    HelloSent,
-    HelloReceived,
-    CertificateReceived,
-    KeyExchange,
-    ChangeCipherSpec,
-    Finished,
-    Connected,
-    Failed,
-};
-
-enum class SrtpProfile : std::uint16_t {
-    Aes128CmSha1_80 = 0x0001,
-    Aes128CmSha1_32 = 0x0002,
-    Aes128Gcm       = 0x0007,
-    Aes256CmSha1_80 = 0x0003,
-};
-
-// -----------------------------------------------------------------------------
-// Endpoint address (mirrors ICE-selected pair)
-// -----------------------------------------------------------------------------
-
-struct DtlsAddr {
-    std::string host;       // IPv4 dotted-quad
-    std::uint16_t port = 0;
-};
-
-// -----------------------------------------------------------------------------
-// DTLS record (one application-visible message)
-// -----------------------------------------------------------------------------
-
-struct DtlsRecord {
-    std::vector<std::uint8_t> bytes;
-    DtlsAddr                  to;       // empty = use session's peer
-};
-
-// -----------------------------------------------------------------------------
-// SRTP keying material (RFC 5764 §4.2)
-// -----------------------------------------------------------------------------
-
-struct SrtpKeyingMaterial {
-    SrtpProfile               profile = SrtpProfile::Aes128CmSha1_80;
-
-    std::array<std::uint8_t, kSrtpMasterKeyLen>  client_master_key{};
-    std::array<std::uint8_t, kSrtpMasterSaltLen> client_master_salt{};
-    std::array<std::uint8_t, kSrtpMasterKeyLen>  server_master_key{};
-    std::array<std::uint8_t, kSrtpMasterSaltLen> server_master_salt{};
-
-    /** Number of times each direction may rollover without re-keying
-     *  (informational; libsrtp doesn't need this). */
-    std::uint32_t            lifetime = 0;
-};
-
-// -----------------------------------------------------------------------------
-// Local fingerprint (advertised in SDP)
-// -----------------------------------------------------------------------------
-
-struct Fingerprint {
-    std::string algorithm;     // "sha-256"
-    std::vector<std::uint8_t> bytes;     // raw hash
-    std::string base64;        // base64-encoded (kept for legacy/debug; NOT for SDP)
-    std::string hex_colon;     // colon-separated UPPER hex per RFC 8122 (SDP form)
-};
-
-// -----------------------------------------------------------------------------
-// Config
-// -----------------------------------------------------------------------------
-
-struct Config {
-    DtlsRole role = DtlsRole::Server;
-
-    /** SDP peer fingerprint (must match the certificate the peer presents). */
-    std::string peer_fingerprint_algo  = "sha-256";
-    std::vector<std::uint8_t> peer_fingerprint_value;  // raw bytes
-
-    /** Preferred SRTP protection profile.  Default = AES-128-CM-SHA1-80. */
-    SrtpProfile srtp_profile = SrtpProfile::Aes128CmSha1_80;
-
-    /** How long to retry HelloVerifyRequest (seconds).  0 = no retry. */
-    std::uint32_t hello_verify_timeout_s = 3;
-
-    /** MTU for outbound records (typical: 1200 to fit IPv6 path). */
-    std::uint16_t mtu = 1200;
-
-    /** Debug: enable verbose logging. */
-    bool verbose = false;
-};
 
 // -----------------------------------------------------------------------------
 // DtlsSession — one peer connection.
@@ -208,7 +101,7 @@ struct Config {
 // The hand-written DTLS state machine (the original `dtls.cpp`) was
 // removed; the only DTLS provider now is wolfSSL.
 // -----------------------------------------------------------------------------
-class DtlsSession {
+class DtlsSession : public IDtlsSession {
 public:
     explicit DtlsSession(Config config);
     ~DtlsSession();
@@ -223,7 +116,7 @@ public:
     /** Initialise state machine + key material.  Must be called before
      *  feed_inbound().  Generates a self-signed cert if no local fingerprint
      *  has been provided (we'll advertise the resulting fingerprint). */
-    core::Result<void> open() noexcept;
+    core::Result<void> open() noexcept override;
 
     void close() noexcept;
 
@@ -233,26 +126,26 @@ public:
      *  consumed from `bytes`.  Outbound records (if any) are pushed onto
      *  the internal queue and can be drained via take_outbound(). */
     std::size_t feed_inbound(std::span<const std::uint8_t> bytes,
-                             const DtlsAddr& from) noexcept;
+                             const DtlsAddr& from) noexcept override;
 
     /** Drain handshake-generated outbound records. */
-    std::vector<DtlsRecord> take_outbound() noexcept;
+    std::vector<DtlsRecord> take_outbound() noexcept override;
 
     /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).  Call from the
      *  engine tick loop at ~50 ms cadence while the handshake has not
      *  yet completed.  Safe no-op once state() is Connected/Failed/Closed. */
-    void tick() noexcept;
+    void tick() noexcept override;
 
     // ---- Status -----------------------------------------------------------
 
-    DtlsState state() const noexcept;
-    bool is_connected() const noexcept;
+    DtlsState state() const noexcept override;
+    bool is_connected() const noexcept override;
 
     /** Human-readable name for a DtlsState enum value (for tracing). */
     static const char* state_name(DtlsState s) noexcept;
 
     /** Local certificate fingerprint (advertised in SDP).  Valid after open(). */
-    const Fingerprint& local_fingerprint() const noexcept;
+    const Fingerprint& local_fingerprint() const noexcept override;
 
     /** Update the SDP-pinned peer fingerprint without recreating the local
      *  certificate/keypair.  Safe to call any time before the handshake
@@ -261,16 +154,50 @@ public:
      *  recreating the session here would change the advertised fingerprint
      *  and break the handshake. */
     void set_peer_fingerprint(std::string algo,
-                              std::vector<std::uint8_t> value) noexcept;
+                              std::vector<std::uint8_t> value) noexcept override;
 
     /** Update the DTLS role without recreating the local certificate/keypair.
      *  When transitioning Server -> Client, the state machine also generates
      *  and enqueues an initial ClientHello.  Safe to call any time before
      *  the handshake completes. */
-    void set_role(DtlsRole r) noexcept;
+    void set_role(DtlsRole r) noexcept override;
 
     /** SRTP keying material — available once state() == Connected. */
-    std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
+    std::optional<SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept override;
+
+    // ------------------------------------------------------------------
+    // PAL Slice 4 / TPAL-4 seam surface — delegates to DtlsSessionWolfSSL
+    // via the inner impl_.  Kept explicit (not just `using`) so a reader
+    // can see the full interface this class satisfies without grepping.
+    // ------------------------------------------------------------------
+
+    /** @override IDtlsSession — accepts the seam Role enum.
+     *  Delegates to set_role(DtlsRole). */
+    void set_role(Role role) noexcept override;
+
+    /** @override IDtlsSession — accepts a raw 32-byte SHA-256 span.
+     *  Forwards to set_peer_fingerprint("sha-256", value). */
+    void set_peer_fingerprint(
+        std::span<const std::uint8_t> raw_sha256) noexcept override;
+
+    /** @override IDtlsSession — equivalent to open() but void-returning.
+     *  Discards the Result<void>; errors surface via state() ==
+     *  Failed or the on_handshake_complete callback. */
+    void start() noexcept override;
+
+    /** @override IDtlsSession — equivalent to tick(). */
+    void pump() noexcept override;
+
+    /** @override IDtlsSession — registers the seam one-shot callback
+     *  with the inner wolfSSL-backed session. */
+    void on_handshake_complete(OnCompleteCb cb) noexcept override;
+
+    /** @override IDtlsSession — flattens the SrtpKeyingMaterial
+     *  4-field layout into the RFC 5764 §4.2 60-byte form.  Returns
+     *  kErrNotReady if the handshake has not completed. */
+    plugins::Status export_srtp_key_material(
+        std::span<std::uint8_t, 60> out) noexcept override;
 
     // ---- Stats ------------------------------------------------------------
 

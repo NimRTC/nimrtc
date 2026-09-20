@@ -116,4 +116,36 @@ DtlsSession::Stats DtlsSession::stats() const noexcept {
     return out;
 }
 
+// ===========================================================================
+// TPAL-4 (v0.11.0) IDtlsSession overrides — DtlsSession now publicly
+// inherits the seam interface; these forward every seam method to the
+// inner DtlsSessionWolfSSL via the existing concrete-typed delegates.
+// ===========================================================================
+
+void DtlsSession::set_role(Role role) noexcept {
+    impl_->inner.set_role(role);
+}
+
+void DtlsSession::set_peer_fingerprint(
+    std::span<const std::uint8_t> raw_sha256) noexcept {
+    impl_->inner.set_peer_fingerprint(raw_sha256);
+}
+
+void DtlsSession::start() noexcept {
+    (void)impl_->inner.open();   // void-returning seam view
+}
+
+void DtlsSession::pump() noexcept {
+    impl_->inner.tick();
+}
+
+void DtlsSession::on_handshake_complete(OnCompleteCb cb) noexcept {
+    impl_->inner.on_handshake_complete(std::move(cb));
+}
+
+plugins::Status DtlsSession::export_srtp_key_material(
+    std::span<std::uint8_t, 60> out) noexcept {
+    return impl_->inner.export_srtp_key_material(out);
+}
+
 } // namespace nimrtc::dtls

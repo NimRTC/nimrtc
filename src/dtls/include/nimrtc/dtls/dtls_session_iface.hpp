@@ -7,10 +7,14 @@
  *
  * The seam lets a host application replace wolfSSL with another DTLS
  * backend (OpenSSL, BoringSSL, mbedTLS, custom) without touching the
- * engine.  Slice 8 (engine integration) will route `engine.cpp` through
- * the factory rather than constructing `DtlsSessionWolfSSL` directly;
- * for Slice 4 we only introduce the seam, register a default factory
- * (id = "wolfssl"), and keep the existing engine.cpp untouched.
+ * engine.  Slice 8 (engine integration) routes `engine.cpp` through the
+ * factory rather than constructing `DtlsSessionWolfSSL` directly; PAL
+ * Slice 4 / TPAL-4 (v0.11.0) extended the seam interface with the
+ * engine-facing surface (`open()` / `state()` / `local_fingerprint()` /
+ * `srtp_keying_material()` / `feed_inbound()` / `take_outbound()` /
+ * `tick()` / `set_role(DtlsRole)` / `set_peer_fingerprint(...)` /
+ * `is_connected()`) so the engine can hold `unique_ptr<IDtlsSession>`
+ * and never downcast to the concrete backend.
  *
  * ## Thread model
  *
@@ -76,7 +80,8 @@
  *    spell these out via `std::span` so callers don't have to know
  *    whether the plugin layer or the module layer owns `span`.
  *
- * @note P1 — interface added as part of PAL Slice 4 (v0.11.0).
+ * @note P1 — interface added as part of PAL Slice 4 (v0.11.0),
+ *       extended with the engine-facing surface in TPAL-4 (v0.11.0).
  */
 
 #ifndef NIMRTC_DTLS_SESSION_IFACE_HPP
@@ -84,20 +89,31 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
-#include <nimrtc/plugins/base.hpp>   // plugins::Status
+#include <nimrtc/core/error.hpp>      // core::Result<void>
+#include <nimrtc/plugins/base.hpp>    // plugins::Status
+#include <nimrtc/dtls/dtls_types.hpp> // DtlsRole, DtlsState, DtlsAddr,
+                                     // DtlsRecord, Fingerprint,
+                                     // SrtpKeyingMaterial, Config — the
+                                     // common types hoisted out of
+                                     // `dtls.hpp` in PAL Slice 4 / TPAL-4
+                                     // (v0.11.0) to break the circular
+                                     // include between this seam header
+                                     // and the concrete `dtls.hpp`.
 
 namespace nimrtc::dtls {
 
-// Forward declarations — the concrete `Config` type lives in
-// `nimrtc/dtls/dtls.hpp` (the existing module header).  Including that
-// here would force every consumer of the seam to also pull in the
-// concrete dtls config; the forward declaration keeps the seam header
-// minimal.
-struct Config;
-using DtlsConfig = Config;   // alias requested by the Slice 4 DoD
+// Alias requested by PAL Slice 4 DoD — `DtlsConfig` is the seam-level
+// name for the concrete `Config` struct (kept in
+// `nimrtc/dtls/dtls_types.hpp`).  Implementers of
+// `IDtlsSessionFactory::create()` receive a `DtlsConfig` and pass it
+// straight through to the concrete backend constructor.
+using DtlsConfig = Config;
 
 /**
  * @brief DTLS role — Server (answerer) or Client (offerer).
@@ -201,6 +217,141 @@ public:
      */
     virtual plugins::Status export_srtp_key_material(
         std::span<std::uint8_t, 60> out) noexcept = 0;
+
+    // =====================================================================
+    // Engine-facing surface (PAL Slice 4 / TPAL-4 — DTLS seam engine
+    // integration, v0.11.0 — DoD gate #6).
+    // ---------------------------------------------------------------------
+    //
+    // These methods mirror the existing concrete `DtlsSession` /
+    // `DtlsSessionWolfSSL` surface so that the engine can hold the
+    // DTLS session as `unique_ptr<IDtlsSession>` and never downcast to
+    // the concrete backend (which is what the v0.10.2 Slice 8 code
+    // did).  Engine-driven replacement of the wolfSSL backend (OpenSSL
+    // / BoringSSL / mbedTLS / 国密 / custom) is now a
+    // `register_dtls_session(id, factory*)` away.
+    //
+    // The signatures are byte-for-byte identical to the v0.10.3
+    // concrete methods — no behaviour changes, no return-type
+    // widening, no signature narrowing.  Backends already implementing
+    // these (DtlsSessionWolfSSL) just need to add `override`; new
+    // backends must implement the full surface or inherit from
+    // DtlsSessionWolfSSL / DtlsSession.
+    // =====================================================================
+
+    /**
+     * @brief Initialise the DTLS context, certificate, and I/O callbacks.
+     *
+     * Equivalent to `start()` (which returns void); this overload
+     * returns `core::Result<void>` so the engine can report the
+     * cert-load / wolfSSL_Init failure modes that v0.10.x used to
+     * surface as a `bool` from the concrete `DtlsSession::open()`.
+     *
+     * MUST be called before `feed_inbound()`; idempotent (a cached
+     * `open_called` flag short-circuits the second+ call with an
+     * `ok()` result).
+     */
+    virtual core::Result<void> open() noexcept = 0;
+
+    /**
+     * @brief Install the DTLS role using the concrete-typed enum.
+     *
+     * Concrete counterpart of `set_role(Role)` above; takes
+     * `dtls::DtlsRole` (the existing module enum).  Engines call this
+     * overload because the role comes straight from the parsed
+     * `a=setup` SDP attribute via `dcfg.role = DtlsRole::Server`.
+     * Safe to call any time before the handshake completes; on
+     * Server -> Client transition the state machine also emits an
+     * initial ClientHello.
+     */
+    virtual void set_role(DtlsRole r) noexcept = 0;
+
+    /**
+     * @brief Install the SDP `a=fingerprint` (algo + raw bytes).
+     *
+     * Concrete counterpart of `set_peer_fingerprint(span)` above;
+     * accepts the algorithm name explicitly so a backend that
+     * supports multiple hash algorithms can pick the right verifier.
+     * The wolfSSL backend currently only honours `"sha-256"`.
+     */
+    virtual void set_peer_fingerprint(
+        std::string algo,
+        std::vector<std::uint8_t> value) noexcept = 0;
+
+    /**
+     * @brief Feed inbound DTLS record bytes from the transport.
+     *
+     * Returns the number of bytes consumed from `bytes` (DTLS is a
+     * datagram protocol so the entire record is either accepted or
+     * rejected).  Outbound records produced as a side effect are
+     * pushed onto the internal queue and can be drained via
+     * `take_outbound()`.
+     */
+    virtual std::size_t feed_inbound(
+        std::span<const std::uint8_t> bytes,
+        const DtlsAddr& from) noexcept = 0;
+
+    /**
+     * @brief Drain handshake-produced outbound DTLS records.
+     *
+     * Returns the queue of outbound records and clears it.  Called
+     * by the engine `drain_dtls()` after every `feed_inbound()` /
+     * `tick()` so the records go out the wire (or into the
+     * scheduler).
+     */
+    virtual std::vector<DtlsRecord> take_outbound() noexcept = 0;
+
+    /**
+     * @brief Drive the DTLS retransmit timer (RFC 6347 §4.2.4).
+     *
+     * Same semantics as `pump()` above — the engine tick loop calls
+     * this at ~50 ms cadence while the handshake has not yet
+     * completed.  Safe no-op once state() is Connected / Failed /
+     * Closed.
+     */
+    virtual void tick() noexcept = 0;
+
+    /**
+     * @brief Current DTLS state machine value.
+     *
+     * Used by the engine's `dtls_state()` accessor and by the
+     * `process_remote_sdp()` flow to drive role / fingerprint
+     * updates.  Out-of-line value `DtlsState::Closed` when the
+     * session has not been opened yet — same convention as the
+     * concrete class.
+     */
+    virtual DtlsState state() const noexcept = 0;
+
+    /**
+     * @brief True iff state() == Connected.
+     *
+     * Shortcut for `state() == DtlsState::Connected`; the engine
+     * checks this before permitting SRTP encrypt / decrypt on the
+     * media path (see `send_audio()` / `on_transport_recv()` in
+     * `src/engine/src/engine.cpp`).
+     */
+    virtual bool is_connected() const noexcept = 0;
+
+    /**
+     * @brief Local certificate fingerprint (advertised in our SDP).
+     *
+     * Valid after `open()`.  The engine reads `.hex_colon` to build
+     * the `a=fingerprint` SDP attribute (RFC 8122 colon-separated
+     * upper-hex form).  Returns a reference into backend-owned
+     * storage; lifetime is tied to the IDtlsSession instance.
+     */
+    virtual const Fingerprint& local_fingerprint() const noexcept = 0;
+
+    /**
+     * @brief SRTP keying material — available once Connected.
+     *
+     * Returns `std::nullopt` until the DTLS handshake reaches
+     * `DtlsState::Connected`; from then on the engine calls
+     * `maybe_install_srtp_keys()` which routes the key material into
+     * `nimrtc::srtp::SrtpContext`.
+     */
+    virtual std::optional<SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept = 0;
 };
 
 } // namespace nimrtc::dtls

@@ -100,6 +100,59 @@ maintenance surface for a small, resource-constrained project.
 | `src/modules/assembly/tests/` JSON round-trip tests still pass | ctest | green |
 | No new TOML / YAML / HCL consumer in tree | `git grep -l "toml\\|yaml\\|hcl"` | zero matches |
 
+## Schema v1.1 incremental fields (PROFILE-1 — v0.11.0 amendment)
+
+The v0.11.0 Profile library (`docs/plan/v0.11-plan.md` §9 PROFILE-1)
+introduces five new Profile variants (`sfu`, `agent-gateway`,
+`sfu-agent`, `teleop`, `agent-low-latency`). The four v1.0 canonical
+profiles (`agent`, `call`, `live`, `transport`) remain unchanged and
+continue to validate against `profiles/schema/profile-v1.0.json`; they
+are not bumped and require no field migration.
+
+Five of the new profiles declare **additive** JSON fields that signal
+scenario intent at the document level. These fields are
+**ignored by the v1.0 loader** (`assembly::profile_from_json_file`)
+and preserve full backward compatibility — a profile JSON containing
+only v1.0 keys still parses correctly via the v1.0 / v1.1 loaders.
+
+| Field | Type | First profile | Semantics |
+|---|---|---|---|
+| `sfu_enabled` | `bool` | `sfu.json`, `sfu-agent.json` | Marker — profile is a Selective Forwarding Unit (server-side forwarding hop, no L2 media). Loader-agnostic; runtime reads via `core::PluginRegistry::get_transport_stack(...)`. |
+| `agent_gateway_enabled` | `bool` | `agent-gateway.json`, `sfu-agent.json` | Marker — profile exposes the PCM-tap-able agent gateway surface (`set_pre_process_tap` / `set_post_process_tap`, per `docs/adr/ADR-008-pcm-tap.md`). |
+| `agent_low_latency` | `bool` | `agent-low-latency.json` | Marker — profile turns off 3A's AGC level estimation to avoid latency contribution; intended for ASR-bound pipelines where the model is the consumer. |
+| `max_sessions_per_engine` | `unsigned int` | `sfu.json`, `sfu-agent.json` | Hint — upper bound on concurrent peer sessions one engine instance is expected to handle; consumed by the SFU engine wiring layer (not by the assembly loader). |
+| `audio3a_name_explicit` | `string` (optional) | `sfu-agent.json` (value = `"webrtc_apm"`) | Convenience — when the profile carries an explicit `audio3a_name` override (vs the empty-string SFU default), this field mirrors it for tooling that wants to find the agent audio pipeline without re-parsing the canonical field. Optional; absence = not agent-side 3A. |
+
+**Loader contract for v1.1**: `profile_from_json_file` continues to read
+only the v1.0 keys (it knows nothing about the additive fields).
+Profiles that need the markers at runtime do one of:
+  (a) embed the marker into the C++ constant companion
+      (`kProfileSfu`, `kProfileAgentGateway`, …) and access it via
+      `ProfileRegistry::find(name)`;
+  (b) read the JSON twice — once via `profile_from_json_file` for the
+      canonical fields, once via a thin `nlohmann::json` parse for the
+      additive marker block (caller code only, no engine wiring
+      change).
+
+No loader API is added in v0.11.0. The schema change is purely
+documentary — it pins what the JSON author is allowed to express, not
+how the engine consumes it.
+
+**Migration / version notes**:
+  - A v1.0 loader happily parses a v1.1 JSON (additive fields are
+    ignored).
+  - A v1.1 parser reading a v1.0 JSON behaves identically to v1.0
+    (no v1.1 marker is present, so no marker-driven code path is
+    triggered).
+  - Bumping to **schema v2.0** requires renaming or removing any v1.0
+    field, not just adding markers — that falls outside this
+    amendment and would be its own ADR.
+
+**CI guard**: `tests/.../test_profile_json`-style round-trip tests
+verify (i) all four v1.0 canonical profiles still parse, (ii) all five
+v1.1 profiles parse, and (iii) the parsed keys intersected with the C++
+constant companion match field-by-field.
+
 ## Out of scope (this ADR)
 
 - The C++ Builder API (unchanged).

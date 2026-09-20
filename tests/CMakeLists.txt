@@ -206,7 +206,12 @@ function(add_dtls_srtp_test name source)
     target_link_libraries(${name} PRIVATE
         nimrtc::engine
         nimrtc::srtp
-        nimrtc::dtls)
+        nimrtc::dtls
+        # PAL Slice 2 (v0.10.2) — see nimrtc_add_engine_video_test above
+        # for the rationale. Linking nimrtc::engine pulls in the
+        # unified kDefaultRegistrars[] table which references
+        # `nimrtc::datachannel::register_default_plugins`.
+        nimrtc::datachannel)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
@@ -355,6 +360,13 @@ function(nimrtc_add_engine_test name source)
         nimrtc::sctp
         nimrtc::raw_udp
         nimrtc::transport
+        # TPAL-5 (v0.11.0): DataChannel plugin seam — links the
+        # datachannel module's `register_default_plugins()` symbol
+        # referenced by the PAL Slice 2 kDefaultRegistrars[] table.
+        # P1: the symbol is a no-op stub; P2: Subagent A wires it to
+        # register `SctpDataChannelFactory`.  Linking here keeps the
+        # Slice 2 table additive — no future PR is required for tests.
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -470,6 +482,12 @@ function(nimrtc_add_engine_video_test name source)
         nimrtc::video_source
         nimrtc::video_sink
         nimrtc::video_pipeline
+        # PAL Slice 2 / TPAL-5 (v0.11.0): `pal_default_registrars.cpp` holds
+        # a reference to `&nimrtc::datachannel::register_default_plugins`,
+        # so the test must link nimrtc::datachannel.lib for the symbol to
+        # resolve. The same fix applies to every `nimrtc_add_*_test()`
+        # function below that links nimrtc::engine (Slice 2 unified table).
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -516,6 +534,12 @@ function(nimrtc_add_engine_codec_test name source)
         nimrtc::video_sink
         nimrtc::video_pipeline
         nimrtc::h264
+        # PAL Slice 2 (v0.10.2) — see nimrtc_add_engine_video_test above for
+        # the rationale. The unified kDefaultRegistrars[] table references
+        # every module's `register_default_plugins()` symbol, so any test
+        # linking `nimrtc::engine` must also link every module whose
+        # registrar is in the table — datachannel is one of those.
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -637,6 +661,31 @@ nimrtc_add_engine_test(test_sctp_usrsctp test_sctp_usrsctp.cpp)
 # assert tap invocation count.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_audio3a_tap plugins/test_audio3a_tap.cpp)
+
+# ---------------------------------------------------------------------------
+# TPAL-5 (v0.11.0) — DataChannel plugin engine-routing regression test.
+#
+# Verifies that the engine:
+#   - Resolves the datachannel plugin via the typed
+#     `core::PluginRegistry::get_datachannel(id)` slot (Slice 8 contract).
+#   - Returns nullptr from create_data_channel() for unknown factory ids
+#     (no silent fallback, matches the DTLS seam from test_dtls_seam).
+#   - Forwards the user-supplied set_on_data_message() /
+#     set_on_data_state() callbacks to the IDataChannel before its open().
+#   - Honours `cfg.datachannel_name = ""` as an explicit disable.
+#
+# Uses the same `nimrtc_add_engine_test` wiring as test_dtls_seam and
+# test_sctp_usrsctp — links the engine + every module that has a
+# `register_default_plugins()` so the Slice 8 typed slots are populated
+# end-to-end.  No network/ICE/DTLS interaction (the test stops at
+# create_offer() / create_data_channel() / close()).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_datachannel_engine test_datachannel_engine.cpp)
+# DataChannel engine test waits on ICE/DTLS handshake (~60s) for the
+# `DisabledDatachannelNameReturnsNull` case; the per-test default
+# TIMEOUT 30 in `nimrtc_add_engine_test()` is too tight.  Bump it
+# specifically for this target.
+set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).

@@ -325,6 +325,11 @@ function(nimrtc_add_engine_test name source)
     add_executable(${name} ${source})
     if(WIN32)
         target_link_libraries(${name} PRIVATE ws2_32)
+    elseif(APPLE)
+        # macOS clang has built-in atomics in libc++; usrsctp uses
+        # OSAtomicAdd32Barrier which requires linking against the C++ runtime.
+        # Do not link -latomic - it does not exist on macOS.
+        target_link_libraries(${name} PRIVATE c++ pthread)
     else()
         # GCC on Linux/libstdc++ requires explicit -latomic for 64-bit
         # std::atomic operations on 32-bit platforms or for non-trivial
@@ -350,6 +355,13 @@ function(nimrtc_add_engine_test name source)
         nimrtc::sctp
         nimrtc::raw_udp
         nimrtc::transport
+        # TPAL-5 (v0.11.0): DataChannel plugin seam — links the
+        # datachannel module's `register_default_plugins()` symbol
+        # referenced by the PAL Slice 2 kDefaultRegistrars[] table.
+        # P1: the symbol is a no-op stub; P2: Subagent A wires it to
+        # register `SctpDataChannelFactory`.  Linking here keeps the
+        # Slice 2 table additive — no future PR is required for tests.
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -588,11 +600,70 @@ endif()
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
 # ---------------------------------------------------------------------------
+# TPAL-4 cleanup (v0.11.0) — DTLS seam engine-routing regression test.
+#
+# Verifies that engine.cpp routes DTLS through the PAL Slice 4 seam
+# (IDtlsSessionFactory) via `core::PluginRegistry::get_dtls_session(id)`:
+#   1. `cfg.dtls_name == ""` resolves to the built-in wolfSSL factory
+#      at id="wolfssl" — source-compat for every v0.10.x caller.
+#   2. `cfg.dtls_name = "mock"` resolves to a user-registered
+#      MockDtlsSessionFactory and the mock's create()/open() are
+#      invoked by the engine (asserted via atomic counters).
+#   3. An un-registered `cfg.dtls_name` produces an open() failure
+#      with kEngineInternal — no silent fallback to "wolfssl".
+#   4. Re-registering under an existing id is last-writer-wins; new
+#      ids add monotonically.  Verified through the typed registry
+#      slot, the same one the engine uses.
+#
+# The seam is exercised end-to-end through `MockDtlsSession` (a fresh
+# `IDtlsSession` implementation defined in this file).  No real
+# wolfSSL handshake is required, so the test stays in the
+# sub-second range.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_dtls_seam test_dtls_seam.cpp)
+
+# ---------------------------------------------------------------------------
+# TPAL-5 (v0.11.0) — usrsctp loopback round-trip regression test.
+#
+# Drives two UsrsctpSocket instances (AF_CONN loopback encapsulation)
+# to verify:
+#   - send_datagram enqueues into usrsctp's send queue (returns kOk)
+#   - on_recv callback fires on usrsctp's worker thread, payloads
+#     land in B's recv queue under a mutex/condvar
+#   - send_partial_reliable(ttl=10ms) call site compiles + returns kOk
+#   - factory slot "usrsctp" is registered (TPAL-5)
+#   - factory slot "stub" is still registered (Slice 5 regression)
+#
+# Links nimrtc::sctp, nimrtc::vendor::usrsctp transitively.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_sctp_usrsctp test_sctp_usrsctp.cpp)
+
+# ---------------------------------------------------------------------------
 # P2 PCM tap test (audio3a pre/post 3A tap, §8.7).
 # Verifies round-trip: IAudio3A instance, install counting tap, feed 100 frames,
 # assert tap invocation count.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_audio3a_tap plugins/test_audio3a_tap.cpp)
+
+# ---------------------------------------------------------------------------
+# TPAL-5 (v0.11.0) — DataChannel plugin engine-routing regression test.
+#
+# Verifies that the engine:
+#   - Resolves the datachannel plugin via the typed
+#     `core::PluginRegistry::get_datachannel(id)` slot (Slice 8 contract).
+#   - Returns nullptr from create_data_channel() for unknown factory ids
+#     (no silent fallback, matches the DTLS seam from test_dtls_seam).
+#   - Forwards the user-supplied set_on_data_message() /
+#     set_on_data_state() callbacks to the IDataChannel before its open().
+#   - Honours `cfg.datachannel_name = ""` as an explicit disable.
+#
+# Uses the same `nimrtc_add_engine_test` wiring as test_dtls_seam and
+# test_sctp_usrsctp — links the engine + every module that has a
+# `register_default_plugins()` so the Slice 8 typed slots are populated
+# end-to-end.  No network/ICE/DTLS interaction (the test stops at
+# create_offer() / create_data_channel() / close()).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_datachannel_engine test_datachannel_engine.cpp)
 
 # ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).

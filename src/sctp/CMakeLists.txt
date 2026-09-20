@@ -35,14 +35,24 @@ add_library(nimrtc_sctp STATIC
     src/sctp_stub_socket.cpp
     src/sctp_stub_factory.cpp
     src/sctp_plugin.cpp
+    # TPAL-5 (v0.11.0) — production usrsctp backend (id="usrsctp").
+    # Sibling to the Slice 5 stub (id="stub"). The stub stays in place
+    # so v0.10.x callers continue to work — TPAL-5 is additive.
+    src/usrsctp_socket.cpp
+    src/usrsctp_factory.cpp
     )
 
-nimrtc_apply_options(nimrtc_sctp)
+nimrtc_apply_options(nimrtc_sctp LENIENT)
 
 target_link_libraries(nimrtc_sctp
     PUBLIC
         nimrtc::core
         nimrtc::plugins       # plugin base types (Status, BufferView, ...)
+    PRIVATE
+        # TPAL-5: usrsctp backend is only linked into the production
+        # library, not re-exported (consumers must go through the
+        # ISctpSocket seam — the factory pointer in the registry).
+        nimrtc::vendor::usrsctp
     )
 
 target_include_directories(nimrtc_sctp

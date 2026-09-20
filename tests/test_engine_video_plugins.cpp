@@ -22,10 +22,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <thread>
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>

@@ -67,13 +67,19 @@ constexpr size_t   kSamplesPerFrame = kSampleRate * kFrameMs / 1000;  // 480
 static double rms_dbfs(const float* s, size_t n) {
     if (n == 0) return -96.0;
     double sum = 0.0;
-    for (size_t i = 0; i < n; ++i) { double v = s[i]; sum += v * v; }
+    for (size_t i = 0; i < n; ++i) {
+        const double v = static_cast<double>(s[i]);
+        sum += v * v;
+    }
     return 20.0 * std::log10(std::sqrt(sum / static_cast<double>(n)) + 1e-10);
 }
 static double rms_dbfs_i16(const int16_t* s, size_t n) {
     if (n == 0) return -96.0;
     double sum = 0.0;
-    for (size_t i = 0; i < n; ++i) { double v = s[i] / 32768.0; sum += v * v; }
+    for (size_t i = 0; i < n; ++i) {
+        const double v = static_cast<double>(s[i]) / 32768.0;
+        sum += v * v;
+    }
     return 20.0 * std::log10(std::sqrt(sum / static_cast<double>(n)) + 1e-10);
 }
 static std::vector<int16_t> float_to_int16(const float* s, size_t n) {

@@ -190,9 +190,15 @@ if(MSVC)
     )
 endif()
 
-# GCC/Clang: silence the same noise.
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+# GCC/Clang: silence the same noise.  -Wno-pedantic is critical:
+# usrsctp 0.9.5.0 uses ISO C99 flexible array members (struct sre {
+#   ...; char sre_data[]; }) which is forbidden by -Wpedantic in C11
+# mode. Without this suppression every compiler treating flexible arrays
+# as non-conforming (GCC, Clang in strict mode) would fail with
+# "error: ISO C++ forbids flexible array member".
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(nimrtc_vendor_usrsctp PRIVATE
+        -Wno-pedantic
         -Wno-sign-compare
         -Wno-unused-parameter
         -Wno-pointer-sign

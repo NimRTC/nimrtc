@@ -67,6 +67,16 @@ function(nimrtc_apply_options target)
         ""          # multi-value args
         ${ARGN})
 
+    # Vendored third-party library targets (nimrtc_vendor_*) must receive
+    # NO flags from NimRTCOptions. Their source trees ship with upstream
+    # warnings (flexible array members in usrsctp, old-style C casts in
+    # wolfSSL) that are not under our control. Skipping all options
+    # ensures they compile cleanly regardless of warning levels.
+    string(TOLOWER "${target}" _target_lower)
+    if(_target_lower MATCHES "^nimrtc_vendor_")
+        return()
+    endif()
+
     target_compile_features(${target} PUBLIC
         cxx_std_${NIMRTC_CXX_STANDARD}
         c_std_11)
@@ -132,6 +142,17 @@ function(nimrtc_apply_options target)
                 -Wno-unused-function
                 -Wno-format-nonliteral)
         endif()
+
+        # Treat warnings as errors on production targets (non-vendor).
+        # wolfSSL is handled via WARNINGS_AS_ERRORS=OFF before add_subdirectory
+        # in src/third_party/wolfssl/CMakeLists.txt so upstream warnings in
+        # wolfSSL headers don't affect nimrtc_dtls.  usrsctp vendor target
+        # is skipped entirely via the vendor_ return() guard above.
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /WX)
+        else()
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
     endif()
 
     # -------------------------------------------------------------------------
@@ -150,22 +171,6 @@ function(nimrtc_apply_options target)
             target_compile_options(${target} PRIVATE
                 -stdlib=libc++)
         endif()
-    endif()
-
-    # Vendored third-party library targets (nimrtc_vendor_*) must NEVER
-    # get -Werror. Their source trees ship with upstream warnings that are
-    # not under our control and are not our responsibility to fix.  Enabling
-    # -Werror on them (e.g. on macOS where wolfSSL headers use old-style
-    # C casts that transitively affect nimrtc_dtls) breaks the build with
-    # no recourse other than patching upstream — which we don't want to do.
-    string(TOLOWER "${target}" _target_lower)
-    if(_target_lower MATCHES "^nimrtc_vendor_")
-        return()
-    endif()
-    if(MSVC)
-        target_compile_options(${target} PRIVATE /WX)
-    else()
-        target_compile_options(${target} PRIVATE -Werror)
     endif()
 
     # -------------------------------------------------------------------------

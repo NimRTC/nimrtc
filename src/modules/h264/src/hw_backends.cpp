@@ -232,7 +232,8 @@ plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return nullptr;   // TODO: wire VideoToolbox encoder when macOS target
+        (void)cfg;   // TODO: wire VideoToolbox encoder when macOS target
+        return nullptr;
     };
     return be;
 }

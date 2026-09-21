@@ -68,13 +68,13 @@ static double rms_dbfs(const float* s, size_t n) {
     if (n == 0) return -96.0;
     double sum = 0.0;
     for (size_t i = 0; i < n; ++i) { double v = s[i]; sum += v * v; }
-    return 20.0 * std::log10(std::sqrt(sum / n) + 1e-10);
+    return 20.0 * std::log10(std::sqrt(sum / static_cast<double>(n)) + 1e-10);
 }
 static double rms_dbfs_i16(const int16_t* s, size_t n) {
     if (n == 0) return -96.0;
     double sum = 0.0;
     for (size_t i = 0; i < n; ++i) { double v = s[i] / 32768.0; sum += v * v; }
-    return 20.0 * std::log10(std::sqrt(sum / n) + 1e-10);
+    return 20.0 * std::log10(std::sqrt(sum / static_cast<double>(n)) + 1e-10);
 }
 static std::vector<int16_t> float_to_int16(const float* s, size_t n) {
     std::vector<int16_t> r(n);
@@ -103,9 +103,9 @@ static void mock_asr(const int16_t* pcm, size_t n) {
 
 // Generate a 440Hz tone or silent frame at 48 kHz mono.
 static std::vector<float> gen_frame(bool speech, size_t n) {
-    static const std::vector<float> tone = [](size_t n) {
-        std::vector<float> t(n);
-        for (size_t i = 0; i < n; ++i) {
+    static const std::vector<float> tone = [](size_t n_frames) {
+        std::vector<float> t(n_frames);
+        for (size_t i = 0; i < n_frames; ++i) {
             double x = double(i) / double(kSampleRate);
             t[i] = static_cast<float>(16000.0 * std::sin(2.0 * M_PI * 440.0 * x) / 32768.0);
         }
@@ -171,7 +171,7 @@ int run_demo(double seconds) {
     a3a->set_pre_process_tap([](const float* s, const PcmFrameMetadata& m) {
         std::fprintf(stderr,
             "[Tap] pre  frame: ts=%lld, samples=%zu, rate=%u, ch=%u, level=%.1f dBFS\n",
-            (long long)m.timestamp_us, m.num_samples, m.sample_rate_hz,
+            static_cast<long long>(m.timestamp_us), m.num_samples, m.sample_rate_hz,
             m.num_channels, rms_dbfs(s, m.num_samples));
     });
     a3a->set_post_process_tap(
@@ -184,7 +184,7 @@ int run_demo(double seconds) {
         [](const int16_t* s, const PcmFrameMetadata& m) {
             std::fprintf(stderr,
                 "[Tap] post frame: ts=%lld, samples=%zu, rate=%u, ch=%u, level=%.1f dBFS\n",
-                (long long)m.timestamp_us, m.num_samples, m.sample_rate_hz,
+                static_cast<long long>(m.timestamp_us), m.num_samples, m.sample_rate_hz,
                 m.num_channels, rms_dbfs_i16(s, m.num_samples));
             mock_asr(s, m.num_samples);
         });

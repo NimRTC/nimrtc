@@ -39,7 +39,16 @@ using video_payload::h264::FuAHeader;
 using video_payload::h264::NaluType;
 using video_payload::h264::parse_fu_a_header;
 
+// kRtpSeqMod / kRtpTsMod are reserved for future sequence/timestamp
+// wrap-around arithmetic; suppress -Werror=unused-const-variable on
+// Clang so the symbols stay available.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint32_t kRtpSeqMod = 65536u;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint64_t kRtpTsMod  = 0x100000000ull;
 
 // ---------------------------------------------------------------------------

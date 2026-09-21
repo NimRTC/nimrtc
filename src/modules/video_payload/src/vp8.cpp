@@ -17,8 +17,20 @@ constexpr std::uint8_t kDescByteBitS = 0x10;
 constexpr std::uint8_t kPidMask      = 0x07;
 
 constexpr std::uint8_t kExtBitI = 0x80;
+// kExtBitL/T/K are reserved for the VP8 picture-ID / TL0PICIDX /
+// TID/Y-keyframe extension bits — not consumed by the current parse
+// path; suppress -Werror=unused-const-variable on Clang.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitL = 0x40;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitT = 0x20;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitK = 0x10;
 
 } // namespace

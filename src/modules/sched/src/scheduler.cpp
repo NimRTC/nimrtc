@@ -67,7 +67,17 @@ struct PacketRecord {
     std::uint32_t     estimated_size_bytes = 0;
 };
 
-/** Log a debug message only when log level is at or below Debug. */
+// Format-string attribute required by Clang/GCC to suppress
+// -Wformat-nonliteral on this variadic helper (the format string
+// comes from the caller; the compiler cannot prove it is a literal).
+// Forward-declare with the attribute, then define separately so GCC
+// (which rejects attributes on inline function *definitions*) is
+// happy with the same syntax as Clang.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+inline void sched_debug(const char* fmt, ...);
+
 inline void sched_debug(const char* fmt, ...) {
     if (core::log::Logger::instance().level() <= kLog) {
         char buf[256];
@@ -587,8 +597,14 @@ int Scheduler::select_next_packet(int max_packets,
         const StreamPriority bucket_prio = static_cast<StreamPriority>(idx);
 
         // Capture bucket_prio so each packet in this bucket carries it.
+        // Currently the C drain path doesn't pass per-bucket priority
+        // through (it uses the plugins::Priority supplied at enqueue
+        // time); the capture is reserved for the next-stage explicit
+        // bucket override path.  Suppress -Wunused-lambda-capture so
+        // Clang doesn't warn under -Werror.
         auto wrapped_cb = cb ? [cb, bucket_prio](plugins::Priority p,
                                                   core::ByteSpan span) -> bool {
+            (void)bucket_prio;
             return cb(p, span);
         } : plugins::DrainCallback{};
 

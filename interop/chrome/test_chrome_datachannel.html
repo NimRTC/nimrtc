@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<!--
+  @file interop/chrome/test_chrome_datachannel.html
+  @brief Headless Chrome DataChannel interop harness for NimRTC.
+
+  Validates Chrome <-> NimRTC SCTP-over-DTLS DataChannel round-trip across
+  the four canonical reliability variants:
+
+    1. reliable  + ordered    (default RTCDataChannel — no options)
+    2. reliable  + unordered  ({ordered: false})
+    3. unreliable + unordered ({ordered: false, maxRetransmits: N})
+    4. unreliable + ordered   ({ordered: true,  maxRetransmits: N})
+
+  Each variant:
+    - Chrome opens an RTCDataChannel on the SAME RTCPeerConnection.
+    - On `dc.onopen`, Chrome sends a 32-byte ASCII payload tagged with
+      the variant index; the harness asserts the NimRTC side logs it
+      via the demo-p2p stderr (this is verified OUT-OF-BAND by the
+      Python harness reading demo-p2p's stderr; Playwright also
+      captures Chrome's console).
+    - On `dc.onmessage`, Chrome appends the received payload to
+      `<pre id="log">` so Playwright's
+      `page.locator("pre#log").text_content()` can scrape it.
+
+  Exposes `window._interopResults.dc = {
+      'r_o'  : {sent: bool, recv: bool, open: bool},
+      'r_u'  : {...},
+      'uu'   : {...},
+      'uo'   : {...},
+  }` for Playwright to read after the test window.
+
+  ## Query parameters
+
+    room=<name>   Room name (default: "interop")
+    ws=<url>      WebSocket signaling URL (default: ws://localhost:8765/<room>)
+    offerer=1     Act as offerer; default is answerer (Chrome reads
+                  SDP from NimRTC's offer).
+    variants=<l>  Comma-separated list of variant ids to run; default
+                  is "r_o,r_u,uu,uo" (all four).  Useful for smoke tests.
+
+  ## Required signaling protocol
+
+    Inbound:  {"type":"offer",  "sdp":"..."}
+              {"type":"candidate", "candidate":"...", "sdpMid":"...", "sdpMLineIndex":N}
+    Outbound: {"type":"answer", "sdp":"..."}
+              {"type":"candidate", "candidate":"...", "sdpMid":"...", "sdpMLineIndex":N}
+
+  Mirrors the WebSocket protocol implemented by
+  `interop/signaling/signaling_server.py` (used by both demo-p2p's
+  signaling_proxy.py and this page).
+
+  ## Why the harness writes payloads to `<pre id="log">`
+
+    Playwright's `page.locator("pre#log").text_content()` returns a
+    single string containing every appended line — much simpler than
+    scraping individual `console.log` events through CDP.  Combined with
+    `page.evaluate("window._interopResults")`, this gives the Python
+    runner both a structured result AND a free-form transcript to
+    diff against the SDP/candidate log.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>NimRTC DataChannel interop</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 1em; }
+    #status { font-weight: bold; color: #222; padding: 0.5em;
+              background: #f3f3f3; border: 1px solid #ddd;
+              font-family: monospace; }
+    pre#log { background: #1e1e1e; color: #d4d4d4; padding: 0.8em;
+              font-family: Consolas, monospace; font-size: 11pt;
+              max-height: 16em; overflow: auto; white-space: pre-wrap; }
+    .ok  { color: #2e7d32; }
+    .err { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>NimRTC DataChannel interop harness</h1>
+  <div id="status">Loading…</div>
+  <pre id="log"></pre>
+
+<script>
+"use strict";
+
+const PARAMS    = new URLSearchParams(window.location.search);
+const ROOM      = PARAMS.get("room")    || "interop";
+const WS_URL    = PARAMS.get("ws")      || ("ws://localhost:8765/" + ROOM);
+const OFFERER   = PARAMS.get("offerer") === "1";
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "20000", 10);
+const VARIANT_PARAM = PARAMS.get("variants") ||
+    "r_o,r_u,uu,uo";
+
+// window._interopResults — written by page JS, read by Playwright via
+// page.evaluate("window._interopResults").  The 'dc' dict maps variant id
+// to per-variant send/recv state.  A variant passes when:
+//   dc[vid].open == true  AND
+//   dc[vid].sent == true  AND   (Chrome sent to NimRTC)
+//   dc[vid].recv == true       (NimRTC sent back to Chrome)
+window._interopResults = {
+    wsConnected:  false,
+    iceConnected: false,
+    sdpExchanged: false,
+    dc: {
+        'r_o': { open: false, sent: false, recv: false,
+                 recvPayload: null, sendPayload: null },
+        'r_u': { open: false, sent: false, recv: false,
+                 recvPayload: null, sendPayload: null },
+        'uu':  { open: false, sent: false, recv: false,
+                 recvPayload: null, sendPayload: null },
+        'uo':  { open: false, sent: false, recv: false,
+                 recvPayload: null, sendPayload: null },
+    },
+    errors: [],
+    exitCode: 0,
+};
+
+// ----- variant table -----
+//
+// Maps the variant id used by both Playwright (parse keys from
+// _interopResults.dc) and the Chrome harness (which variant to create)
+// to its RTCDataChannelInit options.
+//
+//   id   reliability           ordered  maxRetransmits  SCTP / RFC 8831 mode
+//   ---  --------------------  -------  --------------  -------------------
+//   r_o  reliable+ordered      true     0 (none)        kReliableOrdered
+//   r_u  reliable+unordered    false    0 (none)        kReliableOrdered + unordered
+//   uu   unreliable+unordered  false    5               kUnreliable / PR-SCTP cnt
+//   uo   unreliable+ordered    true     5               kPartialReliableCount (or kUnreliable)
+//
+// `maxRetransmits: 5` matches WebRTC's default for partial-reliable channels
+// and gives SCTP enough retry budget for at least one packet loss round.
+const VARIANTS = {
+    'r_o': {
+        label:  'reliable_ordered',
+        init:   {},                       // ordered: true, maxRetransmits: null
+        payload: 'NimRTC<-Chrome reliable+ordered   #0 ',
+    },
+    'r_u': {
+        label:  'reliable_unordered',
+        init:   { ordered: false },
+        payload: 'NimRTC<-Chrome reliable+unordered #1 ',
+    },
+    'uu': {
+        label:  'unreliable_unordered',
+        init:   { ordered: false, maxRetransmits: 5 },
+        payload: 'NimRTC<-Chrome unreli+unord #2     ',
+    },
+    'uo': {
+        label:  'unreliable_ordered',
+        init:   { ordered: true, maxRetransmits: 5 },
+        payload: 'NimRTC<-Chrome unreli+ord   #3     ',
+    },
+};
+
+function variantIds() {
+    return VARIANT_PARAM.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+let pc = null;
+let ws = null;
+let pendingCandidates = [];
+const channels = {};   // variant id -> RTCDataChannel
+
+function log(tag, msg) {
+    const line = `[${new Date().toISOString()}] [${tag}] ${msg}`;
+    console.log(line);
+    const el = document.getElementById("log");
+    if (el) {
+        el.textContent += line + "\n";
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
+function setStatus(s) {
+    const el = document.getElementById("status");
+    if (el) el.textContent = s;
+}
+
+function reportError(code, msg) {
+    window._interopResults.errors.push({ code, msg });
+    window._interopResults.exitCode = code;
+    log("ERROR", `code=0x${code.toString(16)} ${msg}`);
+}
+
+function sendWs(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+    }
+}
+
+// ----- WebRTC setup -----
+
+function makePc() {
+    const config = {
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    };
+    log("RTC", "Creating RTCPeerConnection: " + JSON.stringify(config));
+    const peer = new RTCPeerConnection(config);
+
+    peer.oniceconnectionstatechange = () => {
+        log("ICE", `state=${peer.iceConnectionState}`);
+        if (peer.iceConnectionState === "connected" ||
+            peer.iceConnectionState === "completed") {
+            window._interopResults.iceConnected = true;
+            setStatus("ICE Connected ✓ — opening DataChannels…");
+        } else if (peer.iceConnectionState === "failed") {
+            reportError(0x10, "ICE connection failed");
+        }
+    };
+    peer.onconnectionstatechange = () => {
+        log("CONN", `state=${peer.connectionState}`);
+    };
+    peer.onicecandidate = (event) => {
+        if (event.candidate === null) {
+            log("ICE", "ICE gathering complete (null candidate)");
+            return;
+        }
+        const candStr = event.candidate.candidate;
+        if (!candStr) return;
+        log("ICE", "candidate: " + candStr);
+        sendWs({
+            type: "candidate",
+            candidate: candStr,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+        });
+    };
+    peer.ondatachannel = (event) => {
+        // Peer-initiated channel — only relevant in OFFERER mode
+        // (NimRTC creates the channel).  Not used here (Chrome creates
+        // all four), but log it for diagnostics.
+        log("DC", "peer-initiated channel: " + event.channel.label);
+    };
+    return peer;
+}
+
+function addPendingCandidates() {
+    for (const c of pendingCandidates) {
+        pc.addIceCandidate(c).catch(e => {
+            log("ICE", "addIceCandidate error: " + e);
+        });
+    }
+    pendingCandidates = [];
+}
+
+// ----- DataChannel orchestration -----
+
+function buildPayload(variantId) {
+    // 32 ASCII bytes: "<prefix><variantId>".  Pad to >=16 bytes per
+    // the DoD Gate #1 spec.  variantId carries the variant identity
+    // so NimRTC can echo it back unchanged and we can match recv to
+    // sent per-variant.
+    const base = VARIANTS[variantId].payload;
+    const padded = (base + "0000000000000000").slice(0, 32);
+    return padded;
+}
+
+function sendFromChrome(variantId) {
+    const dc = channels[variantId];
+    if (!dc) return false;
+    if (dc.readyState !== "open") {
+        log("DC", `send(${variantId}) deferred (state=${dc.readyState})`);
+        return false;
+    }
+    const payload = buildPayload(variantId);
+    dc.send(payload);
+    window._interopResults.dc[variantId].sent = true;
+    window._interopResults.dc[variantId].sendPayload = payload;
+    log("DC", `>> ${variantId} send 32B: ${payload}`);
+    return true;
+}
+
+function wireChannel(variantId, dc) {
+    const rec = window._interopResults.dc[variantId];
+    dc.onopen = () => {
+        log("DC", `${variantId} onopen`);
+        rec.open = true;
+        // Send Chrome → NimRTC right away
+        sendFromChrome(variantId);
+        // Schedule NimRTC → Chrome: wait a moment then send a
+        // different echo payload from Chrome so the NimRTC side has
+        // something to echo back (Chrome itself is the test driver
+        // here — it sends BOTH directions; demo-p2p will echo via
+        // its own send path once SCTP-over-DTLS is wired).
+        // For verification of NimRTC→Chrome, we look for ANY payload
+        // arriving on this channel that isn't the one we just sent.
+    };
+    dc.onclose = () => {
+        log("DC", `${variantId} onclose`);
+    };
+    dc.onerror = (e) => {
+        log("DC", `${variantId} onerror: ` + JSON.stringify(e));
+    };
+    dc.onmessage = (event) => {
+        const payload = typeof event.data === "string"
+            ? event.data
+            : "<binary " + (event.data && event.data.byteLength) + "B>";
+        log("DC", `<< ${variantId} recv: ${payload}`);
+        // Mark as recv ONLY if payload is not the one we just sent
+        // (so we don't double-count Chrome→NimRTC→Chrome reflections).
+        if (rec.sendPayload && payload === rec.sendPayload) {
+            log("DC", `${variantId} recv matches our own send — ignoring echo`);
+            return;
+        }
+        rec.recv = true;
+        rec.recvPayload = payload;
+    };
+}
+
+function createAllChannels() {
+    for (const vid of variantIds()) {
+        if (!VARIANTS[vid]) {
+            reportError(0x40, `unknown variant id: ${vid}`);
+            continue;
+        }
+        const v = VARIANTS[vid];
+        log("DC", `createDataChannel(${v.label}, ${JSON.stringify(v.init)})`);
+        const dc = pc.createDataChannel(v.label, v.init);
+        channels[vid] = dc;
+        wireChannel(vid, dc);
+    }
+}
+
+// ----- Signaling -----
+
+function connectWs() {
+    log("WS", "Connecting to " + WS_URL);
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        log("WS", "Connected");
+        window._interopResults.wsConnected = true;
+        setStatus("WS Connected — waiting for SDP…");
+        if (OFFERER) {
+            // Chrome as offerer: build the offer including m=application
+            // via createDataChannel().  createDataChannel() must be
+            // called BEFORE createOffer so the offer SDP carries the
+            // SCTP m-line.  doOffer() handles that ordering.
+            doOffer();
+        }
+    };
+
+    ws.onmessage = async (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); }
+        catch (e) {
+            log("WS", "Invalid JSON: " + evt.data);
+            return;
+        }
+        const t = msg.type;
+        log("WS", `→ ${t}`);
+        if (t === "offer") {
+            window._interopResults.sdpExchanged = true;
+            log("SDP", `offer received (len=${msg.sdp.length})`);
+            setStatus("Processing SDP offer…");
+            // Verify SCTP m-line
+            if (!/m=application\s+\d+\s+UDP\/DTLS\/SCTP/.test(msg.sdp)) {
+                reportError(0x21,
+                    "no m=application UDP/DTLS/SCTP in offer SDP");
+            }
+            if (!/a=sctp-port:\d+/.test(msg.sdp)) {
+                reportError(0x22,
+                    "no a=sctp-port:<N> in offer SDP");
+            }
+            try {
+                await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+                log("SDP", "setRemoteDescription(offer) OK — SCTP association ready");
+                // Chrome automatically establishes the SCTP association for
+                // m=application on setRemoteDescription.  We can now create
+                // DataChannels on it (answerer role).
+                createAllChannels();
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                log("SDP", "answer created, sending to signaling");
+                log("SDP_ANSWER_FULL", pc.localDescription.sdp);
+                sendWs({ type: "answer", sdp: answer.sdp });
+                addPendingCandidates();
+                setStatus("SDP Answer sent, DataChannels opening…");
+            } catch (e) {
+                reportError(0x23,
+                    "setRemoteDescription/createAnswer failed: " + e);
+            }
+        } else if (t === "answer") {
+            log("SDP", "answer received");
+            if (pc.signalingState === "have-local-offer") {
+                try {
+                    await pc.setRemoteDescription({ type: "answer",
+                                                     sdp: msg.sdp });
+                    addPendingCandidates();
+                } catch (e) {
+                    reportError(0x24,
+                        "setRemoteDescription(answer) failed: " + e);
+                }
+            }
+        } else if (t === "candidate") {
+            const cand = msg.candidate;
+            let sdpMid = msg.sdpMid;
+            let sdpMLineIndex = (typeof msg.sdpMLineIndex === "number")
+                ? msg.sdpMLineIndex : null;
+            if (sdpMid == null || sdpMLineIndex == null) {
+                const parsed = parseCandidate(cand);
+                if (parsed.sdpMid) sdpMid = parsed.sdpMid;
+                if (parsed.sdpMLineIndex != null) sdpMLineIndex = parsed.sdpMLineIndex;
+            }
+            if (sdpMid != null && sdpMLineIndex != null) {
+                const rtcCand = {
+                    candidate: cand, sdpMid, sdpMLineIndex,
+                };
+                if (pc.remoteDescription) {
+                    pc.addIceCandidate(rtcCand).catch(e =>
+                        log("ICE", "addIceCandidate error: " + e));
+                } else {
+                    pendingCandidates.push(rtcCand);
+                }
+            }
+        } else {
+            log("WS", "Unknown message type: " + t);
+        }
+    };
+
+    ws.onerror = (e) => {
+        reportError(0x11, "WebSocket error");
+    };
+    ws.onclose = (e) => {
+        log("WS", "closed: code=" + e.code);
+    };
+}
+
+async function doOffer() {
+    // Order matters: RTCPeerConnection only emits an m=application line
+    // for SCTP if at least one RTCDataChannel exists at offer time.
+    createAllChannels();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log("SDP_OFFER_FULL", pc.localDescription.sdp);
+    sendWs({ type: "offer", sdp: offer.sdp });
+    setStatus("SDP Offer sent, waiting for answer…");
+}
+
+function parseCandidate(cand) {
+    // Modern Chrome already populates sdpMid/sdpMLineIndex in the
+    // envelope; fall back to inline parsing for legacy peers.
+    const parts = cand.split(" ");
+    let sdpMid = null, sdpMLineIndex = null;
+    for (let i = 0; i < parts.length; i++) {
+        if (parts[i] === "mid" && i + 1 < parts.length)
+            sdpMid = parts[i + 1];
+        if (parts[i] === "mled" && i + 1 < parts.length)
+            sdpMLineIndex = parseInt(parts[i + 1], 10);
+    }
+    return { sdpMid, sdpMLineIndex };
+}
+
+// ----- End-of-run summary -----
+
+function summarize() {
+    log("RESULT", "=== DataChannel interop results ===");
+    log("RESULT", `wsConnected:  ${window._interopResults.wsConnected}`);
+    log("RESULT", `iceConnected: ${window._interopResults.iceConnected}`);
+    log("RESULT", `sdpExchanged: ${window._interopResults.sdpExchanged}`);
+    for (const vid of variantIds()) {
+        const r = window._interopResults.dc[vid];
+        log("RESULT",
+            `${vid}: open=${r.open} sent=${r.sent} recv=${r.recv} ` +
+            `recvPayload=${JSON.stringify(r.recvPayload)}`);
+    }
+    log("RESULT", `errors: ${JSON.stringify(window._interopResults.errors)}`);
+    log("RESULT", `exitCode: 0x${window._interopResults.exitCode.toString(16)}`);
+}
+
+window.addEventListener("load", () => {
+    log("INIT", `ROOM=${ROOM} WS=${WS_URL} OFFERER=${OFFERER} ` +
+                `variants=${VARIANT_PARAM}`);
+    pc = makePc();
+    window.pc = pc;
+    connectWs();
+    // In answerer mode, createAllChannels() is called inside the offer
+    // handler after setRemoteDescription(offer) returns (see ws.onmessage).
+    // In offerer mode, we create them inside doOffer() before
+    // createOffer() so the offer SDP carries the SCTP m-line.
+    if (!OFFERER) {
+        // nothing yet — wait for offer
+    }
+    // Schedule summary print so Playwright has something to scrape.
+    setTimeout(summarize, TIMEOUT_MS);
+});
+</script>
+</body>
+</html>

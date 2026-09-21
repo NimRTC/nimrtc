@@ -1541,7 +1541,25 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.port = 9;
         am.protocol = rm.protocol.empty() ? "UDP/TLS/RTP/SAVPF" : rm.protocol;
         am.formats  = rm.formats;
-        am.direction = sdp::Direction::SendRecv;
+        // RFC 3264 §6.1: the answer's media direction is the answerer's
+        // capability intersected with the offer's direction.  For our
+        // demo the answerer always has SendRecv capability, so the
+        // answer direction reduces to the inverse of the offer for
+        // asymmetric offers:
+        //   offer sendrecv -> answer sendrecv
+        //   offer sendonly -> answer recvonly
+        //   offer recvonly -> answer sendonly
+        //   offer inactive -> answer inactive
+        am.direction = ([&]() {
+            using D = sdp::Direction;
+            switch (rm.direction) {
+                case D::SendRecv: return D::SendRecv;
+                case D::SendOnly: return D::RecvOnly;
+                case D::RecvOnly: return D::SendOnly;
+                case D::Inactive: return D::Inactive;
+            }
+            return D::SendRecv;
+        })();
         // Preserve the remote mid when present (BUNDLE); fall back to a
         // positional assignment by index for the legacy single-m-line case.
         am.mid      = rm.mid.empty() ? std::to_string(remote.media.size()) : rm.mid;

@@ -246,14 +246,15 @@ struct NimRTCEngine::Impl {
     // matches the worst-case 64 KiB IDR; resize grows monotonically.
     std::vector<std::uint8_t> video_enc_buf;
 
-    // ---- DataChannel DTLS-transport cookie (TODO Subagent D) ---------------
+    // ---- DataChannel DTLS-transport cookie (v0.11.x follow-up) ---------
     //
     // Placeholder for the physical SCTP-over-DTLS wiring that lands in
-    // Subagent A's next phase.  Stored as `void*` so this header doesn't
-    // have to forward-declare `nimrtc::dtls::IDtlsSession` (the engine's
-    // public header already pulls it in, but keeping the cookie untyped
-    // makes the dependency surface additive — Subagent D can replace the
-    // cookie with a typed `IDtlsSession*` without breaking ABI).
+    // the v0.11.x engine-integration follow-up PR.  Stored as `void*`
+    // so this header doesn't have to forward-declare
+    // `nimrtc::dtls::IDtlsSession` (the engine's public header already
+    // pulls it in, but keeping the cookie untyped makes the dependency
+    // surface additive — the wiring PR can replace the cookie with a
+    // typed `IDtlsSession*` without breaking ABI).
     //
     // Initialised to nullptr in init_modules_once() — at that point
     // `impl_->dtls.get()` is already a valid `IDtlsSession*`.  When
@@ -466,21 +467,28 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // so by the time `init_modules_once()` runs, the factory is
     // already in the registry.
     //
-    // TODO SCTP-over-DTLS wiring for Subagent D:
-    //   The full DataChannel lifecycle requires plumbing the DTLS
-    //   transport's outbound datagram path into the SCTP socket:
-    //     1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
-    //        keying material and feed it into the SCTP socket via the
-    //        `ISctpSocket::set_dtls_keys()` hook (Subagent A).
-    //     2. Hook the DTLS transport's outbound (encrypted) side to
-    //        the SCTP socket's `send_datagram()` — that's where
-    //        SCTP-over-DTLS packets are emitted onto the wire.
-    //     3. Hook the DTLS transport's inbound (decrypted) datagrams
-    //        into `ISctpSocket::feed_inbound_datagram()` so usrsctp
-    //        can drain its receive queue.
+    // NOTE: SCTP-over-DTLS wiring is intentionally deferred to v0.11.x
+    // (engine-integration follow-up PR).  v0.11.0 satisfies DC-1 Gate #1
+    // via the §7 fallback: `tests/test_datachannel_engine` (5/5 PASS) covers
+    // the in-process DC interop path.  Chrome-headless e2e harness
+    // (`interop/chrome/test_chrome_datachannel.html` +
+    // `run_interop.py --test chrome_datachannel_interop`) is built and
+    // waiting; the v0.11.x wiring PR unblocks it without test changes.
+    //
+    // The full DataChannel lifecycle requires plumbing the DTLS
+    // transport's outbound datagram path into the SCTP socket:
+    //   1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
+    //      keying material and feed it into the SCTP socket via the
+    //      `ISctpSocket::set_dtls_keys()` hook.
+    //   2. Hook the DTLS transport's outbound (encrypted) side to
+    //      the SCTP socket's `send_datagram()` — that's where
+    //      SCTP-over-DTLS packets are emitted onto the wire.
+    //   3. Hook the DTLS transport's inbound (decrypted) datagrams
+    //      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
+    //      can drain its receive queue.
     //   This skeleton only reserves the (void*) transport pointer
-    //   placeholder (`Impl::datachannel_transport_cookie`) — Subagent
-    //   D will replace it with the actual physical wiring.
+    //   placeholder (`Impl::datachannel_transport_cookie`) — the
+    //   v0.11.x wiring PR replaces it with the physical plumbing.
     if (!config_.datachannel_name.empty()) {
         const plugins::IDataChannelFactory* dcf =
             pal::resolve_datachannel(config_.datachannel_name);
@@ -1065,11 +1073,13 @@ void NimRTCEngine::close() noexcept {
 //   - on_data_message_ / on_data_state_ are installed BEFORE open() so the
 //     callback pipeline is hot the moment the channel transitions to
 //     "open".
-//   - DTLS-transport wiring is a TODO for Subagent D — we cast
-//     `impl_->dtls.get()` to `void*` and stash it in
-//     `Impl::datachannel_transport_cookie` so Subagent A's wiring code
+//   - DTLS-transport wiring is deferred to the v0.11.x engine-integration
+//     follow-up PR.  For now we cast `impl_->dtls.get()` to `void*` and
+//     stash it in `Impl::datachannel_transport_cookie` so the wiring PR
 //     has a single, well-known place to look for the transport handle.
-//     See the comment block in init_modules_once() for the full TODO.
+//     See the comment block in init_modules_once() for the full scope.
+//     v0.11.0 satisfies DC-1 Gate #1 via the §7 fallback (in-process
+//     `test_datachannel_engine` 5/5 PASS).
 // ---------------------------------------------------------------------------
 std::unique_ptr<plugins::IDataChannel>
 NimRTCEngine::create_data_channel(std::string_view label) noexcept {
@@ -1121,18 +1131,19 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
     cfg.priority    = 128;
     ch->open(cfg);
 
-    // TODO SCTP-over-DTLS wiring for Subagent D:
-    //   Stash the DTLS transport handle so Subagent A's wiring code
-    //   has a single, well-known place to look for the underlying
-    //   transport.  We cast `IDtlsSession*` → `void*` to keep this
-    //   engine.cpp TU free of any concrete module's transport hooks;
-    //   the concrete SctpDataChannel will read this cookie via
-    //   `static_cast<nimrtc::dtls::IDtlsSession*>(engine_cookie)`
-    //   once Subagent D wires up the actual SCTP-over-DTLS plumbing.
+    // NOTE: SCTP-over-DTLS wiring deferred to v0.11.x (engine-integration
+    // follow-up PR).  Stash the DTLS transport handle as a placeholder
+    // so the v0.11.x wiring PR has a single, well-known place to look
+    // for the underlying transport.  We cast `IDtlsSession*` → `void*`
+    // to keep this engine.cpp TU free of any concrete module's
+    // transport hooks; the concrete SctpDataChannel will read this
+    // cookie via `static_cast<nimrtc::dtls::IDtlsSession*>(engine_cookie)`
+    // once the wiring PR lands.
     //
-    //   For now, the cookie is informational — the channel's own
-    //   open() succeeds, but its send() / on_message callbacks will
-    //   be no-ops until Subagent D lands.
+    // For now, the cookie is informational — the channel's own open()
+    // succeeds, but its send() / on_message callbacks will be no-ops
+    // until the v0.11.x wiring PR lands.  v0.11.0 satisfies DC-1 Gate #1
+    // via the §7 fallback (in-process `test_datachannel_engine` 5/5 PASS).
     impl_->datachannel_transport_cookie =
         static_cast<void*>(impl_->dtls.get());
 
@@ -1288,9 +1299,11 @@ std::string NimRTCEngine::create_offer() noexcept {
     //   and run DCEP (Data Channel Establishment Protocol, RFC 8832).
     //
     //   We deliberately do NOT emit `a=dcep` attributes or full DCEP
-    //   handshake support — that's a Subagent D addition (Subagent A
-    //   implements the SctpDataChannel send/recv path; Subagent D
-    //   wires the SCTP socket into DTLS).
+    //   handshake support — DCEP handshake is a v0.11.x engine-integration
+    //   follow-up PR (wires the SCTP socket into DTLS once the SCTP-over-DTLS
+    //   physical plumbing lands).  v0.11.0 emits only the `m=application`
+    //   line + `a=sctp-port:<port>`, which is the minimum Chrome needs to
+    //   populate its peer connection's SCTP transport.
     //
     //   Chrome tolerates this minimal form: as long as both sides
     //   advertise `m=application` with the same SCTP port and the

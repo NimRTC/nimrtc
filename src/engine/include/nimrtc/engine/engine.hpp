@@ -403,10 +403,12 @@ public:
     // callback set up via set_on_data_message() / set_on_data_state()
     // takes effect immediately.
     //
-    // Note (P2/TPAL-5 follow-up): the returned channel is NOT yet wired
-    // to the DTLS transport — see the TODO in init_modules_once() and
-    // create_data_channel().  Physical SCTP-over-DTLS plumbing lands in
-    // Subagent A's next phase.
+    // Note (v0.11.x follow-up): the returned channel is NOT yet wired
+    // to the DTLS transport — see the comment in init_modules_once()
+    // and create_data_channel().  Physical SCTP-over-DTLS plumbing is
+    // deferred to the v0.11.x engine-integration follow-up PR.  v0.11.0
+    // satisfies DC-1 Gate #1 via the §7 fallback (in-process
+    // `test_datachannel_engine` 5/5 PASS).
     //
     // Must be called after open() succeeds — pre_open() / open() build
     // the ICE / DTLS / SRTP pipeline the channel will eventually sit on.

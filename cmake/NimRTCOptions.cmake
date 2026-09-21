@@ -136,8 +136,16 @@ function(nimrtc_apply_options target)
 
         # LENIENT mode: relax warnings that are endemic to test harnesses
         # but never appear in production src/ code. See header comment.
+        # -Wno-pedantic is required because NimRTC's SCTP seam includes
+        # upstream usrsctp.h (a C99 header that uses flexible array
+        # members like `char sre_data[]`); GCC treats these as errors
+        # under -Wpedantic when compiled as C++. The usrsctp vendor
+        # target itself compiles the .c files as C, but any .cpp file
+        # that #includes <usrsctp.h> needs -Wno-pedantic to avoid the
+        # "ISO C++ forbids flexible array member" fatal.
         if(NIMRTC_OPT_LENIENT)
             target_compile_options(${target} PRIVATE
+                -Wno-pedantic
                 -Wno-old-style-cast
                 -Wno-unused-function
                 -Wno-format-nonliteral)

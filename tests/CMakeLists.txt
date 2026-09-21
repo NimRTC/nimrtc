@@ -113,6 +113,38 @@ endfunction()
 add_dtls_handshake_test(test_dtls_handshake_e2e test_dtls_handshake_e2e.cpp)
 
 # ----------------------------------------------------------------------------
+# ADR-013 (v0.12.0) — GMSSL TLCP DTLS 1.2 handshake round-trip test.
+#
+# OH-DOD-4 gate: verifies DtlsSessionGmSSL completes a full TLCP
+# (GM/T 0044) handshake in-process, exports symmetric SRTP keying material,
+# fires on_handshake_complete callbacks, and has zero error counts.
+# Compiles ONLY when NIMRTC_ENABLE_DTLS_GMSSL=ON (default OFF).
+#
+# OH-DOD-5 (OHOS-aarch64 cross-compile) uses the same test binary.
+# ----------------------------------------------------------------------------
+if(NIMRTC_ENABLE_DTLS_GMSSL)
+    function(add_dtls_gmssl_test name source)
+        add_executable(${name} ${source})
+        if(WIN32)
+            target_link_libraries(${name} PRIVATE ws2_32)
+        endif()
+        target_link_libraries(${name} PRIVATE nimrtc::dtls_seam)
+        nimrtc_link_gmssl(${name})
+        target_include_directories(${name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/src/core/include"
+            "${CMAKE_SOURCE_DIR}/src/dtls/include")
+        if(WIN32)
+            target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+        endif()
+        nimrtc_apply_options(${name} LENIENT)
+        add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+        set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+        nimrtc_copy_wolfssl_certs(${name})
+    endfunction()
+    add_dtls_gmssl_test(test_dtls_gmssl_tlcp test_dtls_gmssl_tlcp.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # P2.4-DTLS-regression: handshake-flight double-emission guard.
 #
 # Exercises a single retransmit cycle in isolation and asserts that
@@ -381,10 +413,16 @@ function(nimrtc_add_engine_test name source)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
-    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    # Engine tests that talk to a real usrsctp loopback can take up to
+    # ~60 s on slow CI runners (two 30 s wait_for_established calls +
+    # handshake jitter).  The default gtest TIMEOUT of 30 s is too tight
+    # and causes spurious "Test #... (Timeout)" failures on GitHub-hosted
+    # Windows runners; bump to 90 s to leave headroom without making
+    # real failures take too long to surface.
+    set_tests_properties(${name} PROPERTIES TIMEOUT 90)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
-            PROPERTIES TIMEOUT 30
+            PROPERTIES TIMEOUT 90
             DISCOVERY_TIMEOUT 10)
     endif()
 endfunction()

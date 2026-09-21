@@ -327,7 +327,7 @@ bool run_test() {
                 std::string s;
                 s.reserve(32);
                 static const char* h = "0123456789abcdef";
-                for (auto b : key) { s.push_back(h[(b >> 4) & 0xF]); s.push_back(h[b & 0xF]); }
+                for (auto byte : key) { s.push_back(h[(byte >> 4) & 0xF]); s.push_back(h[byte & 0xF]); }
                 return s;
             };
             std::fprintf(stderr,
@@ -370,7 +370,7 @@ bool run_test() {
     // each side — proves key derivation ran end-to-end without relying
     // on a specific byte being non-zero.
     auto has_nonzero_byte = [](const auto& key) {
-        for (auto b : key) if (b != 0) return true;
+        for (auto byte : key) if (byte != 0) return true;
         return false;
     };
     const bool pass =

@@ -24,6 +24,11 @@ namespace {
 using namespace nimrtc;
 using namespace nimrtc::bwe;
 
+// Default scheduling step; reserved for future pacing/feedback-step tests.
+// Suppress -Wunused-const-variable on toolchains that warn here.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr auto kStep = std::chrono::milliseconds(50);
 
 inline core::TimePoint now_plus(core::TimePoint base, std::chrono::milliseconds delta) {

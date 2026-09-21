@@ -60,9 +60,6 @@ struct ArqDtlsSide {
     std::atomic<bool> connected{false};
     std::atomic<int>  arq_sent{0};
     std::atomic<int>  arq_recv{0};
-    std::atomic<int>  dtls_rec_in{0};
-    std::atomic<int>  dtls_rec_out{0};
-    std::atomic<int>  dtls_retrans{0};
 
     // Endpoint of the PEER side.  Set after we know the peer's local port.
     std::uint16_t peer_port = 0;

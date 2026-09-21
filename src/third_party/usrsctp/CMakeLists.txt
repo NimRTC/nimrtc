@@ -145,6 +145,17 @@ target_compile_definitions(nimrtc_vendor_usrsctp
         SCTP_DEBUG=1                              # sctp_debug option default
 )
 
+# Linux: enable _GNU_SOURCE so <netinet/in.h> exposes the IPv6 advanced
+# API (struct in6_pktinfo, struct in6_addr, IPV6_RECVPKTINFO, etc.).
+# Without this, user_recv_thread.c fails to compile on glibc-based
+# systems with "error: invalid application of 'sizeof' to incomplete
+# type 'struct in6_pktinfo'".  macOS uses the __APPLE_USE_RFC_3542
+# branch above and Windows uses a separate codepath; the flag is
+# therefore a no-op outside Linux.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(nimrtc_vendor_usrsctp PRIVATE _GNU_SOURCE=1)
+endif()
+
 # Windows: link Winsock + ip helper API. upstream usrsctplib/CMakeLists.txt
 # only adds ws2_32 + iphlpapi; we add the same set. If link errors
 # pop up (e.g. getaddrinfo is in normal ws2_32 already), the test

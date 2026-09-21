@@ -152,12 +152,20 @@ function(nimrtc_apply_options target)
         endif()
     endif()
 
-    if(NIMRTC_WARNINGS_AS_ERRORS AND NOT NIMRTC_OPT_LENIENT)
-        if(MSVC)
-            target_compile_options(${target} PRIVATE /WX)
-        else()
-            target_compile_options(${target} PRIVATE -Werror)
-        endif()
+    # Vendored third-party library targets (nimrtc_vendor_*) must NEVER
+    # get -Werror. Their source trees ship with upstream warnings that are
+    # not under our control and are not our responsibility to fix.  Enabling
+    # -Werror on them (e.g. on macOS where wolfSSL headers use old-style
+    # C casts that transitively affect nimrtc_dtls) breaks the build with
+    # no recourse other than patching upstream — which we don't want to do.
+    string(TOLOWER "${target}" _target_lower)
+    if(_target_lower MATCHES "^nimrtc_vendor_")
+        return()
+    endif()
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /WX)
+    else()
+        target_compile_options(${target} PRIVATE -Werror)
     endif()
 
     # -------------------------------------------------------------------------

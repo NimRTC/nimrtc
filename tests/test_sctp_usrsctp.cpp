@@ -298,8 +298,11 @@ TEST_F(SctpUsrsctpTest, PartialReliableTtlDrop) {
     const std::uint16_t b_port = sock_b->local_port();
     ASSERT_NE(b_port, 0u);
     ASSERT_EQ(sock_a->connect("127.0.0.1", b_port), plugins::kOk);
-    ASSERT_TRUE(sock_a->wait_for_established(std::chrono::seconds(5)));
-    ASSERT_TRUE(sock_b->wait_for_established(std::chrono::seconds(5)));
+    // 30 s timeout: usrsctp 0.9.5.0 SCTP handshake on Windows GitHub
+    // Actions runners can be slow; 5 s was too tight and caused
+    // spurious timeout failures (e.g. PartialReliableTtlDrop CI failure).
+    ASSERT_TRUE(sock_a->wait_for_established(std::chrono::seconds(30)));
+    ASSERT_TRUE(sock_b->wait_for_established(std::chrono::seconds(30)));
 
     // Send a TTL-bound message from B to A.
     //

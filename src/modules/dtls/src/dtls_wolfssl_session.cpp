@@ -295,11 +295,18 @@ inline void hex_dump_record(const char* dir, const void* buf, std::size_t n) {
     if (n < 13) return;     // not a full DTLS record header
     const auto* p = static_cast<const std::uint8_t*>(buf);
     // content_type | version | epoch | sequence_number | length | data…
-    std::uint16_t ver    = (static_cast<std::uint16_t>(p[1]) << 8) | p[2];
-    std::uint16_t epoch  = (static_cast<std::uint16_t>(p[3]) << 8) | p[4];
+    // Note: cast to unsigned BEFORE the shift to prevent integer-promotion
+    // to signed int (which triggers -Wimplicit-int-conversion with
+    // -Werror on Apple Clang 15).  The final static_cast to uint16_t
+    // is then a safe narrowing conversion with no precision loss.
+    std::uint16_t ver    = static_cast<std::uint16_t>(
+        (static_cast<unsigned>(p[1]) << 8) | static_cast<unsigned>(p[2]));
+    std::uint16_t epoch  = static_cast<std::uint16_t>(
+        (static_cast<unsigned>(p[3]) << 8) | static_cast<unsigned>(p[4]));
     std::uint64_t seq    = 0;
     for (int i = 0; i < 6; ++i) seq = (seq << 8) | p[5 + i];
-    std::uint16_t len    = (std::uint16_t(p[11]) << 8) | p[12];
+    std::uint16_t len    = static_cast<std::uint16_t>(
+        (static_cast<unsigned>(p[11]) << 8) | static_cast<unsigned>(p[12]));
     const char* ct_name  = "?";
     switch (p[0]) {
         case 20: ct_name = "ChangeCipherSpec"; break;

@@ -261,13 +261,30 @@ def run_chrome_interop() -> bool:
             if i < 0:
                 print("[FAIL] no results marker found in chrome log")
             else:
-                tail_block = text[i + len(marker):]
-                j = tail_block.find("{")
-                k = tail_block.find("}", j) if j >= 0 else -1
-                if j < 0 or k < 0:
-                    print("[FAIL] could not locate JSON in results block")
+                tail_block = text[i + len(marker):].lstrip()
+                # Find JSON object boundaries by counting braces.
+                # The Chrome interop script dumps json.dumps(results, indent=2)
+                # so the output spans multiple lines.  Simply finding the first
+                # "}" would incorrectly truncate nested objects (e.g.
+                # {"errors": []}).  Instead, we walk the string and count
+                # nesting depth to find the matching closing brace.
+                depth = 0
+                start = -1
+                end = -1
+                for idx, ch in enumerate(tail_block):
+                    if ch == '{':
+                        if start < 0:
+                            start = idx
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = idx + 1
+                            break
+                if start < 0 or end < 0:
+                    print("[FAIL] could not locate JSON braces in results block")
                 else:
-                    cand = tail_block[j:k+1]
+                    cand = tail_block[start:end]
                     try:
                         results_obj = json.loads(cand)
                     except json.JSONDecodeError as e:

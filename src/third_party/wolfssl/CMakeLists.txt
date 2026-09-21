@@ -94,9 +94,21 @@ set(WOLFSSL_KEEP_PEER_CERT "yes" CACHE BOOL "Keep peer certificate after handsha
 set(WOLFSSL_EXAMPLES "no" CACHE BOOL "Disable wolfssl examples" FORCE)
 set(WOLFSSL_TEST_SUBMIT "no" CACHE BOOL "Disable wolfssl tests" FORCE)
 
+# NIMRTC CI NOTE: wolfSSL upstream (tested with 5.9.2) contains
+# old-style C casts and other warnings that trigger -Wold-style-cast
+# and related flags under NIMRTC_WARNINGS_AS_ERRORS=ON on Apple Clang 15.
+# We suppress -Werror for the wolfSSL build tree only; NimRTC targets
+# outside this block are unaffected and still get -Werror from
+# nimrtc_apply_options().
+set(_nimrtc_werror_backup ${NIMRTC_WARNINGS_AS_ERRORS})
+set(NIMRTC_WARNINGS_AS_ERRORS OFF)
+
 # 添加 wolfSSL 官方构建
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${_src_dir} wolfssl_build)
+
+set(NIMRTC_WARNINGS_AS_ERRORS ${_nimrtc_werror_backup})
+unset(_nimrtc_werror_backup)
 
 # 强制启用 KEEP_PEER_CERT，使 wolfSSL 在握手完成后保留 peer X509 证书。
 # 这是 WebRTC SDP fingerprint 校验的必要条件：握手后调

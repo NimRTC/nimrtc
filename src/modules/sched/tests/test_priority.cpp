@@ -43,10 +43,16 @@ constexpr std::array<std::uint8_t, 4> kPayload = {0xAA, 0xBB, 0xCC, 0xDD};
 
 /** Per-test stream_id assignments.  We keep stream_ids distinct so the
  *  order of drained packets uniquely determines which bucket each one
- *  came from (we then look up the bucket via get_stream_priority()). */
+ *  came from (we then look up the bucket via get_stream_priority()).
+ *  kStreamNormalB is reserved for future Normal-bucket scenarios; mark
+ *  it [[maybe_unused]] so Clang's -Wunused-const-variable under -Werror
+ *  doesn't reject the file. */
 constexpr std::uint32_t kStreamHighA   = 1001;
 constexpr std::uint32_t kStreamHighB   = 1002;
 constexpr std::uint32_t kStreamNormalA = 2001;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint32_t kStreamNormalB = 2002;
 constexpr std::uint32_t kStreamLowA    = 3001;
 constexpr std::uint32_t kStreamLowB    = 3002;

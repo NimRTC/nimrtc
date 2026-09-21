@@ -42,10 +42,13 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
 - **Current state:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop,
-  in-process SFU relay, PCM tap on WebRTC APM, AI Agent demo, and the
-  full 5-variant assembly Profile library now in scope. P1 closed at
-  v0.10.3 (final tech-preview patch). Production-grade quality lands
-  in P3 / P4.
+  L1 strict-priority scheduling, PCM tap on WebRTC APM, AI Agent demo,
+  and the full 5-variant assembly Profile library now in scope.
+  In-process SFU relay, DC forwarding policy, and `sfu-relay` benchmark
+  are deferred to the pre-1.0 decision window (see
+  [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)).
+  P1 closed at v0.10.3 (final tech-preview patch). Production-grade
+  quality lands in P3 / P4.
 
 ---
 
@@ -475,18 +478,25 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | PAL Slice 8 — 4 typed transport-layer registry hooks | ✅ | v0.10.2 |
 | TAP-1 — PCM tap on WebRTC APM (`set_pre_process_tap` / `set_post_process_tap` + int16 ASR variant) | ✅ | v0.11.0 |
 | TPAL-4 cleanup — `EngineConfig::dtls_name` field for guomi_sm4 / OpenSSL / BoringSSL backend selection | ✅ | v0.11.0 |
-| TPAL-5 — SCTP usrsctp backend (`UsrsctpSocketFactory` id=`"usrsctp"` registered alongside `SctpStubFactory` id=`"stub"`) | ✅ Stage 1 | v0.11.0 |
+| TPAL-5 — SCTP usrsctp backend (`UsrsctpSocketFactory` id=`"usrsctp"` registered alongside `SctpStubFactory` id=`"stub"`), Stage 2 in-process SCTP handshake + datagram echo + PR-SCTP TTL seam | ✅ | v0.11.0 |
 | PROFILE-1 — 5-variant Profile library (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`), JSON schema v1.0 canonical | ✅ | v0.11.0 |
 | Profile regression — `JsonFileMatchesBuiltinConstant` field-equality test across 32 subtests | ✅ | v0.11.0 |
+| SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ Deferred | pre-1.0 decision window (per `docs/plan/v0.11-plan.md` §2.2) |
+| DC-3 — DC forwarding policy in SFU relay context | ⏸️ Deferred | pre-1.0 (depends on SFU-1) |
+| BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ Deferred | pre-1.0 (depends on SFU-1) |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
 > v0.11.0 is the **Beta 前哨** minor — first release that ships P2 content
-> (DataChannel interop foundation, in-process SFU relay, PCM tap, AI Agent
-> hooks, full Profile library). v0.10 closed the v0.9 wrap-up + PAL Slice 1
+> (DataChannel interop foundation, L1 strict-priority scheduling, PCM tap,
+> AI Agent hooks, full Profile library). v0.10 closed the v0.9 wrap-up + PAL Slice 1
 > refactor; v0.10.x (v0.10.1–v0.10.3) finished the PAL Slice 2–8
-> infrastructure that v0.11.0 builds on. Remaining v0.11.0 work
-> (DC-1 SCTP handshake / SFU-1 module / DC-2 L1 send scheduling / DEMO-1
-> AI Agent gateway demo) is tracked in `docs/plan/v0.11-plan.md`. See
+> infrastructure that v0.11.0 builds on. **In-process SFU relay
+> (`nimrtc_sfu`), DC forwarding policy, and sfu-relay benchmark are
+> explicitly deferred to the pre-1.0 decision window** — see
+> [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
+> for rationale. Remaining v0.11.0 work
+> (DoD Gate #1: Chrome ↔ NimRTC DC e2e interop test) is tracked in
+> `docs/plan/v0.11-plan.md`. See
 > [Roadmap](#roadmap-p1p4-condensed).
 
 ---

@@ -396,11 +396,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   usrsctp 0.9.5.0 at `src/third_party/usrsctp/`.  The Slice-5 seam
   surface (`send_datagram` / `send_stream` / `send_partial_reliable` /
   `set_on_recv`) is fully wired and callable through
-  `core::PluginRegistry::get_sctp_socket("usrsctp")`, but the
+  `core::PluginRegistry::get_sctp_socket("usrsctp")`, and the
   **SCTP association handshake** (`usrsctp_listen` /
-  `usrsctp_connect`) is **deferred to TPAL-5 Stage 2 follow-up** —
-  end-to-end sends require a live association, which v0.11.0
-  Stage 1 does not yet establish.
+  `usrsctp_connect`) **已落地** in TPAL-5 Stage 2 — two
+  `UsrsctpSocket` instances on `127.0.0.1` complete the
+  SCTP INIT/INIT-ACK handshake via the shared userspace UDP socket
+  (`s_acquire_shared_udp()` / `s_release_shared_udp()` wrapped with
+  `SCTP_REMOTE_UDP_ENCAPS_PORT` per RFC 6951), with state
+  transitions (`kUnbound → kListening/kConnecting → kEstablished`)
+  driven by `SCTP_ASSOC_CHANGE` notifications on the per-instance
+  recv callback. End-to-end sends now work over a live association.
 - **v0.10.x callers that explicitly pick `id="stub"` continue to
   work** — TPAL-5 Stage 1 is purely additive; the engine does NOT
   silently switch the default backend.  The stub stays as the
@@ -415,27 +420,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out of the upstream type contract and surfaces as a corrupt
   `rcvinfo` read by the `OnRecv` dispatcher.  Stage 1 fixes this
   before the handshake lights up the trampoline path on receive.
-- **`tests/test_sctp_usrsctp.exe`**: 2 PASS + 2 SKIPPED out of 4.
-  Factory-registration (`UsrsctpSocketFactory` reachable via
-  `get_sctp_socket("usrsctp")`) and stub-not-displaced regression
-  (`get_sctp_socket("stub")` still returns `SctpStubFactory`) PASS.
-  The two loopback subtests use `GTEST_SKIP()` with a detailed
-  Stage-2 plan captured inline: (1) `usrsctp_listen` on a UDP
-  socket + `usrsctp_connect` mirror to same port + accept callback,
-  (2) `send_stream` + recv callback with a single 16-byte payload.
-  Resolving both unlocks the SCTP association handshake path that
-  DC-1 (Chrome ↔ NimRTC DataChannel interop) needs.
+- **`tests/test_sctp_usrsctp.exe`**: 4/4 PASS. Factory-registration
+  (`UsrsctpSocketFactory` reachable via `get_sctp_socket("usrsctp")`)
+  + stub-not-displaced regression (`get_sctp_socket("stub")` still
+  returns `SctpStubFactory`) + `LoopbackDatagramRoundTrip` (in-process
+  SCTP association handshake + 64-byte datagram echo through
+  shared UDP socket + `SCTP_REMOTE_UDP_ENCAPS_PORT` RFC 6951
+  encapsulation) + `PartialReliableTtlDrop` (PR-SCTP TTL seam
+  reachable; best-effort recv assertion per known usrsctp 0.9.5.0
+  Windows MSVCRT WSAELOOP limitation) all PASS.
 
 ---
 
 ## [Unreleased]
 
-> No unreleased changes yet. The next planned release is **v0.12.0**
-> (P3 client quality + ref_frame), tracked in `docs/plan/v0.12-plan.md`.
-> Items to land there: Adaptive JB + Goog-CC BWE, partial reliable TTL
-> timeline, command-frame correlation API, cloudgame profile.
-
-- DC-2: L1 strict-priority sending scheduler (High/Normal/Low buckets, dynamic re-prioritization, new unit test).
+> No unreleased changes yet. The next planned release is **v0.11.0**
+> (Beta 前哨), tracked in `docs/plan/v0.11-plan.md`. Items landed in
+> v0.11.0 cycle include RFC-1 (PCM Tap Final), TPAL-4 (DTLS seam +
+> `Config::dtls_name`), TPAL-5 (`UsrsctpSocketFactory` + Stage 2
+> SCTP handshake), DC-1 (`SctpDataChannel`), DC-2 (L1 strict-priority
+> scheduler), TAP-1 (PCM tap on WebRTC APM), PROFILE-1 (5-variant
+> Profile library + 32/32 regression), DEMO-1 (`demo-agent-gateway`),
+> DISC-1 (GitHub Discussions enabled).
 
 ---
 

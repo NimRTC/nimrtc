@@ -134,6 +134,24 @@ function(nimrtc_apply_options target)
         endif()
     endif()
 
+    # -------------------------------------------------------------------------
+    # OpenHarmony (OHOS) musl-specific defines
+    # -------------------------------------------------------------------------
+    # OHOS uses musl libc; auto-defined by the musl compiler, but we add
+    # it explicitly so downstream code can `__has_include(<features.h>)`
+    # style checks remain stable when cross-compiling from a glibc host.
+    if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+        target_compile_definitions(${target} PRIVATE
+            NIMRTC_PLATFORM_OHOS=1
+            _LIBCPP_HAS_MUSL_LIBC=1)
+        # OHOS native runtime defaults to c++_shared (shared libc++).
+        # cache var OHOS_STL was set in the toolchain file.
+        if(OHOS_STL STREQUAL "c++_shared")
+            target_compile_options(${target} PRIVATE
+                -stdlib=libc++)
+        endif()
+    endif()
+
     if(NIMRTC_WARNINGS_AS_ERRORS AND NOT NIMRTC_OPT_LENIENT)
         if(MSVC)
             target_compile_options(${target} PRIVATE /WX)

@@ -56,6 +56,11 @@ namespace {
 // libopus's frame_size must be one of the allowed durations × Fs.  NimRTC
 // targets 20 ms frames — a WebRTC-compatible default.
 constexpr std::size_t kSamplesPer20Ms48K = 960;   // 48 kHz × 20 ms
+// Reserved for future 10 ms (or finer-grained) frame-size knob — keep the
+// symbol available without tripping -Werror=unused-const-variable on Clang.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::size_t kSamplesPer10Ms48K = 480;   // 48 kHz × 10 ms
 constexpr std::size_t kSamplesPerFrame   = kSamplesPer20Ms48K;  // P1 default
 

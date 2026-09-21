@@ -1,6 +1,6 @@
 # OpenHarmony 平台支持开发计划
 
-> **Status: DRAFT.** 决策点（target version、是否与 GMSSL 后端绑定）未拍板；先冻结文档结构，§2.3 / §8 的开放问题在第一次评审时关闭。本文不替代 `docs/zh/architecture.md` §13 路线图，是 OpenHarmony 平台 + GM/T 密码栈的子项计划。
+> **Status: Stage 0 已合并 ✅ | Stage 1 进行中 🔶（静态分析完成，OH-DOD-1 待 OHOS SDK 验证）**本文不替代 `docs/zh/architecture.md` §13 路线图，是 OpenHarmony 平台 + GM/T 密码栈的子项计划。
 
 | | |
 |---|---|
@@ -187,12 +187,14 @@ OHOS 平台音频采集 API：
 
 **出口准则（OH-DOD-0）**：独立 PR review 通过；`cmake --preset debug.ohos-arm64` 零 error 配置通过（OHOS SDK 已安装环境）。
 
-### 阶段 1：现有 4 平台产物在 OHOS 上跑通（OH-POSIX-1 / OH-POSIX-2 / R1 musl 验证）—— 1–2 周
+### 阶段 1：现有 4 平台产物在 OHOS 上跑通（OH-POSIX-1 / OH-POSIX-2 / R1 musl 验证）—— 1–2 周 🔶 IN PROGRESS
+
+**当前状态（2026-09-21）**：静态分析完成。`docs/plan/ohos-musl-compat.md` 已产出，记录 R-Audit R1 逐项核对结果。源码层面 R1 零强制改动需求（见该文档）。
 
 具体动作：
 1. 在 OHOS toolchain 上编译所有非测试 target：`nimrtc_core_objects` / `nimrtc_engine` / `nimrtc_dtls_seam` / `nimrtc_dtls` / `nimrtc_srtp` / `nimrtc_opus` / `nimrtc_rtp` / `nimrtc_ice` / `nimrtc_sctp` / `nimrtc_raw_udp` / `nimrtc_transport`
 2. 用 wolfSSL 作为 DTLS 后端（不切 GMSSL，先保证"现有产品在 OHOS 上跑通"）
-3. 验证 §4.1 R1 风险表中各点；记录 R1 实际触发的补丁到 `docs/plan/ohos-musl-compat.md`（issue 级记录，不必成文）
+3. 验证 §4.1 R1 风险表中各点；记录 R1 实际触发的补丁到 `docs/plan/ohos-musl-compat.md`
 4. **测试准入**：cTest 在 OHOS 上**不要求**全绿（OH-TEST-1，OH-CI-1 关联）；最低要求是 `tests/test_dtls_gcm_aead`（纯本地 AES-GCM round-trip，无网络栈依赖）在 OHOS 上能编译并跑通
 5. vendor 库（libopus / libsrtp / libjuice）OHOS 兼容性一次性扫一遍；预期 0–2 个小补丁
 

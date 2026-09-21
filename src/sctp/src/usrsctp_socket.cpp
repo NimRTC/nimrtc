@@ -64,7 +64,6 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 using socket_fd_t = SOCKET;
-constexpr socket_fd_t kInvalidSocket = INVALID_SOCKET;
 inline int close_socket(socket_fd_t s) { return closesocket(s); }
 #else
 #include <arpa/inet.h>
@@ -72,7 +71,6 @@ inline int close_socket(socket_fd_t s) { return closesocket(s); }
 #include <sys/socket.h>
 #include <unistd.h>
 using socket_fd_t = int;
-constexpr socket_fd_t kInvalidSocket = -1;
 inline int close_socket(socket_fd_t s) { return ::close(s); }
 #endif
 
@@ -219,7 +217,6 @@ std::atomic<bool>                       g_shared_udp_should_stop{false};
 // id here.
 std::mutex                              g_endpoint_mu;
 std::unordered_map<std::uint16_t, void*> g_endpoint_registry;
-std::atomic<std::uintptr_t>             g_next_endpoint_id{1};
 
 void finish_usrsctp_once() noexcept {
     // usrsctp_finish() drains its internal state and shuts down the

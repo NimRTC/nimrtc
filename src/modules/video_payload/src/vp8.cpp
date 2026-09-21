@@ -48,9 +48,9 @@ ParseResult parse(core::ByteSpan payload) noexcept {
             if (pic & 0x80) {
                 // M=1 → 16-bit picture ID follows.
                 if (pos + 1 >= payload.size()) return r;
-                const std::uint16_t pic16 =
+                const std::uint16_t pic16 = static_cast<std::uint16_t>(
                     (static_cast<std::uint16_t>(pic & 0x7F) << 8)
-                  |  static_cast<std::uint16_t>(payload[pos]);
+                  |  static_cast<std::uint16_t>(payload[pos]));
                 r.desc.picture_id_16bit = true;
                 r.desc.picture_id       = static_cast<std::int32_t>(pic16);
                 pos += 1;

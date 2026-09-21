@@ -68,9 +68,9 @@ StapAResult parse_stap_a(core::ByteSpan payload) noexcept {
 
     std::size_t pos = 1;
     while (pos + 2 <= payload.size()) {
-        const std::uint16_t nalu_len =
+        const std::uint16_t nalu_len = static_cast<std::uint16_t>(
             (static_cast<std::uint16_t>(payload[pos])     << 8)
-          |  static_cast<std::uint16_t>(payload[pos + 1]);
+          |  static_cast<std::uint16_t>(payload[pos + 1]));
         pos += 2;
         if (nalu_len == 0 || pos + nalu_len > payload.size()) break;
 

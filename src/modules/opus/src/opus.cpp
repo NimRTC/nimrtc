@@ -83,6 +83,17 @@ inline bool is_valid_frame_size(std::size_t samples_per_channel) noexcept {
 
 constexpr auto kLog = core::log::Level::Debug;
 
+// Format-string attribute required by Clang/GCC to suppress
+// -Wformat-nonliteral on this variadic helper (the format string
+// comes from the caller; the compiler cannot prove it is a literal).
+// Forward-declare with the attribute, then define separately so GCC
+// (which rejects attributes on inline function *definitions*) is
+// happy with the same syntax as Clang.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+inline void opus_debug(const char* fmt, ...) noexcept;
+
 inline void opus_debug(const char* fmt, ...) noexcept {
     if (core::log::Logger::instance().level() <= kLog) {
         char buf[256];

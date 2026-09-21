@@ -186,8 +186,8 @@ struct TinySocket {
         if (now >= deadline) return false;
         auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
                               deadline - now).count();
-        tv.tv_sec = static_cast<long>(remaining / 1'000'000);
-        tv.tv_usec = static_cast<long>(remaining % 1'000'000);
+        tv.tv_sec = static_cast<decltype(tv.tv_sec)>(remaining / 1'000'000);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>(remaining % 1'000'000);
         ::setsockopt(s_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         sockaddr_in from{};
         socklen_t_ fl = sizeof(from);

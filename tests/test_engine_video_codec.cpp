@@ -188,11 +188,6 @@ TEST_F(EngineVideoCodec, send_video_encodes_and_emits_packets) {
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    // Collect packets emitted by the sender's packet callback.
-    std::atomic<int> packets_seen{0};
-    std::atomic<std::uint32_t> last_rtp_ts{0};
-    std::atomic<std::uint16_t> last_seq{0};
-
     // Intercept the sender's packet callback by replacing the sender's config.
     // The engine wires this callback during init_video_plugins(); we can't
     // easily replace it after the fact — instead we hook into the sender stats

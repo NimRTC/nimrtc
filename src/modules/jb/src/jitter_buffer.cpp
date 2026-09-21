@@ -21,7 +21,11 @@ namespace {
 // (Default playout delays moved to JitterBuffer::Impl::base_delay_for_pt() —
 // per-payload-type heuristic that also accounts for narrowband vs wideband.)
 
-inline void jb_debug(const char* fmt, ...) {
+inline void jb_debug(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+{
     if (core::log::Logger::instance().level() <= core::log::Level::Debug) {
         char buf[256];
         va_list args;
@@ -32,7 +36,11 @@ inline void jb_debug(const char* fmt, ...) {
     }
 }
 
-inline void jb_trace(const char* fmt, ...) {
+inline void jb_trace(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+{
     if (core::log::Logger::instance().level() <= core::log::Level::Trace) {
         char buf[256];
         va_list args;

@@ -42,3 +42,14 @@ endfunction()
 
 # Slice 4 factory smoke test (4 subtests — see test_dtls_factory.cpp).
 nimrtc_add_dtls_seam_test(test_dtls_factory test_dtls_factory.cpp)
+
+# TPAL-4 (v0.11.0) — seam mock-factory test.  Registers a
+# MockDtlsFactory under a non-default id and verifies the engine's
+# registry lookup, factory.resolve(), session vtable, and
+# same-id overwrite semantics all behave correctly.  This is the
+# substitution-bench for a future 国密 / OpenSSL / BoringSSL /
+# mbedTLS backend; running a real DTLS through the mock and then
+# re-pointing the engine at it is the testbed for Slice 6+ /
+# national-backend verification.
+nimrtc_add_dtls_seam_test(test_dtls_seam_mock_factory
+                          test_dtls_seam_mock_factory.cpp)

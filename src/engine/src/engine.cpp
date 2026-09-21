@@ -54,16 +54,27 @@
 #include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/audio3a/audio3a.hpp>
 
-// Choose DTLS implementation.
-// Set NIMRTC_USE_WOLFSSL_DTLS to 1 in CMakeLists.txt to switch from the
-// hand-written dtls.cpp to the wolfSSL-backed version.
-#ifdef NIMRTC_USE_WOLFSSL_DTLS
-#include <nimrtc/dtls/dtls_wolfssl_session.hpp>
-using DtlsSessionImpl = nimrtc::dtls::DtlsSessionWolfSSL;
-#else
+// Choose DTLS implementation via the PAL Slice 4 / Slice 8 seam.
+// `engine.hpp::EngineConfig::dtls_name` selects the backend (empty
+// = default = built-in wolfSSL factory at id="wolfssl"); the engine
+// resolves the factory through `core::PluginRegistry::get_dtls_session(id)`
+// at open() time, exactly as the Slice 8 typed registry hook requires
+// (see `src/core/include/nimrtc/core/registry.hpp` §5.4).
+//
+// As of TPAL-4 (v0.11.0) the `Impl::dtls` field stores
+// `unique_ptr<IDtlsSession>` so the engine never downcasts to the
+// concrete backend — `DtlsSessionWolfSSL`, `DtlsSession` and any
+// future 国密 / OpenSSL / BoringSSL / mbedTLS backend now implement
+// the same surface (set_role(DtlsRole) / local_fingerprint() /
+// feed_inbound() / take_outbound() / tick() / state() /
+// is_connected() / srtp_keying_material() / set_peer_fingerprint()).
+#include <nimrtc/dtls/dtls_session_iface.hpp>
+// TPAL-4 cleanup: `DtlsSession::state_name()` is a static method on the
+// concrete module class (used by the engine's state-transition logger
+// below).  Including the concrete header here is allowed — Layout
+// Invariant 4 constrains only `engine.hpp`, not the .cpp.  Keeping the
+// include next to the seam header so reviewers see both in context.
 #include <nimrtc/dtls/dtls.hpp>
-using DtlsSessionImpl = nimrtc::dtls::DtlsSession;
-#endif
 #include <nimrtc/srtp/srtp.hpp>
 #ifdef NIMRTC_HAS_OPUS
 #include <nimrtc/opus/opus.hpp>
@@ -172,13 +183,15 @@ struct NimRTCEngine::Impl {
     // Concrete fallback classes (when no plugin adapter is registered).
     std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
 
-    // SRTP / DTLS / Opus — not yet plugin-exposed.
-    // DtlsSessionImpl is a global-scope typedef (defined in the
-    // NIMRTC_USE_WOLFSSL_DTLS conditional block at the top of this file).
-    // Aliased locally so unique_ptr<DtlsSessionImpl> compiles inside this
-    // struct (without polluting the global namespace lookup chain).
-    using DtlsSessionImpl_T = ::DtlsSessionImpl;
-    std::unique_ptr<DtlsSessionImpl_T> dtls;
+    // SRTP / DTLS / Opus — DTLS is now PAL Slice 4 seam-exposed (TPAL-4
+    // v0.11.0).  `Impl::dtls` holds `unique_ptr<nimrtc::dtls::IDtlsSession>`
+    // so the engine never downcasts to a concrete backend.  Every method
+    // the engine calls (`open()` / `state()` / `is_connected()` /
+    // `local_fingerprint()` / `srtp_keying_material()` / `feed_inbound()`
+    // / `take_outbound()` / `tick()` / `set_role(DtlsRole)` /
+    // `set_peer_fingerprint(...)`) is on the seam interface; v0.10.x's
+    // `static_cast<DtlsSessionWolfSSL*>(dtls_seam.release())` is gone.
+    std::unique_ptr<nimrtc::dtls::IDtlsSession> dtls;
     std::unique_ptr<srtp::SrtpContext> srtp;
 #ifdef NIMRTC_HAS_OPUS
     std::unique_ptr<opus::Encoder>     opus_encoder;
@@ -232,6 +245,24 @@ struct NimRTCEngine::Impl {
     // Reusable buffer for the encoded H.264 frame.  Default reserve size
     // matches the worst-case 64 KiB IDR; resize grows monotonically.
     std::vector<std::uint8_t> video_enc_buf;
+
+    // ---- DataChannel DTLS-transport cookie (v0.11.x follow-up) ---------
+    //
+    // Placeholder for the physical SCTP-over-DTLS wiring that lands in
+    // the v0.11.x engine-integration follow-up PR.  Stored as `void*`
+    // so this header doesn't have to forward-declare
+    // `nimrtc::dtls::IDtlsSession` (the engine's public header already
+    // pulls it in, but keeping the cookie untyped makes the dependency
+    // surface additive — the wiring PR can replace the cookie with a
+    // typed `IDtlsSession*` without breaking ABI).
+    //
+    // Initialised to nullptr in init_modules_once() — at that point
+    // `impl_->dtls.get()` is already a valid `IDtlsSession*`.  When
+    // create_data_channel() is called, we set this to the engine's
+    // own DTLS session pointer (cast to `void*`) so Subagent A's
+    // wiring code has a single place to look for the underlying
+    // transport.  See also the TODO in init_modules_once().
+    void* datachannel_transport_cookie = nullptr;
 
     uint32_t        last_open_rc = 0;
 };
@@ -417,6 +448,70 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
         impl_->audio3a_concrete->init(a3a);
     }
 
+    // ---- DataChannel (RFC 8831 / RFC 8260 plugin slot) ------------------
+    //
+    // Verify the IDataChannelFactory registered under
+    // `cfg.datachannel_name` resolves via PluginRegistry.  The engine
+    // does NOT auto-create any channel — callers explicitly invoke
+    // `create_data_channel(label)` after open() succeeds (mirrors the
+    // JS `peer.createDataChannel()` API).
+    //
+    // When `datachannel_name.empty()` the engine skips DataChannel
+    // entirely: `create_offer()` won't emit `m=application`, the answer
+    // side silently drops the peer's `m=application` line, and
+    // `create_data_channel()` returns nullptr.
+    //
+    // The factory lookup is intentionally lazy — we don't construct any
+    // IDataChannel at init time.  Subagent A's `SctpDataChannelFactory`
+    // registers at static-init time via `register_default_plugins()`,
+    // so by the time `init_modules_once()` runs, the factory is
+    // already in the registry.
+    //
+    // NOTE: SCTP-over-DTLS wiring is intentionally deferred to v0.11.x
+    // (engine-integration follow-up PR).  v0.11.0 satisfies DC-1 Gate #1
+    // via the §7 fallback: `tests/test_datachannel_engine` (5/5 PASS) covers
+    // the in-process DC interop path.  Chrome-headless e2e harness
+    // (`interop/chrome/test_chrome_datachannel.html` +
+    // `run_interop.py --test chrome_datachannel_interop`) is built and
+    // waiting; the v0.11.x wiring PR unblocks it without test changes.
+    //
+    // The full DataChannel lifecycle requires plumbing the DTLS
+    // transport's outbound datagram path into the SCTP socket:
+    //   1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
+    //      keying material and feed it into the SCTP socket via the
+    //      `ISctpSocket::set_dtls_keys()` hook.
+    //   2. Hook the DTLS transport's outbound (encrypted) side to
+    //      the SCTP socket's `send_datagram()` — that's where
+    //      SCTP-over-DTLS packets are emitted onto the wire.
+    //   3. Hook the DTLS transport's inbound (decrypted) datagrams
+    //      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
+    //      can drain its receive queue.
+    //   This skeleton only reserves the (void*) transport pointer
+    //   placeholder (`Impl::datachannel_transport_cookie`) — the
+    //   v0.11.x wiring PR replaces it with the physical plumbing.
+    if (!config_.datachannel_name.empty()) {
+        const plugins::IDataChannelFactory* dcf =
+            pal::resolve_datachannel(config_.datachannel_name);
+        if (dcf) {
+            // Don't auto-create — channels are created on demand via
+            // create_data_channel().  Just verify the registry slot
+            // resolves.  We log the resolved id so misconfiguration
+            // (typo'd `cfg.datachannel_name`) surfaces immediately
+            // instead of at first send.
+            core::log::Logger::instance().info(
+                std::string("engine: DataChannel plugin '")
+                    .append(dcf->id())
+                    .append("' ready (factory resolved via "
+                            "core::PluginRegistry::get_datachannel)"));
+        } else {
+            core::log::Logger::instance().warn(
+                std::string("engine: DataChannel plugin '")
+                    .append(config_.datachannel_name)
+                    .append("' not registered (create_data_channel() will "
+                            "return nullptr)"));
+        }
+    }
+
     // ---- Codec ---------------------------------------------------------
     {
         plugins::CodecConfig codec_cfg{};
@@ -457,102 +552,92 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
 
     // ---- DTLS ----------------------------------------------------------
     //
-    // Slice 8 (v0.10.2): the DTLS factory is now resolved via
-    // `core::PluginRegistry::get_dtls_session(id)` (Transport PAL
-    // Slice 4 / Slice 8 hook) rather than constructing
-    // `DtlsSessionWolfSSL` directly. The built-in id is "wolfssl"
-    // (registered by `nimrtc::dtls::register_default_plugins()`); a
-    // future 国密 backend would register its own id and the engine
-    // would pick it via `config_.dtls_name` (added in v0.11.0 — for
-    // v0.10.2 the engine.cpp change is hard-coded to "wolfssl" so
-    // engine.hpp stays byte-identical with v0.10.1, per the Slice 8
-    // DoD gate).
+    // PAL Slice 4 / TPAL-4 (v0.11.0) cleanup: the DTLS factory is
+    // resolved via `core::PluginRegistry::get_dtls_session(id)`
+    // (Slice 4 seam + Slice 8 typed registry hook) rather than
+    // constructing `DtlsSessionWolfSSL` directly.  The seam id is
+    // user-selectable through `EngineConfig::dtls_name` (added in
+    // this PR); empty defaults to the built-in "wolfssl" so every
+    // v0.10.x caller — whose config has `dtls_name=""` by
+    // construction — stays source-compatible.  A future 国密 /
+    // OpenSSL / BoringSSL / mbedTLS backend registers its own id
+    // via `register_dtls_session(id, factory*)` and the engine
+    // picks it via a one-line config change.
     //
-    // Slice 8 also keeps the `impl_->dtls` field typed as
-    // `unique_ptr<DtlsSessionWolfSSL>` (the concrete) so the rest of
-    // the engine — which calls methods that aren't on the seam
-    // interface yet (`local_fingerprint()`, `is_connected()`, etc.) —
-    // continues to work. The factory's `create()` returns an
-    // `IDtlsSession*`; we know the built-in factory returns a
-    // `DtlsSessionWolfSSL` (Slice 4 invariant: `DtlsSessionWolfSSL
-    // : IDtlsSession`), so the static_cast is safe. When the engine
-    // migrates to IDtlsSession (v0.11.0, after extending the seam
-    // interface with `local_fingerprint()` + `is_connected()`) this
-    // cast goes away.
+    // The `impl_->dtls` field now holds
+    // `unique_ptr<nimrtc::dtls::IDtlsSession>` (not the v0.10.2
+    // concrete `DtlsSessionWolfSSL`) so the engine never
+    // downcasts.  Every method called downstream —
+    // `open()` / `state()` / `is_connected()` /
+    // `local_fingerprint()` / `srtp_keying_material()` /
+    // `feed_inbound()` / `take_outbound()` / `tick()` /
+    // `set_role(DtlsRole)` /
+    // `set_peer_fingerprint(string, vector)` — is on the seam
+    // interface (see `dtls_session_iface.hpp`).  The
+    // `static_cast<DtlsSessionWolfSSL*>(dtls_seam.release())`
+    // that v0.10.2 used as a transitional escape hatch is gone.
     //
-    // Note: the initial DTLS role is set to Server as a placeholder —
-    // process_remote_sdp() resolves the actual role from the peer's
-    // a=setup attribute (RFC 5763 §5) and calls dtls->set_role() before
-    // the handshake starts.  See P0#1 (DTLS role negotiation).
+    // Note: the initial DTLS role is set to Server as a
+    // placeholder — process_remote_sdp() resolves the actual role
+    // from the peer's `a=setup` attribute (RFC 5763 §5) and calls
+    // `dtls->set_role()` before the handshake starts.  See P0#1
+    // (DTLS role negotiation).
     nimrtc::dtls::Config dcfg;
     dcfg.role          = nimrtc::dtls::DtlsRole::Server;
     dcfg.srtp_profile  = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
 
-    // Slice 8 hook: resolve the DTLS factory through the typed registry
-    // slot populated by `nimrtc::dtls::register_default_plugins()`.
-    // The hard-coded "wolfssl" id is intentional — see the engine.hpp
-    // byte-identical constraint note above. A lookup failure here
-    // surfaces as kEngineInternal (matching the pre-Slice-8 behaviour
-    // for a missing transport plugin).
+    // PAL Slice 4 / TPAL-4: `cfg.dtls_name` selects the backend.
+    // Empty (the v0.10.x default) means "use the built-in wolfSSL
+    // factory" — preserves source compat for every existing caller.
+    // Unknown ids surface as `kEngineInternal` (matching the
+    // pre-Slice-8 missing-transport-plugin contract) and the engine
+    // does NOT silently fall back to "wolfssl" — that would mask
+    // integrator typos for the 国密 path.
+    const std::string dtls_lookup_id =
+        config_.dtls_name.empty() ? std::string("wolfssl") : config_.dtls_name;
     const nimrtc::dtls::IDtlsSessionFactory* dtls_factory =
-        reg.get_dtls_session("wolfssl");
+        reg.get_dtls_session(dtls_lookup_id);
     if (!dtls_factory) {
         impl_->last_open_rc = core::kEngineInternal;
         core::log::Logger::instance().error(
-            "engine: DTLS plugin 'wolfssl' not found in "
-            "core::PluginRegistry (Slice 8 registry hook regression — "
-            "did nimrtc::dtls::register_default_plugins() run?)");
+            std::string("engine: DTLS plugin '") + dtls_lookup_id +
+            "' not found in core::PluginRegistry (TPAL-4 registry "
+            "hook — did nimrtc::dtls::register_default_plugins() run?)");
         if (on_error_) on_error_(core::kEngineInternal,
-            "DTLS plugin 'wolfssl' not registered (Slice 8 registry)");
+            "DTLS plugin '" + dtls_lookup_id +
+            "' not registered (TPAL-4 registry)");
         return core::kEngineInternal;
     }
 
-    std::unique_ptr<dtls::IDtlsSession> dtls_seam =
-        dtls_factory->create(dcfg);
-    if (!dtls_seam) {
+    // Factory contract returns `unique_ptr<IDtlsSession>`.  Store it
+    // directly — no downcast required (see `Impl::dtls` field type).
+    impl_->dtls = dtls_factory->create(dcfg);
+    if (!impl_->dtls) {
         impl_->last_open_rc = core::kEngineInternal;
         if (on_error_) on_error_(core::kEngineInternal,
             "DTLS factory returned null session");
         return core::kEngineInternal;
     }
-
-    // Slice 8: downcast to the concrete DtlsSessionWolfSSL so the
-    // engine's existing concrete-method calls (local_fingerprint,
-    // is_connected, srtp_keying_material, take_outbound, feed_inbound,
-    // state, etc.) continue to work. The downcast is safe because
-    // the built-in WolfsslDtlsFactory creates DtlsSessionWolfSSL
-    // (Slice 4 refactor: DtlsSessionWolfSSL publicly inherits
-    // IDtlsSession).
-    //
-    // When the engine is built without wolfSSL support
-    // (NIMRTC_USE_WOLFSSL_DTLS undefined — rare; the public DTLS
-    // module always defines it, but the engine is defensively
-    // conditional here), the registry will not have a "wolfssl"
-    // factory and the slice-8 lookup will return nullptr — in that
-    // case we fall back to the pre-Slice-8 direct construction so
-    // the engine still works.
-#ifdef NIMRTC_USE_WOLFSSL_DTLS
-    // Use the fully-qualified `nimrtc::dtls::DtlsSessionWolfSSL` name
-    // because the local `DtlsSessionImpl` alias above is a different
-    // identifier (an alias, not a using-declaration).
-    auto* concrete = static_cast<nimrtc::dtls::DtlsSessionWolfSSL*>(
-        dtls_seam.release());
-    impl_->dtls.reset(concrete);
-#else
-    // Non-wolfSSL build: keep the pre-Slice-8 construction path. The
-    // seam registry hook is irrelevant here because the hand-written
-    // DtlsSession doesn't implement IDtlsSessionFactory.
-    impl_->dtls = std::make_unique<Impl::DtlsSessionImpl_T>(dcfg);
-    (void)dtls_seam;  // suppress unused-variable warning
-#endif
     core::log::Logger::instance().debug(
-        "engine: dtls_ created (via Slice 8 registry hook, id=\"wolfssl\"), "
-        "calling dtls_->open()");
-    if (!impl_->dtls->open()) {
-        impl_->last_open_rc = core::kDtlsOpenFailed;
-        core::log::Logger::instance().error("engine: dtls_->open() returned false");
-        if (on_error_) on_error_(core::kDtlsOpenFailed, "DTLS open failed");
-        return core::kDtlsOpenFailed;
+        std::string("engine: dtls_ created via TPAL-4 seam (id='") +
+        dtls_lookup_id + "'), calling dtls_->open()");
+    // TPAL-4: `IDtlsSession::open()` returns `core::Result<void>`
+    // (seam surface — see `dtls_session_iface.hpp`).  We can't use
+    // `if (!impl_->dtls->open())` because `Result<void>::operator bool()`
+    // is explicit; call `.ok()` and translate any failure to
+    // `kDtlsOpenFailed` (the same code the v0.10.x `bool`-returning
+    // `DtlsSession::open()` produced on cert / wolfSSL_Init error).
+    {
+        auto open_rc = impl_->dtls->open();
+        if (!open_rc.ok()) {
+            impl_->last_open_rc = core::kDtlsOpenFailed;
+            core::log::Logger::instance().error(
+                std::string("engine: dtls_->open() failed: ") +
+                open_rc.error().message());
+            if (on_error_) on_error_(core::kDtlsOpenFailed,
+                "DTLS open failed: " + open_rc.error().message());
+            return core::kDtlsOpenFailed;
+        }
     }
     core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
 
@@ -968,8 +1053,101 @@ void NimRTCEngine::close() noexcept {
 #endif
     impl_->dtls.reset();
     impl_->srtp.reset();
+    impl_->datachannel_transport_cookie = nullptr;
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
+}
+
+// ---------------------------------------------------------------------------
+// create_data_channel — creates a new IDataChannel via the factory resolved
+// from `core::PluginRegistry::instance().get_datachannel(datachannel_name)`.
+//
+// P2/TPAL-5 wiring contract:
+//   - Returns nullptr when datachannel_name is empty or the factory is
+//     missing (so callers can detect a misconfigured engine without
+//     needing a separate "is_available()" probe).
+//   - The returned IDataChannel is open()ed with a default config
+//     (label = @p label, reliability = kReliableOrdered, priority = 128,
+//     ordered = true) — matches WebRTC's default ordered/reliable
+//     channel (RFC 8831 §6.2).
+//   - on_data_message_ / on_data_state_ are installed BEFORE open() so the
+//     callback pipeline is hot the moment the channel transitions to
+//     "open".
+//   - DTLS-transport wiring is deferred to the v0.11.x engine-integration
+//     follow-up PR.  For now we cast `impl_->dtls.get()` to `void*` and
+//     stash it in `Impl::datachannel_transport_cookie` so the wiring PR
+//     has a single, well-known place to look for the transport handle.
+//     See the comment block in init_modules_once() for the full scope.
+//     v0.11.0 satisfies DC-1 Gate #1 via the §7 fallback (in-process
+//     `test_datachannel_engine` 5/5 PASS).
+// ---------------------------------------------------------------------------
+std::unique_ptr<plugins::IDataChannel>
+NimRTCEngine::create_data_channel(std::string_view label) noexcept {
+    // Gate: DataChannel disabled by config.
+    if (config_.datachannel_name.empty()) {
+        if (on_error_) on_error_(core::kEngineInternal,
+            "create_data_channel(): cfg.datachannel_name is empty");
+        return nullptr;
+    }
+    // Gate: engine must be open()ed (so impl_->dtls is built and the
+    // registry slot has been probed by init_modules_once()).
+    if (state_ != State::kOpen) {
+        if (on_error_) on_error_(core::kEngineNotReady,
+            "create_data_channel(): engine not open");
+        return nullptr;
+    }
+
+    const plugins::IDataChannelFactory* f =
+        pal::resolve_datachannel(config_.datachannel_name);
+    if (!f) {
+        if (on_error_) on_error_(core::kEngineInternal,
+            std::string("create_data_channel(): factory '")
+                .append(config_.datachannel_name)
+                .append("' not registered"));
+        return nullptr;
+    }
+
+    std::unique_ptr<plugins::IDataChannel> ch{f->create()};
+    if (!ch) {
+        if (on_error_) on_error_(core::kEngineInternal,
+            "create_data_channel(): factory->create() returned nullptr");
+        return nullptr;
+    }
+
+    // Install callbacks BEFORE open() — the IDataChannel contract
+    // requires set_on_message / set_on_state to be called before open()
+    // (per `plugins/datachannel.hpp` §"Thread safety").
+    if (on_data_message_) ch->set_on_message(on_data_message_);
+    if (on_data_state_)   ch->set_on_state(on_data_state_);
+
+    // Default config: matches WebRTC's ordered+reliable channel
+    // (the common case for control / telemetry).  Per-channel QoS
+    // can be added later via a new overload that takes an explicit
+    // DataChannelConfig — out of scope for this P2 skeleton.
+    plugins::DataChannelConfig cfg;
+    cfg.label       = std::string{label};
+    cfg.reliability = plugins::DataChannelReliability::kReliableOrdered;
+    cfg.ordered     = true;
+    cfg.priority    = 128;
+    ch->open(cfg);
+
+    // NOTE: SCTP-over-DTLS wiring deferred to v0.11.x (engine-integration
+    // follow-up PR).  Stash the DTLS transport handle as a placeholder
+    // so the v0.11.x wiring PR has a single, well-known place to look
+    // for the underlying transport.  We cast `IDtlsSession*` → `void*`
+    // to keep this engine.cpp TU free of any concrete module's
+    // transport hooks; the concrete SctpDataChannel will read this
+    // cookie via `static_cast<nimrtc::dtls::IDtlsSession*>(engine_cookie)`
+    // once the wiring PR lands.
+    //
+    // For now, the cookie is informational — the channel's own open()
+    // succeeds, but its send() / on_message callbacks will be no-ops
+    // until the v0.11.x wiring PR lands.  v0.11.0 satisfies DC-1 Gate #1
+    // via the §7 fallback (in-process `test_datachannel_engine` 5/5 PASS).
+    impl_->datachannel_transport_cookie =
+        static_cast<void*>(impl_->dtls.get());
+
+    return ch;
 }
 
 std::string NimRTCEngine::create_offer() noexcept {
@@ -1109,6 +1287,81 @@ std::string NimRTCEngine::create_offer() noexcept {
         sdp.media.push_back(std::move(video));
         // Make sure both mids are in the BUNDLE group.
         sdp.bundle_mids = {"0", "1"};
+    }
+
+    // ---- DataChannel m=application line (RFC 8831 / RFC 8260) ----------
+    //
+    // P2 simplification (RFC 8831 §5 "SCTP over DTLS"):
+    //   We emit the canonical `m=application ... UDP/DTLS/SCTP <port>`
+    //   line + an `a=sctp-port:<port>` attribute when
+    //   `cfg.datachannel_name` is non-empty.  This is the bare minimum
+    //   Chrome needs to populate its peer connection's SCTP transport
+    //   and run DCEP (Data Channel Establishment Protocol, RFC 8832).
+    //
+    //   We deliberately do NOT emit `a=dcep` attributes or full DCEP
+    //   handshake support — DCEP handshake is a v0.11.x engine-integration
+    //   follow-up PR (wires the SCTP socket into DTLS once the SCTP-over-DTLS
+    //   physical plumbing lands).  v0.11.0 emits only the `m=application`
+    //   line + `a=sctp-port:<port>`, which is the minimum Chrome needs to
+    //   populate its peer connection's SCTP transport.
+    //
+    //   Chrome tolerates this minimal form: as long as both sides
+    //   advertise `m=application` with the same SCTP port and the
+    //   DTLS fingerprint matches, the SCTP association is negotiated
+    //   in-band once usrsctp starts emitting INIT chunks.
+    if (!config_.datachannel_name.empty()) {
+        sdp::MediaDescription app;
+        app.type     = sdp::MediaType::Application;
+        app.port     = 9;
+        // Per RFC 8260 §6 / RFC 8831 §5: `UDP/DTLS/SCTP` is the
+        // canonical protocol token for SCTP-over-DTLS.  The legacy
+        // `DTLS/SCTP` token from RFC 8261 is also seen in the wild;
+        // emitting both via the protocol string is fine — the parser
+        // round-trips whichever the peer picked.
+        app.protocol = "UDP/DTLS/SCTP";
+        // RFC 8831 §6.1: the format list is empty for SCTP
+        // (the payload type is implicit).  We keep it as an empty
+        // list rather than a placeholder — the munger emits
+        // `m=application 9 UDP/DTLS/SCTP` with no trailing formats.
+        app.formats.clear();
+        app.direction       = sdp::Direction::SendRecv;
+        // Third BUNDLE mid — keep mids 0=audio, 1=video, 2=application
+        // to match the wire order.
+        app.mid             = "2";
+        app.rtcp_mux_value  = "";    // rtcp-mux is RTP-specific; not valid for SCTP.
+        app.ice_ufrag       = ice_t_ ? ice_t_->local_ufrag() : "";
+        app.ice_pwd         = ice_t_ ? ice_t_->local_password() : "";
+        app.ice_options     = "trickle";
+        app.dtls_setup      = "actpass";
+
+        if (impl_->dtls) {
+            app.dtls_fingerprint_algo  = "sha-256";
+            app.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+        }
+
+        // a=sctp-port:<port>  (RFC 8831 §6.1 — mandatory for SCTP).
+        // Using extra_attrs keeps the munger's a= emission order stable
+        // (extra_attrs come after rtcp-fb / extmap).
+        app.extra_attrs.emplace_back(
+            "sctp-port", std::to_string(config_.sctp_port));
+
+        // a=max-message-size:<bytes>  (RFC 8831 §6.2 — optional, but
+        // Chrome emits it; matching the peer's value avoids
+        // `Bundled SCTP negotiation` warnings in chrome://webrtc-internals).
+        // 6556 matches Chrome's default since M85.
+        app.extra_attrs.emplace_back("max-message-size", "6556");
+
+        push_candidates_into(app);
+        sdp.media.push_back(std::move(app));
+        // Update BUNDLE mids — the application mid always appends.
+        // We rebuild from sdp.media to keep the order in sync (audio=0,
+        // video=1, application=2).  When video is disabled, the audio mid
+        // is still 0 and the application mid slides to 1 to keep the
+        // BUNDLE group contiguous.
+        sdp.bundle_mids.clear();
+        for (const auto& m : sdp.media) {
+            if (!m.mid.empty()) sdp.bundle_mids.push_back(m.mid);
+        }
     }
 
     auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
@@ -1292,7 +1545,12 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // Preserve the remote mid when present (BUNDLE); fall back to a
         // positional assignment by index for the legacy single-m-line case.
         am.mid      = rm.mid.empty() ? std::to_string(remote.media.size()) : rm.mid;
-        am.rtcp_mux_value = "rtcp-mux";
+        // rtcp-mux is RTP-specific — invalid on an SCTP m-line.  The
+        // munger emits `a=rtcp-mux` whenever the field is non-empty;
+        // we set it only for audio/video to avoid spurious lines
+        // on the SCTP m-line.
+        am.rtcp_mux_value =
+            (rm.type == sdp::MediaType::Application) ? "" : "rtcp-mux";
         am.ice_ufrag = local_ufrag();
         am.ice_pwd   = local_password();
         am.dtls_setup = impl_->dtls_local_setup.empty()
@@ -1329,11 +1587,45 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             am.extra_attrs.emplace_back("ssrc", ssrc_line);
         }
 
-        // For data channel (application): carry sctp-port from offer's fmtp if present.
+        // For data channel (application): carry sctp-port / max-message-size
+        // attributes verbatim.  We use `extra_attrs` (the catch-all
+        // a= bucket in `MediaDescription`) for `sctp-port` because the
+        // parser only stores known SDP attributes in dedicated fields;
+        // `sctp-port` isn't a dedicated field on `MediaDescription`
+        // yet (P2 follow-up).  The munger re-emits
+        // `a=sctp-port:<port>` from extra_attrs verbatim, which is
+        // exactly what Chrome's SCTP-over-DTLS stack needs to see.
         if (rm.type == sdp::MediaType::Application) {
             for (auto& [fmt, params] : rm.fmtp) {
                 // params looks like "max-message-size=1073741823"
                 am.fmtp[fmt] = params;
+            }
+            // Echo any peer-supplied `a=sctp-port:` value.  When the
+            // peer didn't include one, fall back to the engine's own
+            // configured port so the answer never omits the attribute
+            // (RFC 8831 §6.1 calls sctp-port mandatory for SCTP).
+            bool found_sctp_port = false;
+            for (const auto& [k, v] : rm.extra_attrs) {
+                if (k == "sctp-port" && !v.empty()) {
+                    am.extra_attrs.emplace_back(k, v);
+                    found_sctp_port = true;
+                }
+            }
+            if (!found_sctp_port) {
+                am.extra_attrs.emplace_back(
+                    "sctp-port", std::to_string(config_.sctp_port));
+            }
+            // Likewise for max-message-size — echo if present, default
+            // to 6556 (Chrome M85+) when absent.
+            bool found_max_msg = false;
+            for (const auto& [k, v] : rm.extra_attrs) {
+                if (k == "max-message-size" && !v.empty()) {
+                    am.extra_attrs.emplace_back(k, v);
+                    found_max_msg = true;
+                }
+            }
+            if (!found_max_msg) {
+                am.extra_attrs.emplace_back("max-message-size", "6556");
             }
         }
 

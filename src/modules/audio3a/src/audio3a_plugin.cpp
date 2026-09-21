@@ -22,6 +22,8 @@
 #include <nimrtc/audio3a/audio3a_plugin.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -77,8 +79,7 @@ PluginAdapter::PluginAdapter(audio3a::IAudio3A* impl)
     : concrete_(impl ? impl : new NullAudio3A())
     , pre_tap_(nullptr)
     , post_tap_(nullptr)
-    , post_tap_i16_(nullptr)
-    , tap_timestamp_us_(0) {
+    , post_tap_i16_(nullptr) {
     core::log::Logger::instance().debug(
         "audio3a::PluginAdapter created (concrete impl owned)");
 }
@@ -152,8 +153,24 @@ plugins::Status PluginAdapter::process_capture(float*       samples,
     plugins::Status rc = ensure_configured();
     if (rc != plugins::kOk) return rc;
 
+    // ── Build frame metadata ONCE per RFC-001 §2.4 / §6.4 ──
+    // timestamp_us is captured from the engine's monotonic clock
+    // (std::chrono::steady_clock) at process_capture() entry so that pre
+    // and post taps share an identical timestamp for the same frame.
+    // steady_clock's native period is implementation-defined (typically
+    // nanoseconds on Linux/macOS/Windows); dividing by 1000 yields
+    // microseconds regardless of platform.
+    plugins::PcmFrameMetadata meta{};
+    meta.sample_rate_hz = concrete_config_.sample_rate_hz
+                              ? concrete_config_.sample_rate_hz
+                              : 48000;
+    meta.num_samples   = num_samples;
+    meta.num_channels  = static_cast<std::uint8_t>(num_channels);
+    meta.timestamp_us  = static_cast<std::int64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count() / 1000);
+
     // ── Pre-tap: raw mic PCM before 3A (for wake-word / monitoring) ──
-    invoke_pre_tap(samples, num_samples, num_channels);
+    invoke_pre_tap(samples, meta);
 
     audio3a::Frame frame;
     frame.samples        = samples;
@@ -163,7 +180,7 @@ plugins::Status PluginAdapter::process_capture(float*       samples,
     concrete_->process_capture(frame);
 
     // ── Post-tap: 3A-cleaned PCM (for ASR consumption) ──
-    invoke_post_tap(samples, num_samples, num_channels);
+    invoke_post_tap(samples, meta);
 
     maybe_fire_callbacks();
     return plugins::kOk;
@@ -217,28 +234,27 @@ void PluginAdapter::maybe_fire_callbacks() noexcept {
 }
 
 // -------------------------------------------------------------------------
-// PCM Taps (pre/post 3A, §8.7)
+// PCM Taps (pre/post 3A, §8.7 / RFC-001 §2.4 + §6.1–6.5)
 // -------------------------------------------------------------------------
 
-void PluginAdapter::invoke_pre_tap(float* samples, std::size_t num_samples,
-                                   std::size_t num_channels) noexcept {
+void PluginAdapter::invoke_pre_tap(float* samples,
+                                    const plugins::PcmFrameMetadata& meta) noexcept {
     plugins::PcmTapCallback cb;
     {
         std::lock_guard<std::mutex> lk(tap_mu_);
         cb = pre_tap_;
     }
     if (!cb) return;
-    plugins::PcmFrameMetadata meta{};
-    meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
-    meta.num_samples     = num_samples;
-    meta.num_channels   = static_cast<std::uint8_t>(num_channels);
-    meta.timestamp_us    = tap_timestamp_us_;
-    tap_timestamp_us_ += static_cast<std::int64_t>(num_samples * 1000000ULL / meta.sample_rate_hz);
+    // The pre-tap signature is `void(const float*, const PcmFrameMetadata&)` —
+    // cast away the const for the API entry point.  The tap MUST treat the
+    // pointer as read-only (RFC §2.2 / §6.1); passing a non-const pointer
+    // here is a wart in the existing interface that we cannot fix without
+    // changing `plugins::IAudio3A::set_pre_process_tap`'s callback type.
     cb(samples, meta);
 }
 
-void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
-                                    std::size_t num_channels) noexcept {
+void PluginAdapter::invoke_post_tap(float* samples,
+                                     const plugins::PcmFrameMetadata& meta) noexcept {
     plugins::PcmTapCallback    cb_f32;
     plugins::PcmTapCallbackI16 cb_i16;
     {
@@ -247,27 +263,29 @@ void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
         cb_i16 = post_tap_i16_;
     }
     if (!cb_f32 && !cb_i16) return;
-    plugins::PcmFrameMetadata meta{};
-    meta.sample_rate_hz = concrete_config_.sample_rate_hz ? concrete_config_.sample_rate_hz : 48000;
-    meta.num_samples     = num_samples;
-    meta.num_channels   = static_cast<std::uint8_t>(num_channels);
-    meta.timestamp_us    = tap_timestamp_us_;
-    // Note: tap_timestamp_us_ is NOT advanced here — the frame boundary
-    // is the same as the pre-tap; only one tick per process_capture call.
 
     if (cb_f32) {
         cb_f32(samples, meta);
     }
     if (cb_i16) {
-        // Convert float → int16_t inline for ASR consumers.
+        // Convert float → int16_t inline for ASR consumers (RFC-001 §6.3).
+        //
+        // Algorithm: round(std::clamp(s, -1.0f, 1.0f) * 32767.0f).
+        // Clamping happens BEFORE multiplication so a saturated -1.0
+        // becomes INT16_MIN-equivalent (-32767 after round, stored as
+        // -32767 not -32768; this matches the RFC's intent and the
+        // behaviour of every mainstream ASR decoder including Whisper,
+        // Vosk, and Kaldi).  The int16_t range after round() is
+        // [-32767, 32767]; -32768 is intentionally not produced (it
+        // would require asymmetric scaling that ASR pipelines do not
+        // expect).
         //
         // Reuse int16_tap_buf_ (PluginAdapter member) to avoid heap
         // allocation on every process_capture() call.  Capacity grows
         // monotonically — first call after install allocates; subsequent
-        // calls within the same capacity reuse the storage.  std::vector
-        // guarantees no reallocation while size() <= capacity() and the
-        // capacity itself doesn't shrink on resize() to a smaller value.
-        const std::size_t needed = num_samples * num_channels;
+        // calls within the same capacity reuse the storage.
+        const std::size_t needed = static_cast<std::size_t>(meta.num_samples)
+                                  * static_cast<std::size_t>(meta.num_channels);
         if (int16_tap_buf_.size() < needed) {
             // resize (not reserve) so size() == needed and data() returns
             // exactly N valid int16_t values below.  When the first frame
@@ -278,9 +296,9 @@ void PluginAdapter::invoke_post_tap(float* samples, std::size_t num_samples,
         }
         std::int16_t* out = int16_tap_buf_.data();
         for (std::size_t i = 0; i < needed; ++i) {
-            float v = samples[i] * 32767.0f;
-            v = std::max(-32768.0f, std::min(32767.0f, v));
-            out[i] = static_cast<std::int16_t>(v);
+            const float clamped = std::clamp(samples[i], -1.0f, 1.0f);
+            const float scaled  = clamped * 32767.0f;
+            out[i] = static_cast<std::int16_t>(std::round(scaled));
         }
         cb_i16(out, meta);
     }

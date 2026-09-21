@@ -1,0 +1,120 @@
+{
+  // ==========================================================================
+  // profiles/sfu.json — Selective Forwarding Unit (SFU) relay profile
+  // ==========================================================================
+  //
+  // Use case: in-process SFU engine that forwards SRTP packets between
+  // participants without performing any L2 media processing. The SFU is
+  // format-agnostic: it does not decode audio, does not run 3A, does not
+  // estimate bandwidth. Each session is a thin transport hop.
+  //
+  // Design rationale (see §2.6 Profile Table / v0.11.0 PROFILE-1):
+  //   - jb_name = "" / audio3a_name = "" / codec_name = "" / bwe_name = "":
+  //     all L2 media processing plugins are disabled. SFU only forwards
+  //     SRTP packets end-to-end.
+  //   - sfu_enabled = true: profile-level marker that signals "this is an
+  //     SFU". The loader (assembly::profile_from_json_file) ignores this
+  //     additive v1.1 field — engines that care consult the registered
+  //     SFU plugin via core::PluginRegistry::get_transport_stack(...).
+  //     See ADR-010 §"Schema v1.1 incremental fields".
+  //   - max_sessions_per_engine = 32: hint for the SFU engine wiring
+  //     layer (concurrent peer sessions one engine instance is sized
+  //     for). Loader-agnostic.
+  //   - timeline_enabled = false: SFU does not consume timeline events
+  //     by default. (sfu-agent.json turns it on for AI-Agent participants
+  //     that need ref_frame correlation.)
+  //   - scheduler.enabled = false: no priority logic needed — the SFU
+  //     operates at the transport layer and forwards as it sees fit.
+  //
+  // Comparison with v1.0 transport.json:
+  //   - Same plugin bindings (all empty) — both are pure relay.
+  //   - Adds sfu_enabled = true and max_sessions_per_engine = 32 to
+  //     distinguish the intent (server-side SFU hop vs. embedded
+  //     transport gateway) without changing the L0/L1 plumbing.
+  //
+  // Override tips:
+  //   - To route audio through 3A (e.g. recording side-channel), switch
+  //     to sfu-agent.json instead — that profile keeps the SFU media
+  //     path but enables audio3a_name = "webrtc_apm".
+  //   - For embedded gateway use cases (protocol translator), prefer
+  //     transport.json — it is identical at the L0/L1 level but does
+  //     not carry the SFU marker.
+  // ==========================================================================
+
+  "name": "sfu",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  // ICE transport: needed for ICE connectivity + DTLS handshake between
+  // participants. All media processing plugins stay empty.
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  // Empty: no jitter buffer — SRTP is forwarded unchanged.
+  "jb_name": "",
+  // Empty: no 3A — SFU does not decode audio.
+  "audio3a_name": "",
+  // Empty: no codec — SFU is format-agnostic.
+  "codec_name": "",
+  // Empty: no BWE — no rate adaptation; SFU forwards at whatever rate
+  // the sender emits.
+  "bwe_name": "",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Disabled: SFU does not need timeline instrumentation in default
+  // relay mode. Turn on via sfu-agent.json when an Agent participant
+  // joins and needs ref_frame correlation.
+  "timeline_enabled": false,
+  // Disabled: SFU is transport-layer forwarding; control messages are
+  // handled separately (DC forwarding strategy lives in §7.1 of
+  // docs/zh/architecture.md, not here).
+  "datachannel_enabled": false,
+
+  // ---- Audio format --------------------------------------------------------
+  // Not applicable (codec_name = "" means these are not consumed) — set
+  // explicitly to 0 to mirror the C++ constant companion's intent and
+  // avoid misleading callers.
+  "audio_sample_rate_hz": 0,
+  "audio_channels": 0,
+  "audio_payload_type": 0,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // BWE is disabled (bwe_name = ""); values below are placeholders that
+  // match the C++ constant companion and stay invariant under round-trip.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 1000000,
+    "max_bitrate_bps": 10000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // All fields are ignored when jb_name = "".  Sentinels match the C++
+  // constant companion: impl = "" / all delays = 0.
+  "jitter_buffer": {
+    "impl": "",
+    "mode": "low_latency",
+    "initial_delay_ms": 0,
+    "min_delay_ms": 0,
+    "max_delay_ms": 0
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // Disabled: no priority queuing needed for raw forwarding.
+  "scheduler": {
+    "enabled": false,
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- Schema v1.1 additive markers (ADR-010 §"Schema v1.1 incremental
+  //      fields"; loader-agnostic — see ADR-010 for the loader contract).
+  // ---------------------------------------------------------------------------
+  // Marker — this profile is an SFU (server-side forwarding hop).
+  "sfu_enabled": true,
+  // Hint — upper bound on concurrent peer sessions this engine instance
+  // is expected to handle.
+  "max_sessions_per_engine": 32
+}

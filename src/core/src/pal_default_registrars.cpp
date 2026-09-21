@@ -70,6 +70,7 @@ using RegistrarFn = void(*)() noexcept;
 constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::audio3a::register_default_plugins,
     &nimrtc::bwe::register_default_plugins,
+    &nimrtc::datachannel::register_default_plugins,
 #ifdef NIMRTC_HAS_H264
     &nimrtc::h264::register_default_plugins,
 #endif

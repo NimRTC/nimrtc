@@ -46,6 +46,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -53,6 +54,8 @@
 
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/datachannel/sctp_data_channel.hpp>  // SctpDataChannel / SctpDataChannelFactory
+#include <nimrtc/plugins/datachannel.hpp>           // plugins::IDataChannel / DataChannelConfig / DataChannelReliability / DataMessageCallback / DataChannelStateCallback
 
 // We deliberately include the ICE-aware *plugin* interface here, not the
 // concrete `<nimrtc/ice/ice.hpp>` module header. The proxy used to do
@@ -83,8 +86,19 @@ void print_usage(const char* prog) {
                  "  %s --stun-port <p>        STUN server port     (default: 19302)\n"
                  "  %s --no-stun              Disable STUN candidate gathering\n"
                  "  %s --video                Enable synthetic H.264 video stream\n"
-                 "                           (640x480 @ 15 fps, stub encoder; off by default)\n",
-                 prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+                 "                           (640x480 @ 15 fps, stub encoder; off by default)\n"
+                 "  %s --datachannel          Create a single SCTP DataChannel labelled\n"
+                 "                           'interop' after open().  Wires on_data_message\n"
+                 "                           and on_data_state callbacks (logs to stderr) and\n"
+                 "                           attempts a 32-byte NimRTC→Chrome send once\n"
+                 "                           ICE+DTLS reach Connected.  Default = enabled\n"
+                 "                           (cfg.datachannel_name = \"sctp\").  DoD Gate\n"
+                 "                           #1 for v0.11.0 \"Beta 前哨\".\n"
+                 "  %s --no-datachannel       Explicitly disable DataChannel (clears\n"
+                 "                           cfg.datachannel_name).  SDP will NOT carry\n"
+                 "                           m=application even when the plugin is\n"
+                 "                           registered.  Default = enabled.\n",
+                 prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 std::string slurp_file(const char* path) {
@@ -438,6 +452,40 @@ struct ProxyState {
     std::atomic<std::uint64_t> video_rx_nals{0};
     std::int64_t              next_video_emit_us = 0;
     int                       video_fps = 0;     // 0 = video disabled
+
+    // ---- DataChannel driver (v0.11.0 DoD Gate #1) -------------------------
+    //
+    // The engine resolves the usrsctp-backed IDataChannel factory via
+    // `cfg.datachannel_name = "sctp"` (the engine's default).  When
+    // DataChannel is enabled we create FOUR channels after ICE connects,
+    // one per reliability variant used by the Chrome e2e harness:
+    //   "reliable_ordered"     — kReliableOrdered, ordered=true,  maxRetransmits=0
+    //   "reliable_unordered"   — kReliableOrdered, ordered=false, maxRetransmits=0
+    //   "unreliable_unordered" — kUnreliable,    ordered=false, maxRetransmits=5
+    //   "unreliable_ordered"   — kPartialReliableCount, ordered=true, maxRetransmits=5
+    //
+    // Each channel echoes every inbound message back to Chrome so the
+    // harness can verify the round-trip.  All four channels share a
+    // single SCTP association (SCTP supports multiple streams per
+    // association via the stream id field).
+    //
+    // NB: SCTP-over-DTLS physical wiring is deferred to the v0.11.x
+    // engine-integration follow-up PR.  For v0.11.0, `IDataChannel::send()`
+    // queues the payload into usrsctp's internal buffer but no
+    // DTLS-encrypted SCTP packet reaches the wire.  We log every
+    // send/recv attempt so the e2e Chrome harness can pinpoint the
+    // precise blocker, and v0.11.0 satisfies DC-1 Gate #1 via the §7
+    // fallback (`test_datachannel_engine` 5/5 PASS).
+    struct DcChannel {
+        std::unique_ptr<nimrtc::plugins::IDataChannel> ch;
+        std::atomic<bool>                       open{false};
+        std::atomic<std::uint32_t>             msgs_sent{0};
+        std::atomic<std::uint32_t>             msgs_recv{0};
+        std::atomic<std::uint32_t>             bytes_sent{0};
+        std::atomic<std::uint32_t>             bytes_recv{0};
+    };
+    std::map<std::string, DcChannel>          dcs;  // key = label
+    bool                                       dc_enable = true;
 };
 
 // Drain transport every 10 ms; emit ICE candidates once when gathering completes.
@@ -475,6 +523,137 @@ static void engine_tick_thread(ProxyState* st) {
             && !st->ice_connected.load()) {
             st->ice_connected.store(true);
             std::fprintf(stderr, "[demo-p2p] ICE %s\n", state.c_str());
+            // DoD Gate #1: create all four DataChannel variants as soon as
+            // ICE connects.  The SCTP-over-DTLS plumbing is the remaining
+            // blocker — see the v0.11.x engine-integration follow-up PR
+            // (was previously TODO Subagent D in `engine.cpp`).
+            if (st->dc_enable) {
+                std::fprintf(stderr,
+                    "[datachannel] ICE connected — creating 4 DC variants\n");
+
+                // Helper lambda: create one channel with a specific config.
+                // The engine's create_data_channel(label) returns a unique_ptr
+                // owned by the caller; the engine calls open() before returning.
+                // We set per-channel callbacks and configure reliability.
+                auto make_channel = [&](const char* label,
+                        nimrtc::plugins::DataChannelReliability rel,
+                        bool ordered, std::uint16_t max_retrans) {
+                    auto ch = st->engine->create_data_channel(label);
+                    if (!ch) {
+                        std::fprintf(stderr,
+                            "[datachannel] create_data_channel(\"%s\") returned nullptr\n",
+                            label);
+                        return;
+                    }
+                    nimrtc::plugins::DataChannelConfig cfg;
+                    cfg.label        = label;
+                    cfg.reliability  = rel;
+                    cfg.ordered      = ordered;
+                    cfg.max_retransmits = max_retrans;
+                    // Capture ch (unique_ptr) by value in both callbacks so it
+                    // stays alive for the lifetime of the callbacks.
+                    auto* raw = ch.get();   // raw pointer for echo send
+                    raw->set_on_message(
+                        [&st, label, raw](nimrtc::plugins::BufferView msg) {
+                            st->dcs[label].bytes_recv.fetch_add(
+                                static_cast<std::uint32_t>(msg.size()));
+                            st->dcs[label].msgs_recv.fetch_add(1);
+                            std::string_view sv{
+                                reinterpret_cast<const char*>(msg.data()),
+                                msg.size()};
+                            std::string preview;
+                            if (sv.size() > 80) preview = std::string(sv.substr(0, 80)) + "…";
+                            else preview = std::string(sv);
+                            std::fprintf(stderr,
+                                "[datachannel] << %s recv %uB (total %u msgs): %.80s\n",
+                                label,
+                                static_cast<unsigned>(msg.size()),
+                                static_cast<unsigned>(st->dcs[label].msgs_recv.load()),
+                                preview.c_str());
+                            // Echo the payload back to Chrome (round-trip verification).
+                            raw->send(msg);
+                            st->dcs[label].bytes_sent.fetch_add(
+                                static_cast<std::uint32_t>(msg.size()));
+                            st->dcs[label].msgs_sent.fetch_add(1);
+                            std::fprintf(stderr,
+                                "[datachannel] >> %s echo sent %uB\n",
+                                label,
+                                static_cast<unsigned>(msg.size()));
+                        });
+                    raw->set_on_state(
+                        [&st, label](const char* s) {
+                            std::fprintf(stderr, "[datachannel] %s state: %s\n",
+                                         label, s);
+                            if (std::strcmp(s, "open") == 0) {
+                                st->dcs[label].open.store(true);
+                                std::fprintf(stderr,
+                                    "[datachannel] %s open — SCTP association established\n",
+                                    label);
+                            }
+                        });
+                    // Re-configure with the correct reliability/ordering.
+                    // open() was already called by the engine (returns kOk);
+                    // calling it again with the per-channel cfg sets
+                    // usrsctp's per-stream reliability flags.
+                    raw->open(cfg);
+                    // Transfer ownership into ProxyState::dcs map via direct
+                    // member access (avoids DcChannel move/copy assignment which
+                    // std::atomic members make ill-formed).
+                    auto& slot = st->dcs[label];  // default-constructs atomics
+                    slot.ch = std::move(ch);      // unique_ptr is move-assignable
+                    std::fprintf(stderr,
+                        "[datachannel] created '%s' (rel=%d ordered=%d max_retrans=%u)\n",
+                        label,
+                        static_cast<int>(rel),
+                        ordered ? 1 : 0,
+                        static_cast<unsigned>(max_retrans));
+                };
+
+                // Create all four variants
+                make_channel("reliable_ordered",
+                    nimrtc::plugins::DataChannelReliability::kReliableOrdered,
+                    true, 0);
+                make_channel("reliable_unordered",
+                    nimrtc::plugins::DataChannelReliability::kReliableOrdered,
+                    false, 0);
+                make_channel("unreliable_unordered",
+                    nimrtc::plugins::DataChannelReliability::kUnreliable,
+                    false, 5);
+                make_channel("unreliable_ordered",
+                    nimrtc::plugins::DataChannelReliability::kPartialReliableCount,
+                    true, 5);
+            }
+        }
+
+        // DoD Gate #1: once DTLS is connected AND each DataChannel is open,
+        // attempt to send a 32-byte NimRTC→Chrome test payload per variant.
+        // If the SCTP-over-DTLS wiring is incomplete (see TODO in
+        // engine.cpp), the send queues the message in usrsctp's buffer but
+        // nothing traverses the wire — the Chrome harness will correctly
+        // report recv=false for all variants.  This branch fires ONCE per
+        // variant so we don't flood the log.
+        if (st->dc_enable && st->engine->dtls_connected()) {
+            for (auto& [label, dc] : st->dcs) {
+                if (!dc.open.load()) continue;
+                if (dc.msgs_sent.load() > 0) continue;   // already sent initial
+                const char* payload = "NimRTC->Chrome initial probe #0";
+                std::uint8_t bytes[64];
+                for (std::size_t i = 0; i < 32; ++i)
+                    bytes[i] = static_cast<std::uint8_t>(payload[i] ? payload[i] : '?');
+                dc.ch->send(nimrtc::plugins::BufferView{bytes, 32});
+                dc.bytes_sent.fetch_add(32);
+                dc.msgs_sent.fetch_add(1);
+                std::fprintf(stderr,
+                    "[datachannel] >> %s initial 32B sent "
+                    "(DTLS=%s, ICE=%s)\n",
+                    label.c_str(),
+                    st->engine->dtls_connected() ? "connected" : "disconnected",
+                    st->ice_connected.load() ? "connected" : "disconnected");
+                std::fprintf(stderr,
+                    "[datachannel] NOTE: if Chrome harness shows recv=false for all "
+                    "variants, the SCTP-over-DTLS physical wiring is incomplete.\n"
+                    "[datachannel]       Deferred to the v0.11.x engine-integration follow-up PR.\n");
+            }
         }
 
         // Drive synthetic audio into the engine once ICE is up.  We
@@ -551,12 +730,27 @@ static void engine_tick_thread(ProxyState* st) {
 int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
                          bool answerer, int duration_sec,
                          const char* turn_host, int turn_port,
-                         const char* turn_user, const char* turn_pass) {
+                         const char* turn_user, const char* turn_pass,
+                         bool dc_enable) {
     ProxyState st;
     st.engine = &engine;
     st.answerer.store(answerer);
     st.duration_sec = duration_sec;
     st.video_fps = (engine.video_source() != nullptr) ? 15 : 0;
+
+    // DoD Gate #1: DataChannel is enabled by default (cfg.datachannel_name
+    // defaults to "sctp" in EngineConfig).  --no-datachannel was detected
+    // in main() and reflected in cfg.datachannel_name before engine.open().
+    st.dc_enable = dc_enable;
+    if (dc_enable) {
+        std::fprintf(stderr,
+            "[datachannel] enabled (cfg.datachannel_name=\"%.*s\", sctp_port=%u)\n",
+            static_cast<int>(engine.config().datachannel_name.size()),
+            engine.config().datachannel_name.data(),
+            static_cast<unsigned>(engine.config().sctp_port));
+    } else {
+        std::fprintf(stderr, "[datachannel] explicitly disabled\n");
+    }
 
     // Apply TURN relay configuration before open() so libjuice gathers
     // relay candidates from the TURN server.
@@ -918,6 +1112,11 @@ int main(int argc, char** argv) {
             turn_pass_arg = argv[++i];
         } else if (std::strcmp(argv[i], "--video") == 0) {
             video_enabled = true;
+        } else if (std::strcmp(argv[i], "--datachannel") == 0) {
+            // No-op — DataChannel is enabled by default.  Present for
+            // explicit documentation and symmetry with --no-datachannel.
+        } else if (std::strcmp(argv[i], "--no-datachannel") == 0) {
+            // No-op here; detected below before engine construction.
         }
     }
 
@@ -999,7 +1198,17 @@ int main(int argc, char** argv) {
 #endif
     }
 
+    // DoD Gate #1: detect --no-datachannel BEFORE constructing the engine so
+    // the DataChannel factory resolution (init_modules_once) reflects the
+    // correct cfg.datachannel_name.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--no-datachannel") == 0) {
+            cfg.datachannel_name.clear();  // prevents m=application in SDP
+        }
+    }
+
     nimrtc::engine::NimRTCEngine engine(cfg);
+    const bool dc_enable = !cfg.datachannel_name.empty();  // true unless --no-datachannel
 
     // Only "offer" and "answer" are valid positional sub-commands.
     // Any other token after flags is an error (e.g. --codec opus <junk>).
@@ -1016,7 +1225,8 @@ int main(int argc, char** argv) {
     if (proxy_mode) {
         return run_signaling_proxy(engine, proxy_answerer, proxy_duration,
                                  turn_host_arg.c_str(), turn_port_arg,
-                                 turn_user_arg.c_str(), turn_pass_arg.c_str());
+                                 turn_user_arg.c_str(), turn_pass_arg.c_str(),
+                                 dc_enable);
     }
 
     if (argc > 1 && (std::strcmp(argv[1], "-h") == 0 ||

@@ -69,17 +69,17 @@ public:
 
     /** Initialise wolfSSL context and load the ECC certificate.
      *  @return ok() on success. */
-    core::Result<void> open() noexcept;
+    core::Result<void> open() noexcept override;
 
     void close() noexcept;
 
     /** Feed inbound DTLS record bytes from the ICE transport.
      *  @return bytes consumed from `bytes`. */
     std::size_t feed_inbound(std::span<const std::uint8_t> bytes,
-                              const DtlsAddr& from) noexcept;
+                              const DtlsAddr& from) noexcept override;
 
     /** Drain outbound DTLS records produced by wolfSSL. */
-    std::vector<DtlsRecord> take_outbound() noexcept;
+    std::vector<DtlsRecord> take_outbound() noexcept override;
 
     /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).
      *
@@ -92,23 +92,25 @@ public:
      *
      *  Safe to call when state() is Connected / Failed / Closed — becomes
      *  a no-op. */
-    void tick() noexcept;
+    void tick() noexcept override;
 
-    DtlsState state() const noexcept;
-    bool is_connected() const noexcept;
+    DtlsState state() const noexcept override;
+    bool is_connected() const noexcept override;
 
     static const char* state_name(DtlsState s) noexcept;
 
     /** Local certificate fingerprint (RFC 8122).  Valid after open(). */
-    const Fingerprint& local_fingerprint() const noexcept;
+    const Fingerprint& local_fingerprint() const noexcept override;
 
     void set_peer_fingerprint(std::string algo,
-                               std::vector<std::uint8_t> value) noexcept;
+                               std::vector<std::uint8_t> value) noexcept override;
 
-    void set_role(DtlsRole r) noexcept;
+    void set_role(DtlsRole r) noexcept override;
 
-    /** SRTP keying material — valid after state() == Connected. */
-    std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
+    /** SRTP keying material — valid after state() == Connected.
+     *  TPAL-4 (v0.11.0): override of `IDtlsSession::srtp_keying_material()` —
+     *  the engine calls this through the seam, never through the concrete. */
+    std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept override;
 
     // -----------------------------------------------------------------
     // IDtlsSession (PAL Slice 4) — seam methods layered on top of the

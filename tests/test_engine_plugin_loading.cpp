@@ -36,6 +36,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/plugins/datachannel.hpp>
 #include <nimrtc/transport/transport_stack.hpp>   // Slice 7.5: StackConfig, ITransportStack
 
 namespace {
@@ -483,14 +484,101 @@ TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
     // (real) in the same `register_default_plugins()` call, so the count is 2.
     // The shell is preserved for backward-compat with Slice 7 tests that use
     // `get_transport_stack("default")`.
+    //
+    // TPAL-5 (v0.11.0) adds the second SCTP factory: the production
+    // `UsrsctpSocketFactory` ("usrsctp") registers alongside the
+    // pre-existing Slice-5 `SctpStubFactory` ("stub"). Both are
+    // additive and distinct (different ids), so the SCTP slot holds
+    // exactly 2 entries. Re-registration must NOT duplicate either.
     EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u)
         << "Slice 8: DTLS slot duplicated after repeated registration";
-    EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u)
-        << "Slice 8: SCTP slot duplicated after repeated registration";
+    EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 2u)
+        << "TPAL-5: SCTP slot must hold stub + usrsctp (2 entries); "
+           "duplication here means TPAL-5's register_default_plugins() "
+           "is no longer idempotent";
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
         << "Slice 8: raw-UDP slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 2u)
         << "Slice 7.5: transport-stack slot has 2 entries: default (shell) + webrtc-classic (real)";
+}
+
+// ---------------------------------------------------------------------------
+// TPAL-5 (v0.11.0) — DataChannel registry slot + engine integration.
+//
+// Verifies the Slice 8-style typed `register_datachannel(id, factory*)`
+// hook: the registry resolves factories by id (mirrors DTLS / SCTP /
+// raw_udp / transport-stack).  We register a stub factory here rather
+// than asserting against a built-in id because Subagent A's production
+// `SctpDataChannelFactory` lands in a separate PR — the typed slot
+// itself is what this PR is responsible for, and that's stable without
+// any concrete SCTP implementation.
+//
+// The full `create_data_channel()` end-to-end test (factory → engine →
+// IDataChannel instance → callback forwarding) lives in
+// `tests/test_datachannel_engine.cpp` — kept separate so the
+// `EnginePluginLoading` suite stays focused on the registry layer.
+// ---------------------------------------------------------------------------
+
+// Local stub factory — only used by the next test, lives at namespace
+// scope so `register_datachannel` can take its address without keeping
+// it in a wrapper (TypedRegistry doesn't copy factories).
+namespace nimrtc_engine_plugin_loading_dc {
+
+class LocalStubFactory final : public nimrtc::plugins::IDataChannelFactory {
+public:
+    std::string_view id() const noexcept override { return "engine_loading_dc"; }
+    std::string_view display_name() const noexcept override {
+        return "test stub for engine_plugin_loading DataChannel slot";
+    }
+    nimrtc::plugins::IDataChannel* create() const override {
+        // We don't actually create a channel here — this test only
+        // exercises the registry lookup, not the engine's
+        // create_data_channel() path (that's test_datachannel_engine).
+        // Returning nullptr keeps the test side-effect-free.
+        return nullptr;
+    }
+};
+
+static const LocalStubFactory s_factory;
+
+} // namespace nimrtc_engine_plugin_loading_dc
+
+TEST_F(EnginePluginLoading, tpall5_DataChannelFactoryIsRegistered) {
+    // Register the local stub factory under a non-colliding id.
+    PluginRegistry::instance().register_datachannel(
+        nimrtc_engine_plugin_loading_dc::s_factory.id(),
+        &nimrtc_engine_plugin_loading_dc::s_factory);
+
+    // Slot resolves by id (the canonical lookup NimRTCEngine uses).
+    const auto* factory = PluginRegistry::instance().get_datachannel(
+        "engine_loading_dc");
+    ASSERT_NE(factory, nullptr)
+        << "TPAL-5: DataChannel factory 'engine_loading_dc' not found "
+           "in registry (the Slice 8-style slot must resolve factories "
+           "by id, mirroring DTLS / SCTP / raw_udp / transport-stack)";
+    EXPECT_EQ(factory->id(), "engine_loading_dc");
+    EXPECT_FALSE(factory->display_name().empty());
+
+    // The factory list must contain the stub id alongside any
+    // built-in / test-supplied factories (e.g. the "stub_dc" entry
+    // registered by test_datachannel_engine's SetUpTestSuite if both
+    // tests share a process — which they do, since GTest runs in a
+    // single binary).
+    auto ids = PluginRegistry::instance().list_datachannels();
+    bool found = false;
+    for (auto id : ids) {
+        if (id == "engine_loading_dc") { found = true; break; }
+    }
+    EXPECT_TRUE(found)
+        << "list_datachannels() must include the test's stub factory";
+
+    // Unknown id → nullptr (no silent fallback).  Mirrors the Slice 8
+    // DTLS seam contract from test_dtls_seam's third test.
+    const auto* missing =
+        PluginRegistry::instance().get_datachannel("not_registered_xyz");
+    EXPECT_EQ(missing, nullptr)
+        << "get_datachannel() must return nullptr for unregistered ids "
+           "(no silent fallback — matches Slice 8 typed-slot contract)";
 }
 
 } // anonymous namespace

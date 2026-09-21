@@ -147,11 +147,6 @@ private:
     plugins::PcmTapCallback    post_tap_;
     plugins::PcmTapCallbackI16 post_tap_i16_;
 
-    /** Monotonic frame timestamp for tap callbacks. Advanced by
-     *  invoke_pre_tap() to mark the frame boundary; post_tap() uses the
-     *  same value (single tick per process_capture call). */
-    std::int64_t                tap_timestamp_us_ = 0;
-
     /** Reusable scratch buffer for the int16_t post-tap (§8.7).  Avoids
      *  heap allocation on every process_capture() call (audio path runs
      *  at 50–100 Hz; per-call allocation causes latency jitter and memory
@@ -174,11 +169,13 @@ private:
     /** Lazy init: apply concrete_config_ to the concrete impl if not yet done. */
     plugins::Status ensure_configured() noexcept;
 
-    /** Fire pre-/post-3A PCM taps (§8.7).  Called from process_capture. */
-    void invoke_pre_tap(float* samples, std::size_t num_samples,
-                         std::size_t num_channels) noexcept;
-    void invoke_post_tap(float* samples, std::size_t num_samples,
-                          std::size_t num_channels) noexcept;
+    /** Fire pre-/post-3A PCM taps (§8.7).  Called from process_capture().
+     *  Both methods share the same `meta` so the pre/post timestamps are
+     *  identical (single tick per process_capture call, per RFC-001 §2.4). */
+    void invoke_pre_tap(float* samples,
+                        const plugins::PcmFrameMetadata& meta) noexcept;
+    void invoke_post_tap(float* samples,
+                         const plugins::PcmFrameMetadata& meta) noexcept;
 };
 
 

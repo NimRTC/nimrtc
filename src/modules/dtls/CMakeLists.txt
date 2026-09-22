@@ -35,19 +35,6 @@ add_library(nimrtc_dtls STATIC
 
 nimrtc_apply_options(nimrtc_dtls)
 
-# Apple Clang 15: wolfSSL headers use old-style C casts which trigger
-# -Wold-style-cast even inside system headers included transitively.
-# We suppress it here rather than blanket-disabling it project-wide
-# so that production src/ code still gets the warning.  We also
-# suppress -Wimplicit-int-conversion here since dtls_wolfssl_session.cpp
-# contains byte-manipulation code where the fix (using unsigned casts)
-# has already been applied but a marginal edge case remains.
-if(APPLE)
-    target_compile_options(nimrtc_dtls PRIVATE
-        -Wno-old-style-cast
-        -Wno-implicit-int-conversion)
-endif()
-
 target_link_libraries(nimrtc_dtls
     PUBLIC
         nimrtc::core

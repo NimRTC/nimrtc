@@ -21,25 +21,25 @@
  * the header comment in `dtls_plugin.hpp` for the MSVC static-lib
  * linker rationale.
  *
- * ## Slice 8 (v0.10.2) — registry hook
+ * ## Slice 4 scope (this file)
  *
- * The DTLS factory is now published via
- * `nimrtc::core::PluginRegistry::register_dtls_session(id, factory*)`
- * (Transport PAL Slice 8 — see `docs/plan/transport-selection.md` §6.5).
- * The legacy `test_only::get_wolfssl_factory()` accessor is preserved
- * as a thin wrapper around `core::PluginRegistry::get_dtls_session(id)`
- * so existing Slice 4 tests continue to compile and pass without
- * modification.
+ * Registers the default WolfsslDtlsFactory under the DTLS seam id
+ * "wolfssl".  Slice 7 / Slice 8 will add a corresponding slot in
+ * `core::PluginRegistry::register_dtls(...)`; for Slice 4 the
+ * registration is seam-local (the factory is reachable via
+ * `test_only::get_wolfssl_factory()` from tests that link
+ * `nimrtc_dtls_seam`).
  *
- * @note P1 — entry point added as part of PAL Slice 4 (v0.11.0),
- *       promoted to the typed registry hook in Slice 8 (v0.10.2).
+ * That keeps Slice 4 a true seam-only diff: no
+ * core::PluginRegistry surface changes, no engine.cpp changes.
+ *
+ * @note P1 — entry point added as part of PAL Slice 4 (v0.11.0).
  */
 
 #include <nimrtc/dtls/dtls_plugin.hpp>
 #include <nimrtc/dtls/dtls_session_factory.hpp>
 
 #include <nimrtc/core/log.hpp>
-#include <nimrtc/core/registry.hpp>
 
 // Forward declaration of the test-only accessor defined in
 // dtls_wolfssl_factory.cpp.  We don't include the .cpp directly —
@@ -62,22 +62,21 @@ namespace detail {
 // do_register_default_plugins
 // ---------------------------------------------------------------------------
 //
-// On first call: construct a single `WolfsslDtlsFactory` (Meyer
-// singleton), publish it under the seam id "wolfssl" through BOTH:
-//   (1) the typed registry hook
-//       `core::PluginRegistry::register_dtls_session("wolfssl", &f)`
-//       — the canonical lookup path used by the engine / Selector /
-//       Stack factory composition;
-//   (2) the legacy `test_only::set_wolfssl_factory_for_testing(&f)`
-//       hook — preserved verbatim for Slice 4 tests that resolve the
-//       factory pointer without going through the registry. The legacy
-//       accessor now reads back through the registry (see
-//       dtls_wolfssl_factory.cpp), so (1) is the source of truth.
-//
-// The `detail::do_register_default_plugins` definition is intentionally
-// kept in this .cpp (not the header) so the strong-definition symbol
+// Defined in this .cpp (not header) so the strong-definition symbol
 // lands in `nimrtc_dtls_seam.lib` for static-link consumers (same
 // workaround as ice.cpp / rtp_plugin.cpp).
+//
+// On first call: construct a single `WolfsslDtlsFactory` (Meyer
+// singleton) and publish it under the seam id "wolfssl".  Slice 7
+// will add the registry call here:
+//
+//     nimrtc::core::PluginRegistry::instance().register_dtls(
+//         std::string_view{s_factory.id()}, &s_factory);
+//
+// For Slice 4 the seam is module-local — the factory is reachable via
+// `test_only::get_wolfssl_factory()` from any consumer that links
+// `nimrtc_dtls_seam`.  Slice 7 will promote it to a registered
+// backend when the transport-stack / Profile schema lands.
 
 void do_register_default_plugins() noexcept {
     // `static` inside a function ⇒ address-stable for program lifetime;
@@ -85,28 +84,16 @@ void do_register_default_plugins() noexcept {
     // guarantees thread-safety for static-local initialisation).
     static const struct Registrar {
         Registrar() {
+            // Publish the singleton factory pointer through the
+            // test-only slot so Slice 4 tests can resolve the
+            // factory without going through core::PluginRegistry.
+            // Slice 7 will replace this with a `register_dtls(...)`
+            // call into the typed DTLS slot.
             const IDtlsSessionFactory* f = wolfssl_factory_singleton();
-
-            // (1) Canonical: publish via the Slice 8 typed registry hook.
-            //     This is what the engine / Selector / future Profile
-            //     loader will look up by id "wolfssl" when they need a
-            //     DTLS backend. The hook is idempotent under repeated
-            //     calls (TypedRegistry::register_one overwrites in place).
-            nimrtc::core::PluginRegistry::instance().register_dtls_session(
-                std::string_view{f->id()}, f);
-
-            // (2) Legacy: keep the Slice 4 test-only accessor wired so
-            //     tests/test_dtls_factory.cpp can resolve the factory
-            //     pointer without going through the registry. The
-            //     accessor's getter now reads back through the registry
-            //     (see dtls_wolfssl_factory.cpp), so this slot is a
-            //     convenience cache rather than a second source of truth.
             test_only::set_wolfssl_factory_for_testing(f);
-
             nimrtc::core::log::Logger::instance().info(
                 std::string("nimrtc::dtls: default plugin registered (id=") +
-                std::string(f->id()) +
-                ", via Slice 8 typed registry hook + legacy test_only slot)");
+                std::string(f->id()) + ")");
         }
     } s_registrar;
     (void)s_registrar;

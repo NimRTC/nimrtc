@@ -12,6 +12,10 @@
 #     DtlsSessionWolfSSL in src/modules/dtls/ which has been refactored
 #     in place to inherit IDtlsSession)
 #
+# Scope (v0.12.0 PAL Slice 4 + ADR-013):
+#   - Optional second backend: GmSSLDtlsFactory (id = "gmssl")
+#     enabled by NIMRTC_ENABLE_DTLS_GMSSL=ON
+#
 # Architectural role (per docs/plan/transport-selection.md §5.2 / §6.1):
 #   The seam is the first slice of transport-layer plugin-replaceability
 #   for NimRTC.  Slice 5 (SCTP), Slice 6 (raw UDP bypass), Slice 7 (Stack
@@ -26,10 +30,30 @@
 #   - nimrtc::dtls (the existing concrete module — for DtlsSessionWolfSSL)
 #   - nimrtc::vendor::wolfssl (transitive via nimrtc::dtls; declared here
 #     so the seam's tests link the same crypto backend)
+#   - GMSSL v3.x native lib (opt-in via NIMRTC_ENABLE_DTLS_GMSSL)
 # ----------------------------------------------------------------------------
-add_library(nimrtc_dtls_seam STATIC
+
+# GMSSL backend (ADR-013) — opt-in, default OFF
+option(NIMRTC_ENABLE_DTLS_GMSSL
+       "Build the GMSSL-backed DTLS factory (id=\"gmssl\"). "
+       "Requires GMSSL v3.x installed on the system (or in $ENV{GMSSL_ROOT}). "
+       "When OFF (default) only the wolfSSL backend is built."
+       OFF)
+
+set(_dtls_seam_srcs
     src/dtls_wolfssl_factory.cpp
     src/dtls_plugin.cpp
+    )
+
+if(NIMRTC_ENABLE_DTLS_GMSSL)
+    list(APPEND _dtls_seam_srcs
+        src/dtls_gmssl_session.cpp
+        src/dtls_gmssl_factory.cpp
+        )
+endif()
+
+add_library(nimrtc_dtls_seam STATIC
+    ${_dtls_seam_srcs}
     )
 
 nimrtc_apply_options(nimrtc_dtls_seam)
@@ -51,6 +75,21 @@ target_compile_definitions(nimrtc_dtls_seam
         NIMRTC_HAS_DTLS=1
         NIMRTC_USE_WOLFSSL_DTLS=1
     )
+
+if(NIMRTC_ENABLE_DTLS_GMSSL)
+    # ADR-013: link GMSSL v3.x native library (tls.h / TLS_* API).
+    # nimrtc_link_gmssl() resolves the library via find_path/find_library
+    # in /usr/local, /usr, $ENV{GMSSL_ROOT}, falling back gracefully
+    # so a missing GMSSL fails at build-time (not configure-time).
+    nimrtc_link_gmssl(nimrtc_dtls_seam)
+    target_compile_definitions(nimrtc_dtls_seam
+        PUBLIC
+            NIMRTC_HAS_DTLS_GMSSL=1
+        )
+    message(STATUS "GMSSL DTLS backend: enabled (NIMRTC_ENABLE_DTLS_GMSSL=ON)")
+else()
+    message(STATUS "GMSSL DTLS backend: disabled (default; set NIMRTC_ENABLE_DTLS_GMSSL=ON to enable)")
+endif()
 
 target_include_directories(nimrtc_dtls_seam
     PUBLIC

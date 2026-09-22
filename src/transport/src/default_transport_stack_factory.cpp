@@ -189,32 +189,32 @@ public:
     }
 
     // ---- TPAL-4 engine-facing surface -------------------------------
-    // Added so `IDtlsSession` is fully concrete-able; without these
-    // overrides the C++ linker rejects the class with C2259 ("cannot
-    // instantiate abstract class").  Every method returns the same
-    // "not ready" / no-op contract as the Slice 4 surface above.
-    core::Result<void> open() noexcept override {
+    // Legacy methods kept for backwards compatibility with callers that
+    // haven't migrated to the Slice 4 seam surface above.  These are
+    // NOT part of IDtlsSession anymore (the seam surface owns that
+    // interface), so they cannot carry `override`.
+    core::Result<void> open() noexcept {
         return core::Result<void>::make_ok();   // shell — pretend success
     }
-    void set_role(dtls::DtlsRole /*r*/) noexcept override {}
+    void set_role(dtls::DtlsRole /*r*/) noexcept {}
     void set_peer_fingerprint(
         std::string /*algo*/,
-        std::vector<std::uint8_t> /*value*/) noexcept override {}
+        std::vector<std::uint8_t> /*value*/) noexcept {}
     std::size_t feed_inbound(std::span<const std::uint8_t> /*bytes*/,
-                             const dtls::DtlsAddr& /*from*/) noexcept override {
+                             const dtls::DtlsAddr& /*from*/) noexcept {
         return 0;
     }
-    std::vector<dtls::DtlsRecord> take_outbound() noexcept override { return {}; }
-    void tick() noexcept override {}
-    dtls::DtlsState state() const noexcept override {
+    std::vector<dtls::DtlsRecord> take_outbound() noexcept { return {}; }
+    void tick() noexcept {}
+    dtls::DtlsState state() const noexcept {
         return dtls::DtlsState::Closed;
     }
-    bool is_connected() const noexcept override { return false; }
-    const dtls::Fingerprint& local_fingerprint() const noexcept override {
+    bool is_connected() const noexcept { return false; }
+    const dtls::Fingerprint& local_fingerprint() const noexcept {
         return local_fp_;
     }
     std::optional<dtls::SrtpKeyingMaterial>
-    srtp_keying_material() const noexcept override {
+    srtp_keying_material() const noexcept {
         return std::nullopt;
     }
 

@@ -35,9 +35,7 @@
 
 # GMSSL backend (ADR-013) — opt-in, default OFF
 option(NIMRTC_ENABLE_DTLS_GMSSL
-       "Build the GMSSL-backed DTLS factory (id=\"gmssl\"). "
-       "Requires GMSSL v3.x installed on the system (or in $ENV{GMSSL_ROOT}). "
-       "When OFF (default) only the wolfSSL backend is built."
+       "Build the GMSSL-backed DTLS factory (id=gmssl). Requires GMSSL v3.x installed on the system (or in $ENV{GMSSL_ROOT}). When OFF (default) only the wolfSSL backend is built."
        OFF)
 
 set(_dtls_seam_srcs

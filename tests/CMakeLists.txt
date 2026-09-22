@@ -113,6 +113,38 @@ endfunction()
 add_dtls_handshake_test(test_dtls_handshake_e2e test_dtls_handshake_e2e.cpp)
 
 # ----------------------------------------------------------------------------
+# ADR-013 (v0.12.0) — GMSSL TLCP DTLS 1.2 handshake round-trip test.
+#
+# OH-DOD-4 gate: verifies DtlsSessionGmSSL completes a full TLCP
+# (GM/T 0044) handshake in-process, exports symmetric SRTP keying material,
+# fires on_handshake_complete callbacks, and has zero error counts.
+# Compiles ONLY when NIMRTC_ENABLE_DTLS_GMSSL=ON (default OFF).
+#
+# OH-DOD-5 (OHOS-aarch64 cross-compile) uses the same test binary.
+# ----------------------------------------------------------------------------
+if(NIMRTC_ENABLE_DTLS_GMSSL)
+    function(add_dtls_gmssl_test name source)
+        add_executable(${name} ${source})
+        if(WIN32)
+            target_link_libraries(${name} PRIVATE ws2_32)
+        endif()
+        target_link_libraries(${name} PRIVATE nimrtc::dtls_seam)
+        nimrtc_link_gmssl(${name})
+        target_include_directories(${name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/src/core/include"
+            "${CMAKE_SOURCE_DIR}/src/dtls/include")
+        if(WIN32)
+            target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+        endif()
+        nimrtc_apply_options(${name} LENIENT)
+        add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+        set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+        nimrtc_copy_wolfssl_certs(${name})
+    endfunction()
+    add_dtls_gmssl_test(test_dtls_gmssl_tlcp test_dtls_gmssl_tlcp.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # P2.4-DTLS-regression: handshake-flight double-emission guard.
 #
 # Exercises a single retransmit cycle in isolation and asserts that
@@ -206,7 +238,12 @@ function(add_dtls_srtp_test name source)
     target_link_libraries(${name} PRIVATE
         nimrtc::engine
         nimrtc::srtp
-        nimrtc::dtls)
+        nimrtc::dtls
+        # PAL Slice 2 (v0.10.2) — see nimrtc_add_engine_video_test above
+        # for the rationale. Linking nimrtc::engine pulls in the
+        # unified kDefaultRegistrars[] table which references
+        # `nimrtc::datachannel::register_default_plugins`.
+        nimrtc::datachannel)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
@@ -325,6 +362,11 @@ function(nimrtc_add_engine_test name source)
     add_executable(${name} ${source})
     if(WIN32)
         target_link_libraries(${name} PRIVATE ws2_32)
+    elseif(APPLE)
+        # macOS clang has built-in atomics in libc++; usrsctp uses
+        # OSAtomicAdd32Barrier which requires linking against the C++ runtime.
+        # Do not link -latomic - it does not exist on macOS.
+        target_link_libraries(${name} PRIVATE c++ pthread)
     else()
         # GCC on Linux/libstdc++ requires explicit -latomic for 64-bit
         # std::atomic operations on 32-bit platforms or for non-trivial
@@ -350,6 +392,13 @@ function(nimrtc_add_engine_test name source)
         nimrtc::sctp
         nimrtc::raw_udp
         nimrtc::transport
+        # TPAL-5 (v0.11.0): DataChannel plugin seam — links the
+        # datachannel module's `register_default_plugins()` symbol
+        # referenced by the PAL Slice 2 kDefaultRegistrars[] table.
+        # P1: the symbol is a no-op stub; P2: Subagent A wires it to
+        # register `SctpDataChannelFactory`.  Linking here keeps the
+        # Slice 2 table additive — no future PR is required for tests.
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -364,10 +413,16 @@ function(nimrtc_add_engine_test name source)
     # See add_e2e_test() for the rationale on the COMMAND expression.
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
-    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    # Engine tests that talk to a real usrsctp loopback can take up to
+    # ~60 s on slow CI runners (two 30 s wait_for_established calls +
+    # handshake jitter).  The default gtest TIMEOUT of 30 s is too tight
+    # and causes spurious "Test #... (Timeout)" failures on GitHub-hosted
+    # Windows runners; bump to 90 s to leave headroom without making
+    # real failures take too long to surface.
+    set_tests_properties(${name} PROPERTIES TIMEOUT 90)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
-            PROPERTIES TIMEOUT 30
+            PROPERTIES TIMEOUT 90
             DISCOVERY_TIMEOUT 10)
     endif()
 endfunction()
@@ -465,6 +520,12 @@ function(nimrtc_add_engine_video_test name source)
         nimrtc::video_source
         nimrtc::video_sink
         nimrtc::video_pipeline
+        # PAL Slice 2 / TPAL-5 (v0.11.0): `pal_default_registrars.cpp` holds
+        # a reference to `&nimrtc::datachannel::register_default_plugins`,
+        # so the test must link nimrtc::datachannel.lib for the symbol to
+        # resolve. The same fix applies to every `nimrtc_add_*_test()`
+        # function below that links nimrtc::engine (Slice 2 unified table).
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -511,6 +572,12 @@ function(nimrtc_add_engine_codec_test name source)
         nimrtc::video_sink
         nimrtc::video_pipeline
         nimrtc::h264
+        # PAL Slice 2 (v0.10.2) — see nimrtc_add_engine_video_test above for
+        # the rationale. The unified kDefaultRegistrars[] table references
+        # every module's `register_default_plugins()` symbol, so any test
+        # linking `nimrtc::engine` must also link every module whose
+        # registrar is in the table — datachannel is one of those.
+        nimrtc::datachannel
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -588,11 +655,75 @@ endif()
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
 # ---------------------------------------------------------------------------
+# TPAL-4 cleanup (v0.11.0) — DTLS seam engine-routing regression test.
+#
+# Verifies that engine.cpp routes DTLS through the PAL Slice 4 seam
+# (IDtlsSessionFactory) via `core::PluginRegistry::get_dtls_session(id)`:
+#   1. `cfg.dtls_name == ""` resolves to the built-in wolfSSL factory
+#      at id="wolfssl" — source-compat for every v0.10.x caller.
+#   2. `cfg.dtls_name = "mock"` resolves to a user-registered
+#      MockDtlsSessionFactory and the mock's create()/open() are
+#      invoked by the engine (asserted via atomic counters).
+#   3. An un-registered `cfg.dtls_name` produces an open() failure
+#      with kEngineInternal — no silent fallback to "wolfssl".
+#   4. Re-registering under an existing id is last-writer-wins; new
+#      ids add monotonically.  Verified through the typed registry
+#      slot, the same one the engine uses.
+#
+# The seam is exercised end-to-end through `MockDtlsSession` (a fresh
+# `IDtlsSession` implementation defined in this file).  No real
+# wolfSSL handshake is required, so the test stays in the
+# sub-second range.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_dtls_seam test_dtls_seam.cpp)
+
+# ---------------------------------------------------------------------------
+# TPAL-5 (v0.11.0) — usrsctp loopback round-trip regression test.
+#
+# Drives two UsrsctpSocket instances (AF_CONN loopback encapsulation)
+# to verify:
+#   - send_datagram enqueues into usrsctp's send queue (returns kOk)
+#   - on_recv callback fires on usrsctp's worker thread, payloads
+#     land in B's recv queue under a mutex/condvar
+#   - send_partial_reliable(ttl=10ms) call site compiles + returns kOk
+#   - factory slot "usrsctp" is registered (TPAL-5)
+#   - factory slot "stub" is still registered (Slice 5 regression)
+#
+# Links nimrtc::sctp, nimrtc::vendor::usrsctp transitively.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_sctp_usrsctp test_sctp_usrsctp.cpp)
+
+# ---------------------------------------------------------------------------
 # P2 PCM tap test (audio3a pre/post 3A tap, §8.7).
 # Verifies round-trip: IAudio3A instance, install counting tap, feed 100 frames,
 # assert tap invocation count.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_audio3a_tap plugins/test_audio3a_tap.cpp)
+
+# ---------------------------------------------------------------------------
+# TPAL-5 (v0.11.0) — DataChannel plugin engine-routing regression test.
+#
+# Verifies that the engine:
+#   - Resolves the datachannel plugin via the typed
+#     `core::PluginRegistry::get_datachannel(id)` slot (Slice 8 contract).
+#   - Returns nullptr from create_data_channel() for unknown factory ids
+#     (no silent fallback, matches the DTLS seam from test_dtls_seam).
+#   - Forwards the user-supplied set_on_data_message() /
+#     set_on_data_state() callbacks to the IDataChannel before its open().
+#   - Honours `cfg.datachannel_name = ""` as an explicit disable.
+#
+# Uses the same `nimrtc_add_engine_test` wiring as test_dtls_seam and
+# test_sctp_usrsctp — links the engine + every module that has a
+# `register_default_plugins()` so the Slice 8 typed slots are populated
+# end-to-end.  No network/ICE/DTLS interaction (the test stops at
+# create_offer() / create_data_channel() / close()).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_datachannel_engine test_datachannel_engine.cpp)
+# DataChannel engine test waits on ICE/DTLS handshake (~60s) for the
+# `DisabledDatachannelNameReturnsNull` case; the per-test default
+# TIMEOUT 30 in `nimrtc_add_engine_test()` is too tight.  Bump it
+# specifically for this target.
+set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).

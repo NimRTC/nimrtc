@@ -22,6 +22,7 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/plugins/datachannel.hpp>
 
 namespace nimrtc::engine::pal {
 
@@ -41,6 +42,16 @@ resolve_codec(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::IVideoCodecFactory*
 resolve_video_codec(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_codec(id);
+}
+
+/** Resolve an `IDataChannelFactory` by plugin id. Returns nullptr if not
+ *  registered.  Mirrors the resolve_audio3a / resolve_codec / resolve_video_codec
+ *  helpers — used by `NimRTCEngine::create_data_channel()` to resolve the
+ *  `EngineConfig::datachannel_name` factory slot populated by
+ *  `core::PluginRegistry::register_datachannel(id, factory*)`. */
+[[nodiscard]] inline const plugins::IDataChannelFactory*
+resolve_datachannel(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_datachannel(id);
 }
 
 } // namespace nimrtc::engine::pal

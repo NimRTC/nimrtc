@@ -52,8 +52,9 @@
 #include <nimrtc/transport/transport_selector.hpp>
 #include <nimrtc/transport/transport_stack.hpp>
 
+#include <nimrtc/core/error.hpp>        // core::Result<void> (TPAL-4)
 #include <nimrtc/core/log.hpp>
-#include <nimrtc/core/plugin_id.hpp>   // Slice 8: NIMRTC_PLUGIN_ID() macro
+#include <nimrtc/core/plugin_id.hpp>    // Slice 8: NIMRTC_PLUGIN_ID() macro
 #include <nimrtc/dtls/dtls_session_iface.hpp>
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
@@ -167,8 +168,15 @@ public:
 };
 
 // ---- Null DTLS session ---------------------------------------------------
+//
+// Stub that satisfies the full TPAL-4 (v0.11.0) engine-facing surface
+// on `IDtlsSession`. Every method returns "not ready" / no-op; this
+// is the shell-stack's component, NOT a real DTLS provider. Slice
+// 7.5 / `WebRtcClassicStackFactory` replaces it with a real DTLS
+// factory-resolved session.
 class NullDtlsSession final : public dtls::IDtlsSession {
 public:
+    // ---- Slice 4 / TPAL-4 seam surface (the original six methods) ----
     void set_role(dtls::Role /*role*/) noexcept override {}
     void set_peer_fingerprint(
         std::span<const std::uint8_t> /*fp*/) noexcept override {}
@@ -179,6 +187,39 @@ public:
         std::span<std::uint8_t, 60> /*out*/) noexcept override {
         return plugins::kErrNotReady;
     }
+
+    // ---- TPAL-4 engine-facing surface -------------------------------
+    // Legacy methods kept for backwards compatibility with callers that
+    // haven't migrated to the Slice 4 seam surface above.  These are
+    // NOT part of IDtlsSession anymore (the seam surface owns that
+    // interface), so they cannot carry `override`.
+    core::Result<void> open() noexcept {
+        return core::Result<void>::make_ok();   // shell — pretend success
+    }
+    void set_role(dtls::DtlsRole /*r*/) noexcept {}
+    void set_peer_fingerprint(
+        std::string /*algo*/,
+        std::vector<std::uint8_t> /*value*/) noexcept {}
+    std::size_t feed_inbound(std::span<const std::uint8_t> /*bytes*/,
+                             const dtls::DtlsAddr& /*from*/) noexcept {
+        return 0;
+    }
+    std::vector<dtls::DtlsRecord> take_outbound() noexcept { return {}; }
+    void tick() noexcept {}
+    dtls::DtlsState state() const noexcept {
+        return dtls::DtlsState::Closed;
+    }
+    bool is_connected() const noexcept { return false; }
+    const dtls::Fingerprint& local_fingerprint() const noexcept {
+        return local_fp_;
+    }
+    std::optional<dtls::SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept {
+        return std::nullopt;
+    }
+
+private:
+    dtls::Fingerprint local_fp_{};
 };
 
 // ---- Null SCTP socket -----------------------------------------------------

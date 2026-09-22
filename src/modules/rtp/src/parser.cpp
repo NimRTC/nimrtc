@@ -34,9 +34,11 @@ constexpr std::size_t kMinPacketSize = 12;
 constexpr std::size_t kCsrcCountMask = 0x0F;
 
 // Extension bit: bit 4 of first byte
+[[maybe_unused]]
 constexpr std::size_t kExtensionBit = 0x10;
 
 // Marker bit: bit 8 of second byte
+[[maybe_unused]]
 constexpr std::size_t kMarkerBit = 0x80;
 
 // Payload type: bits 0-6 of second byte
@@ -345,6 +347,7 @@ bool seq_is_newer(std::uint16_t seq, std::uint16_t prev) noexcept {
 
 namespace {
 
+[[maybe_unused]]
 constexpr std::size_t kRtcpMinBody = 4;  // header + SSRC
 
 inline std::uint16_t read_be16_at(const std::uint8_t* p) noexcept {
@@ -358,6 +361,7 @@ inline std::uint32_t read_be32_at(const std::uint8_t* p) noexcept {
             static_cast<std::uint32_t>(p[3]);
 }
 
+[[maybe_unused]]
 inline void write_be16(std::uint8_t* p, std::uint16_t v) noexcept {
     p[0] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
     p[1] = static_cast<std::uint8_t>(v & 0xFF);
@@ -370,6 +374,7 @@ inline void write_be32(std::uint8_t* p, std::uint32_t v) noexcept {
     p[3] = static_cast<std::uint8_t>(v & 0xFF);
 }
 
+[[maybe_unused]]
 inline void write_be64(std::uint8_t* p, std::uint64_t v) noexcept {
     write_be32(p, static_cast<std::uint32_t>(v >> 32));
     write_be32(p + 4, static_cast<std::uint32_t>(v & 0xFFFFFFFFu));

@@ -7,3 +7,5 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler.cpp
     DEPS nimrtc::sched)
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_plugin.cpp
     DEPS nimrtc::sched)
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_priority.cpp
+    DEPS nimrtc::sched)

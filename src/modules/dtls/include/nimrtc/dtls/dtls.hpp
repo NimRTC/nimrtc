@@ -63,137 +63,20 @@
 #include <vector>
 
 #include <nimrtc/core/error.hpp>
+#include <nimrtc/dtls/dtls_types.hpp>   // PAL Slice 4 hoist: Constants,
+                                        // DtlsRole, DtlsState, DtlsAddr,
+                                        // DtlsRecord, SrtpKeyingMaterial,
+                                        // Fingerprint, Config.
+#include <nimrtc/dtls/dtls_session_iface.hpp>   // PAL Slice 4 seam — DtlsSession
+                                                // inherits IDtlsSession from
+                                                // here.
 
 namespace nimrtc::dtls {
 
 // -----------------------------------------------------------------------------
-// Constants
+// Types — see nimrtc/dtls/dtls_types.hpp (PAL Slice 4 hoist).
+// This header only owns the concrete DtlsSession class now.
 // -----------------------------------------------------------------------------
-
-constexpr std::size_t kFingerprintHashLen = 32;        // SHA-256 = 32 bytes
-constexpr std::size_t kSrtpKeyLen         = 16;        // AES-CM-128
-constexpr std::size_t kSrtpSaltLen        = 14;
-constexpr std::size_t kSrtpMasterKeyLen   = 16;
-constexpr std::size_t kSrtpMasterSaltLen  = 14;
-
-// DTLS record types (RFC 6347 §4.1)
-constexpr std::uint8_t kDtlsHandshakeContentType = 22;
-constexpr std::uint8_t kDtlsAlertContentType     = 21;
-constexpr std::uint8_t kDtlsChangeCipherSpec     = 20;
-constexpr std::uint8_t kDtlsAppData              = 23;
-
-// DTLS handshake message types (subset we care about)
-constexpr std::uint8_t kHsClientHello  = 1;
-constexpr std::uint8_t kHsServerHello  = 2;
-constexpr std::uint8_t kHsHelloVerify  = 3;
-constexpr std::uint8_t kHsCertificate  = 11;
-constexpr std::uint8_t kHsServerKeyExchange = 12;
-constexpr std::uint8_t kHsCertificateRequest = 13;
-constexpr std::uint8_t kHsServerHelloDone = 14;
-constexpr std::uint8_t kHsCertificateVerify = 15;
-constexpr std::uint8_t kHsClientKeyExchange = 16;
-constexpr std::uint8_t kHsFinished = 20;
-
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
-
-enum class DtlsRole : std::uint8_t {
-    Server,    // answering offer
-    Client,    // initiating offer
-};
-
-enum class DtlsState : std::uint8_t {
-    Closed,
-    Initial,
-    HelloVerify,
-    HelloSent,
-    HelloReceived,
-    CertificateReceived,
-    KeyExchange,
-    ChangeCipherSpec,
-    Finished,
-    Connected,
-    Failed,
-};
-
-enum class SrtpProfile : std::uint16_t {
-    Aes128CmSha1_80 = 0x0001,
-    Aes128CmSha1_32 = 0x0002,
-    Aes128Gcm       = 0x0007,
-    Aes256CmSha1_80 = 0x0003,
-};
-
-// -----------------------------------------------------------------------------
-// Endpoint address (mirrors ICE-selected pair)
-// -----------------------------------------------------------------------------
-
-struct DtlsAddr {
-    std::string host;       // IPv4 dotted-quad
-    std::uint16_t port = 0;
-};
-
-// -----------------------------------------------------------------------------
-// DTLS record (one application-visible message)
-// -----------------------------------------------------------------------------
-
-struct DtlsRecord {
-    std::vector<std::uint8_t> bytes;
-    DtlsAddr                  to;       // empty = use session's peer
-};
-
-// -----------------------------------------------------------------------------
-// SRTP keying material (RFC 5764 §4.2)
-// -----------------------------------------------------------------------------
-
-struct SrtpKeyingMaterial {
-    SrtpProfile               profile = SrtpProfile::Aes128CmSha1_80;
-
-    std::array<std::uint8_t, kSrtpMasterKeyLen>  client_master_key{};
-    std::array<std::uint8_t, kSrtpMasterSaltLen> client_master_salt{};
-    std::array<std::uint8_t, kSrtpMasterKeyLen>  server_master_key{};
-    std::array<std::uint8_t, kSrtpMasterSaltLen> server_master_salt{};
-
-    /** Number of times each direction may rollover without re-keying
-     *  (informational; libsrtp doesn't need this). */
-    std::uint32_t            lifetime = 0;
-};
-
-// -----------------------------------------------------------------------------
-// Local fingerprint (advertised in SDP)
-// -----------------------------------------------------------------------------
-
-struct Fingerprint {
-    std::string algorithm;     // "sha-256"
-    std::vector<std::uint8_t> bytes;     // raw hash
-    std::string base64;        // base64-encoded (kept for legacy/debug; NOT for SDP)
-    std::string hex_colon;     // colon-separated UPPER hex per RFC 8122 (SDP form)
-};
-
-// -----------------------------------------------------------------------------
-// Config
-// -----------------------------------------------------------------------------
-
-struct Config {
-    DtlsRole role = DtlsRole::Server;
-
-    /** SDP peer fingerprint (must match the certificate the peer presents). */
-    std::string peer_fingerprint_algo  = "sha-256";
-    std::vector<std::uint8_t> peer_fingerprint_value;  // raw bytes
-
-    /** Preferred SRTP protection profile.  Default = AES-128-CM-SHA1-80. */
-    SrtpProfile srtp_profile = SrtpProfile::Aes128CmSha1_80;
-
-    /** How long to retry HelloVerifyRequest (seconds).  0 = no retry. */
-    std::uint32_t hello_verify_timeout_s = 3;
-
-    /** MTU for outbound records (typical: 1200 to fit IPv6 path). */
-    std::uint16_t mtu = 1200;
-
-    /** Debug: enable verbose logging. */
-    bool verbose = false;
-};
-
 // -----------------------------------------------------------------------------
 // DtlsSession — one peer connection.
 //
@@ -208,8 +91,15 @@ struct Config {
 // The hand-written DTLS state machine (the original `dtls.cpp`) was
 // removed; the only DTLS provider now is wolfSSL.
 // -----------------------------------------------------------------------------
-class DtlsSession {
+class DtlsSession : public IDtlsSession {
 public:
+    // Expose the seam-surface overloads so the legacy concrete
+    // methods below (`set_role(DtlsRole)`, `set_peer_fingerprint(string,
+    // vector)`) don't hide them via C++ name-hiding rules.  See
+    // dtls_session_iface.hpp for the seam vs. legacy split.
+    using IDtlsSession::set_role;
+    using IDtlsSession::set_peer_fingerprint;
+
     explicit DtlsSession(Config config);
     ~DtlsSession();
 
@@ -271,6 +161,39 @@ public:
 
     /** SRTP keying material — available once state() == Connected. */
     std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
+
+    // ------------------------------------------------------------------
+    // PAL Slice 4 / TPAL-4 seam surface — delegates to DtlsSessionWolfSSL
+    // via the inner impl_.  Kept explicit (not just `using`) so a reader
+    // can see the full interface this class satisfies without grepping.
+    // ------------------------------------------------------------------
+
+    /** @override IDtlsSession — accepts the seam Role enum.
+     *  Delegates to set_role(DtlsRole). */
+    void set_role(Role role) noexcept;
+
+    /** @override IDtlsSession — accepts a raw 32-byte SHA-256 span.
+     *  Forwards to set_peer_fingerprint("sha-256", value). */
+    void set_peer_fingerprint(
+        std::span<const std::uint8_t> raw_sha256) noexcept;
+
+    /** @override IDtlsSession — equivalent to open() but void-returning.
+     *  Discards the Result<void>; errors surface via state() ==
+     *  Failed or the on_handshake_complete callback. */
+    void start() noexcept;
+
+    /** @override IDtlsSession — equivalent to tick(). */
+    void pump() noexcept;
+
+    /** @override IDtlsSession — registers the seam one-shot callback
+     *  with the inner wolfSSL-backed session. */
+    void on_handshake_complete(OnCompleteCb cb) noexcept;
+
+    /** @override IDtlsSession — flattens the SrtpKeyingMaterial
+     *  4-field layout into the RFC 5764 §4.2 60-byte form.  Returns
+     *  kErrNotReady if the handshake has not completed. */
+    plugins::Status export_srtp_key_material(
+        std::span<std::uint8_t, 60> out) noexcept;
 
     // ---- Stats ------------------------------------------------------------
 

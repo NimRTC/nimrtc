@@ -23,7 +23,7 @@
  *
  * ## Slice 8 (v0.10.2) — registry hook
  *
- * The DTLS factory is now published via
+ * The DTLS factory is published via
  * `nimrtc::core::PluginRegistry::register_dtls_session(id, factory*)`
  * (Transport PAL Slice 8 — see `docs/plan/transport-selection.md` §6.5).
  * The legacy `test_only::get_wolfssl_factory()` accessor is preserved
@@ -54,6 +54,17 @@ void set_wolfssl_factory_for_testing(const IDtlsSessionFactory* f) noexcept;
 } // namespace test_only
 } // namespace nimrtc::dtls
 
+// ADR-013: conditionally include GMSSL factory forward declaration.
+#if defined(NIMRTC_HAS_DTLS_GMSSL)
+namespace nimrtc::dtls {
+const IDtlsSessionFactory* gmssl_factory_singleton() noexcept;
+namespace test_only {
+const IDtlsSessionFactory* get_gmssl_factory() noexcept;
+void set_gmssl_factory_for_testing(const IDtlsSessionFactory* f) noexcept;
+} // namespace test_only
+} // namespace nimrtc::dtls
+#endif // NIMRTC_HAS_DTLS_GMSSL
+
 namespace nimrtc::dtls {
 
 namespace detail {
@@ -61,6 +72,10 @@ namespace detail {
 // ---------------------------------------------------------------------------
 // do_register_default_plugins
 // ---------------------------------------------------------------------------
+//
+// Defined in this .cpp (not header) so the strong-definition symbol
+// lands in `nimrtc_dtls_seam.lib` for static-link consumers (same
+// workaround as ice.cpp / rtp_plugin.cpp).
 //
 // On first call: construct a single `WolfsslDtlsFactory` (Meyer
 // singleton), publish it under the seam id "wolfssl" through BOTH:
@@ -70,14 +85,7 @@ namespace detail {
 //       Stack factory composition;
 //   (2) the legacy `test_only::set_wolfssl_factory_for_testing(&f)`
 //       hook — preserved verbatim for Slice 4 tests that resolve the
-//       factory pointer without going through the registry. The legacy
-//       accessor now reads back through the registry (see
-//       dtls_wolfssl_factory.cpp), so (1) is the source of truth.
-//
-// The `detail::do_register_default_plugins` definition is intentionally
-// kept in this .cpp (not the header) so the strong-definition symbol
-// lands in `nimrtc_dtls_seam.lib` for static-link consumers (same
-// workaround as ice.cpp / rtp_plugin.cpp).
+//       factory pointer without going through the registry.
 
 void do_register_default_plugins() noexcept {
     // `static` inside a function ⇒ address-stable for program lifetime;
@@ -96,17 +104,24 @@ void do_register_default_plugins() noexcept {
                 std::string_view{f->id()}, f);
 
             // (2) Legacy: keep the Slice 4 test-only accessor wired so
-            //     tests/test_dtls_factory.cpp can resolve the factory
-            //     pointer without going through the registry. The
-            //     accessor's getter now reads back through the registry
-            //     (see dtls_wolfssl_factory.cpp), so this slot is a
-            //     convenience cache rather than a second source of truth.
+            //     tests that resolve the factory pointer without going
+            //     through the registry continue to work.
             test_only::set_wolfssl_factory_for_testing(f);
 
             nimrtc::core::log::Logger::instance().info(
                 std::string("nimrtc::dtls: default plugin registered (id=") +
                 std::string(f->id()) +
                 ", via Slice 8 typed registry hook + legacy test_only slot)");
+
+// ADR-013: register GMSSL factory alongside wolfSSL when the backend
+// was enabled at build time (NIMRTC_HAS_DTLS_GMSSL=1).
+#if defined(NIMRTC_HAS_DTLS_GMSSL)
+            const IDtlsSessionFactory* g = gmssl_factory_singleton();
+            test_only::set_gmssl_factory_for_testing(g);
+            nimrtc::core::log::Logger::instance().info(
+                std::string("nimrtc::dtls: GMSSL plugin registered (id=") +
+                std::string(g->id()) + ")");
+#endif // NIMRTC_HAS_DTLS_GMSSL
         }
     } s_registrar;
     (void)s_registrar;

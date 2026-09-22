@@ -96,19 +96,6 @@ struct TinySocket {
             close();
             return false;
         }
-        // Put the socket in non-blocking mode so `recv_from()` can honor
-        // its poll deadline.  Without this, recvfrom() blocks until the
-        // kernel has data, the inner `while (clk::now() < deadline)` loop
-        // never iterates again, and the reader thread hangs forever once
-        // the handshake completes and no further packets arrive.
-#ifdef _WIN32
-        u_long nonblocking = 1;
-        ::ioctlsocket(static_cast<SOCKET>(s_),
-                      static_cast<long>(FIONBIO), &nonblocking);
-#else
-        int flags = ::fcntl(s_, F_GETFL, 0);
-        if (flags >= 0) ::fcntl(s_, F_SETFL, flags | O_NONBLOCK);
-#endif
         return true;
     }
 
@@ -233,17 +220,29 @@ struct DtlsSide {
         reader = std::thread([this] {
             std::vector<std::uint8_t> pkt;
             while (!reader_stop.load(std::memory_order_acquire)) {
-                // Step 1: drive the state machine BEFORE waiting for data.
-                // wolfSSL non-blocking DTLS needs accept()/connect() called
-                // on every loop iteration to make progress — even when no
-                // bytes have arrived yet (e.g. to emit a retransmit or
-                // handle an internal state transition).  The previous order
-                // put recv_from() first with a 2 ms poll window; during
-                // that window tick() + take_outbound() were stalled, so
-                // wolfSSL's handshake timer advanced without producing output
-                // and the 30 s test deadline expired before the peer
-                // received enough flights to complete the exchange.
+                // Step 1: receive first — give priority to consuming the
+                // incoming half of the handshake before producing new
+                // outbound bytes.  Previously this loop called take_outbound()
+                // first; on a loaded or slow host the 1ms recv window
+                // expired before the peer's response arrived, causing the
+                // handshake to stall with -308 (SOCKET_ERROR_E) when
+                // wolfSSL's internal state became inconsistent.
+                std::uint16_t from_p = 0;
+                if (socket.recv_from(pkt, &from_p,
+                        clk::now() + std::chrono::milliseconds(2))) {
+                    recv_packets.fetch_add(1, std::memory_order_relaxed);
+                    nimrtc::dtls::DtlsAddr from{"127.0.0.1", from_p};
+                    std::size_t consumed = session->feed_inbound(
+                        std::span<const std::uint8_t>(pkt.data(),
+                                                      pkt.size()), from);
+                    feed_bytes.fetch_add(static_cast<int>(consumed),
+                                         std::memory_order_relaxed);
+                }
+
+                // Step 2: advance the state machine (retransmit timer, etc.).
                 session->tick();
+
+                // Step 3: drain any new outbound records and send them.
                 auto outs = session->take_outbound();
                 for (auto& rec : outs) {
                     if (!socket.send_to(peer_port,
@@ -255,25 +254,6 @@ struct DtlsSide {
                     sent_records.fetch_add(1, std::memory_order_relaxed);
                 }
 
-                // Step 2: drain received packets.
-                std::uint16_t from_p = 0;
-                // 1 ms timeout: enough for the kernel to surface a packet
-                // queued by the peer on loopback, while still driving the
-                // state machine at sub-millisecond cadence.  Zero timeout
-                // (clk::now()) would short-circuit the inner recvfrom
-                // poll loop and starve the recv path entirely.  Requires
-                // the socket to be in non-blocking mode — see open().
-                if (socket.recv_from(pkt, &from_p,
-                        clk::now() + std::chrono::milliseconds(1))) {
-                    recv_packets.fetch_add(1, std::memory_order_relaxed);
-                    nimrtc::dtls::DtlsAddr from{"127.0.0.1", from_p};
-                    std::size_t consumed = session->feed_inbound(
-                        std::span<const std::uint8_t>(pkt.data(),
-                                                      pkt.size()), from);
-                    feed_bytes.fetch_add(static_cast<int>(consumed),
-                                         std::memory_order_relaxed);
-                }
-
                 // Check Connected state.
                 if (session->is_connected() &&
                     !connected.exchange(true, std::memory_order_acq_rel)) {
@@ -282,11 +262,6 @@ struct DtlsSide {
                         static_cast<const void*>(session.get()),
                         recv_packets.load());
                 }
-
-                // Brief yield: prevents the tight loop from starving other
-                // threads on a single-core VM while still driving wolfSSL
-                // at sub-millisecond cadence.
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
         });
     }

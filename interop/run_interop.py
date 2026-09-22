@@ -1204,6 +1204,258 @@ def write_sdp_fixture(name: str, sdp: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Chrome ↔ NimRTC DataChannel interop test (v0.11.0 DoD Gate #1)
+# ---------------------------------------------------------------------------
+
+async def test_chrome_datachannel_interop(
+    cfg: Config, room: str = "interop"
+) -> TestResult:
+    """
+    Test: Headless Chrome ↔ NimRTC DataChannel bidirectional interop.
+    DoD Gate #1 for v0.11.0 "Beta 前哨".
+
+    Validates Chrome ↔ NimRTC SCTP-over-DTLS DataChannel round-trip
+    across four reliability variants:
+      r_o  — reliable  + ordered
+      r_u  — reliable  + unordered
+      uu   — unreliable + unordered
+      uo   — unreliable + ordered
+
+    Each variant: Chrome creates an RTCDataChannel, sends a 32-byte payload
+    when open, and verifies it receives an echo back from NimRTC.
+    NimRTC creates four matching channels (one per variant) after ICE
+    connects, echoes every inbound payload, and sends its own initial
+    probe.
+
+    NOTE: SCTP-over-DTLS physical wiring is not yet complete (deferred
+    to the v0.11.x engine-integration follow-up PR; was previously TODO
+    Subagent D in engine.cpp).  Expected result is all 4 variants FAIL
+    with recv=false.  This test is the infrastructure scaffolding; once
+    the v0.11.x wiring PR lands, the variants will pass automatically.
+
+    Chrome harness: interop/chrome/test_chrome_datachannel.html
+    NimRTC side:   demo-p2p --signaling-proxy --answerer (--datachannel default)
+    Signaling:     interop/signaling/signaling_server.py
+    """
+    start = time.monotonic()
+
+    # Locate the new DC-specific harness HTML.
+    html_path = cfg.interop_root / "chrome" / "test_chrome_datachannel.html"
+    if not html_path.exists():
+        return TestResult(
+            name="chrome_datachannel_interop",
+            status=TestStatus.SKIP,
+            duration_ms=0,
+            details={},
+            message=f"Chrome DC harness not found: {html_path}",
+        )
+
+    # Check signaling server is running (same as opus test).
+    try:
+        import urllib.request as _ur
+        import urllib.error as _ue
+        try:
+            _ur.urlopen(
+                f"http://{cfg.signaling_host}:{cfg.signaling_port}/", timeout=2
+            ).close()
+        except _ue.HTTPError:
+            pass  # 426 Upgrade Required = server is up
+    except Exception:
+        return TestResult(
+            name="chrome_datachannel_interop",
+            status=TestStatus.SKIP,
+            duration_ms=0,
+            details={},
+            message=(
+                f"Signaling server not running at "
+                f"ws://{cfg.signaling_host}:{cfg.signaling_port} — "
+                "start it first"
+            ),
+        )
+
+    # Locate demo-p2p binary and signaling_proxy.py.
+    binary = cfg.nimrtc_binary or str(_find_nimrtc_binary(cfg) or "")
+    if not binary:
+        return TestResult(
+            name="chrome_datachannel_interop",
+            status=TestStatus.SKIP,
+            duration_ms=0,
+            details={},
+            message="NimRTC demo-p2p binary not found; set NIMRTC_BINARY",
+        )
+    proxy_py = cfg.interop_root / "signaling" / "signaling_proxy.py"
+    if not proxy_py.exists():
+        return TestResult(
+            name="chrome_datachannel_interop",
+            status=TestStatus.SKIP,
+            duration_ms=0,
+            details={},
+            message=f"signaling_proxy.py not found at {proxy_py}",
+        )
+
+    # Do not emit demo-p2p stderr to the shared NIMRTC_PROXY_STDERR path
+    # (which chrome_opus_interop also uses) — write to a separate file
+    # so the two tests don't clobber each other's logs.
+    _os.environ.setdefault(
+        "NIMRTC_PROXY_STDERR",
+        str(cfg.interop_root.parent / "build" / "_demo_dc_stderr.log"),
+    )
+    _os.environ.setdefault(
+        "NIMRTC_DTLS_SPKI_FILE",
+        str(cfg.interop_root.parent / "build" / "nimrtc_spki_dc.txt"),
+    )
+
+    # Phase 1: launch NimRTC as answerer first (second to join room → answerer role).
+    # demo-p2p runs with --signaling-proxy --answerer.
+    # DataChannel is enabled by default (--datachannel is a no-op; cfg.datachannel_name
+    # defaults to "sctp").  NimRTC creates 4 DC variants after ICE connects.
+    nimrtc = NimRTCSignalingProcess(
+        binary=binary,
+        proxy=str(proxy_py),
+        signaling_ws=cfg.signaling_ws,
+        answerer=True,
+        duration=cfg.timeout_seconds,
+        bind="0.0.0.0",
+        no_stun=True,
+        turn_host=cfg.turn_host,
+        turn_port=cfg.turn_port,
+        turn_user=cfg.turn_user,
+        turn_pass=cfg.turn_pass,
+    )
+    await nimrtc.start()
+    await asyncio.sleep(1.5)  # let NimRTC register as answerer
+
+    # Wait for NimRTC's SPKI to be written so we can pass it to Chrome.
+    spki_list = ""
+    spki_file = Path(_os.environ.get("NIMRTC_DTLS_SPKI_FILE", ""))
+    deadline_spki = time.monotonic() + 5.0
+    while time.monotonic() < deadline_spki:
+        if spki_file.exists() and spki_file.stat().st_size > 0:
+            try:
+                spki_list = spki_file.read_text(encoding="utf-8").strip()
+                logger.info("NimRTC SPKI (DC test) loaded: %s", spki_list)
+                break
+            except Exception as exc:
+                logger.warning("SPKI read failed: %s", exc)
+        await asyncio.sleep(0.1)
+    if not spki_list:
+        logger.warning("Could not read NimRTC SPKI — Chrome may reject DTLS cert")
+
+    # Phase 2: launch Chrome as offerer (first to join room → offerer role).
+    # Chrome offerer mode: createDataChannel() → createOffer() → SCTP m-line in SDP.
+    # NimRTC receives the offer, processes it, and creates matching channels.
+    chrome = ChromeBrowser(
+        html_path=html_path,
+        signaling_ws=cfg.signaling_ws,
+        chrome_path=cfg.chrome_path,
+        timeout=cfg.timeout_seconds,
+        spki_list=spki_list,
+    )
+    chrome_task = asyncio.create_task(
+        chrome.run(room=room, offerer=True, timeout=cfg.timeout_seconds)
+    )
+
+    # Wait for Chrome + NimRTC to complete.
+    _, chrome_results = await asyncio.gather(
+        nimrtc.wait_exit(timeout=cfg.timeout_seconds + 5),
+        chrome_task,
+        return_exceptions=True,
+    )
+    if isinstance(chrome_results, Exception):
+        logger.warning("Chrome run raised: %s", chrome_results)
+        chrome_results = {}
+    await nimrtc.stop()
+    await chrome.stop()
+
+    duration_ms = (time.monotonic() - start) * 1000
+
+    # Extract per-variant results from _interopResults.dc.
+    # Keys: r_o, r_u, uu, uo
+    dc_results = chrome_results.get("dc", {})
+    variants = ["r_o", "r_u", "uu", "uo"]
+    results_summary = {}
+    passed_variants = 0
+    failed_variants = 0
+    skipped_variants = 0
+
+    for vid in variants:
+        vr = dc_results.get(vid, {})
+        open_ok = bool(vr.get("open", False))
+        sent_ok = bool(vr.get("sent", False))
+        recv_ok = bool(vr.get("recv", False))
+        variant_pass = open_ok and sent_ok and recv_ok
+        results_summary[vid] = {
+            "open": open_ok,
+            "sent": sent_ok,
+            "recv": recv_ok,
+            "variant_pass": variant_pass,
+            "recv_payload": vr.get("recvPayload"),
+            "send_payload": vr.get("sendPayload"),
+        }
+        if variant_pass:
+            passed_variants += 1
+        elif not open_ok:
+            skipped_variants += 1
+        else:
+            failed_variants += 1
+        logger.info(
+            "DC variant %s: open=%s sent=%s recv=%s → %s",
+            vid, open_ok, sent_ok, recv_ok,
+            "PASS" if variant_pass else ("SKIP" if not open_ok else "FAIL"),
+        )
+
+    details = {
+        "chrome_results": chrome_results,
+        "nimrtc_exit_code": nimrtc.exit_code,
+        "nimrtc_stderr_tail": nimrtc.get_stderr()[-30:],
+        "dc_results": results_summary,
+        "variants_passed": passed_variants,
+        "variants_failed": failed_variants,
+        "variants_skipped": skipped_variants,
+    }
+
+    # Per DoD Gate #1 spec: 4/4 variants must pass for Gate to clear.
+    # If SCTP-over-DTLS is not wired (expected), all 4 will fail.
+    # We report FAIL if < 4 pass, with diagnostic message.
+    if passed_variants == 4:
+        status = TestStatus.PASS
+        msg = f"ALL 4 DC variants PASS (4/4) — SCTP-over-DTLS wired ✓"
+    elif passed_variants == 0 and all(
+        not r.get("open", False) for r in dc_results.values()
+    ):
+        # Expected pre-Subagent-D state: channels never opened.
+        # Report as FAIL but explain the expected condition.
+        status = TestStatus.FAIL
+        msg = (
+            f"0/4 DC variants opened (expected: SCTP-over-DTLS wiring "
+            f"not complete; deferred to the v0.11.x engine-integration "
+            f"follow-up PR). See: src/engine/src/engine.cpp."
+        )
+    elif passed_variants > 0:
+        # Partial — possible timing or partial wiring.
+        status = TestStatus.FAIL
+        msg = (
+            f"{passed_variants}/4 DC variants PASS, "
+            f"{failed_variants} FAIL, {skipped_variants} SKIP"
+        )
+    else:
+        status = TestStatus.FAIL
+        msg = (
+            f"0/4 DC variants PASS ({failed_variants} FAIL, "
+            f"{skipped_variants} SKIP) — SCTP-over-DTLS wiring required; "
+            f"deferred to the v0.11.x engine-integration follow-up PR."
+        )
+
+    return TestResult(
+        name="chrome_datachannel_interop",
+        status=status,
+        duration_ms=duration_ms,
+        details=details,
+        message=msg,
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1211,6 +1463,7 @@ TESTS: dict[str, callable] = {
     "sdp_exchange": test_sdp_exchange,
     "loopback_ice": test_loopback_ice,
     "chrome_opus_interop": test_chrome_opus_interop,
+    "chrome_datachannel_interop": test_chrome_datachannel_interop,
 }
 
 

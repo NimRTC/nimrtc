@@ -17,8 +17,20 @@ constexpr std::uint8_t kDescByteBitS = 0x10;
 constexpr std::uint8_t kPidMask      = 0x07;
 
 constexpr std::uint8_t kExtBitI = 0x80;
+// kExtBitL/T/K are reserved for the VP8 picture-ID / TL0PICIDX /
+// TID/Y-keyframe extension bits — not consumed by the current parse
+// path; suppress -Werror=unused-const-variable on Clang.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitL = 0x40;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitT = 0x20;
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kExtBitK = 0x10;
 
 } // namespace
@@ -48,9 +60,9 @@ ParseResult parse(core::ByteSpan payload) noexcept {
             if (pic & 0x80) {
                 // M=1 → 16-bit picture ID follows.
                 if (pos + 1 >= payload.size()) return r;
-                const std::uint16_t pic16 =
+                const std::uint16_t pic16 = static_cast<std::uint16_t>(
                     (static_cast<std::uint16_t>(pic & 0x7F) << 8)
-                  |  static_cast<std::uint16_t>(payload[pos]);
+                  |  static_cast<std::uint16_t>(payload[pos]));
                 r.desc.picture_id_16bit = true;
                 r.desc.picture_id       = static_cast<std::int32_t>(pic16);
                 pos += 1;

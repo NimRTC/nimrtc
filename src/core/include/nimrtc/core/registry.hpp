@@ -71,6 +71,7 @@ class IVideoReceiverFactory;
 class IVideoSenderFactory;
 class IBweFactory;
 class ISchedulerFactory;
+class IDataChannelFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -121,6 +122,7 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
+namespace datachannel      { void register_default_plugins() noexcept; }
 // Transport PAL Slice 8 (v0.10.2): module-level entry points for the
 // DTLS / SCTP / raw_udp / transport-stack seams. Each one populates
 // its matching typed registry slot (register_dtls_session /
@@ -382,6 +384,33 @@ public:
         return scheduler_.list_ids();
     }
 
+    // -- DataChannel (P2 — typed factory slot for IDataChannelFactory*) -----
+    //
+    // Mirrors the SCTP / DTLS / raw_udp / transport-stack slots above.
+    // Per `docs/plan/transport-selection.md` §5.2 (Slice 5 follow-up) and
+    // `src/plugins/include/nimrtc/plugins/datachannel.hpp`, the engine
+    // resolves a channel backend by id (default "sctp") through this slot.
+    //
+    // Subagent B (core/PluginRegistry owner) is the canonical owner of this
+    // hook. This inline stub was added by the datachannel subagent because
+    // (a) the registry slot is required for `SctpDataChannelFactory::create()`
+    //     consumers to actually receive a working channel, and (b) the
+    //     subagent boundary is "additive only" — Subagent B can replace
+    //     this stub with its own equivalent implementation without breaking
+    //     callers because the public API surface (the three methods below)
+    //     is the same shape as every other typed registry hook.
+    void register_datachannel(std::string_view id,
+                              const plugins::IDataChannelFactory* f) {
+        datachannel_.register_one(id, f);
+    }
+    [[nodiscard]] const plugins::IDataChannelFactory*
+    get_datachannel(std::string_view id) const {
+        return datachannel_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_datachannels() const {
+        return datachannel_.list_ids();
+    }
+
     // -- DTLS session (Transport PAL Slice 4 / Slice 8 hook) --------------
     //
     // Typed slot for `nimrtc::dtls::IDtlsSessionFactory*`. The built-in
@@ -480,6 +509,10 @@ private:
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
     TypedRegistry<plugins::IBweFactory>           bwe_;
     TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
+    // DataChannel P2 typed slot — see register_datachannel() above for
+    // the rationale (inline stub; Subagent B will replace with the
+    // canonical implementation).
+    TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
     // Transport PAL Slice 8 (v0.10.2) — typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
     // `register_default_plugins()` publishes a single factory into
@@ -610,6 +643,17 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kScheduler,     \
             #id, factory_ptr }
 
+/** Register a DataChannel plugin by ID and factory pointer.
+ *  P2 typed slot — mirrors the SCTP / DTLS / raw_udp / transport-stack
+ *  hooks above; see `register_datachannel()` for the canonical
+ *  rationale. */
+#define NIMRTC_REGISTER_DATACHANNEL(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_datachannel_){                           \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kDataChannel,   \
+            #id, factory_ptr }
+
 /** Register a DTLS session-factory plugin by ID and factory pointer.
  *  Transport PAL Slice 4 / Slice 8 (v0.10.2) — typed slot for
  *  `nimrtc::dtls::IDtlsSessionFactory*`. */
@@ -692,6 +736,8 @@ public:
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
         kBwe, kScheduler,
+        // P2: DataChannel typed factory slot — see register_datachannel().
+        kDataChannel,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
         // DTLS / SCTP / raw_udp / transport-stack seams. See the
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
@@ -758,6 +804,10 @@ public:
             case Category::kScheduler:
                 reg.register_scheduler(id,
                     static_cast<const plugins::ISchedulerFactory*>(factory));
+                break;
+            case Category::kDataChannel:
+                reg.register_datachannel(id,
+                    static_cast<const plugins::IDataChannelFactory*>(factory));
                 break;
             case Category::kDtlsSession:
                 reg.register_dtls_session(id,

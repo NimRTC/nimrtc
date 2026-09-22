@@ -86,6 +86,14 @@ namespace test_only {
  *  Test-only — production code MUST NOT call this. */
 const IDtlsSessionFactory* get_wolfssl_factory() noexcept;
 
+#if defined(NIMRTC_HAS_DTLS_GMSSL)
+/** Returns the registered GMSSL factory pointer, or nullptr if
+ *  `register_default_plugins()` has not been called yet.
+ *  Test-only — production code MUST NOT call this.
+ *  @note Only present when NIMRTC_ENABLE_DTLS_GMSSL=ON at build time. */
+const IDtlsSessionFactory* get_gmssl_factory() noexcept;
+#endif // NIMRTC_HAS_DTLS_GMSSL
+
 } // namespace test_only
 
 } // namespace nimrtc::dtls

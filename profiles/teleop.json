@@ -1,0 +1,107 @@
+{
+  // ==========================================================================
+  // profiles/teleop.json — robot teleoperation profile
+  // ==========================================================================
+  //
+  // Use case: remote-controlled robot / drone / vehicle. Downlink
+  // carries high-priority control commands (DataChannel, unreliable
+  // unordered, partial-reliable TTL — semantics per
+  // docs/zh/architecture.md §8.2). Uplink carries telemetry (DC) plus
+  // video (RTP). Audio path may be disabled entirely on pure-teleop
+  // platforms.
+  //
+  // Design rationale (see §2.6 Profile Table / v0.11.0 PROFILE-1):
+  //   - scheduler.strategy = "strict_priority" with control_weight = 20
+  //     (twice call.json's 10): control commands MUST preempt every
+  //     other class. No exceptions.
+  //   - datachannel_enabled = true: telemetry / sensor / state / control
+  //     channels ride on DC; unreliable / unordered / partial-reliable
+  //     semantics enforced by the per-stream QoS declaration.
+  //   - timeline_enabled = true: frame-level timestamps + (per §8.4)
+  //     sample-level timestamping is on by default. Commands may carry
+  //     ref_frame to bind "I saw frame X then issued this command".
+  //   - audio3a_name = "": 3A may be disabled in pure teleop (no
+  //     microphone on the robot, or 3A is host-side). Matches the C++
+  //     companion kProfileTeleop which has audio3a_name = "".
+  //   - jitter_buffer.mode = "low_latency", initial_delay_ms = 20:
+  //     motion-to-video delay must be small. 20 ms initial delay is
+  //     the tightest option in the v1.0 schema (lower than
+  //     agent.json's 30 ms and call.json's 40 ms).
+  //   - codec_name = "opus": even when 3A is disabled, opus may still
+  //     be used as the audio codec if the platform carries an audio
+  //     side-channel (e.g. microphone-equipped inspection robot).
+  //
+  // Comparison with v1.0:
+  //   - There is no v1.0 teleop.json; the kProfileTeleop constant is
+  //     C++-only. This file is the matching JSON-first companion and
+  //     does not require any new schema fields (full v1.0 schema).
+  //   - Mirrors the §2.6 Profile Table row for teleop: BWE on, JB
+  //     low-latency, 3A off, DC + timeline on.
+  //
+  // Override tips:
+  //   - For 国密 / 双链路 redundancy, override crypto backend at runtime
+  //     (out of profile JSON scope; see docs/zh/architecture.md §10).
+  //   - For cloud-game / XR 远端渲染 (related teleop family), use the
+  //     §2.6 cloudgame profile combination documented separately.
+  // ==========================================================================
+
+  "name": "teleop",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // 3A may be disabled in pure teleop — operators do not produce
+  // audio through the robot's microphone.
+  "audio3a_name": "",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: frame timing is critical for closed-loop control and the
+  // ref_frame command-binding API.
+  "timeline_enabled": true,
+  // Required: robot telemetry, sensor streams, and control commands ride
+  // on DC. Per-stream QoS is declared at DC creation time, not here.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // 2 Mbps initial / 20 Mbps cap — video + telemetry share the link;
+  // BWE must be aggressive enough to recover from transient loss
+  // without dropping control commands.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 2000000,
+    "max_bitrate_bps": 20000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // LowLatency — 20 ms initial delay is the tightest v1.0 option,
+  // minimising motion-to-video latency for closed-loop control.
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 20,
+    "min_delay_ms": 5,
+    "max_delay_ms": 100
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority, with control_weight = 20 (twice call.json's 10):
+  // control messages MUST preempt every other class.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 20,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  }
+}

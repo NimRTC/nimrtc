@@ -61,6 +61,7 @@
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/plugins/datachannel.hpp>
 
 // Forward declarations of concrete module types — full definitions live
 // in module headers (e.g. <nimrtc/dtls/dtls.hpp>) and are pulled in by
@@ -148,6 +149,32 @@ struct EngineConfig {
      *  { .payload_type=0, .encoding="PCMU", .clock_rate=8000, .channels=1 }
      *  for WebRTC-mandatory narrowband fallback. */
     AudioCodecConfig audio_codec;
+
+    // ---- DTLS backend selector (Transport PAL Slice 4 / TPAL-4, v0.11.0) ----
+    //
+    // Resolved at engine.open() time through the typed
+    // `core::PluginRegistry::get_dtls_session(id)` slot populated by
+    // `nimrtc::dtls::register_default_plugins()` (and any user-registered
+    // `IDtlsSessionFactory`). When empty, the engine falls back to the
+    // built-in wolfSSL factory at id="wolfssl", so every v0.10.x caller
+    // that left this field default-valued stays source-compatible.
+    //
+    // To plug in a 国密 / OpenSSL / BoringSSL / mbedTLS / custom backend:
+    //   1. Provide an IDtlsSessionFactory (matching the contract in
+    //      <nimrtc/dtls/dtls_session_factory.hpp>) that hands out
+    //      unique_ptr<IDtlsSession> instances.
+    //   2. Register it once at program startup:
+    //        core::PluginRegistry::instance().register_dtls_session(
+    //            "guomi_sm4", &my_factory);
+    //   3. Select it per-engine via the field below — empty means
+    //      the default ("wolfssl") wins:
+    //        EngineConfig cfg;
+    //        cfg.dtls_name = "guomi_sm4";   // selects the 国密 backend
+    //
+    // Unknown ids surface as `kEngineInternal` via `on_error_` and
+    // `open()` returns non-zero — the engine does NOT silently fall
+    // back to "wolfssl" (that would mask integrator typos).
+    std::string dtls_name;
 
     // ---- Transport config (forwarded to ITransport::open) ----
 
@@ -267,6 +294,31 @@ struct EngineConfig {
 
     /** IVideoCodec plugin id. Default = "h264". */
     std::string video_codec_name = "h264";
+
+    // ---- DataChannel selection (ADR-001: resolved via PluginRegistry) ----
+    //
+    // The engine resolves the data-channel factory at open() (via init_modules_once()).
+    // Channels are NOT auto-created — the caller invokes create_data_channel(label)
+    // to allocate one after open() succeeds.  This matches the WebRTC JS API
+    // (peer.createDataChannel()) and lets callers attach distinct on_message /
+    // on_state callbacks per channel.
+    //
+    // Default = "sctp" (matches the usrsctp-backed SctpDataChannelFactory
+    // id Subagent A registers).  Empty disables DataChannel entirely:
+    //   - create_offer() does NOT emit m=application
+    //   - process_remote_sdp() silently drops any m=application from the peer
+    //   - create_data_channel() returns nullptr
+    //
+    // See `src/plugins/include/nimrtc/plugins/datachannel.hpp` for the
+    // IDataChannel / IDataChannelFactory contract.
+
+    /** IDataChannel plugin id. Default = "sctp". Empty = no DataChannel. */
+    std::string datachannel_name = "sctp";
+
+    /** SCTP port advertised in `m=application` SDP lines (RFC 8831 §6.1).
+     *  Default = 5000 (matches Chrome / WebRTC interop).  Only used when
+     *  `datachannel_name` is non-empty. */
+    std::uint16_t sctp_port = 5000;
 };
 
 // ---------------------------------------------------------------------------
@@ -311,6 +363,60 @@ public:
     void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
     void set_on_error(EngineErrorCallback cb) noexcept     { on_error_       = std::move(cb); }
     void set_on_state_change(EngineStateCallback cb) noexcept { on_state_change_ = std::move(cb); }
+
+    // ---- DataChannel callbacks (forwarded to every channel create_data_channel() returns) -
+    //
+    // Set once at engine construction / pre_open() time.  Every channel
+    // created via create_data_channel() after this point receives these
+    // callbacks through `IDataChannel::set_on_message` /
+    // `IDataChannel::set_on_state` before its open() call.  The callbacks
+    // are stored as `plugins::DataMessageCallback` /
+    // `plugins::DataChannelStateCallback` (declared in
+    // `src/plugins/include/nimrtc/plugins/datachannel.hpp`).
+    //
+    // No-op when the engine has `cfg.datachannel_name.empty()` — the
+    // callbacks are still stored so callers don't have to gate by config.
+    void set_on_data_message(plugins::DataMessageCallback cb) noexcept {
+        on_data_message_ = std::move(cb);
+    }
+    void set_on_data_state(plugins::DataChannelStateCallback cb) noexcept {
+        on_data_state_ = std::move(cb);
+    }
+
+    // ---- DataChannel creation --------------------------------------------
+    //
+    // Creates a new data channel by calling
+    // `IDataChannelFactory::create()` on the factory resolved via
+    // `core::PluginRegistry::instance().get_datachannel(datachannel_name)`.
+    //
+    // Returns nullptr when:
+    //   - `cfg.datachannel_name.empty()` (DataChannel disabled)
+    //   - The factory id is not registered (the engine is open but the
+    //     caller hasn't called `core::register_all_default_plugins()` or
+    //     registered the requested backend themselves).
+    //   - The factory's create() returned null (catastrophic OOM / impl bug).
+    //
+    // On success, the returned channel is open()ed with a default config
+    // (label = @p label, reliability = kReliableOrdered, priority = 128,
+    // ordered = true).  The engine installs `on_data_message_` /
+    // `on_data_state_` on the channel before its open() call so the
+    // callback set up via set_on_data_message() / set_on_data_state()
+    // takes effect immediately.
+    //
+    // Note (v0.11.x follow-up): the returned channel is NOT yet wired
+    // to the DTLS transport — see the comment in init_modules_once()
+    // and create_data_channel().  Physical SCTP-over-DTLS plumbing is
+    // deferred to the v0.11.x engine-integration follow-up PR.  v0.11.0
+    // satisfies DC-1 Gate #1 via the §7 fallback (in-process
+    // `test_datachannel_engine` 5/5 PASS).
+    //
+    // Must be called after open() succeeds — pre_open() / open() build
+    // the ICE / DTLS / SRTP pipeline the channel will eventually sit on.
+    // Calling before open() returns nullptr because the registry slot
+    // isn't probed until init_modules_once() runs.
+    [[nodiscard]]
+    std::unique_ptr<plugins::IDataChannel>
+    create_data_channel(std::string_view label) noexcept;
 
     // SDP — RFC 8829 compliant
     std::string create_offer() noexcept;
@@ -515,6 +621,12 @@ public:
     plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
+    // ---- Audio3A plugin accessor (for PCM tap setup in demos/tests) ----
+    /** Returns the IAudio3A plugin instance (or nullptr if not created).
+     *  Call after open().  Used by demos to set up pre/post process taps. */
+    plugins::IAudio3A* audio3a() noexcept { return audio3a_plugin_.get(); }
+    const plugins::IAudio3A* audio3a() const noexcept { return audio3a_plugin_.get(); }
+
     // Engine stats for debugging
     struct Stats {
         int srtp_drops = 0;
@@ -574,6 +686,15 @@ private:
     VideoFrameCallback  on_video_frame_;
     EngineErrorCallback on_error_;
     EngineStateCallback on_state_change_;
+
+    // ---- DataChannel callbacks ---------------------------------------------
+    //
+    // Stored on the engine so create_data_channel() can install them on
+    // every new channel.  Empty std::function is fine — IDataChannel
+    // treats an unset callback as a no-op (the plugin interface
+    // explicitly allows `cb = nullptr` because it's a `std::function`).
+    plugins::DataMessageCallback    on_data_message_;
+    plugins::DataChannelStateCallback on_data_state_;
 
     enum class State { kConstructed, kOpen, kClosed };
     State state_ = State::kConstructed;

@@ -60,21 +60,21 @@ bool generate_sm2_cert(const char* basename, const char* common_name,
     if (last_sep) *last_sep = '\0';
 #endif
 
-    char cert_file[512] = {0};
-    char key_file[512]  = {0};
+    char cert_file[1024] = {0};
+    char key_file[1024]  = {0};
     snprintf(cert_file, sizeof(cert_file), "%s/%s.crt", exe_path, basename);
     snprintf(key_file,  sizeof(key_file),  "%s/%s.key",  exe_path, basename);
 
     const char* pass = "P@ssw0rd";
 
     // gmssl sm2keygen -pass <pass> -out <key>
-    char cmd_keygen[768] = {0};
+    char cmd_keygen[1536] = {0};
     snprintf(cmd_keygen, sizeof(cmd_keygen),
              "gmssl sm2keygen -pass %s -out \"%s\" 2>&1", pass, key_file);
 
     // gmssl certgen -key <key> -pass <pass> -sig_alg sm2sign-with-sm3
     //       -sm2_id test -CN <name> -days 365 -out <cert>
-    char cmd_certgen[1024] = {0};
+    char cmd_certgen[4096] = {0};
     snprintf(cmd_certgen, sizeof(cmd_certgen),
              "gmssl certgen -key \"%s\" -pass %s "
              "-sig_alg sm2sign-with-sm3 -sm2_id test "
@@ -230,6 +230,21 @@ int main() {
     pipe.b = &server;
 
     // =========================================================================
+    // Register handshake-complete callbacks BEFORE pumping so they fire
+    // when pump_handshake() transitions to Connected.  Registered after
+    // open() but before drive_until_connected() — same registration
+    // pattern the wolfSSL e2e test uses (test_dtls_handshake_e2e.cpp).
+    // =========================================================================
+    std::atomic<bool> client_called{false};
+    std::atomic<bool> server_called{false};
+    client.on_handshake_complete([&](nimrtc::plugins::Status s) {
+        if (s == nimrtc::plugins::kOk) client_called = true;
+    });
+    server.on_handshake_complete([&](nimrtc::plugins::Status s) {
+        if (s == nimrtc::plugins::kOk) server_called = true;
+    });
+
+    // =========================================================================
     // Handshake pump
     // =========================================================================
     std::printf("starting handshake pump (10s timeout)...\n");
@@ -270,19 +285,52 @@ int main() {
     std::printf("PASS: SRTP keying material available on both sides\n");
     std::fflush(stdout);
 
-    // Symmetry: client and server master keys must differ
-    bool keys_differ = false;
+    // Symmetry invariants (RFC 5764 §4.2):
+    //   1. Both sides derive the SAME 60-byte key_block from the same
+    //      master_secret + client_random || server_random.  So
+    //      km_client->client_master_key == km_server->client_master_key
+    //      (and similarly for server_master_key / client_master_salt /
+    //      server_master_salt) — proving both sides see the same key
+    //      material.
+    //   2. Within ONE side, client_master_key != server_master_key
+    //      (and the salts differ too) — proving the key_block has
+    //      distinct client/server portions as required by RFC 5764.
+    //
+    // The previous check ("client and server master keys are identical"
+    // was a FAIL) had the invariant inverted: it expected the same-named
+    // key to differ between sides, but RFC 5764 guarantees they are
+    // identical.  The correct invariant is the opposite direction:
+    // identical within naming across sides, different within naming
+    // across client/server directions on a single side.
+    bool cross_side_match = true;
     for (std::size_t i = 0; i < km_client->client_master_key.size(); ++i) {
         if (km_client->client_master_key[i] != km_server->client_master_key[i]) {
-            keys_differ = true;
+            cross_side_match = false;
             break;
         }
     }
-    if (!keys_differ) {
-        std::fprintf(stderr, "FAIL: client and server master keys are identical\n");
+    if (!cross_side_match) {
+        std::fprintf(stderr, "FAIL: client/server sessions derived different "
+                             "client_master_key (RFC 5764 §4.2 violation)\n");
         return 1;
     }
-    std::printf("PASS: client/server master keys are distinct\n");
+    std::printf("PASS: cross-side client_master_key matches (RFC 5764 §4.2)\n");
+    std::fflush(stdout);
+
+    bool within_side_differ = false;
+    for (std::size_t i = 0; i < km_client->client_master_key.size(); ++i) {
+        if (km_client->client_master_key[i] != km_client->server_master_key[i]) {
+            within_side_differ = true;
+            break;
+        }
+    }
+    if (!within_side_differ) {
+        std::fprintf(stderr, "FAIL: client_master_key == server_master_key "
+                             "within one session (RFC 5764 §4.2 violation)\n");
+        return 1;
+    }
+    std::printf("PASS: client/server master keys distinct within one side "
+                "(RFC 5764 §4.2)\n");
     std::fflush(stdout);
 
     // PAL Slice 4 seam method: export_srtp_key_material()
@@ -298,17 +346,11 @@ int main() {
     std::fflush(stdout);
 
     // =========================================================================
-    // on_handshake_complete callback verification
+    // on_handshake_complete callback verification — armed BEFORE the handshake
+    // pump above (see "Register handshake-complete callbacks" block before
+    // drive_until_connected).  By the time we reach here, both pump_handshake
+    // paths should have fired on_complete_cb_ with kOk.
     // =========================================================================
-    std::atomic<bool> client_called{false};
-    std::atomic<bool> server_called{false};
-    client.on_handshake_complete([&](nimrtc::plugins::Status s) {
-        if (s == nimrtc::plugins::kOk) client_called = true;
-    });
-    server.on_handshake_complete([&](nimrtc::plugins::Status s) {
-        if (s == nimrtc::plugins::kOk) server_called = true;
-    });
-
     if (!client_called || !server_called) {
         std::fprintf(stderr,
             "FAIL: handshake_complete callback not fired "

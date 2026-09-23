@@ -167,6 +167,38 @@ struct Config {
 
     /** Debug: enable verbose logging. */
     bool verbose = false;
+
+    // ---------------------------------------------------------------------------
+    // GMSSL-specific fields (ADR-013 / OH-DOD-4).
+    // Present on dtls::Config for backward compatibility (default = empty / 0).
+    // wolfSSL and future backends ignore these fields.
+    // ---------------------------------------------------------------------------
+
+    /** Path to the SM2 PEM certificate file (used by GMSSL backend).
+     *  Empty = falls back to the test's bundled cert at
+     *  tests/wolfssl_dtls/certs/server-ecc.pem. */
+    std::string cert_path;
+
+    /** Path to the SM2 PEM private key file (used by GMSSL backend).
+     *  Empty = falls back to tests/wolfssl_dtls/certs/ecc-key.pem. */
+    std::string key_path;
+
+    /** Password for the private key file.  Empty = no password / env-var. */
+    std::string key_pass;
+
+    /** Local bind address for the UDP socket (used by GMSSL backend).
+     *  Empty = defaults to "127.0.0.1". */
+    std::string bind_host;
+
+    /** Local bind port for the UDP socket.  0 = OS-assigned ephemeral port. */
+    std::uint16_t bind_port = 0;
+
+    /** Peer address for the UDP socket (used by GMSSL backend).
+     *  Empty = defaults to "127.0.0.1". */
+    std::string peer_host;
+
+    /** Peer port for the UDP socket.  0 = OS-assigned ephemeral port. */
+    std::uint16_t peer_port = 0;
 };
 
 } // namespace nimrtc::dtls

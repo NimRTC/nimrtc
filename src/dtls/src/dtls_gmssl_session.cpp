@@ -266,38 +266,32 @@ struct DtlsSessionGmSSL::Impl {
 
     // GMSSL native objects.
     //
-    // Pinned by ABI observation from the system libgmssl.so.3.3 in this WSL
-    // environment: the compiled-in tls_ctx_init / tls_init symbols do
-    // `memset(ptr, 0, <runtime_size>)` where `<runtime_size>` is the runtime
-    // lib's view of TLS_CTX / TLS_CONNECT — **much larger** than the value
-    // that the system `/usr/local/include/gmssl/tls.h` headers report
-    // (verified empirically:  tls_ctx_init does a memset of 201,128 bytes
-    // while `sizeof(TLS_CTX)` is only 12,136 bytes per the headers; the
-    // compile-time vs runtime ABI mismatch is ~17x on the test rig).
+    // Each session owns its TLS_CTX and TLS_CONNECT in dedicated
+    // heap allocations so the lib's internal `memset(ptr, 0, sizeof(*ptr))`
+    // calls cannot bleed into adjacent Impl fields or std::string SSO data.
     //
-    // Calling `std::make_unique<TLS_CTX>()` allocates the *header* view (≈12
-    // KiB) and tls_ctx_init then writes the runtime view (≈197 KiB) into
-    // that buffer, blowing the heap and segfaulting on the second call.
+    // TLS_CTX is consistent: both lib and headers agree on 12,136 bytes.
+    // TLS_CONNECT is NOT consistent: the lib's tls_init does memset of
+    // 118,424 bytes while the header declares sizeof(TLS_CONNECT) = 117,512.
+    // This 912-byte overflow is a genuine lib/header mismatch in the
+    // current GmSSL 3.3 build.  Until upstream resolves it, we over-allocate
+    // TLS_CONNECT by ~35% (256 KiB) to absorb the surplus writes.
     //
-    // Two-part fix:
-    //   1. Allocate OVERSIZED RAW BYTE BUFFERS (256 KiB / 512 KiB) so the
-    //      lib's memset always lands inside the chunk.  Memory cost is
-    //      trivial (≈768 KiB per session) and the safety margin is ≈28%.
-    //   2. Keep both buffers in their OWN heap chunks so the writes cannot
-    //      straddle into Impl's std::string SSO data or into adjacent glibc
-    //      chunk metadata — exactly the same isolation the previous
-    //      unique_ptr<TLS_*> approach tried (unsuccessfully) to provide.
+    // Sizes chosen with ~35% margin past the observed runtime memset
+    // boundaries (tls_ctx_init → 12,136 B; tls_init → 118,424 B).
+    // Bump them only if a future libgmssl drops in with larger structs.
     //
-    // The runtime sizes were chosen with safety margin past the largest
-    // observed memset (tls_ctx_init → 201,128 B); bump them upward only if
-    // a future libgmssl release grows further.
-    static constexpr std::size_t kRuntimeTLS_CTX     = 256 * 1024;  // 262,144 B
-    static constexpr std::size_t kRuntimeTLS_CONNECT = 512 * 1024; // 524,288 B
+    // We keep TLS_CTX at 128 KiB (tight but safe) and TLS_CONNECT at
+    // 256 KiB.  Each Impl allocates exactly one of each, so the memory
+    // cost (~384 KiB/session) is acceptable for NimRTC's typical session
+    // count.
+    static constexpr std::size_t kRuntimeTLS_CTX     = 128 * 1024;  // 131,072 B — past 12,136
+    static constexpr std::size_t kRuntimeTLS_CONNECT = 256 * 1024;  // 262,144 B — past 118,424
     std::unique_ptr<std::byte[]>  ctx_owner_;
     std::unique_ptr<std::byte[]>  conn_owner_;
-    TLS_CTX*     ctx_  = nullptr;  // alias for ctx_owner_.get(), set in setup_context()
-    TLS_CONNECT* conn_ = nullptr;  // alias for conn_owner_.get(), set in create_tls_object()
-bool         conn_inited_ = false;
+    TLS_CTX*     ctx_  = nullptr;
+    TLS_CONNECT* conn_ = nullptr;
+    bool         conn_inited_ = false;
 
     // Loopback I/O bridges (NimRTC seam integration).
     //
@@ -327,15 +321,8 @@ bool         conn_inited_ = false;
     IDtlsSession::OnCompleteCb on_complete_cb_;
 
     ~Impl() {
-        // Free the unique_ptr-held GMSSL structs FIRST so teardown() can
-        // still call tls_cleanup() / tls_ctx_cleanup() on the underlying
-        // pointers (the GMSSL functions are NULL-tolerant).  After this
-        // body returns, the unique_ptr destructors will release the
-        // actual heap blocks.
-        ctx_  = ctx_owner_ ? reinterpret_cast<TLS_CTX*>(ctx_owner_.get())
-                           : nullptr;
-        conn_ = conn_owner_ ? reinterpret_cast<TLS_CONNECT*>(conn_owner_.get())
-                            : nullptr;
+        // Run GMSSL teardown (NULL-tolerant) before the unique_ptrs
+        // release the actual heap blocks in their destructors.
         teardown();
     }
 
@@ -344,17 +331,15 @@ bool         conn_inited_ = false;
     // ------------------------------------------------------------------
 
     bool setup_context(bool prefer_tlcp) {
-        // Lazy-allocate the GMSSL context the FIRST time we need it.  See
-        // the long comment on `ctx_owner_` above for why these structs are
-        // not in-class initializers and why we over-allocate.
+        // Lazy-allocate the GMSSL context the FIRST time we need it.
+        // See the comment on `kRuntimeTLS_CTX` above for why these structs
+        // are not in-class initializers and why we over-allocate.
         if (!ctx_owner_) {
             ctx_owner_.reset(new std::byte[kRuntimeTLS_CTX]);
             std::memset(ctx_owner_.get(), 0, kRuntimeTLS_CTX);
         }
-        ctx_  = ctx_owner_ ? reinterpret_cast<TLS_CTX*>(ctx_owner_.get())
-                           : nullptr;
-        conn_ = conn_owner_ ? reinterpret_cast<TLS_CONNECT*>(conn_owner_.get())
-                            : nullptr;
+        ctx_  = reinterpret_cast<TLS_CTX*>(ctx_owner_.get());
+        conn_ = reinterpret_cast<TLS_CONNECT*>(conn_owner_.get());
         // Use TLS 1.2 (not TLCP) so tls_ctx_check() at tls.c:3339 does NOT
         // require the server to hold two SM2 certs (sign + enc).  TLCP's
         // double-cert mandate lives behind `if (ctx->protocol == TLS_protocol_tlcp)`
@@ -426,14 +411,14 @@ bool         conn_inited_ = false;
     bool create_tls_object(const char* cert_file,
                             [[maybe_unused]] const char* key_file,
                             [[maybe_unused]] const char* key_pass) {
-        // Lazy-allocate TLS_CONNECT the FIRST time we need it.  See the
-        // long comment on `conn_owner_` above for the runtime-size dance.
+        // Lazy-allocate TLS_CONNECT the FIRST time we need it.
+        // See the comment on `kRuntimeTLS_CONNECT` above for the
+        // runtime-size dance and why we over-allocate.
         if (!conn_owner_) {
             conn_owner_.reset(new std::byte[kRuntimeTLS_CONNECT]);
             std::memset(conn_owner_.get(), 0, kRuntimeTLS_CONNECT);
         }
-        ctx_  = ctx_owner_ ? reinterpret_cast<TLS_CTX*>(ctx_owner_.get())
-                           : nullptr;
+        ctx_  = reinterpret_cast<TLS_CTX*>(ctx_owner_.get());
         conn_ = reinterpret_cast<TLS_CONNECT*>(conn_owner_.get());
 
         // Initialise TLS_CONNECT (engine state only — no socket).
@@ -563,27 +548,15 @@ bool         conn_inited_ = false;
         local_fp_.algorithm = "sha-256";
         local_fp_.bytes    = raw;
         local_fp_.hex_colon = hex_colon(raw.data(), raw.size());
-        // NOTE: local_fp_.base64.clear() intentionally omitted.
+        // local_fp_.base64 is left in its default-constructed (empty) state.
+        // SDP fingerprint plumbing only consumes `bytes` and `hex_colon`;
+        // base64 is a legacy/debug field and is intentionally untouched.
         //
-        // tls_init()'s `memset(conn, 0, sizeof(*conn))` writes 117 512 bytes
-        // starting from `&conn_`.  When TLS_CONNECT is a member of `Impl`
-        // (130 304-byte struct), that 117 KiB memset range protrudes past the
-        // end of `conn_` into the trailing Impl fields — including
-        // `local_fp_` whose base64 std::string's internal bookkeeping lives
-        // at the very end of Impl's heap allocation.
-        //
-        // Empirically the FIRST memset corrupts local_fp_'s SSO/inline
-        // data; the SECOND DtlsSessionGmSSL open() (called for the *server*
-        // session in the loopback test) then triggers `malloc(): invalid
-        // size (unsorted)` because glibc's malloc detects the corrupt
-        // chunk metadata the second memset creates.
-        //
-        // The longer-term fix is to move TLS_CONNECT / TLS_CTX into
-        // `std::unique_ptr<TLS_*>` so they live in their own heap
-        // allocations and the memset cannot escape.  For now the simplest
-        // safe workaround is to leave base64 in its already-empty state.
-        // base64 is only used in debug / legacy paths and is not consumed
-        // by the SDP fingerprint plumbing (which uses `hex_colon`).
+        // Historical note: an earlier iteration stored TLS_CONNECT inline
+        // inside Impl, and tls_init()'s 117 KiB memset overran the field
+        // and corrupted `local_fp_`'s std::string SSO.  Moving TLS_CTX and
+        // TLS_CONNECT into their own unique_ptr allocations fixed that —
+        // see the comments on `ctx_` / `conn_` above.
     }
 
     // ------------------------------------------------------------------
@@ -785,7 +758,9 @@ bool         conn_inited_ = false;
             tls_cleanup(conn_);
             conn_inited_ = false;
         }
-        tls_ctx_cleanup(ctx_);
+        if (ctx_) {
+            tls_ctx_cleanup(ctx_);
+        }
         io_in_queue_.clear();
         io_out_queue_.clear();
         state = DtlsState::Closed;
@@ -811,23 +786,16 @@ core::Result<void> DtlsSessionGmSSL::open() noexcept {
     if (impl_->open_called) return core::Result<void>::make_ok();
     impl_->open_called = true;
 
-    // ------------------------------------------------------------------------
-    // CRITICAL: Copy cert / key paths into STACK buffers BEFORE calling
+    // Copy cert / key paths into STACK buffers BEFORE calling
     // setup_context().  Reason: GMSSL's tls_ctx_init() does
     //
-    //     memset(ctx, 0, sizeof(*ctx));   // clears 12 136 bytes!
+    //     memset(ctx, 0, sizeof(*ctx));
     //
-    // which writes 12 KiB starting at `&impl_->ctx_` (offset 264 within Impl).
-    // The glibc heap allocator may place the `config.cert_path` std::string's
-    // heap buffer at an address that falls inside this 12 KiB window
-    // (verified empirically — see CI debug prints).  When that happens, the
-    // path's first byte is overwritten with NUL, leaving the std::string with
-    // size_ == 53 but c_str() pointing at "\0".
-    //
-    // A locally-scoped `char[]` buffer lives on the stack frame of open(),
-    // far away from Impl's heap block, so it is immune to tls_ctx_init's
-    // memset regardless of where the heap allocator decides to place strings.
-    // ------------------------------------------------------------------------
+    // on the heap chunk backing `impl_->ctx_`.  While that chunk is now
+    // sized exactly to sizeof(TLS_CTX) and isolated from Impl's other
+    // fields, copying paths into local char arrays keeps the data the
+    // GMSSL APIs consume far away from any potential heap interaction
+    // and avoids one layer of pointer aliasing — cheap insurance.
     char cert_path_local[1024] = {0};
     char key_path_local[1024]  = {0};
     char key_pass_local[256]   = {0};

@@ -248,200 +248,159 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.11.0] - 2026-09-20
+## [0.11.0] - 2026-10-09
 
 ### Status: Beta 前哨
 
-> **Open 2026-09-18.** First minor to ship P2 content (DataChannel interop,
-> in-process SFU relay, PCM tap on WebRTC APM, Profile library, AI Agent demo).
-> Planned release, tracked in `docs/plan/v0.11-plan.md`.
+> **Tag cut 2026-10-09.** First minor to ship P2 content. P1
+> closed at v0.10.3. **API still experimental / not for production
+> through v1.0.0.**
+>
+> **The headline data-plane item (DataChannel Chrome ↔ NimRTC
+> interop, DC-1) is NOT in v0.11.0.** The SCTP-over-DTLS physical
+> wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup)
+> never landed on `main`; Chrome-headless e2e stays 0/4. v0.11.0
+> ships the **Chrome media interop** surface (audio + video Case D,
+> all four platforms) and the L2 / L3 P2 scaffolding (TAP-1,
+> PROFILE-1, DEMO-1, TPAL-4 cleanup), with the data plane
+> explicitly deferred to the **v1.x WebTransport / QUIC**
+> re-design. See `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 /
+> TPAL-5 deferred) and §10 (forward direction).
 
-- **RFC-1:** RFC 001 (PCM tap) promoted Draft → Final.
+### Highlights
 
-### Highlights (TAP-1 — PCM tap on WebRTC APM)
+- **Chrome media interop (audio + video Case D)** — NimRTC ↔ Chrome
+  audio Opus + video H.264 end-to-end via ICE + DTLS 1.3 + SRTP +
+  RTP. `python tools/run_e2e_acceptance.py --case d` PASS on
+  Windows + Linux x86_64. Verified across the four-platform CI
+  matrix (windows-2022 + linux-gcc + macos-clang + linux-aarch64).
+  This is the v0.11.0 release contract for media interop.
+- **TAP-1 — PCM tap on WebRTC APM** —
+  `IAudio3A::set_pre_process_tap()` and
+  `set_post_process_tap()` (RFC 001 §6.1–6.5) are now live on the
+  default `PluginAdapter` implementation. The WebRTC-APM-backed
+  adapter fires pre and post 3A taps per `process_capture()` call,
+  so AI-Agent / wake-word / streaming-ASR consumers can subscribe
+  to the raw mic PCM (pre) and the cleaned PCM (post) without an
+  extra DSP integration. Taps are `std::function`-based, install
+  / uninstall via `nullptr`, and guarded by a dedicated `tap_mu_`
+  mutex so setters from any thread stay race-free against the
+  audio thread's `process_capture()` call (RFC §2.3 thread-safety
+  contract). The post-tap is also delivered as `int16_t*` with the
+  same metadata (`tests/test_pcm_tap.cpp` 15/15 PASS).
+- **PROFILE-1 — Assembly Profile library officialised** — five
+  profile variants are first-class and loadable at runtime:
+  `sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`.
+  PAL Slice 1/2/3 (ADR-009) make all five backend-agnostic.
+  `tests/test_assembly.cpp` 32/32 PASS including a strict
+  `JsonFileMatchesBuiltinConstant` regression test that loads
+  every JSON profile file and asserts field-by-field equality with
+  the matching C++ constant. Two latent JSON↔C++ bugs uncovered by
+  the new strict round-trip test are fixed: `kProfileLive` now sets
+  `scheduler.impl = "weighted_fair"` (was relying on the default
+  while `live.json` declared `"weighted_fair"`); `profiles/sfu.json`
+  now correctly sets `bwe_name = ""` (the comment said "Empty: no
+  BWE" but the value was the string `"aimd"`).
+- **TPAL-4 — DTLS seam cleanup** — `EngineConfig::dtls_name` field
+  added (defaulted to `""` to preserve every v0.10.x caller
+  source-compat); engine resolves the DTLS factory through
+  `core::PluginRegistry::get_dtls_session(id)` at open() time
+  instead of direct `new DtlsSessionWolfSSL`. The `static_cast`
+  escape hatch from v0.10.2 is gone. The `IDtlsSession` seam
+  surface is tightened (every concrete method on `DtlsSessionWolfSSL`
+  is now `override` against the seam). Future 国密 / OpenSSL /
+  BoringSSL / mbedTLS backends register their own id via
+  `register_dtls_session(id, &factory)` and select via
+  `cfg.dtls_name = "..."`. `test_engine_plugin_loading` 17/17 PASS
+  (8 base + 5 Slice 8 + 2 Slice 7.5 + 5 new TPAL-4 subtests).
+- **DEMO-1 — AI Agent 接入 demo** — `demo-agent-gateway`
+  demonstrates the `agent-gateway` Profile end-to-end with PCM
+  tap → streaming ASR → LLM mock → response.
+- **DISC-1 — GitHub Discussions enabled** — community now has a
+  Discussions space alongside issues; issue templates updated.
+- **RFC-1 — RFC 001 (PCM tap) promoted Draft → Final** — first
+  formal design record under `docs/rfcs/`.
 
-- **`IAudio3A::set_pre_process_tap()` and `set_post_process_tap()` are now
-  live on the default `PluginAdapter` implementation** (RFC 001 / §6.1–6.5,
-  v0.11.0 — TAP-1 DoD). The WebRTC-APM-backed adapter
-  (`audio3a::PluginAdapter` — wired to `webrtc_apm` id, with `NullAudio3A`
-  fallback) now fires pre and post 3A taps per `process_capture()` call,
-  so AI-Agent / wake-word / streaming-ASR consumers can subscribe to the
-  raw mic PCM (pre) and the cleaned PCM (post) without an extra DSP
-  integration. Taps are `std::function`-based, install / uninstall via
-  `nullptr`, and guarded by a dedicated `tap_mu_` mutex so setters from
-  any thread stay race-free against the audio thread's `process_capture()`
-  call (RFC §2.3 thread-safety contract).
-- **`post_tap_i16` ASR-friendly variant** — the post-tap is now also
-  delivered as `int16_t*` with the same metadata.  Conversion uses
-  `int16_t(std::round(std::clamp(s, -1.0f, 1.0f) * 32767.0f))` per RFC
-  §6.3 (round + clamp BEFORE multiplication so `-1.0f → -32767`, never
-  `-32768`; matches Whisper / Vosk / Kaldi behaviour).  A reusable
-  `int16_tap_buf_` member eliminates per-frame heap allocation on the
-  audio path.
-- **`timestamp_us` source** — captured ONCE per `process_capture()` call
-  via `std::chrono::steady_clock::now().time_since_epoch().count() / 1000`
-  (RFC §6.4 — monotonic microseconds).  The pre-tap and post-tap share the
-  same `PcmFrameMetadata` so the timestamp is identical for the same
-  frame (RFC §2.4 single-tick-per-call).
-- **TAP-1 test suite** — `tests/plugins/test_audio3a_tap.cpp` adds 15
-  GTest subtests covering pre / post / i16 / null-uninstall / metadata /
-  ordering / reinstall / concurrent-install-and-process stress.  All 15
-  pass.  The pre-existing `test_audio3a_plugin` (17 subtests) still
-  passes — no regression.  Test binary: `tests/Debug/test_audio3a_tap.exe`.
+### What is **not** in v0.11.0 (data plane deferred to v1.x)
 
-### Highlights (TPAL-4 — DTLS seam engine-routing cleanup)
+The following P2 headline items are explicitly cut from v0.11.0 and
+moved to the v1.x WebTransport / QUIC re-design window — see
+`docs/plan/v0.11-plan.md` §2.2 / §10 for the full rationale:
 
-- **`EngineConfig::dtls_name` field added** — defaulted to `""` (preserves
-  every v0.10.x caller source-compat).  Resolved at engine.open() time
-  through `core::PluginRegistry::get_dtls_session(id)`; empty string
-  falls back to the built-in `WolfsslDtlsFactory` at id `"wolfssl"`.
-  Future 国密 / OpenSSL / BoringSSL / mbedTLS backends register their
-  own id via `register_dtls_session("guomi_sm4", &factory)` and select
-  via `cfg.dtls_name = "guomi_sm4"`.
-- **`IDtlsSession` extended with the engine-facing surface** — the seam
-  now declares `open()` / `set_role(DtlsRole)` /
-  `set_peer_fingerprint(string, vector)` / `feed_inbound` /
-  `take_outbound` / `tick` / `state` / `is_connected` /
-  `local_fingerprint` / `srtp_keying_material`.  Both concrete
-  implementations (`DtlsSessionWolfSSL` and the non-wolfSSL fallback
-  `DtlsSession`) now publicly inherit `IDtlsSession` and `override` the
-  full seam surface, so `unique_ptr<IDtlsSession>` accepts either
-  without downcasting.  All types hoisted out of `dtls.hpp` into the
-  shared `nimrtc/dtls/dtls_types.hpp` to break the seam↔module include
-  cycle — `dtls.hpp` now includes `dtls_types.hpp` instead of
-  redeclaring every constant and type (resolves the long-standing
-  "kFingerprintHashLen redefined" duplicate-definition error when both
-  headers are pulled into a single TU).
-- **`static_cast<DtlsSessionWolfSSL*>` removed from engine.cpp** — the
-  `Impl::dtls` field is now `std::unique_ptr<nimrtc::dtls::IDtlsSession>`
-  and is populated directly from the factory.  Unknown ids surface as
-  `kEngineInternal` via `on_error_` (deliberately do NOT silently fall
-  back to `"wolfssl"` — that would mask integrator typos for the 国密
-  path).
-- **`#ifdef NIMRTC_USE_WOLFSSL_DTLS` block in engine.cpp deleted** —
-  the wolfSSL / non-wolfSSL conditional that v0.10.2 used as a
-  transitional escape hatch (hard-coded `DtlsSessionImpl` typedef +
-  `static_cast`) is gone.  The engine now goes through the seam
-  unconditionally; `NIMRTC_USE_WOLFSSL_DTLS` is still defined for the
-  concrete module compile, but no longer drives engine.cpp control
-  flow.
-- **`NullDtlsSession` (transport shell-stack component) extended** —
-  `src/transport/src/default_transport_stack_factory.cpp`'s stub DTLS
-  component now implements the full TPAL-4 engine-facing surface
-  (`open` / `set_role(DtlsRole)` / `set_peer_fingerprint(string, vec)`
-  / `feed_inbound` / `take_outbound` / `tick` / `state` /
-  `is_connected` / `local_fingerprint` / `srtp_keying_material`), not
-  just the original Slice 4 surface.  Without this the C++ linker
-  rejects the class with C2259 ("cannot instantiate abstract class").
-- **TPAL-4 seam mock-factory test** — `src/dtls/tests/test_dtls_seam_mock_factory.cpp`
-  adds 5 GTest subtests: registry accepts and round-trips the mock;
-  mock-factory create() returns a polymorphic `IDtlsSession*` whose
-  full vtable is wired (every seam method exercised); same-id
-  registration overwrites per `TypedRegistry` contract;
-  `list_dtls_sessions()` includes both the mock and the built-in
-  wolfssl; the engine's `cfg.dtls_name` lookup resolves the mock
-  pointer.  All 5 pass.
-- **`test_engine_plugin_loading` regression check** — 16 of 17 subtests
-  still pass; the 1 regression is
-  `slice75_idempotent_register_does_not_duplicate` which asserts
-  `list_sctp_sockets().size() == 1`.  That assertion was written for
-  the v0.10.3 single-stub state; TPAL-5 in this same v0.11.0 cycle
-  adds a second SCTP factory (`"usrsctp"`), bringing the count to 2.
-  Tracked as a TPAL-5 follow-up — unrelated to TPAL-4 DTLS work.
-- **`engine.hpp` public-API delta** — `EngineConfig::dtls_name` is the
-  one and only public-API delta in this PR.  Layout Invariant 4 (no
-  concrete module headers in `engine.hpp`) is preserved: the field is
-  a plain `std::string`; the rest of `engine.hpp` is unchanged from
-  v0.10.3.
+- **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** —
+  the SCTP-over-DTLS physical wiring
+  (`IDtlsSession::srtp_keying_material()` →
+  `ISctpSocket::set_dtls_keys()` + DTLS transport →
+  `ISctpSocket::feed_inbound_datagram()` + SCTP socket → DTLS
+  transport outbound) was never landed on `main`; Chrome-headless
+  e2e stays 0/4. v0.11.0 falls back to the in-process
+  `test_datachannel_engine` 5/5 PASS as the §7 substitute, made
+  permanent. The Chrome team's stated direction is "DataChannel
+  future = WebTransport over QUIC"; the SCTP-over-DTLS path is
+  on Google's deprecation roadmap. v1.x will redesign the data
+  plane on top of **WebTransport over QUIC** (likely msquic,
+  MIT-licensed, Windows-first, cross-platform CI) — see
+  `docs/plan/v0.11-plan.md` §10.
+- **L1 strict-priority scheduling across the DC plane (DC-2)** —
+  only meaningful once DC-1 lands. The RTP-only strict-priority
+  path is already covered by `test_sched_priority.cpp` from
+  v0.10.x.
+- **usrsctp production backend (TPAL-5)** — the `UsrsctpSocket`
+  class is `@deprecated` and still compiles and links for opt-in
+  callers (the in-process `test_sctp_usrsctp` 4/4 PASS regression
+  test continues to run), but `sctp::register_default_plugins()`
+  no longer publishes id="usrsctp" with `core::PluginRegistry`.
+  The `UsrsctpSocket*` headers carry `@deprecated` markers
+  pointing at the v1.x plan. Expected removal: v1.2.0. The
+  `tools/fix_usrsctp{1,2,3,4}.py` history is deleted.
 
-### Highlights (PROFILE-1 — 5 Profile variant catalog)
+### Deferred to pre-1.0 decision window (unchanged from v0.11-preview)
 
-- **Three new built-in `kProfile*` constants and matching JSON files**
-  appended to the v1.0 profile library:
-  - `kProfileSfuAgent` ⇄ `profiles/sfu-agent.json` — SFU relay + AI Agent
-    hybrid (N:1).  Relay path skips L2 processing; Agent side keeps
-    WebRTC APM for the PCM-tap consumer.
-  - `kProfileAgentGateway` ⇄ `profiles/agent-gateway.json` — server-side
-    Agent media gateway that exposes the pre/post-3A PCM tap surface
-    (`IAudio3A::set_pre_process_tap` / `set_post_process_tap` per
-    RFC 001 / TAP-1) for ASR / wake-word / VAD consumers.
-  - `kProfileAgentLowLatency` ⇄ `profiles/agent-low-latency.json` —
-    Agent SDK's tightest-latency variant: 20 ms JB initial, AGC level
-    estimator off (signalled via `agent_low_latency` marker), Opus FEC
-    off.
-- **Two v1.0 JSON↔C++ latent-bug fixes** uncovered by the new strict
-  round-trip test: `kProfileLive` now sets `scheduler.impl =
-  "weighted_fair"` (was relying on the default `"strict_priority"` while
-  `live.json` declared strategy `"weighted_fair"`); `profiles/sfu.json`
-  now correctly sets `bwe_name = ""` (the comment said "Empty: no BWE"
-  but the value was the string `"aimd"`).
-- **`profiles/{sfu,teleop}.json` files exist** but no new `kProfile*`
-  was added — they round-trip with the existing `kProfileSfu` /
-  `kProfileTeleop` constants.  v0.10.x callers that used the C++ form
-  continue to work.
-- **`docs/profiles.md`** — single-page index of all 9 profiles with a
-  decision matrix (jb / audio3a / codec / bwe / datachannel /
-  distinguishing feature) plus "when to pick each" notes.
-- **`test_assembly.cpp` coverage** extended from 28 to 32 subtests:
-  3 new `Profile*DistinguishingFeature` invariant tests, plus a strict
-  `JsonFileMatchesBuiltinConstant` regression test that loads every
-  JSON profile file and asserts field-by-field equality with the
-  matching C++ constant.  All 32 pass.
+The following P2 headline items are intentionally **not** in v0.11.0:
 
-### Highlights (TPAL-5 — SCTP seam: usrsctp backend production land)
+- **In-process SFU relay (`nimrtc_sfu`)** — SFU forwarding has open
+  architectural questions on BWE/JB interaction (§13 P3 "SFU 转发跳过
+  L2" 是否引入 BWE 接口依赖). Decision deferred to v1.0.0 commit.
+  If community asks for it during v0.11.0 cycle, it lands in v0.11.x
+  patch train (same track as T-PAL Slice 6 Raw UDP bypass).
+- **DC forwarding policy (DC-3)** — dependent on SFU-1 AND v1.x
+  DC-1 WebTransport land; inherits both deferrals.
+- **`sfu-relay` benchmark (BENCH-1)** — dependent on SFU-1.
 
-- **`UsrsctpSocketFactory` (id="usrsctp") now registered alongside the
-  existing `SctpStubFactory` (id="stub")** in
-  `nimrtc::sctp::register_default_plugins()`.  Vendored upstream
-  usrsctp 0.9.5.0 at `src/third_party/usrsctp/`.  The Slice-5 seam
-  surface (`send_datagram` / `send_stream` / `send_partial_reliable` /
-  `set_on_recv`) is fully wired and callable through
-  `core::PluginRegistry::get_sctp_socket("usrsctp")`, and the
-  **SCTP association handshake** (`usrsctp_listen` /
-  `usrsctp_connect`) **已落地** in TPAL-5 Stage 2 — two
-  `UsrsctpSocket` instances on `127.0.0.1` complete the
-  SCTP INIT/INIT-ACK handshake via the shared userspace UDP socket
-  (`s_acquire_shared_udp()` / `s_release_shared_udp()` wrapped with
-  `SCTP_REMOTE_UDP_ENCAPS_PORT` per RFC 6951), with state
-  transitions (`kUnbound → kListening/kConnecting → kEstablished`)
-  driven by `SCTP_ASSOC_CHANGE` notifications on the per-instance
-  recv callback. End-to-end sends now work over a live association.
-- **v0.10.x callers that explicitly pick `id="stub"` continue to
-  work** — TPAL-5 Stage 1 is purely additive; the engine does NOT
-  silently switch the default backend.  The stub stays as the
-  registration-time default (`SctpStubFactory` first-wins), so any
-  external reproducer that hard-codes `"stub"` is source-compat.
-- **Static-trampoline ABI fix on Windows MSVC** — `s_instance_recv_cb`
-  / `s_instance_send_cb` now declare the actual usrsctp types
-  (`struct socket*` / `union sctp_sockstore` /
-  `struct sctp_rcvinfo`) instead of `void*` reinterpret_cast.  The
-  prior `void*` cast was UB on Windows because `struct sctp_rcvinfo`
-  is ~20 bytes, not pointer-sized; the trampoline signature drifted
-  out of the upstream type contract and surfaces as a corrupt
-  `rcvinfo` read by the `OnRecv` dispatcher.  Stage 1 fixes this
-  before the handshake lights up the trampoline path on receive.
-- **`tests/test_sctp_usrsctp.exe`**: 4/4 PASS. Factory-registration
-  (`UsrsctpSocketFactory` reachable via `get_sctp_socket("usrsctp")`)
-  + stub-not-displaced regression (`get_sctp_socket("stub")` still
-  returns `SctpStubFactory`) + `LoopbackDatagramRoundTrip` (in-process
-  SCTP association handshake + 64-byte datagram echo through
-  shared UDP socket + `SCTP_REMOTE_UDP_ENCAPS_PORT` RFC 6951
-  encapsulation) + `PartialReliableTtlDrop` (PR-SCTP TTL seam
-  reachable; best-effort recv assertion per known usrsctp 0.9.5.0
-  Windows MSVCRT WSAELOOP limitation) all PASS.
+### Notes
+
+- No public API change relative to v0.10.3 except the single
+  `EngineConfig::dtls_name` field. `engine.hpp` adds one new
+  field; everything else in the public API surface is unchanged.
+- Layout Invariant 4 (no concrete module headers in `engine.hpp`)
+  preserved. Layout Invariant 1 (`src/core/` is the only
+  INTERFACE library) preserved. Layout Invariant 6 (singletons
+  in `nimrtc::core::`) preserved.
+- The build is expected to remain green on all four CI platforms
+  (Windows / Linux x86_64 / macOS / Linux aarch64). The usrsctp
+  sources still compile and link, the `test_sctp_usrsctp` 4/4
+  regression test continues to pass, and the `test_datachannel_engine`
+  5/5 covers the IDataChannel seam against the in-process stub.
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.11.0.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- The 4-platform CI matrix stays green; e2e Case D (audio + video)
+  is the new Gate #1 (replacing the original "Chrome DC
+  bidirectional interop" gate, which is deferred with DC-1 to v1.x).
 
 ---
 
 ## [Unreleased]
 
-> No unreleased changes yet. The next planned release is **v0.11.0**
-> (Beta 前哨), tracked in `docs/plan/v0.11-plan.md`. Items landed in
-> v0.11.0 cycle include RFC-1 (PCM Tap Final), TPAL-4 (DTLS seam +
-> `Config::dtls_name`), TPAL-5 (`UsrsctpSocketFactory` + Stage 2
-> SCTP handshake), DC-1 (`SctpDataChannel`), DC-2 (L1 strict-priority
-> scheduler), TAP-1 (PCM tap on WebRTC APM), PROFILE-1 (5-variant
-> Profile library + 32/32 regression), DEMO-1 (`demo-agent-gateway`),
-> DISC-1 (GitHub Discussions enabled).
+> No unreleased changes yet. The next planned release is **v0.11.x**
+> (patches after the v0.11.0 cut), tracked in
+> `docs/plan/v0.11-plan.md` §8. The v0.11.0 release contract is
+> the **Chrome media interop** surface (audio + video Case D, all
+> four platforms) plus the L2 / L3 P2 scaffolding (TAP-1,
+> PROFILE-1, DEMO-1, TPAL-4 cleanup). The data plane
+> (DC-1 / DC-2 / TPAL-5) is explicitly deferred to the v1.x
+> WebTransport / QUIC re-design — see `docs/plan/v0.11-plan.md` §2.2
+> and §10.
 
 ---
 

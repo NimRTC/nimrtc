@@ -20,10 +20,38 @@
  *
  * ## Slice 5 vs. v0.11.0
  *
- * Slice 5 only registers the stub factory (id="stub"). v0.11.0 will
- * additionally register the production `UsrsctpSocketFactory` (id="usrsctp")
- * without disturbing the "stub" entry — see
- * `docs/plan/transport-selection.md` §6.2 / §7 / §8 #7.
+ * v0.11.0 ships with the **stub-only** registration. The usrsctp
+ * production backend (`UsrsctpSocketFactory`, id="usrsctp") is built
+ * and linked into `nimrtc_sctp.lib` (so anyone who wants to wire it
+ * manually can), but it is **NOT auto-registered** with the global
+ * PluginRegistry — see "Why usrsctp is not the default" below.
+ *
+ * ## Why usrsctp is not the default in v0.11.0
+ *
+ * Per `docs/plan/v0.11-plan.md` §1 (the v0.11.0 cut at tag prep
+ * time) and the deferred status recorded in §2.2 of the same plan:
+ *
+ *   - The SCTP-over-DTLS physical wiring (set_dtls_keys() +
+ *     DTLS↔SCTP inbound/outbound hookup) was never landed on
+ *     `main`; only the in-process `tests/test_datachannel_engine`
+ *     path passes 5/5. Chrome-headless e2e stays 0/4.
+ *   - usrsctp 0.9.5.0 carries a heavy third-party build cost
+ *     (`src/third_party/usrsctp/`: ~25 source files, ~440 compilation
+ *     units) and a Windows MSVCRT WSAELOOP limitation on
+ *     self-loopback that the in-process test tolerates but a real
+ *     DataChannel e2e would not.
+ *   - Chrome is moving DataChannel to **WebTransport over QUIC** in
+ *     the medium term; the SCTP-over-DTLS path is on Google's
+ *     deprecation roadmap. v1.x will revisit the data-plane
+ *     problem on top of WebTransport / QUIC instead of
+ *     SCTP-over-DTLS. Keeping usrsctp in the default registration
+ *     would commit v0.11.0 to a path the upstream is moving away
+ *     from.
+ *
+ * The class still compiles and links; opt-in callers can construct
+ * a `UsrsctpSocketFactory` directly and call `factory->create(cfg)`
+ * without going through the global registry. The header carries a
+ * `@deprecated` comment directing readers to the v1.x plan.
  *
  * ## Note on PluginRegistry::register_sctp_socket
  *
@@ -40,7 +68,6 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 #include "sctp_stub_factory.hpp"
-#include <nimrtc/sctp/usrsctp_factory.hpp>
 
 namespace nimrtc::sctp {
 
@@ -68,25 +95,25 @@ void register_default_plugins() noexcept {
     // Static-local latch — runs once, idempotent. Same pattern as
     // `nimrtc::ice::register_default_plugins()` (see ice.cpp).
     static const int once = []() {
+        // v0.11.0 ships the stub-only default registration. The
+        // `UsrsctpSocketFactory` (id="usrsctp") is intentionally NOT
+        // registered here — see the file-header "Why usrsctp is not
+        // the default in v0.11.0" block for the v1.x WebTransport
+        // re-design rationale.
+        //
+        // The class still compiles and links into `nimrtc_sctp.lib`
+        // (see `src/sctp/CMakeLists.txt` — the usrsctp_*.cpp sources
+        // are still built); opt-in callers can `new
+        // UsrsctpSocketFactory()` and call `factory->create(cfg)`
+        // directly. The header carries a `@deprecated` comment
+        // pointing at the v1.x plan.
         static const SctpStubFactory s_stub_factory{};
-        // TPAL-5 (v0.11.0) — production usrsctp backend.
-        // Sibling to the stub; both factories coexist so v0.10.x
-        // callers that picked `id="stub"` continue to work.
-        // See `docs/plan/transport-selection.md` §6.2 / §7.
-        static const UsrsctpSocketFactory s_usrsctp_factory{};
 
         // Canonical path (Slice 8): publish via the typed registry hook.
         // The engine / Selector / future Profile loader will look up the
         // factory by id "stub" through this slot.
         nimrtc::core::PluginRegistry::instance().register_sctp_socket(
             std::string_view{s_stub_factory.id()}, &s_stub_factory);
-
-        // TPAL-5: register the production backend under id "usrsctp".
-        // Both factories coexist; explicit-id callers get whichever
-        // they ask for, and the typed slot is the canonical source
-        // of truth for both.
-        nimrtc::core::PluginRegistry::instance().register_sctp_socket(
-            std::string_view{s_usrsctp_factory.id()}, &s_usrsctp_factory);
 
         // Legacy: keep the process-local cache in sync for any
         // pre-Slice-8 test code that still pokes the slot directly.
@@ -98,9 +125,8 @@ void register_default_plugins() noexcept {
         core::log::Logger::instance().info(
             "nimrtc::sctp: registered default plugins "
             "(id=\"" + std::string{s_stub_factory.id()} +
-            "\" [Slice 5 stub] + id=\"" + std::string{s_usrsctp_factory.id()} +
-            "\" [TPAL-5 usrsctp production backend]; "
-            "Slice 8 typed registry hook + legacy cache)");
+            "\" [Slice 5 stub]; usrsctp production backend is "
+            "@deprecated — see v0.11-plan.md §2.2 / v1.x WebTransport plan)");
         return 1;
     }();
     (void)once;

@@ -1,24 +1,38 @@
 /**
  * @file nimrtc/sctp/usrsctp_factory.hpp
- * @brief UsrsctpSocketFactory — registration id "usrsctp" (v0.11.0
- *        production backend).
+ * @brief UsrsctpSocketFactory — registration id "usrsctp".
+ *
+ * @deprecated v0.11.0 — DataChannel interop is **not** part of the
+ * v0.11.0 release surface. The usrsctp backend is built into
+ * `nimrtc_sctp.lib` and the factory class still compiles for opt-in
+ * callers, but the production data plane will be redesigned on top
+ * of **WebTransport over QUIC** in the v1.x series. See
+ * `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 / TPAL-5 deferred) and
+ * the v1.x plan placeholder section. Expected removal: v1.2.0.
  *
  * Sibling to the existing `SctpStubFactory` (id="stub", v0.10.x
- * default). TPAL-5 (v0.11.0) registers this factory alongside the
- * stub — `nimrtc::sctp::register_default_plugins()` adds both slots
- * so v0.10.x callers that picked `id="stub"` continue to work.
+ * default). v0.11.0 ships with stub-only registration; the
+ * `register_default_plugins()` body in `sctp_plugin.cpp` no longer
+ * calls `register_sctp_socket("usrsctp", ...)` so the global
+ * `core::PluginRegistry` resolves `get_sctp_socket("usrsctp")` to
+ * nullptr. Production engines that want a real SCTP socket today
+ * must construct the factory directly:
  *
- * ## v0.11.0 selection semantics
+ * ```cpp
+ * #include <nimrtc/sctp/usrsctp_factory.hpp>
+ * nimrtc::sctp::UsrsctpSocketFactory factory;
+ * auto sock = factory.create(cfg);
+ * // sock is non-null only if the opt-in build is linked.
+ * ```
  *
- * Per `docs/plan/transport-selection.md` §6.2 / §7, the production
- * default in v0.11.0 is `id="usrsctp"`. Callers that leave the
- * factory id unset (or rely on the registry's first-registered id)
- * get the stub under the current dual-registration scheme (because
- * `get_sctp_socket("stub")` and `get_sctp_socket("usrsctp")` both
- * resolve non-null, but a default-id resolver picks the first id
- * alphabetically — "stub"). A future v0.11.x follow-up will add a
- * typed resolver that defaults to "usrsctp" once both ids are
- * populated — see transport-selection §8 #7.
+ * The class is retained (not deleted) so:
+ *   1. Existing test code that constructs `UsrsctpSocket` directly
+ *      continues to compile and link.
+ *   2. Out-of-tree integrators who already wired the production
+ *      backend do not see a hard ABI break at v0.11.0 tag-cut.
+ *   3. The v1.x WebTransport / QUIC work can compare the two
+ *      approaches side-by-side without having to revive the
+ *      upstream fork.
  *
  * @note P0 scaffold — interface stable; binary layout TBD P4.
  */

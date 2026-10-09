@@ -1,42 +1,41 @@
 /**
  * @file tests/test_sctp_usrsctp.cpp
- * @brief TPAL-5 (v0.11.0) — usrsctp loopback round-trip regression
- *        suite.
+ * @brief usrsctp **opt-in** regression suite.
  *
- * What this test verifies (per `docs/plan/v0.11-plan.md` §9 Slice 5
- * tracker and the v0.11.0 cleanup PR scope):
+ * v0.11.0 cut: `nimrtc::sctp::register_default_plugins()` no longer
+ * auto-registers `UsrsctpSocketFactory` (id="usrsctp") with
+ * `core::PluginRegistry`. The class still compiles and links (the
+ * `nimrtc_sctp` static lib keeps the usrsctp sources in place for
+ * opt-in callers) and this test exercises the opt-in path:
  *
- *   1. `LoopbackDatagramRoundTrip`: open 2 `UsrsctpSocket`
- *      instances, A and B, both on `127.0.0.1`. B calls
- *      `listen(0)` (ephemeral SCTP port); A calls
- *      `connect("127.0.0.1", B_port)`. Wait up to 5 seconds for
- *      SCTP_COMM_UP on both sides (driven by the Stage-2 state
- *      machine). A then sends a 64-byte payload on stream 0 via
- *      `send_datagram`. B's `set_on_recv` callback pushes the
- *      payload into a thread-safe queue; assert the payload
- *      arrives within 5 seconds and matches.
+ *   1. `LoopbackDatagramRoundTrip` — opt-in: construct
+ *      `UsrsctpSocketFactory` directly (bypassing the registry),
+ *      open 2 `UsrsctpSocket` instances on `127.0.0.1`, run the
+ *      SCTP INIT/INIT-ACK handshake, exchange a 64-byte payload
+ *      on stream 0. End-to-end round-trip is the same as the
+ *      pre-cut test; the only difference is the factory pointer
+ *      comes from a stack-allocated `UsrsctpSocketFactory`
+ *      instead of from `get_sctp_socket("usrsctp")`.
+ *   2. `PartialReliableTtlDrop` — opt-in: same setup, TTL-bound
+ *      PR-SCTP smoke test against the live association.
+ *   3. ~~FactoryRegistration~~ → renamed `UsrsctpNotAutoRegistered`:
+ *      verifies the new v0.11.0 contract that
+ *      `get_sctp_socket("usrsctp")` returns nullptr after
+ *      `register_default_plugins()` runs. This is the
+ *      **negative** assertion that locks in the cut.
+ *   4. `StubFactoryStillRegistered` — Slice 5 regression:
+ *      `get_sctp_socket("stub")` continues to return non-null.
  *
- *   2. `PartialReliableTtlDrop`: same setup. B sends a message
- *      with `ttl=100ms` via `send_partial_reliable`; assert A's
- *      `on_recv` fires OR the message expires within 500ms.
- *      Documents which side of the contract is being verified
- *      (the seam surface accepts the call; PR-SCTP semantics are
- *      best-effort here).
+ * @note The fixture's `SetUpTestSuite` still calls
+ *       `register_default_plugins()` so the test exercises the
+ *       same registry state the production engine sees. The
+ *       opt-in path constructs the factory locally rather than
+ *       relying on the registry slot.
  *
- *   3. `FactoryRegistration`: call
- *      `core::PluginRegistry::instance().get_sctp_socket("usrsctp")`
- *      and assert non-null.
- *
- *   4. `StubFactoryStillRegistered`: call
- *      `core::PluginRegistry::instance().get_sctp_socket("stub")`
- *      and assert non-null (regression — TPAL-5 must not break
- *      Slice 5).
- *
- * Threading: B's `set_on_recv` callback fires on usrsctp's worker
- * thread; we use a mutex + condvar to wake the main test thread.
- *
- * @note P2 — TPAL-5 cleanup test added as part of v0.11.0.
- *        Stage 2 (this revision) un-SKIPs (1) and (2).
+ * @deprecated see `docs/plan/v0.11-plan.md` §2.2 — TPAL-5
+ *             deferred to v1.x WebTransport / QUIC re-design.
+ *             The usrsctp backend is retained for opt-in callers
+ *             through the v1.x series; expected removal at v1.2.0.
  */
 
 #include <gtest/gtest.h>
@@ -48,6 +47,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -60,6 +60,7 @@
 #include <nimrtc/sctp/sctp_plugin.hpp>
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 #include <nimrtc/sctp/sctp_socket_iface.hpp>
+#include <nimrtc/sctp/usrsctp_factory.hpp>
 #include <nimrtc/sctp/usrsctp_socket.hpp>
 
 namespace {
@@ -69,25 +70,22 @@ using nimrtc::sctp::ISctpSocket;
 using nimrtc::sctp::ISctpSocketFactory;
 using nimrtc::sctp::SctpConfig;
 using nimrtc::sctp::UsrsctpSocket;
+using nimrtc::sctp::UsrsctpSocketFactory;
 namespace plugins = nimrtc::plugins;
 
 // ---------------------------------------------------------------------------
-// Helper — resolves the "usrsctp" factory and creates a socket. The
-// factory is registered by `register_default_plugins()` so callers
-// MUST run the test fixture's SetUpTestSuite first. We resolve the
-// factory through the public typed registry slot (same path the
-// engine uses) so the test exercises the full chain end-to-end.
+// Opt-in helper — constructs a `UsrsctpSocket` via a stack-allocated
+// factory. Bypasses the global PluginRegistry (the registry no
+// longer auto-registers id="usrsctp" as of v0.11.0). The factory
+// class still compiles and links because `nimrtc_sctp.lib` keeps
+// the usrsctp_*.cpp sources in place for opt-in callers; see
+// `docs/plan/v0.11-plan.md` §2.2.
 // ---------------------------------------------------------------------------
-std::unique_ptr<ISctpSocket> make_usrsctp_socket(const SctpConfig& cfg) {
-    const ISctpSocketFactory* factory =
-        PluginRegistry::instance().get_sctp_socket("usrsctp");
-    if (factory == nullptr) {
-        ADD_FAILURE() << "TPAL-5: 'usrsctp' factory is not registered; "
-                         "register_default_plugins() must run before this "
-                         "test fixture is invoked";
-        return nullptr;
-    }
-    return factory->create(cfg);
+std::unique_ptr<ISctpSocket> make_usrsctp_socket(
+    const SctpConfig& cfg) {
+    // Stack-allocated factory — opt-in path. No registry round-trip.
+    static const UsrsctpSocketFactory s_factory{};
+    return s_factory.create(cfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,15 +384,18 @@ TEST_F(SctpUsrsctpTest, PartialReliableTtlDrop) {
 }
 
 // ---------------------------------------------------------------------------
-// (3) Factory registration — "usrsctp" slot is populated
+// (3) UsrsctpNotAutoRegistered — v0.11.0 contract: "usrsctp" slot is
+// NOT populated after register_default_plugins()
 // ---------------------------------------------------------------------------
-TEST_F(SctpUsrsctpTest, FactoryRegistration) {
+TEST_F(SctpUsrsctpTest, UsrsctpNotAutoRegistered) {
     const ISctpSocketFactory* factory =
         PluginRegistry::instance().get_sctp_socket("usrsctp");
-    ASSERT_NE(factory, nullptr)
-        << "TPAL-5: 'usrsctp' factory must be registered after "
-           "register_default_plugins()";
-    EXPECT_EQ(factory->id(), "usrsctp");
+    ASSERT_EQ(factory, nullptr)
+        << "v0.11.0 contract: 'usrsctp' factory must NOT be auto-registered "
+           "after register_default_plugins(); use the opt-in path "
+           "(UsrsctpSocketFactory + factory->create(cfg)) for usrsctp "
+           "sockets — see usrsctp_factory.hpp @deprecated header and "
+           "v0.11-plan.md §2.2 (TPAL-5 deferred to v1.x WebTransport)";
 }
 
 // ---------------------------------------------------------------------------

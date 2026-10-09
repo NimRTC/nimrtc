@@ -15,11 +15,26 @@
 #     downstream code cannot accidentally believe the v0.11.0 backend is
 #     already integrated — see sctp_stub_factory.cpp header rationale.
 #
-# v0.11.0 scope (NOT in this file):
-#   - Add `UsrsctpSocket` / `UsrsctpSocketFactory` (id="usrsctp").
-#   - Link `nimrtc_vendor_usrsctp` (vendored third_party).
-#   - Extend SctpConfig with usrsctp-specific knobs (max_num_streams,
-#     local_port, DTLS-SRTP key material hook, ...).
+# v0.11.0 scope (NOT in this file's registration body — see
+#                  sctp_plugin.cpp "Why usrsctp is not the default" header):
+#   - usrsctp source files (`usrsctp_socket.cpp`, `usrsctp_factory.cpp`) are
+#     STILL BUILT and linked into `nimrtc_sctp.lib` so opt-in callers
+#     (out-of-tree integrators, the v1.x WebTransport / QUIC comparison
+#     work, the in-process `tests/test_sctp_usrsctp` regression test) can
+#     keep using the class directly without an ABI break. The default
+#     registration in `sctp_plugin.cpp` no longer publishes
+#     `UsrsctpSocketFactory` into `core::PluginRegistry` — see
+#     `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 / TPAL-5 deferred) and
+#     the `@deprecated` comments in the matching headers.
+#
+# v1.x (planned, NOT this file):
+#   - Replace `UsrsctpSocket` with a WebTransport-over-QUIC backend
+#     (likely msquic, MIT-licensed, Windows-first, cross-platform CI). The
+#     `ISctpSocket` seam is the wrong shape for WebTransport streams and
+#     will either be replaced by an `IWebTransportSession` seam or wrapped
+#     behind a polymorphic `IDataPlane` facade. This CMakeLists will
+#     probably delete `src/usrsctp_*.cpp` and `src/third_party/usrsctp/`
+#     at v1.2.0.
 #
 # Mirrors `src/modules/ice/CMakeLists.txt` structurally (static lib, one
 # include root, enable_testing() + add_subdirectory(tests) when tests dir
@@ -35,9 +50,11 @@ add_library(nimrtc_sctp STATIC
     src/sctp_stub_socket.cpp
     src/sctp_stub_factory.cpp
     src/sctp_plugin.cpp
-    # TPAL-5 (v0.11.0) — production usrsctp backend (id="usrsctp").
-    # Sibling to the Slice 5 stub (id="stub"). The stub stays in place
-    # so v0.10.x callers continue to work — TPAL-5 is additive.
+    # usrsctp production backend (id="usrsctp"). @deprecated v0.11.0 —
+    # see file header and sctp_plugin.cpp for the v0.11.0 cut rationale.
+    # The sources are kept so the class compiles for opt-in callers
+    # and the v1.x WebTransport / QUIC work can compare approaches
+    # without reviving the upstream fork.
     src/usrsctp_socket.cpp
     src/usrsctp_factory.cpp
     )

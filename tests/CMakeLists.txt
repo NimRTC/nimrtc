@@ -678,7 +678,12 @@ nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp
 nimrtc_add_engine_test(test_dtls_seam test_dtls_seam.cpp)
 
 # ---------------------------------------------------------------------------
-# TPAL-5 (v0.11.0) — usrsctp loopback round-trip regression test.
+# TPAL-5 (v0.11.0) — usrsctp opt-in regression test.
+#
+# v0.11.0 cut: `nimrtc::sctp::register_default_plugins()` no longer
+# auto-registers `UsrsctpSocketFactory` (id="usrsctp"). The class still
+# compiles and links (the usrsctp sources are kept for opt-in callers);
+# this test exercises the opt-in path:
 #
 # Drives two UsrsctpSocket instances (AF_CONN loopback encapsulation)
 # to verify:
@@ -686,10 +691,11 @@ nimrtc_add_engine_test(test_dtls_seam test_dtls_seam.cpp)
 #   - on_recv callback fires on usrsctp's worker thread, payloads
 #     land in B's recv queue under a mutex/condvar
 #   - send_partial_reliable(ttl=10ms) call site compiles + returns kOk
-#   - factory slot "usrsctp" is registered (TPAL-5)
+#   - factory slot "usrsctp" is NOT registered (v0.11.0 contract)
 #   - factory slot "stub" is still registered (Slice 5 regression)
 #
 # Links nimrtc::sctp, nimrtc::vendor::usrsctp transitively.
+# See docs/plan/v0.11-plan.md §2.2 (TPAL-5 deferred to v1.x).
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_sctp_usrsctp test_sctp_usrsctp.cpp)
 

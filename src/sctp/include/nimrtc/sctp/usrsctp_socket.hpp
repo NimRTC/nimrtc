@@ -1,14 +1,46 @@
 /**
  * @file nimrtc/sctp/usrsctp_socket.hpp
  * @brief UsrsctpSocket — production implementation of ISctpSocket
- *        backed by upstream usrsctp 0.9.5.0 (Transport PAL Slice 5 /
- *        v0.11.0).
+ *        backed by upstream usrsctp 0.9.5.0.
  *
- * TPAL-5 Stage 2 (this revision): adds the SCTP association
- * handshake surface (`listen()` / `connect()`) and a state machine
- * that tracks SCTP_COMM_UP / SCTP_COMM_LOST notifications so
- * `send_*` after `connect()` actually delivers and `set_on_recv`
- * fires on the receiver.
+ * @deprecated v0.11.0 — DataChannel interop is **not** part of the
+ * v0.11.0 release surface. The usrsctp backend is built into
+ * `nimrtc_sctp.lib` and the class still compiles for opt-in callers,
+ * but the production data plane will be redesigned on top of
+ * **WebTransport over QUIC** in the v1.x series. See
+ * `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 / TPAL-5 deferred) and
+ * the v1.x plan placeholder section. Expected removal: v1.2.0.
+ *
+ * ## v0.11.0 cut rationale
+ *
+ *   1. The SCTP-over-DTLS physical wiring (set_dtls_keys() +
+ *      DTLS↔SCTP inbound/outbound hookup) was never landed on
+ *      `main`; only the in-process `tests/test_datachannel_engine`
+ *      path passes 5/5. Chrome-headless e2e stays 0/4.
+ *   2. usrsctp 0.9.5.0 carries a heavy third-party build cost
+ *      (`src/third_party/usrsctp/`: ~25 source files, ~440
+ *      compilation units) and a Windows MSVCRT WSAELOOP
+ *      self-loopback limitation that the in-process test tolerates
+ *      but a real DataChannel e2e would not.
+ *   3. Chrome is moving DataChannel to **WebTransport over QUIC**
+ *      in the medium term; the SCTP-over-DTLS path is on Google's
+ *      deprecation roadmap. v1.x will revisit the data-plane
+ *      problem on top of WebTransport / QUIC instead of
+ *      SCTP-over-DTLS.
+ *
+ * The class is retained (not deleted) so existing test code that
+ * constructs `UsrsctpSocket` directly continues to compile and link.
+ * `register_default_plugins()` in `sctp_plugin.cpp` no longer wires
+ * this factory into the global `core::PluginRegistry`, so production
+ * engines must construct it directly (see the usrsctp_factory.hpp
+ * header for the opt-in snippet).
+ *
+ * TPAL-5 Stage 2 (this revision, retained in source for v1.x
+ * reference): adds the SCTP association handshake surface
+ * (`listen()` / `connect()`) and a state machine that tracks
+ * SCTP_COMM_UP / SCTP_COMM_LOST notifications so `send_*` after
+ * `connect()` actually delivers and `set_on_recv` fires on the
+ * receiver.
  *
  * ## Backing transport
  *

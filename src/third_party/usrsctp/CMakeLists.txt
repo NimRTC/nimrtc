@@ -1,6 +1,16 @@
 # third_party/usrsctp/CMakeLists.txt
 # =============================================================================
-# usrsctp — portable userland SCTP stack (Transport PAL Slice 5 / v0.11.0).
+# usrsctp — portable userland SCTP stack.
+#
+# @deprecated v0.11.0 — usrsctp 0.9.5.0 is no longer the v0.11.0
+# production SCTP backend. The library is still built into the
+# `nimrtc_vendor_usrsctp` target for opt-in callers and for the
+# in-process `tests/test_sctp_usrsctp` regression test, but the data
+# plane will be redesigned on top of **WebTransport over QUIC** in
+# the v1.x series. See `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 /
+# TPAL-5 deferred) and the v1.x plan placeholder section. Expected
+# removal: v1.2.0 (the entire `src/third_party/usrsctp/` subtree
+# and this file go away with the v0.11.0 deprecation cycle).
 #
 # Populated by:
 #   curl -L https://codeload.github.com/sctplab/usrsctp/tar.gz/refs/tags/0.9.5.0 \

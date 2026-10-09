@@ -113,7 +113,7 @@ public:
     /** Initialise state machine + key material.  Must be called before
      *  feed_inbound().  Generates a self-signed cert if no local fingerprint
      *  has been provided (we'll advertise the resulting fingerprint). */
-    core::Result<void> open() noexcept;
+    core::Result<void> open() noexcept override;
 
     void close() noexcept;
 
@@ -123,26 +123,26 @@ public:
      *  consumed from `bytes`.  Outbound records (if any) are pushed onto
      *  the internal queue and can be drained via take_outbound(). */
     std::size_t feed_inbound(std::span<const std::uint8_t> bytes,
-                             const DtlsAddr& from) noexcept;
+                             const DtlsAddr& from) noexcept override;
 
     /** Drain handshake-generated outbound records. */
-    std::vector<DtlsRecord> take_outbound() noexcept;
+    std::vector<DtlsRecord> take_outbound() noexcept override;
 
     /** Drive the DTLS retransmit timer (RFC 6347 §4.2.4).  Call from the
      *  engine tick loop at ~50 ms cadence while the handshake has not
      *  yet completed.  Safe no-op once state() is Connected/Failed/Closed. */
-    void tick() noexcept;
+    void tick() noexcept override;
 
     // ---- Status -----------------------------------------------------------
 
-    DtlsState state() const noexcept;
-    bool is_connected() const noexcept;
+    DtlsState state() const noexcept override;
+    bool is_connected() const noexcept override;
 
     /** Human-readable name for a DtlsState enum value (for tracing). */
     static const char* state_name(DtlsState s) noexcept;
 
     /** Local certificate fingerprint (advertised in SDP).  Valid after open(). */
-    const Fingerprint& local_fingerprint() const noexcept;
+    const Fingerprint& local_fingerprint() const noexcept override;
 
     /** Update the SDP-pinned peer fingerprint without recreating the local
      *  certificate/keypair.  Safe to call any time before the handshake
@@ -151,16 +151,16 @@ public:
      *  recreating the session here would change the advertised fingerprint
      *  and break the handshake. */
     void set_peer_fingerprint(std::string algo,
-                              std::vector<std::uint8_t> value) noexcept;
+                              std::vector<std::uint8_t> value) noexcept override;
 
     /** Update the DTLS role without recreating the local certificate/keypair.
      *  When transitioning Server -> Client, the state machine also generates
      *  and enqueues an initial ClientHello.  Safe to call any time before
      *  the handshake completes. */
-    void set_role(DtlsRole r) noexcept;
+    void set_role(DtlsRole r) noexcept override;
 
     /** SRTP keying material — available once state() == Connected. */
-    std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept;
+    std::optional<SrtpKeyingMaterial> srtp_keying_material() const noexcept override;
 
     // ------------------------------------------------------------------
     // PAL Slice 4 / TPAL-4 seam surface — delegates to DtlsSessionWolfSSL
@@ -170,30 +170,30 @@ public:
 
     /** @override IDtlsSession — accepts the seam Role enum.
      *  Delegates to set_role(DtlsRole). */
-    void set_role(Role role) noexcept;
+    void set_role(Role role) noexcept override;
 
     /** @override IDtlsSession — accepts a raw 32-byte SHA-256 span.
      *  Forwards to set_peer_fingerprint("sha-256", value). */
     void set_peer_fingerprint(
-        std::span<const std::uint8_t> raw_sha256) noexcept;
+        std::span<const std::uint8_t> raw_sha256) noexcept override;
 
     /** @override IDtlsSession — equivalent to open() but void-returning.
      *  Discards the Result<void>; errors surface via state() ==
      *  Failed or the on_handshake_complete callback. */
-    void start() noexcept;
+    void start() noexcept override;
 
     /** @override IDtlsSession — equivalent to tick(). */
-    void pump() noexcept;
+    void pump() noexcept override;
 
     /** @override IDtlsSession — registers the seam one-shot callback
      *  with the inner wolfSSL-backed session. */
-    void on_handshake_complete(OnCompleteCb cb) noexcept;
+    void on_handshake_complete(OnCompleteCb cb) noexcept override;
 
     /** @override IDtlsSession — flattens the SrtpKeyingMaterial
      *  4-field layout into the RFC 5764 §4.2 60-byte form.  Returns
      *  kErrNotReady if the handshake has not completed. */
     plugins::Status export_srtp_key_material(
-        std::span<std::uint8_t, 60> out) noexcept;
+        std::span<std::uint8_t, 60> out) noexcept override;
 
     // ---- Stats ------------------------------------------------------------
 

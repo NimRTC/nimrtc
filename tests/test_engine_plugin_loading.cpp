@@ -485,17 +485,19 @@ TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
     // The shell is preserved for backward-compat with Slice 7 tests that use
     // `get_transport_stack("default")`.
     //
-    // TPAL-5 (v0.11.0) adds the second SCTP factory: the production
-    // `UsrsctpSocketFactory` ("usrsctp") registers alongside the
-    // pre-existing Slice-5 `SctpStubFactory` ("stub"). Both are
-    // additive and distinct (different ids), so the SCTP slot holds
-    // exactly 2 entries. Re-registration must NOT duplicate either.
+    // v0.11.0 cut: only the Slice 5 stub ("stub") is auto-registered. The
+    // production usrsctp factory ("usrsctp") is NOT auto-registered (see
+    // sctp_plugin.cpp "Why usrsctp is not the default" header) — opt-in
+    // callers construct it directly. The SCTP slot therefore holds
+    // exactly 1 entry, and re-registration must NOT duplicate it.
+    // See tests/test_sctp_usrsctp.cpp UsrsctpNotAutoRegistered for the
+    // negative assertion that locks the new contract.
     EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u)
         << "Slice 8: DTLS slot duplicated after repeated registration";
-    EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 2u)
-        << "TPAL-5: SCTP slot must hold stub + usrsctp (2 entries); "
-           "duplication here means TPAL-5's register_default_plugins() "
-           "is no longer idempotent";
+    EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u)
+        << "v0.11.0: SCTP slot must hold ONLY the Slice 5 stub (1 entry); "
+           "usrsctp is opt-in only and not auto-registered. Duplication "
+           "here means register_default_plugins() is no longer idempotent";
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
         << "Slice 8: raw-UDP slot duplicated after repeated registration";
     EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 2u)

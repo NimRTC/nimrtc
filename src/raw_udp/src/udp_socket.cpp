@@ -206,12 +206,27 @@ bool UdpSocket::open(const std::string& host, std::uint16_t port) noexcept {
 void UdpSocket::close() noexcept {
     if (sock_ == kInvalid) return;
 #ifdef _WIN32
+    // Per MSDN, closesocket() will unblock any recvfrom() blocked in
+    // another thread with WSAEINTR / WSAEBADF.  shutdown() before
+    // close() is also a no-op here.
     ::closesocket(static_cast<SOCKET>(sock_));
     // Intentionally do NOT call WSACleanup() — winsock is process-wide
     // refcounted and other ArqRawUdp instances / future sockets in the
     // same process still need it.  WSACleanup at process exit is
     // automatic.
 #else
+    // shutdown(SHUT_RDWR) BEFORE close() so a concurrent thread blocked
+    // in recvfrom() on the same fd wakes up promptly with ENOTCONN /
+    // EINVAL (Linux: SHUT_RDWR on an unconnected UDP socket returns
+    // ENOTCONN; we ignore the return code).  Without this, close() on
+    // a fd that another thread is blocked in recvfrom() on can wedge
+    // for several seconds on busy Linux kernels (the kernel has to
+    // walk the wait queues; under heavy parallel-test load — ctest
+    // -j 2 with the entire test_dtls_over_arq_udp corpus in flight —
+    // we observed 30–60 s timeouts in CI).  See test_raw_udp_real_loopback
+    // #21/#22/#23 on the fix/windows-dll-boundary branch pre-shutdown
+    // for the original symptom.
+    ::shutdown(sock_, SHUT_RDWR);
     ::close(sock_);
 #endif
     sock_ = kInvalid;

@@ -190,31 +190,32 @@ public:
 
     // ---- TPAL-4 engine-facing surface -------------------------------
     // Legacy methods kept for backwards compatibility with callers that
-    // haven't migrated to the Slice 4 seam surface above.  These are
-    // NOT part of IDtlsSession anymore (the seam surface owns that
-    // interface), so they cannot carry `override`.
-    core::Result<void> open() noexcept {
+    // haven't migrated to the Slice 4 seam surface above.  These
+    // ARE still pure-virtual members of IDtlsSession (see the "Legacy
+    // engine-facing surface" block in dtls_session_iface.hpp), so
+    // they need `override` like the Slice 4 seam methods above.
+    core::Result<void> open() noexcept override {
         return core::Result<void>::make_ok();   // shell — pretend success
     }
-    void set_role(dtls::DtlsRole /*r*/) noexcept {}
+    void set_role(dtls::DtlsRole /*r*/) noexcept override {}
     void set_peer_fingerprint(
         std::string /*algo*/,
-        std::vector<std::uint8_t> /*value*/) noexcept {}
+        std::vector<std::uint8_t> /*value*/) noexcept override {}
     std::size_t feed_inbound(std::span<const std::uint8_t> /*bytes*/,
-                             const dtls::DtlsAddr& /*from*/) noexcept {
+                             const dtls::DtlsAddr& /*from*/) noexcept override {
         return 0;
     }
-    std::vector<dtls::DtlsRecord> take_outbound() noexcept { return {}; }
-    void tick() noexcept {}
-    dtls::DtlsState state() const noexcept {
+    std::vector<dtls::DtlsRecord> take_outbound() noexcept override { return {}; }
+    void tick() noexcept override {}
+    dtls::DtlsState state() const noexcept override {
         return dtls::DtlsState::Closed;
     }
-    bool is_connected() const noexcept { return false; }
-    const dtls::Fingerprint& local_fingerprint() const noexcept {
+    bool is_connected() const noexcept override { return false; }
+    const dtls::Fingerprint& local_fingerprint() const noexcept override {
         return local_fp_;
     }
     std::optional<dtls::SrtpKeyingMaterial>
-    srtp_keying_material() const noexcept {
+    srtp_keying_material() const noexcept override {
         return std::nullopt;
     }
 

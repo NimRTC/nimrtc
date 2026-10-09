@@ -685,6 +685,33 @@ struct DtlsSessionWolfSSL::Impl {
         wolfSSL_SSLSetIORecv(ssl, &DtlsSessionWolfSSL::Impl::io_recv);
         wolfSSL_SSLSetIOSend(ssl, &DtlsSessionWolfSSL::Impl::io_send);
 
+        // RFC 5705 keying material export (used by DTLS-SRTP via
+        // `wolfSSL_export_dtls_srtp_keying_material`) requires the
+        // handshake-derived secrets (clientRandom, serverRandom,
+        // masterSecret) to still be available AFTER the handshake
+        // returns WOLFSSL_SUCCESS.  By default wolfSSL frees them as
+        // soon as the Finished message is processed to reclaim memory,
+        // and `wolfSSL_export_keying_material()` (ssl.c:4053) then
+        // bails out with the guard:
+        //
+        //     if (ssl->options.saveArrays == 0 || ssl->arrays == NULL) {
+        //         WOLFSSL_MSG("To export keying material wolfSSL needs
+        //                     to keep handshake data. Call
+        //                     wolfSSL_KeepArrays before attempting to
+        //                     export keyid material.");
+        //         return WOLFSSL_FAILURE;
+        //     }
+        //
+        // Without this call, the SRTP keying material export would
+        // return 0 (WOLFSSL_FAILURE) silently and `srtp_keys_` would
+        // remain zero-initialised — the first byte of
+        // `client_master_key[0]` would be 0 and the
+        // test_dtls_over_udp_loopback assertion
+        //   `a_keys->client_master_key[0] != 0`
+        // would fail in CI.  See `export_srtp_keys()` for the matching
+        // rc check that gates on the actual return value.
+        wolfSSL_KeepArrays(ssl);
+
         return true;
     }
 
@@ -1019,7 +1046,16 @@ struct DtlsSessionWolfSSL::Impl {
 
         std::vector<std::uint8_t> km(olen);
         rc = wolfSSL_export_dtls_srtp_keying_material(ssl, km.data(), &olen);
-        if (rc != 0 && rc != WOLFSSL_SUCCESS) {
+        // WOLFSSL_FAILURE is 0; WOLFSSL_SUCCESS is 1.  Treat ANY non-1
+        // return as failure (no silent zero-pass-through like before).
+        // The previous check `rc != 0 && rc != WOLFSSL_SUCCESS` was a
+        // logic bug: when wolfSSL_export_keying_material() fails with
+        // WOLFSSL_FAILURE (rc == 0), the short-circuit `rc != 0` was
+        // false and the failure branch was skipped — the zero-filled
+        // `km` vector was then memcpy'd into `srtp_keys_`, causing
+        // `a_keys->client_master_key[0] == 0` and breaking
+        // test_dtls_over_udp_loopback in CI.
+        if (rc != WOLFSSL_SUCCESS) {
             nimrtc::core::log::Logger::instance().error(
                 std::string("wolfSSL: SRTP export failed rc=") +
                 std::to_string(rc) + " olen=" + std::to_string(olen));

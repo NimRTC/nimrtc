@@ -161,20 +161,32 @@ public:
         }
 
         // Order matters here:
-        //   1. Close the socket FIRST so the recv thread's blocking
-        //      recv_from() returns (with -1) and it can notice
-        //      should_stop_ and exit.
-        //   2. THEN signal stop + join both threads.
-        // The previous order (signal-then-join-then-close) deadlocked
-        // because the recv thread was stuck in recv_from() with no
-        // way to observe should_stop_ until the socket was closed.
+        //   1. Set the stop flag so a recv thread that's about to
+        //      enter its next iteration sees it before doing another
+        //      recv_from().
+        //   2. Close the socket so a recv thread that's already
+        //      blocked in recv_from() gets woken up with -1.
+        //   3. Join the recv thread BEFORE resetting the unique_ptr —
+        //      the recv thread is still using `socket_->recv_from()`
+        //      and the destructor on `socket_.reset()` would free the
+        //      UdpSocket out from under the worker thread, causing
+        //      a use-after-free that some Linux kernels mask as
+        //      "stuck forever" (the recv thread ends up blocked in
+        //      the kernel on a freed fd).
+        //   4. NOW reset the unique_ptr (free the UdpSocket) and
+        //      repeat the same dance for the retransmit thread.
+        // The previous order (close-then-reset-then-stop-then-join)
+        // could delete the UdpSocket while the recv thread was
+        // still using it; on Linux this caused close() to wedge for
+        // the full ctest 60 s timeout (kernel keeps the dangling fd
+        // pinned, recv thread never observes should_stop_).
+        recv_thread_should_stop_.store(true, std::memory_order_release);
         if (socket_) {
             socket_->close();
-            socket_.reset();
         }
-
-        recv_thread_should_stop_.store(true, std::memory_order_release);
         if (recv_thread_.joinable()) recv_thread_.join();
+        socket_.reset();
+
         retransmit_thread_should_stop_.store(true, std::memory_order_release);
         if (retransmit_thread_.joinable()) retransmit_thread_.join();
 

@@ -6,6 +6,12 @@ set(_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # 设置 wolfSSL 官方 CMake 选项
 set(WOLFSSL_DTLS "yes" CACHE BOOL "Enable DTLS")
+# WOLFSSL_DTLS13 is the DTLS 1.3 (RFC 9147) counterpart to WOLFSSL_TLS13.
+# Required because Chrome 117+ defaults to DTLS 1.3 for WebRTC and rejects
+# peers that only speak DTLS 1.2.  The `use_srtp` extension (RFC 8261) is
+# supported in wolfSSL 5.9.2 under WOLFSSL_DTLS13 and the same
+# wolfSSL_export_dtls_srtp_keying_material() API works for both 1.2 and 1.3.
+set(WOLFSSL_DTLS13 "yes" CACHE BOOL "Enable DTLS 1.3 (RFC 9147) for WebRTC interop" FORCE)
 set(WOLFSSL_TLS13 "yes" CACHE BOOL "Enable TLS 1.3")
 set(WOLFSSL_ECC "yes" CACHE BOOL "Enable ECC")
 set(WOLFSSL_AESGCM "yes" CACHE BOOL "Enable AES-GCM")

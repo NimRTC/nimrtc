@@ -479,6 +479,26 @@ struct DtlsSessionWolfSSL::Impl {
             return false;
         }
 
+        // DTLS 1.3 (RFC 9147) cipher suites — required when WOLFSSL_DTLS13
+        // is on so the server actually has something to negotiate with
+        // Chrome 117+.  wolfSSL_CTX_set_cipher_list above only sets the
+        // DTLS 1.2 cipher list; DTLS 1.3 has a separate API and a
+        // different cipher-suite namespace (TLS_AES_128_GCM_SHA256 etc.).
+        // Chrome's DTLS 1.3 ClientHello offers both AES-128-GCM and
+        // AES-256-GCM — we mirror that list here.  ECDHE-ECDSA is implicit
+        // in TLS 1.3; the cert/key load above already constrains us to
+        // ECDSA auth.
+#ifdef WOLFSSL_DTLS13
+        rc = wolfSSL_CTX_set_ciphersuites(
+            ctx, "TLS_AES_128_GCM_SHA256:"
+                 "TLS_AES_256_GCM_SHA384");
+        if (rc != WOLFSSL_SUCCESS) {
+            nimrtc::core::log::Logger::instance().error(
+                "wolfSSL: failed to set DTLS 1.3 ciphersuites");
+            return false;
+        }
+#endif
+
         // Extended Master Secret (RFC 7627) — REQUIRED for DTLS-SRTP per
         // RFC 5764 §5 ("the use of the Extended Master Secret extension
         // is REQUIRED").  Chrome enforces EMS since M76.

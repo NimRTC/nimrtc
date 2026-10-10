@@ -6,12 +6,24 @@ set(_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # 设置 wolfSSL 官方 CMake 选项
 set(WOLFSSL_DTLS "yes" CACHE BOOL "Enable DTLS")
-# WOLFSSL_DTLS13 is the DTLS 1.3 (RFC 9147) counterpart to WOLFSSL_TLS13.
-# Required because Chrome 117+ defaults to DTLS 1.3 for WebRTC and rejects
-# peers that only speak DTLS 1.2.  The `use_srtp` extension (RFC 8261) is
-# supported in wolfSSL 5.9.2 under WOLFSSL_DTLS13 and the same
-# wolfSSL_export_dtls_srtp_keying_material() API works for both 1.2 and 1.3.
-set(WOLFSSL_DTLS13 "yes" CACHE BOOL "Enable DTLS 1.3 (RFC 9147) for WebRTC interop" FORCE)
+# Note: WOLFSSL_DTLS13 (RFC 9147) is intentionally LEFT OFF in wolfSSL 5.9.2.
+# The 1.3 server in 5.9.2 has a known incompatibility with the 1.3 client
+# in the same version: when the server receives a 1.2-style ClientHello from
+# a 1.3-capable client (the very first flight, before any hello_retry
+# round-trip), it requires a `key_share` extension up front and emits
+# `missing_extension` instead of issuing the hello_retry_request that
+# RFC 8446 §4.1.2 prescribes.  The in-tree unit tests
+# (tests/test_dtls_*.cpp) are exactly that "NimRTC <-> NimRTC over UDP
+# loopback" topology, so they all fail with `-313 received alert fatal
+# error description=109 (ME)` once WOLFSSL_DTLS13 is turned on — see PR
+# fix/windows-dll-boundary run 38051757830.
+#
+# Chrome / BoringSSL does not hit this because BoringSSL's 1.3 client
+# sends the 1.3 ClientHello (with `supported_versions` and `key_share`)
+# in its very first flight, so the 5.9.2 server's broken short-circuit
+# never triggers.  Until we either patch wolfSSL upstream or upgrade
+# past 5.9.2, we ship DTLS 1.2 only, which is still RFC 5764 / 8261
+# compliant and accepted by every WebRTC implementation.
 set(WOLFSSL_TLS13 "yes" CACHE BOOL "Enable TLS 1.3")
 set(WOLFSSL_ECC "yes" CACHE BOOL "Enable ECC")
 set(WOLFSSL_AESGCM "yes" CACHE BOOL "Enable AES-GCM")

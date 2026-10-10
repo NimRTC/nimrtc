@@ -10,7 +10,7 @@
 > **Current:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop, in-process SFU relay,
 > PCM tap, AI Agent demo, Profile library now in scope. See [docs/plan/v0.11-plan.md](docs/plan/v0.11-plan.md).
 >
-> 🌐 **Other languages**: [Simplified Chinese](README.zh.md)
+> 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
 ---
 
@@ -517,7 +517,8 @@ nimrtc/
 ├── CMakePresets.json          # Presets: dev, debug, release, asan, ci.{linux,windows,macos}
 ├── docs/                      # Technical doc (zh/en), ADRs, security notes
 ├── examples/
-│   └── loopback-p2p/          # Two-agent ICE handshake smoke test
+│   ├── loopback-p2p/          # Two-agent ICE handshake smoke test
+│   └── wasm-demo/             # /wasm/ landing page (placeholder until v0.12.0)
 ├── src/
 │   ├── core/                  # bytes.hpp, log, time, status codes (L0)
 │   ├── engine/                # NimRTCEngine façade (top-level entry)

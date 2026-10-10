@@ -458,6 +458,42 @@ struct DtlsSessionWolfSSL::Impl {
             return false;
         }
 
+        // DTLS 1.3 protocol-version negotiation.
+        //
+        // The Server side keeps a wide negotiation window (1.2 + 1.3) so
+        // that a peer speaking either version can complete a handshake.
+        // Chrome 117+ defaults to 1.3; older WebRTC stacks and the in-tree
+        // unit tests that drive two NimRTC sessions over loopback may
+        // speak either.  The server's `wolfDTLS_server_method()` will
+        // then pick the highest mutually-supported version.
+        //
+        // The Client side is pinned to DTLS 1.3 (RFC 9147).  This is
+        // required because wolfSSL 5.9.2's 1.3 server has a known
+        // short-circuit at tls13.c:7825 (DoClientHello): when the very
+        // first flight is a 1.2-style ClientHello that also advertises
+        // 1.3 capability (the path taken by wolfSSL 5.9.2's own
+        // 1.3-capable client before any hello_retry round-trip), the
+        // server demands a `key_share` extension up front and aborts
+        // with `INCOMPLETE_DATA` -> the TLS `missing_extension` alert
+        // (-313, description=109).  Chrome (BoringSSL) is unaffected
+        // because BoringSSL always sends a 1.3 ClientHello in flight 1
+        // and therefore never hits the broken branch.  Forcing our
+        // client to 1.3 also avoids the round-trip and removes the
+        // path that triggers the alert.  See PR
+        // fix/windows-dll-boundary CI runs 38051757830 (failing) and
+        // 38053763701 (failing differently) for the evidence.
+        if (config.role == DtlsRole::Client) {
+            int rcv = wolfSSL_CTX_set_min_proto_version(
+                ctx, DTLS1_3_VERSION);
+            if (rcv != WOLFSSL_SUCCESS) {
+                nimrtc::core::log::Logger::instance().error(
+                    std::string("wolfSSL: failed to set client min "
+                                "proto version to DTLS 1.3 (rc=") +
+                    std::to_string(rcv) + ")");
+                return false;
+            }
+        }
+
         // RFC 5764 §5 — DTLS-SRTP cipher suites are restricted to two GCM
         // suites.  ECDHE-ECDSA-AES128-SHA256 (a CBC-HMAC suite) is NOT in
         // the RFC 5764 list and Chrome will silently drop the handshake if

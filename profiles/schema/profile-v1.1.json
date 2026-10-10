@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nimrtc.org/schema/profile-v1.1.json",
+  "title": "NimRTC Profile Schema v1.1",
+  "description": "Scenario assembly profile (v1.1 — adds the `transport` block per transport-strategies.md). Strictly ADDITIVE on top of v1.0: every v1.0 profile loads unchanged; v1.1 profiles add the `transport` top-level key. The C++ loader (src/modules/assembly/src/assembly.cpp) reads the block into `assembly::TransportSection`. Five named use-case strategies (see transport-strategies.md §2) cover all known scenarios. The `strategy` field defaults to empty, in which case the engine compile-time default applies (equivalent to 'browser-call').",
+
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+
+  "properties": {
+    "name": { "type": "string" },
+
+    "transport_name": { "type": "string" },
+    "sdp_name":       { "type": "string" },
+    "rtp_name":       { "type": "string" },
+    "jb_name":        { "type": "string" },
+    "audio3a_name":   { "type": "string" },
+    "codec_name":     { "type": "string" },
+    "bwe_name":       { "type": "string" },
+    "scheduler_name": { "type": "string" },
+
+    "timeline_enabled":    { "type": "boolean" },
+    "datachannel_enabled": { "type": "boolean" },
+
+    "audio_sample_rate_hz": { "type": "integer", "minimum": 0 },
+    "audio_channels":       { "type": "integer", "minimum": 0, "maximum": 2 },
+    "audio_payload_type":   { "type": "integer", "minimum": 0, "maximum": 127 },
+
+    "bwe": { "type": "object" },
+    "jitter_buffer": { "type": "object" },
+    "scheduler": { "type": "object" },
+
+    "transport": {
+      "type": "object",
+      "description": "v1.1 additive block — declares the transport strategy and the (media_stack, control_stack) pair. See docs/plan/transport-strategies.md §2 for the five named strategies.",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "browser-call",
+            "teleop-ultra-low-latency",
+            "agent-gateway",
+            "sfu-relay",
+            "cross-network-peer"
+          ],
+          "description": "Use-case strategy id. Empty string (or omitted) = engine compile-time default ('browser-call')."
+        },
+
+        "media": {
+          "type": "object",
+          "description": "Media-plane stack declaration.",
+          "additionalProperties": false,
+          "properties": {
+            "stack": {
+              "type": "string",
+              "enum": ["webrtc-classic", "raw-udp-arq", "webrtc-quic"],
+              "description": "Media-stack factory id. 'webrtc-classic' = libjuice + wolfSSL + usrsctp (default); 'raw-udp-arq' = bare UDP + ARQ (no SCTP, no browser interop); 'webrtc-quic' = v1.x WebTransport (not in v0.12.0)."
+            },
+            "max_p99_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Optional p99 latency budget. The Selector records the value but does not enforce it (v0.13+ may add a validator; see transport-strategies.md §6 #4)."
+            }
+          }
+        },
+
+        "control": {
+          "type": "object",
+          "description": "Control-plane stack declaration. When `enabled` is false, control traffic rides the media stack's DataChannel (SCTP).",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable a side-stack for the control plane. When false, control rides the media stack's DC (SCTP)."
+            },
+            "stack": {
+              "type": "string",
+              "enum": ["webrtc-classic", "raw-udp-arq", "webrtc-quic"],
+              "description": "Control-stack factory id. Only meaningful when `enabled` is true."
+            },
+            "max_p99_ms":  { "type": "integer", "minimum": 0 },
+            "freq_hz":     { "type": "integer", "minimum": 1, "description": "Expected control-message rate in Hz." },
+            "reliability": {
+              "type": "string",
+              "enum": ["reliable_ordered", "partial_reliable", "unreliable"],
+              "description": "Reliability model for the control plane."
+            },
+            "ttl_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Time-to-live for partial_reliable messages (ms)."
+            }
+          }
+        }
+      }
+    }
+  }
+}

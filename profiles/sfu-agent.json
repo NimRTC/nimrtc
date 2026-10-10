@@ -116,5 +116,26 @@
   // Convenience: explicit echo of audio3a_name = "webrtc_apm" so the
   // Agent 3A pipeline is discoverable without re-parsing the canonical
   // field. Loader-agnostic.
-  "audio3a_name_explicit": "webrtc_apm"
+  "audio3a_name_explicit": "webrtc_apm",
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // sfu-relay + agent-gateway composite. The primary `strategy` is
+  // sfu-relay (the media plane is pure SRTP forwarding); the control
+  // side is the Agent raw-udp-arq pipeline (50 Hz, p99 ≤ 100 ms,
+  // reliable_ordered). The composite is resolved by the engine at
+  // open() time (see transport-strategies.md §6 #2 — pre-1.0 decision
+  // window). For v0.12.0, the JSON declares the SFU side as primary
+  // and the Agent side as the control side-stack; v1.0.0 may emit two
+  // separate TransportSessions.
+  "transport": {
+    "strategy": "sfu-relay",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  100,
+      "freq_hz":     50,
+      "reliability": "reliable_ordered"
+    }
+  }
 }

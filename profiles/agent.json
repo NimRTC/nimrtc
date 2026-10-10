@@ -81,5 +81,22 @@
     "audio_weight": 8,
     "video_weight": 4,
     "best_effort_weight": 1
+  },
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // agent-gateway: AI Agent SDK side. Media = webrtc-classic (browser
+  // interop for the operator). Control = raw-udp-arq (LLM/ASR traffic
+  // is high-frequency, p99 ≤ 80 ms; SCTP cwnd would be too slow).
+  // See docs/plan/transport-strategies.md §2.3.
+  "transport": {
+    "strategy": "agent-gateway",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  80,
+      "freq_hz":     100,
+      "reliability": "reliable_ordered"
+    }
   }
 }

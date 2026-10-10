@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nimrtc.org/schema/profile-v1.0.json",
+  "title": "NimRTC Profile Schema v1.0",
+  "description": "Scenario assembly profile (v1.0 — pre-TransportStrategy). This is the legacy schema; v0.12.0+ profiles may declare the additive `transport` block defined in profile-v1.1.json. The loader is backward-compatible: v1.0 profiles continue to load with engine compile-time defaults applied to the missing `transport` block.",
+
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable unique identifier (e.g. 'call', 'live', 'agent')."
+    },
+
+    "transport_name": {
+      "type": "string",
+      "description": "ICE / WebRTC transport plugin id. Empty string means 'no transport' (pure relay)."
+    },
+    "sdp_name":     { "type": "string", "description": "SDP plugin id." },
+    "rtp_name":     { "type": "string", "description": "RTP plugin id." },
+    "jb_name":      { "type": "string", "description": "JitterBuffer plugin id. Empty = no JB (raw passthrough)." },
+    "audio3a_name": { "type": "string", "description": "Audio 3A plugin id. Empty = no 3A (passthrough)." },
+    "codec_name":   { "type": "string", "description": "Audio codec plugin id." },
+    "bwe_name":     { "type": "string", "description": "Bandwidth-estimator plugin id. Empty = no BWE." },
+    "scheduler_name": { "type": "string", "description": "Scheduler plugin id." },
+
+    "timeline_enabled":    { "type": "boolean", "description": "Enable per-frame timeline instrumentation (latency profiling)." },
+    "datachannel_enabled": { "type": "boolean", "description": "Enable WebRTC DataChannel for out-of-band data." },
+
+    "audio_sample_rate_hz": { "type": "integer", "minimum": 0, "description": "Audio sample rate in Hz." },
+    "audio_channels":       { "type": "integer", "minimum": 0, "maximum": 2 },
+    "audio_payload_type":   { "type": "integer", "minimum": 0, "maximum": 127 },
+
+    "bwe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "impl":                { "type": "string" },
+        "initial_bitrate_bps": { "type": "integer", "minimum": 0 },
+        "max_bitrate_bps":     { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "jitter_buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "impl":             { "type": "string" },
+        "mode":             { "enum": ["low_latency", "live", "interactive"] },
+        "initial_delay_ms": { "type": "integer", "minimum": 0 },
+        "min_delay_ms":     { "type": "integer", "minimum": 0 },
+        "max_delay_ms":     { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":             { "type": "boolean" },
+        "strategy":            { "enum": ["strict_priority", "weighted_fair", "fixed_rate"] },
+        "control_weight":      { "type": "integer", "minimum": 0, "maximum": 255 },
+        "audio_weight":        { "type": "integer", "minimum": 0, "maximum": 255 },
+        "video_weight":        { "type": "integer", "minimum": 0, "maximum": 255 },
+        "best_effort_weight":  { "type": "integer", "minimum": 0, "maximum": 255 },
+        "impl":                { "type": "string" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "avg_packet_size_bytes": { "type": "integer", "minimum": 0 },
+            "max_queue_depth":       { "type": "integer", "minimum": 0 },
+            "protect_keyframes":     { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

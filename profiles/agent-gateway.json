@@ -109,5 +109,24 @@
 
   // ---- Schema v1.1 additive markers (ADR-010) ------------------------------
   // Marker — this profile exposes the agent-gateway tap surface.
-  "agent_gateway_enabled": true
+  "agent_gateway_enabled": true,
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // agent-gateway: server side of an Agent pipeline. Media =
+  // webrtc-classic (browser interop on the operator side); control =
+  // raw-udp-arq (LLM/ASR pipeline, p99 ≤ 80 ms, 100 Hz control
+  // messages, reliable_ordered). Matches agent.json byte-for-byte so
+  // swapping in/out is transparent.
+  // See docs/plan/transport-strategies.md §2.3.
+  "transport": {
+    "strategy": "agent-gateway",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  80,
+      "freq_hz":     100,
+      "reliability": "reliable_ordered"
+    }
+  }
 }

@@ -116,5 +116,16 @@
   "sfu_enabled": true,
   // Hint — upper bound on concurrent peer sessions this engine instance
   // is expected to handle.
-  "max_sessions_per_engine": 32
+  "max_sessions_per_engine": 32,
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // sfu-relay: pure SRTP forwarding middlebox. Media = webrtc-classic;
+  // no control side-stack (forwarding is media-only; any DC traffic
+  // flows via the media stack's SCTP). p99 budget 200 ms.
+  // See docs/plan/transport-strategies.md §2.4.
+  "transport": {
+    "strategy": "sfu-relay",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": { "enabled": false }
+  }
 }

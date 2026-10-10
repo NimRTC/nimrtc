@@ -76,5 +76,16 @@
     "audio_weight": 8,
     "video_weight": 4,
     "best_effort_weight": 1
+  },
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // browser-call (loose budget): 1:N broadcast. Media = webrtc-classic;
+  // control rides the media stack's DC plane. p99 budget 300 ms (looser
+  // than 1:1 call) — broadcast is latency-tolerant compared to call.
+  // See docs/plan/transport-strategies.md §2.1.
+  "transport": {
+    "strategy": "browser-call",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 300 },
+    "control": { "enabled": false }
   }
 }

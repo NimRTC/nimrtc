@@ -365,6 +365,17 @@ static void expect_profiles_equal(
               b.scheduler.params.max_queue_depth);
     EXPECT_EQ(a.scheduler.params.protect_keyframes,
               b.scheduler.params.protect_keyframes);
+
+    // v1.1 additive: `transport` block.
+    EXPECT_EQ(a.transport.strategy, b.transport.strategy);
+    EXPECT_EQ(a.transport.media.stack, b.transport.media.stack);
+    EXPECT_EQ(a.transport.media.max_p99_ms, b.transport.media.max_p99_ms);
+    EXPECT_EQ(a.transport.control.enabled, b.transport.control.enabled);
+    EXPECT_EQ(a.transport.control.stack, b.transport.control.stack);
+    EXPECT_EQ(a.transport.control.max_p99_ms, b.transport.control.max_p99_ms);
+    EXPECT_EQ(a.transport.control.freq_hz, b.transport.control.freq_hz);
+    EXPECT_EQ(a.transport.control.reliability, b.transport.control.reliability);
+    EXPECT_EQ(a.transport.control.ttl_ms, b.transport.control.ttl_ms);
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
@@ -574,4 +585,189 @@ TEST_F(AssemblyTest, ExplicitSchedulerImplPreservedInJson) {
     EXPECT_EQ(loaded.scheduler.impl, "my_custom_q");
     EXPECT_EQ(loaded.scheduler.params.avg_packet_size_bytes, 999u);
     fs::remove(tmp);
+}
+
+// =============================================================================
+// 6. v1.1 additive: `transport` block (transport-strategies.md)
+// =============================================================================
+//
+// These tests verify the v1.1 `transport` section round-trips and that
+// the legacy v1.0 format (no `transport` block) still loads with the
+// default empty `TransportSection` (strategy == "" → engine default).
+// =============================================================================
+
+TEST_F(AssemblyTest, TransportSectionDefaultsAreEmpty) {
+    nimrtc::assembly::TransportSection t;
+    EXPECT_EQ(t.strategy, "");
+    EXPECT_EQ(t.media.stack, "");
+    EXPECT_FALSE(t.media.max_p99_ms.has_value());
+    EXPECT_FALSE(t.control.enabled);
+    EXPECT_EQ(t.control.stack, "");
+    EXPECT_FALSE(t.control.max_p99_ms.has_value());
+    EXPECT_FALSE(t.control.freq_hz.has_value());
+    EXPECT_EQ(t.control.reliability, "");
+    EXPECT_FALSE(t.control.ttl_ms.has_value());
+}
+
+TEST_F(AssemblyTest, JsonParseTransportBlockAgentGateway) {
+    std::string json_str = R"({
+      "name": "test_agent_gateway",
+      "transport": {
+        "strategy": "agent-gateway",
+        "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+        "control": {
+          "enabled":     true,
+          "stack":       "raw-udp-arq",
+          "max_p99_ms":  80,
+          "freq_hz":     100,
+          "reliability": "reliable_ordered"
+        }
+      }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_transport.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+    auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.name, "test_agent_gateway");
+    EXPECT_EQ(p.transport.strategy, "agent-gateway");
+    EXPECT_EQ(p.transport.media.stack, "webrtc-classic");
+    ASSERT_TRUE(p.transport.media.max_p99_ms.has_value());
+    EXPECT_EQ(*p.transport.media.max_p99_ms, 200);
+    EXPECT_TRUE(p.transport.control.enabled);
+    EXPECT_EQ(p.transport.control.stack, "raw-udp-arq");
+    ASSERT_TRUE(p.transport.control.max_p99_ms.has_value());
+    EXPECT_EQ(*p.transport.control.max_p99_ms, 80);
+    ASSERT_TRUE(p.transport.control.freq_hz.has_value());
+    EXPECT_EQ(*p.transport.control.freq_hz, 100);
+    EXPECT_EQ(p.transport.control.reliability, "reliable_ordered");
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonParseTransportBlockTeleop) {
+    std::string json_str = R"({
+      "name": "test_teleop",
+      "transport": {
+        "strategy": "teleop-ultra-low-latency",
+        "media":   { "stack": "raw-udp-arq", "max_p99_ms": 100 },
+        "control": {
+          "enabled":     true,
+          "stack":       "raw-udp-arq",
+          "max_p99_ms":  50,
+          "freq_hz":     200,
+          "reliability": "reliable_ordered",
+          "ttl_ms":      100
+        }
+      }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_teleop.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+    auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.transport.strategy, "teleop-ultra-low-latency");
+    EXPECT_EQ(p.transport.media.stack, "raw-udp-arq");
+    ASSERT_TRUE(p.transport.control.ttl_ms.has_value());
+    EXPECT_EQ(*p.transport.control.ttl_ms, 100);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonParseLegacyV10ProfileOmitsTransport) {
+    // A v1.0 profile (no `transport` block) must still load with the
+    // default empty `TransportSection`. This is the backward-compat
+    // contract (ADR-010 §"Schema v1.1 incremental fields").
+    std::string json_str = R"({
+      "name": "legacy_v10",
+      "transport_name": "ice",
+      "jb_name": "adaptive"
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_legacy_v10.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+    auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.name, "legacy_v10");
+    EXPECT_EQ(p.transport_name, "ice");
+    // Transport section: default-constructed (engine compile-time default).
+    EXPECT_EQ(p.transport.strategy, "");
+    EXPECT_EQ(p.transport.media.stack, "");
+    EXPECT_FALSE(p.transport.control.enabled);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonSerialiseTransportBlockRoundTrip) {
+    nimrtc::assembly::Profile p;
+    p.name = "roundtrip";
+    p.transport.strategy = "cross-network-peer";
+    p.transport.media.stack = "webrtc-classic";
+    p.transport.media.max_p99_ms = 150;
+    p.transport.control.enabled = false;
+
+    std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_NE(s.find("\"strategy\": \"cross-network-peer\""), std::string::npos);
+    EXPECT_NE(s.find("\"max_p99_ms\": 150"), std::string::npos);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_roundtrip.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << s;
+    }
+    auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    expect_profiles_equal(p, loaded);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, JsonSerialiseWithoutTransportOmitsBlock) {
+    // A Profile with default-constructed `transport` (strategy = "")
+    // must serialise WITHOUT a `transport` block — this preserves the
+    // v1.0 round-trip byte-for-byte for legacy profiles.
+    nimrtc::assembly::Profile p;
+    p.name = "no_transport";
+    p.transport_name = "ice";
+    // p.transport left default-constructed.
+
+    std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_EQ(s.find("\"transport\""), std::string::npos)
+        << "Default transport block must not appear in JSON output: " << s;
+}
+
+// ---------------------------------------------------------------------------
+// v1.1: every built-in profile declares the expected transport strategy.
+// ---------------------------------------------------------------------------
+TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
+    struct Expectation {
+        std::string_view profile_name;
+        std::string_view expected_strategy;
+        bool expected_control_enabled;
+    };
+    const Expectation expected[] = {
+        {"call",                  "browser-call",             false},
+        {"live",                  "browser-call",             false},
+        {"transport",             "sfu-relay",                false},
+        {"agent",                 "agent-gateway",            true },
+        {"agent-gateway",         "agent-gateway",            true },
+        {"agent-low-latency",     "agent-gateway",            true },
+        {"teleop",                "teleop-ultra-low-latency", true },
+        {"sfu",                   "sfu-relay",                false},
+        {"sfu-agent",             "sfu-relay",                true },  // composite
+    };
+    for (const auto& e : expected) {
+        SCOPED_TRACE("Profile: " + std::string{e.profile_name});
+        const auto* p = nimrtc::assembly::ProfileRegistry::instance()
+                            .find(e.profile_name);
+        ASSERT_NE(p, nullptr);
+        EXPECT_EQ(p->transport.strategy, e.expected_strategy)
+            << "Profile '" << e.profile_name
+            << "' should declare strategy='" << e.expected_strategy << "'";
+        EXPECT_EQ(p->transport.control.enabled, e.expected_control_enabled)
+            << "Profile '" << e.profile_name
+            << "' should have control.enabled=" << e.expected_control_enabled;
+    }
 }

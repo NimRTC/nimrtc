@@ -161,6 +161,58 @@ static SchedulerConfig::Strategy string_to_scheduler_strategy(std::string_view s
 }
 
 // ---------------------------------------------------------------------------
+// transport_from_json — v1.1 `transport` block parser
+// ---------------------------------------------------------------------------
+//
+// Reads the additive `transport` block from a Profile JSON. Missing or
+// null `transport` returns a default-constructed `TransportSection`
+// (strategy == "" → engine compile-time default). All sub-fields are
+// optional; missing keys are left at their default values.
+//
+// The assembly layer does NOT validate strategy names here — the
+// transport layer's `strategy_by_name()` (added in PR3) is the
+// authoritative validator. This keeps `assembly/` independent of
+// `transport/` (no circular dependency) and lets new strategy names
+// be added without touching the loader.
+// ---------------------------------------------------------------------------
+static TransportSection transport_from_json(const json& root) {
+    TransportSection out;
+    if (!root.contains("transport") || !root["transport"].is_object()) {
+        return out;
+    }
+    const auto& t = root["transport"];
+
+    out.strategy = json_to_string(t.value("strategy", ""));
+
+    if (t.contains("media") && t["media"].is_object()) {
+        const auto& m = t["media"];
+        out.media.stack = json_to_string(m.value("stack", ""));
+        if (m.contains("max_p99_ms")) {
+            out.media.max_p99_ms = m["max_p99_ms"].get<int>();
+        }
+    }
+
+    if (t.contains("control") && t["control"].is_object()) {
+        const auto& c = t["control"];
+        out.control.enabled = c.value("enabled", false);
+        out.control.stack   = json_to_string(c.value("stack", ""));
+        if (c.contains("max_p99_ms")) {
+            out.control.max_p99_ms = c["max_p99_ms"].get<int>();
+        }
+        if (c.contains("freq_hz")) {
+            out.control.freq_hz = c["freq_hz"].get<int>();
+        }
+        out.control.reliability =
+            json_to_string(c.value("reliability", ""));
+        if (c.contains("ttl_ms")) {
+            out.control.ttl_ms = c["ttl_ms"].get<int>();
+        }
+    }
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // profile_from_json_file
 // ---------------------------------------------------------------------------
 Profile profile_from_json_file(const std::string& file_path) {
@@ -271,6 +323,9 @@ Profile profile_from_json_file(const std::string& file_path) {
         }
     }
 
+    // -- v1.1 transport section (additive) ------------------------------------
+    p.transport = transport_from_json(root);
+
     return p;
 }
 
@@ -341,6 +396,43 @@ std::string profile_to_json_string(const Profile& p) {
         p.scheduler.params.max_queue_depth;
     root["scheduler"]["params"]["protect_keyframes"] =
         p.scheduler.params.protect_keyframes;
+
+    // v1.1 additive `transport` block. Always emitted when non-default
+    // (i.e. when strategy is non-empty OR the media/control blocks carry
+    // non-default values). This keeps v1.0 round-trips byte-identical
+    // (no `transport` field) while v1.1 profiles carry the full block.
+    if (!p.transport.strategy.empty() ||
+        !p.transport.media.stack.empty() ||
+        p.transport.control.enabled) {
+        json t = json::object();
+        if (!p.transport.strategy.empty()) {
+            t["strategy"] = p.transport.strategy;
+        }
+        // Always emit `media` / `control` sub-objects when the strategy
+        // is set; this makes the JSON self-documenting and the round-trip
+        // symmetric with the parser.
+        t["media"] = json::object();
+        t["media"]["stack"] = p.transport.media.stack;
+        if (p.transport.media.max_p99_ms.has_value()) {
+            t["media"]["max_p99_ms"] = *p.transport.media.max_p99_ms;
+        }
+        t["control"] = json::object();
+        t["control"]["enabled"] = p.transport.control.enabled;
+        t["control"]["stack"]   = p.transport.control.stack;
+        if (p.transport.control.max_p99_ms.has_value()) {
+            t["control"]["max_p99_ms"] = *p.transport.control.max_p99_ms;
+        }
+        if (p.transport.control.freq_hz.has_value()) {
+            t["control"]["freq_hz"] = *p.transport.control.freq_hz;
+        }
+        if (!p.transport.control.reliability.empty()) {
+            t["control"]["reliability"] = p.transport.control.reliability;
+        }
+        if (p.transport.control.ttl_ms.has_value()) {
+            t["control"]["ttl_ms"] = *p.transport.control.ttl_ms;
+        }
+        root["transport"] = std::move(t);
+    }
 
     return root.dump(/*indent=*/2);
 }

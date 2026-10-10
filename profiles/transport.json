@@ -84,5 +84,16 @@
     "audio_weight": 8,
     "video_weight": 4,
     "best_effort_weight": 1
+  },
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // sfu-relay: pure ICE passthrough gateway. Media = webrtc-classic; no
+  // control side-stack (the gateway forwards whatever DC traffic the peers
+  // carry via the media stack's SCTP). p99 budget 200 ms.
+  // See docs/plan/transport-strategies.md §2.4.
+  "transport": {
+    "strategy": "sfu-relay",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": { "enabled": false }
   }
 }

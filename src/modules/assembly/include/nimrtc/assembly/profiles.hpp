@@ -24,11 +24,102 @@
 //   sfu-agent    — SFU + AI-Agent hybrid: relay path no-3A, Agent side 3A on
 //   agent-gateway — server-side Agent media gateway with PCM tap surface
 //   agent-low-latency — Agent SDK's tightest-latency variant (20 ms JB)
+//
+// v1.1 (v0.12.0): each kProfile* carries a `transport` section that
+// names the use-case strategy per `docs/plan/transport-strategies.md` §2.
 // =============================================================================
 
 #include <nimrtc/assembly/assembly.hpp>
 
 namespace nimrtc::assembly {
+
+// ---------------------------------------------------------------------------
+// Transport-section helpers (v1.1) — used by kProfile* constants below
+// ---------------------------------------------------------------------------
+//
+// Each helper returns a `TransportSection` populated from one of the
+// five named strategies defined in
+// `docs/plan/transport-strategies.md` §2. They live in `assembly::detail`
+// because they only touch the assembly-layer `TransportSection` struct;
+// the transport-layer counterpart `strategy_by_name()` (PR3) maps the
+// same strategy id to a `plugins::TransportRequirements`. The two stay
+// in sync because the round-trip test in test_assembly.cpp serialises
+// each kProfile* to JSON and compares it to profiles/*.json byte-for-byte
+// (see `JsonFileMatchesBuiltinConstant`).
+// ---------------------------------------------------------------------------
+namespace detail {
+
+inline TransportSection ts_browser_call(int media_p99_ms = 200) {
+    TransportSection t;
+    t.strategy = "browser-call";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = media_p99_ms;
+    t.control.enabled = false;
+    return t;
+}
+
+inline TransportSection ts_sfu_relay() {
+    TransportSection t;
+    t.strategy = "sfu-relay";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 200;
+    t.control.enabled = false;
+    return t;
+}
+
+inline TransportSection ts_teleop_ultra_low_latency() {
+    TransportSection t;
+    t.strategy = "teleop-ultra-low-latency";
+    t.media.stack = "raw-udp-arq";
+    t.media.max_p99_ms = 100;
+    t.control.enabled = true;
+    t.control.stack = "raw-udp-arq";
+    t.control.max_p99_ms = 50;
+    t.control.freq_hz = 200;
+    t.control.reliability = "reliable_ordered";
+    t.control.ttl_ms = 100;
+    return t;
+}
+
+inline TransportSection ts_agent_gateway(int control_p99_ms = 80) {
+    TransportSection t;
+    t.strategy = "agent-gateway";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 200;
+    t.control.enabled = true;
+    t.control.stack = "raw-udp-arq";
+    t.control.max_p99_ms = control_p99_ms;
+    t.control.freq_hz = 100;
+    t.control.reliability = "reliable_ordered";
+    return t;
+}
+
+inline TransportSection ts_cross_network_peer() {
+    TransportSection t;
+    t.strategy = "cross-network-peer";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 150;
+    t.control.enabled = false;
+    return t;
+}
+
+inline TransportSection ts_sfu_agent() {
+    // Composite: SFU media path = sfu-relay; Agent side control = raw-udp-arq.
+    // The composite resolution is handled by the engine at open() time
+    // (see transport-strategies.md §6 #2 — pre-1.0 decision window).
+    TransportSection t;
+    t.strategy = "sfu-relay";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 200;
+    t.control.enabled = true;
+    t.control.stack = "raw-udp-arq";
+    t.control.max_p99_ms = 100;
+    t.control.freq_hz = 50;
+    t.control.reliability = "reliable_ordered";
+    return t;
+}
+
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // kProfileCall — 1:1 bidirectional voice/video call
@@ -77,6 +168,7 @@ inline const Profile kProfileCall = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,  // Opus
+    .transport           = detail::ts_browser_call(200),
 };
 
 // ---------------------------------------------------------------------------
@@ -127,6 +219,7 @@ inline const Profile kProfileLive = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_browser_call(300),  // live = looser budget
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +258,7 @@ inline const Profile kProfileTransport = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_sfu_relay(),
 };
 
 // ---------------------------------------------------------------------------
@@ -215,6 +309,7 @@ inline const Profile kProfileAgent = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_agent_gateway(80),
 };
 
 // ---------------------------------------------------------------------------
@@ -264,6 +359,7 @@ inline const Profile kProfileTeleop = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_teleop_ultra_low_latency(),
 };
 
 // ---------------------------------------------------------------------------
@@ -304,6 +400,7 @@ inline const Profile kProfileSfu = Profile{
     .audio_sample_rate_hz = 0,              // not applicable for SFU
     .audio_channels      = 0,
     .audio_payload_type  = 0,
+    .transport           = detail::ts_sfu_relay(),
 };
 
 // ---------------------------------------------------------------------------
@@ -359,6 +456,7 @@ inline const Profile kProfileAgentGateway = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_agent_gateway(80),
 };
 
 // ---------------------------------------------------------------------------
@@ -417,6 +515,7 @@ inline const Profile kProfileSfuAgent = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_sfu_agent(),
 };
 
 // ---------------------------------------------------------------------------
@@ -475,6 +574,7 @@ inline const Profile kProfileAgentLowLatency = Profile{
     .audio_sample_rate_hz = 48'000,
     .audio_channels      = 1,
     .audio_payload_type  = 111,
+    .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json
 };
 
 }  // namespace nimrtc::assembly

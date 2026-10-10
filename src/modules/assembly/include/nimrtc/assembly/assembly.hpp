@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -184,6 +185,78 @@ struct JitterBufferConfig {
 };
 
 // ---------------------------------------------------------------------------
+// TransportSection — Profile v1.1 additive `transport` block
+// ---------------------------------------------------------------------------
+//
+// A Profile's `transport` block declares which (media_stack, control_stack)
+// pair the engine should compose when this Profile is loaded. It is the
+// **declarative, JSON-serialisable** counterpart of
+// `plugins::TransportRequirements` (in `src/transport/include/...`); the
+// assembly layer owns the JSON shape, the transport layer owns the
+// runtime semantics. The two never call into each other — application
+// code does the bridge at engine-open() time.
+//
+// Five named strategies (see `docs/plan/transport-strategies.md` §2):
+//   - "browser-call"             (default for v1.0 profiles; legacy compat)
+//   - "teleop-ultra-low-latency"
+//   - "agent-gateway"
+//   - "sfu-relay"
+//   - "cross-network-peer"
+//
+// A `TransportSection` with `strategy == ""` is treated as "use the
+// engine compile-time default" (currently `browser-call`). This is the
+// backward-compat default for v1.0 Profile JSONs that do not declare
+// a `transport` block at all.
+// ---------------------------------------------------------------------------
+struct TransportStackConfig {
+    /// Stack factory id (e.g. "webrtc-classic", "raw-udp-arq").
+    /// Empty string = use Selector's default for this position.
+    std::string stack;
+
+    /// Optional hard p99 budget in milliseconds. The Selector records the
+    /// value but does not enforce it (v0.13+ may add a validator; see
+    /// transport-strategies.md §6 #4).
+    std::optional<int> max_p99_ms;
+};
+
+struct TransportControlConfig {
+    /// Enable a side-stack for the control plane. When false, control
+    /// traffic rides the media stack's DataChannel (SCTP) — the
+    /// `webrtc-classic` legacy path.
+    bool enabled = false;
+
+    /// Stack factory id (e.g. "raw-udp-arq"). Only meaningful when
+    /// `enabled == true`.
+    std::string stack;
+
+    /// Optional p99 budget in milliseconds.
+    std::optional<int> max_p99_ms;
+
+    /// Expected control-message rate (Hz). Used by the Selector / ARQ
+    /// impl to pre-size the send window. Default 100 Hz.
+    std::optional<int> freq_hz;
+
+    /// Reliability model: "reliable_ordered" | "partial_reliable" |
+    /// "unreliable". Default "reliable_ordered".
+    std::string reliability;
+
+    /// Time-to-live for partial_reliable messages (ms). Default 50 ms.
+    std::optional<int> ttl_ms;
+};
+
+struct TransportSection {
+    /// Strategy id (one of the five named use cases). Empty = engine
+    /// default ("browser-call").
+    std::string strategy;
+
+    /// Media-stack declaration.
+    TransportStackConfig media;
+
+    /// Control-stack declaration.
+    TransportControlConfig control;
+};
+
+// ---------------------------------------------------------------------------
 // Profile — scenario assembly unit
 // ---------------------------------------------------------------------------
 //
@@ -247,6 +320,14 @@ struct Profile {
 
     /// RTP payload type for the audio codec (Opus default = 111).
     std::uint8_t audio_payload_type = 111;
+
+    // ---- v1.1 additive: transport strategy ----------------------------------
+    ///
+    /// Optional. When `strategy` is empty (or the entire `transport`
+    /// block is absent from the JSON), the engine compile-time default
+    /// applies (equivalent to `browser-call`). The block is otherwise
+    /// additive on top of v1.0 — see `docs/plan/transport-strategies.md`.
+    TransportSection transport;
 };
 
 // ---------------------------------------------------------------------------

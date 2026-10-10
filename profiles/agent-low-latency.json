@@ -109,5 +109,23 @@
 
   // ---- Schema v1.1 additive markers (ADR-010) ------------------------------
   // Marker — opt out of AGC's level estimator and Opus FEC.
-  "agent_low_latency": true
+  "agent_low_latency": true,
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // agent-gateway with tighter control p99 budget (60 ms vs 80 ms in
+  // agent.json). Matches the JB tightening (20 ms initial delay) — every
+  // millisecond saved on the application side must be matched on the
+  // transport side to keep mouth-to-ASR round-trip within budget.
+  // See docs/plan/transport-strategies.md §2.3.
+  "transport": {
+    "strategy": "agent-gateway",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  60,
+      "freq_hz":     100,
+      "reliability": "reliable_ordered"
+    }
+  }
 }

@@ -441,10 +441,16 @@ struct DtlsSessionWolfSSL::Impl {
     // -- Setup --------------------------------------------------------------
 
     bool setup_context() {
+        // Use the version-flexible method so NimRTC negotiates whichever DTLS
+        // version the peer offers.  Chrome 117+ defaults to DTLS 1.3 for WebRTC;
+        // earlier Chrome versions and other WebRTC stacks use DTLS 1.2.
+        // wolfSSL 5.9.2's generic DTLS method supports both 1.2 (RFC 6347) and
+        // 1.3 (RFC 9147) and exposes the SRTP keying material export for both
+        // via wolfSSL_export_dtls_srtp_keying_material().
         if (config.role == DtlsRole::Server) {
-            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+            ctx = wolfSSL_CTX_new(wolfDTLS_server_method());
         } else {
-            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
+            ctx = wolfSSL_CTX_new(wolfDTLS_client_method());
         }
         if (!ctx) {
             nimrtc::core::log::Logger::instance().error(

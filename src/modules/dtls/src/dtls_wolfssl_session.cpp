@@ -479,25 +479,25 @@ struct DtlsSessionWolfSSL::Impl {
             return false;
         }
 
-        // DTLS 1.3 (RFC 9147) cipher suites — required when WOLFSSL_DTLS13
-        // is on so the server actually has something to negotiate with
-        // Chrome 117+.  wolfSSL_CTX_set_cipher_list above only sets the
-        // DTLS 1.2 cipher list; DTLS 1.3 has a separate API and a
-        // different cipher-suite namespace (TLS_AES_128_GCM_SHA256 etc.).
-        // Chrome's DTLS 1.3 ClientHello offers both AES-128-GCM and
-        // AES-256-GCM — we mirror that list here.  ECDHE-ECDSA is implicit
-        // in TLS 1.3; the cert/key load above already constrains us to
-        // ECDSA auth.
-#ifdef WOLFSSL_DTLS13
-        rc = wolfSSL_CTX_set_ciphersuites(
-            ctx, "TLS_AES_128_GCM_SHA256:"
-                 "TLS_AES_256_GCM_SHA384");
-        if (rc != WOLFSSL_SUCCESS) {
-            nimrtc::core::log::Logger::instance().error(
-                "wolfSSL: failed to set DTLS 1.3 ciphersuites");
-            return false;
-        }
-#endif
+        // DTLS 1.3 (RFC 9147) ciphersuites are NOT set at runtime in
+        // wolfSSL 5.9.2.  In this version they are gated at compile time
+        // by the macros `BUILD_TLS_AES_128_GCM_SHA256` and
+        // `BUILD_TLS_AES_256_GCM_SHA384`, both of which are auto-defined
+        // in wolfssl/internal.h when the following are all on:
+        //   - WOLFSSL_TLS13
+        //   - HAVE_AESGCM
+        //   - !NO_SHA256  &&  WOLFSSL_AES_128
+        //   - WOLFSSL_SHA384 && WOLFSSL_AES_256
+        // Our src/third_party/wolfssl/CMakeLists.txt already turns on
+        // WOLFSSL_TLS13, WOLFSSL_AESGCM, WOLFSSL_SHA384, and the AES-128
+        // / AES-256 macros are defaults (see
+        // wolfssl/wolfcrypt/settings.h:3409-3422), so the two TLS 1.3
+        // GCM suites are compiled in.  No runtime call is required.
+        //
+        // (Newer wolfSSL releases added `wolfSSL_CTX_set_ciphersuites()`
+        // for runtime selection.  5.9.2 only exposes
+        // `wolfSSL_CTX_set_cipher_list()` / `_bytes()`, which set the
+        // DTLS 1.2 list; the 1.3 list is purely compile-time.)
 
         // Extended Master Secret (RFC 7627) — REQUIRED for DTLS-SRTP per
         // RFC 5764 §5 ("the use of the Extended Master Secret extension

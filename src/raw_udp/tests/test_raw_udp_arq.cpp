@@ -179,7 +179,7 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
     std::sort(latencies_us.begin(), latencies_us.end());
     auto pct = [&](double p) -> std::int64_t {
         if (latencies_us.empty()) return 0;
-        std::size_t idx = static_cast<std::size_t>(p * latencies_us.size());
+        std::size_t idx = static_cast<std::size_t>(p * static_cast<double>(latencies_us.size()));
         if (idx >= latencies_us.size()) idx = latencies_us.size() - 1;
         return latencies_us[idx];
     };

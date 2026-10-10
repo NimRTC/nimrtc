@@ -27,6 +27,7 @@ namespace {
 
 // Helpers ----------------------------------------------------------------
 
+[[maybe_unused]]
 constexpr std::string_view kProtocol = "UDP/TLS/RTP/SAVPF";
 
 [[nodiscard]] inline bool is_digit(char c) noexcept {

@@ -1,6 +1,6 @@
 /**
  * @file nimrtc/core/registry.hpp
- * @brief PluginRegistry — global factory registry for NimRTC plugins.
+ * @brief PluginRegistry ??global factory registry for NimRTC plugins.
  *
  * Per ARCHITECTURE.md Layout Invariant 6:
  *   "Singletons (Logger, config registries) live under nimrtc::core:: only."
@@ -40,7 +40,7 @@
  * @note Thread-safe for get_*() calls. register_*() is not thread-safe
  * and must be called before any engine is created.
  *
- * @note P0 scaffold — registry is in-memory only; binary-safe plugin loading
+ * @note P0 scaffold ??registry is in-memory only; binary-safe plugin loading
  * (dlopen / LoadLibrary) is TBD P4.
  */
 
@@ -54,7 +54,10 @@
 #include <mutex>
 #include <cassert>
 
-// Forward declarations of plugin interfaces — no full definitions needed here,
+#include <nimrtc/core/nimrtc_export.h>   // NIMRTC_API ??see header for
+                                          // Windows DLL boundary rationale.
+
+// Forward declarations of plugin interfaces ??no full definitions needed here,
 // just the factory type names. Full definitions are in the respective headers.
 namespace nimrtc::plugins {
 class ITransportFactory;
@@ -71,6 +74,7 @@ class IVideoReceiverFactory;
 class IVideoSenderFactory;
 class IBweFactory;
 class ISchedulerFactory;
+class IDataChannelFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -81,7 +85,7 @@ class ISchedulerFactory;
 //
 // Forward-declared here so the registry's TypedRegistry<...> fields and
 // public method signatures can reference them without pulling the seam
-// headers into core (preserves Layout Invariant 1 — core stays header-
+// headers into core (preserves Layout Invariant 1 ??core stays header-
 // only + the single .cpp exception in `pal_default_registrars.cpp`).
 namespace nimrtc::dtls    { class IDtlsSessionFactory; }
 namespace nimrtc::sctp     { class ISctpSocketFactory; }
@@ -94,7 +98,7 @@ namespace nimrtc           { class ITransportStackFactory; }
 // Each concrete module exposes `register_default_plugins()` (defined in its
 // plugin adapter .cpp). The unified `core::register_all_default_plugins()`
 // below calls each enabled module. Consumers linking the unified entry point
-// MUST also link the corresponding module libraries — the forward declarations
+// MUST also link the corresponding module libraries ??the forward declarations
 // below intentionally avoid pulling any module header into core (Layout Invariant 1).
 // ---------------------------------------------------------------------------
 
@@ -121,6 +125,7 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
+namespace datachannel      { void register_default_plugins() noexcept; }
 // Transport PAL Slice 8 (v0.10.2): module-level entry points for the
 // DTLS / SCTP / raw_udp / transport-stack seams. Each one populates
 // its matching typed registry slot (register_dtls_session /
@@ -184,26 +189,45 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// PluginRegistry — lives in nimrtc::core:: per Layout Invariant 6
+// PluginRegistry ??lives in nimrtc::core:: per Layout Invariant 6.
+//
+// `NIMRTC_API` is applied at the class level so the singleton's
+// vtable (and, more importantly, the function-local static inside
+// `instance()`) is unified across the static-library boundaries that
+// `nimrtc_dtls_seam.lib` / `test_engine_plugin_loading.exe` introduce
+// on Windows.  See `nimrtc/core/nimrtc_export.h` for the Windows DLL
+// rationale; on GCC / Clang the macro is an empty attribute.
+//
+// IMPORTANT: MSVC rejects `__declspec(dllimport)` / `__declspec(dllexport)`
+// on individual members when the enclosing class already has the attribute
+// (C2487 ??"dll interface class member cannot be declared with dll
+// interface").  All public methods therefore inherit the DLL attribute
+// from the class declaration; do NOT re-add `NIMRTC_API` on the
+// individual `register_*` declarations below.
+//
+// `instance()` is intentionally NOT inline ??its body lives in
+// `src/core/src/plugin_registry.cpp` so there is exactly one definition
+// of the function-local static `PluginRegistry inst` across the whole
+// program.  Without that, MSVC would emit a fresh copy in every TU
+// that includes this header, and each static library would end up with
+// its own `PluginRegistry` instance.  See the file header for the
+// pre-/post-fix behavioural contrast.
 // ---------------------------------------------------------------------------
 
-class PluginRegistry {
+class NIMRTC_API PluginRegistry {
     PluginRegistry() = default;
     PluginRegistry(const PluginRegistry&) = delete;
     PluginRegistry& operator=(const PluginRegistry&) = delete;
 
 public:
-    static PluginRegistry& instance() {
-        // Guaranteed destroyed, thread-safe in C++11+.
-        static PluginRegistry inst;
-        return inst;
-    }
+    // Out-of-line definition in `src/core/src/plugin_registry.cpp`.
+    // C++11 guarantees thread-safe first-time initialisation of the
+    // function-local static; destruction is at program exit.
+    static PluginRegistry& instance();
 
     // -- Transport -----------------------------------------------------------
     void register_transport(std::string_view id,
-                            const plugins::ITransportFactory* f) {
-        transport_.register_one(id, f);
-    }
+                            const plugins::ITransportFactory* f);
     [[nodiscard]] const plugins::ITransportFactory*
     get_transport(std::string_view id) const {
         return transport_.get(id);
@@ -222,9 +246,7 @@ public:
     // forwards to `create_ice()`, so registering via `register_ice_transport`
     // also satisfies `get_transport` lookups for the same id.
     void register_ice_transport(std::string_view id,
-                                const plugins::IICETransportFactory* f) {
-        ice_transport_.register_one(id, f);
-    }
+                                const plugins::IICETransportFactory* f);
     [[nodiscard]] const plugins::IICETransportFactory*
     get_ice_transport(std::string_view id) const {
         return ice_transport_.get(id);
@@ -234,9 +256,7 @@ public:
     }
 
     // -- RTP ----------------------------------------------------------------
-    void register_rtp(std::string_view id, const plugins::IRTPFactory* f) {
-        rtp_.register_one(id, f);
-    }
+    void register_rtp(std::string_view id, const plugins::IRTPFactory* f);
     [[nodiscard]] const plugins::IRTPFactory* get_rtp(std::string_view id) const {
         return rtp_.get(id);
     }
@@ -245,9 +265,7 @@ public:
     }
 
     // -- SDP ----------------------------------------------------------------
-    void register_sdp(std::string_view id, const plugins::ISDPFactory* f) {
-        sdp_.register_one(id, f);
-    }
+    void register_sdp(std::string_view id, const plugins::ISDPFactory* f);
     [[nodiscard]] const plugins::ISDPFactory* get_sdp(std::string_view id) const {
         return sdp_.get(id);
     }
@@ -256,9 +274,7 @@ public:
     }
 
     // -- JB -----------------------------------------------------------------
-    void register_jb(std::string_view id, const plugins::IJBFactory* f) {
-        jb_.register_one(id, f);
-    }
+    void register_jb(std::string_view id, const plugins::IJBFactory* f);
     [[nodiscard]] const plugins::IJBFactory* get_jb(std::string_view id) const {
         return jb_.get(id);
     }
@@ -267,9 +283,7 @@ public:
     }
 
     // -- Audio 3A -----------------------------------------------------------
-    void register_audio3a(std::string_view id, const plugins::IAudio3AFactory* f) {
-        audio3a_.register_one(id, f);
-    }
+    void register_audio3a(std::string_view id, const plugins::IAudio3AFactory* f);
     [[nodiscard]] const plugins::IAudio3AFactory*
     get_audio3a(std::string_view id) const {
         return audio3a_.get(id);
@@ -280,9 +294,7 @@ public:
 
     // -- Codec --------------------------------------------------------------
     void register_codec(std::string_view id,
-                        const plugins::ICodecFactory* f) {
-        codec_.register_one(id, f);
-    }
+                        const plugins::ICodecFactory* f);
     [[nodiscard]] const plugins::ICodecFactory*
     get_codec(std::string_view id) const {
         return codec_.get(id);
@@ -293,9 +305,7 @@ public:
 
     // -- Video Codec --------------------------------------------------------
     void register_video_codec(std::string_view id,
-                              const plugins::IVideoCodecFactory* f) {
-        video_codec_.register_one(id, f);
-    }
+                              const plugins::IVideoCodecFactory* f);
     [[nodiscard]] const plugins::IVideoCodecFactory*
     get_video_codec(std::string_view id) const {
         return video_codec_.get(id);
@@ -306,9 +316,7 @@ public:
 
     // -- Video Source -------------------------------------------------------
     void register_video_source(std::string_view id,
-                               const plugins::IVideoSourceFactory* f) {
-        video_source_.register_one(id, f);
-    }
+                               const plugins::IVideoSourceFactory* f);
     [[nodiscard]] const plugins::IVideoSourceFactory*
     get_video_source(std::string_view id) const {
         return video_source_.get(id);
@@ -319,9 +327,7 @@ public:
 
     // -- Video Sink ---------------------------------------------------------
     void register_video_sink(std::string_view id,
-                             const plugins::IVideoSinkFactory* f) {
-        video_sink_.register_one(id, f);
-    }
+                             const plugins::IVideoSinkFactory* f);
     [[nodiscard]] const plugins::IVideoSinkFactory*
     get_video_sink(std::string_view id) const {
         return video_sink_.get(id);
@@ -332,9 +338,7 @@ public:
 
     // -- Video Receiver -----------------------------------------------------
     void register_video_receiver(std::string_view id,
-                                 const plugins::IVideoReceiverFactory* f) {
-        video_receiver_.register_one(id, f);
-    }
+                                 const plugins::IVideoReceiverFactory* f);
     [[nodiscard]] const plugins::IVideoReceiverFactory*
     get_video_receiver(std::string_view id) const {
         return video_receiver_.get(id);
@@ -345,9 +349,7 @@ public:
 
     // -- Video Sender -------------------------------------------------------
     void register_video_sender(std::string_view id,
-                               const plugins::IVideoSenderFactory* f) {
-        video_sender_.register_one(id, f);
-    }
+                               const plugins::IVideoSenderFactory* f);
     [[nodiscard]] const plugins::IVideoSenderFactory*
     get_video_sender(std::string_view id) const {
         return video_sender_.get(id);
@@ -358,9 +360,7 @@ public:
 
     // -- BWE (bandwidth estimator) -----------------------------------------
     void register_bwe(std::string_view id,
-                      const plugins::IBweFactory* f) {
-        bwe_.register_one(id, f);
-    }
+                      const plugins::IBweFactory* f);
     [[nodiscard]] const plugins::IBweFactory*
     get_bwe(std::string_view id) const {
         return bwe_.get(id);
@@ -371,9 +371,7 @@ public:
 
     // -- Scheduler (unified sending) ---------------------------------------
     void register_scheduler(std::string_view id,
-                            const plugins::ISchedulerFactory* f) {
-        scheduler_.register_one(id, f);
-    }
+                            const plugins::ISchedulerFactory* f);
     [[nodiscard]] const plugins::ISchedulerFactory*
     get_scheduler(std::string_view id) const {
         return scheduler_.get(id);
@@ -382,16 +380,39 @@ public:
         return scheduler_.list_ids();
     }
 
+    // -- DataChannel (P2 ??typed factory slot for IDataChannelFactory*) -----
+    //
+    // Mirrors the SCTP / DTLS / raw_udp / transport-stack slots above.
+    // Per `docs/plan/transport-selection.md` section 5.2 (Slice 5 follow-up) and
+    // `src/plugins/include/nimrtc/plugins/datachannel.hpp`, the engine
+    // resolves a channel backend by id (default "sctp") through this slot.
+    //
+    // Subagent B (core/PluginRegistry owner) is the canonical owner of this
+    // hook. This inline stub was added by the datachannel subagent because
+    // (a) the registry slot is required for `SctpDataChannelFactory::create()`
+    //     consumers to actually receive a working channel, and (b) the
+    //     subagent boundary is "additive only" ??Subagent B can replace
+    //     this stub with its own equivalent implementation without breaking
+    //     callers because the public API surface (the three methods below)
+    //     is the same shape as every other typed registry hook.
+    void register_datachannel(std::string_view id,
+                              const plugins::IDataChannelFactory* f);
+    [[nodiscard]] const plugins::IDataChannelFactory*
+    get_datachannel(std::string_view id) const {
+        return datachannel_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_datachannels() const {
+        return datachannel_.list_ids();
+    }
+
     // -- DTLS session (Transport PAL Slice 4 / Slice 8 hook) --------------
     //
     // Typed slot for `nimrtc::dtls::IDtlsSessionFactory*`. The built-in
     // factory is `WolfsslDtlsFactory` (id = "wolfssl"); the seam is
-    // open for replacement by OpenSSL / BoringSSL / mbedTLS / 国密
-    // backends (see `docs/plan/transport-selection.md` §5.2 / §6.1).
+    // open for replacement by OpenSSL / BoringSSL / mbedTLS / GMSSL
+    // backends (see `docs/plan/transport-selection.md` ?5.2 / ?6.1).
     void register_dtls_session(std::string_view id,
-                               const dtls::IDtlsSessionFactory* f) {
-        dtls_session_.register_one(id, f);
-    }
+                               const dtls::IDtlsSessionFactory* f);
     [[nodiscard]] const dtls::IDtlsSessionFactory*
     get_dtls_session(std::string_view id) const {
         return dtls_session_.get(id);
@@ -403,15 +424,13 @@ public:
     // -- SCTP socket (Transport PAL Slice 5 / Slice 8 hook) ---------------
     //
     // Typed slot for `nimrtc::sctp::ISctpSocketFactory*`. The Slice 5
-    // default is the stub factory (id = "stub") — every send returns
+    // default is the stub factory (id = "stub") ??every send returns
     // kErrNotReady so callers can detect the missing usrsctp backend.
     // v0.11.0 will register the production `UsrsctpSocketFactory`
     // (id = "usrsctp") alongside the stub (see
-    // `docs/plan/transport-selection.md` §6.2 / §7).
+    // `docs/plan/transport-selection.md` ?6.2 / ?7).
     void register_sctp_socket(std::string_view id,
-                              const sctp::ISctpSocketFactory* f) {
-        sctp_socket_.register_one(id, f);
-    }
+                              const sctp::ISctpSocketFactory* f);
     [[nodiscard]] const sctp::ISctpSocketFactory*
     get_sctp_socket(std::string_view id) const {
         return sctp_socket_.get(id);
@@ -426,11 +445,9 @@ public:
     // default is `ArqRawUdpFactory` (id = "arq"); v0.11.0 / Slice 7
     // will wire the factory into the ITransportStack composition so the
     // Selector can pick `raw-udp-arq` for the control stack per
-    // `docs/plan/transport-selection.md` §5.3 rule 1.
+    // `docs/plan/transport-selection.md` ?5.3 rule 1.
     void register_raw_udp_datagram(std::string_view id,
-                                   const raw_udp::IRawUdpFactory* f) {
-        raw_udp_.register_one(id, f);
-    }
+                                   const raw_udp::IRawUdpFactory* f);
     [[nodiscard]] const raw_udp::IRawUdpFactory*
     get_raw_udp_datagram(std::string_view id) const {
         return raw_udp_.get(id);
@@ -449,14 +466,12 @@ public:
     // composition to the resulting `ITransportStack`.
     //
     // For v0.10.2 (Slice 8) the slot is registered but the engine does
-    // not yet switch to it — that's a follow-up patch gated on
+    // not yet switch to it ??that's a follow-up patch gated on
     // `WebRtcClassicStackFactory` (Slice 7.5) landing. The hook itself
     // is in place so the engine.cpp / Profile-loader changes can be
     // additive (no public API churn when Slice 7.5 lands).
     void register_transport_stack(std::string_view id,
-                                  const ITransportStackFactory* f) {
-        transport_stack_.register_one(id, f);
-    }
+                                  const ITransportStackFactory* f);
     [[nodiscard]] const ITransportStackFactory*
     get_transport_stack(std::string_view id) const {
         return transport_stack_.get(id);
@@ -480,7 +495,11 @@ private:
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
     TypedRegistry<plugins::IBweFactory>           bwe_;
     TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
-    // Transport PAL Slice 8 (v0.10.2) — typed factory slots for the
+    // DataChannel P2 typed slot ??see register_datachannel() above for
+    // the rationale (inline stub; Subagent B will replace with the
+    // canonical implementation).
+    TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
+    // Transport PAL Slice 8 (v0.10.2) ??typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
     // `register_default_plugins()` publishes a single factory into
     // its matching slot via the `register_*` public methods above.
@@ -610,8 +629,19 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kScheduler,     \
             #id, factory_ptr }
 
+/** Register a DataChannel plugin by ID and factory pointer.
+ *  P2 typed slot ??mirrors the SCTP / DTLS / raw_udp / transport-stack
+ *  hooks above; see `register_datachannel()` for the canonical
+ *  rationale. */
+#define NIMRTC_REGISTER_DATACHANNEL(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_datachannel_){                           \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kDataChannel,   \
+            #id, factory_ptr }
+
 /** Register a DTLS session-factory plugin by ID and factory pointer.
- *  Transport PAL Slice 4 / Slice 8 (v0.10.2) — typed slot for
+ *  Transport PAL Slice 4 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::dtls::IDtlsSessionFactory*`. */
 #define NIMRTC_REGISTER_DTLS_SESSION(id, factory_ptr)                    \
     static ::nimrtc::core::detail::Registrar                          \
@@ -621,7 +651,7 @@ private:
             #id, factory_ptr }
 
 /** Register an SCTP socket-factory plugin by ID and factory pointer.
- *  Transport PAL Slice 5 / Slice 8 (v0.10.2) — typed slot for
+ *  Transport PAL Slice 5 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::sctp::ISctpSocketFactory*`. */
 #define NIMRTC_REGISTER_SCTP_SOCKET(id, factory_ptr)                     \
     static ::nimrtc::core::detail::Registrar                          \
@@ -631,7 +661,7 @@ private:
             #id, factory_ptr }
 
 /** Register a raw-UDP datagram-factory plugin by ID and factory pointer.
- *  Transport PAL Slice 6 / Slice 8 (v0.10.2) — typed slot for
+ *  Transport PAL Slice 6 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::raw_udp::IRawUdpFactory*`. */
 #define NIMRTC_REGISTER_RAW_UDP_DATAGRAM(id, factory_ptr)                \
     static ::nimrtc::core::detail::Registrar                          \
@@ -641,11 +671,11 @@ private:
             #id, factory_ptr }
 
 /** Register a transport-stack factory plugin by ID and factory pointer.
- *  Transport PAL Slice 7 / Slice 8 (v0.10.2) — typed slot for
+ *  Transport PAL Slice 7 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::ITransportStackFactory*`. The Slice 8 engine integration
  *  will use this hook when the engine switches to `ITransportStack*`
  *  composition (gated on Slice 7.5's `WebRtcClassicStackFactory`
- *  landing — see `docs/plan/transport-selection.md` §6.5). */
+ *  landing ??see `docs/plan/transport-selection.md` ?6.5). */
 #define NIMRTC_REGISTER_TRANSPORT_STACK(id, factory_ptr)                 \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_transport_stack_){                       \
@@ -692,6 +722,8 @@ public:
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
         kBwe, kScheduler,
+        // P2: DataChannel typed factory slot ??see register_datachannel().
+        kDataChannel,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
         // DTLS / SCTP / raw_udp / transport-stack seams. See the
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
@@ -759,6 +791,10 @@ public:
                 reg.register_scheduler(id,
                     static_cast<const plugins::ISchedulerFactory*>(factory));
                 break;
+            case Category::kDataChannel:
+                reg.register_datachannel(id,
+                    static_cast<const plugins::IDataChannelFactory*>(factory));
+                break;
             case Category::kDtlsSession:
                 reg.register_dtls_session(id,
                     static_cast<const dtls::IDtlsSessionFactory*>(factory));
@@ -787,13 +823,13 @@ public:
 //
 // Iterates `detail::kDefaultRegistrars[]` (defined in
 // `src/core/src/pal_default_registrars.cpp`, PAL Slice 2) and calls every
-// module's `register_default_plugins()`.  Idempotent — each module uses
+// module's `register_default_plugins()`.  Idempotent ??each module uses
 // Meyer's-singleton latches internally.
 //
 // MUST be called once at program startup before any PluginRegistry lookup.
 // Consumers linking this function MUST also link every concrete module
 // library (audio3a, bwe, h264, ice, jb, opus, rtp, sched, sdp,
-// video_pipeline, video_sink, video_source) — the forward declarations above
+// video_pipeline, video_sink, video_source) ??the forward declarations above
 // resolve at link time.
 //
 // If you only need a subset of modules (e.g. a test that just exercises
@@ -838,7 +874,7 @@ inline void register_all_default_plugins() noexcept {
 // slots (DTLS / SCTP / raw_udp / transport-stack). Including them here
 // is what makes the back-compat shim work for old code that only
 // includes <nimrtc/core/registry.hpp> and then references the new
-// factory types — the include propagates through the rest of the
+// factory types ??the include propagates through the rest of the
 // project's translation units without forcing every TU to add the
 // include itself.
 #include "nimrtc/dtls/dtls_session_factory.hpp"

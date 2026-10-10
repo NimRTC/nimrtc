@@ -231,11 +231,11 @@ TEST(ArqRawUdpRealLoopback, BurstFiftyPacketsInOrder) {
     {
         std::lock_guard<std::mutex> lk(server.mu);
         ASSERT_EQ(server.received.size(), static_cast<std::size_t>(kCount));
-        for (int i = 0; i < kCount; ++i) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(kCount); ++i) {
             int seq_in_payload = 0;
             std::memcpy(&seq_in_payload, server.received[i].data(),
                         sizeof(seq_in_payload));
-            EXPECT_EQ(seq_in_payload, i) << "out-of-order at i=" << i;
+            EXPECT_EQ(seq_in_payload, static_cast<int>(i)) << "out-of-order at i=" << i;
             EXPECT_EQ(server.received[i].size(), kPayloadBytes);
         }
     }

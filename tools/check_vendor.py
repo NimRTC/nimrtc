@@ -169,15 +169,32 @@ def render_human(results: list[VendorResult], manifest_errors: list[str]) -> int
         for r in entries:
             print(f"  ? {r.name}: {status} — {r.message or ''}")
 
-    failed = sum(len(v) for k, v in by_status.items() if k != "ok")
+    # Non-ok statuses that are WARNINGS (do NOT fail the gate).
+    # "no-submodule" is the default for missing paths and
+    # "checked-in-tree" vendors (sources committed directly to the repo
+    # instead of being a git submodule).  Only --strict turns these
+    # into failures.
+    warning_statuses = {"no-submodule"}
+    failed = sum(
+        len(v)
+        for k, v in by_status.items()
+        if k != "ok" and k not in warning_statuses
+    )
     print()
     if failed == 0:
-        print(f"All {len(results)} submodules match vendor.json.")
+        warnings = sum(len(v) for k, v in by_status.items() if k in warning_statuses)
+        if warnings:
+            print(
+                f"All {len(results) - warnings} submodule(s) match vendor.json "
+                f"({warnings} vendor(s) are checked-in trees, skipped)."
+            )
+        else:
+            print(f"All {len(results)} submodules match vendor.json.")
         return 0
 
     print(f"{failed} vendor(s) do not match vendor.json:")
     for r in results:
-        if r.status != "ok":
+        if r.status != "ok" and r.status not in warning_statuses:
             print(f"  - {r.name} ({r.status})")
     return 1
 

@@ -1,0 +1,113 @@
+{
+  // ==========================================================================
+  // profiles/agent-low-latency.json — Agent SDK's lowest-latency variant
+  // ==========================================================================
+  //
+  // Use case: real-time AI Agent pipeline where the model itself is the
+  // consumer of the audio. Latency is the dominant quality dimension;
+  // any DSP processing that adds processing-time jitter is rejected.
+  //
+  // Design rationale (see §2.6 Profile Table / v0.11.0 PROFILE-1):
+  //   - jitter_buffer.mode = "low_latency", initial_delay_ms = 20 (same
+  //     as teleop.json): smallest v1.0 buffer depth — Agent cannot
+  //     afford 40 ms added delay when the mouth-to-ASR round-trip
+  //     budget is the design priority.
+  //   - audio3a_name = "webrtc_apm" but with AGC off (signalled via
+  //     agent_low_latency marker; loader-agnostic — see ADR-010).
+  //     WebRTC APM's AGC uses an RNN-based level estimator whose
+  //     compute cost introduces variable processing-time latency;
+  //     ASR-bound pipelines either trust the raw PCM, or apply their
+  //     own normalisation upstream of the model. The marker tells the
+  //     Agent consumer to skip AGC's level-normalisation.
+  //   - codec_name = "opus" with FEC off (signalled via
+  //     agent_low_latency marker; consumer-level switch). Opus FEC
+  //     trades bandwidth for resilience to packet loss — the
+  //     low-latency variant prefers to re-transmit / repair at the
+  //     application layer (lower latency cost than in-band FEC).
+  //   - timeline_enabled = true: per-frame timing for sub-frame
+  //     observability (mouth → ASR frame-by-frame trace).
+  //   - datachannel_enabled = true: Agent control / state sync / LLM
+  //     partial responses on DC; strict-priority scheduler ensures
+  //     these are never delayed by audio bursts.
+  //   - agent_low_latency = true: v1.1 marker — opt out of AGC level
+  //     estimation and Opus FEC. Loader-agnostic.
+  //
+  // Comparison with v1.0:
+  //   - agent.json: standard Agent SDK profile. agent-low-latency
+  //     tightens the initial JB (30 → 20 ms) and adds a marker that
+  //     tells the consumer to disable AGC's level estimator and Opus
+  //     FEC. Everything else (BWE, scheduler weights, codec) is
+  //     identical to agent.json.
+  //
+  // Override tips:
+  //   - When running on a stable link (LAN / wired), this profile is
+  //     the default for any UI-driven voice Agent.
+  //   - When running on a hostile mobile link, prefer agent.json
+  //     instead — its slightly higher initial_delay_ms (30 ms) and
+  //     default-on AGC give more headroom.
+  // ==========================================================================
+
+  "name": "agent-low-latency",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // WebRTC APM is kept (so AEC / ANS / HPF still run — those don't
+  // add measurable processing-time latency), but AGC's level estimator
+  // is signalled off via the agent_low_latency marker below.
+  "audio3a_name": "webrtc_apm",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: per-frame capture timestamps for sub-frame latency
+  // observability.
+  "timeline_enabled": true,
+  // Required: Agent control / state sync / LLM partial responses.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // Same as agent.json: 500 kbps initial / 5 Mbps cap. Agents are
+  // typically on a low-bandwidth link; the model is the consumer and
+  // rarely needs >5 Mbps.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 500000,
+    "max_bitrate_bps": 5000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // LowLatency — initial_delay_ms = 20 (tighter than agent.json's 30)
+  // is the smallest v1.0 buffer option.
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 20,
+    "min_delay_ms": 5,
+    "max_delay_ms": 120
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority — control messages preempt audio. Same weights as
+  // agent.json / call.json.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- Schema v1.1 additive markers (ADR-010) ------------------------------
+  // Marker — opt out of AGC's level estimator and Opus FEC.
+  "agent_low_latency": true
+}

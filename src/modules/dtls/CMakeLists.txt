@@ -35,6 +35,16 @@ add_library(nimrtc_dtls STATIC
 
 nimrtc_apply_options(nimrtc_dtls)
 
+# wolfSSL upstream headers use C-style casts in their public macros
+# (e.g. WC_LAST_E comparisons in error-crypt.h / error-ssl.h).  Suppress
+# the resulting -Wold-style-cast warning for this module — we can't
+# modify upstream vendored code.
+if(NOT MSVC)
+    target_compile_options(nimrtc_dtls PRIVATE
+        -Wno-old-style-cast
+        -Wno-double-promotion)
+endif()
+
 target_link_libraries(nimrtc_dtls
     PUBLIC
         nimrtc::core

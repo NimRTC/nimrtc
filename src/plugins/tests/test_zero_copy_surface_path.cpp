@@ -178,7 +178,7 @@ TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
     GpuBuffer* buf = pool->acquire(1920, 1080, PixelFormat::kBGRA);
     ASSERT_NE(buf, nullptr);
     auto gb = std::shared_ptr<GpuBuffer>(buf,
-        [pool](GpuBuffer* p) {
+        [](GpuBuffer* p) {
             if (p) {
                 p->release_ref();   // caller drops (ref=2→1)
                 p->release_ref();   // pool drops (ref=1→0→recycle)
@@ -202,7 +202,7 @@ TEST(GpuBufferZeroCopy, FrameClassificationGpu) {
 TEST(GpuBufferZeroCopy, FrameClassificationCpu) {
     auto cpu_buf = std::make_shared<nimrtc::video_frame::VideoFrameBuffer>(
         nimrtc::video_frame::VideoFrameLayout{
-            PixelFormat::kI420, 640, 480, 0});
+            PixelFormat::kI420, 640, 480, {0}});
     VideoFrame f;
     f.buffer = cpu_buf;
     EXPECT_FALSE(f.has_gpu());

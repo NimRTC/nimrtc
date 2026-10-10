@@ -56,6 +56,11 @@ namespace {
 // libopus's frame_size must be one of the allowed durations × Fs.  NimRTC
 // targets 20 ms frames — a WebRTC-compatible default.
 constexpr std::size_t kSamplesPer20Ms48K = 960;   // 48 kHz × 20 ms
+// Reserved for future 10 ms (or finer-grained) frame-size knob — keep the
+// symbol available without tripping -Werror=unused-const-variable on Clang.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::size_t kSamplesPer10Ms48K = 480;   // 48 kHz × 10 ms
 constexpr std::size_t kSamplesPerFrame   = kSamplesPer20Ms48K;  // P1 default
 
@@ -82,6 +87,17 @@ inline bool is_valid_frame_size(std::size_t samples_per_channel) noexcept {
 }
 
 constexpr auto kLog = core::log::Level::Debug;
+
+// Format-string attribute required by Clang/GCC to suppress
+// -Wformat-nonliteral on this variadic helper (the format string
+// comes from the caller; the compiler cannot prove it is a literal).
+// Forward-declare with the attribute, then define separately so GCC
+// (which rejects attributes on inline function *definitions*) is
+// happy with the same syntax as Clang.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+inline void opus_debug(const char* fmt, ...) noexcept;
 
 inline void opus_debug(const char* fmt, ...) noexcept {
     if (core::log::Logger::instance().level() <= kLog) {

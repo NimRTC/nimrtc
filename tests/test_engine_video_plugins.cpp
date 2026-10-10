@@ -22,8 +22,10 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <thread>
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
@@ -189,7 +191,6 @@ TEST_F(EngineVideoPlugins, sender_pushes_frames_and_receiver_counts_packets) {
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u);
 
-    std::atomic<int> packets_pushed{0};
     // Note: receiver.set_frame_callback is wired by init_video_plugins()
     // already; we don't replace it here.
     np::VideoRtpPacket pkt{};

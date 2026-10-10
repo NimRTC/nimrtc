@@ -66,7 +66,12 @@ inline void flag(std::string& out, const char* key) {
     out += "\r\n";
 }
 
-/** Append "k=value\r\n". */
+// Key/value helper kept for future attribute emission (k= lines). Currently
+// unused because all media attributes are written via the dedicated helpers
+// below; suppress -Wunused-function on toolchains that warn here.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 inline void key_val(std::string& out, char key, std::string_view value) {
     out += key;
     out += '=';

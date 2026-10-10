@@ -5,8 +5,9 @@
 | RFC | 001 |
 | Title | PCM Tap — Pre/Post-3A Audio Frame Hooks for AI Agent Pipelines |
 | Author | BDFL |
-| Status | **Draft** |
+| Status | **Final** |
 | Date | 2026-09-18 |
+| Promoted | 2026-09-20 (Draft → Final) |
 | Supersedes | — |
 | Target | v0.11.0 (P2) — TAP-1 per `docs/plan/v0.11-plan.md` §2.1.1 |
 | References | `docs/zh/architecture.md` §8.7; `src/plugins/include/nimrtc/plugins/audio3a.hpp`; ADR-009; ADR-010 |
@@ -235,10 +236,24 @@ Key decisions for the implementor:
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-18 | Initial draft |
+| 0.2 | 2026-09-20 | Promoted Draft → Final. Reviewers: [maintainer] |
 
 ---
 
-## 9. Appendix: Relationship to Other Documents
+## 9. Review Record
+
+| Field | Value |
+|---|---|
+| **Proposer** | BDFL |
+| **Shepherd** | [maintainer] |
+| **Reviewers** | [maintainer] |
+| **Date promoted** | 2026-09-20 |
+| **Target implementation version** | v0.11.0 |
+| **Change log** | See §8 above. |
+
+---
+
+## 10. Appendix: Relationship to Other Documents
 
 - `docs/zh/architecture.md` §8.7 — Original motivation for this feature.
 - `src/plugins/include/nimrtc/plugins/audio3a.hpp` — Canonical interface definition.

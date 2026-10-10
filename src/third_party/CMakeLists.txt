@@ -37,3 +37,9 @@ _nimrtc_vendor_add_if_populated(mbedtls)
 _nimrtc_vendor_add_if_populated(libjuice)
 _nimrtc_vendor_add_if_populated(wolfssl)
 _nimrtc_vendor_add_if_populated(webrtc_audio_processing)
+# TPAL-5 (v0.11.0) — usrsctp SCTP userland stack. Required by the
+# `UsrsctpSocket` production backend registered through
+# `nimrtc::sctp::register_default_plugins()`. Source populated under
+# `src/` by `scripts/vendor-fetch.sh usrsctp` (or curl/tar from
+# https://codeload.github.com/sctplab/usrsctp/tar.gz/refs/tags/0.9.5.0).
+_nimrtc_vendor_add_if_populated(usrsctp)

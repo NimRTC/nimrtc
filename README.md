@@ -7,8 +7,14 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.11.0 Beta 前哨 — P2 kickoff. DataChannel interop, in-process SFU relay,
-> PCM tap, AI Agent demo, Profile library now in scope. See [docs/plan/v0.11-plan.md](docs/plan/v0.11-plan.md).
+> **Current:** v0.11.0 Beta 前哨 — Chrome media interop (audio + video Case D on all four
+> platforms), PCM tap on WebRTC APM, Profile library (9 variants), DTLS seam via plugin registry
+> with `EngineConfig::dtls_name` for future 国密 backends. The data plane (DataChannel
+> interop / usrsctp / SCTP-over-DTLS) is **deferred to v1.x** — Chrome is moving
+> DataChannel to WebTransport over QUIC, and v0.11.0 ships the media interop surface
+> without committing to the SCTP path. See
+> [docs/plan/v0.11-plan.md §2.2 / §10](docs/plan/v0.11-plan.md) for the rationale
+> and forward direction.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
@@ -40,7 +46,19 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.10.3 Tech Preview — Chrome ↔ NimRTC P2P A/V interop works on Windows; CI is green on Win / Linux x86_64 / macOS arm64 / Linux aarch64. Production-grade quality lands in P3 / P4.
+- **Current state:** v0.11.0 Beta 前哨 — first minor to ship P2 content.
+  Chrome media interop (audio + video Case D on all four platforms) plus
+  L2 / L3 P2 scaffolding (TAP-1, PROFILE-1, DEMO-1, TPAL-4 cleanup) are
+  shipped. **The data plane (DataChannel Chrome interop, usrsctp
+  production backend, L1 strict-priority across the DC plane) is
+  explicitly deferred to v1.x** — Chrome is moving DataChannel to
+  WebTransport over QUIC, and v0.11.0 does not commit to the
+  SCTP-over-DTLS path. In-process SFU relay, DC forwarding policy, and
+  `sfu-relay` benchmark remain deferred to the pre-1.0 decision window
+  (see [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
+  and §10 for the WebTransport forward direction). P1 closed at
+  v0.10.3 (final tech-preview patch). Production-grade quality lands in
+  P3 / P4.
 
 ---
 
@@ -448,7 +466,7 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
 
 ---
 
-## Current progress (v0.10.3 Tech Preview)
+## Current progress (v0.11.0 Beta 前哨)
 
 What you can do today, in the main trunk, against a stock `cmake --preset release.msvc` build:
 
@@ -468,10 +486,41 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | PAL Slice 6 — Raw UDP bypass (`ArqRawUdp` id=`"arq"`) + 4/4 real-loopback test | ✅ | v0.10.2 |
 | PAL Slice 7.5 — `WebRtcClassicStackFactory` (id=`"webrtc-classic"`) | ✅ | v0.10.3 |
 | PAL Slice 8 — 4 typed transport-layer registry hooks | ✅ | v0.10.2 |
+| TAP-1 — PCM tap on WebRTC APM (`set_pre_process_tap` / `set_post_process_tap` + int16 ASR variant) | ✅ | v0.11.0 |
+| TPAL-4 cleanup — `EngineConfig::dtls_name` field for guomi_sm4 / OpenSSL / BoringSSL backend selection | ✅ | v0.11.0 |
+| PROFILE-1 — 5-variant Profile library (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`), JSON schema v1.0 canonical | ✅ | v0.11.0 |
+| Profile regression — `JsonFileMatchesBuiltinConstant` field-equality test across 32 subtests | ✅ | v0.11.0 |
+| DEMO-1 — `demo-agent-gateway` (PCM tap → ASR/LLM mock using `agent-gateway` Profile) | ✅ | v0.11.0 |
+| DISC-1 — GitHub Discussions enabled | ✅ | v0.11.0 |
+| RFC-1 — RFC 001 (PCM Tap) Final | ✅ | v0.11.0 |
+| Chrome ↔ NimRTC media interop e2e (Case D, all four platforms) | ✅ | v0.11.0 |
+| TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
+| DC-1 — Chrome ↔ NimRTC DataChannel bidirectional interop | ⏸️ **Deferred to v1.x** | SCTP-over-DTLS physical wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup) never landed on `main`; Chrome-headless e2e stays 0/4. In-process `test_datachannel_engine` 5/5 PASS covers the IDataChannel API surface against the stub SCTP socket. Re-platformed on WebTransport / QUIC in v1.x. |
+| DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ⏸️ **Deferred to v1.x** | The RTP-only strict-priority path is already covered by `test_sched_priority.cpp` from v0.10.x; the DC-plane cross-traffic case waits for DC-1. |
+| SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ Deferred | pre-1.0 decision window (per `docs/plan/v0.11-plan.md` §2.2) |
+| DC-3 — DC forwarding policy in SFU relay context | ⏸️ Deferred | pre-1.0 (depends on SFU-1 AND v1.x DC-1) |
+| BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ Deferred | pre-1.0 (depends on SFU-1) |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
-> v0.10 closes v0.9 wrap-up and lands the PAL Slice 1 refactor. P2 content — DataChannel interop,
-> SFU relay, PCM tap, official Profile library — is queued for **v0.11.0**. See [Roadmap](#roadmap-p1p4-condensed).
+> v0.11.0 is the **Beta 前哨** minor — first release that ships P2
+> content (Chrome media interop, PCM tap, AI Agent demo, full Profile
+> library, DTLS seam cleanup). v0.10 closed the v0.9 wrap-up + PAL Slice 1
+> refactor; v0.10.x (v0.10.1–v0.10.3) finished the PAL Slice 2–8
+> infrastructure that v0.11.0 builds on.
+>
+> **The data plane (DataChannel interop / usrsctp / SCTP-over-DTLS) is
+> explicitly deferred to v1.x** — Chrome is moving DataChannel to
+> WebTransport over QUIC, and v0.11.0 does not commit to the
+> SCTP-over-DTLS path. The `UsrsctpSocket` class is `@deprecated` and
+> still compiles for opt-in callers; the in-process `test_datachannel_engine`
+> 5/5 PASS covers the IDataChannel API surface against the stub SCTP
+> socket. **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy
+> (DC-3), and sfu-relay benchmark (BENCH-1) remain deferred to the
+> pre-1.0 decision window** — see
+> [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
+> and §10 (forward direction: WebTransport / QUIC) for the full
+> rationale. The v0.10.x dual-registration scheme is recoverable from
+> git history if the v1.x WebTransport vendor selection falls through.
 
 ---
 
@@ -612,7 +661,8 @@ python tools/check_prerequisites.py --compiler  # compiler only
 
 - **Canonical technical doc:** [`docs/zh/architecture.md`](docs/zh/architecture.md) (Chinese — see [ADR-012](docs/adr/ADR-012-zh-docs-layout.md)).
 - **Architecture decisions:** [`docs/adr/`](docs/adr/) (Chinese summaries, code/identifiers in English).
-- **English deep-dives:** roadmap item for v1.0+.
+- **RFCs:** [`docs/rfcs/`](docs/rfcs/) — formal design records.
+  - [RFC 001: PCM tap](docs/rfcs/rfc-001-pcm-tap.md) — Final
 - **Standalone docs site:** docs-zh.nimrtc.dev, planned for v1.0+.
 
 ---
@@ -632,6 +682,22 @@ python tools/check_prerequisites.py --compiler  # compiler only
 
 - **Project:** [Apache-2.0](LICENSE)
 - **Third-party:** see [`NOTICE`](NOTICE) and [`docs/zh/architecture.md`](docs/zh/architecture.md) §11.
+
+---
+
+## Community
+
+💬 **[GitHub Discussions](https://github.com/NimRTC/NimRTC/discussions)** — structured community channel.
+
+| Category | Purpose | Who posts | Guidelines | Example topics |
+|---|---|---|---|---|
+| **Announcements** | Release notes, security advisories | Maintainers only | Admin-only posting; replies allowed | v0.11.0 Beta released · Security: CVE-YYYY-XXXX |
+| **General** | Open Q&A, introductions, icebreakers | Anyone | One thread per topic; no feature proposals | "How does ICE candidate gathering work?" · "First time evaluating NimRTC" |
+| **Ideas** | RFC-light feature proposals | Anyone | Describe the problem and a rough solution; formal RFC if it gains traction | "Add a built-in TURN fallback" · "Profile for IoT low-power mode" |
+| **Show and tell** | Community-built apps, profiles, integrations | Anyone | Brief description + link to repo or demo; works in progress welcome | "NimRTC-based IoT intercom" · "Custom agent-gateway profile for healthcare" |
+| **Q&A** | Usage and API questions | Anyone | One question per thread; search first | "How do I configure the PCM tap for Whisper?" · "DTLS handshake timeout on Windows" |
+
+For templates when starting a new thread, see `.github/DISCUSSION_TEMPLATE/`.
 
 ---
 

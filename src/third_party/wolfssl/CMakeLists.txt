@@ -6,6 +6,24 @@ set(_src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # 设置 wolfSSL 官方 CMake 选项
 set(WOLFSSL_DTLS "yes" CACHE BOOL "Enable DTLS")
+# Note: WOLFSSL_DTLS13 (RFC 9147) is intentionally LEFT OFF in wolfSSL 5.9.2.
+# The 1.3 server in 5.9.2 has a known incompatibility with the 1.3 client
+# in the same version: when the server receives a 1.2-style ClientHello from
+# a 1.3-capable client (the very first flight, before any hello_retry
+# round-trip), it requires a `key_share` extension up front and emits
+# `missing_extension` instead of issuing the hello_retry_request that
+# RFC 8446 §4.1.2 prescribes.  The in-tree unit tests
+# (tests/test_dtls_*.cpp) are exactly that "NimRTC <-> NimRTC over UDP
+# loopback" topology, so they all fail with `-313 received alert fatal
+# error description=109 (ME)` once WOLFSSL_DTLS13 is turned on — see PR
+# fix/windows-dll-boundary run 38051757830.
+#
+# Chrome / BoringSSL does not hit this because BoringSSL's 1.3 client
+# sends the 1.3 ClientHello (with `supported_versions` and `key_share`)
+# in its very first flight, so the 5.9.2 server's broken short-circuit
+# never triggers.  Until we either patch wolfSSL upstream or upgrade
+# past 5.9.2, we ship DTLS 1.2 only, which is still RFC 5764 / 8261
+# compliant and accepted by every WebRTC implementation.
 set(WOLFSSL_TLS13 "yes" CACHE BOOL "Enable TLS 1.3")
 set(WOLFSSL_ECC "yes" CACHE BOOL "Enable ECC")
 set(WOLFSSL_AESGCM "yes" CACHE BOOL "Enable AES-GCM")
@@ -94,9 +112,21 @@ set(WOLFSSL_KEEP_PEER_CERT "yes" CACHE BOOL "Keep peer certificate after handsha
 set(WOLFSSL_EXAMPLES "no" CACHE BOOL "Disable wolfssl examples" FORCE)
 set(WOLFSSL_TEST_SUBMIT "no" CACHE BOOL "Disable wolfssl tests" FORCE)
 
+# NIMRTC CI NOTE: wolfSSL upstream (tested with 5.9.2) contains
+# old-style C casts and other warnings that trigger -Wold-style-cast
+# and related flags under NIMRTC_WARNINGS_AS_ERRORS=ON on Apple Clang 15.
+# We suppress -Werror for the wolfSSL build tree only; NimRTC targets
+# outside this block are unaffected and still get -Werror from
+# nimrtc_apply_options().
+set(_nimrtc_werror_backup ${NIMRTC_WARNINGS_AS_ERRORS})
+set(NIMRTC_WARNINGS_AS_ERRORS OFF)
+
 # 添加 wolfSSL 官方构建
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${_src_dir} wolfssl_build)
+
+set(NIMRTC_WARNINGS_AS_ERRORS ${_nimrtc_werror_backup})
+unset(_nimrtc_werror_backup)
 
 # 强制启用 KEEP_PEER_CERT，使 wolfSSL 在握手完成后保留 peer X509 证书。
 # 这是 WebRTC SDP fingerprint 校验的必要条件：握手后调

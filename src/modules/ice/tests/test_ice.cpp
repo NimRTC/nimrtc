@@ -262,21 +262,37 @@ TEST(IceTransportLoopback, TwoAgentsConnectAndExchangeData) {
     // ---- Configs ------------------------------------------------------------
     //
     // Both agents bind to 127.0.0.1 with disjoint port ranges so they don't
-    // collide on the OS UDP port allocator. Role is fixed (offerer = controlling)
-    // because we manually pump SDP, bypassing the engine's offer/answer dance.
+    // collide on the OS UDP port allocator (SO_REUSEADDR + SO_REUSEPORT are
+    // both set in libjuice, which would let two sockets share the same port
+    // and break the loopback path). Role is fixed (offerer = controlling)
+    // because we manually pump SDP, bypassing the engine's offer/answer
+    // dance.
+    //
+    // Range selection rationale: earlier revisions hardcoded
+    // 50000-50099 / 50100-50199 — fine on developer workstations and on
+    // Linux, but on the Windows CI runner ports in 50100-50199 return
+    // WSAEACCES (errno=10013) — typically Hyper-V / Defender-Firewall
+    // reservations. 60000-60099 / 60200-60299 stay in the same
+    // neighbourhood (still well outside the OS-dynamic-exclusion band
+    // 52297-59006 seen on workstations, and below the IANA registered
+    // range), so they should remain likely-free on the CI runner too.
+    // Running both ports out of *separate* small windows also keeps the
+    // test immune to per-band reservations either side of the band might
+    // impose, and the SO_REUSEPORT that libjuice sets for ICE means we
+    // cannot collapse to port=0 (both sockets would share).
 
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    cfg_a.local_port_range_begin = 50000;
-    cfg_a.local_port_range_end   = 50099;
+    cfg_a.local_port_range_begin = 60000;
+    cfg_a.local_port_range_end   = 60099;
     cfg_a.local_ufrag     = "ufragAaaaaaaaaaaaaa";   // 4..256 chars per RFC 5245
     cfg_a.local_password  = "pwdAaaaaaaaaaaaaaaaaaaa";
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.local_port_range_begin = 50100;
-    cfg_b.local_port_range_end   = 50199;
+    cfg_b.local_port_range_begin = 60200;
+    cfg_b.local_port_range_end   = 60299;
     cfg_b.local_ufrag     = "ufragBbbbbbbbbbbbbbb";
     cfg_b.local_password  = "pwdBbbbbbbbbbbbbbbbbbb";
 
@@ -413,17 +429,22 @@ TEST(IceTransportLoopback, TwoAgentsWithRandomUfrag) {
     // WSL2's UDP loopback is unreliable; skip on that platform.
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping ICE test";
 
+    // Port ranges 60000-60099 / 60200-60299 chosen to avoid the WSAEACCES
+    // collision seen on the Windows CI runner with 50100-50199. Same
+    // rationale as TwoAgentsConnectAndExchangeData — keep the two agents
+    // on disjoint fixed ranges because SO_REUSEPORT in libjuice allows
+    // both sockets to share a port, which silently breaks loopback.
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    cfg_a.local_port_range_begin = 50000;
-    cfg_a.local_port_range_end   = 50099;
+    cfg_a.local_port_range_begin = 60000;
+    cfg_a.local_port_range_end   = 60099;
     // local_ufrag / local_password left EMPTY → libjuice generates random.
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.local_port_range_begin = 50100;
-    cfg_b.local_port_range_end   = 50199;
+    cfg_b.local_port_range_begin = 60200;
+    cfg_b.local_port_range_end   = 60299;
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

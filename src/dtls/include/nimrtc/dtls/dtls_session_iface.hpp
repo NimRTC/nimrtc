@@ -87,6 +87,13 @@
 #include <span>
 #include <string_view>
 
+#include <nimrtc/dtls/dtls_types.hpp>   // DtlsRole, DtlsAddr, DtlsRecord,
+                                        // DtlsState, Fingerprint,
+                                        // SrtpKeyingMaterial — used by the
+                                        // concrete IDtlsSession impls that
+                                        // include this header.
+#include <nimrtc/core/error.hpp>       // core::Result<void> (legacy
+                                        // `open()` method return type).
 #include <nimrtc/plugins/base.hpp>   // plugins::Status
 
 namespace nimrtc::dtls {
@@ -201,6 +208,57 @@ public:
      */
     virtual plugins::Status export_srtp_key_material(
         std::span<std::uint8_t, 60> out) noexcept = 0;
+
+    // -------------------------------------------------------------------
+    // Legacy engine-facing surface — preserved for `engine.cpp` and
+    // other direct consumers that pre-date the Slice 4 seam refactor.
+    // Concrete backends (e.g. DtlsSession) implement BOTH this legacy
+    // surface and the new seam surface above; the two coexist.
+    //
+    // `override` is intentionally omitted from these declarations
+    // (they were never abstract members of IDtlsSession) — the C++
+    // compiler would reject them if they ever drifted from a pure-virtual
+    // signature.  We mark them `noexcept` / returning Result<void> where
+    // the concrete backend's existing signatures demand it.
+    // -------------------------------------------------------------------
+
+    /** Initialise state machine + key material.  Returns Result<void> for
+     *  error reporting.  Mirrors `start()` but with an explicit Result. */
+    virtual core::Result<void> open() noexcept = 0;
+
+    /** Same as set_role(Role) but takes the original `DtlsRole` enum
+     *  used by pre-Slice-4 engine code. */
+    virtual void set_role(DtlsRole r) noexcept = 0;
+
+    /** Install the SDP `a=fingerprint` as (algo, raw_bytes).  Mirrors
+     *  set_peer_fingerprint(span) but with separate args. */
+    virtual void set_peer_fingerprint(
+        std::string algo,
+        std::vector<std::uint8_t> value) noexcept = 0;
+
+    /** Feed inbound bytes from the transport.  Returns bytes consumed. */
+    virtual std::size_t feed_inbound(
+        std::span<const std::uint8_t> bytes,
+        const DtlsAddr& from) noexcept = 0;
+
+    /** Drain handshake-generated outbound records. */
+    virtual std::vector<DtlsRecord> take_outbound() noexcept = 0;
+
+    /** Drive the DTLS retransmit timer once.  Mirrors `pump()`. */
+    virtual void tick() noexcept = 0;
+
+    /** Current handshake state. */
+    virtual DtlsState state() const noexcept = 0;
+
+    /** True iff state() == Connected and the handshake is usable. */
+    virtual bool is_connected() const noexcept = 0;
+
+    /** Local certificate fingerprint (advertised in SDP). */
+    virtual const Fingerprint& local_fingerprint() const noexcept = 0;
+
+    /** SRTP keying material — available once state() == Connected. */
+    virtual std::optional<SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept = 0;
 };
 
 } // namespace nimrtc::dtls

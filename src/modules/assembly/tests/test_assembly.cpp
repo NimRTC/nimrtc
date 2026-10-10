@@ -5,7 +5,7 @@
 // Test matrix:
 //   1. ProfileRegistry singleton behaviour
 //      - instance() returns same address on repeated calls
-//      - all built-in profiles are registered (6 total)
+//      - all built-in profiles are registered (9 total — 6 v1.0 + 3 v1.1)
 //      - find() returns correct pointer for known names
 //      - find() returns nullptr for unknown names
 //   2. Profile invariants (each built-in)
@@ -66,12 +66,13 @@ TEST_F(AssemblyTest, AllBuiltinProfilesRegistered) {
     auto& reg = nimrtc::assembly::ProfileRegistry::instance();
     auto names = reg.all_names();
 
-    // Expected: 6 built-in profiles.
-    EXPECT_EQ(names.size(), 6u);
+    // Expected: 9 built-in profiles (6 v1.0 + 3 v1.1 from PROFILE-1).
+    EXPECT_EQ(names.size(), 9u);
 
     // Each known name must be present.
     for (std::string_view expected :
-         {"call", "live", "transport", "agent", "teleop", "sfu"}) {
+         {"call", "live", "transport", "agent", "teleop", "sfu",
+          "sfu-agent", "agent-gateway", "agent-low-latency"}) {
         EXPECT_NE(std::find(names.begin(), names.end(), std::string{expected}),
                   names.end())
             << "Profile '" << expected << "' should be registered";
@@ -187,6 +188,58 @@ TEST_F(AssemblyTest, ProfileLiveBufferModeIsLive) {
     EXPECT_EQ(p.name, "live");
     EXPECT_EQ(p.jitter_buffer.mode,
               nimrtc::assembly::JitterBufferConfig::Mode::kLive);
+}
+
+// ---------------------------------------------------------------------------
+// v1.1 (PROFILE-1) new profile invariants.
+// ---------------------------------------------------------------------------
+
+TEST_F(AssemblyTest, ProfileAgentGatewayExposesApm) {
+    const auto& p = nimrtc::assembly::kProfileAgentGateway;
+    EXPECT_EQ(p.name, "agent-gateway");
+    EXPECT_EQ(p.audio3a_name, "webrtc_apm");
+    EXPECT_EQ(p.codec_name, "opus");
+    EXPECT_TRUE(p.timeline_enabled);
+    EXPECT_TRUE(p.datachannel_enabled);
+    EXPECT_EQ(p.jitter_buffer.mode,
+              nimrtc::assembly::JitterBufferConfig::Mode::kLowLatency);
+    EXPECT_EQ(p.jitter_buffer.initial_delay_ms, 30);
+    // BWE matches agent.json (low-bandwidth Agent link).
+    EXPECT_EQ(p.bwe.params.initial_bitrate_bps, 500'000u);
+}
+
+TEST_F(AssemblyTest, ProfileSfuAgentHybrid) {
+    const auto& p = nimrtc::assembly::kProfileSfuAgent;
+    EXPECT_EQ(p.name, "sfu-agent");
+    // Relay path: no JB / no codec / no BWE.
+    EXPECT_TRUE(p.jb_name.empty());
+    EXPECT_TRUE(p.codec_name.empty());
+    EXPECT_TRUE(p.bwe_name.empty());
+    // Agent side: APM stays on for the PCM-tap consumer.
+    EXPECT_EQ(p.audio3a_name, "webrtc_apm");
+    // Timeline + DC required for Agent observability + control.
+    EXPECT_TRUE(p.timeline_enabled);
+    EXPECT_TRUE(p.datachannel_enabled);
+    // Strict-priority with control_weight=20 (twice agent.json's 10).
+    EXPECT_EQ(p.scheduler.strategy,
+              nimrtc::assembly::SchedulerConfig::Strategy::kStrictPriority);
+    EXPECT_EQ(p.scheduler.control_weight, 20u);
+}
+
+TEST_F(AssemblyTest, ProfileAgentLowLatencyTightJb) {
+    const auto& p = nimrtc::assembly::kProfileAgentLowLatency;
+    EXPECT_EQ(p.name, "agent-low-latency");
+    // Tightest v1.0 buffer depth (same as teleop).
+    EXPECT_EQ(p.jitter_buffer.mode,
+              nimrtc::assembly::JitterBufferConfig::Mode::kLowLatency);
+    EXPECT_EQ(p.jitter_buffer.initial_delay_ms, 20);
+    EXPECT_EQ(p.jitter_buffer.max_delay_ms, 120);
+    // APM stays on (AEC/ANS/HPF are fine; AGC's level estimator is
+    // signalled off via the v1.1 agent_low_latency marker).
+    EXPECT_EQ(p.audio3a_name, "webrtc_apm");
+    EXPECT_EQ(p.codec_name, "opus");
+    EXPECT_TRUE(p.timeline_enabled);
+    EXPECT_TRUE(p.datachannel_enabled);
 }
 
 // =============================================================================
@@ -315,7 +368,8 @@ static void expect_profiles_equal(
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
-    for (std::string_view name : {"call", "live", "transport", "agent", "teleop", "sfu"}) {
+    for (std::string_view name : {"call", "live", "transport", "agent", "teleop", "sfu",
+                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
 
         const nimrtc::assembly::Profile* original =
@@ -371,7 +425,9 @@ TEST_F(AssemblyTest, JsonRoundTripBuilderProfile) {
 
 TEST_F(AssemblyTest, JsonProfileFileExists) {
     // Verify JSON files exist in the build directory.
-    for (std::string_view name : {"call", "live", "transport", "agent"}) {
+    for (std::string_view name : {"call", "live", "transport", "agent",
+                                  "teleop", "sfu",
+                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
         std::string path = profile_path(name);
         EXPECT_TRUE(fs::exists(path))
             << "Profile JSON not found at: " << path;
@@ -379,7 +435,9 @@ TEST_F(AssemblyTest, JsonProfileFileExists) {
 }
 
 TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
-    for (std::string_view name : {"call", "live", "transport", "agent"}) {
+    for (std::string_view name : {"call", "live", "transport", "agent",
+                                  "teleop", "sfu",
+                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
         std::string path = profile_path(name);
         if (!fs::exists(path)) {
             // Skip if build directory is not set up yet.
@@ -390,6 +448,38 @@ TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
             auto p = nimrtc::assembly::profile_from_json_file(path);
             EXPECT_EQ(p.name, name);
         }) << "Failed to parse: " << path;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v1.1 (PROFILE-1) JSON file ↔ C++ constant round-trip.
+//
+// For every JSON profile file shipped under profiles/, the parsed Profile
+// must field-by-field match the corresponding built-in C++ constant. This
+// catches the case where the JSON and the C++ companion drift (e.g. an
+// edit to profiles/sfu.json that doesn't update kProfileSfu).
+// ---------------------------------------------------------------------------
+TEST_F(AssemblyTest, JsonFileMatchesBuiltinConstant) {
+    for (std::string_view name : {"call", "live", "transport", "agent",
+                                  "teleop", "sfu",
+                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+        SCOPED_TRACE("Profile: " + std::string{name});
+
+        std::string path = profile_path(name);
+        if (!fs::exists(path)) {
+            GTEST_SKIP() << "Profile JSON not found at: " << path;
+        }
+
+        const nimrtc::assembly::Profile* cxx_constant =
+            nimrtc::assembly::ProfileRegistry::instance().find(name);
+        ASSERT_NE(cxx_constant, nullptr)
+            << "No C++ constant for profile '" << name
+            << "' — add kProfile* alongside profiles/*.json";
+
+        nimrtc::assembly::Profile from_json =
+            nimrtc::assembly::profile_from_json_file(path);
+
+        expect_profiles_equal(*cxx_constant, from_json);
     }
 }
 

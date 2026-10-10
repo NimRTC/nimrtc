@@ -232,6 +232,63 @@ function(nimrtc_link_wolfssl target)
         WOLFSSL_USER_SETTINGS=1)
 endfunction()
 
+# ADR-013: link GMSSL v3.x native library.
+# GMSSL uses the same TLS API names as OpenSSL 1.1.1 (TLS_CONNECT,
+# TLS_CTX, tls_do_handshake, tls_send, tls_recv etc.) but lives
+# under <gmssl/tls.h> and links to libgmssl / gmssl.lib.
+# The function searches: $ENV{GMSSL_ROOT}/include, /usr/local/include,
+# /usr/include for <gmssl/tls.h>; and $ENV{GMSSL_ROOT}/lib, /usr/local/lib,
+# /usr/lib for libgmssl / gmssl.lib.
+function(nimrtc_link_gmssl target)
+    # Propagate the GMSSL_ROOT hint from the caller (or the environment).
+    set(_gmssl_roots
+        "$ENV{GMSSL_ROOT}"
+        "$ENV{GMSSL_ROOT}/lib"
+        "$ENV{GMSSL_ROOT}/lib64"
+        )
+    # Only add system paths when no explicit root is set.
+    if(NOT DEFINED ENV{GMSSL_ROOT} OR "$ENV{GMSSL_ROOT}" STREQUAL "")
+        list(APPEND _gmssl_roots
+            /usr/local
+            /usr/local/lib
+            /usr/local/lib64
+            /usr
+            )
+    endif()
+
+    # Find the include directory
+    find_path(GMSSL_INCLUDE_DIR gmssl/tls.h
+        PATHS ${_gmssl_roots}
+        PATH_SUFFIXES include include/gmssl
+        NO_DEFAULT_PATH)
+
+    # Find the library
+    find_library(GMSSL_LIB NAMES gmssl
+        PATHS ${_gmssl_roots}
+        PATH_SUFFIXES lib lib64
+        NO_DEFAULT_PATH)
+
+    if(NOT GMSSL_INCLUDE_DIR OR NOT GMSSL_LIB)
+        message(FATAL_ERROR
+            "NIMRTC_ENABLE_DTLS_GMSSL=ON but GMSSL v3.x not found.\n"
+            "  GMSSL_INCLUDE_DIR = ${GMSSL_INCLUDE_DIR}\n"
+            "  GMSSL_LIB         = ${GMSSL_LIB}\n"
+            "  Searched roots: ${_gmssl_roots}\n"
+            "  Set $ENV{GMSSL_ROOT} to your GMSSL install prefix.\n"
+            "  Download & build GMSSL: https://github.com/guanzhi/GmSSL")
+    endif()
+
+    add_library(gmssl_imported UNKNOWN IMPORTED)
+    set_target_properties(gmssl_imported PROPERTIES
+        IMPORTED_LOCATION "${GMSSL_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${GMSSL_INCLUDE_DIR}")
+
+    target_link_libraries(${target} PRIVATE gmssl_imported)
+    target_compile_definitions(${target} PRIVATE
+        NIMRTC_USE_GMSSL=1
+        NIMRTC_HAS_DTLS_GMSSL=1)
+endfunction()
+
 # Future:
 # function(nimrtc_link_usrsctp target) ...
 function(nimrtc_link_webrtc_apm target)

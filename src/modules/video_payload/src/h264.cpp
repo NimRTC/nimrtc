@@ -13,10 +13,22 @@ namespace {
 
 constexpr std::uint8_t kFuAType      = 28;
 constexpr std::uint8_t kStapAType    = 24;
+// kStapBType / kFuBType are reserved for future single-stream STAP-B
+// fragmentation support; suppress -Werror=unused-const-variable on
+// Clang so the symbols stay available.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kStapBType    = 25;
 constexpr std::uint8_t kFuBType      = 29;
 constexpr std::uint8_t kNaluTypeMask = 0x1F;
 constexpr std::uint8_t kNriMask      = 0x60;
+// kForbiddenBit is referenced by the H.264 spec but not currently
+// emitted by NimRTC; keep the constant available for future strict
+// conformance work.
+#if defined(__clang__)
+[[maybe_unused]]
+#endif
 constexpr std::uint8_t kForbiddenBit = 0x80;
 
 inline std::uint8_t make_indicator(std::uint8_t nri, std::uint8_t type) noexcept {
@@ -68,9 +80,9 @@ StapAResult parse_stap_a(core::ByteSpan payload) noexcept {
 
     std::size_t pos = 1;
     while (pos + 2 <= payload.size()) {
-        const std::uint16_t nalu_len =
+        const std::uint16_t nalu_len = static_cast<std::uint16_t>(
             (static_cast<std::uint16_t>(payload[pos])     << 8)
-          |  static_cast<std::uint16_t>(payload[pos + 1]);
+          |  static_cast<std::uint16_t>(payload[pos + 1]));
         pos += 2;
         if (nalu_len == 0 || pos + nalu_len > payload.size()) break;
 

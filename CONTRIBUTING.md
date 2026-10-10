@@ -2,6 +2,14 @@
 
 Thank you for your interest in contributing to NimRTC.
 
+## Questions & discussion
+
+For questions not covered by these guidelines, start a thread in
+[**GitHub Discussions → Q&A**](https://github.com/NimRTC/NimRTC/discussions/categories/Q&A).
+For design discussion before opening a PR, use
+[**GitHub Discussions → Ideas**](https://github.com/NimRTC/NimRTC/discussions/categories/Ideas).
+See [`.github/DISCUSSIONS.md`](.github/DISCUSSIONS.md) for category descriptions.
+
 ## Developer Certificate of Origin (DCO)
 
 All contributions to NimRTC must include a signed-off-by line certifying that

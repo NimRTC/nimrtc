@@ -96,18 +96,21 @@ struct TinySocket {
             close();
             return false;
         }
-        // Put the socket in non-blocking mode so `recv_from()` can honor
-        // its poll deadline.  Without this, recvfrom() blocks until the
-        // kernel has data, the inner `while (clk::now() < deadline)` loop
-        // never iterates again, and the reader thread hangs forever once
-        // the handshake completes and no further packets arrive.
+        // Put the socket in non-blocking mode ONLY on Winsock.  Winsock
+        // has no portable per-recv timeout without select/WSAWaitForMultiple
+        // Events, and the poll loop in `recv_from()` needs recvfrom() to
+        // return immediately when no datagram is queued so the deadline
+        // check can fire.  POSIX uses `SO_RCVTIMEO` (set just before each
+        // recvfrom() call) so the kernel-level recvfrom() already
+        // honors the deadline and the non-blocking flag is unnecessary;
+        // in fact, setting `O_NONBLOCK` here caused Linux to fail
+        // because `SO_RCVTIMEO` is ignored when `O_NONBLOCK` is set on
+        // some glibc versions, leaving the reader thread spinning
+        // without ever reading a packet.
 #ifdef _WIN32
         u_long nonblocking = 1;
         ::ioctlsocket(static_cast<SOCKET>(s_),
                       static_cast<long>(FIONBIO), &nonblocking);
-#else
-        int flags = ::fcntl(s_, F_GETFL, 0);
-        if (flags >= 0) ::fcntl(s_, F_SETFL, flags | O_NONBLOCK);
 #endif
         return true;
     }
@@ -186,8 +189,11 @@ struct TinySocket {
         if (now >= deadline) return false;
         auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
                               deadline - now).count();
-        tv.tv_sec = static_cast<long>(remaining / 1'000'000);
-        tv.tv_usec = static_cast<long>(remaining % 1'000'000);
+        // tv_sec is time_t (== long on 64-bit POSIX) and tv_usec is
+        // suseconds_t (== int on macOS, long on Linux).  Cast to the
+        // destination field type to keep -Wshorten-64-to-32 quiet.
+        tv.tv_sec  = static_cast<decltype(tv.tv_sec)>(remaining / 1'000'000);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>(remaining % 1'000'000);
         ::setsockopt(s_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         sockaddr_in from{};
         socklen_t_ fl = sizeof(from);
@@ -236,13 +242,18 @@ struct DtlsSide {
                 // Step 1: drive the state machine BEFORE waiting for data.
                 // wolfSSL non-blocking DTLS needs accept()/connect() called
                 // on every loop iteration to make progress — even when no
-                // bytes have arrived yet (e.g. to emit a retransmit or
-                // handle an internal state transition).  The previous order
-                // put recv_from() first with a 2 ms poll window; during
-                // that window tick() + take_outbound() were stalled, so
-                // wolfSSL's handshake timer advanced without producing output
-                // and the 30 s test deadline expired before the peer
-                // received enough flights to complete the exchange.
+                // bytes have arrived yet (e.g. to emit a ClientHello on
+                // the very first iteration, or to drive the retransmit
+                // timer mid-handshake).  Without tick() running on a fast
+                // cadence, the Client's first `wolfSSL_connect()` call
+                // never fires and the entire handshake stalls on the
+                // initial "chicken and egg" of "peer hasn't sent yet, so
+                // I must produce my ClientHello via tick() first, but
+                // tick() never runs because recv_from() is parked".
+                // (See TinySocket::open() for the FIONBIO setup that
+                //  makes recv_from() return immediately when no data is
+                //  available — required for this loop to iterate at all
+                //  on Winsock.)
                 session->tick();
                 auto outs = session->take_outbound();
                 for (auto& rec : outs) {
@@ -259,10 +270,8 @@ struct DtlsSide {
                 std::uint16_t from_p = 0;
                 // 1 ms timeout: enough for the kernel to surface a packet
                 // queued by the peer on loopback, while still driving the
-                // state machine at sub-millisecond cadence.  Zero timeout
-                // (clk::now()) would short-circuit the inner recvfrom
-                // poll loop and starve the recv path entirely.  Requires
-                // the socket to be in non-blocking mode — see open().
+                // state machine at sub-millisecond cadence.  Requires the
+                // socket to be in non-blocking mode — see open().
                 if (socket.recv_from(pkt, &from_p,
                         clk::now() + std::chrono::milliseconds(1))) {
                     recv_packets.fetch_add(1, std::memory_order_relaxed);

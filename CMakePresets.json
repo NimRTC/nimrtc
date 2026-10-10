@@ -206,6 +206,16 @@
       }
     },
     {
+      "name": "dev.ohos",
+      "hidden": true,
+      "inherits": ["dev"],
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "OHOS_STL": "c++_shared"
+      }
+    },
+    {
       "name": "coverage",
       "displayName": "Coverage (GCC, Linux)",
       "description": "Debug build with coverage instrumentation",
@@ -216,6 +226,37 @@
         "CMAKE_EXE_LINKER_FLAGS": "--coverage",
         "NIMRTC_BUILD_TESTS": "ON",
         "NIMRTC_WARNINGS_AS_ERRORS": "OFF"
+      }
+    },
+
+    {
+      "name": "debug.ohos-arm64",
+      "displayName": "Debug (OHOS aarch64, cross)",
+      "description": "Debug build targeting OpenHarmony aarch64 via ohos-aarch64 toolchain",
+      "inherits": ["dev.ohos"],
+      "toolchainFile": "${sourceDir}/cmake/toolchains/ohos-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "OHOS",
+        "CMAKE_SYSTEM_PROCESSOR": "aarch64",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "release.ohos-arm64",
+      "displayName": "Release (OHOS aarch64, cross)",
+      "description": "Optimised release build targeting OpenHarmony aarch64 via ohos-aarch64 toolchain",
+      "inherits": ["dev.ohos"],
+      "toolchainFile": "${sourceDir}/cmake/toolchains/ohos-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "OHOS",
+        "CMAKE_SYSTEM_PROCESSOR": "aarch64",
+        "CMAKE_BUILD_TYPE": "Release",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
       }
     }
   ],
@@ -280,6 +321,16 @@
       "name": "coverage",
       "displayName": "Build: Coverage (Linux)",
       "configurePreset": "coverage"
+    },
+    {
+      "name": "debug.ohos-arm64",
+      "displayName": "Build: Debug (OHOS aarch64)",
+      "configurePreset": "debug.ohos-arm64"
+    },
+    {
+      "name": "release.ohos-arm64",
+      "displayName": "Build: Release (OHOS aarch64)",
+      "configurePreset": "release.ohos-arm64"
     }
   ],
   "testPresets": [
@@ -325,6 +376,19 @@
       "name": "tests.aarch64",
       "displayName": "Run all tests (Debug/aarch64)",
       "configurePreset": "debug.aarch64",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.ohos-arm64",
+      "displayName": "Run all tests (Debug/OHOS-aarch64)",
+      "description": "Run tests on OHOS aarch64 target (best-effort — see OH-DOD-5)",
+      "configurePreset": "debug.ohos-arm64",
       "output": {
         "outputOnFailure": true
       },

@@ -101,6 +101,43 @@ DtlsSession::srtp_keying_material() const noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// PAL Slice 4 / TPAL-4 seam surface — thin adapters that delegate to the
+// underlying DtlsSessionWolfSSL (which itself inherits IDtlsSession).
+// ---------------------------------------------------------------------------
+void DtlsSession::set_role(Role role) noexcept {
+    impl_->inner.set_role(role);
+}
+
+void DtlsSession::set_peer_fingerprint(
+    std::span<const std::uint8_t> raw_sha256) noexcept {
+    std::vector<std::uint8_t> value(raw_sha256.begin(), raw_sha256.end());
+    impl_->inner.set_peer_fingerprint("sha-256", std::move(value));
+}
+
+void DtlsSession::start() noexcept {
+    (void)impl_->inner.open();
+}
+
+void DtlsSession::pump() noexcept {
+    impl_->inner.tick();
+}
+
+void DtlsSession::on_handshake_complete(OnCompleteCb cb) noexcept {
+    impl_->inner.on_handshake_complete(std::move(cb));
+}
+
+plugins::Status DtlsSession::export_srtp_key_material(
+    std::span<std::uint8_t, 60> out) noexcept {
+    auto km = impl_->inner.srtp_keying_material();
+    if (!km.has_value()) return plugins::kErrNotReady;
+    std::memcpy(out.data() +  0, km->client_master_key.data(),  16);
+    std::memcpy(out.data() + 16, km->server_master_key.data(),  16);
+    std::memcpy(out.data() + 32, km->client_master_salt.data(), 14);
+    std::memcpy(out.data() + 46, km->server_master_salt.data(), 14);
+    return plugins::kOk;
+}
+
+// ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
 DtlsSession::Stats DtlsSession::stats() const noexcept {

@@ -295,11 +295,11 @@ inline void hex_dump_record(const char* dir, const void* buf, std::size_t n) {
     if (n < 13) return;     // not a full DTLS record header
     const auto* p = static_cast<const std::uint8_t*>(buf);
     // content_type | version | epoch | sequence_number | length | data…
-    std::uint16_t ver    = (std::uint16_t(p[1]) << 8) | p[2];
-    std::uint16_t epoch  = (std::uint16_t(p[3]) << 8) | p[4];
+    std::uint16_t ver    = static_cast<std::uint16_t>((std::uint16_t(p[1]) << 8) | p[2]);
+    std::uint16_t epoch  = static_cast<std::uint16_t>((std::uint16_t(p[3]) << 8) | p[4]);
     std::uint64_t seq    = 0;
     for (int i = 0; i < 6; ++i) seq = (seq << 8) | p[5 + i];
-    std::uint16_t len    = (std::uint16_t(p[11]) << 8) | p[12];
+    std::uint16_t len    = static_cast<std::uint16_t>((std::uint16_t(p[11]) << 8) | p[12]);
     const char* ct_name  = "?";
     switch (p[0]) {
         case 20: ct_name = "ChangeCipherSpec"; break;
@@ -441,10 +441,16 @@ struct DtlsSessionWolfSSL::Impl {
     // -- Setup --------------------------------------------------------------
 
     bool setup_context() {
+        // Use the version-flexible method so NimRTC negotiates whichever DTLS
+        // version the peer offers.  Chrome 117+ defaults to DTLS 1.3 for WebRTC;
+        // earlier Chrome versions and other WebRTC stacks use DTLS 1.2.
+        // wolfSSL 5.9.2's generic DTLS method supports both 1.2 (RFC 6347) and
+        // 1.3 (RFC 9147) and exposes the SRTP keying material export for both
+        // via wolfSSL_export_dtls_srtp_keying_material().
         if (config.role == DtlsRole::Server) {
-            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+            ctx = wolfSSL_CTX_new(wolfDTLS_server_method());
         } else {
-            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
+            ctx = wolfSSL_CTX_new(wolfDTLS_client_method());
         }
         if (!ctx) {
             nimrtc::core::log::Logger::instance().error(
@@ -472,6 +478,26 @@ struct DtlsSessionWolfSSL::Impl {
                 "wolfSSL: failed to set cipher list");
             return false;
         }
+
+        // DTLS 1.3 (RFC 9147) ciphersuites are NOT set at runtime in
+        // wolfSSL 5.9.2.  In this version they are gated at compile time
+        // by the macros `BUILD_TLS_AES_128_GCM_SHA256` and
+        // `BUILD_TLS_AES_256_GCM_SHA384`, both of which are auto-defined
+        // in wolfssl/internal.h when the following are all on:
+        //   - WOLFSSL_TLS13
+        //   - HAVE_AESGCM
+        //   - !NO_SHA256  &&  WOLFSSL_AES_128
+        //   - WOLFSSL_SHA384 && WOLFSSL_AES_256
+        // Our src/third_party/wolfssl/CMakeLists.txt already turns on
+        // WOLFSSL_TLS13, WOLFSSL_AESGCM, WOLFSSL_SHA384, and the AES-128
+        // / AES-256 macros are defaults (see
+        // wolfssl/wolfcrypt/settings.h:3409-3422), so the two TLS 1.3
+        // GCM suites are compiled in.  No runtime call is required.
+        //
+        // (Newer wolfSSL releases added `wolfSSL_CTX_set_ciphersuites()`
+        // for runtime selection.  5.9.2 only exposes
+        // `wolfSSL_CTX_set_cipher_list()` / `_bytes()`, which set the
+        // DTLS 1.2 list; the 1.3 list is purely compile-time.)
 
         // Extended Master Secret (RFC 7627) — REQUIRED for DTLS-SRTP per
         // RFC 5764 §5 ("the use of the Extended Master Secret extension
@@ -677,6 +703,14 @@ struct DtlsSessionWolfSSL::Impl {
 
         wolfSSL_set_using_nonblock(ssl, 1);
 
+        // Per-SSL I/O callbacks (vs. CTX-level which would apply to all
+        // sessions created from this CTX).  We want a different ctx per
+        // session.
+        wolfSSL_SetIOReadCtx(ssl, this);
+        wolfSSL_SetIOWriteCtx(ssl, this);
+        wolfSSL_SSLSetIORecv(ssl, &DtlsSessionWolfSSL::Impl::io_recv);
+        wolfSSL_SSLSetIOSend(ssl, &DtlsSessionWolfSSL::Impl::io_send);
+
         // RFC 5705 keying material export (used by DTLS-SRTP via
         // `wolfSSL_export_dtls_srtp_keying_material`) requires the
         // handshake-derived secrets (clientRandom, serverRandom,
@@ -687,35 +721,22 @@ struct DtlsSessionWolfSSL::Impl {
         // bails out with the guard:
         //
         //     if (ssl->options.saveArrays == 0 || ssl->arrays == NULL) {
-        //         WOLFSSL_MSG("To export keying material wolfSSL needs "
-        //                     "to keep handshake data. Call "
-        //                     "wolfSSL_KeepArrays before attempting "
-        //                     "to export keyid material.");
-        //         return WOLFSSL_FAILURE;   // ← this is the value 0
+        //         WOLFSSL_MSG("To export keying material wolfSSL needs
+        //                     to keep handshake data. Call
+        //                     wolfSSL_KeepArrays before attempting to
+        //                     export keyid material.");
+        //         return WOLFSSL_FAILURE;
         //     }
         //
-        // WOLFSSL_FAILURE is defined as 0 in ssl.h:3146, and our
-        // previous `if (rc != 0 && rc != WOLFSSL_SUCCESS)` check
-        // silently swallowed that case — every SRTP key was filled
-        // from the zero-initialized `km` vector, producing all-zero
-        // client_master_key/server_master_key/client_master_salt/
-        // server_master_salt, which libsrtp rejects with bad-packet
-        // errors that surface as "Decrypt failed" / "auth tag mismatch"
-        // downstream.  That was the root cause of all four ARQ-UDP
-        // e2e tests failing despite a clean DTLS handshake.
-        //
-        // MUST be called BEFORE wolfSSL_connect()/accept() — see
-        // ssl.h:3800 ("need to call wolfSSL_KeepArrays before
-        // handshake to save keys").
+        // Without this call, the SRTP keying material export would
+        // return 0 (WOLFSSL_FAILURE) silently and `srtp_keys_` would
+        // remain zero-initialised — the first byte of
+        // `client_master_key[0]` would be 0 and the
+        // test_dtls_over_udp_loopback assertion
+        //   `a_keys->client_master_key[0] != 0`
+        // would fail in CI.  See `export_srtp_keys()` for the matching
+        // rc check that gates on the actual return value.
         wolfSSL_KeepArrays(ssl);
-
-        // Per-SSL I/O callbacks (vs. CTX-level which would apply to all
-        // sessions created from this CTX).  We want a different ctx per
-        // session.
-        wolfSSL_SetIOReadCtx(ssl, this);
-        wolfSSL_SetIOWriteCtx(ssl, this);
-        wolfSSL_SSLSetIORecv(ssl, &DtlsSessionWolfSSL::Impl::io_recv);
-        wolfSSL_SSLSetIOSend(ssl, &DtlsSessionWolfSSL::Impl::io_send);
 
         return true;
     }
@@ -1049,16 +1070,17 @@ struct DtlsSessionWolfSSL::Impl {
         nimrtc::core::log::Logger::instance().info(
             std::string("wolfSSL: SRTP needs ") + std::to_string(olen) + " bytes");
 
-        // CRITICAL: zero-init the buffer explicitly.  If the wolfSSL call
-        // fails for ANY reason we want a deterministic, diagnosable
-        // all-zero buffer (which the SRTP layer below will reject with
-        // a clean auth-tag-mismatch error) rather than whatever happens
-        // to be on the heap.  See `create_ssl_object()` for the
-        // WOLFSSL_FAILURE-is-0 foot-gun this guards against.
-        std::vector<std::uint8_t> km(olen, 0);
+        std::vector<std::uint8_t> km(olen);
         rc = wolfSSL_export_dtls_srtp_keying_material(ssl, km.data(), &olen);
         // WOLFSSL_FAILURE is 0; WOLFSSL_SUCCESS is 1.  Treat ANY non-1
         // return as failure (no silent zero-pass-through like before).
+        // The previous check `rc != 0 && rc != WOLFSSL_SUCCESS` was a
+        // logic bug: when wolfSSL_export_keying_material() fails with
+        // WOLFSSL_FAILURE (rc == 0), the short-circuit `rc != 0` was
+        // false and the failure branch was skipped — the zero-filled
+        // `km` vector was then memcpy'd into `srtp_keys_`, causing
+        // `a_keys->client_master_key[0] == 0` and breaking
+        // test_dtls_over_udp_loopback in CI.
         if (rc != WOLFSSL_SUCCESS) {
             nimrtc::core::log::Logger::instance().error(
                 std::string("wolfSSL: SRTP export failed rc=") +

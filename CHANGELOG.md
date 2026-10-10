@@ -248,26 +248,159 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.11.0] - TBD
+## [0.11.0] - 2026-10-09
 
 ### Status: Beta 前哨
 
-> **Open 2026-09-18.** First minor to ship P2 content (DataChannel interop,
-> in-process SFU relay, PCM tap on WebRTC APM, Profile library, AI Agent demo).
-> Planned release, tracked in `docs/plan/v0.11-plan.md`.
+> **Tag cut 2026-10-09.** First minor to ship P2 content. P1
+> closed at v0.10.3. **API still experimental / not for production
+> through v1.0.0.**
+>
+> **The headline data-plane item (DataChannel Chrome ↔ NimRTC
+> interop, DC-1) is NOT in v0.11.0.** The SCTP-over-DTLS physical
+> wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup)
+> never landed on `main`; Chrome-headless e2e stays 0/4. v0.11.0
+> ships the **Chrome media interop** surface (audio + video Case D,
+> all four platforms) and the L2 / L3 P2 scaffolding (TAP-1,
+> PROFILE-1, DEMO-1, TPAL-4 cleanup), with the data plane
+> explicitly deferred to the **v1.x WebTransport / QUIC**
+> re-design. See `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 /
+> TPAL-5 deferred) and §10 (forward direction).
+
+### Highlights
+
+- **Chrome media interop (audio + video Case D)** — NimRTC ↔ Chrome
+  audio Opus + video H.264 end-to-end via ICE + DTLS 1.3 + SRTP +
+  RTP. `python tools/run_e2e_acceptance.py --case d` PASS on
+  Windows + Linux x86_64. Verified across the four-platform CI
+  matrix (windows-2022 + linux-gcc + macos-clang + linux-aarch64).
+  This is the v0.11.0 release contract for media interop.
+- **TAP-1 — PCM tap on WebRTC APM** —
+  `IAudio3A::set_pre_process_tap()` and
+  `set_post_process_tap()` (RFC 001 §6.1–6.5) are now live on the
+  default `PluginAdapter` implementation. The WebRTC-APM-backed
+  adapter fires pre and post 3A taps per `process_capture()` call,
+  so AI-Agent / wake-word / streaming-ASR consumers can subscribe
+  to the raw mic PCM (pre) and the cleaned PCM (post) without an
+  extra DSP integration. Taps are `std::function`-based, install
+  / uninstall via `nullptr`, and guarded by a dedicated `tap_mu_`
+  mutex so setters from any thread stay race-free against the
+  audio thread's `process_capture()` call (RFC §2.3 thread-safety
+  contract). The post-tap is also delivered as `int16_t*` with the
+  same metadata (`tests/test_pcm_tap.cpp` 15/15 PASS).
+- **PROFILE-1 — Assembly Profile library officialised** — five
+  profile variants are first-class and loadable at runtime:
+  `sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`.
+  PAL Slice 1/2/3 (ADR-009) make all five backend-agnostic.
+  `tests/test_assembly.cpp` 32/32 PASS including a strict
+  `JsonFileMatchesBuiltinConstant` regression test that loads
+  every JSON profile file and asserts field-by-field equality with
+  the matching C++ constant. Two latent JSON↔C++ bugs uncovered by
+  the new strict round-trip test are fixed: `kProfileLive` now sets
+  `scheduler.impl = "weighted_fair"` (was relying on the default
+  while `live.json` declared `"weighted_fair"`); `profiles/sfu.json`
+  now correctly sets `bwe_name = ""` (the comment said "Empty: no
+  BWE" but the value was the string `"aimd"`).
+- **TPAL-4 — DTLS seam cleanup** — `EngineConfig::dtls_name` field
+  added (defaulted to `""` to preserve every v0.10.x caller
+  source-compat); engine resolves the DTLS factory through
+  `core::PluginRegistry::get_dtls_session(id)` at open() time
+  instead of direct `new DtlsSessionWolfSSL`. The `static_cast`
+  escape hatch from v0.10.2 is gone. The `IDtlsSession` seam
+  surface is tightened (every concrete method on `DtlsSessionWolfSSL`
+  is now `override` against the seam). Future 国密 / OpenSSL /
+  BoringSSL / mbedTLS backends register their own id via
+  `register_dtls_session(id, &factory)` and select via
+  `cfg.dtls_name = "..."`. `test_engine_plugin_loading` 17/17 PASS
+  (8 base + 5 Slice 8 + 2 Slice 7.5 + 5 new TPAL-4 subtests).
+- **DEMO-1 — AI Agent 接入 demo** — `demo-agent-gateway`
+  demonstrates the `agent-gateway` Profile end-to-end with PCM
+  tap → streaming ASR → LLM mock → response.
+- **DISC-1 — GitHub Discussions enabled** — community now has a
+  Discussions space alongside issues; issue templates updated.
+- **RFC-1 — RFC 001 (PCM tap) promoted Draft → Final** — first
+  formal design record under `docs/rfcs/`.
+
+### What is **not** in v0.11.0 (data plane deferred to v1.x)
+
+The following P2 headline items are explicitly cut from v0.11.0 and
+moved to the v1.x WebTransport / QUIC re-design window — see
+`docs/plan/v0.11-plan.md` §2.2 / §10 for the full rationale:
+
+- **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** —
+  the SCTP-over-DTLS physical wiring
+  (`IDtlsSession::srtp_keying_material()` →
+  `ISctpSocket::set_dtls_keys()` + DTLS transport →
+  `ISctpSocket::feed_inbound_datagram()` + SCTP socket → DTLS
+  transport outbound) was never landed on `main`; Chrome-headless
+  e2e stays 0/4. v0.11.0 falls back to the in-process
+  `test_datachannel_engine` 5/5 PASS as the §7 substitute, made
+  permanent. The Chrome team's stated direction is "DataChannel
+  future = WebTransport over QUIC"; the SCTP-over-DTLS path is
+  on Google's deprecation roadmap. v1.x will redesign the data
+  plane on top of **WebTransport over QUIC** (likely msquic,
+  MIT-licensed, Windows-first, cross-platform CI) — see
+  `docs/plan/v0.11-plan.md` §10.
+- **L1 strict-priority scheduling across the DC plane (DC-2)** —
+  only meaningful once DC-1 lands. The RTP-only strict-priority
+  path is already covered by `test_sched_priority.cpp` from
+  v0.10.x.
+- **usrsctp production backend (TPAL-5)** — the `UsrsctpSocket`
+  class is `@deprecated` and still compiles and links for opt-in
+  callers (the in-process `test_sctp_usrsctp` 4/4 PASS regression
+  test continues to run), but `sctp::register_default_plugins()`
+  no longer publishes id="usrsctp" with `core::PluginRegistry`.
+  The `UsrsctpSocket*` headers carry `@deprecated` markers
+  pointing at the v1.x plan. Expected removal: v1.2.0. The
+  `tools/fix_usrsctp{1,2,3,4}.py` history is deleted.
+
+### Deferred to pre-1.0 decision window (unchanged from v0.11-preview)
+
+The following P2 headline items are intentionally **not** in v0.11.0:
+
+- **In-process SFU relay (`nimrtc_sfu`)** — SFU forwarding has open
+  architectural questions on BWE/JB interaction (§13 P3 "SFU 转发跳过
+  L2" 是否引入 BWE 接口依赖). Decision deferred to v1.0.0 commit.
+  If community asks for it during v0.11.0 cycle, it lands in v0.11.x
+  patch train (same track as T-PAL Slice 6 Raw UDP bypass).
+- **DC forwarding policy (DC-3)** — dependent on SFU-1 AND v1.x
+  DC-1 WebTransport land; inherits both deferrals.
+- **`sfu-relay` benchmark (BENCH-1)** — dependent on SFU-1.
+
+### Notes
+
+- No public API change relative to v0.10.3 except the single
+  `EngineConfig::dtls_name` field. `engine.hpp` adds one new
+  field; everything else in the public API surface is unchanged.
+- Layout Invariant 4 (no concrete module headers in `engine.hpp`)
+  preserved. Layout Invariant 1 (`src/core/` is the only
+  INTERFACE library) preserved. Layout Invariant 6 (singletons
+  in `nimrtc::core::`) preserved.
+- The build is expected to remain green on all four CI platforms
+  (Windows / Linux x86_64 / macOS / Linux aarch64). The usrsctp
+  sources still compile and link, the `test_sctp_usrsctp` 4/4
+  regression test continues to pass, and the `test_datachannel_engine`
+  5/5 covers the IDataChannel seam against the in-process stub.
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.11.0.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- The 4-platform CI matrix stays green; e2e Case D (audio + video)
+  is the new Gate #1 (replacing the original "Chrome DC
+  bidirectional interop" gate, which is deferred with DC-1 to v1.x).
 
 ---
 
 ## [Unreleased]
 
-> No unreleased changes yet. The next planned release is **v0.11.0**
-> (P2 kickoff), tracked in `docs/plan/v0.11-plan.md`. Items to land
-> there: DataChannel usrsctp 互通, in-process SFU relay, PCM tap
-> landing on WebRTC APM, AI Agent 接入 demo, pps/Mbps 压测, GitHub
-> Discussions 上线, 首批 RFC 发布, assembly Profile 库官方化
-> (sfu / transport / agent / agent-gateway / sfu-agent), PAL Slice 4
-> (DTLS seam), PAL Slice 5 (usrsctp SCTP seam), T-PAL Slice 6
-> (Raw UDP bypass) in patch.
+> No unreleased changes yet. The next planned release is **v0.11.x**
+> (patches after the v0.11.0 cut), tracked in
+> `docs/plan/v0.11-plan.md` §8. The v0.11.0 release contract is
+> the **Chrome media interop** surface (audio + video Case D, all
+> four platforms) plus the L2 / L3 P2 scaffolding (TAP-1,
+> PROFILE-1, DEMO-1, TPAL-4 cleanup). The data plane
+> (DC-1 / DC-2 / TPAL-5) is explicitly deferred to the v1.x
+> WebTransport / QUIC re-design — see `docs/plan/v0.11-plan.md` §2.2
+> and §10.
 
 ---
 

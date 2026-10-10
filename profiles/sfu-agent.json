@@ -1,0 +1,120 @@
+{
+  // ==========================================================================
+  // profiles/sfu-agent.json — SFU relay + AI Agent hybrid
+  // ==========================================================================
+  //
+  // Use case: SFU middlebox where one participant is an AI Agent
+  // pipeline. The SFU side of the call (relay between human peers) skips
+  // L2 media processing; the Agent side still needs WebRTC APM (so the
+  // Agent pipeline can subscribe to cleaned PCM via PCM tap) and 3A.
+  //
+  // Design rationale (see §2.6 Profile Table / v0.11.0 PROFILE-1):
+  //   - jb_name = "": SFU forwards SRTP unchanged between human peers.
+  //   - audio3a_name = "webrtc_apm": the Agent participant's audio
+  //     pipeline keeps 3A + tap. (SFU does not decode media for the
+  //     relay direction; only the Agent side decodes.)
+  //   - bwe_name = "": BWE is disabled at the relay level (per sfu.json);
+  //     the Agent side may run its own BWE under a separate session
+  //     profile.
+  //   - timeline_enabled = true: SFU re-calibrates timeline on egress
+  //     so the downstream Agent pipeline sees stable NTP↔RTP-TS mapping
+  //     across the hop (per docs/zh/architecture.md §7.1 — sfu-agent
+  //     timeline re-calibration).
+  //   - datachannel_enabled = true: Agent control/forwarding semantics
+  //     ride on DC. Forward-tag strategy (all / none / selector) is
+  //     consumed by the transport stack, not the assembly loader.
+  //   - sfu_enabled = true AND agent_gateway_enabled = true: v1.1
+  //     markers — both surfaces are simultaneously active. The combo is
+  //     the differentiator of this profile vs. agent-gateway (no SFU)
+  //     and sfu (no Agent).
+  //
+  // Comparison with v1.0:
+  //   - sfu.json: pure relay. sfu-agent adds audio3a_name = "webrtc_apm"
+  //     and re-enables timeline_enabled for the Agent side.
+  //   - agent-gateway.json: 1:1 gateway (Agent ↔ peer). sfu-agent
+  //     extends this to N:1 (Agent + several human peers).
+  //
+  // Override tips:
+  //   - If the Agent is not the participant (pure SFU relay with no
+  //     Agent), use sfu.json. The audio3a_name = "webrtc_apm" here
+  //     would decode PCM that is otherwise wasted on the relay path.
+  //   - For 1:1 Agent ↔ peer with no multi-party relay, use
+  //     agent-gateway.json.
+  // ==========================================================================
+
+  "name": "sfu-agent",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  // Empty on the relay path; the Agent session (if instantiated
+  // separately) would set jb_name = "adaptive" on its own profile.
+  "jb_name": "",
+  // WebRTC APM is enabled — Agent consumes the post-3A PCM via tap.
+  "audio3a_name": "webrtc_apm",
+  // Empty on the relay path; Agent side codec_name is "opus".
+  "codec_name": "",
+  // Empty on the relay path — no rate adaptation between human peers.
+  "bwe_name": "",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // On — downstream Agent consumer requires capture_ts and ref_frame
+  // support. SFU re-calibrates NTP↔RTP-TS on egress (see §7.1).
+  "timeline_enabled": true,
+  // On — Agent control/forwarding strategy rides on DC.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  // Match the Agent side: 48 kHz mono Opus is the canonical wire format.
+  // These values are not consumed on the empty-plugin relay path
+  // (codec_name = ""), but downstream Agent-side tooling reads them.
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // Disabled on the relay path. The Agent side, if instantiated
+  // separately, would carry its own bwe block. Values are placeholders
+  // to keep the JSON stable across round-trip.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 1000000,
+    "max_bitrate_bps": 10000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // JB is empty on the relay path. min/max delays are placeholders
+  // matching the C++ constant companion.
+  "jitter_buffer": {
+    "impl": "",
+    "mode": "low_latency",
+    "initial_delay_ms": 0,
+    "min_delay_ms": 0,
+    "max_delay_ms": 0
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority — Agent control messages preempt media packets.
+  // Higher control_weight than kProfileAgent's default of 10 because
+  // SFU + Agent mixes scheduling across both relay and Agent streams.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 20,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- Schema v1.1 additive markers (ADR-010) ------------------------------
+  // Both SFU-side and Agent-side markers are true.
+  "sfu_enabled": true,
+  "agent_gateway_enabled": true,
+  "max_sessions_per_engine": 32,
+  // Convenience: explicit echo of audio3a_name = "webrtc_apm" so the
+  // Agent 3A pipeline is discoverable without re-parsing the canonical
+  // field. Loader-agnostic.
+  "audio3a_name_explicit": "webrtc_apm"
+}

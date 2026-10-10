@@ -32,6 +32,11 @@ ProfileRegistry::ProfileRegistry() {
     profiles_.emplace(std::string{kProfileAgent.name},     kProfileAgent);
     profiles_.emplace(std::string{kProfileTeleop.name},   kProfileTeleop);
     profiles_.emplace(std::string{kProfileSfu.name},      kProfileSfu);
+    // PROFILE-1 (v0.11.0) v1.1 additions — see docs/profiles.md and
+    // ADR-010 §"Schema v1.1 incremental fields".
+    profiles_.emplace(std::string{kProfileAgentGateway.name},     kProfileAgentGateway);
+    profiles_.emplace(std::string{kProfileSfuAgent.name},         kProfileSfuAgent);
+    profiles_.emplace(std::string{kProfileAgentLowLatency.name},  kProfileAgentLowLatency);
 }
 
 ProfileRegistry& ProfileRegistry::instance() {

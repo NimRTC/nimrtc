@@ -53,6 +53,22 @@ static socket_t create_socket_for_addrinfo(const udp_socket_config_t *config,
 		return INVALID_SOCKET;
 	}
 
+	// SO_REUSEADDR — allow re-binding to a port that is in TIME_WAIT or held
+	// by a previously-closed socket. Critical for CI runners where many
+	// tests run in sequence and ports are recycled; without this, bind()
+	// can return EACCES (10013 on Windows) on a port that is technically
+	// free but still owned by the OS until TIME_WAIT expires.
+	// Also lets the ICE loopback tests share a port when port=0 is used.
+	const sockopt_t reuse = 1;
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+#ifdef SO_REUSEPORT
+	// SO_REUSEPORT (Linux/macOS): allows multiple sockets to bind the
+	// same port simultaneously. Combined with SO_REUSEADDR this gives
+	// ICE loopback tests a way to coexist with other test runs without
+	// changing the test code. Linux 3.9+, macOS 10.12+, FreeBSD 12+.
+	setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuse, sizeof(reuse));
+#endif
+
 	// Listen on both IPv6 and IPv4
 	const sockopt_t disabled = 0;
 	if (ai->ai_family == AF_INET6)

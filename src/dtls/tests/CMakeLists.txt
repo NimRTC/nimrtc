@@ -29,7 +29,7 @@ function(nimrtc_add_dtls_seam_test name source)
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
-    nimrtc_apply_options(${name} LENIENT)
+    nimrtc_apply_options(${name})
     add_test(NAME ${name}
         COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)

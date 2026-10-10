@@ -449,8 +449,8 @@ TEST(Rtcp, SrZeroReportBlocks) {
     auto buf = SrBuilder{}.set_ssrc(0x123u).build();
     EXPECT_EQ(buf.size(), 28u);
     // Verify the length field equals total_words - 1 = (28/4) - 1 = 6.
-    const std::uint16_t length_words =
-        (std::uint16_t(buf[2]) << 8) | buf[3];
+    const std::uint16_t length_words = static_cast<std::uint16_t>(
+        (std::uint16_t(buf[2]) << 8) | buf[3]);
     EXPECT_EQ(length_words, 6u);
 
     Parser p;

@@ -67,6 +67,16 @@ function(nimrtc_apply_options target)
         ""          # multi-value args
         ${ARGN})
 
+    # Vendored third-party library targets (nimrtc_vendor_*) must receive
+    # NO flags from NimRTCOptions. Their source trees ship with upstream
+    # warnings (flexible array members in usrsctp, old-style C casts in
+    # wolfSSL) that are not under our control. Skipping all options
+    # ensures they compile cleanly regardless of warning levels.
+    string(TOLOWER "${target}" _target_lower)
+    if(_target_lower MATCHES "^nimrtc_vendor_")
+        return()
+    endif()
+
     target_compile_features(${target} PUBLIC
         cxx_std_${NIMRTC_CXX_STANDARD}
         c_std_11)
@@ -126,19 +136,48 @@ function(nimrtc_apply_options target)
 
         # LENIENT mode: relax warnings that are endemic to test harnesses
         # but never appear in production src/ code. See header comment.
+        # -Wno-pedantic is required because NimRTC's SCTP seam includes
+        # upstream usrsctp.h (a C99 header that uses flexible array
+        # members like `char sre_data[]`); GCC treats these as errors
+        # under -Wpedantic when compiled as C++. The usrsctp vendor
+        # target itself compiles the .c files as C, but any .cpp file
+        # that #includes <usrsctp.h> needs -Wno-pedantic to avoid the
+        # "ISO C++ forbids flexible array member" fatal.
         if(NIMRTC_OPT_LENIENT)
             target_compile_options(${target} PRIVATE
+                -Wno-pedantic
                 -Wno-old-style-cast
                 -Wno-unused-function
                 -Wno-format-nonliteral)
         endif()
-    endif()
 
-    if(NIMRTC_WARNINGS_AS_ERRORS AND NOT NIMRTC_OPT_LENIENT)
+        # Treat warnings as errors on production targets (non-vendor).
+        # wolfSSL is handled via WARNINGS_AS_ERRORS=OFF before add_subdirectory
+        # in src/third_party/wolfssl/CMakeLists.txt so upstream warnings in
+        # wolfSSL headers don't affect nimrtc_dtls.  usrsctp vendor target
+        # is skipped entirely via the vendor_ return() guard above.
         if(MSVC)
             target_compile_options(${target} PRIVATE /WX)
         else()
             target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+
+    # -------------------------------------------------------------------------
+    # OpenHarmony (OHOS) musl-specific defines
+    # -------------------------------------------------------------------------
+    # OHOS uses musl libc; auto-defined by the musl compiler, but we add
+    # it explicitly so downstream code can `__has_include(<features.h>)`
+    # style checks remain stable when cross-compiling from a glibc host.
+    if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+        target_compile_definitions(${target} PRIVATE
+            NIMRTC_PLATFORM_OHOS=1
+            _LIBCPP_HAS_MUSL_LIBC=1)
+        # OHOS native runtime defaults to c++_shared (shared libc++).
+        # cache var OHOS_STL was set in the toolchain file.
+        if(OHOS_STL STREQUAL "c++_shared")
+            target_compile_options(${target} PRIVATE
+                -stdlib=libc++)
         endif()
     endif()
 

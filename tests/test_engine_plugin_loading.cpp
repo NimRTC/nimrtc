@@ -500,8 +500,62 @@ TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
            "here means register_default_plugins() is no longer idempotent";
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u)
         << "Slice 8: raw-UDP slot duplicated after repeated registration";
-    EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 2u)
-        << "Slice 7.5: transport-stack slot has 2 entries: default (shell) + webrtc-classic (real)";
+    EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 3u)
+        << "Slice 7.6: transport-stack slot has 3 entries: default (shell) + "
+           "webrtc-classic (real) + raw-udp-arq (control plane)";
+}
+
+// ---------------------------------------------------------------------------
+// Slice 7.6 (v0.12.0) — RawUdpArqStackFactory (id="raw-udp-arq")
+//
+// The control-plane counterpart of WebRtcClassicStack. CapabilitySelector's
+// §5.3 rules 1b / 2 / 4 (high-freq-control variants) resolve this factory
+// for the control_stack slot. See docs/plan/transport-strategies.md §2.
+// ---------------------------------------------------------------------------
+TEST_F(EnginePluginLoading, slice76_raw_udp_arq_factory_registered) {
+    // RawUdpArqStackFactory (id="raw-udp-arq") is registered by
+    // nimrtc::transport::register_default_plugins() (called via
+    // core::register_all_default_plugins()).  The factory id "raw-udp-arq"
+    // is what the CapabilitySelector resolves for §5.3 rules 1b / 2 / 4
+    // when needs_high_freq_control == true.
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("raw-udp-arq");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 7.6: RawUdpArqStackFactory 'raw-udp-arq' not found "
+           "in registry";
+    EXPECT_EQ(factory->id(), "raw-udp-arq");
+    EXPECT_FALSE(factory->display_name().empty());
+}
+
+TEST_F(EnginePluginLoading, slice76_raw_udp_arq_stack_create_and_lifecycle) {
+    // Verify RawUdpArqStackFactory::create() produces a non-null stack
+    // whose raw_control() returns a real IRawUdpDatagram. The other
+    // accessors (ice/dtls/rtp/sctp) return null-instance references
+    // (the control stack doesn't own those components; see
+    // raw_udp_arq_stack.hpp for the rationale).
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("raw-udp-arq");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 7.6: factory 'raw-udp-arq' not found";
+
+    nimrtc::StackConfig cfg;
+    cfg.raw_id = "arq";   // Slice 6 default ARQ factory
+    auto stack = factory->create(cfg);
+    ASSERT_NE(stack, nullptr)
+        << "RawUdpArqStackFactory::create() returned null";
+    EXPECT_EQ(stack->id(), "raw-udp-arq");
+
+    // The whole point of the raw-udp-arq stack is to expose a real
+    // ARQ session via raw_control(). The ARQ impl is created in
+    // start() (matches the lifecycle model: start() opens resources).
+    EXPECT_EQ(stack->raw_control(), nullptr)
+        << "raw_control() must be null before start() (lazy init)";
+    EXPECT_NO_THROW(stack->start());
+    ASSERT_NE(stack->raw_control(), nullptr)
+        << "raw_control() must be non-null after start()";
+    EXPECT_NO_THROW(stack->close());
+    EXPECT_EQ(stack->raw_control(), nullptr)
+        << "raw_control() must be null after close()";
 }
 
 // ---------------------------------------------------------------------------

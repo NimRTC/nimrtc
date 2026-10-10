@@ -36,6 +36,7 @@ namespace detail {
 // (transport_selector.hpp, transport_stack.hpp, transport_plugin.hpp) stays clean.
 const ITransportStackFactory* default_stack_factory_singleton() noexcept;
 const ITransportStackFactory* webrtc_classic_stack_factory_singleton() noexcept;
+const ITransportStackFactory* raw_udp_arq_stack_factory_singleton() noexcept;
 
 void do_register_default_selector() noexcept {
     // Process-static Selector instance — see Slice 7 header comment.
@@ -89,8 +90,29 @@ void do_register_default_plugins() noexcept {
         }
     } s_registrar2;
 
+    // ---- RawUdpArqStackFactory (id="raw-udp-arq") — Slice 7.6 ---------
+    // The control-plane counterpart of WebRtcClassicStack. CapabilitySelector's
+    // §5.3 rules 1b / 2 / 4 (high-freq-control variants) resolve this factory
+    // for the control_stack slot. See docs/plan/transport-strategies.md §2.
+    static const struct Registrar3 {
+        Registrar3() {
+            const ITransportStackFactory* f =
+                raw_udp_arq_stack_factory_singleton();
+            nimrtc::core::PluginRegistry::instance().register_transport_stack(
+                std::string_view{f->id()}, f);
+            nimrtc::core::log::Logger::instance().info(
+                std::string("nimrtc::transport: RawUdpArqStackFactory "
+                            "registered (id=\"") +
+                std::string(f->id()) +
+                "\"), via Slice 7.6; "
+                "control-plane ARQ bypass; "
+                "ICE/DTLS/RTP/SCTP accessors return null instances");
+        }
+    } s_registrar3;
+
     (void)s_registrar;
     (void)s_registrar2;
+    (void)s_registrar3;
 }
 
 } // namespace detail

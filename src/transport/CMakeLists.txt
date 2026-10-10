@@ -29,6 +29,7 @@ add_library(nimrtc_transport STATIC
     src/transport_plugin.cpp
     src/default_transport_stack_factory.cpp   # Slice 8: shell ITransportStackFactory
     src/webrtc_classic_stack.cpp            # Slice 7.5: real ITransportStack (ICE+DTLS+RTP+SCTP)
+    src/raw_udp_arq_stack.cpp               # Slice 7.6: control-plane ITransportStack (ARQ bypass)
 )
 
 nimrtc_apply_options(nimrtc_transport)

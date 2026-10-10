@@ -69,8 +69,8 @@ bool t01_no_install_before_dtls(std::string& err) {
 
     EngineConfig cfg;
     cfg.local_bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = 55000;
-    cfg.local_port_range_end   = 55099;
+    cfg.local_port_range_begin = 61000;
+    cfg.local_port_range_end   = 61099;
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0) { err = "open() failed"; return false; }
@@ -109,8 +109,8 @@ bool t02_install_is_noop_without_dtls(std::string& err) {
 
     EngineConfig cfg;
     cfg.local_bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = 55100;
-    cfg.local_port_range_end   = 55199;
+    cfg.local_port_range_begin = 61100;
+    cfg.local_port_range_end   = 61199;
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0) { err = "open() failed"; return false; }
@@ -137,8 +137,8 @@ bool t03_dtls_state_initial(std::string& err) {
 
     EngineConfig cfg;
     cfg.local_bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = 55200;
-    cfg.local_port_range_end   = 55299;
+    cfg.local_port_range_begin = 61200;
+    cfg.local_port_range_end   = 61299;
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0) { err = "open() failed"; return false; }
@@ -168,8 +168,8 @@ bool t04_drain_dtls_returns_count(std::string& err) {
 
     EngineConfig cfg;
     cfg.local_bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = 55300;
-    cfg.local_port_range_end   = 55399;
+    cfg.local_port_range_begin = 61300;
+    cfg.local_port_range_end   = 61399;
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0) { err = "open() failed"; return false; }
@@ -195,8 +195,8 @@ bool t05_feed_srtp_before_install(std::string& err) {
 
     EngineConfig cfg;
     cfg.local_bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = 55400;
-    cfg.local_port_range_end   = 55499;
+    cfg.local_port_range_begin = 61400;
+    cfg.local_port_range_end   = 61499;
 
     NimRTCEngine engine(cfg);
     if (engine.open() != 0) { err = "open() failed"; return false; }
@@ -222,12 +222,12 @@ bool t06_two_engines_drain_survives(std::string& err) {
 
     EngineConfig cfgA;
     cfgA.local_bind_address = "127.0.0.1";
-    cfgA.local_port_range_begin = 56000;
-    cfgA.local_port_range_end   = 56099;
+    cfgA.local_port_range_begin = 61500;
+    cfgA.local_port_range_end   = 61599;
 
     EngineConfig cfgB = cfgA;
-    cfgB.local_port_range_begin = 56100;
-    cfgB.local_port_range_end   = 56199;
+    cfgB.local_port_range_begin = 61600;
+    cfgB.local_port_range_end   = 61699;
 
     NimRTCEngine A(cfgA);
     NimRTCEngine B(cfgB);

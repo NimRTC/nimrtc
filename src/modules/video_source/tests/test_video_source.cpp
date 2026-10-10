@@ -331,12 +331,32 @@ TEST(MemorySource, CadenceProducesApproxFps) {
     auto src = create_memory_source(cfg,
         [&](VideoFrameBuffer, auto) { count.fetch_add(1); });
     src->start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Wait for the producer thread to deliver its first frame before
+    // starting the production window. macOS CI runners have high
+    // std::thread + sleep_until warm-up latency (observed up to ~360 ms
+    // on aarch64 hosted GitHub Actions), so a fixed-duration sleep after
+    // start() races against cold-start and produces 0-7 frames even when
+    // the cadence is correct. Polling for the first frame removes the
+    // cold-start variable: once we observe a frame, the producer is
+    // running and we can time a stable window of cadence.
+    using clk = std::chrono::steady_clock;
+    const auto warm_deadline = clk::now() + std::chrono::seconds(2);
+    while (count.load(std::memory_order_acquire) == 0 &&
+           clk::now() < warm_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GE(count.load(std::memory_order_acquire), 1)
+        << "Producer did not deliver a frame within 2 s of start()";
+    // Reset the counter and time a known production window. 50 fps ×
+    // 500 ms = 25 frames nominal; allow a wide range so the test catches
+    // a dead producer (n=0) and a runaway producer (n huge) without
+    // flaking on slow CI.
+    count.store(0, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     src->stop();
-    int n = count.load();
-    // At 50 fps, 200 ms → ~10 frames (allow generous range for CI jitter).
-    EXPECT_GE(n, 5);
-    EXPECT_LE(n, 30);
+    int n = count.load(std::memory_order_acquire);
+    EXPECT_GE(n, 8);
+    EXPECT_LE(n, 60);
 }
 
 // -----------------------------------------------------------------------------

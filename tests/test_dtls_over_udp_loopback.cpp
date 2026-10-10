@@ -96,25 +96,21 @@ struct TinySocket {
             close();
             return false;
         }
-        // Put the socket in non-blocking mode so `recv_from()` can honor
-        // its poll deadline.  Without this, on Winsock the kernel-level
-        // `recvfrom()` blocks until a datagram arrives; the inner
-        // `while (clk::now() < deadline)` loop never iterates, and the
-        // reader thread never advances to `tick()` / `take_outbound()`,
-        // so the DTLS handshake never starts on the very first
-        // iteration (chicken-and-egg: peer hasn't sent yet, so we
-        // must produce our ClientHello via tick() first, but tick()
-        // never runs because recvfrom() is parked).  POSIX uses
-        // `SO_RCVTIMEO` for the same purpose inside `recv_from()` so
-        // the non-blocking flag is not strictly required there, but
-        // setting it is harmless and keeps behaviour aligned.
+        // Put the socket in non-blocking mode ONLY on Winsock.  Winsock
+        // has no portable per-recv timeout without select/WSAWaitForMultiple
+        // Events, and the poll loop in `recv_from()` needs recvfrom() to
+        // return immediately when no datagram is queued so the deadline
+        // check can fire.  POSIX uses `SO_RCVTIMEO` (set just before each
+        // recvfrom() call) so the kernel-level recvfrom() already
+        // honors the deadline and the non-blocking flag is unnecessary;
+        // in fact, setting `O_NONBLOCK` here caused Linux to fail
+        // because `SO_RCVTIMEO` is ignored when `O_NONBLOCK` is set on
+        // some glibc versions, leaving the reader thread spinning
+        // without ever reading a packet.
 #ifdef _WIN32
         u_long nonblocking = 1;
         ::ioctlsocket(static_cast<SOCKET>(s_),
                       static_cast<long>(FIONBIO), &nonblocking);
-#else
-        int flags = ::fcntl(s_, F_GETFL, 0);
-        if (flags >= 0) ::fcntl(s_, F_SETFL, flags | O_NONBLOCK);
 #endif
         return true;
     }

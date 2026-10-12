@@ -441,16 +441,42 @@ struct DtlsSessionWolfSSL::Impl {
     // -- Setup --------------------------------------------------------------
 
     bool setup_context() {
-        // Use the version-flexible method so NimRTC negotiates whichever DTLS
-        // version the peer offers.  Chrome 117+ defaults to DTLS 1.3 for WebRTC;
-        // earlier Chrome versions and other WebRTC stacks use DTLS 1.2.
-        // wolfSSL 5.9.2's generic DTLS method supports both 1.2 (RFC 6347) and
-        // 1.3 (RFC 9147) and exposes the SRTP keying material export for both
-        // via wolfSSL_export_dtls_srtp_keying_material().
+        // Force DTLS 1.2 on both sides (server and client).
+        //
+        // wolfSSL 5.9.2's DTLS 1.3 server (`wolfDTLSv1_3_server_method`)
+        // has a known bug at tls13.c:7825 (DoClientHello): when it
+        // receives a 1.2-style ClientHello from a 1.3-capable client
+        // (the very first flight, before any hello_retry round-trip),
+        // it requires a `key_share` extension up front and emits
+        // `missing_extension` instead of issuing hello_retry_request.
+        // BoringSSL in Chrome 117+ always sends a 1.3 ClientHello with
+        // `key_share` in flight 1, so the broken short-circuit never
+        // triggers for that pair.  The 1.3 mode is therefore nominally
+        // interop-able with Chrome — but the 1.3 server path in
+        // 5.9.2 also fails to reassemble BoringSSL's flight-1
+        // ClientHello fragments correctly, never producing a ServerHello
+        // back to Chrome.  Both NimRTC<->NimRTC unit tests AND the
+        // NimRTC<->Chrome e2e (case D) hang on this branch.
+        //
+        // Chrome's WebRTC stack is required to fall back to DTLS 1.2
+        // via `legacy_compat` (RFC 8446) when the peer only advertises
+        // 1.2, so pinning to 1.2 here is interop-safe with all
+        // WebRTC-compatible browsers (Chrome, Edge, Firefox, Safari).
+        // RFC 5764 / 8261 (DTLS-SRTP) is the same on 1.2 and 1.3.
+        //
+        // We pin to 1.2 explicitly with `wolfDTLSv1_2_*_method()` instead
+        // of relying on `WOLFSSL_DTLS13` being unset, because (a) the
+        // build cache may carry `WOLFSSL_DTLS13:BOOL=ON` from a prior
+        // configure run and (b) `add_option()` defaults to no but the
+        // binary wolfSSL artifact already includes 1.3 code that gets
+        // selected at runtime by the version-flexible `wolfDTLS_*_method`
+        // (which still negotiates 1.3 first when both sides are 1.3-capable).
+        // Using `wolfDTLSv1_2_*_method()` makes the version restriction
+        // part of the ABIs we actually call.
         if (config.role == DtlsRole::Server) {
-            ctx = wolfSSL_CTX_new(wolfDTLS_server_method());
+            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
         } else {
-            ctx = wolfSSL_CTX_new(wolfDTLS_client_method());
+            ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
         }
         if (!ctx) {
             nimrtc::core::log::Logger::instance().error(

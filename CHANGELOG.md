@@ -604,11 +604,14 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   contains `std::optional<std::string>`, which is not a
   literal type in C++17/20.
 - **Commit count**: `git log v0.11.0..HEAD --oneline` is
-  currently ~30 commits (was projected ~25 in the original
-  draft). The 5 delta commits are: `bfeffd5` (v0.12.0
+  currently **21 commits** (was projected ~25 in the original
+  draft, then re-estimated at ~30 during the alignment pass).
+  The 7 v0.12.0-delta commits are: `bfeffd5` (v0.12.0
   stage-3), `75b4f79` (transport-strategies.md), `ac4fad9`
   (Profile v1.1 schema), `744d9d1` (Slice 7.6 PR2),
-  `5f18e1a` (Slice 7.6 PR3). The remaining ~25 commits are
+  `5f18e1a` (Slice 7.6 PR3), `36ee838` (force DTLS 1.2
+  cherry-pick), plus 2 documentation commits
+  (`4aaf74c` + `4bbebec`). The remaining 14 commits are
   v0.11.x stabilization fixes that landed between the
   v0.11.0 cut and HEAD; release manager decides the final
   split at tag time.

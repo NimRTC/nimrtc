@@ -535,6 +535,22 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 - **`cmake/NimRTCOptions.cmake`** — added `if(OHOS)`
   musl-compat branch + `nimrtc_link_gmssl()` helper.
 
+### Fixed
+
+- **DTLS 1.2 forced for Case D Chrome interop** (commit `36ee838`,
+  cherry-picked from `fix/windows-dll-boundary`): `dtls_wolfssl_session.cpp`
+  no longer negotiates DTLS 1.3 by default. wolfSSL 5.9.2's
+  DTLS 1.3 server has a broken short-circuit that (a) requires a
+  `key_share` extension up front on a 1.2-style ClientHello from a
+  1.3-capable client and emits `missing_extension` (this is what
+  82ca051 disables DTLS 1.3 to avoid in the in-tree unit tests),
+  AND (b) fails to reassemble BoringSSL's flight-1 ClientHello
+  fragments in the NimRTC ↔ Chrome e2e (CI run 38057234934 — 18
+  RECV Handshake fragments, zero SEND, then close_notify warning).
+  v0.12.0 forces DTLS 1.2 on both client and server paths to
+  restore the Case D Chrome interop gate. Tracked under
+  `docs/plan/dtls_chrome_interop_review.md`.
+
 ### What's NOT in v0.12.0 (explicitly deferred)
 
 - **§5.3 rule 2 actual media-stack instantiation** —

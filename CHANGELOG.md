@@ -392,15 +392,223 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 
 ## [Unreleased]
 
-> No unreleased changes yet. The next planned release is **v0.11.x**
-> (patches after the v0.11.0 cut), tracked in
-> `docs/plan/v0.11-plan.md` §8. The v0.11.0 release contract is
-> the **Chrome media interop** surface (audio + video Case D, all
-> four platforms) plus the L2 / L3 P2 scaffolding (TAP-1,
-> PROFILE-1, DEMO-1, TPAL-4 cleanup). The data plane
-> (DC-1 / DC-2 / TPAL-5) is explicitly deferred to the v1.x
-> WebTransport / QUIC re-design — see `docs/plan/v0.11-plan.md` §2.2
-> and §10.
+> **No unreleased changes yet.** The next planned release is
+> **v0.12.0** (in-progress alignment draft), tracked in
+> `docs/plan/v0.12.0-release-notes.md`. The v0.12.0 release
+> contract is the **GMSSL TLCP DTLS backend** (ADR-013) + the
+> **OpenHarmony aarch64 toolchain** (Stage 0) + the **T-PAL
+> Slice 7 / 7.6 / 8 named use-case transport strategies** + the
+> **Profile schema v1.1 (additive `transport` section)**. The
+> data plane re-design (DC-1 / DC-2 / TPAL-5) remains
+> explicitly deferred to the v1.x WebTransport / QUIC window
+> — see `docs/plan/v0.11-plan.md` §2.2 and §10.
+
+## [0.12.0] - 2026-10-XX (TBD — in-progress alignment draft)
+
+### Status: Tech Preview (draft)
+
+> **In-progress alignment draft** — this entry is being written in
+> parallel with the v0.12.0 cut. The `[updated 2026-10-12]`
+> markers throughout `docs/plan/v0.12.0-release-notes.md` flag
+> the lines that were added in the alignment pass. The release
+> manager's job at tag time is to clear those markers, confirm
+> the commit count, and pin a release date. **API still
+> experimental / not for production through v1.0.0.**
+
+### Highlights
+
+- **T-PAL Slice 7 / 7.6 / 8 — Five named use-case transport
+  strategies** (`docs/plan/transport-strategies.md`, commits
+  `75b4f79` + `744d9d1` + `5f18e1a`): `browser-call`,
+  `teleop-ultra-low-latency`, `agent-gateway`, `sfu-relay`,
+  `cross-network-peer`. Each strategy is a small `TransportRequirements`
+  constant in `src/transport/include/nimrtc/transport/transport_strategy.hpp`
+  plus a `strategy_by_name()` lookup that the Profile loader
+  consumes. Strategies 1–3 map to one of the four `transport-selection.md`
+  §5.3 Selector rules; `cross-network-peer` is a new combination
+  (rule 1 with a tighter `max_p99_ms = 150`) that §5.3 does not
+  enumerate but is consistent with it.
+- **Profile schema v1.1 (additive `transport` section)**
+  (commit `ac4fad9`): `profiles/schema/profile-v1.1.json` adds
+  a top-level `transport` key with `{strategy, media{...},
+  control{...}}` sub-blocks. v1.0 profiles continue to load;
+  missing `transport` defaults to `null` (= engine's
+  compile-time default = `browser-call`). All nine existing
+  Profile JSONs are retro-fitted with a default
+  `transport.strategy` value (see transport-strategies.md §3).
+- **Engine integration + Profile bridge** (commit `5f18e1a`,
+  PR3): `EngineConfig::transport_strategy_name` (string, optional)
+  added alongside `EngineConfig::transport_name`. The engine
+  now (a) resolves the strategy name to a `TransportRequirements`
+  via `strategy_by_name()`, (b) calls
+  `CapabilitySelector::select()` to get a `TransportSession`
+  with both `media_factory_id` and `control_factory_id`, and
+  (c) records the chosen session in the engine's `open()` result
+  for diagnostic + e2e-test inspection. **The factory is selected
+  but not yet instantiated** — the existing
+  `cfg.transport_name`-driven media-stack construction path
+  remains in effect. Real instantiation of the strategy's
+  chosen factory id is a v0.13+ change.
+- **`raw-udp-arq` control stack registered** (commit `744d9d1`,
+  PR2): the first non-`webrtc-classic` control-plane factory
+  under `core::PluginRegistry::register_transport_stack()`,
+  id `"raw-udp-arq"`. Used by `teleop-ultra-low-latency` and
+  `agent-gateway` to carry the high-frequency control channel
+  independent of the media plane.
+- **GMSSL TLCP DTLS backend (ADR-013)** (commits
+  `8d60e23` + `b2af1c0` + `e9faa7b` + `660610d`):
+  `DtlsSessionGmSSL` wraps GMSSL v3.x's GM/T 0044 (TLCP)
+  handshake + SM2/SM3/SM4 certificates + SM4-GCM encryption.
+  Registered as id `"gmssl"` in
+  `core::PluginRegistry::register_dtls_session()`. Engine
+  default remains wolfSSL (zero regression); OHOS profile
+  defaults to GMSSL. ~900 LOC in `dtls_gmssl_session.cpp` +
+  `dtls_gmssl_factory.cpp`. `NIMRTC_ENABLE_DTLS_GMSSL=OFF` by
+  default.
+- **OpenHarmony aarch64 CMake toolchain (Stage 0)** (commit
+  `bfeffd5`): dual-mode `cmake/toolchains/ohos-aarch64.cmake`
+  (OHOS SDK clang cross-compile + `--target=aarch64-linux-ohos`
+  fallback), six OHOS presets in `CMakePresets.json`, and a
+  `cmake/NimRTCOptions.cmake` `if(OHOS)` musl-compat branch.
+  Stages 1–4 (toolchain validation + e2e audio capture + CI
+  green + OHAudio HAL implementation) remain in-progress.
+- **OHAudio HAL decision** (`docs/plan/ohos-audio-hal.md`):
+  OHAudio selected as the audio HAL for OHOS; OpenSL ES
+  rejected (deprecated). Implementation is a v0.12.x patch
+  follow-up.
+
+### Added
+
+- **`src/transport/include/nimrtc/transport/transport_strategy.hpp`**
+  — five `kStrategy*` constants + `strategy_by_name()`
+  lookup. Round-trip contract with `profile-v1.1.json`
+  asserted by
+  `test_transport_strategy.StrategyNamesMatchProfileSchemaEnum`.
+- **`src/transport/src/raw_udp_arq_stack.cpp`** + matching
+  `RawUdpArqStackFactory` (id `"raw-udp-arq"`).
+- **`profiles/schema/profile-v1.1.json`** — additive
+  `transport` section.
+- **`src/dtls/src/dtls_gmssl_session.cpp`** +
+  **`src/dtls/src/dtls_gmssl_factory.cpp`** + matching
+  `NIMRTC_ENABLE_DTLS_GMSSL` CMake option (default OFF).
+- **`cmake/toolchains/ohos-aarch64.cmake`** + 6 OHOS presets
+  in `CMakePresets.json`.
+- **2 new `EnginePluginLoading` subtests** in
+  `tests/test_engine_plugin_loading.cpp`: Slice 7.6 PR3
+  (engine reads `cfg.transport_strategy_name` + resolves to
+  `TransportSession` with both factory ids) + Slice 7.6 PR2
+  (`raw-udp-arq` factory registered + lifecycle).
+- **New tests**: `tests/test_transport_strategy.cpp` (11/11
+  PASS) covering all 5 strategy constants + the
+  `strategy_by_name()` lookup + the Profile v1.1 round-trip.
+- **New documentation**: `docs/guides/building-on-openharmony.md`,
+  `docs/guides/switching-dtls-backend.md`,
+  `docs/api/engine_api.md`, `docs/api/engine_config.md`,
+  `docs/plugin_author_guide.md`, `docs/troubleshooting.md`,
+  `examples/demo-agent-gateway/README.md`,
+  `docs/plan/transport-strategies.md`,
+  `docs/plan/ohos-audio-hal.md`.
+
+### Changed
+
+- **`src/engine/src/engine.cpp`** — `init_modules_once()`
+  now recognises `cfg.transport_strategy_name` (optional,
+  default `""` → `"browser-call"`) and resolves it to a
+  `TransportSession` via `strategy_by_name()` +
+  `CapabilitySelector::select()`. The chosen `media_factory_id`
+  and `control_factory_id` are recorded in the engine's
+  `open()` result; instantiation continues to use the
+  pre-PR3 `cfg.transport_name`-driven direct-constructor path.
+- **`src/modules/assembly/profiles.cpp`** — Profile loader
+  now reads the v1.1 `transport` section and bridges the
+  declared strategy id + `media` / `control` sub-blocks to
+  a `TransportRequirements`. v1.0 profiles (no `transport`
+  key) default to `transport=null` → compile-time default.
+- **`src/transport/src/transport_plugin.cpp`** —
+  `do_register_default_plugins()` now publishes
+  `"raw-udp-arq"` (PR2) in addition to the existing
+  `"default"` and `"webrtc-classic"` registrations.
+- **`dtls::register_default_plugins()`** — now publishes
+  `GmSSLDtlsFactory` through `register_dtls_session("gmssl")`
+  when `NIMRTC_ENABLE_DTLS_GMSSL=ON`; default `OFF` keeps
+  wolfSSL-only behaviour.
+- **`cmake/NimRTCOptions.cmake`** — added `if(OHOS)`
+  musl-compat branch + `nimrtc_link_gmssl()` helper.
+
+### What's NOT in v0.12.0 (explicitly deferred)
+
+- **§5.3 rule 2 actual media-stack instantiation** —
+  `teleop-ultra-low-latency` is **selected** (PR3 records
+  `media=raw-udp-arq, control=raw-udp-arq` on the
+  `TransportSession`) but the engine still constructs the
+  media stack through the pre-PR3 `cfg.transport_name`-driven
+  direct-constructor path. Wiring the strategy's chosen
+  factory id into a real `MakeTransportInstance()` call is
+  a v0.13+ change. Tracked under
+  `docs/plan/transport-strategies.md` §6 Open questions.
+- **`max_p99_ms` budget enforcement** — Selector **records**
+  the budget on the `TransportSession` for e2e-test /
+  monitoring consumption, but does not enforce it at engine
+  `open()` time. A `StrategyValidator` is v0.13+ scope.
+- **`cross-network-peer` naming review** — strategy id is
+  descriptive but long; alternatives (`robust-peer`,
+  `lossy-link`, `mobile-friendly`) are tracked under
+  `docs/plan/transport-strategies.md` §6 #1.
+- **Composite `sfu-agent` resolution** — the `sfu-agent`
+  Profile JSON declares both SFU and Agent strategies on the
+  same engine; current loader cannot produce two
+  `TransportSession`s for one engine. Tracked under
+  `docs/plan/transport-strategies.md` §6 #2, deferred to
+  the pre-1.0 decision window.
+- **OHOS-aarch64 end-to-end audio capture** — OHAudio
+  adapter implementation is a v0.12.x patch.
+- **OHOS ↔ Chrome / Firefox interop** — TLCP is not
+  supported by any browser; OHOS ↔ NimRTC-Desktop uses
+  wolfSSL path.
+- **GMSSL SRTP backend** — GM/T 0044 SRTP profile is P4;
+  SRTP continues to use wolfSSL.
+- **usrsctp on OHOS** — deferred to v0.12.x patch;
+  OHOS uses `SctpStubFactory` (id `"stub"`) for now.
+- **T-PAL Slice 6** (Raw UDP bypass) — v0.11.x patch.
+- **SFU-1 / DC-3 / BENCH-1** — pre-1.0 decision window per
+  `docs/plan/v0.11-plan.md` §2.2.
+
+### Notes
+
+- **Public API**: byte-identical with v0.11.0 except two
+  additive fields on `EngineConfig`: `dtls_name` (string,
+  default `""` → `"wolfssl"`) and `transport_strategy_name`
+  (string, default `""` → `"browser-call"`).
+- **ABI**: Not committed; experimental through v1.0.0.
+- **Profile schema**: v1.1 is purely additive (no field
+  removal / rename). v1.0 profiles continue to load.
+- **Strategy C++ surface**: five `kStrategy*` constants +
+  `strategy_by_name()` lookup. The constants are `inline
+  const` (not `constexpr`) because `TransportRequirements`
+  contains `std::optional<std::string>`, which is not a
+  literal type in C++17/20.
+- **Commit count**: `git log v0.11.0..HEAD --oneline` is
+  currently ~30 commits (was projected ~25 in the original
+  draft). The 5 delta commits are: `bfeffd5` (v0.12.0
+  stage-3), `75b4f79` (transport-strategies.md), `ac4fad9`
+  (Profile v1.1 schema), `744d9d1` (Slice 7.6 PR2),
+  `5f18e1a` (Slice 7.6 PR3). The remaining ~25 commits are
+  v0.11.x stabilization fixes that landed between the
+  v0.11.0 cut and HEAD; release manager decides the final
+  split at tag time.
+- **4-platform CI**: windows + linux-gcc + macos-clang ✅
+  (linux-aarch64 TEMP-DISABLED). v0.12.0 release manager
+  verifies the 5 new `test_transport_strategy` subtests +
+  5 new `test_engine_plugin_loading` Slice 7.6 subtests
+  pass on all three active platforms.
+- **GMSSL builds**: `NIMRTC_ENABLE_DTLS_GMSSL=ON` requires
+  GMSSL v3.x headers + library on the build host. Linux
+  x86_64 and OHOS-aarch64 are the supported hosts.
+- **国密后端** (SM2/SM4) — GMSSL is the v0.12.0 deliverable
+  for the GM/T 0024 / 0044 path; 国密 SRTP remains P4.
+- **No binary artefacts shipped** (源码为主).
+- **No new third-party dependencies** for the default
+  (wolfSSL) build.
 
 ---
 

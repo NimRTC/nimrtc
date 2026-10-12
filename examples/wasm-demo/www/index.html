@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NimRTC — a from-scratch C++20 WebRTC engine</title>
+<meta name="description" content="NimRTC is a from-scratch C++20 WebRTC engine. ~5.6 MB static lib, 4-platform CI, pluggable crypto, embeddable on aarch64. Wire-level Chrome / Firefox / libwebrtc interop.">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="player.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container header-row">
+    <a class="brand" href="#top">
+      <img src="favicon.svg" alt="" width="28" height="28">
+      <span><b>NimRTC</b></span>
+    </a>
+    <nav class="nav-links">
+      <a href="#demo">Live demo</a>
+      <a href="#start">Quick start</a>
+      <a href="#status">Status</a>
+      <a href="#arch">Architecture</a>
+      <a href="https://github.com/NimRTC/nimrtc">Repo ↗</a>
+      <a href="https://github.com/NimRTC/nimrtc/blob/main/docs/">Docs ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <div class="container">
+    <p class="eyebrow">v0.11.0 Beta 前哨 · 2026-10-09</p>
+    <h1>A from-scratch C++20 WebRTC engine.<br><span class="muted">~5.6 MB. Four platforms. No fork.</span></h1>
+    <p class="lead">
+      NimRTC is an embeddable media engine that keeps the wire-level WebRTC
+      interop you need (Chrome, Firefox, libwebrtc peers) and replaces the
+      150&ndash;250 MB monolith with a layered, plugin-adapted engine you can
+      <code>grep</code>, swap, and ship on aarch64. Same source tree ships a
+      P2P client <em>and</em> an SFU gateway. DTLS, RTP, audio 3A, and codecs
+      are all behind header-only plugin interfaces.
+    </p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#start">Build it in 60s →</a>
+      <a class="btn" href="https://github.com/NimRTC/nimrtc">★ on GitHub</a>
+      <a class="btn ghost" href="#demo">see it run ↓</a>
+    </div>
+    <ul class="hero-numbers">
+      <li><b>5.63 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
+      <li><b>4 platforms</b><span>Windows · Linux x86_64 · macOS arm64 · Linux aarch64</span></li>
+      <li><b>~50k LOC</b><span>of C++20, end-to-end<br>(libwebrtc is ~5.5M)</span></li>
+      <li><b>5 profiles</b><span>transport · sfu · agent · cloudgame · agent-sfu</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="demo" class="demo">
+  <div class="container">
+    <h2>See it run</h2>
+    <p class="section-lead">
+      Two in-process <code>NimRTCEngine</code>s run a real SDP exchange,
+      gather ICE host candidates, run STUN connectivity checks on
+      <code>127.0.0.1</code>, and reach the <code>connected</code> state.
+      Same engine, same wire, no test mock, no signal server. This is the
+      <code>examples/loopback-p2p</code> binary, captured below.
+    </p>
+
+    <div data-asciicast="loopback-p2p.cast" data-font="14"></div>
+
+    <p class="cast-caption">
+      The recording above is a <b>synthesized trace</b> of
+      <code>loopback-p2p</code>'s stderr output, generated from
+      <code>examples/loopback-p2p/loopback-p2p.cpp</code>'s
+      <code>fprintf</code> calls. To re-record a real terminal session with
+      your own build, run <code>tools/record_loopback_demo.sh</code> (or
+      <code>.ps1</code> on Windows) — it captures an <code>asciinema</code>
+      cast and copies it here.
+    </p>
+  </div>
+</section>
+
+<section id="start" class="start">
+  <div class="container">
+    <h2>Quick start</h2>
+    <p class="section-lead">
+      Build the loopback example and run it locally. Total time on a clean
+      clone: <b>~3 minutes</b> on a 4-core x86_64. All third-party deps are
+      git submodules, SHA-pinned in <code>src/third_party/vendor.json</code>.
+    </p>
+    <ol class="steps">
+      <li>
+        <div class="step-title">Clone (with submodules)</div>
+<pre><code>git clone --recurse-submodules https://github.com/NimRTC/nimrtc.git
+cd nimrtc</code></pre>
+      </li>
+      <li>
+        <div class="step-title">Configure + build</div>
+<pre><code>cmake --preset debug.msvc       # or: debug · debug.macos · debug.aarch64
+cmake --build build --target loopback-p2p -j</code></pre>
+      </li>
+      <li>
+        <div class="step-title">Run the smoke test</div>
+<pre><code>./build/examples/Debug/loopback-p2p      # or .exe on Windows</code></pre>
+        <div class="step-expected">Expected output: <code>[A ice] connected</code> and <code>[B ice] connected</code> within ~2&ndash;3 s, then <code>exit code: A=1 B=1</code>, <code>returning 0</code>.</div>
+      </li>
+      <li>
+        <div class="step-title">Run the test suite + Chrome interop e2e</div>
+<pre><code>ctest --preset tests --output-on-failure
+python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section id="status" class="status">
+  <div class="container">
+    <h2>What's working · what's not (be honest)</h2>
+    <div class="grid two">
+      <div>
+        <h3>Shipped in v0.11.0</h3>
+        <ul class="check">
+          <li>Chrome ↔ NimRTC P2P audio + video interop, Case D, on all four platforms (CI green).</li>
+          <li>5-variant profile library (<code>sfu</code> / <code>transport</code> / <code>agent</code> / <code>cloudgame</code> / <code>agent-sfu</code>) with strict JSON↔C++ round-trip tests.</li>
+          <li>Pre/post-3A PCM tap (race-free <code>set_pre_process_tap</code> / <code>set_post_process_tap</code>, int16 ASR variant).</li>
+          <li>PAL Slice 1&ndash;8 — plugin-capability resolution, zero runtime overhead, public API unchanged.</li>
+          <li>Pluggable DTLS backend (<code>EngineConfig::dtls_name</code> resolves to OpenSSL / wolfSSL / mbedTLS at build time).</li>
+          <li>Vendored libs: wolfSSL · libsrtp · libopus · libjuice · WebRTC APM. SHA-pinned.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Deferred to v1.x (and why)</h3>
+        <ul class="cross">
+          <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; v1.x re-platforms on <code>msquic</code>. The <code>usrsctp</code> socket class is <code>@deprecated</code> and still compiles for opt-in callers.</li>
+          <li><b>iOS / Android native.</b> Roadmap, not P1. No ETA yet.</li>
+          <li><b>Production-grade hardening.</b> Lands in P3 / P4. v0.11.0 is a <em>Beta 前哨</em> — API experimental through v1.0.0.</li>
+        </ul>
+        <h3>On the v0.12.0 roadmap</h3>
+        <ul class="bullet">
+          <li>Wasm browser demo (this page is the placeholder; see below).</li>
+          <li>Adaptive jitter buffer + Goog-CC-style BWE (P3).</li>
+          <li>GMSSL DTLS backend for Xinchuang / GM/T (P4).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="arch" class="arch">
+  <div class="container">
+    <h2>Architecture, in 30 seconds</h2>
+    <p class="section-lead">
+      Four compile-time layers (<b>L0&ndash;L3</b>) sit on top of a
+      <b>Plugin Adaptation Layer (PAL)</b>. A <b>profile</b> — also chosen
+      at build time — decides which layers are even linked into the binary.
+      The <code>sfu</code> profile literally omits L2 codecs from the link.
+    </p>
+    <pre class="arch-diagram"><code>┌─────────────────────────────────────────────────────────────┐
+│  PROFILE  —  compile-time selection                          │
+│  transport │ sfu │ agent-gateway │ cloudgame │ agent-sfu    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│ L3  Engine   │      │ L2  Codecs   │      │ L1  Wire /   │
+│ NimRTCEngine │ ←──→ │ + 3A         │ ←──→ │ state        │
+│              │      │ Opus / H.264 │      │ RTP / ICE /  │
+│              │      │ VP8 / 3A    │      │ DTLS / SRTP  │
+└──────────────┘      └──────────────┘      └──────────────┘
+                              │
+                              ▼
+                    ┌──────────────────────┐
+                    │  PAL  —  zero-       │
+                    │  overhead resolver   │
+                    └──────────────────────┘
+                              │
+                              ▼
+        ITransport · IICETransport · IRTP · ISDP · IJB
+        IAudio3A · ICodec · IVideoSource/Sink · IDtlsSession</code></pre>
+    <p class="arch-note">
+      Every capability swap (OpenSSL ↔ wolfSSL ↔ mbedTLS ↔ GMSSL;
+      in-tree 3A ↔ HW 3A; libjuice ↔ custom ICE) flows through one of
+      these header-only interfaces. The public <code>NimRTCEngine</code> API
+      does not change.
+    </p>
+  </div>
+</section>
+
+<section class="roadmap">
+  <div class="container">
+    <h2>This page · and what comes next</h2>
+    <p>
+      <b>This page is a placeholder.</b> It hosts a recording of the
+      in-process <code>loopback-p2p</code> example, not a runnable browser
+      demo. A real NimRTC-in-your-browser experience (Chrome ↔ NimRTC
+      audio + video, with <code>getUserMedia</code> on the browser side
+      and the <code>transport</code> profile compiled to
+      <code>wasm32-unknown-unknown</code>) is on the <b>v0.12.0</b>
+      milestone. The tracking issue lives under
+      <a href="https://github.com/NimRTC/nimrtc/issues?q=is%3Aopen+milestone%3A%22v0.12.0%22">milestone:v0.12.0</a>.
+    </p>
+    <p>
+      In the meantime, if you want to see NimRTC actually move audio and
+      video across a real browser peer, the Chrome interop CI
+      (<code>tools/run_e2e_acceptance.py</code>) is the closest thing we
+      have to a public-facing demo.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>
+      <b>NimRTC</b> · Apache-2.0 ·
+      <a href="https://github.com/NimRTC/nimrtc">github.com/NimRTC/nimrtc</a> ·
+      <a href="https://github.com/NimRTC/nimrtc/blob/main/docs/">docs</a> ·
+      <a href="https://github.com/NimRTC/nimrtc/blob/main/CHANGELOG.md">changelog</a> ·
+      <a href="https://github.com/NimRTC/nimrtc/blob/main/SECURITY.md">security</a>
+    </p>
+    <p class="muted small">
+      This page is served by GitHub Pages from
+      <code>examples/wasm-demo/www/</code>. Source-of-truth is the
+      <code>main</code> branch; the workflow at
+      <code>.github/workflows/wasm-demo-pages.yml</code> rebuilds on every push.
+    </p>
+  </div>
+</footer>
+
+<script src="player.js"></script>
+</body>
+</html>

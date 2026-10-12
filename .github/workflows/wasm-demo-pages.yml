@@ -1,0 +1,155 @@
+# =============================================================================
+# NimRTC — wasm-demo Pages
+#
+# Deploys examples/wasm-demo/www/ to GitHub Pages at /wasm/.
+#
+# URL once enabled: https://nimrtc.github.io/nimrtc/wasm/
+#
+# Enable one-time:  Settings → Pages → Source: "GitHub Actions"
+#                   (this is a manual step; the workflow will refuse to
+#                    publish until Pages is turned on).
+#
+# Triggers:
+#   - push to main, when examples/wasm-demo/www/** or this file changes
+#   - workflow_dispatch (manual)
+#
+# What the artifact looks like:
+#   /
+#   ├── index.html           # <meta http-equiv="refresh"> → /wasm/
+#   └── wasm/
+#       ├── index.html       # the landing page
+#       ├── style.css
+#       ├── player.js
+#       ├── player.css
+#       ├── loopback-p2p.cast
+#       └── favicon.svg
+#
+# The root-level redirect keeps `https://nimrtc.github.io/nimrtc/` honest
+# (it points at the demo) until the project has a real homepage. v0.12.0+
+# will likely replace this with a proper landing page.
+# =============================================================================
+
+name: wasm-demo-pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/wasm-demo/www/**'
+      - '.github/workflows/wasm-demo-pages.yml'
+  workflow_dispatch:
+
+# Same concurrency group across all deploys of this site so we never
+# publish a half-staged artifact.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pages deployment + OIDC token for cloudflare-style signed deploys.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't leave a stale deployment if the env is missing — fail fast
+# with a clear message instead of silently timing out.
+env:
+  PAGES_SOURCE_BRANCH: main
+
+jobs:
+  deploy:
+    name: deploy / wasm-demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight — Pages is enabled
+        shell: bash
+        run: |
+          # The github-pages environment is created automatically the first
+          # time someone turns on Pages in the repo settings. If the env
+          # does not exist, this job will fail with a clear message instead
+          # of timing out at the deploy step.
+          if ! gh api repos/${{ github.repository }}/environments/github-pages \
+                 >/dev/null 2>&1; then
+            echo "::error::The 'github-pages' environment does not exist on this repo."
+            echo "::error::Enable Pages once: Settings → Pages → Source: 'GitHub Actions'."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Stage /wasm/ + redirect at /
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/wasm
+          cp -r examples/wasm-demo/www/. _site/wasm/
+
+          # A small redirect at the root so / points at /wasm/ until a
+          # proper project landing page lands. No build, no JS, no theme.
+          cat > _site/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=wasm/">
+          <title>NimRTC</title>
+          <link rel="canonical" href="wasm/">
+          <style>
+            body { font: 14px -apple-system, system-ui, sans-serif;
+                   color: #57606a; padding: 48px; max-width: 480px; margin: auto; }
+            a { color: #0969da; }
+          </style>
+          </head>
+          <body>
+            <p>Redirecting to <a href="wasm/">/wasm/</a>…</p>
+            <p>If you are not redirected, <a href="wasm/">click here</a>.</p>
+          </body>
+          </html>
+          EOF
+
+          # .nojekyll tells GitHub Pages not to run the site through
+          # Jekyll — we don't need it, and it would otherwise strip the
+          # leading underscore in any future file names.
+          touch _site/.nojekyll
+
+          # Sanity: confirm the artifact has the expected shape.
+          test -f _site/wasm/index.html
+          test -f _site/wasm/style.css
+          test -f _site/wasm/player.js
+          test -f _site/wasm/loopback-p2p.cast
+          echo "staged $(find _site -type f | wc -l) files"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          retention-days: 7
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Surface URLs in Step Summary
+        if: always()
+        shell: bash
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          {
+            echo "## wasm-demo Pages deploy"
+            echo
+            echo "- Page URL: \`$PAGE_URL\`"
+            echo "- Demo URL: \`${PAGE_URL%/}/wasm/\`"
+            echo
+            echo "Files in artifact:"
+            find _site -type f -printf "  - \`%P\`\n" | sort
+          } >> "$GITHUB_STEP_SUMMARY"

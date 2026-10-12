@@ -637,4 +637,151 @@ TEST_F(EnginePluginLoading, tpall5_DataChannelFactoryIsRegistered) {
            "(no silent fallback — matches Slice 8 typed-slot contract)";
 }
 
+// ---------------------------------------------------------------------------
+// Transport strategy integration (v0.12.0 Slice 7.6 PR3)
+//
+// Verifies that NimRTCEngine:
+//   - Exposes `transport_strategy_name` / `transport_strategy_session`
+//     accessors that return the resolved state.
+//   - Resolves an empty `cfg.transport_strategy_name` to the engine
+//     default ("browser-call") and records the resulting factory pair
+//     (`webrtc-classic`, no control stack).
+//   - Resolves each of the 4 non-default strategies to the expected
+//     `media_factory_id` / `control_factory_id` per §5.3 of
+//     `docs/plan/transport-selection.md`.
+//   - Fails `open()` with a non-zero return code when
+//     `cfg.transport_strategy_name` is set to a name that is not in
+//     the v0.12.0 catalog.  This is the "loud-fail on unknown strategy"
+//     contract — the engine does NOT silently fall back to
+//     `browser-call` for an unknown name, because that would mask
+//     integrator typos.
+// ---------------------------------------------------------------------------
+TEST_F(EnginePluginLoading, slice76_strategy_default_is_browser_call) {
+    // No explicit `transport_strategy_name` — the engine must fall
+    // back to `browser-call` (the canonical engine default).  The
+    // media stack is `webrtc-classic`; no control side-stack (legacy
+    // DC plane only).
+    EngineConfig cfg;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    EXPECT_EQ(engine.transport_strategy_name(), "browser-call");
+    const auto session = engine.transport_strategy_session();
+    EXPECT_EQ(session.media_factory_id, "webrtc-classic");
+    EXPECT_EQ(session.control_factory_id, "")
+        << "browser-call must NOT enable a control side-stack";
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, slice76_strategy_agent_gateway) {
+    // agent-gateway: §5.3 rule 1b — browser interop + high-freq
+    // control → media=webrtc-classic, control=raw-udp-arq.
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "agent-gateway";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    EXPECT_EQ(engine.transport_strategy_name(), "agent-gateway");
+    const auto session = engine.transport_strategy_session();
+    EXPECT_EQ(session.media_factory_id, "webrtc-classic");
+    EXPECT_EQ(session.control_factory_id, "raw-udp-arq");
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, slice76_strategy_teleop_ultra_low_latency) {
+    // teleop-ultra-low-latency: §5.3 rule 2 — no browser interop +
+    // high-freq control → media=raw-udp-arq, control=raw-udp-arq.
+    // The Selector picks raw-udp-arq for the media stack (the legacy
+    // v0.10.x "webrtc-classic" fallback only kicks in when the
+    // Selector itself returns empty, e.g. for a hypothetical
+    // webrtc-quic-call strategy that lands in v1.x).  The engine
+    // **records** the Selector's choice but does NOT yet instantiate
+    // the raw-udp-arq media stack — that lands in Slice 7.x 2nd-half
+    // work (v0.13+; see `docs/plan/transport-selection.md` §6.5).
+    // The engine's actual media-stack instantiation continues to go
+    // through `cfg.transport_name` ("ice" by default).
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "teleop-ultra-low-latency";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    EXPECT_EQ(engine.transport_strategy_name(), "teleop-ultra-low-latency");
+    const auto session = engine.transport_strategy_session();
+    EXPECT_EQ(session.media_factory_id, "raw-udp-arq")
+        << "§5.3 rule 2 must resolve the media stack to raw-udp-arq "
+           "(no browser interop + high-freq control)";
+    EXPECT_EQ(session.control_factory_id, "raw-udp-arq");
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, slice76_strategy_sfu_relay) {
+    // sfu-relay: §5.3 rule 1 — browser interop, no high-freq control
+    // → media=webrtc-classic, no control side-stack.
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "sfu-relay";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    EXPECT_EQ(engine.transport_strategy_name(), "sfu-relay");
+    const auto session = engine.transport_strategy_session();
+    EXPECT_EQ(session.media_factory_id, "webrtc-classic");
+    EXPECT_EQ(session.control_factory_id, "")
+        << "sfu-relay must NOT enable a control side-stack";
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, slice76_strategy_cross_network_peer) {
+    // cross-network-peer: §5.3 rule 1 (tighter p99) — same
+    // (webrtc-classic, null) pair as browser-call.
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "cross-network-peer";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    EXPECT_EQ(engine.transport_strategy_name(), "cross-network-peer");
+    const auto session = engine.transport_strategy_session();
+    EXPECT_EQ(session.media_factory_id, "webrtc-classic");
+    EXPECT_EQ(session.control_factory_id, "");
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, slice76_unknown_strategy_fails_open) {
+    // An unknown strategy name must fail `open()` with a non-zero
+    // return code.  The engine does NOT silently fall back to
+    // `browser-call` — that would mask integrator typos.
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "webrtc-quic-call";  // not in v0.12.0
+    NimRTCEngine engine(cfg);
+    // Catch the error via the on_error callback so we can assert on
+    // the message shape without leaking kEngineInvalidParam constants
+    // into the test (the test's responsibility is "fail + log
+    // something about the strategy", not "exactly error code 0x1001").
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view msg) {
+        err_code = err;
+        err_called = true;
+        (void)msg;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_NE(rc, 0u)
+        << "Unknown strategy name must fail open() (got rc=" << rc << ")";
+    EXPECT_TRUE(err_called.load())
+        << "Engine must invoke on_error when strategy validation fails";
+    // The accessors must remain empty (the strategy was rejected
+    // before being recorded).
+    EXPECT_EQ(engine.transport_strategy_name(), "");
+    EXPECT_EQ(engine.transport_strategy_session().media_factory_id, "");
+    EXPECT_EQ(engine.transport_strategy_session().control_factory_id, "");
+    // Engine must NOT be open.
+    EXPECT_FALSE(engine.is_open());
+}
+
+TEST_F(EnginePluginLoading, slice76_accessors_empty_before_open) {
+    // The strategy is recorded inside init_modules_once(); before
+    // open() the accessors must return empty strings (the
+    // "diagnostic, not live state" contract).
+    EngineConfig cfg;
+    cfg.transport_strategy_name = "agent-gateway";
+    NimRTCEngine engine(cfg);
+    EXPECT_EQ(engine.transport_strategy_name(), "");
+    EXPECT_EQ(engine.transport_strategy_session().media_factory_id, "");
+    EXPECT_EQ(engine.transport_strategy_session().control_factory_id, "");
+}
+
 } // anonymous namespace

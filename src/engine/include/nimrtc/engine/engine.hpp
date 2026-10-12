@@ -319,8 +319,35 @@ struct EngineConfig {
      *  Default = 5000 (matches Chrome / WebRTC interop).  Only used when
      *  `datachannel_name` is non-empty. */
     std::uint16_t sctp_port = 5000;
-};
 
+    // ---- Transport strategy (v0.12.0 Slice 7.6 PR3) -------------------------
+    //
+    // Named use-case strategy (one of the 5 from
+    // `docs/plan/transport-strategies.md` §2):
+    //   - "browser-call"              (default — equivalent to empty)
+    //   - "teleop-ultra-low-latency"
+    //   - "agent-gateway"
+    //   - "sfu-relay"
+    //   - "cross-network-peer"
+    //
+    // Empty string (the default) means "use the engine compile-time
+    // default", which is currently `browser-call`. The engine validates
+    // the value at open() time via
+    // `nimrtc::transport::strategy_by_name()` — an unknown name fails
+    // the open() with a clear `std::invalid_argument` rethrown as a
+    // non-zero engine error code. The strategy + Selector combination
+    // is then recorded on the engine as a `TransportSession`
+    // (accessible via `transport_strategy_session()` for diagnostics
+    // and integration tests).
+    //
+    // The `cfg.transport_name` field above (default "ice") selects the
+    // transport implementation (ICE, etc.); this new field selects the
+    // USE-CASE shape (which media_stack + control_stack pair to compose).
+    // The two are orthogonal: a "webrtc-classic"-shaped media stack can
+    // be governed by any of the 5 strategies, depending on whether the
+    // control side needs raw-udp-arq, etc.
+    std::string_view transport_strategy_name = "";
+};
 // ---------------------------------------------------------------------------
 // Public callbacks
 // ---------------------------------------------------------------------------
@@ -565,6 +592,39 @@ public:
      *  to know the PCM rate / channels (e.g. demo-p2p's audio generator)
      *  without making those fields public. */
     const EngineConfig& config() const noexcept { return config_; }
+
+    // ---- Transport strategy accessors (v0.12.0 Slice 7.6 PR3) -----------
+    //
+    // These expose the resolved (validated + Selector-applied) state of
+    // `cfg.transport_strategy_name`.  Both are diagnostic / integration
+    // testing surface; the engine does NOT use them to drive the actual
+    // ICE / DTLS / SRTP pipeline (that continues to go through the
+    // `cfg.transport_name` plugin id and the existing ICE transport).
+    //
+    // The PR3 step deliberately **records** the (media_factory_id,
+    // control_factory_id) choice without changing the engine's media
+    // stack instantiation path.  Slice 7.x 2nd-half work
+    // (v0.13+; see `docs/plan/transport-selection.md` §6.5) will
+    // promote these factory ids to drive the engine's `media_stack` /
+    // `control_stack` selection, at which point the same accessor
+    // pair will return the live factory ids actually in use.
+    //
+    // Returns empty strings before open() succeeds (the strategy is
+    // resolved inside `init_modules_once()`).
+
+    /** Strategy name that the engine resolved from `cfg.transport_strategy_name`
+     *  (empty string when open() was never called or failed). */
+    std::string_view transport_strategy_name() const noexcept;
+
+    /** Resolved (media_factory_id, control_factory_id) pair from the
+     *  CapabilitySelector.  `control_factory_id` is empty when the
+     *  strategy does not enable a side-stack (e.g. `browser-call`).
+     *  Both fields are empty before open() succeeds. */
+    struct TransportSessionView {
+        std::string_view media_factory_id;
+        std::string_view control_factory_id;
+    };
+    TransportSessionView transport_strategy_session() const noexcept;
 
     // ---- Video plugin accessors (R3-Batch) ----
     //

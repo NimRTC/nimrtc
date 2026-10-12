@@ -42,6 +42,14 @@
 #include <nimrtc/plugins/audio3a.hpp>
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/scheduler.hpp>
+// Transport strategy + Selector (v0.12.0 Slice 7.6 PR3).
+//   - transport_selector.hpp: TransportRequirements + CapabilitySelector
+//   - transport_strategy.hpp: strategy_by_name() + the bridge
+//     requirements_from_profile_input() that consumes a
+//     ProfileTransportInput (transport-side mirror of
+//     assembly::TransportSection) and returns the Selector's input.
+#include <nimrtc/transport/transport_selector.hpp>
+#include <nimrtc/transport/transport_strategy.hpp>
 #ifdef NIMRTC_HAS_H264
 #include <nimrtc/h264/codec_plugin.hpp>
 #endif
@@ -270,6 +278,20 @@ struct NimRTCEngine::Impl {
     // transport.  See also the TODO in init_modules_once().
     void* datachannel_transport_cookie = nullptr;
 
+    // ---- Resolved transport strategy (v0.12.0 Slice 7.6 PR3) ---------
+    //
+    // Filled in by `init_transport_strategy()` (called from
+    // `init_modules_once()` at the very top, before any module is
+    // created).  The strategy name comes from `cfg.transport_strategy_name`
+    // (or "browser-call" when empty); the factory ids come from
+    // `CapabilitySelector::last_trace()`.  The ids are stored as
+    // `std::string` (owned) because the Selector's trace returns
+    // `std::string` values that are local to the call site — string_views
+    // into the trace would dangle as soon as the local goes out of scope.
+    std::string      resolved_strategy_name;       // owned
+    std::string      resolved_media_factory_id;     // owned
+    std::string      resolved_control_factory_id;   // owned (may be empty)
+
     uint32_t        last_open_rc = 0;
 };
 
@@ -286,6 +308,27 @@ NimRTCEngine::~NimRTCEngine() {
     }
     delete impl_;
     impl_ = nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Transport strategy accessors (v0.12.0 Slice 7.6 PR3)
+//
+// Out-of-line because they dereference `Impl` (pImpl idiom) — Impl is
+// forward-declared in the public header, so an inline definition there
+// would not compile.  The body is intentionally trivial: read the
+// strings `init_transport_strategy()` (called from `init_modules_once()`)
+// wrote into `impl_`, and hand them back as string_views / a view struct.
+// ---------------------------------------------------------------------------
+std::string_view NimRTCEngine::transport_strategy_name() const noexcept {
+    return impl_ ? std::string_view{impl_->resolved_strategy_name}
+                 : std::string_view{};
+}
+
+NimRTCEngine::TransportSessionView
+NimRTCEngine::transport_strategy_session() const noexcept {
+    if (!impl_) return {std::string_view{}, std::string_view{}};
+    return {std::string_view{impl_->resolved_media_factory_id},
+            std::string_view{impl_->resolved_control_factory_id}};
 }
 
 void NimRTCEngine::init_bwe_scheduler() noexcept {
@@ -373,6 +416,105 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
 uint32_t NimRTCEngine::init_modules_once() noexcept {
     core::register_all_default_plugins();
     auto& reg = core::PluginRegistry::instance();
+
+    // ---- Transport strategy (v0.12.0 Slice 7.6 PR3) --------------------
+    //
+    // Resolve the strategy name and apply the CapabilitySelector BEFORE
+    // any module is created.  This is the single place where the
+    // engine validates the strategy id and records the resolved
+    // (media_factory_id, control_factory_id) pair.
+    //
+    // Failure modes:
+    //   - Unknown strategy name (non-empty, not in the 5-id catalog)
+    //     → std::invalid_argument from `strategy_by_name()`.  We catch
+    //     it and convert to kEngineInvalidParam (0x1001) so callers see
+    //     a uniform non-zero return code (the engine API does not throw).
+    //   - Selector returning an empty media_stack (the
+    //     CapabilitySelector default ctor returns empty stacks when no
+    //     resolver is injected) → kEngineInternal.  This shouldn't
+    //     happen with a well-formed strategy but is caught defensively.
+    //
+    // On success, the resolved pair is stored in `impl_` and surfaced
+    // through the `transport_strategy_session()` accessor.
+    {
+        // Resolve the strategy name.  `strategy_by_name("")` returns the
+        // browser-call default, so empty `cfg.transport_strategy_name`
+        // is handled silently.
+        std::string_view resolved_name;
+        try {
+            // requirements_from_profile_input() throws on unknown names.
+            // The base call below has no per-instance overrides — it
+            // returns the strategy's canonical TransportRequirements.
+            ProfileTransportInput in;
+            in.strategy = config_.transport_strategy_name;
+            (void)requirements_from_profile_input(in);
+            resolved_name = config_.transport_strategy_name.empty()
+                ? std::string_view{"browser-call"}
+                : config_.transport_strategy_name;
+        } catch (const std::invalid_argument& e) {
+            impl_->last_open_rc = core::kEngineInvalidParam;
+            const std::string msg = std::string{"transport_strategy_name: "} + e.what();
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+            return core::kEngineInvalidParam;
+        }
+        impl_->resolved_strategy_name = resolved_name;
+
+        // Apply the Selector.  We construct a default CapabilitySelector
+        // (no resolver hooks), which in "rule-only mode" returns empty
+        // stacks but records the chosen factory ids in `last_trace()`.
+        // Those ids are the §5.3-rule-derived factory names — exactly
+        // what the engine's accessors need to expose.
+        CapabilitySelector selector;
+        TransportRequirements req;
+        try {
+            req = requirements_from_profile_input(
+                ProfileTransportInput{resolved_name});
+        } catch (const std::invalid_argument&) {
+            // Unreachable — we just validated the name above.  Keep the
+            // catch as a defensive belt-and-braces; if it ever fires
+            // it indicates a logic bug, not a config error.
+            impl_->last_open_rc = core::kEngineInternal;
+            return core::kEngineInternal;
+        }
+        TransportSession session = selector.select(req);
+        const auto trace = selector.last_trace();
+
+        // The Selector's trace carries the §5.3-rule-derived factory
+        // ids.  An empty trace.media_factory_id means the Selector
+        // could not resolve a media stack (rule 3 / `webrtc-quic` is
+        // not yet implemented; the `webrtc-quic-call` strategy lands
+        // in v1.x per transport-strategies.md §6 #1).
+        //
+        // We copy the trace strings into impl_->resolved_*_factory_id
+        // (owned `std::string` storage) because `trace` is a local that
+        // goes out of scope at the end of this block; views into it
+        // would dangle.
+        if (trace.media_factory_id.empty()) {
+            // Fall back to the legacy v0.10.x media-stack id
+            // ("webrtc-classic") for v0.12.0 strategies.  This
+            // preserves the engine's pre-PR3 media-stack path while
+            // keeping the strategy recorded.  Slice 7.x 2nd-half work
+            // (v0.13+) will replace this with the Selector's actual
+            // choice.
+            impl_->resolved_media_factory_id = "webrtc-classic";
+        } else {
+            impl_->resolved_media_factory_id = trace.media_factory_id;
+        }
+        impl_->resolved_control_factory_id = trace.control_factory_id;
+
+        // (void)session — the rule-only Selector returns empty stacks.
+        // We log the trace instead so diagnostics still see what the
+        // Selector would have chosen in production.
+        (void)session;
+        core::log::Logger::instance().info(
+            std::string{"transport: strategy '"} +
+            impl_->resolved_strategy_name +
+            "' resolved — media_factory_id='" +
+            impl_->resolved_media_factory_id +
+            "', control_factory_id='" +
+            impl_->resolved_control_factory_id + "'");
+    }
 
     // ---- Plugin: Transport (created but NOT opened yet) -------------------
     //

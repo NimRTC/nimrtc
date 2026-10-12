@@ -148,4 +148,136 @@ inline constexpr std::string_view kStrategyNames[kStrategyCount] = {
     "cross-network-peer",
 };
 
+// ---------------------------------------------------------------------------
+// ProfileTransportInput — transport-side mirror of assembly::TransportSection
+// ---------------------------------------------------------------------------
+//
+// Why a mirror instead of just including <nimrtc/assembly/assembly.hpp>?
+//   - `transport/` is a peer of `assembly/` — neither depends on the
+//     other. Pulling `assembly::TransportSection` into the transport
+//     header would create a one-way dep and break the
+//     "engine is the composition root" invariant (see transport-selection.md
+//     §2).
+//   - The fields the bridge needs are 5 strings + 4 optionals. A
+//     hand-rolled mirror is simpler than wrestling with cross-module
+//     header includes (and the assembly module is heavier — it pulls in
+//     nlohmann/json transitively via its implementation, which we don't
+//     want in `transport_strategy.hpp`).
+//   - The mirror stays **structurally identical** to
+//     `assembly::TransportSection` so application code can write:
+//         auto req = transport::requirements_from_profile_input(
+//             transport::profile_input_from_assembly(profile.transport));
+//     — i.e. a one-line adapter near the call site (or a private helper
+//     in the engine) maps between the two shapes.
+//
+// Field mapping (Profile v1.1 JSON key → ProfileTransportInput field):
+//   - `transport.strategy`            → `strategy`
+//   - `transport.media.max_p99_ms`    → `media_max_p99_ms`
+//   - `transport.control.enabled`     → `control_enabled`
+//   - `transport.control.max_p99_ms`  → `control_max_p99_ms`
+//   - `transport.control.freq_hz`     → `control_freq_hz`
+//   - `transport.control.reliability` → `control_reliability`
+//   - `transport.control.ttl_ms`      → `control_ttl_ms`
+// (The two `stack` fields on the assembly side are intentionally NOT
+// mirrored here — the Selector decides the stack id from the strategy
+// name, not from the JSON. `transport.media.stack` and
+// `transport.control.stack` are diagnostic / override hooks for the
+// §5.3 rule engine, not inputs to the strategy mapping.)
+// ---------------------------------------------------------------------------
+struct ProfileTransportInput {
+    /// Strategy id (one of the 5 named use cases). Empty = engine default
+    /// (currently `browser-call`).
+    std::string_view strategy;
+
+    /// Optional p99 budget override for the media plane.
+    std::optional<int> media_max_p99_ms;
+
+    /// Whether a side-stack for the control plane is enabled. When false,
+    /// the Selector uses the media stack's DC plane (SCTP) for control.
+    bool control_enabled = false;
+
+    /// Optional p99 budget override for the control plane.
+    std::optional<int> control_max_p99_ms;
+
+    /// Optional expected control-message rate (Hz). Used by ARQ impls to
+    /// pre-size the send window.
+    std::optional<int> control_freq_hz;
+
+    /// Optional control reliability model. Accepted values:
+    /// "reliable_ordered" (default), "partial_reliable", "unreliable".
+    std::string_view control_reliability;
+
+    /// Optional time-to-live for partial_reliable messages (ms).
+    std::optional<int> control_ttl_ms;
+};
+
+// ---------------------------------------------------------------------------
+// requirements_from_profile_input — bridge from Profile v1.1 to TransportReq
+// ---------------------------------------------------------------------------
+//
+// Resolves the strategy name via `strategy_by_name()` (so an unknown
+// name throws `std::invalid_argument` with the canonical 5-id list), then
+// composes a `TransportRequirements` value that the Selector can consume.
+//
+// The composition rule (Slice 7.6 PR3 — `docs/plan/transport-strategies.md`):
+//
+//   1. Start with the strategy's default `TransportRequirements`.
+//
+//   2. `media_max_p99_ms` (if set) overrides the default `max_p99_ms`.
+//      The override is the application saying "I want this strategy
+//      with a tighter / looser p99 budget than the strategy default".
+//      Strategies where the default already has a value (all 5) accept
+//      the override. The Selector records the override but does not
+//      enforce it (v0.13+ may add a validator; see transport-strategies
+//      §6 #4).
+//
+//   3. The control-plane fields do NOT translate into booleans on
+//      `TransportRequirements` directly — they are recorded on the
+//      `TransportSession` after `select()` returns. This split keeps
+//      `TransportRequirements` a flat set of capability flags (the
+//      Selector's contract) while still allowing Profile JSONs to
+//      declare the full p99 / freq / reliability triple. The engine
+//      uses `requirements_from_profile_input` for the Selector's input
+//      and re-reads the per-instance fields from the original
+//      `ProfileTransportInput` when wiring the resulting session.
+//
+// Return-by-value (not by reference): the function constructs a fresh
+// `TransportRequirements` from the per-instance override, so the result
+// is independent of the canonical `kStrategy*` constants. Caller can
+// safely take ownership and override further fields.
+//
+// Throws `std::invalid_argument` (with the canonical 5-id list) if
+// `input.strategy` is non-empty and not one of the five known ids. An
+// empty `input.strategy` is silently treated as the engine default
+// ("browser-call") — the same convention as `strategy_by_name("")`.
+//
+inline TransportRequirements
+requirements_from_profile_input(const ProfileTransportInput& input) {
+    // Step 1: resolve strategy name. Empty -> browser-call default.
+    // strategy_by_name throws std::invalid_argument on unknown names.
+    const auto& base = strategy_by_name(input.strategy);
+
+    // Step 2: compose the result. We start with a copy of the base
+    // requirements and apply per-instance overrides.
+    TransportRequirements out = base;
+
+    if (input.media_max_p99_ms.has_value()) {
+        out.max_p99_ms = *input.media_max_p99_ms;
+    }
+    // The control-plane booleans (control_enabled, control_reliability,
+    // control_freq_hz, control_ttl_ms) are NOT part of TransportRequirements
+    // today — they are recorded on TransportSession post-select(). The
+    // engine reads them from the original `input` when it wires the
+    // session. Future Slice-7.x work may grow TransportRequirements to
+    // include `needs_partial_reliable_control` etc.; for v0.12.0, we keep
+    // the bridge intentionally narrow.
+    (void)input.control_enabled;
+    (void)input.control_max_p99_ms;
+    (void)input.control_freq_hz;
+    (void)input.control_reliability;
+    (void)input.control_ttl_ms;
+
+    return out;
+}
+
 }  // namespace nimrtc

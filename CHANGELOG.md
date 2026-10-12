@@ -604,25 +604,30 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   contains `std::optional<std::string>`, which is not a
   literal type in C++17/20.
 - **Commit count**: `git log v0.11.0..HEAD --oneline` is
-  currently **24 commits** (was projected ~25 in the original
-  draft, then re-estimated at ~30 during the alignment pass).
-  The **10 v0.12.0-delta commits** are: `75b4f79`
-  (transport-strategies.md), `ac4fad9` (Profile v1.1
-  schema), `744d9d1` (Slice 7.6 PR2), `5f18e1a` (Slice 7.6
-  PR3), `4aaf74c` (alignment), `36ee838` (force DTLS 1.2
-  cherry-pick), `4bbebec` (record cherry-pick), `8225451`
-  (correct commit count → 21), `0797393` (correct commit
-  count → 22), and `4e91942` (cherry-pick
-  `NIMRTC_SKIP_CASE_D` CI escape hatch from
-  `fix/windows-dll-boundary`). Note: `bfeffd5
+  currently **24 commits** as of the CI escape-hatch
+  cherry-pick (`4e91942`). The **10 v0.12.0-delta
+  commits** are: `75b4f79` (transport-strategies.md),
+  `ac4fad9` (Profile v1.1 schema), `744d9d1` (Slice 7.6
+  PR2), `5f18e1a` (Slice 7.6 PR3), `4aaf74c` (alignment),
+  `36ee838` (force DTLS 1.2 cherry-pick), `4bbebec`
+  (record cherry-pick), `8225451` (correct commit count →
+  21), `0797393` (correct commit count → 22), and
+  `4e91942` (cherry-pick `NIMRTC_SKIP_CASE_D` CI escape
+  hatch from `fix/windows-dll-boundary`). The remaining
+  14 commits are v0.11.x stabilization fixes (DTLS Chrome
+  interop + macOS/Linux CI 30s timeouts) that landed
+  between the v0.11.0 cut and HEAD. Note: `bfeffd5
   feat(v0.12.0): stage-3 — GMSSL TLCP backend, OHOS
-  stage-3 docs, OHAudio HAL decision` is **NOT** a v0.12.0
-  delta — it landed on main on 2026-09-22, 17 days before
-  the v0.11.0 cut (`3ae98f3` on 2026-10-09), and is part
-  of the v0.11.0 baseline. The remaining 14 commits are
-  v0.11.x stabilization fixes that landed between the
-  v0.11.0 cut and HEAD; release manager decides the final
-  split at tag time.
+  stage-3 docs, OHAudio HAL decision` is **NOT** a
+  v0.12.0 delta — it landed on main on 2026-09-22, 17
+  days before the v0.11.0 cut (`3ae98f3` on
+  2026-10-09), and is part of the v0.11.0 baseline. After
+  `4e91942`, two follow-ups land on main: `407002d`
+  (PowerShell 5.1 backtick-parsing fix in the Step
+  Summary) and `822cf75` (this commit-count note
+  update). Release manager decides the v0.11.x patch
+  train vs v0.12.0 split for the 14 stabilization fixes
+  at tag time.
 - **4-platform CI**: windows + linux-gcc + macos-clang ✅
   (linux-aarch64 TEMP-DISABLED). v0.12.0 release manager
   verifies the 5 new `test_transport_strategy` subtests +

@@ -403,17 +403,20 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 > explicitly deferred to the v1.x WebTransport / QUIC window
 > — see `docs/plan/v0.11-plan.md` §2.2 and §10.
 
-## [0.12.0] - 2026-10-XX (TBD — in-progress alignment draft)
+## [0.12.0] - 2026-10-13
 
-### Status: Tech Preview (draft)
+### Status: Tech Preview
 
-> **In-progress alignment draft** — this entry is being written in
-> parallel with the v0.12.0 cut. The `[updated 2026-10-12]`
-> markers throughout `docs/plan/v0.12.0-release-notes.md` flag
-> the lines that were added in the alignment pass. The release
-> manager's job at tag time is to clear those markers, confirm
-> the commit count, and pin a release date. **API still
+> **Tagged 2026-10-13.** Platform expansion + GMSSL TLCP DTLS
+> backend (ADR-013) + OpenHarmony aarch64 toolchain (Stage 0) +
+> T-PAL Slice 7 / 7.6 / 8 named use-case transport strategies +
+> Profile schema v1.1 (additive `transport` section). **API still
 > experimental / not for production through v1.0.0.**
+>
+> 37 commits since the v0.11.0 cut (`3ae98f3` on 2026-10-09).
+> See `docs/plan/v0.12.0-release-notes.md` for the full
+> commit split (22 v0.12.0-delta + 14 v0.11.x patch train + 1
+> merge).
 
 ### Highlights
 

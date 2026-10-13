@@ -220,11 +220,13 @@ TEST(MemorySource, StartProduceStopLifecycle) {
     int after_stop = count.load();
     EXPECT_GE(after_stop, 1);
     // After stop, no more frames. We wait generously because stop() merely
-    // signals the producer thread (it joins in the destructor); on a busy CI
-    // runner the producer can be preempted past the nominal 33 ms / 30 fps
-    // cadence and emit one final frame after we read after_stop. 500 ms is
-    // ~15 frame intervals, ample headroom for a real "stop took effect".
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // signals the producer thread (it joins in the destructor); on a busy
+    // CI runner — especially macOS arm64 — the producer can be preempted
+    // past several frame intervals, so we wait 1.5 s (~45 frame intervals
+    // at 30 fps) before asserting the count is stable. Anything more
+    // indicates the producer is ignoring stop_flag_, which would be a
+    // real bug, not a timing artefact.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     EXPECT_EQ(count.load(), after_stop);
 }
 

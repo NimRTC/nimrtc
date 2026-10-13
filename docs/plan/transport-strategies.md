@@ -397,27 +397,25 @@ valid ids.
 
 ## 6. Open questions
 
-1. **`StrategyCrossNetworkPeer` naming** — "cross-network-peer" is
-   descriptive but long. Alternatives: `robust-peer`, `lossy-link`,
-   `mobile-friendly`. Decision deferred to PR2 (Profile v1.1 review).
-2. **Composite `sfu-agent` resolution** — the JSON has both SFU and
-   Agent on the same engine; the loader must construct two
-   `TransportSession`s. Currently the engine has only one
-   `TransportSession` slot. Either (a) the loader emits two engines,
-   (b) the engine grows a second `TransportSession` slot, or (c) the
-   composite is described in a non-`strategy` field that the engine
-   already knows how to read. (c) is the cheapest; deferred to
-   pre-1.0 decision window (v0.11-plan §7).
-3. **Strategy-by-Profile vs Profile-by-strategy** — should the Profile
-   declare its strategy (`transport.strategy = "agent-gateway"`) or
-   should the application declare its strategy and the engine
-   *derives* the Profile? The current doc assumes the former
-   (Profile-led), which matches the v1.0 schema. Pre-1.0 review may
-   revisit (see v0.11-plan §7).
+1. **`StrategyCrossNetworkPeer` naming** — ~~Decision deferred to PR2
+   (Profile v1.1 review).~~ **BDFL decision (2026-10-13): keep
+   `cross-network-peer`.** See §8 review checklist for rationale.
+2. **Composite `sfu-agent` resolution** — ~~deferred to pre-1.0
+   decision window (v0.11-plan §7).~~ **BDFL decision (2026-10-13):
+   out of v0.12.0 scope; v0.12.0 collapses to the higher-priority
+   single strategy with a `WARN` log.** Pre-1.0 review may add a
+   second `TransportSession` slot or a `composite` non-`strategy`
+   field.
+3. **Strategy-by-Profile vs Profile-by-strategy** — the current doc
+   assumes Profile-led (`transport.strategy = "agent-gateway"`),
+   matching the v1.0 schema. Pre-1.0 review (v0.11-plan §7) may
+   revisit; for v0.12.0 the Profile-led model is the only contract
+   and `test_transport_strategy.ProfileV1RoundTrip` enforces it.
 4. **`max_p99_ms` enforcement** — the Selector currently **records**
    the budget but does not enforce it. A v0.13+ cycle may add a
-   `StrategyValidator` that fails the engine open() if the chosen
-   stack's measured p99 exceeds the budget. Out of v0.12.0 scope.
+   `StrategyValidator` that fails the engine `open()` if the chosen
+   stack's measured p99 exceeds the budget. Out of v0.12.0 scope;
+   recorded here so v0.13 release notes can pick it up.
 
 ---
 
@@ -449,11 +447,38 @@ valid ids.
 - [x] No non-ASCII in this document (per `tools/check_head_non_ascii.py`)
 - [x] No conflicts with `transport-selection.md` §5.3 wording
 - [x] No conflicts with v0.11-plan §2.6 Profile table
-- [ ] BDFL review: §6 #1 — strategy naming
-- [ ] BDFL review: §6 #2 — composite `sfu-agent` resolution
-- [ ] BDFL review: §5 — should `strategy_by_name` live in
-      `src/transport/include/...` (current plan) or in
-      `src/modules/assembly/include/...` (next to the loader)?
-- [ ] BDFL review: PR2 will add the actual `transport` JSON field
-      schema in `profile-v1.1.json`; confirm the v1.0→v1.1 migration
-      is purely additive (no field removal / rename).
+- [x] **BDFL review (2026-10-13): §6 #1 — keep `cross-network-peer`**
+      as the canonical id. The JSON key and the `kStrategyCrossNetworkPeer`
+      C++ constant stay. Reason: the v0.11-plan §2.6 profile table already
+      uses "cross-network-peer" in human-readable form; renaming would
+      break docs. `robust-peer` is too vague; `lossy-link` is a property
+      not a use case; `mobile-friendly` overstates the scope (it covers
+      any NAT-traversal / lossy-link scenario, not only mobile).
+- [x] **BDFL review (2026-10-13): §6 #2 — composite `sfu-agent`
+      is out of v0.12.0 scope.** Defer the multi-`TransportSession`
+      engine decision to the pre-1.0 window (v0.11-plan §7). For
+      v0.12.0, JSON Profiles that name a composite should fall back
+      to the higher-priority single-strategy rule (§5.3 priority
+      list, with SFU outranking agent), and the loader should log
+      a `WARN: composite profile collapsed to <strategy>`. This
+      matches the v0.11.0 behavior of falling back to a single
+      transport slot without surfacing an error to the caller.
+- [x] **BDFL review (2026-10-13): §5 — `strategy_by_name` lives
+      in `src/transport/include/nimrtc/transport/transport_strategy.hpp`**
+      (current plan). Reason: the five `kStrategy*` constants are
+      the same translation unit; `assembly::profiles.cpp` is the
+      caller and only needs the symbol, not its definition. The
+      `assembly` module is a higher-level layer; moving the lookup
+      there would create a cycle (transport depends on no module
+      above PAL Slice 2, assembly depends on transport).
+- [x] **BDFL review (2026-10-13): PR2 — v1.0→v1.1 Profile migration
+      is purely additive.** Confirmed against
+      `profiles/schema/profile-v1.1.json`: the new top-level
+      `transport` object is optional; when present, the `strategy`
+      field is the only required sub-field, and all other v1.1
+      fields (`requirements`, `stack_hints`, `fallback_chain`) are
+      optional. v1.0 fields are untouched: same names, same types,
+      same semantics. No field removed, no field renamed. The
+      `test_transport_strategy.ProfileV1RoundTrip` and
+      `ProfileInputBridge.*` subtests assert byte-level backward
+      compatibility for all 9 existing v1.0 JSONs.

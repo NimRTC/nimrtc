@@ -70,7 +70,7 @@ struct TransportRequirements {
 
     /** Force a specific backend id (e.g. "wolfssl"). Empty = any registered
      *  implementation is acceptable. */
-    std::optional<std::string> required_backend;
+    std::optional<std::string> required_backend = std::nullopt;
 
     /** Soft QUIC preference (hint, not requirement). Open question §8 #2
      *  ratified "hint" — see transport-selection.md. */

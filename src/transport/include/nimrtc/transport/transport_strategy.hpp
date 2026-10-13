@@ -187,28 +187,28 @@ inline constexpr std::string_view kStrategyNames[kStrategyCount] = {
 struct ProfileTransportInput {
     /// Strategy id (one of the 5 named use cases). Empty = engine default
     /// (currently `browser-call`).
-    std::string_view strategy;
+    std::string_view strategy = {};
 
     /// Optional p99 budget override for the media plane.
-    std::optional<int> media_max_p99_ms;
+    std::optional<int> media_max_p99_ms = std::nullopt;
 
     /// Whether a side-stack for the control plane is enabled. When false,
     /// the Selector uses the media stack's DC plane (SCTP) for control.
     bool control_enabled = false;
 
     /// Optional p99 budget override for the control plane.
-    std::optional<int> control_max_p99_ms;
+    std::optional<int> control_max_p99_ms = std::nullopt;
 
     /// Optional expected control-message rate (Hz). Used by ARQ impls to
     /// pre-size the send window.
-    std::optional<int> control_freq_hz;
+    std::optional<int> control_freq_hz = std::nullopt;
 
     /// Optional control reliability model. Accepted values:
     /// "reliable_ordered" (default), "partial_reliable", "unreliable".
-    std::string_view control_reliability;
+    std::string_view control_reliability = {};
 
     /// Optional time-to-live for partial_reliable messages (ms).
-    std::optional<int> control_ttl_ms;
+    std::optional<int> control_ttl_ms = std::nullopt;
 };
 
 // ---------------------------------------------------------------------------

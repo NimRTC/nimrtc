@@ -553,6 +553,45 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   v0.12.0 forces DTLS 1.2 on both client and server paths to
   restore the Case D Chrome interop gate. Tracked under
   `docs/plan/dtls_chrome_interop_review.md`.
+- **Three CI stabilization fixes** (post-tag commits `0d90344`,
+  `9c07fc3`, `e06bb98`) that unblock the Linux/macOS build matrix
+  and the macOS arm64 unit-test gate:
+  1. **`tests/test_dtls_srtp_timing.cpp` ports `71xxx → 64xxx`**
+     (`0d90344`): `EngineConfig::local_port_range_begin/end` is
+     `std::uint16_t`. Port values 71000–71699 silently overflowed
+     to 5464–6163 and triggered `-Werror=overflow` (GCC) /
+     `-Werror=constant-conversion` (Clang) on the Linux and macOS
+     build jobs. Windows MSVC did not flag it, which is why this
+     only surfaced in CI on the non-MSVC runners. Move all 6
+     sub-test port blocks (each 100 ports) into the 64xxx range
+     that fits `uint16_t`, preserves the "no overlap with the
+     50xxx/60xxx blocks used by other test binaries" design
+     intent, and document the `uint16_t` constraint in the
+     comment above t06.
+  2. **`src/modules/ice/tests/test_ice.cpp` loopback ports
+     `60xxx → 63xxx`** (`9c07fc3`): the Windows CI runner now
+     reserves port 60000–60099 (Hyper-V or Defender Firewall),
+     returning `WSAEACCES` (errno=10013) on `bind()`. Both
+     `IceTransportLoopback` tests move to 63000–63099 and
+     63200–63299 — well above the OS-dynamic band 52297–59006
+     and the new 60xxx reservation, still below the `uint16_t`
+     ceiling, and clear of the `test_dtls_srtp_timing` 64xxx
+     block.
+  3. **`src/modules/video_source/tests/test_video_source.cpp`
+     post-stop wait `500 ms → 1500 ms`** (`e06bb98`): on the
+     `macos-clang / arm64` CI runner, the `MemoryVideoSource`
+     producer thread can be preempted for >500 ms after
+     `stop()` sets `stop_flag_=true`, so the assertion that
+     `count()` is stable after the wait fails even though the
+     producer does eventually exit cleanly. Bump the wait to
+     1.5 s (~45 frame intervals at 30 fps) — well past any
+     plausible single-preemption window — to absorb the macOS
+     arm64 scheduler quirk without weakening what the test
+     actually verifies (`stop()` causes the producer to stop
+     within a bounded window).
+  Net effect: `ci` run `38350129429` and `ci-e2e` run
+  `38350129334` both green on the same SHA (`e06bb98`),
+  restoring the full 3-platform build+test matrix.
 
 ### What's NOT in v0.12.0 (explicitly deferred)
 

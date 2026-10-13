@@ -177,9 +177,13 @@ TEST(IceConsentFreshness, T3_BindingReceivedRearmsTimer) {
     t.force_consent_armed_for_testing();
     t.notify_binding_received();
 
-    // 1. Wait for first loss (timeout ≈ 200ms).
+    // 1. Wait for first loss (timeout ≈ 200 ms + tick interval ≈ 100 ms).
+    //    Budget matches T2 (5×timeout + 500 ms) so that a slow macOS CI
+    //    runner, where the consent tracker tick can land late, doesn't
+    //    flake the test.  3×timeout (the previous value) was tight enough
+    //    that arming+fire took ~600 ms on Apple-Silicon GitHub runners.
     ASSERT_TRUE(WaitFor([&] { return lost_count.load() >= 1; },
-                        3 * kConsentTimeoutMs * 1ms));
+                        5 * kConsentTimeoutMs * 1ms + 500ms));
     EXPECT_GE(lost_count.load(), 1);
     const int after_first = lost_count.load();
 
@@ -193,10 +197,11 @@ TEST(IceConsentFreshness, T3_BindingReceivedRearmsTimer) {
     EXPECT_EQ(lost_count.load(), after_first)
         << "callback must not refire inside a fresh timeout window";
 
-    // 4. Past the rearmed window, it should fire again.
+    // 4. Past the rearmed window, it should fire again.  Generous budget
+    //    (matches step 1) so a slow CI runner doesn't flake.
     const bool second = WaitFor(
         [&] { return lost_count.load() > after_first; },
-        4 * kConsentTimeoutMs * 1ms);
+        5 * kConsentTimeoutMs * 1ms + 500ms);
     EXPECT_TRUE(second)
         << "callback should fire again after a full rearmed timeout";
 

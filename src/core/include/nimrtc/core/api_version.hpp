@@ -23,7 +23,7 @@
  *
  * 2. **Stability classification markers** -- `NIMRTC_API_STABLE`,
  *    `NIMRTC_API_UNSTABLE`, and `NIMRTC_API_DEPRECATED(msg)`.  These are
- *    applied to every public symbol in `src/**​/include/nimrtc/**​/*.hpp` as
+ *    applied to every public symbol in `src/<mod>/include/nimrtc/<mod>/<name>.hpp` as
  *    part of the v1.0.0-alpha.1 public-header classification sweep
  *    (PR #3).  The sweep is mechanical: it tags symbols without changing
  *    compilation semantics.
@@ -52,7 +52,7 @@
  *
  * ## Public API freeze commitment
  *
- * Every symbol under `src/**​/include/nimrtc/**​/*.hpp` carries a
+ * Every symbol under `src/<mod>/include/nimrtc/<mod>/<name>.hpp` carries a
  * stability classification.  The policy is documented in
  * `docs/adr/ADR-015-api-stability-policy.md`.
  *

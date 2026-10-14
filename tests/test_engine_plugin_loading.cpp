@@ -469,6 +469,62 @@ TEST_F(EnginePluginLoading, slice75_webrtc_classic_stack_create_and_lifecycle) {
     EXPECT_NO_THROW(stack->close());
 }
 
+// ===========================================================================
+// v0.13.0 — dtls_weak() must auto-expire after close()
+//
+// Regression test for the v0.12.0 P0 UAF class:
+//   - Capture a weak_ptr via dtls_weak() while the stack is alive.
+//   - Verify .lock() returns a valid shared_ptr (session reachable).
+//   - Close the stack.
+//   - Verify .lock() now returns nullptr (session auto-destroyed via
+//     the stack's internal shared_ptr; the engine's weak_ptr expired
+//     without a UAF).
+//
+// Without this guarantee, the engine's `Impl::dtls weak_ptr` would
+// silently hold a "stuck non-null" weak_ptr that .lock()'s into
+// freed memory — exactly the v0.12.0 P0 bug class.  v0.13.0
+// weak_ptr migration eliminates it; this test guards the invariant.
+// ===========================================================================
+TEST_F(EnginePluginLoading, v013_dtls_weak_expires_after_close) {
+    const auto* factory =
+        PluginRegistry::instance().get_transport_stack("webrtc-classic");
+    ASSERT_NE(factory, nullptr)
+        << "PAL Slice 7.5: factory 'webrtc-classic' not found";
+
+    nimrtc::StackConfig cfg;
+    cfg.ice_id  = "ice";
+    cfg.dtls_id = "wolfssl";
+    cfg.rtp_id  = "webrtc";
+    cfg.sctp_id = "stub";
+
+    std::unique_ptr<nimrtc::ITransportStack> stack{factory->create(cfg)};
+    ASSERT_NE(stack, nullptr);
+
+    // Capture the weak_ptr BEFORE close.
+    std::weak_ptr<nimrtc::dtls::IDtlsSession> weak = stack->dtls_weak();
+
+    // While the stack is alive, the weak_ptr must lock to a valid session.
+    {
+        auto locked = weak.lock();
+        EXPECT_NE(locked, nullptr)
+            << "v0.13.0: dtls_weak().lock() must be non-null while the stack is alive";
+    }
+
+    EXPECT_NO_THROW(stack->start());
+    EXPECT_NO_THROW(stack->close());
+
+    // After close, the weak_ptr MUST be expired — the engine's
+    // weak_ptr.lock() check in drain_dtls() / on_transport_recv() /
+    // maybe_install_srtp_keys() depends on this invariant.
+    EXPECT_TRUE(weak.expired())
+        << "v0.13.0: dtls_weak() must auto-expire after close() — "
+           "if this fails, the engine's post-close UAF defence is broken";
+
+    auto locked_after = weak.lock();
+    EXPECT_EQ(locked_after, nullptr)
+        << "v0.13.0: post-close .lock() must return nullptr (no UAF)";
+}
+
 TEST_F(EnginePluginLoading, slice75_idempotent_register_does_not_duplicate) {
     // Call register_all_default_plugins() three times (the Slice 2
     // idempotency contract).  Each of the four Slice 8 typed slots

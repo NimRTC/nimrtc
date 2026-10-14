@@ -5,6 +5,139 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - Unreleased
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport Slice 7.6 PR3 — end-to-end wiring of the 5 transport
+  strategies**. The CapabilitySelector's §5.3-rule-derived factory
+  pair is now consumed by `NimRTCEngine::init_modules_once()` to
+  build a `TransportSession` whose `media_stack` and (optionally)
+  `control_stack` are constructed from the matching
+  `ITransportStackFactory` registered in
+  `core::PluginRegistry::get_transport_stack()`. Pre-PR3 the engine
+  built ICE / DTLS / RTP / SCTP via separate `reg.get_*()` calls and
+  stitched them together by hand; PR3 replaces that with a
+  composition-root flow that lives in the `WebRtcClassicStackFactory`
+  and `RawUdpArqStackFactory` instead.
+  - `NimRTCEngine::ice_t_` and `Impl::dtls` are now **raw
+    non-owning pointers** into `Impl::session.media_stack`; the
+    `Impl::session` member owns the actual stack instances via
+    `unique_ptr<ITransportStack>`. Lifetime is safe because
+    `~NimRTCEngine` runs `close()` (which calls
+    `session.close()`) BEFORE `delete impl_` tears down the
+    session's owned resources.
+  - Rule 2 (`teleop-ultra-low-latency`) gets a dedicated
+    no-DTLS-by-design branch: `Impl::dtls` is null, the engine
+    skips `dtls->open()`, and the audio pipeline falls back to
+    null-encoder. A warning is logged so the degraded mode is
+    visible in the trace.
+  - The 4 browser-interop strategies (`browser-call`,
+    `agent-gateway`, `sfu-relay`, `cross-network-peer`) use
+    `webrtc-classic` for the media stack; missing DTLS factory
+    (e.g. user typo on `cfg.dtls_name`) hard-fails with
+    `kEngineInternal` (the same code the pre-PR3 path produced).
+  - The Selector-resolved pair is now used directly: the legacy
+    "fall back to webrtc-classic when trace.media_factory_id is
+    empty" path is preserved for unknown strategies
+    (`webrtc-quic-call`, deferred to v1.x).
+
+### Added
+
+- **`nimrtc::transport::make_transport_instance(media_factory_id,
+  control_factory_id, cfg)`** — canonical engine-facing entry
+  point for the v0.12.0 transport-strategy layer. Translates the
+  Selector's resolved factory ids into a fully-constructed
+  `TransportSession`. Lives in `transport_plugin.cpp` for future
+  consumers (test harnesses, webrtc-quic stack factory); the
+  engine inlines the equivalent lookup so its existing
+  `nimrtc::transport` PRIVATE link is sufficient.
+- **6 new subtests in `test_engine_plugin_loading.cpp`** for the
+  5 strategies + unknown-strategy failure mode:
+  - `slice76_strategy_default_is_browser_call`
+  - `slice76_strategy_agent_gateway` (webrtc-classic + raw-udp-arq control)
+  - `slice76_strategy_teleop_ultra_low_latency` (raw-udp-arq media + raw-udp-arq control)
+  - `slice76_strategy_sfu_relay` (webrtc-classic, no control)
+  - `slice76_strategy_cross_network_peer` (webrtc-classic, no control)
+  - `slice76_unknown_strategy_fails_open` (kEngineInternal guard)
+  - `slice76_accessors_empty_before_open` (diagnostic surface contract)
+
+### Changed
+
+- **`NimRTCEngine::Impl::dtls`** changed from
+  `unique_ptr<nimrtc::dtls::IDtlsSession>` to a raw non-owning
+  pointer. The DTLS session is now owned by
+  `WebRtcClassicStackFactory::create()` inside the media stack.
+  See `Impl::dtls` field comment for lifetime rationale.
+- **`NimRTCEngine::ice_t_`** changed from
+  `unique_ptr<plugins::IICETransport>` to a raw non-owning
+  pointer. The ICE transport is now owned by the media stack.
+- **`NimRTCEngine::close()`** now calls `Impl::session.close()`
+  (which tears down the media and control stacks in order)
+  before nulling `ice_t_` and `Impl::dtls`.
+- **`init_modules_once()` transport section** removed the
+  pre-PR3 manual ICE + DTLS construction path; the section now
+  resolves the §5.3 factory pair from the Selector, calls
+  `get_transport_stack()` on each id, and builds the session.
+- **PAL Slice 1.5 — `nimrtc::engine::pal::make_plugin<IPlugin,
+  Config, Factory>` template** added at
+  `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`. The
+  helper consolidates the 5-step "factory lookup → create →
+  null-check → open → report" dance that was copy-pasted across
+  9 plugin categories in `engine.cpp` (5 video plugins + 2 BWE /
+  Scheduler + audio3a + codec). Per-block size dropped from
+  ~20 lines to ~7 lines with no behaviour change.
+  - The helper takes a `PluginFailureMode` enum (Error / Warn /
+    Silent) so each plugin category keeps its original
+    failure-reporting policy (e.g. video → on_error_, BWE →
+    log-warn, audio3a → silent fallback, codec → silent
+    fallback).
+  - A `post_create` hook is invoked between `create()` and
+    `open()` to cover the audio3a case where `set_callbacks()`
+    must precede `open()`.
+  - A compile-time branch (`if constexpr`) handles the
+    no-config case (`IAudio3AFactory::create()` takes no
+    arguments) — the caller passes `nullptr` as the config
+    argument.
+  - `init_video_plugins()` lost the `auto& reg = ...` capture
+    and the `reg.get_video_*` calls; the registry lookups now
+    happen inline at each `pal::make_plugin` call site.
+- **`NimRTCEngine::Impl::datachannel_transport_cookie`**
+  retyped from `void*` to `nimrtc::dtls::IDtlsSession*` (non-
+  owning). The v1.x WebTransport redesign will replace the
+  field with a tagged union over `{IDtlsSession*,
+  IWebTransportSession*}`; until then, the typed pointer
+  removes the unsafe `static_cast<void*>` round-trip.
+- **Meta-comments removed** from `core/registry.hpp` and three
+  production headers (`engine.hpp`, `engine.cpp`,
+  `raw_udp_datagram.hpp`). Production code no longer mentions
+  per-subagent ownership boundaries (those live in PR
+  descriptions / changelogs).
+
+### Notes
+
+- No public API change — `nimrtc/engine/engine.hpp` keeps the same
+  `transport_strategy_name()` / `transport_strategy_session()`
+  accessors; existing callers see no signature change.
+- 465/465 ctest cases pass on `Debug` configuration
+  (Windows MSVC, all 4 platform CI runners). The 6 new Slice 7.6
+  PR3 subtests are part of `test_engine_plugin_loading` (the
+  e2e engine test fixture).
+- 5 transport strategies are wired end-to-end but
+  `teleop-ultra-low-latency` (Rule 2) and `webrtc-quic-call`
+  (Rule 3) are explicitly tagged as v0.12.0-tech-preview:
+  - Rule 2 (raw-udp-arq media) — DTLS intentionally absent;
+    audio falls back to null-encoder; ICE/connectivity work
+    via raw-UDP ARQ. Production-hardening (reliable media over
+    the ARQ plane, FEC integration) lands in v0.13+.
+  - Rule 3 (`webrtc-quic-call`) — Selector returns empty;
+    engine falls back to `webrtc-classic` so a v0.12.0 caller
+    can opt in early without breaking. Real webrtc-quic stack
+    lands in v1.x.
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.12.0.
+
 ## [0.10.2] - 2026-09-17
 
 ### Status: Tech Preview
@@ -390,6 +523,52 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 
 ---
 
+## [1.0.0-alpha.1] - 2026-10-13
+
+### Status: Tech Preview
+
+> **First pre-release of the v1.0.0 cycle.** Banner remains
+> "Tech Preview" — the public API is **not yet frozen**. The
+> "experimental through v1.0.0" banner is dropped at the
+> v1.0.0 final tag, not at pre-releases.
+
+### Added
+
+- **`NIMRTC_API_VERSION` macros** (v1.0.0-alpha.1 / `docs/plan/v1.0-plan.md`
+  §2.1 P0 item API-VERSION): `NIMRTC_API_VERSION_MAJOR/MINOR/PATCH`,
+  `NIMRTC_API_VERSION_PRE_RELEASE`, `NIMRTC_API_VERSION_STRING` (combined
+  "1.0.0"). The matching `nimrtc::core::api_version::kMajor/kMinor/kPatch/
+  String/PreRelease` constants are exposed for runtime inspection.
+  No public API change to any existing symbol.
+
+- **`NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` markers**: visual
+  documentation macros applied to public symbols. Empty expansion
+  by default; no compile-time effect. The public header classification
+  sweep (alpha.1 PR #3) applies them without changing compilation
+  semantics.
+
+- **`NIMRTC_API_DEPRECATED(msg)` macro**: cross-compiler deprecation
+  attribute. Expands to `[[deprecated(msg)]]` (C++14+),
+  `__attribute__((deprecated(msg)))` (GCC/Clang), or
+  `__declspec(deprecated(msg))` (MSVC). Emits the standard
+  compiler warning on caller use.
+
+- **`tests/test_api_version.cpp`** (5/5 subtests): verifies the
+  macros + namespace constants are well-formed. Compile-time
+  smoke for `NIMRTC_API_STABLE/UNSTABLE/DEPRECATED` expansion.
+
+### Notes
+
+- No public API change. All existing v0.12.0 callers continue
+  to compile and link without modification.
+- v1.0.0 pre-release sequence per `docs/plan/v1.0-plan.md` §12.
+  Next pre-release: v1.0.0-alpha.2 (WebTransport seam).
+- Banner remains "Tech Preview" through v1.0.0-beta.x. The
+  "experimental through v1.0.0" line is dropped only at the
+  v1.0.0 final tag.
+
+---
+
 ## [Unreleased]
 
 > **No unreleased changes yet.** The next planned release is
@@ -402,6 +581,32 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 > data plane re-design (DC-1 / DC-2 / TPAL-5) remains
 > explicitly deferred to the v1.x WebTransport / QUIC window
 > — see `docs/plan/v0.11-plan.md` §2.2 and §10.
+
+> **v1.0 预发布版本序列已开启** (`docs/plan/v1.0-plan.md` §12).
+> Pre-release version sequence:
+>   - **v1.0.0-alpha.1** — API stability foundation
+>     (4-6 weeks): `NIMRTC_API_VERSION` + STABLE/UNSTABLE/DEPRECATED
+>     macros + ADR-015 stability policy + public header
+>     classification sweep.
+>   - **v1.0.0-alpha.2** — WebTransport seam (4-6 weeks):
+>     ADR-014 msquic decision + `IWebTransportSession`
+>     interface + `core::PluginRegistry::register_web_transport()`
+>     typed slot.
+>   - **v1.0.0-beta.1** — **DC-1 land** (8-10 weeks): msquic
+>     integration + `WebTransportDataChannel` impl + Chrome e2e
+>     Case E. The v1.0.0 headline gate.
+>   - **v1.0.0-beta.2** — DC-2 (4-6 weeks): L1 strict-priority
+>     across the DC plane.
+>   - **v1.0.0-rc.1** (conditional on §7 decision) —
+>     SFU-1 + DC-3 + BENCH-1 (6-8 weeks). If §7 = NO, skip
+>     directly to v1.0.0 (defer to v1.1.0).
+>   - **v1.0.0** — Stable (2-4 weeks): banner flip + first
+>     GitHub Release. The "experimental through v1.0.0" banner
+>     drops at this tag.
+>
+> **Total estimated timeline**: 30-40 weeks (§7 = YES) or 24-32
+> weeks (§7 = NO). See `docs/plan/v1.0-plan.md` §12 for the
+> full pre-release split with per-version DoD gates.
 
 ## [0.12.0] - 2026-10-13
 

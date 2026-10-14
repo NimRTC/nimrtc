@@ -104,6 +104,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `init_video_plugins()` lost the `auto& reg = ...` capture
     and the `reg.get_video_*` calls; the registry lookups now
     happen inline at each `pal::make_plugin` call site.
+- **PAL Slice 1.5 upgrade — `pal::make_plugin` now has a C++20
+  `auto Resolver` overload and a `MakePluginOpts` named-arguments
+  struct**. The 4 positional `err_open_failed` / `err_missing` /
+  `open_fail_mode` / `missing_mode` arguments (and the trailing
+  `on_error`) are folded into a single `MakePluginOpts` struct
+  consumed by designated initializers at the call site. The new
+  template overload
+  `make_plugin<auto Resolver, IPlugin, Config>(id, slot, cfg, opts, post_create)`
+  takes a resolver function pointer (e.g. `&pal::resolve_bwe`)
+  and deduces the factory type from
+  `std::invoke_result_t<Resolver, string_view>`; the
+  `reg.get_X(id)` lookup now happens inside the helper. All 9
+  `engine.cpp` plugin-load call sites (BWE / Scheduler / Audio3A
+  / Codec / Video Sink / Source / Receiver / Sender / Codec)
+  migrated — per-call-site arg count drops from 9-10 positional
+  to 5 positional + 1 struct. 6 new `pal::resolve_*` forwarders
+  added to `engine_plugin_resolver.hpp` (bwe, scheduler,
+  video_sink, video_source, video_receiver, video_sender) so the
+  resolver header is now symmetric across all 9 plugin
+  categories used by the engine. Behaviour-preserving: 27/27
+  `test_engine_plugin_loading`, 15/15 `test_audio3a_tap`, 13/13
+  `test_video_source` PASS on Windows MSVC. The
+  `reg.get_transport_stack` calls in `init_transport_session()`
+  are intentionally left as `reg.get_*()` (not migrated) because
+  they are part of the v0.12.0 Slice 7.6 PR3 transport-strategy
+  wiring, not the per-plugin factory loading pattern that PAL
+  Slice 1 covers.
 - **`NimRTCEngine::Impl::datachannel_transport_cookie`**
   retyped from `void*` to `nimrtc::dtls::IDtlsSession*` (non-
   owning). The v1.x WebTransport redesign will replace the
@@ -115,6 +142,35 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `raw_udp_datagram.hpp`). Production code no longer mentions
   per-subagent ownership boundaries (those live in PR
   descriptions / changelogs).
+
+### Fixed
+
+- **Use-after-free guard in `NimRTCEngine::on_transport_recv()`**
+  (`src/engine/src/engine.cpp`, around line 2286). Added
+  `if (!is_open()) return;` at function entry. The ICE recv
+  callback runs on the transport thread and can race with
+  `close()`: a buffered packet may arrive after `close()` has
+  torn down `Impl::dtls` (a raw non-owning pointer into
+  `session.media_stack`), causing a use-after-free in
+  `impl_->dtls->state()` / `feed_inbound()`. Mirrors the existing
+  `send_audio()` pattern (line 2119). **Severity: Critical**
+  (per `docs/plan/p1-uaf-dtls-investigation.md`).
+- **Use-after-free guard in `NimRTCEngine::process_remote_sdp()`**
+  (`src/engine/src/engine.cpp`, around line 1699). Added
+  `if (state_ != State::kOpen) return std::nullopt;` at function
+  entry. Same race window: a delayed signaling message after
+  `close()` would deref `impl_->dtls->set_role()` /
+  `set_peer_fingerprint()`. Mirrors the existing DataChannel
+  guard pattern (line 1341). **Severity: High**.
+- **Note:** `NimRTCEngine::tick()` (line 2188) already had the
+  `is_open()` guard and required no change. The
+  `Impl::datachannel_transport_cookie` lifetime (Medium risk)
+  is deferred to the v1.x wiring PR (per P1 investigation).
+- **Follow-up:** `Impl::dtls` migration from raw pointer to
+  `std::weak_ptr<IDtlsSession>` is **P1 for v0.13.0** (not
+  v0.12.0). The two `is_open()` / `state_` guards above close
+  the known Critical and High paths; the `weak_ptr` migration
+  eliminates the entire UAF class.
 
 ### Notes
 
@@ -137,6 +193,107 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     can opt in early without breaking. Real webrtc-quic stack
     lands in v1.x.
 - 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.12.0.
+
+## [0.13.0] - Unreleased
+
+### Status: Tech Preview
+
+### Highlights
+
+- **DTLS UAF class eliminated** — `ITransportStack::dtls_weak()` lands
+  alongside the existing `dtls()` reference getter; the engine
+  migrates `Impl::dtls` (and `Impl::datachannel_transport_cookie`)
+  from raw pointer to `std::weak_ptr<IDtlsSession>`. After
+  `close()` the weak_ptr auto-expires; `.lock()` returns
+  `nullptr` and every engine call site short-circuits without
+  dereferencing a dangling `IDtlsSession`. The v0.12.0
+  `is_open()` P0 guards become a defence-in-depth second layer
+  rather than the only line of defence.
+
+### Changed
+
+- **`ITransportStack::dtls_weak()` (new method)** in
+  `src/transport/include/nimrtc/transport/transport_stack.hpp`.
+  Returns `std::weak_ptr<dtls::IDtlsSession>`. Added to the
+  interface as a non-breaking change; the existing
+  `dtls()` reference getter is preserved with a `[[deprecated]]`
+  comment (removal scheduled for v0.15.0 per the
+  ADR-001 versioning policy).
+- **`WebRtcClassicStack::dtls_` (member type changed)** in
+  `src/transport/src/webrtc_classic_stack.cpp`. Changed from
+  `std::unique_ptr<dtls::IDtlsSession>` to
+  `std::shared_ptr<dtls::IDtlsSession>` so the stack can hand
+  out a `weak_ptr` that outlives the stack's own reference.
+  `set_dtls()` still accepts a `unique_ptr` (the implicit
+  `unique_ptr → shared_ptr` move ctor is used internally).
+- **`RawUdpArqStack::dtls_weak()`** in
+  `src/transport/include/nimrtc/transport/raw_udp_arq_stack.hpp`.
+  Returns an empty `weak_ptr` because the control stack does
+  not own a DTLS session (the engine only dereferences the
+  media stack's dtls).
+- **`Impl::dtls` (engine)** in
+  `src/engine/src/engine.cpp`. Changed from
+  `nimrtc::dtls::IDtlsSession*` to
+  `std::weak_ptr<nimrtc::dtls::IDtlsSession>`. The capture
+  site (`init_modules_once()`) now reads
+  `impl_->dtls = impl_->session.media_stack->dtls_weak();`
+  instead of capturing a raw pointer. All 14 use sites
+  (one `if`-lock per function, holding a local
+  `shared_ptr` for the lifetime of each function body)
+  use the `if (auto d = impl_->dtls.lock()) { d->X(); }`
+  pattern. The `close()` reset is implicit
+  (weak_ptr auto-expires).
+- **`Impl::datachannel_transport_cookie` (engine)** in
+  `src/engine/src/engine.cpp`. Same change: raw pointer →
+  `weak_ptr`. The P1 UAF investigation's
+  Medium-rated risk for this field is now resolved
+  (it was previously listed as deferred-to-v1.x in
+  `docs/plan/p1-uaf-dtls-investigation.md`).
+- **Comments** in `engine.cpp` and the `Impl` field
+  doc-blocks updated to describe the new lifetime model.
+
+### Added
+
+- **Regression test `v013_dtls_weak_expires_after_close`**
+  in `tests/test_engine_plugin_loading.cpp`. Verifies
+  the core v0.13.0 invariant:
+    1. `stack->dtls_weak()` returns a non-expired
+       `weak_ptr` while the stack is alive.
+    2. After `stack->close()`, the same `weak_ptr` is
+       expired; `weak.lock()` returns `nullptr`.
+
+  Without this guarantee, the engine's `Impl::dtls
+  weak_ptr` would silently hold a "stuck non-null"
+  `weak_ptr` that `.lock()`'s into freed memory —
+  exactly the v0.12.0 P0 UAF bug class. v0.13.0
+  eliminates it; this test guards the invariant.
+
+### Notes
+
+- **Public API is unchanged.** `nimrtc/engine/engine.hpp`
+  keeps the same `dtls_state()` / `dtls_connected()`
+  signatures. The `transport_stack.hpp` change is
+  additive (new method) + deprecation comment on the
+  existing getter. External consumers that bypass
+  `ITransportStack` and reach into concrete backends
+  directly are not affected.
+- **No new build dependencies.** `<memory>` was already
+  transitively available in `engine.cpp`; the explicit
+  `#include <memory>` was added for clarity.
+- **P0 `is_open()` guards from v0.12.0 stay in place**
+  as a second line of defence. Together with the
+  `weak_ptr` they close the entire UAF class:
+    - `is_open()` blocks the engine-thread API surface
+    - `weak_ptr.lock()` blocks the transport-thread
+      async surface (ICE recv, DTLS tick)
+  - Either alone is sufficient; both together is
+    defence-in-depth.
+- **Follow-up (v1.x)**: the
+  `Impl::datachannel_transport_cookie` field is still
+  informational — the actual data-channel transport
+  wiring lands in the v1.x WebTransport / QUIC
+  redesign (per `docs/plan/v0.11-plan.md` §2.2
+  DC-1 / DC-2 / TPAL-5).
 
 ## [0.10.2] - 2026-09-17
 

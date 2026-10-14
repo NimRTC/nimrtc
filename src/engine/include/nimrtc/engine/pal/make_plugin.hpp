@@ -8,7 +8,7 @@
  * collapsed `reg.get_<category>(id)` into `pal::resolve_<category>(id)`;
  * Slice 1.5 collapses the surrounding 4-step boilerplate (create / null
  * check / open / report) into a single template call. The result is
- * a per-plugin-block drop from ~20 lines to ~7 lines, with no loss of
+ * a per-plugin-block drop from ~9-10 lines to ~5 lines, with no loss of
  * behaviour.
  *
  * ## Why a template (not a virtual `IPluginFactory`)
@@ -21,12 +21,25 @@
  * 5-step dance is effectively doing inline; the template just makes
  * the specialisation declarative.
  *
+ * ## Why two overloads (low-level + resolver-aware)
+ *
+ * The low-level overload (`make_plugin<IPlugin, Config, Factory>(factory, ...)`)
+ * takes the factory pointer as an argument. The resolver-aware overload
+ * (`make_plugin<auto Resolver, IPlugin, Config>(id, ...)`) takes a
+ * resolver function pointer (e.g. `&pal::resolve_bwe`) and deduces the
+ * factory type from `std::invoke_result_t<Resolver, std::string_view>`.
+ * The resolver-aware form is the common case at the call site (every
+ * engine.cpp call site resolves through `pal::resolve_*` or
+ * `reg.get_*`); the low-level form remains for cases where the factory
+ * is already in hand (e.g. a test that constructs one in-line).
+ *
  * ## Failure modes
  *
  * Each of the two failure paths (factory missing, open failed) is
- * independently configurable via `PluginFailureMode`:
+ * independently configurable via `PluginFailureMode` (passed in the
+ * `MakePluginOpts` struct):
  *
- *   - `Error`  → fires the engine's `on_error_` callback with the
+ *   - `Error`  → fires the engine's `on_error` callback with the
  *                supplied code (e.g. `kVideoSinkOpenFailed`).
  *   - `Warn`   → logs a warning via `core::log::Logger`.
  *   - `Silent` → does nothing (the caller handles the consequence,
@@ -34,7 +47,8 @@
  *
  * The 9 plugin categories each map to a different combination — see
  * `engine.cpp` for the per-call-site mapping. The helper does not
- * hard-code any of those policies; the caller passes them in.
+ * hard-code any of those policies; the caller passes them in via
+ * `MakePluginOpts`.
  *
  * @see docs/adr/ADR-009-pal-slice-1.md
  */
@@ -70,14 +84,58 @@ enum class NIMRTC_API_STABLE PluginFailureMode : std::uint8_t {
 };
 
 /**
+ * @brief Named-arguments struct for `make_plugin`.
+ *
+ * Replaces the four positional `err_open_failed` / `err_missing` /
+ * `open_fail_mode` / `missing_mode` / `on_error` arguments that the
+ * pre-Slice-1.5 helper took. Designated initializers at the call
+ * site make the per-category policy visible at a glance:
+ *
+ * @code
+ *   pal::make_plugin<&pal::resolve_bwe>(
+ *       config_.bwe_name, bwe_, config_.bwe_config,
+ *       {.err_open_failed = core::kEngineInternal,
+ *        .err_missing     = core::kEngineInternal,
+ *        .open_fail_mode  = pal::PluginFailureMode::Warn,
+ *        .missing_mode    = pal::PluginFailureMode::Warn,
+ *        .on_error        = on_error_});
+ * @endcode
+ *
+ * `err_open_failed` and `err_missing` are only consulted when
+ * `open_fail_mode == Error` and `missing_mode == Error` respectively.
+ * They are dead when the corresponding mode is Warn or Silent; the
+ * caller is free to leave them at the default `0` in those cases.
+ */
+struct NIMRTC_API_STABLE MakePluginOpts {
+    /** Status code passed to `on_error` when `slot->open()` fails.
+     *  Only consulted when `open_fail_mode == Error`. */
+    std::uint32_t err_open_failed = 0;
+
+    /** Status code passed to `on_error` when the factory is missing or
+     *  `create()` returned null. Only consulted when
+     *  `missing_mode == Error`. */
+    std::uint32_t err_missing = 0;
+
+    /** How to report an `open()` failure. */
+    PluginFailureMode open_fail_mode = PluginFailureMode::Error;
+
+    /** How to report a factory-missing or create-returned-null failure. */
+    PluginFailureMode missing_mode = PluginFailureMode::Error;
+
+    /** Engine error callback. May be empty; only consulted when a
+     *  failure mode == Error. */
+    EngineErrorCallback on_error = nullptr;
+};
+
+/**
  * @brief Create and open a plugin from a (already-resolved) factory pointer.
  *
  * The 5-step dance:
- *   1. factory == nullptr  →  report via `missing_mode`  →  return false.
+ *   1. factory == nullptr  →  report via `opts.missing_mode`  →  return false.
  *   2. slot.reset( factory->create( std::forward<Config>(config) ) ).
- *   3. slot == nullptr     →  report via `missing_mode`  →  return false.
+ *   3. slot == nullptr     →  report via `opts.missing_mode`  →  return false.
  *   4. post_create(*slot)  (only if the post_create hook is non-null).
- *   5. slot->open() != kOk →  report via `open_fail_mode` + slot.reset()
+ *   5. slot->open() != kOk →  report via `opts.open_fail_mode` + slot.reset()
  *                            →  return false.
  *
  * On success returns `true` and leaves the plugin in `slot` (open()ed).
@@ -86,7 +144,10 @@ enum class NIMRTC_API_STABLE PluginFailureMode : std::uint8_t {
  * @tparam IPlugin     The plugin interface. Must derive from
  *                     `plugins::IPlugin` (for the `open()` call).
  * @tparam Config      The factory's config type. Forwarded to
- *                     `factory->create()` by perfect forwarding.
+ *                     `factory->create()` by perfect forwarding. Pass
+ *                     `nullptr` (decuced as `std::nullptr_t`) for
+ *                     factories that take no config
+ *                     (e.g. `IAudio3AFactory::create()`).
  * @tparam Factory     The factory type. Must have a
  *                     `IPlugin* create(ConfigT)` member.
  * @tparam PostCreate  Optional hook type, default `std::nullptr_t`.
@@ -101,15 +162,8 @@ enum class NIMRTC_API_STABLE PluginFailureMode : std::uint8_t {
  * @param slot              Engine-owned `std::unique_ptr<IPlugin>`.
  *                          Set on success; cleared on failure.
  * @param config            Config forwarded to `factory->create()`.
- * @param err_open_failed   Code to pass to `on_error` if open() fails
- *                          (only used when `open_fail_mode == Error`).
- * @param err_missing       Code to pass to `on_error` if factory is
- *                          null or `create` returned null (only used
- *                          when `missing_mode == Error`).
- * @param open_fail_mode    How to report an open() failure.
- * @param missing_mode      How to report a factory-missing failure.
- * @param on_error          Engine error callback. May be empty; only
- *                          consulted when a failure mode == Error.
+ * @param opts              Named-arguments struct: error codes,
+ *                          failure modes, on_error callback.
  * @param post_create       Optional callable invoked between create()
  *                          and open(). Default = no-op.
  *
@@ -122,11 +176,7 @@ template <typename IPlugin, typename Config, typename Factory,
     std::string_view plugin_id,
     std::unique_ptr<IPlugin>& slot,
     Config&& config,
-    std::uint32_t err_open_failed,
-    std::uint32_t err_missing,
-    PluginFailureMode open_fail_mode,
-    PluginFailureMode missing_mode,
-    EngineErrorCallback on_error = nullptr,
+    const MakePluginOpts& opts,
     PostCreate&& post_create = nullptr) noexcept {
 
     // Helper: emit a "missing" diagnostic per the chosen mode.
@@ -134,9 +184,9 @@ template <typename IPlugin, typename Config, typename Factory,
         const std::string msg = std::string{"engine: '"}
             + std::string{plugin_id}
             + "' plugin factory not registered or returned null";
-        switch (missing_mode) {
+        switch (opts.missing_mode) {
             case PluginFailureMode::Error:
-                if (on_error) on_error(err_missing, msg);
+                if (opts.on_error) opts.on_error(opts.err_missing, msg);
                 break;
             case PluginFailureMode::Warn:
                 nimrtc::core::log::Logger::instance().warn(msg);
@@ -150,9 +200,9 @@ template <typename IPlugin, typename Config, typename Factory,
         const std::string msg = std::string{"engine: '"}
             + std::string{plugin_id}
             + "' plugin open failed";
-        switch (open_fail_mode) {
+        switch (opts.open_fail_mode) {
             case PluginFailureMode::Error:
-                if (on_error) on_error(err_open_failed, msg);
+                if (opts.on_error) opts.on_error(opts.err_open_failed, msg);
                 break;
             case PluginFailureMode::Warn:
                 nimrtc::core::log::Logger::instance().warn(msg);
@@ -209,6 +259,50 @@ template <typename IPlugin, typename Config, typename Factory,
     }
 
     return true;
+}
+
+/**
+ * @brief Resolver-aware overload of `make_plugin`.
+ *
+ * Takes a resolver function pointer (e.g. `&pal::resolve_bwe`) and
+ * deduces the factory type from its return. The factory lookup happens
+ * inside the helper, removing the `reg.get_X(id)` / `pal::resolve_X(id)`
+ * boilerplate from the call site.
+ *
+ * @tparam Resolver  Function pointer of shape
+ *                   `const Factory* (*)(std::string_view) noexcept`.
+ *                   Usually `&pal::resolve_<category>`.
+ * @tparam IPlugin   The plugin interface (the slot's element type).
+ * @tparam Config    Factory config type. Pass `nullptr` for
+ *                   config-less factories.
+ * @tparam PostCreate  Optional post-create hook (audio3a use case).
+ *
+ * @param plugin_id   Plugin id (also the resolver key).
+ * @param slot        Engine-owned `std::unique_ptr<IPlugin>`.
+ * @param config      Config forwarded to `factory->create()`.
+ * @param opts        Named-arguments struct.
+ * @param post_create Optional hook between create() and open().
+ *
+ * @return true iff a plugin was created AND opened successfully.
+ */
+template <auto Resolver, typename IPlugin, typename Config,
+          typename PostCreate = std::nullptr_t>
+[[nodiscard]] NIMRTC_API_STABLE bool make_plugin(
+    std::string_view plugin_id,
+    std::unique_ptr<IPlugin>& slot,
+    Config&& config,
+    const MakePluginOpts& opts,
+    PostCreate&& post_create = nullptr) noexcept {
+    static_assert(std::is_pointer_v<decltype(Resolver)>,
+                  "Resolver must be a function pointer "
+                  "(e.g. &pal::resolve_bwe).");
+    using FactoryPtr =
+        std::remove_pointer_t<std::invoke_result_t<decltype(Resolver), std::string_view>>;
+    using Factory = std::remove_cv_t<FactoryPtr>;
+    const Factory* factory = Resolver(plugin_id);
+    return make_plugin<IPlugin, Config, Factory, PostCreate>(
+        factory, plugin_id, slot, std::forward<Config>(config),
+        opts, std::forward<PostCreate>(post_create));
 }
 
 }  // namespace pal

@@ -92,7 +92,7 @@
 // Placed under a dedicated `raw_udp` namespace rather than `transport`
 // so that the slice-6 path (src/raw_udp/) and slice-7 path
 // (src/transport/) do not collide on file tree or namespace even when
-// parallel subagents land both at the same time (transport-selection
+// the two are developed in parallel (transport-selection
 // §11 review checklist final item).
 // =============================================================================
 namespace nimrtc::raw_udp {

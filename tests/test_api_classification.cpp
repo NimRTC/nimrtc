@@ -11,7 +11,7 @@
  *
  * Per ADR-015 (`docs/adr/ADR-015-api-stability-policy.md`) and
  * `docs/plan/v1.0-plan.md` Sec.12.3.1, every public symbol under
- * `src/**​/include/nimrtc/**​/*.hpp` must carry a stability
+ * `src/<mod>/include/nimrtc/<mod>/<name>.hpp` must carry a stability
  * classification.  In v1.0.0-alpha.1 that means every public
  * header file must contain at least one `NIMRTC_API_STABLE` or
  * `NIMRTC_API_UNSTABLE` marker.
@@ -19,8 +19,8 @@
  * This test walks the source tree at runtime and asserts:
  *
  * 1. `every_header_has_at_least_one_marker` -- for every `.hpp`
- *    under `<root>/src/**​/include/nimrtc/**` (excluding
- *    `<root>/src/third_party/**`), the file content contains at
+ *    under `<root>/src/<mod>/include/nimrtc/<mod>` (excluding
+ *    `<root>/src/third_party/<mod>`), the file content contains at
  *    least one occurrence of `NIMRTC_API_STABLE` or
  *    `NIMRTC_API_UNSTABLE`.  Failures print the full missing list
  *    so the next PR can apply the missing markers mechanically.
@@ -77,8 +77,8 @@ namespace {
 // Filesystem walker
 // -----------------------------------------------------------------------------
 
-/// Recursively collect every `.hpp` under `<root>/src/**​/include/nimrtc/**`
-/// that is NOT under `<root>/src/third_party/**`.
+/// Recursively collect every `.hpp` under `<root>/src/<mod>/include/nimrtc/<mod>`
+/// that is NOT under `<root>/src/third_party/<mod>`.
 ///
 /// Returns paths sorted lexicographically (stable ordering for ctest output).
 std::vector<fs::path> collect_public_headers(const fs::path& root) {
@@ -169,7 +169,7 @@ TEST(public_header_classification, every_header_has_at_least_one_marker) {
 
     ASSERT_FALSE(headers.empty())
         << "No public headers found under " << root
-        << "/src/**​/include/nimrtc/**.  Check NIMRTC_SOURCE_ROOT and the "
+        << "/src/<mod>/include/nimrtc/<mod>.  Check NIMRTC_SOURCE_ROOT and the "
         << "include-directory layout in the project.";
 
     std::vector<fs::path> missing;

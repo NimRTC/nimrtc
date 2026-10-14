@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/raw_udp_datagram.hpp
  * @brief IRawUdpDatagram — raw UDP bypass seam for high-frequency control.
  *
@@ -55,6 +55,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <functional>
 #include <memory>

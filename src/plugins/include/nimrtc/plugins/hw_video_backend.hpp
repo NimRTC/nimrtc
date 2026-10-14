@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/hw_video_backend.hpp
  * @brief Backend selector for video encoders/decoders — platform-aware,
  *        hardware-first, with automatic fallback.
@@ -33,6 +33,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <functional>
 #include <memory>

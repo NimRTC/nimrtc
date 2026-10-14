@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/dtls/dtls_session_factory.hpp
  * @brief IDtlsSessionFactory — DTLS session factory seam (PAL Slice 4).
  *
@@ -35,6 +35,10 @@
 
 #ifndef NIMRTC_DTLS_SESSION_FACTORY_HPP
 #define NIMRTC_DTLS_SESSION_FACTORY_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <memory>
 #include <string_view>

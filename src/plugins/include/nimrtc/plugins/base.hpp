@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/base.hpp
  * @brief Base types for plugin interfaces.
  *
@@ -14,6 +14,10 @@
 
 #ifndef NIMRTC_PLUGINS_BASE_HPP
 #define NIMRTC_PLUGINS_BASE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <cstring>   // memset, memcmp

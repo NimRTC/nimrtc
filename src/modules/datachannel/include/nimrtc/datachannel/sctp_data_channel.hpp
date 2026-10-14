@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/datachannel/sctp_data_channel.hpp
  * @brief SctpDataChannel — usrsctp-backed implementation of IDataChannel.
  *
@@ -51,6 +51,10 @@
 
 #ifndef NIMRTC_DATACHANNEL_SCTP_DATA_CHANNEL_HPP
 #define NIMRTC_DATACHANNEL_SCTP_DATA_CHANNEL_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <memory>

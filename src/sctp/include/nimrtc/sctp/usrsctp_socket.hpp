@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sctp/usrsctp_socket.hpp
  * @brief UsrsctpSocket — production implementation of ISctpSocket
  *        backed by upstream usrsctp 0.9.5.0.
@@ -85,6 +85,10 @@
 
 #ifndef NIMRTC_SCTP_USRSCTP_SOCKET_HPP
 #define NIMRTC_SCTP_USRSCTP_SOCKET_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <atomic>
 #include <chrono>

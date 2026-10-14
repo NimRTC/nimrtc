@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/core/engine_errors.hpp
  * @brief Centralised engine-level error codes (P1#9 fix).
  *
@@ -42,6 +42,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 
 namespace nimrtc::core {

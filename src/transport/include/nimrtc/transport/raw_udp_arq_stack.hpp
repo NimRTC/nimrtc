@@ -77,6 +77,15 @@ public:
     plugins::IRTP&          rtp() noexcept override;
     sctp::ISctpSocket&      sctp() noexcept override;
 
+    // ---- Weak-ref (v0.13.0) ------------------------------------------------
+    // RawUdpArqStack is a control stack; its dtls() returns a null singleton
+    // that the engine never dereferences (media_stack owns the real session).
+    // We return an empty weak_ptr so dtls_weak().lock() is always nullptr,
+    // which is the correct safe behaviour for the control plane.
+    std::weak_ptr<dtls::IDtlsSession> dtls_weak() noexcept override {
+        return {};
+    }
+
     // The control-plane payload: the ARQ session.
     raw_udp::IRawUdpDatagram* raw_control() noexcept override {
         return raw_control_.get();

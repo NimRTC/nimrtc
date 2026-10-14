@@ -380,21 +380,15 @@ public:
         return scheduler_.list_ids();
     }
 
-    // -- DataChannel (P2 ??typed factory slot for IDataChannelFactory*) -----
+    // -- DataChannel (P2: typed factory slot for IDataChannelFactory*) -----
     //
     // Mirrors the SCTP / DTLS / raw_udp / transport-stack slots above.
     // Per `docs/plan/transport-selection.md` section 5.2 (Slice 5 follow-up) and
     // `src/plugins/include/nimrtc/plugins/datachannel.hpp`, the engine
     // resolves a channel backend by id (default "sctp") through this slot.
-    //
-    // Subagent B (core/PluginRegistry owner) is the canonical owner of this
-    // hook. This inline stub was added by the datachannel subagent because
-    // (a) the registry slot is required for `SctpDataChannelFactory::create()`
-    //     consumers to actually receive a working channel, and (b) the
-    //     subagent boundary is "additive only" ??Subagent B can replace
-    //     this stub with its own equivalent implementation without breaking
-    //     callers because the public API surface (the three methods below)
-    //     is the same shape as every other typed registry hook.
+    // The public API surface (`register_*` / `get_*` / `list_*`) matches
+    // every other typed registry hook; callers can register custom channel
+    // backends here without depending on any concrete module.
     void register_datachannel(std::string_view id,
                               const plugins::IDataChannelFactory* f);
     [[nodiscard]] const plugins::IDataChannelFactory*
@@ -495,9 +489,8 @@ private:
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
     TypedRegistry<plugins::IBweFactory>           bwe_;
     TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
-    // DataChannel P2 typed slot ??see register_datachannel() above for
-    // the rationale (inline stub; Subagent B will replace with the
-    // canonical implementation).
+    // DataChannel P2 typed slot — see register_datachannel() above for
+    // the rationale.
     TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
     // Transport PAL Slice 8 (v0.10.2) ??typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's

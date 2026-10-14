@@ -20,9 +20,14 @@
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
+#include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
-#include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/plugins/scheduler.hpp>
+#include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/plugins/video_pipeline.hpp>
+#include <nimrtc/plugins/video_sink.hpp>
+#include <nimrtc/plugins/video_source.hpp>
 
 namespace nimrtc::engine::pal {
 
@@ -38,10 +43,46 @@ resolve_codec(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_codec(id);
 }
 
+/** Resolve an `IBweFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::IBweFactory*
+resolve_bwe(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_bwe(id);
+}
+
+/** Resolve an `ISchedulerFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::ISchedulerFactory*
+resolve_scheduler(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_scheduler(id);
+}
+
 /** Resolve an `IVideoCodecFactory` by plugin id. Returns nullptr if not registered. */
 [[nodiscard]] inline const plugins::IVideoCodecFactory*
 resolve_video_codec(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_codec(id);
+}
+
+/** Resolve an `IVideoSinkFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::IVideoSinkFactory*
+resolve_video_sink(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_sink(id);
+}
+
+/** Resolve an `IVideoSourceFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::IVideoSourceFactory*
+resolve_video_source(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_source(id);
+}
+
+/** Resolve an `IVideoReceiverFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::IVideoReceiverFactory*
+resolve_video_receiver(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_receiver(id);
+}
+
+/** Resolve an `IVideoSenderFactory` by plugin id. Returns nullptr if not registered. */
+[[nodiscard]] inline const plugins::IVideoSenderFactory*
+resolve_video_sender(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_sender(id);
 }
 
 /** Resolve an `IDataChannelFactory` by plugin id. Returns nullptr if not

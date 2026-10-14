@@ -112,12 +112,42 @@ public:
     // reference at call sites).
 
     virtual plugins::IICETransport& ice() noexcept = 0;
+
+    // [[deprecated]] — returns a reference to a component owned by the
+    // stack.  Storing the reference past close() is a UAF.  Prefer
+    // `dtls_weak()` (v0.13.0) and lock the returned weak_ptr when you
+    // need to call session methods.
+    //
+    // The deprecation is documentation-only at v0.13.0; removal is
+    // scheduled for v0.15.0 (six-month deprecation window per the
+    // ADR-001 versioning policy).  Engine code does not use this
+    // getter anymore.
     virtual dtls::IDtlsSession&      dtls() noexcept = 0;
     virtual plugins::IRTP&          rtp() noexcept = 0;
     virtual sctp::ISctpSocket&       sctp() noexcept = 0;
 
     // ---- Optional component (nullptr if not configured) -----------------
     virtual raw_udp::IRawUdpDatagram* raw_control() noexcept = 0;
+
+    // ---- Weak-ref DTLS accessor (v0.13.0, replaces raw-pointer capture)
+    //
+    // Returns a `weak_ptr` to the DTLS session that the engine stores
+    // as `Impl::dtls`.  Unlike `dtls()` (which returns a reference
+    // stable only for the stack's lifetime), this `weak_ptr` can be
+    // safely `.lock()`-ed after the stack is destroyed:
+    //
+    //   if (auto s = stack->dtls_weak().lock()) { s->feed_inbound(...); }
+    //
+    // The weak_ptr auto-expires when the stack's internal shared_ptr
+    // releases its last reference (i.e. after `close()`).  v0.12.0's
+    // `is_open()` guards on the engine API surface and v0.13.0's
+    // `weak_ptr.lock()` checks on the transport-thread surface form a
+    // defence-in-depth pair that eliminates the entire UAF class.
+    //
+    // The old `dtls()` reference getter above is preserved (with a
+    // deprecation comment) so existing call sites are not broken — it
+    // is NOT safe for engine use; always prefer `dtls_weak()`.
+    virtual std::weak_ptr<dtls::IDtlsSession> dtls_weak() noexcept = 0;
 
     // ---- Lifecycle ------------------------------------------------------
     virtual void start() noexcept = 0;

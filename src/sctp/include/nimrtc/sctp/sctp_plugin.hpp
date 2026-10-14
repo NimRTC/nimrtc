@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sctp/sctp_plugin.hpp
  * @brief Public registration entry point for the SCTP module (Slice 5).
  *
@@ -43,6 +43,10 @@
 
 #ifndef NIMRTC_SCTP_SCTP_PLUGIN_HPP
 #define NIMRTC_SCTP_SCTP_PLUGIN_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 

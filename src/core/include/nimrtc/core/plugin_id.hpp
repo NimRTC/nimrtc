@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/core/plugin_id.hpp
  * @brief NIMRTC_PLUGIN_ID — compile-time-unique plugin id literal wrapper (PAL Slice 3).
  *
@@ -75,6 +75,10 @@
 
 #ifndef NIMRTC_CORE_PLUGIN_ID_HPP
 #define NIMRTC_CORE_PLUGIN_ID_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <string_view>
 

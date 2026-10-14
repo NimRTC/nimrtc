@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/jb.hpp
  * @brief IJB — pluggable jitter buffer interface.
  *
@@ -20,6 +20,10 @@
 
 #ifndef NIMRTC_PLUGINS_JB_HPP
 #define NIMRTC_PLUGINS_JB_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <functional>

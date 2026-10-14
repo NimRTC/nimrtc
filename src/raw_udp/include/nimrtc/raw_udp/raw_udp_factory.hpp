@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/raw_udp_factory.hpp
  * @brief ArqRawUdpFactory — concrete factory for the ARQ raw-UDP datagram.
  *
@@ -26,6 +26,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <memory>
 #include <string_view>
 

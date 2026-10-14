@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/dtls/dtls_gmssl_session.hpp
  * @brief DtlsSession implementation backed by GMSSL (国密 SSL) DTLS 1.2.
  *
@@ -68,6 +68,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <nimrtc/dtls/dtls.hpp>
 #include <nimrtc/dtls/dtls_session_iface.hpp>   // PAL Slice 4 seam
 

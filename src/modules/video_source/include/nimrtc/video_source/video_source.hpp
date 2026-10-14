@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_source/video_source.hpp
  * @brief In-memory video frame source for testing / demo interop.
  *
@@ -31,6 +31,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <atomic>
 #include <cstdint>
 #include <functional>

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/engine/pal/engine_plugin_resolver.hpp
  * @brief PAL Slice 1 — inline plugin-resolution forwarders.
  *
@@ -15,6 +15,10 @@
  */
 #ifndef NIMRTC_ENGINE_PAL_ENGINE_PLUGIN_RESOLVER_HPP
 #define NIMRTC_ENGINE_PAL_ENGINE_PLUGIN_RESOLVER_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <string_view>
 

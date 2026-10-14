@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sctp/usrsctp_factory.hpp
  * @brief UsrsctpSocketFactory — registration id "usrsctp".
  *
@@ -39,6 +39,10 @@
 
 #ifndef NIMRTC_SCTP_USRSCTP_FACTORY_HPP
 #define NIMRTC_SCTP_USRSCTP_FACTORY_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <memory>
 #include <string_view>

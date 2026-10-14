@@ -4,6 +4,46 @@
 # Single-module tests live inside each module's `tests/` directory.
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# v1.0.0-alpha.1 DoD §12.3.1 gate #6 — core API stability framework tests.
+#
+# Two GoogleTest executables:
+#   - test_api_version:        macro framework smoke test (5/5 cases).
+#   - test_api_classification: per-header ≥1 STABLE/UNSTABLE marker check
+#                              + baseline header-count check (89 files).
+#
+# Both tests link only `nimrtc::core` + GTest.  The classification test
+# also receives NIMRTC_SOURCE_ROOT via target_compile_definitions so it
+# can walk the source tree at runtime (see test_api_classification.cpp).
+# ----------------------------------------------------------------------------
+function(nimrtc_add_core_api_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include")
+    target_compile_definitions(${name} PRIVATE
+        NIMRTC_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endfunction()
+
+nimrtc_add_core_api_test(test_api_version        test_api_version.cpp)
+nimrtc_add_core_api_test(test_api_classification test_api_classification.cpp)
+
 # E2E tests are standalone (custom main(), no GoogleTest). They each use
 # raw sockets to verify round-trip behaviour. add_e2e_test is a small wrapper
 # that wires the include dirs, links Winsock on Windows, and registers the

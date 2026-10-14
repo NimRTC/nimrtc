@@ -52,6 +52,8 @@ target_link_libraries(nimrtc_engine
         nimrtc::sctp           # SCTP factory id="stub"   (Slice 5/8)
         nimrtc::raw_udp        # raw-UDP factory id="arq" (Slice 6/8)
         nimrtc::transport      # transport-stack factory id="default" (Slice 7/8)
+                               # Also pulls in TransportSession + ITransportStackFactory
+                               # (used by engine via get_transport_stack() lookups).
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 

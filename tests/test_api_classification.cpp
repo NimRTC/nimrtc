@@ -26,7 +26,7 @@
  *    so the next PR can apply the missing markers mechanically.
  *
  * 2. `total_header_count_matches_baseline` -- the count of public
- *    headers equals the v1.0.0-alpha.1 baseline of 88.  A drift
+ *    headers equals the v1.0.0-alpha.1 baseline of 89.  A drift
  *    here signals that new public headers were added without
  *    updating the classification sweep; bump the baseline in the
  *    same PR that adds the header.
@@ -235,10 +235,18 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - 4 headers have >=1 NIMRTC_API_STABLE marker applied (the
     //     framework file api_version.hpp plus three pilot files:
     //     engine.hpp, engine/pal/make_plugin.hpp, transport_plugin.hpp).
-    //   - 85 headers are still missing markers — the bulk sweep is
-    //     tracked as a post-alpha.1 follow-up; this test fires
-    //     `every_header_has_at_least_one_marker` (above) to surface
-    //     the gap every time the test suite runs.
+    //   - 85 headers annotated by the bulk API-CLASSIFY sweep
+    //     (`7319d48` / `feat(public-headers): bulk API-CLASSIFY
+    //     sweep — 85 headers (v0.13.0)`); missing_markers=0 at the
+    //     alpha.1 cut.  The `every_header_has_at_least_one_marker`
+    //     test (above) stays enabled as a sentinel so a future header
+    //     addition without a marker surfaces as a test failure.
+    //   - Note: the alpha.1 framework commit body (`2b4b62b`)
+    //     described this test as "intentionally FAILS by design" --
+    //     that text was written before the bulk sweep landed.  After
+    //     `7319d48` both test cases pass (verified locally: 2/2
+    //     PASS, headers=89 stable=107 unstable=6 deprecated=8
+    //     missing_markers=0).
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
     constexpr std::size_t kBaselineHeaderCount = 89;

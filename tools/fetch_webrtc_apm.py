@@ -66,8 +66,16 @@ def get_source_dir(project_root):
     return project_root / "src" / "third_party" / "webrtc_audio_processing" / "src"
 
 
-def run(cmd, cwd=None, check=True, timeout=300):
-    """Run a command; return (rc, stdout)."""
+def run(cmd, cwd=None, check=True, timeout=300, project_root=None):
+    """Run a command; return (rc, stdout).
+
+    `project_root` is optional and only consulted on the failure path so
+    the helper can dump the `webrtc_apm_build.log` for triage. Passing it
+    explicitly (instead of closing over the caller's local) avoids the
+    `NameError: name 'project_root' is not defined` that the closure
+    version triggered when a build failure actually needed triage — i.e.
+    exactly when the diagnostic was most useful.
+    """
     print(f"[CMD] {' '.join(cmd)}")
     try:
         result = subprocess.run(
@@ -92,19 +100,22 @@ def run(cmd, cwd=None, check=True, timeout=300):
             tail = result.stdout[-200_000:] if len(result.stdout) > 200_000 else result.stdout
             tail_lines = tail.rsplit("\n", 200)[-200:]
             print("\n".join(tail_lines))
-            for log_name in ("webrtc_apm_build.log",):
-                for cand_root in (project_root / "build",):
-                    log_path = cand_root / log_name
-                    if log_path.exists() and log_path.is_file():
-                        size = log_path.stat().st_size
-                        print(f"--- {log_path} ({size} bytes, last 400 lines) ---")
-                        try:
-                            with log_path.open("r", encoding="utf-8", errors="replace") as fp:
-                                lines = fp.readlines()
-                                for line in lines[-400:]:
-                                    print(line.rstrip())
-                        except Exception as exc:
-                            print(f"[unable to read {log_path}: {exc}]")
+            if project_root is not None:
+                for log_name in ("webrtc_apm_build.log",):
+                    for cand_root in (project_root / "build",):
+                        log_path = cand_root / log_name
+                        if log_path.exists() and log_path.is_file():
+                            size = log_path.stat().st_size
+                            print(f"--- {log_path} ({size} bytes, last 400 lines) ---")
+                            try:
+                                with log_path.open("r", encoding="utf-8", errors="replace") as fp:
+                                    lines = fp.readlines()
+                                    for line in lines[-400:]:
+                                        print(line.rstrip())
+                            except Exception as exc:
+                                print(f"[unable to read {log_path}: {exc}]")
+            else:
+                print("[no project_root supplied; skipping webrtc_apm_build.log dump]")
         return ok, result.stdout
     except subprocess.TimeoutExpired:
         print(f"[TIMEOUT after {timeout}s]")
@@ -177,14 +188,15 @@ def find_build_script(project_root):
     return None, None
 
 
-def run_build_script(script_path, runner):
+def run_build_script(script_path, runner, project_root=None):
     """Run the platform-appropriate build script."""
     if runner == "cmd.exe":
-        ok, _ = run(["cmd.exe", "/c", str(script_path)], timeout=1200)
+        ok, _ = run(["cmd.exe", "/c", str(script_path)], timeout=1200, project_root=project_root)
     else:
         ok, _ = run(
             ["bash", str(script_path)],
             timeout=1200,
+            project_root=project_root,
         )
     return ok
 
@@ -303,7 +315,7 @@ def main():
         return 0
 
     print(f"  -> Using: {script_path} (via {runner})")
-    if not run_build_script(script_path, runner):
+    if not run_build_script(script_path, runner, project_root=project_root):
         print()
         print("[ERROR] Build failed. Check the output above.")
         print("The audio3a module will fall back to the stub implementation.")

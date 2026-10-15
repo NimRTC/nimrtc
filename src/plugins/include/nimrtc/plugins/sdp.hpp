@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/sdp.hpp
  * @brief ISDP — pluggable SDP parsing and munging interface.
  *
@@ -19,6 +19,10 @@
 
 #ifndef NIMRTC_PLUGINS_SDP_HPP
 #define NIMRTC_PLUGINS_SDP_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <functional>

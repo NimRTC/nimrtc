@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_pipeline/video_pipeline.hpp
  * @brief Video receive / send pipeline glue layer.
  *
@@ -44,6 +44,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <functional>
 #include <memory>

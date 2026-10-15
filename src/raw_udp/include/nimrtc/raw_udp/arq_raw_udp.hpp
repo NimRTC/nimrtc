@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/arq_raw_udp.hpp
  * @brief ArqRawUdp concrete implementation.
  *
@@ -51,6 +51,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/raw_udp/raw_udp_datagram.hpp>
 #include <nimrtc/raw_udp/udp_socket.hpp>

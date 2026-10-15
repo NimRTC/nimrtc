@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 //
 // @file nimrtc/dtls/dtls_prf.hpp
 // @brief TLS 1.2 PRF (P_SHA256, RFC 5246 §5) — extracted from dtls.cpp so it
@@ -11,6 +11,10 @@
 //
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstddef>
 #include <cstdint>
 #include <span>

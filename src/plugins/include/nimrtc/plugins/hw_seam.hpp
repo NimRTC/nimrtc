@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/hw_seam.hpp
  * @brief Hardware-accelerated plugin seam — abstract base interfaces for
  *        out-of-tree HW plugins (NDK MediaCodec, VideoToolbox, NVDEC,
@@ -44,6 +44,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <memory>
 #include <string_view>

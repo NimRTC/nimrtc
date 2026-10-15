@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sctp/sctp_socket_iface.hpp
  * @brief ISctpSocket — seam interface for SCTP / PR-SCTP / SCTP-over-DTLS
  *        sockets (Transport PAL Slice 5).
@@ -40,6 +40,10 @@
 
 #ifndef NIMRTC_SCTP_SCTP_SOCKET_IFACE_HPP
 #define NIMRTC_SCTP_SCTP_SOCKET_IFACE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <chrono>
 #include <cstdint>

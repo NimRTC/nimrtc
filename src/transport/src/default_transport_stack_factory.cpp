@@ -274,6 +274,14 @@ public:
 
     raw_udp::IRawUdpDatagram* raw_control() noexcept override { return nullptr; }
 
+    // CapabilitySelectorStack is a Slice 8 shell — it has no real DTLS
+    // session.  dtls_weak() returns an empty weak_ptr so the engine's
+    // .lock() check returns nullptr (consistent with the "shell"
+    // contract documented in this file's header).
+    std::weak_ptr<dtls::IDtlsSession> dtls_weak() noexcept override {
+        return {};
+    }
+
     void start() noexcept override {
         NIMRTC_LOG_INFO("transport: CapabilitySelectorStack('"
                         << id_ << "') start() — Slice 8 shell; "

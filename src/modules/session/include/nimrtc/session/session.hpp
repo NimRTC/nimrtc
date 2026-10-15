@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file session.hpp
  * @brief Session orchestration — Stream and Session management.
  *
@@ -19,6 +19,10 @@
 
 #ifndef NIMRTC_SESSION_SESSION_HPP
 #define NIMRTC_SESSION_SESSION_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <memory>
 #include <shared_mutex>

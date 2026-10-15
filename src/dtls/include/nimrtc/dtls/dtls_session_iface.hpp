@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/dtls/dtls_session_iface.hpp
  * @brief IDtlsSession — DTLS session seam (PAL Slice 4).
  *
@@ -81,6 +81,10 @@
 
 #ifndef NIMRTC_DTLS_SESSION_IFACE_HPP
 #define NIMRTC_DTLS_SESSION_IFACE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <functional>

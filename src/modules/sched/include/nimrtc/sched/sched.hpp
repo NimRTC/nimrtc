@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sched/sched.hpp
  * @brief Unified sending scheduler — L1 packet prioritisation (§8.2 / §8.3).
  *
@@ -31,6 +31,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <cstddef>
 #include <functional>

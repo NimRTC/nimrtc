@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/transport/transport_strategy.hpp
  * @brief Named transport strategies — the bridge from Profile v1.1
  *        `transport.strategy` to a concrete `TransportRequirements`.
@@ -34,6 +34,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <stdexcept>
 #include <string>
 #include <string_view>

@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <nimrtc/core/api_version.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -97,7 +98,7 @@ namespace nimrtc::engine {
  *  encoding / decoding.  Defaults match RFC 7587 Opus.
  *  When NIMRTC_HAS_OPUS is not defined, the engine ignores codec_name and
  *  falls back to the first statically-linked codec plugin (e.g. PCMU). */
-struct AudioCodecConfig {
+struct NIMRTC_API_STABLE AudioCodecConfig {
     /** RTP payload type number.  RFC 7587 uses 111 for Opus.
      *  WebRTC mandatory: 0 (PCMU) and 8 (PCMA). */
     std::uint8_t  payload_type  = 111;
@@ -116,7 +117,7 @@ struct AudioCodecConfig {
     std::string   fmtp;
 };
 
-struct EngineConfig {
+struct NIMRTC_API_STABLE EngineConfig {
     // ---- Plugin selection (ADR-001: look up by string ID in PluginRegistry) ----
 
     /** ITransport plugin name. Default = "ice". */
@@ -232,7 +233,7 @@ struct EngineConfig {
 
     /** Defaults forwarded to plugins::VideoReceiverConfig when the engine
      *  instantiates the video receiver plugin. */
-    struct VideoReceiverTuning {
+    struct NIMRTC_API_STABLE VideoReceiverTuning {
         std::uint32_t ssrc                = 0xDEADBEEF;
         std::uint8_t  payload_type        = 102;
         std::uint32_t max_inflight_frames = 8;
@@ -243,7 +244,7 @@ struct EngineConfig {
 
     /** Defaults forwarded to plugins::VideoSenderConfig when the engine
      *  instantiates the video sender plugin. */
-    struct VideoSenderTuning {
+    struct NIMRTC_API_STABLE VideoSenderTuning {
         std::uint32_t ssrc         = 0xCAFEBABE;
         std::uint8_t  payload_type = 102;
         std::uint16_t mtu          = 1200;
@@ -304,7 +305,8 @@ struct EngineConfig {
     // on_state callbacks per channel.
     //
     // Default = "sctp" (matches the usrsctp-backed SctpDataChannelFactory
-    // id Subagent A registers).  Empty disables DataChannel entirely:
+    // id registered at static-init time).  Empty disables DataChannel
+    // entirely:
     //   - create_offer() does NOT emit m=application
     //   - process_remote_sdp() silently drops any m=application from the peer
     //   - create_data_channel() returns nullptr
@@ -352,16 +354,16 @@ struct EngineConfig {
 // Public callbacks
 // ---------------------------------------------------------------------------
 
-using AudioFrameCallback = std::function<void(const float* pcm, size_t num_samples)>;
-using VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
-using EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
-using EngineStateCallback = std::function<void(const char* state)>;
+using NIMRTC_API_STABLE AudioFrameCallback = std::function<void(const float* pcm, size_t num_samples)>;
+using NIMRTC_API_STABLE VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
+using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
+using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* state)>;
 
 // ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
 
-class NimRTCEngine {
+class NIMRTC_API_STABLE NimRTCEngine {
 public:
     explicit NimRTCEngine(EngineConfig config);
     ~NimRTCEngine();
@@ -572,9 +574,10 @@ public:
      *  in the WebSocket signaling proxy.  Returns nullptr if not yet open().
      *
      *  The pointer is non-owning: the engine retains the only owner
-     *  (`ice_t_`). Callers must not delete it. */
-    plugins::ITransport* get_transport() noexcept { return ice_t_.get(); }
-    const plugins::ITransport* get_transport() const noexcept { return ice_t_.get(); }
+     *  (the `media_stack` inside `Impl::session`). Callers must not
+     *  delete it. */
+    plugins::ITransport* get_transport() noexcept { return ice_t_; }
+    const plugins::ITransport* get_transport() const noexcept { return ice_t_; }
 
     /** ICE-aware view of the transport.  Returns nullptr if no
      *  IICETransport plugin has been resolved (which only happens if the
@@ -583,9 +586,9 @@ public:
      *  ICE transports).
      *
      *  Non-owning; same lifetime as the engine. */
-    plugins::IICETransport* get_ice_transport() noexcept { return ice_t_.get(); }
+    plugins::IICETransport* get_ice_transport() noexcept { return ice_t_; }
     const plugins::IICETransport* get_ice_transport() const noexcept {
-        return ice_t_.get();
+        return ice_t_;
     }
 
     /** Read-only view of the engine's config.  Useful for tools that need
@@ -620,7 +623,7 @@ public:
      *  CapabilitySelector.  `control_factory_id` is empty when the
      *  strategy does not enable a side-stack (e.g. `browser-call`).
      *  Both fields are empty before open() succeeds. */
-    struct TransportSessionView {
+    struct NIMRTC_API_STABLE TransportSessionView {
         std::string_view media_factory_id;
         std::string_view control_factory_id;
     };
@@ -688,7 +691,7 @@ public:
     const plugins::IAudio3A* audio3a() const noexcept { return audio3a_plugin_.get(); }
 
     // Engine stats for debugging
-    struct Stats {
+    struct NIMRTC_API_STABLE Stats {
         int srtp_drops = 0;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl. */
@@ -712,17 +715,30 @@ private:
 
     // ---- Plugin instances (created via PluginRegistry in open()) ----
     //
-    // `ice_t_` is the owning handle to the ICE-aware transport plugin
-    // (concretely `nimrtc::ice::IceTransport` for the default "ice"
-    // plugin, but resolvable through the plugin seam — see
-    // `plugins::IICETransport`). Because IICETransport IS-A ITransport,
-    // callers can downcast to ITransport* for generic send/recv; we keep
-    // the IICETransport* alias around because every ICE-specific call
-    // (state, credentials, gathering, remote SDP, pre-open config) goes
-    // through it.  Storing the IICETransport pointer eliminates all
-    // **`dynamic_cast<ice::IceTransport*>`** calls from this class — the
-    // plugin-seam objective achieved by this refactor.
-    std::unique_ptr<plugins::IICETransport>      ice_t_;
+    // `ice_t_` is a NON-OWNING handle to the ICE-aware transport plugin
+    // living inside the media `ITransportStack` (Slice 7.6 PR3 / v0.12.0
+    // refactor). The actual ownership moved into `Impl::session`
+    // (a `TransportSession` with `media_stack` and `control_stack`),
+    // which is constructed by `make_transport_instance()` in
+    // `init_modules_once()` and torn down in `~NimRTCEngine()`.
+    //
+    // Why a raw pointer (not unique_ptr)?
+    //   - The session owns the ITransportStack; the stack owns ICE /
+    //     DTLS / RTP / SCTP. Two unique_ptrs (one on `ice_t_`, one
+    //     inside the stack) would double-free on destruction.
+    //   - The session is destroyed in `delete impl_` (which runs in
+    //     `~NimRTCEngine` BEFORE the engine's own members are
+    //     destroyed). After that point, `ice_t_` becomes dangling but
+    //     no code dereferences it (close() is the last user and
+    //     runs before `delete impl_`).
+    //   - Storing the raw pointer is therefore safe AND keeps the
+    //     call sites (`ice_t_->send(bv, {})`, `ice_t_->recv()`,
+    //     `ice_t_->local_ufrag()`) unchanged.
+    //
+    // For pre-v0.12.0 readers: the previous `unique_ptr<IICETransport>`
+    // was the engine's pre-PR3 storage. The refactor moves ownership
+    // into the session but preserves the call-site contract.
+    plugins::IICETransport*                     ice_t_ = nullptr;
     std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;
     std::unique_ptr<plugins::ICodec>            codec_plugin_;
 
@@ -768,6 +784,73 @@ private:
     void shutdown_bwe_scheduler() noexcept;
     void init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
+
+    // ---- init_modules_once() phase helpers (P0 refactor) -----------------
+    //
+    // `init_modules_once()` used to be a single ~460-line procedure that
+    // mixed transport-strategy validation, TransportSession construction,
+    // ICE pre-open configuration, BWE/Scheduler injection, Audio3A
+    // plugin creation, DataChannel factory verification, Codec plugin
+    // creation, SRTP context creation, DTLS handshake, and ICE
+    // callback wiring.  The function grew organically as Slice 7.6 PR3
+    // (v0.12.0) replaced the manual ICE+DTLS construction path with the
+    // composition-root flow; reading it required 4 scroll-up cycles to
+    // remember which phase you were in.
+    //
+    // The 5 phase helpers below give each step a single named entry
+    // point so:
+    //   - failures land in one place (a helper returns an engine error
+    //     code; the orchestrator forwards it to `init_modules_once()`'s
+    //     caller);
+    //   - the orchestrator itself is a 6-line top-down read;
+    //   - future per-phase instrumentation (timing logs, e2e hooks,
+    //     per-strategy validators) can be added in one focused spot.
+    //
+    // Phase ordering is preserved bit-for-bit with the pre-refactor
+    // function — the orchestrator's call sequence matches the
+    // pre-refactor inline order exactly.  Behaviour is unchanged.
+    //
+    // @see init_modules_once() for the orchestration contract.
+
+    /** Phase 1 — validate `cfg.transport_strategy_name` and apply the
+     *  CapabilitySelector.  Stores the resolved strategy name + the
+     *  Selector-derived (media_factory_id, control_factory_id) pair on
+     *  `impl_`.  Returns `kEngineInvalidParam` (0x1001) for unknown
+     *  strategy names, or `kEngineInternal` for defensive failures. */
+    uint32_t init_transport_strategy() noexcept;
+
+    /** Phase 2 — build the `TransportSession` from the Selector-resolved
+     *  factory ids (media + optional control), apply ICE pre-open config
+     *  (bind address / STUN / local port range), and extract the
+     *  non-owning `ice_t_` / `impl_->dtls` handles.  Returns
+     *  `kEngineInternal` when a required factory is missing, returns
+     *  null, or when DTLS-required-but-missing contract fails. */
+    uint32_t init_transport_session() noexcept;
+
+    /** Phase 4 — create the Audio3A plugin (with `NullAudio3A` fallback)
+     *  and the Codec plugin (with static Opus fallback when
+     *  `NIMRTC_HAS_OPUS`).  Both go through `pal::make_plugin()` with
+     *  their pre-refactor failure modes.  No return value — failures
+     *  surface through `on_error_` and the `unique_ptr` slot is reset
+     *  to `nullptr` so the fallback path runs. */
+    void init_audio_modules() noexcept;
+
+    /** Phase 5 — verify the DataChannel factory registered under
+     *  `cfg.datachannel_name` resolves via `core::PluginRegistry`.
+     *  No construction here — `create_data_channel()` is the
+     *  on-demand API.  No return value — a missing factory just logs
+     *  a warning and `create_data_channel()` will return `nullptr`
+     *  on the caller side. */
+    void init_datachannel_registry() noexcept;
+
+    /** Phase 6 — create the SRTP context, open the DTLS session
+     *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`
+     *  is null by design), and wire the ICE recv / error callbacks.
+     *  Returns `kDtlsOpenFailed` when `dtls_->open()` reports a
+     *  failure, or `kEngineInternal` when the media stack requires
+     *  DTLS (webrtc-classic) but the user-supplied `cfg.dtls_name`
+     *  did not resolve to a registered factory. */
+    uint32_t init_dtls_handshake() noexcept;
 
     static void default_on_error(uint32_t err, std::string_view msg) noexcept;
 

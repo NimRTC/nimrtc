@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/scheduler.hpp
  * @brief IScheduler — pluggable unified sending scheduler (NimRTC §2.5 / §8.3).
  *
@@ -38,6 +38,10 @@
 
 #ifndef NIMRTC_PLUGINS_SCHEDULER_HPP
 #define NIMRTC_PLUGINS_SCHEDULER_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <cstddef>

@@ -29,6 +29,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <random>
 #include <vector>
 
@@ -37,6 +38,8 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/core/engine_errors.hpp>   // P1#9 — module error-code constants
 #include <nimrtc/engine/pal/engine_plugin_resolver.hpp>
+#include <nimrtc/engine/pal/make_plugin.hpp>     // PAL Slice 1.5 — plugin
+                                                // 5-step dance helper
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
@@ -50,6 +53,11 @@
 //     assembly::TransportSection) and returns the Selector's input.
 #include <nimrtc/transport/transport_selector.hpp>
 #include <nimrtc/transport/transport_strategy.hpp>
+// Slice 7.6 PR3 (v0.12.0): TransportSession + ITransportStackFactory.
+// The factory lookups (get_transport_stack by §5.3-rule-derived ids) are
+// expressed inline in init_modules_once(); transport_plugin.hpp is NOT
+// included to avoid a PUBLIC link dependency on make_transport_instance().
+#include <nimrtc/transport/transport_stack.hpp>
 #ifdef NIMRTC_HAS_H264
 #include <nimrtc/h264/codec_plugin.hpp>
 #endif
@@ -192,15 +200,65 @@ struct NimRTCEngine::Impl {
     std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
 
     // SRTP / DTLS / Opus — DTLS is now PAL Slice 4 seam-exposed (TPAL-4
-    // v0.11.0).  `Impl::dtls` holds `unique_ptr<nimrtc::dtls::IDtlsSession>`
-    // so the engine never downcasts to a concrete backend.  Every method
-    // the engine calls (`open()` / `state()` / `is_connected()` /
-    // `local_fingerprint()` / `srtp_keying_material()` / `feed_inbound()`
-    // / `take_outbound()` / `tick()` / `set_role(DtlsRole)` /
-    // `set_peer_fingerprint(...)`) is on the seam interface; v0.10.x's
-    // `static_cast<DtlsSessionWolfSSL*>(dtls_seam.release())` is gone.
-    std::unique_ptr<nimrtc::dtls::IDtlsSession> dtls;
+    // v0.11.0).  `Impl::dtls` holds a NON-OWNING pointer to
+    // `nimrtc::dtls::IDtlsSession` — the OWNING instance lives inside
+    // the media `ITransportStack` (see `Impl::session` below, built by
+    // `make_transport_instance()` in `init_modules_once()`).
+    //
+    // Why a weak_ptr (not `unique_ptr<IDtlsSession>` or raw pointer)?
+    //   - Pre-Slice-7.6 PR3 (v0.12.0), the engine built DTLS itself
+    //     via `reg.get_dtls_session("wolfssl")` and stored it in a
+    //     `unique_ptr`. The Slice 7.6 refactor moves that construction
+    //     into `WebRtcClassicStackFactory` (the "webrtc-classic" stack
+    //     factory), which produces a `WebRtcClassicStack` that owns
+    //     the DTLS session. The engine no longer builds DTLS
+    //     independently — the stack's factory does, and the engine
+    //     reaches the resulting session through the stack's
+    //     `dtls_weak()` accessor.
+    //   - Storing a `unique_ptr<dtls>` AND a stack-owned DTLS
+    //     session would double-free on destruction.  Storing a raw
+    //     pointer is safe (no ownership) but introduces the UAF class:
+    //     if the engine dereferences the pointer after the stack dies,
+    //     it reads freed memory.  weak_ptr resolves both: the stack
+    //     keeps ownership via its internal `shared_ptr`, and the
+    //     engine's `weak_ptr.lock()` returns nullptr once the stack
+    //     releases that shared_ptr (i.e. on `close()`).
+    //
+    // Lifetime: `impl_->session.media_stack` is destroyed in
+    // `delete impl_` (which `~NimRTCEngine` runs before its own
+    // members are destroyed).
+    //
+    // v0.12.0 P0: is_open() guards prevent post-close UAF on the API
+    // surface.  v0.13.0 (this change): changed to weak_ptr so
+    // .lock() returns nullptr automatically after close(), eliminating
+    // the UAF class entirely.  All callers now use:
+    //   if (auto* d = impl_->dtls.lock().get()) { d->X(); }
+    std::weak_ptr<nimrtc::dtls::IDtlsSession>  dtls;
     std::unique_ptr<srtp::SrtpContext> srtp;
+
+    // ---- Resolved transport session (v0.12.0 Slice 7.6 PR3) ---------
+    //
+    // Built by `make_transport_instance()` in `init_modules_once()` from
+    // the Selector's resolved (media_factory_id, control_factory_id).
+    // The session owns the media and (optionally) control
+    // ITransportStack instances. `ice_t_` is a raw pointer into this
+    // session (see the comment above that field); `impl_->dtls` is a
+    // weak_ptr into the same session (v0.13.0, see the comment above
+    // the field).
+    //
+    // For the 4 browser-interop strategies (browser-call, agent-gateway,
+    // sfu-relay, cross-network-peer):
+    //   - `session.media_stack`  → WebRtcClassicStack (owns ICE / DTLS / RTP / SCTP)
+    //   - `session.control_stack` → null (browser-call / sfu-relay / cross-network-peer)
+    //                              RawUdpArqStack (agent-gateway — high-freq control)
+    //
+    // For teleop-ultra-low-latency (§5.3 Rule 2):
+    //   - `session.media_stack`  → RawUdpArqStack (no DTLS — not browser-interop)
+    //   - `session.control_stack` → RawUdpArqStack
+    //   - `impl_->dtls` = nullptr (no DTLS in media path for this strategy)
+    //   - Audio pipeline falls back to null-encoder; ICE/DTLS work via
+    //     the control stack's raw-UDP ARQ
+    TransportSession session;
 #ifdef NIMRTC_HAS_OPUS
     std::unique_ptr<opus::Encoder>     opus_encoder;
     std::unique_ptr<opus::Decoder>     opus_decoder;
@@ -263,20 +321,28 @@ struct NimRTCEngine::Impl {
     // in-process `tests/test_datachannel_engine` 5/5 PASS as the §7
     // substitute, made permanent.
     //
-    // Stored as `void*` so this header doesn't have to forward-declare
-    // `nimrtc::dtls::IDtlsSession` (the engine's public header already
-    // pulls it in, but keeping the cookie untyped makes the dependency
-    // surface additive — the v1.x wiring PR can replace the cookie with
-    // a typed `IDtlsSession*` (or, post-WebTransport, an
-    // `IWebTransportSession*`) without breaking ABI).
+    // Typed as `nimrtc::dtls::IDtlsSession*` (non-owning) so the field
+    // is self-describing — the v1.x wiring PR that swaps to
+    // WebTransport will replace this with a tagged union over
+    // {IDtlsSession*, IWebTransportSession*} rather than juggling a
+    // raw `void*` cast.  Lifetime (v0.13.0): weak_ptr into the
+    // media_stack's DTLS session; expired automatically after
+    // close() tears down the stack.
     //
-    // Initialised to nullptr in init_modules_once() — at that point
-    // `impl_->dtls.get()` is already a valid `IDtlsSession*`.  When
-    // create_data_channel() is called, we set this to the engine's
-    // own DTLS session pointer (cast to `void*`) so the v1.x
-    // wiring code has a single place to look for the underlying
-    // transport.  See also the TODO in init_modules_once().
-    void* datachannel_transport_cookie = nullptr;
+    // Initialised as an empty weak_ptr in init_modules_once() — at that point
+    // `impl_->dtls` is a weak_ptr into `impl_->session.media_stack`. By the
+    // time this method runs, `init_modules_once()` has built the session and
+    // either set `impl_->dtls` to the stack's DTLS session (browser-interop
+    // strategies) or left it expired (Rule 2 / raw-udp-arq media).
+    // create_data_channel() then assigns impl_->dtls into this cookie
+    // so the v1.x wiring code has a single, well-known place to look
+    // for the underlying transport.  See also the TODO in
+    // init_modules_once().
+    //
+    // v0.13.0 (this change): changed from raw pointer to weak_ptr, aligned
+    // with Impl::dtls.  The cookie is informational — callers must .lock()
+    // before use; they get nullptr after close() automatically.
+    std::weak_ptr<nimrtc::dtls::IDtlsSession> datachannel_transport_cookie;
 
     // ---- Resolved transport strategy (v0.12.0 Slice 7.6 PR3) ---------
     //
@@ -332,48 +398,37 @@ NimRTCEngine::transport_strategy_session() const noexcept {
 }
 
 void NimRTCEngine::init_bwe_scheduler() noexcept {
-    auto& reg = core::PluginRegistry::instance();
-
     // ---- BWE plugin -------------------------------------------------------
     // Created and opened here; injected into ice_t_ via set_bwe().
     // If bwe_name is empty, BWE is skipped (passthrough — "transport" profile).
     if (!config_.bwe_name.empty() && !bwe_) {
-        const auto* f = reg.get_bwe(config_.bwe_name);
-        if (f) {
-            bwe_.reset(f->create(config_.bwe_config));
-            if (bwe_) {
-                if (bwe_->open() != plugins::kOk) {
-                    core::log::Logger::instance().warn(
-                        "engine: bwe plugin open failed, skipping BWE");
-                    bwe_.reset();
-                }
-            }
-        } else {
-            core::log::Logger::instance().warn(
-                std::string("engine: bwe plugin not found: ")
-                    .append(config_.bwe_name));
-        }
+        // Failure policy: Warn (matches pre-Slice-1.5 behaviour — BWE is
+        // optional, so a missing or broken plugin degrades to "no BWE"
+        // with a diagnostic log line, not an on_error_ fire).
+        (void)pal::make_plugin<&pal::resolve_bwe>(
+            config_.bwe_name,
+            bwe_,
+            config_.bwe_config,
+            {.err_open_failed = core::kEngineInternal,  // unused (Warn)
+             .err_missing = core::kEngineInternal,      // unused (Warn)
+             .open_fail_mode = pal::PluginFailureMode::Warn,
+             .missing_mode = pal::PluginFailureMode::Warn,
+             .on_error = on_error_});
     }
 
     // ---- Scheduler plugin ------------------------------------------------
     // Created and opened here; injected into ice_t_ via set_scheduler().
     // If scheduler_config.enabled is false, scheduler is skipped (direct ICE send).
     if (config_.scheduler_config.enabled && !scheduler_) {
-        const auto* f = reg.get_scheduler(config_.scheduler_name);
-        if (f) {
-            scheduler_.reset(f->create(config_.scheduler_config));
-            if (scheduler_) {
-                if (scheduler_->open() != plugins::kOk) {
-                    core::log::Logger::instance().warn(
-                        "engine: scheduler plugin open failed, falling back to direct send");
-                    scheduler_.reset();
-                }
-            }
-        } else {
-            core::log::Logger::instance().warn(
-                std::string("engine: scheduler plugin not found: ")
-                    .append(config_.scheduler_name));
-        }
+        (void)pal::make_plugin<&pal::resolve_scheduler>(
+            config_.scheduler_name,
+            scheduler_,
+            config_.scheduler_config,
+            {.err_open_failed = core::kEngineInternal,
+             .err_missing = core::kEngineInternal,
+             .open_fail_mode = pal::PluginFailureMode::Warn,
+             .missing_mode = pal::PluginFailureMode::Warn,
+             .on_error = on_error_});
     }
 
     // ---- Inject into ICE transport ---------------------------------------
@@ -413,29 +468,62 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// init_modules_once() — thin orchestrator (P0 refactor, see engine.hpp).
+//
+// Splits the pre-refactor ~460-line monolith into 5 phase helpers:
+//   1. init_transport_strategy()  — validate + Selector
+//   2. init_transport_session()   — TransportSession build + ICE pre-open config
+//   3. init_bwe_scheduler()       — already-extracted (PAL Slice 1.5 era)
+//   4. init_audio_modules()       — audio3a + codec (Silent fallback paths)
+//   5. init_datachannel_registry()— DataChannel factory verification
+//   6. init_dtls_handshake()      — SRTP context + DTLS open + ICE callbacks
+//
+// Phase ordering matches the pre-refactor inline order exactly; behaviour
+// is unchanged.
+// ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_modules_once() noexcept {
     core::register_all_default_plugins();
-    auto& reg = core::PluginRegistry::instance();
+    // Note: `core::PluginRegistry::instance()` is consulted indirectly
+    // through `make_transport_instance()` (which looks up the media and
+    // control factories by id) and directly through
+    // `init_bwe_scheduler()` and `init_video_plugins()` for BWE /
+    // scheduler / video plugins. We don't capture a local `reg` here
+    // because every consumer in the helpers below gets the registry
+    // through its own helper.
 
-    // ---- Transport strategy (v0.12.0 Slice 7.6 PR3) --------------------
-    //
-    // Resolve the strategy name and apply the CapabilitySelector BEFORE
-    // any module is created.  This is the single place where the
-    // engine validates the strategy id and records the resolved
-    // (media_factory_id, control_factory_id) pair.
-    //
-    // Failure modes:
-    //   - Unknown strategy name (non-empty, not in the 5-id catalog)
-    //     → std::invalid_argument from `strategy_by_name()`.  We catch
-    //     it and convert to kEngineInvalidParam (0x1001) so callers see
-    //     a uniform non-zero return code (the engine API does not throw).
-    //   - Selector returning an empty media_stack (the
-    //     CapabilitySelector default ctor returns empty stacks when no
-    //     resolver is injected) → kEngineInternal.  This shouldn't
-    //     happen with a well-formed strategy but is caught defensively.
-    //
-    // On success, the resolved pair is stored in `impl_` and surfaced
-    // through the `transport_strategy_session()` accessor.
+    if (const uint32_t rc = init_transport_strategy();   rc != 0) return rc;
+    if (const uint32_t rc = init_transport_session();    rc != 0) return rc;
+    init_bwe_scheduler();
+    init_audio_modules();
+    init_datachannel_registry();
+    if (const uint32_t rc = init_dtls_handshake();       rc != 0) return rc;
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — transport strategy validation + CapabilitySelector.
+//
+// Resolve the strategy name and apply the CapabilitySelector BEFORE any
+// module is created.  This is the single place where the engine validates
+// the strategy id and records the resolved (media_factory_id,
+// control_factory_id) pair.
+//
+// Failure modes:
+//   - Unknown strategy name (non-empty, not in the 5-id catalog)
+//     → std::invalid_argument from `strategy_by_name()`.  We catch it
+//     and convert to kEngineInvalidParam (0x1001) so callers see a
+//     uniform non-zero return code (the engine API does not throw).
+//   - Selector returning an empty media_stack (the CapabilitySelector
+//     default ctor returns empty stacks when no resolver is injected) →
+//     kEngineInternal.  This shouldn't happen with a well-formed
+//     strategy but is caught defensively.
+//
+// On success, the resolved pair is stored in `impl_` and surfaced
+// through the `transport_strategy_session()` accessor.
+// ---------------------------------------------------------------------------
+uint32_t NimRTCEngine::init_transport_strategy() noexcept {
     {
         // Resolve the strategy name.  `strategy_by_name("")` returns the
         // browser-call default, so empty `cfg.transport_strategy_name`
@@ -515,52 +603,125 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
             "', control_factory_id='" +
             impl_->resolved_control_factory_id + "'");
     }
+    return 0;
+}
 
-    // ---- Plugin: Transport (created but NOT opened yet) -------------------
-    //
-    // Preferred path: look up the ICE-aware factory by name. This is the
-    // only place the engine ever casts across the plugin seam — once we
-    // hold an `IICETransport*`, all ICE-specific calls go through the
-    // virtual interface (no dynamic_cast to `ice::IceTransport`).
-    //
-    // We still keep a one-shot dynamic_cast fallback so that if a user
-    // registers a generic ITransportFactory (not an IICETransportFactory)
-    // under the same name, the engine can still detect it and run — the
-    // ICE-specific code paths then just skip silently.
-    const plugins::IICETransportFactory* ifactory =
-        reg.get_ice_transport(config_.transport_name);
-    if (ifactory) {
-        ice_t_.reset(ifactory->create_ice());
-    } else {
-        const plugins::ITransportFactory* tfactory =
-            reg.get_transport(config_.transport_name);
-        if (!tfactory) {
+// ---------------------------------------------------------------------------
+// Phase 2 — TransportSession build + ICE pre-open configuration.
+//
+// Slice 7.6 PR3 replaces the pre-PR3 manual ICE + DTLS construction
+// path with a TransportSession that owns the media_stack and
+// control_stack.  The factory lookups are expressed inline here (rather
+// than via a helper in the transport module) to keep the engine's
+// link surface unchanged for existing consumers — nimrtc::transport is
+// still linked, but the PUBLIC link is sufficient; no new API
+// boundary is required.
+//
+// StackConfig defaults mirror what the pre-PR3 engine set on each
+// plugin individually.  The §5.3 factory ids (webrtc-classic /
+// raw-udp-arq) are stored in impl_->resolved_media_factory_id /
+// control_factory_id.
+//
+// Rule 2 caveat (teleop-ultra-low-latency):
+//   §5.3 Rule 2 maps "no browser interop + high-freq control" to
+//   media=raw-udp-arq.  That stack has no DTLS.  Audio falls back to
+//   null-encoder; ICE/connectivity work via raw-UDP ARQ.
+// ---------------------------------------------------------------------------
+uint32_t NimRTCEngine::init_transport_session() noexcept {
+    {
+        StackConfig scfg;
+        scfg.ice_id  = config_.transport_name;
+        scfg.dtls_id = config_.dtls_name.empty()
+                           ? std::string{"wolfssl"}
+                           : config_.dtls_name;
+        // The sctp_id and rtp_id use the factory defaults; leave them
+        // empty so the factory uses its own defaults.
+
+        impl_->session.media_stack_id   = impl_->resolved_media_factory_id;
+        impl_->session.control_stack_id = impl_->resolved_control_factory_id;
+
+        auto& reg = core::PluginRegistry::instance();
+
+        // Media stack — must succeed.
+        const ITransportStackFactory* media_f =
+            reg.get_transport_stack(impl_->resolved_media_factory_id);
+        if (!media_f) {
             impl_->last_open_rc = core::kEngineInternal;
-            if (on_error_) on_error_(core::kEngineInternal, "transport plugin not found");
+            const std::string msg =
+                std::string{"engine: media stack factory '"} +
+                impl_->resolved_media_factory_id +
+                "' not registered (did "
+                "nimrtc::transport::register_default_plugins() run "
+                "before engine construction?).";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInternal, msg);
             return core::kEngineInternal;
         }
-        plugins::ITransport* raw = tfactory->create();
-        if (!raw) {
+        impl_->session.media_stack = media_f->create(scfg);
+        if (!impl_->session.media_stack) {
             impl_->last_open_rc = core::kEngineInternal;
-            if (on_error_) on_error_(core::kEngineInternal, "transport factory returned null");
+            const std::string msg =
+                std::string{"engine: media stack factory '"} +
+                impl_->resolved_media_factory_id +
+                "' returned null ITransportStack.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInternal, msg);
             return core::kEngineInternal;
         }
-        // Last-resort safety net: a generic ITransport that also happens
-        // to implement IICETransport.  This is the only place the engine
-        // still does a cross-class dynamic_cast, and it's intentional —
-        // it lets out-of-tree ICE transports (or a test double) work
-        // without registering the ICE-specific factory.
-        ice_t_.reset(dynamic_cast<plugins::IICETransport*>(raw));
-        if (!ice_t_) {
-            impl_->last_open_rc = core::kEngineInternal;
-            if (on_error_) on_error_(core::kEngineInternal, "transport plugin does not implement IICETransport");
-            delete raw;
-            return core::kEngineInternal;
+
+        // Control stack — optional (null for strategies without
+        // high-freq control).
+        if (!impl_->resolved_control_factory_id.empty()) {
+            const ITransportStackFactory* ctrl_f =
+                reg.get_transport_stack(impl_->resolved_control_factory_id);
+            if (ctrl_f) {
+                impl_->session.control_stack = ctrl_f->create(scfg);
+                if (!impl_->session.control_stack) {
+                    core::log::Logger::instance().warn(
+                        std::string{"engine: control stack factory '"} +
+                        impl_->resolved_control_factory_id +
+                        "' returned null — control plane inactive for this strategy.");
+                }
+            } else {
+                core::log::Logger::instance().warn(
+                    std::string{"engine: control stack factory '"} +
+                    impl_->resolved_control_factory_id +
+                    "' not registered — control plane inactive for this strategy.");
+            }
         }
+
+        // Extract handles into the owned session.
+        //   - ice_t_: raw pointer (out of v0.13.0 scope; still safe because
+        //     the engine never outlives the session's media_stack — see
+        //     ~NimRTCEngine's delete impl_ ordering).
+        //   - impl_->dtls: weak_ptr (v0.13.0; auto-expires after close()).
+        ice_t_      = &impl_->session.media_stack->ice();
+        impl_->dtls = impl_->session.media_stack->dtls_weak();   // weak_ptr — auto-expires after close()
+
+        // Rule 2 warning: raw-udp-arq media has no DTLS.
+        if (!impl_->dtls.lock()) {
+            core::log::Logger::instance().warn(
+                std::string{"engine: strategy '"} +
+                impl_->resolved_strategy_name +
+                "' uses media_factory_id='" +
+                impl_->resolved_media_factory_id +
+                "' with no DTLS (Rule 2 — raw-udp-arq media). "
+                "Audio pipeline uses null-encoder; "
+                "DTLS-dependent features (SRTP, DataChannel) inactive.");
+        }
+
+        core::log::Logger::instance().info(
+            std::string{"engine: TransportSession built — "
+                        "media='"} +
+            impl_->resolved_media_factory_id +
+            "', control='" +
+            impl_->resolved_control_factory_id +
+            "'");
     }
 
-    // Apply pre-open configuration through the plugin interface — no
-    // dynamic_cast to `ice::IceTransport` needed.
+    // ---- Apply pre-open ICE configuration ---------------------------------
+    // set_bind_address / set_stun_server / set_local_port_range are safe
+    // on null-instance ICE returns from RawUdpArqStack (they are no-ops).
     ice_t_->set_bind_address(config_.local_bind_address);
     ice_t_->set_stun_server(config_.stun_server_host, config_.stun_server_port);
     ice_t_->set_local_port_range(config_.local_port_range_begin,
@@ -568,25 +729,49 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // TURN servers are added via NimRTCEngine::add_turn_server() *before*
     // open() — they're applied to ice_t_ at that time, so no loop here.
 
-    // ---- BWE + Scheduler (injected into ice_t_) -------------------------
-    init_bwe_scheduler();
+    return 0;
+}
 
+// ---------------------------------------------------------------------------
+// Phase 4 — audio3a + codec plugin creation.
+//
+// Original order: set_callbacks() BEFORE open().  We preserve that
+// ordering via make_plugin's post_create hook.  The audio3a plugin's
+// on_error callback bridges into the engine's on_error_ via a
+// captured-this lambda.
+//
+// Failure policy:
+//   - audio3a — silent on missing (concrete NullAudio3A fallback below
+//     covers the gap), Error on open fail (callers want to know the
+//     configured plugin misbehaved even though we fall back).
+//   - codec — Silent on missing / open fail / create returns null.  The
+//     engine falls back to the statically-linked opus module
+//     (NIMRTC_HAS_OPUS).  Callers do not need an error notification
+//     because the fallback is "the same codec from a different path".
+//     This matches the pre-Slice-1.5 behaviour.
+//
+// Returns void — failures surface through `on_error_` and the
+// `unique_ptr` slot is reset to `nullptr` so the fallback path runs.
+// ---------------------------------------------------------------------------
+void NimRTCEngine::init_audio_modules() noexcept {
     // ---- Audio3A --------------------------------------------------------
-    const plugins::IAudio3AFactory* a3a_factory = pal::resolve_audio3a(config_.audio3a_name);
-    if (a3a_factory) {
-        audio3a_plugin_.reset(a3a_factory->create());
-        if (audio3a_plugin_) {
-            audio3a_plugin_->set_callbacks(
+    (void)pal::make_plugin<&pal::resolve_audio3a>(
+        config_.audio3a_name,
+        audio3a_plugin_,
+        /*config=*/nullptr,                // IAudio3AFactory::create()
+                                           // takes no config (see
+                                           // nullptr_t branch in helper)
+        {.err_open_failed = core::kAudio3APluginOpenFailed,
+         .open_fail_mode = pal::PluginFailureMode::Error,
+         .missing_mode = pal::PluginFailureMode::Silent,  // missing → silent fallback
+         .on_error = on_error_},
+        /*post_create=*/[this](plugins::IAudio3A& p) {
+            p.set_callbacks(
                 [](bool) {}, [](float) {},
                 [this](std::uint32_t err, std::string_view msg) {
                     if (on_error_) on_error_(err, msg);
                 });
-            if (audio3a_plugin_->open() != plugins::kOk) {
-                if (on_error_) on_error_(core::kAudio3APluginOpenFailed, "audio3a plugin open failed; falling back to concrete");
-                audio3a_plugin_.reset();
-            }
-        }
-    }
+        });
     if (!audio3a_plugin_) {
         impl_->audio3a_concrete = std::make_unique<audio3a::NullAudio3A>();
         audio3a::Config a3a;
@@ -596,49 +781,89 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
         impl_->audio3a_concrete->init(a3a);
     }
 
-    // ---- DataChannel (RFC 8831 / RFC 8260 plugin slot) ------------------
-    //
-    // Verify the IDataChannelFactory registered under
-    // `cfg.datachannel_name` resolves via PluginRegistry.  The engine
-    // does NOT auto-create any channel — callers explicitly invoke
-    // `create_data_channel(label)` after open() succeeds (mirrors the
-    // JS `peer.createDataChannel()` API).
-    //
-    // When `datachannel_name.empty()` the engine skips DataChannel
-    // entirely: `create_offer()` won't emit `m=application`, the answer
-    // side silently drops the peer's `m=application` line, and
-    // `create_data_channel()` returns nullptr.
-    //
-    // The factory lookup is intentionally lazy — we don't construct any
-    // IDataChannel at init time.  Subagent A's `SctpDataChannelFactory`
-    // registers at static-init time via `register_default_plugins()`,
-    // so by the time `init_modules_once()` runs, the factory is
-    // already in the registry.
-    //
-    // NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport
-    // / QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
-    // DC-2 / TPAL-5 deferred) and §10 (forward direction).  v0.11.0
-    // falls back to the in-process `tests/test_datachannel_engine`
-    // 5/5 PASS as the §7 substitute, made permanent.  Chrome is moving
-    // DataChannel to WebTransport over QUIC; v1.x will redesign the
-    // data plane on top of that path (likely msquic, MIT-licensed,
-    // Windows-first, cross-platform CI).
-    //
-    // The full DataChannel lifecycle requires plumbing the DTLS
-    // transport's outbound datagram path into the SCTP socket:
-    //   1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
-    //      keying material and feed it into the SCTP socket via the
-    //      `ISctpSocket::set_dtls_keys()` hook.
-    //   2. Hook the DTLS transport's outbound (encrypted) side to
-    //      the SCTP socket's `send_datagram()` — that's where
-    //      SCTP-over-DTLS packets are emitted onto the wire.
-    //   3. Hook the DTLS transport's inbound (decrypted) datagrams
-    //      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
-    //      can drain its receive queue.
-    //   This skeleton only reserves the (void*) transport pointer
-    //   placeholder (`Impl::datachannel_transport_cookie`) — the
-    //   v1.x wiring PR replaces it with the physical plumbing on
-    //   top of WebTransport / QUIC.
+    // ---- Codec ---------------------------------------------------------
+    {
+        plugins::CodecConfig codec_cfg{};
+        codec_cfg.sample_rate_hz = config_.pcm_sample_rate_hz;
+        codec_cfg.channels       = config_.pcm_channels;
+        codec_cfg.bitrate_bps    = 64000;
+        codec_cfg.complexity     = 10;
+        codec_cfg.fec_enabled    = true;
+        codec_cfg.dtx_enabled    = false;
+        codec_cfg.vad_enabled    = false;
+        codec_cfg.payload_type   = config_.audio_codec.payload_type;
+        codec_cfg.name           = config_.codec_name;
+        (void)pal::make_plugin<&pal::resolve_codec>(
+            config_.codec_name,
+            codec_plugin_,
+            std::move(codec_cfg),
+            {.open_fail_mode = pal::PluginFailureMode::Silent,
+             .missing_mode = pal::PluginFailureMode::Silent,
+             .on_error = on_error_});
+        if (!codec_plugin_) {
+#ifdef NIMRTC_HAS_OPUS
+            opus::EncoderConfig ec;
+            ec.sample_rate_hz = config_.pcm_sample_rate_hz;
+            ec.channels       = config_.pcm_channels;
+            impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
+            opus::DecoderConfig dc;
+            dc.sample_rate_hz = config_.pcm_sample_rate_hz;
+            dc.channels       = config_.pcm_channels;
+            impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
+#endif
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 — DataChannel factory verification.
+//
+// Verify the IDataChannelFactory registered under
+// `cfg.datachannel_name` resolves via PluginRegistry.  The engine
+// does NOT auto-create any channel — callers explicitly invoke
+// `create_data_channel(label)` after open() succeeds (mirrors the JS
+// `peer.createDataChannel()` API).
+//
+// When `datachannel_name.empty()` the engine skips DataChannel
+// entirely: `create_offer()` won't emit `m=application`, the answer
+// side silently drops the peer's `m=application` line, and
+// `create_data_channel()` returns nullptr.
+//
+// The factory lookup is intentionally lazy — we don't construct any
+// IDataChannel at init time.  The default `SctpDataChannelFactory`
+// registers at static-init time via `register_default_plugins()`,
+// so by the time `init_modules_once()` runs, the factory is
+// already in the registry.
+//
+// NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport /
+// QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
+// DC-2 / TPAL-5 deferred) and §10 (forward direction).  v0.11.0
+// falls back to the in-process `tests/test_datachannel_engine`
+// 5/5 PASS as the §7 substitute, made permanent.  Chrome is moving
+// DataChannel to WebTransport over QUIC; v1.x will redesign the
+// data plane on top of that path (likely msquic, MIT-licensed,
+// Windows-first, cross-platform CI).
+//
+// The full DataChannel lifecycle requires plumbing the DTLS
+// transport's outbound datagram path into the SCTP socket:
+//   1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
+//      keying material and feed it into the SCTP socket via the
+//      `ISctpSocket::set_dtls_keys()` hook.
+//   2. Hook the DTLS transport's outbound (encrypted) side to
+//      the SCTP socket's `send_datagram()` — that's where
+//      SCTP-over-DTLS packets are emitted onto the wire.
+//   3. Hook the DTLS transport's inbound (decrypted) datagrams
+//      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
+//      can drain its receive queue.
+//   This skeleton only reserves the (void*) transport pointer
+// placeholder (`Impl::datachannel_transport_cookie`) — the v1.x
+// wiring PR replaces it with the physical plumbing on top of
+// WebTransport / QUIC.
+//
+// Returns void — a missing factory just logs a warning and
+// `create_data_channel()` will return `nullptr` on the caller side.
+// ---------------------------------------------------------------------------
+void NimRTCEngine::init_datachannel_registry() noexcept {
     if (!config_.datachannel_name.empty()) {
         const plugins::IDataChannelFactory* dcf =
             pal::resolve_datachannel(config_.datachannel_name);
@@ -661,124 +886,57 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
                             "return nullptr)"));
         }
     }
+}
 
-    // ---- Codec ---------------------------------------------------------
-    {
-        plugins::CodecConfig codec_cfg{};
-        codec_cfg.sample_rate_hz = config_.pcm_sample_rate_hz;
-        codec_cfg.channels       = config_.pcm_channels;
-        codec_cfg.bitrate_bps    = 64000;
-        codec_cfg.complexity     = 10;
-        codec_cfg.fec_enabled    = true;
-        codec_cfg.dtx_enabled    = false;
-        codec_cfg.vad_enabled    = false;
-        codec_cfg.payload_type   = config_.audio_codec.payload_type;
-        codec_cfg.name           = config_.codec_name;
-        const plugins::ICodecFactory* cf = pal::resolve_codec(config_.codec_name);
-        if (cf) {
-            codec_plugin_.reset(cf->create(codec_cfg));
-            if (codec_plugin_ && codec_plugin_->open() != plugins::kOk) {
-                codec_plugin_.reset();
-            }
-        }
-        if (!codec_plugin_) {
-#ifdef NIMRTC_HAS_OPUS
-            opus::EncoderConfig ec;
-            ec.sample_rate_hz = config_.pcm_sample_rate_hz;
-            ec.channels       = config_.pcm_channels;
-            impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
-            opus::DecoderConfig dc;
-            dc.sample_rate_hz = config_.pcm_sample_rate_hz;
-            dc.channels       = config_.pcm_channels;
-            impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
-#endif
-        }
-    }
-
+// ---------------------------------------------------------------------------
+// Phase 6 — SRTP context creation + DTLS open + ICE callbacks.
+//
+// Slice 7.6 PR3 (v0.12.0): DTLS session ownership moved from the
+// engine (direct `reg.get_dtls_session()` + `factory->create()`) to
+// `WebRtcClassicStackFactory` inside `make_transport_instance()`.
+// `impl_->dtls` is a weak_ptr into `impl_->session.media_stack`
+// (see the field comment on `Impl::dtls`).
+//
+// v0.13.0: changed from raw pointer to weak_ptr so `.lock()` returns
+// nullptr automatically after close(), eliminating the UAF class.
+//
+// The factory's `create()` already built a default DtlsConfig with
+// role=Server / srtp_profile=Aes128CmSha1_80 — matching what the
+// pre-PR3 engine set here.  The DTLS role is still a placeholder;
+// `process_remote_sdp()` resolves the real role from the peer's
+// `a=setup` attribute (RFC 5763 §5) and calls `dtls->set_role()`
+// before the handshake.  See P0#1 (DTLS role negotiation).
+//
+// Rule 2 caveat (teleop-ultra-low-latency):
+//   `impl_->dtls` may be expired (weak_ptr, no lock) when the media stack is
+//   raw-udp-arq (no DTLS in the media plane).  In that case we
+//   skip DTLS open and surface a warning earlier in this function.
+//   Note: weak_ptr::lock() == nullptr for both "never set" and "already destroyed".
+//
+// DTLS-missing-but-required gate (regression for test_dtls_seam
+//   `cfg_dtls_name_unknown_factory_yields_open_failure`):
+//   When the resolved media stack REQUIRES DTLS (webrtc-classic
+//   for all 4 browser-interop strategies) but the user-supplied
+//   `dtls_name` doesn't resolve to a registered factory, the
+//   stack's factory returns the stack with dtls_=null (defensive
+//   — see webrtc_classic_stack.cpp create()'s "DTLS factory not
+//   found" branch).  The engine must NOT silently proceed without
+//   DTLS in that case — it must surface kDtlsOpenFailed (the same
+//   error the pre-PR3 path produced when `reg.get_dtls_session()`
+//   returned null).  Rule 2 (raw-udp-arq media) is the only case
+//   where null DTLS is OK; the strategy id is checked here to
+//   distinguish "DTLS-less by design" from "DTLS-less by
+//   misconfiguration".
+// ---------------------------------------------------------------------------
+uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
     // ---- SRTP ----------------------------------------------------------
     impl_->srtp = std::make_unique<srtp::SrtpContext>();
     core::log::Logger::instance().debug(
-        "engine: srtp_ created, about to create dtls_");
+        "engine: srtp_ created, about to open dtls_");
 
     // ---- DTLS ----------------------------------------------------------
-    //
-    // PAL Slice 4 / TPAL-4 (v0.11.0) cleanup: the DTLS factory is
-    // resolved via `core::PluginRegistry::get_dtls_session(id)`
-    // (Slice 4 seam + Slice 8 typed registry hook) rather than
-    // constructing `DtlsSessionWolfSSL` directly.  The seam id is
-    // user-selectable through `EngineConfig::dtls_name` (added in
-    // this PR); empty defaults to the built-in "wolfssl" so every
-    // v0.10.x caller — whose config has `dtls_name=""` by
-    // construction — stays source-compatible.  A future 国密 /
-    // OpenSSL / BoringSSL / mbedTLS backend registers its own id
-    // via `register_dtls_session(id, factory*)` and the engine
-    // picks it via a one-line config change.
-    //
-    // The `impl_->dtls` field now holds
-    // `unique_ptr<nimrtc::dtls::IDtlsSession>` (not the v0.10.2
-    // concrete `DtlsSessionWolfSSL`) so the engine never
-    // downcasts.  Every method called downstream —
-    // `open()` / `state()` / `is_connected()` /
-    // `local_fingerprint()` / `srtp_keying_material()` /
-    // `feed_inbound()` / `take_outbound()` / `tick()` /
-    // `set_role(DtlsRole)` /
-    // `set_peer_fingerprint(string, vector)` — is on the seam
-    // interface (see `dtls_session_iface.hpp`).  The
-    // `static_cast<DtlsSessionWolfSSL*>(dtls_seam.release())`
-    // that v0.10.2 used as a transitional escape hatch is gone.
-    //
-    // Note: the initial DTLS role is set to Server as a
-    // placeholder — process_remote_sdp() resolves the actual role
-    // from the peer's `a=setup` attribute (RFC 5763 §5) and calls
-    // `dtls->set_role()` before the handshake starts.  See P0#1
-    // (DTLS role negotiation).
-    nimrtc::dtls::Config dcfg;
-    dcfg.role          = nimrtc::dtls::DtlsRole::Server;
-    dcfg.srtp_profile  = nimrtc::dtls::SrtpProfile::Aes128CmSha1_80;
-
-    // PAL Slice 4 / TPAL-4: `cfg.dtls_name` selects the backend.
-    // Empty (the v0.10.x default) means "use the built-in wolfSSL
-    // factory" — preserves source compat for every existing caller.
-    // Unknown ids surface as `kEngineInternal` (matching the
-    // pre-Slice-8 missing-transport-plugin contract) and the engine
-    // does NOT silently fall back to "wolfssl" — that would mask
-    // integrator typos for the 国密 path.
-    const std::string dtls_lookup_id =
-        config_.dtls_name.empty() ? std::string("wolfssl") : config_.dtls_name;
-    const nimrtc::dtls::IDtlsSessionFactory* dtls_factory =
-        reg.get_dtls_session(dtls_lookup_id);
-    if (!dtls_factory) {
-        impl_->last_open_rc = core::kEngineInternal;
-        core::log::Logger::instance().error(
-            std::string("engine: DTLS plugin '") + dtls_lookup_id +
-            "' not found in core::PluginRegistry (TPAL-4 registry "
-            "hook — did nimrtc::dtls::register_default_plugins() run?)");
-        if (on_error_) on_error_(core::kEngineInternal,
-            "DTLS plugin '" + dtls_lookup_id +
-            "' not registered (TPAL-4 registry)");
-        return core::kEngineInternal;
-    }
-
-    // Factory contract returns `unique_ptr<IDtlsSession>`.  Store it
-    // directly — no downcast required (see `Impl::dtls` field type).
-    impl_->dtls = dtls_factory->create(dcfg);
-    if (!impl_->dtls) {
-        impl_->last_open_rc = core::kEngineInternal;
-        if (on_error_) on_error_(core::kEngineInternal,
-            "DTLS factory returned null session");
-        return core::kEngineInternal;
-    }
-    core::log::Logger::instance().debug(
-        std::string("engine: dtls_ created via TPAL-4 seam (id='") +
-        dtls_lookup_id + "'), calling dtls_->open()");
-    // TPAL-4: `IDtlsSession::open()` returns `core::Result<void>`
-    // (seam surface — see `dtls_session_iface.hpp`).  We can't use
-    // `if (!impl_->dtls->open())` because `Result<void>::operator bool()`
-    // is explicit; call `.ok()` and translate any failure to
-    // `kDtlsOpenFailed` (the same code the v0.10.x `bool`-returning
-    // `DtlsSession::open()` produced on cert / wolfSSL_Init error).
-    {
-        auto open_rc = impl_->dtls->open();
+    if (auto* d = impl_->dtls.lock().get()) {
+        auto open_rc = d->open();
         if (!open_rc.ok()) {
             impl_->last_open_rc = core::kDtlsOpenFailed;
             core::log::Logger::instance().error(
@@ -788,8 +946,38 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
                 "DTLS open failed: " + open_rc.error().message());
             return core::kDtlsOpenFailed;
         }
+        core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
+    } else if (impl_->resolved_media_factory_id == "raw-udp-arq") {
+        // Rule 2: no DTLS in media path (raw-udp-arq media stack).
+        // The strategy block above already warned; here we just log
+        // at debug level so the trace shows the session was built
+        // without DTLS.
+        core::log::Logger::instance().debug(
+            "engine: dtls_->open() skipped — "
+            "Rule 2 strategy has no DTLS in media path");
+    } else {
+        // Media stack requires DTLS (webrtc-classic) but dtls_ is
+        // null.  This means the user-supplied cfg.dtls_name (or the
+        // default "wolfssl") didn't resolve in core::PluginRegistry.
+        // The pre-PR3 contract was to fail with kEngineInternal in
+        // that case (test_dtls_seam regresses this).  Preserve that
+        // contract: a misconfigured DTLS backend is a hard error,
+        // not a silent degradation.  The error code matches the
+        // pre-Slice-8 "transport plugin not found" path that the
+        // test pins.
+        impl_->last_open_rc = core::kEngineInternal;
+        const std::string msg =
+            std::string{"engine: DTLS plugin '"} +
+            config_.dtls_name +
+            "' not registered (required by media stack '" +
+            impl_->resolved_media_factory_id +
+            "' — no DTLS in the resolved stack). Check "
+            "nimrtc::dtls::register_default_plugins() ran before "
+            "engine construction.";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kEngineInternal, msg);
+        return core::kEngineInternal;
     }
-    core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
 
     // ---- ICE recv / error callbacks ------------------------------------
     ice_t_->set_callbacks(
@@ -817,9 +1005,25 @@ uint32_t NimRTCEngine::open() noexcept {
             "op7b transport pre_open→open");
     }
 
-    // ---- ice_t_->open() triggers ICE gather_candidates() ------------------
-    // At this point, if set_remote_ice() was called before open(), the ICE
-    // transport knows the peer's credentials and will be CONTROLLED.
+    // ---- Session start triggers ICE gather_candidates() (Slice 7.6 PR3) ----
+    //
+    // The TransportSession owns ICE (inside media_stack). `ice_t_` is a raw
+    // non-owning pointer into the session; calling `ice_t_->open()` directly
+    // reaches the real ICE transport and preserves the error-code path
+    // (pre-PR3 behaviour). The session's own `start()` method is void; we
+    // call `ice_t_->open()` here to keep the `!= kOk` error check.
+    //
+    // At this point, if `set_remote_ice()` was called before `open()`, the
+    // ICE transport knows the peer's credentials and will be CONTROLLED.
+    if (!ice_t_) {
+        // Guard: if `make_transport_instance()` returned a null media_stack
+        // (unknown factory), `init_modules_once()` already returned an error
+        // and we would not reach here. This is a belt-and-suspenders check.
+        impl_->last_open_rc = core::kEngineInternal;
+        if (on_error_) on_error_(core::kEngineInternal,
+            "open(): ice_t_ is null (make_transport_instance returned null media_stack)");
+        return core::kEngineInternal;
+    }
     core::log::Logger::instance().debug("op8 calling ice_t_->open()");
     const auto ice_open_rc = ice_t_->open();
     if (ice_open_rc != plugins::kOk) {
@@ -829,7 +1033,7 @@ uint32_t NimRTCEngine::open() noexcept {
         impl_->last_open_rc = core::kEngineInternal;
         core::log::Logger::instance().error(std::string(err));
         if (on_error_) on_error_(core::kEngineInternal, err);
-        ice_t_.reset();
+        ice_t_ = nullptr;  // raw pointer — null after failure
         return core::kEngineInternal;
     }
     core::log::Logger::instance().debug("op7 transport open ok");
@@ -876,139 +1080,112 @@ void NimRTCEngine::set_video_source(
 }
 
 void NimRTCEngine::init_video_plugins() noexcept {
-    auto& reg = core::PluginRegistry::instance();
-
-    // ========================================================================
-    // PHASE 1 — create all plugins (order: sink, source, receiver, sender, codec)
-    // ========================================================================
+    // PHASE 1 — create all plugins (order: sink, source, receiver, sender,
+    // codec). The 5-step factory dance for each plugin is consolidated
+    // into pal::make_plugin() (PAL Slice 1.5); see make_plugin.hpp.
+    // PHASE 2 — wire pipeline callbacks (down below the make_plugin
+    // blocks).  Splitting the function into two phases ensures that by
+    // the time any callback fires, every plugin slot is already filled.
 
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
-        const auto* f = reg.get_video_sink(config_.video_sink_name);
-        if (f) {
-            plugins::VideoSinkConfig cfg{};
-            video_sink_.reset(f->create(cfg));
-            if (video_sink_) {
-                if (video_sink_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(core::kVideoSinkOpenFailed,
-                        "video_sink plugin open failed");
-                    video_sink_.reset();
-                }
-            }
-        } else if (on_error_) {
-            on_error_(core::kVideoSinkPluginMissing,
-                std::string("video_sink plugin not found: ")
-                    .append(config_.video_sink_name));
-        }
+        // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
+        // → open → report" dance with one helper call. The Error/Error
+        // policy matches the original on_error_ path.
+        (void)pal::make_plugin<&pal::resolve_video_sink>(
+            config_.video_sink_name,
+            video_sink_,
+            plugins::VideoSinkConfig{},                  // default config
+            {.err_open_failed = core::kVideoSinkOpenFailed,
+             .err_missing = core::kVideoSinkPluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
     }
 
     // ---- Video Source ------------------------------------------------------
     if (!video_source_) {
-        const auto* f = reg.get_video_source(config_.video_source_name);
-        if (f) {
-            plugins::VideoSourceConfig cfg{};
-            cfg.width  = 640;
-            cfg.height = 480;
-            cfg.fps    = 30;
-            cfg.ssrc   = config_.video_sender_tuning.ssrc;
-            video_source_.reset(f->create(cfg));
-            if (video_source_) {
-                if (video_source_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(core::kVideoSourceOpenFailed,
-                        "video_source plugin open failed");
-                    video_source_.reset();
-                }
-            }
-        } else if (on_error_) {
-            on_error_(core::kVideoSourcePluginMissing,
-                std::string("video_source plugin not found: ")
-                    .append(config_.video_source_name));
-        }
+        plugins::VideoSourceConfig cfg{};
+        cfg.width  = 640;
+        cfg.height = 480;
+        cfg.fps    = 30;
+        cfg.ssrc   = config_.video_sender_tuning.ssrc;
+        (void)pal::make_plugin<&pal::resolve_video_source>(
+            config_.video_source_name,
+            video_source_,
+            std::move(cfg),
+            {.err_open_failed = core::kVideoSourceOpenFailed,
+             .err_missing = core::kVideoSourcePluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
     }
 
     // ---- Video Receiver ----------------------------------------------------
     if (!video_receiver_) {
-        const auto* f = reg.get_video_receiver(config_.video_receiver_name);
-        if (f) {
-            plugins::VideoReceiverConfig cfg{};
-            cfg.codec        = plugins::VideoCodecKind::kH264;
-            cfg.ssrc         = config_.video_receiver_tuning.ssrc;
-            cfg.payload_type = config_.video_receiver_tuning.payload_type;
-            cfg.expect_fu_a  = config_.video_receiver_tuning.expect_fu_a;
-            cfg.max_inflight_frames =
-                config_.video_receiver_tuning.max_inflight_frames;
-            cfg.max_jitter_buffer_ms =
-                config_.video_receiver_tuning.max_jitter_buffer_ms;
-            cfg.emit_nacks  = config_.video_receiver_tuning.emit_nacks;
-            video_receiver_.reset(f->create(cfg));
-            if (video_receiver_) {
-                if (video_receiver_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(core::kVideoReceiverOpenFailed,
-                        "video_receiver plugin open failed");
-                    video_receiver_.reset();
-                }
-            }
-        } else if (on_error_) {
-            on_error_(core::kVideoReceiverPluginMissing,
-                std::string("video_receiver plugin not found: ")
-                    .append(config_.video_receiver_name));
-        }
+        plugins::VideoReceiverConfig cfg{};
+        cfg.codec        = plugins::VideoCodecKind::kH264;
+        cfg.ssrc         = config_.video_receiver_tuning.ssrc;
+        cfg.payload_type = config_.video_receiver_tuning.payload_type;
+        cfg.expect_fu_a  = config_.video_receiver_tuning.expect_fu_a;
+        cfg.max_inflight_frames =
+            config_.video_receiver_tuning.max_inflight_frames;
+        cfg.max_jitter_buffer_ms =
+            config_.video_receiver_tuning.max_jitter_buffer_ms;
+        cfg.emit_nacks  = config_.video_receiver_tuning.emit_nacks;
+        (void)pal::make_plugin<&pal::resolve_video_receiver>(
+            config_.video_receiver_name,
+            video_receiver_,
+            std::move(cfg),
+            {.err_open_failed = core::kVideoReceiverOpenFailed,
+             .err_missing = core::kVideoReceiverPluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
     }
 
     // ---- Video Sender ------------------------------------------------------
     if (!video_sender_) {
-        const auto* f = reg.get_video_sender(config_.video_sender_name);
-        if (f) {
-            plugins::VideoSenderConfig cfg{};
-            cfg.codec        = plugins::VideoCodecKind::kH264;
-            cfg.ssrc         = config_.video_sender_tuning.ssrc;
-            cfg.payload_type = config_.video_sender_tuning.payload_type;
-            cfg.mtu          = config_.video_sender_tuning.mtu;
-            cfg.initial_seq  = config_.video_sender_tuning.initial_seq;
-            cfg.packetization_mode =
-                plugins::VideoPacketizationMode::kNonInterleaved;
-            video_sender_.reset(f->create(cfg));
-            if (video_sender_) {
-                if (video_sender_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(core::kVideoSenderOpenFailed,
-                        "video_sender plugin open failed");
-                    video_sender_.reset();
-                }
-            }
-        } else if (on_error_) {
-            on_error_(core::kVideoSenderPluginMissing,
-                std::string("video_sender plugin not found: ")
-                    .append(config_.video_sender_name));
-        }
+        plugins::VideoSenderConfig cfg{};
+        cfg.codec        = plugins::VideoCodecKind::kH264;
+        cfg.ssrc         = config_.video_sender_tuning.ssrc;
+        cfg.payload_type = config_.video_sender_tuning.payload_type;
+        cfg.mtu          = config_.video_sender_tuning.mtu;
+        cfg.initial_seq  = config_.video_sender_tuning.initial_seq;
+        cfg.packetization_mode =
+            plugins::VideoPacketizationMode::kNonInterleaved;
+        (void)pal::make_plugin<&pal::resolve_video_sender>(
+            config_.video_sender_name,
+            video_sender_,
+            std::move(cfg),
+            {.err_open_failed = core::kVideoSenderOpenFailed,
+             .err_missing = core::kVideoSenderPluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
     }
 
     // ---- Video Codec (H.264) -----------------------------------------------
     if (!config_.video_codec_name.empty() && !video_codec_) {
-        const auto* f = pal::resolve_video_codec(config_.video_codec_name);
-        if (f) {
-            plugins::VideoCodecConfig cfg{};
-            cfg.width = 640;
-            cfg.height = 480;
-            cfg.fps = 30;
-            cfg.bitrate_bps = 1'000'000;
-            cfg.keyframe_interval = 60;
-            cfg.pixel_format = plugins::VideoPixelFormat::kI420;
-            cfg.codec = plugins::VideoCodecKind::kH264;
-            cfg.payload_type = config_.video_receiver_tuning.payload_type;
-            cfg.name = config_.video_codec_name;
-            video_codec_.reset(f->create(cfg));
-            if (video_codec_) {
-                if (video_codec_->open() != plugins::kOk) {
-                    if (on_error_) on_error_(core::kVideoCodecOpenFailed,
-                        "video_codec plugin open failed");
-                    video_codec_.reset();
-                }
-            }
-        } else if (on_error_) {
-            on_error_(core::kVideoCodecPluginMissing,
-                std::string("video_codec plugin not found: ")
-                    .append(config_.video_codec_name));
-        }
+        plugins::VideoCodecConfig cfg{};
+        cfg.width = 640;
+        cfg.height = 480;
+        cfg.fps = 30;
+        cfg.bitrate_bps = 1'000'000;
+        cfg.keyframe_interval = 60;
+        cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+        cfg.codec = plugins::VideoCodecKind::kH264;
+        cfg.payload_type = config_.video_receiver_tuning.payload_type;
+        cfg.name = config_.video_codec_name;
+        (void)pal::make_plugin<&pal::resolve_video_codec>(
+            config_.video_codec_name,
+            video_codec_,
+            std::move(cfg),
+            {.err_open_failed = core::kVideoCodecOpenFailed,
+             .err_missing = core::kVideoCodecPluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
     }
 
     // ========================================================================
@@ -1192,7 +1369,24 @@ void NimRTCEngine::close() noexcept {
     if (codec_plugin_) codec_plugin_->close();
     shutdown_video_plugins();
     shutdown_bwe_scheduler();
-    ice_t_.reset();
+    // ---- Tear down the TransportSession (Slice 7.6 PR3) ----------------
+    //
+    // `impl_->session` owns the media_stack and (optionally)
+    // control_stack. Their `close()` methods drive ICE / DTLS / RTP /
+    // SCTP / raw-UDP teardown in the right order. The session's own
+    // close() also nulls `session.media_stack` / `session.control_stack`,
+    // so after this call `ice_t_` becomes dangling and `impl_->dtls`
+    // (weak_ptr into those stacks) auto-expires — but no code dereferences
+    // them after close() returns (P0 v0.12.0 is_open() guards prevent API
+    // surface use; v0.13.0 weak_ptr eliminates the UAF class entirely).
+    //
+    // `~NimRTCEngine` later calls `delete impl_` which destroys the
+    // session and any remaining owned resources. Order is critical:
+    // the engine must call this `close()` BEFORE the destructor runs
+    // (which the destructor does itself when `state_ == State::kOpen`).
+    impl_->session.close();
+    ice_t_ = nullptr;
+    // weak_ptr: no explicit reset needed — auto-expires when stack dies
     impl_->jitter_buffers.clear();
     audio3a_plugin_.reset();
     impl_->audio3a_concrete.reset();
@@ -1201,9 +1395,9 @@ void NimRTCEngine::close() noexcept {
     impl_->opus_encoder.reset();
     impl_->opus_decoder.reset();
 #endif
-    impl_->dtls.reset();
     impl_->srtp.reset();
-    impl_->datachannel_transport_cookie = nullptr;
+    // weak_ptr reset (no implicit nullptr conversion in C++20)
+    impl_->datachannel_transport_cookie.reset();
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
 }
@@ -1226,13 +1420,11 @@ void NimRTCEngine::close() noexcept {
 //   - DTLS-transport wiring is deferred to the **v1.x WebTransport /
 //     QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
 //     DC-2 / TPAL-5 deferred) and §10 (forward direction).  For now
-//     we cast `impl_->dtls.get()` to `void*` and stash it in
-//     `Impl::datachannel_transport_cookie` so the v1.x wiring PR
-//     has a single, well-known place to look for the transport
-//     handle.  See the comment block in init_modules_once() for the
-//     full scope.  v0.11.0 satisfies the data-plane DoD gate via
-//     the §7 fallback (in-process `test_datachannel_engine` 5/5
-//     PASS), made permanent.
+//     `impl_->dtls` is a weak_ptr into the session's media_stack;
+//     `datachannel_transport_cookie` also holds a weak_ptr (v0.13.0).
+//     See the comment block in init_modules_once() for the full scope.
+//     v0.11.0 satisfies the data-plane DoD gate via the §7 fallback
+//     (in-process `test_datachannel_engine` 5/5 PASS), made permanent.
 // ---------------------------------------------------------------------------
 std::unique_ptr<plugins::IDataChannel>
 NimRTCEngine::create_data_channel(std::string_view label) noexcept {
@@ -1289,20 +1481,18 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
     // DC-2 / TPAL-5 deferred) and §10 (forward direction).  Stash the
     // DTLS transport handle as a placeholder so the v1.x wiring PR
     // has a single, well-known place to look for the underlying
-    // transport.  We cast `IDtlsSession*` → `void*` to keep this
-    // engine.cpp TU free of any concrete module's transport hooks;
-    // the concrete SctpDataChannel (or its v1.x WebTransportDataChannel
-    // replacement) will read this cookie via
-    // `static_cast<nimrtc::dtls::IDtlsSession*>(engine_cookie)` once
-    // the wiring PR lands.
+    // transport.  v0.13.0: the cookie is typed as
+    // `std::weak_ptr<IDtlsSession>` (was `IDtlsSession*` raw pointer
+    // pre-v0.13.0; now auto-expires after close()).  The v1.x
+    // redesign will replace this field with a tagged union over
+    // {IDtlsSession*, IWebTransportSession*}.
     //
     // For now, the cookie is informational — the channel's own open()
     // succeeds, but its send() / on_message callbacks will be no-ops
     // until the v1.x wiring PR lands.  v0.11.0 satisfies the
     // data-plane DoD gate via the §7 fallback (in-process
     // `test_datachannel_engine` 5/5 PASS), made permanent.
-    impl_->datachannel_transport_cookie =
-        static_cast<void*>(impl_->dtls.get());
+    impl_->datachannel_transport_cookie = impl_->dtls;
 
     return ch;
 }
@@ -1335,9 +1525,9 @@ std::string NimRTCEngine::create_offer() noexcept {
     audio.ice_options     = "trickle";
     audio.dtls_setup      = "actpass";
 
-    if (impl_->dtls) {
+    if (auto d = impl_->dtls.lock()) {
         audio.dtls_fingerprint_algo  = "sha-256";
-        audio.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+        audio.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
     }
 
     sdp::MediaDescription::RtpMap codec_map;
@@ -1393,9 +1583,9 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.ice_options     = "trickle";
         video.dtls_setup      = "actpass";
 
-        if (impl_->dtls) {
+        if (auto d = impl_->dtls.lock()) {
             video.dtls_fingerprint_algo  = "sha-256";
-            video.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+            video.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
         // a=rtpmap:<vpt> H264/90000  (RFC 6184 §5.6)
@@ -1491,9 +1681,9 @@ std::string NimRTCEngine::create_offer() noexcept {
         app.ice_options     = "trickle";
         app.dtls_setup      = "actpass";
 
-        if (impl_->dtls) {
+        if (auto d = impl_->dtls.lock()) {
             app.dtls_fingerprint_algo  = "sha-256";
-            app.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+            app.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
         // a=sctp-port:<port>  (RFC 8831 §6.1 — mandatory for SCTP).
@@ -1532,6 +1722,12 @@ std::string NimRTCEngine::create_offer() noexcept {
 
 std::optional<std::string>
 NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
+    // P0 (v0.12.0): guard against post-close use.  Same rationale as
+    // on_transport_recv(): after close() the underlying dtls session is
+    // gone but a delayed signaling message may still call this entry
+    // point and deref impl_->dtls->set_role() / set_peer_fingerprint()
+    // below.  Mirrors the DataChannel guard pattern at line 1341.
+    if (state_ != State::kOpen) return std::nullopt;
     auto parsed = impl_->sdp_parser->parse(remote_sdp);
     if (!parsed) {
         if (on_error_) on_error_(core::kEngineSdpCorrupt, "SDP parse failed");
@@ -1617,7 +1813,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             rm.type != sdp::MediaType::Application) {
             continue;
         }
-        if (impl_->dtls) {
+        if (auto d = impl_->dtls.lock()) {
         // DTLS role is determined by the remote peer's `a=setup` attribute
         // (RFC 5763 §5):
         //
@@ -1650,7 +1846,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         nimrtc::dtls::DtlsRole desired_role  = nimrtc::dtls::DtlsRole::Server;
         std::string    local_setup_attr = "passive";
         (void)peer_setup;
-        impl_->dtls->set_role(desired_role);
+        d->set_role(desired_role);
         impl_->dtls_local_setup = local_setup_attr;
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: dtls role resolved peer_setup='")
@@ -1666,7 +1862,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 if (bytes.empty()) {
                     bytes = base64_decode(rm.dtls_fingerprint_value);
                 }
-                impl_->dtls->set_peer_fingerprint(rm.dtls_fingerprint_algo, std::move(bytes));
+                d->set_peer_fingerprint(rm.dtls_fingerprint_algo, std::move(bytes));
             }
         }
         break;
@@ -1734,9 +1930,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: answer SDP setup='") + am.dtls_setup +
             "' (peer wanted '" + rm.dtls_setup + "')");
-        if (impl_->dtls) {
+        if (auto d = impl_->dtls.lock()) {
             am.dtls_fingerprint_algo  = "sha-256";
-            am.dtls_fingerprint_value = impl_->dtls->local_fingerprint().hex_colon;
+            am.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
         // For audio: carry rtpmap/fmtp from offer.
@@ -1855,7 +2051,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // DTLS alert).  Without this check, demo-p2p would continue logging
     // "audio frames sent=N rc=0x0" after the handshake has transitioned
     // to Failed.
-    if (!impl_->dtls || !impl_->dtls->is_connected()) {
+    auto d_check = impl_->dtls.lock();
+    if (!d_check || !d_check->is_connected()) {
         return core::kEngineNotReady;
     }
 
@@ -2081,9 +2278,10 @@ std::string NimRTCEngine::local_password() const noexcept {
 }
 
 std::string NimRTCEngine::local_dtls_fingerprint_sha256_base64() const noexcept {
-    // Pointer stability: dtls_ is owned by the engine and never replaced
-    // after open(), so reading it from a const method is safe.
-    auto* d = impl_ ? impl_->dtls.get() : nullptr;
+    // Pointer stability: dtls_ (weak_ptr) locks into a shared_ptr here.
+    // The shared_ptr keeps the session alive for the lifetime of this
+    // call, so the returned reference from local_fingerprint() is safe.
+    auto d = impl_ ? impl_->dtls.lock() : std::shared_ptr<dtls::IDtlsSession>{};
     if (!d) return {};
     const auto& fp = d->local_fingerprint();
     if (fp.bytes.empty()) return {};
@@ -2118,14 +2316,28 @@ std::string NimRTCEngine::local_dtls_fingerprint_sha256_base64() const noexcept 
 }
 
 void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
+    // P0 (v0.12.0): guard against post-close use.  The ICE recv callback
+    // can race with close(): a buffered packet may arrive on the transport
+    // thread after close() has torn down the media_stack.  Without this
+    // guard we'd hit a use-after-free in d->state() / feed_inbound()
+    // below.  Mirrors the send_audio() pattern at line 2119.
+    //
+    // v0.13.0: impl_->dtls is a weak_ptr; .lock() returns nullptr
+    // automatically after close(), so the inner if (auto d = ...) check
+    // below catches the closed-engine case.  This is_open() guard
+    // remains as a defence-in-depth short-circuit that avoids the
+    // weak_ptr::lock() atomic increment on every non-DTLS packet.
+    if (!is_open()) return;
     if (pkt.empty() || pkt.size() < 1) return;
     std::uint8_t b0 = pkt.data()[0];
     bool looks_like_dtls = (b0 == 22 || b0 == 23 || b0 == 21);
-    if (looks_like_dtls && impl_->dtls) {
+    if (looks_like_dtls) {
+        auto d = impl_->dtls.lock();
+        if (!d) return;  // weak_ptr expired — engine is closed; drop packet
         core::log::Logger::instance().info(
             std::string("engine[dtls]: rx dtls ct=") + std::to_string(b0) +
             " len=" + std::to_string(pkt.size()) +
-            " state=" + std::string(nimrtc::dtls::DtlsSession::state_name(impl_->dtls->state())));
+            " state=" + std::string(nimrtc::dtls::DtlsSession::state_name(d->state())));
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
         // The ITransport::RecvCallback interface carries only the payload, no
         // source address.  For DTLS over ICE there is only one peer at a time
@@ -2152,7 +2364,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
                 }
             }
         }
-        impl_->dtls->feed_inbound(bytes, from);
+        d->feed_inbound(bytes, from);
         // Only flush outbound DTLS records once ICE has selected a pair,
         // mirroring the gate in tick().  Without this, the first inbound
         // ClientHello (which arrives as soon as the peer's ICE connectivity
@@ -2167,7 +2379,9 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     }
     // CCS (content type 20) isn't recognised as DTLS above; process it so
     // the receiving side can complete its state machine.
-    if (b0 == nimrtc::dtls::kDtlsChangeCipherSpec && impl_->dtls) {
+    if (b0 == nimrtc::dtls::kDtlsChangeCipherSpec) {
+        auto d = impl_->dtls.lock();
+        if (!d) return;  // weak_ptr expired — engine is closed; drop packet
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
         // Same peer-address derivation as the DTLS path above.
         nimrtc::dtls::DtlsAddr from;
@@ -2184,7 +2398,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
                 }
             }
         }
-        impl_->dtls->feed_inbound(bytes, from);
+        d->feed_inbound(bytes, from);
         if (is_ice_connected()) {
             drain_dtls();
         }
@@ -2219,15 +2433,16 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
 }
 
 int NimRTCEngine::drain_dtls() noexcept {
-    if (!impl_->dtls) return 0;
+    auto d = impl_->dtls.lock();
+    if (!d) return 0;
 
     // Drive the wolfSSL retransmit timer (RFC 6347 §4.2.4).  Without
     // this pump, a stalled handshake (e.g. lost HelloVerifyRequest
     // cookie exchange) hangs forever.  tick() is a no-op once the
     // session reaches Connected/Failed/Closed.
-    impl_->dtls->tick();
+    d->tick();
 
-    auto recs = impl_->dtls->take_outbound();
+    auto recs = d->take_outbound();
     int sent = 0;
     for (auto& rec : recs) {
         plugins::BufferView bv{rec.bytes.data(), rec.bytes.size()};
@@ -2237,7 +2452,7 @@ int NimRTCEngine::drain_dtls() noexcept {
     // Trace DTLS state transitions for debuggability.  Uses a per-engine
     // member (not a static local) so two engines in the same process
     // (e.g. the loopback test) log their transitions independently.
-    const auto new_state = impl_->dtls->state();
+    const auto new_state = d->state();
     if (new_state != impl_->last_dtls_state) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
@@ -2264,7 +2479,8 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
             "engine[dtls→srtp]: already installed, skipping");
         return;
     }
-    if (!impl_->dtls) {
+    auto d = impl_->dtls.lock();
+    if (!d) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: dtls_ is null, skipping");
         return;
@@ -2278,7 +2494,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // Pre-condition: DTLS MUST be Connected (RFC 5764 §4.2 — keying material
     // is only available after the Finished message).  Re-check inside this
     // function to avoid races between drain_dtls()'s state read and our own.
-    const auto dtls_state = impl_->dtls->state();
+    const auto dtls_state = d->state();
     if (dtls_state != nimrtc::dtls::DtlsState::Connected) {
         core::log::Logger::instance().debug(
             "engine[dtls→srtp]: dtls_state=" +
@@ -2287,7 +2503,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
         return;
     }
 
-    auto km = impl_->dtls->srtp_keying_material();
+    auto km = d->srtp_keying_material();
     if (!km) {
         core::log::Logger::instance().warn(
             "engine[dtls→srtp]: dtls reports Connected but no keying material");
@@ -2449,11 +2665,13 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
 // ---------------------------------------------------------------------------
 
 nimrtc::dtls::DtlsState NimRTCEngine::dtls_state() const noexcept {
-    return impl_->dtls ? impl_->dtls->state() : nimrtc::dtls::DtlsState::Closed;
+    auto d = impl_->dtls.lock();
+    return d ? d->state() : nimrtc::dtls::DtlsState::Closed;
 }
 
 bool NimRTCEngine::dtls_connected() const noexcept {
-    return impl_->dtls && impl_->dtls->is_connected();
+    auto d = impl_->dtls.lock();
+    return d && d->is_connected();
 }
 
 bool NimRTCEngine::is_ice_connected() const noexcept {

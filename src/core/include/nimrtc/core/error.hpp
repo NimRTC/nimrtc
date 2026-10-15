@@ -1,4 +1,8 @@
 ﻿#pragma once
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 // Note: This file intentionally saved as UTF-8 with BOM so that MSVC
 // (compiling with a non-UTF-8 code page such as CP936/GBK on Chinese Windows)
 // does not emit C4819 for any future non-ASCII characters in comments.

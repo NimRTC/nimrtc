@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/video_pipeline.hpp
  * @brief IVideoReceiver + IVideoSender — pluggable RTP-packetized video
  *        pipeline seam.
@@ -59,6 +59,10 @@
 
 #ifndef NIMRTC_PLUGINS_VIDEO_PIPELINE_HPP
 #define NIMRTC_PLUGINS_VIDEO_PIPELINE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <cstddef>

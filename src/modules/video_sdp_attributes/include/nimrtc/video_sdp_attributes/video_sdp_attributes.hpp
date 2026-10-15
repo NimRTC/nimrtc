@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_sdp_attributes/video_sdp_attributes.hpp
  * @brief Codec-specific SDP attribute parsers for video (H.264/VP8/VP9).
  *
@@ -38,6 +38,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <optional>
 #include <string>

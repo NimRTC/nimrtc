@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file track.hpp
  * @brief Track — single media track (audio / video / data).
  *
@@ -10,6 +10,10 @@
 
 #ifndef NIMRTC_SESSION_TRACK_HPP
 #define NIMRTC_SESSION_TRACK_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <memory>

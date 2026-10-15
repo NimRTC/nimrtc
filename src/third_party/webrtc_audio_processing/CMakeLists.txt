@@ -152,7 +152,17 @@ list(APPEND _imported_libraries ${_absl_libs})
 
 set_target_properties(nimrtc_vendor_webrtc_apm PROPERTIES
     IMPORTED_LOCATION             "${_apm_lib}"
-    INTERFACE_INCLUDE_DIRECTORIES "${_include_root}/webrtc"
+    # Two INTERFACE include directories are required:
+    #   1. The upstream `webrtc/` tree (audio_processing.h, common_audio,
+    #      common_types.h, ...).
+    #   2. The abseil-cpp subproject tree that meson fetched into
+    #      `${_abs_root}` (absl/base/config.h, absl/types/optional.h, ...).
+    #      Without (2) every translation unit that includes a public APM
+    #      header fails with `fatal error: absl/base/config.h: No such
+    #      file or directory` on the first #include (see
+    #      src/modules/audio3a/src/webrtc_audio3a.cpp:45, which itself
+    #      includes audio_processing.h that pulls in absl headers).
+    INTERFACE_INCLUDE_DIRECTORIES "${_include_root}/webrtc;${_abs_root}"
     INTERFACE_COMPILE_DEFINITIONS "WEBRTC_POSIX=1;WEBRTC_WIN=1;WEBRTC_AUDIO_PROCESSING_ONLY_BUILD=1"
     INTERFACE_LINK_LIBRARIES      "${_imported_libraries}"
 )

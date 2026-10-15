@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/bwe.hpp
  * @brief IBwe — pluggable Bandwidth Estimation interface (NimRTC §2.5 / §6).
  *
@@ -36,6 +36,10 @@
 
 #ifndef NIMRTC_PLUGINS_BWE_HPP
 #define NIMRTC_PLUGINS_BWE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <optional>

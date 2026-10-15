@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_jb/video_jitter_buffer.hpp
  * @brief Video-aware jitter buffer (RFC 6184 / 7741 / 9559).
  *
@@ -41,6 +41,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <cstddef>
 #include <memory>

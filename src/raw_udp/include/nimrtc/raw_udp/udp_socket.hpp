@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/udp_socket.hpp
  * @brief Tiny cross-platform UDP socket wrapper for the ArqRawUdp layer.
  *
@@ -29,6 +29,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstddef>
 #include <cstdint>
 #include <span>

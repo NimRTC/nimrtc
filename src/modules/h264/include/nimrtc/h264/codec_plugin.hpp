@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/h264/codec_plugin.hpp
  * @brief Codec plugin adapter: wraps nimrtc::h264::Decoder behind plugins::IVideoCodec.
  *
@@ -18,6 +18,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <cstddef>
 #include <memory>

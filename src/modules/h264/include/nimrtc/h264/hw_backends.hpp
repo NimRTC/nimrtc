@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/h264/hw_backends.hpp
  * @brief H.264 backend registry — platform HW encoders first, software last.
  *
@@ -34,6 +34,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <nimrtc/plugins/hw_video_backend.hpp>
 
 namespace nimrtc::h264 {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/dtls/dtls_types.hpp
  * @brief Common DTLS types — shared between the concrete dtls module
  *        and the PAL Slice 4 seam header.
@@ -30,6 +30,10 @@
 
 #ifndef NIMRTC_DTLS_TYPES_HPP
 #define NIMRTC_DTLS_TYPES_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <array>
 #include <cstdint>

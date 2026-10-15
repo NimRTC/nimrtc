@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/datachannel/datachannel.hpp
  * @brief DataChannel module — P1 placeholder.
  *
@@ -13,6 +13,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 // P1: the module is a thin shim. The concrete IDataChannel implementation
 // lives in nimrtc/plugins/datachannel.hpp (the plugin interface).
 // P2: include the SCTP implementation header here.

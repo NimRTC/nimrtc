@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_pipeline/video_pipeline_plugin.hpp
  * @brief PluginAdapter — wraps concrete `VideoReceiver` / `VideoSender` so
  *        they can be looked up by string ID through `core::PluginRegistry`.
@@ -35,6 +35,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <memory>
 #include <string_view>

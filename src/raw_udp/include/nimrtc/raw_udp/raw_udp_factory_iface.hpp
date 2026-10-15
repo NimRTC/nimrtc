@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/raw_udp_factory_iface.hpp
  * @brief IRawUdpFactory — abstract factory for IRawUdpDatagram backends.
  *
@@ -51,6 +51,10 @@
 
 #ifndef NIMRTC_RAW_UDP_FACTORY_IFACE_HPP
 #define NIMRTC_RAW_UDP_FACTORY_IFACE_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <memory>
 #include <string_view>

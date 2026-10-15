@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_payload/h264.hpp
  * @brief H.264 RTP payload packetizer / depacketizer (RFC 6184).
  *
@@ -26,6 +26,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <cstddef>
 #include <optional>

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/audio3a/audio3a_plugin.hpp
  * @brief Plugin adapter: wraps a concrete audio3a::IAudio3A behind plugins::IAudio3A.
  *
@@ -47,6 +47,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <memory>
 #include <mutex>

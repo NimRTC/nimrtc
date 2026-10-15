@@ -5,6 +5,296 @@ All notable changes to NimRTC are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - Unreleased
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport Slice 7.6 PR3 — end-to-end wiring of the 5 transport
+  strategies**. The CapabilitySelector's §5.3-rule-derived factory
+  pair is now consumed by `NimRTCEngine::init_modules_once()` to
+  build a `TransportSession` whose `media_stack` and (optionally)
+  `control_stack` are constructed from the matching
+  `ITransportStackFactory` registered in
+  `core::PluginRegistry::get_transport_stack()`. Pre-PR3 the engine
+  built ICE / DTLS / RTP / SCTP via separate `reg.get_*()` calls and
+  stitched them together by hand; PR3 replaces that with a
+  composition-root flow that lives in the `WebRtcClassicStackFactory`
+  and `RawUdpArqStackFactory` instead.
+  - `NimRTCEngine::ice_t_` and `Impl::dtls` are now **raw
+    non-owning pointers** into `Impl::session.media_stack`; the
+    `Impl::session` member owns the actual stack instances via
+    `unique_ptr<ITransportStack>`. Lifetime is safe because
+    `~NimRTCEngine` runs `close()` (which calls
+    `session.close()`) BEFORE `delete impl_` tears down the
+    session's owned resources.
+  - Rule 2 (`teleop-ultra-low-latency`) gets a dedicated
+    no-DTLS-by-design branch: `Impl::dtls` is null, the engine
+    skips `dtls->open()`, and the audio pipeline falls back to
+    null-encoder. A warning is logged so the degraded mode is
+    visible in the trace.
+  - The 4 browser-interop strategies (`browser-call`,
+    `agent-gateway`, `sfu-relay`, `cross-network-peer`) use
+    `webrtc-classic` for the media stack; missing DTLS factory
+    (e.g. user typo on `cfg.dtls_name`) hard-fails with
+    `kEngineInternal` (the same code the pre-PR3 path produced).
+  - The Selector-resolved pair is now used directly: the legacy
+    "fall back to webrtc-classic when trace.media_factory_id is
+    empty" path is preserved for unknown strategies
+    (`webrtc-quic-call`, deferred to v1.x).
+
+### Added
+
+- **`nimrtc::transport::make_transport_instance(media_factory_id,
+  control_factory_id, cfg)`** — canonical engine-facing entry
+  point for the v0.12.0 transport-strategy layer. Translates the
+  Selector's resolved factory ids into a fully-constructed
+  `TransportSession`. Lives in `transport_plugin.cpp` for future
+  consumers (test harnesses, webrtc-quic stack factory); the
+  engine inlines the equivalent lookup so its existing
+  `nimrtc::transport` PRIVATE link is sufficient.
+- **6 new subtests in `test_engine_plugin_loading.cpp`** for the
+  5 strategies + unknown-strategy failure mode:
+  - `slice76_strategy_default_is_browser_call`
+  - `slice76_strategy_agent_gateway` (webrtc-classic + raw-udp-arq control)
+  - `slice76_strategy_teleop_ultra_low_latency` (raw-udp-arq media + raw-udp-arq control)
+  - `slice76_strategy_sfu_relay` (webrtc-classic, no control)
+  - `slice76_strategy_cross_network_peer` (webrtc-classic, no control)
+  - `slice76_unknown_strategy_fails_open` (kEngineInternal guard)
+  - `slice76_accessors_empty_before_open` (diagnostic surface contract)
+
+### Changed
+
+- **`NimRTCEngine::Impl::dtls`** changed from
+  `unique_ptr<nimrtc::dtls::IDtlsSession>` to a raw non-owning
+  pointer. The DTLS session is now owned by
+  `WebRtcClassicStackFactory::create()` inside the media stack.
+  See `Impl::dtls` field comment for lifetime rationale.
+- **`NimRTCEngine::ice_t_`** changed from
+  `unique_ptr<plugins::IICETransport>` to a raw non-owning
+  pointer. The ICE transport is now owned by the media stack.
+- **`NimRTCEngine::close()`** now calls `Impl::session.close()`
+  (which tears down the media and control stacks in order)
+  before nulling `ice_t_` and `Impl::dtls`.
+- **`init_modules_once()` transport section** removed the
+  pre-PR3 manual ICE + DTLS construction path; the section now
+  resolves the §5.3 factory pair from the Selector, calls
+  `get_transport_stack()` on each id, and builds the session.
+- **PAL Slice 1.5 — `nimrtc::engine::pal::make_plugin<IPlugin,
+  Config, Factory>` template** added at
+  `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`. The
+  helper consolidates the 5-step "factory lookup → create →
+  null-check → open → report" dance that was copy-pasted across
+  9 plugin categories in `engine.cpp` (5 video plugins + 2 BWE /
+  Scheduler + audio3a + codec). Per-block size dropped from
+  ~20 lines to ~7 lines with no behaviour change.
+  - The helper takes a `PluginFailureMode` enum (Error / Warn /
+    Silent) so each plugin category keeps its original
+    failure-reporting policy (e.g. video → on_error_, BWE →
+    log-warn, audio3a → silent fallback, codec → silent
+    fallback).
+  - A `post_create` hook is invoked between `create()` and
+    `open()` to cover the audio3a case where `set_callbacks()`
+    must precede `open()`.
+  - A compile-time branch (`if constexpr`) handles the
+    no-config case (`IAudio3AFactory::create()` takes no
+    arguments) — the caller passes `nullptr` as the config
+    argument.
+  - `init_video_plugins()` lost the `auto& reg = ...` capture
+    and the `reg.get_video_*` calls; the registry lookups now
+    happen inline at each `pal::make_plugin` call site.
+- **PAL Slice 1.5 upgrade — `pal::make_plugin` now has a C++20
+  `auto Resolver` overload and a `MakePluginOpts` named-arguments
+  struct**. The 4 positional `err_open_failed` / `err_missing` /
+  `open_fail_mode` / `missing_mode` arguments (and the trailing
+  `on_error`) are folded into a single `MakePluginOpts` struct
+  consumed by designated initializers at the call site. The new
+  template overload
+  `make_plugin<auto Resolver, IPlugin, Config>(id, slot, cfg, opts, post_create)`
+  takes a resolver function pointer (e.g. `&pal::resolve_bwe`)
+  and deduces the factory type from
+  `std::invoke_result_t<Resolver, string_view>`; the
+  `reg.get_X(id)` lookup now happens inside the helper. All 9
+  `engine.cpp` plugin-load call sites (BWE / Scheduler / Audio3A
+  / Codec / Video Sink / Source / Receiver / Sender / Codec)
+  migrated — per-call-site arg count drops from 9-10 positional
+  to 5 positional + 1 struct. 6 new `pal::resolve_*` forwarders
+  added to `engine_plugin_resolver.hpp` (bwe, scheduler,
+  video_sink, video_source, video_receiver, video_sender) so the
+  resolver header is now symmetric across all 9 plugin
+  categories used by the engine. Behaviour-preserving: 27/27
+  `test_engine_plugin_loading`, 15/15 `test_audio3a_tap`, 13/13
+  `test_video_source` PASS on Windows MSVC. The
+  `reg.get_transport_stack` calls in `init_transport_session()`
+  are intentionally left as `reg.get_*()` (not migrated) because
+  they are part of the v0.12.0 Slice 7.6 PR3 transport-strategy
+  wiring, not the per-plugin factory loading pattern that PAL
+  Slice 1 covers.
+- **`NimRTCEngine::Impl::datachannel_transport_cookie`**
+  retyped from `void*` to `nimrtc::dtls::IDtlsSession*` (non-
+  owning). The v1.x WebTransport redesign will replace the
+  field with a tagged union over `{IDtlsSession*,
+  IWebTransportSession*}`; until then, the typed pointer
+  removes the unsafe `static_cast<void*>` round-trip.
+- **Meta-comments removed** from `core/registry.hpp` and three
+  production headers (`engine.hpp`, `engine.cpp`,
+  `raw_udp_datagram.hpp`). Production code no longer mentions
+  per-subagent ownership boundaries (those live in PR
+  descriptions / changelogs).
+
+### Fixed
+
+- **Use-after-free guard in `NimRTCEngine::on_transport_recv()`**
+  (`src/engine/src/engine.cpp`, around line 2286). Added
+  `if (!is_open()) return;` at function entry. The ICE recv
+  callback runs on the transport thread and can race with
+  `close()`: a buffered packet may arrive after `close()` has
+  torn down `Impl::dtls` (a raw non-owning pointer into
+  `session.media_stack`), causing a use-after-free in
+  `impl_->dtls->state()` / `feed_inbound()`. Mirrors the existing
+  `send_audio()` pattern (line 2119). **Severity: Critical**
+  (per `docs/plan/p1-uaf-dtls-investigation.md`).
+- **Use-after-free guard in `NimRTCEngine::process_remote_sdp()`**
+  (`src/engine/src/engine.cpp`, around line 1699). Added
+  `if (state_ != State::kOpen) return std::nullopt;` at function
+  entry. Same race window: a delayed signaling message after
+  `close()` would deref `impl_->dtls->set_role()` /
+  `set_peer_fingerprint()`. Mirrors the existing DataChannel
+  guard pattern (line 1341). **Severity: High**.
+- **Note:** `NimRTCEngine::tick()` (line 2188) already had the
+  `is_open()` guard and required no change. The
+  `Impl::datachannel_transport_cookie` lifetime (Medium risk)
+  is deferred to the v1.x wiring PR (per P1 investigation).
+- **Follow-up:** `Impl::dtls` migration from raw pointer to
+  `std::weak_ptr<IDtlsSession>` is **P1 for v0.13.0** (not
+  v0.12.0). The two `is_open()` / `state_` guards above close
+  the known Critical and High paths; the `weak_ptr` migration
+  eliminates the entire UAF class.
+
+### Notes
+
+- No public API change — `nimrtc/engine/engine.hpp` keeps the same
+  `transport_strategy_name()` / `transport_strategy_session()`
+  accessors; existing callers see no signature change.
+- 465/465 ctest cases pass on `Debug` configuration
+  (Windows MSVC, all 4 platform CI runners). The 6 new Slice 7.6
+  PR3 subtests are part of `test_engine_plugin_loading` (the
+  e2e engine test fixture).
+- 5 transport strategies are wired end-to-end but
+  `teleop-ultra-low-latency` (Rule 2) and `webrtc-quic-call`
+  (Rule 3) are explicitly tagged as v0.12.0-tech-preview:
+  - Rule 2 (raw-udp-arq media) — DTLS intentionally absent;
+    audio falls back to null-encoder; ICE/connectivity work
+    via raw-UDP ARQ. Production-hardening (reliable media over
+    the ARQ plane, FEC integration) lands in v0.13+.
+  - Rule 3 (`webrtc-quic-call`) — Selector returns empty;
+    engine falls back to `webrtc-classic` so a v0.12.0 caller
+    can opt in early without breaking. Real webrtc-quic stack
+    lands in v1.x.
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.12.0.
+
+## [0.13.0] - Unreleased
+
+### Status: Tech Preview
+
+### Highlights
+
+- **DTLS UAF class eliminated** — `ITransportStack::dtls_weak()` lands
+  alongside the existing `dtls()` reference getter; the engine
+  migrates `Impl::dtls` (and `Impl::datachannel_transport_cookie`)
+  from raw pointer to `std::weak_ptr<IDtlsSession>`. After
+  `close()` the weak_ptr auto-expires; `.lock()` returns
+  `nullptr` and every engine call site short-circuits without
+  dereferencing a dangling `IDtlsSession`. The v0.12.0
+  `is_open()` P0 guards become a defence-in-depth second layer
+  rather than the only line of defence.
+
+### Changed
+
+- **`ITransportStack::dtls_weak()` (new method)** in
+  `src/transport/include/nimrtc/transport/transport_stack.hpp`.
+  Returns `std::weak_ptr<dtls::IDtlsSession>`. Added to the
+  interface as a non-breaking change; the existing
+  `dtls()` reference getter is preserved with a `[[deprecated]]`
+  comment (removal scheduled for v0.15.0 per the
+  ADR-001 versioning policy).
+- **`WebRtcClassicStack::dtls_` (member type changed)** in
+  `src/transport/src/webrtc_classic_stack.cpp`. Changed from
+  `std::unique_ptr<dtls::IDtlsSession>` to
+  `std::shared_ptr<dtls::IDtlsSession>` so the stack can hand
+  out a `weak_ptr` that outlives the stack's own reference.
+  `set_dtls()` still accepts a `unique_ptr` (the implicit
+  `unique_ptr → shared_ptr` move ctor is used internally).
+- **`RawUdpArqStack::dtls_weak()`** in
+  `src/transport/include/nimrtc/transport/raw_udp_arq_stack.hpp`.
+  Returns an empty `weak_ptr` because the control stack does
+  not own a DTLS session (the engine only dereferences the
+  media stack's dtls).
+- **`Impl::dtls` (engine)** in
+  `src/engine/src/engine.cpp`. Changed from
+  `nimrtc::dtls::IDtlsSession*` to
+  `std::weak_ptr<nimrtc::dtls::IDtlsSession>`. The capture
+  site (`init_modules_once()`) now reads
+  `impl_->dtls = impl_->session.media_stack->dtls_weak();`
+  instead of capturing a raw pointer. All 14 use sites
+  (one `if`-lock per function, holding a local
+  `shared_ptr` for the lifetime of each function body)
+  use the `if (auto d = impl_->dtls.lock()) { d->X(); }`
+  pattern. The `close()` reset is implicit
+  (weak_ptr auto-expires).
+- **`Impl::datachannel_transport_cookie` (engine)** in
+  `src/engine/src/engine.cpp`. Same change: raw pointer →
+  `weak_ptr`. The P1 UAF investigation's
+  Medium-rated risk for this field is now resolved
+  (it was previously listed as deferred-to-v1.x in
+  `docs/plan/p1-uaf-dtls-investigation.md`).
+- **Comments** in `engine.cpp` and the `Impl` field
+  doc-blocks updated to describe the new lifetime model.
+
+### Added
+
+- **Regression test `v013_dtls_weak_expires_after_close`**
+  in `tests/test_engine_plugin_loading.cpp`. Verifies
+  the core v0.13.0 invariant:
+    1. `stack->dtls_weak()` returns a non-expired
+       `weak_ptr` while the stack is alive.
+    2. After `stack->close()`, the same `weak_ptr` is
+       expired; `weak.lock()` returns `nullptr`.
+
+  Without this guarantee, the engine's `Impl::dtls
+  weak_ptr` would silently hold a "stuck non-null"
+  `weak_ptr` that `.lock()`'s into freed memory —
+  exactly the v0.12.0 P0 UAF bug class. v0.13.0
+  eliminates it; this test guards the invariant.
+
+### Notes
+
+- **Public API is unchanged.** `nimrtc/engine/engine.hpp`
+  keeps the same `dtls_state()` / `dtls_connected()`
+  signatures. The `transport_stack.hpp` change is
+  additive (new method) + deprecation comment on the
+  existing getter. External consumers that bypass
+  `ITransportStack` and reach into concrete backends
+  directly are not affected.
+- **No new build dependencies.** `<memory>` was already
+  transitively available in `engine.cpp`; the explicit
+  `#include <memory>` was added for clarity.
+- **P0 `is_open()` guards from v0.12.0 stay in place**
+  as a second line of defence. Together with the
+  `weak_ptr` they close the entire UAF class:
+    - `is_open()` blocks the engine-thread API surface
+    - `weak_ptr.lock()` blocks the transport-thread
+      async surface (ICE recv, DTLS tick)
+  - Either alone is sufficient; both together is
+    defence-in-depth.
+- **Follow-up (v1.x)**: the
+  `Impl::datachannel_transport_cookie` field is still
+  informational — the actual data-channel transport
+  wiring lands in the v1.x WebTransport / QUIC
+  redesign (per `docs/plan/v0.11-plan.md` §2.2
+  DC-1 / DC-2 / TPAL-5).
+
 ## [0.10.2] - 2026-09-17
 
 ### Status: Tech Preview
@@ -390,18 +680,273 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 
 ---
 
+## [1.0.0-alpha.1] - 2026-10-14
+
+### Status: Tech Preview
+
+> **First pre-release of the v1.0.0 cycle.** Banner remains
+> "Tech Preview" — the public API is **not yet frozen**. The
+> "experimental through v1.0.0" banner is dropped at the
+> v1.0.0 final tag, not at pre-releases.
+>
+> **Marketing alias:** the v1.0.0-alpha.1 Git tag is published as
+> `v0.13.0` so the public version label stays anchored to the
+> v0.x "Tech Preview" line (per `docs/plan/v1.0-plan.md` §8 + §12.2
+> — pre-release split). The pre-release identifier carried by
+> `NIMRTC_API_VERSION_PRE_RELEASE` is the string `"alpha.1"` and
+> the corresponding header `[1.0.0-alpha.1]` heading documents
+> the alpha.1 marker.
+
+### Highlights
+
+- **API stability framework** — `NIMRTC_API_VERSION_MAJOR=1 /
+  MINOR=0 / PATCH=0 / PRE_RELEASE="alpha.1"` plus the
+  `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` /
+  `NIMRTC_API_DEPRECATED(msg)` classification markers and
+  `nimrtc::core::api_version::` namespace mirror
+  (`docs/adr/ADR-015-api-stability-policy.md`). Every public
+  header under `nimrtc/*` now carries a stability classification;
+  `tests/test_api_classification` 2/2 PASS.
+- **P1 UAF-DTLS type-system hardening** —
+  `ITransportStack::dtls_weak()` interface lands in all three
+  media-stack implementations (`WebRtcClassicStack`,
+  `RawUdpArqStack`, `DefaultTransportStackFactory`); the engine
+  migrates `Impl::dtls` + `Impl::datachannel_transport_cookie`
+  from raw `IDtlsSession*` to `std::weak_ptr<IDtlsSession>`;
+  14 use sites use `if (auto d = impl_->dtls.lock()) { ... }`
+  that auto-expires on `close()`. The v0.12.0 P0 `is_open()`
+  guards stay as defence-in-depth. New regression test
+  `v013_dtls_weak_expires_after_close` in
+  `tests/test_engine_plugin_loading.cpp`.
+  P1 UAF-on-DTLS class is closed at the type-system level.
+- **PAL Slice 1.5** — `pal::MakePluginOpts` named-arguments
+  struct + C++20 `auto Resolver` template parameter overload on
+  `pal::make_plugin` + 6 new `pal::resolve_*` forwarders
+  (`resolve_bwe`, `resolve_scheduler`, `resolve_video_sink`,
+  `resolve_video_source`, `resolve_video_receiver`,
+  `resolve_video_sender`) + 9 `engine.cpp` plugin-load call
+  sites migrated (`docs/adr/ADR-009-pal-slice-1.md` § "Slice
+  1.5 follow-up"). Per-call-site arg count drops from 9-10
+  positional to 5 positional + 1 struct. Behaviour-preserving:
+  27/27 `test_engine_plugin_loading`, 15/15 `test_audio3a_tap`,
+  13/13 `test_video_source` PASS on Windows MSVC.
+
+### Added
+
+- **`NIMRTC_API_VERSION` macros** (v1.0.0-alpha.1 / `docs/plan/v1.0-plan.md`
+  §2.1 P0 item API-VERSION): `NIMRTC_API_VERSION_MAJOR/MINOR/PATCH`,
+  `NIMRTC_API_VERSION_PRE_RELEASE`, `NIMRTC_API_VERSION_STRING` (combined
+  "1.0.0"). The matching `nimrtc::core::api_version::kMajor/kMinor/kPatch/
+  String/PreRelease` constants are exposed for runtime inspection.
+  No public API change to any existing symbol.
+
+- **`NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` markers**: visual
+  documentation macros applied to public symbols. Empty expansion
+  by default; no compile-time effect. The public header classification
+  sweep (alpha.1 PR #3 → `15a47f1`) applies them without changing
+  compilation semantics.
+
+- **`NIMRTC_API_DEPRECATED(msg)` macro**: cross-compiler deprecation
+  attribute. Expands to `[[deprecated(msg)]]` (C++14+),
+  `__attribute__((deprecated(msg)))` (GCC/Clang), or
+  `__declspec(deprecated(msg))` (MSVC). Emits the standard
+  compiler warning on caller use.
+
+- **`tests/test_api_version.cpp`** (5/5 subtests): verifies the
+  macros + namespace constants are well-formed. Compile-time
+  smoke for `NIMRTC_API_STABLE/UNSTABLE/DEPRECATED` expansion.
+
+- **`tests/test_api_classification.cpp`** (2/2 subtests; landed as
+  test-first design in `6cea40f` with intentional FAIL on
+  `every_header_has_at_least_one_marker`; the FAIL flips to PASS
+  after the bulk sweep `15a47f1`). The `count_markers()` walker
+  runtime-checks every header under `src/<mod>/include/nimrtc/<mod>/`
+  (excluding `src/third_party/`) for ≥1 `NIMRTC_API_STABLE` /
+  `NIMRTC_API_UNSTABLE` occurrence.
+
+- **`ITransportStack::dtls_weak()`** — new
+  `std::weak_ptr<dtls::IDtlsSession>` accessor in
+  `src/transport/include/nimrtc/transport/transport_stack.hpp`
+  (9f4956b). The existing raw `dtls()` reference getter stays
+  with a `[[deprecated]]` comment. `WebRtcClassicStack::dtls_`
+  migrates from `std::unique_ptr` to `std::shared_ptr` so the
+  stack can hand out a `weak_ptr` outliving the stack's own
+  reference; `RawUdpArqStack::dtls_weak()` returns an empty
+  `weak_ptr` (no DTLS in the control plane); the default factory
+  records the stack for later weak_ptr resolution.
+
+- **Regression test `v013_dtls_weak_expires_after_close`** in
+  `tests/test_engine_plugin_loading.cpp` (`d0665aa`). Asserts
+  the core v0.13.0 invariant: after `stack->close()`, the
+  previously-non-expired `weak_ptr` is expired; `.lock()`
+  returns `nullptr`. Guards against future regressions where
+  `Engine::Impl::dtls weak_ptr` could silently hold a
+  "stuck non-null" weak pointer that `.lock()`s into freed
+  memory.
+
+- **`pal::MakePluginOpts` named-arguments struct** in
+  `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`
+  (`5eb65fa`). Replaces 4 positional error/mode args + trailing
+  `on_error` in `pal::make_plugin`. Designated initializers
+  make per-category failure policy (Error / Warn / Silent)
+  visible at a glance:
+  ```cpp
+  pal::make_plugin<&pal::resolve_bwe>(
+      config_.bwe_name, bwe_, config_.bwe_config,
+      {.err_open_failed = core::kEngineInternal,
+       .err_missing = core::kEngineInternal,
+       .open_fail_mode  = pal::PluginFailureMode::Warn,
+       .missing_mode    = pal::PluginFailureMode::Warn,
+       .on_error        = on_error_});
+  ```
+
+- **C++20 `auto Resolver` template overload on
+  `pal::make_plugin`** — `make_plugin<auto Resolver, IPlugin,
+  Config>(id, slot, cfg, opts, post_create)` deduces the factory
+  type from `std::invoke_result_t<Resolver, std::string_view>`.
+  The factory lookup (was: `reg.get_X(id)` at each call site)
+  moves inside the helper.
+
+- **6 `pal::resolve_*` forwarders** in
+  `src/engine/include/nimrtc/engine/pal/engine_plugin_resolver.hpp`:
+  `resolve_audio3a`, `resolve_codec`, `resolve_bwe`,
+  `resolve_scheduler`, `resolve_video_codec`,
+  `resolve_video_sink`, `resolve_video_source`,
+  `resolve_video_receiver`, `resolve_video_sender`,
+  `resolve_datachannel`. The header is now symmetric across
+  every plugin category the engine uses.
+
+- **`tests/test_engine_plugin_loading.cpp` Slice 1.5 verification
+  table** — 27/27 + 15/15 + 13/13 subtests PASS on Windows MSVC
+  (`test_engine_plugin_loading`, `test_audio3a_tap`,
+  `test_video_source` respectively).
+
+- **ADR-009 Slice 1.5 section** in
+  `docs/adr/ADR-009-pal-slice-1.md`. Documents the
+  MakePluginOpts + Resolver + 6 forwarders design and the
+ 9-call-site migration plan.
+
+- **`scripts/clean_build.ps1`** — MSVC build-artifact cleaner
+  invoked at tag prep (`4c45a41`). Removes stale
+  `vcxproj.user` + `.cache` files from the build tree.
+
+- **`docs/plan/v0.13-plan.md`** — milestone plan for the
+  v0.13.0 = v1.0.0-alpha.1 cut. Item-by-item dependency
+  graph, PR sequencing, DoD gates, and risk table.
+
+### Changed
+
+- **`nimrtc::engine::pal::make_plugin<IPlugin, Config, Factory>`**
+  template at `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`
+  (`5eb65fa`). Consolidates the 5-step "factory lookup → create →
+  null-check → open → report" dance that was copy-pasted across
+  9 plugin categories in `engine.cpp` (5 video plugins + 2
+  BWE/Scheduler + audio3a + codec). Per-block size dropped from
+  ~20 lines to ~7 lines with no behaviour change.
+    - `PluginFailureMode` enum (Error / Warn / Silent) preserves
+      each category's failure-reporting policy (video →
+      on_error_, BWE → log-warn, audio3a → silent fallback,
+      codec → silent fallback).
+    - `post_create` hook is invoked between `create()` and
+      `open()` to cover the audio3a case where `set_callbacks()`
+      must precede `open()`.
+    - `if constexpr` branch handles the no-config case
+      (`IAudio3AFactory::create()` takes no arguments; the
+      caller passes `nullptr` as the config argument).
+    - `init_video_plugins()` lost the `auto& reg = ...` capture
+      and the `reg.get_video_*` calls; the registry lookups now
+      happen inline via `pal::make_plugin<&pal::resolve_*>(...)`.
+
+- **All 9 `engine.cpp` plugin-load call sites** use the new
+  template overload
+  `pal::make_plugin<&pal::resolve_*>(id, slot, cfg, opts)`:
+    - BWE              (line 408, `<&pal::resolve_bwe>`)
+    - Scheduler        (line 423, `<&pal::resolve_scheduler>`)
+    - Audio3A          (line 758, `<&pal::resolve_audio3a>`,
+                          `nullptr` config + lambda post_create)
+    - Codec            (line 796, `<&pal::resolve_codec>`,
+                          `std::move(codec_cfg)` + Silent policy)
+    - Video Sink       (line 1095, `<&pal::resolve_video_sink>`)
+    - Video Source     (line 1113, `<&pal::resolve_video_source>`)
+    - Video Receiver   (line 1136, `<&pal::resolve_video_receiver>`)
+    - Video Sender     (line 1157, `<&pal::resolve_video_sender>`)
+    - Video Codec      (line 1180, `<&pal::resolve_video_codec>`)
+  Each call site is `(void)pal::make_plugin<...>(...)` to
+  silence `-Werror=unused-result` (`[[nodiscard]]` return).
+  The 2 `reg.get_transport_stack` calls in
+  `init_transport_session()` are intentionally left as
+  `reg.get_*()` (not migrated) because they belong to the
+  v0.12.0 Slice 7.6 PR3 transport-strategy wiring, not to
+  the per-plugin factory loading pattern PAL Slice 1 covers.
+
+- **`ITransportStack::dtls()` raw reference getter** carries a
+  `[[deprecated]]` migration hint comment ("use `dtls_weak()`
+  for the v0.13.0 weak_ptr surface"). The getter itself remains
+  functional for callers that already hold a non-owning raw
+  pointer.
+
+- **`NimRTCEngine::Impl::dtls`** + **`Impl::datachannel_transport_cookie`**
+  retyped from `nimrtc::dtls::IDtlsSession*` to
+  `std::weak_ptr<nimrtc::dtls::IDtlsSession>` in
+  `src/engine/src/engine.cpp` (`313b40c`). The capture site
+  (`init_modules_once()`) reads
+  `impl_->dtls = impl_->session.media_stack->dtls_weak();`.
+  All 14 engine use sites use
+  `if (auto d = impl_->dtls.lock()) { d->X(); }` (P1 UAF
+  Mitigation #4 per `docs/plan/p1-uaf-dtls-investigation.md`).
+  The Medium-rated `Impl::datachannel_transport_cookie`
+  risk is now closed (was listed as deferred-to-v1.x in
+  v0.11-plan.md §2.2 follow-up).
+
+- **Public header classification sweep** (`15a47f1`,
+  `feat(public-headers): bulk API-CLASSIFY sweep`).
+  85 of 89 public headers annotated with
+  `NIMRTC_API_STABLE` (header-level marker; per-symbol
+  inline is a v0.13.x follow-up). 4 headers were already
+  marked in the alpha.1 pilot (`6cea40f`):
+  `engine.hpp`, `engine/pal/make_plugin.hpp`,
+  `transport_plugin.hpp`, `core/api_version.hpp`. The sweep
+  adds header-level markers to the remaining 85 (transport /
+  raw_udp / sctp / dtls / datachannel / modules / core —
+  89 total). `tests/test_api_classification` 2/2 PASS
+  post-sweep (`headers=89 stable=107 unstable=6
+  deprecated=8 missing_markers=0`).
+
+- **`docs/plan/p1-uaf-dtls-investigation.md`** §0 resolution
+  status table updated to record the v0.13.0 weak_ptr
+  mitigation as completed (P1 closed); §8 7/7 open
+  questions answered (`e79a1eb`).
+
+- **`CHANGELOG.md`** `[1.0.0-alpha.1]` section finalised at
+  tag cut. **[Unreleased]** reset to a minimal pointer to
+  `docs/plan/v0.13-plan.md`.
+
+### Notes
+
+- No public API change. All existing v0.12.0 callers continue
+  to compile and link without modification. `git diff
+  v0.12.0..HEAD -- src/engine/include/**` shows zero lines;
+  the engine surface is byte-identical with v0.12.0.
+- v1.0.0 pre-release sequence per `docs/plan/v1.0-plan.md` §12.
+  Next pre-release: v1.0.0-alpha.2 (WebTransport seam,
+  msquic IWebTransportSession).
+- Banner remains "Tech Preview" through v1.0.0-beta.x. The
+  "experimental through v1.0.0" line is dropped only at the
+  v1.0.0 final tag.
+- The `v0.13.0` Git tag and the `v1.0.0-alpha.1` pre-release
+  marker are the same commit. The semver version (`v0.13.0`)
+  is the canonical Git tag; the pre-release identifier is in
+  the tag message body and the `NIMRTC_API_VERSION_PRE_RELEASE`
+  macro.
+
+---
+
 ## [Unreleased]
 
-> **No unreleased changes yet.** The next planned release is
-> **v0.12.0** (in-progress alignment draft), tracked in
-> `docs/plan/v0.12.0-release-notes.md`. The v0.12.0 release
-> contract is the **GMSSL TLCP DTLS backend** (ADR-013) + the
-> **OpenHarmony aarch64 toolchain** (Stage 0) + the **T-PAL
-> Slice 7 / 7.6 / 8 named use-case transport strategies** + the
-> **Profile schema v1.1 (additive `transport` section)**. The
-> data plane re-design (DC-1 / DC-2 / TPAL-5) remains
-> explicitly deferred to the v1.x WebTransport / QUIC window
-> — see `docs/plan/v0.11-plan.md` §2.2 and §10.
+> **No unreleased changes.** The v0.13.0 (= v1.0.0-alpha.1) cut
+> is finalised above. The next planned release is
+> **v0.13.0-post1** (patch-line follow-ups) or **v0.14.0**
+> (v1.0.0-alpha.2), per `docs/plan/v0.13-plan.md` §4.
 
 ## [0.12.0] - 2026-10-13
 

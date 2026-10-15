@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sdp/sdp_plugin.hpp
  * @brief Plugin adapter: wraps nimrtc::sdp::Parser/Munger behind plugins::ISDP.
  *
@@ -28,6 +28,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstdint>
 #include <memory>
 #include <optional>

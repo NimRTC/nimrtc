@@ -104,6 +104,56 @@ stage — Slice 1 is the structural change with the lowest risk).
 | Public `NimRTCEngine` API byte-identical to v0.9.2 | `git diff -- 'src/engine/include/**'` | zero lines |
 | `e2e` Case D (Chrome interop) still PASS | `python tools/run_e2e_acceptance.py` | green |
 
+## Slice 1.5 follow-up (v0.12.0)
+
+Slice 1.5 binds to v0.12.0 as a follow-up that:
+
+1. **Introduces `pal::MakePluginOpts`** — a named-arguments struct
+   replacing the 4 positional error / mode arguments and the
+   trailing `on_error` callback that the Slice-1-era
+   `pal::make_plugin` took. Designated initializers at the call
+   site make the per-category failure policy (Error / Warn /
+   Silent) visible at a glance.
+
+2. **Adds a C++20 `auto Resolver` non-type template parameter
+   overload** to `pal::make_plugin`. The new shape
+   `make_plugin<auto Resolver, IPlugin, Config>(id, slot, cfg, opts, post_create)`
+   takes a resolver function pointer (e.g. `&pal::resolve_bwe`)
+   and deduces the factory type from
+   `std::invoke_result_t<Resolver, string_view>`. The
+   `reg.get_X(id)` lookup moves inside the helper.
+
+3. **Migrates all 9 `engine.cpp` plugin-load call sites** to
+   the new overload: BWE, Scheduler, Audio3A, Codec, Video
+   Sink, Video Source, Video Receiver, Video Sender, Video
+   Codec. Per-call-site arg count drops from 9-10 positional
+   to 5 positional + 1 struct.
+
+4. **Adds 6 new `pal::resolve_*` forwarders** to
+   `engine_plugin_resolver.hpp`: `resolve_bwe`,
+   `resolve_scheduler`, `resolve_video_sink`,
+   `resolve_video_source`, `resolve_video_receiver`,
+   `resolve_video_sender`. The header is now symmetric across
+   all 9 plugin categories used by the engine.
+
+### Slice 1.5 verification
+
+| Check | Where | Result |
+|---|---|---|
+| `test_engine_plugin_loading` 27 subtests | Windows MSVC | PASS |
+| `test_audio3a_tap` 15 subtests | Windows MSVC | PASS |
+| `test_video_source` 13 subtests | Windows MSVC | PASS |
+| `engine.cpp` no longer calls `reg.get_X` for plugin factories | grep | yes (the 2 `reg.get_transport_stack` calls in `init_transport_session()` are intentionally out of scope — they belong to Slice 7.6 PR3) |
+| Public `NimRTCEngine` API unchanged | `git diff` engine.hpp | zero lines |
+
+The `reg.get_transport_stack` calls in `init_transport_session()`
+are intentionally left as `reg.get_*()` (not migrated to
+`pal::resolve_*`) because they are part of the v0.12.0 Slice
+7.6 PR3 transport-strategy wiring, not the per-plugin factory
+loading pattern that PAL Slice 1 covers. A future PAL Slice
+1.6 (deferred) will fold transport stacks into the same
+resolver pattern.
+
 ## Out of scope (this ADR)
 
 - Slice 2 (`kDefaultRegistrars[]`) and Slice 3 (`NIMRTC_PLUGIN_ID`) — v0.10.x.

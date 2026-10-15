@@ -164,6 +164,9 @@ public:
     }
 
     plugins::IICETransport* ice_ptr() const noexcept { return ice_.get(); }
+    std::weak_ptr<dtls::IDtlsSession> dtls_weak() noexcept override {
+        return dtls_;   // shared_ptr converts implicitly to weak_ptr
+    }
 
     // ---------------------------------------------------------------------------
     // tick — called by the engine tick loop (~50 ms cadence).
@@ -183,9 +186,12 @@ private:
 
     // Non-null when the factory resolved and injected them.
     std::unique_ptr<plugins::IICETransport> ice_;
-    std::unique_ptr<dtls::IDtlsSession>     dtls_;
-    std::unique_ptr<plugins::IRTP>          rtp_;
-    std::unique_ptr<sctp::ISctpSocket>     sctp_;
+    // v0.13.0: changed from unique_ptr to shared_ptr so dtls_weak() can
+    // hand out a weak_ptr that outlasts close() (the engine stores it as
+    // Impl::dtls weak_ptr and checks .lock() after stack teardown).
+    std::shared_ptr<dtls::IDtlsSession> dtls_;
+    std::unique_ptr<plugins::IRTP>       rtp_;
+    std::unique_ptr<sctp::ISctpSocket> sctp_;
 };
 
 // ---------------------------------------------------------------------------

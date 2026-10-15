@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/plugins/ice_transport.hpp
  * @brief IICETransport — ICE-aware transport interface on top of ITransport.
  *
@@ -53,6 +53,10 @@
 
 #ifndef NIMRTC_PLUGINS_ICE_TRANSPORT_HPP
 #define NIMRTC_PLUGINS_ICE_TRANSPORT_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <cstdint>
 #include <string>

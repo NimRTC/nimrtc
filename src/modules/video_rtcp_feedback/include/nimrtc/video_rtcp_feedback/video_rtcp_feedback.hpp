@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp
  * @brief Video RTCP feedback messages — PLI / FIR / SLI / NACK.
  *
@@ -22,6 +22,10 @@
 
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/sctp/sctp_socket_factory.hpp
  * @brief ISctpSocketFactory — seam factory for ISctpSocket (Slice 5).
  *
@@ -17,6 +17,10 @@
 
 #ifndef NIMRTC_SCTP_SCTP_SOCKET_FACTORY_HPP
 #define NIMRTC_SCTP_SCTP_SOCKET_FACTORY_HPP
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 
 #include <memory>
 #include <string_view>

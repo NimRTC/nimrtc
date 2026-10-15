@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/raw_udp/raw_udp_plugin.hpp
  * @brief Public registration entry point for the raw-udp bypass module.
  *
@@ -12,6 +12,10 @@
  */
 #pragma once
 
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
+// a v0.13.x follow-up.
 namespace nimrtc::raw_udp {
 
 /** Register the built-in "arq" raw-UDP datagram factory. Call once at

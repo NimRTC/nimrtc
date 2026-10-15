@@ -130,21 +130,36 @@ if not exist "%BUILD_DIR%\build.ninja" (
 
 REM ---------------------------------------------------------------------------
 REM Step 2: ninja build
+REM
+REM We need to capture BOTH stdout and stderr in the log file.  The
+REM idiomatic `ninja ... > log 2>&1` form is unreliable on some Windows
+REM host configurations because cmd.exe's parser can mis-tokenise the
+REM `&1` in `2>&1` (it then reports e.g. `1 was unexpected at this
+REM time.`).  `PowerShell`'s `*>` operator is the robust equivalent and
+REM also writes UTF-8 cleanly so `tail`-style triage downstream is
+REM readable.  We invoke PowerShell once, redirect both streams into
+REM the log, and propagate the exit code to `ERRORLEVEL`.
 REM ---------------------------------------------------------------------------
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 echo.
 echo [STEP 2] ninja build (logging to %LOG_DIR%\webrtc_apm_build.log)...
-ninja -C "%BUILD_DIR%" > "%LOG_DIR%\webrtc_apm_build.log" 2>&1
-set NINJA_RC=!ERRORLEVEL!
+powershell -NoProfile -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "ninja -C '%BUILD_DIR%' *>'%LOG_DIR%\webrtc_apm_build.log';" ^
+  "exit $LASTEXITCODE"
+set "NINJA_RC=%ERRORLEVEL%"
 
-if !NINJA_RC! neq 0 (
-    echo [ERROR] ninja build failed with rc=!NINJA_RC!
-    set "LOG_SIZE=0"
-    for %%F in ("%LOG_DIR%\webrtc_apm_build.log") do set "LOG_SIZE=%%~zF"
-    echo Full log: %LOG_DIR%\webrtc_apm_build.log  (!LOG_SIZE! bytes) - printing in full for triage
-    powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log'"
-    REM Also surface the first "error C\d+" / "fatal error" / "FAILED:" if any
-    powershell -NoProfile -Command "$lines = Get-Content '%LOG_DIR%\webrtc_apm_build.log' -ErrorAction SilentlyContinue; $lines | Select-String -Pattern 'error C\d+:|fatal error|FAILED: [a-zA-Z0-9=_. -]+' | Select-Object -First 20 | ForEach-Object { $_.Line }"
+if %NINJA_RC% neq 0 (
+    echo [ERROR] ninja build failed with rc=%NINJA_RC%
+    if exist "%LOG_DIR%\webrtc_apm_build.log" (
+        for %%F in ("%LOG_DIR%\webrtc_apm_build.log") do set "LOG_SIZE=%%~zF"
+        echo Full log: %LOG_DIR%\webrtc_apm_build.log  (!LOG_SIZE! bytes) - printing in full for triage
+        powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log'"
+        REM Also surface the first "error C\d+" / "fatal error" / "FAILED:" if any
+        powershell -NoProfile -Command "$lines = Get-Content '%LOG_DIR%\webrtc_apm_build.log' -ErrorAction SilentlyContinue; $lines | Select-String -Pattern 'error C\d+:|fatal error|FAILED: [a-zA-Z0-9=_. -]+' | Select-Object -First 20 | ForEach-Object { $_.Line }"
+    ) else (
+        echo [ERROR] Log file was not produced; ninja may have failed before opening it.
+    )
     exit /b 3
 )
 

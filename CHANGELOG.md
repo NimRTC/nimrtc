@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to NimRTC are documented in this file.
 

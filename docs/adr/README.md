@@ -31,6 +31,9 @@ Write an ADR when a decision:
 | [ADR-010](ADR-010-profile-json-format.md) | JSON as first-class declarative Profile format | P1.1 |
 | [ADR-011](ADR-011-teleop-metrics-caliber.md) | 遥操作指标口径 — engine 单跳预算，端到端由集成方负责 | P1.1 |
 | [ADR-012](ADR-012-zh-docs-layout.md) | 中文文档布局 — `docs/zh/` 子目录先行，独立站点延后 | P1.1 |
+| [ADR-013](ADR-013-gmssl-dtls-backend.md) | GMSSL — 国密 DTLS 后端 | P1 |
+| [ADR-014](ADR-014-web-transport-vendor.md) | WebTransport / QUIC vendor — msquic | P3 |
+| [ADR-015](ADR-015-api-stability-policy.md) | NimRTC API Stability Policy | P2 |
 
 ## Process
 

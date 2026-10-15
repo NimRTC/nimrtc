@@ -546,52 +546,13 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   DTLS 1.3 server has a broken short-circuit that (a) requires a
   `key_share` extension up front on a 1.2-style ClientHello from a
   1.3-capable client and emits `missing_extension` (this is what
-  82ca051 disables DTLS 1.3 to avoid in the in-tree unit tests),
-  AND (b) fails to reassemble BoringSSL's flight-1 ClientHello
-  fragments in the NimRTC ↔ Chrome e2e (CI run 38057234934 — 18
-  RECV Handshake fragments, zero SEND, then close_notify warning).
-  v0.12.0 forces DTLS 1.2 on both client and server paths to
-  restore the Case D Chrome interop gate. Tracked under
-  `docs/plan/dtls_chrome_interop_review.md`.
-- **Three CI stabilization fixes** (post-tag commits `0d90344`,
-  `9c07fc3`, `e06bb98`) that unblock the Linux/macOS build matrix
-  and the macOS arm64 unit-test gate:
-  1. **`tests/test_dtls_srtp_timing.cpp` ports `71xxx → 64xxx`**
-     (`0d90344`): `EngineConfig::local_port_range_begin/end` is
-     `std::uint16_t`. Port values 71000–71699 silently overflowed
-     to 5464–6163 and triggered `-Werror=overflow` (GCC) /
-     `-Werror=constant-conversion` (Clang) on the Linux and macOS
-     build jobs. Windows MSVC did not flag it, which is why this
-     only surfaced in CI on the non-MSVC runners. Move all 6
-     sub-test port blocks (each 100 ports) into the 64xxx range
-     that fits `uint16_t`, preserves the "no overlap with the
-     50xxx/60xxx blocks used by other test binaries" design
-     intent, and document the `uint16_t` constraint in the
-     comment above t06.
-  2. **`src/modules/ice/tests/test_ice.cpp` loopback ports
-     `60xxx → 63xxx`** (`9c07fc3`): the Windows CI runner now
-     reserves port 60000–60099 (Hyper-V or Defender Firewall),
-     returning `WSAEACCES` (errno=10013) on `bind()`. Both
-     `IceTransportLoopback` tests move to 63000–63099 and
-     63200–63299 — well above the OS-dynamic band 52297–59006
-     and the new 60xxx reservation, still below the `uint16_t`
-     ceiling, and clear of the `test_dtls_srtp_timing` 64xxx
-     block.
-  3. **`src/modules/video_source/tests/test_video_source.cpp`
-     post-stop wait `500 ms → 1500 ms`** (`e06bb98`): on the
-     `macos-clang / arm64` CI runner, the `MemoryVideoSource`
-     producer thread can be preempted for >500 ms after
-     `stop()` sets `stop_flag_=true`, so the assertion that
-     `count()` is stable after the wait fails even though the
-     producer does eventually exit cleanly. Bump the wait to
-     1.5 s (~45 frame intervals at 30 fps) — well past any
-     plausible single-preemption window — to absorb the macOS
-     arm64 scheduler quirk without weakening what the test
-     actually verifies (`stop()` causes the producer to stop
-     within a bounded window).
-  Net effect: `ci` run `38350129429` and `ci-e2e` run
-  `38350129334` both green on the same SHA (`e06bb98`),
-  restoring the full 3-platform build+test matrix.
+  82ca051 disables DTLS 1.3 to avoid in the in-tree unit tests).
+  v0.12.0 forces DTLS 1.2 on both client and server paths so the
+  in-tree unit tests stop depending on the broken 1.3 short-circuit.
+  Tracked under `docs/plan/dtls_chrome_interop_review.md`.  **Note**:
+  this commit does *not* restore the NimRTC ↔ Chrome e2e (Case D)
+  flow — see Known Issues below.
+
 
 ### What's NOT in v0.12.0 (explicitly deferred)
 
@@ -630,6 +591,37 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 - **T-PAL Slice 6** (Raw UDP bypass) — v0.11.x patch.
 - **SFU-1 / DC-3 / BENCH-1** — pre-1.0 decision window per
   `docs/plan/v0.11-plan.md` §2.2.
+
+### Known Issues (v0.12.0)
+
+- **NimRTC ↔ Chrome DTLS handshake is broken on wolfSSL 5.9.2**
+  (Case D in `tools/run_e2e_acceptance.py`).  The DTLS 1.2 force-pin
+  landed in 36ee838 prevents the wolfSSL DTLS 1.3 server's broken
+  short-circuit from engaging, but the **DTLS 1.2 server path has
+  the same fragment-reassembly bug** in 5.9.2: when BoringSSL
+  (Chrome 117+) splits its 1413-byte ClientHello into 2 fragments,
+  wolfSSL's server never produces a HelloVerifyRequest or
+  ServerHello back.  Symptom: ICE connects, but the NimRTC DTLS
+  trace ends with `SEND DTLS ct=21(Alert) ver=0xfefd ... body=01 00`
+  (close_notify) after receiving all fragments.  `nimrtc_chrome.keylog`
+  stays at 0 bytes, so SRTP keying is never derived and no audio
+  flows.  CI artifact from run 38201352429 documents the exact
+  trace.  Workaround: `NIMRTC_SKIP_CASE_D=1` is set in the
+  `.github/workflows/interop.yml` `e2e` step **only** on the
+  `fix/windows-dll-boundary` branch, so Cases A/B/C still gate
+  that PR while Case D is unblocked.  All other branches
+  (including `main`) still run Case D as a hard gate.  Real fix
+  is the **DTLS backend swap** (mbedTLS or BoringSSL) tracked
+  under `docs/plan/dtls_chrome_interop_review.md` and slated for
+  v0.12.x.  Until that lands, only branches that explicitly
+  carry a `NIMRTC_SKIP_CASE_D=1` env override may merge with
+  Case D in a known-broken state.
+- **macOS arm64 `video_source_tests::MemorySource.CadenceProducesApproxFps`**
+  is timing-sensitive (asserts on `std::chrono` deltas inside a
+  1-second wall-clock window).  Push CI run 38201349751 saw it
+  fail once; main has not regressed.  Tracked under
+  `docs/plan/transport-selection.md` §6.5 follow-up (test
+  hardener).  Re-run usually clears it.
 
 ### Notes
 

@@ -332,6 +332,60 @@ def run_chrome_interop() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Case D — step summary writer
+# ---------------------------------------------------------------------------
+#
+# Earlier revisions of this logic lived in a PowerShell `run:` block in
+# `.github/workflows/interop.yml`, which on the GHA windows-2022 runner
+# (PowerShell 5.1) tripped the parser error
+#     "A parser error on the backtick-before-paren sequence."
+# on the `$caseDLine` interpolation.  Moving the string composition into
+# Python eliminates that whole class of failure: Python does no escape
+# processing on backticks, and the here-doc is plain text after the
+# variables are substituted.  The workflow step just copies the rendered
+# file into `$GITHUB_STEP_SUMMARY`, so a GHA runner upgrade cannot
+# reintroduce the parser error.
+
+CASE_D_SUMMARY = """\
+## E2E acceptance summary
+
+Case A (BCrypt AES-GCM round-trip), Case B (in-process DTLS),
+Case C (NimRTC<->NimRTC loopback) are always expected to PASS.
+
+{case_d_line}
+"""
+
+
+def write_case_d_summary(skipped: bool) -> Path:
+    """Render the Case-D step-summary markdown and write it to
+    `build/e2e/case_d_summary.md`.  Returns the path so the caller
+    (and the workflow) can use it.  Single source of truth for the
+    Case-D line in the GitHub Actions Step Summary.
+    """
+    if skipped:
+        case_d_line = (
+            "Case D is **SKIPPED** on this branch (NIMRTC_SKIP_CASE_D=1) "
+            "because of a known wolfSSL 5.9.2 fragment-reassembly bug. "
+            "Tracked under `docs/plan/dtls_chrome_interop_review.md`. "
+            "Cases A/B/C still run and gate the job."
+        )
+    else:
+        case_d_line = (
+            "Case D (NimRTC<->real Chrome DTLS handshake) is expected to "
+            "PASS. The Case D certificate_unknown alert that blocked "
+            "0.9.0-rc1 is fixed (see CHANGELOG.md \"Fixed - Chrome "
+            "interop: fatal alert 46\")."
+        )
+
+    out = E2E / "case_d_summary.md"
+    out.write_text(
+        CASE_D_SUMMARY.format(case_d_line=case_d_line),
+        encoding="utf-8",
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -376,6 +430,16 @@ def main() -> int:
         print(f"   {k:12s}: {'PASS' if v else 'FAIL'}")
     overall = all(results.values())
     print(f"\nRESULT: {'PASS' if overall else 'FAIL'}")
+
+    # Render the GitHub Actions Step Summary section for Case D.  The
+    # workflow just copies this file into $GITHUB_STEP_SUMMARY, so the
+    # summary survives a PowerShell upgrade on the GHA runner.  The
+    # skip flag is derived from the same env var the orchestrator
+    # consulted, so the rendered line is always consistent with the
+    # Case-D outcome the user sees in the run log.
+    summary_path = write_case_d_summary(skip_case_d)
+    print(f"[ok]  case-D step summary -> {summary_path}")
+
     return 0 if overall else 1
 
 

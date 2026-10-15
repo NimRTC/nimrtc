@@ -1,0 +1,29 @@
+# ADR-014 spike — gating evidence for the 5 evaluation criteria
+# (see ../README.md for what each line means)
+#
+# Spike-run timestamp:   <TBD at spike-run time>
+# Platform:              <windows-2022 | linux-gcc | macos-clang | linux-aarch64>
+# msquic submodule SHA:  <TBD — `git -C src/third_party/msquic rev-parse HEAD`>
+# msquic submodule date: <TBD — `git -C src/third_party/msquic log -1 --format=%ci`>
+#
+# Format (one line per criterion, in order 1-5):
+#   [N] <PASS|FAIL> <criterion description>: <evidence>
+#
+# Criterion 1 — License (MIT / BSD-2 / Apache-2)
+[1] <PASS|FAIL> License: <header text from src/third_party/msquic/LICENSE>
+
+# Criterion 2 — No Rust / no CFFI
+[2] <PASS|FAIL> No Rust / no CFFI: <count of .rs files in msquic tree>
+
+# Criterion 3 — Cross-platform CI green (per-platform)
+[3] <PASS|FAIL> Cross-platform CI green: windows-2022=<P|F> linux-gcc=<P|F> macos-clang=<P|F> linux-aarch64=<P|F>
+
+# Criterion 4 — Windows is first-class (kernel QUIC on Windows)
+[4] <PASS|FAIL or N/A> Windows is first-class: 0-RTT echo RTT=<Xms> (target <50ms; userspace-only range >200ms)
+
+# Criterion 5 — Active maintenance (last commit within 6 months of v0.14.0 tag cut)
+[5] <PASS|FAIL> Active maintenance: submodule age=<X days> (target <180 days)
+
+# Final assertion (the spike-run script checks this)
+# ALL 5 CRITERIA MUST BE PASS FOR ADR-014 TO REMAIN ACCEPTED.
+# IF ANY CRITERION FAILS, ADR-014 REOPENS AND THE FALLBACK IS QUICHE.

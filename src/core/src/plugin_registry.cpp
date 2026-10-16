@@ -179,4 +179,21 @@ void PluginRegistry::register_transport_stack(std::string_view id,
     transport_stack_.register_one(id, f);
 }
 
+// v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam slot.  The slot
+// exists (declared in registry.hpp) so the engine can resolve a
+// factory id from `EngineConfig::datachannel_backend` at any point in
+// the cycle; no factory is auto-registered at the alpha.2 cut.  The
+// msquic-backed factory (`WebTransportMsQuicSessionFactory`, id =
+// "msquic") lands in v0.14.0-beta.1 alongside the msquic integration
+// and will call `register_web_transport("msquic", &factory)` from
+// `web_transport::register_default_plugins()`.  Until then every call
+// to `register_web_transport` is from user code (the seam is exposed
+// to host applications for opt-in backends like quiche per ADR-014
+// §Alternatives).
+void PluginRegistry::register_web_transport(
+    std::string_view id,
+    const web_transport::IWebTransportSessionFactory* f) {
+    web_transport_.register_one(id, f);
+}
+
 } // namespace nimrtc::core

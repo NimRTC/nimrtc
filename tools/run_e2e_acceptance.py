@@ -332,6 +332,64 @@ def run_chrome_interop() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Case D — step summary writer
+# ---------------------------------------------------------------------------
+#
+# Earlier revisions of this logic lived in a PowerShell `run:` block in
+# `.github/workflows/interop.yml`, which on the GHA windows-2022 runner
+# (PowerShell 5.1) tripped the parser error
+#     "A parser error on the backtick-before-paren sequence."
+# on the `$caseDLine` interpolation.  Moving the string composition into
+# Python eliminates that whole class of failure: Python does no escape
+# processing on backticks, and the here-doc is plain text after the
+# variables are substituted.  The workflow step just copies the rendered
+# file into `$GITHUB_STEP_SUMMARY`, so a GHA runner upgrade cannot
+# reintroduce the parser error.
+
+CASE_D_SUMMARY = """\
+## E2E acceptance summary
+
+Case A (BCrypt AES-GCM round-trip), Case B (in-process DTLS),
+Case C (NimRTC<->NimRTC loopback) are always expected to PASS.
+
+{case_d_line}
+"""
+
+
+def write_case_d_summary(skipped: bool) -> Path:
+    """Render the Case-D step-summary markdown and write it to
+    `build/e2e/case_d_summary.md`.  Returns the path so the caller
+    (and the workflow) can use it.  Single source of truth for the
+    Case-D line in the GitHub Actions Step Summary.
+    """
+    if skipped:
+        case_d_line = (
+            "Case D is **SKIPPED** on this branch (NIMRTC_SKIP_CASE_D=1) "
+            "as a belt-and-braces escape hatch.  The fragment-reassembly "
+            "bug is fixed in this release via the `DtlsHandshakeReassembler` "
+            "shim (`src/modules/dtls/include/nimrtc/dtls/"
+            "dtls_handshake_reassembler.hpp`); `main` does NOT need this "
+            "flag.  The escape hatch is retained for any branch that has "
+            "not yet merged the shim (e.g. the `fix/windows-dll-boundary` "
+            "historical branch).  Cases A/B/C still run and gate the job."
+        )
+    else:
+        case_d_line = (
+            "Case D (NimRTC<->real Chrome DTLS handshake) is expected to "
+            "PASS. The Case D certificate_unknown alert that blocked "
+            "0.9.0-rc1 is fixed (see CHANGELOG.md \"Fixed - Chrome "
+            "interop: fatal alert 46\")."
+        )
+
+    out = E2E / "case_d_summary.md"
+    out.write_text(
+        CASE_D_SUMMARY.format(case_d_line=case_d_line),
+        encoding="utf-8",
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -340,13 +398,14 @@ def main() -> int:
     print(f"=== End-to-end acceptance ===")
     print(f"   artifacts: {E2E}")
 
-    # CI escape hatch: branches that know they're broken on Case D
-    # (currently the `fix/windows-dll-boundary` branch — wolfSSL 5.9.2
-    # fragment reassembly bug regardless of DTLS 1.2 force-pin) can set
-    # NIMRTC_SKIP_CASE_D=1 to make the orchestrator skip the Chrome
-    # run entirely and report a synthetic PASS for case_d.  The
-    # behavior is recorded in case_d_chrome.log so the skip is visible
-    # in the artifact.  Default is to run Case D normally.
+    # Belt-and-braces CI escape hatch: branches that have NOT merged the
+    # `DtlsHandshakeReassembler` shim can set NIMRTC_SKIP_CASE_D=1 to
+    # skip the Chrome run and report a synthetic PASS for case_d.  This
+    # flag is NOT required on `main` / any branch that has merged the shim
+    # (the fix closes the Case D interop failure; the flag is retained
+    # for historical branches that pre-date the fix).  The skip is recorded
+    # in case_d_chrome.log so the choice is visible in the CI artifact.
+    # Default is to run Case D normally.
     skip_case_d = os.environ.get("NIMRTC_SKIP_CASE_D", "0") == "1"
 
     results["a_gcm_aead"] = run_local(EXE_GCM,    "case_a_gcm_aead.log")
@@ -358,13 +417,20 @@ def main() -> int:
         chrome_log.write_text(
             "case D Chrome interop SKIPPED for this CI run.\n"
             "Reason: NIMRTC_SKIP_CASE_D=1 is set in the workflow env.\n"
-            "Branch fix/windows-dll-boundary has a known wolfSSL 5.9.2\n"
-            "fragment-reassembly bug that blocks the Chrome DTLS server\n"
-            "handshake regardless of the DTLS 1.2 force-pin landed in\n"
-            "commit 36ee838.  Tracked under\n"
-            "docs/plan/dtls_chrome_interop_review.md.  Case D re-enables\n"
-            "in the follow-up PR that swaps the DTLS backend (mbedTLS or\n"
-            "BoringSSL).\n",
+            "\n"
+            "Status: belt-and-braces escape hatch.  The Chrome\n"
+            "fragment-reassembly bug is FIXED in this release via the\n"
+            "`DtlsHandshakeReassembler` shim\n"
+            "(src/modules/dtls/include/nimrtc/dtls/"
+            "dtls_handshake_reassembler.hpp,\n"
+            "wired into dtls_wolfssl_session.cpp::feed_inbound).\n"
+            "`main` does NOT need this flag; this branch is presumed to\n"
+            "have not yet merged the shim (e.g. the historical\n"
+            "`fix/windows-dll-boundary` branch which pre-dates the fix).\n"
+            "CI run 38201352429 is the historical 'before' trace;\n"
+            "the `test_dtls_replay_chrome_hello` executable covers the\n"
+            "'after' path.  See CHANGELOG.md 'Fixed' and\n"
+            "docs/plan/v0.12.0-release-notes.md Decision log 2026-10-16.\n",
             encoding="utf-8",
         )
         results["d_chrome"] = True
@@ -376,6 +442,16 @@ def main() -> int:
         print(f"   {k:12s}: {'PASS' if v else 'FAIL'}")
     overall = all(results.values())
     print(f"\nRESULT: {'PASS' if overall else 'FAIL'}")
+
+    # Render the GitHub Actions Step Summary section for Case D.  The
+    # workflow just copies this file into $GITHUB_STEP_SUMMARY, so the
+    # summary survives a PowerShell upgrade on the GHA runner.  The
+    # skip flag is derived from the same env var the orchestrator
+    # consulted, so the rendered line is always consistent with the
+    # Case-D outcome the user sees in the run log.
+    summary_path = write_case_d_summary(skip_case_d)
+    print(f"[ok]  case-D step summary -> {summary_path}")
+
     return 0 if overall else 1
 
 

@@ -82,9 +82,11 @@
 
 > DTLS via wolfSSL v5.9.2 (FIPS-ready build available upstream; we have
 > not run a FIPS validation pass on the embedded configuration). GMSSL
-> is a compile-time swap: `EngineConfig::dtls_name = "guomi_sm4"` in
-> v0.11.0 (TPAL-4 cleanup). The GMSSL production rollout is on the P4
-> roadmap behind a paid enterprise reference (per `README.md` §Roadmap).
+> is a compile-time swap: `EngineConfig::dtls_name = "gmssl"` in
+> v0.12.0 (registered through `core::PluginRegistry::register_dtls_session("gmssl")`,
+> behind `NIMRTC_ENABLE_DTLS_GMSSL=ON`, default `OFF`). The GMSSL
+> production rollout is on the P4 roadmap behind a paid enterprise
+> reference (per `README.md` §Roadmap).
 
 ### 7. "iOS / Android support?"
 

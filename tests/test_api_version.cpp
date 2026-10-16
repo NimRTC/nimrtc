@@ -51,7 +51,7 @@ TEST(version_macros, are_defined) {
     // ::strcmp is constexpr.  Switching to a runtime check costs us
     // zero release-build perf (the test runs once) and keeps the
     // assertion portable to MSVC 19.30+, GCC 10+, Clang 12+.
-    EXPECT_STREQ(NIMRTC_API_VERSION_PRE_RELEASE, "alpha.1");
+    EXPECT_STREQ(NIMRTC_API_VERSION_PRE_RELEASE, "alpha.2");
 }
 
 // -----------------------------------------------------------------------------

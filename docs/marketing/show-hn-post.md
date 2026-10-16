@@ -14,7 +14,7 @@
 1. ✓ **SELECTED — `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, ~5.6MB static lib`**
 
 Rationale: 3 hits in one title — (a) "Show HN" tag, (b) "WebRTC" keyword
-for search, (c) "5.6MB static lib" is the single most-memorable number inHN
+for search, (c) "5.6MB static lib" is the single most-memorable number in
 the project and the differentiator vs. libwebrtc at 150–250 MB. Most
 information per character for a 70-character HN title limit.
 
@@ -73,7 +73,7 @@ I would just use it. But:
 ### What's working vs. what's not (be honest)
 
 - ✅ Chrome ↔ NimRTC audio + video Case D, 4 platforms.
-- ✅ 5 assembly profiles (P2P / SFU / Agent / CloudGame / Agent-SFU) with
+- ✅ 5 assembly profiles (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`) with
   strict JSON↔C++ round-trip tests.
 - ✅ Pre/post-3A PCM tap with race-free setter semantics.
 - ❌ DataChannel over SCTP-over-DTLS is **deferred to v1.x** — Chrome

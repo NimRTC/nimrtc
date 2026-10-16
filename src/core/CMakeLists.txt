@@ -81,6 +81,16 @@ target_include_directories(nimrtc_core_objects
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
+        # v0.14.0 alpha.2 (ADR-014): the back-compat shim at the
+        # bottom of nimrtc/core/registry.hpp transitively includes
+        # `nimrtc/web_transport/web_transport_session_factory.hpp`
+        # (the typed factory interface for the WebTransport slot).
+        # The static_cast in `detail::Registrar::invoke()` for
+        # `Category::kWebTransport` needs the full factory type
+        # visible; adding this include path is the same pattern
+        # used for the Slice 8 DTLS / SCTP / raw_udp / transport
+        # slots above.
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -108,6 +118,14 @@ target_include_directories(nimrtc_registry
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
+        # v0.14.0 alpha.2 (ADR-014): the new `register_web_transport`
+        # method in plugin_registry.cpp takes a
+        # `const web_transport::IWebTransportSessionFactory*`
+        # argument; the full type must be visible at the call
+        # site so the TypedRegistry<...> member template can
+        # resolve.  Same pattern as the Slice 8 / PAL Slice 2
+        # dtls/sctp/raw_udp/transport include paths above.
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>
         $<INSTALL_INTERFACE:include>)
 target_link_libraries(nimrtc_registry
     PUBLIC

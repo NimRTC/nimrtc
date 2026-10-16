@@ -44,6 +44,51 @@ endfunction()
 nimrtc_add_core_api_test(test_api_version        test_api_version.cpp)
 nimrtc_add_core_api_test(test_api_classification test_api_classification.cpp)
 
+# ----------------------------------------------------------------------------
+# v0.14.0 alpha.2 — WebTransport seam compile-only test
+# (`docs/plan/v0.14-plan.md` §3.1 Gate #2 + `docs/adr/ADR-014`).
+#
+# The seam is pure-virtual + vendor-agnostic; this test only needs
+# `nimrtc::core` + the new seam headers (no msquic link).  The test
+# verifies that:
+#   - Every interface (`IWebTransportSession` / `IBidirectionalStream` /
+#     `IUnidirectionalStream` / `DatagramFacade`) is well-formed and
+#     its `static_assert`s fire at compile time.
+#   - The `WebTransportConfig` defaults match the v1.0-plan.md §10.4
+#     contract (RFC 9000 / RFC 9221).
+#   - The `WebTransportState` enum values round-trip.
+#
+# The actual implementation (`WebTransportMsQuicSession`, etc.) lands
+# in v0.14.0-beta.1 alongside the msquic integration; the alpha.2
+# cycle ships only the seam + this compile-only test.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_web_transport_seam_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endfunction()
+
+nimrtc_add_web_transport_seam_test(test_web_transport_seam
+                                    test_web_transport_seam.cpp)
+
 # E2E tests are standalone (custom main(), no GoogleTest). They each use
 # raw sockets to verify round-trip behaviour. add_e2e_test is a small wrapper
 # that wires the include dirs, links Winsock on Windows, and registers the
@@ -259,6 +304,29 @@ add_arq_e2e_test(test_dtls_over_arq_udp        test_dtls_over_arq_udp.cpp)
 add_arq_e2e_test(test_srtp_over_dtls_over_arq_udp
                                                test_srtp_over_dtls_over_arq_udp.cpp)
 add_arq_e2e_test(test_rtp_srtp_arq_e2e        test_rtp_srtp_arq_e2e.cpp)
+
+# Diagnostic-only: replay a captured (or synthesised) Chrome DTLS
+# ClientHello against a server-side DtlsSessionWolfSSL and print the
+# outbound records the server produces.  Used to triage Case D
+# interop; not part of the normal ctest acceptance gate.
+add_executable(test_dtls_replay_chrome_hello
+    test_dtls_replay_chrome_hello.cpp)
+target_include_directories(test_dtls_replay_chrome_hello PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/raw_udp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/srtp/include")
+target_link_libraries(test_dtls_replay_chrome_hello PRIVATE
+    nimrtc::dtls_seam)
+if(WIN32)
+    target_compile_definitions(test_dtls_replay_chrome_hello PRIVATE
+        _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_dtls_replay_chrome_hello LENIENT)
+nimrtc_copy_wolfssl_certs(test_dtls_replay_chrome_hello)
+nimrtc_copy_wolfssl_certs(test_dtls_replay_chrome_hello)
 
 # Timeout for the burst test (D): it sends 10+5=15 packets at 5ms intervals,
 # plus 3s receive timeout, plus the initial DTLS handshake.

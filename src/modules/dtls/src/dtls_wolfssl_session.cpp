@@ -17,6 +17,7 @@
 #endif
 
 #include "nimrtc/dtls/dtls_wolfssl_session.hpp"
+#include "nimrtc/dtls/dtls_handshake_reassembler.hpp"
 
 #include <nimrtc/core/log.hpp>
 
@@ -402,6 +403,16 @@ struct DtlsSessionWolfSSL::Impl {
     // status).  Auto-clears on fire so a re-armed callback must be
     // re-registered for the next handshake attempt.
     IDtlsSession::OnCompleteCb on_complete_cb_;
+
+    // -- DTLS handshake fragment reassembly shim -----------------------
+    // See dtls_handshake_reassembler.hpp for the rationale and
+    // semantics.  In short: wolfSSL 5.9.2 does not reassemble
+    // fragmented Handshake records on the DTLS 1.2 path, so Chrome
+    // 117+'s two-record ClientHello flight (~1100 B + ~300 B) gets
+    // silently dropped.  The reassembler intercepts the records
+    // before they reach wolfSSL and synthesises a fresh
+    // unfragmented record once all fragments have arrived.
+    DtlsHandshakeReassembler reassembler_;
 
     ~Impl() { teardown(); }
 
@@ -1141,6 +1152,9 @@ struct DtlsSessionWolfSSL::Impl {
             wolfSSL_CTX_free(ctx);
             ctx = nullptr;
         }
+        reassembler_.clear();   // discard any partial Handshake
+                                 // fragments so a re-handshake starts
+                                 // with a clean buffer map
         state = nimrtc::dtls::DtlsState::Closed;
     }
 };
@@ -1287,6 +1301,36 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
         impl_->set_peer(from.host, from.port);
     }
 
+    // DTLS handshake fragment reassembly shim.
+    //
+    // wolfSSL 5.9.2's DTLS 1.2 path does not reassemble fragmented
+    // Handshake records.  Chrome 117+ always sends its first
+    // ClientHello flight as two records (record-seq 0 and 1, body
+    // ~1100 + ~300 bytes), so without this shim wolfSSL silently
+    // drops both fragments and never produces a ServerHello.
+    //
+    // impl_->reassembler_.try_reassemble() returns:
+    //   kPassThrough      — pass through unchanged
+    //   kFragmentBuffered — buffered; drop this record
+    //   kReassembled      — feed `reassembled` instead of original
+    std::vector<std::uint8_t> reassembled;
+    using R = DtlsHandshakeReassembler::Result;
+    const R rr = impl_->reassembler_.try_reassemble(bytes, reassembled);
+    if (rr == R::kReassembled) {
+        nimrtc::dtls::diag::trace(
+            "feed_inbound: handshake fragment reassembled -> " +
+            std::to_string(reassembled.size()) + "B (original=" +
+            std::to_string(bytes.size()) + "B)");
+        bytes = std::span<const std::uint8_t>(reassembled.data(),
+                                              reassembled.size());
+    } else if (rr == R::kFragmentBuffered) {
+        nimrtc::dtls::diag::trace(
+            "feed_inbound: handshake fragment buffered; "
+            "dropping " + std::to_string(bytes.size()) + "B");
+        ++impl_->stats_instance.records_in;  // already counted above
+        return bytes.size();
+    }
+
     auto old = impl_->recv_buf_.size();
     impl_->recv_buf_.resize(old + bytes.size());
     std::memcpy(impl_->recv_buf_.data() + old, bytes.data(), bytes.size());
@@ -1328,6 +1372,21 @@ void DtlsSessionWolfSSL::tick() noexcept {
         impl_->state == nimrtc::dtls::DtlsState::Failed ||
         impl_->state == nimrtc::dtls::DtlsState::Closed) {
         return;
+    }
+
+    // GC stale Handshake fragment buffers.  Without this a peer that
+    // crashed mid-flight (e.g. Chrome closed the tab while we still
+    // had a partial ClientHello buffered) would leak memory until the
+    // session itself was torn down.  The reassembler's default TTL is
+    // 5 s, well inside the RFC 6347 §4.2.4 60-s retransmit envelope.
+    if (impl_->reassembler_.size() > 0) {
+        const std::size_t evicted =
+            impl_->reassembler_.gc_expired(DtlsHandshakeReassembler::clock::now());
+        if (evicted > 0) {
+            nimrtc::dtls::diag::trace(
+                "tick: reassembler GC evicted " + std::to_string(evicted) +
+                " stale fragment buffer(s)");
+        }
     }
 
     // Advance the wolfSSL internal retransmit timer.  When the timer

@@ -183,6 +183,7 @@ jobs:
           cmake --preset release.msvc `
             -DNIMRTC_BUILD_EXAMPLES=OFF `
             -DNIMRTC_BUILD_TESTS=OFF `
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF `
             -DNIMRTC_INSTALL=ON
 
       - name: Build
@@ -252,6 +253,7 @@ jobs:
           cmake --preset release \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
             -DNIMRTC_INSTALL=ON
 
       - name: Build
@@ -318,6 +320,7 @@ jobs:
           cmake --preset release.aarch64 \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
             -DNIMRTC_INSTALL=ON
 
       - name: Build
@@ -412,6 +415,7 @@ jobs:
           cmake --preset release.macos \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
             -DNIMRTC_INSTALL=ON
 
       - name: Build

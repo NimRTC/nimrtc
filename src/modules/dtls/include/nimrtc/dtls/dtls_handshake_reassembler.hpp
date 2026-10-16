@@ -202,9 +202,14 @@ public:
         p[4] = static_cast<std::uint8_t>(buf.epoch & 0xff);
         // Synthesised sequence: 1 above first fragment's seq.
         // Local-only space — never leaves the reassembler.
+        // The shift uses 8 * (5 - i).  Compute 5 - i as
+        // `static_cast<std::size_t>(5) - i` (not `5 - i`) so the
+        // int -> size_t conversion is explicit and -Wsign-conversion
+        // under Apple Clang's strict -Werror matrix does not fire.
         const std::uint64_t new_seq = buf.first_seq + 1;
         for (std::size_t i = 0; i < 6; ++i) {
-            p[5 + i] = static_cast<std::uint8_t>((new_seq >> (8 * (5 - i))) & 0xff);
+            p[5 + i] = static_cast<std::uint8_t>(
+                (new_seq >> (8 * (static_cast<std::size_t>(5) - i))) & 0xff);
         }
         const std::uint16_t new_rec_len = static_cast<std::uint16_t>(12 + hs_total);
         p[11] = static_cast<std::uint8_t>((new_rec_len >> 8) & 0xff);

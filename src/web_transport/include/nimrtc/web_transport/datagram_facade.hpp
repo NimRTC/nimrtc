@@ -41,14 +41,7 @@
 
 #include <nimrtc/core/api_version.hpp>  // NIMRTC_API_UNSTABLE
 #include <nimrtc/plugins/base.hpp>       // plugins::Status
-
-// Forward declaration of the session type — the facade only
-// needs to call into the seam surface; including the session
-// header here would force every consumer of the facade to
-// also pull in the (still-unimplemented) session surface.
-namespace nimrtc::web_transport {
-class IWebTransportSession;
-} // namespace nimrtc::web_transport
+#include <nimrtc/web_transport/web_transport_session_iface.hpp>  // IWebTransportSession
 
 namespace nimrtc::web_transport {
 

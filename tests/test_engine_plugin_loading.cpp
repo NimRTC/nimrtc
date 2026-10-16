@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <iomanip>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -846,6 +847,7 @@ TEST_F(EnginePluginLoading, slice76_accessors_empty_before_open) {
     EXPECT_EQ(engine.transport_strategy_session().control_factory_id, "");
 }
 
+
 // ---------------------------------------------------------------------------
 // v0.14.0 alpha.2 (ADR-014) — WebTransport / QUIC seam registry slot.
 //
@@ -872,6 +874,36 @@ TEST_F(EnginePluginLoading, slice76_accessors_empty_before_open) {
 //        v0.14-plan.md §3.1 Gate #3 ("loud-fail on unknown
 //        id", no silent fallback).
 // ---------------------------------------------------------------------------
+
+// File-scope stub factory used by the
+// `wt014_registry_slot_is_typed_for_web_transport_factory` test
+// below.  Declared at TU scope (not inside the TEST_F body)
+// because some MSVC versions reject local namespaces inside
+// function bodies with C2870; the namespace gives the symbol an
+// internal-linkage-friendly name distinct from any other stub
+// factories in the wider test suite.
+namespace wt014_local_namespace {
+
+class StubFactory final
+    : public nimrtc::web_transport::IWebTransportSessionFactory {
+public:
+    std::string_view id() const noexcept override {
+        return "wt014_stub";
+    }
+    std::string_view display_name() const noexcept override {
+        return "v0.14.0 alpha.2 stub factory for the registry test";
+    }
+    std::unique_ptr<nimrtc::web_transport::IWebTransportSession>
+    create(const nimrtc::web_transport::WebTransportConfig&)
+        const override {
+        return nullptr;  // the test only exercises the lookup,
+                         // not the create path
+    }
+};
+
+static const StubFactory k_stub_factory;
+
+} // namespace wt014_local_namespace
 
 TEST_F(EnginePluginLoading,
        wt014_registry_slot_is_typed_for_web_transport_factory) {
@@ -902,33 +934,22 @@ TEST_F(EnginePluginLoading,
     // local stub factory and verify it resolves by id.  This
     // proves the slot is functional (the engine can wire a
     // factory through it in beta.1).
-    namespace wt014_local {
-    class StubFactory final
-        : public nimrtc::web_transport::IWebTransportSessionFactory {
-    public:
-        std::string_view id() const noexcept override {
-            return "wt014_stub";
-        }
-        std::string_view display_name() const noexcept override {
-            return "v0.14.0 alpha.2 stub factory for the registry test";
-        }
-        std::unique_ptr<nimrtc::web_transport::IWebTransportSession>
-        create(const nimrtc::web_transport::WebTransportConfig&)
-            const override {
-            return nullptr;  // the test only exercises the lookup,
-                             // not the create path
-        }
-    };
-    static const StubFactory k_stub_factory;
-    }  // namespace wt014_local
-
+    //
+    // The stub factory is defined at file scope (in
+    // `wt014_local_namespace`, declared just above this test)
+    // because some MSVC versions (notably the one in the
+    // windows-2022 image) reject local namespaces inside
+    // function bodies with C2870, even though the standard
+    // permits them.  The namespace + factory are guarded by
+    // anonymous-namespace rules so the symbol has internal
+    // linkage within this TU.
     PluginRegistry::instance().register_web_transport(
-        wt014_local::k_stub_factory.id(),
-        &wt014_local::k_stub_factory);
+        wt014_local_namespace::k_stub_factory.id(),
+        &wt014_local_namespace::k_stub_factory);
 
     const auto* resolved =
         PluginRegistry::instance().get_web_transport("wt014_stub");
-    EXPECT_EQ(resolved, &wt014_local::k_stub_factory)
+    EXPECT_EQ(resolved, &wt014_local_namespace::k_stub_factory)
         << "v0.14.0 alpha.2: get_web_transport() must resolve the "
            "user-registered factory by id (typed slot contract; "
            "matches the DTLS / SCTP / raw_udp / transport-stack "

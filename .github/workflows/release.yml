@@ -442,7 +442,12 @@ jobs:
           staging="build/_install/macos-arm64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
-          sha256sum "build/nimrtc-${version}-macos-arm64-clang.tar.xz" \
+          # macOS / BSD userland does not ship GNU coreutils' `sha256sum`;
+          # use the Perl-portable `shasum -a 256` (also available on Linux
+          # distros that ship the perl-String-Util package; for Linux we
+          # still keep `sha256sum` in the linux-gcc / linux-aarch64 jobs).
+          shasum -a 256 "build/nimrtc-${version}-macos-arm64-clang.tar.xz" \
+            | awk '{print $1"  "substr($2,index($2,"/")+1)}' \
             > "build/nimrtc-${version}-macos-arm64-clang.tar.xz.sha256"
 
       - name: Upload artefact bundle

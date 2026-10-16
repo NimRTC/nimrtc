@@ -150,7 +150,13 @@ TEST(DtlsHandshakeReassembler, ForwardOrderReassembles) {
                                     (std::uint32_t(p[23]) << 8)  |
                                      std::uint32_t(p[24]);
     EXPECT_EQ(frag_len, body.size());
-    const std::uint16_t frag_off = (std::uint16_t(p[19]) << 8) | p[20];
+    // Clang -Werror,-Wimplicit-int-conversion: `p[20]` is `int`; the
+    // shift partner is `std::uint16_t`, which is unsigned short. Cast
+    // explicitly so Clang Release builds accept the bitwise OR.
+    const std::uint16_t frag_off =
+        static_cast<std::uint16_t>(
+            (std::uint16_t(p[19]) << 8) |
+            static_cast<std::uint16_t>(p[20]));
     // frag_off occupies 3 bytes; only 2 are within the rec header span
     // of 3 bytes starting at p[19].
     EXPECT_EQ(frag_off & 0xffff, 0u);

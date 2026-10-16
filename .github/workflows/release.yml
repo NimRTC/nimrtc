@@ -368,11 +368,19 @@ jobs:
         with:
           submodules: recursive
 
+      # macos-14 runners ship Python 3.12 + xz-utils pre-installed, but
+      # the system Python 3 is "externally managed" (PEP 668) and
+      # `brew update && brew install python@3.12 xz` is slow enough
+      # (10-25 min cold-tap refresh on first run) to push the whole
+      # job past 30 min. Pin a managed Python 3.12 via
+      # actions/setup-python@v5 (1-2 min, no Homebrew), and use the
+      # system `tar -cJf` / `xz` for bundling (macOS userland ships
+      # `/usr/bin/tar` with `-J` support and `/usr/bin/xz`).
       - name: Install Python
-        shell: bash
-        run: |
-          brew update
-          brew install python@3.12 xz
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
 
       # WebRTC APM is built out-of-tree with meson (upstream doesn't ship a
       # CMakeLists.txt). Run `tools/fetch_webrtc_apm.py` to clone +
@@ -380,38 +388,21 @@ jobs:
       # the cmake configure step below succeeds with the default
       # NIMRTC_VENDORED_WEBRTC_APM=ON contract documented in
       # docs/zh/architecture.md §11.5.5.
-      # Homebrew's python3 on macos-* runners is "externally managed"
-      # (PEP 668), which makes even `pip install --user` fail with
-      # `error: externally-managed-environment`. Add
-      # `--break-system-packages` so the user-site install goes through
-      # (Homebrew's docs explicitly recommend this for ephemeral CI
-      # runners; we never touch the system site-packages).
+      # actions/setup-python@v5 above pins a managed Python 3.12 that
+      # is NOT "externally managed" (PEP 668), so a plain
+      # `python3 -m pip install --user` works without
+      # `--break-system-packages` and without going through Homebrew
+      # (which can take 5+ min on a cold tap refresh on macos-14
+      # runners). Mirror the linux-gcc / windows pattern.
       - name: Install meson (for WebRTC APM prebuild)
         shell: bash
         run: |
-          # Try Homebrew first — the macos-* runner images ship `brew`
-          # pre-installed and meson is a well-known formula. This avoids
-          # the Homebrew/Homebrew-Python version skew problem (different
-          # runner images carry Python 3.10/3.11/3.12/3.13 and the
-          # user-site script dir changes accordingly).
-          if brew install meson ninja 2>/dev/null; then
-            echo "[+] Installed meson + ninja via Homebrew"
-            echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-          else
-            # Fallback: user-site pip install with --break-system-packages.
-            # The exact user-site scripts dir depends on the Homebrew
-            # Python version, so query sysconfig rather than hard-coding.
-            python3 -m pip install --user --break-system-packages "meson>=1.10" "ninja"
-            user_scripts=$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme="posix_user"))')
-            echo "[+] Installed meson + ninja via pip user-site"
-            echo "[i] user scripts dir: $user_scripts"
-            echo "$user_scripts" >> "$GITHUB_PATH"
-          fi
-          # Sanity-check before continuing so we fail fast with a
-          # useful message instead of running the whole build first.
+          python3 -m pip install --user --quiet "meson>=1.10"
+          user_scripts=$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme="posix_user"))')
+          echo "[+] user scripts dir: $user_scripts"
+          echo "$user_scripts" >> "$GITHUB_PATH"
           if ! command -v meson >/dev/null 2>&1; then
-            echo "::error::meson not found on PATH after install attempt"
-            which python3 || true
+            echo "::error::meson not found on PATH after install"
             python3 -m meson --version 2>/dev/null || true
             exit 1
           fi

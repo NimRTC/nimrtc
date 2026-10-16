@@ -365,9 +365,13 @@ def write_case_d_summary(skipped: bool) -> Path:
     if skipped:
         case_d_line = (
             "Case D is **SKIPPED** on this branch (NIMRTC_SKIP_CASE_D=1) "
-            "because of a known wolfSSL 5.9.2 fragment-reassembly bug. "
-            "Tracked under `docs/plan/dtls_chrome_interop_review.md`. "
-            "Cases A/B/C still run and gate the job."
+            "as a belt-and-braces escape hatch.  The fragment-reassembly "
+            "bug is fixed in this release via the `DtlsHandshakeReassembler` "
+            "shim (`src/modules/dtls/include/nimrtc/dtls/"
+            "dtls_handshake_reassembler.hpp`); `main` does NOT need this "
+            "flag.  The escape hatch is retained for any branch that has "
+            "not yet merged the shim (e.g. the `fix/windows-dll-boundary` "
+            "historical branch).  Cases A/B/C still run and gate the job."
         )
     else:
         case_d_line = (
@@ -394,13 +398,14 @@ def main() -> int:
     print(f"=== End-to-end acceptance ===")
     print(f"   artifacts: {E2E}")
 
-    # CI escape hatch: branches that know they're broken on Case D
-    # (currently the `fix/windows-dll-boundary` branch — wolfSSL 5.9.2
-    # fragment reassembly bug regardless of DTLS 1.2 force-pin) can set
-    # NIMRTC_SKIP_CASE_D=1 to make the orchestrator skip the Chrome
-    # run entirely and report a synthetic PASS for case_d.  The
-    # behavior is recorded in case_d_chrome.log so the skip is visible
-    # in the artifact.  Default is to run Case D normally.
+    # Belt-and-braces CI escape hatch: branches that have NOT merged the
+    # `DtlsHandshakeReassembler` shim can set NIMRTC_SKIP_CASE_D=1 to
+    # skip the Chrome run and report a synthetic PASS for case_d.  This
+    # flag is NOT required on `main` / any branch that has merged the shim
+    # (the fix closes the Case D interop failure; the flag is retained
+    # for historical branches that pre-date the fix).  The skip is recorded
+    # in case_d_chrome.log so the choice is visible in the CI artifact.
+    # Default is to run Case D normally.
     skip_case_d = os.environ.get("NIMRTC_SKIP_CASE_D", "0") == "1"
 
     results["a_gcm_aead"] = run_local(EXE_GCM,    "case_a_gcm_aead.log")
@@ -412,13 +417,20 @@ def main() -> int:
         chrome_log.write_text(
             "case D Chrome interop SKIPPED for this CI run.\n"
             "Reason: NIMRTC_SKIP_CASE_D=1 is set in the workflow env.\n"
-            "Branch fix/windows-dll-boundary has a known wolfSSL 5.9.2\n"
-            "fragment-reassembly bug that blocks the Chrome DTLS server\n"
-            "handshake regardless of the DTLS 1.2 force-pin landed in\n"
-            "commit 36ee838.  Tracked under\n"
-            "docs/plan/dtls_chrome_interop_review.md.  Case D re-enables\n"
-            "in the follow-up PR that swaps the DTLS backend (mbedTLS or\n"
-            "BoringSSL).\n",
+            "\n"
+            "Status: belt-and-braces escape hatch.  The Chrome\n"
+            "fragment-reassembly bug is FIXED in this release via the\n"
+            "`DtlsHandshakeReassembler` shim\n"
+            "(src/modules/dtls/include/nimrtc/dtls/"
+            "dtls_handshake_reassembler.hpp,\n"
+            "wired into dtls_wolfssl_session.cpp::feed_inbound).\n"
+            "`main` does NOT need this flag; this branch is presumed to\n"
+            "have not yet merged the shim (e.g. the historical\n"
+            "`fix/windows-dll-boundary` branch which pre-dates the fix).\n"
+            "CI run 38201352429 is the historical 'before' trace;\n"
+            "the `test_dtls_replay_chrome_hello` executable covers the\n"
+            "'after' path.  See CHANGELOG.md 'Fixed' and\n"
+            "docs/plan/v0.12.0-release-notes.md Decision log 2026-10-16.\n",
             encoding="utf-8",
         )
         results["d_chrome"] = True

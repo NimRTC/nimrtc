@@ -80,8 +80,8 @@
 /// Patch version number of the NimRTC public API.
 #define NIMRTC_API_VERSION_PATCH 0
 
-/// Pre-release identifier for v1.0.0-alpha.1.  Empty string for final releases.
-#define NIMRTC_API_VERSION_PRE_RELEASE "alpha.1"
+/// Pre-release identifier for v1.0.0-alpha.2.  Empty string for final releases.
+#define NIMRTC_API_VERSION_PRE_RELEASE "alpha.2"
 
 // Two-level indirection required to expand __LINE__ if the caller passes
 // a macro rather than a literal string (C99/C++03 Sec.6.10.3).

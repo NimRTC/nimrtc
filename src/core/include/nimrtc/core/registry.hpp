@@ -96,6 +96,16 @@ namespace nimrtc::sctp     { class ISctpSocketFactory; }
 namespace nimrtc::raw_udp  { class IRawUdpFactory; }
 namespace nimrtc           { class ITransportStackFactory; }
 
+// v0.14.0 alpha.2 (ADR-014): typed factory slot for the WebTransport /
+// QUIC seam. The seam itself (`IWebTransportSession` + companion
+// headers) lands in alpha.2; the msquic-backed factory lands in
+// beta.1.  Forward-declared here so the registry's TypedRegistry<...>
+// field and public method signatures can reference the factory type
+// without pulling the seam headers into core (same Layout Invariant 1
+// rationale as the DTLS / SCTP / raw_udp / transport-stack slots
+// above).
+namespace nimrtc::web_transport { class IWebTransportSessionFactory; }
+
 // ---------------------------------------------------------------------------
 // Forward declarations for unified registration entry point.
 //
@@ -140,6 +150,15 @@ namespace dtls     { void register_default_plugins() noexcept; }
 namespace sctp     { void register_default_plugins() noexcept; }
 namespace raw_udp  { void register_default_plugins() noexcept; }
 namespace transport { void register_default_plugins() noexcept; }
+// v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam module entry
+// point.  The forward declaration is here so the inline
+// `register_all_default_plugins()` body in `nimrtc::core` can
+// reference the symbol when it lands (beta.1) without forcing
+// every TU to include the web_transport module header (Layout
+// Invariant 1).  At the alpha.2 cut the symbol is not yet
+// defined; the matching kDefaultRegistrars[] entry is added in
+// beta.1 alongside the factory implementation.
+namespace web_transport { void register_default_plugins() noexcept; }
 } // namespace nimrtc
 
 namespace nimrtc::core {
@@ -478,6 +497,30 @@ public:
         return transport_stack_.list_ids();
     }
 
+    // -- WebTransport / QUIC session (v0.14.0 alpha.2 / ADR-014) -----------
+    //
+    // Typed slot for `nimrtc::web_transport::IWebTransportSessionFactory*`.
+    // The seam (`IWebTransportSession` + companion headers) lands in
+    // v0.14.0 alpha.2 (this PR); the msquic-backed factory
+    // (`WebTransportMsQuicSessionFactory`, id = `"msquic"`) lands in
+    // v0.14.0-beta.1 alongside the msquic integration.  At the alpha.2
+    // cut, the slot exists but `list_web_transports()` returns an
+    // empty vector -- no factory is registered yet.  The
+    // `EngineConfig::datachannel_backend` field (lands in beta.1)
+    // resolves factories by id through this slot; the runtime error
+    // for a v0.14.0 alpha.2 caller that tries to use a web_transport
+    // id is documented in `docs/plan/v0.14-plan.md` §3.1 Gate #3
+    // ("loud-fail" contract; no silent fallback to wolfSSL).
+    void register_web_transport(std::string_view id,
+                                const web_transport::IWebTransportSessionFactory* f);
+    [[nodiscard]] const web_transport::IWebTransportSessionFactory*
+    get_web_transport(std::string_view id) const {
+        return web_transport_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_web_transports() const {
+        return web_transport_.list_ids();
+    }
+
 private:
     TypedRegistry<plugins::ITransportFactory>    transport_;
     TypedRegistry<plugins::IICETransportFactory> ice_transport_;
@@ -504,6 +547,15 @@ private:
     TypedRegistry<sctp::ISctpSocketFactory>        sctp_socket_;
     TypedRegistry<raw_udp::IRawUdpFactory>         raw_udp_;
     TypedRegistry<ITransportStackFactory>          transport_stack_;
+    // v0.14.0 alpha.2 (ADR-014): typed factory slot for the
+    // WebTransport / QUIC seam.  Empty at the alpha.2 cut; the
+    // msquic factory lands in beta.1 and is published via
+    // `register_web_transport("msquic", &factory)`.  The slot
+    // exists so the engine can resolve the factory id from
+    // `EngineConfig::datachannel_backend` at any point in the
+    // cycle.
+    TypedRegistry<web_transport::IWebTransportSessionFactory>
+                                                web_transport_;
 };
 
 // ---------------------------------------------------------------------------
@@ -680,6 +732,20 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kTransportStack, \
             #id, factory_ptr }
 
+/** Register a WebTransport / QUIC session-factory plugin by ID and
+ *  factory pointer.  v0.14.0 alpha.2 (ADR-014) — typed slot for
+ *  `nimrtc::web_transport::IWebTransportSessionFactory*`.  At the
+ *  alpha.2 cut, no factory is auto-registered (the slot exists but
+ *  `list_web_transports()` returns an empty vector); the msquic
+ *  factory lands in beta.1 via
+ *  `NIMRTC_REGISTER_WEB_TRANSPORT("msquic", &factory)`. */
+#define NIMRTC_REGISTER_WEB_TRANSPORT(id, factory_ptr)                  \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_web_transport_){                        \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kWebTransport, \
+            #id, factory_ptr }
+
 namespace detail {
 
 // Tiny utility macros
@@ -726,7 +792,11 @@ public:
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
         // TRANSPORT_STACK macros above for the matching registration
         // entry points.
-        kDtlsSession, kSctpSocket, kRawUdpDatagram, kTransportStack
+        kDtlsSession, kSctpSocket, kRawUdpDatagram, kTransportStack,
+        // v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam.
+        // The factory slot lands in alpha.2; the msquic factory
+        // lands in beta.1 via NIMRTC_REGISTER_WEB_TRANSPORT().
+        kWebTransport
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -808,6 +878,10 @@ public:
                 reg.register_transport_stack(id,
                     static_cast<const ITransportStackFactory*>(factory));
                 break;
+            case Category::kWebTransport:
+                reg.register_web_transport(id,
+                    static_cast<const web_transport::IWebTransportSessionFactory*>(factory));
+                break;
         }
     }
 };
@@ -878,6 +952,19 @@ inline void register_all_default_plugins() noexcept {
 #include "nimrtc/sctp/sctp_socket_factory.hpp"
 #include "nimrtc/raw_udp/raw_udp_factory_iface.hpp"
 #include "nimrtc/transport/transport_stack.hpp"
+
+// v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam factory
+// interface.  Including the factory header here is what makes the
+// back-compat shim work for old code that only includes
+// <nimrtc/core/registry.hpp> and then references the new factory
+// type — the include propagates through the rest of the project's
+// translation units without forcing every TU to add the include
+// itself.  The matching seam headers (`web_transport_session_iface.hpp`
+// etc.) are NOT included here; they are included by the
+// `web_transport_session_factory.hpp` header above, and consumers
+// that need the seam surface (e.g. the v0.14.0-beta.1 msquic
+// factory) include them directly.
+#include "nimrtc/web_transport/web_transport_session_factory.hpp"
 
 namespace nimrtc::plugins {
 

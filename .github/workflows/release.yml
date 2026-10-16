@@ -173,7 +173,17 @@ jobs:
           Write-Host "Adding to GITHUB_PATH: $userScripts"
           Add-Content -Path $env:GITHUB_PATH -Value $userScripts
 
+      # TEMPORARILY SKIPPED in release.yml (was the v0.14.0 release-cut
+      # release / build / windows failure; see v0.14.0 release notes).
+      # Release builds pass `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to cmake
+      # so audio3a links against the same system / stub WebRTC APM path
+      # as ci.yml; the prebuild output is unused.  Long-term fix
+      # (target_link_libraries(audio3a PUBLIC webrtc_apm::webrtc_apm)
+      # so absl's INCLUDE_DIRECTORIES propagate to the consumer) is
+      # tracked in a follow-up issue; once it lands, restore the
+      # `if:` line below and drop the `if: ${{ false }}` shim.
       - name: Prebuild WebRTC APM
+        if: ${{ false }}
         shell: pwsh
         run: python tools/fetch_webrtc_apm.py
 
@@ -244,6 +254,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Prebuild WebRTC APM
+        if: ${{ false }}  # see comment in the windows job above
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
@@ -311,6 +322,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Prebuild WebRTC APM
+        if: ${{ false }}  # see comment in the windows job above
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
@@ -406,6 +418,7 @@ jobs:
           meson --version
 
       - name: Prebuild WebRTC APM
+        if: ${{ false }}  # see comment in the windows job above
         shell: bash
         run: python3 tools/fetch_webrtc_apm.py
 

@@ -23,8 +23,18 @@
 // DTLS I/O on the engine thread, and the reassembler must be fed
 // strictly in-order with respect to fragment reception (out-of-order
 // IS allowed, but interleaving with another handshake is not).
+//
+// ## Stability
+//
+// UNSTABLE — internal helper to the v0.12.0 Chrome interop fix
+// (PR https://github.com/NimRTC/nimrtc/pull/19).  Exposed via
+// the public include path only because DtlsSession holds it
+// by-value; consumers should not depend on the type directly.
+// See ADR-015 §"internal-helpers".
 
 #pragma once
+
+#include <nimrtc/core/api_version.hpp>  // NIMRTC_API_UNSTABLE
 
 #include <chrono>
 #include <cstdint>
@@ -35,7 +45,7 @@
 
 namespace nimrtc::dtls {
 
-class DtlsHandshakeReassembler {
+class NIMRTC_API_UNSTABLE DtlsHandshakeReassembler {
 public:
     // TTL for a partial fragment buffer before it is garbage-collected.
     // Default: 5 s.  RFC 6347 §4.2.4 sets the maximum DTLS retransmit

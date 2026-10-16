@@ -193,6 +193,22 @@ public:
         return nullptr;
     }
 
+    /// Remove a single entry by id.  Returns true if a matching
+    /// entry was removed.  Used by tests to clean up after
+    /// themselves (the registry is a process-wide singleton, so a
+    /// test that calls `register_one("foo", ...)` would otherwise
+    /// leak "foo" into every later test in the same process).
+    bool unregister_one(std::string_view id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->first == id) {
+                entries_.erase(it);
+                return true;
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] std::vector<std::string_view> list_ids() const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<std::string_view> out;
@@ -513,6 +529,14 @@ public:
     // ("loud-fail" contract; no silent fallback to wolfSSL).
     void register_web_transport(std::string_view id,
                                 const web_transport::IWebTransportSessionFactory* f);
+    /// Remove a web_transport factory by id.  Returns true if a
+    /// matching entry was removed.  Test-only helper; the
+    /// production path always registers through
+    /// `NIMRTC_REGISTER_WEB_TRANSPORT(id, factory)` at static-init
+    /// time and never removes a factory at runtime.
+    bool unregister_web_transport(std::string_view id) {
+        return web_transport_.unregister_one(id);
+    }
     [[nodiscard]] const web_transport::IWebTransportSessionFactory*
     get_web_transport(std::string_view id) const {
         return web_transport_.get(id);

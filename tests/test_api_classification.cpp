@@ -249,7 +249,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 96;
+    constexpr std::size_t kBaselineHeaderCount = 97;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-alpha.1 baseline "

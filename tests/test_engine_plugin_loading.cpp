@@ -978,6 +978,20 @@ TEST_F(EnginePluginLoading,
     // Note: the "no auto-registered factory" assertion is split
     // into the next subtest so the assertions are easy to
     // bisect when the test fails.
+
+    // Clean up the stub factory so the next test (which asserts
+    // `list_web_transports()` is empty after
+    // `register_all_default_plugins()`) starts with a clean
+    // registry.  The factory registry is a process-wide
+    // singleton; without this unregister the stub from this test
+    // would leak into the next test and break the
+    // "no auto-registered factory" assertion.
+    const bool removed = PluginRegistry::instance().unregister_web_transport(
+        wt014_local_namespace::k_stub_factory.id());
+    EXPECT_TRUE(removed)
+        << "v0.14.0 alpha.2: unregister_web_transport() must remove the "
+           "stub factory registered earlier in this test (test fixture "
+           "leak guard)";
 }
 
 TEST_F(EnginePluginLoading,
@@ -994,6 +1008,22 @@ TEST_F(EnginePluginLoading,
     // future PR accidentally adds a factory entry in
     // `pal_default_registrars.cpp` before the msquic integration
     // is ready, this test fails at PR review time.
+    //
+    // Defensive cleanup: if a previous test in this TU leaked a
+    // web_transport factory into the registry, unregister it
+    // here.  The "alpha.2: no auto-registered factory" contract
+    // is about the production `register_all_default_plugins()`
+    // path, not about user-registered stub factories in tests.
+    while (!PluginRegistry::instance().list_web_transports().empty()) {
+        const auto leaked_ids = PluginRegistry::instance().list_web_transports();
+        bool any_removed = false;
+        for (auto id : leaked_ids) {
+            if (PluginRegistry::instance().unregister_web_transport(id)) {
+                any_removed = true;
+            }
+        }
+        if (!any_removed) break;  // safety: avoid infinite loop
+    }
     nimrtc::core::register_all_default_plugins();
     nimrtc::core::register_all_default_plugins();
     nimrtc::core::register_all_default_plugins();

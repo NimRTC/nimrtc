@@ -4,682 +4,301 @@ All notable changes to NimRTC are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [0.12.0] - Unreleased
+## [0.14.0] - Unreleased
 
 ### Status: Tech Preview
 
+> **First pre-release of the v0.14.x cycle** — the
+> **v1.0.0-alpha.2** pre-release per `docs/plan/v1.0-plan.md`
+> §8 + §12.2 + §12.3.2.  The marketing version stays anchored
+> to the v0.x line ("Tech Preview" banner unchanged from
+> v0.13.0); the `NIMRTC_API_VERSION_PRE_RELEASE` macro cycles
+> to `"alpha.2"`.  This is the **seam land** — no
+> `WebTransportDataChannel` impl exists yet; the existing
+> `test_datachannel_engine` 5/5 + `test_sctp_usrsctp` 4/4
+> regression surface continues to be the in-process validation.
+> The data-plane wire-up is the v0.14.0-beta.1 work per
+> `docs/plan/v0.14-plan.md` §2.1.2.
+>
+> **Tag cut**: `git tag -s v0.14.0 -m "v0.14.0 (alias: v1.0.0-alpha.2) — ..."`.
+> The tag message body documents the alias relationship to
+> v1.0.0-alpha.2 and the v0.x banner unchanged.
+
 ### Highlights
 
-- **Transport Slice 7.6 PR3 — end-to-end wiring of the 5 transport
-  strategies**. The CapabilitySelector's §5.3-rule-derived factory
-  pair is now consumed by `NimRTCEngine::init_modules_once()` to
-  build a `TransportSession` whose `media_stack` and (optionally)
-  `control_stack` are constructed from the matching
-  `ITransportStackFactory` registered in
-  `core::PluginRegistry::get_transport_stack()`. Pre-PR3 the engine
-  built ICE / DTLS / RTP / SCTP via separate `reg.get_*()` calls and
-  stitched them together by hand; PR3 replaces that with a
-  composition-root flow that lives in the `WebRtcClassicStackFactory`
-  and `RawUdpArqStackFactory` instead.
-  - `NimRTCEngine::ice_t_` and `Impl::dtls` are now **raw
-    non-owning pointers** into `Impl::session.media_stack`; the
-    `Impl::session` member owns the actual stack instances via
-    `unique_ptr<ITransportStack>`. Lifetime is safe because
-    `~NimRTCEngine` runs `close()` (which calls
-    `session.close()`) BEFORE `delete impl_` tears down the
-    session's owned resources.
-  - Rule 2 (`teleop-ultra-low-latency`) gets a dedicated
-    no-DTLS-by-design branch: `Impl::dtls` is null, the engine
-    skips `dtls->open()`, and the audio pipeline falls back to
-    null-encoder. A warning is logged so the degraded mode is
-    visible in the trace.
-  - The 4 browser-interop strategies (`browser-call`,
-    `agent-gateway`, `sfu-relay`, `cross-network-peer`) use
-    `webrtc-classic` for the media stack; missing DTLS factory
-    (e.g. user typo on `cfg.dtls_name`) hard-fails with
-    `kEngineInternal` (the same code the pre-PR3 path produced).
-  - The Selector-resolved pair is now used directly: the legacy
-    "fall back to webrtc-classic when trace.media_factory_id is
-    empty" path is preserved for unknown strategies
-    (`webrtc-quic-call`, deferred to v1.x).
+- **WebTransport / QUIC vendor decision (ADR-014)** —
+  `docs/adr/ADR-014-web-transport-vendor.md` (Status:
+  Accepted). msquic chosen as the WebTransport / QUIC backend
+  for the v0.14.0-beta.1 `WebTransportMsQuicSession` impl. The
+  5 evaluation criteria in `v1.0-plan.md` §10.2 (license /
+  no-Rust / no-CFFI / cross-platform CI / Windows-first /
+  active maintenance) are verified by the spike at
+  `interop/v0_14_msquic_spike/`; results.txt records
+  per-criterion PASS/FAIL with timestamps + commit SHAs.
+  License (MIT), no Rust / no CFFI, cross-platform CI green
+  (windows-2022 + linux-gcc + macos-clang + linux-aarch64),
+  Windows-first (kernel QUIC), active maintenance (last commit
+  within 6 months of v0.14.0 tag cut). Fallback to quiche
+  (BSD-2, C API, userspace only on Windows) is documented in
+  ADR-014 §Alternatives + §Consequences.
+
+- **`IWebTransportSession` interface** — pure-virtual seam
+  (no impl) at
+  `src/web_transport/include/nimrtc/web_transport/web_transport_session_iface.hpp`.
+  Companion headers:
+    - `bidi_stream_iface.hpp` — `IBidirectionalStream`
+    - `uni_stream_iface.hpp`  — `IUnidirectionalStream`
+    - `datagram_facade.hpp`   — `DatagramFacade` (utility wrapper)
+    - `web_transport_config.hpp` — `WebTransportConfig`
+      (max_idle_timeout_ms / initial_max_stream_data /
+      initial_max_data / keep_alive_interval_ms)
+    - `web_transport_state.hpp`  — `WebTransportState` enum
+      (kConnecting / kConnected / kClosing / kClosed / kFailed)
+    - `web_transport_session_factory.hpp` —
+      `IWebTransportSessionFactory` (the typed factory
+      contract)
+  All seven headers are `NIMRTC_API_UNSTABLE` (the
+  classification is visual at v1.0.0-alpha.2; the "v1.0.0
+  stable" banner does not flip until v1.0.0 final).
+
+- **`core::PluginRegistry::register_web_transport()` slot** —
+  parallel to the Slice 8 DTLS / SCTP / raw_udp /
+  transport-stack slots. The factory slot exists at the
+  alpha.2 cut; the msquic factory lands in beta.1 alongside
+  the msquic integration. `list_web_transports()` returns an
+  empty vector at the alpha.2 cut; user-supplied factory ids
+  resolve normally, and unknown ids return nullptr (no silent
+  fallback to wolfSSL). Two new subtests in
+  `test_engine_plugin_loading.cpp`:
+    - `wt014_registry_slot_is_typed_for_web_transport_factory`
+    - `wt014_registry_default_registrars_omits_web_transport_until_beta1`
+
+- **Compile-only seam test** —
+  `tests/test_web_transport_seam.cpp` (new). Verifies every
+  pure-virtual interface is `std::is_abstract`, every
+  `WebTransportConfig` default matches the v1.0-plan.md
+  §10.4 contract (RFC 9000 / RFC 9221), and every
+  `WebTransportState` enum value round-trips. 5 subtests
+  PASS on Windows MSVC. No msquic link required (the seam is
+  vendor-agnostic; the impl lands in beta.1).
+
+- **v0.14.x spike-validation program** — 6 spike programs at
+  `interop/v0_14_msquic_spike/` exercise the full msquic C
+  API surface against the planned `IWebTransportSession`
+  methods:
+    - `echo_client.cpp` / `echo_server.cpp` — 0-RTT echo
+      round-trip latency < 50 ms
+    - `stream_reset.cpp` — `MsQuicStreamSendComplete` + reset
+    - `datagram_roundtrip.cpp` — `MsQuicDatagramSend` / recv
+    - `concurrent_streams.cpp` — 16-stream fanout
+  The `results.txt` file is the gating evidence for ADR-014's
+  criterion 5 ("active maintenance"); per-criterion PASS/FAIL
+  with timestamps + commit SHAs.
 
 ### Added
 
-- **`nimrtc::transport::make_transport_instance(media_factory_id,
-  control_factory_id, cfg)`** — canonical engine-facing entry
-  point for the v0.12.0 transport-strategy layer. Translates the
-  Selector's resolved factory ids into a fully-constructed
-  `TransportSession`. Lives in `transport_plugin.cpp` for future
-  consumers (test harnesses, webrtc-quic stack factory); the
-  engine inlines the equivalent lookup so its existing
-  `nimrtc::transport` PRIVATE link is sufficient.
-- **6 new subtests in `test_engine_plugin_loading.cpp`** for the
-  5 strategies + unknown-strategy failure mode:
-  - `slice76_strategy_default_is_browser_call`
-  - `slice76_strategy_agent_gateway` (webrtc-classic + raw-udp-arq control)
-  - `slice76_strategy_teleop_ultra_low_latency` (raw-udp-arq media + raw-udp-arq control)
-  - `slice76_strategy_sfu_relay` (webrtc-classic, no control)
-  - `slice76_strategy_cross_network_peer` (webrtc-classic, no control)
-  - `slice76_unknown_strategy_fails_open` (kEngineInternal guard)
-  - `slice76_accessors_empty_before_open` (diagnostic surface contract)
+- **`src/web_transport/include/nimrtc/web_transport/*.hpp`**
+  (7 new public headers) — the WebTransport / QUIC seam.
+  All headers are `NIMRTC_API_UNSTABLE` (the v1.0.0-alpha.2
+  classification; stable banner does not flip until v1.0.0
+  final).
 
-### Changed
+- **`IWebTransportSession` interface** in
+  `web_transport_session_iface.hpp`. Methods: `state()`,
+  `open_bidi_stream()`, `open_uni_stream()`,
+  `send_datagram()`, `set_on_datagram()`, `close()`. Pure
+  virtual; no impl.
 
-- **`NimRTCEngine::Impl::dtls`** changed from
-  `unique_ptr<nimrtc::dtls::IDtlsSession>` to a raw non-owning
-  pointer. The DTLS session is now owned by
-  `WebRtcClassicStackFactory::create()` inside the media stack.
-  See `Impl::dtls` field comment for lifetime rationale.
-- **`NimRTCEngine::ice_t_`** changed from
-  `unique_ptr<plugins::IICETransport>` to a raw non-owning
-  pointer. The ICE transport is now owned by the media stack.
-- **`NimRTCEngine::close()`** now calls `Impl::session.close()`
-  (which tears down the media and control stacks in order)
-  before nulling `ice_t_` and `Impl::dtls`.
-- **`init_modules_once()` transport section** removed the
-  pre-PR3 manual ICE + DTLS construction path; the section now
-  resolves the §5.3 factory pair from the Selector, calls
-  `get_transport_stack()` on each id, and builds the session.
-- **PAL Slice 1.5 — `nimrtc::engine::pal::make_plugin<IPlugin,
-  Config, Factory>` template** added at
-  `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`. The
-  helper consolidates the 5-step "factory lookup → create →
-  null-check → open → report" dance that was copy-pasted across
-  9 plugin categories in `engine.cpp` (5 video plugins + 2 BWE /
-  Scheduler + audio3a + codec). Per-block size dropped from
-  ~20 lines to ~7 lines with no behaviour change.
-  - The helper takes a `PluginFailureMode` enum (Error / Warn /
-    Silent) so each plugin category keeps its original
-    failure-reporting policy (e.g. video → on_error_, BWE →
-    log-warn, audio3a → silent fallback, codec → silent
-    fallback).
-  - A `post_create` hook is invoked between `create()` and
-    `open()` to cover the audio3a case where `set_callbacks()`
-    must precede `open()`.
-  - A compile-time branch (`if constexpr`) handles the
-    no-config case (`IAudio3AFactory::create()` takes no
-    arguments) — the caller passes `nullptr` as the config
-    argument.
-  - `init_video_plugins()` lost the `auto& reg = ...` capture
-    and the `reg.get_video_*` calls; the registry lookups now
-    happen inline at each `pal::make_plugin` call site.
-- **PAL Slice 1.5 upgrade — `pal::make_plugin` now has a C++20
-  `auto Resolver` overload and a `MakePluginOpts` named-arguments
-  struct**. The 4 positional `err_open_failed` / `err_missing` /
-  `open_fail_mode` / `missing_mode` arguments (and the trailing
-  `on_error`) are folded into a single `MakePluginOpts` struct
-  consumed by designated initializers at the call site. The new
-  template overload
-  `make_plugin<auto Resolver, IPlugin, Config>(id, slot, cfg, opts, post_create)`
-  takes a resolver function pointer (e.g. `&pal::resolve_bwe`)
-  and deduces the factory type from
-  `std::invoke_result_t<Resolver, string_view>`; the
-  `reg.get_X(id)` lookup now happens inside the helper. All 9
-  `engine.cpp` plugin-load call sites (BWE / Scheduler / Audio3A
-  / Codec / Video Sink / Source / Receiver / Sender / Codec)
-  migrated — per-call-site arg count drops from 9-10 positional
-  to 5 positional + 1 struct. 6 new `pal::resolve_*` forwarders
-  added to `engine_plugin_resolver.hpp` (bwe, scheduler,
-  video_sink, video_source, video_receiver, video_sender) so the
-  resolver header is now symmetric across all 9 plugin
-  categories used by the engine. Behaviour-preserving: 27/27
-  `test_engine_plugin_loading`, 15/15 `test_audio3a_tap`, 13/13
-  `test_video_source` PASS on Windows MSVC. The
-  `reg.get_transport_stack` calls in `init_transport_session()`
-  are intentionally left as `reg.get_*()` (not migrated) because
-  they are part of the v0.12.0 Slice 7.6 PR3 transport-strategy
-  wiring, not the per-plugin factory loading pattern that PAL
-  Slice 1 covers.
-- **`NimRTCEngine::Impl::datachannel_transport_cookie`**
-  retyped from `void*` to `nimrtc::dtls::IDtlsSession*` (non-
-  owning). The v1.x WebTransport redesign will replace the
-  field with a tagged union over `{IDtlsSession*,
-  IWebTransportSession*}`; until then, the typed pointer
-  removes the unsafe `static_cast<void*>` round-trip.
-- **Meta-comments removed** from `core/registry.hpp` and three
-  production headers (`engine.hpp`, `engine.cpp`,
-  `raw_udp_datagram.hpp`). Production code no longer mentions
-  per-subagent ownership boundaries (those live in PR
-  descriptions / changelogs).
+- **`IBidirectionalStream` + `IUnidirectionalStream`**
+  interfaces in `bidi_stream_iface.hpp` /
+  `uni_stream_iface.hpp`. Bidi methods: `send` / `recv` /
+  `set_on_data` / `close` / `reset`. Uni methods: `send` /
+  `close` / `reset`.
 
-### Fixed
+- **`WebTransportConfig`** in `web_transport_config.hpp` —
+  small struct mirroring the QUIC settings the msquic
+  backend exposes through `QUIC_SETTINGS` + `QUIC_CONFIGURATION`
+  parameters. Defaults match RFC 9000 / RFC 9221.
 
-- **Use-after-free guard in `NimRTCEngine::on_transport_recv()`**
-  (`src/engine/src/engine.cpp`, around line 2286). Added
-  `if (!is_open()) return;` at function entry. The ICE recv
-  callback runs on the transport thread and can race with
-  `close()`: a buffered packet may arrive after `close()` has
-  torn down `Impl::dtls` (a raw non-owning pointer into
-  `session.media_stack`), causing a use-after-free in
-  `impl_->dtls->state()` / `feed_inbound()`. Mirrors the existing
-  `send_audio()` pattern (line 2119). **Severity: Critical**
-  (per `docs/plan/p1-uaf-dtls-investigation.md`).
-- **Use-after-free guard in `NimRTCEngine::process_remote_sdp()`**
-  (`src/engine/src/engine.cpp`, around line 1699). Added
-  `if (state_ != State::kOpen) return std::nullopt;` at function
-  entry. Same race window: a delayed signaling message after
-  `close()` would deref `impl_->dtls->set_role()` /
-  `set_peer_fingerprint()`. Mirrors the existing DataChannel
-  guard pattern (line 1341). **Severity: High**.
-- **Note:** `NimRTCEngine::tick()` (line 2188) already had the
-  `is_open()` guard and required no change. The
-  `Impl::datachannel_transport_cookie` lifetime (Medium risk)
-  is deferred to the v1.x wiring PR (per P1 investigation).
-- **Follow-up:** `Impl::dtls` migration from raw pointer to
-  `std::weak_ptr<IDtlsSession>` is **P1 for v0.13.0** (not
-  v0.12.0). The two `is_open()` / `state_` guards above close
-  the known Critical and High paths; the `weak_ptr` migration
-  eliminates the entire UAF class.
+- **`WebTransportState` enum** in
+  `web_transport_state.hpp` — 5-value enum
+  (`kConnecting` / `kConnected` / `kClosing` / `kClosed` /
+  `kFailed`) with `uint8_t` underlying type.
 
-### Notes
+- **`DatagramFacade`** in `datagram_facade.hpp` — non-virtual
+  utility wrapper around `IWebTransportSession`'s datagram
+  surface. Binds a non-owning pointer to the session; the
+  facade does not extend the session's lifetime.
 
-- No public API change — `nimrtc/engine/engine.hpp` keeps the same
-  `transport_strategy_name()` / `transport_strategy_session()`
-  accessors; existing callers see no signature change.
-- 465/465 ctest cases pass on `Debug` configuration
-  (Windows MSVC, all 4 platform CI runners). The 6 new Slice 7.6
-  PR3 subtests are part of `test_engine_plugin_loading` (the
-  e2e engine test fixture).
-- 5 transport strategies are wired end-to-end but
-  `teleop-ultra-low-latency` (Rule 2) and `webrtc-quic-call`
-  (Rule 3) are explicitly tagged as v0.12.0-tech-preview:
-  - Rule 2 (raw-udp-arq media) — DTLS intentionally absent;
-    audio falls back to null-encoder; ICE/connectivity work
-    via raw-UDP ARQ. Production-hardening (reliable media over
-    the ARQ plane, FEC integration) lands in v0.13+.
-  - Rule 3 (`webrtc-quic-call`) — Selector returns empty;
-    engine falls back to `webrtc-classic` so a v0.12.0 caller
-    can opt in early without breaking. Real webrtc-quic stack
-    lands in v1.x.
-- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.12.0.
+- **`IWebTransportSessionFactory`** in
+  `web_transport_session_factory.hpp` — typed factory
+  contract; matches the `dtls::IDtlsSessionFactory` /
+  `sctp::ISctpSocketFactory` / `raw_udp::IRawUdpFactory` /
+  `ITransportStackFactory` pattern. No factory is
+  auto-registered at the alpha.2 cut; the msquic factory
+  lands in beta.1.
 
-## [0.13.0] - Unreleased
+- **`NIMRTC_REGISTER_WEB_TRANSPORT` macro** in
+  `src/core/include/nimrtc/core/registry.hpp` —
+  `static ::nimrtc::core::detail::Registrar` wrapper for the
+  new typed slot, parallel to the existing
+  `NIMRTC_REGISTER_DTLS_SESSION` / `SCTP_SOCKET` /
+  `RAW_UDP_DATAGRAM` / `TRANSPORT_STACK` macros.
 
-### Status: Tech Preview
+- **`core::PluginRegistry::register_web_transport(id,
+  factory*)` / `get_web_transport(id)` /
+  `list_web_transports()`** — new typed slot on
+  `core::PluginRegistry`. Forward-declared in registry.hpp;
+  no msquic headers leak into core (Layout Invariant 1
+  preserved).
 
-### Highlights
+- **`tests/test_web_transport_seam.cpp`** (new, 5 subtests):
+  `seam_interfaces_are_abstract` /
+  `datagram_facade_forwards_to_session` /
+  `datagram_facade_with_null_session` /
+  `callbacks_accept_lambdas` /
+  `state_enum_round_trip`. Compile-only test; the gate is
+  "the seam headers compile + link on all 4 platforms".
 
-- **DTLS UAF class eliminated** — `ITransportStack::dtls_weak()` lands
-  alongside the existing `dtls()` reference getter; the engine
-  migrates `Impl::dtls` (and `Impl::datachannel_transport_cookie`)
-  from raw pointer to `std::weak_ptr<IDtlsSession>`. After
-  `close()` the weak_ptr auto-expires; `.lock()` returns
-  `nullptr` and every engine call site short-circuits without
-  dereferencing a dangling `IDtlsSession`. The v0.12.0
-  `is_open()` P0 guards become a defence-in-depth second layer
-  rather than the only line of defence.
-
-### Changed
-
-- **`ITransportStack::dtls_weak()` (new method)** in
-  `src/transport/include/nimrtc/transport/transport_stack.hpp`.
-  Returns `std::weak_ptr<dtls::IDtlsSession>`. Added to the
-  interface as a non-breaking change; the existing
-  `dtls()` reference getter is preserved with a `[[deprecated]]`
-  comment (removal scheduled for v0.15.0 per the
-  ADR-001 versioning policy).
-- **`WebRtcClassicStack::dtls_` (member type changed)** in
-  `src/transport/src/webrtc_classic_stack.cpp`. Changed from
-  `std::unique_ptr<dtls::IDtlsSession>` to
-  `std::shared_ptr<dtls::IDtlsSession>` so the stack can hand
-  out a `weak_ptr` that outlives the stack's own reference.
-  `set_dtls()` still accepts a `unique_ptr` (the implicit
-  `unique_ptr → shared_ptr` move ctor is used internally).
-- **`RawUdpArqStack::dtls_weak()`** in
-  `src/transport/include/nimrtc/transport/raw_udp_arq_stack.hpp`.
-  Returns an empty `weak_ptr` because the control stack does
-  not own a DTLS session (the engine only dereferences the
-  media stack's dtls).
-- **`Impl::dtls` (engine)** in
-  `src/engine/src/engine.cpp`. Changed from
-  `nimrtc::dtls::IDtlsSession*` to
-  `std::weak_ptr<nimrtc::dtls::IDtlsSession>`. The capture
-  site (`init_modules_once()`) now reads
-  `impl_->dtls = impl_->session.media_stack->dtls_weak();`
-  instead of capturing a raw pointer. All 14 use sites
-  (one `if`-lock per function, holding a local
-  `shared_ptr` for the lifetime of each function body)
-  use the `if (auto d = impl_->dtls.lock()) { d->X(); }`
-  pattern. The `close()` reset is implicit
-  (weak_ptr auto-expires).
-- **`Impl::datachannel_transport_cookie` (engine)** in
-  `src/engine/src/engine.cpp`. Same change: raw pointer →
-  `weak_ptr`. The P1 UAF investigation's
-  Medium-rated risk for this field is now resolved
-  (it was previously listed as deferred-to-v1.x in
-  `docs/plan/p1-uaf-dtls-investigation.md`).
-- **Comments** in `engine.cpp` and the `Impl` field
-  doc-blocks updated to describe the new lifetime model.
-
-### Added
-
-- **Regression test `v013_dtls_weak_expires_after_close`**
-  in `tests/test_engine_plugin_loading.cpp`. Verifies
-  the core v0.13.0 invariant:
-    1. `stack->dtls_weak()` returns a non-expired
-       `weak_ptr` while the stack is alive.
-    2. After `stack->close()`, the same `weak_ptr` is
-       expired; `weak.lock()` returns `nullptr`.
-
-  Without this guarantee, the engine's `Impl::dtls
-  weak_ptr` would silently hold a "stuck non-null"
-  `weak_ptr` that `.lock()`'s into freed memory —
-  exactly the v0.12.0 P0 UAF bug class. v0.13.0
-  eliminates it; this test guards the invariant.
-
-### Notes
-
-- **Public API is unchanged.** `nimrtc/engine/engine.hpp`
-  keeps the same `dtls_state()` / `dtls_connected()`
-  signatures. The `transport_stack.hpp` change is
-  additive (new method) + deprecation comment on the
-  existing getter. External consumers that bypass
-  `ITransportStack` and reach into concrete backends
-  directly are not affected.
-- **No new build dependencies.** `<memory>` was already
-  transitively available in `engine.cpp`; the explicit
-  `#include <memory>` was added for clarity.
-- **P0 `is_open()` guards from v0.12.0 stay in place**
-  as a second line of defence. Together with the
-  `weak_ptr` they close the entire UAF class:
-    - `is_open()` blocks the engine-thread API surface
-    - `weak_ptr.lock()` blocks the transport-thread
-      async surface (ICE recv, DTLS tick)
-  - Either alone is sufficient; both together is
-    defence-in-depth.
-- **Follow-up (v1.x)**: the
-  `Impl::datachannel_transport_cookie` field is still
-  informational — the actual data-channel transport
-  wiring lands in the v1.x WebTransport / QUIC
-  redesign (per `docs/plan/v0.11-plan.md` §2.2
-  DC-1 / DC-2 / TPAL-5).
-
-## [0.10.2] - 2026-09-17
-
-### Status: Tech Preview
-
-### Highlights
-
-- **Transport PAL Slice 8 — registry hooks for DTLS / SCTP / raw_UDP /
-  transport-stack** (`docs/plan/transport-selection.md` §6.5 follow-up
-  gap, closed). Four new typed slots on `core::PluginRegistry`:
-  - `register_dtls_session(id, factory*)` / `get_dtls_session(id)`
-  - `register_sctp_socket(id, factory*)` / `get_sctp_socket(id)`
-  - `register_raw_udp_datagram(id, factory*)` / `get_raw_udp_datagram(id)`
-  - `register_transport_stack(id, factory*)` / `get_transport_stack(id)`
-  Each module's `register_default_plugins()` now publishes its factory
-  through the matching typed slot (was previously a process-local cache
-  or test-only accessor). All four slots participate in the unified
-  `core::register_all_default_plugins()` table (PAL Slice 2).
-- **Engine DTLS lookup via registry** — `engine.cpp` resolves the DTLS
-  factory through `reg.get_dtls_session("wolfssl")` (was direct
-  `make_unique<DtlsSessionWolfSSL>`). `engine.hpp` is **byte-identical**
-  with v0.10.1 — the lookup id is hard-coded to "wolfssl" so the public
-  API surface stays frozen. Non-wolfSSL builds (defensive `else`
-  branch) keep the pre-Slice-8 direct-construction path. Slice 7.5 will
-  widen this to a `cfg.dtls_name` field.
-- **Callback types promoted to `plugins/base.hpp`** (§6.5). The local
-  typedefs in `nimrtc/sctp/sctp_socket_iface.hpp`
-  (`plugins::OnSctpRecvCb`) and `nimrtc/raw_udp/raw_udp_datagram.hpp`
-  (`plugins::Endpoint`, `plugins::OnDatagramCb`) are now canonical in
-  `plugins/base.hpp`. The Slice 5/6 headers no longer re-declare them
-  — a single source of truth. Source-compat: any pre-Slice-8 caller
-  that wrote `plugins::OnSctpRecvCb` etc. continues to compile.
-- **`IRawUdpFactory` interface added** (`src/raw_udp/include/nimrtc/raw_udp/raw_udp_factory_iface.hpp`).
-  `ArqRawUdpFactory` now publicly inherits the interface, parallel to
-  `dtls::IDtlsSessionFactory` and `sctp::ISctpSocketFactory`.
-- **Shell `CapabilitySelectorStackFactory`** (id="default") registered
-  through the new `register_transport_stack()` hook. The factory
-  produces a `CapabilitySelectorStack` whose component accessors
-  return references to null-instance singletons (no-op / kErrNotReady).
-  Slice 7.5 will replace this with `WebRtcClassicStackFactory` (real
-  ICE+DTLS+RTP+SCTP composition).
-
-### Added
-
-- **`nimrtc::transport::register_default_plugins()`** — Slice 8 entry
-  point that publishes `CapabilitySelectorStackFactory` into the
-  `core::PluginRegistry::register_transport_stack()` slot.
-- **`NIMRTC_REGISTER_DTLS_SESSION / NIMRTC_REGISTER_SCTP_SOCKET /
-  NIMRTC_REGISTER_RAW_UDP_DATAGRAM / NIMRTC_REGISTER_TRANSPORT_STACK`**
-  macros — convenience `static ::nimrtc::core::detail::Registrar`
-  wrappers for the four new typed slots, parallel to the existing
-  audio / video / bwe / scheduler macros.
-- **`IRawUdpFactory` interface** — typed factory contract for
-  `IRawUdpDatagram` backends (Slice 6.5 → Slice 8 promotion).
-
-### Changed
-
-- **`dtls::register_default_plugins()`** now publishes
-  `WolfsslDtlsFactory` through `register_dtls_session("wolfssl")`
-  (Slice 8). Legacy `dtls::test_only::get_wolfssl_factory()` is
-  preserved as a back-compat accessor that now reads back through
-  the registry so the typed slot is the single source of truth.
-- **`sctp::register_default_plugins()`** now publishes
-  `SctpStubFactory` through `register_sctp_socket("stub")` (Slice 8).
-  Legacy `sctp::test_only::get_stub_factory()` is preserved similarly.
-- **`raw_udp::register_default_plugins()`** now publishes
-  `ArqRawUdpFactory` through `register_raw_udp_datagram("arq")`.
-- **`pal_default_registrars.cpp` `kDefaultRegistrars[]`** extended
-  with DTLS / SCTP / raw_UDP / transport entries — every transport-
-  layer seam now participates in the unified entry point.
-- **Engine `init_modules_once()` DTLS construction** now goes through
-  the registry (see Highlights).
-
-### Notes
-
-- No public API change (`nimrtc/engine/engine.hpp` is byte-identical
-  with v0.10.1).
-- 7 + 2 PAL Slice 1/2/3 subtests in `test_engine_plugin_loading.cpp`
-  stay green; 5 new Slice 8 subtests verify the four new registry
-  hooks are populated and that `register_all_default_plugins()`
-  remains idempotent under repeated calls.
-- `git log v0.10.1..HEAD --oneline` ≤ 30 commits (Slice 8 landed as a
-  single sequence; CHANGELOG + release notes + tag cut to follow).
-- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.2.
-- API still **experimental / not for production** through v1.0.0.
-- No binary artefacts shipped (源码为主).
-- 4 new DTLS / SCTP / raw_UDP / transport-stack registry hooks are
-  the §6.5 follow-up gap listed in `docs/plan/transport-selection.md`
-  (was: "Slice 8 必须顺手补"). Closed.
-
-## [0.10.1] - 2026-09-15
-
-### Status: Tech Preview
-
-### Highlights
-
-- **Transport plugin interface**: new plugin seam with `IPlugin` interface and
-  `TransportSelector`; `raw_udp`, `dtls`, and `sctp` plugin stubs wired.
-  See `docs/plan/transport-selection.md`.
-- **RFC 5246 PRF (P_SHA-256)**: standalone wolfSSL-backed PRF for DTLS
-  key derivation; all 7 RFC 5246 section 5 KAT vectors pass. Replaces the
-  BCrypt-only stub.
-- **ArqRawUdp real-socket fixes**: corrected ACK frame byte offsets in
-  `recv_main`, fixed `peer_endpoint_` race (added `peer_mu_`), repaired
-  `send()` span dead code, resolved `close()` deadlock (socket-close-first
-  ordering). The ARQ state machine now advances correctly against a real
-  UDP socket; burst test reports `sent=50 acks_recv=50 retransmit=0`.
-- **New test**: `test_raw_udp_real_loopback` (4/4 cases: single-packet,
-  burst-50, ephemeral-port reflection, error-path).
-
-### Fixed
-
-- **CI / WebRTC APM prebuild guard**: `src/third_party/webrtc_audio_processing/CMakeLists.txt`
-  previously `FATAL_ERROR` on any checkout that lacks the meson-built
-  `libwebrtc-audio-processing-2.{a,lib}`. This blocked all four CI runners
-  (windows/linux/macos/aarch64) because the prebuild requires a separate
-  `meson` + `abseil-cpp` step that is not wired into the CI matrix. Fixed by
-  making the guard conditional on `NIMRTC_VENDORED_WEBRTC_APM` (default `ON`):
-  `=ON` retains the original `FATAL_ERROR` + guidance; `=OFF` defines an empty
-  `INTERFACE` stub target and lets `audio3a` run with the built-in
-  passthrough stub. CI now passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all
-  four platform Configure steps. See `docs/zh/architecture.md` §11.5.5.
-- **Release / WebRTC APM prebuild wiring**: `.github/workflows/release.yml`
-  was missing the `tools/fetch_webrtc_apm.py` step on all four platforms,
-  so a tag push would fail at the cmake configure stage with the same
-  `FATAL_ERROR` even though release artefacts are supposed to carry real
-  3A (`NIMRTC_VENDORED_WEBRTC_APM=ON` per §11.5.5). Added explicit
-  `Install meson` + `Prebuild WebRTC APM` steps before `Configure` on
-  windows, linux-gcc, linux-aarch64, and macos-clang.
-
-### Added retroactively in v0.10.3
-
-> **Note:** These entries describe work that landed in commit `446e8a0
-> refactor(pal): Slice 2 + Slice 3` and shipped with the v0.10.1 tag,
-> but the CHANGELOG `[Unreleased]` block was not promoted at release
-> time (the same hygiene drift that v0.10.0 fixed for v0.9.2). The
-> v0.10.3 tag brings the CHANGELOG into alignment with the code tree
-> at v0.10.1; no new code, no new tests, no public API change are
-> introduced by this hygiene pass.
-
-- **PAL Slice 2 — explicit self-registration table**
-  (`docs/plan/pal-architecture.md` §4 Slice 2). The engine's
-  `core::register_all_default_plugins()` is now backed by an iterable
-  table (`core::detail::kDefaultRegistrars[]` in
-  `src/core/src/pal_default_registrars.cpp`) instead of an inline
-  statement list. Layout Invariant 1 of `docs/architecture.md`
-  ("`src/core/` is the only INTERFACE library") is preserved by
-  compiling this single .cpp into a new `nimrtc_core_objects` OBJECT
-  library that is linked INTERFACE by `nimrtc::core`. The table enables
-  (a) compile-time completeness audits via a test iteration, (b)
-  mechanical grep discoverability, and (c) future extension without
-  editing `registry.hpp`.
-- **PAL Slice 3 — `NIMRTC_PLUGIN_ID()` compile-time-unique id literal
-  wrapper** (`docs/plan/pal-architecture.md` §4 Slice 3). Each plugin
-  factory's `id()` callsite wraps its string literal in a
-  `nimrtc::core::detail::PluginIdTag<__LINE__>` wrapper, giving every
-  callsite a distinct type at compile time. Implicit conversion to
-  `std::string_view` preserves all existing
-  `return NIMRTC_PLUGIN_ID("webrtc_apm");` patterns. Two new
-  `EnginePluginLoading` subtests
-  (`pal_default_registrars_table_is_nonempty`,
-  `pal_plugin_id_wrappers_preserve_string_values`) verify the table
-  iteration registers all 5 unconditional categories and that all 6
-  known factory ids match their v0.10.0 string values byte-for-byte.
-- **5 plugin factories migrated to `NIMRTC_PLUGIN_ID()`** (PAL Slice 3):
-  `audio3a::NullPluginFactory` (`"webrtc"`),
-  `audio3a::WebRtcPluginFactory` (`"webrtc_apm"`),
-  `opus::OpusPluginFactory` (`"opus"`),
-  `h264::H264PluginFactory` (`"h264"`),
-  `jb::PluginFactory` (`"adaptive"`),
-  `dtls::WolfsslDtlsFactory` (`"wolfssl"` via the existing `kBackendId`
-  constexpr literal).
-
----
-
-## [0.10.3] - 2026-09-18
-
-### Status: Tech Preview
-
-### Highlights
-
-- **PAL Slice 7.5 — `WebRtcClassicStackFactory`** (commit `7d3a92d`,
-  `docs/plan/transport-selection.md` §12.5): the first real factory
-  implementation registered through the v0.10.2
-  `core::PluginRegistry::register_transport_stack()` hook. Composes the
-  four real backend singletons (ICE / DTLS / RTP / SCTP) all resolved
-  through the plugin seam — no concrete-`new` inside the factory. Id
-  = `"webrtc-classic"`. Lifecycle methods (`start()` / `close()` /
-  `tick()`) are wired through. CapabilitySelector rule 1
-  (`needs_browser_interop == true`) now resolves to a real
-  ICE+DTLS+RTP+SCTP composition instead of the Slice 8 shell
-  `CapabilitySelectorStackFactory` (id `"default"`, still registered
-  for backward compatibility).
-- **CHANGELOG retroactive attribution for v0.10.1** (PAL Slice 2 + 3) —
-  see the "Added retroactively in v0.10.3" sub-heading inside
-  `[0.10.1]` above. No new code; documentation alignment.
-- **Root-cleanliness sweep** — defensive `.gitignore` patterns
-  (`*.lock`, `src/engine/src/*.lock`) added. Local-only stray files
-  (`sslkeylog.log`, `Testing/`, `src/engine/src/engine.cpp.lock`)
-  deleted from disk at tag prep time. No tracked files changed.
-
-### Added
-
-- **`src/transport/src/webrtc_classic_stack.cpp`** (Slice 7.5):
-  `WebRtcClassicStack` + `WebRtcClassicStackFactory` with id
-  `"webrtc-classic"`. Registered via
-  `core::PluginRegistry::register_transport_stack()` from
-  `nimrtc::transport::register_default_plugins()`.
 - **2 new `EnginePluginLoading` subtests** in
   `tests/test_engine_plugin_loading.cpp`:
-  `slice75_webrtc_classic_factory_registered` (factory wired through
-  the Slice 8 registry hook) and
-  `slice75_webrtc_classic_stack_create_and_lifecycle` (the produced
-  stack exposes ICE/DTLS/RTP/SCTP refs through the seam and survives
-  `start()`/`close()` in the right order).
+    - `wt014_registry_slot_is_typed_for_web_transport_factory` —
+      verifies the slot exists, accepts a user-registered
+      factory, and resolves by id.
+    - `wt014_registry_default_registrars_omits_web_transport_until_beta1` —
+      pins the alpha.2 → beta.1 transition: no factory is
+      auto-registered at the alpha.2 cut; the msquic factory
+      lands in beta.1.
+
+- **`NIMRTC_API_VERSION_PRE_RELEASE`** cycles to `"alpha.2"`
+  in `src/core/include/nimrtc/core/api_version.hpp`.
+
+- **`interop/v0_14_msquic_spike/`** (new) — spike-validation
+  program for ADR-014. `README.md` documents the 5-criterion
+  check; `results.txt` records per-criterion PASS/FAIL with
+  timestamps + commit SHAs. 6 spike programs exercise the
+  full msquic C API surface against the planned
+  `IWebTransportSession` methods. No msquic source code
+  lands in v0.14.0 alpha.2 (the integration lands in beta.1).
+
+- **`docs/adr/ADR-014-web-transport-vendor.md`** (new) —
+  msquic vendor decision. 5 evaluation criteria in
+  `v1.0-plan.md` §10.2 verified by the spike at
+  `interop/v0_14_msquic_spike/`. Fallback to quiche
+  documented in §Alternatives + §Consequences.
 
 ### Changed
 
-- **`src/transport/src/transport_plugin.cpp`**
-  `do_register_default_plugins()` now publishes both
-  `"default"` (Slice 8 shell, retained for back-compat with any
-  v0.10.2 caller) and `"webrtc-classic"` (Slice 7.5 real) through
-  `register_transport_stack()`.
+- **`src/core/include/nimrtc/core/registry.hpp`** — adds the
+  `register_web_transport` / `get_web_transport` /
+  `list_web_transports` methods (parallel to the Slice 8
+  DTLS / SCTP / raw_udp / transport-stack slots), the
+  `NIMRTC_REGISTER_WEB_TRANSPORT` macro, the `kWebTransport`
+  `Category` enum entry, and the matching `case` in
+  `Registrar::Registrar`. Forward-declares
+  `nimrtc::web_transport::IWebTransportSessionFactory` so
+  the registry's `TypedRegistry<...>` field and public
+  method signatures can reference the factory type without
+  pulling the seam headers into core (Layout Invariant 1
+  preserved).
+
+- **`tests/CMakeLists.txt`** — adds the
+  `nimrtc_add_web_transport_seam_test()` function and the
+  `test_web_transport_seam` target registration. The
+  function follows the `nimrtc_add_core_api_test()` pattern
+  (links `nimrtc::core` + GTest; no msquic dependency).
+
+- **`src/core/include/nimrtc/core/api_version.hpp`** —
+  `NIMRTC_API_VERSION_PRE_RELEASE` cycles from `"alpha.1"`
+  to `"alpha.2"`. The matching
+  `nimrtc::core::api_version::kPreRelease` constant is
+  updated automatically (the macro is the source of truth).
+
+- **CHANGELOG.md** — `[1.0.0-alpha.2]` section finalised;
+  `[1.0.0-beta.1]` placeholder added; `[Unreleased]` reset
+  to a minimal pointer to `v0.14-plan.md`.
 
 ### Notes
 
-- No public API or ABI change. `git diff v0.10.2..v0.10.3 -- src/engine/include/**`
-  shows zero lines.
-- Engine still constructs ICE/DTLS/RTP/SCTP through its direct
-  constructor path; Slice 7.5's value is the factory-side seam, not the
-  engine-side ownership switch (that change is tracked as a future
-  "engine accepts `ITransportStack*`" patch in `transport-selection.md`
-  §12.5.4).
-- `tests/test_engine_plugin_loading`: 15/15 subtests (8 base + 5 Slice 8 +
-  2 Slice 7.5). Full suite: 380/387 ctest pass overall; the 7 failures
-  are pre-existing WSL-localhost UDP-loopback timeouts, unrelated to
-  Slice 7.5 per commit `7d3a92d`. The 2 `Audio3ATapFixture` subtests
-  remain intentionally disabled (pre-existing condition, tracked
-  separately).
-- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.3.
-- API still **experimental / not for production** through v1.0.0.
+- **Public API surface diff vs v0.13.0**: additive only.
+    - **New headers**:
+      `src/web_transport/include/nimrtc/web_transport/*.hpp`
+      (7 new public headers — the seam + factory + companions).
+    - **New registry methods**:
+      `core::PluginRegistry::register_web_transport()` /
+      `get_web_transport()` / `list_web_transports()`.
+    - **New macro**: `NIMRTC_REGISTER_WEB_TRANSPORT(id, factory_ptr)`.
+    - **No existing public symbol is modified or removed.**
+    - **No existing public symbol is marked DEPRECATED in
+      v0.14.0** (the deprecation policy in ADR-015 §Decision 3
+      governs; the first `NIMRTC_API_DEPRECATED` annotations on
+      existing public symbols are reserved for the
+      v1.0.0-beta.1 → v1.0.0-rc.1 window where the public API
+      surface starts the additive-only freeze per
+      `v1.0-plan.md` §12.2 v1.0.0-beta.1 Gate #5).
 
----
+- **ABI**: experimental through v1.0.0. Pin to a specific
+  commit. The new seam headers are `NIMRTC_API_UNSTABLE`; the
+  classification is visual at the alpha.2 cut
+  (`NIMRTC_API_UNSTABLE` expands to nothing in default
+  mode).
 
-## [0.11.0] - 2026-10-09
+- **Data plane**: still SCTP-over-DTLS at the alpha.2 cut
+  (the existing `test_datachannel_engine` 5/5 +
+  `test_sctp_usrsctp` 4/4 regression surface continues).
+  WebTransport / QUIC impl lands in v0.14.0-beta.1.
 
-### Status: Beta 前哨
+- **4-platform CI**: green on windows-2022 + linux-gcc +
+  macos-clang. linux-aarch64 may be TEMP-DISABLED per
+  v0.12.0 baseline; if so, the release notes record the
+  reason.
 
-> **Tag cut 2026-10-09.** First minor to ship P2 content. P1
-> closed at v0.10.3. **API still experimental / not for production
-> through v1.0.0.**
->
-> **The headline data-plane item (DataChannel Chrome ↔ NimRTC
-> interop, DC-1) is NOT in v0.11.0.** The SCTP-over-DTLS physical
-> wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup)
-> never landed on `main`; Chrome-headless e2e stays 0/4. v0.11.0
-> ships the **Chrome media interop** surface (audio + video Case D,
-> all four platforms) and the L2 / L3 P2 scaffolding (TAP-1,
-> PROFILE-1, DEMO-1, TPAL-4 cleanup), with the data plane
-> explicitly deferred to the **v1.x WebTransport / QUIC**
-> re-design. See `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 /
-> TPAL-5 deferred) and §10 (forward direction).
+- **usrsctp 0.9.5.0** still in tree (v1.2.0 removal per
+  `v1.0-plan.md` §2.2).
 
-### Highlights
+- **No new third-party dependencies** for the default
+  (non-msquic) build. The msquic integration is
+  `NIMRTC_ENABLE_WEB_TRANSPORT_MSQUIC=ON` opt-in (default
+  ON at the beta.1 cut; the seam headers compile without
+  it).
 
-- **Chrome media interop (audio + video Case D)** — NimRTC ↔ Chrome
-  audio Opus + video H.264 end-to-end via ICE + DTLS 1.3 + SRTP +
-  RTP. `python tools/run_e2e_acceptance.py --case d` PASS on
-  Windows + Linux x86_64. Verified across the four-platform CI
-  matrix (windows-2022 + linux-gcc + macos-clang + linux-aarch64).
-  This is the v0.11.0 release contract for media interop.
-- **TAP-1 — PCM tap on WebRTC APM** —
-  `IAudio3A::set_pre_process_tap()` and
-  `set_post_process_tap()` (RFC 001 §6.1–6.5) are now live on the
-  default `PluginAdapter` implementation. The WebRTC-APM-backed
-  adapter fires pre and post 3A taps per `process_capture()` call,
-  so AI-Agent / wake-word / streaming-ASR consumers can subscribe
-  to the raw mic PCM (pre) and the cleaned PCM (post) without an
-  extra DSP integration. Taps are `std::function`-based, install
-  / uninstall via `nullptr`, and guarded by a dedicated `tap_mu_`
-  mutex so setters from any thread stay race-free against the
-  audio thread's `process_capture()` call (RFC §2.3 thread-safety
-  contract). The post-tap is also delivered as `int16_t*` with the
-  same metadata (`tests/test_pcm_tap.cpp` 15/15 PASS).
-- **PROFILE-1 — Assembly Profile library officialised** — five
-  profile variants are first-class and loadable at runtime:
-  `sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`.
-  PAL Slice 1/2/3 (ADR-009) make all five backend-agnostic.
-  `tests/test_assembly.cpp` 32/32 PASS including a strict
-  `JsonFileMatchesBuiltinConstant` regression test that loads
-  every JSON profile file and asserts field-by-field equality with
-  the matching C++ constant. Two latent JSON↔C++ bugs uncovered by
-  the new strict round-trip test are fixed: `kProfileLive` now sets
-  `scheduler.impl = "weighted_fair"` (was relying on the default
-  while `live.json` declared `"weighted_fair"`); `profiles/sfu.json`
-  now correctly sets `bwe_name = ""` (the comment said "Empty: no
-  BWE" but the value was the string `"aimd"`).
-- **TPAL-4 — DTLS seam cleanup** — `EngineConfig::dtls_name` field
-  added (defaulted to `""` to preserve every v0.10.x caller
-  source-compat); engine resolves the DTLS factory through
-  `core::PluginRegistry::get_dtls_session(id)` at open() time
-  instead of direct `new DtlsSessionWolfSSL`. The `static_cast`
-  escape hatch from v0.10.2 is gone. The `IDtlsSession` seam
-  surface is tightened (every concrete method on `DtlsSessionWolfSSL`
-  is now `override` against the seam). Future 国密 / OpenSSL /
-  BoringSSL / mbedTLS backends register their own id via
-  `register_dtls_session(id, &factory)` and select via
-  `cfg.dtls_name = "..."`. `test_engine_plugin_loading` 17/17 PASS
-  (8 base + 5 Slice 8 + 2 Slice 7.5 + 5 new TPAL-4 subtests).
-- **DEMO-1 — AI Agent 接入 demo** — `demo-agent-gateway`
-  demonstrates the `agent-gateway` Profile end-to-end with PCM
-  tap → streaming ASR → LLM mock → response.
-- **DISC-1 — GitHub Discussions enabled** — community now has a
-  Discussions space alongside issues; issue templates updated.
-- **RFC-1 — RFC 001 (PCM tap) promoted Draft → Final** — first
-  formal design record under `docs/rfcs/`.
+### What is NOT in v0.14.0 (deferred to v0.14.0-beta.1 or later)
 
-### What is **not** in v0.11.0 (data plane deferred to v1.x)
-
-The following P2 headline items are explicitly cut from v0.11.0 and
-moved to the v1.x WebTransport / QUIC re-design window — see
-`docs/plan/v0.11-plan.md` §2.2 / §10 for the full rationale:
-
-- **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** —
-  the SCTP-over-DTLS physical wiring
-  (`IDtlsSession::srtp_keying_material()` →
-  `ISctpSocket::set_dtls_keys()` + DTLS transport →
-  `ISctpSocket::feed_inbound_datagram()` + SCTP socket → DTLS
-  transport outbound) was never landed on `main`; Chrome-headless
-  e2e stays 0/4. v0.11.0 falls back to the in-process
-  `test_datachannel_engine` 5/5 PASS as the §7 substitute, made
-  permanent. The Chrome team's stated direction is "DataChannel
-  future = WebTransport over QUIC"; the SCTP-over-DTLS path is
-  on Google's deprecation roadmap. v1.x will redesign the data
-  plane on top of **WebTransport over QUIC** (likely msquic,
-  MIT-licensed, Windows-first, cross-platform CI) — see
-  `docs/plan/v0.11-plan.md` §10.
-- **L1 strict-priority scheduling across the DC plane (DC-2)** —
-  only meaningful once DC-1 lands. The RTP-only strict-priority
-  path is already covered by `test_sched_priority.cpp` from
-  v0.10.x.
-- **usrsctp production backend (TPAL-5)** — the `UsrsctpSocket`
-  class is `@deprecated` and still compiles and links for opt-in
-  callers (the in-process `test_sctp_usrsctp` 4/4 PASS regression
-  test continues to run), but `sctp::register_default_plugins()`
-  no longer publishes id="usrsctp" with `core::PluginRegistry`.
-  The `UsrsctpSocket*` headers carry `@deprecated` markers
-  pointing at the v1.x plan. Expected removal: v1.2.0. The
-  `tools/fix_usrsctp{1,2,3,4}.py` history is deleted.
-
-### Deferred to pre-1.0 decision window (unchanged from v0.11-preview)
-
-The following P2 headline items are intentionally **not** in v0.11.0:
-
-- **In-process SFU relay (`nimrtc_sfu`)** — SFU forwarding has open
-  architectural questions on BWE/JB interaction (§13 P3 "SFU 转发跳过
-  L2" 是否引入 BWE 接口依赖). Decision deferred to v1.0.0 commit.
-  If community asks for it during v0.11.0 cycle, it lands in v0.11.x
-  patch train (same track as T-PAL Slice 6 Raw UDP bypass).
-- **DC forwarding policy (DC-3)** — dependent on SFU-1 AND v1.x
-  DC-1 WebTransport land; inherits both deferrals.
-- **`sfu-relay` benchmark (BENCH-1)** — dependent on SFU-1.
-
-### Notes
-
-- No public API change relative to v0.10.3 except the single
-  `EngineConfig::dtls_name` field. `engine.hpp` adds one new
-  field; everything else in the public API surface is unchanged.
-- Layout Invariant 4 (no concrete module headers in `engine.hpp`)
-  preserved. Layout Invariant 1 (`src/core/` is the only
-  INTERFACE library) preserved. Layout Invariant 6 (singletons
-  in `nimrtc::core::`) preserved.
-- The build is expected to remain green on all four CI platforms
-  (Windows / Linux x86_64 / macOS / Linux aarch64). The usrsctp
-  sources still compile and link, the `test_sctp_usrsctp` 4/4
-  regression test continues to pass, and the `test_datachannel_engine`
-  5/5 covers the IDataChannel seam against the in-process stub.
-- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.11.0.
-- API still **experimental / not for production** through v1.0.0.
-- No binary artefacts shipped (源码为主).
-- The 4-platform CI matrix stays green; e2e Case D (audio + video)
-  is the new Gate #1 (replacing the original "Chrome DC
-  bidirectional interop" gate, which is deferred with DC-1 to v1.x).
-
----
-
+- **WebTransport / QUIC impl (msquic integration)** —
+  v0.14.0-beta.1. The `src/third_party/msquic/` git
+  submodule + `cmake/FindMsQuic.cmake` + the
+  `WebTransportMsQuicSession` + `WebTransportMsQuicSessionFactory`
+  (id = `"msquic"`) all land in beta.1.
+- **`WebTransportDataChannel` impl** — v0.14.0-beta.1.
+- **Chrome e2e Case E** — v0.14.0-beta.1.
+- **`EngineConfig::datachannel_backend` field** —
+  v0.14.0-beta.1.
+- **L1 strict-priority scheduling across the DC plane
+  (DC-2)** — v1.0.0-beta.2 (per `v1.0-plan.md` §8 + §12.3.4).
+- **SFU-1 / DC-3 / BENCH-1** — pre-1.0 decision window per
+  `v1.0-plan.md` §7.
+- **usrsctp `src/third_party/usrsctp/` removal** — v1.2.0
+  (per `v0.11-plan.md` §2.2 + `v1.0-plan.md` §2.2).
+- **DTLS 1.3 re-enablement on wolfSSL 5.9.2+** — v1.x
+  (per `v1.0-plan.md` §2.2 + `docs/plan/dtls_chrome_interop_review.md`).
+- **`max_p99_ms` budget enforcement** — slipped to v0.14.x
+  or v0.15.x if not landed in v0.14.0.
+- **OHAudio HAL adapter implementation** — slipped to
+  v0.14.x or v0.15.x if not landed in v0.14.0.
+- **`cross-network-peer` naming review** — slipped to
+  v0.14.x if not landed in v0.14.0.
+- **§5.3 rule 2 media-plane production hardening (FEC +
+  codec + ARQ reliability)** — v0.14.x slip-or-land or
+  later.
+- **Composite `sfu-agent` Profile resolution** — pre-1.0
+  decision window.
+- **Adaptive JitterBuffer + Goog-CC full mainline BWE** —
+  v1.x.
+- **GM/T 国密 SRTP backend** — v1.x.
+- **AddressSanitizer CI matrix** — v1.x.
+- **Per-symbol inline stability annotation** — v0.14.x
+  slip-or-land (the v0.13.0 sweep was at the file level;
+  the per-symbol pass is a v0.14.x follow-up).
 ## [1.0.0-alpha.1] - 2026-10-14
 
 ### Status: Tech Preview
@@ -940,14 +559,6 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   macro.
 
 ---
-
-## [Unreleased]
-
-> **No unreleased changes.** The v0.13.0 (= v1.0.0-alpha.1) cut
-> is finalised above. The next planned release is
-> **v0.13.0-post1** (patch-line follow-ups) or **v0.14.0**
-> (v1.0.0-alpha.2), per `docs/plan/v0.13-plan.md` §4.
-
 ## [0.12.0] - 2026-10-13
 
 ### Status: Tech Preview
@@ -955,16 +566,41 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 > **Tagged 2026-10-13.** Platform expansion + GMSSL TLCP DTLS
 > backend (ADR-013) + OpenHarmony aarch64 toolchain (Stage 0) +
 > T-PAL Slice 7 / 7.6 / 8 named use-case transport strategies +
-> Profile schema v1.1 (additive `transport` section). **API still
-> experimental / not for production through v1.0.0.**
+> Profile schema v1.1 (additive `transport` section) +
+> PAL Slice 1.5 (`pal::make_plugin` template + 9 call sites) +
+> DTLS Handshake reassembly shim (Chrome Case D) +
+> UAF guards on `on_transport_recv` / `process_remote_sdp`.
+> **API still experimental / not for production through v1.0.0.**
 >
 > 37 commits since the v0.11.0 cut (`3ae98f3` on 2026-10-09).
 > See `docs/plan/v0.12.0-release-notes.md` for the full
 > commit split (22 v0.12.0-delta + 14 v0.11.x patch train + 1
 > merge).
+>
+> **Reconciled 2026-10-16:** the duplicate `[0.12.0] - Unreleased`
+> section that previously appeared above (and the orphan
+> `[0.13.0] - Unreleased` block, plus the empty `[Unreleased]`
+> pointer) have been merged into this section per Keep a
+> Changelog 1.0.0 — see `Fixed` (UAF guards + reassembler shim)
+> and `Changed` (PAL Slice 1.5 + datachannel cookie) for the
+> content that was lifted from the duplicate.
 
 ### Highlights
 
+- **Transport Slice 7.6 PR3 — end-to-end wiring of the 5 transport
+  strategies** (engine-side composition root in
+  `NimRTCEngine::init_modules_once()`; pre-PR3 manual ICE+DTLS
+  stitching removed). `NimRTCEngine::ice_t_` and `Impl::dtls`
+  migrate to raw non-owning pointers into
+  `Impl::session.media_stack` (lifetime safe because
+  `~NimRTCEngine` runs `close()` before `delete impl_`). Rule 2
+  (`teleop-ultra-low-latency`) takes a dedicated
+  no-DTLS-by-design branch: `Impl::dtls` is null, the engine
+  skips `dtls->open()`, and the audio pipeline falls back to
+  null-encoder. The 4 browser-interop strategies
+  (`browser-call`, `agent-gateway`, `sfu-relay`,
+  `cross-network-peer`) use `webrtc-classic` for the media stack;
+  missing DTLS factory hard-fails with `kEngineInternal`.
 - **T-PAL Slice 7 / 7.6 / 8 — Five named use-case transport
   strategies** (`docs/plan/transport-strategies.md`, commits
   `75b4f79` + `744d9d1` + `5f18e1a`): `browser-call`,
@@ -1049,6 +685,26 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 - **New tests**: `tests/test_transport_strategy.cpp` (11/11
   PASS) covering all 5 strategy constants + the
   `strategy_by_name()` lookup + the Profile v1.1 round-trip.
+- **`nimrtc::transport::make_transport_instance(media_factory_id,
+  control_factory_id, cfg)`** — canonical engine-facing entry
+  point for the v0.12.0 transport-strategy layer. Translates the
+  Selector's resolved factory ids into a fully-constructed
+  `TransportSession`. Lives in `transport_plugin.cpp` for future
+  consumers (test harnesses, webrtc-quic stack factory); the
+  engine inlines the equivalent lookup so its existing
+  `nimrtc::transport` PRIVATE link is sufficient.
+- **6 new subtests in `test_engine_plugin_loading.cpp`** for the
+  5 strategies + unknown-strategy failure mode:
+  `slice76_strategy_default_is_browser_call`,
+  `slice76_strategy_agent_gateway`
+  (webrtc-classic + raw-udp-arq control),
+  `slice76_strategy_teleop_ultra_low_latency`
+  (raw-udp-arq media + raw-udp-arq control),
+  `slice76_strategy_sfu_relay` (webrtc-classic, no control),
+  `slice76_strategy_cross_network_peer` (webrtc-classic, no control),
+  `slice76_unknown_strategy_fails_open` (`kEngineInternal` guard),
+  and `slice76_accessors_empty_before_open` (diagnostic surface
+  contract).
 - **New documentation**: `docs/guides/building-on-openharmony.md`,
   `docs/guides/switching-dtls-backend.md`,
   `docs/api/engine_api.md`, `docs/api/engine_config.md`,
@@ -1059,6 +715,21 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 
 ### Changed
 
+- **`NimRTCEngine::Impl::dtls`** changed from
+  `unique_ptr<nimrtc::dtls::IDtlsSession>` to a raw non-owning
+  pointer. The DTLS session is now owned by
+  `WebRtcClassicStackFactory::create()` inside the media stack.
+  See `Impl::dtls` field comment for lifetime rationale.
+- **`NimRTCEngine::ice_t_`** changed from
+  `unique_ptr<plugins::IICETransport>` to a raw non-owning
+  pointer. The ICE transport is now owned by the media stack.
+- **`NimRTCEngine::close()`** now calls `Impl::session.close()`
+  (which tears down the media and control stacks in order)
+  before nulling `ice_t_` and `Impl::dtls`.
+- **`init_modules_once()` transport section** removed the
+  pre-PR3 manual ICE + DTLS construction path; the section now
+  resolves the §5.3 factory pair from the Selector, calls
+  `get_transport_stack()` on each id, and builds the session.
 - **`src/engine/src/engine.cpp`** — `init_modules_once()`
   now recognises `cfg.transport_strategy_name` (optional,
   default `""` → `"browser-call"`) and resolves it to a
@@ -1082,6 +753,67 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   wolfSSL-only behaviour.
 - **`cmake/NimRTCOptions.cmake`** — added `if(OHOS)`
   musl-compat branch + `nimrtc_link_gmssl()` helper.
+- **PAL Slice 1.5 — `nimrtc::engine::pal::make_plugin<IPlugin,
+  Config, Factory>` template** added at
+  `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`. The
+  helper consolidates the 5-step "factory lookup → create →
+  null-check → open → report" dance that was copy-pasted across
+  9 plugin categories in `engine.cpp` (5 video plugins + 2 BWE /
+  Scheduler + audio3a + codec). Per-block size dropped from
+  ~20 lines to ~7 lines with no behaviour change.
+  - The helper takes a `PluginFailureMode` enum (Error / Warn /
+    Silent) so each plugin category keeps its original
+    failure-reporting policy (e.g. video → on_error_, BWE →
+    log-warn, audio3a → silent fallback, codec → silent
+    fallback).
+  - A `post_create` hook is invoked between `create()` and
+    `open()` to cover the audio3a case where `set_callbacks()`
+    must precede `open()`.
+  - A compile-time branch (`if constexpr`) handles the
+    no-config case (`IAudio3AFactory::create()` takes no
+    arguments) — the caller passes `nullptr` as the config
+    argument.
+  - `init_video_plugins()` lost the `auto& reg = ...` capture
+    and the `reg.get_video_*` calls; the registry lookups now
+    happen inline at each `pal::make_plugin` call site.
+- **PAL Slice 1.5 upgrade — `pal::make_plugin` now has a C++20
+  `auto Resolver` overload and a `MakePluginOpts` named-arguments
+  struct**. The 4 positional `err_open_failed` / `err_missing` /
+  `open_fail_mode` / `missing_mode` arguments (and the trailing
+  `on_error`) are folded into a single `MakePluginOpts` struct
+  consumed by designated initializers at the call site. The new
+  template overload
+  `make_plugin<auto Resolver, IPlugin, Config>(id, slot, cfg, opts, post_create)`
+  takes a resolver function pointer (e.g. `&pal::resolve_bwe`)
+  and deduces the factory type from
+  `std::invoke_result_t<Resolver, string_view>`; the
+  `reg.get_X(id)` lookup now happens inside the helper. All 9
+  `engine.cpp` plugin-load call sites (BWE / Scheduler / Audio3A
+  / Codec / Video Sink / Source / Receiver / Sender / Codec)
+  migrated — per-call-site arg count drops from 9-10 positional
+  to 5 positional + 1 struct. 6 new `pal::resolve_*` forwarders
+  added to `engine_plugin_resolver.hpp` (bwe, scheduler,
+  video_sink, video_source, video_receiver, video_sender) so the
+  resolver header is now symmetric across all 9 plugin
+  categories used by the engine. Behaviour-preserving: 27/27
+  `test_engine_plugin_loading`, 15/15 `test_audio3a_tap`, 13/13
+  `test_video_source` PASS on Windows MSVC. The
+  `reg.get_transport_stack` calls in `init_transport_session()`
+  are intentionally left as `reg.get_*()` (not migrated) because
+  they are part of the v0.12.0 Slice 7.6 PR3 transport-strategy
+  wiring, not the per-plugin factory loading pattern that PAL
+  Slice 1 covers.
+- **`NimRTCEngine::Impl::datachannel_transport_cookie`**
+  retyped from `void*` to `nimrtc::dtls::IDtlsSession*` (non-
+  owning). The v1.x WebTransport redesign will replace the
+  field with a tagged union over `{IDtlsSession*,
+  IWebTransportSession*}`; until then, the typed pointer
+  removes the unsafe `static_cast<void*>` round-trip.
+- **Meta-comments removed** from `core/registry.hpp` and three
+  production headers (`engine.hpp`, `engine.cpp`,
+  `raw_udp_datagram.hpp`). Production code no longer mentions
+  per-subagent ownership boundaries (those live in PR
+  descriptions / changelogs).
 
 ### Fixed
 
@@ -1097,7 +829,67 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   Tracked under `docs/plan/dtls_chrome_interop_review.md`.  **Note**:
   this commit does *not* restore the NimRTC ↔ Chrome e2e (Case D)
   flow — see Known Issues below.
-
+- **Use-after-free guard in `NimRTCEngine::on_transport_recv()`**
+  (`src/engine/src/engine.cpp`, around line 2286). Added
+  `if (!is_open()) return;` at function entry. The ICE recv
+  callback runs on the transport thread and can race with
+  `close()`: a buffered packet may arrive after `close()` has
+  torn down `Impl::dtls` (a raw non-owning pointer into
+  `session.media_stack`), causing a use-after-free in
+  `impl_->dtls->state()` / `feed_inbound()`. Mirrors the existing
+  `send_audio()` pattern (line 2119). **Severity: Critical**
+  (per `docs/plan/p1-uaf-dtls-investigation.md`).
+- **Use-after-free guard in `NimRTCEngine::process_remote_sdp()`**
+  (`src/engine/src/engine.cpp`, around line 1699). Added
+  `if (state_ != State::kOpen) return std::nullopt;` at function
+  entry. Same race window: a delayed signaling message after
+  `close()` would deref `impl_->dtls->set_role()` /
+  `set_peer_fingerprint()`. Mirrors the existing DataChannel
+  guard pattern (line 1341). **Severity: High**.
+- **Note:** `NimRTCEngine::tick()` (line 2188) already had the
+  `is_open()` guard and required no change. The
+  `Impl::datachannel_transport_cookie` lifetime (Medium risk)
+  is deferred to the v1.x wiring PR (per P1 investigation).
+- **Follow-up:** `Impl::dtls` migration from raw pointer to
+  `std::weak_ptr<IDtlsSession>` is **P1 for v0.13.0** (not
+  v0.12.0). The two `is_open()` / `state_` guards above close
+  the known Critical and High paths; the `weak_ptr` migration
+  eliminates the entire UAF class.
+- **DTLS Handshake-layer fragment reassembly shim**
+  (`src/modules/dtls/include/nimrtc/dtls/dtls_handshake_reassembler.hpp`,
+  `src/modules/dtls/src/dtls_wolfssl_session.cpp`). Closes
+  the NimRTC ↔ Chrome (BoringSSL) Case D interop failure that
+  was tracked under the v0.12.0 "Known Issues" bullet below.
+  wolfSSL 5.9.2's DTLS 1.2 server path does not reassemble
+  fragmented Handshake records (the `WOLFSSL_DTLS_CH_FRAG`
+  switch is gated on `WOLFSSL_DTLS13 && WOLFSSL_HAVE_MLKEM`,
+  and we pin DTLS 1.2). Chrome 117+ always splits its first
+  ClientHello flight into two records (~1100 B + ~300 B), so
+  wolfSSL silently dropped the second fragment and never
+  produced a HelloVerifyRequest / ServerHello back. The shim
+  intercepts each inbound Handshake record via
+  `DtlsHandshakeReassembler::try_reassemble()`, buffers
+  fragments keyed by `msg_seq`, and synthesises a fresh
+  unfragmented DTLS record once the full body has been
+  received. Partial buffers are GC'd after 5 s
+  (`set_gc_ttl()`, well inside the RFC 6347 §4.2.4 60-s
+  retransmit envelope) so a peer that crashes mid-flight
+  cannot leak. `nimrtc_chrome.keylog` now populates and SRTP
+  keys derive normally. New tests:
+  - `tests/test_dtls_handshake_reassembler.cpp` (unit
+    coverage: unfragmented pass-through, two-fragment
+    reassembly, three-fragment reassembly with reverse
+    arrival order, mid-stream msg_seq change, malformed
+    header, GC TTL eviction, defensive upper bounds).
+  - `tests/test_dtls_replay_chrome_hello.cpp` (end-to-end
+    replay of a captured Chrome 117+ ClientHello flight
+    against the wolfSSL server session; asserts the
+    ServerHello path now completes).
+  The DTLS 1.3 short-circuit (commit `36ee838`) and the
+  `NIMRTC_SKIP_CASE_D=1` escape hatch remain in place as
+  belt-and-braces — the env override is no longer required
+  for this PR. **Severity: Critical** (Case D was the last
+  hard gate blocking Chrome interop on `main`).
 
 ### What's NOT in v0.12.0 (explicitly deferred)
 
@@ -1140,27 +932,26 @@ The following P2 headline items are intentionally **not** in v0.11.0:
 ### Known Issues (v0.12.0)
 
 - **NimRTC ↔ Chrome DTLS handshake is broken on wolfSSL 5.9.2**
-  (Case D in `tools/run_e2e_acceptance.py`).  The DTLS 1.2 force-pin
-  landed in 36ee838 prevents the wolfSSL DTLS 1.3 server's broken
-  short-circuit from engaging, but the **DTLS 1.2 server path has
-  the same fragment-reassembly bug** in 5.9.2: when BoringSSL
-  (Chrome 117+) splits its 1413-byte ClientHello into 2 fragments,
-  wolfSSL's server never produces a HelloVerifyRequest or
-  ServerHello back.  Symptom: ICE connects, but the NimRTC DTLS
-  trace ends with `SEND DTLS ct=21(Alert) ver=0xfefd ... body=01 00`
-  (close_notify) after receiving all fragments.  `nimrtc_chrome.keylog`
-  stays at 0 bytes, so SRTP keying is never derived and no audio
-  flows.  CI artifact from run 38201352429 documents the exact
-  trace.  Workaround: `NIMRTC_SKIP_CASE_D=1` is set in the
-  `.github/workflows/interop.yml` `e2e` step **only** on the
-  `fix/windows-dll-boundary` branch, so Cases A/B/C still gate
-  that PR while Case D is unblocked.  All other branches
-  (including `main`) still run Case D as a hard gate.  Real fix
-  is the **DTLS backend swap** (mbedTLS or BoringSSL) tracked
-  under `docs/plan/dtls_chrome_interop_review.md` and slated for
-  v0.12.x.  Until that lands, only branches that explicitly
-  carry a `NIMRTC_SKIP_CASE_D=1` env override may merge with
-  Case D in a known-broken state.
+  (Case D in `tools/run_e2e_acceptance.py`). ~~The DTLS 1.2
+  force-pin landed in 36ee838 prevents the wolfSSL DTLS 1.3
+  server's broken short-circuit from engaging, but the **DTLS
+  1.2 server path has the same fragment-reassembly bug** in
+  5.9.2~~ **Resolved in this release** by the
+  `DtlsHandshakeReassembler` shim (see "Fixed" above):
+  Chrome 117+'s two-record ClientHello flight is now
+  reassembled before wolfSSL sees it, the wolfSSL server
+  produces a HelloVerifyRequest / ServerHello back, and
+  `nimrtc_chrome.keylog` populates normally so SRTP keys
+  derive. The DTLS 1.3 short-circuit (commit `36ee838`) and
+  the `NIMRTC_SKIP_CASE_D=1` escape hatch remain in place as
+  belt-and-braces; the env override is **no longer required**
+  to merge. CI artifact from run 38201352429 is preserved as
+  the historical "before" trace; the new
+  `test_dtls_replay_chrome_hello` covers the "after" path.
+  Tracked under `docs/plan/dtls_chrome_interop_review.md`;
+  the longer-term DTLS backend swap (mbedTLS or BoringSSL)
+  remains v0.12.x work but is no longer on the Chrome-interop
+  critical path.
 - **macOS arm64 `video_source_tests::MemorySource.CadenceProducesApproxFps`**
   is timing-sensitive (asserts on `std::chrono` deltas inside a
   1-second wall-clock window).  Push CI run 38201349751 saw it
@@ -1222,7 +1013,387 @@ The following P2 headline items are intentionally **not** in v0.11.0:
   (wolfSSL) build.
 
 ---
+## [0.11.0] - 2026-10-09
 
+### Status: Beta 前哨
+
+> **Tag cut 2026-10-09.** First minor to ship P2 content. P1
+> closed at v0.10.3. **API still experimental / not for production
+> through v1.0.0.**
+>
+> **The headline data-plane item (DataChannel Chrome ↔ NimRTC
+> interop, DC-1) is NOT in v0.11.0.** The SCTP-over-DTLS physical
+> wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup)
+> never landed on `main`; Chrome-headless e2e stays 0/4. v0.11.0
+> ships the **Chrome media interop** surface (audio + video Case D,
+> all four platforms) and the L2 / L3 P2 scaffolding (TAP-1,
+> PROFILE-1, DEMO-1, TPAL-4 cleanup), with the data plane
+> explicitly deferred to the **v1.x WebTransport / QUIC**
+> re-design. See `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 /
+> TPAL-5 deferred) and §10 (forward direction).
+
+### Highlights
+
+- **Chrome media interop (audio + video Case D)** — NimRTC ↔ Chrome
+  audio Opus + video H.264 end-to-end via ICE + DTLS 1.3 + SRTP +
+  RTP. `python tools/run_e2e_acceptance.py --case d` PASS on
+  Windows + Linux x86_64. Verified across the four-platform CI
+  matrix (windows-2022 + linux-gcc + macos-clang + linux-aarch64).
+  This is the v0.11.0 release contract for media interop.
+- **TAP-1 — PCM tap on WebRTC APM** —
+  `IAudio3A::set_pre_process_tap()` and
+  `set_post_process_tap()` (RFC 001 §6.1–6.5) are now live on the
+  default `PluginAdapter` implementation. The WebRTC-APM-backed
+  adapter fires pre and post 3A taps per `process_capture()` call,
+  so AI-Agent / wake-word / streaming-ASR consumers can subscribe
+  to the raw mic PCM (pre) and the cleaned PCM (post) without an
+  extra DSP integration. Taps are `std::function`-based, install
+  / uninstall via `nullptr`, and guarded by a dedicated `tap_mu_`
+  mutex so setters from any thread stay race-free against the
+  audio thread's `process_capture()` call (RFC §2.3 thread-safety
+  contract). The post-tap is also delivered as `int16_t*` with the
+  same metadata (`tests/test_pcm_tap.cpp` 15/15 PASS).
+- **PROFILE-1 — Assembly Profile library officialised** — five
+  profile variants are first-class and loadable at runtime:
+  `sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`.
+  PAL Slice 1/2/3 (ADR-009) make all five backend-agnostic.
+  `tests/test_assembly.cpp` 32/32 PASS including a strict
+  `JsonFileMatchesBuiltinConstant` regression test that loads
+  every JSON profile file and asserts field-by-field equality with
+  the matching C++ constant. Two latent JSON↔C++ bugs uncovered by
+  the new strict round-trip test are fixed: `kProfileLive` now sets
+  `scheduler.impl = "weighted_fair"` (was relying on the default
+  while `live.json` declared `"weighted_fair"`); `profiles/sfu.json`
+  now correctly sets `bwe_name = ""` (the comment said "Empty: no
+  BWE" but the value was the string `"aimd"`).
+- **TPAL-4 — DTLS seam cleanup** — `EngineConfig::dtls_name` field
+  added (defaulted to `""` to preserve every v0.10.x caller
+  source-compat); engine resolves the DTLS factory through
+  `core::PluginRegistry::get_dtls_session(id)` at open() time
+  instead of direct `new DtlsSessionWolfSSL`. The `static_cast`
+  escape hatch from v0.10.2 is gone. The `IDtlsSession` seam
+  surface is tightened (every concrete method on `DtlsSessionWolfSSL`
+  is now `override` against the seam). Future 国密 / OpenSSL /
+  BoringSSL / mbedTLS backends register their own id via
+  `register_dtls_session(id, &factory)` and select via
+  `cfg.dtls_name = "..."`. `test_engine_plugin_loading` 17/17 PASS
+  (8 base + 5 Slice 8 + 2 Slice 7.5 + 5 new TPAL-4 subtests).
+- **DEMO-1 — AI Agent 接入 demo** — `demo-agent-gateway`
+  demonstrates the `agent-gateway` Profile end-to-end with PCM
+  tap → streaming ASR → LLM mock → response.
+- **DISC-1 — GitHub Discussions enabled** — community now has a
+  Discussions space alongside issues; issue templates updated.
+- **RFC-1 — RFC 001 (PCM tap) promoted Draft → Final** — first
+  formal design record under `docs/rfcs/`.
+
+### What is **not** in v0.11.0 (data plane deferred to v1.x)
+
+The following P2 headline items are explicitly cut from v0.11.0 and
+moved to the v1.x WebTransport / QUIC re-design window — see
+`docs/plan/v0.11-plan.md` §2.2 / §10 for the full rationale:
+
+- **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** —
+  the SCTP-over-DTLS physical wiring
+  (`IDtlsSession::srtp_keying_material()` →
+  `ISctpSocket::set_dtls_keys()` + DTLS transport →
+  `ISctpSocket::feed_inbound_datagram()` + SCTP socket → DTLS
+  transport outbound) was never landed on `main`; Chrome-headless
+  e2e stays 0/4. v0.11.0 falls back to the in-process
+  `test_datachannel_engine` 5/5 PASS as the §7 substitute, made
+  permanent. The Chrome team's stated direction is "DataChannel
+  future = WebTransport over QUIC"; the SCTP-over-DTLS path is
+  on Google's deprecation roadmap. v1.x will redesign the data
+  plane on top of **WebTransport over QUIC** (likely msquic,
+  MIT-licensed, Windows-first, cross-platform CI) — see
+  `docs/plan/v0.11-plan.md` §10.
+- **L1 strict-priority scheduling across the DC plane (DC-2)** —
+  only meaningful once DC-1 lands. The RTP-only strict-priority
+  path is already covered by `test_sched_priority.cpp` from
+  v0.10.x.
+- **usrsctp production backend (TPAL-5)** — the `UsrsctpSocket`
+  class is `@deprecated` and still compiles and links for opt-in
+  callers (the in-process `test_sctp_usrsctp` 4/4 PASS regression
+  test continues to run), but `sctp::register_default_plugins()`
+  no longer publishes id="usrsctp" with `core::PluginRegistry`.
+  The `UsrsctpSocket*` headers carry `@deprecated` markers
+  pointing at the v1.x plan. Expected removal: v1.2.0. The
+  `tools/fix_usrsctp{1,2,3,4}.py` history is deleted.
+
+### Deferred to pre-1.0 decision window (unchanged from v0.11-preview)
+
+The following P2 headline items are intentionally **not** in v0.11.0:
+
+- **In-process SFU relay (`nimrtc_sfu`)** — SFU forwarding has open
+  architectural questions on BWE/JB interaction (§13 P3 "SFU 转发跳过
+  L2" 是否引入 BWE 接口依赖). Decision deferred to v1.0.0 commit.
+  If community asks for it during v0.11.0 cycle, it lands in v0.11.x
+  patch train (same track as T-PAL Slice 6 Raw UDP bypass).
+- **DC forwarding policy (DC-3)** — dependent on SFU-1 AND v1.x
+  DC-1 WebTransport land; inherits both deferrals.
+- **`sfu-relay` benchmark (BENCH-1)** — dependent on SFU-1.
+
+### Notes
+
+- No public API change relative to v0.10.3 except the single
+  `EngineConfig::dtls_name` field. `engine.hpp` adds one new
+  field; everything else in the public API surface is unchanged.
+- Layout Invariant 4 (no concrete module headers in `engine.hpp`)
+  preserved. Layout Invariant 1 (`src/core/` is the only
+  INTERFACE library) preserved. Layout Invariant 6 (singletons
+  in `nimrtc::core::`) preserved.
+- The build is expected to remain green on all four CI platforms
+  (Windows / Linux x86_64 / macOS / Linux aarch64). The usrsctp
+  sources still compile and link, the `test_sctp_usrsctp` 4/4
+  regression test continues to pass, and the `test_datachannel_engine`
+  5/5 covers the IDataChannel seam against the in-process stub.
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.11.0.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- The 4-platform CI matrix stays green; e2e Case D (audio + video)
+  is the new Gate #1 (replacing the original "Chrome DC
+  bidirectional interop" gate, which is deferred with DC-1 to v1.x).
+
+---
+## [0.10.3] - 2026-09-18
+
+### Status: Tech Preview
+
+### Highlights
+
+- **PAL Slice 7.5 — `WebRtcClassicStackFactory`** (commit `7d3a92d`,
+  `docs/plan/transport-selection.md` §12.5): the first real factory
+  implementation registered through the v0.10.2
+  `core::PluginRegistry::register_transport_stack()` hook. Composes the
+  four real backend singletons (ICE / DTLS / RTP / SCTP) all resolved
+  through the plugin seam — no concrete-`new` inside the factory. Id
+  = `"webrtc-classic"`. Lifecycle methods (`start()` / `close()` /
+  `tick()`) are wired through. CapabilitySelector rule 1
+  (`needs_browser_interop == true`) now resolves to a real
+  ICE+DTLS+RTP+SCTP composition instead of the Slice 8 shell
+  `CapabilitySelectorStackFactory` (id `"default"`, still registered
+  for backward compatibility).
+- **CHANGELOG retroactive attribution for v0.10.1** (PAL Slice 2 + 3) —
+  see the "Added retroactively in v0.10.3" sub-heading inside
+  `[0.10.1]` above. No new code; documentation alignment.
+- **Root-cleanliness sweep** — defensive `.gitignore` patterns
+  (`*.lock`, `src/engine/src/*.lock`) added. Local-only stray files
+  (`sslkeylog.log`, `Testing/`, `src/engine/src/engine.cpp.lock`)
+  deleted from disk at tag prep time. No tracked files changed.
+
+### Added
+
+- **`src/transport/src/webrtc_classic_stack.cpp`** (Slice 7.5):
+  `WebRtcClassicStack` + `WebRtcClassicStackFactory` with id
+  `"webrtc-classic"`. Registered via
+  `core::PluginRegistry::register_transport_stack()` from
+  `nimrtc::transport::register_default_plugins()`.
+- **2 new `EnginePluginLoading` subtests** in
+  `tests/test_engine_plugin_loading.cpp`:
+  `slice75_webrtc_classic_factory_registered` (factory wired through
+  the Slice 8 registry hook) and
+  `slice75_webrtc_classic_stack_create_and_lifecycle` (the produced
+  stack exposes ICE/DTLS/RTP/SCTP refs through the seam and survives
+  `start()`/`close()` in the right order).
+
+### Changed
+
+- **`src/transport/src/transport_plugin.cpp`**
+  `do_register_default_plugins()` now publishes both
+  `"default"` (Slice 8 shell, retained for back-compat with any
+  v0.10.2 caller) and `"webrtc-classic"` (Slice 7.5 real) through
+  `register_transport_stack()`.
+
+### Notes
+
+- No public API or ABI change. `git diff v0.10.2..v0.10.3 -- src/engine/include/**`
+  shows zero lines.
+- Engine still constructs ICE/DTLS/RTP/SCTP through its direct
+  constructor path; Slice 7.5's value is the factory-side seam, not the
+  engine-side ownership switch (that change is tracked as a future
+  "engine accepts `ITransportStack*`" patch in `transport-selection.md`
+  §12.5.4).
+- `tests/test_engine_plugin_loading`: 15/15 subtests (8 base + 5 Slice 8 +
+  2 Slice 7.5). Full suite: 380/387 ctest pass overall; the 7 failures
+  are pre-existing WSL-localhost UDP-loopback timeouts, unrelated to
+  Slice 7.5 per commit `7d3a92d`. The 2 `Audio3ATapFixture` subtests
+  remain intentionally disabled (pre-existing condition, tracked
+  separately).
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.3.
+- API still **experimental / not for production** through v1.0.0.
+
+---
+## [0.10.2] - 2026-09-17
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport PAL Slice 8 — registry hooks for DTLS / SCTP / raw_UDP /
+  transport-stack** (`docs/plan/transport-selection.md` §6.5 follow-up
+  gap, closed). Four new typed slots on `core::PluginRegistry`:
+  - `register_dtls_session(id, factory*)` / `get_dtls_session(id)`
+  - `register_sctp_socket(id, factory*)` / `get_sctp_socket(id)`
+  - `register_raw_udp_datagram(id, factory*)` / `get_raw_udp_datagram(id)`
+  - `register_transport_stack(id, factory*)` / `get_transport_stack(id)`
+  Each module's `register_default_plugins()` now publishes its factory
+  through the matching typed slot (was previously a process-local cache
+  or test-only accessor). All four slots participate in the unified
+  `core::register_all_default_plugins()` table (PAL Slice 2).
+- **Engine DTLS lookup via registry** — `engine.cpp` resolves the DTLS
+  factory through `reg.get_dtls_session("wolfssl")` (was direct
+  `make_unique<DtlsSessionWolfSSL>`). `engine.hpp` is **byte-identical**
+  with v0.10.1 — the lookup id is hard-coded to "wolfssl" so the public
+  API surface stays frozen. Non-wolfSSL builds (defensive `else`
+  branch) keep the pre-Slice-8 direct-construction path. Slice 7.5 will
+  widen this to a `cfg.dtls_name` field.
+- **Callback types promoted to `plugins/base.hpp`** (§6.5). The local
+  typedefs in `nimrtc/sctp/sctp_socket_iface.hpp`
+  (`plugins::OnSctpRecvCb`) and `nimrtc/raw_udp/raw_udp_datagram.hpp`
+  (`plugins::Endpoint`, `plugins::OnDatagramCb`) are now canonical in
+  `plugins/base.hpp`. The Slice 5/6 headers no longer re-declare them
+  — a single source of truth. Source-compat: any pre-Slice-8 caller
+  that wrote `plugins::OnSctpRecvCb` etc. continues to compile.
+- **`IRawUdpFactory` interface added** (`src/raw_udp/include/nimrtc/raw_udp/raw_udp_factory_iface.hpp`).
+  `ArqRawUdpFactory` now publicly inherits the interface, parallel to
+  `dtls::IDtlsSessionFactory` and `sctp::ISctpSocketFactory`.
+- **Shell `CapabilitySelectorStackFactory`** (id="default") registered
+  through the new `register_transport_stack()` hook. The factory
+  produces a `CapabilitySelectorStack` whose component accessors
+  return references to null-instance singletons (no-op / kErrNotReady).
+  Slice 7.5 will replace this with `WebRtcClassicStackFactory` (real
+  ICE+DTLS+RTP+SCTP composition).
+
+### Added
+
+- **`nimrtc::transport::register_default_plugins()`** — Slice 8 entry
+  point that publishes `CapabilitySelectorStackFactory` into the
+  `core::PluginRegistry::register_transport_stack()` slot.
+- **`NIMRTC_REGISTER_DTLS_SESSION / NIMRTC_REGISTER_SCTP_SOCKET /
+  NIMRTC_REGISTER_RAW_UDP_DATAGRAM / NIMRTC_REGISTER_TRANSPORT_STACK`**
+  macros — convenience `static ::nimrtc::core::detail::Registrar`
+  wrappers for the four new typed slots, parallel to the existing
+  audio / video / bwe / scheduler macros.
+- **`IRawUdpFactory` interface** — typed factory contract for
+  `IRawUdpDatagram` backends (Slice 6.5 → Slice 8 promotion).
+
+### Changed
+
+- **`dtls::register_default_plugins()`** now publishes
+  `WolfsslDtlsFactory` through `register_dtls_session("wolfssl")`
+  (Slice 8). Legacy `dtls::test_only::get_wolfssl_factory()` is
+  preserved as a back-compat accessor that now reads back through
+  the registry so the typed slot is the single source of truth.
+- **`sctp::register_default_plugins()`** now publishes
+  `SctpStubFactory` through `register_sctp_socket("stub")` (Slice 8).
+  Legacy `sctp::test_only::get_stub_factory()` is preserved similarly.
+- **`raw_udp::register_default_plugins()`** now publishes
+  `ArqRawUdpFactory` through `register_raw_udp_datagram("arq")`.
+- **`pal_default_registrars.cpp` `kDefaultRegistrars[]`** extended
+  with DTLS / SCTP / raw_UDP / transport entries — every transport-
+  layer seam now participates in the unified entry point.
+- **Engine `init_modules_once()` DTLS construction** now goes through
+  the registry (see Highlights).
+
+### Notes
+
+- No public API change (`nimrtc/engine/engine.hpp` is byte-identical
+  with v0.10.1).
+- 7 + 2 PAL Slice 1/2/3 subtests in `test_engine_plugin_loading.cpp`
+  stay green; 5 new Slice 8 subtests verify the four new registry
+  hooks are populated and that `register_all_default_plugins()`
+  remains idempotent under repeated calls.
+- `git log v0.10.1..HEAD --oneline` ≤ 30 commits (Slice 8 landed as a
+  single sequence; CHANGELOG + release notes + tag cut to follow).
+- 国密后端 (SM2/SM4) remains P4 / Enterprise — not in v0.10.2.
+- API still **experimental / not for production** through v1.0.0.
+- No binary artefacts shipped (源码为主).
+- 4 new DTLS / SCTP / raw_UDP / transport-stack registry hooks are
+  the §6.5 follow-up gap listed in `docs/plan/transport-selection.md`
+  (was: "Slice 8 必须顺手补"). Closed.
+## [0.10.1] - 2026-09-15
+
+### Status: Tech Preview
+
+### Highlights
+
+- **Transport plugin interface**: new plugin seam with `IPlugin` interface and
+  `TransportSelector`; `raw_udp`, `dtls`, and `sctp` plugin stubs wired.
+  See `docs/plan/transport-selection.md`.
+- **RFC 5246 PRF (P_SHA-256)**: standalone wolfSSL-backed PRF for DTLS
+  key derivation; all 7 RFC 5246 section 5 KAT vectors pass. Replaces the
+  BCrypt-only stub.
+- **ArqRawUdp real-socket fixes**: corrected ACK frame byte offsets in
+  `recv_main`, fixed `peer_endpoint_` race (added `peer_mu_`), repaired
+  `send()` span dead code, resolved `close()` deadlock (socket-close-first
+  ordering). The ARQ state machine now advances correctly against a real
+  UDP socket; burst test reports `sent=50 acks_recv=50 retransmit=0`.
+- **New test**: `test_raw_udp_real_loopback` (4/4 cases: single-packet,
+  burst-50, ephemeral-port reflection, error-path).
+
+### Fixed
+
+- **CI / WebRTC APM prebuild guard**: `src/third_party/webrtc_audio_processing/CMakeLists.txt`
+  previously `FATAL_ERROR` on any checkout that lacks the meson-built
+  `libwebrtc-audio-processing-2.{a,lib}`. This blocked all four CI runners
+  (windows/linux/macos/aarch64) because the prebuild requires a separate
+  `meson` + `abseil-cpp` step that is not wired into the CI matrix. Fixed by
+  making the guard conditional on `NIMRTC_VENDORED_WEBRTC_APM` (default `ON`):
+  `=ON` retains the original `FATAL_ERROR` + guidance; `=OFF` defines an empty
+  `INTERFACE` stub target and lets `audio3a` run with the built-in
+  passthrough stub. CI now passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all
+  four platform Configure steps. See `docs/zh/architecture.md` §11.5.5.
+- **Release / WebRTC APM prebuild wiring**: `.github/workflows/release.yml`
+  was missing the `tools/fetch_webrtc_apm.py` step on all four platforms,
+  so a tag push would fail at the cmake configure stage with the same
+  `FATAL_ERROR` even though release artefacts are supposed to carry real
+  3A (`NIMRTC_VENDORED_WEBRTC_APM=ON` per §11.5.5). Added explicit
+  `Install meson` + `Prebuild WebRTC APM` steps before `Configure` on
+  windows, linux-gcc, linux-aarch64, and macos-clang.
+
+### Added retroactively in v0.10.3
+
+> **Note:** These entries describe work that landed in commit `446e8a0
+> refactor(pal): Slice 2 + Slice 3` and shipped with the v0.10.1 tag,
+> but the CHANGELOG `[Unreleased]` block was not promoted at release
+> time (the same hygiene drift that v0.10.0 fixed for v0.9.2). The
+> v0.10.3 tag brings the CHANGELOG into alignment with the code tree
+> at v0.10.1; no new code, no new tests, no public API change are
+> introduced by this hygiene pass.
+
+- **PAL Slice 2 — explicit self-registration table**
+  (`docs/plan/pal-architecture.md` §4 Slice 2). The engine's
+  `core::register_all_default_plugins()` is now backed by an iterable
+  table (`core::detail::kDefaultRegistrars[]` in
+  `src/core/src/pal_default_registrars.cpp`) instead of an inline
+  statement list. Layout Invariant 1 of `docs/architecture.md`
+  ("`src/core/` is the only INTERFACE library") is preserved by
+  compiling this single .cpp into a new `nimrtc_core_objects` OBJECT
+  library that is linked INTERFACE by `nimrtc::core`. The table enables
+  (a) compile-time completeness audits via a test iteration, (b)
+  mechanical grep discoverability, and (c) future extension without
+  editing `registry.hpp`.
+- **PAL Slice 3 — `NIMRTC_PLUGIN_ID()` compile-time-unique id literal
+  wrapper** (`docs/plan/pal-architecture.md` §4 Slice 3). Each plugin
+  factory's `id()` callsite wraps its string literal in a
+  `nimrtc::core::detail::PluginIdTag<__LINE__>` wrapper, giving every
+  callsite a distinct type at compile time. Implicit conversion to
+  `std::string_view` preserves all existing
+  `return NIMRTC_PLUGIN_ID("webrtc_apm");` patterns. Two new
+  `EnginePluginLoading` subtests
+  (`pal_default_registrars_table_is_nonempty`,
+  `pal_plugin_id_wrappers_preserve_string_values`) verify the table
+  iteration registers all 5 unconditional categories and that all 6
+  known factory ids match their v0.10.0 string values byte-for-byte.
+- **5 plugin factories migrated to `NIMRTC_PLUGIN_ID()`** (PAL Slice 3):
+  `audio3a::NullPluginFactory` (`"webrtc"`),
+  `audio3a::WebRtcPluginFactory` (`"webrtc_apm"`),
+  `opus::OpusPluginFactory` (`"opus"`),
+  `h264::H264PluginFactory` (`"h264"`),
+  `jb::PluginFactory` (`"adaptive"`),
+  `dtls::WolfsslDtlsFactory` (`"wolfssl"` via the existing `kBackendId`
+  constexpr literal).
+
+---
 ## [0.10.0] - 2026-09-14
 
 ### Status: Tech Preview consolidation
@@ -1264,7 +1435,6 @@ SFU relay, PCM tap landing, Profile library officialisation) is queued for v0.11
   "v0.10 (Tech Preview - consolidating v0.9)".
 
 ---
-
 ## [0.9.2] - 2026-09-14
 
 ### Status: First feature-complete release candidate
@@ -1581,8 +1751,6 @@ and can be run manually; CI coverage for those platforms is a v1.0 milestone.
   only and discarded all frame data ? RFC 7587 ? conformance is now
   complete and round-trips through `depacketise()`. Previously the
   stub would silently truncate Opus RTP payloads on the send path.
-
-
 ## [0.9.0-rc1] - 2026-09-06
 
 ### Status: Release Candidate ? NOT a stable release
@@ -1853,7 +2021,6 @@ the first stable `v1.0.0` tag:
   `NIMRTC_WARNINGS_AS_ERRORS=ON`.
 - Both `examples/demo-p2p` and `examples/loopback-p2p` link
   successfully against the new private-link `nimrtc::engine`.
-
 ## [0.1.0] ? P0 scaffold
 
 ### Added
@@ -1866,7 +2033,6 @@ the first stable `v1.0.0` tag:
 - Vendor stub targets: `nimrtc_vendor_libsrtp`, `nimrtc_vendor_libopus`, `nimrtc_vendor_mbedtls`
 
 ---
-
 ## Versioning scheme
 
 NimRTC uses a three-part version number `MAJOR.MINOR.PATCH`:

@@ -214,12 +214,17 @@ TEST_F(SctpUsrsctpTest, LoopbackDatagramRoundTrip) {
     // Wait for SCTP_COMM_UP on both sides. The recv trampoline
     // fires SCTP_ASSOC_CHANGE; the state machine transitions to
     // kEstablished; wait_for_established() blocks until then (or
-    // until 5s elapses / kClosed).
-    const bool a_up = sock_a->wait_for_established(std::chrono::seconds(5));
-    const bool b_up = sock_b->wait_for_established(std::chrono::seconds(5));
-    ASSERT_TRUE(a_up) << "A did not reach kEstablished within 5s; "
+    // until the timeout elapses / kClosed).
+    //
+    // 60 s ceiling: usrsctp 0.9.5.0 SCTP handshake is intermittently
+    // slow on cold Linux / Windows GitHub Actions runners (cold
+    // usrsctp_init + per-test port churn).  Windows / macOS skip the
+    // body via the platform guard above, so this only runs on Linux.
+    const bool a_up = sock_a->wait_for_established(std::chrono::seconds(60));
+    const bool b_up = sock_b->wait_for_established(std::chrono::seconds(60));
+    ASSERT_TRUE(a_up) << "A did not reach kEstablished within 60s; "
                       << "final state = " << to_string(sock_a->state());
-    ASSERT_TRUE(b_up) << "B did not reach kEstablished within 5s; "
+    ASSERT_TRUE(b_up) << "B did not reach kEstablished within 60s; "
                       << "final state = " << to_string(sock_b->state());
 
     // Build a deterministic 64-byte payload: 0xA0..0xDF.
@@ -324,11 +329,17 @@ TEST_F(SctpUsrsctpTest, PartialReliableTtlDrop) {
     const std::uint16_t b_port = sock_b->local_port();
     ASSERT_NE(b_port, 0u);
     ASSERT_EQ(sock_a->connect("127.0.0.1", b_port), plugins::kOk);
-    // 30 s timeout: usrsctp 0.9.5.0 SCTP handshake on Windows GitHub
-    // Actions runners can be slow; 5 s was too tight and caused
-    // spurious timeout failures (e.g. PartialReliableTtlDrop CI failure).
-    ASSERT_TRUE(sock_a->wait_for_established(std::chrono::seconds(30)));
-    ASSERT_TRUE(sock_b->wait_for_established(std::chrono::seconds(30)));
+    // 60 s timeout: usrsctp 0.9.5.0 SCTP handshake is intermittently
+    // slow on cold Linux GitHub Actions runners (inter-test port /
+    // state churn on the process-wide usrsctp init; the 30 s window
+    // hit a flaky failure on the 2026-10-16 PR run #38886883086).
+    // Linux + a 60 s ceiling still gates the seam contract end-to-end
+    // (handshake completes vs. timeout), so the regression is still
+    // meaningful — the bound is just generous enough to absorb
+    // one-off cold-start latency.  Windows / macOS skip the body via
+    // the platform guard above.
+    ASSERT_TRUE(sock_a->wait_for_established(std::chrono::seconds(60)));
+    ASSERT_TRUE(sock_b->wait_for_established(std::chrono::seconds(60)));
 
     // Send a TTL-bound message from B to A.
     //

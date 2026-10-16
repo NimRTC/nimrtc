@@ -104,7 +104,7 @@ public:
      */
     plugins::Status send(
         std::span<const std::uint8_t> bytes) noexcept {
-        if (session_ == nullptr) return plugins::Status::kErrInternal;
+        if (session_ == nullptr) return plugins::kErrInternal;
         return session_->send_datagram(bytes);
     }
 

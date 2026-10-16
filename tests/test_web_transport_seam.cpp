@@ -208,8 +208,8 @@ public:
     nimrtc::plugins::Status send_datagram(
         std::span<const std::uint8_t> /*bytes*/) noexcept override {
         return state_ == nimrtc::web_transport::WebTransportState::kConnected
-                   ? nimrtc::plugins::Status::kOk
-                   : nimrtc::plugins::Status::kErrNotReady;
+                   ? nimrtc::plugins::kOk
+                   : nimrtc::plugins::kErrNotReady;
     }
     void set_on_datagram(
         nimrtc::web_transport::OnDatagramCb /*cb*/) noexcept override {}
@@ -269,11 +269,11 @@ TEST_F(WebTransportSeamCompileOnly, datagram_facade_forwards_to_session) {
     constexpr std::array<std::uint8_t, 4> kPayload = {0xDE, 0xAD, 0xBE, 0xEF};
 
     session_.set_state(nimrtc::web_transport::WebTransportState::kConnected);
-    EXPECT_EQ(facade.send(kPayload), nimrtc::plugins::Status::kOk);
+    EXPECT_EQ(facade.send(kPayload), nimrtc::plugins::kOk);
 
     session_.set_state(nimrtc::web_transport::WebTransportState::kConnecting);
     EXPECT_EQ(facade.send(kPayload),
-              nimrtc::plugins::Status::kErrNotReady);
+              nimrtc::plugins::kErrNotReady);
 }
 
 TEST_F(WebTransportSeamCompileOnly, datagram_facade_with_null_session) {
@@ -285,7 +285,7 @@ TEST_F(WebTransportSeamCompileOnly, datagram_facade_with_null_session) {
     nimrtc::web_transport::DatagramFacade facade(nullptr);
     constexpr std::array<std::uint8_t, 4> kPayload = {0x01, 0x02, 0x03, 0x04};
     EXPECT_EQ(facade.send(kPayload),
-              nimrtc::plugins::Status::kErrInternal);
+              nimrtc::plugins::kErrInternal);
 }
 
 TEST_F(WebTransportSeamCompileOnly, callbacks_accept_lambdas) {

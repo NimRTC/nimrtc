@@ -111,7 +111,13 @@ public:
         const std::uint16_t epoch = static_cast<std::uint16_t>(
             (static_cast<std::uint16_t>(record[3]) << 8) | record[4]);
         std::uint64_t seq = 0;
-        for (int i = 0; i < 6; ++i) seq = (seq << 8) | record[5 + i];
+        // Use std::size_t for the loop counter to avoid an implicit
+        // signed-to-unsigned conversion in `record[5 + i]`.  The
+        // -Wsign-conversion warning under the strict Linux gcc
+        // -Werror matrix fires on `5 + i` even though the value
+        // is non-negative, because the index type of std::span
+        // is unsigned.
+        for (std::size_t i = 0; i < 6; ++i) seq = (seq << 8) | record[5 + i];
         const std::uint16_t rec_len = static_cast<std::uint16_t>(
             (static_cast<std::uint16_t>(record[11]) << 8) | record[12]);
         if (record.size() < 13u + rec_len) return Result::kPassThrough;
@@ -197,7 +203,7 @@ public:
         // Synthesised sequence: 1 above first fragment's seq.
         // Local-only space — never leaves the reassembler.
         const std::uint64_t new_seq = buf.first_seq + 1;
-        for (int i = 0; i < 6; ++i) {
+        for (std::size_t i = 0; i < 6; ++i) {
             p[5 + i] = static_cast<std::uint8_t>((new_seq >> (8 * (5 - i))) & 0xff);
         }
         const std::uint16_t new_rec_len = static_cast<std::uint16_t>(12 + hs_total);

@@ -119,7 +119,17 @@ int main(int argc, char** argv) {
 
     // ----- Feed each datagram, then call take_outbound ------------------
     for (std::size_t i = 0; i < datagrams.size(); ++i) {
-        nimrtc::dtls::DtlsAddr from{"127.0.0.1", 12345 + static_cast<std::uint16_t>(i)};
+        // The port arithmetic stays in std::uint16_t directly to
+        // avoid an `int` -> `uint16_t` narrowing conversion under
+        // the strict Linux gcc -Werror matrix.  `12345 + uint16_t`
+        // promotes to `int` in standard arithmetic conversions;
+        // the explicit cast back to uint16_t at the call site
+        // silences -Wnarrowing / -Wsign-conversion without changing
+        // the wire value.
+        const std::uint16_t port = static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(12345) +
+            static_cast<std::uint16_t>(i));
+        nimrtc::dtls::DtlsAddr from{"127.0.0.1", port};
         std::size_t consumed = session->feed_inbound(
             std::span<const std::uint8_t>(datagrams[i].data(), datagrams[i].size()),
             from);

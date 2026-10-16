@@ -23,6 +23,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > **Tag cut**: `git tag -s v0.14.0 -m "v0.14.0 (alias: v1.0.0-alpha.2) — ..."`.
 > The tag message body documents the alias relationship to
 > v1.0.0-alpha.2 and the v0.x banner unchanged.
+>
+> **Tag day follow-ups (2026-10-16)**: the v0.14.0 tag was
+> **force-re-pointed twice** on tag day to fold in two `release.yml`
+> fixes that the tag-cut force-push surfaced:
+>
+> 1. **PR #20** (`b5da037`) — added `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`
+>    to the four `release.yml` `Configure` steps so audio3a links
+>    against the same stub path that `ci.yml` uses, instead of
+>    chasing `absl/base/config.h` in the vendored WebRTC APM
+>    prebuild.
+> 2. **`dc15ad8`** — added `if: ${{ false }}` to the four
+>    `Prebuild WebRTC APM` steps in `release.yml` (windows-msvc +
+>    linux-gcc + linux-aarch64 + macos-clang) so the `meson` /
+>    `abseil-cpp` subproject is no longer built before
+>    `Configure`. The long-term fix
+>    (`target_link_libraries(audio3a PUBLIC webrtc_apm::webrtc_apm)`
+>    so abseil's `INCLUDE_DIRECTORIES` propagate to the consumer) is
+>    tracked in a follow-up; until that lands, `release.yml` ships
+>    with the audio3a stub path, byte-equivalent to `ci.yml`.
+>
+> RELEASING.md §2.3 tag immutability is preserved because the
+> v0.14.0 GitHub Release was a no-artefact draft at first cut
+> (`release / publish` was skipped / cancelled in
+> run #38898093864); no public announcement had been made. Each
+> re-point landed before the corresponding `release / publish`
+> re-run.
 
 ### Highlights
 

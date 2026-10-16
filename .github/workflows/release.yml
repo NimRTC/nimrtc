@@ -394,6 +394,14 @@ jobs:
       # `--break-system-packages` and without going through Homebrew
       # (which can take 5+ min on a cold tap refresh on macos-14
       # runners). Mirror the linux-gcc / windows pattern.
+      # NOTE: the user-site scripts dir (here
+      # `/Users/runner/Library/Python/3.12/bin`) is NOT on PATH for
+      # this same step — `$GITHUB_PATH` is only honored by the runner
+      # in *subsequent* steps. So the sanity-check below invokes
+      # `meson` via the absolute path rather than relying on the PATH
+      # rewrite. The `$GITHUB_PATH` line still runs so that the
+      # Configure / Build / Bundle steps (which all run after this
+      # one) can find `meson` on PATH.
       - name: Install meson (for WebRTC APM prebuild)
         shell: bash
         run: |
@@ -401,12 +409,12 @@ jobs:
           user_scripts=$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme="posix_user"))')
           echo "[+] user scripts dir: $user_scripts"
           echo "$user_scripts" >> "$GITHUB_PATH"
-          if ! command -v meson >/dev/null 2>&1; then
-            echo "::error::meson not found on PATH after install"
+          if [ ! -x "$user_scripts/meson" ]; then
+            echo "::error::meson not found at $user_scripts/meson after install"
             python3 -m meson --version 2>/dev/null || true
             exit 1
           fi
-          meson --version
+          "$user_scripts/meson" --version
 
       - name: Prebuild WebRTC APM
         if: ${{ false }}  # see comment in the windows job above

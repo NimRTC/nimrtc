@@ -266,7 +266,13 @@ TEST_F(WebTransportSeamCompileOnly, datagram_facade_forwards_to_session) {
     // `datagram_facade.hpp` and the test pins it.
     nimrtc::web_transport::DatagramFacade facade(&session_);
 
-    constexpr std::array<std::uint8_t, 4> kPayload = {0xDE, 0xAD, 0xBE, 0xEF};
+    // The explicit std::uint8_t{} casts are required to keep
+    // -Wsign-conversion / -Wnarrowing quiet under the strict
+    // Linux gcc -Werror matrix: 0xDE is an `int` literal in
+    // C++20, and the array element type is `std::uint8_t`.
+    constexpr std::array<std::uint8_t, 4> kPayload = {
+        std::uint8_t{0xDE}, std::uint8_t{0xAD},
+        std::uint8_t{0xBE}, std::uint8_t{0xEF}};
 
     session_.set_state(nimrtc::web_transport::WebTransportState::kConnected);
     EXPECT_EQ(facade.send(kPayload), nimrtc::plugins::kOk);
@@ -283,7 +289,9 @@ TEST_F(WebTransportSeamCompileOnly, datagram_facade_with_null_session) {
     // error via the plugins::Status return value, matching the
     // seam's "no exceptions across the boundary" rule.)
     nimrtc::web_transport::DatagramFacade facade(nullptr);
-    constexpr std::array<std::uint8_t, 4> kPayload = {0x01, 0x02, 0x03, 0x04};
+    constexpr std::array<std::uint8_t, 4> kPayload = {
+        std::uint8_t{0x01}, std::uint8_t{0x02},
+        std::uint8_t{0x03}, std::uint8_t{0x04}};
     EXPECT_EQ(facade.send(kPayload),
               nimrtc::plugins::kErrInternal);
 }
@@ -305,7 +313,8 @@ TEST_F(WebTransportSeamCompileOnly, callbacks_accept_lambdas) {
             stream_data_called = true;
         };
 
-    constexpr std::array<std::uint8_t, 3> kBytes = {0xAA, 0xBB, 0xCC};
+    constexpr std::array<std::uint8_t, 3> kBytes = {
+        std::uint8_t{0xAA}, std::uint8_t{0xBB}, std::uint8_t{0xCC}};
     datagram_cb(kBytes);
     stream_data_cb(kBytes);
     EXPECT_TRUE(datagram_called);

@@ -575,13 +575,30 @@ jobs:
         run: |
           version="${{ github.ref_name }}"   # e.g. v1.0.0
           stripped="${version#v}"            # 1.0.0
+          export stripped
           # Match "## [X.Y.Z]" or "## [X.Y.Z-rc.N]" headings.
-          heading="\\[${stripped//./\\.}\\]"
-          awk -v heading="$heading" '
+          #
+          # NOTE on the awk pattern: GNU Awk 5.x warns that the escapes
+          # `\[`, `\.`, `\]` are implementation-defined and treats them
+          # as plain characters, which collapses `\[0\.14\.0\]` into
+          # the character class `[0.14.0]` (matches ANY of `0`, `.`,
+          # `1`, `4`).  That made every `## ` heading "match" the
+          # heading pattern and the `exit` branch was unreachable, so
+          # the entire CHANGELOG ended up in the release body (observed
+          # at v0.14.0 cut).  The fix is a `^## ` anchor + plain
+          # `index()` substring check that bypasses the regex engine
+          # entirely. `ENVIRON["stripped"]` reads the exported shell
+          # var into awk without going through -v (which would force a
+          # re-escape and reintroduce the same bug).
+          awk '
             BEGIN { keep = 0 }
             /^## / {
-              if ($0 ~ heading) { keep = 1; print; next }
               if (keep == 1)    { exit }
+              if (index($0, "## [" ENVIRON["stripped"] "]") > 0) {
+                keep = 1
+                print
+                next
+              }
             }
             keep == 1 { print }
           ' CHANGELOG.md > dist/release_notes.md

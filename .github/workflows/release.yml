@@ -471,9 +471,17 @@ jobs:
   # Publish: download all four artefacts, sign each one with the release
   # manager's GPG key, generate an SBOM, then draft the GitHub Release
   # with CHANGELOG.md content. Drafts can be edited before publish.
+  #
+  # `contents: write` is required by softprops/action-gh-release@v2 to
+  # create the Draft Release; the default GITHUB_TOKEN permission for
+  # this workflow is `contents: read` (see top of file), which makes
+  # the action fail with `Resource not accessible by integration (403)`
+  # (observed at v0.14.0 cut).
   # ---------------------------------------------------------------------------
   publish-release:
     name: release / publish
+    permissions:
+      contents: write
     needs:
       - build-windows
       - build-linux-gcc

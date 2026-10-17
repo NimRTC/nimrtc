@@ -211,7 +211,23 @@ jobs:
           $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
           # Use 7z (already on windows-2022) for deterministic xz output.
           7z a -ttar -so $staging | 7z a -txz -si $bundle
-          Get-FileHash $bundle | Tee-Object -FilePath "$bundle.sha256"
+          # `Get-FileHash` as a pipeline command writes a 3-column tabular
+          # line (Algorithm/Hash/Path) which is PowerShell-specific and not
+          # consumable by `sha256sum -c` on Linux/macOS downstream. Read
+          # the structured object's `.Hash` property instead, lowercase
+          # it, and write the bare hex (no `sha256:` prefix, no path) so
+          # the sidecar matches the `sha256sum -c` "binary" mode that
+          # the Linux/macOS jobs already produce. Detected at v0.14.0
+          # cut: the Windows sidecar was the odd one out and downstream
+          # verification (`sha256sum -c` against the published file)
+          # failed because the first token was the word "Algorithm" not
+          # a hex digest. The v0.14.0 release asset has been manually
+          # replaced with the correct bare-hex sidecar (using the OCI
+          # digest GitHub exposes on the asset object as the source of
+          # truth); this fix prevents the same regression in future cuts.
+          $hash = (Get-FileHash -Algorithm SHA256 $bundle).Hash.ToLower()
+          Set-Content -Path "$bundle.sha256" -Value $hash -NoNewline
+          Get-Content "$bundle.sha256"
 
       - name: Upload artefact bundle
         uses: actions/upload-artifact@v4

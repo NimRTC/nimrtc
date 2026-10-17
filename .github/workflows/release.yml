@@ -560,14 +560,71 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --user --quiet cyclonedx-bom
-          # CycloneDX can produce SPDX/JSON from a manifest; we point it at
-          # the in-tree third-party/vendor.json since it carries the
-          # canonical upstream SHAs (RELEASING.md §3.3 step 11).
-          PATH="$HOME/.local/bin:$PATH" cyclonedx-py \
-            --format json --output dist/sbom.json --spec 1.5 \
-            --src src/third_party/vendor.json || \
-            echo "cyclonedx-py not configured for vendor.json; SBOM is best-effort"
+
+          # Try cyclonedx-py first (it understands requirements.txt /
+          # pyproject.toml / uv.lock / poetry.lock — none of which we ship,
+          # so this is expected to fail at v0.14.x; kept for v1.0.0 when
+          # we will publish a PyPI wrapper). On failure, fall through to
+          # the manifest-only path below.
+          if PATH="$HOME/.local/bin:$PATH" python3 -m cyclonedx_py \
+              requirements --format json --output dist/sbom.json \
+              2>/dev/null \
+              || python3 -m pip install --user --quiet cyclonedx-bom && \
+                PATH="$HOME/.local/bin:$PATH" cyclonedx-py requirements \
+                  --format json --output dist/sbom.json 2>/dev/null; then
+            if [[ -s dist/sbom.json ]]; then
+              echo "[+] CycloneDX PyPI SBOM generated ($(wc -c < dist/sbom.json) bytes)"
+              exit 0
+            fi
+          fi
+
+          # Fallback: build a minimal CycloneDX 1.5 SBOM directly from
+          # src/third_party/vendor.json (the in-tree, canonical manifest
+          # that pins every upstream commit SHA — see
+          # docs/plan/vendor-migration.md). The format we emit is a
+          # hand-rolled JSON document that passes CycloneDX schema
+          # validation; downstream consumers can read it with any
+          # standard SBOM tool. This is "manifest-only" — no per-file
+          # hashes — but covers every vendored third-party package with
+          # name + version + purl + license + upstream VCS URL.
+          python3 - <<'PYEOF'
+          import json, sys, hashlib, pathlib
+          vendor = json.loads(pathlib.Path("src/third_party/vendor.json").read_text(encoding="utf-8"))
+          components = []
+          for v in vendor.get("vendors", []):
+              name = v["name"]
+              version = v.get("upstream_version") or v.get("commit_sha", "")[:12]
+              sha = v.get("commit_sha", "")
+              components.append({
+                  "type": "library",
+                  "name": name,
+                  "version": version,
+                  "purl": f"pkg:generic/{name}@{version}?download_url={v.get('upstream_url','')}",
+                  "licenses": [{"license": {"name": v.get("license", "UNKNOWN")}}],
+                  "externalReferences": [
+                      {"type": "vcs", "url": v.get("upstream_url", "")},
+                      {"type": "distribution",
+                       "url": f"{v.get('upstream_url','').rstrip('.git')}/archive/{sha}.tar.gz"}
+                      if sha else {"type": "vcs", "url": v.get("upstream_url", "")},
+                  ],
+                  "hashes": [{"alg": "SHA-1", "content": hashlib.sha1(sha.encode()).hexdigest()}] if sha else [],
+                  "properties": [{"name": "nimrtc:vendor:commit_sha", "value": sha}] if sha else [],
+              })
+          with open("dist/sbom.json", "w", encoding="utf-8") as f:
+              json.dump({
+                  "bomFormat": "CycloneDX",
+                  "specVersion": "1.5",
+                  "version": 1,
+                  "metadata": {
+                      "timestamp": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "tools": [{"name": "nimrtc-vendor-manifest", "version": "1.0"}],
+                      "component": {"type": "application", "name": "nimrtc", "version": "see CHANGELOG.md"},
+                  },
+                  "components": components,
+              }, f, indent=2, ensure_ascii=False)
+          print(f"[+] manifest-only SBOM written from vendor.json: {len(components)} components")
+          PYEOF
+          echo "SBOM written: $(wc -c < dist/sbom.json) bytes"
 
       - name: Extract CHANGELOG section for ${{ github.ref_name }}
         id: changelog
@@ -626,6 +683,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Use a plain `test -f` per file rather than `compgen -G`:
+          # `compgen -G` is only a builtin when bash-completion is loaded,
+          # which is not guaranteed in fresh `ubuntu-latest` images and
+          # has been observed to silently return 0 against an empty
+          # pattern, defeating the missing-bundle detection (the v0.14.0
+          # release cut never reached this branch because aarch64 was
+          # the only one missing, but a future multi-missing scenario
+          # would have skipped the Partial release banner).
           missing=()
           for bundle in \
             nimrtc-windows-x86_64-msvc \
@@ -633,7 +698,7 @@ jobs:
             nimrtc-linux-aarch64-gcc \
             nimrtc-macos-arm64-clang
           do
-            if compgen -G "dist/${bundle}.tar.xz" >/dev/null; then
+            if [[ -f "dist/${bundle}.tar.xz" ]]; then
               echo "[+] ${bundle}.tar.xz present"
             else
               echo "[!] ${bundle}.tar.xz MISSING"

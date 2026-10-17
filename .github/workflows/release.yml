@@ -295,6 +295,15 @@ jobs:
     needs: preflight
     runs-on: ubuntu-22.04-arm64
     timeout-minutes: 60
+    # GHA-hosted ARM64 runners have limited capacity; on busy days
+    # `ubuntu-22.04-arm64` jobs can sit in the queue for hours. Treat
+    # this job as best-effort: if it fails or never gets a runner,
+    # the publish job still ships the other 3 platforms (windows,
+    # linux-gcc, macos-clang). The aarch64 artefact is filled in
+    # later as a follow-up release when runner capacity returns.
+    # Also see publish-release's `if:` which lets publish run
+    # regardless of this job's result.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -468,8 +477,19 @@ jobs:
     needs:
       - build-windows
       - build-linux-gcc
-      - build-linux-aarch64
       - build-macos-clang
+      # build-linux-aarch64 is intentionally NOT in `needs:` — see the
+      # `continue-on-error: true` note on that job. GHA ARM64 runner
+      # capacity is unreliable (a 14+ hour queue is a real failure
+      # mode, not a hypothetical); making it a hard gate would block
+      # publishing the Windows / Linux x86_64 / macOS arm64 artefact
+      # trio. The aarch64 artefact is filled in later as a follow-up
+      # release when runner capacity returns. The download step below
+      # still picks up `nimrtc-linux-aarch64-gcc` if it was uploaded
+      # (download-artifact with `merge-multiple: true` grabs every
+      # artefact in the run regardless of `needs:`), and the Draft
+      # step uses `fail_on_unmatched_files: false` so a missing
+      # aarch64 bundle is non-fatal.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -576,6 +596,42 @@ jobs:
             } >> dist/release_notes.md
           fi
           echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Verify which platform bundles are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for bundle in \
+            nimrtc-windows-x86_64-msvc \
+            nimrtc-linux-x86_64-gcc \
+            nimrtc-linux-aarch64-gcc \
+            nimrtc-macos-arm64-clang
+          do
+            if compgen -G "dist/${bundle}.tar.xz" >/dev/null; then
+              echo "[+] ${bundle}.tar.xz present"
+            else
+              echo "[!] ${bundle}.tar.xz MISSING"
+              missing+=("$bundle")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            {
+              echo
+              echo "---"
+              echo
+              echo "> ⚠️ **Partial release — the following platform bundle(s)"
+              echo "> were not built in this run and are NOT in the published"
+              echo "> artefact set:**"
+              for m in "${missing[@]}"; do
+                echo "> - \`${m}\`"
+              done
+              echo "> Cause: GHA-hosted ARM64 runner capacity (14+ hour queue"
+              echo "> was observed at v0.14.0 cut) for \`ubuntu-22.04-arm64\`."
+              echo "> Follow-up release will ship the missing platform when"
+              echo "> runner capacity returns."
+            } >> dist/release_notes.md
+          fi
 
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v2

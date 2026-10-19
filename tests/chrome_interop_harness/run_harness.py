@@ -64,7 +64,12 @@ E2E_DIR.mkdir(parents=True, exist_ok=True)
 SIGNALING_SERVER  = ROOT / "interop" / "signaling" / "signaling_server.py"
 SIGNALING_PROXY   = ROOT / "interop" / "signaling" / "signaling_proxy.py"
 CHROME_HTML       = HARNESS_DIR / "chrome_dtls_only.html"
-CHROME_EXE        = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+# Default to system Chrome; allow override via env var so CI / dev machines
+# without Google Chrome (but with Playwright's bundled Chromium) can still
+# run Case E.  Example:
+#   NIMRTC_CHROME_PATH="C:\Users\me\AppData\Local\ms-playwright\chromium-1223\chrome-win64\chrome.exe"
+_CHROME_DEFAULT = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+CHROME_EXE = Path(os.environ.get("NIMRTC_CHROME_PATH", str(_CHROME_DEFAULT)))
 
 # demo-p2p binary — resolve using the same logic as run_e2e_acceptance.py.
 _NIMRTC_BUILD_DIR = Path(os.environ.get("NIMRTC_BUILD_DIR", BUILD_DIR))
@@ -235,11 +240,20 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
         # offerer — it generates the SDP offer that demo-p2p processes.
         # Bind to 0.0.0.0 so ICE candidates are reachable from Chrome.
         # We pass the full env dict so demo-p2p sees DTLS env vars.
+        # NIMRTC_PROXY_STDERR routes demo-p2p's stderr into our e2e dir
+        # so the harness can grep the DTLS-reached-Connected line below.
+        # Without this, the proxy's NimRTCSubprocess would write to its
+        # default path under interop/signaling/ and the harness would see
+        # only the proxy's own log (not demo-p2p's engine trace).
+        # proxy_err_path is set later in the file (Step 7) so we resolve
+        # the same path here to keep the two references in sync.
+        proxy_err_path = E2E_DIR / "case_e_proxy.err"
         proxy_env = dict(os.environ)
         proxy_env["NIMRTC_DTLS_SPKI_FILE"] = str(spki_file)
         proxy_env["NIMRTC_DTLS_TRACE"]      = str(nimrtc_trace)
         proxy_env["NIMRTC_DTLS_KEYLOG"]     = str(nimrtc_keylog)
         proxy_env["NIMRTC_DTLS_DUMP"]       = "1"
+        proxy_env["NIMRTC_PROXY_STDERR"]    = str(proxy_err_path)
 
         proxy_proc = subprocess.Popen(
             [
@@ -297,11 +311,13 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
         except ImportError:
             results["errors"].append(
                 "playwright not installed — run: pip install playwright && "
-                "python -m playwright install chromium")
+                "python -m playwright install chromium "
+                "(or set NIMRTC_CHROME_PATH to a system Chrome if you have one)")
             stop_all()
             return results
 
-        proxy_err_path = E2E_DIR / "case_e_proxy.err"
+        # proxy_err_path is resolved earlier (Step 5) so demo-p2p's
+        # stderr flows to the same file we now read.
 
         logger.info("Launching Chrome: %s", chrome_url)
         chrome_results: dict = {}

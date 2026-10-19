@@ -120,6 +120,12 @@ class NimRTCSubprocess:
             stdout=subprocess.PIPE,
             stderr=self._stderr_file,
             bufsize=0,                 # unbuffered for line-by-line read
+            # Set cwd to the directory containing demo-p2p.exe so Windows
+            # DLL search order finds the bundled msquic.dll sitting next
+            # to the binary.  Without this, demo-p2p exits with
+            # STATUS_DLL_NOT_FOUND (0xC0000135) when msquic.dll isn't on
+            # the inherited PATH.
+            cwd=str(self.binary.parent),
             # Inherit the proxy's environment and add optional debug toggles
             # so we can dump DTLS verify_data traces for Chrome interop
             # debugging without touching the test runner.  Set

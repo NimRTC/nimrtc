@@ -9,7 +9,7 @@
 //      - find() returns correct pointer for known names
 //      - find() returns nullptr for unknown names
 //   2. Profile invariants (each built-in)
-//      - kProfileTransport/kProfileSfu have empty plugin names where required
+//      - kProfileTransport/kProfileRelay have empty plugin names where required
 //      - kProfileAgent/kProfileTeleop have timeline_enabled=true
 //      - kProfileAgent/kProfileTeleop have datachannel_enabled=true
 //      - Scheduler mode is correct per profile

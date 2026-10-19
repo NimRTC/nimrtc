@@ -43,6 +43,7 @@ constexpr Status kErrBufferTooSmall= 0x1003;
 constexpr Status kErrCorrupt      = 0x1004;
 constexpr Status kErrUnsupported   = 0x1005;
 constexpr Status kErrHardwareError = 0x1006;  // GPU SDK / driver failure
+constexpr Status kErrClosed        = 0x1007;  // peer closed / reset / FIN
 constexpr Status kErrInternal      = 0x1FFF;
 
 /** Human-readable status message, may be nullptr. */
@@ -55,6 +56,7 @@ inline const char* status_string(Status s) noexcept {
         case kErrCorrupt:       return "corrupt data";
         case kErrUnsupported:   return "unsupported operation";
         case kErrHardwareError: return "hardware/driver error";
+        case kErrClosed:        return "closed";
         default:                return "unknown error";
     }
 }

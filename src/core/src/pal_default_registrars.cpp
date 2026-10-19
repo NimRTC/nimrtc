@@ -109,6 +109,13 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::sctp::register_default_plugins,
     &nimrtc::raw_udp::register_default_plugins,
     &nimrtc::transport::register_default_plugins,
+    // v0.14.0-beta.1 (ADR-014): WebTransport / QUIC seam factory.
+    // Produces IWebTransportSession instances backed by msquic (MIT-licensed,
+    // Windows-first, cross-platform). Registered alongside the transport-layer
+    // seams above so `register_all_default_plugins()` covers the full
+    // transport stack. The web_transport module links nimrtc::vendor::msquic
+    // so callers that don't need WebTransport don't need to link it.
+    &nimrtc::web_transport::register_default_plugins,
 };
 
 // ---------------------------------------------------------------------------

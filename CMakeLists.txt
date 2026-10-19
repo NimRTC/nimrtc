@@ -226,6 +226,7 @@ add_subdirectory(src/sctp)     # SCTP seam (Transport PAL Slice 5; SEAM ONLY in 
 add_subdirectory(src/dtls)     # DTLS seam (Transport PAL Slice 4; v0.11.0)
 add_subdirectory(src/raw_udp)  # Raw-UDP bypass seam (Transport PAL Slice 6; v0.11.0)
 add_subdirectory(src/transport) # Transport stack + Selector (Transport PAL Slice 7; v0.11.0)
+add_subdirectory(src/web_transport) # WebTransport / QUIC seam (v0.14.0-beta.1, ADR-014)
 add_subdirectory(src/modules)  # Concrete module implementations
 
 # nlohmann_json 3.11.3 (used by the assembly module for JSON profile loading).

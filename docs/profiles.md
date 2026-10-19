@@ -15,8 +15,8 @@ and diff-reviewed in pull requests.
 | `transport` | embedded ICE transport gateway | none | none | none | none | no | pure SRTP passthrough; no L2 processing |
 | `agent` | AI Agent SDK (1:1 voice/text) | adaptive / low_latency / 30 ms | webrtc_apm | opus | aimd (.5/5 Mbps) | yes | timeline + DC for Agent observability |
 | `teleop` | robot teleoperation | adaptive / low_latency / 20 ms | none | opus | aimd (2/20 Mbps) | yes | control_weight=20 (twice call's 10); strict-priority |
-| `sfu` | server-side SFU forwarding | none | none | none | none | no | `sfu_enabled` marker; `max_sessions_per_engine`=32 |
-| `sfu-agent` | SFU + AI Agent hybrid (N:1) | none (relay) | webrtc_apm (Agent side) | none (relay) | none (relay) | yes | `sfu_enabled`+`agent_gateway_enabled` markers; timeline re-calibration on egress |
+| `relay` | server-side relay gateway (forwarding) | none | none | none | none | no | `relay_enabled` marker; `max_sessions_per_engine`=32 |
+| `relay-agent` | relay + AI Agent hybrid (N:1) | none (relay) | webrtc_apm (Agent side) | none (relay) | none (relay) | yes | `relay_enabled`+`agent_gateway_enabled` markers; timeline re-calibration on egress |
 | `agent-gateway` | server-side Agent media gateway | adaptive / low_latency / 30 ms | webrtc_apm (tap surface) | opus | aimd (.5/5 Mbps) | yes | exposes pre/post-3A PCM tap for ASR / wake-word / VAD |
 | `agent-low-latency` | Agent SDK's lowest-latency variant | adaptive / low_latency / 20 ms | webrtc_apm (AGC off) | opus (FEC off) | aimd (.5/5 Mbps) | yes | `agent_low_latency` marker; AGC level estimator off; Opus FEC off |
 
@@ -41,12 +41,15 @@ timeline (for mouth-to-ASR latency tracking).
 scheduler with control_weight=20 ensures control commands preempt
 everything else. 20 ms JB initial delay is the tightest v1.0 option.
 
-**`sfu`** — In-process SFU middlebox that forwards SRTP between
-participants without decoding media. `sfu_enabled=true` is the marker; the
+**`relay`** — In-process relay gateway that forwards SRTP between
+participants without decoding media. `relay_enabled=true` is the marker; the
 loader (per ADR-010) treats it as loader-agnostic metadata. Pair with the
-SFU transport-stack plugin via `core::PluginRegistry::get_transport_stack`.
+relay transport-stack plugin via `core::PluginRegistry::get_transport_stack`.
 
-**`sfu-agent`** — SFU + AI Agent hybrid. The relay direction skips L2
+**Note:** The name "relay" describes capabilities, not a conference server.
+To compose an SFU, combine multiple relay engines with a routing layer.
+
+**`relay-agent`** — relay + AI Agent hybrid. The relay direction skips L2
 processing; the Agent side keeps WebRTC APM so the Agent pipeline can
 subscribe to cleaned PCM via the post-3A tap. Timeline re-calibration on
 egress so downstream consumers see a stable NTP↔RTP-TS mapping across the
@@ -66,11 +69,11 @@ variable compute cost breaks sub-frame latency tracking), Opus FEC off
 
 ## Schema version
 
-- **v1.0** — `call` / `live` / `transport` / `agent` / `teleop` / `sfu`.
+- **v1.0** — `call` / `live` / `transport` / `agent` / `teleop` / `relay`.
   Full schema lives in [ADR-010](../docs/adr/ADR-010-profile-json-format.md).
-- **v1.1** (PROFILE-1, v0.11.0) — adds `sfu-agent` / `agent-gateway` /
+- **v1.1** (PROFILE-1, v0.11.0) — adds `relay-agent` / `agent-gateway` /
   `agent-low-latency` and the **additive** v1.1 markers
-  `sfu_enabled` / `agent_gateway_enabled` / `agent_low_latency` /
+  `relay_enabled` / `agent_gateway_enabled` / `agent_low_latency` /
   `max_sessions_per_engine` / `audio3a_name_explicit`. Loader-agnostic —
   the C++ loader ignores them (see ADR-010 §"Schema v1.1 incremental
   fields"). Engines that care consult these markers at composition time.
@@ -102,8 +105,8 @@ corresponding `kProfile<Name>` constant in
 [`profiles.hpp`](../src/modules/assembly/include/nimrtc/assembly/profiles.hpp).
 The invariant is enforced by
 [`AssemblyTest.JsonFileMatchesBuiltinConstant`](../src/modules/assembly/tests/test_assembly.cpp)
-— any drift (e.g. an edit to `profiles/sfu.json` without updating
-`kProfileSfu`) fails the build.
+— any drift (e.g. an edit to `profiles/relay.json` without updating
+`kProfileRelay`) fails the build.
 
 ## Adding a new profile
 

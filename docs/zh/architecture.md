@@ -71,7 +71,7 @@ flowchart LR
 | 客户端 SDK | 桌面 / 移动端 SDK，嵌入宿主 App | 音视频应用、协同办公 | ✅ P1 起（传输先行） |
 | 嵌入式 / 网关 | 仅传输层的裁剪构建 | 对讲、IPC、边缘网关 | ✅ 架构支持，P1 出体积基线 |
 | 服务端 in-process SFU | 库形态的转发引擎，嵌入业务进程 | 房间型会议、直播转推、录制网关 | ✅ P2 |
-| AI Agent 实时交互（语音 / 多模态） | 服务端形态：媒体网关 / transceiver，或 SFU 中 Agent 作为参与者（Profile 见 §2.6 `agent-gateway` / `sfu-agent`）；SDK 形态 Agent 终端（Profile `agent`） | 实时语音 Agent、智能客服、Agent 应用 | ✅ P2（DataChannel 互通 + 媒体网关）/ P3（时间线 + 模型输入原语完整） |
+| AI Agent 实时交互（语音 / 多模态） | 服务端形态：媒体网关 / transceiver，或 relay 中 Agent 作为参与者（Profile 见 §2.6 `agent-gateway` / `relay-agent`）；SDK 形态 Agent 终端（Profile `agent`） | 实时语音 Agent、智能客服、Agent 应用 | ✅ P2（DataChannel 互通 + 媒体网关）/ P3（时间线 + 模型输入原语完整） |
 | 机器人 / 无人设备遥操作 | 设备端 SDK + 远控端 SDK（共用共享核心，Profile `teleop`） | 巡检、物流、危险作业、远程维修 | ✅ P2 起（DC + 调度）/ P4 完整 |
 | 自动驾驶远程接管 / 云控 | 车端 SDK + 云控平台 | Robotaxi / 集卡 / 矿山港口（外部标准见 §8.1） | ✅ 架构支持，P4 交付 |
 | 云游戏 / 云渲染串流 | 渲染端 SDK（服务端形态）+ 玩家端 SDK（客户端形态） | 云游戏平台、3D 应用串流、XR 远端渲染 | ✅ P3（随 teleop 族进官方 Profile 组合，见 §2.6） |
@@ -161,7 +161,7 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 | audio3a | nimrtc_audio3a | 3A 抽象（内置 passthrough + 基础降噪 / 可关 / 第三方） | ✅ P1 |
 | session | nimrtc_session | 会话编排、SDP 生成/解析、Track/Stream | ✅ P1 |
 | assembly | nimrtc_assembly | **场景装配**：Profile 注册表 + Engine::Builder，把各接缝实现按场景绑定；运行期受限重配 | ✅ P1 骨架 / P2 Profile 库 |
-| sfu | nimrtc_sfu | **服务端形态**：in-process 转发引擎（裸 RTP 收转发） | ⏸ P2 |
+| relay | nimrtc_relay | **服务端形态**：in-process 转发引擎（裸 RTP 收转发） | ⏸ P2 |
 | device | nimrtc_device | **客户端形态**：采集 / 播放抽象（ALSA/CoreAudio/AAudio/WASAPI） | ⏸ 插件化，后期 |
 
 ### 2.4 目录骨架（草案）
@@ -209,7 +209,7 @@ nimrtc/
 | 层次 | 时机 | 机制 | 可换范围 | 典型例子 |
 |---|---|---|---|---|
 | 构建期 | 编译时 | CMake 裁剪（§2.2 规则 3） | 形态级：客户端 / 服务端 / 纯传输 | 嵌入式传输网关 = `L0+L1`，不含任何媒体模块 |
-| 装配期 | `Engine::Create` 时 | `Builder` + Profile 绑定各接缝实现 | 引擎级默认组合 | 一个进程默认 `sfu` Profile；另一进程按 `teleop` Profile 起网关 |
+| 装配期 | `Engine::Create` 时 | `Builder` + Profile 绑定各接缝实现 | 引擎级默认组合 | 一个进程默认 `relay` Profile；另一进程按 `teleop` Profile 起网关 |
 | 会话边界 | 每会话 / 每轨道创建 | 会话携带自身 Profile，或继承引擎默认 | **同一进程内不同会话跑不同实现** | 同一引擎内 会话 A = 通话，会话 B = 遥操作，互不干扰（依赖 D3 无全局状态） |
 | 运行期 | 会话进行中 | **受限**：显式 `Reconfigure` / 流重建 | 仅两类接缝（见下） | 弱网场景切换调度策略；握手前换 crypto 后端 |
 
@@ -224,11 +224,11 @@ nimrtc/
 | ptt | 半双工对讲 / 集群 | Goog-CC 主线 | 对讲档（延迟优先） | 可关 | 音频优先 | 关 | 国际 |
 | agent | AI Agent 实时交互（**SDK 形态：Agent 终端**） | Goog-CC 主线 | 低延迟通话档 | 内置（流式） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语（§8.7）** | **帧级开** | 国际 |
 | **agent-gateway** | AI Agent 实时交互（**服务端形态：媒体网关 / transceiver**，直连 1:1 Agent） | Goog-CC 主线 | **无 L2（网关侧不解码可选旁路解码 + 模型输入 tap）** | 透传（模型侧处理） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语** | 帧级开 | 国际 |
-| **sfu-agent** | AI Agent 实时交互（**SFU 形态：Agent 作为 SFU 参与者**，控制/事件 DC 选择性转发） | 无（转发跳过 L2） | 无 | 无（透传） | 转发公平 + **DC 转发策略（按消息流声明的转发标签转发）** | 帧级开 + **重新校准**（不让时间戳随 hop 漂移） | 国际 |
+| **relay-agent** | AI Agent 实时交互（**relay 形态：Agent 作为 relay 参与者**，控制/事件 DC 选择性转发） | 无（转发跳过 L2） | 无 | 无（透传） | 转发公平 + **DC 转发策略（按消息流声明的转发标签转发）** | 帧级开 + **重新校准**（不让时间戳随 hop 漂移） | 国际 |
 | teleop | 机器人 / 无人设备遥操作 | Goog-CC 主线 | 低延迟通话档 | 关或第三方 | **严格优先级（指令插队）+ DC 不可靠无序 + TTL 丢旧保新** | **帧级 + 样本级** | 国际 / 国密可选 |
 | takeover | 自动驾驶远程接管 / 云控 | 同 teleop（多路视频） | 低延迟通话档 | 关或第三方 | 同 teleop + 高频心跳 / dead-man | 帧级 + 样本级 | **国密（SM）+ 双链路** |
 | cloudgame | 云游戏 / 云渲染串流（teleop 族） | **高码率主线**（视频即体验本体，降级坡度缓） | 低延迟档（下行为主） | 关（无采集端） | 同 teleop（输入严格优先级 / 丢旧保新）+ **上行高频状态流原语** | **帧级（输入↔渲染帧）** | 国际 |
-| sfu | 服务端转发 | 无（转发跳过 L2） | 无 | 无 | 转发公平 | 关 | 国际 |
+| relay | 服务端转发 | 无（转发跳过 L2） | 无 | 无 | 转发公平 | 关 | 国际 |
 | transport | 嵌入式 / 传输网关 | 无（`L0+L1`） | 无 | 无 | 极简 | 关 | 国际 / 国密可选 |
 
 - Profile 是**默认推荐 + 可覆盖**：上层可继承官方 Profile 再单点覆盖某条接缝（"teleop 但 3A 用第三方"），不设硬编码模式。**Profile JSON schema 见 [ADR-010](docs/adr/ADR-010-profile-json-format.md)**；接缝后端由 PAL resolver 注入（Slice 1 见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)）。
@@ -257,7 +257,7 @@ nimrtc/
 | D6 | 时钟全抽象：媒体时钟 / RTP 时间戳 / 系统时钟解耦 | 单测可模拟时间；嵌入式时钟漂移可控 | — |
 | D7 | SDP 独立模块，不绑定会话状态机 | 可单独复用（信令网关、录制分析） | — |
 | D8 | **数据面发送严格优先级调度**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽，绝不让媒体排挤控制 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
-| D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `sfu-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明） |
+| D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明） |
 | D10 | **场景装配与切换纪律**：实现选择只发生在 构建期 / 装配期 / 会话边界 三处 + 运行期显式 `Reconfigure`；有内部状态的模块（JB / BWE / 3A）禁止静默热换（走 Pause→Drain→Rebind→Resume 或流重建）；Profile 官方组合每场景仅一条高质量主线 | "多场景 = 多实现"若无纪律会退化成组合爆炸，运行期乱换实现会静默丢状态 | 集中在 assembly 模块 + 显式 API；切换事件全部进统计（§9） |
 | D11 | **PAL Slice 1 — engine plugin resolver seam**：`engine.cpp` 通过 `pal::resolve_*` 内联 forwarder 走 `core::PluginRegistry`，公开 API 字节一致；Slice 2/3 进 v0.10.x 补丁轨道 | 详 [ADR-009](docs/adr/ADR-009-pal-slice-1.md) + [PAL 架构](docs/plan/pal-architecture.md) §4 | Slice 1 是 ~50 LOC 薄 alias，后续 API 演化成本随 transitive 依赖放大 → header-only + 字节级向后兼容 |
 | D12 | **JSON 作为声明式 Profile 一等公民**：与 C++ Builder 同等 first-class；现有 `profiles/*.json` 固定 schema v1.0；schema 变更遵循 SemVer（任何 break → 升 MINOR） | 详 [ADR-010](docs/adr/ADR-010-profile-json-format.md) + §2.6 Profile 表 | 双格式长期维护成本（CI 校验 json↔builder 一致） |
@@ -338,21 +338,21 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 - 转发路径走 D5 引用计数 Buffer + 零拷贝；提供 `sfu-relay` 压测工具，产出可复现的 pps / Mbps 基准（§14）。
 - RTCP 可扩展，允许注册自定义反馈类型（为私有 QoE 反馈、国密扩展留口）。
 
-### 7.1 DC / 控制消息 / 时间线在 SFU 中的转发语义（P2 起，呼应 §2.6 `sfu-agent` Profile）
+### 7.1 DC / 控制消息 / 时间线在 relay 中的转发语义（P2 起，呼应 §2.6 `relay-agent` Profile）
 
 > **SFU 不只是 RTP 转发器**——AI Agent / 遥操场景里，SFU 形态也跑控制消息，行为必须可声明、可观测。下列语义与 §2.6 Profile 表对齐，引擎不替上层做"是否转发"的策略决策，只提供原语与默认值。
 
-- **媒体转发**：裸 RTP 收转发，`L0 + L1 + L3` 即可（不依赖 L2）；与 §2.6 `sfu` Profile 一致。
+- **媒体转发**：裸 RTP 收转发，`L0 + L1 + L3` 即可（不依赖 L2）；与 §2.6 `relay` Profile 一致。
 - **DataChannel 转发策略**：
   - DC 消息按消息流声明的 **转发标签**（forward-tag = `all` / `none` / `selector`）决定是否跨参与者转发，默认 `all`（普通聊天）。
   - SFU **不做内容审计**（审计是上层应用的事；引擎只按"标签 + QoS 声明"转发，呼应 §1.4 non-goal）。
   - 选择性转发场景（如 AI Agent 作为 SFU 参与者时只让工具调用事件到指定 peer）通过 `selector` 标签 + 上层策略文件实现。
 - **时间线在 SFU 中的处理**：
-  - **不重新校准**：`sfu` Profile 默认转发透传时间戳，避免多 hop 漂移。
-  - **`sfu-agent` Profile 按需校准**：Agent 网关需给下游模型稳定时间基准时，由 SFU 在出口侧打"参考 NTP↔RTP ts 重新映射"（避免累积漂移）。
+  - **不重新校准**：`relay` Profile 默认转发透传时间戳，避免多 hop 漂移。
+  - **`relay-agent` Profile 按需校准**：Agent 网关需给下游模型稳定时间基准时，由 relay 在出口侧打"参考 NTP↔RTP ts 重新映射"（避免累积漂移）。
 - **RTCP 转发**：
   - SR/RR 默认透传；**自定义 RTCP 反馈**（私有 QoE / 国密扩展）按 Profile 决定 SFU 是否合并 / 重写。
-- **AI Agent 作为参与者的特殊行为**（呼应 §2.6 `sfu-agent`）：
+- **AI Agent 作为参与者的特殊行为**（呼应 §2.6 `relay-agent`）：
   - **模型输入 PCM tap 旁路**（§8.7）：SFU 形态的 Agent 也可通过 RTP 解码旁路 tap，**无需上层在每个 peer 端都接解码**。
   - **心跳 / dead-man 由 Profile 控制**：takeover Profile 强制心跳，不在 SFU 层强制；其它 Profile 默认不上心跳逻辑。
 
@@ -412,7 +412,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 - **命令-画面关联**：控制消息可携带 `ref_frame`（"我依据哪一帧决策 / 下达"），遥操作端与 AI Agent 都能实现对所见画面发指令（"所见即所控"）；
 - **E2E 时延分解**：导出 采集 → 入网 → 出网 → 渲染 各跳时延事件，供上层显示与校准；
 - **三种对齐粒度**：会话级（建立共享参考时钟，一次校准全程复用）／帧级（命令挂帧号，AI 场景主用）／样本级（控制-执行精确对准，机械臂 / 线控执行器）；
-- **按场景开启 / 关闭**：timeline 接口在架构中默认就位（D9），按 Profile 开启——`call` / `live` / `ptt` / `sfu` / `transport` 默认关；`agent` / `agent-gateway` / `sfu-agent` / `teleop` / `takeover` / `cloudgame` 默认开。关闭路径仍可编译通过、零运行时开销（不解析 SR、不挂帧级事件）。
+- **按场景开启 / 关闭**：timeline 接口在架构中默认就位（D9），按 Profile 开启——`call` / `live` / `ptt` / `relay` / `transport` 默认关；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` 默认开。关闭路径仍可编译通过、零运行时开销（不解析 SR、不挂帧级事件）。
 
 ### 8.5 遥操作可靠性与接管（引擎边界）
 
@@ -432,7 +432,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 - 分期：**P1** 发送调度契约（sched 接口）+ DataChannel API 入口（无 SCTP 实现，先定接口与 QoS 语义）；**P2** timeline 接口 + DataChannel 基础互通（usrsctp 接入）+ 调度实现 + assembly Profile 库 + 模型输入 PCM tap 原语（P2 首项 §8.7）；**P3** 部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API + cloudgame 官方 Profile 组合；**P4** 双链路 / 接管方案完整化交付。
 - 指标（§14 量化目标）：引擎单跳处理预算、控制不被挤占、时间线精度——全部【待实测】，禁止先写数字。
 
-### 8.7 模型输入原语（P2 起，呼应 §2.6 `agent` / `agent-gateway` / `sfu-agent` Profile）
+### 8.7 模型输入原语（P2 起，呼应 §2.6 `agent` / `agent-gateway` / `relay-agent` Profile）
 
 > AI Agent 硬需求是"音频流式入模型（不等整段）"。通用 codec 注入接口（§6）只覆盖"宿主 / 插件接外部解码器"，**没覆盖"模型订阅解码后 PCM 的稳定 hook"**。本节定义这个 hook 的位置与语义——避免每个上层 Agent 各自重写解码后 → 模型输入 的胶水代码，并保证 PCM 与时间线 / 3A 顺序不脱钩。
 
@@ -441,8 +441,8 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
   - **post-3a tap**（3A 后）：模型拿到的是"通话后的干净 PCM"，省去模型端重复做信号处理。
 - **API 形态**：`AudioSink` 抽象，支持回调（低延迟）或异步队列（批处理友好）；与 §9 统计事件同端口，可观测。
 - **时序保证**：tap 数据携带 timeline 标量（`capture_ts` / `frame_seq`），模型端拿到的每段 PCM 都可对齐"原始哪一帧、什么时间"，与 §8.4 帧级原语同源。
-- **SFU 形态**：在 `sfu-agent` Profile 下，SFU 可选旁路解码（`agent-gateway` 路径，呼应 §7.1）→ 同一 tap 接口暴露给 Agent——避免每个 peer 端都做解码。
-- **分期**：**P2 接口首项 + §13 P2 内容列加 `audio sink 原语` + Profile `agent-gateway` / `sfu-agent` 入官方组合**；P3 与 timeline 联动（命令挂帧号 + 模型输入帧号对齐）。
+- **relay 形态**：在 `relay-agent` Profile 下，relay 可选旁路解码（`agent-gateway` 路径，呼应 §7.1）→ 同一 tap 接口暴露给 Agent——避免每个 peer 端都做解码。
+- **分期**：**P2 接口首项 + §13 P2 内容列加 `audio sink 原语` + Profile `agent-gateway` / `relay-agent` 入官方组合**；P3 与 timeline 联动（命令挂帧号 + 模型输入帧号对齐）。
 - **不做的**：模型框架绑定（不做 OpenAI Realtime / 豆包特定适配，仅提供 PCM tap；上层业务按需接 ASR / LLM）。
 
 > **呼应 §1.4 non-goal**：本节是"引擎原语"，**不做 Agent 网关产品**、**不做模型适配胶水**。上层应用基于此 tap 组合自己的 Agent / ASR / LLM 接入（与 §7.1 边界一致）。
@@ -732,7 +732,7 @@ third_party/
 | **P1 传输 MVP** | ICE+DTLS+SRTP+RTP/RTCP+SDP+会话编排；**最小可用 JitterBuffer(固定窗口)+ 基础 3A(降噪/Passthrough) + BWE 默认(固定/AIMD)**；**L1 sched 接口（发送调度契约，无 SCTP 调度实现）** + DataChannel API 入口（仅接口与 QoS 语义，无 SCTP 实现）；内存帧源 + 宿主编解码注入接口（最小形态）；assembly 骨架（Builder + Profile 注册表）；echo-loopback；**aarch64 最小构建验证（编译验证，非互通验证，参见 §13.1）** | **Chrome ↔ NimRTC P2P 音/视频互通（Tier 0，x86_64 优先，aarch64 编译可过 ≠ 互通可过）+ 通话体验可用（无明显卡顿 / 噪声，量化口径见 §14）** + Quick Start 成立；README 6 段式首屏就位（§16.2）；Logo / Social Preview / Badges 就位（§16.4）；英文 README 落地、中文镜像 `README.zh-CN.md` 同步；**aarch64 编译产物 + Dockerfile 跨平台镜像**（呼应 §16.6） | **首次 public（Tech Preview）** |
 | **v0.13.0**（= v1.0.0-alpha.1 内部别名，见 `docs/plan/v0.13-plan.md` §1 + ADR-015）| **API 稳定性框架**：`NIMRTC_API_VERSION` 宏 + `NIMRTC_API_STABLE / UNSTABLE / DEPRECATED(msg)` 标注 + `nimrtc::core::api_version::*` 命名空间镜像；**89 个 public header 全部加稳定性分类标注**；**P1 UAF-DTLS `weak_ptr` 类型系统级加固**（`ITransportStack::dtls_weak()` + 14 处 engine `.lock()` + `v013_dtls_weak_expires_after_close` 回归测试）；**PAL Slice 1.5**（`pal::MakePluginOpts` 命名参数结构 + C++20 `auto Resolver` 模板 + 9 处 `engine.cpp` call site 迁移 + 6 个 `pal::resolve_*` forwarder） | windows-msvc + linux-gcc 本地 CI 双绿；macos-clang + linux-aarch64 跟随 `release.yml` 在 tag push 时验证；`tests/test_api_classification` 2/2 PASS（`headers=89 stable=107 unstable=6 deprecated=8 missing=0`）；`NIMRTC_API_VERSION_PRE_RELEASE = "alpha.1"`；**零**公共符号被标 DEPRECATED；**零**既有公共符号被修改或移除；公共 `NimRTCEngine` API 与 v0.12.0-post1 字节级一致 | 二次发布：Git tag `v0.13.0` 在 message body 标注 `v1.0.0-alpha.1` 别名；v0.x 线 "Tech Preview" banner 保持；首次以 `NIMRTC_API_*` 宏公开承诺 API 稳定性分类 |
 | **v0.14.0**（= v1.0.0-alpha.2 别名，见 `docs/plan/v0.14-plan.md` §2.1.1 + `docs/plan/v1.0-plan.md` §12.3.2 + ADR-014）| **WebTransport / QUIC 纯虚接口 seam**（`src/web_transport/include/nimrtc/web_transport/`：`IWebTransportSession` + `IBidirectionalStream` / `IUnidirectionalStream` + `DatagramFacade` + `IWebTransportSessionFactory`）；**PluginRegistry 新增 `web_transport_` 类型化 slot**（`register_web_transport` / `get_web_transport` / `list_web_transports` + `NIMRTC_REGISTER_WEB_TRANSPORT` 静态注册宏，与 DTLS / SCTP / raw_udp / transport-stack 4 个 factory slot 对称）；**NIMRTC_API_VERSION_PRE_RELEASE 由 `alpha.1` 升 `alpha.2`**；**DTLS Case D 片段重装器**（`DtlsHandshakeReassembler`，pure C++，无 wolfSSL 依赖；按 `msg_seq` 缓存入站 DTLS Handshake 记录；RFC 6347 §4.2.4 60 s 重传窗口内 5 s TTL GC；解决 Chrome `ClientHello` 跨多 record 拆分导致的 e2e 静默 drop）；**compile-only `test_web_transport_seam`** + `test_engine_plugin_loading` 加 2 个 alpha.2→beta.1 过渡护栏 | windows-msvc + linux-gcc 本地 CI 双绿（PR #19 retry 后均过，3m6s / 4m36s）；`test_web_transport_seam` 通过（接口良构 + v1.0-plan §10.4 默认值匹配 + enum round-trip）；`test_dtls_handshake_reassembler` 8/8 subtest + `test_dtls_replay_chrome_hello` 通过（1438 B `ClientHello` 端到端消费 + `HelloVerifyRequest` 发出 + 握手越过旧静默 drop 行为点）；`test_sctp_usrsctp` 4/4 Linux 平台 PASS（Windows / macOS 由 `__APPLE__` / `_WIN32` 平台守卫跳过，60 s 握手超时仅作 Linux 防御性上限，flake 已被 PR #19 retry 收口）；macos-clang / linux-aarch64 仍是 GHA runner capacity 跟随 `release.yml` 在 tag push 时验证（PR #19 4 平台 CI gate #6 实质满足，capacity 卡 8 h 已主动 cancel 释放 runner） | 三次发布：Git tag `v0.14.0` 在 message body 标注 `v1.0.0-alpha.2` 别名；v0.x 线 "Tech Preview" banner 保持；首次以 `IWebTransportSession` seam 公开承诺 v0.14.0-beta.1 落地路径；CHANGELOG `[0.14.0]` 段从 `Unreleased` 切到 `2026-10-16`，CMake `project(VERSION 0.14.0)`；无公共 API 移除 / 变更，仅新增 `web_transport_*` 命名空间与 `IWebTransportSession` 头文件 |
-| **P2 SFU 转发 + 数据通道 + Agent 接入** | in-process 转发引擎 + sfu-relay 压测；**DataChannel 基础互通（可靠 / 不可靠，usrsctp）+ L1 发送调度实现 + DC 转发策略（§7.1）**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（sfu / transport / agent / agent-gateway / sfu-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通；**Chrome ↔ NimRTC DataChannel 双向互通**；控制消息在视频拥塞下不被挤占的本地演示；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；pps/Mbps 基准可复现；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
+| **P2 relay 转发 + 数据通道 + Agent 接入** | in-process 转发引擎 + sfu-relay 压测；**DataChannel 基础互通（可靠 / 不可靠，usrsctp）+ L1 发送调度实现 + DC 转发策略（§7.1）**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（relay / transport / agent / agent-gateway / relay-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通；**Chrome ↔ NimRTC DataChannel 双向互通**；控制消息在视频拥塞下不被挤占的本地演示；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；pps/Mbps 基准可复现；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
 | **P3 客户端质量成熟 + 控制面语义** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；**cloudgame 进入官方 Profile 组合**（随 teleop 族：高码率主线 + 输入↔渲染帧对齐，见 §2.6(b)） | API 趋于稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 beta 不再心虚；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Beta） |
 | **P4 生产化 + 遥操作交付 + 国密** | 安全审计、QoE 数据、首个真实用户；**双链路 / 接管框架完整化**；国密后端 + 信创适配矩阵 | "可用于生产"不再心虚；完成首次外部安全审计；嵌入式 / 政企 / 关基行业场景下首个公开参考交付 | public（生产可用） |
 
@@ -755,7 +755,7 @@ third_party/
 | 指标 | 目标 | 状态 |
 |---|---|---|
 | 传输层最小集静态库体积（ICE+DTLS+SRTP+RTP，无媒体） | < 1 MB（stripped，随后端波动） | 【待实测】 |
-| SFU 单实例转发吞吐 | pps / Mbps 上限 + 零拷贝路径占比 | 【待 sfu-relay 压测】 |
+| relay 单实例转发吞吐 | pps / Mbps 上限 + 零拷贝路径占比 | 【待 sfu-relay 压测】 |
 | 全新环境全量构建时间（CI 机） | < 10 min | 【待测】 |
 | 单模块单测耗时 | < 2 min | 【待测】 |
 | 转发路径整帧拷贝次数 | 0（引用计数 + 切片） | 架构约束，代码走查验证 |
@@ -870,7 +870,7 @@ python3 apps/demo-p2p/signaling_demo.py
 # Connect → you should see 2-way audio/video loopback
 
 # See profiles/ for scene configurations:
-#   call · live · ptt · agent · teleop · takeover · cloudgame · sfu · transport
+#   call · live · ptt · agent · teleop · takeover · cloudgame · relay · transport
 ```
 
 > **Demo signaling**：minimal Python/Node script included; **not production-grade**.
@@ -911,11 +911,11 @@ backend at build or assembly time.
 | `ptt`           | Half-duplex push-to-talk              | Goog | PTT  | off | audio-first       | off              |
 | `agent`         | AI agent realtime (voice/multimodal)  | Goog | low  | on  | control > media   | frame-level      |
 | `agent-gateway` | AI agent realtime (server gateway)    | Goog | none | pass | control > media  | frame-level      |
-| `sfu-agent`     | AI agent as SFU participant           | —    | —    | —   | fair + DC policy  | frame + recalib  |
+| `relay-agent`   | AI agent as relay participant           | —    | —    | —   | fair + DC policy  | frame + recalib  |
 | `teleop`        | Robot/UAV teleoperation               | Goog | low  | off | strict priority   | frame+sample     |
 | `takeover`      | Autonomous vehicle remote takeover    | Goog | low  | off | strict + dual-link | frame+sample     |
 | `cloudgame`     | Cloud rendering/streaming             | high | low  | off | strict + input    | frame (input↔render) |
-| `sfu`           | Server forwarding                     | —    | —    | —   | fair              | off              |
+| `relay`         | Server forwarding                   | —    | —    | —   | fair              | off              |
 | `transport`     | Embedded gateway (L0+L1 only)         | —    | —    | —   | minimal           | off              |
 ```
 
@@ -1113,10 +1113,10 @@ Maintainer（模块合并权 + CODEOWNERS）
 
 **v0.12 修订（目标-架构对齐审视 + 8 项修复）**：
 - **§1.1 / §1.3 AI Agent 叙事提前**：主定位句加 P 阶段限定；§1.3 AI Agent 行细化；
-- **§2.6 Profile 表补** `agent-gateway`（媒体网关形态）与 `sfu-agent`（SFU 形态）两行；
+- **§2.6 Profile 表补** `agent-gateway`（媒体网关形态）与 `relay-agent`（relay 形态）两行；
 - **§7 SFU 章节扩 §7.1**：DC 转发策略、时间线在 SFU 中的处理、RTCP 透传与合并；
 - **D9 + §8.4 timeline 措辞协调**：默认就位、按场景开启；
 - **新增 §8.7 模型输入原语**：pre-3a / post-3a 双 tap 接口；
 - **§14 增加 P1 客户端体验指标**；
 - **§13.1 aarch64 互通口径**诚实分层（编译可过 ≠ 互通可过）；
-- §16.2 README Profile 表加 `agent-gateway` / `sfu-agent` 两行。
+- §16.2 README Profile 表加 `agent-gateway` / `relay-agent` 两行。

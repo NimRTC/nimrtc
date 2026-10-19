@@ -74,7 +74,7 @@ NimRTC's bet is a four-layer compile-time split:
 
 ```
 L3  Engine façade (NimRTCEngine)          ← the only thing app code sees
-L2  Codecs + 3A                          ← skipped by `sfu` profile
+L2  Codecs + 3A                          ← skipped by `relay` profile
 L1  Wire / state (RTP, RTCP, SDP, ICE,   ← the bit that's WebRTC
      DTLS, SRTP, JB, BWE)                   wire-compatible
 L0  Primitives (bytes, log, time, status)
@@ -83,13 +83,13 @@ Plugin interfaces (header-only)           ← header in src/plugins/
 ```
 
 Each layer is a CMake INTERFACE / STATIC library. The **profile** is
-also a compile-time selection: `transport` (P2P client) / `sfu`
+also a compile-time selection: `transport` (P2P client) / `relay`
 (forwarding only, no L2) / `agent-gateway` (PCM dual-tap) / `cloudgame`
-(high-bitrate + aligned input) / `sfu-agent` (combo).
+(high-bitrate + aligned input) / `relay-agent` (combo).
 
 The reason this is interesting: the same source tree ships both a P2P
-client *and* an SFU gateway. LiveKit and mediasoup are server-only;
-libwebrtc is monolithic. The "P2P client and SFU in one source tree" is
+client *and* a relay gateway. LiveKit and mediasoup are server-only;
+libwebrtc is monolithic. The "P2P client and relay in one source tree" is
 a thing nobody else in the OSS WebRTC ecosystem has, as far as I can
 tell, and it's a load-bearing feature for the AI-Agent use case (the
 gateway side often needs both directions: a thin client to the user's

@@ -73,7 +73,7 @@ I would just use it. But:
 ### What's working vs. what's not (be honest)
 
 - ✅ Chrome ↔ NimRTC audio + video Case D, 4 platforms.
-- ✅ 5 assembly profiles (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`) with
+- ✅ 5 assembly profiles (`relay` / `transport` / `agent` / `agent-gateway` / `relay-agent`) with
   strict JSON↔C++ round-trip tests.
 - ✅ Pre/post-3A PCM tap with race-free setter semantics.
 - ❌ DataChannel over SCTP-over-DTLS is **deferred to v1.x** — Chrome

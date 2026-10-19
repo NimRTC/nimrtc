@@ -31,7 +31,7 @@ if (-not $Target) {
     }
 }
 
-$Description = 'A from-scratch C++20 WebRTC engine. P2P client + SFU gateway in one source tree. ~5.6 MB static lib. Chrome / Firefox / libwebrtc wire interop. Pluggable crypto: OpenSSL / wolfSSL / mbedTLS / GMSSL-ready for Xinchuang. 4-platform CI.'
+$Description = 'A from-scratch C++20 WebRTC engine. P2P client + relay gateway in one source tree. ~5.6 MB static lib. Chrome / Firefox / libwebrtc wire interop. Pluggable crypto: OpenSSL / wolfSSL / mbedTLS / GMSSL-ready for Xinchuang. 4-platform CI.'
 
 $Topics = @(
     'webrtc',

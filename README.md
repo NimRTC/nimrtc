@@ -67,7 +67,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 | | | |
 |---|---|---|
 | 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **~5.6 MB static lib** (vs libwebrtc 150–250 MB) |
-| 🧩 **Profiles for scenes, not forks** — `transport` / `sfu` / `agent-gateway` / `cloudgame` | 🔁 **Swappable crypto** — OpenSSL ↔ mbedTLS ↔ GMSSL with no API change | 🛡️ **GM/T cryptography ready** — production-credible path for Xinchuang |
+| 🧩 **Profiles for scenes, not forks** — `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **Swappable crypto** — OpenSSL ↔ mbedTLS ↔ GMSSL with no API change | 🛡️ **GM/T cryptography ready** — production-credible path for Xinchuang |
 | 📡 **Wire-level interop** — Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
 
 ---
@@ -96,7 +96,7 @@ No single feature here is brand new — but the **combination** is rare in the o
 | Operating in a **Xinchuang / regulated** environment that mandates GM/T cryptography | Swap DTLS crypto to GMSSL without forking the engine. |
 | Running on **embedded Linux aarch64** (Raspberry Pi, industrial SBCs, robotics) | Get real RTC on a constrained board with the same codebase that powers your desktop client. |
 | Building **AI Agents / teleop / cloud gaming** | Use the dual PCM tap (pre/post-3A), strict-priority QoS, and ref_frame timeline APIs. |
-| Standing up an **SFU** without rewriting protocol code | Compile the `sfu` profile (L0+L1+L3) — same engine, no L2 codec. |
+| Standing up an **relay** without rewriting protocol code | Compile the `relay` profile (L0+L1+L3) — same engine, no L2 codec. |
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not P1).
 
@@ -247,7 +247,7 @@ this is how the same source tree ships both a P2P client *and* an SFU gateway.
 ```
             ┌──────────────────────────────────────────────────┐
             │  PROFILE  —  compile-time selection              │
-            │  transport (P2P) │ sfu │ agent-gateway │ cloudgame │
+            │  transport (P2P) │ relay │ agent-gateway │ cloudgame │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -258,7 +258,7 @@ this is how the same source tree ships both a P2P client *and* an SFU gateway.
                                     │
                                     ▼
             ┌──────────────────────────────────────────────────┐
-            │  L2  Codecs + 3A          (skipped by `sfu`)       │
+            │  L2  Codecs + 3A          (skipped by `relay`)       │
             │  Opus / G.711 / VP8 / H.264 · audio 3A pipeline  │
             └──────────────────────────────────────────────────┘
                                     │
@@ -297,13 +297,13 @@ The same diagram, rendered natively by GitHub:
 flowchart TB
     subgraph PROF["Profile - compile-time selection"]
         P1["transport: P2P client"]
-        P2["sfu: forwarding only"]
+        P2["relay: forwarding only"]
         P3["agent-gateway: PCM dual-tap"]
         P4["cloudgame: high-bitrate + aligned input"]
     end
 
     PROF --> L3
-    L3["L3 - Engine facade / NimRTCEngine"] --> L2["L2 - Codecs + 3A (skipped by sfu profile)"]
+    L3["L3 - Engine facade / NimRTCEngine"] --> L2["L2 - Codecs + 3A (skipped by relay profile)"]
     L2 --> L1["L1 - RTP / RTCP / SDP / ICE / DTLS / SRTP / JB / BWE"]
     L1 --> L0["L0 - Bytes / log / time / status codes"]
 
@@ -324,9 +324,9 @@ flowchart TB
 
 | Layer | Lives in | Responsibility |
 |---|---|---|
-| **Profile** | `cmake/profiles/*.cmake` | A pure build-time selection: which of L0–L3 are linked, which plugin backends are picked. No runtime dispatch — selecting `sfu` literally omits L2 from the binary. |
+| **Profile** | `cmake/profiles/*.cmake` | A pure build-time selection: which of L0–L3 are linked, which plugin backends are picked. No runtime dispatch — selecting `relay` literally omits L2 from the binary. |
 | **L3 Engine** | `src/engine/` | The single public façade (`NimRTCEngine`). Wires plugins together; contains **no concrete module headers** in its API — see Layout Invariant 4 in [`ARCHITECTURE.md`](ARCHITECTURE.md). |
-| **L2 Codecs + 3A** | `src/modules/opus/`, `…/audio3a/`, `…/video_payload/` | Encode/decode and the audio 3A pipeline. The `sfu` profile compiles without L2, halving the codec surface in the resulting binary. |
+| **L2 Codecs + 3A** | `src/modules/opus/`, `…/audio3a/`, `…/video_payload/` | Encode/decode and the audio 3A pipeline. The `relay` profile compiles without L2, halving the codec surface in the resulting binary. |
 | **L1 Wire / state** | `src/modules/{rtp,sdp,ice,dtls,srtp,jb,bwe}/` | The protocols and state machines that talk to the network. In-house (not vendored) per the §11 vendoring rule. |
 | **L0 Primitives** | `src/core/`, `src/log/` | Status codes, byte buffers, monotonic time, logging. Header-only where possible. |
 | **PAL** | `src/plugins/pal/` | Resolves every plugin capability at build time via a small registry. After resolution, plugin calls are direct (zero indirection), so the public API surface is unchanged from the engine’s point of view. See [ADR-009](docs/adr/ADR-009-pal-slice-1.md). |
@@ -436,7 +436,7 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 | Profile | Layers | Use case |
 |---|---|---|
 | `transport` | L0+L1+L2+L3 | Full P2P client (Chrome interop) |
-| `sfu` | L0+L1+L3 (**skips L2**) | Server-side forwarding without re-encoding |
+| `relay` | L0+L1+L3 (**skips L2**)| Server-side forwarding without re-encoding |
 | `agent-gateway` | L0+L1+L2 (tap enabled) | AI Agent ingress — dual PCM tap + 3A bypass |
 | `cloudgame` | L0+L1+L2+L3 (high-bitrate main + input/render alignment) | Teleop / cloud gaming (long-term candidate) |
 
@@ -488,7 +488,7 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | PAL Slice 8 — 4 typed transport-layer registry hooks | ✅ | v0.10.2 |
 | TAP-1 — PCM tap on WebRTC APM (`set_pre_process_tap` / `set_post_process_tap` + int16 ASR variant) | ✅ | v0.11.0 |
 | TPAL-4 cleanup — `EngineConfig::dtls_name` field for guomi_sm4 / OpenSSL / BoringSSL backend selection | ✅ | v0.11.0 |
-| PROFILE-1 — 5-variant Profile library (`sfu` / `transport` / `agent` / `agent-gateway` / `sfu-agent`), JSON schema v1.0 canonical | ✅ | v0.11.0 |
+| PROFILE-1 — 5-variant Profile library (`relay` / `transport` / `agent` / `agent-gateway` / `relay-agent`), JSON schema v1.0 canonical | ✅ | v0.11.0 |
 | Profile regression — `JsonFileMatchesBuiltinConstant` field-equality test across 32 subtests | ✅ | v0.11.0 |
 | DEMO-1 — `demo-agent-gateway` (PCM tap → ASR/LLM mock using `agent-gateway` Profile) | ✅ | v0.11.0 |
 | DISC-1 — GitHub Discussions enabled | ✅ | v0.11.0 |

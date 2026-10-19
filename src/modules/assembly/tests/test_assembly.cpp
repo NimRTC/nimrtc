@@ -71,8 +71,8 @@ TEST_F(AssemblyTest, AllBuiltinProfilesRegistered) {
 
     // Each known name must be present.
     for (std::string_view expected :
-         {"call", "live", "transport", "agent", "teleop", "sfu",
-          "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+         {"call", "live", "transport", "agent", "teleop", "relay",
+          "relay-agent", "agent-gateway", "agent-low-latency"}) {
         EXPECT_NE(std::find(names.begin(), names.end(), std::string{expected}),
                   names.end())
             << "Profile '" << expected << "' should be registered";
@@ -146,9 +146,9 @@ TEST_F(AssemblyTest, ProfileTransportNoMediaPlugins) {
     EXPECT_FALSE(p.datachannel_enabled);
 }
 
-TEST_F(AssemblyTest, ProfileSfuNoMediaPlugins) {
-    const auto& p = nimrtc::assembly::kProfileSfu;
-    EXPECT_EQ(p.name, "sfu");
+TEST_F(AssemblyTest, ProfileRelayNoMediaPlugins) {
+    const auto& p = nimrtc::assembly::kProfileRelay;
+    EXPECT_EQ(p.name, "relay");
     EXPECT_TRUE(p.jb_name.empty());
     EXPECT_TRUE(p.audio3a_name.empty());
     EXPECT_TRUE(p.bwe_name.empty());
@@ -208,9 +208,9 @@ TEST_F(AssemblyTest, ProfileAgentGatewayExposesApm) {
     EXPECT_EQ(p.bwe.params.initial_bitrate_bps, 500'000u);
 }
 
-TEST_F(AssemblyTest, ProfileSfuAgentHybrid) {
-    const auto& p = nimrtc::assembly::kProfileSfuAgent;
-    EXPECT_EQ(p.name, "sfu-agent");
+TEST_F(AssemblyTest, ProfileRelayAgentHybrid) {
+    const auto& p = nimrtc::assembly::kProfileRelayAgent;
+    EXPECT_EQ(p.name, "relay-agent");
     // Relay path: no JB / no codec / no BWE.
     EXPECT_TRUE(p.jb_name.empty());
     EXPECT_TRUE(p.codec_name.empty());
@@ -379,8 +379,8 @@ static void expect_profiles_equal(
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
-    for (std::string_view name : {"call", "live", "transport", "agent", "teleop", "sfu",
-                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+    for (std::string_view name : {"call", "live", "transport", "agent", "teleop", "relay",
+                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
 
         const nimrtc::assembly::Profile* original =
@@ -437,8 +437,8 @@ TEST_F(AssemblyTest, JsonRoundTripBuilderProfile) {
 TEST_F(AssemblyTest, JsonProfileFileExists) {
     // Verify JSON files exist in the build directory.
     for (std::string_view name : {"call", "live", "transport", "agent",
-                                  "teleop", "sfu",
-                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "teleop", "relay",
+                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
         std::string path = profile_path(name);
         EXPECT_TRUE(fs::exists(path))
             << "Profile JSON not found at: " << path;
@@ -447,8 +447,8 @@ TEST_F(AssemblyTest, JsonProfileFileExists) {
 
 TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
     for (std::string_view name : {"call", "live", "transport", "agent",
-                                  "teleop", "sfu",
-                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "teleop", "relay",
+                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
         std::string path = profile_path(name);
         if (!fs::exists(path)) {
             // Skip if build directory is not set up yet.
@@ -468,12 +468,12 @@ TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
 // For every JSON profile file shipped under profiles/, the parsed Profile
 // must field-by-field match the corresponding built-in C++ constant. This
 // catches the case where the JSON and the C++ companion drift (e.g. an
-// edit to profiles/sfu.json that doesn't update kProfileSfu).
+// edit to profiles/relay.json that doesn't update kProfileRelay).
 // ---------------------------------------------------------------------------
 TEST_F(AssemblyTest, JsonFileMatchesBuiltinConstant) {
     for (std::string_view name : {"call", "live", "transport", "agent",
-                                  "teleop", "sfu",
-                                  "sfu-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "teleop", "relay",
+                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
 
         std::string path = profile_path(name);
@@ -755,8 +755,8 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
         {"agent-gateway",         "agent-gateway",            true },
         {"agent-low-latency",     "agent-gateway",            true },
         {"teleop",                "teleop-ultra-low-latency", true },
-        {"sfu",                   "sfu-relay",                false},
-        {"sfu-agent",             "sfu-relay",                true },  // composite
+        {"relay",                 "sfu-relay",                false},
+        {"relay-agent",           "sfu-relay",                true },  // composite
     };
     for (const auto& e : expected) {
         SCOPED_TRACE("Profile: " + std::string{e.profile_name});

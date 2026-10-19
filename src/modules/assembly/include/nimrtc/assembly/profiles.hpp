@@ -24,8 +24,8 @@
 //   transport — raw relay gateway: ICE transport only, no media processing
 //   agent    — AI Agent SDK: DataChannel + timeline + low-latency JB
 //   teleop   — robot teleoperation: strict priority scheduler + datachannel
-//   sfu      — SFU forwarding: skips L2 media processing entirely
-//   sfu-agent    — SFU + AI-Agent hybrid: relay path no-3A, Agent side 3A on
+//   relay    — relay gateway: skips L2 media processing entirely
+//   relay-agent    — relay + AI-Agent hybrid: relay path no-3A, Agent side 3A on
 //   agent-gateway — server-side Agent media gateway with PCM tap surface
 //   agent-low-latency — Agent SDK's tightest-latency variant (20 ms JB)
 //
@@ -367,18 +367,22 @@ inline const Profile kProfileTeleop = Profile{
 };
 
 // ---------------------------------------------------------------------------
-// kProfileSfu — server-side forwarding (SFU hop, no L2 processing)
+// kProfileRelay — server-side relay gateway (no L2 processing)
 // ---------------------------------------------------------------------------
 
 // Design notes:
-//   - All media processing plugins are disabled: SFU only forwards SRTP
+//   - All media processing plugins are disabled: the relay only forwards SRTP
 //     packets without touching the media — no JB, no 3A, no BWE.
-//   - No audio format needed: SFU is format-agnostic.
-//   - Scheduler disabled: SFU operates at the transport layer.
-//   - Suitable for: SFU middlebox, media recorder, protocol bridge.
+//   - No audio format needed: the relay is format-agnostic.
+//   - Scheduler disabled: the relay operates at the transport layer.
+//   - Suitable for: relay middlebox, media recorder, protocol bridge.
+//   - Note: This describes relay capabilities. To compose an SFU, combine
+//     multiple relay engines with a routing layer. The naming "relay" vs
+//     "SFU" is intentional — we describe what we ship rather than implying
+//     we deliver a full conference server.
 // ---------------------------------------------------------------------------
-inline const Profile kProfileSfu = Profile{
-    .name                 = "sfu",
+inline const Profile kProfileRelay = Profile{
+    .name                 = "relay",
     .transport_name       = "ice",
     .sdp_name             = "webrtc",
     .rtp_name             = "webrtc",
@@ -464,26 +468,26 @@ inline const Profile kProfileAgentGateway = Profile{
 };
 
 // ---------------------------------------------------------------------------
-// kProfileSfuAgent — SFU relay + AI-Agent hybrid (PROFILE-1)
+// kProfileRelayAgent — relay gateway + AI-Agent hybrid (PROFILE-1)
 // ---------------------------------------------------------------------------
-// Design notes (matches profiles/sfu-agent.json):
-//   - The SFU side (relay between human peers) skips L2 media processing;
+// Design notes (matches profiles/relay-agent.json):
+//   - The relay side (relay between human peers) skips L2 media processing;
 //     the Agent side keeps WebRTC APM + PCM tap so the Agent pipeline can
 //     subscribe to the cleaned PCM.
 //   - jb_name = "" / codec_name = "" / bwe_name = "": the relay path is
 //     pure SRTP forwarding; the Agent session (if instantiated as a
 //     separate engine) carries its own jb/codec/bwe under agent.json.
-//   - timeline_enabled = true: SFU re-calibrates NTP↔RTP-TS on egress
+//   - timeline_enabled = true: the relay re-calibrates NTP↔RTP-TS on egress
 //     so the downstream Agent pipeline sees a stable mapping across
 //     the hop (docs/zh/architecture.md §7.1).
 //   - datachannel_enabled = true: Agent control + forwarding semantics.
-//   - scheduler.control_weight = 20 (higher than agent.json's 10): SFU + Agent
+//   - scheduler.control_weight = 20 (higher than agent.json's 10): relay + Agent
 //     mixes scheduling across both relay and Agent streams; control
 //     messages preempt every other class on either side.
-//   - sfu_enabled + agent_gateway_enabled = true: v1.1 markers (ADR-010).
+//   - relay_enabled + agent_gateway_enabled = true: v1.1 markers (ADR-010).
 // ---------------------------------------------------------------------------
-inline const Profile kProfileSfuAgent = Profile{
-    .name                 = "sfu-agent",
+inline const Profile kProfileRelayAgent = Profile{
+    .name                 = "relay-agent",
     .transport_name       = "ice",
     .sdp_name             = "webrtc",
     .rtp_name             = "webrtc",

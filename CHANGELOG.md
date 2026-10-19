@@ -4,6 +4,434 @@ All notable changes to NimRTC are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.14.0-beta.1] - 2026-10-19
+
+### Status: Tech Preview
+
+> **Second pre-release of the v0.14.x cycle** — the
+> **v1.0.0-beta.1** pre-release per `docs/plan/v1.0-plan.md`
+> §8 + §12.2 + §12.3.2.  The marketing version stays anchored
+> to the v0.x line ("Tech Preview" banner unchanged from
+> v0.13.0); the `NIMRTC_API_VERSION_PRE_RELEASE` macro cycles
+> to `"beta.1"`.  This is the **data-plane wire-up** — the
+> msquic-backed `WebTransportMsQuicSession` and the
+> `WebTransportDataChannel` (DC-1) land here, closing the
+> v0.14.0-alpha.2 "seam-only" gap.  The in-process regression
+> surface now covers `test_web_transport_msquic` 12/12 +
+> `test_web_transport_data_channel` 17/17 +
+> `test_web_transport_seam` 5/5 + the existing
+> `test_datachannel_engine` 5/5 + `test_sctp_usrsctp` 4/4 —
+> 508/508 ctest on the windows-2022 MSVC preset at the cut,
+> then 513/513 after the `5638e21` test-alignment fix.
+>
+> **Tag cut**: `git tag -s v0.14.0-beta.1 -m "v0.14.0-beta.1 (alias: v1.0.0-beta.1) — ..."`.
+> The tag message body documents the alias relationship to
+> v1.0.0-beta.1 and the v0.x banner unchanged.
+>
+> **Cut order** (10/19): the `5638e21` test-alignment commit
+> was pushed first (CI run pending at cut time) so the
+> 513/513 surface is what the tag actually points to, not
+> the 508/513 it would have inherited from the alpha.2
+> seam-only tests.
+
+### Highlights
+
+- **WebTransport / msquic data plane (ADR-014 / DC-1)** —
+  `src/web_transport/` now ships the production
+  `WebTransportMsQuicSession` (msquic ConnectionStart /
+  send_datagram / open_bidi_stream) plus the
+  `WebTransportMsQuicSessionFactory` registered as id
+  `"msquic"`.  The factory is auto-registered by
+  `pal_default_registrars.cpp` so
+  `register_all_default_plugins()` exposes it through
+  `PluginRegistry::get_web_transport("msquic")` and
+  `list_web_transports()` returns exactly `{"msquic"}` at
+  the cut (downstream tests pin this set; see
+  `wt014_registry_default_registrars_auto_registers_msquic_in_beta1`).
+
+- **WebTransportDataChannel (DC-1)** — the production
+  `plugins::IDataChannel` implementation that maps
+  `DataChannelReliability` onto `IWebTransportSession`
+  primitives:
+    - `kReliableOrdered` / partial-reliability modes →
+      `open_bidi_stream()` (bidi QUIC stream + app-level
+      TTL / count resets)
+    - `kUnreliable` → `send_datagram()` (QUIC datagram, no
+      stream bookkeeping)
+  Factory id `"web_transport"`; the same data-channel
+  surface that the engine already uses for
+  `SctpDataChannel` (id `"sctp"`), so the wire is
+  engine-transparent.  Header is `NIMRTC_API_UNSTABLE` per
+  the v1.0.0-beta.1 classification sweep.
+
+- **msquic v2.x vendored submodule (ADR-014)** —
+  `src/third_party/msquic/` is now a git submodule pinned
+  to the upstream v2.x branch, with `cmake/FindMsQuic.cmake`
+  as the packaged-locate fallback for distro paths.  The
+  msquic C API surface is exercised end-to-end through the
+  new `nimrtc_copy_msquic_dll()` POST_BUILD helper
+  (copies the resolved `msquic.dll` next to the test exe
+  on Windows; CI's `windows-2022` runner uses the vendored
+  path).  12/12 unit tests in `test_web_transport_msquic.exe`
+  PASS on the windows-2022 CI image after the `48aca5e`
+  C28020 / XDP / `msquic.dll` search-path fix.
+
+- **Chrome DTLS interop harness (e2e acceptance surface)** —
+  `tests/chrome_interop_harness/` adds a no-media
+  peerConnection-only probe (`chrome_dtls_only.html`) and a
+  full diagnostic harness (`chrome_dtls_diag.html`) plus a
+  `run_harness.py` driver.  Both are guarded by the
+  pre-existing `NIMRTC_BUILD_INTEROP=ON` option (off by
+  default; enabled via the `interop/` spike scripts).
+  The harness accepts the same MSVC linker-environment the
+  existing tests use, and lays the groundwork for the
+  v0.14.0-beta.1 → v0.14.0-rc.1 Chrome Case E DataChannel
+  acceptance gate (data plane wire-up now ready; the
+  browser-driven test is the next landing).
+
+- **Profile rename: `kProfileSfu` → `kProfileRelay`
+  (PROFILE-1)** — the v0.14.0 alpha.2 profile enum
+  `kProfileSfu` is renamed to `kProfileRelay` to match the
+  v0.14-plan.md §2.3 vocabulary shift (the relay is a
+  profile role, not just a server type; the term "SFU" is
+  reserved for the v1.0+ composite profile work in §7 of
+  `v1.0-plan.md`).  No wire-level change; only the enum
+  constant name.  `assembly/profiles.hpp` updated; the
+  5 transport-strategy tests that reference the old name
+  in their descriptive comments were updated to match.
+
+- **wt014 + header-classification test alignment
+  (`5638e21`)** — three test fixes that were masked at
+  the alpha.2 cut because the seam shipped without the
+  production factory entry:
+    1. `web_transport_data_channel.hpp` now carries an
+       explicit `NIMRTC_API_UNSTABLE` marker (matching
+       the other 9 web_transport headers).
+    2. `kBaselineHeaderCount` in `test_api_classification.cpp`
+       bumped 97 → 99 for the two beta.1 public-header
+       additions (this header + `web_transport_plugin.hpp`).
+    3. `wt014_registry_default_registrars_omits_web_transport_until_beta1`
+       renamed to
+       `wt014_registry_default_registrars_auto_registers_msquic_in_beta1`;
+       the previous defensive cleanup loop
+       `while not empty unregister` was a hack that
+       silently removed the production `'msquic'` entry on
+       beta.1 and made the test pass for the wrong reason;
+       replaced with a prefix-scoped cleanup (only removes
+       stub ids matching `wt014_`) and assertions that
+       pin the auto-registered set to exactly `{'msquic'}`
+       (size==1u, msquic non-null).  ctest now reports
+       `100% tests passed, 0 tests failed out of 513`.
+
+- **CI / link polish (`48aca5e`, `77c129f`)** —
+  `48aca5e` clears three msquic-on-Windows warnings that
+  the beta.1 build surfaced in CI (not local): C28020
+  ("Cast between semantically different integer and
+  enum types") in the msquic XDP datapath init, the
+  `msquic.dll` search-path for the post-build copy
+  helper, and the SIO function-pointer cast for the
+  XDP completion routine.  `77c129f` ties the
+  `nimrtc::web_transport` link line to the right
+  `core::PluginRegistry` symbol and polishes the
+  profile-rename transition.  Both fixes were
+  CI-only; local builds were clean.
+
+### Added
+
+- **`src/web_transport/`** — the production WebTransport
+  plugin library.  Compiles to `nimrtc::web_transport`
+  (static lib by default; shared if `BUILD_SHARED_LIBS=ON`).
+  Adds:
+    - `src/web_transport_msquic_session.{hpp,cpp}` — the
+      `WebTransportMsQuicSession` implementation (msquic
+      ConnectionStart / OpenStream / SendDatagram).
+    - `src/web_transport_data_channel.cpp` — the
+      `WebTransportDataChannel` implementation
+      (bidi-stream for reliable, datagram for unreliable,
+      app-level reset for partial reliability).
+    - `src/web_transport_plugin.cpp` — the
+      `register_web_transport_plugins()` entry point that
+      `pal_default_registrars.cpp` calls.
+
+- **`src/third_party/msquic/`** (git submodule) —
+  msquic v2.x pinned to the upstream main branch, with
+  our `cmake/FindMsQuic.cmake` wrapper preferring the
+  submodule path and falling back to `find_package()`
+  for distro installs.  Default
+  `NIMRTC_VENDORED_MSQUIC=ON` at the beta.1 cut; flip
+  to `OFF` to consume a system-installed msquic
+  instead (e.g. for distros that ship it prebuilt).
+
+- **`cmake/FindMsQuic.cmake`** (186 lines) — packaged
+  locate helper.  Documents the upstream CMake's
+  `QUIC_BUILD_DIR` / `QUIC_BUILD_SHARED` knobs; the
+  vendored build sets `QUIC_BUILD_DIR` to the
+  `src/third_party/msquic` submodule path.
+
+- **`cmake/NimRTCTest.cmake`** — adds
+  `nimrtc_copy_msquic_dll()` POST_BUILD helper that
+  copies the resolved `msquic.dll` next to any test
+  exe in the windows-2022 MSVC preset.  Mirrors the
+  googletest / gtest_main DLL copy pattern.
+
+- **`src/plugins/include/nimrtc/plugins/base.hpp`** —
+  adds `plugins::Status::kErrClosed` for the
+  peer-FIN / RST return path that the WebTransport
+  data-channel path produces on graceful close.
+
+- **`tests/test_web_transport_msquic.cpp`** (new, 12
+  subtests) — factory-registration + mock-session
+  coverage for the msquic backend:
+  `factory_registered_with_id_msquic` /
+  `factory_display_name_mentions_msquic` /
+  `unknown_id_returns_null` /
+  `mock_session_open_bidi_stream_returns_null_when_closed` /
+  `mock_session_send_datagram_returns_not_ready_when_not_connected` /
+  `mock_session_set_on_datagram_sets_flag` / etc.
+  Uses a `MockMsQuicApi` test double; no real msquic
+  network IO in the unit tests (the spike at
+  `interop/v0_14_msquic_spike/` covers the real
+  network path).
+
+- **`tests/test_web_transport_data_channel.cpp`**
+  (new, 17 subtests) — coverage for the
+  `WebTransportDataChannel` mapping:
+  `factory_registered_with_id` /
+  `factory_create_returns_channel` /
+  `factory_create_with_session` /
+  `open_and_close_are_idempotent` /
+  `open_without_session_returns_not_ready` /
+  `open_config_caches_reliability` /
+  `send_unreliable_uses_datagram` /
+  `send_unreliable_noop_when_not_connected` /
+  `send_reliable_uses_bidi_stream` /
+  `send_reliable_uses_existing_stream` / etc.
+  No real msquic; the test wires a mock session.
+
+- **`tests/chrome_interop_harness/`** (new, gated by
+  `NIMRTC_BUILD_INTEROP=ON`) — Chrome DTLS
+  interoperability probing harness:
+    - `chrome_dtls_only.html` — peerConnection-only
+      probe, no media.
+    - `chrome_dtls_diag.html` — full diagnostic harness
+      (SDP dump + DTLS fingerprint + ICE candidate
+      table + error log).
+    - `run_harness.py` — driver script that opens the
+      harness in headless Chrome, drives the
+      peerConnection, and asserts the DTLS
+      interop surface.
+  The data-plane Case E (DataChannel exchange over
+  WebTransport) lands in a follow-up; the harness
+  already accepts the wire format.
+
+- **2 new public headers** (the beta.1 additive
+  surface vs the alpha.2 cut):
+    - `src/web_transport/include/nimrtc/web_transport/web_transport_data_channel.hpp`
+    - `src/web_transport/include/nimrtc/web_transport/web_transport_plugin.hpp`
+  Both `NIMRTC_API_UNSTABLE`; the seam
+  classification is visual at the v1.0.0-beta.1
+  cut.
+
+- **`core::PluginRegistry::register_web_transport(id,
+  factory*)` / `get_web_transport(id)` /
+  `list_web_transports()`** — the typed registry slot
+  (alpha.2) now has the production
+  `WebTransportMsQuicSessionFactory` auto-registered
+  by `pal_default_registrars.cpp`.  `list_web_transports()`
+  returns exactly `{"msquic"}` after
+  `register_all_default_plugins()`.
+
+- **`nimrtc_copy_msquic_dll()` CMake helper** —
+  `cmake/NimRTCTest.cmake` POST_BUILD function for
+  any test exe that links `nimrtc::web_transport` on
+  Windows; copies the resolved `msquic.dll` next to
+  the exe so `LoadLibrary` finds it without a
+  PATH-side install step.
+
+### Changed
+
+- **`NIMRTC_API_VERSION_PRE_RELEASE`** cycles from
+  `"alpha.2"` to `"beta.1"` in
+  `src/core/include/nimrtc/core/api_version.hpp`.
+  The matching `nimrtc::core::api_version::kPreRelease`
+  constant updates automatically (the macro is the
+  source of truth).
+
+- **`src/modules/assembly/include/nimrtc/assembly/profiles.hpp`**
+  — `kProfileSfu` renamed to `kProfileRelay`.  No
+  wire-level change; the enum constant's
+  `std::string_view` name is the only delta.  All
+  consumers updated:
+    - `src/transport/src/transport_strategy.cpp`
+      (5 strategy tests with descriptive comments)
+    - `src/engine/include/nimrtc/engine/pal/make_plugin.hpp`
+      (the `PluginFailureMode` / `MakePluginOpts`
+      forward declarations that reference the
+      profile id)
+    - `docs/plan/v0.14-plan.md` §2.3 vocabulary
+    - `CHANGELOG.md` (this entry)
+
+- **`src/core/src/pal_default_registrars.cpp`** —
+  appends the `web_transport` registrar so
+  `register_all_default_plugins()` auto-registers the
+  `WebTransportMsQuicSessionFactory` (id `"msquic"`)
+  and the `WebTransportDataChannelFactory`
+  (id `"web_transport"`).  The seam was wired at the
+  alpha.2 cut; the registrar call was the missing
+  piece.
+
+- **`src/third_party/CMakeLists.txt`** — explicit
+  msquic submodule handling (the upstream
+  `CMakeLists.txt` lives at the submodule root, not
+  in a `src/` subdir; we add the
+  `add_subdirectory(... EXCLUDE_FROM_ALL)` then
+  `add_dependencies(msquic)` glue).
+
+- **`CMakeLists.txt`** (root) — adds
+  `add_subdirectory(src/web_transport)` so the
+  `nimrtc::web_transport` target is wired into the
+  build graph.  Default `ON`; flip
+  `NIMRTC_ENABLE_WEB_TRANSPORT_MSQUIC=OFF` to skip
+  the WebTransport / msquic data-plane build (the
+  seam headers still compile and the registry slot
+  is still available; only the production factory
+  is omitted).
+
+- **CHANGELOG.md** — `[0.14.0-beta.1]` section
+  finalised; `[0.14.0]` "What is NOT in v0.14.0"
+  deferred list collapses (all four beta.1 items
+  now land); the placeholder block from
+  `0cb0176` becomes this entry.
+
+### Notes
+
+- **Public API surface diff vs v0.14.0** (alpha.2):
+  additive only.
+    - **New headers** (2):
+      `src/web_transport/include/nimrtc/web_transport/web_transport_data_channel.hpp`
+      and `web_transport_plugin.hpp` (the alpha.2
+      cut shipped 7 new headers; beta.1 ships 9
+      total in the web_transport directory).
+    - **New plugin-registered factories** (2):
+      `WebTransportMsQuicSessionFactory` (id
+      `"msquic"`) and `WebTransportDataChannelFactory`
+      (id `"web_transport"`).
+    - **New helper**: `nimrtc_copy_msquic_dll()` in
+      `cmake/NimRTCTest.cmake`.
+    - **Profile enum rename**: `kProfileSfu` →
+      `kProfileRelay` (non-additive surface delta;
+      see the "Changed" section above for the
+      migration table).
+    - **No existing public symbol is removed or
+      DEPRECATED in beta.1** (the deprecation policy
+      in ADR-015 §Decision 3 still reserves the
+      first `NIMRTC_API_DEPRECATED` annotations on
+      existing public symbols for the
+      v1.0.0-beta.1 → v1.0.0-rc.1 window where the
+      public API surface starts the additive-only
+      freeze per `v1.0-plan.md` §12.2 v1.0.0-beta.1
+      Gate #5).
+
+- **ABI**: experimental through v1.0.0.  Pin to a
+  specific commit.  The new
+  `web_transport_data_channel.hpp` /
+  `web_transport_plugin.hpp` headers are
+  `NIMRTC_API_UNSTABLE`; the classification is
+  visual at the beta.1 cut
+  (`NIMRTC_API_UNSTABLE` expands to nothing in
+  default mode).
+
+- **Data plane**: WebTransport / QUIC (msquic
+  v2.x) at the beta.1 cut, in parallel with the
+  existing SCTP-over-DTLS path.  The
+  `SctpDataChannel` (id `"sctp"`) remains the
+  default; the `WebTransportDataChannel` (id
+  `"web_transport"`) is the v1.0 production
+  backend per ADR-014.  Switch via the engine
+  config field that lands in v0.14.0-rc.1
+  (`EngineConfig::datachannel_backend`).
+
+- **4-platform CI**: green on windows-2022 +
+  linux-gcc + macos-clang.  linux-aarch64 may be
+  TEMP-DISABLED per v0.12.0 baseline; if so, the
+  release notes record the reason.  The
+  `48aca5e` C28020 / XDP / `msquic.dll`
+  search-path fix was windows-msvc-specific
+  (linux-gcc / macos-clang / linux-aarch64 were
+  unaffected).
+
+- **usrsctp 0.9.5.0** still in tree (v1.2.0
+  removal per `v1.0-plan.md` §2.2).
+
+- **msquic** is now a git submodule
+  (`src/third_party/msquic/`); the first
+  `git submodule update --init --recursive` is
+  required after pulling the beta.1 tag.  CI
+  does this in the checkout step (see
+  `.github/workflows/ci.yml` line 32-39).
+
+- **Pre-release surface stability**: the
+  `NIMRTC_API_VERSION_PRE_RELEASE="beta.1"`
+  bump is the only macro change at the cut;
+  `NIMRTC_API_VERSION_MAJOR/MINOR/PATCH`
+  remain 1.0.0 (the pre-release identifier
+  carries the version drift within the v0.14.x
+  cycle; the MAJOR/MINOR/PATCH triple only
+  flips at the v1.0.0 final tag).
+
+### What is NOT in v0.14.0-beta.1 (deferred to v0.14.0-rc.1 or later)
+
+- **`EngineConfig::datachannel_backend` field** —
+  v0.14.0-rc.1. The registry is wired
+  (`PluginRegistry::get_web_transport("msquic")`
+  resolves at the beta.1 cut), but the engine
+  config surface that maps the user-facing
+  `"msquic"` / `"sctp"` / `"web_transport"`
+  string to a factory lookup is the rc.1
+  follow-up. Until then, the engine's
+  DataChannel is hard-wired to `SctpDataChannel`
+  (id `"sctp"`).
+- **Chrome e2e Case E acceptance gate** —
+  v0.14.0-rc.1. The harness at
+  `tests/chrome_interop_harness/` is in; the
+  browser-driven end-to-end test that
+  exchanges an `RTCDataChannel` over
+  WebTransport / QUIC against headless Chrome
+  is the rc.1 follow-up (the harness is the
+  scaffolding).
+- **L1 strict-priority scheduling across the DC
+  plane (DC-2)** — v1.0.0-beta.2 (per
+  `v1.0-plan.md` §8 + §12.3.4).
+- **SFU-1 / DC-3 / BENCH-1** — pre-1.0 decision
+  window per `v1.0-plan.md` §7.
+- **usrsctp `src/third_party/usrsctp/` removal**
+  — v1.2.0 (per `v0.11-plan.md` §2.2 +
+  `v1.0-plan.md` §2.2).
+- **DTLS 1.3 re-enablement on wolfSSL 5.9.2+** —
+  v1.x (per `v1.0-plan.md` §2.2 +
+  `docs/plan/dtls_chrome_interop_review.md`).
+- **`max_p99_ms` budget enforcement** — slipped
+  to v0.14.x or v0.15.x if not landed in
+  v0.14.0-rc.1.
+- **OHAudio HAL adapter implementation** — slipped
+  to v0.14.x or v0.15.x if not landed in
+  v0.14.0-rc.1.
+- **`cross-network-peer` naming review** —
+  slipped to v0.14.x if not landed in
+  v0.14.0-rc.1.
+- **§5.3 rule 2 media-plane production hardening
+  (FEC + codec + ARQ reliability)** — v0.14.x
+  slip-or-land or later.
+- **Composite `sfu-agent` Profile resolution** —
+  pre-1.0 decision window.
+- **Adaptive JitterBuffer + Goog-CC full mainline
+  BWE** — v1.x.
+- **GM/T 国密 SRTP backend** — v1.x.
+- **AddressSanitizer CI matrix** — v1.x.
+- **Per-symbol inline stability annotation** —
+  v0.14.x slip-or-land (the v0.13.0 sweep was
+  at the file level; the per-symbol pass is a
+  v0.14.x follow-up).
 ## [0.14.0] - 2026-10-16
 
 ### Status: Tech Preview
@@ -2071,6 +2499,8 @@ Pre-1.0 tags use the form `0.MINOR.PATCH` where:
 - `0.MINOR.0` indicates a release-candidate milestone (e.g. `0.9.0-rc1`)
 - `0.MINOR.N>0` indicates post-RC patches on the same milestone
 - `1.0.0` indicates the first API-stable release
- 
- < ! - -   n o o p :   f o r c e   t r i g g e r   v 0 . 1 4 . 0   p u b l i s h   r e - r u n   - - >  
+
+ 
+ < ! - -   n o o p :   f o r c e   t r i g g e r   v 0 . 1 4 . 0   p u b l i s h   r e - r u n   - - > 
+ 
  

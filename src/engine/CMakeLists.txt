@@ -54,6 +54,17 @@ target_link_libraries(nimrtc_engine
         nimrtc::transport      # transport-stack factory id="default" (Slice 7/8)
                                # Also pulls in TransportSession + ITransportStackFactory
                                # (used by engine via get_transport_stack() lookups).
+        # v0.14.0-beta.1 (ADR-014): WebTransport / QUIC seam factory.
+        # `pal_default_registrars.cpp` references
+        # `nimrtc::web_transport::register_default_plugins()` unconditionally,
+        # so any consumer linking `nimrtc::engine` must have the
+        # `nimrtc::web_transport` symbol resolved. Linking PRIVATE follows
+        # the same Layout Invariant 5 / MSVC-linker-quirk pattern as the
+        # other Slice 8 modules above — it guarantees the static-init
+        # symbol in `web_transport_plugin.cpp` is included in
+        # `nimrtc_engine.lib` and is therefore resolvable by every
+        # downstream executable (tests/ examples/ chrome_interop_harness/).
+        nimrtc::web_transport
         nimrtc_vendor_libjuice # ICE vendor (P1)
 )
 

@@ -65,9 +65,22 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Debug -j
 
+      # NB: use the `tests.msvc` preset (NOT `tests`) so that
+      # `configuration: "Debug"` propagates to `ctest --build-config Debug`.
+      # The `tests` preset is the Linux single-config variant and has no
+      # `configuration` field; with the VS multi-config generator +
+      # `gtest_discover_tests(PRE_TEST)`, an empty `CTEST_CONFIGURATION_TYPE`
+      # causes `${CTEST_CONFIGURATION_TYPE}` to substitute to `` -1.1``
+      # inside the auto-generated `<target>[N]_include.cmake` dispatcher,
+      # which then tries to include the non-existent
+      # `<target>[N]_include-.cmake` and aborts ctest before any
+      # gtest binary is invoked.  Failure mode surfaces as
+      # `Errors while running CTest` with no test results, even though
+      # the build itself succeeds.  See run #231 onwards in the
+      # ci-e2e history for the regression chain.
       - name: Run unit tests
         shell: pwsh
-        run: ctest --preset tests --output-on-failure
+        run: ctest --preset tests.msvc --output-on-failure
 
   # ---------------------------------------------------------------------------
   # Windows MSVC: end-to-end acceptance (NimRTC↔NimRTC + NimRTC↔Chrome)

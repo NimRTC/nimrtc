@@ -44,6 +44,12 @@
 #ifndef NIMRTC_WEB_TRANSPORT_WEB_TRANSPORT_DATA_CHANNEL_HPP
 #define NIMRTC_WEB_TRANSPORT_WEB_TRANSPORT_DATA_CHANNEL_HPP
 
+// Stability classification: NIMRTC_API_UNSTABLE — the
+// `WebTransportDataChannel` factory lands with v0.14.0-beta.1
+// (DC-1 / ADR-014); the IDataChannel-on-WebTransport mapping is
+// not stable until the v0.14.0 release line freezes. See
+// `web_transport_session_iface.hpp` for the broader WebTransport
+// seam stability rationale.
 #include <atomic>
 #include <chrono>
 #include <functional>

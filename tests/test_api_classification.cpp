@@ -229,27 +229,37 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     const fs::path root = fs::path(NIMRTC_SOURCE_ROOT);
     const auto headers = collect_public_headers(root);
 
-    // v1.0.0-alpha.2 baseline: 96 public headers (89 from alpha.1
-    // plus 7 new headers under src/web_transport/include/nimrtc/
-    // web_transport/ landing with the v0.14.0 alpha.2 WebTransport
-    // / QUIC seam, per ADR-014 + v0.14-plan.md section 2.1.1 WT-SEAM):
-    //   - web_transport_session_iface.hpp
-    //   - web_transport_session_factory.hpp
-    //   - bidi_stream_iface.hpp
-    //   - uni_stream_iface.hpp
-    //   - datagram_facade.hpp
-    //   - web_transport_config.hpp
-    //   - web_transport_state.hpp
+    // v1.0.0-alpha.2 baseline: 97 public headers (89 from alpha.1
+    // plus 8 new headers landing with v0.14.0 alpha.2:
+    //   7 new headers under src/web_transport/include/nimrtc/
+    //   web_transport/ (the WebTransport / QUIC seam, per
+    //   ADR-014 + v0.14-plan.md section 2.1.1 WT-SEAM):
+    //     - web_transport_session_iface.hpp
+    //     - web_transport_session_factory.hpp
+    //     - bidi_stream_iface.hpp
+    //     - uni_stream_iface.hpp
+    //     - datagram_facade.hpp
+    //     - web_transport_config.hpp
+    //     - web_transport_state.hpp
+    //   1 new header under src/modules/dtls/include/nimrtc/dtls/
+    //     (the DTLS handshake reassembler seam):
+    //     - dtls_handshake_reassembler.hpp
     // Verified 2026-10-16 by the alpha.2 classification sweep;
     // see docs/plan/v0.14-plan.md section 3.1 Gate #2 (the alpha.2
     // seam compile-only test pins the same header set).
+    //
+    // v0.14.0-beta.1 bump: +2 public headers (97 -> 99) for the
+    //   `WebTransportDataChannel` data-plane landing (DC-1 /
+    //   ADR-014):
+    //     - web_transport_data_channel.hpp
+    //     - web_transport_plugin.hpp
     //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 97;
+    constexpr std::size_t kBaselineHeaderCount = 99;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-alpha.1 baseline "

@@ -51,7 +51,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | | | |
 |---|---|---|
 | 🎯 **编译期分层（L0–L3）** | 🔌 **公开 plugin 接口** | 🪶 **~5.6 MB 静态库**（libwebrtc 150–250 MB）|
-| 🧩 **面向场景的 Profile，不 fork 主干** —— `transport` / `sfu` / `agent-gateway` / `cloudgame` | 🔁 **加密后端可替换** —— OpenSSL ↔ mbedTLS ↔ GMSSL，API 不变 | 🛡️ **GM/T 国密就绪** —— 信创合规场景有可信落地路径 |
+| 🧩 **面向场景的 Profile，不 fork 主干** —— `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **加密后端可替换** —— OpenSSL ↔ mbedTLS ↔ GMSSL，API 不变 | 🛡️ **GM/T 国密就绪** —— 信创合规场景有可信落地路径 |
 | 📡 **线缆级互通** —— Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **四平台 CI** —— Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **面向 AI Agent 的差异化** —— pre/post-3A PCM tap、ref_frame 时间线 |
 
 ---
@@ -80,7 +80,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | 政企信创 / 国密合规环境 | 不 fork 主干就把 DTLS 加密切换到 GMSSL。 |
 | 在嵌入式 Linux aarch64 上跑 | Raspberry Pi、工业 SBC、机器人主控 —— 同一 codebase，桌面端能用的能力嵌入式也能用。 |
 | 搭 AI Agent / 遥操作 / 云游戏 | 用 pre/post-3A 双 PCM tap、严格优先级 QoS、ref_frame 时间线 API。 |
-| 自建 SFU 但不想重写协议栈 | 编译 `sfu` profile（L0+L1+L3），同一套引擎，跳过 L2 codec。 |
+| 自建 relay 但不想重写协议栈 | 编译 `relay` profile（L0+L1+L3），同一套引擎，跳过 L2 codec。 |
 
 > **不适用的场景**：今天就要一个开箱即用的浏览器级 SDK；只做移动端（iOS/Android 在路线图，不在 P1）。
 
@@ -228,7 +228,7 @@ NimRTC 是 **L0–L3 四层编译期叠加 PAL（Plugin Adaptation Layer）**。
 ```
             ┌──────────────────────────────────────────────────┐
             │  PROFILE  ——  编译期选择                          │
-            │  transport（P2P）│ sfu │ agent-gateway │ cloudgame │
+            │  transport（P2P）│ relay │ agent-gateway │ cloudgame │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -239,7 +239,7 @@ NimRTC 是 **L0–L3 四层编译期叠加 PAL（Plugin Adaptation Layer）**。
                                     │
                                     ▼
             ┌──────────────────────────────────────────────────┐
-            │  L2  编解码 + 3A         （sfu profile 跳过）     │
+            │  L2  编解码 + 3A         （relay profile 跳过）     │
             │  Opus / G.711 / VP8 / H.264 · 音频 3A 流水线      │
             └──────────────────────────────────────────────────┘
                                     │
@@ -277,13 +277,13 @@ GitHub 原生渲染版本：
 flowchart TB
     subgraph PROF["Profile - 编译期选择"]
         P1["transport: P2P 客户端"]
-        P2["sfu: 纯转发"]
+        P2["relay: 纯转发"]
         P3["agent-gateway: PCM 双 tap"]
         P4["cloudgame: 高码率 + 输入对齐"]
     end
 
     PROF --> L3
-    L3["L3 - Engine 外观层 / NimRTCEngine"] --> L2["L2 - 编解码 + 3A（sfu profile 跳过）"]
+    L3["L3 - Engine 外观层 / NimRTCEngine"] --> L2["L2 - 编解码 + 3A（relay profile 跳过）"]
     L2 --> L1["L1 - RTP / RTCP / SDP / ICE / DTLS / SRTP / JB / BWE"]
     L1 --> L0["L0 - 字节 / 日志 / 时间 / 状态码"]
 
@@ -304,9 +304,9 @@ flowchart TB
 
 | 层 | 所在位置 | 职责 |
 |---|---|---|
-| **Profile** | `cmake/profiles/*.cmake` | 纯构建期选择：决定 L0–L3 哪些被链接、Plugin 走哪一套后端。**没有运行期分发**——选 `sfu` 就是在构建时把 L2 整个砍掉。 |
+| **Profile** | `cmake/profiles/*.cmake` | 纯构建期选择：决定 L0–L3 哪些被链接、Plugin 走哪一套后端。**没有运行期分发**——选 `relay` 就是在构建时把 L2 整个砍掉。 |
 | **L3 Engine** | `src/engine/` | 唯一对外门面（`NimRTCEngine`）。把 Plugin 串起来；公开 API 里**不出现任何具体模块头文件**——见 [`ARCHITECTURE.md`](ARCHITECTURE.md) 的 Layout Invariant 4。 |
-| **L2 编解码 + 3A** | `src/modules/opus/`、`…/audio3a/`、`…/video_payload/` | 编解码与音频 3A 流水线。`sfu` profile 不编 L2，二进制里编码面直接砍半。 |
+| **L2 编解码 + 3A** | `src/modules/opus/`、`…/audio3a/`、`…/video_payload/` | 编解码与音频 3A 流水线。`relay` profile 不编 L2，二进制里编码面直接砍半。 |
 | **L1 协议 / 状态机** | `src/modules/{rtp,sdp,ice,dtls,srtp,jb,bwe}/` | 真正跟网络打交道的那一层。按 §11 vendoring 规则**自研**，不引入第三方协议栈。 |
 | **L0 原语** | `src/core/`、`src/log/` | 状态码、字节缓冲、单调时钟、日志。能 header-only 就 header-only。 |
 | **PAL** | `src/plugins/pal/` | 用一个小注册表把每个 Plugin 能力在编译期解析完；解析之后调用是直接的，零间接，对 Engine 来说公开 API 完全不变。见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。 |
@@ -420,7 +420,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | Profile | 包含层 | 用途 |
 |---|---|---|
 | `transport` | L0+L1+L2+L3 | 完整 P2P 客户端（Chrome 互通） |
-| `sfu` | L0+L1+L3（**跳过 L2**）| 服务器转发，不重编解码 |
+| `relay` | L0+L1+L3（**跳过 L2**）| 服务器转发，不重编解码 |
 | `agent-gateway` | L0+L1+L2（tap 打开）| AI Agent 接入，PCM 双 tap + 3A 旁路 |
 | `cloudgame` | L0+L1+L2+L3（高码率主线 + 输入渲染对齐）| 遥操作 / 云游戏（远期候选） |
 

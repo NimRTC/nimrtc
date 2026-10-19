@@ -57,7 +57,7 @@ NimRTC 的赌注是一个四层编译期拆分：
 
 ```
 L3  引擎门面（NimRTCEngine）          ← 应用代码唯一看到的东西
-L2  编解码 + 3A                      ← `sfu` profile 跳过
+L2  编解码 + 3A                      ← `relay` profile 跳过
 L1  协议 / 状态（RTP、RTCP、SDP、     ← WebRTC 协议兼容
      ICE、DTLS、SRTP、JB、BWE）          的那一层
 L0  原语（bytes、log、time、status）
@@ -66,13 +66,13 @@ PAL 插件适配层                       ← 编译期解析
 ```
 
 每一层都是一个 CMake 的 INTERFACE / STATIC 库。**Profile** 也是编译
-期选择：`transport`（P2P 客户端）/ `sfu`（仅转发，不含 L2）/
+期选择：`transport`（P2P 客户端）/ `relay`（仅转发，不含 L2）/
 `agent-gateway`（PCM 双 tap）/ `cloudgame`（高码率 + 对齐输入）/
-`sfu-agent`（组合）。
+`relay-agent`（组合）。
 
-这有趣的地方是：同一份源码树同时输出一个 P2P 客户端**和**一个 SFU 网
+这有趣的地方是：同一份源码树同时输出一个 P2P 客户端**和**一个 relay 网
 关。LiveKit 和 mediasoup 都是纯服务端；libwebrtc 是单体。OSS WebRTC
-生态里我没见过谁把"P2P 客户端和 SFU 放在同一份源码"做了，而这件事
+生态里我没见过谁把"P2P 客户端和 relay 放在同一份源码"做了，而这件事
 对 AI Agent 场景是承重的——网关端经常要两个方向：到用户浏览器的瘦
 客户端，加上到下游 worker 的转发路径。
 

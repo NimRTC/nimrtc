@@ -52,7 +52,7 @@
       <li><b>5.63 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
       <li><b>4 platforms</b><span>Windows · Linux x86_64 · macOS arm64 · Linux aarch64</span></li>
       <li><b>~50k LOC</b><span>of C++20, end-to-end<br>(libwebrtc is ~5.5M)</span></li>
-      <li><b>5 profiles</b><span>transport · sfu · agent · cloudgame · agent-sfu</span></li>
+      <li><b>5 profiles</b><span>transport · relay · agent · cloudgame · relay-agent</span></li>
     </ul>
   </div>
 </section>
@@ -123,7 +123,7 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
         <h3>Shipped in v0.11.0</h3>
         <ul class="check">
           <li>Chrome ↔ NimRTC P2P audio + video interop, Case D, on all four platforms (CI green).</li>
-          <li>5-variant profile library (<code>sfu</code> / <code>transport</code> / <code>agent</code> / <code>cloudgame</code> / <code>agent-sfu</code>) with strict JSON↔C++ round-trip tests.</li>
+          <li>5-variant profile library (<code>relay</code> / <code>transport</code> / <code>agent</code> / <code>cloudgame</code> / <code>relay-agent</code>) with strict JSON↔C++ round-trip tests.</li>
           <li>Pre/post-3A PCM tap (race-free <code>set_pre_process_tap</code> / <code>set_post_process_tap</code>, int16 ASR variant).</li>
           <li>PAL Slice 1&ndash;8 — plugin-capability resolution, zero runtime overhead, public API unchanged.</li>
           <li>Pluggable DTLS backend (<code>EngineConfig::dtls_name</code> resolves to OpenSSL / wolfSSL / mbedTLS at build time).</li>
@@ -155,11 +155,11 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
       Four compile-time layers (<b>L0&ndash;L3</b>) sit on top of a
       <b>Plugin Adaptation Layer (PAL)</b>. A <b>profile</b> — also chosen
       at build time — decides which layers are even linked into the binary.
-      The <code>sfu</code> profile literally omits L2 codecs from the link.
+      The <code>relay</code> profile literally omits L2 codecs from the link.
     </p>
     <pre class="arch-diagram"><code>┌─────────────────────────────────────────────────────────────┐
 │  PROFILE  —  compile-time selection                          │
-│  transport │ sfu │ agent-gateway │ cloudgame │ agent-sfu    │
+│  transport │ relay │ agent-gateway │ cloudgame │ relay-agent    │
 └─────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐

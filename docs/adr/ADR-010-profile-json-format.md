@@ -103,8 +103,8 @@ maintenance surface for a small, resource-constrained project.
 ## Schema v1.1 incremental fields (PROFILE-1 — v0.11.0 amendment)
 
 The v0.11.0 Profile library (`docs/plan/v0.11-plan.md` §9 PROFILE-1)
-introduces five new Profile variants (`sfu`, `agent-gateway`,
-`sfu-agent`, `teleop`, `agent-low-latency`). The four v1.0 canonical
+introduces five new Profile variants (`relay`, `agent-gateway`,
+`relay-agent`, `teleop`, `agent-low-latency`). The four v1.0 canonical
 profiles (`agent`, `call`, `live`, `transport`) remain unchanged and
 continue to validate against `profiles/schema/profile-v1.0.json`; they
 are not bumped and require no field migration.
@@ -117,17 +117,17 @@ only v1.0 keys still parses correctly via the v1.0 / v1.1 loaders.
 
 | Field | Type | First profile | Semantics |
 |---|---|---|---|
-| `sfu_enabled` | `bool` | `sfu.json`, `sfu-agent.json` | Marker — profile is a Selective Forwarding Unit (server-side forwarding hop, no L2 media). Loader-agnostic; runtime reads via `core::PluginRegistry::get_transport_stack(...)`. |
-| `agent_gateway_enabled` | `bool` | `agent-gateway.json`, `sfu-agent.json` | Marker — profile exposes the PCM-tap-able agent gateway surface (`set_pre_process_tap` / `set_post_process_tap`, per `docs/adr/ADR-008-pcm-tap.md`). |
+| `relay_enabled` | `bool` | `relay.json`, `relay-agent.json` | Marker — profile is a relay gateway (server-side forwarding hop, no L2 media). Loader-agnostic; runtime reads via `core::PluginRegistry::get_transport_stack(...)`. |
+| `agent_gateway_enabled` | `bool` | `agent-gateway.json`, `relay-agent.json` | Marker — profile exposes the PCM-tap-able agent gateway surface (`set_pre_process_tap` / `set_post_process_tap`, per `docs/adr/ADR-008-pcm-tap.md`). |
 | `agent_low_latency` | `bool` | `agent-low-latency.json` | Marker — profile turns off 3A's AGC level estimation to avoid latency contribution; intended for ASR-bound pipelines where the model is the consumer. |
-| `max_sessions_per_engine` | `unsigned int` | `sfu.json`, `sfu-agent.json` | Hint — upper bound on concurrent peer sessions one engine instance is expected to handle; consumed by the SFU engine wiring layer (not by the assembly loader). |
-| `audio3a_name_explicit` | `string` (optional) | `sfu-agent.json` (value = `"webrtc_apm"`) | Convenience — when the profile carries an explicit `audio3a_name` override (vs the empty-string SFU default), this field mirrors it for tooling that wants to find the agent audio pipeline without re-parsing the canonical field. Optional; absence = not agent-side 3A. |
+| `max_sessions_per_engine` | `unsigned int` | `relay.json`, `relay-agent.json` | Hint — upper bound on concurrent peer sessions one engine instance is expected to handle; consumed by the relay engine wiring layer (not by the assembly loader). |
+| `audio3a_name_explicit` | `string` (optional) | `relay-agent.json` (value = `"webrtc_apm"`) | Convenience — when the profile carries an explicit `audio3a_name` override (vs the empty-string relay default), this field mirrors it for tooling that wants to find the agent audio pipeline without re-parsing the canonical field. Optional; absence = not agent-side 3A. |
 
 **Loader contract for v1.1**: `profile_from_json_file` continues to read
 only the v1.0 keys (it knows nothing about the additive fields).
 Profiles that need the markers at runtime do one of:
   (a) embed the marker into the C++ constant companion
-      (`kProfileSfu`, `kProfileAgentGateway`, …) and access it via
+      (`kProfileRelay`, `kProfileAgentGateway`, …) and access it via
       `ProfileRegistry::find(name)`;
   (b) read the JSON twice — once via `profile_from_json_file` for the
       canonical fields, once via a thin `nlohmann::json` parse for the
@@ -157,8 +157,8 @@ constant companion match field-by-field.
 
 - The C++ Builder API (unchanged).
 - Loader API for runtime Profile composition (v0.11.0 work, own ADR).
-- Profile 库 官方化 (5 个 Profile: sfu / transport / agent / agent-gateway /
-  sfu-agent) — v0.11.0.
+- Profile 库 官方化 (5 个 Profile: relay / transport / agent / agent-gateway /
+  relay-agent) — v0.11.0.
 
 ## References
 

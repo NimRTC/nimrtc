@@ -316,13 +316,13 @@ engine's compile-time default, equivalent to `browser-call`).
 | `agent-gateway.json` | `agent-gateway` | Server side of an Agent pipeline |
 | `agent-low-latency.json` | `agent-gateway` + `max_p99_ms: 80` | Tightest Agent variant |
 | `teleop.json` | `teleop-ultra-low-latency` | Robot / drone teleop |
-| `sfu.json` | `sfu-relay` | SFU forwarding middlebox |
-| `sfu-agent.json` | `sfu-relay` + `agent-gateway` (composite) | SFU + Agent hybrid; uses `sfu-relay` as the primary strategy, with `agent-gateway` overriding the control plane |
+| `sfu.json` | `sfu-relay` | relay forwarding middlebox |
+| `sfu-agent.json` | `sfu-relay` + `agent-gateway` (composite) | relay + Agent hybrid; uses `sfu-relay` as the primary strategy, with `agent-gateway` overriding the control plane |
 
 The composite `sfu-agent` case is resolved by the engine picking
-`sfu-relay` for the SFU side and `agent-gateway` for the Agent side
+`sfu-relay` for the relay side and `agent-gateway` for the Agent side
 of the same engine; the `TransportSession` is built twice. See
-`docs/zh/architecture.md` §2.6 for the SFU+Agent hybrid description.
+`docs/zh/architecture.md` §2.6 for the relay+Agent hybrid description.
 
 ---
 

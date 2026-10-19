@@ -32,7 +32,7 @@
 
 > Different layer of the stack and different language. Pion is Go; mediasoup
 > and LiveKit are server-side SFU only. NimRTC is C++20 and ships both P2P
-> client *and* SFU from the same source tree (sfu profile skips L2
+> client *and* relay from the same source tree (relay profile skips L2
 > codecs — no runtime dispatch, compile-time layer omission).
 >
 > ↳ Long-form: `show-hn-post.md` §Reply-A.

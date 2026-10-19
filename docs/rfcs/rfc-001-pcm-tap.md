@@ -173,7 +173,7 @@ enable PCM tap as part of their standard composition:
 |---|---|---|
 | `agent` | Both pre + post taps available | SDK 形态，3A enabled; tap for wake-word + ASR |
 | `agent-gateway` | Post tap preferred (3A bypass / passthrough) | 服务端形态; gateway side receives cleaned PCM or decoded frames |
-| `sfu-agent` | Post tap via RTP decode bypass | SFU 形态; SFU decodes once and fans out to N agents |
+| `relay-agent` | Post tap via RTP decode bypass | relay 形态; relay decodes once and fans out to N agents |
 
 The Profile JSON schema (ADR-010, schema v1.0) does not need a new section
 for PCM tap — tap registration is an API-level action, not a declarative

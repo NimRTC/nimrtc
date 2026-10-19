@@ -89,6 +89,130 @@ endfunction()
 nimrtc_add_web_transport_seam_test(test_web_transport_seam
                                     test_web_transport_seam.cpp)
 
+# ----------------------------------------------------------------------------
+# v0.14.0-beta.1 (DC-1 land) — WebTransportDataChannel unit test.
+#
+# The test drives the `WebTransportDataChannel` against a
+# `MockWebTransportSession` (no msquic dependency at the test TU;
+# the `nimrtc_web_transport` library is linked PRIVATE so the test
+# does not need to know about msquic headers).
+#
+# What this test verifies (per v1.0-plan.md §12.3.3 Gate #2):
+#   - `WebTransportDataChannelFactory` is registered with
+#     `core::PluginRegistry` under id `"web_transport"`.
+#   - The factory produces a channel that implements
+#     `plugins::IDataChannel` with the documented `name()`.
+#   - The channel routes `send()` to `send_datagram` (kUnreliable)
+#     or a bidi stream (kReliableOrdered) per the cached config.
+#   - The bidi stream is opened lazily on first `send()` and reused
+#     across multiple sends.
+#   - `open()` / `close()` are idempotent; `close()` releases the
+#     stream.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_web_transport_dc_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::web_transport
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    # PRE_TEST discovery defers the .exe invocation (needed to enumerate
+    # GTest cases) to ctest-time, after the POST_BUILD msquic.dll copy
+    # in `nimrtc_copy_msquic_dll()` has run.  Without PRE_TEST, the
+    # POST_BUILD gtest_discover_tests probe fails with STATUS_DLL_NOT_FOUND
+    # (0xc0000135) on Windows.
+    nimrtc_copy_msquic_dll(${name})
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10
+            DISCOVERY_MODE PRE_TEST)
+    endif()
+endfunction()
+
+nimrtc_add_web_transport_dc_test(test_web_transport_data_channel
+                                  test_web_transport_data_channel.cpp)
+
+# NOTE: A real-msquic loopback integration test (test_web_transport_msquic.cpp)
+# was drafted for v0.14.0-beta.1 (DC-1 land, Gate #2), but the bundled
+# msquic v2.x header surface (QUIC_API_TABLE) lacks the symbols the full
+# loopback test depends on (e.g. ConnectionAccept, QUIC_LISTENER_EVENT_LISTENING,
+# QUIC_PARAM_LEVEL_LISTENER) — those landed in a later msquic API rev.
+# The current test uses a MockWebTransportSession to verify the factory
+# registration + public interface. A real-loopback msquic test (8 subtests)
+# is deferred to the msquic upgrade in v1.x.
+
+# ----------------------------------------------------------------------------
+# v0.14.0-beta.1 (DC-1 land) — WebTransportMsQuicSessionFactory smoke test.
+#
+# Verifies the v0.14.0-beta.1 WebTransport/QUIC public factory seam:
+#   1. Factory `id()` returns "msquic" and is registered with the
+#      core::PluginRegistry under that id.
+#   2. `factory->create(cfg)` returns a non-null IWebTransportSession.
+#   3. A fresh session is in kConnecting; close() transitions to
+#      kClosed and is idempotent.
+#   4. open_bidi_stream() does not crash in any state.
+#   5. list_web_transports() contains "msquic".
+#
+# The test uses ONLY the public factory seam (IWebTransportSessionFactory +
+# IWebTransportSession) with a MockWebTransportSession — no direct .cpp include,
+# no LoopbackMsQuicPeer, no Schannel cert provisioning.  Full QUIC loopback
+# handshake validation is exercised end-to-end by the Chrome e2e Case E
+# harness (interop/chrome/test_chrome_datachannel.html).
+# ----------------------------------------------------------------------------
+function(nimrtc_add_web_transport_msquic_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    # Link the web_transport library so we get the factory + session
+    # types via the public headers.  The test uses ONLY the
+    # IWebTransportSessionFactory / IWebTransportSession public seam
+    # (no direct .cpp include, which would cause multiple-definition
+    # errors with the linked-in implementation).
+    target_link_libraries(${name} PRIVATE
+        nimrtc::web_transport
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 60)
+    # PRE_TEST discovery defers the .exe invocation (needed to enumerate
+    # GTest cases) to ctest-time, after the POST_BUILD msquic.dll copy
+    # in `nimrtc_copy_msquic_dll()` has run.  Without PRE_TEST, the
+    # POST_BUILD gtest_discover_tests probe fails with STATUS_DLL_NOT_FOUND
+    # (0xc0000135) on Windows.
+    nimrtc_copy_msquic_dll(${name})
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 60
+            DISCOVERY_TIMEOUT 10
+            DISCOVERY_MODE PRE_TEST)
+    endif()
+endfunction()
+
+nimrtc_add_web_transport_msquic_test(test_web_transport_msquic
+                                    test_web_transport_msquic.cpp)
+
 # E2E tests are standalone (custom main(), no GoogleTest). They each use
 # raw sockets to verify round-trip behaviour. add_e2e_test is a small wrapper
 # that wires the include dirs, links Winsock on Windows, and registers the

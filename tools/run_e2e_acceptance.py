@@ -8,12 +8,17 @@ Order:
   2. case_b_dtls_inproc    - NimRTC aes_gcm_seal/open (in-process)
   3. case_c_loopback       - NimRTC <-> NimRTC DTLS+ICE+SRTP (loopback UDP)
   4. case_d_chrome         - NimRTC <-> real Chrome via signaling server + Playwright
+                            (full audio pipeline: ICE + DTLS + SRTP + Opus RTP)
+  5. case_e_dtls          - NimRTC <-> Chrome DTLS-only interop (wolfSSL ←→ BoringSSL)
+                            (DTLS handshake + SRTP keys, no audio required)
 
 All artifacts go to build/e2e/. Output is captured to
 build/e2e/case_<x>_*.log so the project root stays clean.
 
 Usage:
-    python tools/run_e2e_acceptance.py
+    python tools/run_e2e_acceptance.py               # run all cases A-D
+    python tools/run_e2e_acceptance.py --case=e   # run Case E only (DTLS-only)
+    python tools/run_e2e_acceptance.py --case=all  # run all cases A-E
 """
 
 from __future__ import annotations
@@ -332,6 +337,69 @@ def run_chrome_interop() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Case E — Chrome ↔ NimRTC DTLS-only interop (wolfSSL ←→ BoringSSL)
+# ---------------------------------------------------------------------------
+
+def run_case_e_dtls() -> bool:
+    """
+    CI-passable Chrome ↔ NimRTC DTLS interop verification.
+
+    Evidence items:
+      E1. Chrome ICE connected within 20 s.
+      E2. Chrome DTLS state === 'connected' (BoringSSL has derived SRTP keys).
+      E3. demo-p2p stderr contains
+            engine[dtls→srtp]: DTLS reached Connected
+
+    All three must pass for overall PASS.  Run with:
+        python tools/run_e2e_acceptance.py --case=e
+    """
+    print("\n[run] case E: Chrome ↔ NimRTC DTLS-only interop")
+    harness_py = ROOT / "tests" / "chrome_interop_harness" / "run_harness.py"
+    if not harness_py.exists():
+        print(f"[FAIL] harness not found: {harness_py}")
+        return False
+
+    log = E2E / "case_e_harness.log"
+    try:
+        with open(log, "w", encoding="utf-8") as f:
+            rc = subprocess.call(
+                [sys.executable, str(harness_py),
+                 "--signaling-port", "9000",
+                 "--timeout", "25"],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+            )
+    except subprocess.TimeoutExpired:
+        print(f"[FAIL] case E timed out after 120 s")
+        return False
+
+    if log.exists():
+        tail = log.read_text(errors="replace").splitlines()[-20:]
+        for ln in tail:
+            print(f"   | {ln}")
+    print(f"[rc]  run_harness.py exit={rc}")
+
+    # Read the machine-readable results from the harness.
+    results_path = E2E / "case_e_results.json"
+    if results_path.exists():
+        try:
+            obj = json.loads(results_path.read_text(errors="replace"))
+            pass_ = obj.get("pass", False)
+            print(f"[result] pass={pass_}")
+            chrome = obj.get("chrome", {})
+            dtls_state = chrome.get("dtlsState", "unknown")
+            nimrtc_line = obj.get("nimrtc_dtls_line", "")
+            print(f"         Chrome dtlsState={dtls_state!r}")
+            print(f"         NimRTC DTLS line: {nimrtc_line[:80] if nimrtc_line else '(not found)'}")
+            return bool(pass_)
+        except Exception as e:
+            print(f"[warn] could not parse {results_path}: {e}")
+
+    return rc == 0
+
+
+# ---------------------------------------------------------------------------
 # Case D — step summary writer
 # ---------------------------------------------------------------------------
 #
@@ -394,8 +462,30 @@ def write_case_d_summary(skipped: bool) -> Path:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="NimRTC end-to-end acceptance runner")
+    parser.add_argument(
+        "--case",
+        default="all",
+        choices=["all", "a", "b", "c", "d", "e", "ab", "abc", "abcd"],
+        help=(
+            "Which case(s) to run.  "
+            "'all' runs A+B+C+D (Case E excluded unless explicitly listed).  "
+            "'e' runs Case E only (DTLS-only interop).  "
+            "Default: all."
+        ),
+    )
+    args = parser.parse_args()
+
+    run_all  = args.case == "all"
+    run_a    = run_all or args.case in ("a",    "ab",    "abc",    "abcd")
+    run_b    = run_all or args.case in ("b",    "ab",    "abc",    "abcd")
+    run_c    = run_all or args.case in ("c",    "abc",   "abcd")
+    run_d    = run_all or args.case in ("d",    "abcd")
+    run_e    = args.case in ("e",)   # Case E only when explicitly requested
+
     results = {}
-    print(f"=== End-to-end acceptance ===")
+    print(f"=== End-to-end acceptance (case={args.case!r}) ===")
     print(f"   artifacts: {E2E}")
 
     # Belt-and-braces CI escape hatch: branches that have NOT merged the
@@ -408,34 +498,42 @@ def main() -> int:
     # Default is to run Case D normally.
     skip_case_d = os.environ.get("NIMRTC_SKIP_CASE_D", "0") == "1"
 
-    results["a_gcm_aead"] = run_local(EXE_GCM,    "case_a_gcm_aead.log")
-    results["b_inproc"]   = run_local(EXE_INPROC, "case_b_dtls_inproc.log")
-    results["c_loopback"] = run_local(EXE_LOOP,   "case_c_loopback.log", timeout_s=20)
-    if skip_case_d:
-        print("\n[run] case D: SKIPPED (NIMRTC_SKIP_CASE_D=1)")
-        chrome_log = E2E / "case_d_chrome.log"
-        chrome_log.write_text(
-            "case D Chrome interop SKIPPED for this CI run.\n"
-            "Reason: NIMRTC_SKIP_CASE_D=1 is set in the workflow env.\n"
-            "\n"
-            "Status: belt-and-braces escape hatch.  The Chrome\n"
-            "fragment-reassembly bug is FIXED in this release via the\n"
-            "`DtlsHandshakeReassembler` shim\n"
-            "(src/modules/dtls/include/nimrtc/dtls/"
-            "dtls_handshake_reassembler.hpp,\n"
-            "wired into dtls_wolfssl_session.cpp::feed_inbound).\n"
-            "`main` does NOT need this flag; this branch is presumed to\n"
-            "have not yet merged the shim (e.g. the historical\n"
-            "`fix/windows-dll-boundary` branch which pre-dates the fix).\n"
-            "CI run 38201352429 is the historical 'before' trace;\n"
-            "the `test_dtls_replay_chrome_hello` executable covers the\n"
-            "'after' path.  See CHANGELOG.md 'Fixed' and\n"
-            "docs/plan/v0.12.0-release-notes.md Decision log 2026-10-16.\n",
-            encoding="utf-8",
-        )
-        results["d_chrome"] = True
-    else:
-        results["d_chrome"] = run_chrome_interop()
+    if run_a:
+        results["a_gcm_aead"] = run_local(EXE_GCM, "case_a_gcm_aead.log")
+    if run_b:
+        results["b_inproc"] = run_local(EXE_INPROC, "case_b_dtls_inproc.log")
+    if run_c:
+        results["c_loopback"] = run_local(EXE_LOOP, "case_c_loopback.log", timeout_s=20)
+
+    if run_d:
+        if skip_case_d:
+            print("\n[run] case D: SKIPPED (NIMRTC_SKIP_CASE_D=1)")
+            chrome_log = E2E / "case_d_chrome.log"
+            chrome_log.write_text(
+                "case D Chrome interop SKIPPED for this CI run.\n"
+                "Reason: NIMRTC_SKIP_CASE_D=1 is set in the workflow env.\n"
+                "\n"
+                "Status: belt-and-braces escape hatch.  The Chrome\n"
+                "fragment-reassembly bug is FIXED in this release via the\n"
+                "`DtlsHandshakeReassembler` shim\n"
+                "(src/modules/dtls/include/nimrtc/dtls/"
+                "dtls_handshake_reassembler.hpp,\n"
+                "wired into dtls_wolfssl_session.cpp::feed_inbound).\n"
+                "`main` does NOT need this flag; this branch is presumed to\n"
+                "have not yet merged the shim (e.g. the historical\n"
+                "`fix/windows-dll-boundary` branch which pre-dates the fix).\n"
+                "CI run 38201352429 is the historical 'before' trace;\n"
+                "the `test_dtls_replay_chrome_hello` executable covers the\n"
+                "'after' path.  See CHANGELOG.md 'Fixed' and\n"
+                "docs/plan/v0.12.0-release-notes.md Decision log 2026-10-16.\n",
+                encoding="utf-8",
+            )
+            results["d_chrome"] = True
+        else:
+            results["d_chrome"] = run_chrome_interop()
+
+    if run_e:
+        results["e_dtls"] = run_case_e_dtls()
 
     print("\n=== Summary ===")
     for k, v in results.items():
@@ -449,8 +547,11 @@ def main() -> int:
     # skip flag is derived from the same env var the orchestrator
     # consulted, so the rendered line is always consistent with the
     # Case-D outcome the user sees in the run log.
-    summary_path = write_case_d_summary(skip_case_d)
-    print(f"[ok]  case-D step summary -> {summary_path}")
+    # Only write the summary when Case D was actually run or explicitly
+    # skipped (not when --case=e skips it entirely).
+    if run_d or skip_case_d:
+        summary_path = write_case_d_summary(skip_case_d)
+        print(f"[ok]  case-D step summary -> {summary_path}")
 
     return 0 if overall else 1
 

@@ -849,30 +849,32 @@ TEST_F(EnginePluginLoading, slice76_accessors_empty_before_open) {
 
 
 // ---------------------------------------------------------------------------
-// v0.14.0 alpha.2 (ADR-014) — WebTransport / QUIC seam registry slot.
+// v0.14.0 (ADR-014) — WebTransport / QUIC seam registry slot.
 //
 // The seam (`IWebTransportSession` + companion headers + factory
 // interface) lands in v0.14.0 alpha.2; the msquic-backed factory
-// lands in beta.1.  At the alpha.2 cut, the registry slot exists
-// (parallel to the Slice 8 DTLS / SCTP / raw_udp / transport-stack
-// slots) but no factory is auto-registered.  These two tests pin
-// the alpha.2 contract:
+// is auto-registered in beta.1 by `pal_default_registrars.cpp`.
+// These two tests pin the alpha.2 → beta.1 transition contract:
 //
 //   1. `wt014_registry_slot_is_typed_for_web_transport_factory`
 //        — `get_web_transport()` / `list_web_transports()` /
 //        `register_web_transport()` exist and return the
 //        expected `const IWebTransportSessionFactory*` type
 //        (i.e. the slot is wired into the typed registry
-//        hooks, not a process-local cache).
+//        hooks, not a process-local cache).  The
+//        auto-registered "msquic" factory is visible;
+//        user-registered stubs are accepted and resolvable by
+//        id; unknown ids still return nullptr (no silent
+//        fallback, matching the Slice 8 contract).
 //
-//   2. `wt014_registry_default_registrars_omits_web_transport_until_beta1`
+//   2. `wt014_registry_default_registrars_auto_registers_msquic_in_beta1`
 //        — after `register_all_default_plugins()` runs (the PAL
 //        Slice 2 unified entry point), `list_web_transports()`
-//        returns an empty vector.  No factory is auto-registered
-//        at the alpha.2 cut.  A user-supplied factory id
-//        resolves to nullptr — the runtime error documented in
-//        v0.14-plan.md §3.1 Gate #3 ("loud-fail on unknown
-//        id", no silent fallback).
+//        contains exactly one id: "msquic".  The auto-registered
+//        factory is the runtime error surface inverted from
+//        alpha.2 (no silent fallback) to beta.1 (a real
+//        production factory resolves; see
+//        v0.14-plan.md §3.1 Gate #3).
 // ---------------------------------------------------------------------------
 
 // File-scope stub factory used by the
@@ -907,28 +909,30 @@ static const StubFactory k_stub_factory;
 
 TEST_F(EnginePluginLoading,
        wt014_registry_slot_is_typed_for_web_transport_factory) {
-    // The slot must exist.  The `get_web_transport()` accessor
-    // returns nullptr for unknown ids (the Slice 8 typed-slot
-    // contract); verify the accessor compiles + links + returns
-    // the right type by checking that an unknown id returns
-    // nullptr and a known id (also nonexistent) returns nullptr.
+    // v0.14.0-beta.1 contract: the msquic factory is
+    // auto-registered by `register_all_default_plugins()` (it
+    // lands in beta.1 alongside the msquic integration; the
+    // alpha.2 cut shipped the seam only).
     const auto* factory =
         PluginRegistry::instance().get_web_transport("msquic");
-    EXPECT_EQ(factory, nullptr)
-        << "v0.14.0 alpha.2: msquic factory is NOT auto-registered "
-           "(the factory lands in beta.1)";
+    EXPECT_NE(factory, nullptr)
+        << "v0.14.0-beta.1: get_web_transport(\"msquic\") must "
+           "resolve to the auto-registered factory (the msquic "
+           "factory lands in beta.1 per ADR-014 + v0.14-plan.md "
+           "§2.1.2 WT-IMPL; see pal_default_registrars.cpp)";
 
-    // The list accessor must exist and return an empty vector
-    // (verified in the next subtest).
+    // The list accessor must include the auto-registered
+    // "msquic" id (size may grow in future releases, so we
+    // only assert membership — not an exact count — to keep
+    // the test forward-compatible).
     auto ids = PluginRegistry::instance().list_web_transports();
-    // Cast to a typed size_t so the test compiles cleanly even
-    // if the accessor returns an empty vector (the static_cast
-    // is a no-op on size_t, but it documents the type contract).
-    EXPECT_EQ(static_cast<std::size_t>(ids.size()),
-              static_cast<std::size_t>(0))
-        << "v0.14.0 alpha.2: list_web_transports() must return an "
-           "empty vector (no factory is auto-registered at the "
-           "alpha.2 cut)";
+    bool found_msquic = false;
+    for (auto id : ids) {
+        if (id == "msquic") { found_msquic = true; break; }
+    }
+    EXPECT_TRUE(found_msquic)
+        << "v0.14.0-beta.1: list_web_transports() must include "
+           "the auto-registered \"msquic\" factory";
 
     // The slot must accept a user-registered factory.  Register a
     // local stub factory and verify it resolves by id.  This
@@ -950,19 +954,20 @@ TEST_F(EnginePluginLoading,
     const auto* resolved =
         PluginRegistry::instance().get_web_transport("wt014_stub");
     EXPECT_EQ(resolved, &wt014_local_namespace::k_stub_factory)
-        << "v0.14.0 alpha.2: get_web_transport() must resolve the "
+        << "v0.14.0-beta.1: get_web_transport() must resolve the "
            "user-registered factory by id (typed slot contract; "
            "matches the DTLS / SCTP / raw_udp / transport-stack "
            "Slice 8 slots)";
 
-    // The stub id must appear in the list accessor.
+    // The stub id must appear in the list accessor (alongside
+    // the auto-registered "msquic" factory from beta.1).
     auto ids_after = PluginRegistry::instance().list_web_transports();
     bool found_stub = false;
     for (auto id : ids_after) {
         if (id == "wt014_stub") { found_stub = true; break; }
     }
     EXPECT_TRUE(found_stub)
-        << "v0.14.0 alpha.2: list_web_transports() must include the "
+        << "v0.14.0-beta.1: list_web_transports() must include the "
            "user-registered factory (the slot is a real typed "
            "registry, not a process-local cache)";
 
@@ -972,99 +977,105 @@ TEST_F(EnginePluginLoading,
         PluginRegistry::instance().get_web_transport(
             "not_registered_xyz");
     EXPECT_EQ(missing, nullptr)
-        << "v0.14.0 alpha.2: get_web_transport() must return nullptr "
+        << "v0.14.0-beta.1: get_web_transport() must return nullptr "
            "for unregistered ids (no silent fallback)";
 
-    // Note: the "no auto-registered factory" assertion is split
+    // Note: the "msquic IS auto-registered" assertion is split
     // into the next subtest so the assertions are easy to
     // bisect when the test fails.
 
     // Clean up the stub factory so the next test (which asserts
-    // `list_web_transports()` is empty after
+    // the auto-registered set is exactly {msquic} after
     // `register_all_default_plugins()`) starts with a clean
     // registry.  The factory registry is a process-wide
     // singleton; without this unregister the stub from this test
-    // would leak into the next test and break the
-    // "no auto-registered factory" assertion.
+    // would leak into the next test and inflate the expected
+    // "msquic-only" count.
     const bool removed = PluginRegistry::instance().unregister_web_transport(
         wt014_local_namespace::k_stub_factory.id());
     EXPECT_TRUE(removed)
-        << "v0.14.0 alpha.2: unregister_web_transport() must remove the "
+        << "v0.14.0-beta.1: unregister_web_transport() must remove the "
            "stub factory registered earlier in this test (test fixture "
            "leak guard)";
 }
 
 TEST_F(EnginePluginLoading,
-       wt014_registry_default_registrars_omits_web_transport_until_beta1) {
-    // v0.14.0 alpha.2 contract: no factory is auto-registered by
-    // `register_all_default_plugins()`.  The msquic factory lands
-    // in beta.1 alongside the msquic integration; the alpha.2
-    // cut ships the seam + the registry slot only.
+       wt014_registry_default_registrars_auto_registers_msquic_in_beta1) {
+    // v0.14.0-beta.1 contract: `register_all_default_plugins()`
+    // auto-registers the msquic factory (it lands in beta.1
+    // alongside the msquic integration; the alpha.2 cut shipped
+    // the seam + the registry slot only — see
+    // docs/plan/v0.14-plan.md §2.1.2 WT-IMPL).
     //
     // Verify: after three calls to `register_all_default_plugins()`
     // (the PAL Slice 2 idempotency contract), the
-    // `list_web_transports()` accessor still returns an empty
-    // vector.  This pins the alpha.2 → beta.1 transition: if a
-    // future PR accidentally adds a factory entry in
-    // `pal_default_registrars.cpp` before the msquic integration
-    // is ready, this test fails at PR review time.
+    // `list_web_transports()` accessor contains exactly one id
+    // ("msquic"), and `get_web_transport("msquic")` resolves to
+    // a non-null factory.  This pins the beta.1 contract: if a
+    // future PR accidentally removes the msquic entry from
+    // `pal_default_registrars.cpp` — or accidentally adds a
+    // second auto-registered factory — this test fails at PR
+    // review time.
     //
     // Defensive cleanup: if a previous test in this TU leaked a
-    // web_transport factory into the registry, unregister it
-    // here.  The "alpha.2: no auto-registered factory" contract
-    // is about the production `register_all_default_plugins()`
-    // path, not about user-registered stub factories in tests.
-    while (!PluginRegistry::instance().list_web_transports().empty()) {
-        const auto leaked_ids = PluginRegistry::instance().list_web_transports();
-        bool any_removed = false;
-        for (auto id : leaked_ids) {
-            if (PluginRegistry::instance().unregister_web_transport(id)) {
-                any_removed = true;
-            }
+    // user-registered stub factory into the registry, unregister
+    // it here.  We do NOT unregister the auto-registered
+    // "msquic" entry — the whole point of this test is to
+    // confirm it IS present after `register_all_default_plugins()`
+    // runs.  Stub ids registered by other tests in this TU use
+    // a `wt014_` prefix (e.g. `wt014_stub`), so we filter on
+    // that prefix to avoid removing the production entry.
+    for (auto id : PluginRegistry::instance().list_web_transports()) {
+        if (id.rfind("wt014_", 0) == 0) {
+            PluginRegistry::instance().unregister_web_transport(id);
         }
-        if (!any_removed) break;  // safety: avoid infinite loop
     }
     nimrtc::core::register_all_default_plugins();
     nimrtc::core::register_all_default_plugins();
     nimrtc::core::register_all_default_plugins();
 
     auto ids = PluginRegistry::instance().list_web_transports();
-    EXPECT_TRUE(ids.empty())
-        << "v0.14.0 alpha.2: list_web_transports() must be empty "
-           "after register_all_default_plugins() — no factory is "
-           "auto-registered at the alpha.2 cut.  Found ids:";
+    EXPECT_EQ(ids.size(), 1u)
+        << "v0.14.0-beta.1: list_web_transports() must contain "
+           "exactly one id (\"msquic\") after "
+           "register_all_default_plugins() — the msquic factory "
+           "is the only auto-registered WebTransport factory in "
+           "beta.1; see pal_default_registrars.cpp";
+    bool found_msquic = false;
     for (auto id : ids) {
+        if (id == "msquic") { found_msquic = true; break; }
         ADD_FAILURE() << "  unexpected id: " << id;
     }
+    EXPECT_TRUE(found_msquic)
+        << "v0.14.0-beta.1: list_web_transports() must include "
+           "the auto-registered \"msquic\" factory after "
+           "register_all_default_plugins()";
 
-    // A user-supplied lookup of a would-be beta.1 id ("msquic")
-    // must return nullptr — the engine's runtime "loud-fail on
-    // unknown factory" contract is the alpha.2 error surface
-    // for `EngineConfig::datachannel_backend = "msquic"` callers.
+    // The auto-registered lookup must succeed (no silent
+    // fallback).  This is the inverse of the alpha.2 contract
+    // (where "msquic" was a loud-fail — see
+    // v0.14-plan.md §3.1 Gate #3).
     const auto* msquic =
         PluginRegistry::instance().get_web_transport("msquic");
-    EXPECT_EQ(msquic, nullptr)
-        << "v0.14.0 alpha.2: get_web_transport(\"msquic\") must "
-           "return nullptr (the msquic factory is scheduled to "
-           "land in v0.14.0-beta.1; see docs/plan/v0.14-plan.md "
-           "§3.1 Gate #3 — the alpha.2 error surface is a "
-           "loud-fail, not a silent fallback)";
+    EXPECT_NE(msquic, nullptr)
+        << "v0.14.0-beta.1: get_web_transport(\"msquic\") must "
+           "return a non-null factory (the msquic factory is "
+           "auto-registered at the beta.1 cut)";
 
     // The Slice 8 / v0.10.2 typed-slot count is unchanged
-    // (DTLS=1, SCTP=1, raw_udp=1, transport_stack=3, web_transport=0).
-    // The web_transport slot adds a new dimension that lands in
-    // beta.1; pinning the count prevents accidental over- or
-    // under-registration in the PAL Slice 2 table.
+    // (DTLS=1, SCTP=1, raw_udp=1, transport_stack=3,
+    // web_transport=1 with the beta.1 msquic entry).  Pinning
+    // the count prevents accidental over- or under-registration
+    // in the PAL Slice 2 table.
     EXPECT_EQ(PluginRegistry::instance().list_dtls_sessions().size(), 1u);
     EXPECT_EQ(PluginRegistry::instance().list_sctp_sockets().size(), 1u);
     EXPECT_EQ(PluginRegistry::instance().list_raw_udp_datagrams().size(), 1u);
     EXPECT_EQ(PluginRegistry::instance().list_transport_stacks().size(), 3u)
         << "Slice 7.6 baseline: default (shell) + webrtc-classic + "
            "raw-udp-arq (3 entries)";
-    EXPECT_EQ(PluginRegistry::instance().list_web_transports().size(), 0u)
-        << "v0.14.0 alpha.2: web_transport slot is empty (no "
-           "factory is auto-registered; the msquic factory lands "
-           "in beta.1)";
+    EXPECT_EQ(PluginRegistry::instance().list_web_transports().size(), 1u)
+        << "v0.14.0-beta.1: web_transport slot has exactly one "
+           "auto-registered entry (\"msquic\")";
 }
 
 } // anonymous namespace

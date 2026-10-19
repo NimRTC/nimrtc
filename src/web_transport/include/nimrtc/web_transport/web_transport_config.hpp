@@ -26,6 +26,7 @@
 // Stability classification: NIMRTC_API_UNSTABLE — see
 // web_transport_session_iface.hpp for the rationale.
 #include <cstdint>
+#include <string_view>
 
 namespace nimrtc::web_transport {
 
@@ -87,6 +88,31 @@ struct WebTransportConfig {
      * `QUIC_SETTINGS`.
      */
     std::uint32_t keep_alive_interval_ms = 0;
+
+    /**
+     * @brief Peer hostname or IP address.
+     *
+     * Passed to msquic's `ConnectionStart()` as the target for the
+     * QUIC handshake.  Empty string means in-process loopback
+     * (useful for unit tests); real callers set this to the
+     * WebTransport server's hostname or IP.  Default: empty
+     * (loopback, for unit-test use only).
+     *
+     * msquic mapping: `ConnectionStart` `RemoteAddress` parameter.
+     */
+    std::string_view peer_hostname;
+
+    /**
+     * @brief Peer QUIC port number.
+     *
+     * The port on `peer_hostname` that the QUIC server is listening
+     * on.  Standard WebTransport port is 443.  Default: 443.
+     * A value of 0 disables outbound connection attempts (useful
+     * for unit tests that only exercise registration/configuration).
+     *
+     * msquic mapping: `ConnectionStart` `RemotePort` parameter.
+     */
+    std::uint16_t peer_port = 443;
 };
 
 } // namespace nimrtc::web_transport

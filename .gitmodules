@@ -58,3 +58,13 @@
 	url = https://github.com/google/googletest.git
 	# Pinned: v1.12.0 (v1.12.1 not yet released upstream as of 2026-09-11)
 	branch = v1.12.0
+
+[submodule "src/third_party/msquic"]
+	path = src/third_party/msquic
+	url = https://github.com/microsoft/msquic.git
+	# Pinned: see src/third_party/vendor.json (commit_sha field).
+	# Run `git submodule update --init src/third_party/msquic` to fetch.
+	# Update vendor.json with the actual SHA after fetching.
+	# ADR-014 Criterion 5 (active maintenance: < 180 days old) is verified
+	# by interop/v0_14_msquic_spike/ at build time.
+	branch = master

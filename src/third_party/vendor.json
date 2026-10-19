@@ -97,6 +97,17 @@
       "build": "Single-header INTERFACE library — only the header is needed.",
       "notes": "Single-header JSON. Submodule root has single_include/nlohmann/json.hpp; CMakeLists.txt wraps it as nlohmann_json::nlohmann_json.",
       "size_estimate": "0.9 MB / 3 files (header-only)"
+    },
+    {
+      "name": "msquic",
+      "upstream_url": "https://github.com/microsoft/msquic.git",
+      "upstream_version": "master",
+      "commit_sha": "42376ae4b414ff80d8317aadb3e9e789400e7638",
+      "submodule_path": "src/third_party/msquic",
+      "license": "MIT",
+      "build": "add_subdirectory(src) — see src/third_party/msquic/CMakeLists.txt",
+      "notes": "WebTransport / QUIC backend for IWebTransportSession. Source populated by git submodule; CMakeLists.txt wraps the upstream src/CMakeLists.txt and exposes nimrtc_vendor_msquic. ADR-014 Criterion 5 (active maintenance: < 180 days) is verified at build time by interop/v0_14_msquic_spike/ CMake scripts. If criterion 5 fails, ADR-014 reopens and the fallback is quiche (BSD-2, C API). Last upstream commit: 2026-10-16 (3 days ago as of 2026-10-19).",
+      "size_estimate": "~30 MB / 500 files"
     }
   ],
 

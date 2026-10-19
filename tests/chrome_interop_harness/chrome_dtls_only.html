@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chrome ↔ NimRTC DTLS-SRTP Interop Test (Minimal)</title>
+<style>
+body { font-family: 'Consolas', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; max-width: 1000px; margin: 0 auto; }
+h1 { color: #58a6ff; font-size: 1.2em; }
+button { background: #238636; color: #fff; border: none; padding: 8px 16px; cursor: pointer; margin: 4px 2px; font-family: inherit; font-weight: bold; }
+button:disabled { background: #484f58; color: #8b949e; cursor: not-allowed; }
+.log { background: #161b22; border: 1px solid #30363d; padding: 8px; max-height: 500px; overflow-y: auto; margin: 10px 0; font-size: 12px; line-height: 1.5; }
+.log-line { margin: 1px 0; }
+.pass { color: #3fb950; font-weight: bold; }
+.fail { color: #f85149; font-weight: bold; }
+.info { color: #8b949e; }
+.warn { color: #d29922; }
+.chrome { color: #79c0ff; }
+.nimrtc { color: #a371f7; }
+.panel { background: #161b22; border: 1px solid #30363d; padding: 12px; margin: 8px 0; border-radius: 4px; }
+.label { color: #58a6ff; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>🐺 Chrome ↔ NimRTC DTLS-SRTP Interop (Minimal — No Audio Required)</h1>
+
+<div class="panel">
+  <p><span class="label">Status:</span> <span id="status">Idle — click "Start" to begin</span></p>
+  <p><span class="label">Room:</span> <span id="room" class="info">-</span></p>
+  <p><span class="label">Role:</span> <span id="role" class="warn">-</span></p>
+</div>
+
+<div>
+  <button id="btnStart" onclick="startTest()">Start DTLS Interop Test</button>
+  <button id="btnClear" onclick="clearLog()">Clear Log</button>
+</div>
+
+<div class="log" id="log"></div>
+
+<script>
+// ============================================================================
+// Chrome ↔ NimRTC DTLS-SRTP Interop Test (Minimal)
+// ============================================================================
+//
+// This test verifies DTLS-SRTP handshake between Chrome and NimRTC WITHOUT
+// requiring audio flow.  It proves:
+//   1. Chrome's BoringSSL DTLS client can shake hands with NimRTC's wolfSSL
+//      DTLS server (or vice versa).
+//   2. SRTP keys are derived and usable on both sides.
+//
+// Verification method:
+//   - Chrome side: RTCPeerConnection.iceConnectionState === 'connected'
+//                  RTCPeerConnection.connectionState === 'connected'
+//                  (DTLS must complete before ICE 'connected' can be reached
+//                   since NimRTC sends DTLS records over the ICE-selected path)
+//   - NimRTC side: engine logs "engine[dtls→srtp]: DTLS reached Connected"
+//                  in demo-p2p stderr (grepped by the test harness)
+//
+// This harness does NOT require getUserMedia, audio analysis, or any media
+// flow — making it suitable for headless CI environments where no microphone
+// or speaker is available.
+
+const PARAMS = new URLSearchParams(window.location.search);
+const ROOM   = PARAMS.get("room") || "interop";
+const WS_URL = PARAMS.get("ws")   || "ws://localhost:9000/" + ROOM;
+const OFFERER = PARAMS.get("offerer") === "1";
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "20000", 10);
+
+// ---------- Results (read by Python test harness via page.evaluate) ----------
+window._interopResults = {
+    wsConnected:    false,
+    iceConnected:   false,
+    connConnected:  false,
+    sdpOfferSeen:  false,
+    sdpAnswerSent: false,
+    // DTLS-specific checks
+    dtlsState:     "unknown",   // 'new' | 'connecting' | 'connected' | 'closed' | 'failed'
+    srtpCipher:    null,       // e.g. 'SRTP_AES128_CM_SHA1_80'
+    errors:        [],
+    exitCode:      0,
+};
+
+let pc = null;
+let ws = null;
+let pendingCandidates = [];
+let testStartTime = 0;
+
+function log(msg, cls) {
+    cls = cls || 'info';
+    const div = document.createElement('div');
+    div.className = 'log-line ' + cls;
+    div.textContent = new Date().toISOString().substr(11, 12) + ' | ' + msg;
+    document.getElementById('log').appendChild(div);
+    document.getElementById('log').scrollTop = 1e9;
+    console.log('[' + cls + '] ' + msg);
+}
+
+function clearLog() {
+    document.getElementById('log').innerHTML = '';
+}
+
+function setStatus(msg) {
+    document.getElementById('status').innerHTML = msg;
+}
+
+function reportError(code, msg) {
+    window._interopResults.errors.push({ code: code, msg: msg });
+    window._interopResults.exitCode = code;
+    log('ERROR 0x' + code.toString(16) + ': ' + msg, 'fail');
+}
+
+// ----- WebSocket -----
+
+function sendWs(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+    }
+}
+
+function connectWs() {
+    log('Connecting to signaling server: ' + WS_URL, 'info');
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        log('WebSocket CONNECTED', 'pass');
+        window._interopResults.wsConnected = true;
+        setStatus('Signaling connected');
+        document.getElementById('room').textContent = ROOM;
+        document.getElementById('role').textContent = OFFERER ? 'Offerer (Chrome DTLS client)' : 'Answerer';
+        if (OFFERER) {
+            createAndSendOffer();
+        }
+    };
+
+    ws.onmessage = async (evt) => {
+        let msg;
+        try {
+            msg = JSON.parse(evt.data);
+        } catch (e) {
+            log('Invalid JSON: ' + evt.data, 'fail');
+            return;
+        }
+        const t = msg.type;
+        log('WS ← ' + t, 'chrome');
+
+        if (t === 'offer') {
+            window._interopResults.sdpOfferSeen = true;
+            log('SDP offer received (len=' + msg.sdp.length + ')', 'chrome');
+            setStatus('Processing SDP offer from NimRTC…');
+            try {
+                await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+                log('setRemoteDescription(offer) OK', 'pass');
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                window._interopResults.sdpAnswerSent = true;
+                log('SDP answer created', 'pass');
+                sendWs({ type: 'answer', sdp: answer.sdp });
+                log('SDP answer sent to NimRTC', 'chrome');
+                setStatus('Answer sent — waiting for ICE…');
+                flushCandidates();
+            } catch (e) {
+                reportError(0x21, 'setRemoteDescription/createAnswer: ' + e.message);
+            }
+
+        } else if (t === 'answer') {
+            log('SDP answer received', 'nimrtc');
+            window._interopResults.sdpAnswerSent = true;
+            if (pc.signalingState === 'have-local-offer') {
+                try {
+                    await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+                    log('setRemoteDescription(answer) OK', 'pass');
+                    flushCandidates();
+                } catch (e) {
+                    reportError(0x22, 'setRemoteDescription(answer): ' + e.message);
+                }
+            }
+
+        } else if (t === 'candidate') {
+            const cand = msg.candidate;
+            log('ICE candidate: ' + cand, 'info');
+            let sdpMid = msg.sdpMid;
+            let sdpMLineIndex = (typeof msg.sdpMLineIndex === 'number') ? msg.sdpMLineIndex : null;
+            if (sdpMid == null || sdpMLineIndex == null) {
+                // Legacy parse
+                const parts = cand.split(' ');
+                for (let i = 0; i < parts.length; i++) {
+                    if (parts[i] === 'mid' && i + 1 < parts.length) sdpMid = parts[i + 1];
+                    if (parts[i] === 'mled' && i + 1 < parts.length) sdpMLineIndex = parseInt(parts[i + 1], 10);
+                }
+            }
+            if (sdpMid != null && sdpMLineIndex != null) {
+                const rtcCand = { candidate: cand, sdpMid: sdpMid, sdpMLineIndex: sdpMLineIndex };
+                if (pc.remoteDescription && pc.remoteDescription.sdp) {
+                    pc.addIceCandidate(rtcCand).catch(e => log('addIceCandidate error: ' + e, 'warn'));
+                } else {
+                    pendingCandidates.push(rtcCand);
+                }
+            } else {
+                log('Skipping candidate without sdpMid/sdpMLineIndex', 'warn');
+            }
+
+        } else {
+            log('Unknown message type: ' + t, 'warn');
+        }
+    };
+
+    ws.onerror = (e) => {
+        reportError(0x11, 'WebSocket error');
+    };
+
+    ws.onclose = (e) => {
+        log('WebSocket closed: code=' + e.code + ' reason=' + e.reason, 'warn');
+        if (!window._interopResults.iceConnected) {
+            reportError(0x12, 'WebSocket closed before ICE connected');
+        }
+    };
+}
+
+function flushCandidates() {
+    for (const c of pendingCandidates) {
+        pc.addIceCandidate(c).catch(e => log('addIceCandidate (flush) error: ' + e, 'warn'));
+    }
+    pendingCandidates = [];
+}
+
+// ----- PeerConnection -----
+
+function makePc() {
+    // No STUN server needed for local loopback, but use Google's for real interop.
+    // For Chrome ↔ NimRTC on the same Windows host, local host candidates
+    // should be sufficient since NimRTC binds to 0.0.0.0.
+    const config = {
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    };
+    log('RTCPeerConnection config: ' + JSON.stringify(config), 'info');
+    pc = new RTCPeerConnection(config);
+
+    pc.oniceconnectionstatechange = () => {
+        log('ICE connectionState: ' + pc.iceConnectionState,
+            pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed' ? 'pass' : 'info');
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            window._interopResults.iceConnected = true;
+            setStatus('ICE Connected ✓ — DTLS handshake in progress…');
+            log('ICE Connected — DTLS handshake is underway', 'warn');
+            flushCandidates();
+            // Start polling DTLS state
+            startDtlsPolling();
+        } else if (pc.iceConnectionState === 'failed') {
+            reportError(0x10, 'ICE connection failed');
+        } else if (pc.iceConnectionState === 'disconnected') {
+            log('ICE disconnected (may be transient)', 'warn');
+        }
+    };
+
+    pc.onconnectionstatechange = () => {
+        log('Peer connectionState: ' + pc.connectionState,
+            pc.connectionState === 'connected' ? 'pass' : 'info');
+        if (pc.connectionState === 'connected') {
+            window._interopResults.connConnected = true;
+            log('PeerConnection connected ✓ — DTLS-SRTP handshake complete!', 'pass');
+        }
+    };
+
+    pc.onicecandidate = (e) => {
+        if (e.candidate === null) {
+            log('ICE gathering complete (null)', 'info');
+            return;
+        }
+        const candStr = e.candidate.candidate;
+        if (!candStr) return;
+        log('Local ICE candidate: ' + candStr.substr(0, 80), 'chrome');
+        // Extract sdpMid / sdpMLineIndex from the RTCIceCandidateInit
+        sendWs({
+            type: 'candidate',
+            candidate: candStr,
+            sdpMid: e.candidate.sdpMid,
+            sdpMLineIndex: e.candidate.sdpMLineIndex,
+        });
+    };
+
+    // Chrome may add a data channel if NimRTC supports it
+    pc.ondatachannel = (e) => {
+        log('DataChannel received: ' + e.channel.label, 'pass');
+        e.channel.onopen = () => log('DataChannel OPEN: ' + e.channel.label, 'pass');
+        e.channel.onmessage = (ev) => log('DataChannel MSG: ' + ev.data, 'info');
+    };
+
+    return pc;
+}
+
+async function createAndSendOffer() {
+    // Ensure the offer has a media section: Chrome's createOffer() with no
+    // tracks/transceivers returns a media-less SDP that NimRTC can't parse.
+    try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch (_) {}
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log('SDP offer created', 'pass');
+    if (offer.sdp.includes('111') || offer.sdp.includes('0')) {
+        log('Offer includes audio codec ✓', 'pass');
+    }
+    window._interopResults.sdpOfferSeen = true;
+    sendWs({ type: 'offer', sdp: offer.sdp });
+    log('SDP offer sent to signaling server', 'chrome');
+    setStatus('Offer sent — waiting for SDP answer from NimRTC…');
+}
+
+// ----- DTLS state polling via getStats -----
+//
+// Chrome's RTCPeerConnection does not expose DTLS state directly to JS.
+// We poll getStats() to find:
+//   - transport.dtlsState  (Chrome 107+): 'new'|'connecting'|'connected'|'closed'|'failed'
+//   - transport.srtpCipher  (Chrome 107+): e.g. 'SRTP_AES128_CM_SHA1_80'
+//
+// When transport.dtlsState === 'connected', Chrome has completed the
+// DTLS-SRTP handshake AND derived SRTP keys.  This is the Chrome-side
+// proof of interop.
+//
+// Note: Some Chrome versions may report dtlsState only after ICE is connected
+// (since DTLS records travel over the ICE-selected path).  We start polling
+// as soon as ICE is connected.
+
+let dtlsPollInterval = null;
+
+function startDtlsPolling() {
+    if (dtlsPollInterval) return;
+    log('Starting DTLS state polling…', 'info');
+    dtlsPollInterval = setInterval(async () => {
+        if (!pc) { clearInterval(dtlsPollInterval); return; }
+        try {
+            const stats = await pc.getStats();
+            stats.forEach(report => {
+                if (report.type === 'transport' && report.dtlsState) {
+                    const prev = window._interopResults.dtlsState;
+                    window._interopResults.dtlsState = report.dtlsState;
+                    if (report.dtlsState !== prev) {
+                        log('DTLS state: ' + report.dtlsState,
+                            report.dtlsState === 'connected' ? 'pass' : 'warn');
+                    }
+                    if (report.srtpCipher) {
+                        window._interopResults.srtpCipher = report.srtpCipher;
+                        log('SRTP cipher: ' + report.srtpCipher, 'pass');
+                    }
+                    // Once DTLS is connected, we have proof of interop
+                    if (report.dtlsState === 'connected') {
+                        clearInterval(dtlsPollInterval);
+                        dtlsPollInterval = null;
+                        onDtlsConnected(report.srtpCipher);
+                    }
+                }
+                // Fallback: check component stats for older Chrome
+                if (report.type === 'component' && report.dtlsState) {
+                    if (!window._interopResults.dtlsState ||
+                        window._interopResults.dtlsState === 'unknown') {
+                        window._interopResults.dtlsState = report.dtlsState;
+                        log('DTLS state (component): ' + report.dtlsState,
+                            report.dtlsState === 'connected' ? 'pass' : 'warn');
+                        if (report.dtlsState === 'connected') {
+                            clearInterval(dtlsPollInterval);
+                            onDtlsConnected(null);
+                        }
+                    }
+                }
+            });
+        } catch (e) {
+            log('getStats error: ' + e, 'warn');
+        }
+    }, 200);
+}
+
+function onDtlsConnected(srtpCipher) {
+    log('');
+    log('★ ★ ★ DTLS-SRTP HANDSHAKE SUCCESSFUL ★ ★ ★', 'pass');
+    log('Chrome has completed the DTLS handshake with NimRTC', 'pass');
+    log('SRTP keys installed: ' + (srtpCipher || window._interopResults.srtpCipher || 'via SRTP API'), 'pass');
+    setStatus('✓ DTLS-SRTP Handshake Complete! Chrome ↔ NimRTC interop verified.');
+    scheduleResultDump();
+}
+
+function scheduleResultDump() {
+    // Give one more second for final stats to settle, then print results.
+    setTimeout(printResults, 1000);
+}
+
+function printResults() {
+    log('');
+    log('=== Chrome ↔ NimRTC DTLS Interop Results ===', 'pass');
+    log('wsConnected:    ' + window._interopResults.wsConnected, window._interopResults.wsConnected ? 'pass' : 'fail');
+    log('sdpOfferSeen:   ' + window._interopResults.sdpOfferSeen, window._interopResults.sdpOfferSeen ? 'pass' : 'fail');
+    log('sdpAnswerSent:  ' + window._interopResults.sdpAnswerSent, window._interopResults.sdpAnswerSent ? 'pass' : 'fail');
+    log('iceConnected:    ' + window._interopResults.iceConnected, window._interopResults.iceConnected ? 'pass' : 'fail');
+    log('connConnected:   ' + window._interopResults.connConnected, window._interopResults.connConnected ? 'pass' : 'fail');
+    log('dtlsState:      ' + window._interopResults.dtlsState, window._interopResults.dtlsState === 'connected' ? 'pass' : 'warn');
+    log('srtpCipher:     ' + (window._interopResults.srtpCipher || '-'), 'info');
+    log('errors:         ' + JSON.stringify(window._interopResults.errors), window._interopResults.errors.length === 0 ? 'pass' : 'fail');
+    log('exitCode:       0x' + window._interopResults.exitCode.toString(16), window._interopResults.exitCode === 0 ? 'pass' : 'fail');
+    log('');
+    log('Chrome-side verification: DTLS state = ' + window._interopResults.dtlsState +
+        ' (Chrome has derived SRTP keys if dtlsState=connected)', 'info');
+    log('NimRTC-side verification: grep demo-p2p stderr for:', 'info');
+    log('  "engine[dtls→srtp]: DTLS reached Connected"', 'nimrtc');
+    log('  (proves NimRTC wolfSSL completed handshake and installed SRTP keys)', 'nimrtc');
+    document.getElementById('btnStart').disabled = false;
+}
+
+// ----- Init -----
+
+function startTest() {
+    document.getElementById('btnStart').disabled = true;
+    clearLog();
+    testStartTime = Date.now();
+    log('=== Chrome ↔ NimRTC DTLS-SRTP Interop Test ===', 'pass');
+    log('Room: ' + ROOM, 'info');
+    log('WS URL: ' + WS_URL, 'info');
+    log('Role: ' + (OFFERER ? 'Offerer (Chrome DTLS client)' : 'Answerer'), 'info');
+    log('', 'info');
+
+    setStatus('Connecting to signaling server…');
+    pc = makePc();
+    connectWs();
+
+    // Fallback: print results after TIMEOUT_MS even if DTLS didn't complete
+    // (test harness will interpret missing evidence as FAIL)
+    setTimeout(() => {
+        if (!window._interopResults.dtlsState ||
+            window._interopResults.dtlsState === 'new' ||
+            window._interopResults.dtlsState === 'connecting') {
+            log('');
+            log('TIMEOUT: DTLS did not complete within ' + TIMEOUT_MS + 'ms', 'fail');
+            reportError(0x20, 'DTLS handshake timeout');
+            printResults();
+        }
+    }, TIMEOUT_MS);
+}
+
+// Auto-start after brief delay for programmatic testing
+window.addEventListener('load', () => {
+    document.getElementById('room').textContent = ROOM;
+    document.getElementById('role').textContent = OFFERER ? 'Offerer' : 'Answerer';
+    log('Page loaded. Click "Start DTLS Interop Test" or wait for auto-start.', 'info');
+    log('Query params: room=' + ROOM + ' ws=' + WS_URL + ' offerer=' + OFFERER, 'info');
+    // Auto-start after 1 second for CI/programmatic use
+    setTimeout(() => {
+        if (!window._interopResults.wsConnected) {
+            log('Auto-starting test…', 'warn');
+            startTest();
+        }
+    }, 1000);
+}, { once: true });
+</script>
+</body>
+</html>

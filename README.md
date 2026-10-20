@@ -22,9 +22,18 @@
 
 **A native C++ WebRTC alternative — embeddable, scene-assembled, swappable backends.**
 
-One source tree ships a **P2P client**, an **SFU gateway**, and runs on **embedded Linux aarch64**.
+One source tree ships a **P2P client**, a **`relay` gateway**, and runs on **embedded Linux aarch64**.
 DTLS / RTP / 3A codecs are all pluggable; the crypto path can swap to **GMSSL** for GM/T-regulated
 deployments without forking the trunk.
+
+> **Note on terminology:** the gateway shipped by this source tree is the
+> `relay` profile — single-strategy forwarding with compile-time L2 codec
+> skip, per `docs/zh/architecture.md` §7.1. A from-scratch SFU module is
+> *not* a v1.0.0 deliverable; the §7 pre-1.0 decision window for
+> SFU-1 / DC-3 / BENCH-1 closed as NO (BDFL, 2026-10-19 — SFU is not a
+> project core goal; see `docs/plan/v1.0-plan.md` §7 + §12.5). If the
+> SFU track is reopened in a future cycle, it lands in a separate
+> `v1.1.0-plan.md` and is explicitly out of the v1.0.x critical path.
 
 [Why NimRTC?](#why-nimrtc) · [Who is it for](#who-is-it-for) · [Quick Start](#quick-start) · [Hello, World](#hello-world) · [Architecture](#architecture-at-a-glance) · [Benchmarks](#benchmarks) · [Roadmap](#roadmap) · [FAQ](#faq)
 
@@ -53,8 +62,12 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
   production backend, L1 strict-priority across the DC plane) is
   explicitly deferred to v1.x** — Chrome is moving DataChannel to
   WebTransport over QUIC, and v0.11.0 does not commit to the
-  SCTP-over-DTLS path. In-process SFU relay, DC forwarding policy, and
-  `sfu-relay` benchmark remain deferred to the pre-1.0 decision window
+  SCTP-over-DTLS path. **In-process SFU relay (`nimrtc_sfu`), DC forwarding
+  policy (DC-3), and `sfu-relay` benchmark (BENCH-1) are deferred to
+  v1.1.0** per `docs/plan/v1.0-plan.md` §7 (closed 2026-10-19, BDFL:
+  SFU is not a project core goal); they are **off the v1.0.x
+  critical path**. The pre-1.0 window is no longer pending — the
+  decision is recorded. See
   (see [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
   and §10 for the WebTransport forward direction). P1 closed at
   v0.10.3 (final tech-preview patch). Production-grade quality lands in
@@ -78,11 +91,11 @@ No single feature here is brand new — but the **combination** is rare in the o
 
 | # | Differentiator | Why it matters |
 |---|---|---|
-| 1 | **Layered design + Profile composition (L0–L3)** | Compile-time layer selection. The same source tree ships a full P2P client *and* an SFU gateway (SFU skips L2). LiveKit/mediasoup are server-only; libwebrtc is monolithic. |
+| 1 | **Layered design + Profile composition (L0–L3)** | Compile-time layer selection. The same source tree ships a full P2P client *and* a `relay` gateway (`relay` profile skips L2 codecs; per `docs/zh/architecture.md` §7.1). **Note**: a from-scratch SFU module is *not* a v1.0.0 deliverable (the §7 pre-1.0 decision window for SFU-1 / DC-3 / BENCH-1 closed as NO, 2026-10-19 — SFU is not a project core goal; see `docs/plan/v1.0-plan.md` §7 + §12.5). LiveKit/mediasoup are server-only; libwebrtc is monolithic. |
 | 2 | **Multi-platform CI green** | Windows, Linux x86_64, macOS arm64, Linux aarch64 — all four pass build + unit tests. See [Platform support](#platform-support). |
 | 3 | **PAL (Plugin Adaptation Layer)** | All capability swapping flows through `pal::*` with **zero runtime overhead** and an unchanged public API. See [ADR-009](docs/adr/ADR-009-pal-slice-1.md). |
 | 4 | **Swappable crypto backends** | DTLS backend can be replaced in-tree with OpenSSL / mbedTLS / GMSSL (China's GM/T cryptography suite). Most OSS WebRTC stacks hard-wire their crypto. |
-| 5 | **P2P client and SFU from the same codebase** | One set of plugin interfaces serves both. In 2026's OSS WebRTC ecosystem, this is rare. |
+| 5 | **P2P client and relay from the same codebase** | One set of plugin interfaces serves both. In 2026's OSS WebRTC ecosystem, this is rare. (A from-scratch SFU module is *not* a project core goal — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19.) |
 
 > **The plugin interfaces are the architectural seam.** They make the five points above work together. See [§ Plugin Architecture](#plugin-architecture) below.
 
@@ -240,7 +253,10 @@ see [`interop/`](interop/) and [`tools/run_e2e_acceptance.py`](tools/run_e2e_acc
 
 NimRTC is **four compile-time layers (L0–L3) sitting on top of a Plugin Adaptation Layer (PAL)**.
 A **profile** (also chosen at build time) decides which layers are even linked into the binary —
-this is how the same source tree ships both a P2P client *and* an SFU gateway.
+this is how the same source tree ships both a P2P client *and* a `relay` gateway
+(`relay` profile skips L2 codecs; per `docs/zh/architecture.md` §7.1).
+**An from-scratch SFU module is not a v1.0.0 deliverable** — the §7 pre-1.0 decision
+window closed as NO (BDFL, 2026-10-19; see `docs/plan/v1.0-plan.md` §7 + §12.5).
 
 ### Layer overview
 
@@ -400,7 +416,7 @@ NimRTC exposes nearly every "swappable" capability through plugin interfaces def
 | **Third-party ecosystem** | Write `MyAudio3A : plugins::IAudio3A`, link with `-DNIMRTC_MODULE_AUDIO3A=MyAudio3A` | Users must `#include <nimrtc/audio3a/...>` — encapsulation breaks |
 | **Failure-domain isolation** | Plugin interface status codes are the contract | Errors propagate inconsistently across modules |
 
-**Comparison baseline:** GStreamer / FFmpeg / OBS / PipeWire all use plugin architectures — but in the **WebRTC** ecosystem (libwebrtc / Pion / LiveKit / mediasoup / janus), only Pion and libwebrtc internally have similar abstractions. **NimRTC exposes them publicly and runs both P2P and SFU on the same set of interfaces.**
+**Comparison baseline:** GStreamer / FFmpeg / OBS / PipeWire all use plugin architectures — but in the **WebRTC** ecosystem (libwebrtc / Pion / LiveKit / mediasoup / janus), only Pion and libwebrtc internally have similar abstractions. **NimRTC exposes them publicly and runs both P2P and `relay` on the same set of interfaces** (the `relay` profile skips L2 codecs; a from-scratch SFU module is *not* a v1.0.0 deliverable — see `docs/plan/v1.0-plan.md` §7).
 
 Plugins are the evolution mechanism: P0–P1 use built-in implementations; P2–P3 differentiating features (dual 3A tap, strict-priority QoS, ref_frame timeline) also ship as plugins (`IJB::set_render_delivered`, `IRTP::set_ref_frame`).
 
@@ -413,7 +429,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | | **NimRTC** | **libwebrtc** | **Pion** | **mediasoup** | **LiveKit** |
 |---|---|---|---|---|---|
 | **Language** | C++20 | C++ (mixed C++03/17) | Go | C++ | Go |
-| **P2P client + SFU from one codebase** | ✅ | ⚠️ libwebrtc + separate server | ❌ | ❌ SFU only | ❌ SFU only |
+| **P2P client + relay from one codebase** | ✅ | ⚠️ libwebrtc + separate server | ❌ | ❌ SFU only | ❌ SFU only |
 | **Public plugin seam** | ✅ every layer | ❌ internal | ⚠️ partial | ⚠️ server-side | ⚠️ server-side |
 | **Static-link footprint** | **~5.6 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
 | **Embedded Linux aarch64** | ✅ CI green | ⚠️ unmaintained ports | ❌ | ❌ | ❌ |
@@ -424,7 +440,8 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **Production maturity (2026)** | Tech Preview | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **Where NimRTC wins outright:** aarch64 embedded, GM/T crypto, AI Agent hooks, single-trunk
-P2P+SFU. **Where NimRTC loses:** ecosystem breadth, codec coverage, browser-engine parity, and
+P2P+relay (where `relay` is the single-strategy gateway profile that compiles out L2 codecs; a from-scratch SFU module is not a v1.0.0 deliverable — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19).
+**Where NimRTC loses:** ecosystem breadth, codec coverage, browser-engine parity, and
 years of hardening. Pick accordingly.
 
 ---
@@ -497,9 +514,9 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
 | DC-1 — Chrome ↔ NimRTC DataChannel bidirectional interop | ⏸️ **Deferred to v1.x** | SCTP-over-DTLS physical wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup) never landed on `main`; Chrome-headless e2e stays 0/4. In-process `test_datachannel_engine` 5/5 PASS covers the IDataChannel API surface against the stub SCTP socket. Re-platformed on WebTransport / QUIC in v1.x. |
 | DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ⏸️ **Deferred to v1.x** | The RTP-only strict-priority path is already covered by `test_sched_priority.cpp` from v0.10.x; the DC-plane cross-traffic case waits for DC-1. |
-| SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ Deferred | pre-1.0 decision window (per `docs/plan/v0.11-plan.md` §2.2) |
-| DC-3 — DC forwarding policy in SFU relay context | ⏸️ Deferred | pre-1.0 (depends on SFU-1 AND v1.x DC-1) |
-| BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ Deferred | pre-1.0 (depends on SFU-1) |
+| SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ **Deferred to v1.1.0** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the v1.0.x critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
+| DC-3 — DC forwarding policy in SFU relay context | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
+| BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
 > v0.11.0 is the **Beta 前哨** minor — first release that ships P2
@@ -515,8 +532,11 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 > still compiles for opt-in callers; the in-process `test_datachannel_engine`
 > 5/5 PASS covers the IDataChannel API surface against the stub SCTP
 > socket. **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy
-> (DC-3), and sfu-relay benchmark (BENCH-1) remain deferred to the
-> pre-1.0 decision window** — see
+> (DC-3), and `sfu-relay` benchmark (BENCH-1) are deferred to v1.1.0**
+> per `docs/plan/v1.0-plan.md` §7 (closed 2026-10-19, BDFL: SFU is
+> not a project core goal). The pre-1.0 window is **no longer
+> pending** — the decision is recorded and the trio is off the
+> v1.0.x critical path. See
 > [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
 > and §10 (forward direction: WebTransport / QUIC) for the full
 > rationale. The v0.10.x dual-registration scheme is recoverable from

@@ -32,6 +32,7 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
+#include <nimrtc/web_transport/web_transport_session_factory.hpp>   // IWebTransportSessionFactory (v0.14.0 alpha.2 seam)
 
 namespace nimrtc::engine::pal {
 
@@ -97,6 +98,19 @@ resolve_video_sender(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::IDataChannelFactory*
 resolve_datachannel(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_datachannel(id);
+}
+
+/** Resolve an `IWebTransportSessionFactory` by plugin id. Returns nullptr if not
+ *  registered.  Mirrors the resolve_audio3a / resolve_datachannel family —
+ *  used by `NimRTCEngine::init_datachannel_registry()` to verify the
+ *  `EngineConfig::web_transport_name` factory slot (default `"msquic"`)
+ *  when `EngineConfig::datachannel_backend == "web_transport"`.  The slot
+ *  is populated by `core::PluginRegistry::register_web_transport(id, factory*)`
+ *  or the v0.14.0-beta.1 auto-registrar (id `"msquic"` → msquic-backed
+ *  factory).  Landed in v0.14.0-rc.1 alongside `datachannel_backend`. */
+[[nodiscard]] inline const web_transport::IWebTransportSessionFactory*
+resolve_web_transport(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_web_transport(id);
 }
 
 } // namespace nimrtc::engine::pal

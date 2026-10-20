@@ -1078,4 +1078,409 @@ TEST_F(EnginePluginLoading,
            "auto-registered entry (\"msquic\")";
 }
 
+// ===========================================================================
+// DC-1 v1.0.0 headline gate — EngineConfig::datachannel_backend
+// + web_transport_name (v0.14.0-rc.1)
+//
+// The v0.14.0-beta.1 cut ships the WebTransport / QUIC seam + msquic
+// factory + WebTransportDataChannel factory, but the engine is
+// still hard-wired to the legacy `SctpDataChannel` because
+// `EngineConfig::datachannel_backend` does not exist yet. The
+// v0.14.0-rc.1 field lands here: a single string switch that
+// picks between the legacy SCTP family and the new WebTransport
+// family, with a companion `web_transport_name` field for the
+// session factory id.
+//
+// These tests pin the rc.1 contract — they assert the dispatch
+// behaviour + the soft-warn / hard-error boundaries. The full
+// end-to-end DC-exchange test (browser-driven Case E over
+// WebTransport) lands in a follow-up PR.
+//
+// Subtests:
+//   1. dc0141_backend_default_sctp_resolves_sctp_factory
+//   2. dc0141_backend_web_transport_resolves_msquic_session_factory
+//   3. dc0141_backend_web_transport_without_msquic_soft_warns
+//   4. dc0141_backend_unknown_value_hard_fails_open
+//   5. dc0141_backend_empty_disables_datachannel
+//   6. dc0141_legacy_datachannel_name_only_sctp_still_works
+//   7. dc0141_legacy_datachannel_name_nondefault_uses_as_factory_id
+// ===========================================================================
+
+// File-scope stub factory for the legacy-v0.x backward-compat test
+// (subtest #7 below).  Mirrors the `wt014_local_namespace::StubFactory`
+// shape so the test stays self-contained.
+namespace dc0141_legacy_stub_namespace {
+
+class StubFactory final
+    : public nimrtc::plugins::IDataChannelFactory {
+public:
+    std::string_view id() const noexcept override {
+        return "dc0141_legacy_stub";
+    }
+    std::string_view display_name() const noexcept override {
+        return "v0.14.0-rc.1 legacy-stub for the datachannel_name "
+               "backward-compat test";
+    }
+    nimrtc::plugins::IDataChannel* create() const override {
+        return nullptr;  // test only exercises the lookup
+    }
+};
+
+static const StubFactory k_stub_factory;
+
+} // namespace dc0141_legacy_stub_namespace
+
+TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
+    // v0.14.0-rc.1 contract: the default `datachannel_backend = "sctp"`
+    // resolves the `SctpDataChannelFactory` (id="sctp") through
+    // `core::PluginRegistry::get_datachannel("sctp")`.  The
+    // engine's `init_datachannel_registry()` then records the
+    // resolved factory id (default "sctp") into
+    // `resolved_dc_factory_id_`; an empty string means
+    // DataChannel is disabled.
+    EngineConfig cfg;
+    EXPECT_EQ(cfg.datachannel_backend, "sctp")
+        << "v0.14.0-rc.1: default datachannel_backend must be \"sctp\" "
+           "(backward compat: every v0.x caller that did not set the "
+           "field continues to land on the SCTP family)";
+    EXPECT_EQ(cfg.web_transport_name, "msquic")
+        << "v0.14.0-rc.1: default web_transport_name must be \"msquic\" "
+           "(matches list_web_transports() at the v0.14.0-beta.1 cut)";
+
+    // The SctpDataChannelFactory must be auto-registered (existing
+    // contract; the v0.x path that `init_datachannel_registry` relied
+    // on — verify it is still in place before we exercise the new
+    // dispatcher).
+    const auto* sctp_factory =
+        PluginRegistry::instance().get_datachannel("sctp");
+    ASSERT_NE(sctp_factory, nullptr)
+        << "v0.14.0-rc.1: SctpDataChannelFactory (\"sctp\") must be "
+           "auto-registered by core::register_all_default_plugins() "
+           "(this is the pre-rc.1 contract; the rc.1 dispatcher "
+           "relies on it for the \"sctp\" backend lookup)";
+
+    // EngineConstruction + open() must not surface an error for
+    // the default config (the default backend is "sctp", the
+    // factory resolves; `init_datachannel_registry()` should log
+    // readiness and silently fall through to the existing
+    // create_data_channel() path).
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        err_code = err;
+        err_called = true;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_EQ(rc, 0u)
+        << "v0.14.0-rc.1: default config (datachannel_backend=\"sctp\") "
+           "must open() cleanly; on_error fired with code 0x"
+        << std::hex << err_code.load() << std::dec
+        << " (err_called=" << (err_called.load() ? 1 : 0) << ")";
+    EXPECT_FALSE(err_called.load())
+        << "v0.14.0-rc.1: default config must NOT invoke on_error_ "
+           "during open()";
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading,
+       dc0141_backend_web_transport_resolves_msquic_session_factory) {
+    // v0.14.0-rc.1 contract: with
+    // `cfg.datachannel_backend = "web_transport"`, the engine's
+    // `init_datachannel_registry()`:
+    //   (a) resolves the `WebTransportDataChannelFactory`
+    //       (id="web_transport") via
+    //       `core::PluginRegistry::get_datachannel("web_transport")`;
+    //   (b) ALSO resolves the WebTransport session factory via
+    //       `core::PluginRegistry::get_web_transport(cfg.web_transport_name)`
+    //       (default "msquic") for readiness verification.
+    //
+    // Both lookups must succeed when the auto-registered factories
+    // are present (the v0.14.0-beta.1 cut guarantees both:
+    // `pal_default_registrars.cpp` auto-registers the msquic
+    // session factory + the web_transport DataChannel factory).
+    const auto* dc_factory =
+        PluginRegistry::instance().get_datachannel("web_transport");
+    ASSERT_NE(dc_factory, nullptr)
+        << "v0.14.0-rc.1: WebTransportDataChannelFactory (\"web_transport\") "
+           "must be auto-registered (see v0.14.0-beta.1 release notes — the "
+           "factory lands in beta.1 per pal_default_registrars.cpp)";
+    const auto* session_factory =
+        PluginRegistry::instance().get_web_transport("msquic");
+    ASSERT_NE(session_factory, nullptr)
+        << "v0.14.0-rc.1: WebTransportMsQuicSessionFactory (\"msquic\") "
+           "must be auto-registered (v0.14.0-beta.1 baseline)";
+
+    EngineConfig cfg;
+    cfg.datachannel_backend = "web_transport";
+    EXPECT_EQ(cfg.datachannel_backend, "web_transport");
+    EXPECT_EQ(cfg.web_transport_name, "msquic");
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        err_code = err;
+        err_called = true;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_EQ(rc, 0u)
+        << "v0.14.0-rc.1: datachannel_backend=\"web_transport\" (with "
+           "msquic auto-registered) must open() cleanly; on_error code=0x"
+        << std::hex << err_code.load() << std::dec;
+    EXPECT_FALSE(err_called.load())
+        << "v0.14.0-rc.1: web_transport backend must NOT hard-fail "
+           "on_error_ during open() when msquic is auto-registered "
+           "(the readiness check is soft-warn only at this phase; "
+           "physical DTLS↔WebTransport wiring is the rc.1 follow-up)";
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading,
+       dc0141_backend_web_transport_without_msquic_soft_warns) {
+    // v0.14.0-rc.1 contract: when `datachannel_backend = "web_transport"`
+    // but the `cfg.web_transport_name` session factory is not
+    // registered, the engine logs a WARNING and continues open()
+    // (does NOT hard-fail).  The hard-fail lands in the next rc.1 PR
+    // that wires physical DTLS↔WebTransport plumbing — until then
+    // a missing session factory is non-fatal so v0.14.0-rc.1 callers
+    // can still build/test the datachannel-backend plumbing without
+    // needing a live msquic runtime.
+    //
+    // We simulate "msquic not registered" by unregistering the
+    // auto-registered factory for the duration of this test, then
+    // re-registering it via `register_all_default_plugins()` for
+    // downstream tests.  The factory registry is process-wide so we
+    // must be careful with cleanup.
+    constexpr std::string_view kSessionId = "msquic";
+    const bool removed = PluginRegistry::instance().unregister_web_transport(
+        kSessionId);
+    ASSERT_TRUE(removed)
+        << "v0.14.0-rc.1: precondition — auto-registered msquic factory "
+           "must be removable (test simulates a build with "
+           "NIMRTC_ENABLE_WEB_TRANSPORT_MSQUIC=OFF)";
+
+    EngineConfig cfg;
+    cfg.datachannel_backend = "web_transport";
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        err_code = err;
+        err_called = true;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_EQ(rc, 0u)
+        << "v0.14.0-rc.1: open() must succeed (soft-warn, not hard-fail) "
+           "when the web_transport session factory is unregistered; "
+           "on_error code=0x" << std::hex << err_code.load() << std::dec;
+    // The on_error callback MAY fire for unrelated reasons (e.g.
+    // DTLS not yet ready); we don't gate on err_called here because
+    // the assertion target is the *return code* + the (silent vs
+    // loud) failure mode. The soft-warn is verified by reading the
+    // stderr log; the test re-uses no log capture (KISS).
+
+    // Cleanup: re-register the msquic factory so downstream tests
+    // (e.g. dc0141_backend_default_sctp_resolves_sctp_factory
+    // running in the same binary) see the v0.14.0-beta.1 baseline.
+    nimrtc::core::register_all_default_plugins();
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, dc0141_backend_unknown_value_hard_fails_open) {
+    // v0.14.0-rc.1 contract: an unrecognised `datachannel_backend` value
+    // hard-fails `open()` with `kEngineInternal` via `on_error_`. The
+    // engine does NOT silently fall back to "sctp" — that would mask
+    // integrator typos.  This is the same "loud-fail on unknown id"
+    // contract as the DTLS backend (Slice 4 / v0.11.0).
+    EngineConfig cfg;
+    cfg.datachannel_backend = "webrtc-quic-direct";  // not "sctp" / "web_transport" / ""
+    EXPECT_FALSE(cfg.datachannel_backend.empty());
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    std::string err_msg;
+    engine.set_on_error([&](std::uint32_t err, std::string_view msg) {
+        err_code = err;
+        err_called = true;
+        err_msg.assign(msg.data(), msg.size());
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_NE(rc, 0u)
+        << "v0.14.0-rc.1: unknown datachannel_backend='webrtc-quic-direct' "
+           "must fail open() (got rc=" << rc << ")";
+    EXPECT_TRUE(err_called.load())
+        << "v0.14.0-rc.1: engine must invoke on_error_ when "
+           "datachannel_backend is unrecognised";
+    EXPECT_EQ(err_code.load(), static_cast<std::uint32_t>(nimrtc::core::kEngineInternal))
+        << "v0.14.0-rc.1: unknown backend must surface kEngineInternal "
+           "(the typed Status-derived code); err_msg=" << err_msg;
+    EXPECT_NE(err_msg.find("webrtc-quic-direct"), std::string::npos)
+        << "v0.14.0-rc.1: error message must mention the offending value "
+           "(typo-discoverability contract)";
+
+    // create_data_channel() must return nullptr without crashing
+    // (the engine refuses to construct from an unrecognised
+    // backend; defensively, the resolved factory id stays empty
+    // after the hard-fail, so create_data_channel() short-circuits
+    // to the "disabled" branch).
+    //
+    // Note: after the hard-fail above, `engine.is_open()` is false
+    // (open() returned non-zero and state_ did not transition to
+    // kOpen).  create_data_channel() will fire its "engine not open"
+    // branch — that's fine; the resolved_dc_factory_id_ empty-check
+    // is verified separately by the dc0141_backend_empty_disables_*
+    // test below.
+}
+
+TEST_F(EnginePluginLoading, dc0141_backend_empty_disables_datachannel) {
+    // v0.14.0-rc.1 contract: setting `datachannel_backend = ""` AND
+    // `datachannel_name = ""` disables DataChannel entirely (mirrors
+    // the v0.x "cfg.datachannel_name = empty" contract that we
+    // preserve for backward compat).
+    //
+    // The engine's `create_data_channel()` then:
+    //   - returns nullptr (with on_error_ firing kEngineInternal)
+    //   - skips emitting `m=application` in create_offer()
+    //   - silently drops `m=application` from the peer's SDP in
+    //     process_remote_sdp()
+    //
+    // These first-two behaviours are tested here; the SDP
+    // behaviours are covered by `tests/test_sdp_no_datachannel.cpp`
+    // (existing v0.10.x regression surface).
+    EngineConfig cfg;
+    cfg.datachannel_backend = "";
+    cfg.datachannel_name    = "";
+    EXPECT_TRUE(cfg.datachannel_backend.empty());
+    EXPECT_TRUE(cfg.datachannel_name.empty());
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> open_err{0};
+    std::atomic<bool> open_err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        open_err = err;
+        open_err_called = true;
+    });
+    ASSERT_EQ(engine.open(), 0u)
+        << "v0.14.0-rc.1: open() must succeed even when DataChannel is "
+           "disabled (DataChannel-disabled is a *user choice*, not an "
+           "engine error)";
+    EXPECT_FALSE(open_err_called.load())
+        << "v0.14.0-rc.1: open() must NOT fire on_error_ for the "
+           "DataChannel-disabled case (open_err=0x"
+        << std::hex << open_err.load() << std::dec << ")";
+
+    // Engine is open — now call create_data_channel() and verify
+    // the disabled branch fires (returns nullptr + on_error_).
+    std::atomic<std::uint32_t> cdc_err{0};
+    std::atomic<bool> cdc_err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        cdc_err = err;
+        cdc_err_called = true;
+    });
+    std::unique_ptr<nimrtc::plugins::IDataChannel> ch =
+        engine.create_data_channel("test");
+    EXPECT_EQ(ch, nullptr)
+        << "v0.14.0-rc.1: create_data_channel() must return nullptr when "
+           "DataChannel is disabled (datachannel_backend == \"\" && "
+           "datachannel_name.empty())";
+    EXPECT_TRUE(cdc_err_called.load())
+        << "v0.14.0-rc.1: create_data_channel() must invoke on_error_ "
+           "with kEngineInternal when DataChannel is disabled";
+    EXPECT_EQ(cdc_err.load(),
+              static_cast<std::uint32_t>(nimrtc::core::kEngineInternal));
+
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading, dc0141_legacy_datachannel_name_only_sctp_still_works) {
+    // v0.14.0-rc.1 backward-compat contract: a v0.x caller that did
+    // not set `datachannel_backend` (the field did not exist) but
+    // explicitly set `datachannel_name = "sctp"` (the v0.x default)
+    // must continue to land on the SCTP family without any
+    // behaviour change.
+    //
+    // The dispatch logic in `init_datachannel_registry()`:
+    //   1. `cfg.datachannel_backend.empty()` → fall back to legacy
+    //      `cfg.datachannel_name` ("sctp") as the dispatch input.
+    //   2. The legacy "sctp" value maps to the new "sctp" backend
+    //      family (so the engine's behaviour is byte-identical to
+    //      the v0.x contract for this input).
+    EngineConfig cfg;
+    cfg.datachannel_backend = "";    // not yet set (legacy v0.x)
+    cfg.datachannel_name    = "sctp"; // v0.x default
+    EXPECT_TRUE(cfg.datachannel_backend.empty());
+    EXPECT_EQ(cfg.datachannel_name, "sctp");
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        err_code = err;
+        err_called = true;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_EQ(rc, 0u)
+        << "v0.14.0-rc.1: legacy (datachannel_backend empty, "
+           "datachannel_name=\"sctp\") must open() cleanly; on_error "
+           "code=0x" << std::hex << err_code.load() << std::dec;
+    EXPECT_FALSE(err_called.load())
+        << "v0.14.0-rc.1: legacy v0.x config must NOT change engine "
+           "behaviour (no spurious on_error firings)";
+    engine.close();
+}
+
+TEST_F(EnginePluginLoading,
+       dc0141_legacy_datachannel_name_nondefault_uses_as_factory_id) {
+    // v0.14.0-rc.1 backward-compat contract: a v0.x power-user who
+    // set `datachannel_name = "<custom-id>"` (a value other than
+    // "sctp") continues to resolve that id directly through the
+    // `core::PluginRegistry::get_datachannel("<custom-id>")` path —
+    // the engine does NOT silently rewrite it to a backend-family
+    // dispatch.
+    //
+    // We register a TU-scope stub factory (id="dc0141_legacy_stub")
+    // and point `datachannel_name` at it.  The new dispatcher must
+    // resolve the stub factory by id (treating the legacy value as
+    // a direct factory id when it is not one of the recognised
+    // backend families).  After the test, we unregister the stub
+    // so downstream tests see a clean registry.
+    PluginRegistry::instance().register_datachannel(
+        dc0141_legacy_stub_namespace::k_stub_factory.id(),
+        &dc0141_legacy_stub_namespace::k_stub_factory);
+
+    EngineConfig cfg;
+    cfg.datachannel_backend = "";            // v0.x did not have this
+    cfg.datachannel_name    = "dc0141_legacy_stub";
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+        err_code = err;
+        err_called = true;
+    });
+    const uint32_t rc = engine.open();
+    EXPECT_EQ(rc, 0u)
+        << "v0.14.0-rc.1: legacy custom datachannel_name=\""
+           << cfg.datachannel_name << "\" must open() (factory resolves); "
+           "on_error code=0x" << std::hex << err_code.load() << std::dec;
+    EXPECT_FALSE(err_called.load())
+        << "v0.14.0-rc.1: backward-compat path must NOT fire spurious errors";
+
+    // Cleanup: unregister the stub so other tests in this TU see a
+    // clean registry (mirrors the cleanup pattern in the
+    // wt014_registry_slot_is_typed_for_web_transport_factory test).
+    const bool removed =
+        PluginRegistry::instance().unregister_datachannel(
+            dc0141_legacy_stub_namespace::k_stub_factory.id());
+    EXPECT_TRUE(removed)
+        << "v0.14.0-rc.1: unregister_datachannel() must remove the "
+           "test-registered stub (cleanup contract; matches the "
+           "wt014 test cleanup pattern)";
+    engine.close();
+}
+
 } // anonymous namespace

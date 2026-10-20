@@ -74,6 +74,14 @@ latter, see below.
   },
 
   // ---- Schema v1.1 markers (loader-agnostic; v0.11.0+) ----
+  //
+  // The `sfu_enabled` marker is **retained** in the JSON schema for
+  // documentation / future use, but a from-scratch SFU module is
+  // *not* a v1.0.0 deliverable per `docs/plan/v1.0-plan.md` §7
+  // (closed 2026-10-19, BDFL: SFU is not a project core goal).
+  // Profiles that set `sfu_enabled = true` are not wired into the
+  // v1.0.x engine runtime; the `relay` Profile is the single-strategy
+  // gateway that ships.
   "sfu_enabled": true|false,
   "agent_gateway_enabled": true|false,
   "agent_low_latency": true|false,
@@ -177,14 +185,14 @@ the build.
 | `codec_name` | yes | `""` falls back to first statically-linked codec. |
 | `bwe_name`, `scheduler_name` | yes | Defaults = `"aimd"` / `"default"`. |
 | `timeline_enabled` | yes | Default = `false` for non-Agent profiles. |
-| `datachannel_enabled` | yes | Default = `false` for non-Agent / non-SFU profiles. |
+| `datachannel_enabled` | yes | Default = `false` for non-Agent profiles. (The original "non-SFU profiles" wording is retired: a from-scratch SFU module is *not* a v1.0.0 deliverable per `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19; SFU-aware profiles are retained as documentation but not wired into the v1.0.x engine runtime.) |
 | `audio_sample_rate_hz` | yes | Typically 48000 (Opus) or 8000 (PCMU/PCMA). |
 | `audio_channels` | yes | 1 for telephony, 2 for stereo music. |
 | `audio_payload_type` | yes | 111 for Opus, 0 for PCMU, 8 for PCMA. |
 | `bwe` | yes | At minimum `impl` + `initial_bitrate_bps`. |
 | `jitter_buffer` | yes | At minimum `impl` + `mode` + `initial_delay_ms`. |
 | `scheduler` | yes | `enabled` + `strategy` + weights. |
-| v1.1 markers (`sfu_enabled`, `agent_gateway_enabled`, …) | no | Loader-agnostic; populated only by profiles that consume them. |
+| v1.1 markers (`sfu_enabled`, `agent_gateway_enabled`, …) | no | Loader-agnostic; populated only by profiles that consume them. The `sfu_enabled` marker is **retained** in the JSON schema for documentation / future use only — a from-scratch SFU module is not a v1.0.0 deliverable (see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19); profiles with `sfu_enabled = true` are not wired into the v1.0.x engine runtime. |
 
 If a field is missing in JSON, the Builder errors out at load —
 there is no "quiet default fill" beyond the dotted-line keys.
@@ -348,7 +356,7 @@ markers the **C++ loader ignores** but downstream tools honour:
 
 | Marker | Type | Use case |
 |---|---|---|
-| `sfu_enabled` | bool | Mark a profile as an SFU; SFU-aware tooling groups them. |
+| `sfu_enabled` | bool | **Retained in JSON schema for documentation / future use** (per `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19: from-scratch SFU module is *not* a v1.0.0 deliverable; SFU-1 defers off the v1.0.x critical path). Profiles with `sfu_enabled = true` are not wired into the v1.0.x engine runtime; the `relay` Profile is the single-strategy gateway. The marker is kept so SFU-aware tooling can still group profiles authored today, and so a future `v1.1.0-plan.md` (if the SFU track is reopened) can pick up the schema without churn. |
 | `agent_gateway_enabled` | bool | Mark a profile as agent-gateway for Agent-platform integrations. |
 | `agent_low_latency` | bool | Mark a profile as the tightest-latency Agent variant. |
 | `max_sessions_per_engine` | int | Cap concurrent sessions in this profile (helper for cloud deploys). |
@@ -384,9 +392,13 @@ Otherwise reviewers will flag it as "speculative".
   ships good defaults; don't go above 30 without a benchmark.
 - **Loading a profile that requires a plugin the host binary
   doesn't have**. The Builder emits a clear error but if you
-  accept profiles from JSON files at runtime (e.g. an SFU reading
-  user-supplied profiles), call `core::register_all_default_plugins()`
-  first AND validate the plugin ids before instantiation.
+  accept profiles from JSON files at runtime (e.g. a multi-profile
+  gateway host reading user-supplied profiles), call
+  `core::register_all_default_plugins()` first AND validate the
+  plugin ids before instantiation. (Note: "an SFU reading
+  user-supplied profiles" was the original example; "multi-profile
+  gateway host" is the v1.0.0-correct phrasing — see
+  `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19.)
 
 ---
 

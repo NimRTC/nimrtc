@@ -496,7 +496,7 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     if (const uint32_t rc = init_transport_session();    rc != 0) return rc;
     init_bwe_scheduler();
     init_audio_modules();
-    init_datachannel_registry();
+    if (const uint32_t rc = init_datachannel_registry(); rc != 0) return rc;
     if (const uint32_t rc = init_dtls_handshake();       rc != 0) return rc;
 
     return 0;
@@ -525,6 +525,38 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
 // ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_transport_strategy() noexcept {
     {
+        // ==================================================================
+        // Sentinel: `cfg.transport_strategy_name == "shell"` opts out of
+        // real ICE/DTLS entirely and picks the Slice 8 shell factory
+        // (id="default", whose accessors return references to
+        // null-instance singletons whose methods are no-ops /
+        // kErrNotReady).  This path is intended for:
+        //   - in-process unit tests that exercise engine wiring
+        //     (create_data_channel, plugin dispatch, SDP munging) but
+        //     have no network and would otherwise fail ice_t_->open()
+        //     because of port-bind restrictions in sandboxed CI runners
+        //     or low-integrity processes (errno 10013 WSAEACCES on the
+        //     Windows GitHub Actions runner, observed repeatedly for
+        //     hardcoded test port ranges like [52000, 52100]);
+        //   - SDK/demo binaries where transport is intentionally disabled
+        //     (render-only / source-only demos).
+        // The "shell" sentinel bypasses Selector validation by handling
+        // the unmatched name here and never calling
+        // `requirements_from_profile_input()` — the Sentinel is a
+        // well-known reserved name documented in the public EngineConfig
+        // header (see engine.hpp).
+        // ==================================================================
+        if (config_.transport_strategy_name == "shell") {
+            impl_->resolved_strategy_name     = "shell";
+            impl_->resolved_media_factory_id  = "default";
+            impl_->resolved_control_factory_id = "";     // no control plane
+            core::log::Logger::instance().info(
+                "engine: transport strategy 'shell' — using Slice 8 "
+                "shell stack factory (id=\"default\"); ICE/DTLS/SRTP "
+                "are inactive by design");
+            return 0;
+        }
+
         // Resolve the strategy name.  `strategy_by_name("")` returns the
         // browser-call default, so empty `cfg.transport_strategy_name`
         // is handled silently.
@@ -573,6 +605,9 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // could not resolve a media stack (rule 3 / `webrtc-quic` is
         // not yet implemented; the `webrtc-quic-call` strategy lands
         // in v1.x per transport-strategies.md §6 #1).
+        //
+        // The "shell" sentinel (no real ICE/DTLS) is handled earlier
+        // in `init_transport_strategy()` and never reaches this block.
         //
         // We copy the trace strings into impl_->resolved_*_factory_id
         // (owned `std::string` storage) because `trace` is a local that
@@ -860,32 +895,205 @@ void NimRTCEngine::init_audio_modules() noexcept {
 // wiring PR replaces it with the physical plumbing on top of
 // WebTransport / QUIC.
 //
-// Returns void — a missing factory just logs a warning and
-// `create_data_channel()` will return `nullptr` on the caller side.
+// Returns `core::kEngineInternal` when `cfg.datachannel_backend` holds
+// an unrecognised value (no silent fallback to "sctp"); a missing
+// factory only logs a warning and `create_data_channel()` will return
+// `nullptr` on the caller side.
 // ---------------------------------------------------------------------------
-void NimRTCEngine::init_datachannel_registry() noexcept {
-    if (!config_.datachannel_name.empty()) {
+uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
+    // ---- DataChannel factory dispatch (v0.14.0-rc.1) --------------------
+    //
+    // Algorithm:
+    //   1. If `cfg.datachannel_backend` is empty, fall back to the legacy
+    //      `cfg.datachannel_name` selector (backward compat for v0.x
+    //      callers).  After this step the field is treated as the new
+    //      `datachannel_backend` (might be "sctp", "web_transport", "...").
+    //   2. Dispatch on the resolved backend id:
+    //        "sctp"          — pick factory id "sctp" (or `datachannel_name`
+    //                          override when non-empty).
+    //        "web_transport" — pick factory id "web_transport" (the
+    //                          `datachannel_name` override is ignored in
+    //                          this mode); also verify the
+    //                          `web_transport_name` session factory
+    //                          resolves (readiness-only; physical
+    //                          session creation follows in the next rc.1
+    //                          PR that wires DTLS↔WebTransport).
+    //        ""              — DataChannel disabled (resolved id stays
+    //                          empty).
+    //        <other>         — hard error: `kEngineInternal` is returned
+    //                          so `open()` fails and surfaces the problem
+    //                          via `on_error_`; the factory id is left
+    //                          empty and `create_data_channel()` returns
+    //                          nullptr.  No silent fallback to "sctp".
+    //
+    // A legacy `datachannel_name` holding a value outside the known
+    // backend families is the v0.x power-user escape hatch: it resolves as
+    // a direct `IDataChannelFactory` id rather than being rejected.
+    //
+    // The resolved factory id is stored in `resolved_dc_factory_id_` for
+    // `create_data_channel()` to read.
+    //
+    // Returns 0 on every path except an unrecognised `datachannel_backend`
+    // value: a missing DC factory just logs a warning, and a missing
+    // WebTransport session factory is soft-warned at this phase (the engine
+    // surfaces it without failing init so callers can still pre-register a
+    // factory between construction and `open()`).
+
+    // Step 1: backward-compat normalisation.
+    std::string backend = config_.datachannel_backend;
+    // Set when the legacy `datachannel_name` carried a value that is not a
+    // known backend family.  Such a value is a direct `IDataChannelFactory`
+    // id (the v0.x power-user escape hatch), so it resolves through the
+    // registry directly instead of being rejected as an unknown backend.
+    bool legacy_direct_factory_id = false;
+    if (backend.empty() && !config_.datachannel_name.empty()) {
+        // Legacy v0.x call: `datachannel_name` is set, `datachannel_backend`
+        // is not.  Map the legacy value to the new dispatch:
+        //   - "sctp" (the v0.x default) maps to "sctp" backend
+        //     (factory id stays "sctp")
+        //   - any other (non-empty) factory id is treated as a power-user
+        //     factory override; the engine resolves it directly without
+        //     dispatching through a backend family.
+        if (config_.datachannel_name == "sctp") {
+            backend = "sctp";   // explicit even though "sctp" is also the default
+        } else {
+            // Power-user factory override.  Treat the value as a direct
+            // factory id rather than a backend family — flagging it keeps
+            // the dispatch below from reporting it as an unrecognised
+            // `datachannel_backend` value.
+            backend              = config_.datachannel_name;
+            legacy_direct_factory_id = true;
+        }
+    }
+
+    // Step 2: dispatch.
+    if (backend.empty()) {
+        // Disabled — resolved id stays empty, no factory resolution.
+        core::log::Logger::instance().debug(
+            "engine: DataChannel disabled (datachannel_backend == \"\" "
+            "&& datachannel_name.empty())");
+        return 0;
+    }
+
+    if (legacy_direct_factory_id) {
+        // v0.x power-user path: `datachannel_name` held a custom factory id.
+        // Resolve it directly through the registry — no family dispatch, no
+        // hard error (this is the pre-rc.1 contract).
+        resolved_dc_factory_id_ = backend;
         const plugins::IDataChannelFactory* dcf =
-            pal::resolve_datachannel(config_.datachannel_name);
+            pal::resolve_datachannel(resolved_dc_factory_id_);
         if (dcf) {
-            // Don't auto-create — channels are created on demand via
-            // create_data_channel().  Just verify the registry slot
-            // resolves.  We log the resolved id so misconfiguration
-            // (typo'd `cfg.datachannel_name`) surfaces immediately
-            // instead of at first send.
             core::log::Logger::instance().info(
                 std::string("engine: DataChannel plugin '")
                     .append(dcf->id())
-                    .append("' ready (factory resolved via "
+                    .append("' ready (legacy datachannel_name resolved via "
                             "core::PluginRegistry::get_datachannel)"));
         } else {
             core::log::Logger::instance().warn(
                 std::string("engine: DataChannel plugin '")
-                    .append(config_.datachannel_name)
-                    .append("' not registered (create_data_channel() will "
-                            "return nullptr)"));
+                    .append(resolved_dc_factory_id_)
+                    .append("' not registered (legacy datachannel_name; "
+                            "create_data_channel() will return nullptr)"));
         }
+        return 0;
     }
+
+    if (backend == "sctp") {
+        // Legacy SCTP-over-DTLS path.  `datachannel_name` stays the
+        // authoritative knob in this family: it is both the factory-id
+        // override and the explicit-disable signal (empty = disabled),
+        // which is the v0.x contract (`cfg.datachannel_name = ""` was how
+        // callers turned DataChannel off).  The `EngineConfig` default is
+        // already "sctp", so an empty value here is unambiguously an
+        // intentional disable rather than an unset field.
+        if (config_.datachannel_name.empty()) {
+            core::log::Logger::instance().debug(
+                "engine: DataChannel disabled (datachannel_name is empty)");
+            return 0;
+        }
+        resolved_dc_factory_id_ = config_.datachannel_name;
+
+        const plugins::IDataChannelFactory* dcf =
+            pal::resolve_datachannel(resolved_dc_factory_id_);
+        if (dcf) {
+            core::log::Logger::instance().info(
+                std::string("engine: DataChannel backend='sctp' ready "
+                            "(factory '")
+                    .append(dcf->id())
+                    .append("' resolved via core::PluginRegistry::get_datachannel)"));
+        } else {
+            core::log::Logger::instance().warn(
+                std::string("engine: DataChannel backend='sctp' but factory '")
+                    .append(resolved_dc_factory_id_)
+                    .append("' is not registered (create_data_channel() will return nullptr)"));
+        }
+        return 0;
+    }
+
+    if (backend == "web_transport") {
+        // v1.0.0 production data plane.  Factory id is fixed to
+        // "web_transport" (`datachannel_name` is intentionally ignored in
+        // this mode so the family-name and the factory-id are not
+        // duplicated knobs).
+        resolved_dc_factory_id_ = "web_transport";
+
+        const plugins::IDataChannelFactory* dcf =
+            pal::resolve_datachannel(resolved_dc_factory_id_);
+        if (dcf) {
+            core::log::Logger::instance().info(
+                std::string("engine: DataChannel backend='web_transport' "
+                            "ready (factory '")
+                    .append(dcf->id())
+                    .append("' resolved via core::PluginRegistry::get_datachannel)"));
+        } else {
+            core::log::Logger::instance().warn(
+                "engine: DataChannel backend='web_transport' but factory "
+                "'web_transport' is not registered (was "
+                "NIMRTC_ENABLE_WEB_TRANSPORT_MSQUIC=OFF at build time? "
+                "create_data_channel() will return nullptr)");
+        }
+
+        // Also verify the WebTransport session factory (readiness only;
+        // physical session creation is the v0.14.0-rc.1 follow-up PR that
+        // wires DTLS↔WebTransport plumbing).
+        if (config_.web_transport_name.empty()) {
+            core::log::Logger::instance().warn(
+                "engine: DataChannel backend='web_transport' but "
+                "web_transport_name is empty (skipping session factory lookup)");
+        } else {
+            const web_transport::IWebTransportSessionFactory* wtf =
+                pal::resolve_web_transport(config_.web_transport_name);
+            if (wtf) {
+                core::log::Logger::instance().info(
+                    std::string("engine: WebTransport session factory '")
+                        .append(wtf->id())
+                        .append("' ready (factory resolved via "
+                                "core::PluginRegistry::get_web_transport)"));
+            } else {
+                core::log::Logger::instance().warn(
+                    std::string("engine: WebTransport session factory '")
+                        .append(config_.web_transport_name)
+                        .append("' not registered (the engine will not be "
+                                "able to create the session; this becomes "
+                                "fatal in the rc.1 PR that wires "
+                                "DTLS↔WebTransport plumbing)"));
+            }
+        }
+        return 0;
+    }
+
+    // Unknown backend — hard error.  `open()` propagates the return code
+    // so the caller sees a non-zero rc; there is deliberately no silent
+    // fallback to "sctp" (a typo'd backend id would otherwise mask an
+    // integrator error).
+    std::string msg = std::string("engine: datachannel_backend='") + backend
+        + "' is not recognised (valid: \"sctp\", \"web_transport\", \"\"; "
+          "see docs/plan/v0.14-plan.md §2.1 / docs/plan/v1.0-plan.md §2.1.1)";
+    core::log::Logger::instance().error(msg);
+    impl_->last_open_rc = core::kEngineInternal;
+    if (on_error_) on_error_(core::kEngineInternal, msg);
+    resolved_dc_factory_id_.clear();   // force nullptr path in create_data_channel
+    return core::kEngineInternal;
 }
 
 // ---------------------------------------------------------------------------
@@ -947,14 +1155,25 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
             return core::kDtlsOpenFailed;
         }
         core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
-    } else if (impl_->resolved_media_factory_id == "raw-udp-arq") {
-        // Rule 2: no DTLS in media path (raw-udp-arq media stack).
-        // The strategy block above already warned; here we just log
-        // at debug level so the trace shows the session was built
+    } else if (impl_->resolved_media_factory_id == "raw-udp-arq" ||
+               impl_->resolved_media_factory_id == "default") {
+        // No-DTLS-by-design media stack:
+        //   - "raw-udp-arq"  — Rule 2 strategy (teleop-ultra-low-latency).
+        //     Strategically chosen for high-freq control without browser
+        //     interop, so DTLS is omitted from the media plane.
+        //   - "default"      — Slice 8 shell stack used by the "shell"
+        //     transport strategy (no ICE/DTLS/SRTP at all). The shell
+        //     is intended for in-process engine wiring tests and
+        //     render-only / source-only SDK demos that bypass
+        //     networking entirely.
+        // The strategy block above already warned (raw-udp-arq) or
+        // info-logged (default) at this phase; here we just log at
+        // debug level so the trace shows the session was built
         // without DTLS.
         core::log::Logger::instance().debug(
-            "engine: dtls_->open() skipped — "
-            "Rule 2 strategy has no DTLS in media path");
+            "engine: dtls_->open() skipped — media stack id='" +
+            impl_->resolved_media_factory_id +
+            "' has no DTLS in its media path by design");
     } else {
         // Media stack requires DTLS (webrtc-classic) but dtls_ is
         // null.  This means the user-supplied cfg.dtls_name (or the
@@ -1428,10 +1647,19 @@ void NimRTCEngine::close() noexcept {
 // ---------------------------------------------------------------------------
 std::unique_ptr<plugins::IDataChannel>
 NimRTCEngine::create_data_channel(std::string_view label) noexcept {
-    // Gate: DataChannel disabled by config.
-    if (config_.datachannel_name.empty()) {
+    // Gate 1: DataChannel disabled by config (resolved factory id empty).
+    //
+    // v0.14.0-rc.1: the resolved id is set by init_datachannel_registry()
+    // and reflects the dispatch on `cfg.datachannel_backend` +
+    // `cfg.datachannel_name` (with the v0.x legacy fallback for empty
+    // `datachannel_backend`).  When the resolved id is empty, DataChannel
+    // is disabled — `create_offer()` does not emit `m=application`,
+    // process_remote_sdp() silently drops the peer's `m=application` line,
+    // and create_data_channel() returns nullptr.
+    if (resolved_dc_factory_id_.empty()) {
         if (on_error_) on_error_(core::kEngineInternal,
-            "create_data_channel(): cfg.datachannel_name is empty");
+            "create_data_channel(): DataChannel is disabled (resolved factory "
+            "id is empty; check cfg.datachannel_backend / cfg.datachannel_name)");
         return nullptr;
     }
     // Gate: engine must be open()ed (so impl_->dtls is built and the
@@ -1443,11 +1671,11 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
     }
 
     const plugins::IDataChannelFactory* f =
-        pal::resolve_datachannel(config_.datachannel_name);
+        pal::resolve_datachannel(resolved_dc_factory_id_);
     if (!f) {
         if (on_error_) on_error_(core::kEngineInternal,
             std::string("create_data_channel(): factory '")
-                .append(config_.datachannel_name)
+                .append(resolved_dc_factory_id_)
                 .append("' not registered"));
         return nullptr;
     }

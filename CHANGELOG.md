@@ -94,8 +94,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kProfileSfu` is renamed to `kProfileRelay` to match the
   v0.14-plan.md §2.3 vocabulary shift (the relay is a
   profile role, not just a server type; the term "SFU" is
-  reserved for the v1.0+ composite profile work in §7 of
-  `v1.0-plan.md`).  No wire-level change; only the enum
+  reserved for the future `v1.1.0-plan.md` (if the SFU
+  track is reopened) — per `v1.0-plan.md` §7 = NO,
+  closed 2026-10-19).  No wire-level change; only the enum
   constant name.  `assembly/profiles.hpp` updated; the
   5 transport-strategy tests that reference the old name
   in their descriptive comments were updated to match.

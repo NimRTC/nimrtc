@@ -47,7 +47,12 @@ loader (per ADR-010) treats it as loader-agnostic metadata. Pair with the
 relay transport-stack plugin via `core::PluginRegistry::get_transport_stack`.
 
 **Note:** The name "relay" describes capabilities, not a conference server.
-To compose an SFU, combine multiple relay engines with a routing layer.
+**A from-scratch SFU module is *not* a v1.0.0 deliverable** (the §7 pre-1.0
+decision window for SFU-1 / DC-3 / BENCH-1 closed as NO, BDFL 2026-10-19 — SFU
+is not a project core goal; see `docs/plan/v1.0-plan.md` §7 + §12.5). If the
+SFU track is reopened in a future cycle, it lands in a separate
+`v1.1.0-plan.md`; for now the canonical way to compose multi-party forwarding
+is multiple `relay` engines behind a routing layer.
 
 **`relay-agent`** — relay + AI Agent hybrid. The relay direction skips L2
 processing; the Agent side keeps WebRTC APM so the Agent pipeline can

@@ -15,7 +15,6 @@
 #include <thread>
 
 #include <nimrtc/core/log.hpp>
-
 namespace nimrtc::video_source {
 
 namespace {
@@ -176,6 +175,14 @@ public:
     }
     ~MemoryVideoSource() override {
         stop();
+        // wait_until_idle (1s) prevents the destructor from hanging on a
+        // wedged producer thread (e.g. when an external callback deadlocks);
+        // we still log if the join truly fails so the missing-thread scenario
+        // doesn't show up as silent tests.
+        if (!wait_until_idle(std::chrono::milliseconds(1000))) {
+            vsrc_debug("MemoryVideoSource: ~dtor wait_until_idle timed out; "
+                       "leaving thread detached (will be killed on process exit)");
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -184,7 +191,17 @@ public:
         if (was_running) return core::Result<void>::make_ok();
         // Reset cadence from now.
         next_emit_us_ = now_us();
-        stop_flag_ = false;
+        // Acquire the loop mutex BEFORE spawning the thread so the
+        // very first iteration's cv_.wait_until() is parked against a
+        // well-initialised condition_variable. Without this, a window
+        // exists where stop_flag_/cv_ are still being initialised
+        // (per C++20 [thread.condition.condvar] §32.6) and the
+        // producer could miss the wake-up.
+        {
+            std::lock_guard<std::mutex> lk(loop_mu_);
+            stop_flag_    = false;
+            thread_exited_ = false;
+        }
         thread_ = std::thread([this] { cadence_loop(); });
         vsrc_debug("MemoryVideoSource: started (%ux%u @ %u fps, pattern=%s)",
                    cfg_.width, cfg_.height, cfg_.fps,
@@ -194,8 +211,20 @@ public:
 
     void stop() noexcept override {
         if (!running_.exchange(false)) return;
-        stop_flag_ = true;
-        // The thread will exit on its own; we join in the destructor.
+        // Signal-and-wake: setting stop_flag_ under the loop mutex
+        // (so the cadence loop, if it's mid-wait_until, observes the
+        // predicate on the next atomic load) and notifying the cv so
+        // the producer thread exits its wait IMMEDIATELY rather than
+        // after the next frame interval (which on a busy CI runner
+        // can be many tens of milliseconds and race with stop()
+        // callers).
+        {
+            std::lock_guard<std::mutex> lk(loop_mu_);
+            stop_flag_ = true;
+        }
+        cv_.notify_all();
+        // The thread joins in the destructor (or wait_until_idle for
+        // tests/callers that need a synchronous barrier).
     }
 
     bool running() const noexcept override { return running_.load(); }
@@ -221,25 +250,59 @@ public:
         return s;
     }
 
+    /** Block until the producer thread has exited (or until the
+     *  timeout elapses). Returns true on full exit, false on timeout.
+     *  Idempotent: returns true immediately when the thread is
+     *  already gone (either never started or already joined). */
+    bool wait_until_idle(std::chrono::milliseconds timeout) noexcept override {
+        std::unique_lock<std::mutex> lk(loop_mu_);
+        return exit_cv_.wait_for(lk, timeout, [this] {
+            return thread_exited_.load(std::memory_order_acquire);
+        });
+    }
+
 private:
     void cadence_loop() noexcept {
         using clock = std::chrono::steady_clock;
         const std::int64_t interval_us = (cfg_.fps == 0) ? 0 :
             static_cast<std::int64_t>(1'000'000 / cfg_.fps);
-        while (!stop_flag_) {
-            auto wakeup = clock::time_point(std::chrono::microseconds(next_emit_us_));
-            std::this_thread::sleep_until(wakeup);
-            if (stop_flag_) break;
-            ticks_.fetch_add(1);
+        // Hold the loop mutex for the entire loop so stop_flag_/cv_
+        // mutations from stop() and waits here share the same memory.
+        // The mutex is NEVER held across do_produce() — the user's
+        // frame callback could call back into set_callback() or
+        // wait_until_idle(); holding the mutex across it would
+        // deadlock. We release/relock around do_produce().
+        std::unique_lock<std::mutex> lk(loop_mu_);
+        while (!stop_flag_.load(std::memory_order_acquire)) {
+            auto wakeup = clock::time_point(
+                std::chrono::microseconds(next_emit_us_));
+            // cv_.wait_until returns std::cv_status::timeout when the
+            // wait ends normally and the predicate is still false
+            // (= "produce a frame now"), or std::cv_status::no_timeout
+            // when notified early (= "we were woken up; re-check the
+            // predicate"). Either way: re-check the predicate.
+            (void)cv_.wait_until(lk, wakeup, [this] {
+                return stop_flag_.load(std::memory_order_acquire);
+            });
+            if (stop_flag_.load(std::memory_order_acquire)) break;
+            ticks_.fetch_add(1, std::memory_order_relaxed);
+            lk.unlock();
             do_produce();
+            lk.lock();
             next_emit_us_ += interval_us;
             // If we fell behind, skip the missed slots (catch-up).
             std::int64_t now = now_us();
             if (next_emit_us_ < now - interval_us) {
-                frames_dropped_.fetch_add(1);
+                frames_dropped_.fetch_add(1, std::memory_order_relaxed);
                 next_emit_us_ = now;
             }
         }
+        // Mark thread-exited and notify wait_until_idle() observers.
+        // We hold loop_mu_ here, so it pairs with stop_flag_ writes
+        // from stop() and exit_cv_ waits in wait_until_idle().
+        thread_exited_.store(true, std::memory_order_release);
+        lk.unlock();
+        exit_cv_.notify_all();
     }
 
     void do_produce() noexcept {
@@ -265,13 +328,32 @@ private:
     SourceConfig cfg_;
     video_frame::VideoFrameLayout layout_{};
     std::atomic<bool> running_{false};
+    // stop_flag_ is read inside cadence_loop() under loop_mu_ via
+    // wait_until's predicate AND locklessly via the wait_until
+    // implementation; we use acquire ordering on the read and
+    // release ordering on the write (in stop()/start()).
     std::atomic<bool> stop_flag_{false};
+    // thread_exited_ is set to true when cadence_loop() reaches its
+    // natural exit. wait_until_idle() observes it via exit_cv_ to
+    // stop polling. Release on the producer side; acquire on the
+    // wait_until_idle side.
+    std::atomic<bool> thread_exited_{true};   // pre-set so a fresh
+                                              // source is "already idle"
     std::thread thread_;
     std::int64_t  next_emit_us_ = 0;
     std::atomic<std::uint64_t> frames_produced_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
     std::atomic<std::uint64_t> ticks_{0};
     std::mutex cb_mu_;
+    // loop_mu_ + cv_ + exit_cv_ form the cadence-loop synchronization
+    // trio:
+    //   - loop_mu_  : serializes cadence_loop() ↔ stop() / start()'
+    //                 memory of stop_flag_, and protects `next_emit_us_`.
+    //   - cv_       : wakes cadence_loop() early when stop_flag_ flips.
+    //   - exit_cv_  : wait_until_idle() waits on it for `thread_exited_`.
+    std::mutex loop_mu_;
+    std::condition_variable cv_;
+    std::condition_variable exit_cv_;
     FrameCallback cb_;
 };
 

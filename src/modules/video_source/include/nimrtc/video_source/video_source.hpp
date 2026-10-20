@@ -36,9 +36,12 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -118,6 +121,19 @@ public:
     /** Manually produce one frame (skips cadence). Returns the produced
      *  frame + invokes the callback (if any). */
     virtual void produce_one() noexcept = 0;
+
+    /** Wait until the producer thread has fully exited after `stop()`.
+     *  Returns true if the thread exited within the timeout; false on
+     *  timeout. Idempotent and safe to call when the producer is
+     *  already stopped (returns true immediately). Tests use this to
+     *  observe stop() without polling counters; production callers
+     *  normally rely on the destructor to join the thread.
+     *
+     *  Implemented as a default no-op (`return true`) in
+     *  IVideoSource so existing in-tree plugins keep compiling. Real
+     *  producers (e.g. MemoryVideoSource) override. */
+    virtual bool wait_until_idle(
+        std::chrono::milliseconds /*timeout*/) noexcept { return true; }
 
     /** Get the current source config. */
     virtual SourceConfig config() const noexcept = 0;

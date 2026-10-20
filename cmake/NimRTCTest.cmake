@@ -102,6 +102,11 @@ function(nimrtc_copy_msquic_dll target)
     if(TARGET _nimrtc_msquic_dll_copier_${target})
         return()
     endif()
+    if(NOT WIN32)
+        # Non-Windows platforms use a .so or .dylib shared library and do not
+        # require the runtime DLL to be co-located with the test binary.
+        return()
+    endif()
     if(NOT TARGET msquic)
         # Vendored msquic library was not built; nothing to copy.
         return()

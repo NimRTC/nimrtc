@@ -218,8 +218,31 @@ protected:
         cfg.stun_server_host       = "";
         cfg.local_port_range_begin = 52000;
         cfg.local_port_range_end   = 52100;
-        // datachannel_name defaults to "sctp" — tests that need a
-        // different id (e.g. the "nope" test) override it locally.
+        // datachannel_name defaults to "sctp" — tests that need a different
+        // id (e.g. the "nope" unknown-id test) override it locally.
+
+        // Use the "shell" transport strategy (Slice 8 sentinel in
+        // engine.hpp) so engine.open() does NOT actually try to bind
+        // ICE UDP sockets. Reasons:
+        //   1. These tests cover the engine's DataChannel plumbing
+        //      (factory lookup, callback forwarding, disabled-id
+        //      paths), not the transport stack — they have no need
+        //      for a real ICE candidate gathering or DTLS handshake.
+        //   2. On Windows runners (GitHub Actions / low-integrity
+        //      processes) libjuice's UDP bind fails with WSAEACCES
+        //      (errno 10013) for any local port range, including
+        //      [52000, 52100] here and any other typical range. With
+        //      the real "webrtc-classic" stack this surfaces as a
+        //      `transport open failed rc=8191` from libjuice's agent,
+        //      and engine.open() returns non-zero — silently
+        //      breaking every test in this fixture even though no
+        //      DataChannel code path was at fault.
+        //   3. The shell stack's ice_t_->open() returns kOk without
+        //      touching the network, so the engine reaches the
+        //      open() success state and the DataChannel dispatch
+        //      logic actually executes — which is the whole point.
+        cfg.transport_strategy_name = "shell";
+
         return cfg;
     }
 };
@@ -392,25 +415,44 @@ TEST_F(DataChannelEngine, EngineSurfacesDataChannelCallbacks) {
 }
 
 // =====================================================================
-// Test 4: `cfg.datachannel_name = ""` (DataChannel disabled) makes
+// Test 4: `cfg.datachannel_backend = ""` (DataChannel disabled) makes
 // `create_data_channel()` return nullptr even when the "sctp" (or any
-// other) factory is registered.  This is the source-compat /
-// explicit-disable path — mirrors how `cfg.bwe_name = ""` disables BWE.
+// other) factory is registered.  This is the explicit-disable path —
+// mirrors how `cfg.bwe_name = ""` disables BWE.
+//
+// v0.14.0-rc.1 contract (engine_config.md §2.6.3): setting
+// `datachannel_name = ""` disables DataChannel in **every** backend
+// family, including the `"sctp"` default where `datachannel_name`
+// stays the authoritative knob (see the `backend == "sctp"` branch
+// in `init_datachannel_registry()`, engine.cpp).  This is the v0.x
+// contract that `cfg.datachannel_name = ""` disables DataChannel and
+// is preserved for source compatibility.
+//
+// This test clears BOTH fields so the assertion holds regardless of
+// which one the backend dispatch consults; clearing `datachannel_name`
+// alone is sufficient, and clearing `datachannel_backend` alone is
+// also sufficient (the empty-backend branch resolves to an empty
+// factory id and skips resolution entirely).  Setting both is
+// belt-and-suspenders and documents the intended caller-facing
+// spelling of "disable".
 // =====================================================================
 TEST_F(DataChannelEngine, DisabledDatachannelNameReturnsNull) {
     EngineConfig cfg = make_test_config();
-    cfg.datachannel_name = "";   // explicit disable
+    cfg.datachannel_backend = "";  // explicit disable (rc.1 API)
+    cfg.datachannel_name    = "";  // also clear (belt-and-suspenders)
 
     NimRTCEngine engine(cfg);
     ASSERT_EQ(engine.open(), 0u)
         << "engine.open() should succeed when DataChannel is disabled "
-           "(datachannel_name is a per-channel knob, not a hard "
+           "(datachannel_backend is a per-channel knob, not a hard "
            "dependency)";
 
     auto ch = engine.create_data_channel("test");
     EXPECT_EQ(ch, nullptr)
         << "create_data_channel() must return nullptr when "
-           "cfg.datachannel_name is empty (DataChannel disabled)";
+           "cfg.datachannel_name (and cfg.datachannel_backend) are "
+           "empty (DataChannel disabled per v0.14.0-rc.1 contract in "
+           "engine_config.md §2.6.3)";
 
     engine.close();
 }

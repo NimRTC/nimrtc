@@ -27,7 +27,9 @@ EngineConfig
 │   ├── bwe_name                        = "aimd"
 │   ├── scheduler_name                  = "strict_priority"
 │   ├── video_codec_name                = "h264"
+│   ├── datachannel_backend             = "sctp"        ← new in v0.14.0-rc.1
 │   ├── datachannel_name                = "sctp"
+│   ├── web_transport_name              = "msquic"       ← new in v0.14.0-rc.1
 │   ├── video_source_name               = "memory"
 │   ├── video_sink_name                 = "headless"
 │   ├── video_receiver_name             = "reference"
@@ -152,16 +154,62 @@ cfg.video_receiver_name   = "videotoolbox";  // Apple
 ### 2.6 DataChannel
 
 ```cpp
-std::string datachannel_name = "sctp";   // empty = no DataChannel
-std::uint16_t sctp_port      = 5000;
+std::string datachannel_backend = "sctp";   // "sctp" | "web_transport" | ""
+std::string datachannel_name    = "sctp";   // empty = no DataChannel; OR power-user factory id
+std::string web_transport_name  = "msquic"; // WebTransport session factory id
+std::uint16_t sctp_port        = 5000;
 ```
 
-`datachannel_name = ""` disables DataChannel entirely:
+**v0.14.0-rc.1** added the `datachannel_backend` + `web_transport_name`
+fields to support the DC-1 v1.0.0 headline gate (WebTransport / QUIC
+data plane; see `docs/plan/v1.0-plan.md` §2.1.1 PR-3).
+
+#### 2.6.1 Backend dispatch
+
+The engine resolves `core::PluginRegistry::get_datachannel(<id>)` at
+`init_modules_once()` time by dispatching on `datachannel_backend`:
+
+| `datachannel_backend` | Resolved factory id       | Notes                                           |
+|-----------------------|---------------------------|-------------------------------------------------|
+| `"sctp"` (default)    | `"sctp"` (or `datachannel_name` override when set) | Legacy SCTP-over-DTLS path; same as v0.x.        |
+| `"web_transport"`     | `"web_transport"` (fixed; `datachannel_name` is ignored) | Production path. Also verifies `web_transport_name` session factory (default `"msquic"`). |
+| `""`                  | `datachannel_name` (legacy v0.x fallback) | Backward compat — a v0.x caller that set only `datachannel_name` continues to work without code changes. |
+| `<other>`             | **(hard error)**          | Surfaces `kEngineInternal` via `on_error_` — engine does NOT silently fall back to `"sctp"` (typos would mask integrator errors). |
+
+#### 2.6.2 WebTransport session factory
+
+When `datachannel_backend = "web_transport"`, the engine additionally
+resolves `core::PluginRegistry::get_web_transport(web_transport_name)`
+(default `"msquic"`) for **readiness verification** only — the
+physical session creation PR (DTLS↔WebTransport plumbing) lands in a
+follow-up v0.14.0-rc.1 PR.  A missing session factory at the rc.1
+cut is a soft-warn (logged via `core::log`); the physical plumbing
+PR promotes it to hard-fail.
+
+#### 2.6.3 Disabling DataChannel
+
+Setting `datachannel_name = ""` disables DataChannel entirely
+(mirrors the v0.x contract). This works in **every** backend family,
+including `"sctp"` (the default) where `datachannel_name` stays the
+authoritative knob:
 
 - `create_offer()` does **not** emit `m=application`;
 - `process_remote_sdp()` silently drops any `m=application` from
   the peer;
 - `create_data_channel()` returns `nullptr`.
+
+To disable by way of the new field instead, set
+`datachannel_backend = ""` **and** `datachannel_name = ""`.
+
+#### 2.6.4 Power-user factory override (legacy v0.x)
+
+A v0.x caller that set `datachannel_name = "<custom-id>"` (a value
+other than `"sctp"`) continues to resolve that id directly through
+`core::PluginRegistry::get_datachannel("<custom-id>")` — the engine
+treats the legacy value as a direct factory id when it is not one
+of the recognised backend families.  For the v1.0.0 release, prefer
+using the new `datachannel_backend` switch with the built-in factory
+ids (`"sctp"` or `"web_transport"`).
 
 ### 2.7 Video codec
 
@@ -237,7 +285,7 @@ The loopback-p2p example uses `51000–51099`; demo-agent-gateway uses
 TURN servers are configured at runtime via
 `engine.add_turn_server(host, port, user, pass)` — not in the
 config struct, because TURN servers are typically per-session
-(rotated by an SFU / TURN service).
+(rotated by a relay-rotation / TURN service).
 
 ---
 

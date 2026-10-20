@@ -254,8 +254,13 @@ struct SfuRelayStrategy {
 **Variant — SFU with DC forwarding policy**: When the SFU must
 forward DataChannels across the hop (DC-3 in v0.11-plan §2.2), enable
 the control stack with `stack: "webrtc-classic"` (i.e. forward via
-the media stack's DC). This is the v0.12.0 default; the pre-1.0
-DC forwarding decision (§7) is out of scope.
+the media stack's DC). This was the v0.12.0 default; the pre-1.0
+DC forwarding decision (§7) is now **closed as NO** (BDFL,
+2026-10-19 — SFU is not a project core goal; see
+`v1.0-plan.md` §7 + §12.5), so the SFU-with-DC-forwarding
+variant is **not on any roadmap**. The `relay` strategy in
+`relay-agent` Profile (single-strategy relay, no DC forwarding)
+remains the canonical relay use case.
 
 ### 2.5 Strategy `cross-network-peer`
 
@@ -403,9 +408,13 @@ valid ids.
 2. **Composite `sfu-agent` resolution** — ~~deferred to pre-1.0
    decision window (v0.11-plan §7).~~ **BDFL decision (2026-10-13):
    out of v0.12.0 scope; v0.12.0 collapses to the higher-priority
-   single strategy with a `WARN` log.** Pre-1.0 review may add a
-   second `TransportSession` slot or a `composite` non-`strategy`
-   field.
+   single strategy with a `WARN` log.** **Update (2026-10-19):**
+   the pre-1.0 window is now closed as `v1.0-plan.md` §7 = NO
+   (BDFL: SFU is not a project core goal). The composite
+   `sfu-agent` resolution is **not on any roadmap**; if the
+   SFU track is reopened in a future cycle, a new
+   `v1.1.0-plan.md` re-evaluates the design (out of scope
+   for v1.0.0).
 3. **Strategy-by-Profile vs Profile-by-strategy** — the current doc
    assumes Profile-led (`transport.strategy = "agent-gateway"`),
    matching the v1.0 schema. Pre-1.0 review (v0.11-plan §7) may
@@ -454,9 +463,14 @@ valid ids.
       break docs. `robust-peer` is too vague; `lossy-link` is a property
       not a use case; `mobile-friendly` overstates the scope (it covers
       any NAT-traversal / lossy-link scenario, not only mobile).
-- [x] **BDFL review (2026-10-13): §6 #2 — composite `sfu-agent`
-      is out of v0.12.0 scope.** Defer the multi-`TransportSession`
-      engine decision to the pre-1.0 window (v0.11-plan §7). For
+- [x] **BDFL review (2026-10-13; reaffirmed 2026-10-19): §6 #2 —
+      composite `sfu-agent` is out of v0.12.0 scope and is
+      **no longer on any roadmap**.** Defer the multi-`TransportSession`
+      engine decision to the pre-1.0 window (v0.11-plan §7). The
+      pre-1.0 window is now closed as `v1.0-plan.md` §7 = NO
+      (BDFL, 2026-10-19: SFU is not a project core goal), so
+      the composite sfu-agent resolution is **not on any roadmap**.
+      For
       v0.12.0, JSON Profiles that name a composite should fall back
       to the higher-priority single-strategy rule (§5.3 priority
       list, with SFU outranking agent), and the loader should log

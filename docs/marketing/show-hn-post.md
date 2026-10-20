@@ -60,8 +60,13 @@ I would just use it. But:
 ### What NimRTC looks like
 
 - **L0–L3 compile-time layering** with a Plugin Adaptation Layer (PAL).
-  Same source tree ships a full P2P client *and* an SFU gateway (SFU
-  skips L2 codecs). ~50k LOC of C++20.
+  Same source tree ships a full P2P client *and* a `relay` gateway
+  (relay skips L2 codecs, per the `relay` profile in
+  `docs/zh/architecture.md` §7.1). **Note**: a from-scratch SFU
+  module is *not* a v1.0.0 deliverable (the §7 pre-1.0 decision
+  window for SFU-1 / DC-3 / BENCH-1 closed as NO, 2026-10-19;
+  SFU is not a project core goal — see `docs/plan/v1.0-plan.md`
+  §7 + §12.5). ~50k LOC of C++20.
 - **Header-only plugin interfaces** for transport, ICE, RTP, SDP, jitter
   buffer, audio 3A, codecs, video source/sink, DataChannel, hardware
   codecs. The seam surface is small, and the public API doesn't change

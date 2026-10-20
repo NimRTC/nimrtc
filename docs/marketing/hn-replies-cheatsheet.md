@@ -32,8 +32,14 @@
 
 > Different layer of the stack and different language. Pion is Go; mediasoup
 > and LiveKit are server-side SFU only. NimRTC is C++20 and ships both P2P
-> client *and* relay from the same source tree (relay profile skips L2
-> codecs — no runtime dispatch, compile-time layer omission).
+> client *and* a `relay` gateway from the same source tree (relay profile
+> skips L2 codecs — no runtime dispatch, compile-time layer omission).
+> **Note:** a from-scratch SFU module is *not* a v1.0.0 deliverable
+> (the §7 pre-1.0 decision window for SFU-1 / DC-3 / BENCH-1 closed as
+> NO, 2026-10-19; SFU is not a project core goal — see
+> `docs/plan/v1.0-plan.md` §7 + §12.5). The `relay` profile is one
+> compile-time strategy of the same engine; the SFU track is off the
+> v1.0.x critical path.
 >
 > ↳ Long-form: `show-hn-post.md` §Reply-A.
 > ↳ Comparison table: `README.md` §"How NimRTC compares".

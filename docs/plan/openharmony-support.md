@@ -21,7 +21,8 @@
 
 `README.md` 把 NimRTC 的差异化卖点浓缩在两行——"可控 / 可静态审计 / 几 MB"和"GM/T 密码栈可替换"。**这两条都直接指向 OpenHarmony，却没有任何代码路径已经覆盖到它**。把 OpenHarmony 推到 P3-prep 优先级的三个前置条件：
 
-1. **README 用户画像的内在一致性。** "Xinchuang / regulated environment that mandates GM/T cryptography" 这一行写在"Building an SFU without rewriting protocol code"之前——但 NimRTC 当前**没有 GMSSL 后端、没有任何信创平台 build target**。这一行目前是 *愿景*，不是 *能力*。OpenHarmony 是第一个能把它从愿景变成能力的目标平台。
+1. **README 用户画像的内在一致性。** "Xinchuang / regulated environment that mandates GM/T cryptography" 这一行写在"Standing up a `relay` without rewriting protocol code"之前——但 NimRTC 当前**没有 GMSSL 后端、没有任何信创平台 build target**。这一行目前是 *愿景*，不是 *能力*。OpenHarmony 是第一个能把它从愿景变成能力的目标平台。
+   （注：`README` 行已经从 "Building an SFU" 更新为 "Standing up a `relay`" —— 见 §7 pre-1.0 决策窗口由 BDFL 关闭为 NO，2026-10-19；SFU 不是项目核心目标，from-scratch SFU 模块不在 v1.0.x 关键路径上。详见 `docs/plan/v1.0-plan.md` §7 + §12.5。）
 2. **`linux-x86_64-support.md` §1.2 已经划了边界。** 文档把 macOS / aarch64 / Android / iOS / 信创平台列为"独立 PR"——意味着 Linux aarch64 已落地后，下一个该拿下的就是信创体系，而 OpenHarmony 是信创体系里唯一同时覆盖移动 + IoT + 标准设备的入口。
 3. **PAL Slice 1–8 已落地。** `transport-selection.md` §6 把 ICE / DTLS / SCTP / RTP / transport-stack 全部拉到了 typed factory seam（v0.10.2 / v0.10.3 持续推进）。意味着 OHOS 支持**不需要重写 transport 代码**，只缺：(a) 一个 OHOS toolchain、(b) 一个 GMSSL DTLS 后端实现、(c) 平台音频 HAL 适配。
 

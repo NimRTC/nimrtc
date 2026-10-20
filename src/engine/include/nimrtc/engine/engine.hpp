@@ -314,8 +314,65 @@ struct NIMRTC_API_STABLE EngineConfig {
     // See `src/plugins/include/nimrtc/plugins/datachannel.hpp` for the
     // IDataChannel / IDataChannelFactory contract.
 
-    /** IDataChannel plugin id. Default = "sctp". Empty = no DataChannel. */
+    /** IDataChannel plugin id. Default = "sctp". Empty = no DataChannel.
+     *  This is the **low-level** factory-slot selector: the engine resolves
+     *  `core::PluginRegistry::get_datachannel(datachannel_name)` at
+     *  `init_modules_once()` time and uses the result for
+     *  `create_data_channel()`.
+     *
+     *  Setting this to `""` disables DataChannel entirely (in every backend
+     *  family, including `"sctp"` — this is the v0.x contract).
+     *
+     *  Most callers should prefer `datachannel_backend` (below); `datachannel_name`
+     *  is retained for power users that want to inject a custom factory
+     *  into the engine (e.g. an in-tree `MockDataChannelFactory` for tests).
+     *  When `datachannel_backend` is empty, `datachannel_name` is the
+     *  effective selector; otherwise `datachannel_backend` wins.
+     */
     std::string datachannel_name = "sctp";
+
+    /** DataChannel backend family selector (v0.14.0-rc.1, DC-1 v1.0.0
+     *  headline gate).  The engine resolves this at `init_modules_once()`
+     *  time and picks the matching `IDataChannelFactory` + (when needed)
+     *  `IWebTransportSessionFactory` from `core::PluginRegistry`.
+     *
+     *  Valid values:
+     *    - `"sctp"` (default) — SCTP-over-DTLS path (legacy).  Uses the
+     *      `"sctp"` DataChannel factory; `datachannel_name` may override.
+     *    - `"web_transport"`  — WebTransport / QUIC path (v1.0.0 production).
+     *      Uses the `"web_transport"` DataChannel factory + the
+     *      `web_transport_name` (default `"msquic"`) WebTransport session
+     *      factory.  `datachannel_name` is ignored in this mode.
+     *    - `""`               — DataChannel disabled (same as
+     *      `datachannel_name = ""`); falls back to `datachannel_name` if
+     *      non-empty (backward compatibility for v0.x callers that set
+     *      `datachannel_name` without `datachannel_backend`).
+     *
+     *  Unknown values surface as `kEngineInternal` via `on_error_` at
+     *  `open()` time — the engine does **not** silently fall back to
+     *  `"sctp"` (typo'd backend ids would mask integrator errors).
+     *
+     *  Added in v0.14.0-rc.1 per `docs/plan/v1.0-plan.md` §2.1.1 PR-3
+     *  (DC-1-LAND dependency) and the v0.14.0-beta.1 release notes
+     *  "What is NOT in v0.14.0-beta.1" deferred-list entry for
+     *  `EngineConfig::datachannel_backend`. */
+    std::string datachannel_backend = "sctp";
+
+    /** IWebTransportSession factory id (v0.14.0-rc.1, DC-1 v1.0.0
+     *  headline gate).  Consumed only when `datachannel_backend ==
+     *  "web_transport"`; the engine resolves
+     *  `core::PluginRegistry::get_web_transport(web_transport_name)` at
+     *  `init_modules_once()` time (readiness verification only — the
+     *  actual session creation PR follows in v0.14.0-rc.1 PR after this
+     *  one and wires the session through the DTLS/ICE pipeline).
+     *
+     *  Default = `"msquic"` (the v0.14.0-beta.1 msquic-backed factory;
+     *  matches `list_web_transports()` at the beta.1 cut).
+     *
+     *  Empty string = disable WebTransport resolution (the engine logs a
+     *  warning and `datachannel_backend = "web_transport"` then fails at
+     *  `open()` with a clear error). */
+    std::string web_transport_name = "msquic";
 
     /** SCTP port advertised in `m=application` SDP lines (RFC 8831 §6.1).
      *  Default = 5000 (matches Chrome / WebRTC interop).  Only used when
@@ -331,6 +388,7 @@ struct NIMRTC_API_STABLE EngineConfig {
     //   - "agent-gateway"
     //   - "sfu-relay"
     //   - "cross-network-peer"
+    //   - "shell"                     (SENTINEL — see below)
     //
     // Empty string (the default) means "use the engine compile-time
     // default", which is currently `browser-call`. The engine validates
@@ -348,6 +406,34 @@ struct NIMRTC_API_STABLE EngineConfig {
     // The two are orthogonal: a "webrtc-classic"-shaped media stack can
     // be governed by any of the 5 strategies, depending on whether the
     // control side needs raw-udp-arq, etc.
+    //
+    // Sentinel "shell": a well-known reserved name that opts out of
+    // the real ICE / DTLS / SRTP media pipeline entirely. The engine
+    // resolves this to the Slice 8 shell stack factory
+    // (id="default"; `CapabilitySelectorStack`), whose component
+    // accessors return references to null-instance singletons whose
+    // methods are no-ops or return `kErrNotReady`. Specifically:
+    //   - `ice_t_->open()` returns `kOk` (NullIceTransport::open())
+    //     and never attempts to bind UDP sockets;
+    //   - DTLS/SRTP are inactive by design (no real session);
+    //   - `cfg.local_port_range_begin/end` are never consulted.
+    //
+    // Use cases:
+    //   - In-process unit tests that exercise engine wiring
+    //     (`create_data_channel`, `create_offer`, plugin dispatch)
+    //     without a network. On Windows GitHub Actions runners, the
+    //     real `ice_t_->open()` of `webrtc-classic` fails with
+    //     WSAEACCES (errno 10013) on `[52000, 52100]` because of
+    //     restricted Winsock access in the sandbox, which breaks any
+    //     test that needs to fully bring up an engine. The "shell"
+    //     sentinel bypasses that bind entirely.
+    //   - SDK / demo binaries that intentionally disable transport
+    //     (render-only / source-only demos that exercise the encoder
+    //     and codec paths but never connect to a peer).
+    //
+    // The sentinel is documented as a stable public API; downstream
+    // tests and integration shims can rely on it as the canonical way
+    // to construct a network-free engine instance.
     std::string_view transport_strategy_name = "";
 };
 // ---------------------------------------------------------------------------
@@ -772,6 +858,20 @@ private:
     plugins::DataMessageCallback    on_data_message_;
     plugins::DataChannelStateCallback on_data_state_;
 
+    // ---- DataChannel factory dispatch (v0.14.0-rc.1, DC-1 v1.0.0 headline) -
+    //
+    // Resolved at `init_modules_once()` time by dispatching on
+    // `config_.datachannel_backend` ("sctp" / "web_transport" / "" + legacy
+    // `datachannel_name` fallback); the result is the factory id the engine
+    // hands to `core::PluginRegistry::get_datachannel(id)` in
+    // `create_data_channel()`.  When empty, DataChannel is disabled
+    // (mirrors `cfg.datachannel_backend.empty() && cfg.datachannel_name.empty()`).
+    //
+    // Lives on the engine (not in `Impl`) because `create_data_channel()` is
+    // a public API method that needs to read it directly, and `Impl` is a
+    // pimpl hidden behind `engine.cpp`.
+    std::string                        resolved_dc_factory_id_;
+
     enum class State { kConstructed, kOpen, kClosed };
     State state_ = State::kConstructed;
 
@@ -835,13 +935,21 @@ private:
      *  to `nullptr` so the fallback path runs. */
     void init_audio_modules() noexcept;
 
-    /** Phase 5 — verify the DataChannel factory registered under
-     *  `cfg.datachannel_name` resolves via `core::PluginRegistry`.
+    /** Phase 5 — resolve the DataChannel factory id from
+     *  `cfg.datachannel_backend` (+ the legacy `cfg.datachannel_name`
+     *  fallback) and verify the factory resolves via
+     *  `core::PluginRegistry`.
      *  No construction here — `create_data_channel()` is the
-     *  on-demand API.  No return value — a missing factory just logs
-     *  a warning and `create_data_channel()` will return `nullptr`
-     *  on the caller side. */
-    void init_datachannel_registry() noexcept;
+     *  on-demand API.  A missing factory only logs a warning and
+     *  `create_data_channel()` will return `nullptr` on the caller
+     *  side, so those paths return 0.
+     *
+     *  Returns `kEngineInternal` when `cfg.datachannel_backend` holds an
+     *  unrecognised value: the engine does not silently fall back to
+     *  `"sctp"` (a typo'd backend id would otherwise mask an integrator
+     *  error).  The error is also routed through `on_error_` before the
+     *  return, matching the other `init_*` failure paths. */
+    uint32_t init_datachannel_registry() noexcept;
 
     /** Phase 6 — create the SRTP context, open the DTLS session
      *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`

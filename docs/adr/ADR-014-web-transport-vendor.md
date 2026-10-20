@@ -219,7 +219,10 @@ in-process regression as the §7 substitute.
   A Case E that doesn't pass is not a v1.0.0 headline gate.
 - The §7 "pre-1.0 decision window" deferred SFU-1 / DC-3 /
   BENCH-1, **not** DC-1. DC-1 is the v1.0.0 headline gate per
-  `v1.0-plan.md` §3 Gate #1.
+  `v1.0-plan.md` §3 Gate #1. **As of 2026-10-19, §7 is
+  CLOSED (BDFL: SFU is not a project core goal)** — the
+  trio is off the v1.0.x critical path; see
+  `v1.0-plan.md` §7 + §12.5.
 
 **Why not**: this is not a "vendor choice" alternative; it is a
 "do nothing" alternative. v0.11.0 already evaluated it and

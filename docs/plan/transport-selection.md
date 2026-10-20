@@ -19,7 +19,7 @@
 ## 1. 背景与动机
 
 v0.9.2 已 tag，v0.10.0 收 PAL Slice 1 + chlog 卫生，v0.11.0 是 P2 入口
-（DataChannel usrsctp 互通、in-process SFU relay、Profile 库官方化）。
+（DataChannel usrsctp 互通、Profile 库官方化、in-process `relay` 转发引擎）。
 在这个边界点上，三股力量正在把"传输层是不是 plugin-replaceable"这个问题推上台面：
 
 1. **场景侧**——具身智能 / 无人车 / 远程操控这一类低延迟控制场景开始进入视野。
@@ -500,7 +500,7 @@ additive change 用 PATCH bump）。
 | 原行 | 调整后 |
 |---|---|
 | "usrsctp 跨平台构建（macOS / aarch64）" | 保留，但实现走 Slice 5 的 `UsrsctpSocket` 而非硬编码集成 |
-| "SFU 转发是否需要 nimrtc_bwe / nimrtc_jb 依赖" | 不变；与 Slice 4–8 正交 |
+| "SFU 转发是否需要 nimrtc_bwe / nimrtc_jb 依赖" | 不变；与 Slice 4–8 正交 —— 但 §7 pre-1.0 决策窗口已由 BDFL 关闭为 NO（2026-10-19，SFU 不是项目核心目标），SFU-1 / DC-3 / BENCH-1 推迟到未来 `v1.1.0-plan.md`，不在 v1.0.x 关键路径上（见 `docs/plan/v1.0-plan.md` §7 + §12.5） |
 | "PCM tap 与 WebRTC APM 的接缝" | 不变 |
 
 ---

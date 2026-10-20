@@ -16,9 +16,16 @@
 
 **原生 C++ WebRTC 替代实现 —— 可嵌入、场景化组装、后端可替换。**
 
-一份源码同时产出 **P2P 客户端**、**SFU 网关**，并能在 **嵌入式 Linux aarch64** 上跑。
+一份源码同时产出 **P2P 客户端**、**`relay` 网关**，并能在 **嵌入式 Linux aarch64** 上跑。
 DTLS / RTP / 3A 后端均通过 plugin 接口暴露，加密路径可切换到 **GMSSL**，在 GM/T 合规场景里
 不 fork 主干。
+
+> **术语说明**：本仓库产出的网关是 `relay` Profile —— 单策略转发 + 编译期 L2
+> 编解码跳过（见 `docs/zh/architecture.md` §7.1）。**From-scratch 的 SFU 模块不是
+> v1.0.0 的交付内容**——SFU-1 / DC-3 / BENCH-1 在 §7 pre-1.0 决策窗口由 BDFL
+> 关闭为 NO（2026-10-19，SFU 不是项目核心目标；见 `docs/plan/v1.0-plan.md`
+> §7 + §12.5）。若 SFU 轨道在后续 cycle 重新打开，会落在独立的 `v1.1.0-plan.md`
+> 里，与 v1.0.x 关键路径明确分离。
 
 [为什么选 NimRTC？](#为什么选-nimrtc) · [适用人群](#适用人群) · [快速上手](#快速上手) · [Hello, World](#hello-world) · [架构概览](#架构概览) · [基准数据](#基准数据) · [路线图](#路线图) · [常见问题](#常见问题)
 
@@ -62,11 +69,11 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 | # | 差异化点 | 为什么重要 |
 |---|---|---|
-| 1 | **分层 + Profile 组装（L0–L3）** | 编译期选层。同一份代码既能发 P2P 客户端，也能发 SFU 网关（SFU 直接跳过 L2）。LiveKit/mediasoup 只做服务端；libwebrtc 是 monolithic。 |
+| 1 | **分层 + Profile 组装（L0–L3）** | 编译期选层。同一份代码既能发 P2P 客户端，也能发 `relay` 网关（`relay` profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1）。**注意**：from-scratch 的 SFU 模块不是 v1.0.0 的交付内容（§7 pre-1.0 决策窗口在 2026-10-19 由 BDFL 关闭为 NO，SFU 不是项目核心目标；见 `docs/plan/v1.0-plan.md` §7 + §12.5）。LiveKit/mediasoup 只做服务端；libwebrtc 是 monolithic。 |
 | 2 | **多平台 CI 全部绿色** | Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均通过构建+单测。详见[平台支持](#平台支持)。 |
 | 3 | **PAL（Plugin Adaptation Layer）** | 所有能力切换走 `pal::*`，**零运行时开销**，公共 API 不变。详见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。 |
 | 4 | **加密后端可替换** | DTLS 后端可在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL、WoTrCrypt）。多数开源 WebRTC 栈把加密焊死。 |
-| 5 | **P2P 客户端和 SFU 同一 codebase** | 同一套 plugin 接口同时支撑两条产品线。2026 年的开源 WebRTC 生态里几乎找不到第二家。 |
+| 5 | **P2P 客户端和 relay 同一 codebase** | 同一套 plugin 接口同时支撑两条产品线。2026 年的开源 WebRTC 生态里几乎找不到第二家。（from-scratch 的 SFU 模块不是项目核心目标 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19。） |
 
 > **plugin 接口是这套架构的"接缝"**。上面五点要组合起来才出差异化，详见 [§ plugin 架构](#plugin-架构)。
 
@@ -221,7 +228,10 @@ Chrome 互通（Chrome 出 offer，NimRTC 出 answer，SDP↔ICE 手动桥接）
 ## 架构概览
 
 NimRTC 是 **L0–L3 四层编译期叠加 PAL（Plugin Adaptation Layer）**。**Profile** 也是编译期决定
-哪些层会被链接进二进制——同一份源码既能产出 P2P 客户端，又能产出 SFU 网关，原理就在这里。
+哪些层会被链接进二进制——同一份源码既能产出 P2P 客户端，又能产出 `relay` 网关（`relay`
+profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1），原理就在这里。
+**From-scratch 的 SFU 模块不是 v1.0.0 的交付内容** —— §7 pre-1.0 决策窗口
+已由 BDFL 关闭为 NO（2026-10-19，SFU 不是项目核心目标；见 `docs/plan/v1.0-plan.md` §7 + §12.5）。
 
 ### 分层一览
 
@@ -385,7 +395,7 @@ NimRTC 几乎所有"可替换"的能力都通过 plugin 接口暴露（[`src/plu
 | **第三方生态** | 写 `MyAudio3A : plugins::IAudio3A`，`-DNIMRTC_MODULE_AUDIO3A=MyAudio3A` 注入 | 用户必须 `#include <nimrtc/audio3a/...>` 才能扩展，破坏封装 |
 | **故障域隔离** | plugin 接口 status code 是契约 | 错误码五花八门，跨模块失败原因追踪极其痛苦 |
 
-**对比基线**：GStreamer / FFmpeg / OBS / PipeWire 都用 plugin 架构，但那是多媒体生态；**WebRTC 生态**里（libwebrtc / Pion / LiveKit / mediasoup / janus）只有 Pion 和 libwebrtc 内部有类似抽象。**NimRTC 把 plugin 接口公开，且让 P2P 客户端和 SFU 跑在同一套接口上**——2026 年的开源 WebRTC 生态里几乎找不到第二家。
+**对比基线**：GStreamer / FFmpeg / OBS / PipeWire 都用 plugin 架构，但那是多媒体生态；**WebRTC 生态**里（libwebrtc / Pion / LiveKit / mediasoup / janus）只有 Pion 和 libwebrtc 内部有类似抽象。**NimRTC 把 plugin 接口公开，且让 P2P 客户端和 `relay` 网关跑在同一套接口上**（`relay` profile 跳过 L2 编解码；from-scratch 的 SFU 模块不是 v1.0.0 的交付内容 —— 见 `docs/plan/v1.0-plan.md` §7）——2026 年的开源 WebRTC 生态里几乎找不到第二家。
 
 Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2–P3 引入的差异化能力（双 3A tap、严格优先级、ref_frame）也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
 
@@ -398,7 +408,7 @@ Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2
 | | **NimRTC** | **libwebrtc** | **Pion** | **mediasoup** | **LiveKit** |
 |---|---|---|---|---|---|
 | **语言** | C++20 | C++（混 C++03/17） | Go | C++ | Go |
-| **同一 codebase 产出 P2P + SFU** | ✅ | ⚠️ libwebrtc + 独立 server | ❌ | ❌ 仅 SFU | ❌ 仅 SFU |
+| **同一 codebase 产出 P2P + relay** | ✅ | ⚠️ libwebrtc + 独立 server | ❌ | ❌ 仅 SFU | ❌ 仅 SFU |
 | **公开 plugin 接口** | ✅ 各层都有 | ❌ 内部封装 | ⚠️ 部分 | ⚠️ 服务端 | ⚠️ 服务端 |
 | **静态链接 footprint** | **~5.6 MB** | 150–250 MB | 不适用（Go） | 服务端 | 服务端 |
 | **嵌入式 Linux aarch64** | ✅ CI 绿色 | ⚠️ 久未维护的 port | ❌ | ❌ | ❌ |
@@ -408,7 +418,7 @@ Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2
 | **线缆级 Chrome 互通** | ✅ Case D 绿色 | ✅ | ✅（仅 Go） | ✅ 通过浏览器 SDK | ✅ 通过浏览器 SDK |
 | **2026 生产成熟度** | Tech Preview | Production-grade | Production-grade | Production-grade | Production-grade |
 
-**NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密、AI Agent hook、单主干 P2P+SFU。
+**NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密、AI Agent hook、单主干 P2P+relay（`relay` 是单策略网关 profile，编译期跳过 L2 编解码；from-scratch 的 SFU 模块不是 v1.0.0 的交付内容 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19）。
 **NimRTC 落后的领域**：生态广度、编解码覆盖、浏览器引擎对等、年限沉淀。**按需选择。**
 
 ---
@@ -472,8 +482,12 @@ master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能�
 | PAL Slice 8 —— 4 个传输层 typed registry hook | ✅ | v0.10.2 |
 | H.264 硬件后端（NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ | v0.9.2 |
 
-> v0.10 关闭 v0.9 收尾并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、SFU relay、PCM tap、
-> Profile 库官方化）排入 **v0.11.0**。见 [路线图](#路线图p1p4-简化版)。
+> v0.10 关闭 v0.9 收尾并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、PCM tap、
+> Profile 库官方化）排入 **v0.11.0**。
+> **事后注（2026-10-19，BDFL）**：原计划中的 "SFU relay" 部分
+> （SFU-1 / DC-3 / BENCH-1）在 §7 pre-1.0 决策窗口被关闭为 NO —— SFU
+> 不是项目核心目标。`relay` Profile 的单策略转发仍是 P2 的核心交付物，
+> 但 from-scratch SFU 模块不在 v1.0.x 关键路径上。详见 `docs/plan/v1.0-plan.md` §7 + §12.5。见 [路线图](#路线图p1p4-简化版)。
 
 ---
 

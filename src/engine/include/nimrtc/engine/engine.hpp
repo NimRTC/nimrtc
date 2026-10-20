@@ -30,7 +30,32 @@
  *
  * Open() calls `core::register_all_default_plugins()` first, so callers
  * normally do not need to do anything to populate the registry.
- * normally do not need to do anything to populate the registry.
+ *
+ * ## Per-symbol stability annotations (v0.14.x PER-SYMBOL-CLASSIFY)
+ *
+ * The v0.13.0 sweep marked this header at the file level
+ * (`NIMRTC_API_STABLE` once on `EngineConfig` / `AudioCodecConfig` /
+ * `NimRTCEngine`). The v0.14.x follow-up annotates the
+ * most-instantiated public methods of `NimRTCEngine` individually
+ * so callers can reason about per-symbol stability:
+ *
+ *   - Lifecycle (`open()` / `pre_open()` / `close()` / `is_open()`) —
+ *     STABLE. The four fundamental engine lifecycle entry points; every
+ *     caller invokes at least one of them.
+ *   - Core payload (`send_audio()` / `create_offer()` /
+ *     `process_remote_sdp()` / `create_data_channel()`) — STABLE.
+ *     The core SDP / data-channel / audio emission contract.
+ *   - Video (`start_video()` / `stop_video()` / `send_video()`) —
+ *     UNSTABLE. The video API is still P1.1 / R3 scope; the surface
+ *     may shift in a v0.15.x follow-up before v1.0.0 final.
+ *   - Accessors (`set_on_*()` / ICE diagnostics / state inspect) —
+ *     STABLE. Simple std::function setters and diagnostic readbacks.
+ *
+ * The macro expands to nothing in default builds; it becomes load-bearing
+ * when the host app opts into `NIMRTC_ENABLE_API_STABILITY_ANNOTATIONS=1`,
+ * at which point `NIMRTC_API_UNSTABLE` emits the cross-compiler
+ * `[[deprecated]]` attribute. Per ADR-015 §Decision 3: v0.x → v1.0.0
+ * may mark symbols DEPRECATED but does not REMOVE any.
  *
  * @note P1 — DTLS-SRTP keying material is now derived after the DTLS
  *       handshake completes; SRTP protects RTP in both directions.
@@ -449,18 +474,54 @@ using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* sta
 // NimRTCEngine
 // ---------------------------------------------------------------------------
 
+/** Main entry point for the NimRTC stack.
+ *
+ * ## Per-symbol stability annotations (v0.14.x PER-SYMBOL-CLASSIFY)
+ *
+ * The file-level header comment carries the full per-method list.
+ * In brief:
+ *   - Lifecycle (`open()` / `pre_open()` / `close()` / `tick()`) — STABLE.
+ *   - Core payload (`send_audio()` / `create_offer()` /
+ *     `process_remote_sdp()` / `create_data_channel()`) — STABLE.
+ *   - Video (`start_video()` / `stop_video()` / `send_video()`) — UNSTABLE.
+ *   - Accessors (`set_on_*()` / ICE diagnostics / plugin handles) — STABLE.
+ *
+ * The macro expands to nothing in default builds; it becomes load-bearing
+ * when `NIMRTC_ENABLE_API_STABILITY_ANNOTATIONS=1` is set, at which point
+ * `NIMRTC_API_UNSTABLE` emits the cross-compiler `[[deprecated]]` attribute.
+ * Per ADR-015 §Decision 3: v0.x → v1.0.0 may mark DEPRECATED
+ * but does not REMOVE any symbol. */
+
 class NIMRTC_API_STABLE NimRTCEngine {
 public:
-    explicit NimRTCEngine(EngineConfig config);
-    ~NimRTCEngine();
+    // STABLE: the four fundamental engine lifecycle entry points; every
+    // caller invokes at least one of them.
+    /** Construct from a config. The caller may destroy / mutate `config`
+     *  after this returns. */
+    explicit NIMRTC_API_STABLE NimRTCEngine(EngineConfig config);
+    NIMRTC_API_STABLE ~NimRTCEngine();
 
-    NimRTCEngine(const NimRTCEngine&)            = delete;
-    NimRTCEngine& operator=(const NimRTCEngine&) = delete;
+    NIMRTC_API_STABLE NimRTCEngine(const NimRTCEngine&)            = delete;
+    NIMRTC_API_STABLE NimRTCEngine& operator=(const NimRTCEngine&) = delete;
 
-    // Lifecycle
-    uint32_t open() noexcept;
-    void     close() noexcept;
-    bool     is_open() const noexcept { return state_ == State::kOpen; }
+    // Lifecycle -----------------------------------------------------------
+    //
+    // `open()` / `pre_open()` / `close()` / `tick()` are the four
+    // fundamental engine lifecycle entry points.  Marked STABLE.
+
+    /** Bring the engine up: build the ICE / DTLS / SRTP pipeline and
+     *  start ICE candidate gathering.  Idempotent only in the
+     *  kConstructed -> kOpen transition; subsequent calls return
+     *  immediately with kOk (or the prior open() error code). */
+    NIMRTC_API_STABLE uint32_t open() noexcept;
+
+    /** Tear the engine down: close all plugins, drop ICE sockets, drain
+     *  pending DTLS / SRTP records.  Safe to call multiple times. */
+    NIMRTC_API_STABLE void     close() noexcept;
+
+    /** True iff the engine is in the kOpen state. Cheap inline check;
+     *  usable from any thread (reads an atomic state_). */
+    NIMRTC_API_STABLE bool     is_open() const noexcept { return state_ == State::kOpen; }
 
     /** Optional early setup: creates the ICE transport (and all other modules)
      *  WITHOUT starting ICE candidate gathering.  Callers can then call
@@ -471,13 +532,34 @@ public:
      *
      *  After pre_open(), call open() normally — gather_candidates() will fire.
      *  Can be called at most once. Returns same error codes as open(). */
-    uint32_t pre_open() noexcept;
+    NIMRTC_API_STABLE uint32_t pre_open() noexcept;
 
-    // Callbacks
-    void set_on_audio_frame(AudioFrameCallback cb) noexcept { on_audio_frame_ = std::move(cb); }
-    void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
-    void set_on_error(EngineErrorCallback cb) noexcept     { on_error_       = std::move(cb); }
-    void set_on_state_change(EngineStateCallback cb) noexcept { on_state_change_ = std::move(cb); }
+    // Callbacks -----------------------------------------------------------
+    //
+    // `set_on_*()` install std::function callbacks the engine invokes during
+    // tick().  Marked STABLE — the setter signature has been stable since
+    // v0.10.0 and is consumed by every demo / test.
+
+    /** Install the audio-frame callback.  Fires on the engine thread at
+     *  the configured PCM rate.  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_audio_frame(AudioFrameCallback cb) noexcept { on_audio_frame_ = std::move(cb); }
+
+    /** Install the video-frame callback.  Fires on the engine thread
+     *  when the video pipeline decodes a complete frame (raw NAL).
+     *  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
+
+    /** Install the error callback.  Fires on the engine thread on
+     *  non-fatal errors (DTLS retry exhausted, ICE consent loss, etc).
+     *  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_error(EngineErrorCallback cb) noexcept     { on_error_       = std::move(cb); }
+
+    /** Install the state-change callback.  Fires on the engine thread
+     *  when the ICE / DTLS / connection state transitions.  The string
+     *  argument is one of the canonical ICE state names ("new",
+     *  "checking", "connected", "completed", "disconnected", "failed",
+     *  "closed").  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_state_change(EngineStateCallback cb) noexcept { on_state_change_ = std::move(cb); }
 
     // ---- DataChannel callbacks (forwarded to every channel create_data_channel() returns) -
     //
@@ -491,10 +573,10 @@ public:
     //
     // No-op when the engine has `cfg.datachannel_name.empty()` — the
     // callbacks are still stored so callers don't have to gate by config.
-    void set_on_data_message(plugins::DataMessageCallback cb) noexcept {
+    NIMRTC_API_STABLE void set_on_data_message(plugins::DataMessageCallback cb) noexcept {
         on_data_message_ = std::move(cb);
     }
-    void set_on_data_state(plugins::DataChannelStateCallback cb) noexcept {
+    NIMRTC_API_STABLE void set_on_data_state(plugins::DataChannelStateCallback cb) noexcept {
         on_data_state_ = std::move(cb);
     }
 
@@ -529,17 +611,30 @@ public:
     // the ICE / DTLS / SRTP pipeline the channel will eventually sit on.
     // Calling before open() returns nullptr because the registry slot
     // isn't probed until init_modules_once() runs.
+    //
+    // STABLE: the factory-resolve + callback-install contract has been
+    // stable since v0.11.0; the WebTransport / msquic backend that
+    // lands in v0.14.x is a backend swap (no API change at this
+    // signature).
+    NIMRTC_API_STABLE
     [[nodiscard]]
     std::unique_ptr<plugins::IDataChannel>
     create_data_channel(std::string_view label) noexcept;
 
-    // SDP — RFC 8829 compliant
-    std::string create_offer() noexcept;
-    std::optional<std::string> process_remote_sdp(std::string_view remote_sdp) noexcept;
+    // SDP — RFC 8829 compliant -----------------------------------------
+    //
+    // `create_offer()` / `process_remote_sdp()` are the two engine
+    // entry points every P2P / interop demo exercises.  Marked STABLE;
+    // the SDP serialisation is documented in `docs/plan/sdp-grammar.md`
+    // and consumed by Chrome / libjuice / libwebrtc peers.
+    NIMRTC_API_STABLE std::string create_offer() noexcept;
+    NIMRTC_API_STABLE std::optional<std::string> process_remote_sdp(std::string_view remote_sdp) noexcept;
 
     // ---- Audio I/O --------------------------------------------------------
+    //
     // Opus encode + RTP packetise + SRTP encrypt + transport.send.
-    uint32_t send_audio(const float* pcm_samples, size_t num_samples) noexcept;
+    // STABLE: the audio I/O surface is the load-bearing P2 contract.
+    NIMRTC_API_STABLE uint32_t send_audio(const float* pcm_samples, size_t num_samples) noexcept;
 
     // ---- Video I/O --------------------------------------------------------
     //
@@ -558,55 +653,78 @@ public:
     //   own rendering.
     //
     // Both paths require `open()` to have been called first.
+    //
+    // UNSTABLE: the video API is still P1.1 / R3 scope; the surface
+    // may shift in a v0.15.x follow-up before v1.0.0 final.  Per
+    // ADR-015 §Decision 2, marking UNSTABLE gives the engine room to
+    // refactor the FU-A depacketise path / packetiser FU-A helpers /
+    // NACK path in `video_payload/` without bumping the MAJOR version.
 
     /** Start the video capture source (produces frames at the configured fps).
      *  Idempotent if already running.  Returns kOk on success. */
-    plugins::Status start_video() noexcept;
+    NIMRTC_API_UNSTABLE plugins::Status start_video() noexcept;
 
     /** Stop the video capture source. Idempotent if already stopped. */
-    void stop_video() noexcept;
+    NIMRTC_API_UNSTABLE void stop_video() noexcept;
 
     /** Manually push one raw frame through the video pipeline.
      *  Bypasses the video_source capture cadence; useful for feeding
      *  camera frames directly (caller owns the cadence loop).
      *  The frame is encoded, packetized, and enqueued to the scheduler
      *  exactly like the auto-capture path.
-     *  @param frame  Raw frame (must remain valid for the call). */
+     *  @param frame  Raw frame (must remain valid for the call).
+     *
+     *  UNSTABLE: part of the video API surface (see start_video()). */
+    NIMRTC_API_UNSTABLE
     plugins::Status send_video(const plugins::VideoSourceFrame& frame) noexcept;
+
+    // --- DTLS/SRTP internal pipeline -----------------------------------
+    //
+    // These two methods drive the DTLS and SRTP handshake steps inside
+    // the engine tick.  Marked STABLE so the tick() contract is frozen:
+    // callers (tests / demo harness / msquic handoff) can rely on being
+    // able to drain DTLS records or install SRTP keys without these
+    // signatures changing.
 
     /** Drive DTLS state machine: feed pending outbound DTLS records back
      *  through ICE.  Returns number of records sent. */
-    int drain_dtls() noexcept;
+    NIMRTC_API_STABLE int drain_dtls() noexcept;
 
     /** Once DTLS connected, pull SRTP keying material and install on the
      *  SrtpContext.  Idempotent. */
-    void maybe_install_srtp_keys() noexcept;
+    NIMRTC_API_STABLE void maybe_install_srtp_keys() noexcept;
 
     // --- Inspection helpers (for tests / debugging) ---
 
     /** True iff SRTP keys have been installed (post-DTLS-Connected).
      *  Out-of-line to keep the public header free of <nimrtc/srtp/srtp.hpp>. */
-    bool srtp_installed() const noexcept;
+    NIMRTC_API_STABLE bool srtp_installed() const noexcept;
 
     /** Current DTLS state, or Closed if DTLS not initialised.
      *  Out-of-line so the public header doesn't need <nimrtc/dtls/dtls.hpp>. */
-    dtls::DtlsState dtls_state() const noexcept;
+    NIMRTC_API_STABLE dtls::DtlsState dtls_state() const noexcept;
 
     /** True iff DTLS has reached Connected state. */
-    bool dtls_connected() const noexcept;
+    NIMRTC_API_STABLE bool dtls_connected() const noexcept;
 
     /** True iff the ICE agent has selected at least one candidate pair
      *  (Connected or Completed).  Used to gate outbound DTLS sends.
      *  Implementation now goes through the plugin seam
      *  (`plugins::IICETransport::state()`), not a dynamic_cast to the
      *  concrete module class. */
-    bool is_ice_connected() const noexcept;
+    NIMRTC_API_STABLE bool is_ice_connected() const noexcept;
 
     /** Last error code from open()/pre_open() — useful for diagnostics
      *  when the bool result is non-OK but we want to know which subsystem
      *  failed (e.g. 0x1FFF = ICE, 0x2000 = DTLS, 0x1A00 = audio3a).
      *  Out-of-line because last_open_rc_ lives in Impl. */
-    uint32_t last_open_rc() const noexcept;
+    NIMRTC_API_STABLE uint32_t last_open_rc() const noexcept;
+
+    // --- ICE configuration (pre-open) -----------------------------------
+    //
+    // These configure the ICE transport before candidate gathering begins.
+    // Marked STABLE so the loopback test and signaling proxy use-cases
+    // (set_remote_ice / add_turn_server) have a stable contract.
 
     /** Set the remote ICE description (ice-ufrag / ice-pwd / candidates) BEFORE
      *  open() is called.  This is required for the loopback test: the answerer
@@ -616,7 +734,7 @@ public:
      *  the raw SDP media section containing a=ice-ufrag, a=ice-pwd, and
      *  optionally a=candidate lines.  Can also be called after open() (applied
      *  immediately). */
-    bool set_remote_ice(std::string_view ice_block) noexcept;
+    NIMRTC_API_STABLE bool set_remote_ice(std::string_view ice_block) noexcept;
 
     /** Add a TURN server for relay candidate gathering.
      *
@@ -630,30 +748,46 @@ public:
      *  @return  0 on success; non-zero if the ICE transport is not yet created
      *            (call pre_open() first).
      */
-    int add_turn_server(std::string_view host, std::uint16_t port,
+    NIMRTC_API_STABLE int add_turn_server(std::string_view host, std::uint16_t port,
                         std::string_view username,
                         std::string_view password) noexcept;
 
-    /** Inbound raw bytes — alternative entry point for test injection. */
-    uint32_t feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept;
+    /** Inbound raw bytes — alternative entry point for test injection.
+     *
+     *  UNSTABLE: this is a test seam, not a general-purpose API.
+     *  It bypasses the normal ICE transport recv() path and directly
+     *  injects into the SRTP pipeline for loopback / harness testing. */
+    NIMRTC_API_UNSTABLE uint32_t feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept;
 
     /** Drain packets from the ICE socket and dispatch them.  Returns the
      *  number of packets dispatched (RTP / DTLS / STUN). */
-    int tick() noexcept;
+    NIMRTC_API_STABLE int tick() noexcept;
 
-    // ICE state inspection
-    const char* ice_state_string() const noexcept;
+    // --- ICE state and credential inspection -----------------------------
+    //
+    // These expose ICE / DTLS diagnostics used by tests, demos, and the
+    // signaling proxy.  Marked STABLE so the diagnostic surface is frozen.
 
-    // Local ICE credentials — to embed in SDP
-    std::string local_ufrag()    const noexcept;
-    std::string local_password() const noexcept;
+    /** ICE state as a human-readable string. */
+    NIMRTC_API_STABLE const char* ice_state_string() const noexcept;
+
+    /** Local ICE ufrag (user fragment).  Embed in SDP. */
+    NIMRTC_API_STABLE std::string local_ufrag()    const noexcept;
+    /** Local ICE password.  Embed in SDP. */
+    NIMRTC_API_STABLE std::string local_password() const noexcept;
 
     /** Local DTLS fingerprint advertised in our SDP, as a base64-encoded
      *  SHA-256 SPKI hash (the format Chrome's
      *  --ignore-certificate-errors-spki-list expects).  Returns an empty
      *  string if the DTLS session is not yet open or self-signed certs
      *  are disabled.  Computed lazily from the underlying DtlsSession. */
-    std::string local_dtls_fingerprint_sha256_base64() const noexcept;
+    NIMRTC_API_STABLE std::string local_dtls_fingerprint_sha256_base64() const noexcept;
+
+    // --- Transport accessors (diagnostic / integration testing) ---------
+    //
+    // These expose the live transport instances to callers that need direct
+    // access (signaling proxy, ICE candidate forwarding, test harness).
+    // Marked STABLE so the non-owning handle identity is frozen.
 
     /** Underlying ITransport (ICE by default).  Useful for tests and demos that
      *  need direct access to the transport — e.g. for ICE candidate forwarding
@@ -662,8 +796,8 @@ public:
      *  The pointer is non-owning: the engine retains the only owner
      *  (the `media_stack` inside `Impl::session`). Callers must not
      *  delete it. */
-    plugins::ITransport* get_transport() noexcept { return ice_t_; }
-    const plugins::ITransport* get_transport() const noexcept { return ice_t_; }
+    NIMRTC_API_STABLE plugins::ITransport* get_transport() noexcept { return ice_t_; }
+    NIMRTC_API_STABLE const plugins::ITransport* get_transport() const noexcept { return ice_t_; }
 
     /** ICE-aware view of the transport.  Returns nullptr if no
      *  IICETransport plugin has been resolved (which only happens if the
@@ -672,15 +806,15 @@ public:
      *  ICE transports).
      *
      *  Non-owning; same lifetime as the engine. */
-    plugins::IICETransport* get_ice_transport() noexcept { return ice_t_; }
-    const plugins::IICETransport* get_ice_transport() const noexcept {
+    NIMRTC_API_STABLE plugins::IICETransport* get_ice_transport() noexcept { return ice_t_; }
+    NIMRTC_API_STABLE const plugins::IICETransport* get_ice_transport() const noexcept {
         return ice_t_;
     }
 
     /** Read-only view of the engine's config.  Useful for tools that need
      *  to know the PCM rate / channels (e.g. demo-p2p's audio generator)
      *  without making those fields public. */
-    const EngineConfig& config() const noexcept { return config_; }
+    NIMRTC_API_STABLE const EngineConfig& config() const noexcept { return config_; }
 
     // ---- Transport strategy accessors (v0.12.0 Slice 7.6 PR3) -----------
     //
@@ -703,7 +837,7 @@ public:
 
     /** Strategy name that the engine resolved from `cfg.transport_strategy_name`
      *  (empty string when open() was never called or failed). */
-    std::string_view transport_strategy_name() const noexcept;
+    NIMRTC_API_STABLE std::string_view transport_strategy_name() const noexcept;
 
     /** Resolved (media_factory_id, control_factory_id) pair from the
      *  CapabilitySelector.  `control_factory_id` is empty when the
@@ -713,7 +847,7 @@ public:
         std::string_view media_factory_id;
         std::string_view control_factory_id;
     };
-    TransportSessionView transport_strategy_session() const noexcept;
+    NIMRTC_API_STABLE TransportSessionView transport_strategy_session() const noexcept;
 
     // ---- Video plugin accessors (R3-Batch) ----
     //
@@ -731,25 +865,29 @@ public:
     //   - render decoded frames via video_sink_->render().
     //
     // Returns nullptr if the configured plugin id was not found at open().
+    //
+    // UNSTABLE: these are plugin-seam handles (ADR-001 §"Plugin seam");
+    // the underlying plugin ABI is still evolving as video_pipeline/
+    // video_payload/ move toward v1.0.0.
 
-    plugins::IVideoSource*   video_source()   noexcept { return video_source_.get(); }
-    plugins::IVideoSink*     video_sink()     noexcept { return video_sink_.get(); }
-    plugins::IVideoReceiver* video_receiver() noexcept { return video_receiver_.get(); }
-    plugins::IVideoSender*   video_sender()   noexcept { return video_sender_.get(); }
-    const plugins::IVideoSource*   video_source()   const noexcept { return video_source_.get(); }
-    const plugins::IVideoSink*     video_sink()     const noexcept { return video_sink_.get(); }
-    const plugins::IVideoReceiver* video_receiver() const noexcept { return video_receiver_.get(); }
-    const plugins::IVideoSender*   video_sender()   const noexcept { return video_sender_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoSource*   video_source()   noexcept { return video_source_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoSink*     video_sink()     noexcept { return video_sink_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoReceiver* video_receiver() noexcept { return video_receiver_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoSender*   video_sender()   noexcept { return video_sender_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoSource*   video_source()   const noexcept { return video_source_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoSink*     video_sink()     const noexcept { return video_sink_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoReceiver* video_receiver() const noexcept { return video_receiver_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoSender*   video_sender()   const noexcept { return video_sender_.get(); }
 
     /** Replace the video sink at runtime (e.g. swap "headless" for an SDL
      *  renderer). Closes the previous sink and transfers ownership of @p sink.
      *  Safe to call before or after open(); if called before open(), the
      *  sink configured via video_sink_name is replaced and the new one is
      *  used instead. Pass nullptr to detach (next render() calls are no-ops). */
-    void set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noexcept;
+    NIMRTC_API_STABLE void set_video_sink(std::unique_ptr<plugins::IVideoSink> sink) noexcept;
 
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
-    void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
+    NIMRTC_API_STABLE void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
 
     // ---- BWE / Scheduler accessors (ADR-001: resolved via PluginRegistry) ----
     //
@@ -760,28 +898,33 @@ public:
     // (e.g. inject custom BWE feedback, inspect scheduler stats).
     //
     // Returns nullptr if the configured plugin id was not found at open().
+    //
+    // UNSTABLE: the BWE / scheduler / video-codec plugin ABI is still
+    // evolving; these handles expose the live plugin state.
 
-    plugins::IBwe*        bwe()        noexcept { return bwe_.get(); }
-    const plugins::IBwe*  bwe()  const noexcept { return bwe_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IBwe*        bwe()        noexcept { return bwe_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IBwe*  bwe()  const noexcept { return bwe_.get(); }
 
-    plugins::IScheduler*  scheduler()  noexcept { return scheduler_.get(); }
-    const plugins::IScheduler* scheduler() const noexcept { return scheduler_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IScheduler*  scheduler()  noexcept { return scheduler_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IScheduler* scheduler() const noexcept { return scheduler_.get(); }
 
-    plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
-    const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
+    NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
     // ---- Audio3A plugin accessor (for PCM tap setup in demos/tests) ----
     /** Returns the IAudio3A plugin instance (or nullptr if not created).
      *  Call after open().  Used by demos to set up pre/post process taps. */
-    plugins::IAudio3A* audio3a() noexcept { return audio3a_plugin_.get(); }
-    const plugins::IAudio3A* audio3a() const noexcept { return audio3a_plugin_.get(); }
+    NIMRTC_API_STABLE plugins::IAudio3A* audio3a() noexcept { return audio3a_plugin_.get(); }
+    NIMRTC_API_STABLE const plugins::IAudio3A* audio3a() const noexcept { return audio3a_plugin_.get(); }
 
     // Engine stats for debugging
     struct NIMRTC_API_STABLE Stats {
         int srtp_drops = 0;
     };
-    /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl. */
-    Stats stats() const noexcept;
+    /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
+     *
+     *  UNSTABLE: the Stats struct fields may change before v1.0.0. */
+    NIMRTC_API_UNSTABLE Stats stats() const noexcept;
 
 private:
     // ---- Engine state ----

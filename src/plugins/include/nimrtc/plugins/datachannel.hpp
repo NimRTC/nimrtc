@@ -22,6 +22,26 @@
  * 2. Register: `PluginRegistry::instance().register_datachannel("sctp", factory);`
  * 3. (P2) Wire it into NimRTCEngine via its datachannel_name config field.
  *
+ * ## Per-symbol stability annotations (v0.14.x PER-SYMBOL-CLASSIFY)
+ *
+ * The v0.13.0 sweep marked this header at the file level. The v0.14.x
+ * per-symbol follow-up annotates each `IDataChannel` member:
+ *
+ *   - `name()` / `open()` / `close()` — STABLE. These are the `IPlugin`
+ *     overrides every backend implements; the engine's create/dispatch
+ *     path goes through them.
+ *   - `IDataChannel::open(cfg)` / `send()` / `set_on_message()` /
+ *     `set_on_state()` — STABLE. The four-member channel contract is
+ *     the load-bearing data-plane seam. Two concrete impls consume it
+ *     in-tree: `SctpDataChannel` (id `"sctp"`) and
+ *     `WebTransportDataChannel` (id `"web_transport"`, landed
+ *     v0.14.0-beta.1). A v1.0.x patch changing these signatures would
+ *     break both, so they are frozen.
+ *   - `IDataChannelFactory::id()` / `display_name()` / `create()` —
+ *     STABLE. Registry lookups key off `id()`.
+ *   - `SimpleDataChannelFactory` — STABLE. Template helper used by the
+ *     in-tree factories.
+ *
  * @note P1 scaffold — interface stable, binary layout TBD P4.
  */
 
@@ -30,9 +50,14 @@
 #ifndef NIMRTC_PLUGINS_DATACHANNEL_HPP
 #define NIMRTC_PLUGINS_DATACHANNEL_HPP
 
-// Stability classification: NIMRTC_API_STABLE (visual marker;
-// see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
-// a v0.13.x follow-up.
+// Stability classification: NIMRTC_API_STABLE (file-level marker from the
+// v0.13.0 sweep; see ADR-015 / docs/plan/v0.13-plan.md). The v0.14.x
+// per-symbol follow-up annotates every `IDataChannel` member below; see the
+// "Per-symbol stability annotations" note in the header comment above.
+//
+// `nimrtc_plugins` links `nimrtc::core` PUBLIC (see src/plugins/CMakeLists.txt),
+// so <nimrtc/core/api_version.hpp> is reachable from this header.
+#include <nimrtc/core/api_version.hpp>   // NIMRTC_API_STABLE
 
 #include <cstdint>
 #include <functional>
@@ -103,8 +128,23 @@ using DataChannelStateCallback = std::function<void(const char* state)>;
  *     (the engine thread) before open().
  *   - send() is thread-safe — implementations must queue outbound data.
  *   - on_message / on_state callbacks are dispatched from the engine tick.
- */
-class IDataChannel : public IPlugin {
+ *
+ * ## Per-symbol stability annotations (v0.14.x PER-SYMBOL-CLASSIFY)
+ *
+ * The file-level header comment carries the full list.  In brief:
+ *   - `name()` / `open()` / `close()` — STABLE (IPlugin overrides).
+ *   - `open(cfg)` / `send()` / `set_on_message()` / `set_on_state()` — STABLE.
+ *     The four-member channel contract is the load-bearing data-plane seam;
+ *     both in-tree backends (`SctpDataChannel` id `"sctp"` and
+ *     `WebTransportDataChannel` id `"web_transport"`, v0.14.0-beta.1) consume it.
+ *   - `IDataChannelFactory::id()` / `display_name()` / `create()` — STABLE.
+ *   - `SimpleDataChannelFactory` — STABLE (template helper). */
+// STABLE: the four-member contract (`open` / `send` / `set_on_message` /
+// `set_on_state`) plus the three IPlugin overrides is the load-bearing
+// data-plane seam. Two concrete impls consume it in-tree — `SctpDataChannel`
+// (id `"sctp"`) and `WebTransportDataChannel` (id `"web_transport"`, landed
+// v0.14.0-beta.1). A v1.0.x patch changing any signature below breaks both.
+class NIMRTC_API_STABLE IDataChannel : public IPlugin {
 public:
     ~IDataChannel() override = default;
 
@@ -112,9 +152,9 @@ public:
     // IPlugin overrides
     // ------------------------------------------------------------------
 
-    const char* name() const noexcept override = 0;
-    Status      open() noexcept override = 0;
-    void        close() noexcept override = 0;
+    NIMRTC_API_STABLE const char* name() const noexcept override = 0;
+    NIMRTC_API_STABLE Status      open() noexcept override = 0;
+    NIMRTC_API_STABLE void        close() noexcept override = 0;
 
     // ------------------------------------------------------------------
     // Channel lifecycle
@@ -123,41 +163,51 @@ public:
     /** Apply channel configuration after transport handshake completes.
      *  @param cfg  Channel parameters (label, QoS, priority).
      *  @note Called from engine thread. Implementations must be reentrant. */
-    virtual void open(const DataChannelConfig& cfg) = 0;
+    NIMRTC_API_STABLE virtual void open(const DataChannelConfig& cfg) = 0;
 
     /** Send a binary message. Implementation queues according to QoS config.
      *  @param data  Payload bytes (any size up to SCTP limit).
      *  @note Thread-safe. */
-    virtual void send(BufferView data) = 0;
+    NIMRTC_API_STABLE virtual void send(BufferView data) = 0;
 
     /** Set the binary message callback. Must be called before open().
      *  @note Not thread-safe — call only from the engine thread. */
-    virtual void set_on_message(DataMessageCallback cb) noexcept = 0;
+    NIMRTC_API_STABLE virtual void set_on_message(DataMessageCallback cb) noexcept = 0;
 
     /** Set the state-change callback. Must be called before open().
      *  @note Not thread-safe — call only from the engine thread. */
-    virtual void set_on_state(DataChannelStateCallback cb) noexcept = 0;
+    NIMRTC_API_STABLE virtual void set_on_state(DataChannelStateCallback cb) noexcept = 0;
 };
 
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
-/** Factory for data-channel backend instances. */
-class IDataChannelFactory : public IPluginFactory {
+/** Factory for data-channel backend instances.
+ *
+ *  STABLE: the factory pattern (id / display_name / create) is the
+ *  engine-facing seam for backend substitution. `SctpDataChannelFactory`
+ *  (id `"sctp"`) and `WebTransportDataChannelFactory` (id `"web_transport"`)
+ *  are the two concrete impls; both use this interface. Marking STABLE so
+ *  the registry key identity is frozen. */
+class NIMRTC_API_STABLE IDataChannelFactory : public IPluginFactory {
 public:
     ~IDataChannelFactory() override = default;
 
-    std::string_view id()          const noexcept override = 0;
-    std::string_view display_name() const noexcept override = 0;
+    NIMRTC_API_STABLE std::string_view id()          const noexcept override = 0;
+    NIMRTC_API_STABLE std::string_view display_name() const noexcept override = 0;
 
-    /** Create a new channel instance. Ownership passes to caller. */
-    virtual IDataChannel* create() const = 0;
+    /** Create a new channel instance. Ownership passes to caller.
+     *  STABLE: factory->create() is the one-step channel allocation path;
+     *  the engine calls it from create_data_channel(). */
+    NIMRTC_API_STABLE virtual IDataChannel* create() const = 0;
 };
 
-/** Template helper — creates a factory that owns a channel type T. */
+/** Template helper — creates a factory that owns a channel type T.
+ *
+ *  STABLE: the most common in-tree factory implementation pattern. */
 template<class T>
-class SimpleDataChannelFactory : public IDataChannelFactory {
+class NIMRTC_API_STABLE SimpleDataChannelFactory : public IDataChannelFactory {
     std::string_view id_;
     std::string_view name_;
 public:
@@ -165,9 +215,9 @@ public:
                                       std::string_view name) noexcept
         : id_(id), name_(name) {}
 
-    std::string_view id()          const noexcept override { return id_; }
-    std::string_view display_name() const noexcept override { return name_; }
-    IDataChannel* create()          const override { return new T(); }
+    NIMRTC_API_STABLE std::string_view id()          const noexcept override { return id_; }
+    NIMRTC_API_STABLE std::string_view display_name() const noexcept override { return name_; }
+    NIMRTC_API_STABLE IDataChannel* create()          const override { return new T(); }
 };
 
 } // namespace nimrtc::plugins

@@ -40,8 +40,11 @@
       interop you need (Chrome, Firefox, libwebrtc peers) and replaces the
       150&ndash;250 MB monolith with a layered, plugin-adapted engine you can
       <code>grep</code>, swap, and ship on aarch64. Same source tree ships a
-      P2P client <em>and</em> an SFU gateway. DTLS, RTP, audio 3A, and codecs
-      are all behind header-only plugin interfaces.
+      P2P client <em>and</em> a <code>relay</code> gateway (relay profile
+      skips L2 codecs; a from-scratch SFU module is <em>not</em> a v1.0.0
+      deliverable per the §7 pre-1.0 decision window closure, BDFL
+      2026-10-19). DTLS, RTP, audio 3A, and codecs are all behind
+      header-only plugin interfaces.
     </p>
     <div class="hero-cta">
       <a class="btn primary" href="#start">Build it in 60s →</a>

@@ -453,10 +453,12 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > rc.1 **PR-2** follow-up; rc.1 ships PR-1 alone so the
 > §12.3.5 "regression-only" gate is preserved.
 >
-> **Cut order**: the 4 commits since `v0.14.0-beta.1`
+> **Cut order**: the shipped commits since `v0.14.0-beta.1`
 > landed in sequence (rc.1 PR-1 → repair → test-align →
-> CI flake-fix) and are pushed as a single stack; the tag
-> points at the post-`2662513` tree.
+> CI flake-fix), followed by one attempted-build commit and
+> its revert (`a88383e` → `ef6ff11`, net-zero).  All are
+> pushed as a single stack and the tag points at the
+> post-`ef6ff11` tree.
 
 ### Highlights
 
@@ -618,23 +620,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Build / CI
 
-- msquic Windows dummy-datapath patch (`a88383e`,
-  shipped earlier in this stack): the `OR TRUE` shim
-  in `src/CMakeLists.txt` forces `datapath_raw_dummy.c`
-  so the CI runner (`windows-2022`) builds + runs the
-  msquic self-tests without an XDP driver installed.
-  Patch is **local to NimRTC**; when msquic is updated
-  upstream the patch should be rebased or replaced with
-  a proper conditional.  See the commit message body
-  for the full rationale.
+- CI re-verified green on the rc.1 tree: `ci-e2e` run
+  39377787364 reports `100% tests passed, 0 tests failed out of 520`
+  on `windows-2022`, clearing the five failures carried from
+  `v0.14.0-beta.1` (`video_source_tests` #280 and
+  `test_datachannel_engine` #480-482/#513).
+- **Attempted then reverted:** `a88383e` tried to force msquic's
+  dummy raw datapath (`datapath_raw_dummy.c`) on Windows by way of
+  an `OR TRUE` shim in the **msquic submodule's own**
+  `CMakeLists.txt` (msquic's `src/CMakeLists.txt`, not NimRTC's).
+  The gitlink was moved to a commit that existed only on an
+  unpushed local branch, so `actions/checkout@v4` could not
+  resolve it (`upload-pack: not our ref a5ae3a06`).  Reverted in
+  `ef6ff11`, restoring the gitlink to upstream `42376ae`.
+  Upstream msquic already gates the XDP datapath correctly and
+  the CI runner builds and tests clean without the shim.
+- If the dummy-datapath workaround is ever genuinely required, it
+  must ship as a fork of `microsoft/msquic` whose patched branch is
+  pushed and referenced by `.gitmodules`, not as an in-tree gitlink
+  to an unpushed commit.
 
 ### Notes
 
-- The 4 commits in this stack were authored as a single
-  rc.1 delivery (`abfcba4` → `ab54a64` → `b254f15` →
-  `2662513`).  They were pushed in the order above so
-  the `2662513` fixup rolls into the rc.1 cut, not
-  into a later pre-release.
+- The 4 functional commits in this stack were authored as a
+  single rc.1 delivery (`abfcba4` → `ab54a64` → `b254f15` →
+  `2662513`), followed by `a88383e` (attempted build fix) and
+  `ef6ff11` (its revert) which net to zero tree delta.  They
+  were pushed in the order above so the `2662513` flake-fix
+  rolls into the rc.1 cut, not into a later pre-release.
 
 - `NIMRTC_API_VERSION_PRE_RELEASE` has cycled from
   `"beta.1"` to `"rc.1"` for this cut.  The v1.0.0

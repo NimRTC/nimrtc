@@ -433,6 +433,232 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   v0.14.x slip-or-land (the v0.13.0 sweep was
   at the file level; the per-symbol pass is a
   v0.14.x follow-up).
+## [0.14.0-rc.1] - 2026-10-20
+
+### Status: Tech Preview
+
+> **Third pre-release of the v0.14.x cycle** — the
+> **v1.0.0-rc.1** release candidate per
+> `docs/plan/v1.0-plan.md` §7 + §8 + §12.2 + §12.3.5.
+> The marketing version stays anchored to the v0.x line
+> ("Tech Preview" banner unchanged from v0.13.0); the
+> `NIMRTC_API_VERSION_PRE_RELEASE` macro cycles to
+> `"rc.1"`.  This is the **regression-only stabilisation**
+> window (no SFU-1 / DC-3 / BENCH-1; §7 = NO, closed
+> 2026-10-19); the only landed feature work is the
+> **DC-1 readiness PR-1** (`EngineConfig::datachannel_backend`
+> dispatch) deferred from `v0.14.0-beta.1` per that
+> release's `What is NOT in v0.14.0-beta.1` section.
+> Physical DTLS-ICE → RFC 9221 handoff wiring is the
+> rc.1 **PR-2** follow-up; rc.1 ships PR-1 alone so the
+> §12.3.5 "regression-only" gate is preserved.
+>
+> **Cut order**: the 4 commits since `v0.14.0-beta.1`
+> landed in sequence (rc.1 PR-1 → repair → test-align →
+> CI flake-fix) and are pushed as a single stack; the tag
+> points at the post-`2662513` tree.
+
+### Highlights
+
+- **EngineConfig::datachannel_backend dispatch (rc.1
+  PR-1, DC-1 readiness)** — `src/engine/include/nimrtc/engine/engine.hpp`
+  gains two config fields:
+    - `datachannel_backend` (string, default `"sctp"`,
+      empty → falls back to the legacy `datachannel_name`
+      so the v0.x contract is preserved)
+    - `web_transport_name` (string, default `"msquic"`)
+  and `engine.cpp::init_datachannel_registry()` is rewritten
+  as a `uint32_t` dispatcher with five resolved branches
+  (`sctp` / `msquic` / unknown-name error /
+  empty-after-legacy explicit-disable / not-built error).
+  This is the **readiness-verification** surface only —
+  the factory id resolves and the `web_transport_name`
+  slot verifies for web-transport backends; physical
+  WebTransport session creation (DTLS-ICE → RFC 9221
+  handoff) is the PR-2 follow-up.  (`abfcba4`)
+
+- **PluginRegistry::unregister_datachannel() (rc.1 PR-1
+  repair)** — `test_engine_plugin_loading` exposed that
+  `register_datachannel()` had no symmetric tear-down for
+  the in-test re-register case.  Added as the peer to
+  `register_datachannel()`; `test_engine_plugin_loading`
+  goes green on all 4 platforms.  (`ab54a64`)
+
+- **test_datachannel_engine + wasm-demo §7 closure
+  (comment alignment)** — pre-release doc / comment
+  alignment with the `v0.14.0-rc.1` vocabulary; no
+  behaviour change.  (`b254f15`)
+
+- **MemoryVideoSource cv-driven stop handshake +
+  `wait_until_idle()` (CI flake fix)** — `video_source.cpp`
+  replaces the legacy "set `stop_flag_` and let the
+  thread exit on the next frame interval" polling model
+  with a deterministic `loop_mu_` + `cv_` + `exit_cv_`
+  + `thread_exited_` synchronization trio:
+    - `start()` takes `loop_mu_` before spawning the
+      thread to close a `[thread.condition.condvar]`
+      init window on the very first `cv_.wait_until()`
+      entry path.
+    - `stop()` holds `loop_mu_` for the `stop_flag_` write
+      and `notify_all()`s `cv_`, so the cadence loop
+      exits its `cv_.wait_until()` within one
+      scheduling slice rather than after `1 / fps`
+      seconds (33 ms at 30 fps).
+    - The loop holds `loop_mu_` for the entire cycle but
+      releases it around `do_produce()`, so a user-supplied
+      `FrameCallback` that calls back into the source
+      (e.g. `set_callback`, `wait_until_idle`) can never
+      deadlock the producer.
+    - The destructor calls `wait_until_idle(1s)` as a
+      safety net — if a wedged callback holds the producer
+      thread, the destructor logs and joins anyway rather
+      than hanging the test process on shutdown.
+  New public virtual `IVideoSource::wait_until_idle(timeout)`
+  with a default no-op impl so external plugin sources
+  keep compiling without changes; `MemoryVideoSource`
+  overrides.  This is the source-level fix for the CI
+  flake flagged in run 39359503550 test 280
+  (`MemorySource.StartProduceStopLifecycle` failed on a
+  busy runner; the old code parked the producer thread on
+  a preemption-prone `sleep_until()`).  (`2662513`)
+
+### Added
+
+- `IVideoSource::wait_until_idle(std::chrono::milliseconds)`
+  — virtual with default no-op impl returning `true` so
+  existing in-tree plugin sources keep compiling.  Override
+  seam for any source that owns a worker thread.  Public
+  header surface **widening**; release notes flag this
+  as an intentional `v0.14.0-rc.1` surface addition
+  (every in-tree `IVideoSource` override gets the free
+  default; external plugins compile unchanged).
+  (`src/modules/video_source/include/nimrtc/video_source/video_source.hpp`)
+
+- `MemoryVideoSource::wait_until_idle(timeout)` override +
+  the `loop_mu_` / `cv_` / `exit_cv_` / `thread_exited_`
+  synchronization trio.  (`src/modules/video_source/src/video_source.cpp`)
+
+- `PluginRegistry::unregister_datachannel(id)` — symmetric
+  peer to `register_datachannel()`; needed by
+  `test_engine_plugin_loading`.  (`src/core/include/nimrtc/core/plugin_registry.hpp`
+  + `src/core/src/plugin_registry.cpp`)
+
+- `EngineConfig::datachannel_backend` (string, default
+  `"sctp"`) and `EngineConfig::web_transport_name` (string,
+  default `"msquic"`); empty `datachannel_backend` falls
+  back to `datachannel_name` for backward compatibility
+  with the v0.x contract.
+  (`src/engine/include/nimrtc/engine/engine.hpp`)
+
+### Changed
+
+- `engine.cpp::init_datachannel_registry()` rewritten as a
+  `uint32_t` dispatcher with five resolved branches.  The
+  dispatch layer is `v0.14.0-rc.1`-thin by design —
+  physical WebTransport session creation (DTLS-ICE →
+  RFC 9221 handoff) is the rc.1 PR-2 follow-up.  (`abfcba4`)
+
+- `MemoryVideoSource::cadence_loop()` now holds `loop_mu_`
+  for the entire loop with the mutex released around
+  `do_produce()`.  `start()` takes `loop_mu_` before
+  spawning the thread.  These are correctness fixes for
+  the stop-exit-vs-preemption race; the deterministic-exit
+  guarantee is documented in the new
+  `IVideoSource::wait_until_idle` contract.
+  (`src/modules/video_source/src/video_source.cpp`)
+
+### Fixed
+
+- **CI flake (run 39359503550 test 280):
+  `MemorySource.StartProduceStopLifecycle`** — the
+  producer thread could be preempted past several frame
+  intervals after `stop()`, and the only way callers
+  could observe "the producer had actually stopped" was
+  `sleep_for(1.5s)` + re-read the frame counter.  Resolved
+  at the source by changing `stop()` to signal +
+  `notify_all()` rather than rely on the next-frame wake;
+  the test now uses `wait_until_idle(500ms)` (deterministic,
+  <1 ms in practice).  See `Highlights → MemoryVideoSource`
+  for the full synchronization rewrite.  (`2662513`)
+
+- **`test_engine_plugin_loading` build break after PR-1**:
+  the rc.1 PR-1 engine refactor broke the plugin test
+  because `PluginRegistry::unregister_datachannel()` did
+  not exist.  Now added as the symmetric peer to
+  `register_datachannel()`; `test_engine_plugin_loading`
+  goes green on all 4 platforms.  (`ab54a64`)
+
+### Tests
+
+- `test_video_source` 13/13 PASS including
+  `MemorySource.StartProduceStopLifecycle` with the
+  deterministic `wait_until_idle(500ms)` barrier; 8/8
+  repeat runs clean (no race observed on windows-2022
+  MSVC).  No external-`IVideoSource`-impl test broken:
+  the `wait_until_idle` virtual is a pure addition with
+  a default impl that returns `true`.
+
+- `test_engine_plugin_loading` PASS on all 4 platforms
+  after the `PluginRegistry::unregister_datachannel()`
+  symmetrisation.
+
+- `test_datachannel_engine` 5/5 with comment-alignment
+  pass.  The L1-priority / DC-2 follow-up remains as
+  rc.1 PR-2.
+
+- `test_engine_video_codec` PASS — downstream consumer
+  of the `IVideoSource` surface (no test change needed;
+  inherits the new `wait_until_idle` virtual cleanly).
+
+### Docs
+
+- `docs/plan/v1.0-plan.md` §12.3.5 DoD item 6
+  satisfied: the `CHANGELOG [0.14.0-rc.1]` entry is
+  now present.
+
+### Build / CI
+
+- msquic Windows dummy-datapath patch (`a88383e`,
+  shipped earlier in this stack): the `OR TRUE` shim
+  in `src/CMakeLists.txt` forces `datapath_raw_dummy.c`
+  so the CI runner (`windows-2022`) builds + runs the
+  msquic self-tests without an XDP driver installed.
+  Patch is **local to NimRTC**; when msquic is updated
+  upstream the patch should be rebased or replaced with
+  a proper conditional.  See the commit message body
+  for the full rationale.
+
+### Notes
+
+- The 4 commits in this stack were authored as a single
+  rc.1 delivery (`abfcba4` → `ab54a64` → `b254f15` →
+  `2662513`).  They were pushed in the order above so
+  the `2662513` fixup rolls into the rc.1 cut, not
+  into a later pre-release.
+
+- `NIMRTC_API_VERSION_PRE_RELEASE` has cycled from
+  `"beta.1"` to `"rc.1"` for this cut.  The v1.0.0
+  final cut will set it to `""` per §12.3.6 DoD item 2.
+
+### What is NOT in v0.14.0-rc.1 (deferred to v1.0.0 or later)
+
+- **Physical WebTransport session wiring (DTLS-ICE →
+  RFC 9221 handoff)** — rc.1 PR-2 (the dispatch
+  resolved in PR-1 is the seam only; the wire-up
+  lands when the rc.1 soak completes).
+- **DC-2 L1 strict-priority + DC plane** —
+  v1.0.0-beta.2.
+- **Composite `sfu-agent` Profile resolution** —
+  closed by §7 = NO; off the v1.0.x critical path;
+  reopens at v1.1.0 only if the SFU track is
+  revisited.
+- **Adaptive JitterBuffer + Goog-CC full mainline
+  BWE** — v1.x.
+- **GM/T 国密 SRTP backend** — v1.x.
+- **AddressSanitizer CI matrix** — v1.x.
+- **Per-symbol inline stability annotation** —
+  v0.14.x slip-or-land.
+
 ## [0.14.0] - 2026-10-16
 
 ### Status: Tech Preview

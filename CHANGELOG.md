@@ -627,18 +627,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `test_datachannel_engine` #480-482/#513).
 - **Attempted then reverted:** `a88383e` tried to force msquic's
   dummy raw datapath (`datapath_raw_dummy.c`) on Windows by way of
-  an `OR TRUE` shim in the **msquic submodule's own**
-  `CMakeLists.txt` (msquic's `src/CMakeLists.txt`, not NimRTC's).
-  The gitlink was moved to a commit that existed only on an
-  unpushed local branch, so `actions/checkout@v4` could not
-  resolve it (`upload-pack: not our ref a5ae3a06`).  Reverted in
-  `ef6ff11`, restoring the gitlink to upstream `42376ae`.
-  Upstream msquic already gates the XDP datapath correctly and
-  the CI runner builds and tests clean without the shim.
-- If the dummy-datapath workaround is ever genuinely required, it
-  must ship as a fork of `microsoft/msquic` whose patched branch is
-  pushed and referenced by `.gitmodules`, not as an in-tree gitlink
-  to an unpushed commit.
+  an `OR TRUE` shim appended to the **msquic submodule's own**
+  `src/platform/CMakeLists.txt` datapath condition (not a
+  NimRTC-owned file).  The gitlink was moved to a commit that
+  existed only on an unpushed local branch, so `actions/checkout@v4`
+  could not resolve it (`upload-pack: not our ref a5ae3a06`).  Reverted
+  in `ef6ff11`, restoring the gitlink to upstream `42376ae`.
+  Verified after the revert: a clean rebuild against upstream msquic
+  succeeds and the full suite is green, so the shim was never
+  required — the earlier CI failures it was chasing had other causes.
+- If a datapath workaround is ever genuinely required, it must ship
+  as a fork of `microsoft/msquic` whose patched branch is pushed and
+  referenced by `.gitmodules`, not as an in-tree gitlink to an
+  unpushed commit.
 
 ### Notes
 

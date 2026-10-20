@@ -625,17 +625,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on `windows-2022`, clearing the five failures carried from
   `v0.14.0-beta.1` (`video_source_tests` #280 and
   `test_datachannel_engine` #480-482/#513).
-- **Attempted then reverted:** `a88383e` tried to force msquic's
-  dummy raw datapath (`datapath_raw_dummy.c`) on Windows by way of
-  an `OR TRUE` shim appended to the **msquic submodule's own**
-  `src/platform/CMakeLists.txt` datapath condition (not a
-  NimRTC-owned file).  The gitlink was moved to a commit that
-  existed only on an unpushed local branch, so `actions/checkout@v4`
-  could not resolve it (`upload-pack: not our ref a5ae3a06`).  Reverted
-  in `ef6ff11`, restoring the gitlink to upstream `42376ae`.
-  Verified after the revert: a clean rebuild against upstream msquic
-  succeeds and the full suite is green, so the shim was never
-  required — the earlier CI failures it was chasing had other causes.
+- **Configure-time XDP dummy datapath patcher:** `48aca5e` added
+  `_nimrtc_msquic_force_dummy_datapath()` to `src/third_party/CMakeLists.txt`.
+  This function (still present at HEAD) patches `src/third_party/msquic/src/platform/CMakeLists.txt`
+  at configure time, forcing `datapath_raw_dummy.c` instead of the real
+  XDP datapath.  Required because the Windows XDP SDK (`xdp-for-windows`)
+  is not available in the NimRTC CI build environment (windows-2022 image);
+  without this patcher, the Windows build fails at compile time with a
+  missing `xdp/wincommon.h` header.  Idempotent — re-running `cmake` has
+  no additional effect.  The submodule stays vendor-clean (gitlink = upstream
+  `42376ae`); no submodule commits are modified.
+- **MSVC C28020 false-positive suppression:** `48aca5e` also added a
+  `target_compile_options(core PRIVATE /wd28020)` workaround scoped to
+  the msquic `core` library.  This silences a known MSVC `/analyze` false
+  positive on the SAL value-range check in `crypto_tls.c`'s macro-driven
+  switch.  Without this, Windows CI fails with `error C2220: warning
+  treated as error` before the engine links.  Still required at HEAD.
+- `a88383e` moved the msquic gitlink to a commit that existed only on
+  a local unpushed branch; `actions/checkout@v4` could not resolve it
+  (`upload-pack: not our ref a5ae3a06`).  Reverted in `ef6ff11`;
+  gitlink restored to upstream `42376ae`.
 - If a datapath workaround is ever genuinely required, it must ship
   as a fork of `microsoft/msquic` whose patched branch is pushed and
   referenced by `.gitmodules`, not as an in-tree gitlink to an

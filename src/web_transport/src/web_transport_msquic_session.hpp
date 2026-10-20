@@ -205,7 +205,6 @@ public:
 private:
     HQUIC stream_;
     const ApiTable* api_;
-    Impl* session_;   // non-owning back-pointer to parent session
 
     // Inbound queue (filled by QUIC callback, drained by recv()).
     std::vector<std::vector<std::uint8_t>> recv_queue_;
@@ -264,7 +263,6 @@ public:
 private:
     HQUIC stream_;
     const ApiTable* api_;
-    Impl* session_;   // non-owning back-pointer to parent session
     std::atomic<bool> closed_{false};
 };
 

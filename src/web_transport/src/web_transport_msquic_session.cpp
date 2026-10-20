@@ -154,8 +154,8 @@ ApiTable::~ApiTable() {
 // ===========================================================================
 
 MsQuicBidiStream::MsQuicBidiStream(HQUIC stream, const ApiTable* api,
-                                   Impl* session) noexcept
-    : stream_(stream), api_(api), session_(session) {
+                                   Impl* /*session*/) noexcept
+    : stream_(stream), api_(api) {
     // Note: SetContext / SetCallbackHandler are NOT called here.
     // The caller (Impl::open_bidi_stream) calls init_msquic_context()
     // after StreamOpen succeeds, so the handle is always valid at this point.
@@ -226,7 +226,7 @@ plugins::Status MsQuicBidiStream::recv(
     std::memcpy(out.data(), front.data(), n);
     if (n < front.size()) {
         // Partial read: keep the remainder.
-        std::vector<std::uint8_t> remainder(front.begin() + n, front.end());
+        std::vector<std::uint8_t> remainder(front.begin() + static_cast<std::ptrdiff_t>(n), front.end());
         front = std::move(remainder);
     } else {
         recv_queue_.erase(recv_queue_.begin());
@@ -344,8 +344,8 @@ MsQuicBidiStream* MsQuicBidiStream::from_context(void* ctx) noexcept {
 // ===========================================================================
 
 MsQuicUniStream::MsQuicUniStream(HQUIC stream, const ApiTable* api,
-                                  Impl* session) noexcept
-    : stream_(stream), api_(api), session_(session) {
+                                  Impl* /*session*/) noexcept
+    : stream_(stream), api_(api) {
     // Note: SetContext / SetCallbackHandler are NOT called here.
     // The caller (Impl::open_uni_stream) calls set_handle()
     // after StreamOpen succeeds, so the handle is always valid at that point.

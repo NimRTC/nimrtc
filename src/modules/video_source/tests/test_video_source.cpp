@@ -193,6 +193,16 @@ TEST(RenderPattern, FormatMismatchReturnsError) {
 
 // -----------------------------------------------------------------------------
 // 7. Lifecycle: start / produce_one / stop
+//
+// The producer thread is woken from its `cv_.wait_until()` immediately
+// on stop() via `cv_.notify_all()` (see `cadence_loop()` in
+// `video_source.cpp`), so it exits deterministically within a few
+// scheduling slices rather than after at most one frame interval
+// (33 ms at 30 fps). Tests verify the producer has fully stopped via
+// `wait_until_idle(500ms)` instead of the old "sleep 1.5 s and
+// re-read the counter" approach, which was a recognised flake on busy
+// CI runners (see the comment block that used to live here in
+// v0.11.0–v0.13.0).
 // -----------------------------------------------------------------------------
 
 TEST(MemorySource, StartProduceStopLifecycle) {
@@ -217,17 +227,22 @@ TEST(MemorySource, StartProduceStopLifecycle) {
     EXPECT_TRUE(src->running());
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
     src->stop();
+    // Deterministic: the cadence loop wakes immediately on stop() and
+    // exits within one or two scheduling slices. 500 ms is a generous
+    // upper bound; in practice wait_until_idle() returns in well under
+    // 1 ms on any modern host.
+    const bool exited = src->wait_until_idle(std::chrono::milliseconds(500));
+    EXPECT_TRUE(exited)
+        << "cadence loop did not exit within 500 ms of stop(); the "
+           "stop() → cv_.notify_all() → exit path is broken";
     int after_stop = count.load();
     EXPECT_GE(after_stop, 1);
-    // After stop, no more frames. We wait generously because stop() merely
-    // signals the producer thread (it joins in the destructor); on a busy
-    // CI runner — especially macOS arm64 — the producer can be preempted
-    // past several frame intervals, so we wait 1.5 s (~45 frame intervals
-    // at 30 fps) before asserting the count is stable. Anything more
-    // indicates the producer is ignoring stop_flag_, which would be a
-    // real bug, not a timing artefact.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    EXPECT_EQ(count.load(), after_stop);
+    // The producer thread has exited, so the count is guaranteed stable
+    // — no more frames will be produced (the loop has terminated, so
+    // there is no race with future ticks).
+    EXPECT_EQ(count.load(), after_stop)
+        << "count changed after wait_until_idle(); the producer thread "
+           "isn't actually stopped";
 }
 
 // -----------------------------------------------------------------------------

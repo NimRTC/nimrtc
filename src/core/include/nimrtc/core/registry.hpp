@@ -430,6 +430,15 @@ public:
     // backends here without depending on any concrete module.
     void register_datachannel(std::string_view id,
                               const plugins::IDataChannelFactory* f);
+    /// Remove a datachannel factory by id.  Returns true if a
+    /// matching entry was removed.  Test-only helper; mirrors
+    /// `unregister_web_transport()` and exists so a TU-scope stub
+    /// factory does not leak into later tests in the same process.
+    /// The production path always registers through static-init
+    /// registration and never removes a factory at runtime.
+    bool unregister_datachannel(std::string_view id) {
+        return datachannel_.unregister_one(id);
+    }
     [[nodiscard]] const plugins::IDataChannelFactory*
     get_datachannel(std::string_view id) const {
         return datachannel_.get(id);

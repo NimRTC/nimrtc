@@ -250,19 +250,27 @@ enforceable.
 
 - Same maintenance overhead as any SemVer-strict project: bumping
   MINOR/PATCH appropriately, marking removals with deprecation.
-- Does not add new CI gates beyond the two tests introduced by
-  alpha.1 PR #1 and alpha.1 PR #3:
-  `tests/test_api_version.cpp` and `tests/test_api_classification.cpp`.
+- `scripts/check-release-freeze.sh` is a POSIX-sh guardrail that
+  invokes the same scanners at tag-cut time (file-level `api`
+  + per-symbol `api-symbols`); the pipeline catches the same
+  facts that CI catches so a tag cut cannot disagree with the
+  merge gate.
 
 ## Verification
 
+The freeze has two layered gates: the file-level check is the
+in-CI C++ test (built from the same source tree); the per-symbol
+check is a Node scanner wired into all four platform jobs.
+
 | Check | Where | Required |
 |---|---|---|
-| `tests/test_api_version.cpp` 5/5 PASS | Windows MSVC + Linux x86_64 | green |
-| Every public symbol under `src/**/include/nimrtc/**` carries at least one stability annotation | `tests/test_api_classification.cpp` (alpha.1 PR #3) | green; missing annotation → compile error |
+| `tests/test_api_version.cpp` 7/7 PASS (`NIMRTC_API_VERSION_MAJOR` / `MINOR` / `PATCH` / `PRE_RELEASE` / `STRING` + `NIMRTC_API_VERSION` + `NIMRTC_API_VERSION_CHECK` + the STABLE / UNSTABLE / DEPRECATED expansion) | Windows MSVC + Linux x86_64 | green |
+| Every public header under `src/**/include/nimrtc/**` contains at least one `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` marker and the public-header count equals the v1.0.0-beta.1 baseline (100) | `tests/test_api_classification.cpp::every_header_has_at_least_one_marker` + `::total_header_count_matches_baseline` (alpha.1 PR #3) | green; missing annotation → test failure with the file list printed to stdout |
+| Every *symbol* (not just every file) at namespace scope in a public header carries a stability marker, after exempting `detail::` / `Impl`-suffix / `NIMRTC_*`-prefix names per the policy above | `scripts/api_freeze_scan.js` (CI gate on all four platforms; `Missing: 0` against the current tree) | green; unclassified symbol → non-zero exit |
+| Every public header that *uses* a stability marker also `#include`s `<nimrtc/core/api_version.hpp>` so the first standalone consumer does not hit MSVC C2079 ("uses undefined struct") | `scripts/check_api_marker_includes.py` (CI gate on all four platforms) | green; missing include → non-zero exit |
 | Every symbol marked `NIMRTC_API_DEPRECATED` has a `CHANGELOG.md` entry under `[Unreleased]` or the current dev cycle | code review | yes |
-| `NIMRTC_API_VERSION_PRE_RELEASE` is `""` (empty) for any final tag | at tag cut | yes |
-| Public-header diff vs v0.12.0: only additive changes | `git diff v0.12.0..HEAD -- 'src/**/include/**'` | only new symbols; zero modified or removed |
+| `NIMRTC_API_VERSION_PRE_RELEASE` is `""` (empty) for any final tag | `scripts/check-release-freeze.sh --final-tag` (`version` check) + tag-cut job | yes |
+| Public-header diff vs v0.14.0-beta.1 tag: only additive changes | `git diff v0.14.0-beta.1..HEAD -- 'src/**/include/**'` (alpha.2 seam ⇒ beta.1 freeze boundary, per `v0.14-plan.md` §2.1.2 HEADER-FREEZE-B1) | only new symbols; zero modified or removed |
 
 ## Out of scope (this ADR)
 

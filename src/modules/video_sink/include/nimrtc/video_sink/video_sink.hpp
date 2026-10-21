@@ -24,6 +24,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -41,7 +42,7 @@ namespace nimrtc::video_sink {
  *  benchmarks, and CI where rendering overhead is undesirable.
  *
  *  Thread safety: NOT thread-safe — render() must be serialized externally. */
-class HeadlessSink : public plugins::IVideoSink {
+class NIMRTC_API_STABLE HeadlessSink : public plugins::IVideoSink {
 public:
     explicit HeadlessSink(plugins::VideoSinkConfig cfg) noexcept;
     ~HeadlessSink() override;
@@ -67,7 +68,7 @@ private:
 
 /** PinnedSink — headless sink that asserts every frame's `capture_ts_us`
  *  is strictly increasing. Catches timestamp mishandling in tests. */
-class PinnedSink : public plugins::IVideoSink {
+class NIMRTC_API_STABLE PinnedSink : public plugins::IVideoSink {
 public:
     explicit PinnedSink(plugins::VideoSinkConfig cfg) noexcept;
     ~PinnedSink() override;
@@ -97,12 +98,12 @@ private:
 // ---------------------------------------------------------------------------
 
 /** Build a headless sink with the given config. */
-std::unique_ptr<plugins::IVideoSink> create_headless_sink(
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoSink> create_headless_sink(
     plugins::VideoSinkConfig cfg) noexcept;
 
 /** Build a pinned sink (headless + capture_ts ordering check) with the
  *  given config. */
-std::unique_ptr<plugins::IVideoSink> create_pinned_sink(
+NIMRTC_API_STABLE std::unique_ptr<plugins::IVideoSink> create_pinned_sink(
     plugins::VideoSinkConfig cfg) noexcept;
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,7 @@ std::unique_ptr<plugins::IVideoSink> create_pinned_sink(
  *
  *  Owned by the registry factory — single use; consumer calls `delete`
  *  (or wraps in unique_ptr) after no longer needed. */
-class PluginAdapter : public plugins::IVideoSink {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::IVideoSink {
 public:
     explicit PluginAdapter(std::unique_ptr<plugins::IVideoSink> concrete) noexcept;
     ~PluginAdapter() override;
@@ -138,7 +139,7 @@ private:
 };
 
 /** Plugin factory for the headless sink (id "headless"). */
-class HeadlessPluginFactory : public plugins::IVideoSinkFactory {
+class NIMRTC_API_STABLE HeadlessPluginFactory : public plugins::IVideoSinkFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -146,7 +147,7 @@ public:
 };
 
 /** Plugin factory for the pinned sink (id "pinned"). */
-class PinnedPluginFactory : public plugins::IVideoSinkFactory {
+class NIMRTC_API_STABLE PinnedPluginFactory : public plugins::IVideoSinkFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -155,6 +156,6 @@ public:
 
 /** Register the default video_sink plugin(s) with core::PluginRegistry.
  *  Idempotent. */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::video_sink

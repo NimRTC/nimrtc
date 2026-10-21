@@ -47,6 +47,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -60,7 +61,7 @@ namespace nimrtc {
 // ---------------------------------------------------------------------------
 // TransportRequirements — capability flags the application expresses
 // ---------------------------------------------------------------------------
-struct TransportRequirements {
+struct NIMRTC_API_STABLE TransportRequirements {
     /** True if the connection must terminate in a browser (Chrome/Firefox/
      *  Safari). Forces webrtc-classic media plane. */
     bool needs_browser_interop = true;
@@ -84,7 +85,7 @@ struct TransportRequirements {
 // ---------------------------------------------------------------------------
 // ITransportSelector — interface
 // ---------------------------------------------------------------------------
-class ITransportSelector {
+class NIMRTC_API_STABLE ITransportSelector {
 public:
     virtual ~ITransportSelector() = default;
 
@@ -107,7 +108,7 @@ public:
 // Test code injects MockStackFactory through the resolver below so the
 // rule engine itself is testable today.
 // ---------------------------------------------------------------------------
-class CapabilitySelector final : public ITransportSelector {
+class NIMRTC_API_STABLE CapabilitySelector final : public ITransportSelector {
 public:
     CapabilitySelector() = default;
 

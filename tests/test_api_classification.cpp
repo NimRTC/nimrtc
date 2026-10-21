@@ -26,7 +26,7 @@
  *    so the next PR can apply the missing markers mechanically.
  *
  * 2. `total_header_count_matches_baseline` -- the count of public
- *    headers equals the v1.0.0-alpha.1 baseline of 89.  A drift
+ *    headers equals the v1.0.0-beta.1 baseline of 100.  A drift
  *    here signals that new public headers were added without
  *    updating the classification sweep; bump the baseline in the
  *    same PR that adds the header.
@@ -254,15 +254,19 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - web_transport_data_channel.hpp
     //     - web_transport_plugin.hpp
     //
+    // v0.14.0-beta.2 bump: +1 public header (99 -> 100) for the
+    //   WebTransport server seam (Case E / WT-SEVER):
+    //     - web_transport_server.hpp
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 99;
+    constexpr std::size_t kBaselineHeaderCount = 100;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
-        << "Public header count drifted from the v1.0.0-alpha.1 baseline "
+        << "Public header count drifted from the v1.0.0-beta.1 baseline "
         << "of " << kBaselineHeaderCount << ".  Either new public headers "
         << "were added (update the baseline + run the classification sweep) "
         << "or a public header was removed (update the baseline + ADR-015).";

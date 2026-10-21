@@ -19,6 +19,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_AUDIO3A_HPP
@@ -39,7 +40,7 @@ namespace nimrtc::plugins {
 // Config
 // ---------------------------------------------------------------------------
 
-struct Audio3AConfig {
+struct NIMRTC_API_STABLE Audio3AConfig {
     std::string_view name;
     uint32_t sample_rate_hz = 48000;
     uint8_t  capture_channels = 1;
@@ -57,16 +58,16 @@ struct Audio3AConfig {
 // Events
 // ---------------------------------------------------------------------------
 
-using VadCallback       = std::function<void(bool speech)>;
-using LevelCallback     = std::function<void(float dbfs)>;
-using AudioErrorCallback = std::function<void(Status, std::string_view)>;
+using NIMRTC_API_STABLE VadCallback       = std::function<void(bool speech)>;
+using NIMRTC_API_STABLE LevelCallback     = std::function<void(float dbfs)>;
+using NIMRTC_API_STABLE AudioErrorCallback = std::function<void(Status, std::string_view)>;
 
 // ---------------------------------------------------------------------------
 // PCM Tap interface (for AI Agent 3A bypass, §8.7)
 // ---------------------------------------------------------------------------
 
 /** Metadata describing an audio frame. */
-struct PcmFrameMetadata {
+struct NIMRTC_API_STABLE PcmFrameMetadata {
     uint32_t sample_rate_hz = 48000;
     size_t   num_samples    = 0;   // samples per channel
     uint8_t  num_channels   = 1;
@@ -77,17 +78,17 @@ struct PcmFrameMetadata {
  *  The tap receives raw PCM samples and metadata.
  *  Taps are synchronous — they must return quickly.
  *  No copy is made unless the tap needs one. */
-using PcmTapCallback = std::function<void(const float* samples, const PcmFrameMetadata& meta)>;
+using NIMRTC_API_STABLE PcmTapCallback = std::function<void(const float* samples, const PcmFrameMetadata& meta)>;
 
 /** PCM tap with int16_t input (for ASR consumption).
  *  The 3A implementation converts float→int16_t before invoking this tap. */
-using PcmTapCallbackI16 = std::function<void(const int16_t* samples, const PcmFrameMetadata& meta)>;
+using NIMRTC_API_STABLE PcmTapCallbackI16 = std::function<void(const int16_t* samples, const PcmFrameMetadata& meta)>;
 
 // ---------------------------------------------------------------------------
 // IAudio3A
 // ---------------------------------------------------------------------------
 
-class IAudio3A : public IPlugin {
+class NIMRTC_API_STABLE IAudio3A : public IPlugin {
 public:
     virtual void set_callbacks(VadCallback         on_vad,
                               LevelCallback       on_level,
@@ -157,7 +158,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class IAudio3AFactory {
+class NIMRTC_API_STABLE IAudio3AFactory {
 public:
     virtual ~IAudio3AFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -166,7 +167,7 @@ public:
 };
 
 template<class T>
-class SimpleAudio3AFactory : public IAudio3AFactory {
+class NIMRTC_API_STABLE SimpleAudio3AFactory : public IAudio3AFactory {
     std::string_view id_;
     std::string_view name_;
 public:

@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -56,7 +57,7 @@ namespace nimrtc::assembly {
 // `to_plugins_scheduler_config()` collapses both layers into the
 // single struct the scheduler plugin factory expects.
 // ---------------------------------------------------------------------------
-struct SchedulerConfig {
+struct NIMRTC_API_STABLE SchedulerConfig {
     /// Enable the priority scheduler. When false, packets are sent FIFO.
     bool enabled = true;
 
@@ -98,7 +99,7 @@ struct SchedulerConfig {
  *  If `assembly::SchedulerConfig::impl` is empty, the helper defaults
  *  to `"strict_priority"` so the legacy profile JSON files (which
  *  predate this field) keep resolving to the default plugin. */
-inline plugins::SchedulerConfig
+NIMRTC_API_STABLE inline plugins::SchedulerConfig
 to_plugins_scheduler_config(const SchedulerConfig& sc) noexcept {
     plugins::SchedulerConfig out = sc.params;
     return out;
@@ -159,7 +160,7 @@ struct BweConfig {
  *  fields) have a single, documented bridge point — and so call sites
  *  read as "we hand the assembly config to the plugin factory".
  */
-inline plugins::BweConfig to_plugins_bwe_config(const BweConfig& cfg) noexcept {
+NIMRTC_API_STABLE inline plugins::BweConfig to_plugins_bwe_config(const BweConfig& cfg) noexcept {
     return cfg.params;
 }
 
@@ -212,7 +213,7 @@ struct JitterBufferConfig {
 // backward-compat default for v1.0 Profile JSONs that do not declare
 // a `transport` block at all.
 // ---------------------------------------------------------------------------
-struct TransportStackConfig {
+struct NIMRTC_API_STABLE TransportStackConfig {
     /// Stack factory id (e.g. "webrtc-classic", "raw-udp-arq").
     /// Empty string = use Selector's default for this position.
     std::string stack;
@@ -223,7 +224,7 @@ struct TransportStackConfig {
     std::optional<int> max_p99_ms;
 };
 
-struct TransportControlConfig {
+struct NIMRTC_API_STABLE TransportControlConfig {
     /// Enable a side-stack for the control plane. When false, control
     /// traffic rides the media stack's DataChannel (SCTP) — the
     /// `webrtc-classic` legacy path.
@@ -248,7 +249,7 @@ struct TransportControlConfig {
     std::optional<int> ttl_ms;
 };
 
-struct TransportSection {
+struct NIMRTC_API_STABLE TransportSection {
     /// Strategy id (one of the five named use cases). Empty = engine
     /// default ("browser-call").
     std::string strategy;
@@ -271,7 +272,7 @@ struct TransportSection {
 // impact is negligible — Profile is constructed once at engine setup,
 // not on the hot path.
 //
-struct Profile {
+struct NIMRTC_API_STABLE Profile {
     /// Human-readable unique identifier, e.g. "call", "live", "agent".
     std::string name;
 

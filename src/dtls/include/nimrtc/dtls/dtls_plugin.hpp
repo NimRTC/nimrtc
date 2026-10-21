@@ -42,6 +42,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/dtls/dtls_session_factory.hpp>   // IDtlsSessionFactory
 
 namespace nimrtc::dtls {
@@ -88,14 +89,14 @@ namespace test_only {
 /** Returns the registered factory pointer, or nullptr if
  *  `register_default_plugins()` has not been called yet.
  *  Test-only — production code MUST NOT call this. */
-const IDtlsSessionFactory* get_wolfssl_factory() noexcept;
+NIMRTC_API_STABLE const IDtlsSessionFactory* get_wolfssl_factory() noexcept;
 
 #if defined(NIMRTC_HAS_DTLS_GMSSL)
 /** Returns the registered GMSSL factory pointer, or nullptr if
  *  `register_default_plugins()` has not been called yet.
  *  Test-only — production code MUST NOT call this.
  *  @note Only present when NIMRTC_ENABLE_DTLS_GMSSL=ON at build time. */
-const IDtlsSessionFactory* get_gmssl_factory() noexcept;
+NIMRTC_API_STABLE const IDtlsSessionFactory* get_gmssl_factory() noexcept;
 #endif // NIMRTC_HAS_DTLS_GMSSL
 
 } // namespace test_only

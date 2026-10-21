@@ -9,24 +9,25 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::core {
 
 // -----------------------------------------------------------------------------
 // Zero-copy view of bytes (no ownership).
 // -----------------------------------------------------------------------------
-using ByteSpan       = std::span<const std::uint8_t>;
-using MutableByteSpan = std::span<std::uint8_t>;
+using NIMRTC_API_STABLE ByteSpan       = std::span<const std::uint8_t>;
+using NIMRTC_API_STABLE MutableByteSpan = std::span<std::uint8_t>;
 
 // -----------------------------------------------------------------------------
 // Owned byte buffer.
 // -----------------------------------------------------------------------------
-using ByteBuffer = std::vector<std::uint8_t>;
+using NIMRTC_API_STABLE ByteBuffer = std::vector<std::uint8_t>;
 
 // -----------------------------------------------------------------------------
 // Helpers — string ↔ bytes (no encoding conversion; ASCII / opaque).
 // -----------------------------------------------------------------------------
-inline ByteBuffer to_byte_buffer(std::string_view s) {
+NIMRTC_API_STABLE inline ByteBuffer to_byte_buffer(std::string_view s) {
     ByteBuffer buf;
     buf.reserve(s.size());
     for (char c : s) {

@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <nimrtc/core/api_version.hpp>   // NIMRTC_API_STABLE
 
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is

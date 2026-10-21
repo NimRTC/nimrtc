@@ -72,6 +72,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/dtls/dtls.hpp>
 #include <nimrtc/dtls/dtls_session_iface.hpp>   // PAL Slice 4 seam
 
@@ -79,10 +80,10 @@
 // keep the public header clean.  The .cpp file includes the real
 // headers.  GMSSL uses `SSL` / `SSL_CTX` / `SSL_METHOD` / `BIO` /
 // `X509` — exactly the OpenSSL 1.1.x naming.
-struct ssl_st;
-struct ssl_ctx_st;
-struct bio_st;
-struct x509_st;
+struct NIMRTC_API_STABLE ssl_st;
+struct NIMRTC_API_STABLE ssl_ctx_st;
+struct NIMRTC_API_STABLE bio_st;
+struct NIMRTC_API_STABLE x509_st;
 
 namespace nimrtc::dtls {
 
@@ -103,7 +104,7 @@ namespace nimrtc::dtls {
  *
  * @see docs/adr/ADR-013-gmssl-dtls-backend.md (decision rationale).
  */
-class DtlsSessionGmSSL : public IDtlsSession {
+class NIMRTC_API_STABLE DtlsSessionGmSSL : public IDtlsSession {
 public:
     explicit DtlsSessionGmSSL(Config cfg);
     ~DtlsSessionGmSSL();

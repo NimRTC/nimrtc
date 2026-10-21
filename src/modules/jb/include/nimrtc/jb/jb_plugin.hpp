@@ -30,6 +30,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -52,7 +53,7 @@ namespace nimrtc::jb {
  * Adapter is constructed per SSRC (concrete JitterBuffer holds state for
  * one stream). Use PluginFactory::create() per stream.
  */
-class PluginAdapter : public plugins::IJB {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::IJB {
 public:
     explicit PluginAdapter(plugins::JBConfig config);
     ~PluginAdapter() override;
@@ -115,7 +116,7 @@ private:
  * Registered as id "adaptive" (matches EngineConfig::jb_name default).
  * create() returns a new PluginAdapter with default 40 ms initial delay.
  */
-class PluginFactory : public plugins::IJBFactory {
+class NIMRTC_API_STABLE PluginFactory : public plugins::IJBFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;

@@ -30,6 +30,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <string_view>
 
@@ -39,7 +40,7 @@
 namespace nimrtc::raw_udp {
 
 /** Concrete factory. Slice 8: inherits `IRawUdpFactory`. */
-class ArqRawUdpFactory : public IRawUdpFactory {
+class NIMRTC_API_STABLE ArqRawUdpFactory : public IRawUdpFactory {
 public:
     ArqRawUdpFactory() = default;
     explicit ArqRawUdpFactory(RawUdpConfig default_config) noexcept;

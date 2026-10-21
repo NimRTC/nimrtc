@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -61,14 +62,14 @@ namespace nimrtc::ice {
 //
 // The numeric values mirror juice_state_t 1:1; any new state added here
 // MUST also be added to `plugins::IceState`, and vice versa.
-using IceState = plugins::IceState;
+using NIMRTC_API_STABLE IceState = plugins::IceState;
 
-enum class Role : std::uint8_t {
+enum class NIMRTC_API_STABLE Role : std::uint8_t {
     Controlling,
     Controlled,
 };
 
-enum class CandidateType : std::uint8_t {
+enum class NIMRTC_API_STABLE CandidateType : std::uint8_t {
     Host,
     Srflx,
     Prflx,
@@ -79,7 +80,7 @@ enum class CandidateType : std::uint8_t {
 // Candidate — parsed SDP-form candidate info.
 // -----------------------------------------------------------------------------
 
-struct Candidate {
+struct NIMRTC_API_STABLE Candidate {
     CandidateType type   = CandidateType::Host;
     std::string   foundation;
     std::uint8_t  component_id = 0;
@@ -97,13 +98,13 @@ struct Candidate {
 
 /** Parse a single candidate SDP line. Accepts both "candidate:..." and the
  *  full "a=candidate:..." form. */
-std::optional<Candidate> parse_candidate(std::string_view sdp);
+NIMRTC_API_STABLE std::optional<Candidate> parse_candidate(std::string_view sdp);
 
 // -----------------------------------------------------------------------------
 // TURN server config
 // -----------------------------------------------------------------------------
 
-struct TurnServer {
+struct NIMRTC_API_STABLE TurnServer {
     std::string   host;
     std::uint16_t port = 0;
     std::string   username;
@@ -114,7 +115,7 @@ struct TurnServer {
 // IceConfig — what the application passes to IceTransport.
 // -----------------------------------------------------------------------------
 
-struct IceConfig {
+struct NIMRTC_API_STABLE IceConfig {
     /** Controlling = initiates nomination / sends STUN binding requests
      *  with USE-CANDIDATE. Determined by SDP offer/answer in a real
      *  WebRTC flow; the application sets this before gathering. */
@@ -180,7 +181,7 @@ struct IceConfig {
 // `dynamic_cast<ice::IceTransport*>`.
 // -----------------------------------------------------------------------------
 
-class IceTransport : public plugins::IICETransport {
+class NIMRTC_API_STABLE IceTransport : public plugins::IICETransport {
 public:
     explicit IceTransport(IceConfig config);
     ~IceTransport() override;
@@ -367,7 +368,7 @@ private:
 // the strongest typed view that matches their needs.
 // -----------------------------------------------------------------------------
 
-class IceTransportFactory : public plugins::IICETransportFactory {
+class NIMRTC_API_STABLE IceTransportFactory : public plugins::IICETransportFactory {
 public:
     /** Factory with a default IceConfig. Use create() to get a fresh transport
      *  per connection. */

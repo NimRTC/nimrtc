@@ -33,6 +33,7 @@
 // names the use-case strategy per `docs/plan/transport-strategies.md` §2.
 // =============================================================================
 
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/assembly/assembly.hpp>
 
 namespace nimrtc::assembly {

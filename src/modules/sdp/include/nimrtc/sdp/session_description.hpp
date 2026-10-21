@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -28,7 +29,7 @@ namespace nimrtc::sdp {
 // -----------------------------------------------------------------------------
 // Media / direction enums
 // -----------------------------------------------------------------------------
-enum class MediaType {
+enum class NIMRTC_API_STABLE MediaType {
     Audio,
     Video,
     Application,
@@ -36,10 +37,10 @@ enum class MediaType {
     Other,
 };
 
-const char*       to_string(MediaType t) noexcept;
-std::optional<MediaType> parse_media_type(std::string_view s) noexcept;
+NIMRTC_API_STABLE const char*       to_string(MediaType t) noexcept;
+NIMRTC_API_STABLE std::optional<MediaType> parse_media_type(std::string_view s) noexcept;
 
-enum class Direction {
+enum class NIMRTC_API_STABLE Direction {
     SendRecv,
     SendOnly,
     RecvOnly,
@@ -47,12 +48,12 @@ enum class Direction {
 };
 
 const char*                  to_string(Direction d) noexcept;
-std::optional<Direction>     parse_direction(std::string_view s) noexcept;
+NIMRTC_API_STABLE std::optional<Direction>     parse_direction(std::string_view s) noexcept;
 
 // -----------------------------------------------------------------------------
 // Per-media MSID (RFC 8830 / draft-ietf-mmusic-msid)
 // -----------------------------------------------------------------------------
-struct Msid {
+struct NIMRTC_API_STABLE Msid {
     std::string stream_id;
     std::string track_id;
 };
@@ -60,7 +61,7 @@ struct Msid {
 // -----------------------------------------------------------------------------
 // Per-media description
 // -----------------------------------------------------------------------------
-struct MediaDescription {
+struct NIMRTC_API_STABLE MediaDescription {
     MediaType  type            = MediaType::Audio;
     std::uint16_t port         = 0;
     std::string protocol;          // e.g. "UDP/TLS/RTP/SAVPF", "RTP/SAVPF"
@@ -121,7 +122,7 @@ struct MediaDescription {
 // -----------------------------------------------------------------------------
 // Session description
 // -----------------------------------------------------------------------------
-struct SessionDescription {
+struct NIMRTC_API_STABLE SessionDescription {
     int version = 0;             // v= line
     std::string session_id;      // o= IN IP4 ... <sess-id>
     std::string session_name = "-";   // s= line
@@ -167,7 +168,7 @@ struct SessionDescription {
 // -----------------------------------------------------------------------------
 // Parser
 // -----------------------------------------------------------------------------
-class Parser {
+class NIMRTC_API_STABLE Parser {
 public:
     // Out-of-line declarations: see parser.cpp. Required by the pImpl
     // idiom — the definitions live where `Impl` is complete.
@@ -188,7 +189,7 @@ private:
 // WebRTC interop requires attribute order to follow RFC 8829 §5 ("Standard
 // ordering of attributes"): see the comment inside the implementation.
 // -----------------------------------------------------------------------------
-class Munger {
+class NIMRTC_API_STABLE Munger {
 public:
     // Out-of-line declarations: the definitions live in munger.cpp where
     // `Impl` is complete. Without this, any TU that uses Munger as a value

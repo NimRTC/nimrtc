@@ -55,6 +55,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/raw_udp/raw_udp_datagram.hpp>
 #include <nimrtc/raw_udp/udp_socket.hpp>
@@ -79,7 +80,7 @@ namespace nimrtc::raw_udp {
 // ===========================================================================
 // Frame types (must match the on-wire byte in arq_raw_udp.cpp).
 // ===========================================================================
-enum class FrameType : std::uint8_t {
+enum class NIMRTC_API_STABLE FrameType : std::uint8_t {
     Data = 0x01,
     Ack  = 0x02,
 };
@@ -87,7 +88,7 @@ enum class FrameType : std::uint8_t {
 // ===========================================================================
 // PendingPacket — one in-flight DATA packet on the tx side.
 // ===========================================================================
-struct PendingPacket {
+struct NIMRTC_API_STABLE PendingPacket {
     std::uint16_t seq = 0;
     std::vector<std::uint8_t> framed;        // full on-wire bytes
     std::chrono::steady_clock::time_point sent_at{};
@@ -101,15 +102,15 @@ struct PendingPacket {
 // with the slice-6 factory / test contract.  Replace with real DTLS 1.3 PSK
 // record wrapping once Slice 4 lands the IDtlsSession PSK extension.
 // ===========================================================================
-std::vector<std::uint8_t> dtls_psk_encrypt(
+NIMRTC_API_STABLE std::vector<std::uint8_t> dtls_psk_encrypt(
     const std::vector<std::uint8_t>& pt, std::string_view psk_hint);
-std::vector<std::uint8_t> dtls_psk_decrypt(
+NIMRTC_API_STABLE std::vector<std::uint8_t> dtls_psk_decrypt(
     const std::vector<std::uint8_t>& ct, std::string_view psk_hint);
 
 // ===========================================================================
 // ArqRawUdp — selective-repeat ARQ on top of a real UDP socket.
 // ===========================================================================
-class ArqRawUdp final : public IRawUdpDatagram {
+class NIMRTC_API_STABLE ArqRawUdp final : public IRawUdpDatagram {
 public:
     explicit ArqRawUdp(RawUdpConfig cfg) : cfg_(std::move(cfg)) {}
     ~ArqRawUdp() override { close(); }
@@ -376,7 +377,7 @@ private:
 };
 
 // ---- Test hooks (free functions in nimrtc::raw_udp namespace). -------------
-void arq_test_inject_inbound(ArqRawUdp*, std::vector<std::uint8_t>);
-void arq_test_tick_retransmit(ArqRawUdp*);
+NIMRTC_API_STABLE void arq_test_inject_inbound(ArqRawUdp*, std::vector<std::uint8_t>);
+NIMRTC_API_STABLE void arq_test_tick_retransmit(ArqRawUdp*);
 
 } // namespace nimrtc::raw_udp

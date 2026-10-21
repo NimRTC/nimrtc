@@ -56,6 +56,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -65,7 +66,7 @@
 #include <nimrtc/plugins/datachannel.hpp>  // IDataChannel / IDataChannelFactory
 
 namespace nimrtc::sctp {
-class ISctpSocket;
+class NIMRTC_API_STABLE ISctpSocket;
 }
 
 namespace nimrtc::datachannel {
@@ -151,7 +152,7 @@ using plugins::kErrInternal;
  * underlying transport handshake is performed here — that's the
  * engine's responsibility).
  */
-class SctpDataChannel final : public plugins::IDataChannel {
+class NIMRTC_API_STABLE SctpDataChannel final : public plugins::IDataChannel {
 public:
     /**
      * @brief Production constructor — creates the underlying
@@ -264,7 +265,7 @@ private:
  * is a stateless thin shell — see the .cpp for the registration
  * entry point.
  */
-class SctpDataChannelFactory final : public plugins::IDataChannelFactory {
+class NIMRTC_API_STABLE SctpDataChannelFactory final : public plugins::IDataChannelFactory {
 public:
     SctpDataChannelFactory() = default;
     ~SctpDataChannelFactory() override = default;
@@ -307,7 +308,7 @@ public:
  * ice.cpp / audio3a_plugin.cpp comment for why the symbol must land
  * in a real .obj inside `nimrtc_datachannel.lib`.
  */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::datachannel
 

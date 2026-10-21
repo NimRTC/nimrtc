@@ -20,6 +20,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <string_view>
 
 #include <nimrtc/core/registry.hpp>
@@ -37,7 +38,7 @@
 namespace nimrtc::engine::pal {
 
 /** Resolve an `IAudio3AFactory` by plugin id. Returns nullptr if not registered. */
-[[nodiscard]] inline const plugins::IAudio3AFactory*
+[[nodiscard]] NIMRTC_API_STABLE inline const plugins::IAudio3AFactory*
 resolve_audio3a(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_audio3a(id);
 }

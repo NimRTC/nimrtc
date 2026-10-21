@@ -35,6 +35,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <functional>
@@ -49,12 +50,12 @@
 
 // Re-export plugin types under nimrtc::sched:: for backwards-compatibility.
 namespace nimrtc::sched {
-    using Priority           = plugins::Priority;
-    using SchedulerConfig    = plugins::SchedulerConfig;
-    using SchedulerStats     = plugins::SchedulerStats;
-    using DrainCallback      = plugins::DrainCallback;
-    using IScheduler         = plugins::IScheduler;
-    constexpr std::size_t kPriorityCount = plugins::kPriorityCount;
+    using NIMRTC_API_STABLE Priority           = plugins::Priority;
+    using NIMRTC_API_STABLE SchedulerConfig    = plugins::SchedulerConfig;
+    using NIMRTC_API_STABLE SchedulerStats     = plugins::SchedulerStats;
+    using NIMRTC_API_STABLE DrainCallback      = plugins::DrainCallback;
+    using NIMRTC_API_STABLE IScheduler         = plugins::IScheduler;
+    NIMRTC_API_STABLE constexpr std::size_t kPriorityCount = plugins::kPriorityCount;
 
     // NOTE: `plugins::priority_rank` is a free function in `nimrtc::plugins::`
     // and is picked up through ADL on the `Priority` argument (which is
@@ -66,7 +67,7 @@ namespace nimrtc::sched {
     // from `plugins::` because priority traversal is a sched-module concept.
 
     /** Return the next lower priority, or std::nullopt at the bottom. */
-    [[nodiscard]] constexpr std::optional<Priority> lower_priority(Priority p) noexcept {
+    [[nodiscard]] NIMRTC_API_STABLE constexpr std::optional<Priority> lower_priority(Priority p) noexcept {
         if (p == Priority::kBestEffort) return std::nullopt;
         return static_cast<Priority>(static_cast<std::uint8_t>(p) + 1);
     }
@@ -90,10 +91,10 @@ namespace nimrtc::sched {
     };
 
     /** Number of L1 priority buckets (High / Normal / Low). */
-    constexpr std::size_t kStreamPriorityCount = 3;
+    NIMRTC_API_STABLE constexpr std::size_t kStreamPriorityCount = 3;
 
     /** Convert a StreamPriority to its integer rank (0 = High, 2 = Low). */
-    [[nodiscard]] constexpr std::size_t
+    [[nodiscard]] NIMRTC_API_STABLE constexpr std::size_t
     stream_priority_rank(StreamPriority p) noexcept {
         return static_cast<std::size_t>(p);
     }
@@ -110,7 +111,7 @@ namespace nimrtc::sched {
  *  Used by the default `"strict_priority"` plugin id. A weighted-fair or
  *  EDF scheduler can register under a different id and the engine will
  *  resolve it through `core::PluginRegistry::get_scheduler()`. */
-class Scheduler final : public plugins::IScheduler {
+class NIMRTC_API_STABLE Scheduler final : public plugins::IScheduler {
 public:
     explicit Scheduler(plugins::SchedulerConfig config = {});
     ~Scheduler() override;
@@ -203,29 +204,29 @@ private:
 // =============================================================================
 
 /** Opaque handle to a Scheduler instance for the C ABI. */
-struct SchedulerHandle;
+struct NIMRTC_API_STABLE SchedulerHandle;
 
 /** Allocate a new Scheduler and return an opaque handle.
  *  Pass nullptr for `config` to use defaults. */
-[[nodiscard]] SchedulerHandle*
+[[nodiscard]] NIMRTC_API_STABLE SchedulerHandle*
 sched_create(const plugins::SchedulerConfig* config) noexcept;
 
 /** Destroy a SchedulerHandle returned by sched_create(). */
-void sched_destroy(SchedulerHandle* h) noexcept;
+NIMRTC_API_STABLE void sched_destroy(SchedulerHandle* h) noexcept;
 
 /** C wrapper for set_stream_priority. */
-void sched_set_stream_priority(SchedulerHandle* h,
+NIMRTC_API_STABLE void sched_set_stream_priority(SchedulerHandle* h,
                                std::uint32_t stream_id,
                                StreamPriority level) noexcept;
 
 /** C wrapper for get_stream_priority. Returns Normal if not found. */
-[[nodiscard]] StreamPriority
+[[nodiscard]] NIMRTC_API_STABLE StreamPriority
 sched_get_stream_priority(const SchedulerHandle* h,
                           std::uint32_t stream_id) noexcept;
 
 /** C wrapper for enqueue_for_stream_owned.
  *  Pass nullptr for `data` and `len=0` to indicate an empty payload. */
-void sched_enqueue_stream_owned(SchedulerHandle* h,
+NIMRTC_API_STABLE void sched_enqueue_stream_owned(SchedulerHandle* h,
                                std::uint32_t stream_id,
                                const std::uint8_t* data,
                                std::size_t len,
@@ -234,7 +235,7 @@ void sched_enqueue_stream_owned(SchedulerHandle* h,
 /** C wrapper for select_next_packet.
  *  Pass nullptr for `cb` to drain without a callback.
  *  Returns the number of packets drained. */
-[[nodiscard]] int
+[[nodiscard]] NIMRTC_API_STABLE int
 sched_select_next_packet(SchedulerHandle* h,
                          int max_packets,
                          void (*on_packet)(std::uint32_t stream_id,

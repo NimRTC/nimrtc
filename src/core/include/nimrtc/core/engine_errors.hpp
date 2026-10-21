@@ -47,16 +47,17 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 #include <cstdint>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::core {
 
 // ---------------------------------------------------------------------------
 // Engine lifecycle / state
 // ---------------------------------------------------------------------------
-constexpr std::uint32_t kEngineInvalidParam = 0x1001;  // == plugins::kErrInvalidParam
-constexpr std::uint32_t kEngineNotReady     = 0x1002;  // == plugins::kErrNotReady
-constexpr std::uint32_t kEngineSdpCorrupt   = 0x1004;  // == plugins::kErrCorrupt
-constexpr std::uint32_t kEngineInternal     = 0x1FFF;  // == plugins::kErrInternal
+inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineInvalidParam = 0x1001;  // == plugins::kErrInvalidParam
+inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineNotReady     = 0x1002;  // == plugins::kErrNotReady
+inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineSdpCorrupt   = 0x1004;  // == plugins::kErrCorrupt
+inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineInternal     = 0x1FFF;  // == plugins::kErrInternal
 
 // ---------------------------------------------------------------------------
 // Transport (ICE) — 0x1F00..0x1FFF
@@ -69,34 +70,34 @@ constexpr std::uint32_t kEngineInternal     = 0x1FFF;  // == plugins::kErrIntern
 // ---------------------------------------------------------------------------
 // DTLS — 0x2000..0x20FF
 // ---------------------------------------------------------------------------
-constexpr std::uint32_t kDtlsOpenFailed     = 0x2000;  // dtls_->open() returned false
-constexpr std::uint32_t kDtlsHandshakeFail  = 0x2001;  // reserved (peer rejected)
-constexpr std::uint32_t kDtlsKeyDeriveFail  = 0x2002;  // reserved
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDtlsOpenFailed     = 0x2000;  // dtls_->open() returned false
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDtlsHandshakeFail  = 0x2001;  // reserved (peer rejected)
+inline constexpr NIMRTC_API_STABLE std::uint32_t kDtlsKeyDeriveFail  = 0x2002;  // reserved
 
 // ---------------------------------------------------------------------------
 // Audio3A plugin loader — 0x1A00..0x1A1F
 // ---------------------------------------------------------------------------
-constexpr std::uint32_t kAudio3APluginOpenFailed = 0x1A00;
-constexpr std::uint32_t kAudio3APluginMissing    = 0x1A01;  // reserved
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudio3APluginOpenFailed = 0x1A00;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudio3APluginMissing    = 0x1A01;  // reserved
 
 // ---------------------------------------------------------------------------
 // Video plugin loader — 0x1A20..0x1A3F
 // ---------------------------------------------------------------------------
 // Each subsystem reserves 4 codes: open failure, factory null, not-found,
 // reserved.
-constexpr std::uint32_t kVideoSinkOpenFailed     = 0x1A20;
-constexpr std::uint32_t kVideoSinkPluginMissing  = 0x1A22;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSinkOpenFailed     = 0x1A20;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSinkPluginMissing  = 0x1A22;
 
-constexpr std::uint32_t kVideoSourceOpenFailed    = 0x1A21;
-constexpr std::uint32_t kVideoSourcePluginMissing = 0x1A23;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSourceOpenFailed    = 0x1A21;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSourcePluginMissing = 0x1A23;
 
-constexpr std::uint32_t kVideoReceiverOpenFailed    = 0x1A24;
-constexpr std::uint32_t kVideoReceiverPluginMissing = 0x1A25;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoReceiverOpenFailed    = 0x1A24;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoReceiverPluginMissing = 0x1A25;
 
-constexpr std::uint32_t kVideoSenderOpenFailed    = 0x1A26;
-constexpr std::uint32_t kVideoSenderPluginMissing = 0x1A27;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderOpenFailed    = 0x1A26;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1A27;
 
-constexpr std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
-constexpr std::uint32_t kVideoCodecPluginMissing = 0x1A31;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 
 } // namespace nimrtc::core

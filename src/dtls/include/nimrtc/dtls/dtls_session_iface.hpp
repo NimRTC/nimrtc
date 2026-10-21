@@ -86,6 +86,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -107,8 +108,8 @@ namespace nimrtc::dtls {
 // here would force every consumer of the seam to also pull in the
 // concrete dtls config; the forward declaration keeps the seam header
 // minimal.
-struct Config;
-using DtlsConfig = Config;   // alias requested by the Slice 4 DoD
+struct NIMRTC_API_STABLE Config;
+using NIMRTC_API_STABLE DtlsConfig = Config;   // alias requested by the Slice 4 DoD
 
 /**
  * @brief DTLS role — Server (answerer) or Client (offerer).
@@ -118,7 +119,7 @@ using DtlsConfig = Config;   // alias requested by the Slice 4 DoD
  * role concept.  See the header comment deviation note above for why
  * this isn't `plugins::Role`.
  */
-enum class Role : std::uint8_t {
+enum class NIMRTC_API_STABLE Role : std::uint8_t {
     Server = 0,
     Client = 1,
 };
@@ -131,7 +132,7 @@ enum class Role : std::uint8_t {
  *
  * @see docs/plan/transport-selection.md §5.2 / §6.1.
  */
-class IDtlsSession {
+class NIMRTC_API_STABLE IDtlsSession {
 public:
     /**
      * @brief One-shot completion callback.

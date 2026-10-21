@@ -32,6 +32,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_BWE_HPP
@@ -58,7 +59,7 @@ namespace nimrtc::plugins {
  *  Implementations are free to ignore fields that don't apply to their
  *  algorithm (e.g. a fixed-rate BWE only reads `initial_bitrate_bps`).
  *  Field semantics follow §6. */
-struct BweConfig {
+struct NIMRTC_API_STABLE BweConfig {
     /** Initial target bitrate (bits per second). */
     std::uint32_t initial_bitrate_bps = 1'000'000;   // 1 Mbps
 
@@ -90,7 +91,7 @@ struct BweConfig {
  *  Loss rate is the ratio over a single RTCP reporting window; RTT is the
  *  smoothed round-trip time; REMB is the receiver-reported estimate (when
  *  present, override local if higher after sanity checks). */
-struct BweFeedback {
+struct NIMRTC_API_STABLE BweFeedback {
     /** Loss rate in [0.0, 1.0]. */
     double loss_rate = 0.0;
 
@@ -115,7 +116,7 @@ struct BweFeedback {
 // ---------------------------------------------------------------------------
 
 /** Latest bandwidth estimate + observability metadata. */
-struct BweEstimate {
+struct NIMRTC_API_STABLE BweEstimate {
     /** Target egress bitrate (bps) the sender should aim for. */
     std::uint32_t target_bitrate_bps = 0;
 
@@ -146,7 +147,7 @@ struct BweEstimate {
  *  Implementations are pure consumers of feedback signals — they do NOT
  *  send packets or own pacing timers. The caller (engine / scheduler)
  *  owns the wire side and decides how to act on the estimate. */
-class IBwe : public IPlugin {
+class NIMRTC_API_STABLE IBwe : public IPlugin {
 public:
     ~IBwe() override = default;
 
@@ -179,7 +180,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for BWE implementations. */
-class IBweFactory {
+class NIMRTC_API_STABLE IBweFactory {
 public:
     virtual ~IBweFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -191,7 +192,7 @@ public:
 
 /** Template helper — creates a factory that owns a BWE type T. */
 template<class T>
-class SimpleBweFactory : public IBweFactory {
+class NIMRTC_API_STABLE SimpleBweFactory : public IBweFactory {
     std::string_view id_;
     std::string_view name_;
 public:

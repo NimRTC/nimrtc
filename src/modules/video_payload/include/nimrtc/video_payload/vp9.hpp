@@ -31,6 +31,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -44,7 +45,7 @@ namespace nimrtc::video_payload::vp9 {
 // Descriptor
 // ---------------------------------------------------------------------------
 
-struct Descriptor {
+struct NIMRTC_API_STABLE Descriptor {
     /** Picture ID. If `has_picture_id` is false, value is unspecified. */
     bool         has_picture_id = false;
     bool         picture_id_16bit = false;   ///< M=1 → 16-bit; M=0 → 7-bit
@@ -66,19 +67,19 @@ struct Descriptor {
 
 /** Total size of the descriptor for this payload, in bytes.
  *  Returns 1, 2, or 3 depending on has_picture_id / has_layer_info. */
-std::size_t descriptor_size(const Descriptor& d) noexcept;
+NIMRTC_API_STABLE std::size_t descriptor_size(const Descriptor& d) noexcept;
 
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
-struct ParseResult {
+struct NIMRTC_API_STABLE ParseResult {
     bool          parsed_ok = false;
     Descriptor    desc{};
     core::ByteSpan bitstream;
 };
 
-ParseResult parse(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE ParseResult parse(core::ByteSpan payload) noexcept;
 
 // ---------------------------------------------------------------------------
 // Build
@@ -86,12 +87,12 @@ ParseResult parse(core::ByteSpan payload) noexcept;
 
 /** Write the VP9 payload descriptor into @p output.
  *  @return Number of bytes written; 0 on overflow / unsupported config. */
-std::size_t build_descriptor(const Descriptor& d,
+NIMRTC_API_STABLE std::size_t build_descriptor(const Descriptor& d,
                              core::MutableByteSpan output) noexcept;
 
 /** Build a complete VP9 RTP payload (descriptor + bitstream) into @p output.
  *  @return Number of bytes written. */
-std::size_t build(const Descriptor& d,
+NIMRTC_API_STABLE std::size_t build(const Descriptor& d,
                   core::ByteSpan bitstream,
                   core::MutableByteSpan output) noexcept;
 

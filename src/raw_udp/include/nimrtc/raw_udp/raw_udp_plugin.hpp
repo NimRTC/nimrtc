@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <nimrtc/core/api_version.hpp>   // NIMRTC_API_STABLE
 
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
@@ -24,6 +25,6 @@ namespace nimrtc::raw_udp {
  *  MSVC static-link workaround: not `inline` so the symbol is guaranteed
  *  in nimrtc_raw_udp.lib (matches nimrtc::ice::register_default_plugins
  *  convention). */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::raw_udp

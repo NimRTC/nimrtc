@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -46,7 +47,7 @@ namespace nimrtc::audio3a {
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
-struct Config {
+struct NIMRTC_API_STABLE Config {
     // Audio format
     std::uint32_t sample_rate_hz = 48000;
     std::uint8_t  capture_channels = 1;
@@ -75,7 +76,7 @@ struct Config {
 // -----------------------------------------------------------------------------
 
 // Audio frame — interleaved PCM samples
-struct Frame {
+struct NIMRTC_API_STABLE Frame {
     float*        samples = nullptr;     // interleaved: [ch0_s0, ch1_s0, ch0_s1, ch1_s1, ...]
     std::size_t   num_samples = 0;      // samples per channel
     std::size_t   num_channels = 1;
@@ -84,7 +85,7 @@ struct Frame {
 };
 
 // Level metrics (dBFS: dB relative to full scale)
-struct LevelStats {
+struct NIMRTC_API_STABLE LevelStats {
     float capture_level_dbfs = -96.0f;
     float render_level_dbfs = -96.0f;
     bool  vad_active = false;
@@ -93,7 +94,7 @@ struct LevelStats {
 // -----------------------------------------------------------------------------
 // IAudio3A — pluggable interface
 // -----------------------------------------------------------------------------
-class IAudio3A {
+class NIMRTC_API_STABLE IAudio3A {
 public:
     virtual ~IAudio3A() = default;
 
@@ -127,7 +128,7 @@ public:
 // -----------------------------------------------------------------------------
 // NullAudio3A — no-op stub for testing
 // -----------------------------------------------------------------------------
-class NullAudio3A : public IAudio3A {
+class NIMRTC_API_STABLE NullAudio3A : public IAudio3A {
 public:
     bool init(const Config& config) override;
     void process_capture(Frame& frame) override;
@@ -149,7 +150,7 @@ private:
 // WebRtcAudio3A — WebRTC APM integration
 // Requires NIMRTC_VENDORED_WEBRTC_APM=ON and source populated.
 // -----------------------------------------------------------------------------
-class WebRtcAudio3A : public IAudio3A {
+class NIMRTC_API_STABLE WebRtcAudio3A : public IAudio3A {
 public:
     WebRtcAudio3A();
     ~WebRtcAudio3A() override;
@@ -171,8 +172,8 @@ private:
 // -----------------------------------------------------------------------------
 // Factory
 // -----------------------------------------------------------------------------
-std::unique_ptr<IAudio3A> create_null_audio3a();
-std::unique_ptr<IAudio3A> create_webrtc_audio3a();
-std::unique_ptr<IAudio3A> create_audio3a(std::string_view type);
+NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_null_audio3a();
+NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_webrtc_audio3a();
+NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_audio3a(std::string_view type);
 
 } // namespace nimrtc::audio3a

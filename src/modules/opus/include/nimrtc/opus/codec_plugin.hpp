@@ -33,6 +33,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -53,7 +54,7 @@ namespace nimrtc::opus {
  * a valid CodecConfig (or with sample_rate/channels defaulted) before
  * encode()/decode().
  */
-class CodecPluginAdapter : public plugins::ICodec {
+class NIMRTC_API_STABLE CodecPluginAdapter : public plugins::ICodec {
 public:
     explicit CodecPluginAdapter(plugins::CodecConfig cfg);
     ~CodecPluginAdapter() override;
@@ -127,7 +128,7 @@ private:
  * a different codec register their own ICodecFactory and set
  * cfg.codec_name accordingly.
  */
-class OpusPluginFactory : public plugins::ICodecFactory {
+class NIMRTC_API_STABLE OpusPluginFactory : public plugins::ICodecFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;

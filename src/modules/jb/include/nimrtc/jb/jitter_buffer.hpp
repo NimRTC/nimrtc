@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -29,7 +30,7 @@ namespace nimrtc::jb {
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
-struct Config {
+struct NIMRTC_API_STABLE Config {
     core::Milliseconds initial_delay = core::Milliseconds{50};
     core::Milliseconds min_delay     = core::Milliseconds{20};
     core::Milliseconds max_delay     = core::Milliseconds{400};
@@ -53,7 +54,7 @@ struct Config {
 // Frame — output unit.
 // A frame may consist of one or more RTP packets sharing an RTP timestamp.
 // -----------------------------------------------------------------------------
-struct Frame {
+struct NIMRTC_API_STABLE Frame {
     std::vector<rtp::PacketView> packets;
     std::uint32_t    frame_timestamp    = 0;       // RTP timestamp of first packet
     core::Nanoseconds capture_latency   = {};      // now - first arrival (sanity check)
@@ -68,7 +69,7 @@ struct Frame {
 // -----------------------------------------------------------------------------
 // Stats — observability for /stats endpoint and tests.
 // -----------------------------------------------------------------------------
-struct Stats {
+struct NIMRTC_API_STABLE Stats {
     std::size_t          buffered_packets = 0;
     std::size_t          frames_emitted   = 0;
     std::size_t          packets_dropped  = 0;
@@ -79,7 +80,7 @@ struct Stats {
 // -----------------------------------------------------------------------------
 // JitterBuffer
 // -----------------------------------------------------------------------------
-class JitterBuffer {
+class NIMRTC_API_STABLE JitterBuffer {
 public:
     JitterBuffer();                              // uses default Config
     explicit JitterBuffer(Config config);

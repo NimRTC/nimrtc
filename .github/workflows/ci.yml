@@ -71,6 +71,21 @@ jobs:
         shell: pwsh
         run: python tools/check_vendor.py
 
+      - name: API freeze — per-symbol classification
+        # Every namespace-scope symbol in a public header must carry a
+        # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015
+        # "Verification").  The scanner exits non-zero when a public
+        # symbol is unclassified.  Node ships preinstalled on every
+        # GitHub-hosted runner image.
+        run: node scripts/api_freeze_scan.js
+
+      - name: API freeze — marker include hygiene
+        # A header that *uses* NIMRTC_API_STABLE / UNSTABLE / DEPRECATED
+        # must also include <nimrtc/core/api_version.hpp>, otherwise the
+        # first consumer to include that header standalone hits MSVC
+        # C2079 ("uses undefined struct") instead of a clean error.
+        run: python scripts/check_api_marker_includes.py
+
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check
         shell: pwsh
@@ -132,6 +147,21 @@ jobs:
         if: hashFiles('src/third_party/vendor.json') != ''
         continue-on-error: true
         run: python tools/check_vendor.py
+
+      - name: API freeze — per-symbol classification
+        # Every namespace-scope symbol in a public header must carry a
+        # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015
+        # "Verification").  The scanner exits non-zero when a public
+        # symbol is unclassified.  Node ships preinstalled on every
+        # GitHub-hosted runner image.
+        run: node scripts/api_freeze_scan.js
+
+      - name: API freeze — marker include hygiene
+        # A header that *uses* NIMRTC_API_STABLE / UNSTABLE / DEPRECATED
+        # must also include <nimrtc/core/api_version.hpp>, otherwise the
+        # first consumer to include that header standalone hits MSVC
+        # C2079 ("uses undefined struct") instead of a clean error.
+        run: python3 scripts/check_api_marker_includes.py
 
       # Ubuntu 22.04 ships CMake 3.22.3; CMakePresets.json uses preset
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
@@ -204,6 +234,21 @@ jobs:
         continue-on-error: true
         run: python tools/check_vendor.py
 
+      - name: API freeze — per-symbol classification
+        # Every namespace-scope symbol in a public header must carry a
+        # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015
+        # "Verification").  The scanner exits non-zero when a public
+        # symbol is unclassified.  Node ships preinstalled on every
+        # GitHub-hosted runner image.
+        run: node scripts/api_freeze_scan.js
+
+      - name: API freeze — marker include hygiene
+        # A header that *uses* NIMRTC_API_STABLE / UNSTABLE / DEPRECATED
+        # must also include <nimrtc/core/api_version.hpp>, otherwise the
+        # first consumer to include that header standalone hits MSVC
+        # C2079 ("uses undefined struct") instead of a clean error.
+        run: python3 scripts/check_api_marker_includes.py
+
       - name: Install ninja + g++ + aarch64 cross toolchain + Python
         run: |
           sudo apt-get update
@@ -264,6 +309,21 @@ jobs:
         if: hashFiles('src/third_party/vendor.json') != ''
         continue-on-error: true
         run: python tools/check_vendor.py
+
+      - name: API freeze — per-symbol classification
+        # Every namespace-scope symbol in a public header must carry a
+        # NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE marker (ADR-015
+        # "Verification").  The scanner exits non-zero when a public
+        # symbol is unclassified.  Node ships preinstalled on every
+        # GitHub-hosted runner image.
+        run: node scripts/api_freeze_scan.js
+
+      - name: API freeze — marker include hygiene
+        # A header that *uses* NIMRTC_API_STABLE / UNSTABLE / DEPRECATED
+        # must also include <nimrtc/core/api_version.hpp>, otherwise the
+        # first consumer to include that header standalone hits MSVC
+        # C2079 ("uses undefined struct") instead of a clean error.
+        run: python3 scripts/check_api_marker_includes.py
 
       # macos-14 ships CMake 3.27.x (≥ 3.25). Only Python is added here.
       - name: Install Python

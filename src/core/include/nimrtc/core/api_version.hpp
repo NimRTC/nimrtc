@@ -8,11 +8,11 @@
 /**
  * @file nimrtc/core/api_version.hpp
  * @brief NIMRTC_API_VERSION -- version constants + stability classification
- * markers (v1.0.0-alpha.1, PAL API-FREEZE framework).
+ * markers (v1.0.0-beta.1, PAL API-FREEZE framework).
  *
  * ## What this is
  *
- * `api_version.hpp` exposes two classes of symbols:
+ * `api_version.hpp` exposes three classes of symbols:
  *
  * 1. **Version constants** -- `NIMRTC_API_VERSION_MAJOR/MINOR/PATCH/PRE_RELEASE`
  *    and `NIMRTC_API_VERSION_STRING`.  These are compile-time literals derived
@@ -21,7 +21,12 @@
  *    kPreRelease` namespace constants provide the same values for runtime
  *    inspection.
  *
- * 2. **Stability classification markers** -- `NIMRTC_API_STABLE`,
+ * 2. **Encoded version integer** -- `NIMRTC_API_VERSION` encodes the version
+ *    as MAJOR*10000 + MINOR*100 + PATCH (e.g. v1.0.0 = 10000).  Use with
+ *    `NIMRTC_API_VERSION_CHECK(major, minor, patch)` for compile-time
+ *    version compatibility guards.
+ *
+ * 3. **Stability classification markers** -- `NIMRTC_API_STABLE`,
  *    `NIMRTC_API_UNSTABLE`, and `NIMRTC_API_DEPRECATED(msg)`.  These are
  *    applied to every public symbol in `src/<mod>/include/nimrtc/<mod>/<name>.hpp` as
  *    part of the v1.0.0-alpha.1 public-header classification sweep
@@ -58,9 +63,9 @@
  *
  * ## Sec.12.3.1 v1.0.0-alpha.1 DoD gate #6
  *
- * `tests/test_api_version.cpp` 5/5 PASS verifies the macro + namespace
- * constants are well-formed and that the STABLE/UNSTABLE/DEPRECATED
- * expansion is valid C++.
+ * `tests/test_api_version.cpp` 7/7 PASS verifies the macro + namespace
+ * constants are well-formed, that STABLE/UNSTABLE/DEPRECATED
+ * expansion is valid C++, and that NIMRTC_API_VERSION_CHECK works correctly.
  *
  * @see docs/plan/v1.0-plan.md Sec.2.1 (API-VERSION P0 item) and Sec.12
  *      (pre-release split).
@@ -83,6 +88,11 @@
 /// Pre-release identifier for v1.0.0-beta.1.  Empty string for final releases.
 #define NIMRTC_API_VERSION_PRE_RELEASE "beta.1"
 
+/// Encoded integer version for compile-time comparisons.
+/// Format: MAJOR*10000 + MINOR*100 + PATCH.  v1.0.0 = 10000.
+#define NIMRTC_API_VERSION \
+    (NIMRTC_API_VERSION_MAJOR * 10000 + NIMRTC_API_VERSION_MINOR * 100 + NIMRTC_API_VERSION_PATCH)
+
 // Two-level indirection required to expand __LINE__ if the caller passes
 // a macro rather than a literal string (C99/C++03 Sec.6.10.3).
 #define NIMRTC_API_VERSION_STRING_IMPL_(major, minor, patch) \
@@ -96,6 +106,27 @@
         NIMRTC_API_VERSION_MAJOR, \
         NIMRTC_API_VERSION_MINOR, \
         NIMRTC_API_VERSION_PATCH)
+
+/**
+ * @def NIMRTC_API_VERSION_CHECK(major, minor, patch)
+ * @brief Compile-time version compatibility check.
+ *
+ * Evaluates to true (non-zero) if the current NIMRTC_API_VERSION
+ * is greater than or equal to the specified version.
+ *
+ * Usage:
+ * @code
+ *   #if NIMRTC_API_VERSION_CHECK(1, 2, 0)
+ *     // code requiring v1.2.0 or later
+ *   #endif
+ * @endcode
+ *
+ * @param major  Major version number.
+ * @param minor  Minor version number.
+ * @param patch  Patch version number.
+ */
+#define NIMRTC_API_VERSION_CHECK(major, minor, patch) \
+    (NIMRTC_API_VERSION >= ((major) * 10000 + (minor) * 100 + (patch)))
 
 // -----------------------------------------------------------------------------
 // Stability classification markers
@@ -171,19 +202,19 @@
 namespace nimrtc::core::api_version {
 
 /// Major version number.
-inline constexpr int kMajor = NIMRTC_API_VERSION_MAJOR;
+NIMRTC_API_STABLE inline constexpr int kMajor = NIMRTC_API_VERSION_MAJOR;
 
 /// Minor version number.
-inline constexpr int kMinor = NIMRTC_API_VERSION_MINOR;
+NIMRTC_API_STABLE inline constexpr int kMinor = NIMRTC_API_VERSION_MINOR;
 
 /// Patch version number.
-inline constexpr int kPatch = NIMRTC_API_VERSION_PATCH;
+NIMRTC_API_STABLE inline constexpr int kPatch = NIMRTC_API_VERSION_PATCH;
 
 /// Human-readable version string "MAJOR.MINOR.PATCH".
-inline constexpr const char* kString = NIMRTC_API_VERSION_STRING;
+NIMRTC_API_STABLE inline constexpr const char* kString = NIMRTC_API_VERSION_STRING;
 
 /// Pre-release identifier (e.g. "alpha.1").  Empty string for final releases.
-inline constexpr const char* kPreRelease = NIMRTC_API_VERSION_PRE_RELEASE;
+NIMRTC_API_STABLE inline constexpr const char* kPreRelease = NIMRTC_API_VERSION_PRE_RELEASE;
 
 } // namespace nimrtc::core::api_version
 

@@ -35,6 +35,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -50,35 +51,35 @@ namespace nimrtc {
 // switch these to `#include <nimrtc/dtls/dtls_session_iface.hpp>` etc.
 // ---------------------------------------------------------------------------
 namespace plugins {
-class IICETransport;   // named "plugins::IICETransport" — Slice 4
+class NIMRTC_API_STABLE IICETransport;   // named "plugins::IICETransport" — Slice 4
                        // (already exists, see plugins/ice_transport.hpp)
-class IRTPFactory;
-class IRTP;
+class NIMRTC_API_STABLE IRTPFactory;
+class NIMRTC_API_STABLE IRTP;
 } // namespace plugins
 
 namespace dtls {
-class IDtlsSession;     // Slice 4 (does NOT exist yet — forward-declared only)
-class IDtlsSessionFactory;
+class NIMRTC_API_STABLE IDtlsSession;     // Slice 4 (does NOT exist yet — forward-declared only)
+class NIMRTC_API_STABLE IDtlsSessionFactory;
 } // namespace dtls
 
 namespace sctp {
-class ISctpSocket;      // Slice 5 (does NOT exist yet — forward-declared only)
-class ISctpSocketFactory;
+class NIMRTC_API_STABLE ISctpSocket;      // Slice 5 (does NOT exist yet — forward-declared only)
+class NIMRTC_API_STABLE ISctpSocketFactory;
 } // namespace sctp
 
 namespace raw_udp {
-class IRawUdpDatagram;  // Slice 6 (DOES exist — forward-declared for parallel
+class NIMRTC_API_STABLE IRawUdpDatagram;  // Slice 6 (DOES exist — forward-declared for parallel
                         // build isolation; the real include is added when
                         // Slice 6 lands as a sibling target. See
                         // transport_selector.cpp TODO.)
-class IRawUdpFactory;
+class NIMRTC_API_STABLE IRawUdpFactory;
 } // namespace raw_udp
 
 // ---------------------------------------------------------------------------
 // StackConfig — names the per-stack backend plugins (Slice 7 reads these
 // out of the JSON Profile; Selector passes them to the StackFactory).
 // ---------------------------------------------------------------------------
-struct StackConfig {
+struct NIMRTC_API_STABLE StackConfig {
     std::string ice_id   = "ice";      // plugins::IICETransportFactory id
     std::string dtls_id  = "wolfssl";  // dtls::IDtlsSessionFactory id (Slice 4)
     std::string sctp_id  = "usrsctp";  // sctp::ISctpSocketFactory id (Slice 5)
@@ -102,7 +103,7 @@ struct StackConfig {
 // raw-UDP bypass. The returned references are stable for the stack's
 // lifetime; consumers MUST NOT cache them past close().
 // ---------------------------------------------------------------------------
-class ITransportStack {
+class NIMRTC_API_STABLE ITransportStack {
 public:
     virtual ~ITransportStack() = default;
 
@@ -171,7 +172,7 @@ public:
 // etc.) land in Slice 7.5 — they depend on Slice 4/5/6 default impls
 // being merged first. Slice 7 ships only this interface + Selector.
 // ---------------------------------------------------------------------------
-class ITransportStackFactory {
+class NIMRTC_API_STABLE ITransportStackFactory {
 public:
     virtual ~ITransportStackFactory() = default;
 
@@ -195,7 +196,7 @@ public:
 // id strings so log lines / error messages can name which stack was
 // chosen.
 // ---------------------------------------------------------------------------
-struct TransportSession {
+struct NIMRTC_API_STABLE TransportSession {
     std::unique_ptr<ITransportStack> media_stack;
     std::unique_ptr<ITransportStack> control_stack;     // may be nullptr
     std::string media_stack_id;                         // e.g. "webrtc-classic"

@@ -48,6 +48,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -67,7 +68,7 @@ namespace nimrtc::video_pipeline {
 // `video_pipeline` don't need to pull SDP-format helpers.
 // ---------------------------------------------------------------------------
 
-enum class PacketizationMode : std::uint8_t {
+enum class NIMRTC_API_STABLE PacketizationMode : std::uint8_t {
     kSingleNal     = 0,   ///< only single-NALU packets allowed
     kNonInterleaved = 1,  ///< Single NAL + STAP-A + FU-A
     kInterleaved    = 2,  ///< STAP-B + FU-B; not implemented (RFC reserved)
@@ -77,7 +78,7 @@ enum class PacketizationMode : std::uint8_t {
 // Receiver configuration
 // ---------------------------------------------------------------------------
 
-struct ReceiverConfig {
+struct NIMRTC_API_STABLE ReceiverConfig {
     /** Codec of the inbound stream.  Determines which depacketizer path
      *  the receiver uses. */
     video_frame::CodecKind codec         = video_frame::CodecKind::kH264;
@@ -100,7 +101,7 @@ struct ReceiverConfig {
 // Receiver statistics
 // ---------------------------------------------------------------------------
 
-struct ReceiverStats {
+struct NIMRTC_API_STABLE ReceiverStats {
     std::uint64_t packets_pushed       = 0;
     std::uint64_t frames_emitted       = 0;
     std::uint64_t frames_incomplete    = 0;
@@ -119,7 +120,7 @@ struct ReceiverStats {
  *  for the duration of the callback; copy out if you need to keep it.
  *  - `frame` is the assembled compressed access unit.
  *  - `now_us` is the arrival time at which the JB finally emitted it. */
-using ReceiverFrameCallback =
+using NIMRTC_API_STABLE ReceiverFrameCallback =
     std::function<void(video_frame::EncodedVideoFrame frame,
                        std::int64_t now_us)>;
 
@@ -142,7 +143,7 @@ using ReceiverFrameCallback =
  *
  * Single-threaded.
  */
-class VideoReceiver {
+class NIMRTC_API_STABLE VideoReceiver {
 public:
     explicit VideoReceiver(ReceiverConfig cfg);
     ~VideoReceiver();
@@ -184,7 +185,7 @@ private:
 // Sender configuration
 // ---------------------------------------------------------------------------
 
-struct SenderConfig {
+struct NIMRTC_API_STABLE SenderConfig {
     video_frame::CodecKind  codec              = video_frame::CodecKind::kH264;
     std::uint32_t           ssrc               = 0;
     std::uint8_t            payload_type       = 0;
@@ -203,7 +204,7 @@ struct SenderConfig {
 // Sender statistics
 // ---------------------------------------------------------------------------
 
-struct SenderStats {
+struct NIMRTC_API_STABLE SenderStats {
     std::uint64_t frames_pushed                = 0;
     std::uint64_t packets_emitted              = 0;
     std::uint64_t fua_frames_packetized        = 0;
@@ -228,7 +229,7 @@ struct SenderStats {
  *
  *  The span is only valid for the duration of the callback; the sender
  *  reuses an internal buffer for subsequent packets. */
-using SenderPacketCallback =
+using NIMRTC_API_STABLE SenderPacketCallback =
     std::function<void(core::ByteSpan rtp_packet_payload,
                        std::uint32_t rtp_timestamp,
                        std::uint16_t seq,
@@ -251,7 +252,7 @@ using SenderPacketCallback =
  *
  * Single-threaded.
  */
-class VideoSender {
+class NIMRTC_API_STABLE VideoSender {
 public:
     explicit VideoSender(SenderConfig cfg);
     ~VideoSender();

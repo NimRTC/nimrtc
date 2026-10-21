@@ -34,6 +34,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 // Reuse VideoPixelFormat / VideoSourceFrame from the source plugin header
 // (so the decoder→sink handoff doesn't need a translation layer).
@@ -57,7 +58,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** Per-sink configuration. */
-struct VideoSinkConfig {
+struct NIMRTC_API_STABLE VideoSinkConfig {
     /** Target render width. 0 = use frame's native width. */
     std::uint32_t width  = 0;
 
@@ -83,7 +84,7 @@ struct VideoSinkConfig {
 // Sink statistics
 // ---------------------------------------------------------------------------
 
-struct VideoSinkStats {
+struct NIMRTC_API_STABLE VideoSinkStats {
     std::uint64_t frames_rendered      = 0;
     std::uint64_t frames_dropped       = 0;   ///< back-pressure drops
     std::uint64_t format_conversions   = 0;   ///< I420→BGRA etc.
@@ -102,7 +103,7 @@ struct VideoSinkStats {
  * One `IVideoSink` instance is owned by one receive stream (or shared
  * between streams for a multi-stream composite renderer).
  */
-class IVideoSink : public IPlugin {
+class NIMRTC_API_STABLE IVideoSink : public IPlugin {
 public:
     /** Render one decoded frame synchronously. Must return before the next
      *  frame can be delivered. Return kOk on success.
@@ -135,7 +136,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for video-sink plugin instances. */
-class IVideoSinkFactory {
+class NIMRTC_API_STABLE IVideoSinkFactory {
 public:
     virtual ~IVideoSinkFactory() = default;
 
@@ -152,7 +153,7 @@ public:
 };
 
 template<class T>
-class SimpleVideoSinkFactory : public IVideoSinkFactory {
+class NIMRTC_API_STABLE SimpleVideoSinkFactory : public IVideoSinkFactory {
     std::string_view id_;
     std::string_view name_;
 public:

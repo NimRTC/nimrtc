@@ -40,6 +40,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <string_view>
 
@@ -56,7 +57,7 @@ namespace nimrtc::dtls {
  * multiple threads concurrently — each call returns a fresh session
  * instance.
  */
-class IDtlsSessionFactory {
+class NIMRTC_API_STABLE IDtlsSessionFactory {
 public:
     virtual ~IDtlsSessionFactory() = default;
 

@@ -41,6 +41,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -54,7 +55,7 @@ namespace nimrtc::video_payload::vp8 {
 // Descriptor fields
 // ---------------------------------------------------------------------------
 
-struct Descriptor {
+struct NIMRTC_API_STABLE Descriptor {
     /** Partition index (0..7). */
     std::uint8_t partition_index = 0;
     /** True iff this is the start of a partition (S bit). */
@@ -70,19 +71,19 @@ struct Descriptor {
 
 /** Total size of the descriptor for this payload, in bytes.
  *  Returns 1 if X=0, 2 if only I is set, 3-4 if more bits are set. */
-std::size_t descriptor_size(const Descriptor& d) noexcept;
+NIMRTC_API_STABLE std::size_t descriptor_size(const Descriptor& d) noexcept;
 
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
-struct ParseResult {
+struct NIMRTC_API_STABLE ParseResult {
     bool          parsed_ok = false;
     Descriptor    desc{};
     core::ByteSpan bitstream;       ///< payload bytes AFTER the descriptor
 };
 
-ParseResult parse(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE ParseResult parse(core::ByteSpan payload) noexcept;
 
 // ---------------------------------------------------------------------------
 // Build
@@ -90,12 +91,12 @@ ParseResult parse(core::ByteSpan payload) noexcept;
 
 /** Write the VP8 payload descriptor into @p output.
  *  @return Number of bytes written; 0 on overflow / unsupported config. */
-std::size_t build_descriptor(const Descriptor& d,
+NIMRTC_API_STABLE std::size_t build_descriptor(const Descriptor& d,
                              core::MutableByteSpan output) noexcept;
 
 /** Build a complete VP8 RTP payload (descriptor + bitstream) into @p output.
  *  @return Number of bytes written. */
-std::size_t build(const Descriptor& d,
+NIMRTC_API_STABLE std::size_t build(const Descriptor& d,
                   core::ByteSpan bitstream,
                   core::MutableByteSpan output) noexcept;
 
@@ -105,7 +106,7 @@ std::size_t build(const Descriptor& d,
 
 /** True if the VP8 bitstream's first byte indicates a key frame.
  *  VP8 bitstream: byte 0 = frame tag.  Bits 0 = key frame flag (1=keyframe). */
-inline bool bitstream_is_keyframe(core::ByteSpan bitstream) noexcept {
+NIMRTC_API_STABLE inline bool bitstream_is_keyframe(core::ByteSpan bitstream) noexcept {
     return bitstream.size() >= 1 && (bitstream[0] & 0x01) != 0;
 }
 

@@ -43,6 +43,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_VIDEO_CODEC_HPP
@@ -66,21 +67,21 @@ namespace nimrtc::plugins {
 // can stay in the `nimrtc::plugins` namespace.
 // ---------------------------------------------------------------------------
 
-using VideoPixelFormat = video_frame::PixelFormat;
-using VideoCodecKind   = video_frame::CodecKind;
-using NaluFormat       = video_frame::NaluFormat;
-using GpuBackend       = video_frame::GpuBackend;
-using GpuHandle        = video_frame::GpuHandle;
-using GpuBuffer        = video_frame::GpuBuffer;
-using GpuBufferPool    = video_frame::GpuBufferPool;
+using NIMRTC_API_STABLE VideoPixelFormat = video_frame::PixelFormat;
+using NIMRTC_API_STABLE VideoCodecKind   = video_frame::CodecKind;
+using NIMRTC_API_STABLE NaluFormat       = video_frame::NaluFormat;
+using NIMRTC_API_STABLE GpuBackend       = video_frame::GpuBackend;
+using NIMRTC_API_STABLE GpuHandle        = video_frame::GpuHandle;
+using NIMRTC_API_STABLE GpuBuffer        = video_frame::GpuBuffer;
+using NIMRTC_API_STABLE GpuBufferPool    = video_frame::GpuBufferPool;
 
-inline std::string_view pixel_format_name(VideoPixelFormat f) noexcept {
+inline NIMRTC_API_STABLE std::string_view pixel_format_name(VideoPixelFormat f) noexcept {
     return video_frame::pixel_format_name(f);
 }
-inline std::string_view video_codec_name(VideoCodecKind k) noexcept {
+inline NIMRTC_API_STABLE std::string_view video_codec_name(VideoCodecKind k) noexcept {
     return video_frame::codec_name(k);
 }
-inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
+inline NIMRTC_API_STABLE std::string_view gpu_backend_name(GpuBackend b) noexcept {
     return video_frame::gpu_backend_name(b);
 }
 
@@ -102,12 +103,12 @@ inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
 // GpuBuffer's `cpu_mirror` plane pointers instead. See codec_plugin.cpp's
 // StubEncoder below for a migration example.
 
-using VideoFrame       = video_frame::VideoFrame;
-using EncodedVideoFrame = video_frame::EncodedVideoFrame;
+using NIMRTC_API_STABLE VideoFrame       = video_frame::VideoFrame;
+using NIMRTC_API_STABLE EncodedVideoFrame = video_frame::EncodedVideoFrame;
 
 /** Video codec configuration (passed at open() time). Mirrors the
  *  concrete module's `EncoderConfig` / `DecoderConfig`. */
-struct VideoCodecConfig {
+struct NIMRTC_API_STABLE VideoCodecConfig {
     /** Target width in pixels. */
     std::uint32_t width = 0;
 
@@ -140,7 +141,7 @@ struct VideoCodecConfig {
 // Codec statistics
 // ---------------------------------------------------------------------------
 
-struct VideoCodecStats {
+struct NIMRTC_API_STABLE VideoCodecStats {
     /** Total frames successfully encoded. */
     std::uint64_t frames_encoded = 0;
     /** Total bytes of encoded payload output. */
@@ -168,7 +169,7 @@ struct VideoCodecStats {
  * one peer-connection / one stream. Thread-safety: NOT thread-safe; caller
  * must serialize encode() and decode() calls (engine does this).
  */
-class IVideoCodec : public IPlugin {
+class NIMRTC_API_STABLE IVideoCodec : public IPlugin {
 public:
     // ---- Direction flags (one instance may support both) -------------------
 
@@ -305,7 +306,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class IVideoCodecFactory {
+class NIMRTC_API_STABLE IVideoCodecFactory {
 public:
     virtual ~IVideoCodecFactory() = default;
     virtual std::string_view id()           const noexcept = 0;
@@ -321,7 +322,7 @@ public:
 };
 
 template<class T>
-class SimpleVideoCodecFactory : public IVideoCodecFactory {
+class NIMRTC_API_STABLE SimpleVideoCodecFactory : public IVideoCodecFactory {
     std::string_view id_;
     std::string_view name_;
 public:

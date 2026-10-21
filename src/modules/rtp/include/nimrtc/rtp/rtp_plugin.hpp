@@ -31,6 +31,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -54,7 +55,7 @@ namespace nimrtc::rtp {
  * ITransport-style API is a no-op (RTP has no network state); kept for
  * IPlugin uniformity.
  */
-class PluginAdapter : public plugins::IRTP {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::IRTP {
 public:
     PluginAdapter();
     ~PluginAdapter() override;
@@ -120,7 +121,7 @@ private:
  *
  * Registered as id "webrtc" (matches EngineConfig::rtp_name default).
  */
-class PluginFactory : public plugins::IRTPFactory {
+class NIMRTC_API_STABLE PluginFactory : public plugins::IRTPFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;

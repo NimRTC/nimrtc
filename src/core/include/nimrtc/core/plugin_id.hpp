@@ -81,6 +81,7 @@
 // a v0.13.x follow-up.
 
 #include <string_view>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::core::detail {
 
@@ -95,7 +96,7 @@ namespace nimrtc::core::detail {
  *                callsites always produce two distinct types.
  */
 template <int Line>
-struct PluginIdTag {
+struct NIMRTC_API_STABLE PluginIdTag {
     const char* value;
 
     /// Compile-time check that the wrapped literal is non-empty.

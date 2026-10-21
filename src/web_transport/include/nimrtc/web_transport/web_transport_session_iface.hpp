@@ -91,9 +91,9 @@
 // declarations keep the session header minimal.
 namespace nimrtc::web_transport {
 
-class IBidirectionalStream;
-class IUnidirectionalStream;
-enum class WebTransportState : std::uint8_t;
+class NIMRTC_API_UNSTABLE IBidirectionalStream;
+class NIMRTC_API_UNSTABLE IUnidirectionalStream;
+enum class NIMRTC_API_UNSTABLE WebTransportState : std::uint8_t;
 
 /**
  * @brief One-shot inbound datagram callback.
@@ -106,7 +106,7 @@ enum class WebTransportState : std::uint8_t;
  * Pass an empty std::function to unregister. Not thread-safe; call
  * only from the engine thread.
  */
-using OnDatagramCb =
+using NIMRTC_API_UNSTABLE OnDatagramCb =
     std::function<void(std::span<const std::uint8_t> bytes)>;
 
 } // namespace nimrtc::web_transport

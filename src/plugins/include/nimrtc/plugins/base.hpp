@@ -26,6 +26,7 @@
 
 // Stable buffer types shared by plugin interfaces and concrete modules.
 #include <nimrtc/core/bytes.hpp>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::plugins {
 
@@ -34,17 +35,17 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** Opaque status code, zero = success. */
-using Status = uint32_t;
+using NIMRTC_API_STABLE Status = uint32_t;
 
-constexpr Status kOk               = 0x0000;
-constexpr Status kErrInvalidParam  = 0x1001;
-constexpr Status kErrNotReady     = 0x1002;
-constexpr Status kErrBufferTooSmall= 0x1003;
-constexpr Status kErrCorrupt      = 0x1004;
-constexpr Status kErrUnsupported   = 0x1005;
-constexpr Status kErrHardwareError = 0x1006;  // GPU SDK / driver failure
-constexpr Status kErrClosed        = 0x1007;  // peer closed / reset / FIN
-constexpr Status kErrInternal      = 0x1FFF;
+inline constexpr NIMRTC_API_STABLE Status kOk               = 0x0000;
+inline constexpr NIMRTC_API_STABLE Status kErrInvalidParam  = 0x1001;
+inline constexpr NIMRTC_API_STABLE Status kErrNotReady     = 0x1002;
+inline constexpr NIMRTC_API_STABLE Status kErrBufferTooSmall= 0x1003;
+inline constexpr NIMRTC_API_STABLE Status kErrCorrupt      = 0x1004;
+inline constexpr NIMRTC_API_STABLE Status kErrUnsupported   = 0x1005;
+inline constexpr NIMRTC_API_STABLE Status kErrHardwareError = 0x1006;  // GPU SDK / driver failure
+inline constexpr NIMRTC_API_STABLE Status kErrClosed        = 0x1007;  // peer closed / reset / FIN
+inline constexpr NIMRTC_API_STABLE Status kErrInternal      = 0x1FFF;
 
 /** Human-readable status message, may be nullptr. */
 inline const char* status_string(Status s) noexcept {
@@ -66,25 +67,25 @@ inline const char* status_string(Status s) noexcept {
 // ---------------------------------------------------------------------------
 
 /** Monotonic microsecond counter (same epoch as std::chrono). */
-using TimestampUs = int64_t;
+using NIMRTC_API_STABLE TimestampUs = int64_t;
 
 /** RTP NTP timestamp fraction scale (2^32). */
-using Ntp64 = uint64_t;
+using NIMRTC_API_STABLE Ntp64 = uint64_t;
 
 // ---------------------------------------------------------------------------
 // Network address (opaque, protocol-agnostic)
 // ---------------------------------------------------------------------------
 
 /** Maximum size of an encoded network address. */
-constexpr size_t kMaxAddrLen = 64;
+inline constexpr NIMRTC_API_STABLE size_t kMaxAddrLen = 64;
 
 /** Opaque network address. Transport implementations own the format. */
-struct Addr {
+struct NIMRTC_API_STABLE Addr {
     uint8_t data[kMaxAddrLen] = {0};
     uint32_t len = 0;
 };
 
-inline bool operator==(const Addr& a, const Addr& b) noexcept {
+NIMRTC_API_STABLE inline bool operator==(const Addr& a, const Addr& b) noexcept {
     return a.len == b.len && std::memcmp(a.data, b.data, a.len) == 0;
 }
 inline bool operator!=(const Addr& a, const Addr& b) noexcept { return !(a == b); }
@@ -100,7 +101,7 @@ using BufferView = core::ByteSpan;
 
 /** Mutable outbound packet descriptor.
  *  Wraps nimrtc::core::MutableByteSpan with an additional destination address. */
-struct OutPacket {
+struct NIMRTC_API_STABLE OutPacket {
     core::MutableByteSpan buf;  // data + capacity
     size_t               len    = 0;  // valid bytes written
     Addr                dst_addr;    // destination address
@@ -156,19 +157,19 @@ struct OutPacket {
  *  `plugins::Addr` — raw UDP talks to the same opaque address
  *  encoding that `ITransport::send` / `recv` already use.
  *  Promoted from raw_udp_datagram.hpp in Slice 8. */
-using Endpoint = Addr;
+using NIMRTC_API_STABLE Endpoint = Addr;
 
 /** Per-datagram receive callback used by IRawUdpDatagram::on_recv.
  *  Fires from the ARQ recv thread on each in-window, in-order
  *  delivered datagram. Promoted from raw_udp_datagram.hpp in Slice 8. */
-using OnDatagramCb = std::function<void(BufferView)>;
+using NIMRTC_API_STABLE OnDatagramCb = std::function<void(BufferView)>;
 
 /** Inbound SCTP message callback used by ISctpSocket::set_on_recv.
  *  `stream` is the SCTP stream id (0..65534) the message arrived on;
  *  `data` is the message payload (zero-copy view; lifetime ends when
  *  the callback returns). Promoted from sctp_socket_iface.hpp in
  *  Slice 8. */
-using OnSctpRecvCb = std::function<void(uint16_t stream,
+using NIMRTC_API_STABLE OnSctpRecvCb = std::function<void(uint16_t stream,
                                         core::ByteSpan data)>;
 
 // ---------------------------------------------------------------------------
@@ -176,7 +177,7 @@ using OnSctpRecvCb = std::function<void(uint16_t stream,
 // ---------------------------------------------------------------------------
 
 /** Uncompressed audio/video sample descriptor. */
-struct MediaSample {
+struct NIMRTC_API_STABLE MediaSample {
     enum class Kind : uint8_t { kAudio = 0, kVideo = 1 };
     Kind kind = Kind::kAudio;
 
@@ -204,7 +205,7 @@ struct MediaSample {
 // ---------------------------------------------------------------------------
 
 /** Every plugin implements this interface. */
-class IPlugin {
+class NIMRTC_API_STABLE IPlugin {
 public:
     virtual ~IPlugin() = default;
 
@@ -228,7 +229,7 @@ public:
  *  Concrete factories (e.g. IDataChannelFactory) inherit from this so
  *  the PluginRegistry can hold heterogeneous factory types uniformly.
  *  @note P1 scaffold — stable interface, binary layout TBD P4. */
-class IPluginFactory {
+class NIMRTC_API_STABLE IPluginFactory {
 public:
     virtual ~IPluginFactory() = default;
 

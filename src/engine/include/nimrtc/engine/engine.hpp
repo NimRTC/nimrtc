@@ -94,23 +94,23 @@
 // src/engine/src/engine.cpp.  This keeps engine.hpp free of concrete
 // module dependency surface (Layout Invariant 4).
 namespace nimrtc::sdp {
-struct SessionDescription;
+struct NIMRTC_API_STABLE SessionDescription;
 } // namespace nimrtc::sdp
 
-namespace nimrtc::rtp    { struct PacketView; }
-namespace nimrtc::jb     { class JitterBuffer; }
-namespace nimrtc::audio3a { class IAudio3A; }
+namespace nimrtc::rtp    { struct NIMRTC_API_STABLE PacketView; }
+namespace nimrtc::jb     { class NIMRTC_API_STABLE JitterBuffer; }
+namespace nimrtc::audio3a { class NIMRTC_API_STABLE IAudio3A; }
 namespace nimrtc::dtls   {
-enum class DtlsState : std::uint8_t;
-class DtlsSession;
-class DtlsSessionWolfSSL;
+enum class NIMRTC_API_STABLE DtlsState : std::uint8_t;
+class NIMRTC_API_STABLE DtlsSession;
+class NIMRTC_API_STABLE DtlsSessionWolfSSL;
 }
-namespace nimrtc::srtp   { class SrtpContext; }
+namespace nimrtc::srtp   { class NIMRTC_API_STABLE SrtpContext; }
 #ifdef NIMRTC_HAS_OPUS
-namespace nimrtc::opus   { class Encoder; class Decoder; }
+namespace nimrtc::opus   { class NIMRTC_API_STABLE Encoder; class Decoder; }
 #endif
 namespace nimrtc::plugins {
-class IVideoCodec;
+class NIMRTC_API_STABLE IVideoCodec;
 }
 
 namespace nimrtc::engine {

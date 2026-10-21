@@ -15,6 +15,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_SDP_HPP
@@ -39,7 +40,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** Media description (one "m=" line and its attributes). */
-struct SdpMedia {
+struct NIMRTC_API_STABLE SdpMedia {
     std::string_view media;          // "audio", "video", "application", …
     uint16_t port = 0;
     std::string_view proto;          // "RTP/AVP", "RTP/SAVPF", …
@@ -58,7 +59,7 @@ struct SdpMedia {
 };
 
 /** Session-level description. */
-struct SdpSession {
+struct NIMRTC_API_STABLE SdpSession {
     std::string_view version;         // "v=0"
     std::string_view origin;          // "o=- …"
     std::string_view session_name;    // "s=-"
@@ -83,7 +84,7 @@ struct SdpSession {
 // ---------------------------------------------------------------------------
 
 /** Per-codec constraints for munging. */
-struct SdpCodecConfig {
+struct NIMRTC_API_STABLE SdpCodecConfig {
     std::string_view codec_name;    // "opus", "vp8", "h264", …
     int ptime_ms = 0;               // 0 = keep default
     int max_ptime_ms = 0;
@@ -94,7 +95,7 @@ struct SdpCodecConfig {
 };
 
 /** Munging options for rewriting an SDP offer/answer. */
-struct MungOptions {
+struct NIMRTC_API_STABLE MungOptions {
     /** Replace connection address (c=) with this host. */
     std::string_view rewrite_c_addr;
 
@@ -121,13 +122,13 @@ struct MungOptions {
 // Events
 // ---------------------------------------------------------------------------
 
-using SdpParseErrorCallback = std::function<void(Status, std::string_view)>;
+using NIMRTC_API_STABLE SdpParseErrorCallback = std::function<void(Status, std::string_view)>;
 
 // ---------------------------------------------------------------------------
 // ISDP
 // ---------------------------------------------------------------------------
 
-class ISDP : public IPlugin {
+class NIMRTC_API_STABLE ISDP : public IPlugin {
 public:
     /** Parse an SDP string into an SdpSession.
      *  @return parsed session, or nullopt on error (error callback fired). */
@@ -167,7 +168,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class ISDPFactory {
+class NIMRTC_API_STABLE ISDPFactory {
 public:
     virtual ~ISDPFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -176,7 +177,7 @@ public:
 };
 
 template<class T>
-class SimpleSDPFactory : public ISDPFactory {
+class NIMRTC_API_STABLE SimpleSDPFactory : public ISDPFactory {
     std::string_view id_;
     std::string_view name_;
 public:

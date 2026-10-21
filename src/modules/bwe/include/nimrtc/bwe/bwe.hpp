@@ -32,6 +32,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 
@@ -45,9 +46,9 @@
 // identity across translation units, which matters for explicit
 // `dynamic_cast` and template type deduction.
 namespace nimrtc::bwe {
-    using Config   = plugins::BweConfig;
-    using Feedback = plugins::BweFeedback;
-    using Estimate = plugins::BweEstimate;
+    using NIMRTC_API_STABLE Config   = plugins::BweConfig;
+    using NIMRTC_API_STABLE Feedback = plugins::BweFeedback;
+    using NIMRTC_API_STABLE Estimate = plugins::BweEstimate;
     using plugins::IBwe;        // <-- using-declaration (single source of truth)
 }
 
@@ -67,7 +68,7 @@ namespace nimrtc::bwe {
  *  `modules/bwe/tests/test_bwe.cpp` must continue to pass for the new
  *  default.
  */
-class Bwe final : public plugins::IBwe {
+class NIMRTC_API_STABLE Bwe final : public plugins::IBwe {
 public:
     /** Construct with a BweConfig (defaults match the plugin header). */
     explicit Bwe(plugins::BweConfig config = {});

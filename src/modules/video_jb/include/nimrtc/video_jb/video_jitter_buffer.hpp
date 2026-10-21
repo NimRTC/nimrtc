@@ -45,6 +45,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -61,13 +62,13 @@ namespace nimrtc::video_jb {
 // Configuration
 // ---------------------------------------------------------------------------
 
-enum class Mode : std::uint8_t {
+enum class NIMRTC_API_STABLE Mode : std::uint8_t {
     kLowLatency  = 0,   ///< minimum delay; for call / agent / teleop
     kLive        = 1,   ///< moderate delay; for live broadcast
     kInteractive = 2,   ///< max robustness; for hostile networks
 };
 
-struct Config {
+struct NIMRTC_API_STABLE Config {
     Mode mode = Mode::kLowLatency;
 
     /** Maximum number of in-flight frames before dropping the oldest. */
@@ -87,7 +88,7 @@ struct Config {
 
 /** One RTP packet handed to the jitter buffer. The buffer does NOT take
  *  ownership of `payload` — it copies the bytes internally. */
-struct InboundPacket {
+struct NIMRTC_API_STABLE InboundPacket {
     std::uint32_t ssrc          = 0;
     std::uint16_t seq           = 0;
     std::uint32_t rtp_timestamp = 0;
@@ -107,7 +108,7 @@ struct InboundPacket {
 // Assembled frame
 // ---------------------------------------------------------------------------
 
-struct AssembledFrame {
+struct NIMRTC_API_STABLE AssembledFrame {
     std::uint32_t              ssrc          = 0;
     std::uint32_t              rtp_timestamp = 0;
     std::uint32_t              frame_seq     = 0;
@@ -127,7 +128,7 @@ struct AssembledFrame {
 // Statistics
 // ---------------------------------------------------------------------------
 
-struct Stats {
+struct NIMRTC_API_STABLE Stats {
     std::uint64_t packets_inserted  = 0;
     std::uint64_t packets_reordered = 0;
     std::uint64_t packets_dropped   = 0;
@@ -140,7 +141,7 @@ struct Stats {
 // IVideoJitterBuffer — abstract interface (matches plugins/jb IJB pattern)
 // ---------------------------------------------------------------------------
 
-class IVideoJitterBuffer {
+class NIMRTC_API_STABLE IVideoJitterBuffer {
 public:
     virtual ~IVideoJitterBuffer() = default;
 
@@ -170,6 +171,6 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Create a video jitter buffer with the given config. */
-std::unique_ptr<IVideoJitterBuffer> create(Config cfg);
+NIMRTC_API_STABLE std::unique_ptr<IVideoJitterBuffer> create(Config cfg);
 
 } // namespace nimrtc::video_jb

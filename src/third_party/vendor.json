@@ -102,11 +102,14 @@
       "name": "msquic",
       "upstream_url": "https://github.com/microsoft/msquic.git",
       "upstream_version": "master",
-      "commit_sha": "42376ae4b414ff80d8317aadb3e9e789400e7638",
+      "fork_url": "https://github.com/NimRTC/msquic.git",
+      "fork_branch": "nimrtc-patches",
+      "commit_sha": "a5ae3a06ed6e3c054c251892370801db98d85174",
+      "upstream_commit_sha": "42376ae4b414ff80d8317aadb3e9e789400e7638",
       "submodule_path": "src/third_party/msquic",
       "license": "MIT",
       "build": "add_subdirectory(src) — see src/third_party/msquic/CMakeLists.txt",
-      "notes": "WebTransport / QUIC backend for IWebTransportSession. Source populated by git submodule; CMakeLists.txt wraps the upstream src/CMakeLists.txt and exposes nimrtc_vendor_msquic. ADR-014 Criterion 5 (active maintenance: < 180 days) is verified at build time by interop/v0_14_msquic_spike/ CMake scripts. If criterion 5 fails, ADR-014 reopens and the fallback is quiche (BSD-2, C API). Last upstream commit: 2026-10-16 (3 days ago as of 2026-10-19).",
+      "notes": "WebTransport / QUIC backend for IWebTransportSession. Source populated by git submodule; CMakeLists.txt wraps the upstream src/CMakeLists.txt and exposes nimrtc_vendor_msquic. ADR-014 Criterion 5 (active maintenance: < 180 days) is verified at build time by interop/v0_14_msquic_spike/ CMake scripts. If criterion 5 fails, ADR-014 reopens and the fallback is quiche (BSD-2, C API). Last upstream commit: 2026-10-16 (3 days ago as of 2026-10-19). The submodule tracks the NimRTC fork, whose 'nimrtc-patches' branch is upstream 42376ae plus one NimRTC commit (a5ae3a06) that forces the dummy raw datapath on Windows, because the xdp-for-windows SDK is absent in the CI build environment. The pin is pushed to github.com/NimRTC/msquic, so it is fetchable from a fresh clone.",
       "size_estimate": "~30 MB / 500 files"
     }
   ],

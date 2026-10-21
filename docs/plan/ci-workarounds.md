@@ -39,7 +39,7 @@ history. This register answers that in one table.
 
 | ID | Workaround | Where | Why | Impact if removed | Removal condition | Blocks v1.0.0? |
 |---|---|---|---|---|---|---|
-| **W1** | msquic forced onto the dummy raw datapath | `src/third_party/CMakeLists.txt` → `_nimrtc_msquic_force_dummy_datapath()` | The Windows XDP SDK (`xdp-for-windows`) is not present on the `windows-2022` runner image, so msquic's real datapath fails to compile with a missing `xdp/wincommon.h`. The function patches msquic's `src/platform/CMakeLists.txt` at configure time to force `datapath_raw_dummy.c`. | Windows CI goes red at configure/compile. | Add the `xdp-for-windows` SDK to the runner image, or move the msquic build off the stock runner. | No |
+| **W1** | msquic forced onto the dummy raw datapath | `src/third_party/.gitmodules` (msquic URL → NimRTC/msquic, branch `nimrtc-patches`) + commit `a5ae3a06e` on the fork | The Windows XDP SDK (`xdp-for-windows`) is not present on the `windows-2022` runner image, so msquic's real datapath fails to compile with a missing `xdp/wincommon.h`. msquic is therefore pinned to a NimRTC fork (`https://github.com/NimRTC/msquic`), whose `nimrtc-patches` branch is upstream `microsoft/msquic` `42376ae` plus one NimRTC commit that flips the platform `CMakeLists.txt` condition to force `datapath_raw_dummy.c`. The patch is committed in the fork, not rewritten at configure time, so the submodule working tree stays vendor-clean. | Windows CI goes red at configure/compile. | Add the `xdp-for-windows` SDK to the runner image, then re-point the msquic submodule at `microsoft/msquic` and drop the fork branch — the dummy-datapath patch would no longer be needed. | No |
 | **W2** | `target_compile_options(core PRIVATE /wd28020)` | `src/third_party/CMakeLists.txt` | msquic's `core` target compiles `src/core/crypto_tls.c` under MSVC `/analyze /WX /sdl`, tripping a known false-positive `C28020` (SAL value-range) on a macro-driven `TlsRead`/`TlsWrite` switch. Scoped `PRIVATE` to the vendored `core` target so it does not leak into NimRTC's own `/W4 /WX` targets. | MSVC analysis fails the msquic build. | Upstream msquic suppresses or fixes C28020; or NimRTC stops building msquic with `/analyze`. | No |
 | **W3** | `Prebuild WebRTC APM` step disabled via `if: ${{ false }}` (×4) | `.github/workflows/release.yml` lines 186, 273, 350, 445 | The step's output was unused: the release Configure passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`, so `audio3a` links the same system/stub APM path CI uses. Caused a `release / build / windows` failure during the v0.14.0 release cut. | Nothing today — the step is dead weight. Restoring it *without* also flipping the Configure flag would reintroduce the failure. | Make `target_link_libraries(audio3a PUBLIC webrtc_apm::webrtc_apm)` so abseil's `INCLUDE_DIRECTORIES` propagate to the consumer, then restore the `if:` line **and** configure with `NIMRTC_VENDORED_WEBRTC_APM=ON`. | **See §3 — this is a release-artifact gap** |
 | **W4** | Vendor manifest check is `continue-on-error: true` | `.github/workflows/ci.yml` (×4), `.github/workflows/interop.yml` (×2) | The drift gate (`tools/check_vendor.py`) only runs when `src/third_party/vendor.json` exists. Warn-only pre-1.0 so an unrelated PR is not blocked by vendor bookkeeping. | Unrelated PRs start failing on vendor drift. | **Intentional through v0.x.** At v1.0.0 the check becomes a hard gate and `continue-on-error` is removed. | No (but see §3) |
@@ -49,21 +49,27 @@ history. This register answers that in one table.
 
 ## 1. Vendor-state cleanliness (W1, W2)
 
-Both are applied from `src/third_party/CMakeLists.txt` at **configure
-time**, not by committing a patched file into the submodule. Consequences
-worth stating explicitly:
+W2 is still applied from `src/third_party/CMakeLists.txt` at
+**configure time** (a `/wd28020` flag scoped to msquic's `core` target).
+W1 moved out of the CMake overlay and into a committed change on a
+fork, so its status is "commit in the fork" rather than "file rewrite
+at configure time".  Consequences worth stating explicitly:
 
-- `src/third_party/msquic` stays vendor-clean. Its recorded HEAD is
-  upstream `microsoft/msquic` `42376ae`, which sits on `origin/main`.
-  `sh scripts/check-release-freeze.sh --only submodules` verifies this
-  and must stay green — an unpinned or local-only commit breaks every
-  clone but the author's. (This is not hypothetical: the v0.14.0-rc.1
-  cycle pinned msquic at a local-only commit in `a88383e` and had to be
-  reverted in `ef6ff11`.)
-- W1 is idempotent. Re-running `cmake` after
-  `git submodule update --init` re-applies the patch cleanly; the marker
-  string `OR TRUE)  # NimRTC: force dummy raw datapath` makes re-application
-  a no-op.
+- `src/third_party/msquic` stays vendor-clean.  Its recorded HEAD is
+  upstream `microsoft/msquic` `42376ae` plus one NimRTC commit
+  (`a5ae3a06e`); the *whole* of that combined history lives on the
+  `NimRTC/msquic` fork's `nimrtc-patches` branch, so the pin is fetchable
+  from a fresh clone (no local-only commits).  `sh scripts/check-release-freeze.sh --only submodules`
+  verifies reachability via `git -C src/third_party/msquic branch -r
+  --contains <sha>` and must stay green — an unpinned or local-only
+  commit breaks every clone but the author's.  (This is not
+  hypothetical: the v0.14.0-rc.1 cycle pinned msquic at a local-only
+  commit in `a88383e` and had to be reverted in `ef6ff11`; the fork is
+  exactly the change that prevents the same failure mode from recurring.)
+- W2's approach (configure-time flag injection) is unchanged, so the
+  idempotency note below applies only to W2 now; the W1 marker string
+  `OR TRUE)  # NimRTC: force dummy raw datapath` lives in a committed
+  file and is no longer rewritten per-configure.
 
 **Functional consequence to be honest about in release notes:** on
 Windows the WebTransport / QUIC data path runs on msquic's dummy raw

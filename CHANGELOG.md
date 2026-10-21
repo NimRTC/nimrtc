@@ -57,6 +57,20 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RTP × DC enqueue / reset / stats). Still needs a 4-platform CI run
   before `v1.0-plan.md` §3 Gate #3 can be marked closed.
 
+- **msquic: point the third-party submodule at a NimRTC fork**
+  (`https://github.com/NimRTC/msquic`, branch `nimrtc-patches`)
+  instead of rewriting the platform `CMakeLists.txt` at configure
+  time.  The fork is upstream `microsoft/msquic` `42376ae4` plus
+  one NimRTC commit (`a5ae3a06e`) that forces the dummy raw datapath
+  on Windows, so the cmake overlay (`_nimrtc_msquic_force_dummy_datapath()`)
+  and the `.gitmodules` `ignore = dirty` hack are gone, the
+  submodule working tree stays vendor-clean after configure + build,
+  and the recorded pin is fetchable from a fresh clone (resolves the
+  v0.14.0-rc.1 / `a88383e` "local-only commit breaks every clone
+  but the author's" class of failure).  See `docs/plan/ci-workarounds.md`
+  W1 — the workaround itself (Windows XDP SDK unavailable in the
+  `windows-2022` runner image) is unchanged.
+
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
 > **This is a working draft.** v1.0.0 has **not** been released and the

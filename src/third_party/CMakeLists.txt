@@ -31,37 +31,14 @@ function(_nimrtc_vendor_add_if_populated name)
     endif()
 endfunction()
 
-# Helper: patch msquic's src/platform/CMakeLists.txt to force the
-# dummy raw datapath (datapath_raw_dummy.c) instead of the XDP-backed
-# real datapath.  Required because the Windows XDP SDK (xdp-for-windows)
-# is not available in the NimRTC CI build environment (windows-2022 image),
-# so the real XDP datapath fails at compile time with a missing header
-# (xdp/wincommon.h).  Must be called BEFORE add_subdirectory(msquic) so
-# the patched file is what msquic's own CMake sees.
-#
-# The patch is idempotent (re-applying is a no-op) so a fresh
-# `git submodule update --init` followed by another cmake configure
-# is safe.  We do NOT commit the patched file into the submodule;
-# the submodule stays vendor-clean (HEAD = upstream microsoft/msquic
-# 42376ae) and NimRTC overlays the configure-time patch from this file.
-function(_nimrtc_msquic_force_dummy_datapath)
-    set(_platform "${CMAKE_CURRENT_SOURCE_DIR}/msquic/src/platform/CMakeLists.txt")
-    if(NOT EXISTS "${_platform}")
-        return()
-    endif()
-    file(READ "${_platform}" _cmake)
-    set(_marker "OR TRUE)  # NimRTC: force dummy raw datapath")
-    string(FIND "${_cmake}" "${_marker}" _patched_idx)
-    if(_patched_idx GREATER_EQUAL 0)
-        return()  # already patched
-    endif()
-    string(REPLACE
-        "\${SYSTEM_PROCESSOR} STREQUAL \"arm64ec\")"
-        "\${SYSTEM_PROCESSOR} STREQUAL \"arm64ec\" ${_marker}"
-        _cmake "${_cmake}")
-    file(WRITE "${_platform}" "${_cmake}")
-    message(STATUS "nimrtc: patched msquic platform/CMakeLists.txt to force dummy raw datapath (XDP SDK not in build env)")
-endfunction()
+# The Windows XDP SDK (xdp-for-windows) is not available in the NimRTC CI
+# build environment (windows-2022 image), so msquic's real XDP datapath
+# fails to compile with a missing xdp/wincommon.h header.  This is
+# handled inside the vendored msquic fork (NimRTC/msquic, branch
+# nimrtc-patches), which carries the "force dummy raw datapath" change
+# as a committed patch on top of upstream 42376ae.  Nothing is rewritten
+# at configure time, so the submodule working tree stays vendor-clean and
+# the recorded pin is reachable from a fresh clone.
 
 _nimrtc_vendor_add_if_populated(libsrtp)
 _nimrtc_vendor_add_if_populated(libopus)
@@ -94,10 +71,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/msquic/CMakeLists.txt")
         set(QUIC_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
         set(QUIC_BUILD_TEST  OFF CACHE BOOL "" FORCE)
         set(QUIC_BUILD_PERF  OFF CACHE BOOL "" FORCE)
-
-        # Windows XDP SDK workaround: force the dummy raw datapath so the
-        # build does not fail with a missing xdp/wincommon.h header.
-        _nimrtc_msquic_force_dummy_datapath()
 
         add_subdirectory(msquic)
 

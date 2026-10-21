@@ -61,20 +61,15 @@
 
 [submodule "src/third_party/msquic"]
 	path = src/third_party/msquic
-	url = https://github.com/microsoft/msquic.git
+	url = https://github.com/NimRTC/msquic.git
 	# Pinned: see src/third_party/vendor.json (commit_sha field).
 	# Run `git submodule update --init src/third_party/msquic` to fetch.
 	# Update vendor.json with the actual SHA after fetching.
 	# ADR-014 Criterion 5 (active maintenance: < 180 days old) is verified
 	# by interop/v0_14_msquic_spike/ at build time.
-	branch = master
-	# NimRTC's CMake overlay (src/third_party/CMakeLists.txt ->
-	# _nimrtc_msquic_force_dummy_datapath) rewrites
-	# src/platform/CMakeLists.txt inside this submodule at configure time to
-	# force the dummy raw datapath, because the Windows XDP SDK is absent in
-	# the CI build environment.  The rewrite is idempotent and is
-	# intentionally NOT committed upstream, so the submodule working tree
-	# shows up as "modified content" after every configure.  Tell git to
-	# ignore that dirty state so `git status` in the parent repo stays
-	# readable; the submodule *pointer* remains fully version-controlled.
-	ignore = dirty
+	# Fork of microsoft/msquic carrying one NimRTC patch: force the dummy
+	# raw datapath, because the Windows XDP SDK is absent in the CI build
+	# environment.  The patch is committed on the fork's branch rather
+	# than rewritten at configure time, so the submodule working tree
+	# stays vendor-clean and the pin is fetchable from a fresh clone.
+	branch = nimrtc-patches

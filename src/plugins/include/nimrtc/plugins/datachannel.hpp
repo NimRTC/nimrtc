@@ -70,7 +70,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** Per-channel reliability and ordering semantics (RFC 8831 §6). */
-enum class DataChannelReliability {
+enum class NIMRTC_API_STABLE DataChannelReliability {
     kReliableOrdered,      // SCTP reliable ordered — file, structured logs
     kUnreliable,           // SCTP unordered, no reliability — telemetry
     kPartialReliableTTL,   // PR-SCTP: drop oldest when TTL expires
@@ -78,7 +78,7 @@ enum class DataChannelReliability {
 };
 
 /** Configuration for a single data channel. */
-struct DataChannelConfig {
+struct NIMRTC_API_STABLE DataChannelConfig {
     /** Human-readable label, e.g. "telemetry", "cmd", "file". */
     std::string label;
 
@@ -108,11 +108,11 @@ struct DataChannelConfig {
 // ---------------------------------------------------------------------------
 
 /** Invoked when a binary message arrives on this channel. */
-using DataMessageCallback = std::function<void(BufferView msg)>;
+using NIMRTC_API_STABLE DataMessageCallback = std::function<void(BufferView msg)>;
 
 /** Invoked when the channel state changes.
  *  State string is one of: "connecting", "open", "closing", "closed", "error". */
-using DataChannelStateCallback = std::function<void(const char* state)>;
+using NIMRTC_API_STABLE DataChannelStateCallback = std::function<void(const char* state)>;
 
 // ---------------------------------------------------------------------------
 // IDataChannel interface

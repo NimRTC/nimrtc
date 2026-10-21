@@ -51,6 +51,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <string_view>
 
@@ -61,7 +62,7 @@ namespace nimrtc::transport {
 // ---------------------------------------------------------------------------
 // RawUdpArqStack — control-plane ITransportStack
 // ---------------------------------------------------------------------------
-class RawUdpArqStack final : public ITransportStack {
+class NIMRTC_API_STABLE RawUdpArqStack final : public ITransportStack {
 public:
     explicit RawUdpArqStack(StackConfig cfg) noexcept;
     ~RawUdpArqStack() override;
@@ -111,7 +112,7 @@ private:
 // ---------------------------------------------------------------------------
 // RawUdpArqStackFactory — produces RawUdpArqStack instances
 // ---------------------------------------------------------------------------
-class RawUdpArqStackFactory final : public ITransportStackFactory {
+class NIMRTC_API_STABLE RawUdpArqStackFactory final : public ITransportStackFactory {
 public:
     std::string_view id() const noexcept override;
     std::string_view display_name() const noexcept override;

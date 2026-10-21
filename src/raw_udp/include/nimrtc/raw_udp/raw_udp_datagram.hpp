@@ -59,6 +59,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -104,7 +105,7 @@ namespace nimrtc::raw_udp {
 // ---------------------------------------------------------------------------
 // Configuration passed to the factory + to open()
 // ---------------------------------------------------------------------------
-struct RawUdpConfig {
+struct NIMRTC_API_STABLE RawUdpConfig {
     /** Local bind host ("0.0.0.0" = any). Empty = OS default. */
     std::string local_host;
 
@@ -155,7 +156,7 @@ struct RawUdpConfig {
 // ---------------------------------------------------------------------------
 // Stats — produced by the ARQ impl for observability + the Slice-6 test.
 // ---------------------------------------------------------------------------
-struct RawUdpStats {
+struct NIMRTC_API_STABLE RawUdpStats {
     std::uint64_t packets_sent = 0;
     std::uint64_t packets_recv = 0;
     std::uint64_t packets_retransmit = 0;
@@ -169,7 +170,7 @@ struct RawUdpStats {
 // ---------------------------------------------------------------------------
 // IRawUdpDatagram — interface
 // ---------------------------------------------------------------------------
-class IRawUdpDatagram {
+class NIMRTC_API_STABLE IRawUdpDatagram {
 public:
     virtual ~IRawUdpDatagram() = default;
 

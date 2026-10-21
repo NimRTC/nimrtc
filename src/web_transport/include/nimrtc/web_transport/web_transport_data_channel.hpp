@@ -50,6 +50,7 @@
 // not stable until the v0.14.0 release line freezes. See
 // `web_transport_session_iface.hpp` for the broader WebTransport
 // seam stability rationale.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -97,7 +98,7 @@ using plugins::kErrInternal;
  * The session is a non-owning pointer passed at construction time
  * (injected by `WebTransportDataChannelFactory`).
  */
-class WebTransportDataChannel final : public plugins::IDataChannel {
+class NIMRTC_API_UNSTABLE WebTransportDataChannel final : public plugins::IDataChannel {
 public:
     /**
      * @brief Construct a channel backed by an existing WebTransport session.
@@ -237,7 +238,7 @@ private:
  * be injected at channel construction time.  The engine owns the
  * session and creates channels via `create(IWebTransportSession*)`.
  */
-class WebTransportDataChannelFactory final
+class NIMRTC_API_UNSTABLE WebTransportDataChannelFactory final
     : public plugins::IDataChannelFactory {
 public:
     WebTransportDataChannelFactory() = default;

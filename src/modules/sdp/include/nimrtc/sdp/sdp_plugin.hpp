@@ -32,6 +32,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -56,7 +57,7 @@ namespace nimrtc::sdp {
  * buffer. Call parse() / serialize() per engine tick — old views become
  * invalid once a new parse() runs.
  */
-class PluginAdapter : public plugins::ISDP {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::ISDP {
 public:
     PluginAdapter();
     ~PluginAdapter() override;
@@ -122,7 +123,7 @@ private:
  *
  * Registered as id "webrtc" (matches EngineConfig::sdp_name default).
  */
-class PluginFactory : public plugins::ISDPFactory {
+class NIMRTC_API_STABLE PluginFactory : public plugins::ISDPFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;

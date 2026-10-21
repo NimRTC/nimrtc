@@ -11,22 +11,28 @@
  * 1. `version_macros_are_defined` -- canonical version triplet matches
  *    v1.0.0-alpha.1 (MAJOR=1, MINOR=0, PATCH=0, PRE_RELEASE="alpha.1").
  *
- * 2. `version_string_is_well_formed` -- `NIMRTC_API_VERSION_STRING`
+ * 2. `encoded_version_is_correct` -- `NIMRTC_API_VERSION` equals 10000
+ *    for v1.0.0 (MAJOR*10000 + MINOR*100 + PATCH).
+ *
+ * 3. `version_string_is_well_formed` -- `NIMRTC_API_VERSION_STRING`
  *    expands to "1.0.0".
  *
- * 3. `api_version_namespace_constants_match_macros` -- the runtime
+ * 4. `api_version_namespace_constants_match_macros` -- the runtime
  *    `nimrtc::core::api_version::k*` constants are identical to the
  *    corresponding `NIMRTC_API_VERSION_*` macros.
  *
- * 4. `stability_markers_expand_to_something` -- `NIMRTC_API_STABLE`
+ * 5. `stability_markers_expand_to_something` -- `NIMRTC_API_STABLE`
  *    and `NIMRTC_API_UNSTABLE` expand to valid C++ when applied to a
  *    function declaration (compile-time smoke; no runtime effect in
  *    v1.0.0-alpha.1 because both macros are empty).
  *
- * 5. `deprecated_expands_to_valid_attribute` -- `NIMRTC_API_DEPRECATED(msg)`
+ * 6. `deprecated_expands_to_valid_attribute` -- `NIMRTC_API_DEPRECATED(msg)`
  *    is syntactically valid C++ when applied to a function declaration.
  *    The test does NOT call the deprecated function so no deprecation
  *    warning is emitted; the macro expansion is the subject under test.
+ *
+ * 7. `version_check_works_correctly` -- `NIMRTC_API_VERSION_CHECK(major, minor, patch)`
+ *    evaluates correctly for current, earlier, and later versions.
  *
  * ## Platform coverage
  *
@@ -52,6 +58,17 @@ TEST(version_macros, are_defined) {
     // zero release-build perf (the test runs once) and keeps the
     // assertion portable to MSVC 19.30+, GCC 10+, Clang 12+.
     EXPECT_STREQ(NIMRTC_API_VERSION_PRE_RELEASE, "beta.1");
+}
+
+// -----------------------------------------------------------------------------
+// Test 1b -- encoded version integer is correct (v1.0.0 = 10000)
+// -----------------------------------------------------------------------------
+
+TEST(version_macros, encoded_version_is_correct) {
+    // NIMRTC_API_VERSION encodes MAJOR*10000 + MINOR*100 + PATCH.
+    // v1.0.0 => 1*10000 + 0*100 + 0 = 10000.
+    static_assert(NIMRTC_API_VERSION == 10000, "NIMRTC_API_VERSION must be 10000 for v1.0.0");
+    EXPECT_EQ(NIMRTC_API_VERSION, 10000);
 }
 
 // -----------------------------------------------------------------------------
@@ -143,4 +160,30 @@ TEST(deprecated, expands_to_valid_attribute) {
     // This means the TU emits no deprecation warning (C4996 / -Wdeprecated).
     // If the NIMRTC_API_DEPRECATED macro were broken, the TU would not compile.
     EXPECT_EQ(0, nimrtc::core::api_version::deprecated_marker_ok_fn());
+}
+
+// -----------------------------------------------------------------------------
+// Test 6 -- NIMRTC_API_VERSION_CHECK compile-time version comparison
+// -----------------------------------------------------------------------------
+
+TEST(version_check, works_correctly) {
+    // v1.0.0 == 10000.  Verify NIMRTC_API_VERSION_CHECK works at compile time.
+
+    // Current version exactly.
+    static_assert(NIMRTC_API_VERSION_CHECK(1, 0, 0), "v1.0.0 should match itself");
+    EXPECT_TRUE(NIMRTC_API_VERSION_CHECK(1, 0, 0));
+
+    // Earlier versions should also pass.
+    static_assert(NIMRTC_API_VERSION_CHECK(0, 99, 99), "v1.0.0 >= v0.99.99");
+    EXPECT_TRUE(NIMRTC_API_VERSION_CHECK(0, 99, 99));
+
+    // Later versions should fail (static_assert triggers, EXPECT_FALSE catches).
+    // We cannot use static_assert for the negative case because it would fail
+    // at compile time.  Use constexpr bool instead.
+    constexpr bool v2_0_0_check = NIMRTC_API_VERSION_CHECK(2, 0, 0);
+    constexpr bool v1_1_0_check = NIMRTC_API_VERSION_CHECK(1, 1, 0);
+    constexpr bool v1_0_1_check = NIMRTC_API_VERSION_CHECK(1, 0, 1);
+    EXPECT_FALSE(v2_0_0_check);  // v1.0.0 < v2.0.0
+    EXPECT_FALSE(v1_1_0_check); // v1.0.0 < v1.1.0
+    EXPECT_FALSE(v1_0_1_check);  // v1.0.0 < v1.0.1
 }

@@ -35,6 +35,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -49,11 +50,11 @@ namespace nimrtc::h264 {
 // H.264 start codes
 // ---------------------------------------------------------------------------
 
-constexpr std::size_t kStartCode3 = 3;   // 00 00 01
-constexpr std::size_t kStartCode4 = 4;   // 00 00 00 01
+NIMRTC_API_STABLE constexpr std::size_t kStartCode3 = 3;   // 00 00 01
+NIMRTC_API_STABLE constexpr std::size_t kStartCode4 = 4;   // 00 00 00 01
 
 /** True iff the buffer at @p data starts with an Annex B start code. */
-inline bool is_start_code(core::ByteSpan data) noexcept {
+NIMRTC_API_STABLE inline bool is_start_code(core::ByteSpan data) noexcept {
     if (data.size() >= 4 && data[0] == 0 && data[1] == 0
                          && data[2] == 0 && data[3] == 1) return true;
     if (data.size() >= 3 && data[0] == 0 && data[1] == 0
@@ -83,7 +84,7 @@ struct ParsedNalu {
 // BitstreamParser — stateful iterator over an Annex B bitstream
 // ---------------------------------------------------------------------------
 
-class BitstreamParser {
+class NIMRTC_API_STABLE BitstreamParser {
 public:
     BitstreamParser() noexcept = default;
 
@@ -200,18 +201,18 @@ private:
 
 /** Extract the first SPS NAL unit from an Annex B bitstream.
  *  Returns std::nullopt if no SPS is found. */
-std::optional<ParsedNalu> find_sps(core::ByteSpan bitstream) noexcept;
+NIMRTC_API_STABLE std::optional<ParsedNalu> find_sps(core::ByteSpan bitstream) noexcept;
 
 /** Extract the first PPS NAL unit from an Annex B bitstream.
  *  Returns std::nullopt if no PPS is found. */
-std::optional<ParsedNalu> find_pps(core::ByteSpan bitstream) noexcept;
+NIMRTC_API_STABLE std::optional<ParsedNalu> find_pps(core::ByteSpan bitstream) noexcept;
 
 /** Find the first IDR slice (key frame) in an Annex B bitstream. */
-std::optional<ParsedNalu> find_idr_slice(core::ByteSpan bitstream) noexcept;
+NIMRTC_API_STABLE std::optional<ParsedNalu> find_idr_slice(core::ByteSpan bitstream) noexcept;
 
 /** Build an Annex B bitstream from a list of NAL units (start-code-prefixed).
  *  Output buffer must be at least 4 bytes per NALU + sum of NALU sizes. */
-std::size_t build_annex_b(core::ByteSpan* nalu_datas,
+NIMRTC_API_STABLE std::size_t build_annex_b(core::ByteSpan* nalu_datas,
                           std::size_t nalu_count,
                           std::uint8_t* output,
                           std::size_t output_capacity) noexcept;

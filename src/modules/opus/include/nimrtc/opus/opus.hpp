@@ -23,6 +23,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -35,23 +36,23 @@ namespace nimrtc::opus {
 // Constants
 // -----------------------------------------------------------------------------
 
-constexpr std::uint32_t kDefaultSampleRate = 48000;
-constexpr std::uint8_t  kDefaultChannels   = 1;
-constexpr std::uint8_t  kDefaultPayloadType = 111;  // RFC 7587
+NIMRTC_API_STABLE constexpr std::uint32_t kDefaultSampleRate = 48000;
+NIMRTC_API_STABLE constexpr std::uint8_t  kDefaultChannels   = 1;
+NIMRTC_API_STABLE constexpr std::uint8_t  kDefaultPayloadType = 111;  // RFC 7587
 
 // ---------------------------------------------------------------------------
 // Opus application mode — mirrors libopus's OPUS_APPLICATION_* macros
 // (opus_defines.h: 2048 = VOIP, 2049 = AUDIO).  Exposed at the public
 // header level so callers don't need to pull in <opus.h>.
 // ---------------------------------------------------------------------------
-inline constexpr int kOpusApplicationVoip  = 2048;
-inline constexpr int kOpusApplicationAudio = 2049;
+NIMRTC_API_STABLE inline constexpr int kOpusApplicationVoip  = 2048;
+NIMRTC_API_STABLE inline constexpr int kOpusApplicationAudio = 2049;
 
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
 
-struct EncoderConfig {
+struct NIMRTC_API_STABLE EncoderConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
     std::uint8_t  channels       = kDefaultChannels;
     int            bitrate_bps    = 64000;
@@ -68,7 +69,7 @@ struct EncoderConfig {
     int            application    = kOpusApplicationVoip;
 };
 
-struct DecoderConfig {
+struct NIMRTC_API_STABLE DecoderConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
     std::uint8_t  channels     = kDefaultChannels;
     int            complexity     = 10;
@@ -78,7 +79,7 @@ struct DecoderConfig {
 // Encoder
 // -----------------------------------------------------------------------------
 
-class Encoder {
+class NIMRTC_API_STABLE Encoder {
 public:
     explicit Encoder(EncoderConfig config);
     ~Encoder();
@@ -133,7 +134,7 @@ private:
 // Decoder
 // -----------------------------------------------------------------------------
 
-class Decoder {
+class NIMRTC_API_STABLE Decoder {
 public:
     explicit Decoder(DecoderConfig config);
     ~Decoder();
@@ -187,7 +188,7 @@ private:
  *  (interleaved L/R). Higher values are clamped to 0 or 1 by the
  *  packetiser.
  */
-struct CodecFrame {
+struct NIMRTC_API_STABLE CodecFrame {
     const std::uint8_t* data     = nullptr;
     std::size_t         size     = 0;
     std::uint16_t       frame_size_ms = 20;  // 2.5, 5, 10, 20, 40, 60
@@ -199,7 +200,7 @@ struct CodecFrame {
  *  `sample_rate_hz` determine how many frames packetise() packs per RTP
  *  payload.
  */
-struct CodecConfig {
+struct NIMRTC_API_STABLE CodecConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
     std::uint8_t  channels       = kDefaultChannels;   // 1 or 2 (stereo LR)
     std::uint16_t ptime_ms       = 20;                // preferred packet dur
@@ -211,7 +212,7 @@ struct CodecConfig {
  *  payload. `code` is the TOC[1:0] c-field (0..3) and `s` is the stereo
  *  bit at TOC[2]. `data` points into the original payload buffer (no copy).
  */
-struct PacketView {
+struct NIMRTC_API_STABLE PacketView {
     const std::uint8_t* data          = nullptr;
     std::size_t         size          = 0;
     std::uint8_t        config        = 0;   // TOC[7:3] (RFC 6716 Table 2)
@@ -222,7 +223,7 @@ struct PacketView {
 
 /** Maximum representable Opus frame length per RFC 6716 §3.2.1 (R2):
  *  255 * 4 + 255 = 1275 bytes. */
-inline constexpr std::size_t kMaxOpusFrameBytes = 1275;
+NIMRTC_API_STABLE inline constexpr std::size_t kMaxOpusFrameBytes = 1275;
 
 /** Compute the TOC config field for a given frame size in ms. Returns 0..31
  *  per RFC 6716 Table 2 (config bits TOC[7:3]), or `std::nullopt` if the
@@ -233,7 +234,7 @@ inline constexpr std::size_t kMaxOpusFrameBytes = 1275;
  *  chooses the bandwidth via libopus CTL (OPUS_SET_MAX_BANDWIDTH) — this
  *  helper only encodes the duration.
  */
-std::optional<std::uint8_t> toc_config_for_frame_size_ms(std::uint16_t frame_size_ms) noexcept;
+NIMRTC_API_STABLE std::optional<std::uint8_t> toc_config_for_frame_size_ms(std::uint16_t frame_size_ms) noexcept;
 
 /** Build the TOC byte from a config field and an `s` field (TOC[1]).
  *  Bits: TOC = (config << 3) | (s << 2) | code.
@@ -242,7 +243,7 @@ std::optional<std::uint8_t> toc_config_for_frame_size_ms(std::uint16_t frame_siz
  *  - code    (2 bits) sit in bits 1..0
  *  See RFC 6716 §3.1 Figure 1.
  */
-inline std::uint8_t make_toc_byte(std::uint8_t config,
+NIMRTC_API_STABLE inline std::uint8_t make_toc_byte(std::uint8_t config,
                                     std::uint8_t s,
                                     std::uint8_t code) noexcept {
     return static_cast<std::uint8_t>(
@@ -272,7 +273,7 @@ inline std::uint8_t make_toc_byte(std::uint8_t config,
  *  @return Number of bytes written to `output`, or 0 on error (insufficient
  *          capacity, mismatched configs, too many frames, etc.).
  */
-std::size_t packetise(const CodecFrame* frames,
+NIMRTC_API_STABLE std::size_t packetise(const CodecFrame* frames,
                       std::size_t num_frames,
                       std::uint32_t sample_rate_hz,
                       bool cbr,
@@ -293,7 +294,7 @@ std::size_t packetise(const CodecFrame* frames,
  *          on malformed input (truncated length table, Code 1 with odd
  *          payload, Code 2 len overflow, etc.).
  */
-std::size_t depacketise(const std::uint8_t* payload,
+NIMRTC_API_STABLE std::size_t depacketise(const std::uint8_t* payload,
                         std::size_t payload_len,
                         PacketView* views,
                         std::size_t views_capacity,

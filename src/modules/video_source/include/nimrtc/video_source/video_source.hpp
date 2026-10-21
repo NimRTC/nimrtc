@@ -35,6 +35,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -55,14 +56,14 @@ namespace nimrtc::video_source {
 // ---------------------------------------------------------------------------
 
 /** Test pattern for the source. */
-enum class Pattern : std::uint8_t {
+enum class NIMRTC_API_STABLE Pattern : std::uint8_t {
     kSolidColor = 0,   ///< Solid fill (configurable color)
     kColorBars  = 1,   ///< SMPTE-like colour bars (good for manual eyeballing)
     kGradient   = 2,   ///< Vertical gradient (R→B)
     kFrameCount = 3,   ///< Animated gradient + frame counter overlay
 };
 
-struct SourceConfig {
+struct NIMRTC_API_STABLE SourceConfig {
     std::uint32_t width  = 640;
     std::uint32_t height = 480;
 
@@ -98,14 +99,14 @@ struct SourceConfig {
  *  - @p frame: refcounted pixel buffer (caller takes ownership of the
  *    local shared_ptr — keeping it alive preserves the buffer).
  *  - @p info:  capture metadata (capture_ts, frame_seq, rtp_timestamp). */
-using FrameCallback = std::function<void(video_frame::VideoFrameBuffer frame,
+using NIMRTC_API_STABLE FrameCallback = std::function<void(video_frame::VideoFrameBuffer frame,
                                          video_frame::VideoFrameInfo info)>;
 
 // ---------------------------------------------------------------------------
 // IVideoSource — interface (matches future device plugin shape)
 // ---------------------------------------------------------------------------
 
-class IVideoSource {
+class NIMRTC_API_STABLE IVideoSource {
 public:
     virtual ~IVideoSource() = default;
 
@@ -163,7 +164,7 @@ public:
  *  @param cfg       Source configuration.
  *  @param callback  Frame callback (called on the producing thread).
  *  @return Heap-allocated source. Caller owns. */
-std::unique_ptr<IVideoSource> create_memory_source(SourceConfig cfg,
+NIMRTC_API_STABLE std::unique_ptr<IVideoSource> create_memory_source(SourceConfig cfg,
                                                    FrameCallback callback) noexcept;
 
 /** Generate one frame of the requested pattern into the supplied buffer.
@@ -173,11 +174,11 @@ std::unique_ptr<IVideoSource> create_memory_source(SourceConfig cfg,
  *  @param buffer  Destination buffer. Must be at least compute_layout(cfg).
  *  @param info    On success, populated with capture_ts, frame_seq, etc.
  *  @return kOk on success. */
-core::Result<void> render_pattern(const SourceConfig& cfg,
+NIMRTC_API_STABLE core::Result<void> render_pattern(const SourceConfig& cfg,
                             video_frame::VideoFrameBuffer& buffer,
                             video_frame::VideoFrameInfo& info) noexcept;
 
 /** Pattern name (for logging). */
-std::string_view pattern_name(Pattern p) noexcept;
+NIMRTC_API_STABLE std::string_view pattern_name(Pattern p) noexcept;
 
 } // namespace nimrtc::video_source

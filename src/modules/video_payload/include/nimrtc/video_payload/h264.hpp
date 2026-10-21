@@ -30,6 +30,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -44,7 +45,7 @@ namespace nimrtc::video_payload::h264 {
 // H.264 NAL unit type (RFC 6184 §5.4)
 // ---------------------------------------------------------------------------
 
-enum class NaluType : std::uint8_t {
+enum class NIMRTC_API_STABLE NaluType : std::uint8_t {
     kUnspecified       = 0,
     kSliceNonIDR       = 1,
     kSliceDPA          = 2,
@@ -74,7 +75,7 @@ enum class NaluType : std::uint8_t {
     // 30, 31 reserved.
 };
 
-inline bool is_keyframe_nalu(NaluType t) noexcept {
+NIMRTC_API_STABLE inline bool is_keyframe_nalu(NaluType t) noexcept {
     return t == NaluType::kSliceIDR;
 }
 
@@ -104,13 +105,13 @@ struct Nalu {
  *  @param payload RTP payload bytes (just the payload, after the RTP header)
  *  @return NALU on success; std::nullopt if the payload is empty or doesn't
  *          look like a single NAL unit. */
-std::optional<Nalu> parse_single(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE std::optional<Nalu> parse_single(core::ByteSpan payload) noexcept;
 
 /** Build a single NAL Unit Packet (NAL types 1..23).
  *  @param nalu_data NAL unit bytes WITHOUT the start-code prefix.
  *  @param output    Caller-owned buffer.
  *  @return number of bytes written; 0 on overflow. */
-std::size_t build_single(NaluType type,
+NIMRTC_API_STABLE std::size_t build_single(NaluType type,
                          core::ByteSpan nalu_data,
                          core::MutableByteSpan output) noexcept;
 
@@ -120,17 +121,17 @@ std::size_t build_single(NaluType type,
 
 /** Parse an STAP-A packet into its constituent NAL units.
  *  Caller's buffer must outlive the returned Nalus (we reference into it). */
-struct StapAResult {
+struct NIMRTC_API_STABLE StapAResult {
     std::vector<Nalu> nalus;
     bool              parsed_ok = false;
 };
-StapAResult parse_stap_a(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE StapAResult parse_stap_a(core::ByteSpan payload) noexcept;
 
 /** Build an STAP-A packet from a list of NAL units.
  *  Each nalu in @p nalus must have valid `data` (raw NAL unit body, no
  *  start code) and a `type` field.  The function writes the STAP-A header
  *  + each NAL unit with its 16-bit length prefix. */
-std::size_t build_stap_a(core::ByteSpan* nalu_datas,
+NIMRTC_API_STABLE std::size_t build_stap_a(core::ByteSpan* nalu_datas,
                          std::size_t nalu_count,
                          core::MutableByteSpan output) noexcept;
 
@@ -139,7 +140,7 @@ std::size_t build_stap_a(core::ByteSpan* nalu_datas,
 // ---------------------------------------------------------------------------
 
 /** FU-A header (RFC 6184 §5.8). */
-struct FuAHeader {
+struct NIMRTC_API_STABLE FuAHeader {
     std::uint8_t  fu_indicator = 0;   // F + NRI + Type=28
     std::uint8_t  fu_header    = 0;   // S + E + R + Type
     core::ByteSpan fragment;          // payload of THIS fragment
@@ -147,7 +148,7 @@ struct FuAHeader {
 
 /** Parse a FU-A packet's first 2 bytes (indicator + header).
  *  @return true if `payload` starts with FU-A (type 28 in indicator byte). */
-bool parse_fu_a_header(core::ByteSpan payload,
+NIMRTC_API_STABLE bool parse_fu_a_header(core::ByteSpan payload,
                        FuAHeader& out) noexcept;
 
 /** Build one FU-A fragment.
@@ -158,7 +159,7 @@ bool parse_fu_a_header(core::ByteSpan payload,
  *  @param end                 True iff this is the LAST fragment.
  *  @param output              Caller-owned buffer.
  *  @return Number of bytes written; 0 on overflow. */
-std::size_t build_fu_a(NaluType original_nalu_type,
+NIMRTC_API_STABLE std::size_t build_fu_a(NaluType original_nalu_type,
                        core::ByteSpan fragment_data,
                        bool start,
                        bool end,
@@ -170,7 +171,7 @@ std::size_t build_fu_a(NaluType original_nalu_type,
 
 /** Parse any RTP payload type (Single / STAP-A / FU-A / FU-B).
  *  FU-B is parsed as a header + fragment but not reassembled (rare in practice). */
-struct ParseResult {
+struct NIMRTC_API_STABLE ParseResult {
     enum class Kind : std::uint8_t {
         kSingle = 0,
         kStapA,
@@ -189,10 +190,10 @@ struct ParseResult {
     bool            parsed_ok   = false;
 };
 
-ParseResult parse(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE ParseResult parse(core::ByteSpan payload) noexcept;
 
 /** Determine NAL unit type from the first byte of an RTP payload.
  *  Returns kUnspecified for empty payload. */
-NaluType peek_nalu_type(core::ByteSpan payload) noexcept;
+NIMRTC_API_STABLE NaluType peek_nalu_type(core::ByteSpan payload) noexcept;
 
 } // namespace nimrtc::video_payload::h264

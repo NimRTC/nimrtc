@@ -193,8 +193,15 @@ interop/test_data/*.csr
 # Created by dtls_client/dtls_server/main/minimal_test when run locally.
 # Tests themselves are committed (see the same dir for *.cpp / *.html / *.js).
 # ─────────────────────────────────────────────
-# TLS keylog (set by SSLKEYLOGFILE env var; used for Wireshark debugging)
-sslkeylog.log
+# TLS keylog (set by SSLKEYLOGFILE env var; used for Wireshark debugging).
+# SECURITY: contains TLS session keys -- anyone with the file can decrypt
+# the corresponding traffic. Never commit, never leave in the working tree.
+# The pattern below covers the common env-var spellings so a stray
+# `set SSLKEYLOGFILE=keys.log` from the repo root is also caught.
+/sslkeylog*.log
+/*keylog*.log
+/*keys.log
+**/sslkeylog*.log
 
 # Debug / temp scripts that must never appear at project root
 _findline.py
@@ -208,7 +215,16 @@ tests/wolfssl_dtls/*.err
 tests/wolfssl_dtls/certs/
 
 # CTest scratch
-Testing/
+#
+# ctest writes Testing/ into its CWD. Under build/ that is expected, but a
+# bare `ctest` invoked from the repo root drops Testing/ at the root and
+# pollutes the working tree. Prefer one of:
+#   ctest --preset tests.msvc          (CMake passes --test-dir for us)
+#   .\scripts\run_ctest.ps1            (wrapper cd's into build/ first)
+#   ctest --test-dir build -C Debug    (explicit)
+# The bare `ctest` form is what created the stale root Testing/ dir that was
+# deleted on 2026-10-21.
+/Testing/
 
 # OS / editor cruft
 Thumbs.db

@@ -15,6 +15,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -24,7 +25,7 @@ namespace nimrtc::session {
 // ---------------------------------------------------------------------------
 // Media type
 // ---------------------------------------------------------------------------
-enum class MediaType {
+enum class NIMRTC_API_STABLE MediaType {
     kAudio,
     kVideo,
     kData,
@@ -33,7 +34,7 @@ enum class MediaType {
 // ---------------------------------------------------------------------------
 // Track direction (RFC 8829 / WebRTC semantics)
 // ---------------------------------------------------------------------------
-enum class TrackDirection {
+enum class NIMRTC_API_STABLE TrackDirection {
     kSendOnly,   // offer=sendonly / answer=recvonly
     kRecvOnly,   // offer=recvonly / answer=sendonly
     kSendRecv,   // offer=sendrecv / answer=sendrecv
@@ -43,7 +44,7 @@ enum class TrackDirection {
 // ---------------------------------------------------------------------------
 // Track — single media track (PIMPL)
 // ---------------------------------------------------------------------------
-class Track {
+class NIMRTC_API_STABLE Track {
 public:
     /**
      * Construct a track with the given identity and type.

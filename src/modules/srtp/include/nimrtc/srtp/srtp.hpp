@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -44,17 +45,17 @@ namespace nimrtc::srtp {
 // -----------------------------------------------------------------------------
 
 // SRTP MKI (Master Key Identifier) length
-constexpr std::size_t kMkiLength = 4;
+NIMRTC_API_STABLE constexpr std::size_t kMkiLength = 4;
 
 // Maximum ROC (Roll Over Counter) value before wrap
-constexpr std::uint32_t kMaxRoc = 0x7FFFFFFF;
+NIMRTC_API_STABLE constexpr std::uint32_t kMaxRoc = 0x7FFFFFFF;
 
 // -----------------------------------------------------------------------------
 // Types
 // -----------------------------------------------------------------------------
 
 // Crypto suite (SRTP protection profile)
-enum class CryptoSuite {
+enum class NIMRTC_API_STABLE CryptoSuite {
     Aes128CmSha1_80,   // AES-128-CM, HMAC-SHA1-80 auth (default)
     Aes128CmSha1_32,   // AES-128-CM, HMAC-SHA1-32 auth
     Aes128Gcm_128,     // AES-128-GCM, no auth tag (AEAD)
@@ -62,13 +63,13 @@ enum class CryptoSuite {
 };
 
 // Convert suite to libsrtp profile id
-std::uint32_t to_libsrtp_profile(CryptoSuite suite);
+NIMRTC_API_STABLE std::uint32_t to_libsrtp_profile(CryptoSuite suite);
 
 // -----------------------------------------------------------------------------
 // Keying Material
 // -----------------------------------------------------------------------------
 
-struct KeyingMaterial {
+struct NIMRTC_API_STABLE KeyingMaterial {
     std::vector<std::uint8_t> master_salt;   // 14 bytes for AES-CM
     std::vector<std::uint8_t> master_key;    // 16 or 32 bytes
     std::vector<std::uint8_t> mki;            // optional MKI
@@ -85,7 +86,7 @@ struct KeyingMaterial {
 // Session Config
 // -----------------------------------------------------------------------------
 
-struct Config {
+struct NIMRTC_API_STABLE Config {
     // Crypto suite to use
     CryptoSuite suite = CryptoSuite::Aes128CmSha1_80;
 
@@ -113,7 +114,7 @@ struct Config {
 // SrtpSession
 // -----------------------------------------------------------------------------
 
-class SrtpSession {
+class NIMRTC_API_STABLE SrtpSession {
 public:
     SrtpSession();
     ~SrtpSession();
@@ -190,7 +191,7 @@ private:
 
 // Top-level SRTP context managing multiple SSRC sessions.
 // Used by the transport layer to handle multiple streams.
-class SrtpContext {
+class NIMRTC_API_STABLE SrtpContext {
 public:
     SrtpContext();
     ~SrtpContext();

@@ -45,6 +45,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -67,7 +68,7 @@ namespace nimrtc::sctp {
  * stub is honest about not being ready (sends fail loudly instead of being
  * silently dropped).
  */
-class ISctpSocket {
+class NIMRTC_API_STABLE ISctpSocket {
 public:
     virtual ~ISctpSocket() = default;
 

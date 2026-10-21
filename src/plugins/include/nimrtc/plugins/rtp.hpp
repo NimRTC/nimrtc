@@ -15,6 +15,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_RTP_HPP
@@ -37,7 +38,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** RFC 3550 RTP fixed header (first 12 bytes), plus CSRC array. */
-struct RtpHeader {
+struct NIMRTC_API_STABLE RtpHeader {
     uint8_t  version = 2;
     bool     padding = false;
     bool     has_ext = false;
@@ -63,7 +64,7 @@ struct RtpHeader {
 };
 
 /** Parsed RTP packet with header and payload view. */
-struct RtpPacket {
+struct NIMRTC_API_STABLE RtpPacket {
     RtpHeader  header;
     BufferView payload;   // after header + ext
     BufferView raw;       // entire packet (for SRTP)
@@ -73,7 +74,7 @@ struct RtpPacket {
 // RTCP packet types (subset)
 // ---------------------------------------------------------------------------
 
-enum class RtcpType : uint8_t {
+enum class NIMRTC_API_STABLE RtcpType : uint8_t {
     SR   = 200,   // Sender Report
     RR   = 201,   // Receiver Report
     SDES = 202,   // Source Description
@@ -85,13 +86,13 @@ enum class RtcpType : uint8_t {
 };
 
 /** NACK entry. */
-struct RtcpNack {
+struct NIMRTC_API_STABLE RtcpNack {
     uint16_t pid;          // packet ID
     uint16_t blp;          // bitmask of lost packets after pid
 };
 
 /** Parsed RTCP compound packet (points into original buffer). */
-struct RtcpPacket {
+struct NIMRTC_API_STABLE RtcpPacket {
     RtcpType  type;
     BufferView raw;   // entire compound packet
 };
@@ -100,7 +101,7 @@ struct RtcpPacket {
 // Config
 // ---------------------------------------------------------------------------
 
-struct RtpConfig {
+struct NIMRTC_API_STABLE RtpConfig {
     std::string_view name;
     uint32_t local_ssrc = 0;
     std::vector<uint32_t> expected_remote_ssrcs;
@@ -111,15 +112,15 @@ struct RtpConfig {
 // Events
 // ---------------------------------------------------------------------------
 
-using RtpRecvCallback    = std::function<void(RtpPacket)>;
-using RtcpRecvCallback   = std::function<void(const std::vector<RtcpPacket>&)>;
-using RtpParseErrorCallback = std::function<void(Status, std::string_view)>;
+using NIMRTC_API_STABLE RtpRecvCallback    = std::function<void(RtpPacket)>;
+using NIMRTC_API_STABLE RtcpRecvCallback   = std::function<void(const std::vector<RtcpPacket>&)>;
+using NIMRTC_API_STABLE RtpParseErrorCallback = std::function<void(Status, std::string_view)>;
 
 // ---------------------------------------------------------------------------
 // IRTP
 // ---------------------------------------------------------------------------
 
-class IRTP : public IPlugin {
+class NIMRTC_API_STABLE IRTP : public IPlugin {
 public:
     virtual void set_callbacks(RtpRecvCallback     on_rtp,
                              RtcpRecvCallback     on_rtcp,
@@ -164,7 +165,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class IRTPFactory {
+class NIMRTC_API_STABLE IRTPFactory {
 public:
     virtual ~IRTPFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -173,7 +174,7 @@ public:
 };
 
 template<class T>
-class SimpleRTPFactory : public IRTPFactory {
+class NIMRTC_API_STABLE SimpleRTPFactory : public IRTPFactory {
     std::string_view id_;
     std::string_view name_;
 public:

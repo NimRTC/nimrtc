@@ -25,6 +25,7 @@
 
 // Stability classification: NIMRTC_API_UNSTABLE — see
 // web_transport_session_iface.hpp for the rationale.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <string_view>
 
@@ -37,7 +38,7 @@ namespace nimrtc::web_transport {
  * (lands in beta.1) consumes this struct when constructing the
  * underlying msquic `QUIC_CONFIGURATION` handle.
  */
-struct WebTransportConfig {
+struct NIMRTC_API_UNSTABLE WebTransportConfig {
     /**
      * @brief Maximum idle timeout in milliseconds.
      *

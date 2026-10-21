@@ -44,6 +44,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <string_view>
 
@@ -52,9 +53,9 @@
 namespace nimrtc::sctp {
 
 // Forward declaration — full type lives in usrsctp_socket.hpp.
-class UsrsctpSocket;
+class NIMRTC_API_STABLE UsrsctpSocket;
 
-class UsrsctpSocketFactory final : public ISctpSocketFactory {
+class NIMRTC_API_STABLE UsrsctpSocketFactory final : public ISctpSocketFactory {
 public:
     UsrsctpSocketFactory() = default;
     ~UsrsctpSocketFactory() override = default;

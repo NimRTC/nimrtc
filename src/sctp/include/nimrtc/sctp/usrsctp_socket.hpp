@@ -90,6 +90,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -113,9 +114,9 @@
 // where usrsctp.h declares them (not `nimrtc::sctp` — the compiler
 // would otherwise see them as `nimrtc::sctp::socket` etc. and reject
 // usrsctp_socket()'s argument types).
-struct socket;
-union  sctp_sockstore;
-struct sctp_rcvinfo;
+struct NIMRTC_API_STABLE socket;
+union  NIMRTC_API_STABLE sctp_sockstore;
+struct NIMRTC_API_STABLE sctp_rcvinfo;
 
 namespace nimrtc::sctp {
 
@@ -150,7 +151,7 @@ namespace nimrtc::sctp {
 //
 // Guarded by `state_mu_` and exposed to waiters via `state_cv_`.
 // ---------------------------------------------------------------------------
-enum class UsrsctpSocketState : std::uint8_t {
+enum class NIMRTC_API_STABLE UsrsctpSocketState : std::uint8_t {
     kUnbound     = 0,
     kListening   = 1,
     kConnecting  = 2,
@@ -176,7 +177,7 @@ public:
     ~UsrsctpSocket() override;
 
     UsrsctpSocket(const UsrsctpSocket&)            = delete;
-    UsrsctpSocket& operator=(const UsrsctpSocket&) = delete;
+    NIMRTC_API_STABLE UsrsctpSocket& operator=(const UsrsctpSocket&) = delete;
 
     // ---- ISctpSocket -----------------------------------------------------
 

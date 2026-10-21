@@ -24,6 +24,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -40,7 +41,7 @@ namespace nimrtc::session {
 // ---------------------------------------------------------------------------
 // Stream — a group of Tracks (corresponds to WebRTC MediaStream)
 // ---------------------------------------------------------------------------
-class Stream {
+class NIMRTC_API_STABLE Stream {
 public:
     /** Construct a stream with the given identity. */
     explicit Stream(std::string id);
@@ -75,7 +76,7 @@ private:
 // ---------------------------------------------------------------------------
 // Session — top-level session manager
 // ---------------------------------------------------------------------------
-class Session {
+class NIMRTC_API_STABLE Session {
 public:
     Session();
     ~Session();

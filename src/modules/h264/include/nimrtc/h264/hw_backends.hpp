@@ -38,6 +38,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 
 namespace nimrtc::h264 {
@@ -45,16 +46,16 @@ namespace nimrtc::h264 {
 /// Register all H.264 backend entries declared in hw_backends.cpp. Idempotent.
 /// Called automatically by `register_default_plugins()` from the h264
 /// module. Safe to invoke multiple times (re-registration is no-op).
-void register_default_video_backends() noexcept;
+NIMRTC_API_STABLE void register_default_video_backends() noexcept;
 
 /// Select encoder honouring `preferred_id` and selection policy. Returns
 /// a backend descriptor that is non-null. If `create()` ultimately fails,
 /// the caller will see a clear error message identifying the backend.
-const plugins::VideoEncoderBackend*
+NIMRTC_API_STABLE const plugins::VideoEncoderBackend*
 select_encoder_backend(const plugins::VideoCodecConfig& cfg) noexcept;
 
 /// Same for decoders.
-const plugins::VideoDecoderBackend*
+NIMRTC_API_STABLE const plugins::VideoDecoderBackend*
 select_decoder_backend(const plugins::VideoCodecConfig& cfg) noexcept;
 
 } // namespace nimrtc::h264

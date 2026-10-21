@@ -30,6 +30,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -45,7 +46,7 @@ namespace nimrtc::video_frame {
 // Pixel format
 // ---------------------------------------------------------------------------
 
-enum class PixelFormat : std::uint8_t {
+enum class NIMRTC_API_STABLE PixelFormat : std::uint8_t {
     kUnknown = 0,
     kI420    = 1,   ///< YUV 4:2:0 planar (YYYY... UUU... VVV...)
     kNV12    = 2,   ///< YUV 4:2:0 semi-planar (YYYY... UVUVUV...)
@@ -56,7 +57,7 @@ enum class PixelFormat : std::uint8_t {
 };
 
 /** Human-readable pixel format name (for logging). */
-inline std::string_view pixel_format_name(PixelFormat f) noexcept {
+NIMRTC_API_STABLE inline std::string_view pixel_format_name(PixelFormat f) noexcept {
     switch (f) {
         case PixelFormat::kI420:  return "I420";
         case PixelFormat::kNV12:  return "NV12";
@@ -112,12 +113,12 @@ struct VideoFrameLayout {
 /** Compute the layout for a (format, width, height) triple.
  *  Strides are aligned to 16 bytes for SSE/NEON-friendliness (no perf cost
  *  on modern HW, and lets decoders produce aligned buffers). */
-VideoFrameLayout compute_layout(PixelFormat format,
+NIMRTC_API_STABLE VideoFrameLayout compute_layout(PixelFormat format,
                                 std::uint32_t width,
                                 std::uint32_t height) noexcept;
 
 /** Compute the layout with custom stride alignment. */
-VideoFrameLayout compute_layout_aligned(PixelFormat format,
+NIMRTC_API_STABLE VideoFrameLayout compute_layout_aligned(PixelFormat format,
                                        std::uint32_t width,
                                        std::uint32_t height,
                                        std::uint32_t stride_align) noexcept;
@@ -127,7 +128,7 @@ VideoFrameLayout compute_layout_aligned(PixelFormat format,
 // ---------------------------------------------------------------------------
 
 /** Internal buffer control block. */
-struct FrameBufferControl {
+struct NIMRTC_API_STABLE FrameBufferControl {
     std::atomic<std::uint32_t> ref_count{1};
     std::size_t   capacity = 0;     ///< total bytes allocated
     std::uint32_t width    = 0;
@@ -159,7 +160,7 @@ protected:
  * Thread-safety: ref count is atomic; `data()` access requires the caller to
  * keep a shared_ptr alive (which is the normal pattern).
  */
-class VideoFrameBuffer {
+class NIMRTC_API_STABLE VideoFrameBuffer {
 public:
     /** Probe used by `VideoFrame::has_gpu()` to disambiguate the type-
      *  erased buffer. Default CPU-side implementation returns false.
@@ -337,7 +338,7 @@ private:
 // `GpuBufferPool` is the per-backend arena that allocates + recycles handles.
 
 /** Platform-specific GPU resource identifier. */
-enum class GpuBackend : std::uint8_t {
+enum class NIMRTC_API_STABLE GpuBackend : std::uint8_t {
     kNone           = 0,   ///< CPU path (no GPU handle); `handle` is nullptr.
     kAndroidNativeWindow = 1,  ///< ANativeWindow* (Android)
     kAndroidSurfaceTexture = 2, ///< ASurfaceTexture (Android Vulkan / GL)
@@ -359,7 +360,7 @@ enum class GpuBackend : std::uint8_t {
 };
 
 /** One GPU resource handle. Owned by a GpuBuffer; never standalone. */
-struct GpuHandle {
+struct NIMRTC_API_STABLE GpuHandle {
     GpuBackend backend = GpuBackend::kNone;
     void*      handle  = nullptr;  ///< type per `backend`
     /** Native row stride / pitch in bytes (0 if not applicable). Some
@@ -372,7 +373,7 @@ struct GpuHandle {
 };
 
 /** Human-readable GpuBackend name (for logging). */
-inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
+NIMRTC_API_STABLE inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
     switch (b) {
         case GpuBackend::kNone:                  return "none";
         case GpuBackend::kAndroidNativeWindow:   return "android-surface";
@@ -555,7 +556,7 @@ private:
 // SDK call (cuArrayCreate, AMediaCodec_createSurface, ID3D11Device_Create
 // Texture2D, vaCreateSurfaces, MMAL_PORT_ENABLE, etc.).
 
-class GpuBufferPool {
+class NIMRTC_API_STABLE GpuBufferPool {
 public:
     virtual ~GpuBufferPool() = default;
 
@@ -597,7 +598,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Capture-time and presentation metadata (per §8.4 timeline). */
-struct VideoFrameInfo {
+struct NIMRTC_API_STABLE VideoFrameInfo {
     /** Wall-clock capture timestamp (microseconds, monotonic clock). */
     std::int64_t  capture_ts_us   = 0;
 
@@ -636,7 +637,7 @@ struct VideoFrameInfo {
 // struct so the by-value `info` member has a complete type. Both
 // `VideoFrame::info` and `EncodedVideoFrame::info` reuse the same type.
 
-struct VideoFrame {
+struct NIMRTC_API_STABLE VideoFrame {
     /** Either a `VideoFrameBuffer` (CPU-only) or a `GpuBuffer` (GPU-first
      *  with optional CPU mirror). We use `std::shared_ptr<void>` so
      *  both shapes share one slot; concrete plugins cast based on the
@@ -709,7 +710,7 @@ struct VideoFrame {
 // EncodedVideoFrame — codec-agnostic compressed payload
 // ---------------------------------------------------------------------------
 
-enum class CodecKind : std::uint8_t {
+enum class NIMRTC_API_STABLE CodecKind : std::uint8_t {
     kUnknown = 0,
     kH264    = 1,
     kH265    = 2,
@@ -718,7 +719,7 @@ enum class CodecKind : std::uint8_t {
     kAV1     = 5,
 };
 
-inline std::string_view codec_name(CodecKind k) noexcept {
+NIMRTC_API_STABLE inline std::string_view codec_name(CodecKind k) noexcept {
     switch (k) {
         case CodecKind::kH264:  return "H264";
         case CodecKind::kH265:  return "H265";
@@ -746,7 +747,7 @@ enum class NaluFormat : std::uint8_t {
  *   - VP8/VP9/AV1: raw bitstream (no descriptor — descriptors live in the
  *     RTP payload framing, handled by the video_payload module)
  */
-struct EncodedVideoFrame {
+struct NIMRTC_API_STABLE EncodedVideoFrame {
     CodecKind         codec         = CodecKind::kUnknown;
     NaluFormat        nalu_format   = NaluFormat::kUnknown;
     core::ByteSpan    payload;                 ///< codec bitstream
@@ -756,7 +757,7 @@ struct EncodedVideoFrame {
 };
 
 /** Convenience: total payload size in bytes. */
-inline std::size_t encoded_size(const EncodedVideoFrame& f) noexcept {
+NIMRTC_API_STABLE inline std::size_t encoded_size(const EncodedVideoFrame& f) noexcept {
     return f.payload.size();
 }
 
@@ -775,7 +776,7 @@ void convert_i420_to_bgra(std::uint32_t width,
                           std::int32_t bgra_stride) noexcept;
 
 /** Convert NV12 (YYYY... UVUV...) to I420 (de-interleave UV). */
-void convert_nv12_to_i420(std::uint32_t width,
+NIMRTC_API_STABLE void convert_nv12_to_i420(std::uint32_t width,
                           std::uint32_t height,
                           const std::uint8_t* y_plane, std::int32_t y_stride,
                           const std::uint8_t* uv_plane, std::int32_t uv_stride,
@@ -784,7 +785,7 @@ void convert_nv12_to_i420(std::uint32_t width,
                           std::uint8_t* v_out, std::int32_t v_out_stride) noexcept;
 
 /** Convert I420 to NV12 (interleave UV). */
-void convert_i420_to_nv12(std::uint32_t width,
+NIMRTC_API_STABLE void convert_i420_to_nv12(std::uint32_t width,
                           std::uint32_t height,
                           const std::uint8_t* y_plane, std::int32_t y_stride,
                           const std::uint8_t* u_plane, std::int32_t u_stride,

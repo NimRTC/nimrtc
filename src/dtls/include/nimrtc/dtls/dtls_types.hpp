@@ -35,6 +35,8 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>   // NIMRTC_API_STABLE / NIMRTC_API_UNSTABLE
+
 #include <array>
 #include <cstdint>
 #include <map>
@@ -49,40 +51,40 @@ namespace nimrtc::dtls {
 // Constants
 // -----------------------------------------------------------------------------
 
-constexpr std::size_t kFingerprintHashLen = 32;        // SHA-256 = 32 bytes
-constexpr std::size_t kSrtpKeyLen         = 16;        // AES-CM-128
-constexpr std::size_t kSrtpSaltLen        = 14;
-constexpr std::size_t kSrtpMasterKeyLen   = 16;
-constexpr std::size_t kSrtpMasterSaltLen  = 14;
+NIMRTC_API_STABLE constexpr std::size_t kFingerprintHashLen = 32;        // SHA-256 = 32 bytes
+NIMRTC_API_STABLE constexpr std::size_t kSrtpKeyLen         = 16;        // AES-CM-128
+NIMRTC_API_STABLE constexpr std::size_t kSrtpSaltLen        = 14;
+NIMRTC_API_STABLE constexpr std::size_t kSrtpMasterKeyLen   = 16;
+NIMRTC_API_STABLE constexpr std::size_t kSrtpMasterSaltLen  = 14;
 
 // DTLS record types (RFC 6347 §4.1)
-constexpr std::uint8_t kDtlsHandshakeContentType = 22;
-constexpr std::uint8_t kDtlsAlertContentType     = 21;
-constexpr std::uint8_t kDtlsChangeCipherSpec     = 20;
-constexpr std::uint8_t kDtlsAppData              = 23;
+NIMRTC_API_STABLE constexpr std::uint8_t kDtlsHandshakeContentType = 22;
+NIMRTC_API_STABLE constexpr std::uint8_t kDtlsAlertContentType     = 21;
+NIMRTC_API_STABLE constexpr std::uint8_t kDtlsChangeCipherSpec     = 20;
+NIMRTC_API_STABLE constexpr std::uint8_t kDtlsAppData              = 23;
 
 // DTLS handshake message types (subset we care about)
-constexpr std::uint8_t kHsClientHello  = 1;
-constexpr std::uint8_t kHsServerHello  = 2;
-constexpr std::uint8_t kHsHelloVerify  = 3;
-constexpr std::uint8_t kHsCertificate  = 11;
-constexpr std::uint8_t kHsServerKeyExchange = 12;
-constexpr std::uint8_t kHsCertificateRequest = 13;
-constexpr std::uint8_t kHsServerHelloDone = 14;
-constexpr std::uint8_t kHsCertificateVerify = 15;
-constexpr std::uint8_t kHsClientKeyExchange = 16;
-constexpr std::uint8_t kHsFinished = 20;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsClientHello  = 1;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsServerHello  = 2;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsHelloVerify  = 3;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsCertificate  = 11;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsServerKeyExchange = 12;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsCertificateRequest = 13;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsServerHelloDone = 14;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsCertificateVerify = 15;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsClientKeyExchange = 16;
+NIMRTC_API_STABLE constexpr std::uint8_t kHsFinished = 20;
 
 // -----------------------------------------------------------------------------
 // Enums
 // -----------------------------------------------------------------------------
 
-enum class DtlsRole : std::uint8_t {
+enum class NIMRTC_API_STABLE DtlsRole : std::uint8_t {
     Server,    // answering offer
     Client,    // initiating offer
 };
 
-enum class DtlsState : std::uint8_t {
+enum class NIMRTC_API_STABLE DtlsState : std::uint8_t {
     Closed,
     Initial,
     HelloVerify,
@@ -96,7 +98,7 @@ enum class DtlsState : std::uint8_t {
     Failed,
 };
 
-enum class SrtpProfile : std::uint16_t {
+enum class NIMRTC_API_STABLE SrtpProfile : std::uint16_t {
     Aes128CmSha1_80 = 0x0001,
     Aes128CmSha1_32 = 0x0002,
     Aes128Gcm       = 0x0007,
@@ -107,7 +109,7 @@ enum class SrtpProfile : std::uint16_t {
 // Endpoint address (mirrors ICE-selected pair)
 // -----------------------------------------------------------------------------
 
-struct DtlsAddr {
+struct NIMRTC_API_STABLE DtlsAddr {
     std::string host;       // IPv4 dotted-quad
     std::uint16_t port = 0;
 };
@@ -116,7 +118,7 @@ struct DtlsAddr {
 // DTLS record (one application-visible message)
 // -----------------------------------------------------------------------------
 
-struct DtlsRecord {
+struct NIMRTC_API_STABLE DtlsRecord {
     std::vector<std::uint8_t> bytes;
     DtlsAddr                  to;       // empty = use session's peer
 };
@@ -125,7 +127,7 @@ struct DtlsRecord {
 // SRTP keying material (RFC 5764 §4.2)
 // -----------------------------------------------------------------------------
 
-struct SrtpKeyingMaterial {
+struct NIMRTC_API_STABLE SrtpKeyingMaterial {
     SrtpProfile               profile = SrtpProfile::Aes128CmSha1_80;
 
     std::array<std::uint8_t, kSrtpMasterKeyLen>  client_master_key{};
@@ -142,7 +144,7 @@ struct SrtpKeyingMaterial {
 // Local fingerprint (advertised in SDP)
 // -----------------------------------------------------------------------------
 
-struct Fingerprint {
+struct NIMRTC_API_STABLE Fingerprint {
     std::string algorithm;     // "sha-256"
     std::vector<std::uint8_t> bytes;     // raw hash
     std::string base64;        // base64-encoded (kept for legacy/debug; NOT for SDP)
@@ -153,7 +155,7 @@ struct Fingerprint {
 // Config
 // -----------------------------------------------------------------------------
 
-struct Config {
+struct NIMRTC_API_STABLE Config {
     DtlsRole role = DtlsRole::Server;
 
     /** SDP peer fingerprint (must match the certificate the peer presents). */

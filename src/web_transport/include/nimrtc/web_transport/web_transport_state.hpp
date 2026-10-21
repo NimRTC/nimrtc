@@ -17,6 +17,7 @@
 
 // Stability classification: NIMRTC_API_UNSTABLE — see
 // web_transport_session_iface.hpp for the rationale.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 
 namespace nimrtc::web_transport {
@@ -28,7 +29,7 @@ namespace nimrtc::web_transport {
  * loop at ~50 ms cadence; the state-diff drives the handshake
  * completion callback and the close lifecycle.
  */
-enum class WebTransportState : std::uint8_t {
+enum class NIMRTC_API_UNSTABLE WebTransportState : std::uint8_t {
     /**
      * @brief Connection handshake in progress.
      *

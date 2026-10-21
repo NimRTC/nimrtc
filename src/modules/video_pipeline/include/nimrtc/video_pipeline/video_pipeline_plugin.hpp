@@ -39,6 +39,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -61,7 +62,7 @@ namespace nimrtc::video_pipeline {
  *   - `plugins::EncodedVideoFrame` (alias of `video_frame::EncodedVideoFrame`) — same struct
  *   - plugin `VideoReceiverConfig` ↔ concrete `ReceiverConfig`
  */
-class ReceiverAdapter : public plugins::IVideoReceiver {
+class NIMRTC_API_STABLE ReceiverAdapter : public plugins::IVideoReceiver {
 public:
     /** Takes ownership of the concrete receiver. */
     explicit ReceiverAdapter(std::unique_ptr<VideoReceiver> concrete) noexcept;
@@ -105,7 +106,7 @@ private:
  * takes `(frame, capture_ts_us, rtp_timestamp, frame_seq)` as separate
  * scalars. The adapter bridges them.
  */
-class SenderAdapter : public plugins::IVideoSender {
+class NIMRTC_API_STABLE SenderAdapter : public plugins::IVideoSender {
 public:
     /** Takes ownership of the concrete sender. */
     explicit SenderAdapter(std::unique_ptr<VideoSender> concrete) noexcept;
@@ -141,7 +142,7 @@ private:
 // ---------------------------------------------------------------------------
 
 /** Receiver factory wrapping the concrete `VideoReceiver` reference impl. */
-class ReferenceReceiverFactory : public plugins::IVideoReceiverFactory {
+class NIMRTC_API_STABLE ReferenceReceiverFactory : public plugins::IVideoReceiverFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -149,7 +150,7 @@ public:
 };
 
 /** Sender factory wrapping the concrete `VideoSender` reference impl. */
-class ReferenceSenderFactory : public plugins::IVideoSenderFactory {
+class NIMRTC_API_STABLE ReferenceSenderFactory : public plugins::IVideoSenderFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -163,6 +164,6 @@ public:
 /** Register the default video_pipeline plugin(s) with core::PluginRegistry.
  *  Must be called once at program startup before any pipeline lookup.
  *  Idempotent: subsequent invocations are no-ops. */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::video_pipeline

@@ -30,14 +30,15 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/dtls/dtls.hpp>
 #include <nimrtc/dtls/dtls_session_iface.hpp>   // PAL Slice 4 seam
 
 // Forward declare instead of including wolfSSL headers here to keep the
 // public header clean.  The .cpp file includes the real headers.
-struct WOLFSSL;
-struct WOLFSSL_CTX;
-struct WOLFSSL_X509;
+struct NIMRTC_API_STABLE WOLFSSL;
+struct NIMRTC_API_STABLE WOLFSSL_CTX;
+struct NIMRTC_API_STABLE WOLFSSL_X509;
 
 namespace nimrtc::dtls {
 
@@ -59,7 +60,7 @@ namespace nimrtc::dtls {
  *  the existing primitives where possible; see the .cpp for the
  *  dispatch).
  */
-class DtlsSessionWolfSSL : public IDtlsSession {
+class NIMRTC_API_STABLE DtlsSessionWolfSSL : public IDtlsSession {
 public:
     /** cfg.srtp_profile is ignored — wolfSSL always negotiates
      *  SRTP_AES128_CM_SHA1_80 (RFC 5764 mandatory profile). */

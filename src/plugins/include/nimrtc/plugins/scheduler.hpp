@@ -34,6 +34,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_SCHEDULER_HPP
@@ -56,7 +57,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 // Priority — strictly ordered descending (highest = enum value 0)
 // ---------------------------------------------------------------------------
-enum class Priority : std::uint8_t {
+enum class NIMRTC_API_STABLE Priority : std::uint8_t {
     kControl      = 0,  // highest — control messages, never dropped by scheduler
     kAudio        = 1,
     kVideoKeyframe = 2, // video I-frame (key frame)
@@ -65,17 +66,17 @@ enum class Priority : std::uint8_t {
 };
 
 /** Number of priority levels. */
-constexpr std::size_t kPriorityCount = 5;
+constexpr NIMRTC_API_STABLE std::size_t kPriorityCount = 5;
 
 /** Convert a Priority to its integer rank (lower = higher priority). */
-[[nodiscard]] constexpr std::size_t priority_rank(Priority p) noexcept {
+[[nodiscard]] constexpr NIMRTC_API_STABLE std::size_t priority_rank(Priority p) noexcept {
     return static_cast<std::size_t>(p);
 }
 
 // ---------------------------------------------------------------------------
 // SchedulerConfig
 // ---------------------------------------------------------------------------
-struct SchedulerConfig {
+struct NIMRTC_API_STABLE SchedulerConfig {
     /** Estimated average outbound packet size in bytes.
      *  Used to convert a target bitrate (bps) into a packets-per-second
      *  budget. Defaults to a conservative RTP packet MTU estimate. */
@@ -99,7 +100,7 @@ struct SchedulerConfig {
 // ---------------------------------------------------------------------------
 // SchedulerStats — observable statistics
 // ---------------------------------------------------------------------------
-struct SchedulerStats {
+struct NIMRTC_API_STABLE SchedulerStats {
     /** Packets currently held in all queues. */
     std::uint32_t queued_packets = 0;
 
@@ -125,7 +126,7 @@ struct SchedulerStats {
 
 /** Callback invoked once per packet drained by `drain_with()`.
  *  Returning false stops draining immediately. */
-using DrainCallback = std::function<bool(Priority, core::ByteSpan)>;
+using NIMRTC_API_STABLE DrainCallback = std::function<bool(Priority, core::ByteSpan)>;
 
 // ---------------------------------------------------------------------------
 // IScheduler
@@ -145,7 +146,7 @@ using DrainCallback = std::function<bool(Priority, core::ByteSpan)>;
  *  - `on_bwe_update()` is the input from the BWE plugin; implementations
  *    must drop lowest-priority traffic first, never `kControl`.
  */
-class IScheduler : public IPlugin {
+class NIMRTC_API_STABLE IScheduler : public IPlugin {
 public:
     ~IScheduler() override = default;
 
@@ -213,7 +214,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for scheduler implementations. */
-class ISchedulerFactory {
+class NIMRTC_API_STABLE ISchedulerFactory {
 public:
     virtual ~ISchedulerFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -225,7 +226,7 @@ public:
 
 /** Template helper — creates a factory that owns a scheduler type T. */
 template<class T>
-class SimpleSchedulerFactory : public ISchedulerFactory {
+class NIMRTC_API_STABLE SimpleSchedulerFactory : public ISchedulerFactory {
     std::string_view id_;
     std::string_view name_;
 public:

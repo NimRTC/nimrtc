@@ -22,6 +22,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -39,7 +40,7 @@ namespace nimrtc::h264 {
 // ---------------------------------------------------------------------------
 
 /** Wraps a concrete h264::Decoder behind plugins::IVideoCodec. */
-class CodecPluginAdapter : public plugins::IVideoCodec {
+class NIMRTC_API_STABLE CodecPluginAdapter : public plugins::IVideoCodec {
 public:
     explicit CodecPluginAdapter(plugins::VideoCodecConfig cfg) noexcept;
     ~CodecPluginAdapter() override;
@@ -102,7 +103,7 @@ private:
  *  Registered as id "h264".  Replace by registering your own
  *  factory with a different id and selecting it via
  *  `EngineConfig::video_codec_name`. */
-class H264PluginFactory : public plugins::IVideoCodecFactory {
+class NIMRTC_API_STABLE H264PluginFactory : public plugins::IVideoCodecFactory {
 public:
     std::string_view id() const noexcept override { return NIMRTC_PLUGIN_ID("h264"); }
     std::string_view display_name() const noexcept override {

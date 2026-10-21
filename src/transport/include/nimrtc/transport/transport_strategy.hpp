@@ -38,6 +38,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -112,7 +113,7 @@ inline const TransportRequirements kStrategyCrossNetworkPeer{
 //   req.max_p99_ms = 80;   // tighter than the 100 ms default
 //   selector.select(req);
 //
-inline const TransportRequirements& strategy_by_name(std::string_view name) {
+NIMRTC_API_STABLE inline const TransportRequirements& strategy_by_name(std::string_view name) {
     if (name.empty()) {
         return kStrategyBrowserCall;  // engine default
     }
@@ -188,7 +189,7 @@ inline constexpr std::string_view kStrategyNames[kStrategyCount] = {
 // `transport.control.stack` are diagnostic / override hooks for the
 // §5.3 rule engine, not inputs to the strategy mapping.)
 // ---------------------------------------------------------------------------
-struct ProfileTransportInput {
+struct NIMRTC_API_STABLE ProfileTransportInput {
     /// Strategy id (one of the 5 named use cases). Empty = engine default
     /// (currently `browser-call`).
     std::string_view strategy = {};
@@ -255,7 +256,7 @@ struct ProfileTransportInput {
 // empty `input.strategy` is silently treated as the engine default
 // ("browser-call") — the same convention as `strategy_by_name("")`.
 //
-inline TransportRequirements
+NIMRTC_API_STABLE inline TransportRequirements
 requirements_from_profile_input(const ProfileTransportInput& input) {
     // Step 1: resolve strategy name. Empty -> browser-call default.
     // strategy_by_name throws std::invalid_argument on unknown names.

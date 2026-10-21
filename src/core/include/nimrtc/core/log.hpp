@@ -9,13 +9,14 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::core::log {
 
 // -----------------------------------------------------------------------------
 // Severity levels
 // -----------------------------------------------------------------------------
-enum class Level : std::uint8_t {
+enum class NIMRTC_API_STABLE Level : std::uint8_t {
     Trace,
     Debug,
     Info,
@@ -24,23 +25,23 @@ enum class Level : std::uint8_t {
     Critical,
 };
 
-const char* to_string(Level level) noexcept;
-Level parse_level(std::string_view s) noexcept;
+NIMRTC_API_STABLE const char* to_string(Level level) noexcept;
+NIMRTC_API_STABLE Level parse_level(std::string_view s) noexcept;
 
 // -----------------------------------------------------------------------------
 // Sink — pluggable destination for log lines.
 // -----------------------------------------------------------------------------
-class Sink {
+class NIMRTC_API_STABLE Sink {
 public:
     virtual ~Sink() = default;
     virtual void write(Level level, std::string_view msg) noexcept = 0;
 };
 
-using SinkPtr = std::shared_ptr<Sink>;
+using NIMRTC_API_STABLE SinkPtr = std::shared_ptr<Sink>;
 
 // Default sink writes to stderr in the form:
 //   [Level] message
-class StderrSink final : public Sink {
+class NIMRTC_API_STABLE StderrSink final : public Sink {
 public:
     void write(Level level, std::string_view msg) noexcept override;
 };
@@ -48,7 +49,7 @@ public:
 // -----------------------------------------------------------------------------
 // Logger — singleton, thread-safe, lock-light (atomic level + shared sink).
 // -----------------------------------------------------------------------------
-class Logger {
+class NIMRTC_API_STABLE Logger {
 public:
     static Logger& instance() noexcept;
 
@@ -74,7 +75,7 @@ public:
 // -----------------------------------------------------------------------------
 // Free-function convenience wrappers (inlined so they fold to member calls).
 // -----------------------------------------------------------------------------
-inline void set_level(Level l) noexcept          { Logger::instance().set_level(l); }
+NIMRTC_API_STABLE inline void set_level(Level l) noexcept          { Logger::instance().set_level(l); }
 inline void trace(std::string_view m) noexcept   { Logger::instance().trace(m); }
 inline void debug(std::string_view m) noexcept   { Logger::instance().debug(m); }
 inline void info (std::string_view m) noexcept   { Logger::instance().info(m); }

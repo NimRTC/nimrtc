@@ -33,6 +33,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -48,7 +49,7 @@ namespace nimrtc::raw_udp {
  * recv thread + one or more send threads (send_to() is thread-safe
  * by virtue of UDP being message-atomic at the kernel level).
  */
-class UdpSocket {
+class NIMRTC_API_STABLE UdpSocket {
 public:
     UdpSocket() noexcept = default;
     ~UdpSocket() noexcept { close(); }

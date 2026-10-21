@@ -1,16 +1,15 @@
-﻿#pragma once
-
-// Stability classification: NIMRTC_API_STABLE (visual marker;
+﻿// Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
-// Note: This file intentionally saved as UTF-8 with BOM so that MSVC
-// (compiling with a non-UTF-8 code page such as CP936/GBK on Chinese Windows)
-// does not emit C4819 for any future non-ASCII characters in comments.
+
+#ifndef NIMRTC_CORE_ERROR_HPP
+#define NIMRTC_CORE_ERROR_HPP
 
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <nimrtc/core/api_version.hpp>
 
 namespace nimrtc::core {
 
@@ -19,7 +18,7 @@ namespace nimrtc::core {
 // -----------------------------------------------------------------------------
 // Keep this enum stable. Module-specific codes may be appended in their own
 // headers, but core codes are part of the cross-module ABI.
-enum class ErrorCode : std::uint8_t {
+enum class NIMRTC_API_STABLE ErrorCode : std::uint8_t {
     Ok                  = 0,
     InvalidArgument     = 1,   // argument shape / value rejected
     InvalidState        = 2,   // API called in wrong state machine state
@@ -35,12 +34,12 @@ enum class ErrorCode : std::uint8_t {
     InternalError       = 99,  // bug — should not happen
 };
 
-const char* to_string(ErrorCode code) noexcept;
+NIMRTC_API_STABLE const char* to_string(ErrorCode code) noexcept;
 
 // -----------------------------------------------------------------------------
 // Error
 // -----------------------------------------------------------------------------
-class Error {
+class NIMRTC_API_STABLE Error {
 public:
     Error() noexcept = default;
     Error(ErrorCode code, std::string message) noexcept
@@ -63,7 +62,7 @@ private:
 // -----------------------------------------------------------------------------
 // A variant-free Result<T> using tag dispatch. T must be move-constructible.
 template <typename T>
-class Result {
+class NIMRTC_API_STABLE Result {
 public:
     static Result ok(T value) {
         return Result(std::move(value), ok_tag{});
@@ -103,7 +102,7 @@ private:
 // Result<void>
 // -----------------------------------------------------------------------------
 template <>
-class Result<void> {
+class NIMRTC_API_STABLE Result<void> {
 public:
     // Named `make_ok()` to avoid signature collision with `bool ok() const noexcept`
     // on MSVC (C2686) in template specializations.
@@ -137,3 +136,5 @@ private:
 };
 
 } // namespace nimrtc::core
+
+#endif // NIMRTC_CORE_ERROR_HPP

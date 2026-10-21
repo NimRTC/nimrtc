@@ -51,6 +51,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 // Reuse VideoCodecKind / VideoPacketizationMode enum from video_codec.hpp.
 // EncodedVideoFrame is also defined there; we reuse it so the receiver→
@@ -78,7 +79,7 @@ namespace nimrtc::plugins {
 // `video_pipeline.hpp` don't need to pull SDP-format helpers.
 // ---------------------------------------------------------------------------
 
-enum class VideoPacketizationMode : std::uint8_t {
+enum class NIMRTC_API_STABLE VideoPacketizationMode : std::uint8_t {
     kSingleNal      = 0,   ///< only single-NALU packets allowed
     kNonInterleaved = 1,   ///< Single NAL + STAP-A + FU-A (RFC 6184 default)
     kInterleaved    = 2,   ///< STAP-B + FU-B; not implemented (RFC reserved)
@@ -91,7 +92,7 @@ enum class VideoPacketizationMode : std::uint8_t {
 /** Minimal RTP packet view used by `IVideoReceiver::push_rtp()`. The
  *  pipeline needs only the fields relevant to depacketization and reorder
  *  detection; it does NOT need the CSRC array or extension data. */
-struct VideoRtpPacket {
+struct NIMRTC_API_STABLE VideoRtpPacket {
     std::uint32_t ssrc          = 0;
     std::uint16_t seq           = 0;
     std::uint32_t rtp_timestamp = 0;
@@ -109,7 +110,7 @@ struct VideoRtpPacket {
 
 /** Receiver configuration. Mirrors the concrete `video_pipeline::ReceiverConfig`
  *  but uses plugin types (`VideoCodecKind`, `TimestampUs`). */
-struct VideoReceiverConfig {
+struct NIMRTC_API_STABLE VideoReceiverConfig {
     /** Codec of the inbound stream. Determines which depacketizer path
      *  the receiver uses (H.264 FU-A / STAP-A dispatch; VP8 partition
      *  detection; ...). */
@@ -136,7 +137,7 @@ struct VideoReceiverConfig {
 };
 
 /** Receiver statistics. */
-struct VideoReceiverStats {
+struct NIMRTC_API_STABLE VideoReceiverStats {
     std::uint64_t packets_pushed       = 0;
     std::uint64_t frames_emitted       = 0;
     std::uint64_t frames_incomplete    = 0;
@@ -149,7 +150,7 @@ struct VideoReceiverStats {
 /** Frame callback: invoked on the receiver thread for every assembled frame.
  *  The frame's `payload` is owned by the receiver and is only valid for
  *  the duration of the callback; copy out if you need to keep it. */
-using VideoReceiverFrameCallback =
+using NIMRTC_API_STABLE VideoReceiverFrameCallback =
     std::function<void(const EncodedVideoFrame& frame, TimestampUs now_us)>;
 
 /** Decoded frame callback: invoked once a frame has been fully decoded
@@ -170,13 +171,13 @@ using VideoReceiverFrameCallback =
  *  Default receivers don't decode — they emit the encoded callback only.
  *  Set `set_decoded_callback` to opt into decoding + zero-copy display.
  */
-using VideoReceiverDecodedCallback =
+using NIMRTC_API_STABLE VideoReceiverDecodedCallback =
     std::function<void(const VideoFrame& frame, TimestampUs now_us)>;
 
 /** Callback fired when the receiver decides a packet should be requested
  *  via NACK.  Defaults: implementers populate a seq list and the engine
  *  sends a NACK RTCP FB for each entry. */
-using VideoReceiverNackCallback =
+using NIMRTC_API_STABLE VideoReceiverNackCallback =
     std::function<void(std::vector<std::uint16_t> missing_seqs)>;
 
 /**
@@ -194,7 +195,7 @@ using VideoReceiverNackCallback =
  *
  * Single-threaded.
  */
-class IVideoReceiver : public IPlugin {
+class NIMRTC_API_STABLE IVideoReceiver : public IPlugin {
 public:
     /** Register the frame callback (must be set before push_rtp). */
     virtual void set_frame_callback(VideoReceiverFrameCallback cb) noexcept = 0;
@@ -265,7 +266,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for receiver pipeline plugin instances. */
-class IVideoReceiverFactory {
+class NIMRTC_API_STABLE IVideoReceiverFactory {
 public:
     virtual ~IVideoReceiverFactory() = default;
 
@@ -282,7 +283,7 @@ public:
 };
 
 template<class T>
-class SimpleVideoReceiverFactory : public IVideoReceiverFactory {
+class NIMRTC_API_STABLE SimpleVideoReceiverFactory : public IVideoReceiverFactory {
     std::string_view id_;
     std::string_view name_;
 public:
@@ -303,7 +304,7 @@ public:
 // ===========================================================================
 
 /** Sender configuration. */
-struct VideoSenderConfig {
+struct NIMRTC_API_STABLE VideoSenderConfig {
     VideoCodecKind        codec              = VideoCodecKind::kH264;
     std::uint32_t         ssrc               = 0;
     std::uint8_t          payload_type       = 0;
@@ -321,7 +322,7 @@ struct VideoSenderConfig {
 };
 
 /** Sender statistics. */
-struct VideoSenderStats {
+struct NIMRTC_API_STABLE VideoSenderStats {
     std::uint64_t frames_pushed                = 0;
     std::uint64_t packets_emitted              = 0;
     std::uint64_t fua_frames_packetized        = 0;
@@ -342,7 +343,7 @@ struct VideoSenderStats {
  *
  *  The span is only valid for the duration of the callback; the sender
  *  reuses an internal buffer for subsequent packets. */
-using VideoSenderPacketCallback =
+using NIMRTC_API_STABLE VideoSenderPacketCallback =
     std::function<void(BufferView rtp_packet_payload,
                        std::uint32_t rtp_timestamp,
                        std::uint16_t seq,
@@ -361,7 +362,7 @@ using VideoSenderPacketCallback =
  *
  * Single-threaded.
  */
-class IVideoSender : public IPlugin {
+class NIMRTC_API_STABLE IVideoSender : public IPlugin {
 public:
     /** Register the per-packet callback (must be set before push_frame). */
     virtual void set_packet_callback(VideoSenderPacketCallback cb) noexcept = 0;
@@ -419,7 +420,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for sender pipeline plugin instances. */
-class IVideoSenderFactory {
+class NIMRTC_API_STABLE IVideoSenderFactory {
 public:
     virtual ~IVideoSenderFactory() = default;
 
@@ -436,7 +437,7 @@ public:
 };
 
 template<class T>
-class SimpleVideoSenderFactory : public IVideoSenderFactory {
+class NIMRTC_API_STABLE SimpleVideoSenderFactory : public IVideoSenderFactory {
     std::string_view id_;
     std::string_view name_;
 public:

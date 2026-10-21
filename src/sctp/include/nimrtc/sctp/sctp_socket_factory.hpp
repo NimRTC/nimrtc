@@ -22,6 +22,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <memory>
 #include <string_view>
 
@@ -30,7 +31,7 @@
 namespace nimrtc::sctp {
 
 // Forward declaration — full type lives in sctp_socket_iface.hpp.
-class ISctpSocket;
+class NIMRTC_API_STABLE ISctpSocket;
 
 // ---------------------------------------------------------------------------
 // SctpConfig — opaque per-socket config passed to ISctpSocketFactory::create().
@@ -42,7 +43,7 @@ class ISctpSocket;
 // SCTP-over-DTLS plumbing). Keep the seam additive so v0.11.0 is a pure
 // field addition — no breakage at existing call sites.
 // ---------------------------------------------------------------------------
-struct SctpConfig {
+struct NIMRTC_API_STABLE SctpConfig {
     /** Application-level label, surfaced in logs. May be empty. */
     std::string_view label;
 
@@ -60,7 +61,7 @@ struct SctpConfig {
 // ---------------------------------------------------------------------------
 
 /** Factory for SCTP backend instances. */
-class ISctpSocketFactory {
+class NIMRTC_API_STABLE ISctpSocketFactory {
 public:
     virtual ~ISctpSocketFactory() = default;
 

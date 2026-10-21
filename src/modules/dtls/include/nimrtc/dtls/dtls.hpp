@@ -56,6 +56,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -95,7 +96,7 @@ namespace nimrtc::dtls {
 // The hand-written DTLS state machine (the original `dtls.cpp`) was
 // removed; the only DTLS provider now is wolfSSL.
 // -----------------------------------------------------------------------------
-class DtlsSession : public IDtlsSession {
+class NIMRTC_API_STABLE DtlsSession : public IDtlsSession {
 public:
     // Expose the seam-surface overloads so the legacy concrete
     // methods below (`set_role(DtlsRole)`, `set_peer_fingerprint(string,

@@ -150,6 +150,27 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    CI runners (windows, linux-gcc, linux-aarch64, macos-clang). All four must
    be green before proceeding.
 
+5. Run the release freeze checklist:
+
+   ```bash
+   sh scripts/check-release-freeze.sh                  # mid-cycle / pre-release tags
+   sh scripts/check-release-freeze.sh --final-tag      # final tags only (v1.0.0, vX.Y.0)
+   ```
+
+   This covers the repo-level invariants that no unit test asserts:
+
+   | Check | What it guards |
+   |---|---|
+   | `sfu` | The SFU track stays inert. Closed as NO on 2026-10-19 (`docs/plan/v1.0-plan.md` §7); the Profile JSONs are documentation-only and must not acquire engine wiring. A failure means a closed decision was reopened without a `v1.1.0-plan.md`. |
+   | `api` | Every public header under `src/<mod>/include/nimrtc/` carries a `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` marker (ADR-015). |
+   | `api-symbols` | Every *symbol* at namespace scope in a public header carries a marker (ADR-015 §Decision 1). Runs the same `scripts/api_freeze_scan.js` scanner CI runs on all four platforms, so the tag cut cannot disagree with the merge gate. Skipped with a note when `node` is not on `PATH`. |
+   | `version` | `NIMRTC_API_VERSION_PRE_RELEASE` tracks the release stage, and is `""` under `--final-tag` (ADR-015 Verification table). |
+   | `submodules` | Every git submodule pin sits on an upstream remote branch. The `v0.14.0-rc.1` cycle pinned `src/third_party/msquic` at a local-only commit (`a88383e`) and had to be reverted (`ef6ff11`); such a pin breaks every clone but the author's. |
+   | `root` | No scratch scripts, captured logs, TLS keylogs or CTest output at the project root. |
+
+   Pass `--no-network` on an offline machine to skip the submodule query
+   (run it at least once with network before cutting the tag).
+
    **CI vs release build differ on WebRTC APM**: `.github/workflows/ci.yml`
    passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all four Configure steps so
    the runner doesn't need a `meson`+`abseil-cpp` prebuild. The actual release
@@ -160,26 +181,26 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
 
 ### 3.2 Stabilisation window (T-7 … T-1)
 
-5. Cherry-pick hot-fixes from `main` to `release/X.Y`. Each hot-fix PR must
+6. Cherry-pick hot-fixes from `main` to `release/X.Y`. Each hot-fix PR must
    carry the `release-blocker` label and be reviewed by the module's
    `CODEOWNERS` owner (§16.3 DoD).
-6. Update `CHANGELOG.md`: move entries from `## [Unreleased]` into a new
+7. Update `CHANGELOG.md`: move entries from `## [Unreleased]` into a new
    `## [X.Y.Z] - YYYY-MM-DD` heading following
    [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-7. Run `python tools/check_ci.py --release` (or equivalent) to verify:
+8. Run `python tools/check_ci.py --release` (or equivalent) to verify:
    - `reuse lint` is clean (or a documented waiver exists in `cmake/REUSE.toml`).
    - `scancode-toolkit` reports no new licence conflicts vs. `NOTICE`.
    - Dependabot PRs are merged or explicitly deferred.
-8. Bump the version in:
+9. Bump the version in:
    - `CMakeLists.txt` (`project(NimRTC VERSION X.Y.Z ...)`)
    - `src/core/include/nimrtc/core/version.hpp`
    - The `Doxyfile`/`docs/api/` version banner (if present)
-9. Smoke-test the example binaries: `examples/loopback-p2p` must complete a
-   full ICE+DTLS+SRTP+RTP handshake against itself and exit 0.
+10. Smoke-test the example binaries: `examples/loopback-p2p` must complete a
+    full ICE+DTLS+SRTP+RTP handshake against itself and exit 0.
 
 ### 3.3 Tag day (T)
 
-10. Tag from `release/X.Y` HEAD:
+11. Tag from `release/X.Y` HEAD:
 
     ```bash
     git checkout release/X.Y
@@ -188,7 +209,7 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     git push origin vX.Y.Z
     ```
 
-11. The push triggers `.github/workflows/release.yml` which:
+12. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
       containing headers, CMake config files, and the static `.lib`/`.a`).
     - Signs the artefacts with the release manager's GPG key (see
@@ -223,15 +244,15 @@ gpg --send-keys "$GPG_FPR"
 
 ### 3.4 Post-tag (T+1 day)
 
-12. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
+13. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
     is visible on `main` too. This merge commit is **not** a new release.
-13. Open a PR titled `chore: post-release version bump` that advances
+14. Open a PR titled `chore: post-release version bump` that advances
     `CMakeLists.txt` and `version.hpp` to `X.Y.(Z+1)-dev` on `main` so
     `find_package(NimRTC)` cannot accidentally pick up an in-progress build
     as `X.Y.Z`.
-14. Mark the milestone as `100% complete` on GitHub.
-15. Announce:
-    - GitHub Release (auto-created in step 11) — pinned to the repo front page.
+15. Mark the milestone as `100% complete` on GitHub.
+16. Announce:
+    - GitHub Release (auto-created in step 12) — pinned to the repo front page.
     - Project mailing list / Discussions thread for public RCs and stable
       releases only (not for `*-alpha.*` / `*-beta.*` internal tags).
 

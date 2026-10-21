@@ -26,6 +26,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -41,21 +42,21 @@ namespace nimrtc::video_rtcp_feedback {
 // ---------------------------------------------------------------------------
 // Fixed RTCP header (4) + sender-SSRC (4) + media-SSRC (4) = 12 bytes
 // is the minimum size of any feedback packet (PLI has no FCI).
-inline constexpr std::size_t kRtcpHeaderSize   = 4;
-inline constexpr std::size_t kSsrcBlockSize    = 8;   // sender + media
-inline constexpr std::size_t kPliPacketSize    = kRtcpHeaderSize + kSsrcBlockSize; // 12
-inline constexpr std::size_t kFirMinSize       = kPliPacketSize;                    // 12
-inline constexpr std::size_t kSliMinSize       = kPliPacketSize;                    // 12
-inline constexpr std::size_t kNackMinSize      = kPliPacketSize;                    // 12
+NIMRTC_API_STABLE inline constexpr std::size_t kRtcpHeaderSize   = 4;
+NIMRTC_API_STABLE inline constexpr std::size_t kSsrcBlockSize    = 8;   // sender + media
+NIMRTC_API_STABLE inline constexpr std::size_t kPliPacketSize    = kRtcpHeaderSize + kSsrcBlockSize; // 12
+NIMRTC_API_STABLE inline constexpr std::size_t kFirMinSize       = kPliPacketSize;                    // 12
+NIMRTC_API_STABLE inline constexpr std::size_t kSliMinSize       = kPliPacketSize;                    // 12
+NIMRTC_API_STABLE inline constexpr std::size_t kNackMinSize      = kPliPacketSize;                    // 12
 
 // FCI sizes per entry:
-inline constexpr std::size_t kFirEntrySize     = 8;   // SSRC(4) + reserved(1) + seq_nr(1) + reserved(2)
-inline constexpr std::size_t kSliEntrySize     = 8;   // first(2) + number(2) + picture_id(4) [see note]
-inline constexpr std::size_t kNackEntrySize    = 4;   // PID(2) + BLP(2)
-inline constexpr std::size_t kNackFciSize      = kNackEntrySize;  // alias for naming parity
+NIMRTC_API_STABLE inline constexpr std::size_t kFirEntrySize     = 8;   // SSRC(4) + reserved(1) + seq_nr(1) + reserved(2)
+NIMRTC_API_STABLE inline constexpr std::size_t kSliEntrySize     = 8;   // first(2) + number(2) + picture_id(4) [see note]
+NIMRTC_API_STABLE inline constexpr std::size_t kNackEntrySize    = 4;   // PID(2) + BLP(2)
+NIMRTC_API_STABLE inline constexpr std::size_t kNackFciSize      = kNackEntrySize;  // alias for naming parity
 
 // FCI sizes for a packet containing N entries:
-inline constexpr std::size_t kFirFciSize(std::size_t n) noexcept { return n * kFirEntrySize; }
+NIMRTC_API_STABLE inline constexpr std::size_t kFirFciSize(std::size_t n) noexcept { return n * kFirEntrySize; }
 inline constexpr std::size_t kSliFciSize(std::size_t n) noexcept { return n * kSliEntrySize; }
 inline constexpr std::size_t kNackFciSizeN(std::size_t n) noexcept { return n * kNackEntrySize; }
 
@@ -149,9 +150,9 @@ std::size_t build_nack(core::MutableByteSpan output, const NackPacket& p) noexce
 // representation is a copy of fixed-size integers anyway.
 
 core::Result<PliPacket>  parse_pli (core::ByteSpan input) noexcept;
-core::Result<FirPacket>  parse_fir (core::ByteSpan input) noexcept;
-core::Result<SliPacket>  parse_sli (core::ByteSpan input) noexcept;
-core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept;
+NIMRTC_API_STABLE core::Result<FirPacket>  parse_fir (core::ByteSpan input) noexcept;
+NIMRTC_API_STABLE core::Result<SliPacket>  parse_sli (core::ByteSpan input) noexcept;
+NIMRTC_API_STABLE core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept;
 
 // ---------------------------------------------------------------------------
 // FIR coalescer — rate-limit FIR per media SSRC (RFC 5104 §4.3.1.1).
@@ -160,7 +161,7 @@ core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept;
 // sender; it remembers the last send time per media SSRC and a single
 // monotonic `seq_nr` counter used to populate FIR entries.
 
-class FirCoalescer {
+class NIMRTC_API_STABLE FirCoalescer {
 public:
     explicit FirCoalescer(std::uint32_t sender_ssrc) noexcept;
 

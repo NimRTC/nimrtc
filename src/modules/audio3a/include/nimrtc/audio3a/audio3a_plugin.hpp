@@ -51,6 +51,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -76,7 +77,7 @@ namespace nimrtc::audio3a {
  * Thread safety of the concrete impl is the same as audio3a::IAudio3A:
  * caller must serialize process_capture / process_render calls.
  */
-class PluginAdapter : public plugins::IAudio3A {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::IAudio3A {
 public:
     /** Takes ownership of the concrete impl (may be nullptr → creates NullAudio3A). */
     explicit PluginAdapter(audio3a::IAudio3A* impl);
@@ -193,7 +194,7 @@ private:
  * Registered as id "webrtc" (the EngineConfig default). Until WebRtcAudio3A
  * lands, "webrtc" really means "WebRTC-style 3A pipeline (currently stub)".
  */
-class NullPluginFactory : public plugins::IAudio3AFactory {
+class NIMRTC_API_STABLE NullPluginFactory : public plugins::IAudio3AFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -210,7 +211,7 @@ public:
  * Registered as id "webrtc_apm". Requires NIMRTC_VENDORED_WEBRTC_APM=ON.
  * Falls back to NullAudio3A if WebRTC APM source is not populated.
  */
-class WebRtcPluginFactory : public plugins::IAudio3AFactory {
+class NIMRTC_API_STABLE WebRtcPluginFactory : public plugins::IAudio3AFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;

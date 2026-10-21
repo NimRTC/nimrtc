@@ -41,6 +41,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -67,7 +68,7 @@ namespace nimrtc::video_source {
  * caller must serialize `start` / `stop` / `produce_one` calls. The
  * adapter's own state (callback storage) is single-threaded.
  */
-class PluginAdapter : public plugins::IVideoSource {
+class NIMRTC_API_STABLE PluginAdapter : public plugins::IVideoSource {
 public:
     /** Construct adapter wrapping an existing concrete impl.
      *  The adapter takes ownership. Pass nullptr to delay creation. */
@@ -105,7 +106,7 @@ private:
 
 /** Factory for the in-memory test-pattern source. Registers under id
  *  `"memory"` (the default for `EngineConfig::video_source_name`). */
-class MemoryPluginFactory : public plugins::IVideoSourceFactory {
+class NIMRTC_API_STABLE MemoryPluginFactory : public plugins::IVideoSourceFactory {
 public:
     std::string_view id()           const noexcept override;
     std::string_view display_name() const noexcept override;
@@ -126,6 +127,6 @@ public:
  *  Must be called once at program startup before any video-source lookup.
  *  The first invocation registers; subsequent invocations are no-ops
  *  (idempotent via a Meyer's-singleton latch). */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 } // namespace nimrtc::video_source

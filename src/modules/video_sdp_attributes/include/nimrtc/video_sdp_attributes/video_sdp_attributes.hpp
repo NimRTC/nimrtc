@@ -42,6 +42,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -58,20 +59,20 @@ namespace nimrtc::video_sdp_attributes {
 // every consumer of this header — but the values match).
 // ---------------------------------------------------------------------------
 
-using CodecKind = nimrtc::video_frame::CodecKind;
+using NIMRTC_API_STABLE CodecKind = nimrtc::video_frame::CodecKind;
 
 // ---------------------------------------------------------------------------
 // H.264 fmtp parameters (RFC 6184 §8.2 + §8.3)
 // ---------------------------------------------------------------------------
 
 /** H.264 `packetization-mode` (RFC 6184 §6 / §8.2). */
-enum class PacketizationMode : std::uint8_t {
+enum class NIMRTC_API_STABLE PacketizationMode : std::uint8_t {
     kSingleNal   = 0,
     kNonInterleaved = 1,   // Single NAL + STAP-A + FU-A
     kInterleaved   = 2,   // reserved by RFC 6184; rarely used
 };
 
-struct H264Fmtp {
+struct NIMRTC_API_STABLE H264Fmtp {
     std::optional<PacketizationMode> packetization_mode;
     /** Hex-encoded profile-level-id, e.g. "42e01f" (Baseline 3.1). */
     std::optional<std::string>       profile_level_id;
@@ -94,7 +95,7 @@ struct H264Fmtp {
 // VP8 fmtp parameters (RFC 7741 §6.1 + WebRTC extension)
 // ---------------------------------------------------------------------------
 
-struct Vp8Fmtp {
+struct NIMRTC_API_STABLE Vp8Fmtp {
     std::optional<std::uint32_t>     max_fr;        // max frame rate (per second)
     std::optional<std::uint32_t>     max_fs;        // max frame size (macroblocks / 16x16 blocks)
 };
@@ -103,7 +104,7 @@ struct Vp8Fmtp {
 // VP9 fmtp parameters (RFC 9559 / draft-ietf-payload-vp9-09)
 // ---------------------------------------------------------------------------
 
-struct Vp9Fmtp {
+struct NIMRTC_API_STABLE Vp9Fmtp {
     std::optional<std::uint32_t>     profile_id;
     std::optional<std::string>       profile_mapping;   // comma-separated "<pt>:<profile>"
     std::optional<std::uint32_t>     max_fr;
@@ -115,7 +116,7 @@ struct Vp9Fmtp {
 // Variant — strongly-typed union for parse / build dispatch
 // ---------------------------------------------------------------------------
 
-struct ParsedFmtp {
+struct NIMRTC_API_STABLE ParsedFmtp {
     CodecKind kind = CodecKind::kUnknown;
     union {
         H264Fmtp h264;
@@ -140,21 +141,21 @@ struct ParsedFmtp {
  *  @param fmtp_raw The fmtp body, e.g. "packetization-mode=1;profile-level-id=42e01f"
  *                  (NOT including the leading "a=fmtp:<pt> ").
  *  @return Typed ParsedFmtp on success; core::Status on error. */
-core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
+NIMRTC_API_STABLE core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                                     std::string_view fmtp_raw) noexcept;
 
 /** Auto-detect the codec kind from a `a=rtpmap:<pt> <encoding>/<clock>` line.
  *  Returns kUnknown if the encoding name is not recognised. */
-CodecKind codec_from_rtpmap_encoding(std::string_view encoding) noexcept;
+NIMRTC_API_STABLE CodecKind codec_from_rtpmap_encoding(std::string_view encoding) noexcept;
 
 /** Parse H.264 fmtp body directly. */
-core::Result<H264Fmtp> parse_h264(std::string_view fmtp_raw) noexcept;
+NIMRTC_API_STABLE core::Result<H264Fmtp> parse_h264(std::string_view fmtp_raw) noexcept;
 
 /** Parse VP8 fmtp body directly. */
-core::Result<Vp8Fmtp> parse_vp8(std::string_view fmtp_raw) noexcept;
+NIMRTC_API_STABLE core::Result<Vp8Fmtp> parse_vp8(std::string_view fmtp_raw) noexcept;
 
 /** Parse VP9 fmtp body directly. */
-core::Result<Vp9Fmtp> parse_vp9(std::string_view fmtp_raw) noexcept;
+NIMRTC_API_STABLE core::Result<Vp9Fmtp> parse_vp9(std::string_view fmtp_raw) noexcept;
 
 // ---------------------------------------------------------------------------
 // Build — produce a fmtp body from a typed config (for SDP answer emission)
@@ -162,16 +163,16 @@ core::Result<Vp9Fmtp> parse_vp9(std::string_view fmtp_raw) noexcept;
 
 /** Build a H.264 fmtp body, e.g. "packetization-mode=1;profile-level-id=42e01f".
  *  Fields that are std::nullopt are omitted. */
-std::string build_h264_fmtp(const H264Fmtp& cfg) noexcept;
+NIMRTC_API_STABLE std::string build_h264_fmtp(const H264Fmtp& cfg) noexcept;
 
 /** Build a VP8 fmtp body. */
-std::string build_vp8_fmtp(const Vp8Fmtp& cfg) noexcept;
+NIMRTC_API_STABLE std::string build_vp8_fmtp(const Vp8Fmtp& cfg) noexcept;
 
 /** Build a VP9 fmtp body. */
-std::string build_vp9_fmtp(const Vp9Fmtp& cfg) noexcept;
+NIMRTC_API_STABLE std::string build_vp9_fmtp(const Vp9Fmtp& cfg) noexcept;
 
 /** Dispatch on ParsedFmtp::kind. */
-std::string build_fmtp(const ParsedFmtp& cfg) noexcept;
+NIMRTC_API_STABLE std::string build_fmtp(const ParsedFmtp& cfg) noexcept;
 
 // ---------------------------------------------------------------------------
 // Generic key=value parser (used internally; also handy for unit tests)
@@ -181,12 +182,12 @@ std::string build_fmtp(const ParsedFmtp& cfg) noexcept;
  *  Semicolons separate pairs; the first '=' per pair separates key/value.
  *  Values are URL-decoded (replacing %xx and '+' with their literal).
  *  @return Ordered list of (key, value) pairs. */
-std::vector<std::pair<std::string, std::string>>
+NIMRTC_API_STABLE std::vector<std::pair<std::string, std::string>>
 split_fmtp_pairs(std::string_view body) noexcept;
 
 /** Parse a single integer value from a fmtp key=value pair.
  *  @return Parsed value, or std::nullopt on parse error. */
-std::optional<std::int64_t>
+NIMRTC_API_STABLE std::optional<std::int64_t>
 parse_int_value(std::string_view value) noexcept;
 
 } // namespace nimrtc::video_sdp_attributes

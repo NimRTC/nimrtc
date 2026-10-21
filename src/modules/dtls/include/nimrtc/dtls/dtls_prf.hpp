@@ -15,6 +15,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -37,7 +38,7 @@ namespace nimrtc::dtls {
  *  @param out_len number of bytes to produce (truncated to this length)
  *  @return exactly `out_len` bytes on success, empty vector on HMAC failure
  */
-std::vector<std::uint8_t>
+NIMRTC_API_STABLE std::vector<std::uint8_t>
 tls_prf_p_sha256(std::span<const std::uint8_t> secret,
                  std::span<const std::uint8_t> label,
                  std::span<const std::uint8_t> seed1,
@@ -49,7 +50,7 @@ tls_prf_p_sha256(std::span<const std::uint8_t> secret,
  *  Used by master_secret, key_block, EXTRACTOR-dtls_srtp, and verify_data
  *  computations.
  */
-std::vector<std::uint8_t>
+NIMRTC_API_STABLE std::vector<std::uint8_t>
 tls12_prf(std::span<const std::uint8_t> secret,
           std::string_view label,
           std::span<const std::uint8_t> seed,
@@ -61,7 +62,7 @@ tls12_prf(std::span<const std::uint8_t> secret,
 
 /** HMAC-SHA-256(key, data) per RFC 2104 / FIPS 198-1.
  *  @return 32-byte MAC, or empty vector on failure. */
-std::vector<std::uint8_t>
+NIMRTC_API_STABLE std::vector<std::uint8_t>
 dtls_hmac_sha256(std::span<const std::uint8_t> key,
                  std::span<const std::uint8_t> data) noexcept;
 

@@ -70,7 +70,7 @@ namespace nimrtc::plugins {
 // ---------------------------------------------------------------------------
 
 /** Opaque key-value config passed to the transport at open(). */
-struct TransportConfig {
+struct NIMRTC_API_STABLE TransportConfig {
     std::string_view name;   // plugin name, for logging
     std::string_view local_addr;    // e.g. "0.0.0.0:5000" or ""
     std::string_view remote_addr;   // e.g. "192.168.1.10:5000" or ""
@@ -84,7 +84,7 @@ struct TransportConfig {
 };
 
 /** Parse "host:port" string into addr parts. Returns {host, port}. */
-inline std::optional<std::pair<std::string_view, uint16_t>>
+NIMRTC_API_STABLE inline std::optional<std::pair<std::string_view, uint16_t>>
 parse_endpoint(std::string_view ep) {
     auto colon = ep.rfind(':');
     if (colon == std::string_view::npos) return std::nullopt;
@@ -108,7 +108,7 @@ parse_endpoint(std::string_view ep) {
 using RecvCallback = std::function<void(BufferView)>;
 
 /** Notifies the engine of an asynchronous error. */
-using ErrorCallback = std::function<void(Status err, std::string_view msg)>;
+using NIMRTC_API_STABLE ErrorCallback = std::function<void(Status err, std::string_view msg)>;
 
 /** Notifies the engine that ICE consent freshness (RFC 7675 / RFC 8445 §10)
  *  has been lost — i.e. no STUN Binding request received from the peer
@@ -117,7 +117,7 @@ using ErrorCallback = std::function<void(Status err, std::string_view msg)>;
  *  Fired exactly once per loss event by transports that implement consent
  *  tracking. After firing, the tracker is automatically rearmed; the
  *  callback may fire again on a subsequent loss event. */
-using OnConsentLost = std::function<void()>;
+using NIMRTC_API_STABLE OnConsentLost = std::function<void()>;
 
 // ---------------------------------------------------------------------------
 // ITransport

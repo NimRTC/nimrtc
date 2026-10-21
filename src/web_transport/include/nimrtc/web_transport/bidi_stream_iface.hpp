@@ -74,7 +74,7 @@ namespace nimrtc::web_transport {
  * Pass an empty std::function to unregister. Not thread-safe;
  * call only from the engine thread.
  */
-using OnStreamDataCb =
+using NIMRTC_API_UNSTABLE OnStreamDataCb =
     std::function<void(std::span<const std::uint8_t> bytes)>;
 
 } // namespace nimrtc::web_transport

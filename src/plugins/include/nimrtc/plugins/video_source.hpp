@@ -38,6 +38,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 // Reuse VideoPixelFormat already defined here to keep one canonical enum.
 #include "nimrtc/plugins/video_codec.hpp"
@@ -63,7 +64,7 @@ namespace nimrtc::plugins {
 
 /** Source content pattern. Real sources (camera, screen capture) typically
  *  use `kCustom`; demo / interop sources use the named patterns. */
-enum class VideoSourcePattern : std::uint8_t {
+enum class NIMRTC_API_STABLE VideoSourcePattern : std::uint8_t {
     kCustom    = 0,   ///< plugin-specific content (real camera, screen, file)
     kSolid     = 1,   ///< Solid colour fill (configurable Y/U/V)
     kColorBars = 2,   ///< SMPTE-like colour bars (good for manual eyeballing)
@@ -72,7 +73,7 @@ enum class VideoSourcePattern : std::uint8_t {
 };
 
 /** Human-readable pattern name (for logging). */
-inline std::string_view video_source_pattern_name(VideoSourcePattern p) noexcept {
+inline NIMRTC_API_STABLE std::string_view video_source_pattern_name(VideoSourcePattern p) noexcept {
     switch (p) {
         case VideoSourcePattern::kCustom:     return "custom";
         case VideoSourcePattern::kSolid:      return "solid";
@@ -89,7 +90,7 @@ inline std::string_view video_source_pattern_name(VideoSourcePattern p) noexcept
 
 /** Per-source configuration. Mirrors the concrete `video_source::SourceConfig`
  *  but uses plugin types (`TimestampUs`, `VideoPixelFormat`). */
-struct VideoSourceConfig {
+struct NIMRTC_API_STABLE VideoSourceConfig {
     /** Frame width in pixels. */
     std::uint32_t width  = 640;
 
@@ -131,7 +132,7 @@ struct VideoSourceConfig {
  *  for the duration of the callback; the callback consumer MUST finish
  *  reading before returning OR keep a reference to the source's internal
  *  pixel buffer (sources may pool). */
-struct VideoSourceFrame {
+struct NIMRTC_API_STABLE VideoSourceFrame {
     std::uint32_t width  = 0;
     std::uint32_t height = 0;
     VideoPixelFormat format = VideoPixelFormat::kUnknown;
@@ -178,7 +179,7 @@ struct VideoSourceFrame {
 
 /** Frame callback: invoked on the producing thread for every emitted frame.
  *  - @p frame: pixel descriptor (see `VideoSourceFrame` for ownership). */
-using VideoSourceFrameCallback =
+using NIMRTC_API_STABLE VideoSourceFrameCallback =
     std::function<void(const VideoSourceFrame& frame)>;
 
 // ---------------------------------------------------------------------------
@@ -197,7 +198,7 @@ using VideoSourceFrameCallback =
  * drives the source (internal cadence thread for kLowLatency, or the
  * caller's thread if `produce_one()` is used).
  */
-class IVideoSource : public IPlugin {
+class NIMRTC_API_STABLE IVideoSource : public IPlugin {
 public:
     /** Start emitting frames at the configured cadence.
      *  @return kOk on success; error code if already running / config invalid. */
@@ -250,7 +251,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Factory for video-source plugin instances. */
-class IVideoSourceFactory {
+class NIMRTC_API_STABLE IVideoSourceFactory {
 public:
     virtual ~IVideoSourceFactory() = default;
 
@@ -269,7 +270,7 @@ public:
 
 /** Helper to create a factory for a concrete IVideoSource type. */
 template<class T>
-class SimpleVideoSourceFactory : public IVideoSourceFactory {
+class NIMRTC_API_STABLE SimpleVideoSourceFactory : public IVideoSourceFactory {
     std::string_view id_;
     std::string_view name_;
 public:

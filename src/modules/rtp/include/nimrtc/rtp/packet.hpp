@@ -4,6 +4,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -25,7 +26,7 @@
 // =============================================================================
 namespace nimrtc::rtp {
 
-inline constexpr std::uint8_t kVersion = 2;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kVersion = 2;
 
 // -----------------------------------------------------------------------------
 // Extension element (RFC 5285)
@@ -34,7 +35,7 @@ inline constexpr std::uint8_t kVersion = 2;
 // Extension element (RFC 5285). abs-send-time and transport-wide-CC
 // (RFC 9143) are layered on top of this; see parse_*_extension below.
 // -----------------------------------------------------------------------------
-struct Extension {
+struct NIMRTC_API_STABLE Extension {
     std::uint16_t type = 0;          // 1..14 for one-byte form; 1..255 for two-byte
     core::ByteSpan data{};           // payload bytes (NOT including the type byte)
 };
@@ -44,7 +45,7 @@ struct Extension {
 // 24-bit absolute timestamp at 24 MHz; wrapping is handled by the
 // assignment operator (caller may store the 32-bit-aligned value here).
 // -----------------------------------------------------------------------------
-struct AbsSendTime {
+struct NIMRTC_API_STABLE AbsSendTime {
     std::uint32_t send_time_24mhz = 0;
 };
 
@@ -53,17 +54,17 @@ struct AbsSendTime {
 // `packets` has length = packet_status_count; one element per RTP packet,
 // in seq order starting at base_seq (modulo 2^16).
 // -----------------------------------------------------------------------------
-enum class PacketStatus : std::uint8_t {
+enum class NIMRTC_API_STABLE PacketStatus : std::uint8_t {
     NotReceived   = 0,
     Received      = 1,
     ReceivedSmall = 2,
 };
-struct TransportCcPacketStatus {
+struct NIMRTC_API_STABLE TransportCcPacketStatus {
     PacketStatus status    = PacketStatus::NotReceived;
     std::int16_t delta_250us = 0;  // recv-time delta in 250-µs ticks vs reference time
                                    // (only meaningful when status != NotReceived)
 };
-struct TransportCcFeedback {
+struct NIMRTC_API_STABLE TransportCcFeedback {
     std::uint32_t sender_ssrc = 0;
     std::uint32_t media_ssrc  = 0;
     std::uint16_t base_seq    = 0;
@@ -77,7 +78,7 @@ struct TransportCcFeedback {
 // PacketView — non-owning view into a parsed RTP packet.
 // The caller must keep the underlying bytes alive for as long as the view is used.
 // -----------------------------------------------------------------------------
-struct PacketView {
+struct NIMRTC_API_STABLE PacketView {
     core::ByteSpan raw{};            // entire packet including header
     core::ByteSpan payload{};        // bytes after header+CSRC+extension
 
@@ -118,7 +119,7 @@ struct NackPacket;
 // Parser — parses a raw RTP packet or RTCP compound packet into the matching
 // view/struct. Stateless; returns ProtocolError on malformed input.
 // -----------------------------------------------------------------------------
-class Parser {
+class NIMRTC_API_STABLE Parser {
 public:
     Parser();
 
@@ -153,7 +154,7 @@ private:
 // -----------------------------------------------------------------------------
 // PacketBuilder — builds raw RTP packets (one-shot, call reset() to reuse).
 // -----------------------------------------------------------------------------
-class PacketBuilder {
+class NIMRTC_API_STABLE PacketBuilder {
 public:
     PacketBuilder& set_ssrc(std::uint32_t v) noexcept;
     PacketBuilder& set_seq(std::uint16_t v) noexcept;
@@ -194,7 +195,7 @@ private:
 // -----------------------------------------------------------------------------
 // RTCP — types and minimal types declared here; full implementation in P1.
 // -----------------------------------------------------------------------------
-enum class RtcpType : std::uint8_t {
+enum class NIMRTC_API_STABLE RtcpType : std::uint8_t {
     SR     = 200,
     RR     = 201,
     SDES   = 202,
@@ -207,7 +208,7 @@ enum class RtcpType : std::uint8_t {
 
 // FCI (feedback control information) kinds for RTPFB:
 //   NACK (1), TMMBR/TMMBN (3), TSTR (4), TSTN (5), PLI (6), SLI (7), FIR (8).
-enum class RtcpFbKind : std::uint8_t {
+enum class NIMRTC_API_STABLE RtcpFbKind : std::uint8_t {
     GenericNACK = 1,
     PLI         = 6,
     SLI         = 7,
@@ -216,15 +217,15 @@ enum class RtcpFbKind : std::uint8_t {
 
 // FCI kinds for PSFB:
 //   PLI, SLI, FIR (same as above), REMB (15).
-enum class RtcpPsFbKind : std::uint8_t {
+enum class NIMRTC_API_STABLE RtcpPsFbKind : std::uint8_t {
     REMB = 15,
 };
 
 // -----------------------------------------------------------------------------
 // Helpers — small wrappers used by NACK/REMB code (P1).
 // -----------------------------------------------------------------------------
-std::optional<std::uint16_t> seq_distance(std::uint16_t a, std::uint16_t b) noexcept;
-bool seq_is_newer(std::uint16_t seq, std::uint16_t prev) noexcept;
+NIMRTC_API_STABLE std::optional<std::uint16_t> seq_distance(std::uint16_t a, std::uint16_t b) noexcept;
+NIMRTC_API_STABLE bool seq_is_newer(std::uint16_t seq, std::uint16_t prev) noexcept;
 
 // =============================================================================
 // RTCP — Sender Report / Receiver Report / Generic NACK
@@ -243,14 +244,14 @@ bool seq_is_newer(std::uint16_t seq, std::uint16_t prev) noexcept;
 //   PT    payload type (200 SR, 201 RR, 205 RTPFB, 206 PSFB)
 //   length packet length in 32-bit words, MINUS ONE (i.e. header only → 1)
 
-inline constexpr std::size_t kRtcpHeaderSize    = 4;
-inline constexpr std::size_t kReportBlockSize   = 24;
-inline constexpr std::size_t kNackFciSize       = 4;
+NIMRTC_API_STABLE inline constexpr std::size_t kRtcpHeaderSize    = 4;
+NIMRTC_API_STABLE inline constexpr std::size_t kReportBlockSize   = 24;
+NIMRTC_API_STABLE inline constexpr std::size_t kNackFciSize       = 4;
 
 // -----------------------------------------------------------------------------
 // Report block (RFC 3550 §6.4.3) — appears 0..31 times in SR and RR bodies.
 // -----------------------------------------------------------------------------
-struct ReportBlock {
+struct NIMRTC_API_STABLE ReportBlock {
     std::uint32_t ssrc                   = 0;    // SSRC of source this report describes
     std::uint8_t  fraction_lost          = 0;    // 0..255; uint8 since RFC stores 8 bits
     std::int32_t  cumulative_packets_lost = 0;   // 24-bit signed, sign-extended
@@ -264,7 +265,7 @@ struct ReportBlock {
 // Sender Report (RFC 3550 §6.4.1, PT=200).
 // Header + 20B sender-info + RC * 24B report-blocks.
 // -----------------------------------------------------------------------------
-struct SenderReport {
+struct NIMRTC_API_STABLE SenderReport {
     std::uint32_t              ssrc                = 0;
     std::uint64_t              ntp_timestamp       = 0;     // full 64-bit NTP timestamp
     std::uint32_t              rtp_timestamp       = 0;
@@ -277,7 +278,7 @@ struct SenderReport {
 // Receiver Report (RFC 3550 §6.4.2, PT=201).
 // Header + 4B SSRC + RC * 24B report-blocks.
 // -----------------------------------------------------------------------------
-struct ReceiverReport {
+struct NIMRTC_API_STABLE ReceiverReport {
     std::uint32_t              ssrc        = 0;
     std::vector<ReportBlock>   report_blocks;
 };
@@ -293,12 +294,12 @@ struct ReceiverReport {
 //   PID = seq of a lost packet.
 //   BLP = bitmask of the next 16 packets (bit 0 = PID+1, bit 15 = PID+16).
 // -----------------------------------------------------------------------------
-struct NackEntry {
+struct NIMRTC_API_STABLE NackEntry {
     std::uint16_t packet_id = 0;
     std::uint16_t blp       = 0;
 };
 
-struct NackPacket {
+struct NIMRTC_API_STABLE NackPacket {
     std::uint32_t          sender_ssrc = 0;     // SSRC of the feedback sender
     std::uint32_t          media_ssrc  = 0;     // SSRC of the media source being ack'd
     std::vector<NackEntry> entries;
@@ -308,7 +309,7 @@ struct NackPacket {
 // Builders — one-shot. Chain setters, then call build() to serialise.
 // Header-only SR (RC=0) is legal; builder enforces RC ≤ 31.
 // -----------------------------------------------------------------------------
-class SrBuilder {
+class NIMRTC_API_STABLE SrBuilder {
 public:
     SrBuilder& set_ssrc(std::uint32_t v) noexcept;
     SrBuilder& set_ntp_timestamp(std::uint64_t v) noexcept;
@@ -330,7 +331,7 @@ private:
     std::vector<ReportBlock>   report_blocks_;
 };
 
-class RrBuilder {
+class NIMRTC_API_STABLE RrBuilder {
 public:
     RrBuilder& set_ssrc(std::uint32_t v) noexcept;
     RrBuilder& add_report_block(ReportBlock rb);
@@ -344,7 +345,7 @@ private:
     std::vector<ReportBlock>   report_blocks_;
 };
 
-class NackBuilder {
+class NIMRTC_API_STABLE NackBuilder {
 public:
     NackBuilder& set_sender_ssrc(std::uint32_t v) noexcept;
     NackBuilder& set_media_ssrc(std::uint32_t v) noexcept;

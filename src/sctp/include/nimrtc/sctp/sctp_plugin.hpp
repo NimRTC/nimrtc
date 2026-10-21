@@ -48,11 +48,12 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <nimrtc/core/api_version.hpp>
 #include <nimrtc/sctp/sctp_socket_factory.hpp>
 
 namespace nimrtc::sctp {
 
-class SctpStubFactory;   // forward-declared from src/sctp_stub_factory.hpp
+class NIMRTC_API_STABLE SctpStubFactory;   // forward-declared from src/sctp_stub_factory.hpp
 
 /**
  * @brief Register the built-in "stub" SCTP factory with
@@ -69,7 +70,7 @@ class SctpStubFactory;   // forward-declared from src/sctp_stub_factory.hpp
  * @note Not `inline` — see the static-link workaround in
  *       `nimrtc::ice::register_default_plugins()`.
  */
-void register_default_plugins() noexcept;
+NIMRTC_API_STABLE void register_default_plugins() noexcept;
 
 // ---------------------------------------------------------------------------
 // Test-only accessor (not part of the public API; production code MUST NOT
@@ -81,7 +82,7 @@ namespace test_only {
 /** Returns the registered stub factory pointer, or nullptr if
  *  `register_default_plugins()` has not been called yet.
  *  Test-only — production code MUST NOT call this. */
-const SctpStubFactory* get_stub_factory() noexcept;
+NIMRTC_API_STABLE const SctpStubFactory* get_stub_factory() noexcept;
 
 } // namespace test_only
 

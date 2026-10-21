@@ -48,6 +48,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -64,7 +65,7 @@ namespace nimrtc::plugins {
 
 /** Stable identifier for the HW backend a plugin targets.
  *  `Software` is the default; HW plugins MUST return one of the others. */
-enum class HwBackend : std::uint16_t {
+enum class NIMRTC_API_STABLE HwBackend : std::uint16_t {
     Software         = 0,
     MediaCodec       = 1,    // Android NDK MediaCodec
     VideoToolbox     = 2,    // Apple VideoToolbox
@@ -86,7 +87,7 @@ enum class HwBackend : std::uint16_t {
 
 /** Map HwBackend → short string identifier (matches
  *  IVideo*::hardware_backend() convention). */
-inline constexpr std::string_view hw_backend_name(HwBackend b) noexcept {
+inline constexpr NIMRTC_API_STABLE std::string_view hw_backend_name(HwBackend b) noexcept {
     switch (b) {
         case HwBackend::Software:        return "software";
         case HwBackend::MediaCodec:      return "mediacodec";
@@ -126,7 +127,7 @@ inline constexpr std::string_view hw_backend_name(HwBackend b) noexcept {
  *       (Android ANativeWindow*, CVPixelBufferRef, VASurfaceID, ...) —
  *       callers may use it for zero-copy GPU rendering.
  */
-class IHwVideoEncoder {
+class NIMRTC_API_STABLE IHwVideoEncoder {
 public:
     virtual ~IHwVideoEncoder() = default;
 
@@ -160,7 +161,7 @@ public:
 
 /** Common interface for HW video decoders. See IHwVideoEncoder doc for
  *  the inheritance pattern; here the partner is `IVideoReceiver`. */
-class IHwVideoDecoder {
+class NIMRTC_API_STABLE IHwVideoDecoder {
 public:
     virtual ~IHwVideoDecoder() = default;
 
@@ -193,7 +194,7 @@ public:
  *  (V4L2, AVFoundation, NDK Camera2, DirectShow, ScreenCapture on
  *  Win32 / macOS / X11) inherit from BOTH this and `IVideoSource`.
  */
-class IHwVideoCapture {
+class NIMRTC_API_STABLE IHwVideoCapture {
 public:
     virtual ~IHwVideoCapture() = default;
 
@@ -228,7 +229,7 @@ public:
  *  Returns true iff the plugin implements IHwVideoEncoder/Decoder/Capture
  *  AND its backend() != Software.
  */
-template <class PluginT, class HwInterfaceT>
+NIMRTC_API_STABLE template <class PluginT, class HwInterfaceT>
 inline bool is_hw_accelerated(PluginT* plugin, HwInterfaceT* /*hint*/) noexcept {
     if (!plugin) return false;
     if (!plugin->is_hardware_accelerated()) return false;

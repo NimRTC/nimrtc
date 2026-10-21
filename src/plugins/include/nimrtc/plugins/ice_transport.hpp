@@ -47,6 +47,7 @@
 
 // base.hpp must be included BEFORE the include guard.
 // This ensures base types are always available regardless of include order.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/transport.hpp"
 #include "nimrtc/plugins/bwe.hpp"
 #include "nimrtc/plugins/scheduler.hpp"
@@ -75,7 +76,7 @@ namespace nimrtc::plugins {
 // here MUST also update `nimrtc::ice::IceState` and the conversion in
 // `nimrtc::ice::IceTransport::state()` (or vice versa).
 
-enum class IceState : std::uint8_t {
+enum class NIMRTC_API_STABLE IceState : std::uint8_t {
     Disconnected = 0,
     Gathering    = 1,
     Connecting   = 2,
@@ -98,7 +99,7 @@ enum class IceState : std::uint8_t {
  *  upcast through IICETransport well-defined when a transport is
  *  constructed as `IceTransport`).
  */
-class IICETransport : public virtual ITransport {
+class NIMRTC_API_STABLE IICETransport : public virtual ITransport {
 public:
     // ---- State / credentials ----------------------------------------------
 
@@ -202,7 +203,7 @@ public:
  *  via BOTH the generic transport registry entry point
  *  (`register_transport`) and the ICE-specific one
  *  (`register_ice_transport`). */
-class IICETransportFactory : public ITransportFactory {
+class NIMRTC_API_STABLE IICETransportFactory : public ITransportFactory {
 public:
     /** Same as ITransportFactory::create() but typed as IICETransport*. */
     virtual IICETransport* create_ice() const = 0;

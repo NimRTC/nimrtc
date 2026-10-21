@@ -29,6 +29,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -40,7 +41,7 @@ namespace nimrtc::video_stats {
 // ---------------------------------------------------------------------------
 
 /** Tunable parameters for a stats sink. */
-struct StatsConfig {
+struct NIMRTC_API_STABLE StatsConfig {
     /** Gap (ms) between two rendered frames that counts as a freeze. */
     std::uint32_t freeze_threshold_ms = 150;
 
@@ -55,7 +56,7 @@ struct StatsConfig {
 // Drop reason
 // ---------------------------------------------------------------------------
 
-enum class DropReason : std::uint8_t {
+enum class NIMRTC_API_STABLE DropReason : std::uint8_t {
     kJitterBufferTimeout = 0,
     kDecoderError        = 1,
     kDependencyLost     = 2,
@@ -65,7 +66,7 @@ enum class DropReason : std::uint8_t {
 // RTCP feedback kind
 // ---------------------------------------------------------------------------
 
-enum class RtcpFeedbackKind : std::uint8_t {
+enum class NIMRTC_API_STABLE RtcpFeedbackKind : std::uint8_t {
     kPLI  = 0,
     kFIR  = 1,
     kNACK = 2,
@@ -78,7 +79,7 @@ enum class RtcpFeedbackKind : std::uint8_t {
 
 /** A consistent snapshot of all counters.  All fields are
  *  std::uint64_t unless noted. */
-struct VideoStreamStats {
+struct NIMRTC_API_STABLE VideoStreamStats {
     // Frame counters
     std::uint64_t frames_received       = 0;
     std::uint64_t frames_decoded        = 0;
@@ -113,7 +114,7 @@ struct VideoStreamStats {
 // IVideoStatsSink — push interface (called by JB, decoder, renderer)
 // ---------------------------------------------------------------------------
 
-class IVideoStatsSink {
+class NIMRTC_API_STABLE IVideoStatsSink {
 public:
     virtual ~IVideoStatsSink() = default;
 
@@ -154,7 +155,7 @@ public:
 // ---------------------------------------------------------------------------
 
 /** Create a new stats sink with the given config. */
-[[nodiscard]] std::unique_ptr<IVideoStatsSink>
+[[nodiscard]] NIMRTC_API_STABLE std::unique_ptr<IVideoStatsSink>
 create_stats_sink(StatsConfig cfg = {});
 
 } // namespace nimrtc::video_stats

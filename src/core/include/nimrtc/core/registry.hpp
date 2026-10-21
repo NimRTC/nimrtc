@@ -60,25 +60,26 @@
 
 #include <nimrtc/core/nimrtc_export.h>   // NIMRTC_API ??see header for
                                           // Windows DLL boundary rationale.
+#include <nimrtc/core/api_version.hpp>    // NIMRTC_API_STABLE
 
 // Forward declarations of plugin interfaces ??no full definitions needed here,
 // just the factory type names. Full definitions are in the respective headers.
 namespace nimrtc::plugins {
-class ITransportFactory;
-class IICETransportFactory;
-class IRTPFactory;
-class ISDPFactory;
-class IJBFactory;
-class IAudio3AFactory;
-class ICodecFactory;
-class IVideoCodecFactory;
-class IVideoSourceFactory;
-class IVideoSinkFactory;
-class IVideoReceiverFactory;
-class IVideoSenderFactory;
-class IBweFactory;
-class ISchedulerFactory;
-class IDataChannelFactory;
+class NIMRTC_API_STABLE ITransportFactory;
+class NIMRTC_API_STABLE IICETransportFactory;
+class NIMRTC_API_STABLE IRTPFactory;
+class NIMRTC_API_STABLE ISDPFactory;
+class NIMRTC_API_STABLE IJBFactory;
+class NIMRTC_API_STABLE IAudio3AFactory;
+class NIMRTC_API_STABLE ICodecFactory;
+class NIMRTC_API_STABLE IVideoCodecFactory;
+class NIMRTC_API_STABLE IVideoSourceFactory;
+class NIMRTC_API_STABLE IVideoSinkFactory;
+class NIMRTC_API_STABLE IVideoReceiverFactory;
+class NIMRTC_API_STABLE IVideoSenderFactory;
+class NIMRTC_API_STABLE IBweFactory;
+class NIMRTC_API_STABLE ISchedulerFactory;
+class NIMRTC_API_STABLE IDataChannelFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -91,10 +92,10 @@ class IDataChannelFactory;
 // public method signatures can reference them without pulling the seam
 // headers into core (preserves Layout Invariant 1 ??core stays header-
 // only + the single .cpp exception in `pal_default_registrars.cpp`).
-namespace nimrtc::dtls    { class IDtlsSessionFactory; }
-namespace nimrtc::sctp     { class ISctpSocketFactory; }
-namespace nimrtc::raw_udp  { class IRawUdpFactory; }
-namespace nimrtc           { class ITransportStackFactory; }
+namespace nimrtc::dtls    { class NIMRTC_API_STABLE IDtlsSessionFactory; }
+namespace nimrtc::sctp     { class NIMRTC_API_STABLE ISctpSocketFactory; }
+namespace nimrtc::raw_udp  { class NIMRTC_API_STABLE IRawUdpFactory; }
+namespace nimrtc           { class NIMRTC_API_STABLE ITransportStackFactory; }
 
 // v0.14.0 alpha.2 (ADR-014): typed factory slot for the WebTransport /
 // QUIC seam. The seam itself (`IWebTransportSession` + companion
@@ -104,7 +105,7 @@ namespace nimrtc           { class ITransportStackFactory; }
 // without pulling the seam headers into core (same Layout Invariant 1
 // rationale as the DTLS / SCTP / raw_udp / transport-stack slots
 // above).
-namespace nimrtc::web_transport { class IWebTransportSessionFactory; }
+namespace nimrtc::web_transport { class NIMRTC_API_STABLE IWebTransportSessionFactory; }
 
 // ---------------------------------------------------------------------------
 // Forward declarations for unified registration entry point.
@@ -117,7 +118,7 @@ namespace nimrtc::web_transport { class IWebTransportSessionFactory; }
 // ---------------------------------------------------------------------------
 
 namespace nimrtc {
-namespace ice     { void register_default_plugins() noexcept; }
+NIMRTC_API_STABLE namespace ice     { void register_default_plugins() noexcept; }
 namespace rtp     { void register_default_plugins() noexcept; }
 namespace sdp     { void register_default_plugins() noexcept; }
 namespace jb      { void register_default_plugins() noexcept; }
@@ -168,7 +169,7 @@ namespace nimrtc::core {
 // ---------------------------------------------------------------------------
 
 template<class T>
-class TypedRegistry {
+class NIMRTC_API_STABLE TypedRegistry {
     std::vector<std::pair<std::string_view, const T*>> entries_;
     mutable std::mutex mutex_;
 
@@ -253,7 +254,7 @@ public:
 // pre-/post-fix behavioural contrast.
 // ---------------------------------------------------------------------------
 
-class NIMRTC_API PluginRegistry {
+class NIMRTC_API_STABLE PluginRegistry {
     PluginRegistry() = default;
     PluginRegistry(const PluginRegistry&) = delete;
     PluginRegistry& operator=(const PluginRegistry&) = delete;

@@ -15,6 +15,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 #include "nimrtc/plugins/rtp.hpp"   // RtpPacket, MediaSample
 
@@ -37,7 +38,7 @@ namespace nimrtc::plugins {
 // Config
 // ---------------------------------------------------------------------------
 
-struct JBConfig {
+struct NIMRTC_API_STABLE JBConfig {
     std::string_view name;
     uint32_t ssrc = 0;
     uint32_t clock_rate_hz = 90000;
@@ -51,14 +52,14 @@ struct JBConfig {
 // Events
 // ---------------------------------------------------------------------------
 
-using FrameReadyCallback = std::function<void(MediaSample)>;
-using FrameDropCallback = std::function<void(uint16_t seq, TimestampUs delay_ms)>;
+using NIMRTC_API_STABLE FrameReadyCallback = std::function<void(MediaSample)>;
+using NIMRTC_API_STABLE FrameDropCallback = std::function<void(uint16_t seq, TimestampUs delay_ms)>;
 
 // ---------------------------------------------------------------------------
 // IJB
 // ---------------------------------------------------------------------------
 
-class IJB : public IPlugin {
+class NIMRTC_API_STABLE IJB : public IPlugin {
 public:
     virtual void set_callbacks(FrameReadyCallback on_frame_ready,
                                FrameDropCallback  on_frame_drop) noexcept = 0;
@@ -91,7 +92,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class IJBFactory {
+class NIMRTC_API_STABLE IJBFactory {
 public:
     virtual ~IJBFactory() = default;
     virtual std::string_view id()          const noexcept = 0;
@@ -100,7 +101,7 @@ public:
 };
 
 template<class T>
-class SimpleJBFactory : public IJBFactory {
+class NIMRTC_API_STABLE SimpleJBFactory : public IJBFactory {
     std::string_view id_;
     std::string_view name_;
 public:

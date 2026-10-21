@@ -26,6 +26,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <memory>
@@ -41,7 +42,7 @@ namespace nimrtc::h264 {
 // SPS-derived configuration (best-effort extraction)
 // ---------------------------------------------------------------------------
 
-struct SpsSummary {
+struct NIMRTC_API_STABLE SpsSummary {
     std::uint32_t width      = 0;     ///< pic_width_in_mbs_minus1 * 16
     std::uint32_t height     = 0;     ///< pic_height_in_map_units_minus1 * 16
     std::uint8_t  profile_idc = 0;    ///< e.g. 66 (Baseline), 100 (High)
@@ -56,14 +57,14 @@ struct SpsSummary {
  *
  *  For full SPS parsing, integrate libopenh264 or ffmpeg via a host plugin.
  */
-SpsSummary parse_sps(core::ByteSpan sps_nalu) noexcept;
+NIMRTC_API_STABLE SpsSummary parse_sps(core::ByteSpan sps_nalu) noexcept;
 
 // ---------------------------------------------------------------------------
 // Decoder interface
 // ---------------------------------------------------------------------------
 
 /** Output of one decode call. */
-struct DecodedImage {
+struct NIMRTC_API_STABLE DecodedImage {
     video_frame::VideoFrameBuffer buffer;   ///< refcounted pixel storage
     std::uint32_t                 width    = 0;
     std::uint32_t                 height   = 0;
@@ -74,7 +75,7 @@ struct DecodedImage {
 };
 
 /** Abstract H.264 decoder — implemented by host plugins (libopenh264 / ffmpeg / HW). */
-class Decoder {
+class NIMRTC_API_STABLE Decoder {
 public:
     virtual ~Decoder() = default;
 
@@ -104,7 +105,7 @@ public:
 /** A no-op decoder used when no real H.264 implementation is linked.
  *  Useful for the pipeline test (RTP → payload → JB → decoder → empty
  *  VideoFrame) without dragging in libopenh264 / ffmpeg. */
-class StubDecoder final : public Decoder {
+class NIMRTC_API_STABLE StubDecoder final : public Decoder {
 public:
     StubDecoder() = default;
     ~StubDecoder() override = default;
@@ -120,6 +121,6 @@ public:
 };
 
 /** Factory for the stub decoder. */
-std::unique_ptr<Decoder> create_stub_decoder() noexcept;
+NIMRTC_API_STABLE std::unique_ptr<Decoder> create_stub_decoder() noexcept;
 
 } // namespace nimrtc::h264

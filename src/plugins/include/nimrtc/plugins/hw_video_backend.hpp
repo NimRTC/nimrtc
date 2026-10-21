@@ -37,6 +37,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
+#include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -68,7 +69,7 @@ namespace nimrtc::plugins {
  * device enumeration can be expensive on some platforms (D3D11 device
  * creation, CUDA device probe, VideoToolbox session creation).
  */
-struct VideoEncoderBackend {
+struct NIMRTC_API_STABLE VideoEncoderBackend {
     /// Short stable id used in logs and `EngineConfig::video_codec_name`.
     std::string_view id;
 
@@ -128,7 +129,7 @@ struct VideoEncoderBackend {
  *        IVideoCodec interface covers both directions, so we share `create`,
  *        but the selector maintains two separate tables for clarity.)
  */
-struct VideoDecoderBackend {
+struct NIMRTC_API_STABLE VideoDecoderBackend {
     std::string_view id;
     std::string_view description;
     HwBackend backend;
@@ -180,7 +181,7 @@ struct VideoDecoderBackend {
  *   auto codec = be->create(cfg);
  * @endcode
  */
-class HwVideoBackendRegistry {
+class NIMRTC_API_STABLE HwVideoBackendRegistry {
 public:
     static HwVideoBackendRegistry& instance() noexcept;
 

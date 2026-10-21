@@ -72,7 +72,7 @@ namespace nimrtc::engine {
 // forward declaration here so the helper does not drag in the full
 // engine.hpp (which pulls concrete module headers transitively). The
 // forward declaration matches the engine's public callback shape.
-using EngineErrorCallback = std::function<void(std::uint32_t err, std::string_view msg)>;
+using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(std::uint32_t err, std::string_view msg)>;
 
 namespace pal {
 

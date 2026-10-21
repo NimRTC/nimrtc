@@ -37,6 +37,7 @@
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
+#include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
 
 #ifndef NIMRTC_PLUGINS_CODEC_HPP
@@ -57,7 +58,7 @@ namespace nimrtc::plugins {
 // union; codec implementations translate as needed)
 // ---------------------------------------------------------------------------
 
-struct CodecConfig {
+struct NIMRTC_API_STABLE CodecConfig {
     /** Sample rate in Hz (48000 for Opus, 8000 for G.711, etc.). */
     std::uint32_t sample_rate_hz = 48000;
 
@@ -90,7 +91,7 @@ struct CodecConfig {
 // Codec statistics
 // ---------------------------------------------------------------------------
 
-struct CodecStats {
+struct NIMRTC_API_STABLE CodecStats {
     /** Total frames successfully encoded. */
     std::uint64_t frames_encoded = 0;
     /** Total bytes of encoded payload output. */
@@ -118,7 +119,7 @@ struct CodecStats {
  * peer-connection / one stream. Thread-safety: NOT thread-safe; caller
  * must serialize encode() and decode() calls (engine does this).
  */
-class ICodec : public IPlugin {
+class NIMRTC_API_STABLE ICodec : public IPlugin {
 public:
     /**
      * @brief Encode one frame of PCM to the codec's compressed format.
@@ -172,7 +173,7 @@ public:
 // Factory
 // ---------------------------------------------------------------------------
 
-class ICodecFactory {
+class NIMRTC_API_STABLE ICodecFactory {
 public:
     virtual ~ICodecFactory() = default;
     virtual std::string_view id()           const noexcept = 0;
@@ -188,7 +189,7 @@ public:
 };
 
 template<class T>
-class SimpleCodecFactory : public ICodecFactory {
+class NIMRTC_API_STABLE SimpleCodecFactory : public ICodecFactory {
     std::string_view id_;
     std::string_view name_;
 public:

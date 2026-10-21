@@ -258,12 +258,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   WebTransport server seam (Case E / WT-SEVER):
     //     - web_transport_server.hpp
     //
+    // ADR-016 bump: +1 public header (100 -> 101) for the
+    //   NTP <-> RTP-TS timeline seam:
+    //     - rtp/timeline.hpp
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 100;
+    constexpr std::size_t kBaselineHeaderCount = 101;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

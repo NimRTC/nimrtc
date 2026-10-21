@@ -96,6 +96,14 @@ struct NIMRTC_API_STABLE VideoSinkStats {
 // IVideoSink
 // ---------------------------------------------------------------------------
 
+/** Frame information published by a sink after a successful render. */
+struct NIMRTC_API_STABLE VideoFrameInfo {
+    std::int64_t  capture_ts_us = 0;       ///< monotonic capture timestamp
+    std::uint32_t frame_seq     = 0;       ///< per-SSRC frame counter
+    std::uint32_t rtp_timestamp = 0;       ///< 32-bit media clock
+    std::int64_t  render_time_us = 0;      ///< local monotonic at render()
+};
+
 /**
  * @brief Decoded-video consumer (renderer / recorder / inference).
  *
@@ -115,6 +123,16 @@ public:
 
     /** Current sink configuration (for diagnostics / logs). */
     virtual VideoSinkConfig config() const noexcept = 0;
+
+    // ---- Most-recently-rendered-frame query (ADR-016, v1.0.0) ----
+    // Default = nullptr (sink doesn't track frame metadata).
+    // Useful for ASR / agent pipelines that need "what frame is on
+    // screen right now?". Returns a pointer to sink-internal state
+    // that is valid until the next render() call. Pointer stability
+    // is implementation-defined; copies are cheap and ABI-safe.
+    virtual const VideoFrameInfo* current_frame_info() const noexcept {
+        return nullptr;
+    }
 
     // ---- HW capability flag (R3-Batch) -----------------------------------
     // Default = false (software). HW renderer plugins (SDL+Vulkan,

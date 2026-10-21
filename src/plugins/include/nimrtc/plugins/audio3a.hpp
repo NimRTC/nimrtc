@@ -72,6 +72,23 @@ struct NIMRTC_API_STABLE PcmFrameMetadata {
     size_t   num_samples    = 0;   // samples per channel
     uint8_t  num_channels   = 1;
     int64_t  timestamp_us   = 0;   // monotonic microseconds
+
+    /** Timeline seam fields (ADR-016, v1.0.0).  Additive — existing
+     *  plugins that ignore them continue to compile and run.  The
+     *  engine populates these from the active media path:
+     *    - media_ssrc: RTP SSRC the frame belongs to (sender's side)
+     *    - frame_seq : monotonically-increasing per-SSRC frame counter
+     *  Together with the abs-send-time 24-bit timestamp on the wire
+     *  they let the receiver reconstruct the sender-side capture time
+     *  without an inline `ref_frame` RPC. */
+    uint32_t media_ssrc     = 0;
+    uint32_t frame_seq      = 0;
+
+    /** NTP ↔ RTP-TS anchor at capture time (middle 32 bits of the
+     *  sender's most recent RTCP-SR NTP timestamp).  0 when no SR has
+     *  been received yet — receivers fall back to local-arrival time
+     *  in that case (the existing v0.x behaviour). */
+    uint32_t ntp_mid_32     = 0;
 };
 
 /** PCM tap callback signatures.

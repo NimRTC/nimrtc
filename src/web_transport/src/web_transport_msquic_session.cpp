@@ -19,9 +19,9 @@
  *
  *   IWebTransportSession  (pure-virtual public seam)
  *       ↓
- *   WebTransportMsQuicSession  (thin owner; delegates to Impl)
+ *   WebTransportMsQuicSession  (thin owner; delegates to MsQuicSessionImpl)
  *       ↓
- *   detail::Impl  (connection lifetime, state machine, stream registry)
+ *   detail::MsQuicSessionImpl  (connection lifetime, state machine, stream registry)
  *       ↓
  *   detail::MsQuicBidiStream / MsQuicUniStream  (per-stream wrappers)
  *       ↓
@@ -129,8 +129,9 @@ ApiTable::ApiTable() {
     ConnectionStart           = api->ConnectionStart;
     ConnectionSetConfiguration = api->ConnectionSetConfiguration;
 
-    ConfigurationOpen  = api->ConfigurationOpen;
-    ConfigurationClose = api->ConfigurationClose;
+    ConfigurationOpen   = api->ConfigurationOpen;
+    ConfigurationClose  = api->ConfigurationClose;
+    ConfigurationLoadCredential = api->ConfigurationLoadCredential;
 
     RegistrationOpen  = api->RegistrationOpen;
     RegistrationClose = api->RegistrationClose;
@@ -140,6 +141,11 @@ ApiTable::ApiTable() {
     SetContext        = api->SetContext;
     GetContext        = api->GetContext;
     SetCallbackHandler = api->SetCallbackHandler;
+
+    ListenerOpen     = api->ListenerOpen;
+    ListenerStart    = api->ListenerStart;
+    ListenerClose    = api->ListenerClose;
+    ListenerStop     = api->ListenerStop;
 }
 
 ApiTable::~ApiTable() {
@@ -154,10 +160,10 @@ ApiTable::~ApiTable() {
 // ===========================================================================
 
 MsQuicBidiStream::MsQuicBidiStream(HQUIC stream, const ApiTable* api,
-                                   Impl* /*session*/) noexcept
+                                   MsQuicSessionImpl* /*session*/) noexcept
     : stream_(stream), api_(api) {
     // Note: SetContext / SetCallbackHandler are NOT called here.
-    // The caller (Impl::open_bidi_stream) calls init_msquic_context()
+    // The caller (MsQuicSessionImpl::open_bidi_stream) calls init_msquic_context()
     // after StreamOpen succeeds, so the handle is always valid at this point.
 }
 
@@ -344,10 +350,10 @@ MsQuicBidiStream* MsQuicBidiStream::from_context(void* ctx) noexcept {
 // ===========================================================================
 
 MsQuicUniStream::MsQuicUniStream(HQUIC stream, const ApiTable* api,
-                                  Impl* /*session*/) noexcept
+                                  MsQuicSessionImpl* /*session*/) noexcept
     : stream_(stream), api_(api) {
     // Note: SetContext / SetCallbackHandler are NOT called here.
-    // The caller (Impl::open_uni_stream) calls set_handle()
+    // The caller (MsQuicSessionImpl::open_uni_stream) calls set_handle()
     // after StreamOpen succeeds, so the handle is always valid at that point.
     // Calling SetContext/SetCallbackHandler with a null handle is a no-op
     // in msquic, but we skip it entirely for consistency with MsQuicBidiStream.
@@ -443,14 +449,14 @@ QUIC_STATUS QUIC_API quic_stream_callback(
     // Instead, we use a tag: we store the pointer and a type tag in a
     // small struct, or we can just use a reinterpret_cast with a heuristic.
     //
-    // Simpler: store the Impl* as context (not the stream wrapper) and
+    // Simpler: store the MsQuicSessionImpl* as context (not the stream wrapper) and
     // dispatch from the connection callback for PEER_STREAM_STARTED.
     // For stream callbacks, the context is the stream wrapper itself.
     //
     // Approach: we always store the stream wrapper pointer as context.
     // We need to know whether it's a bidi or uni stream.  We can use
     // dynamic_cast (the wrapper has RTTI), or we can use a base-class
-    // tag.  The simplest is to store the Impl* as context for ALL
+    // tag.  The simplest is to store the MsQuicSessionImpl* as context for ALL
     // streams and handle everything in the connection callback, but
     // that's awkward for recv data.
     //
@@ -471,7 +477,7 @@ QUIC_STATUS QUIC_API quic_stream_callback(
     // used when opening.  But the callback doesn't receive the flags.
     //
     // Best clean approach: use a small tagged union as context.
-    // For now, let's use the Impl* as context (set via SetContext on the
+    // For now, let's use the MsQuicSessionImpl* as context (set via SetContext on the
     // stream) and handle PEER_STREAM_STARTED only in the connection
     // callback.  Stream callbacks that need per-stream dispatch
     // (RECEIVE, SEND_COMPLETE, etc.) will use a different mechanism.
@@ -575,10 +581,10 @@ QUIC_STATUS quic_stream_callback_uni_impl(
 }
 
 // ===========================================================================
-// Impl
+// MsQuicSessionImpl
 // ===========================================================================
 
-Impl::Impl(const std::string& peer_hostname, uint16_t peer_port,
+MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t peer_port,
            const ApiTable* api, const WebTransportConfig& cfg)
     : api_(api) {
     if (!api_->ok()) {
@@ -673,7 +679,7 @@ Impl::Impl(const std::string& peer_hostname, uint16_t peer_port,
         const QUIC_STATUS rc = api_->ConnectionOpen(
             registration_,
             quic_connection_callback,
-            this,   // context = this Impl
+            this,   // context = this MsQuicSessionImpl
             &conn_);
         if (QUIC_FAILED(rc)) {
             api_->ConfigurationClose(configuration_);
@@ -723,11 +729,33 @@ Impl::Impl(const std::string& peer_hostname, uint16_t peer_port,
     }
 }
 
-Impl::~Impl() {
+MsQuicSessionImpl::MsQuicSessionImpl(HQUIC conn, HQUIC registration, HQUIC configuration,
+           const ApiTable* api, const WebTransportConfig& cfg)
+    : api_(api), registration_(registration), configuration_(configuration),
+      conn_(conn) {
+    if (!api_->ok()) {
+        throw std::runtime_error(
+            "WebTransportMsQuicSession: msquic API not available");
+    }
+
+    // Set context and callback on the connection handle.
+    api_->SetContext(conn_, this);
+    api_->SetCallbackHandler(conn_,
+                               reinterpret_cast<void*>(&quic_connection_callback),
+                               this);
+
+    // Server-side: the QUIC handshake is already complete (the listener
+    // accepted the connection).  We transition directly to kConnected.
+    state_.store(WebTransportState::kConnected, std::memory_order_release);
+    nimrtc::core::log::Logger::instance().info(
+        "WebTransportMsQuicSession: server-side session created (already connected)");
+}
+
+MsQuicSessionImpl::~MsQuicSessionImpl() {
     close();
 }
 
-IBidirectionalStream* Impl::open_bidi_stream() noexcept {
+IBidirectionalStream* MsQuicSessionImpl::open_bidi_stream() noexcept {
     if (state_.load(std::memory_order_acquire) != WebTransportState::kConnected) {
         return nullptr;
     }
@@ -774,7 +802,7 @@ IBidirectionalStream* Impl::open_bidi_stream() noexcept {
     return ptr;
 }
 
-IUnidirectionalStream* Impl::open_uni_stream() noexcept {
+IUnidirectionalStream* MsQuicSessionImpl::open_uni_stream() noexcept {
     if (state_.load(std::memory_order_acquire) != WebTransportState::kConnected) {
         return nullptr;
     }
@@ -825,7 +853,7 @@ IUnidirectionalStream* Impl::open_uni_stream() noexcept {
     return ptr;
 }
 
-plugins::Status Impl::send_datagram(
+plugins::Status MsQuicSessionImpl::send_datagram(
     std::span<const std::uint8_t> bytes) noexcept {
     if (state_.load(std::memory_order_acquire) != WebTransportState::kConnected) {
         return plugins::kErrNotReady;
@@ -856,7 +884,7 @@ plugins::Status Impl::send_datagram(
     return plugins::kOk;
 }
 
-void Impl::close() noexcept {
+void MsQuicSessionImpl::close() noexcept {
     if (closing_.exchange(true)) return;  // idempotent
 
     state_.store(WebTransportState::kClosing, std::memory_order_release);
@@ -876,21 +904,21 @@ void Impl::close() noexcept {
     }
 }
 
-void Impl::on_connected() noexcept {
+void MsQuicSessionImpl::on_connected() noexcept {
     state_.store(WebTransportState::kConnected, std::memory_order_release);
 }
 
-void Impl::on_shutdown_initiated_by_transport(QUIC_STATUS status) noexcept {
+void MsQuicSessionImpl::on_shutdown_initiated_by_transport(QUIC_STATUS status) noexcept {
     (void)status;
     state_.store(WebTransportState::kFailed, std::memory_order_release);
 }
 
-void Impl::on_shutdown_initiated_by_peer(uint64_t) noexcept {
+void MsQuicSessionImpl::on_shutdown_initiated_by_peer(uint64_t) noexcept {
     // Peer initiated close — treat as graceful.
     state_.store(WebTransportState::kClosing, std::memory_order_release);
 }
 
-void Impl::on_shutdown_complete() noexcept {
+void MsQuicSessionImpl::on_shutdown_complete() noexcept {
     WebTransportState expected = WebTransportState::kClosing;
     if (!state_.compare_exchange_strong(expected,
                                          WebTransportState::kClosed,
@@ -919,7 +947,7 @@ void Impl::on_shutdown_complete() noexcept {
     }
 }
 
-void Impl::on_peer_stream_started(HQUIC stream,
+void MsQuicSessionImpl::on_peer_stream_started(HQUIC stream,
                                    QUIC_STREAM_OPEN_FLAGS flags) noexcept {
     // An inbound stream started on the connection.  We currently don't
     // handle inbound streams (we are a client only).  msquic requires
@@ -938,14 +966,14 @@ void Impl::on_peer_stream_started(HQUIC stream,
     api_->StreamClose(stream);
 }
 
-void Impl::on_datagram_state_changed(bool send_enabled,
+void MsQuicSessionImpl::on_datagram_state_changed(bool send_enabled,
                                       uint16_t max_send_length) noexcept {
     std::lock_guard<std::mutex> l{datagram_mutex_};
     datagram_send_enabled_ = send_enabled;
     datagram_max_send_length_ = max_send_length;
 }
 
-void Impl::on_datagram_received(const uint8_t* data,
+void MsQuicSessionImpl::on_datagram_received(const uint8_t* data,
                                   uint32_t len) noexcept {
     if (len == 0) return;
     OnDatagramCb cb;
@@ -958,12 +986,12 @@ void Impl::on_datagram_received(const uint8_t* data,
     }
 }
 
-void Impl::on_connection_closed() noexcept {
+void MsQuicSessionImpl::on_connection_closed() noexcept {
     state_.store(WebTransportState::kFailed, std::memory_order_release);
 }
 
-Impl* Impl::from_context(void* ctx) noexcept {
-    return static_cast<Impl*>(ctx);
+MsQuicSessionImpl* MsQuicSessionImpl::from_context(void* ctx) noexcept {
+    return static_cast<MsQuicSessionImpl*>(ctx);
 }
 
 // ===========================================================================
@@ -974,7 +1002,7 @@ QUIC_STATUS QUIC_API quic_connection_callback(
     HQUIC Connection,
     void* Context,
     QUIC_CONNECTION_EVENT* Event) noexcept {
-    auto* impl = static_cast<Impl*>(Context);
+    auto* impl = static_cast<MsQuicSessionImpl*>(Context);
     (void)Connection;  // available via impl->conn_ if needed
 
     switch (Event->Type) {
@@ -1046,14 +1074,20 @@ ApiTable& ApiTable::instance() noexcept {
     return singleton;
 }
 
+// Exposed for web_transport_msquic_listener.cpp (server-side listener).
+// Both listener and session share the same msquic API table.
+ApiTable& api_table_instance_ref() noexcept {
+    return ApiTable::instance();
+}
+
 } // namespace nimrtc::web_transport::detail
 
 // ===========================================================================
 // WebTransportMsQuicSession — public IWebTransportSession surface
 // ===========================================================================
 //
-// Thin owner that wraps detail::Impl and exposes the IWebTransportSession
-// interface.  The Impl is constructed with peer address + config and
+// Thin owner that wraps detail::MsQuicSessionImpl and exposes the IWebTransportSession
+// interface.  The MsQuicSessionImpl is constructed with peer address + config and
 // immediately starts the QUIC handshake.
 //
 // Usage:
@@ -1063,69 +1097,59 @@ ApiTable& ApiTable::instance() noexcept {
 //   stream->send({...});
 //
 // Thread safety: see the IWebTransportSession contract and the
-// detail::Impl header comment.
+// detail::MsQuicSessionImpl header comment.
 // ===========================================================================
 
 namespace nimrtc::web_transport {
 
-class WebTransportMsQuicSession final : public IWebTransportSession {
-public:
-    /**
-     * @brief Construct and start a client-mode WebTransport session.
-     *
-     * @param peer_hostname  Server hostname (SNI). May be empty for
-     *                       in-process loopback testing.
-     * @param peer_port      Server port.
-     * @param cfg            WebTransport / QUIC configuration.
-     *
-     * @throws std::runtime_error if the msquic API cannot be opened
-     *         or if a msquic call fails during setup.  After construction,
-     *         the session is in kConnecting state.  Use `state()` to poll
-     *         until kConnected.
-     */
-    WebTransportMsQuicSession(const std::string& peer_hostname,
-                               uint16_t peer_port,
-                               const WebTransportConfig& cfg)
-        : impl_(std::make_unique<detail::Impl>(peer_hostname, peer_port,
-                                                &detail::ApiTable::instance(),
-                                                cfg)) {}
+// ===========================================================================
+// WebTransportMsQuicSession — out-of-line definitions
+// ===========================================================================
 
-    // Move-only (unique_ptr can't be copied).
-    WebTransportMsQuicSession(WebTransportMsQuicSession&&) = default;
-    WebTransportMsQuicSession& operator=(WebTransportMsQuicSession&&) = default;
+WebTransportMsQuicSession::WebTransportMsQuicSession(
+    const std::string& peer_hostname,
+    uint16_t peer_port,
+    const WebTransportConfig& cfg)
+    : impl_(std::make_unique<detail::MsQuicSessionImpl>(
+          peer_hostname, peer_port,
+          &detail::ApiTable::instance(), cfg)) {}
 
-    ~WebTransportMsQuicSession() override = default;
+WebTransportMsQuicSession::WebTransportMsQuicSession(
+    HQUIC conn,
+    HQUIC registration,
+    HQUIC configuration,
+    const detail::ApiTable* api,
+    const WebTransportConfig& cfg)
+    : impl_(std::make_unique<detail::MsQuicSessionImpl>(
+          conn, registration, configuration, api, cfg)) {}
 
-    // ---- IWebTransportSession ----
+WebTransportMsQuicSession::~WebTransportMsQuicSession() = default;
 
-    WebTransportState state() const noexcept override {
-        return impl_->state();
-    }
+WebTransportState WebTransportMsQuicSession::state() const noexcept {
+    return impl_->state();
+}
 
-    IBidirectionalStream* open_bidi_stream() noexcept override {
-        return impl_->open_bidi_stream();
-    }
+IBidirectionalStream* WebTransportMsQuicSession::open_bidi_stream() noexcept {
+    return impl_->open_bidi_stream();
+}
 
-    IUnidirectionalStream* open_uni_stream() noexcept override {
-        return impl_->open_uni_stream();
-    }
+IUnidirectionalStream* WebTransportMsQuicSession::open_uni_stream() noexcept {
+    return impl_->open_uni_stream();
+}
 
-    plugins::Status send_datagram(
-        std::span<const std::uint8_t> bytes) noexcept override {
-        return impl_->send_datagram(bytes);
-    }
+plugins::Status
+WebTransportMsQuicSession::send_datagram(
+    std::span<const std::uint8_t> bytes) noexcept {
+    return impl_->send_datagram(bytes);
+}
 
-    void set_on_datagram(OnDatagramCb cb) noexcept override {
-        impl_->set_on_datagram(std::move(cb));
-    }
+void WebTransportMsQuicSession::set_on_datagram(OnDatagramCb cb) noexcept {
+    impl_->set_on_datagram(std::move(cb));
+}
 
-    void close() noexcept override {
-        impl_->close();
-    }
-
-private:
-    std::unique_ptr<detail::Impl> impl_;
-};
+void WebTransportMsQuicSession::close() noexcept {
+    impl_->close();
+}
 
 } // namespace nimrtc::web_transport
 

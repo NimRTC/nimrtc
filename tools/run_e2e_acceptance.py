@@ -400,6 +400,75 @@ def run_case_e_dtls() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Case E (WebTransport) — Chrome ↔ NimRTC WebTransport over QUIC
+# ---------------------------------------------------------------------------
+
+def run_case_e_webtransport() -> bool:
+    """
+    Chrome ↔ NimRTC WebTransport end-to-end interop verification (Case E, WT plane).
+
+    Evidence items:
+      E1. Chrome WebTransport API available.
+      E2. session.ready resolves → connected state.
+      E3. Datagram sent → echoed back by demo-wtserver.
+      E4. Bidirectional stream opened → stream data echoed back.
+
+    All four must pass for overall PASS.  Run with:
+        python tools/run_e2e_acceptance.py --case=e_webtransport
+    """
+    print("\n[run] case E: Chrome ↔ NimRTC WebTransport interop")
+    harness_py = (ROOT / "tests" / "chrome_interop_harness"
+                  / "run_webtransport_harness.py")
+    if not harness_py.exists():
+        print(f"[FAIL] harness not found: {harness_py}")
+        return False
+
+    log = E2E / "case_e_webtransport_harness.log"
+    try:
+        with open(log, "w", encoding="utf-8") as f:
+            rc = subprocess.call(
+                [sys.executable, str(harness_py),
+                 "--wt-port", "9443",
+                 "--timeout", "20"],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+            )
+    except subprocess.TimeoutExpired:
+        print("[FAIL] case E WebTransport harness timed out after 120 s")
+        return False
+
+    if log.exists():
+        tail = log.read_text(errors="replace").splitlines()[-20:]
+        for ln in tail:
+            print(f"   | {ln}")
+    print(f"[rc]  run_webtransport_harness.py exit={rc}")
+
+    # Read the machine-readable results from the harness.
+    results_path = E2E / "case_e_webtransport_results.json"
+    if results_path.exists():
+        try:
+            obj = json.loads(results_path.read_text(errors="replace"))
+            pass_ = obj.get("pass", False)
+            print(f"[result] pass={pass_}")
+            checks = {
+                "apiAvailable":  obj.get("apiAvailable") is True,
+                "connected":     obj.get("connected") is True,
+                "datagramSent":  obj.get("datagramSent") is True,
+                "datagramRecv":  obj.get("datagramRecv") is True,
+                "streamSent":    obj.get("streamSent") is True,
+                "streamRecv":    obj.get("streamRecv") is True,
+            }
+            for name, val in checks.items():
+                print(f"         {name}: {'OK' if val else 'FAIL'}")
+            return bool(pass_)
+        except Exception as e:
+            print(f"[warn] could not parse {results_path}: {e}")
+
+    return rc == 0
+
+
+# ---------------------------------------------------------------------------
 # Case D — step summary writer
 # ---------------------------------------------------------------------------
 #
@@ -467,11 +536,13 @@ def main() -> int:
     parser.add_argument(
         "--case",
         default="all",
-        choices=["all", "a", "b", "c", "d", "e", "ab", "abc", "abcd"],
+        choices=["all", "a", "b", "c", "d", "e", "e_webtransport",
+                 "ab", "abc", "abcd"],
         help=(
             "Which case(s) to run.  "
             "'all' runs A+B+C+D (Case E excluded unless explicitly listed).  "
             "'e' runs Case E only (DTLS-only interop).  "
+            "'e_webtransport' runs Case E WebTransport interop.  "
             "Default: all."
         ),
     )
@@ -482,7 +553,8 @@ def main() -> int:
     run_b    = run_all or args.case in ("b",    "ab",    "abc",    "abcd")
     run_c    = run_all or args.case in ("c",    "abc",   "abcd")
     run_d    = run_all or args.case in ("d",    "abcd")
-    run_e    = args.case in ("e",)   # Case E only when explicitly requested
+    run_e    = args.case in ("e",)   # Case E DTLS-only when explicitly requested
+    run_e_wt = args.case in ("e_webtransport",)  # Case E WebTransport when explicitly requested
 
     results = {}
     print(f"=== End-to-end acceptance (case={args.case!r}) ===")
@@ -534,6 +606,9 @@ def main() -> int:
 
     if run_e:
         results["e_dtls"] = run_case_e_dtls()
+
+    if run_e_wt:
+        results["e_webtransport"] = run_case_e_webtransport()
 
     print("\n=== Summary ===")
     for k, v in results.items():

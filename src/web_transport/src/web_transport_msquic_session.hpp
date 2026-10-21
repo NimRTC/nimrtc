@@ -115,6 +115,7 @@ struct ApiTable {
     // Configuration
     QUIC_CONFIGURATION_OPEN_FN  ConfigurationOpen;
     QUIC_CONFIGURATION_CLOSE_FN ConfigurationClose;
+    QUIC_CONFIGURATION_LOAD_CREDENTIAL_FN ConfigurationLoadCredential;
 
     // Registration
     QUIC_REGISTRATION_OPEN_FN  RegistrationOpen;
@@ -127,12 +128,18 @@ struct ApiTable {
     QUIC_SET_CONTEXT_FN          SetContext;
     QUIC_GET_CONTEXT_FN          GetContext;
     QUIC_SET_CALLBACK_HANDLER_FN SetCallbackHandler;
+
+    // Listener (server-side)
+    QUIC_LISTENER_OPEN_FN    ListenerOpen;
+    QUIC_LISTENER_START_FN   ListenerStart;
+    QUIC_LISTENER_CLOSE_FN   ListenerClose;
+    QUIC_LISTENER_STOP_FN    ListenerStop;
 };
 
-// Forward declaration of Impl — required because MsQuicBidiStream /
-// MsQuicUniStream hold an `Impl*` back-pointer and are themselves
-// declared before the full Impl class definition below.
-class Impl;
+// Forward declaration of MsQuicSessionImpl — required because MsQuicBidiStream /
+// MsQuicUniStream hold an `MsQuicSessionImpl*` back-pointer and are themselves
+// declared before the full MsQuicSessionImpl class definition below.
+class MsQuicSessionImpl;
 
 // Forward declaration of the QUIC stream callback so that
 // `MsQuicUniStream::set_handle` (inline-defined inside the class
@@ -169,7 +176,7 @@ QUIC_STATUS quic_stream_callback_uni_impl(
 class MsQuicBidiStream final : public IBidirectionalStream {
 public:
     MsQuicBidiStream(HQUIC stream, const ApiTable* api,
-                     Impl* session) noexcept;
+                     MsQuicSessionImpl* session) noexcept;
     ~MsQuicBidiStream() override;
 
     // ---- IBidirectionalStream ----
@@ -199,7 +206,7 @@ public:
     static MsQuicBidiStream* from_context(void* ctx) noexcept;
 
     /** Initialise msquic context (SetContext + SetCallbackHandler).
-     *  Called by Impl::open_bidi_stream() after StreamOpen succeeds. */
+     *  Called by MsQuicSessionImpl::open_bidi_stream() after StreamOpen succeeds. */
     void init_msquic_context(HQUIC stream) noexcept;
 
 private:
@@ -229,7 +236,7 @@ private:
 class MsQuicUniStream final : public IUnidirectionalStream {
 public:
     MsQuicUniStream(HQUIC stream, const ApiTable* api,
-                    Impl* session) noexcept;
+                    MsQuicSessionImpl* session) noexcept;
     ~MsQuicUniStream() override;
 
     // ---- IUnidirectionalStream ----
@@ -247,7 +254,7 @@ public:
     static MsQuicUniStream* from_context(void* ctx) noexcept;
 
     /** Transfer a valid stream handle to this wrapper and initialise
-     *  msquic context.  Called by Impl::open_uni_stream() after
+     *  msquic context.  Called by MsQuicSessionImpl::open_uni_stream() after
      *  StreamOpen succeeds. */
     void set_handle(HQUIC stream) noexcept {
         stream_ = stream;
@@ -267,7 +274,7 @@ private:
 };
 
 // ===========================================================================
-// Impl — internal session implementation
+// MsQuicSessionImpl — internal session implementation
 // ===========================================================================
 //
 // Holds the QUIC connection handle, all active streams, and the session
@@ -276,10 +283,10 @@ private:
 // a void* context pointer).
 //
 // The public IWebTransportSession surface is a thin owner of a
-// std::unique_ptr<Impl>.
+// std::unique_ptr<MsQuicSessionImpl>.
 // ===========================================================================
 
-class Impl {
+class MsQuicSessionImpl {
 public:
     /**
      * @brief Construct a client-mode QUIC connection.
@@ -295,9 +302,29 @@ public:
      * @param cfg            WebTransport connection configuration.
      * @throws std::runtime_error if msquic API cannot be opened.
      */
-    Impl(const std::string& peer_hostname, uint16_t peer_port,
+    MsQuicSessionImpl(const std::string& peer_hostname, uint16_t peer_port,
          const ApiTable* api, const WebTransportConfig& cfg);
-    ~Impl();
+
+    /**
+     * @brief Construct a server-mode QUIC session from an accepted connection.
+     *
+     * Called when the msquic listener accepts a WebTransport connection
+     * and the HTTP/3 + WebTransport handshake is complete.  The connection
+     * is already in kConnected state from the QUIC perspective.
+     *
+     * @param conn           QUIC connection handle (already accepted,
+     *                       already had QUIC handshake completed).
+     * @param registration   Registration handle (must outlive this).
+     * @param configuration  Configuration handle (must outlive this).
+     * @param api            Pointer to the global ApiTable singleton.
+     * @param cfg            WebTransport connection configuration.
+     *
+     * @throws std::runtime_error if setup fails.
+     */
+    MsQuicSessionImpl(HQUIC conn, HQUIC registration, HQUIC configuration,
+         const ApiTable* api, const WebTransportConfig& cfg);
+
+    ~MsQuicSessionImpl();
 
     // ---- IWebTransportSession surface (delegated from the owner) ----
     WebTransportState state() const noexcept { return state_.load(std::memory_order_acquire); }
@@ -321,7 +348,7 @@ public:
     HQUIC connection_handle() const noexcept { return conn_; }
 
     /** Context pointer stored in the msquic connection handle. */
-    static Impl* from_context(void* ctx) noexcept;
+    static MsQuicSessionImpl* from_context(void* ctx) noexcept;
 
 private:
     friend class MsQuicBidiStream;
@@ -391,6 +418,91 @@ QUIC_STATUS QUIC_API quic_stream_callback(
     void* Context,
     QUIC_STREAM_EVENT* Event) noexcept;
 
+/**
+ * @brief Expose the ApiTable singleton reference for shared use
+ *        between session (client) and listener (server).
+ *
+ * Defined in web_transport_msquic_session.cpp.
+ * The listener uses this to share the same msquic API table
+ * as the session implementation.
+ */
+ApiTable& api_table_instance_ref() noexcept;
+
 } // namespace nimrtc::web_transport::detail
+
+// ===========================================================================
+// WebTransportMsQuicSession — msquic-backed IWebTransportSession
+// ===========================================================================
+//
+// Implements the IWebTransportSession interface using the msquic C library
+// as the underlying QUIC transport.  Two constructors:
+//   - Client mode: connects to a server (peer_hostname:peer_port)
+//   - Server mode: wraps an already-connected QUIC connection handle
+//                  (used by the msquic listener, Case E).
+// ===========================================================================
+
+namespace nimrtc::web_transport {
+
+class WebTransportMsQuicSession final : public IWebTransportSession {
+public:
+    /**
+     * @brief Construct and start a client-mode WebTransport session.
+     *
+     * @param peer_hostname  Server hostname (SNI). May be empty for
+     *                       in-process loopback testing.
+     * @param peer_port      Server port.
+     * @param cfg           WebTransport / QUIC configuration.
+     *
+     * @throws std::runtime_error if the msquic API cannot be opened
+     *         or if a msquic call fails during setup.  After construction,
+     *         the session is in kConnecting state.  Use `state()` to poll
+     *         until kConnected.
+     */
+    WebTransportMsQuicSession(const std::string& peer_hostname,
+                               uint16_t peer_port,
+                               const WebTransportConfig& cfg);
+
+    /**
+     * @brief Construct a server-side session from an accepted connection.
+     *
+     * Used by the msquic listener (Case E) when a Chrome WebTransport
+     * client completes the HTTP/3 + WebTransport handshake.  The QUIC
+     * handshake has already completed, so the session starts in
+     * kConnected state.
+     *
+     * @param conn           QUIC connection handle (already accepted and
+     *                       connected).
+     * @param registration   Registration handle (owned by the listener).
+     * @param configuration  Configuration handle (owned by the listener).
+     * @param api            Pointer to the global ApiTable singleton.
+     * @param cfg            WebTransport connection configuration.
+     */
+    WebTransportMsQuicSession(HQUIC conn,
+                               HQUIC registration,
+                               HQUIC configuration,
+                               const detail::ApiTable* api,
+                               const WebTransportConfig& cfg);
+
+    // Move-only (unique_ptr can't be copied).
+    WebTransportMsQuicSession(WebTransportMsQuicSession&&) = default;
+    WebTransportMsQuicSession& operator=(WebTransportMsQuicSession&&) = default;
+
+    ~WebTransportMsQuicSession() override;
+
+    // ---- IWebTransportSession ----
+
+    WebTransportState state() const noexcept override;
+    IBidirectionalStream* open_bidi_stream() noexcept override;
+    IUnidirectionalStream* open_uni_stream() noexcept override;
+    plugins::Status send_datagram(
+        std::span<const std::uint8_t> bytes) noexcept override;
+    void set_on_datagram(OnDatagramCb cb) noexcept override;
+    void close() noexcept override;
+
+private:
+    std::unique_ptr<detail::MsQuicSessionImpl> impl_;
+};
+
+} // namespace nimrtc::web_transport
 
 #endif // NIMRTC_WEB_TRANSPORT_MSQUIC_SESSION_HPP

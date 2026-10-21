@@ -1,20 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.11.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.14.0--beta.1-orange.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.11.0 Beta 前哨 — Chrome media interop (audio + video Case D on all four
-> platforms), PCM tap on WebRTC APM, Profile library (9 variants), DTLS seam via plugin registry
-> with `EngineConfig::dtls_name` for future 国密 backends. The data plane (DataChannel
-> interop / usrsctp / SCTP-over-DTLS) is **deferred to v1.x** — Chrome is moving
-> DataChannel to WebTransport over QUIC, and v0.11.0 ships the media interop surface
-> without committing to the SCTP path. See
-> [docs/plan/v0.11-plan.md §2.2 / §10](docs/plan/v0.11-plan.md) for the rationale
-> and forward direction.
+> **Current:** v0.14.0-beta.1 (Tech Preview) — WebTransport / msquic data plane (DC-1), `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome DTLS interop harness. Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) is **In Progress** — targeting v0.14.0-rc.1. The data plane (DataChannel interop / usrsctp / SCTP-over-DTLS) is **deferred to v1.x** — Chrome is moving DataChannel to WebTransport over QUIC, and v0.14.0 ships the data-plane wire-up without committing to the SCTP path. See [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §12.3.3 DoD gates for status. v0.14.0 is the **v1.0.0-beta.1** pre-release per `docs/plan/v1.0-plan.md` §8 + §12.2 + §12.3.3.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
@@ -55,23 +48,15 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.11.0 Beta 前哨 — first minor to ship P2 content.
-  Chrome media interop (audio + video Case D on all four platforms) plus
-  L2 / L3 P2 scaffolding (TAP-1, PROFILE-1, DEMO-1, TPAL-4 cleanup) are
-  shipped. **The data plane (DataChannel Chrome interop, usrsctp
-  production backend, L1 strict-priority across the DC plane) is
-  explicitly deferred to v1.x** — Chrome is moving DataChannel to
-  WebTransport over QUIC, and v0.11.0 does not commit to the
-  SCTP-over-DTLS path. **In-process SFU relay (`nimrtc_sfu`), DC forwarding
-  policy (DC-3), and `sfu-relay` benchmark (BENCH-1) are deferred to
-  v1.1.0** per `docs/plan/v1.0-plan.md` §7 (closed 2026-10-19, BDFL:
-  SFU is not a project core goal); they are **off the v1.0.x
-  critical path**. The pre-1.0 window is no longer pending — the
-  decision is recorded. See
-  (see [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
-  and §10 for the WebTransport forward direction). P1 closed at
-  v0.10.3 (final tech-preview patch). Production-grade quality lands in
-  P3 / P4.
+- **Current state:** v0.14.0-beta.1 Tech Preview — WebTransport / msquic data plane (DC-1 wire-up),
+  `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome DTLS interop harness.
+  Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) is **In Progress** —
+  targeting v0.14.0-rc.1. The `SctpDataChannel` (id `"sctp"`) remains the default;
+  `WebTransportDataChannel` (id `"web_transport"`) is the v1.0 production backend per ADR-014.
+  **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
+  benchmark (BENCH-1) are deferred to v1.1.0** per `docs/plan/v1.0-plan.md` §7
+  (closed 2026-10-19, BDFL: SFU is not a project core goal); they are **off the
+  v1.0.x critical path**.
 
 ---
 
@@ -483,7 +468,7 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
 
 ---
 
-## Current progress (v0.11.0 Beta 前哨)
+## Current progress (v0.14.0-beta.1 Tech Preview)
 
 What you can do today, in the main trunk, against a stock `cmake --preset release.msvc` build:
 
@@ -512,35 +497,24 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | RFC-1 — RFC 001 (PCM Tap) Final | ✅ | v0.11.0 |
 | Chrome ↔ NimRTC media interop e2e (Case D, all four platforms) | ✅ | v0.11.0 |
 | TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
-| DC-1 — Chrome ↔ NimRTC DataChannel bidirectional interop | ⏸️ **Deferred to v1.x** | SCTP-over-DTLS physical wiring (set_dtls_keys() + DTLS↔SCTP inbound/outbound hookup) never landed on `main`; Chrome-headless e2e stays 0/4. In-process `test_datachannel_engine` 5/5 PASS covers the IDataChannel API surface against the stub SCTP socket. Re-platformed on WebTransport / QUIC in v1.x. |
+| ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
+| DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
+| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ⏸️ **In Progress** | Targeting v0.14.0-rc.1; harness in place at `tests/chrome_interop_harness/`. |
 | DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ⏸️ **Deferred to v1.x** | The RTP-only strict-priority path is already covered by `test_sched_priority.cpp` from v0.10.x; the DC-plane cross-traffic case waits for DC-1. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ **Deferred to v1.1.0** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the v1.0.x critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
-> v0.11.0 is the **Beta 前哨** minor — first release that ships P2
-> content (Chrome media interop, PCM tap, AI Agent demo, full Profile
-> library, DTLS seam cleanup). v0.10 closed the v0.9 wrap-up + PAL Slice 1
-> refactor; v0.10.x (v0.10.1–v0.10.3) finished the PAL Slice 2–8
-> infrastructure that v0.11.0 builds on.
->
-> **The data plane (DataChannel interop / usrsctp / SCTP-over-DTLS) is
-> explicitly deferred to v1.x** — Chrome is moving DataChannel to
-> WebTransport over QUIC, and v0.11.0 does not commit to the
-> SCTP-over-DTLS path. The `UsrsctpSocket` class is `@deprecated` and
-> still compiles for opt-in callers; the in-process `test_datachannel_engine`
-> 5/5 PASS covers the IDataChannel API surface against the stub SCTP
-> socket. **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy
-> (DC-3), and `sfu-relay` benchmark (BENCH-1) are deferred to v1.1.0**
-> per `docs/plan/v1.0-plan.md` §7 (closed 2026-10-19, BDFL: SFU is
-> not a project core goal). The pre-1.0 window is **no longer
-> pending** — the decision is recorded and the trio is off the
-> v1.0.x critical path. See
-> [docs/plan/v0.11-plan.md §2.2](docs/plan/v0.11-plan.md#22-out-of-scope-deferred)
-> and §10 (forward direction: WebTransport / QUIC) for the full
-> rationale. The v0.10.x dual-registration scheme is recoverable from
-> git history if the v1.x WebTransport vendor selection falls through.
+> v0.14.0-beta.1 is the **Tech Preview** release — WebTransport / msquic data plane (DC-1 wire-up),
+> `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome DTLS interop harness.
+> Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) is **In Progress** —
+> targeting v0.14.0-rc.1. The `SctpDataChannel` (id `"sctp"`) remains the default;
+> `WebTransportDataChannel` (id `"web_transport"`) is the v1.0 production backend per ADR-014.
+> **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
+> benchmark (BENCH-1) are deferred to v1.1.0** per `docs/plan/v1.0-plan.md` §7
+> (closed 2026-10-19, BDFL: SFU is not a project core goal); they are **off the
+> v1.0.x critical path**.
 
 ---
 

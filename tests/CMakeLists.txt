@@ -8,7 +8,7 @@
 # v1.0.0-alpha.1 DoD §12.3.1 gate #6 — core API stability framework tests.
 #
 # Two GoogleTest executables:
-#   - test_api_version:        macro framework smoke test (5/5 cases).
+#   - test_api_version:        macro framework smoke test (7/7 cases).
 #   - test_api_classification: per-header ≥1 STABLE/UNSTABLE marker check
 #                              + baseline header-count check (89 files).
 #
@@ -212,6 +212,28 @@ endfunction()
 
 nimrtc_add_web_transport_msquic_test(test_web_transport_msquic
                                     test_web_transport_msquic.cpp)
+
+# ----------------------------------------------------------------------------
+# v0.14.0-beta.2 (Case E / WT-SEVER) — WebTransport server seam test.
+#
+# Drives the msquic-backed IWebTransportServer through its public surface:
+#   - factory produces a non-null server
+#   - running() is false before start()
+#   - start() on unprivileged port succeeds (listener binds)
+#   - running() is true after start()
+#   - stop() is idempotent; running() goes false
+#   - restart after stop is safe
+#   - start() when already running returns false (no double-start)
+#   - set_on_session accepts lambdas; empty std::function unregisters
+#
+# Compile-time assertions verify IWebTransportServer is abstract and
+# create_msquic_webtransport_server has the correct return type.
+#
+# Note: this test does NOT connect a real Chrome client — that is
+# covered by tests/chrome_interop_harness/run_webtransport_harness.py.
+# ----------------------------------------------------------------------------
+nimrtc_add_web_transport_msquic_test(test_web_transport_server_seam
+                                    test_web_transport_server_seam.cpp)
 
 # E2E tests are standalone (custom main(), no GoogleTest). They each use
 # raw sockets to verify round-trip behaviour. add_e2e_test is a small wrapper

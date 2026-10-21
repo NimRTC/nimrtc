@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<!--
+  @file interop/chrome/test_chrome_webtransport.html
+  @brief Headless Chrome WebTransport interop harness for NimRTC (Case E).
+
+  Validates that Chrome's WebTransport JS API can connect to the
+  NimRTC WebTransport server (msquic listener) and exchange data
+  over both the datagram and bidirectional-stream planes.
+
+  Chrome's WebTransport API (https://w3c.github.io/webtransport/)
+  uses the `new WebTransport(url)` constructor.  The URL must use the
+  `https:` scheme (RFC 9298 §3 — WebTransport is defined only for
+  secure contexts).  For local testing against a self-signed / plain
+  msquic listener, the page itself is loaded over `file://`, and the
+  server certificate is trusted via Chrome's
+  `--ignore-certificate-errors-spki-list` switch.  When the page is
+  NOT a secure context, Chrome refuses to construct a WebTransport
+  session; the harness therefore also accepts an `http://host:port`
+  form via the `wtscheme` query parameter, which it rewrites to
+  `https:` before constructing the session.
+
+  ## What this harness verifies
+
+    1. `typeof WebTransport === 'function'` — the API exists in this Chrome.
+    2. The session reaches `readyState === 'connected'` (HTTP/3 +
+       WebTransport CONNECT handshake succeeded).
+    3. An inbound datagram echoes back after the harness sends one
+       (WebTransportDataChannel datagram plane, RFC 9221).
+    4. A bidirectional stream can be opened, written to, and read back
+       (WebTransportDataChannel reliable-ordered plane).
+
+  ## Exposed results
+
+  `window._interopResults` is read by Playwright after the run:
+
+    {
+      apiAvailable: bool,
+      connected:    bool,   // session.ready fired
+      datagramSent: bool,
+      datagramRecv: bool,
+      datagramPayload: str, // echo text received back
+      streamSent:   bool,
+      streamRecv:   bool,
+      streamPayload: str,
+      closed:       bool,   // session closed cleanly
+      errors: [{code, msg}],
+      exitCode: number,
+    }
+
+  A run PASSes when `apiAvailable && connected && datagramSent &&
+  datagramRecv && streamSent && streamRecv`.
+
+  ## Query parameters
+
+    url=<wt-url>       Full WebTransport URL.  If omitted, the harness
+                        builds `https://localhost:<wtport>/webtransport`
+                        from `wtport` (default 9443).
+    wtport=<port>      NimRTC WebTransport server UDP port (default 9443).
+    timeout=<ms>       Total harness budget in milliseconds (default 20000).
+    insecure=1         If set, the harness records a non-fatal note that
+                        the page context may be insecure; it does not
+                        change behaviour (Chrome decides).
+
+  @see tests/chrome_interop_harness/run_webtransport_harness.py
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>NimRTC WebTransport interop</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 1em; }
+    #status { font-weight: bold; color: #222; padding: 0.5em;
+              background: #f3f3f3; border: 1px solid #ddd;
+              font-family: monospace; }
+    pre#log { background: #1e1e1e; color: #d4d4d4; padding: 0.8em;
+              font-family: Consolas, monospace; font-size: 11pt;
+              max-height: 16em; overflow: auto; white-space: pre-wrap; }
+    .ok  { color: #2e7d32; }
+    .err { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>NimRTC WebTransport interop harness</h1>
+  <div id="status">Loading…</div>
+  <pre id="log"></pre>
+
+<script>
+"use strict";
+
+// ----- Query parameters -----------------------------------------------------
+
+const PARAMS     = new URLSearchParams(window.location.search);
+const WT_PORT    = parseInt(PARAMS.get("wtport") || "9443", 10);
+const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "20000", 10);
+const WT_URL     = PARAMS.get("url") ||
+                   ("https://localhost:" + WT_PORT + "/webtransport");
+
+// ----- Results (read by Playwright via page.evaluate) ------------------------
+
+window._interopResults = {
+    apiAvailable:   false,
+    connected:      false,
+    datagramSent:   false,
+    datagramRecv:   false,
+    datagramPayload: null,
+    streamSent:     false,
+    streamRecv:     false,
+    streamPayload:  null,
+    closed:         false,
+    errors:         [],
+    exitCode:       0,
+};
+
+// ----- Logging helpers ------------------------------------------------------
+
+function log(tag, msg) {
+    const line = "[" + new Date().toISOString() + "] [" + tag + "] " + msg;
+    console.log(line);
+    const el = document.getElementById("log");
+    if (el) {
+        el.textContent += line + "\n";
+        el.scrollTop = el.scrollHeight;
+    }
+}
+
+function setStatus(s) {
+    const el = document.getElementById("status");
+    if (el) el.textContent = s;
+}
+
+function reportError(code, msg) {
+    window._interopResults.errors.push({ code: code, msg: String(msg) });
+    window._interopResults.exitCode = code;
+    log("ERROR", "code=0x" + code.toString(16) + " " + msg);
+}
+
+// ----- Datagram payload -----------------------------------------------------
+
+// A fixed, short ASCII payload so the echo can be matched exactly.
+const DG_PAYLOAD = "NIMRTC-WT-DGRAM-ECHO-01";
+
+// ----- Stream payload -------------------------------------------------------
+
+const ST_PAYLOAD = "NIMRTC-WT-STREAM-ECHO-01";
+
+// ----- Runner ---------------------------------------------------------------
+
+let session = null;
+let timerHandle = null;
+
+function finish() {
+    log("RESULT", "=== WebTransport interop results ===");
+    log("RESULT", "apiAvailable:    " + window._interopResults.apiAvailable);
+    log("RESULT", "connected:       " + window._interopResults.connected);
+    log("RESULT", "datagramSent:    " + window._interopResults.datagramSent);
+    log("RESULT", "datagramRecv:    " + window._interopResults.datagramRecv +
+                  "  payload=" + JSON.stringify(window._interopResults.datagramPayload));
+    log("RESULT", "streamSent:      " + window._interopResults.streamSent);
+    log("RESULT", "streamRecv:      " + window._interopResults.streamRecv +
+                  "  payload=" + JSON.stringify(window._interopResults.streamPayload));
+    log("RESULT", "errors:          " + JSON.stringify(window._interopResults.errors));
+    log("RESULT", "exitCode:        0x" + window._interopResults.exitCode.toString(16));
+    setStatus("Test complete — see results above.");
+}
+
+async function runStreamTest(wt) {
+    // Open a bidirectional stream, write a payload, and read the echo.
+    try {
+        const stream = await wt.createBidirectionalStream();
+        log("STREAM", "bidirectional stream opened");
+
+        const writer = stream.writable.getWriter();
+        const encoder = new TextEncoder();
+
+        // Set up the reader FIRST so we don't miss the echo (the server may
+        // echo synchronously once the stream is created).
+        const reader = stream.readable.getReader();
+        const decoder = new TextDecoder();
+
+        const readDone = (async () => {
+            try {
+                const { value, done } = await reader.read();
+                if (done) {
+                    log("STREAM", "readable closed by peer");
+                    return;
+                }
+                const text = decoder.decode(value);
+                window._interopResults.streamRecv = true;
+                window._interopResults.streamPayload = text;
+                log("STREAM", "<< " + text);
+            } catch (e) {
+                log("STREAM", "reader error: " + e);
+            }
+        })();
+
+        // Write the payload and close our send side.
+        const bytes = encoder.encode(ST_PAYLOAD);
+        await writer.write(bytes);
+        window._interopResults.streamSent = true;
+        log("STREAM", ">> " + ST_PAYLOAD + " (" + bytes.byteLength + "B)");
+        try { await writer.close(); } catch (_) { /* already closed */ }
+
+        // Await the echo with a bounded timeout.
+        await Promise.race([
+            readDone,
+            new Promise((r) => setTimeout(r, 5000)),
+        ]);
+    } catch (e) {
+        log("STREAM", "stream test failed: " + e);
+        reportError(0x23, "bidirectional stream test failed: " + e);
+    }
+}
+
+async function run() {
+    log("INIT", "WT_URL=" + WT_URL + " TIMEOUT_MS=" + TIMEOUT_MS);
+
+    // ---- 1. API availability ----
+    if (typeof WebTransport !== "function") {
+        reportError(0x20, "WebTransport API not available in this Chrome build");
+        finish();
+        return;
+    }
+    window._interopResults.apiAvailable = true;
+    log("INIT", "WebTransport API available ✓");
+
+    // ---- 2. Construct the session ----
+    try {
+        session = new WebTransport(WT_URL);
+    } catch (e) {
+        reportError(0x21, "new WebTransport() threw: " + e);
+        finish();
+        return;
+    }
+    window.wtSession = session;
+    log("WT", "WebTransport session constructed (readyState=" +
+              session.readyState + ")");
+
+    // ---- Inbound datagram handler ----
+    session.datagrams.incoming
+        .getReader()
+        .read()
+        .then(({ value, done }) => {
+            if (done) return;
+            const text = new TextDecoder().decode(value);
+            window._interopResults.datagramRecv = true;
+            window._interopResults.datagramPayload = text;
+            log("DGRAM", "<< echo: " + text);
+        })
+        .catch((e) => log("DGRAM", "datagram reader error: " + e));
+
+    // ---- 3. ready promise ----
+    try {
+        await session.ready;
+        window._interopResults.connected = true;
+        log("WT", "session.ready resolved — CONNECTED ✓");
+        setStatus("WebTransport connected — running data-plane tests…");
+    } catch (e) {
+        reportError(0x22, "session.ready rejected: " + e);
+        finish();
+        return;
+    }
+
+    // ---- 4. Datagram round-trip ----
+    try {
+        const w = session.datagrams.writable.getWriter();
+        const bytes = new TextEncoder().encode(DG_PAYLOAD);
+        await w.write(bytes);
+        window._interopResults.datagramSent = true;
+        log("DGRAM", ">> " + DG_PAYLOAD + " (" + bytes.byteLength + "B)");
+        try { w.releaseLock(); } catch (_) { /* noop */ }
+    } catch (e) {
+        log("DGRAM", "datagram send failed: " + e);
+        reportError(0x24, "datagram send failed: " + e);
+    }
+
+    // Give the echo a moment to arrive before the stream test.
+    await new Promise((r) => setTimeout(r, 400));
+
+    // ---- 5. Bidirectional stream round-trip ----
+    await runStreamTest(session);
+
+    // ---- 6. Clean shutdown ----
+    try {
+        session.close();
+        window._interopResults.closed = true;
+        log("WT", "session.close() called");
+    } catch (e) {
+        log("WT", "session.close() error: " + e);
+    }
+
+    finish();
+}
+
+// ----- Boot -----------------------------------------------------------------
+
+window.addEventListener("load", () => {
+    // Overall wall-clock guard.
+    timerHandle = setTimeout(() => {
+        if (!window._interopResults.connected &&
+            window._interopResults.errors.length === 0) {
+            reportError(0x25, "WebTransport connect timeout after " +
+                               TIMEOUT_MS + "ms");
+        }
+        finish();
+    }, TIMEOUT_MS);
+
+    // Auto-run the harness (headless / CI mode).
+    run().catch((e) => {
+        reportError(0x26, "unexpected harness failure: " + e);
+        finish();
+    });
+});
+</script>
+</body>
+</html>

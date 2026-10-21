@@ -72,3 +72,12 @@ add_custom_command(
 
 # demo-agent-gateway: PCM tap → streaming ASR → LLM mock flow demo.
 add_subdirectory(demo-agent-gateway)
+
+# demo-wtserver: WebTransport echo server for Case E (Chrome ↔ NimRTC interop).
+# Uses the msquic-backed IWebTransportServer to accept Chrome WebTransport
+# connections over QUIC + HTTP/3 + WebTransport (RFC 9298).
+add_executable(demo-wtserver demo-wtserver/demo-wtserver.cpp)
+nimrtc_apply_options(demo-wtserver)
+target_link_libraries(demo-wtserver PRIVATE
+    nimrtc::web_transport  # IWebTransportServer + msquic listener
+)

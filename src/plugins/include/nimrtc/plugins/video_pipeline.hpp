@@ -387,10 +387,22 @@ public:
      *  capture_ts_us : monotonic capture timestamp in microseconds.
      *  frame_id      : monotonically-increasing per-stream frame counter.
      *  rtp_timestamp: 90kHz RTP clock value pinned to capture_ts_us.
-     *  Default impl in adapters is a no-op stub; see ADR-NNN. */
-    virtual void set_ref_frame(std::int64_t capture_ts_us,
-                               std::uint32_t frame_id,
-                               std::uint32_t rtp_timestamp) noexcept = 0;
+     *
+     *  Compatibility note (ADR-016, v1.0.0): the active timeline carrier
+     *  is RFC 6051 abs-send-time + RTCP-SR-based NTP↔RTP-TS mapping
+     *  (see `nimrtc/rtp/timeline.hpp`). set_ref_frame() is preserved as
+     *  an ABI-stable no-op for plugin implementers; the engine reads
+     *  capture_ts/frame_seq directly from the EncodedVideoFrame and the
+     *  abs-send-time 24-bit unsigned timestamp bound to the wire.
+     *
+     *  Default impl is the no-op stub for binary compatibility with
+     *  plugin adapters that pre-date v1.0.0. */
+    virtual void set_ref_frame(std::int64_t /*capture_ts_us*/,
+                               std::uint32_t /*frame_id*/,
+                               std::uint32_t /*rtp_timestamp*/) noexcept {
+        // no-op: timeline propagation lives in the engine + abs-send-time
+        // extension; see ADR-016 for the long-term plan.
+    }
 
     /** Snapshot of sender counters. */
     virtual VideoSenderStats stats() const noexcept = 0;

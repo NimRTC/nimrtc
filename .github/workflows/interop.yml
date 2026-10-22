@@ -53,6 +53,18 @@ jobs:
         with:
           arch: x64
 
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's SChannel backend loads the
+      # certificate from the Windows certificate store, so the certificate is
+      # created and installed here; its SHA-1 thumbprint is written to
+      # build/wtserver_hash.txt, which the listener reads at startup.
+      - name: Provision WebTransport TLS material
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File ./scripts/generate_wtserver_cert.ps1 `
+            -BuildDir "${{ github.workspace }}/build"
+
       - name: Configure
         shell: pwsh
         run: |

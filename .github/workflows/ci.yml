@@ -109,6 +109,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cmake-debug.msvc-
 
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's SChannel backend loads the
+      # certificate from the Windows certificate store, so the certificate is
+      # created and installed here; its SHA-1 thumbprint is written to
+      # build/wtserver_hash.txt, which the listener reads at startup.
+      # This step runs after the build-directory cache restore so the
+      # thumbprint file always matches the certificate in the store.
+      - name: Provision WebTransport TLS material
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File ./scripts/generate_wtserver_cert.ps1 `
+            -BuildDir "${{ github.workspace }}/build"
+
       - name: Configure
         run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
@@ -187,6 +201,23 @@ jobs:
           key: ${{ runner.os }}-cmake-debug-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
           restore-keys: |
             ${{ runner.os }}-cmake-debug-
+
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's OpenSSL / quictls backend
+      # loads it from PEM files, so a self-signed key + certificate pair is
+      # written into the build directory here.
+      - name: Provision WebTransport TLS material
+        run: |
+          mkdir -p build
+          printf '%s\n' \
+            '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+            '[dn]' 'CN = localhost' \
+            '[v3]' 'subjectAltName = DNS:localhost,IP:127.0.0.1' \
+            > build/wtserver_openssl.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout build/wtserver_key.pem \
+            -out build/wtserver_cert.pem \
+            -config build/wtserver_openssl.cnf
 
       - name: Configure
         run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
@@ -272,6 +303,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cmake-debug.aarch64-
 
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's OpenSSL / quictls backend
+      # loads it from PEM files, so a self-signed key + certificate pair is
+      # written into the build directory here.
+      - name: Provision WebTransport TLS material
+        run: |
+          mkdir -p build
+          printf '%s\n' \
+            '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+            '[dn]' 'CN = localhost' \
+            '[v3]' 'subjectAltName = DNS:localhost,IP:127.0.0.1' \
+            > build/wtserver_openssl.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout build/wtserver_key.pem \
+            -out build/wtserver_cert.pem \
+            -config build/wtserver_openssl.cnf
+
       - name: Configure
         run: cmake --preset debug.aarch64 -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
@@ -344,6 +392,23 @@ jobs:
           key: ${{ runner.os }}-cmake-debug.macos-${{ hashFiles('CMakeLists.txt', 'cmake/NimRTCOptions.cmake', 'cmake/NimRTCVendored.cmake', 'cmake/NimRTCTest.cmake') }}
           restore-keys: |
             ${{ runner.os }}-cmake-debug.macos-
+
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's OpenSSL / quictls backend
+      # loads it from PEM files, so a self-signed key + certificate pair is
+      # written into the build directory here.
+      - name: Provision WebTransport TLS material
+        run: |
+          mkdir -p build
+          printf '%s\n' \
+            '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+            '[dn]' 'CN = localhost' \
+            '[v3]' 'subjectAltName = DNS:localhost,IP:127.0.0.1' \
+            > build/wtserver_openssl.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout build/wtserver_key.pem \
+            -out build/wtserver_cert.pem \
+            -config build/wtserver_openssl.cnf
 
       - name: Configure
         run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF

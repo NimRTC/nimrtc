@@ -173,28 +173,43 @@ jobs:
           Write-Host "Adding to GITHUB_PATH: $userScripts"
           Add-Content -Path $env:GITHUB_PATH -Value $userScripts
 
-      # TEMPORARILY SKIPPED in release.yml (was the v0.14.0 release-cut
-      # release / build / windows failure; see v0.14.0 release notes).
-      # Release builds pass `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to cmake
-      # so audio3a links against the same system / stub WebRTC APM path
-      # as ci.yml; the prebuild output is unused.  Long-term fix
-      # (target_link_libraries(audio3a PUBLIC webrtc_apm::webrtc_apm)
-      # so absl's INCLUDE_DIRECTORIES propagate to the consumer) is
-      # tracked in a follow-up issue; once it lands, restore the
-      # `if:` line below and drop the `if: ${{ false }}` shim.
+      # The meson prebuild of webrtc_audio_processing fails on the
+      # windows-2022 runner: meson pulls abseil-cpp in as a subproject
+      # and ninja then reports a subcommand failure while building
+      # `libwebrtc-audio-processing-2.a` (see commit dc15ad8 for the
+      # v0.14.0 release-cut failure, which aborted the whole release).
+      #
+      # The step is therefore `continue-on-error: true` rather than
+      # skipped: when the prebuild succeeds the bundle ships the real
+      # WebRTC APM 3A (AEC/ANS/AGC); when it fails, Configure falls back
+      # to `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` and the bundle ships the
+      # built-in stub 3A path that ci.yml also uses.  Either way the
+      # release is published -- the prebuild can no longer abort the cut.
+      # The per-platform outcome is recorded in `build/3a-status-*.txt`
+      # and surfaced in the release notes (publish-release reads them).
       - name: Prebuild WebRTC APM
-        if: ${{ false }}
+        id: apm_prebuild
+        continue-on-error: true
         shell: pwsh
         run: python tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: pwsh
         run: |
+          # W3: pick the APM mode from the prebuild outcome.  The prebuild
+          # is allowed to fail (see the comment above), so a failed
+          # prebuild degrades the bundle to the stub 3A path instead of
+          # aborting the release.
+          $apm = "OFF"
+          if ("${{ steps.apm_prebuild.outcome }}" -eq "success") { $apm = "ON" }
+          Write-Host "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release.msvc `
             -DNIMRTC_BUILD_EXAMPLES=OFF `
             -DNIMRTC_BUILD_TESTS=OFF `
-            -DNIMRTC_VENDORED_WEBRTC_APM=OFF `
+            -DNIMRTC_VENDORED_WEBRTC_APM=$apm `
             -DNIMRTC_INSTALL=ON
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          "3a=$apm" | Set-Content -Path build/3a-status-windows.txt
 
       - name: Build
         shell: pwsh
@@ -236,6 +251,7 @@ jobs:
           path: |
             build/nimrtc-*.tar.xz
             build/nimrtc-*.tar.xz.sha256
+            build/3a-status-windows.txt
           retention-days: 14
 
   build-linux-gcc:
@@ -269,19 +285,34 @@ jobs:
           python3 -m pip install --user --quiet "meson>=1.10"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # W3: the meson prebuild of webrtc_audio_processing is known-good
+      # on the linux runners (it succeeded in the v0.14.0 release-cut run
+      # -- see commit dc15ad8), so the real WebRTC APM 3A (AEC/ANS/AGC)
+      # is bundled here.  `continue-on-error: true` keeps a prebuild
+      # regression from aborting the release: Configure then falls back
+      # to the stub 3A path, and the per-platform outcome is recorded in
+      # `build/3a-status-*.txt` for the release notes.
       - name: Prebuild WebRTC APM
-        if: ${{ false }}  # see comment in the windows job above
+        id: apm_prebuild
+        continue-on-error: true
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
+          # W3: pick the APM mode from the prebuild outcome (a failed
+          # prebuild degrades the bundle to the stub 3A path instead of
+          # aborting the release).
+          apm="OFF"
+          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
             -DNIMRTC_INSTALL=ON
+          echo "3a=$apm" > build/3a-status-linux-x86_64.txt
 
       - name: Build
         shell: bash
@@ -304,6 +335,7 @@ jobs:
           path: |
             build/nimrtc-*.tar.xz
             build/nimrtc-*.tar.xz.sha256
+            build/3a-status-linux-x86_64.txt
           retention-days: 14
 
   build-linux-aarch64:
@@ -346,19 +378,34 @@ jobs:
           python3 -m pip install --user --quiet "meson>=1.10"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # W3: the meson prebuild of webrtc_audio_processing is known-good
+      # on the linux runners (it succeeded in the v0.14.0 release-cut run
+      # -- see commit dc15ad8), so the real WebRTC APM 3A (AEC/ANS/AGC)
+      # is bundled here.  `continue-on-error: true` keeps a prebuild
+      # regression from aborting the release: Configure then falls back
+      # to the stub 3A path, and the per-platform outcome is recorded in
+      # `build/3a-status-*.txt` for the release notes.
       - name: Prebuild WebRTC APM
-        if: ${{ false }}  # see comment in the windows job above
+        id: apm_prebuild
+        continue-on-error: true
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
+          # W3: pick the APM mode from the prebuild outcome (a failed
+          # prebuild degrades the bundle to the stub 3A path instead of
+          # aborting the release).
+          apm="OFF"
+          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release.aarch64 \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
             -DNIMRTC_INSTALL=ON
+          echo "3a=$apm" > build/3a-status-linux-aarch64.txt
 
       - name: Build
         shell: bash
@@ -381,6 +428,7 @@ jobs:
           path: |
             build/nimrtc-*.tar.xz
             build/nimrtc-*.tar.xz.sha256
+            build/3a-status-linux-aarch64.txt
           retention-days: 14
 
   build-macos-clang:
@@ -441,19 +489,30 @@ jobs:
           fi
           "$user_scripts/meson" --version
 
+      # W3: see the comment on the linux-gcc job above.  The macos
+      # prebuild uses the system `python3` (the meson install step above
+      # already put a managed 3.12 on PATH for later steps).
       - name: Prebuild WebRTC APM
-        if: ${{ false }}  # see comment in the windows job above
+        id: apm_prebuild
+        continue-on-error: true
         shell: bash
         run: python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
+          # W3: pick the APM mode from the prebuild outcome (a failed
+          # prebuild degrades the bundle to the stub 3A path instead of
+          # aborting the release).
+          apm="OFF"
+          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release.macos \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
             -DNIMRTC_INSTALL=ON
+          echo "3a=$apm" > build/3a-status-macos-arm64.txt
 
       - name: Build
         shell: bash
@@ -481,6 +540,7 @@ jobs:
           path: |
             build/nimrtc-*.tar.xz
             build/nimrtc-*.tar.xz.sha256
+            build/3a-status-macos-arm64.txt
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -739,6 +799,34 @@ jobs:
             } >> dist/release_notes.md
           fi
 
+          # W3: per-platform 3A (AEC/ANS/AGC) status.  Each build job
+          # writes `3a-status-<platform>.txt` recording whether the
+          # WebRTC APM prebuild succeeded (real 3A) or fell back to the
+          # stub path.  Surface it so a consumer can tell at a glance
+          # which bundles carry the real audio-processing module.
+          {
+            echo
+            echo "---"
+            echo
+            echo "> **3A (AEC/ANS/AGC) status per platform**"
+            echo
+            for status_file in dist/3a-status-*.txt; do
+              [[ -f "$status_file" ]] || continue
+              platform="$(basename "$status_file" .txt)"
+              platform="${platform#3a-status-}"
+              value="$(cut -d= -f2 "$status_file" | tr -d '\r')"
+              if [[ "$value" == "ON" ]]; then
+                echo "> - \`${platform}\` — WebRTC APM (real 3A) bundled"
+              else
+                echo "> - \`${platform}\` — stub 3A path (WebRTC APM prebuild did not succeed)"
+              fi
+            done
+            echo
+            echo "> The WebRTC APM is prebuilt out-of-tree with meson. Where"
+            echo "> that prebuild fails, the bundle falls back to NimRTC's"
+            echo "> built-in stub 3A path instead of aborting the release."
+          } >> dist/release_notes.md
+
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -760,6 +848,35 @@ jobs:
         env:
           GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
         run: |
+          # W5: the aarch64 leg is a soft dependency (GHA ARM64 runner
+          # capacity), so the missing/present bundle list and the 3A
+          # status are surfaced in the Step Summary as well as in the
+          # release body -- a partial release must never be silent.
+          {
+            echo "## Platform bundle coverage"
+            echo
+            for bundle in \
+              nimrtc-windows-x86_64-msvc \
+              nimrtc-linux-x86_64-gcc \
+              nimrtc-linux-aarch64-gcc \
+              nimrtc-macos-arm64-clang
+            do
+              if [[ -f "dist/${bundle}.tar.xz" ]]; then
+                echo "- \`${bundle}\` — present"
+              else
+                echo "- \`${bundle}\` — **MISSING** (aarch64 leg is best-effort; see RELEASING.md §3.1 step 4)"
+              fi
+            done
+            echo
+            for status_file in dist/3a-status-*.txt; do
+              [[ -f "$status_file" ]] || continue
+              platform="$(basename "$status_file" .txt)"
+              platform="${platform#3a-status-}"
+              value="$(cut -d= -f2 "$status_file" | tr -d '\r')"
+              echo "- \`${platform}\` — 3A: ${value}"
+            done
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ needs.preflight.outputs.configured }}" == "true" ]]; then
             {
               echo "## Release attestation"

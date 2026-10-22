@@ -12,7 +12,8 @@ Run once during the build (or manually):
 
 Outputs (all under <project_root>/build/, auto-created):
     wtserver_cert.pfx   — PFX blob for msquic SChannel
-    wtserver_cert.pem   — PEM for inspection
+    wtserver_cert.pem   — PEM certificate (msquic OpenSSL/quictls backend)
+    wtserver_key.pem    — PEM private key (msquic OpenSSL/quictls backend)
     wtserver_hash.txt   — lowercase SHA-1 hex (matches .ps1 output)
     wtserver_thumbprint.txt — uppercase SHA-1 hex (matches .ps1 output)
 
@@ -21,6 +22,13 @@ two scripts are interchangeable — pick whichever is available on the host
 (PowerShell is preferred on Windows because the cert is also installed in
 the `Cert:\CurrentUser\My` store for msquic SChannel QUIC_CREDENTIAL_TYPE_
 CERTIFICATE_HASH_STORE).
+
+On Linux and macOS the msquic OpenSSL / quictls backend loads the
+certificate through QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE, which needs a
+PEM private key next to the PEM certificate — that is what
+`wtserver_key.pem` is for.  On Windows the SChannel backend instead
+needs the certificate inside the Windows certificate store, so the
+PowerShell sibling is the script to use there.
 """
 
 import argparse
@@ -33,6 +41,7 @@ ROOT_DIR   = os.path.dirname(SCRIPT_DIR)  # NimRTC project root
 BUILD_DIR  = os.path.join(ROOT_DIR, "build")
 OUT_PFX    = os.path.join(BUILD_DIR, "wtserver_cert.pfx")
 OUT_PEM    = os.path.join(BUILD_DIR, "wtserver_cert.pem")
+OUT_KEY    = os.path.join(BUILD_DIR, "wtserver_key.pem")
 PFX_PASSWORD = "nimrtc-wtserver"
 
 
@@ -43,6 +52,7 @@ def main() -> int:
     parser.add_argument("--key-size", type=int, default=2048)
     parser.add_argument("--out-pfx", default=OUT_PFX)
     parser.add_argument("--out-pem", default=OUT_PEM)
+    parser.add_argument("--out-key", default=OUT_KEY)
     args = parser.parse_args()
 
     try:
@@ -97,11 +107,24 @@ def main() -> int:
     print(f"  Certificate valid for {args.days} days: {now.date()} → "
           f"{(now + timedelta(days=args.days)).date()}")
 
-    # --- 3. Export PEM (for inspection) ---
+    # --- 3. Export PEM (certificate) ---
     pem_bytes = cert.public_bytes(serialization.Encoding.PEM)
     with open(args.out_pem, "wb") as f:
         f.write(pem_bytes)
     print(f"  PEM written: {args.out_pem}  ({len(pem_bytes):,} bytes)")
+
+    # --- 3b. Export PEM private key (unencrypted) ---
+    # The msquic OpenSSL / quictls backend (Linux, macOS) loads the server
+    # certificate through QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE, which needs
+    # the private key in its own PEM file next to the certificate PEM.
+    key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    with open(args.out_key, "wb") as f:
+        f.write(key_bytes)
+    print(f"  Key PEM written: {args.out_key}  ({len(key_bytes):,} bytes)")
 
     # --- 4. Export PFX ---
     # Windows SChannel / msquic expects a PFX blob.

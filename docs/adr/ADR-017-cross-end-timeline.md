@@ -1,14 +1,14 @@
-# ADR-017: Cross-end frame timeline — RFC 6051 abs-send-time + RTCP-SR anchoring
+# ADR-017: Cross-end frame timeline — abs-send-time + RTCP-SR anchoring
 
 | | |
 |---|---|
 | Number | 017 |
-| Status | **Accepted (seam landed, feature incomplete)** |
+| Status | **Accepted (landed; audio clock rate pending, see Decision 6)** |
 | Date | 2026-10-21 |
 | Phase | P2 (v1.0.0) |
 | Bound to | v1.0.0 |
 | Supersedes | — |
-| Related | `docs/plan/v1.0-plan.md` §8 (Timeline expectation), `docs/adr/ADR-015-api-stability-policy.md` (the `NIMRTC_API_STABLE` markers on the seam), `docs/adr/ADR-001-plugin-system.md` (the plugin surface it feeds), `src/modules/rtp/include/nimrtc/rtp/timeline.hpp` (the implementation) |
+| Related | `docs/plan/v1.0-plan.md` §8 (Timeline expectation), `docs/plan/timeline-engine-wiring.md` (engine-side landing plan + open gaps), `docs/adr/ADR-015-api-stability-policy.md` (the `NIMRTC_API_STABLE` markers on the seam), `docs/adr/ADR-001-plugin-system.md` (the plugin surface it feeds), `src/modules/rtp/include/nimrtc/rtp/timeline.hpp` (the implementation) |
 
 > **ADR-016 is deliberately not this ADR.** Number 016 is reserved by
 > `docs/plan/v1.0-plan.md` §12.5 for the (currently deferred, SFU-track)
@@ -18,12 +18,15 @@
 ## Context
 
 `Profile::timeline_enabled` has existed since v0.x and is set `true` in
-seven shipped profiles (`agent`, `teleop`, `agent-gateway`,
-`agent-low-latency`, `relay-agent`, `sfu-agent`, plus the
-`kProfileClosedLoop` preset in `assembly/profiles.hpp`). The flag is
-parsed, serialised, and round-trip-tested — but until this seam there
-was **nothing behind it**. Consumers asking "when was this frame
-captured, in a clock both ends agree on?" had no engine API.
+six shipped JSON profiles (`agent`, `teleop`, `agent-gateway`,
+`agent-low-latency`, `relay-agent`, `sfu-agent`) and in five C++
+presets in `assembly/profiles.hpp` (`kProfileAgent`, `kProfileTeleop`,
+`kProfileAgentGateway`, `kProfileRelayAgent`,
+`kProfileAgentLowLatency`; the JSON set additionally enables
+`sfu-agent`). The flag is parsed, serialised, and round-trip-tested —
+but until this seam there was **nothing behind it**. Consumers asking
+"when was this frame captured, in a clock both ends agree on?" had no
+engine API.
 
 Three mechanisms exist in RFC-land to answer it, and the codebase had
 partial support for two of them without a way to join them:
@@ -31,9 +34,10 @@ partial support for two of them without a way to join them:
 1. **RTCP Sender Report** (RFC 3550 §6.4.1) pairs an NTP wall-clock
    with an RTP media clock. `Parser::parse_sr()` already decoded it
    into a `SenderReport` struct — with nothing downstream consuming it.
-2. **abs-send-time** (RFC 6051 / Chrome's
-   `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time`) — a
-   24-bit timestamp at 65536 Hz carried in every RTP header. The RTP
+2. **abs-send-time** (the WebRTC header extension
+   `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time`, from the
+   never-published `draft-ietf-avtcore-abs-send-time`) — a 24-bit
+   timestamp at 65536 Hz carried in every RTP header. The RTP
    parser/builder already round-tripped the extension element
    (`parse_abs_send_time_extension` / `build_abs_send_time_extension`,
    `test_transport_cc.cpp`), but nothing tied it to a wall clock.
@@ -50,8 +54,8 @@ above were written for.
 
 **NimRTC introduces a cross-end timeline seam at
 `src/modules/rtp/include/nimrtc/rtp/timeline.hpp`, gated by
-`Profile::timeline_enabled`, carrying RFC 6051 abs-send-time on the
-wire and RFC 3550 SR-based NTP↔RTP-TS mapping for reconstruction.**
+`Profile::timeline_enabled`, carrying WebRTC abs-send-time on the wire
+and RFC 3550 SR-based NTP↔RTP-TS mapping for reconstruction.**
 
 ### Decision 1 — Anchoring convention: Unix epoch, not NTP epoch
 
@@ -81,11 +85,21 @@ the epoch. The SR supplies the epoch; abs-send-time refines it.
 
 Consequently `capture_ts_us_for()` takes the abs-send-time value in
 its signature (so the seam is wire-compatible and the argument slot
-exists) but the v1.0.0 implementation resolves capture time from the
-most-recent SR plus a linear RTP-TS delta. **Combining the two — using
-abs-send-time to reject or smooth SR-derived timestamps — is
-explicitly out of scope for v1.0.0** and is the first item of the
-completion work below.
+exists). The v1.0.0 implementation resolves capture time from the
+most-recent SR plus a linear RTP-TS delta; the **7-argument overload**
+additionally combines the two: it refines the SR-derived estimate with
+the abs-send-time *delta* (the difference between the packet's
+abs-send-time value and the value that was current at the SR instant),
+which measures the sender's elapsed time without inheriting the media
+clock's rate error. The refinement is applied only when the two
+estimates agree within `kAstAgreementToleranceUs` — otherwise the
+SR-derived value wins, because a large disagreement means the
+abs-send-time anchor is broken (e.g. a peer that restarted its 256 s
+counter).
+
+> This supersedes the original "combining the two is out of scope for
+> v1.0.0" wording: the combination landed after review, in the shape
+> above.
 
 ### Decision 3 — Deliberately linear, no EWMA/Kalman
 
@@ -118,40 +132,57 @@ thread through. Computing it out-of-band is the v1.0.0 contract.
 
 **Landed (this ADR):** `Ntp64` + `system_clock` conversion;
 abs-send-time 24-bit encode/decode; `SenderReportTracker` with per-SSRC
-SR ingestion and single-SR linear extrapolation; 9 unit cases in
+SR ingestion and single-SR linear extrapolation; 21 unit cases in
 `src/modules/rtp/tests/test_timeline.cpp`.
 
-**Not landed — the feature is a seam, not a capability.** Nothing
-consumes `SenderReportTracker` outside its own tests. Specifically
-still to do before `timeline_enabled=true` means anything end-to-end:
+**The engine side landed with it.** `EngineConfig::timeline_enabled`
+and `EngineConfig::sr_period_ms` gate the seam; the engine advertises
+the extension in its SDP, parses the peer's `a=extmap`, feeds inbound
+RTCP Sender Reports and inbound abs-send-time elements into the tracker,
+and exposes the reconstruction through `last_capture_ts_us()`,
+`capture_ts_us_for_ssrc()` and `last_one_way_delay_us()`.
 
-| Gap | Where it belongs |
+| Gap | State |
 |---|---|
-| Per-SSRC clock rate from SDP `rtpmap` (currently hardcoded 90000 — wrong for audio at 48000 Hz) | `SenderReportTracker::on_sender_report` |
-| RTP-timestamp wrap handling (the `> 2^31` branch currently refuses the legitimate post-wrap forward case instead of adding 2³²) | `capture_ts_us_for` |
-| `abs_send_time_24` actually feeding the estimate (Decision 2) | `capture_ts_us_for` |
-| `monotonic_origin_ntp64` actually anchoring encode/decode (currently `(void)`-discarded in both) | `timeline.cpp` |
-| extmap negotiation + header-extension write, using `kAbsSendTimeUri` / `kAbsSendTimeDefaultLocalId` (both declared, zero references) | engine / RTP builder |
-| SR send scheduling on `kSrPeriodMs` (declared, zero references) | engine |
-| Engine wiring: read `Profile::timeline_enabled`, feed parsed SRs into the tracker, expose capture timestamps on the plugin surface | `src/engine` |
-| `sender_recv_skew_us` real value | v1.1 |
+| Per-SSRC clock rate from SDP `rtpmap` (was hardcoded 90000 — wrong for audio at 48000 Hz) | **landed** — `set_ssrc_clock_rate()` |
+| RTP-timestamp wrap handling (the `> 2^31` branch refused the legitimate post-wrap forward case) | **landed** — modular difference over 2³² |
+| `abs_send_time_24` actually feeding the estimate (Decision 2) | **landed** — the 7-argument `capture_ts_us_for()` overload refines the SR-based estimate from the abs-send-time delta, subject to `kAstAgreementToleranceUs` |
+| `monotonic_origin_ntp64` actually anchoring encode/decode (was `(void)`-discarded in both) | **landed** — the encoder anchors to the Unix epoch; the decoder deliberately returns a position *within one 256 s cycle* (choosing the cycle is the caller's job) |
+| extmap negotiation + header-extension write, using `kAbsSendTimeUri` / `kAbsSendTimeDefaultLocalId` | **landed** — `create_offer()` / `process_remote_sdp()` negotiate the per-direction id; `PacketBuilder::set_abs_send_time(t, id)` emits under it |
+| SR send scheduling on `kSrPeriodMs` (declared, zero references) | **landed** — `EngineConfig::sr_period_ms` drives the send cadence |
+| Engine wiring: read `Profile::timeline_enabled`, feed parsed SRs into the tracker, expose capture timestamps | **landed** — `src/engine` |
+| `sender_recv_skew_us` real value | **v1.1** by decision |
+
+### Decision 6 — Known limitation: no engine-side SDP-driven clock rate
+
+`SenderReportTracker` needs each SSRC's media clock rate, which the
+media clock rate does not carry (RFC 3550 §6.4.1) — it comes from the
+SDP `a=rtpmap` line. The engine currently does **not** call
+`set_ssrc_clock_rate()` per SSRC, so an audio SSRC at 48 kHz is
+reconstructed against the 90 kHz default and its capture instants are
+wrong by a factor of 90000/48000 ≈ 1.875.
+
+This is a real gap, not a documented limitation to accept: until it
+closes, `last_capture_ts_us()` is only trustworthy for video (90 kHz)
+SSRCs. It is tracked as v1.1 work alongside `sender_recv_skew_us`, and
+the fix sequence is in `docs/plan/timeline-engine-wiring.md`.
 
 ## Consequences
 
 **Positive.** The public seam exists and is frozen under ADR-015
 (`NIMRTC_API_STABLE`), so v1.1+ completion does not break v1.0.0
-consumers. Seven profiles can set `timeline_enabled` without a
+consumers. Six JSON profiles can set `timeline_enabled` without a
 signature change. The anchoring convention and the SR-authoritative /
 abs-send-time-refining split are decided, which is the part that is
 expensive to reverse.
 
-**Negative.** `timeline_enabled=true` is currently **inert**. A
-consumer enabling it and expecting capture timestamps will get
-nothing; the flag still only costs the parse/serialise round trip. The
-three declared-but-unreferenced constants (`kSrPeriodMs`,
-`kAbsSendTimeUri`, `kAbsSendTimeDefaultLocalId`) are a standing
-reminder, not working configuration. The hardcoded 90 kHz clock rate
-means the tracker is correct for video only.
+**Negative.** Reconstruction is only correct for 90 kHz (video) SSRCs
+until the engine wires `set_ssrc_clock_rate()` from the SDP `a=rtpmap`
+(see Decision 6). `sender_recv_skew_us` is reserved but always 0
+(Decision 4). Nothing in the current test suite exercises the engine
+path end-to-end — the timeline unit tests cover the RTP-side tracker
+directly, so a regression in the SDP-negotiation or RTCP-demux wiring
+would not be caught by `ctest`.
 
 **Neutral.** The `set_ref_frame()` no-op kept on the video-pipeline
 plugin interface is unaffected — the engine reads capture metadata
@@ -166,7 +197,7 @@ from the frame and the wire, not from that RPC.
 - **Use arrival time as the capture estimate.** Rejected: it folds
   network jitter into the capture timestamp, which defeats the
   closed-loop latency control the agent profiles are for.
-- **Reuse RFC 9143 abs-send-time as the sole clock.** Rejected: the
+- **Reuse abs-send-time as the sole clock.** Rejected: the
   256 s wrap makes it unusable alone for anything but short sessions.
 - **Adopt an existing NTP↔RTP mapper.** No in-tree option; the ~40
   lines of linear extrapolation are smaller than the dependency.

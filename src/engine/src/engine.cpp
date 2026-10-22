@@ -29,8 +29,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
+#include <optional>
 #include <random>
+#include <set>
 #include <vector>
 
 #include <nimrtc/core/log.hpp>
@@ -67,6 +70,7 @@
 // any of these; consumers only need the plugin interfaces.
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/rtp/packet.hpp>
+#include <nimrtc/rtp/timeline.hpp>     // ADR-017 cross-end timeline seam
 #include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/audio3a/audio3a.hpp>
 
@@ -311,6 +315,86 @@ struct NimRTCEngine::Impl {
     // Reusable buffer for the encoded H.264 frame.  Default reserve size
     // matches the worst-case 64 KiB IDR; resize grows monotonically.
     std::vector<std::uint8_t> video_enc_buf;
+
+    // ---- Cross-end timeline (ADR-017) --------------------------------------
+    //
+    // `EngineConfig::timeline_enabled` turns this seam on.  Four things
+    // hang off it (ADR-017 §"Decision 5" — the engine side):
+    //
+    //   1. extmap negotiation in create_offer() / process_remote_sdp()
+    //      (`local_abs_send_time_id` / `remote_abs_send_time_id`);
+    //   2. outbound abs-send-time on every RTP packet we build
+    //      (`abs_send_time_origin_ntp64` anchors the encoder);
+    //   3. outbound Sender Reports on `EngineConfig::sr_period_ms`
+    //      (`sr_last_sent`, plus the per-stream RTP-TS / packet / octet
+    //      counters the SR body carries);
+    //   4. inbound SR + abs-send-time into `sr_tracker`, whose output is
+    //      exposed through the `capture_ts_us_*` accessors.
+    //
+    // While the flag is false, every field here stays at its default and
+    // no abs-send-time / SR is ever emitted (ADR-017 §"Decision 5").
+    rtp::SenderReportTracker sr_tracker;
+
+    /** The RTP header-extension id WE advertise for abs-send-time in our
+     *  own SDP.  This is the id the *peer* will expect on the wire, so it
+     *  is what outbound packets are built with.  0 = not advertised. */
+    std::uint16_t local_abs_send_time_id = 0;
+
+    /** The extension id the PEER advertised for its own abs-send-time.
+     *  Inbound packets are parsed with this id.  0 = the peer never
+     *  advertised the extension, so no inbound refinement is possible. */
+    std::uint16_t remote_abs_send_time_id = 0;
+
+    /** Monotonic-clock origin for `encode_abs_send_time_24`.  Set once at
+     *  open() from the system clock so the encoded 24-bit value represents
+     *  the absolute send instant on the Unix timeline (modulo the 256 s
+     *  wrap the receiver resolves against the SR). */
+    rtp::Ntp64 abs_send_time_origin_ntp64{0};
+
+    /** Local wall clock (µs since Unix epoch) at open() minus the steady
+     *  clock reading taken at the same instant.  Lets the abs-send-time
+     *  encoder convert a send-time monotonic stamp into Unix-anchored
+     *  microseconds without a second clock read per packet. */
+    std::int64_t boot_epoch_offset_us = 0;
+
+    /** Last reconstructed capture instant per inbound SSRC (µs since Unix
+     *  epoch, on the *peer's* wall clock).  Ordered so `last_capture_ts`
+     *  can report the most recently updated stream. */
+    std::map<std::uint32_t, std::int64_t> capture_ts_us_by_ssrc;
+
+    /** Local arrival instant (µs since Unix epoch) of the same frame, used
+     *  to derive the one-way delay.  Parallel to the map above. */
+    std::map<std::uint32_t, std::int64_t> arrival_us_by_ssrc;
+
+    /** Capture instant + arrival of the most recent inbound frame across
+     *  all SSRCs — backs `last_capture_ts_us()` / `last_one_way_delay_us()`. */
+    std::optional<std::int64_t> last_capture_us;
+    std::optional<std::int64_t> last_arrival_us;
+
+    /** SSRCs whose media clock rate has already been pinned on the tracker.
+     *  Membership means "configured once" — the payload-type → clock-rate
+     *  resolution in `handle_rtp()` runs only on the first packet of each
+     *  SSRC, keeping the media hot path free of per-packet map work. */
+    std::set<std::uint32_t> clock_rate_pinned_ssrcs;
+
+    // ---- Outbound Sender Report state --------------------------------------
+    // `sr_*` carry the values an SR body reports for the audio stream
+    // (RFC 3550 §6.4.1 sender info).  Video is folded into the same SR via
+    // report blocks only when a video sender is active; the audio stream is
+    // the SR's own media source because it is always the first one out.
+    std::chrono::steady_clock::time_point sr_last_sent{};
+    std::uint32_t audio_ssrc          = 0;
+    std::uint32_t audio_rtp_timestamp   = 0;
+    std::uint32_t audio_packet_count    = 0;
+    std::uint32_t audio_octet_count     = 0;
+    std::uint32_t video_rtp_timestamp   = 0;
+    std::uint32_t video_packet_count    = 0;
+    std::uint32_t video_octet_count     = 0;
+
+    // Reusable buffer for the outbound SRTCP packet (avoid a per-tick
+    // allocation; SR is 1 Hz by default so this is not hot, but tick() is
+    // called at the transport cadence).
+    std::vector<std::uint8_t> sr_send_buf;
 
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ---------
     //
@@ -1263,6 +1347,37 @@ uint32_t NimRTCEngine::open() noexcept {
     // expose the accessors); warnings go through on_error_.
     init_video_plugins();
 
+    // ---- Cross-end timeline anchor (ADR-017) --------------------------------
+    //
+    // Sample both clocks once, back to back, so `abs_send_time_origin_ntp64`
+    // plus `boot_epoch_offset_us` convert a steady-clock reading at send
+    // time into a Unix-anchored instant without a second clock read per
+    // packet.  Sampling both here (rather than deriving one from the other)
+    // keeps the residual offset inside one scheduling jitter (~µs), which is
+    // an order of magnitude below the 15.26 µs abs-send-time quantisation.
+    //
+    // Nothing is sent here: with `timeline_enabled = false` the tracker stays
+    // empty, no extmap is advertised, and no SR is scheduled.
+    {
+        const auto steady_now = core::SteadyClock::now();
+        const auto system_now = std::chrono::system_clock::now();
+        const std::int64_t steady_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                steady_now.time_since_epoch()).count();
+        const std::int64_t system_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                system_now.time_since_epoch()).count();
+        impl_->boot_epoch_offset_us      = system_us - steady_us;
+        impl_->abs_send_time_origin_ntp64 = rtp::ntp64_from(system_now);
+        impl_->sr_tracker.set_monotonic_origin(impl_->abs_send_time_origin_ntp64);
+        impl_->sr_last_sent = steady_now;   // first SR fires one period in
+        if (config_.timeline_enabled) {
+            core::log::Logger::instance().info(
+                "engine[timeline]: abs-send-time + Sender Reports enabled "
+                "(sr_period_ms=" + std::to_string(config_.sr_period_ms) + ")");
+        }
+    }
+
     state_ = State::kOpen;
     if (on_state_change_) on_state_change_("open");
     trace("NimRTCEngine opened (DTLS, SRTP, Opus initialised)");
@@ -1766,6 +1881,31 @@ std::string NimRTCEngine::create_offer() noexcept {
     if (!config_.audio_codec.fmtp.empty())
         audio.fmtp[pt] = config_.audio_codec.fmtp;
 
+    // ---- Cross-end timeline extmap (ADR-017) ------------------------------
+    //
+    // a=extmap:4 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+    //
+    // RFC 5285 §6 negotiates the id *per direction*: the id a sender uses on
+    // the wire is the one it advertised itself, and it is the receiver's job to
+    // echo it back.  So advertising `kAbsSendTimeDefaultLocalId` here means:
+    // "packets I send carry abs-send-time under id 4".  The peer's answer
+    // carries its own id, which is what we parse *their* packets with.
+    //
+    // Direction is sendrecv (not sendonly) because both ends of a NimRTC
+    // session are symmetric here — the remote-answer path resolves the peer
+    // id separately (see process_remote_sdp).  The id is deliberately left at
+    // the well-known 4 rather than randomised: Chrome's WebRTC stack has used
+    // 4 for abs-send-time for years and a mismatch here is a silent
+    // "extension present but wrong id" bug on the peer.
+    if (config_.timeline_enabled) {
+        sdp::MediaDescription::ExtMap ast;
+        ast.id        = static_cast<int>(rtp::kAbsSendTimeDefaultLocalId);
+        ast.direction = sdp::Direction::SendRecv;
+        ast.uri       = std::string(rtp::kAbsSendTimeUri);
+        audio.extmap.push_back(ast);
+        impl_->local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
+    }
+
     // Helper: append ICE candidates stripped of any prefix the libjuice
     // collector added (the munger re-emits "a=candidate:" itself).
     auto push_candidates_into = [&](sdp::MediaDescription& m) {
@@ -1822,6 +1962,18 @@ std::string NimRTCEngine::create_offer() noexcept {
         video_map.clock_rate = 90000;
         video_map.channels   = 1;             // H.264 clock is 90 kHz, no audio channels
         video.rtpmap[vpt]    = video_map;
+
+        // Cross-end timeline extmap (ADR-017).  Same id and rationale as the
+        // audio m-line: the ids are negotiated per m-section in RFC 5285 §6,
+        // and Chrome uses 4 on both.  Advertising the same id on both keeps a
+        // peer that multiplexes by mid (rather than per-m-line) unambiguous.
+        if (config_.timeline_enabled) {
+            sdp::MediaDescription::ExtMap ast;
+            ast.id        = static_cast<int>(rtp::kAbsSendTimeDefaultLocalId);
+            ast.direction = sdp::Direction::SendRecv;
+            ast.uri       = std::string(rtp::kAbsSendTimeUri);
+            video.extmap.push_back(ast);
+        }
 
         // a=fmtp:<vpt> profile-level-id=42E01F;packetization-mode=1;
         //                  sprop-parameter-sets=Z0LAHtkA,aM4G4g==
@@ -2186,6 +2338,45 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             am.extra_attrs.emplace_back("ssrc", ssrc_line);
         }
 
+        // ---- Cross-end timeline extmap (ADR-017) --------------------------
+        //
+        // RFC 5285 §6: the extension id is negotiated per direction.  The id
+        // the peer advertised in ITS offer is the id it will send under, so
+        // that is the id we parse their inbound packets with.  We accept the
+        // extension if — and only if — we offered it too; advertising an
+        // extension the answerer never offered is not a negotiation (RFC 3264
+        // §6.1) and Chrome silently drops it.
+        //
+        // The id is read from the FIRST m-section that advertises it and then
+        // reused for the remaining ones.  Chrome uses the same id across its
+        // audio and video m-lines, and a per-m-section id would require
+        // tracking which m-line a given SSRC belongs to before we could parse
+        // it — which the RTP layer does not currently carry.
+        if (config_.timeline_enabled &&
+            rm.type != sdp::MediaType::Application) {
+            for (const auto& em : rm.extmap) {
+                if (em.uri != rtp::kAbsSendTimeUri) continue;
+                if (em.direction == sdp::Direction::Inactive) continue;
+                // Direction semantics on the *offer* side: SendOnly means the
+                // peer sends and we receive, so its packets carry the
+                // extension.  SendRecv means both.  RecvOnly means the peer
+                // only receives, so it will not send us the extension.
+                const bool peer_sends =
+                    em.direction == sdp::Direction::SendRecv ||
+                    em.direction == sdp::Direction::SendOnly;
+                if (!peer_sends) continue;
+                if (em.id <= 0 || em.id > 255) continue;
+                if (impl_->remote_abs_send_time_id == 0) {
+                    impl_->remote_abs_send_time_id =
+                        static_cast<std::uint16_t>(em.id);
+                    core::log::Logger::instance().info(
+                        "engine[timeline]: peer advertised abs-send-time "
+                        "under extension id " + std::to_string(em.id));
+                }
+                break;
+            }
+        }
+
         // For data channel (application): carry sctp-port / max-message-size
         // attributes verbatim.  We use `extra_attrs` (the catch-all
         // a= bucket in `MediaDescription`) for `sctp-port` because the
@@ -2226,6 +2417,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             if (!found_max_msg) {
                 am.extra_attrs.emplace_back("max-message-size", "6556");
             }
+        }
+
+        // Echo the abs-send-time extmap back on the RTP m-sections (ADR-017).
+        // RFC 5285 §6: an answer that omits an extension the offer advertised
+        // is a rejection of that extension, and Chrome treats it as one — the
+        // peer then never parses our abs-send-time.  The id must be the SAME
+        // one we advertised in our own offer (or, when answering a peer's
+        // offer, the one the peer advertised for its send direction).
+        //
+        // `local_abs_send_time_id` is set by create_offer(); when this engine
+        // is the answerer and never produced an offer, it is still 0 and we
+        // fall back to the documented default — the answer then declares id 4
+        // and we build our outbound packets with the same id.
+        if (config_.timeline_enabled &&
+            rm.type != sdp::MediaType::Application) {
+            const std::uint16_t answer_id =
+                impl_->local_abs_send_time_id != 0
+                    ? impl_->local_abs_send_time_id
+                    : rtp::kAbsSendTimeDefaultLocalId;
+            impl_->local_abs_send_time_id = answer_id;
+            sdp::MediaDescription::ExtMap ast;
+            ast.id        = static_cast<int>(answer_id);
+            ast.direction = sdp::Direction::SendRecv;
+            ast.uri       = std::string(rtp::kAbsSendTimeUri);
+            am.extmap.push_back(ast);
         }
 
         if (ice_t_) {
@@ -2331,10 +2547,45 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
       .set_seq(seq_num)
       .set_timestamp(cur_ts)
       .set_payload_type(config_.audio_codec.payload_type)
-      .set_marker(false)
-      .set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
+      .set_marker(false);
+
+    // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ---------------
+    // Only when the seam is on *and* the id was negotiated. The encoded
+    // value is the sender's wall-clock send instant (24 bits at 65536 Hz,
+    // 256 s wrap) on the Unix timeline; the receiver resolves the wrap
+    // against our Sender Report, which is why the two are gated together.
+    if (config_.timeline_enabled && impl_->local_abs_send_time_id != 0) {
+        // `boot_epoch_offset_us` was sampled at open() as (system - steady),
+        // so adding it to a steady-clock stamp yields Unix microseconds
+        // without a second clock read per packet.
+        const std::int64_t steady_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count();
+        const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
+        // The encoder sums `unix_us_from_ntp64(origin) + monotonic_us`; a
+        // zero Ntp64 contributes 0 µs, so passing the absolute instant as
+        // the "monotonic" term and a zero origin encodes it verbatim.
+        const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+            std::chrono::microseconds{unix_us}, rtp::Ntp64{0});
+        pb.set_abs_send_time(rtp::AbsSendTime{ast24},
+                             impl_->local_abs_send_time_id);
+    }
+
+    pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
     auto pkt_buf = pb.build();
     if (pkt_buf.empty()) return 0;
+
+    // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
+    // RTP timestamp is sampled *before* SRTP so the SR and the media packet
+    // it anchors describe the same media position; the octet count is the
+    // payload length, which is what the peer subtracts to check.
+    ++impl_->audio_packet_count;
+    impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
+    impl_->audio_rtp_timestamp = cur_ts;
+    // Record the SSRC so the Sender Report can name the media source it
+    // describes (RFC 3550 §6.4.1). The value comes from a function-local
+    // static, so tick() has no other way to learn it.
+    impl_->audio_ssrc = curr_ssrc;
 
     // SRTP protect (or pass-through when not yet keyed).
     // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
@@ -2480,8 +2731,72 @@ int NimRTCEngine::tick() noexcept {
     // connected") and the handshake never starts.
     if (is_ice_connected()) {
         drain_dtls();
+        maybe_send_sender_report();
     }
     return ice_t_->recv();
+}
+
+void NimRTCEngine::maybe_send_sender_report() noexcept {
+    // Cross-end timeline (ADR-017 §"Decision 5"). Gated so that with
+    // `timeline_enabled = false` the engine emits *no* RTCP at all: the
+    // flag must cost nothing on the wire when off.
+    if (!config_.timeline_enabled || config_.sr_period_ms == 0) return;
+    if (!ice_t_ || !is_ice_connected()) return;
+
+    const auto now = core::SteadyClock::now();
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - impl_->sr_last_sent).count();
+    if (elapsed < static_cast<std::int64_t>(config_.sr_period_ms)) return;
+    impl_->sr_last_sent = now;
+
+    // No audio has gone out yet — an SR with a zero RTP timestamp and a
+    // zero packet count describes no media position, and would poison the
+    // peer's extrapolation anchor. Wait for the first frame instead.
+    if (impl_->audio_packet_count == 0) return;
+
+    // RFC 3550 §6.4.1: the SR pairs the sender's wall-clock instant with
+    // the RTP timestamp of the media it describes. The NTP64 must be the
+    // *same instant* the RTP timestamp corresponds to, so sample the wall
+    // clock once here and use `audio_rtp_timestamp` — the timestamp of the
+    // last packet actually sent — rather than extrapolating a new one. The
+    // residual (the send-to-tick gap) is bounded by the frame interval.
+    const auto wall = std::chrono::system_clock::now();
+    rtp::SrBuilder sr;
+    sr.set_ssrc(impl_->audio_ssrc)
+      .set_ntp_timestamp(rtp::ntp64_from(wall).value)
+      .set_rtp_timestamp(impl_->audio_rtp_timestamp)
+      .set_sender_packet_count(impl_->audio_packet_count)
+      .set_sender_octet_count(impl_->audio_octet_count);
+    const core::ByteBuffer sr_bytes = sr.build();
+    if (sr_bytes.empty()) return;
+
+    // RTCP leaves the engine as SRTCP (RFC 3711 §3.4) once SRTP is keyed,
+    // which is a *different* crypto context from SRTP — using protect_rtp
+    // here would produce a packet the peer's unprotect_rtcp rejects, and
+    // the SR would be silently dropped.
+    core::ByteSpan out(sr_bytes.data(), sr_bytes.size());
+    std::vector<std::uint8_t> enc;
+    if (impl_->srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
+                                              /*outgoing=*/true);
+        if (!sess) return;   // SRTP installed but no keying yet — skip.
+        auto r = sess->protect_rtcp(out);
+        if (!r) {
+            core::log::Logger::instance().warn(
+                "engine[timeline]: protect_rtcp failed; Sender Report dropped");
+            return;
+        }
+        enc.assign(r.value().data(),
+                   r.value().data() + r.value().size());
+        out = core::ByteSpan(enc.data(), enc.size());
+    }
+
+    plugins::BufferView bv{out.data(), out.size()};
+    if (ice_t_->send(bv, {}) != 0) {
+        core::log::Logger::instance().warn(
+            "engine[timeline]: Sender Report send failed");
+    }
 }
 
 const char* NimRTCEngine::ice_state_string() const noexcept {
@@ -2638,16 +2953,52 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     if (impl_->srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(0, /*outgoing=*/false);
         if (sess) {
+            // SRTP and SRTCP use *different* key derivations and independent
+            // sequence-index spaces (RFC 3711 §3.3), so an SRTCP packet fed
+            // to srtp_unprotect fails the auth tag and is reported as a
+            // decryption error.  The two are indistinguishable on the wire
+            // under rtcp-mux (RFC 5761 — same 5-tuple, no port to demux on),
+            // so the only way to tell them apart is to try one and fall back
+            // to the other.  Trying RTP first preserves the existing hot
+            // path: a media packet succeeds on the first attempt and never
+            // pays for the RTCP branch.
             auto r = sess->unprotect_rtp(view, nullptr, nullptr);
             if (r) {
                 view = r.value();
                 tried_srtp = true;
             } else {
+                // Not an SRTP packet — try the RTCP context before giving up.
+                auto rc = sess->unprotect_rtcp(view);
+                if (rc) {
+                    handle_rtcp(rc.value());
+                    return;
+                }
                 ++impl_->srtp_stats_drop;
                 return;
             }
         }
     }
+    // ---- RTCP demux before RTP (ADR-017) ---------------------------------
+    // RFC 3550 §6.1: an RTCP packet is identified by the second octet's
+    // payload-type field falling in 192..223, which cannot collide with an
+    // RTP payload type (0..127) or an RTCP packet riding the same socket
+    // under rtcp-mux (RFC 5761).  Sender Reports are the anchor the
+    // timeline seam needs, so they get parsed here rather than falling
+    // through to the RTP parser (which would reject them) and being
+    // dropped as "non-RTP".
+    //
+    // This catches the *unencrypted* case (SRTP not yet keyed, or a peer
+    // that negotiated plaintext RTCP).  The SRTCP case is handled above by
+    // the unprotect_rtcp fallback, where the plaintext PT byte is only
+    // readable after decryption.
+    if (view.size() >= 2) {
+        const std::uint8_t pt2 = view[1];
+        if (pt2 >= 192 && pt2 <= 223) {
+            handle_rtcp(view);
+            return;
+        }
+    }
+
     rtp::Parser rp;
     auto parsed = rp.parse(view);
     if (parsed) {
@@ -2657,6 +3008,46 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     if (!tried_srtp) {
         core::log::Logger::instance().debug(
             "engine: non-RTP and non-DTLS packet (likely STUN handled by libjuice)");
+    }
+}
+
+void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
+    if (!config_.timeline_enabled) {
+        // The engine MUST NOT schedule SRs while the flag is false
+        // (ADR-017 §"Decision 5"), and symmetrically there is no anchor to
+        // maintain — an inbound SR is of no use to a disabled seam.
+        return;
+    }
+
+    // Compound RTCP packets are a concatenation of sub-packets sharing one
+    // header (RFC 3550 §6.1). Walk them so an SR that follows an RR in the
+    // same compound datagram is not missed. A malformed length field ends
+    // the walk rather than throwing — the rest of the datagram is
+    // unparseable, but that is not an error worth failing the read path for.
+    std::size_t off = 0;
+    while (off + 4 <= view.size()) {
+        const std::uint8_t count = static_cast<std::uint8_t>(view[off] & 0x1F);
+        const std::uint32_t words = static_cast<std::uint32_t>(view[off + 2]) << 8 |
+                                    static_cast<std::uint32_t>(view[off + 3]);
+        const std::size_t sub_len = (static_cast<std::size_t>(words) + 1u) * 4u;
+        if (sub_len < 4u || off + sub_len > view.size()) {
+            break;
+        }
+
+        const std::uint8_t ptype = view[off + 1];
+        if (ptype == 200) {  // SR
+            rtp::Parser rp;
+            auto sr = rp.parse_sr(view.subspan(off, sub_len));
+            if (sr) {
+                const auto now_us = static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                impl_->sr_tracker.on_sender_report(sr.value(), now_us);
+            }
+        }
+        (void)count;  // report-block count is parsed inside parse_sr()
+
+        off += sub_len;
     }
 }
 
@@ -2827,7 +3218,105 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
     return 0;
 }
 
+void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
+    // No negotiated id => the peer never advertised abs-send-time for its
+    // sending direction, so there is no element to look for. Walking the
+    // block to discover that on every packet would be wasted work, so
+    // skip straight out.
+    const std::uint16_t ext_id = impl_->remote_abs_send_time_id;
+    if (ext_id == 0 || !pv.extension.has_value()) {
+        return;
+    }
+
+    auto elem = rtp::find_extension_element(pv.extension->data,
+                                            pv.extension->type,
+                                            ext_id);
+    if (!elem) {
+        return;  // NotFound (peer sent no abs-send-time) or malformed.
+    }
+    const core::ByteSpan e = elem.value();
+    if (e.size() < 3) {
+        return;
+    }
+
+    // 24-bit big-endian sender send-instant counter, 65536 Hz.
+    const std::uint32_t ast24 =
+        (static_cast<std::uint32_t>(e[0]) << 16) |
+        (static_cast<std::uint32_t>(e[1]) <<  8) |
+         static_cast<std::uint32_t>(e[2]);
+
+    const auto now_us = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    // The 7-argument overload records the (rtp_ts, ast) observation itself
+    // and refines the SR-based estimate per ADR-017 §"Decision 2". The
+    // `true` is exact: we only reach this point after resolving the
+    // negotiated element from the wire, so the packet really does carry it.
+    // Without the flag the call would resolve to the 6-argument overload,
+    // which ignores the field entirely — no observation recorded, no anchor
+    // established, and the refinement silently dead.
+    // clock_rate_hz = 0 => use the rate configured via set_ssrc_clock_rate()
+    // for this SSRC (the engine wires that from the SDP rtpmap).
+    auto cap = impl_->sr_tracker.capture_ts_us_for(
+        pv.ssrc, pv.timestamp, ast24,
+        /*has_abs_send_time=*/true,
+        /*clock_rate_hz=*/0,
+        now_us,
+        /*out_sender_recv_skew_us=*/nullptr);
+    if (!cap) {
+        return;  // No SR for this SSRC yet, or the packet predates it.
+    }
+
+    impl_->capture_ts_us_by_ssrc[pv.ssrc] = *cap;
+    impl_->arrival_us_by_ssrc[pv.ssrc]    = now_us;
+    impl_->last_capture_us                = *cap;
+    impl_->last_arrival_us                = now_us;
+}
+
 void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
+    // ---- Cross-end timeline capture reconstruction (ADR-017) -----------
+    //
+    // Runs before the media demux below and independently of it: both the
+    // audio and the video path need the reconstructed capture instant,
+    // and neither knows about the seam. Doing it here means a host that
+    // only pulls RTP (no decoded frames) still gets timestamps.
+    if (config_.timeline_enabled) {
+        // Pin this SSRC's media clock rate before anything can ask the
+        // tracker for a capture instant — the reconstruction depends on
+        // it, and the tracker has no way to learn it from the wire.
+        //
+        // `SenderReportTracker` falls back to 90 kHz when an SSRC has no
+        // configured rate, which is correct for video (RFC 6184 H.264) and
+        // ~2x wrong for Opus at 48 kHz — the reconstructed capture instant
+        // would drift by 87.5% of the media duration.  The RTP layer does not
+        // carry the clock rate (it is an SDP `a=rtpmap` property), so the
+        // engine resolves it here from the same payload-type demux used for
+        // media routing, and pins it on the tracker once per SSRC.
+        //
+        // The gate is an explicit per-SSRC set rather than `state_for()`: the
+        // tracker returns nullopt until the first SR arrives, so using it here
+        // would re-enter this branch on every packet for the whole pre-SR
+        // window — the exact hot path this is trying to stay off. The set also
+        // keeps a second SSRC on the same PT (RFC 5956 simulcast) on its own
+        // entry, so each gets configured once.
+        std::uint32_t clock_rate = 0;
+        if (pv.payload_type == config_.video_receiver_tuning.payload_type) {
+            clock_rate = 90000;                    // RFC 6184 §5.6 H.264
+        } else {
+            clock_rate = config_.audio_codec.clock_rate;  // 48 kHz for Opus
+        }
+        if (clock_rate != 0 &&
+            impl_->clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
+            impl_->sr_tracker.set_ssrc_clock_rate(pv.ssrc, clock_rate);
+        }
+
+        // The abs-send-time refinement only applies when the peer actually
+        // negotiated the extension; `observe_timeline()` re-checks that and
+        // returns immediately when it did not.
+        observe_timeline(pv);
+    }
+
     // ---- Demux by RTP payload type --------------------------------------
     // The audio_codec PT is configured in EngineConfig; the video codec PT
     // lives in the video_receiver/video_sender tuning. We first check
@@ -2919,6 +3408,60 @@ uint32_t NimRTCEngine::last_open_rc() const noexcept {
 
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     return Stats{impl_->srtp_stats_drop};
+}
+
+// -----------------------------------------------------------------------------
+// Cross-end timeline (ADR-017)
+// -----------------------------------------------------------------------------
+//
+// The engine side of the timeline seam. The reconstruction arithmetic is
+// `nimrtc::rtp::SenderReportTracker`; what lives here is the wiring that
+// feeds it (inbound RTCP SRs + inbound abs-send-time elements) and the
+// read-only diagnostics the public API exposes.
+//
+// Note on thread safety: the transport callbacks that feed the tracker
+// (`handle_inbound` / `handle_rtp`) are already serialised by the
+// transport layer onto a single thread, so the tracker itself is only
+// ever touched from that one thread. The read-only accessors below read
+// the cached `last_*` fields without locking; they are the same benign
+// racy-read pattern the rest of this file already uses for diagnostics
+// (`stats()`, `last_open_rc()`), and every field they expose is a
+// `std::optional<std::int64_t>` written as a single aligned store.
+// -----------------------------------------------------------------------------
+//
+// Absent a negotiated `a=extmap` id for abs-send-time (peer never
+// advertised it), the extension is not read and no capture instant is
+// reconstructed — `remote_abs_send_time_id` stays 0 and every
+// accessor returns `std::nullopt`. That is the correct pre-negotiation
+// state, not an error.
+// -----------------------------------------------------------------------------
+
+std::uint16_t NimRTCEngine::abs_send_time_ext_id() const noexcept {
+    return impl_->local_abs_send_time_id;
+}
+
+std::uint16_t NimRTCEngine::remote_abs_send_time_ext_id() const noexcept {
+    return impl_->remote_abs_send_time_id;
+}
+
+std::optional<std::int64_t> NimRTCEngine::last_capture_ts_us() const noexcept {
+    return impl_->last_capture_us;
+}
+
+std::optional<std::int64_t>
+NimRTCEngine::capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept {
+    auto it = impl_->capture_ts_us_by_ssrc.find(ssrc);
+    if (it != impl_->capture_ts_us_by_ssrc.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept {
+    if (!impl_->last_capture_us || !impl_->last_arrival_us) {
+        return std::nullopt;
+    }
+    return *impl_->last_capture_us - *impl_->last_arrival_us;
 }
 
 } // namespace nimrtc::engine

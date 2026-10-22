@@ -1,6 +1,6 @@
 /**
  * @file tests/test_transport_cc.cpp
- * @brief Tests for RFC 9143 abs-send-time and transport-wide CC feedback.
+ * @brief Tests for WebRTC abs-send-time and RFC 8888 transport-wide CC feedback.
  *
  * Covers:
  *   T1 — abs-send-time round-trip (build → parse → equal)
@@ -198,7 +198,7 @@ TEST(TransportCcFeedback, StatusVectorChunk_1BitSymbols) {
 
 // ---------------------------------------------------------------------------
 // T5: Status + delta chunk (T=1, S=1) — 2-bit symbols + 14-bit delta per
-// "received" packet. RFC 9143 §7.1.1.
+// "received" packet. RFC 8888 §7.1.1.
 // ---------------------------------------------------------------------------
 TEST(TransportCcFeedback, StatusDeltaChunk_2BitsAndDeltas) {
     // word: 1|1|symbol_count=2 — S=1, count=2

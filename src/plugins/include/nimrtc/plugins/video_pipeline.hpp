@@ -389,7 +389,7 @@ public:
      *  rtp_timestamp: 90kHz RTP clock value pinned to capture_ts_us.
      *
      *  Compatibility note (ADR-017, v1.0.0): the active timeline carrier
-     *  is RFC 6051 abs-send-time + RTCP-SR-based NTP↔RTP-TS mapping
+     *  is WebRTC abs-send-time + RTCP-SR-based NTP↔RTP-TS mapping
      *  (see `nimrtc/rtp/timeline.hpp`). set_ref_frame() is preserved as
      *  an ABI-stable no-op for plugin implementers; the engine reads
      *  capture_ts/frame_seq directly from the EncodedVideoFrame and the

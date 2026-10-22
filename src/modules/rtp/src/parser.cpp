@@ -73,6 +73,79 @@ constexpr std::uint16_t kTwoByteExtProfile = 0x1000;
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// find_extension_element — locate a negotiated extension element
+// ---------------------------------------------------------------------------
+//
+// RFC 5285 §4.2 (one-byte form, profile 0xBEDE):
+//   element := [ 4-bit id | 4-bit (len-1) ] [ len bytes of data ]
+//
+// RFC 8285 §4.2 (two-byte form, profile 0x1000):
+//   element := [ 8-bit id ] [ 8-bit len ] [ len bytes of data ]
+//
+// The block is padded to a 32-bit boundary with padding elements (id = 0),
+// so the walk stops as soon as it would run past the end of the block.
+//
+core::Result<core::ByteSpan>
+    find_extension_element(core::ByteSpan ext_block,
+                           std::uint16_t profile,
+                           std::uint16_t id) {
+    if (ext_block.empty()) {
+        return core::Result<core::ByteSpan>::fail(
+            core::ErrorCode::InvalidArgument,
+            "extension block is empty");
+    }
+
+    if (profile == kExtProfileOneByte) {
+        std::size_t off = 0;
+        while (off < ext_block.size()) {
+            const std::uint8_t hdr = ext_block[off];
+            const std::uint16_t elem_id = static_cast<std::uint16_t>(hdr >> 4);
+            const std::size_t len = static_cast<std::size_t>(hdr & 0x0Fu) + 1u;
+            if (off + 1u + len > ext_block.size()) {
+                return core::Result<core::ByteSpan>::fail(
+                    core::ErrorCode::ProtocolError,
+                    "one-byte extension element truncated at offset " +
+                        std::to_string(off));
+            }
+            if (elem_id == id && id != 0) {
+                return core::Result<core::ByteSpan>::ok(
+                    ext_block.subspan(off + 1u, len));
+            }
+            off += 1u + len;
+        }
+        return core::Result<core::ByteSpan>::fail(
+            core::ErrorCode::NotFound,
+            "extension id " + std::to_string(id) + " not present in block");
+    }
+
+    if (profile == kExtProfileTwoByte) {
+        std::size_t off = 0;
+        while (off + 1u < ext_block.size()) {
+            const std::uint16_t elem_id = ext_block[off];
+            const std::size_t len = ext_block[off + 1u];
+            if (off + 2u + len > ext_block.size()) {
+                return core::Result<core::ByteSpan>::fail(
+                    core::ErrorCode::ProtocolError,
+                    "two-byte extension element truncated at offset " +
+                        std::to_string(off));
+            }
+            if (elem_id == id && id != 0) {
+                return core::Result<core::ByteSpan>::ok(
+                    ext_block.subspan(off + 2u, len));
+            }
+            off += 2u + len;
+        }
+        return core::Result<core::ByteSpan>::fail(
+            core::ErrorCode::NotFound,
+            "extension id " + std::to_string(id) + " not present in block");
+    }
+
+    return core::Result<core::ByteSpan>::fail(
+        core::ErrorCode::ProtocolError,
+        "unknown header-extension profile 0x" + std::to_string(profile));
+}
+
+// ---------------------------------------------------------------------------
 // Parser::Impl
 // ---------------------------------------------------------------------------
 
@@ -685,7 +758,7 @@ core::Result<TransportCcFeedback> Parser::parse_transport_cc(core::ByteSpan raw)
     f.base_seq            = read_be16_at(p + kRtcpHeaderSize + 8);
     f.packet_status_count = read_be16_at(p + kRtcpHeaderSize + 10);
     // Reference time is a 24-bit field carrying the reference time at 1 kHz
-    // tick (RFC 9143 §7.1: lower 8 bits of NTP timestamp at 1ms resolution).
+    // tick (RFC 8888 §7.1: lower 8 bits of NTP timestamp at 1ms resolution).
     f.reference_time_24mhz =
         (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 12]) << 16) |
         (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 13]) <<  8) |

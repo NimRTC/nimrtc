@@ -258,7 +258,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   WebTransport server seam (Case E / WT-SEVER):
     //     - web_transport_server.hpp
     //
-    // ADR-016 bump: +1 public header (100 -> 101) for the
+    // ADR-017 bump: +1 public header (100 -> 101) for the
     //   NTP <-> RTP-TS timeline seam:
     //     - rtp/timeline.hpp
     //

@@ -388,7 +388,7 @@ public:
      *  frame_id      : monotonically-increasing per-stream frame counter.
      *  rtp_timestamp: 90kHz RTP clock value pinned to capture_ts_us.
      *
-     *  Compatibility note (ADR-016, v1.0.0): the active timeline carrier
+     *  Compatibility note (ADR-017, v1.0.0): the active timeline carrier
      *  is RFC 6051 abs-send-time + RTCP-SR-based NTP↔RTP-TS mapping
      *  (see `nimrtc/rtp/timeline.hpp`). set_ref_frame() is preserved as
      *  an ABI-stable no-op for plugin implementers; the engine reads
@@ -401,7 +401,7 @@ public:
                                std::uint32_t /*frame_id*/,
                                std::uint32_t /*rtp_timestamp*/) noexcept {
         // no-op: timeline propagation lives in the engine + abs-send-time
-        // extension; see ADR-016 for the long-term plan.
+        // extension; see ADR-017 for the long-term plan.
     }
 
     /** Snapshot of sender counters. */

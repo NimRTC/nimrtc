@@ -7,13 +7,13 @@
  *   1. The sender-side bookkeeping needed to pair (NTP wall-clock,
  *      RTP media clock) inside an RTCP Sender Report (SR).
  *      `SenderReportTracker` plays the *receiver* role: it ingests
- *      incoming SRs, smooths a slope estimate via Chrome's
- *      `net/rtp/sender_report_tracker` algorithm, and answers
- *      "what was the sender's wall-clock capture time of this
- *      RTP packet?".
+ *      incoming SRs and answers "what was the sender's wall-clock
+ *      capture time of this RTP packet?" by extrapolating linearly
+ *      from the most-recent SR.  See ADR-017 for the full design and
+ *      for the completion gaps this seam still carries.
  *
  *   2. The on-wire timestamp format we use. RFC 6051
- *      `abs-send-time` (24-bit unsigned at 65536 Hz, 18.6 h wrap)
+ *      `abs-send-time` (24-bit unsigned at 65536 Hz, 256 s wrap)
  *      is the standard cross-implementation-compatible variant
  *      emitted by Chromium / WebRTC / Firefox; we bind the
  *      extension URI `http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time`
@@ -23,27 +23,38 @@
  *
  *   3. The NTP 64-bit ↔ std::chrono::system_clock conversion. RFC
  *      5905 §6 — seconds since 1900-01-01 00:00:00 UTC. We use
- *      a single 64-bit `Ntp64` value that lops off the low 32
- *      fraction bits deliberately (RFC 3550 §6.4.1 only carries
- *      the middle 32; we store 64 so SR/RR report-blocks can
+ *      a single 64-bit `Ntp64` value that carries the full
+ *      seconds + 32-bit fraction (RFC 3550 §6.4.1 only carries
+ *      the middle 32 of it; we store 64 so SR/RR report-blocks can
  *      round-trip losslessly).
  *
  * ## Non-goals
  *
- *   - Drift-tolerant long-running alignment (Kalman / EWMA): we
- *     implement a linear extrapolation between successive SRs and
- *     leave the heavy filter for v1.x. The linear model is correct
- *     for short sessions (<5 min typical) and within ~5 ms of the
- *     sender NTP for the full 18.6 h abs-send-time wrap period.
+ *   - Drift-tolerant long-running alignment (Kalman / EWMA) and
+ *     multi-SR slope estimation: we extrapolate linearly from a
+ *     single SR and leave the filter for v1.x.  The linear model is
+ *     correct for short sessions (<5 min typical) and degrades
+ *     gracefully beyond that.
  *   - Audio sample-level sync: out of scope (PCM path needs a
- *     SRTP-indexed adapter; see ADR-016 §"Audio carry").
+ *     SRTP-indexed adapter; see ADR-017 §"Audio carry").
+ *
+ * ## Status
+ *
+ *   This header is a *seam*, not a finished feature.  As of v1.0.0
+ *   nothing outside the timeline's own tests consumes
+ *   `SenderReportTracker`, and no engine path acts on
+ *   `Profile::timeline_enabled`.  The remaining work — per-SSRC
+ *   clock rate, RTP-TS wrap handling, abs-send-time participation,
+ *   extmap negotiation, SR scheduling, engine wiring — is
+ *   enumerated in ADR-017 §"Decision 5".
  *
  * ## Stability
  *
  *   The structs in this header are NIMRTC_API_STABLE — same
  *   freeze rules as the rest of the modules/rtp surface. v1.0.0
- *   feature gate is `Profile::timeline_enabled`. When false, the
- *   engine MUST NOT emit abs-send-time or schedule SR sends.
+ *   feature gate is `Profile::timeline_enabled`; when the feature
+ *   is completed, the engine MUST NOT emit abs-send-time or
+ *   schedule SR sends while the flag is false.
  */
 #pragma once
 
@@ -130,23 +141,27 @@ NIMRTC_API_STABLE std::chrono::system_clock::time_point
     system_clock_from_ntp64(Ntp64 ntp) noexcept;
 
 /** Pack a `SteadyClock::time_point` (monotonic microseconds since boot)
- *  into the 24-bit abs-send-time value the wire carries. The conversion
- *  takes an explicit `monotonic_origin_ntp64` so that "abs-send-time =
- *  0" maps to a deterministic wall-clock anchor; the engine sets the
- *  origin at construction. Returns 0 on overflow (loop period
- *  < 256 s, plenty for any single session). */
+ *  into the 24-bit abs-send-time value the wire carries. The value
+ *  wraps modulo 2^24 (every 256 s at 65536 Hz) — it is deliberately
+ *  not an epoch, so it must be anchored to a wider clock before use.
+ *
+ *  NOTE: `monotonic_origin_ntp64` is currently accepted but not
+ *  applied — the encoder emits raw monotonic ticks and the origin is
+ *  reserved for the v1.1 origin-anchored form.  See ADR-017
+ *  §"Decision 5". */
 NIMRTC_API_STABLE std::uint32_t
     encode_abs_send_time_24(std::chrono::microseconds monotonic_us,
                            Ntp64 monotonic_origin_ntp64) noexcept;
 
-/** Inverse of `encode_abs_send_time_24`. Reconstructs the *sender*
- *  monotonic microsecond timestamp at which the packet's abs-send-time
- *  was sampled. The exact value isn't observable — the wire carries 24
- *  bits at 65536 Hz, so its quantization is `1e6 / 65536 ≈ 15.26 µs`;
- *  we return the lowest-resolution value at-or-after the true sample
- *  time. The wire wraps every 256 s — callers MUST anchor the result
- *  to a wider clock (SR or monotonic boot) before subtracting or
- *  comparing across longer intervals. */
+/** Inverse of `encode_abs_send_time_24`. Converts the 24-bit wire value
+ *  back to sender monotonic microseconds *relative to the abs-send-time
+ *  wrap epoch* — the origin is not applied, so the result is only
+ *  meaningful modulo 256 s. The exact value isn't observable — the wire
+ *  carries 24 bits at 65536 Hz, so its quantization is
+ *  `1e6 / 65536 ≈ 15.26 µs`.
+ *
+ *  NOTE: `monotonic_origin_ntp64` is currently accepted but not
+ *  applied.  See ADR-017 §"Decision 5". */
 NIMRTC_API_STABLE std::chrono::microseconds
     decode_abs_send_time_24(std::uint32_t raw_24,
                             Ntp64 monotonic_origin_ntp64) noexcept;
@@ -155,41 +170,45 @@ NIMRTC_API_STABLE std::chrono::microseconds
 // SenderReportTracker — receiver-side NTP ↔ RTP-TS mapping (RFC 3550 §4.5,
 // §8.1) and per-SSRC abs-send-time → wall-clock lookup.
 //
-// Algorithm (small / good-enough / Chromium-shaped):
+// Algorithm (v1.0.0 — single-SR linear extrapolation):
 //
-//   For each remote SSRC we keep:
-//     - last_seen_sr_ntp64
-//     - last_seen_sr_rtp_ts
-//     - last_seen_sr_local_recv_us (monotonic clock at SR receive)
-//     - abs_send_time_offset_us  (sender-monotonic at SR send)
+//   For each remote SSRC we keep the most-recent SR only:
+//     - sr_ntp64          (RFC 3550 §6.4.1 sender info)
+//     - sr_rtp_ts         (paired RTP-TS at the SR instant)
 //
-//   For any incoming RTP with:
-//     - rtp_ts X
-//     - abs-send-time raw 24-bit value A (sender wall-clock at send)
-//   we compute:
-//     sender_monotonic_us_at_send = decode_abs_send_time_24(A, origin)
-//     sender_wall_clock_us_at_send = sender_monotonic_at_send + offset
+//   For any incoming RTP with rtp_ts X:
+//     capture_us = sr_ntp_us + (X − sr_rtp_ts) × 1e6 / clock_rate_hz
 //
-//   Slope estimation kicks in once we have ≥ 2 SR samples; the linear
-//   estimator keeps us within ~1 ppm of the true sender clock across
-//   the 256 s abs-send-time wrap.
+//   NOT implemented in v1.0.0 — see ADR-017 §"Decision 5":
+//     - slope estimation across ≥ 2 SR samples (there is no SR history;
+//       `slope_nsec_per_rtp_ts` is a derived constant, not a fit)
+//     - combining abs-send-time with the SR (the field is accepted for
+//       wire compatibility but currently unused; the 24-bit value wraps
+//       every 256 s so it cannot anchor a wall clock on its own)
+//     - EWMA / Kalman smoothing (v1.1+; the linear model above is the
+//       deliberate v1.0.0 trade-off)
 //
-//   This is deliberately NOT an EWMA / Kalman — see the v1.x plan for
-//   the smoother. The linear model is correct for sub-1-ms alignment
-//   over sessions up to a few minutes long and degrades gracefully
-//   thereafter.
+//   `local_recv_us_since_epoch` is recorded per SR so callers can
+//   measure the estimate's error out-of-band; the tracker itself does
+//   not use it.
 // -----------------------------------------------------------------------------
 
 struct NIMRTC_API_STABLE SsrcTimelineState {
     Ntp64          sr_ntp64           = Ntp64{0};
     std::uint32_t  sr_rtp_ts          = 0;
     std::int64_t   sr_local_recv_us   = 0;
-    std::int64_t   sr_abs_send_us     = 0;   // decoded monotonic us at SR send
-    // Linear slope estimate (nsec-per-rtp-ts), updated when a
-    // second SR arrives for this SSRC.
+    // Not populated in v1.0.0 — reserved for the abs-send-time ↔ SR
+    // cross-check.  See ADR-017 §"Decision 5".
+    std::int64_t   sr_abs_send_us     = 0;
+    // Nanoseconds per RTP timestamp tick.  In v1.0.0 this is a
+    // constant derived from `clock_rate_hz`, NOT a fitted slope — there
+    // is no multi-SR history.  See ADR-017 §"Decision 5".
     std::int64_t   slope_nsec_per_rtp_ts = 0;
     std::uint32_t  clock_rate_hz         = 90000;
-    std::uint32_t  sr_count              = 0;  // # of SRs seen
+    // Number of SRs ingested for this SSRC.  In v1.0.0 this saturates
+    // at 1 (the tracker keeps only the most-recent SR) — it is not a
+    // running count.  See ADR-017 §"Decision 5".
+    std::uint32_t  sr_count              = 0;
 };
 
 class NIMRTC_API_STABLE SenderReportTracker {
@@ -204,16 +223,20 @@ public:
 
     /** Origin the sender's monotonic clock is anchored to. Engine passes
      *  its own boot-time-equivalent (SteadyClock::now() at construction).
-     *  Together with abs-send-time + a paired local recv time this is
-     *  the wall-clock source for `capture_ts_us_for`. */
+     *
+     *  NOTE: in v1.0.0 this value is stored but not consumed by any
+     *  lookup — `capture_ts_us_for` resolves capture time from the SR
+     *  alone.  Reserved for the v1.1 origin-anchored form.  See
+     *  ADR-017 §"Decision 5". */
     void set_monotonic_origin(Ntp64 origin_ntp64) noexcept;
 
     Ntp64 monotonic_origin() const noexcept { return origin_; }
 
     /** Ingest an inbound Sender Report. `local_recv_us_since_epoch` is
      *  the monotonic-clock microseconds at which the engine *received*
-     *  the SR packet (before any queueing). MUST be sampled under the
-     *  same clock used by abs-send-time on the wire. */
+     *  the SR packet (before any queueing). Recorded per SSRC so a
+     *  caller can measure the estimate's error out-of-band; the
+     *  tracker itself does not use it. */
     void on_sender_report(const SenderReport& sr,
                           std::int64_t local_recv_us_since_epoch) noexcept;
 
@@ -225,7 +248,9 @@ public:
      *  identified by SSRC and carrying `abs_send_time_24` as the
      *  24-bit abs-send-time field. Returns std::nullopt when:
      *    - No SR has been seen for this SSRC yet; or
-     *    - abs_send_time_24 is the sentinel "no extension" value.
+     *    - the RTP timestamp falls in a previous wrap cycle relative
+     *      to the stored SR (see ADR-017 §"Decision 5" — the wrap
+     *      handling is known-incomplete in v1.0.0).
      *
      *  IMPORTANT: this is a *microsecond* timestamp on the sender's
      *  wall clock (1970 Unix epoch). Callers anchor it to their own
@@ -239,12 +264,19 @@ public:
      *  guarded here) are clamped to 0 in the seconds field; the
      *  fractional microsecond component is preserved.
      *
+     *  Parameters:
+     *    - ssrc / rtp_ts : identify the packet and its media-clock
+     *      position; the timestamp is extrapolated from the stored SR.
+     *    - abs_send_time_24 : accepted for wire compatibility; NOT
+     *      used by the v1.0.0 estimate (see ADR-017 §"Decision 2").
+     *    - clock_rate_hz : the media clock rate to extrapolate against.
+     *    - local_recv_us_since_epoch : accepted for symmetry with
+     *      `on_sender_report`; not used by the estimate.
+     *
      *  Out-params:
-     *    - capture_ts_us : sender's NTP64 wall-clock at send (microsecond
-     *      resolution, accurate to ~15 µs by abs-send-time quantization)
      *    - sender_recv_skew_us (optional; pass nullptr to discard):
-     *      approx capture_ts_us minus the sender's monotonic clock at
-     *      send; positive means capture clock is ahead of monotonic. */
+     *      reserved for v1.1 — always 0 in v1.0.0.  See ADR-017
+     *      §"Decision 4". */
     std::optional<std::int64_t> capture_ts_us_for(
         std::uint32_t ssrc,
         std::uint32_t rtp_ts,

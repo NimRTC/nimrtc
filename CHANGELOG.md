@@ -9,7 +9,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### In Progress
 
-- **ADR-016 cross-end timeline seam** —  `nimrtc/rtp/timeline.hpp` (new
+- **ADR-017 cross-end timeline seam** —  `nimrtc/rtp/timeline.hpp` (new
   public header) lands in the Unreleased window behind
   `Profile::timeline_enabled`.  The header owns `Ntp64` (RFC 5905 §6
   64-bit timestamp), `ntp64_from` / `system_clock_from_ntp64`,
@@ -50,6 +50,36 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CTestTestfile.cmake` at that level, so `ctest` never recursed
   into `src/modules/rtp/tests/` and the 9 timeline cases were
   invisible to the suite.
+
+  **Design record: ADR-017** (`docs/adr/ADR-017-cross-end-timeline.md`).
+  The seam was previously referenced as "ADR-016" in code and in this
+  changelog, but number 016 is reserved by `docs/plan/v1.0-plan.md`
+  §12.5 for the (currently deferred, SFU-track) "SFU forwarding
+  skips L2" BWE-interface ADR, and no ADR-016 document ever existed.
+  The timeline seam therefore takes **ADR-017**; the reservation for
+  016 is left intact and is now recorded in `docs/adr/README.md`.
+  All 10 code/doc references were re-pointed.
+
+  **Status: seam landed, feature NOT complete.** `timeline_enabled`
+  is still inert — nothing outside the timeline's own tests consumes
+  `SenderReportTracker`, and no engine path reads the flag. The
+  header's own algorithm comment previously over-claimed (it
+  described a Chrome-shaped slope estimator and abs-send-time
+  participation that were never implemented); it now states the
+  actual single-SR linear extrapolation and enumerates the gaps.
+  Known gaps, all listed in ADR-017 §"Decision 5":
+    - per-SSRC clock rate is hardcoded to 90000 Hz (wrong for audio
+      at 48000 Hz);
+    - the RTP-timestamp wrap branch (`> 2^31`) refuses the
+      legitimate post-wrap forward case instead of adding 2^32;
+    - `abs_send_time_24` and `monotonic_origin_ntp64` are accepted
+      but unused; `kSrPeriodMs`, `kAbsSendTimeUri` and
+      `kAbsSendTimeDefaultLocalId` are declared with zero
+      references (no SR scheduling, no extmap negotiation, no
+      header-extension write);
+    - no engine wiring: the flag is parsed and round-tripped but
+      never acted on;
+    - `sender_recv_skew_us` is reserved for v1.1 and always 0.
 
 - **Chrome e2e Case E — WebTransport server seam (beta.2)** —
   `IWebTransportServer` (new public header

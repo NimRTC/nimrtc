@@ -124,7 +124,7 @@ public:
     /** Current sink configuration (for diagnostics / logs). */
     virtual VideoSinkConfig config() const noexcept = 0;
 
-    // ---- Most-recently-rendered-frame query (ADR-016, v1.0.0) ----
+    // ---- Most-recently-rendered-frame query (ADR-017, v1.0.0) ----
     // Default = nullptr (sink doesn't track frame metadata).
     // Useful for ASR / agent pipelines that need "what frame is on
     // screen right now?". Returns a pointer to sink-internal state

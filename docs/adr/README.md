@@ -34,7 +34,7 @@ Write an ADR when a decision:
 | [ADR-013](ADR-013-gmssl-dtls-backend.md) | GMSSL — 国密 DTLS 后端 | P1 |
 | [ADR-014](ADR-014-web-transport-vendor.md) | WebTransport / QUIC vendor — msquic | P3 |
 | [ADR-015](ADR-015-api-stability-policy.md) | NimRTC API Stability Policy | P2 |
-| [ADR-017](ADR-017-cross-end-timeline.md) | Cross-end frame timeline — RFC 6051 abs-send-time + RTCP-SR anchoring | P2 |
+| [ADR-017](ADR-017-cross-end-timeline.md) | Cross-end frame timeline — WebRTC abs-send-time + RTCP-SR anchoring | P2 |
 
 ### Reserved numbers
 

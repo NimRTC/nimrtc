@@ -190,6 +190,11 @@ function(nimrtc_add_web_transport_msquic_test name source)
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
         "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+    # The server seam needs the WebTransport TLS material (build directory).
+    # Compiling the binary directory in lets the test probe for it no matter
+    # which working directory ctest starts the case from.
+    target_compile_definitions(${name} PRIVATE
+        NIMRTC_DEFAULT_BUILD_ROOT="${CMAKE_BINARY_DIR}")
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
@@ -984,6 +989,18 @@ nimrtc_add_engine_test(test_datachannel_engine test_datachannel_engine.cpp)
 # TIMEOUT 30 in `nimrtc_add_engine_test()` is too tight.  Bump it
 # specifically for this target.
 set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
+
+# ---------------------------------------------------------------------------
+# ADR-017 — engine-side cross-end timeline wiring.
+#
+# Covers the layer *above* `nimrtc::rtp::SenderReportTracker` (whose own
+# arithmetic is covered by `src/modules/rtp/tests/test_timeline.cpp`):
+# the feature gate, the SDP `a=extmap` negotiation, and the
+# "no Sender Report ⇒ no capture timestamp" invariant.  Uses the "shell"
+# transport strategy so no ICE/DTLS handshake is involved; the same
+# wiring as `test_datachannel_engine` above.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 
 # ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).

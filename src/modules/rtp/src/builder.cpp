@@ -101,11 +101,19 @@ PacketBuilder& PacketBuilder::set_extension(std::uint16_t type, core::ByteSpan d
     extension_->type = type;
     extension_->data = data;
     abs_send_time_ = std::nullopt;  // disambiguate: explicit extension wins
+    abs_send_time_id_ = 1;
     return *this;
 }
 
 PacketBuilder& PacketBuilder::set_abs_send_time(AbsSendTime t) noexcept {
+    // Historical default: RFC 5285 one-byte-form element with id 1.
+    return set_abs_send_time(t, 1);
+}
+
+PacketBuilder& PacketBuilder::set_abs_send_time(AbsSendTime t,
+                                                 std::uint16_t id) noexcept {
     abs_send_time_ = t;
+    abs_send_time_id_ = (id == 0) ? 1 : id;
     extension_     = std::nullopt;  // disambiguate: fast-path override (see build())
     return *this;
 }
@@ -113,6 +121,7 @@ PacketBuilder& PacketBuilder::set_abs_send_time(AbsSendTime t) noexcept {
 PacketBuilder& PacketBuilder::clear_extension() noexcept {
     extension_     = std::nullopt;
     abs_send_time_ = std::nullopt;
+    abs_send_time_id_ = 1;
     return *this;
 }
 
@@ -136,11 +145,16 @@ std::size_t PacketBuilder::compute_size() const noexcept {
     // abs-send-time is emitted as a one-byte-form element (RFC 5285 §4.2,
     // profile = 0xBEDE) with local id 1 and 3 data bytes = 4 bytes total
     // (already 4-aligned, so no extra padding).
+    // When the negotiated id exceeds 14 the RFC 8285 two-byte form is used
+    // instead: id byte + length byte + 3 data bytes = 5 bytes, padded to
+    // 8 bytes with RFC 8285 padding elements (id = 0).
     if (extension_.has_value() || abs_send_time_.has_value()) {
         size += 4;  // 2 bytes profile + 2 bytes length
         std::size_t data_bytes = extension_.has_value()
                                      ? extension_->data.size()
-                                     : 4;  // abs-send-time element = 4 bytes
+                                     : (abs_send_time_id_ <= kExtProfileOneByteMaxId
+                                            ? 4   // one-byte form: 1 hdr + 3 data
+                                            : 5); // two-byte form: 1 id + 1 len + 3 data
         std::size_t words = (data_bytes + 3) / 4;
         size += words * 4;
     }
@@ -196,24 +210,46 @@ core::ByteBuffer PacketBuilder::build() const {
     // Extension header
     if (extension_.has_value() || abs_send_time_.has_value()) {
         if (abs_send_time_.has_value()) {
-            // Emit abs-send-time as a one-byte-form extension element
-            // (RFC 5285 §4.2 with profile = 0xBEDE and local id = 1 per RFC 9143 §5).
-            //
-            // On-wire layout:
-            //   2 bytes profile      = 0xBEDE
-            //   2 bytes length       = 1  (one 32-bit word of element data)
-            //   1 byte  id+len       = (1 << 4) | 2   ; id=1, len=2 (3-1)
-            //   3 bytes abs-send-time = 24-bit BE timestamp at 24 MHz
-            write_be16(buf + offset, 0xBEDE);
-            offset += 2;
-            write_be16(buf + offset, 1);  // one 32-bit word
-            offset += 2;
-
             const std::uint32_t ts24 = abs_send_time_->send_time_24mhz & 0x00FFFFFFu;
-            buf[offset++] = static_cast<std::uint8_t>(0x10u | 0x02u);  // id=1, len=2
-            buf[offset++] = static_cast<std::uint8_t>((ts24 >> 16) & 0xFFu);
-            buf[offset++] = static_cast<std::uint8_t>((ts24 >>  8) & 0xFFu);
-            buf[offset++] = static_cast<std::uint8_t>( ts24        & 0xFFu);
+            if (abs_send_time_id_ <= kExtProfileOneByteMaxId) {
+                // Emit abs-send-time as a one-byte-form extension element
+                // (RFC 5285 §4.2 with profile = 0xBEDE).
+                //
+                // On-wire layout:
+                //   2 bytes profile      = 0xBEDE
+                //   2 bytes length       = 1  (one 32-bit word of element data)
+                //   1 byte  id+len       = (id << 4) | 2 ; len=2 (3-1)
+                //   3 bytes abs-send-time = 24-bit BE timestamp at 24 MHz
+                write_be16(buf + offset, kExtProfileOneByte);
+                offset += 2;
+                write_be16(buf + offset, 1);  // one 32-bit word
+                offset += 2;
+
+                buf[offset++] = static_cast<std::uint8_t>(
+                    (static_cast<std::uint32_t>(abs_send_time_id_) << 4) | 0x02u);
+                buf[offset++] = static_cast<std::uint8_t>((ts24 >> 16) & 0xFFu);
+                buf[offset++] = static_cast<std::uint8_t>((ts24 >>  8) & 0xFFu);
+                buf[offset++] = static_cast<std::uint8_t>( ts24        & 0xFFu);
+            } else {
+                // RFC 8285 two-byte form: profile 0x1000, element id byte,
+                // explicit length byte, then the 3-byte payload.  The block
+                // is padded to a 32-bit boundary with padding elements
+                // (id = 0, length = 0) — RFC 8285 §4.2.
+                write_be16(buf + offset, kExtProfileTwoByte);
+                offset += 2;
+                write_be16(buf + offset, 2);  // two 32-bit words (8 bytes)
+                offset += 2;
+
+                buf[offset++] = static_cast<std::uint8_t>(abs_send_time_id_);
+                buf[offset++] = 3;  // element payload length in bytes
+                buf[offset++] = static_cast<std::uint8_t>((ts24 >> 16) & 0xFFu);
+                buf[offset++] = static_cast<std::uint8_t>((ts24 >>  8) & 0xFFu);
+                buf[offset++] = static_cast<std::uint8_t>( ts24        & 0xFFu);
+                // 3 bytes of padding to reach the 8-byte block boundary.
+                buf[offset++] = 0;
+                buf[offset++] = 0;
+                buf[offset++] = 0;
+            }
         } else {
             // Generic extension (caller-supplied profile + raw payload).
             write_be16(buf + offset, extension_->type);
@@ -255,6 +291,7 @@ void PacketBuilder::reset() noexcept {
     csrc_.clear();
     extension_ = std::nullopt;
     abs_send_time_ = std::nullopt;
+    abs_send_time_id_ = 1;
     payload_ = {};
     padding_bytes_ = 0;
 }

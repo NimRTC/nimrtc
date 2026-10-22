@@ -404,6 +404,40 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  `datachannel_name` is non-empty. */
     std::uint16_t sctp_port = 5000;
 
+    // ---- Cross-end timeline (ADR-017) -------------------------------------
+    //
+    // When enabled, the engine turns the timeline seam on:
+    //
+    //   1. SDP: the offer advertises `a=extmap:<id>` for the WebRTC
+    //      abs-send-time extension (RFC 5285 §6 negotiation), and the
+    //      answer echoes it.  The extension id actually used on the wire
+    //      is the one the *peer* advertised for its own sending
+    //      direction.
+    //   2. Outbound RTP packets carry the abs-send-time element, which
+    //      encodes the sender's wall-clock send instant (24 bits at
+    //      65536 Hz, 256 s wrap).
+    //   3. Outbound RTCP Sender Reports are sent every `sr_period_ms`,
+    //      giving the peer the (NTP wall-clock ↔ RTP media clock) anchor
+    //      it needs to reconstruct our capture instants.
+    //   4. Inbound RTCP Sender Reports + inbound abs-send-time elements
+    //      are fed to `nimrtc::rtp::SenderReportTracker`, which
+    //      reconstructs the *peer's* capture instant for every inbound
+    //      frame.  The result is exposed through `last_capture_ts_us()` /
+    //      `capture_ts_us_for_ssrc()`.
+    //
+    // While this flag is false the engine MUST NOT emit abs-send-time
+    // and MUST NOT schedule Sender Reports (ADR-017 §"Decision 5").
+    //
+    // Host applications that drive the engine from an `assembly::Profile`
+    // copy `Profile::timeline_enabled` into this field.
+    bool timeline_enabled = false;
+
+    /** Sender Report cadence in milliseconds.  Default = 1000 ms
+     *  (matches `nimrtc::rtp::kSrPeriodMs` and the WebRTC default).
+     *  0 disables the periodic Sender Report while keeping the
+     *  abs-send-time extension active. */
+    std::uint32_t sr_period_ms = 1000;
+
     // ---- Transport strategy (v0.12.0 Slice 7.6 PR3) -------------------------
     //
     // Named use-case strategy (one of the 5 from
@@ -816,6 +850,50 @@ public:
      *  without making those fields public. */
     NIMRTC_API_STABLE const EngineConfig& config() const noexcept { return config_; }
 
+    // ---- Cross-end timeline diagnostics (ADR-017) --------------------------
+    //
+    // These expose what the timeline seam reconstructed from the peer's
+    // RTCP Sender Reports (+ abs-send-time refinement).  They are read-only
+    // and safe to call from any thread after the engine is open.
+
+    /** True when the cross-end timeline seam is enabled for this engine
+     *  (mirrors `EngineConfig::timeline_enabled`). */
+    NIMRTC_API_STABLE bool timeline_enabled() const noexcept {
+        return config_.timeline_enabled;
+    }
+
+    /** The RTP header-extension id used for *outbound* abs-send-time
+     *  elements.  0 means the extension was never negotiated (the peer
+     *  never advertised it), in which case no abs-send-time is emitted. */
+    NIMRTC_API_STABLE std::uint16_t abs_send_time_ext_id() const noexcept;
+
+    /** The RTP header-extension id the peer advertised for its own
+     *  abs-send-time elements — the id inbound packets are parsed with.
+     *  0 = the peer never advertised the extension. */
+    NIMRTC_API_STABLE std::uint16_t remote_abs_send_time_ext_id() const noexcept;
+
+    /** Sender-wall-clock capture instant (microseconds since the Unix
+     *  epoch) of the most recently received inbound frame, reconstructed
+     *  from the peer's Sender Report.
+     *
+     *  Empty until the first usable Sender Report has been ingested.
+     *  The value lives on the *peer's* wall clock, so it is directly
+     *  comparable with a locally computed Unix timestamp (and with the
+     *  peer's own timeline) — subtract the local arrival time to obtain
+     *  the one-way delay. */
+    NIMRTC_API_STABLE std::optional<std::int64_t> last_capture_ts_us() const noexcept;
+
+    /** Same as `last_capture_ts_us()` but for a specific inbound SSRC
+     *  (audio and video streams have their own SSRCs). */
+    NIMRTC_API_STABLE std::optional<std::int64_t>
+        capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept;
+
+    /** One-way delay (microseconds) of the most recently received inbound
+     *  frame: the peer's capture instant minus the local arrival instant,
+     *  both on the Unix timeline.  Empty until the first Sender Report
+     *  has been ingested. */
+    NIMRTC_API_STABLE std::optional<std::int64_t> last_one_way_delay_us() const noexcept;
+
     // ---- Transport strategy accessors (v0.12.0 Slice 7.6 PR3) -----------
     //
     // These expose the resolved (validated + Selector-applied) state of
@@ -1023,6 +1101,9 @@ private:
     // those headers (Layout Invariant 4).
     void on_transport_recv(const plugins::BufferView& pkt) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
+    void handle_rtcp(plugins::BufferView view) noexcept;
+    void observe_timeline(const rtp::PacketView& pv) noexcept;
+    void maybe_send_sender_report() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
     void init_video_plugins() noexcept;

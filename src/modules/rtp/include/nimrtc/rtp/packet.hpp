@@ -33,7 +33,7 @@ NIMRTC_API_STABLE inline constexpr std::uint8_t kVersion = 2;
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Extension element (RFC 5285). abs-send-time and transport-wide-CC
-// (RFC 9143) are layered on top of this; see parse_*_extension below.
+// (RFC 8888) are layered on top of this; see parse_*_extension below.
 // -----------------------------------------------------------------------------
 struct NIMRTC_API_STABLE Extension {
     std::uint16_t type = 0;          // 1..14 for one-byte form; 1..255 for two-byte
@@ -41,16 +41,60 @@ struct NIMRTC_API_STABLE Extension {
 };
 
 // -----------------------------------------------------------------------------
-// RFC 9143 abs-send-time (one-byte-form, extension id = 1).
-// 24-bit absolute timestamp at 24 MHz; wrapping is handled by the
-// assignment operator (caller may store the 32-bit-aligned value here).
+// RFC 5285 / RFC 8285 header-extension profiles
+// -----------------------------------------------------------------------------
+
+/** Profile id of the RFC 5285 §4.2 one-byte header extension
+ *  (element id 1..14 packed into the high nibble of the element's first
+ *  byte).  This is the profile Chrome / libwebrtc use for the
+ *  abs-send-time extension. */
+NIMRTC_API_STABLE inline constexpr std::uint16_t kExtProfileOneByte = 0xBEDE;
+
+/** Profile id of the RFC 8285 two-byte header extension (element id
+ *  0..255, one explicit length byte per element). */
+NIMRTC_API_STABLE inline constexpr std::uint16_t kExtProfileTwoByte = 0x1000;
+
+/** Highest element id that fits the RFC 5285 one-byte form. */
+NIMRTC_API_STABLE inline constexpr std::uint16_t kExtProfileOneByteMaxId = 14;
+
+/** Locate the RFC 5285 / RFC 8285 extension element carrying `id` inside a
+ *  parsed RTP header-extension block.
+ *
+ *  @param ext_block  the extension *data* — i.e. `PacketView::extension->data`,
+ *                    which excludes the 4-byte extension header.
+ *  @param profile    the 16-bit profile id carried by that header —
+ *                    i.e. `PacketView::extension->type`.
+ *  @param id         the negotiated extension id to look for.
+ *
+ *  Returns the element payload (without the id / length prefix) or a
+ *  failure (`NotFound` when the block simply does not carry `id`,
+ *  `ProtocolError` when the block is malformed or the profile is
+ *  unknown).
+ *
+ *  The extension id is *negotiated* per direction (RFC 5285 §6): the id a
+ *  peer uses on the wire is the one it advertised in its own SDP, so the
+ *  lookup is parameterised by id rather than hard-coding one.
+ */
+NIMRTC_API_STABLE core::Result<core::ByteSpan>
+    find_extension_element(core::ByteSpan ext_block,
+                           std::uint16_t profile,
+                           std::uint16_t id);
+
+// -----------------------------------------------------------------------------
+// WebRTC abs-send-time (RFC 5285 one-byte form; the historical local id
+// used throughout this module is 1).
+// 24-bit absolute timestamp; the `24mhz` field name is the legacy name
+// kept for ABI stability — the timeline seam interprets the same 24 bits
+// at 65536 Hz (see nimrtc/rtp/timeline.hpp `kAbsSendTimeClockRateHz`).
+// Wrapping is handled by the assignment operator (caller may store the
+// 32-bit-aligned value here).
 // -----------------------------------------------------------------------------
 struct NIMRTC_API_STABLE AbsSendTime {
     std::uint32_t send_time_24mhz = 0;
 };
 
 // -----------------------------------------------------------------------------
-// RFC 9143 transport-wide CC feedback packet (PT = RTPFB, FMT = 15).
+// transport-wide CC feedback packet (RFC 8888; PT = RTPFB, FMT = 15).
 // `packets` has length = packet_status_count; one element per RTP packet,
 // in seq order starting at base_seq (modulo 2^16).
 // -----------------------------------------------------------------------------
@@ -165,6 +209,21 @@ public:
 
     PacketBuilder& set_extension(std::uint16_t type, core::ByteSpan data);
     PacketBuilder& set_abs_send_time(AbsSendTime t) noexcept;
+
+    /** Emit abs-send-time under a *negotiated* extension id.
+     *
+     *  RFC 5285 §6: the extension id is negotiated per direction — the id
+     *  the peer expects on the wire is the one it advertised in its SDP.
+     *  Ids 1..14 use the RFC 5285 one-byte form (profile 0xBEDE); ids
+     *  15..255 use the RFC 8285 two-byte form (profile 0x1000).
+     *
+     *  `id == 0` is invalid and is treated as 1 (the historical default).
+     */
+    PacketBuilder& set_abs_send_time(AbsSendTime t, std::uint16_t id) noexcept;
+
+    /** The extension id the abs-send-time element will be emitted under. */
+    std::uint16_t abs_send_time_ext_id() const noexcept { return abs_send_time_id_; }
+
     PacketBuilder& clear_extension() noexcept;
     PacketBuilder& set_payload(core::ByteSpan data);
     PacketBuilder& set_padding(std::size_t bytes);
@@ -188,6 +247,7 @@ private:
     std::vector<std::uint32_t> csrc_;
     std::optional<Extension> extension_;
     std::optional<AbsSendTime> abs_send_time_;
+    std::uint16_t abs_send_time_id_ = 1;   // negotiated extension id (RFC 5285 §6)
     core::ByteSpan payload_{};
     std::size_t    padding_bytes_  = 0;
 };

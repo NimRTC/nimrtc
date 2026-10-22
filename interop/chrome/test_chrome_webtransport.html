@@ -236,17 +236,30 @@ async function run() {
               session.readyState + ")");
 
     // ---- Inbound datagram handler ----
-    session.datagrams.incoming
-        .getReader()
-        .read()
-        .then(({ value, done }) => {
-            if (done) return;
-            const text = new TextDecoder().decode(value);
-            window._interopResults.datagramRecv = true;
-            window._interopResults.datagramPayload = text;
-            log("DGRAM", "<< echo: " + text);
-        })
-        .catch((e) => log("DGRAM", "datagram reader error: " + e));
+    // Chrome exposes `session.datagrams` as a container object whose
+    // `readable` / `writable` members are the actual streams.  The old draft
+    // used `session.datagrams.incoming` / `.outgoing`.  Using a shape the
+    // browser does not have throws "getReader is not a function" and aborts
+    // the run before the connection is even awaited.  Accept all three.
+    const dt = session.datagrams;
+    const incomingDatagrams = (dt && dt.readable) ? dt.readable
+        : (dt && dt.incoming) ? dt.incoming
+        : dt;
+    try {
+        incomingDatagrams
+            .getReader()
+            .read()
+            .then(({ value, done }) => {
+                if (done) return;
+                const text = new TextDecoder().decode(value);
+                window._interopResults.datagramRecv = true;
+                window._interopResults.datagramPayload = text;
+                log("DGRAM", "<< echo: " + text);
+            })
+            .catch((e) => log("DGRAM", "datagram reader error: " + e));
+    } catch (e) {
+        reportError(0x27, "could not open inbound datagram stream: " + e);
+    }
 
     // ---- 3. ready promise ----
     try {

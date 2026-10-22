@@ -7,6 +7,82 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Case E WebTransport harness read the datagram stream through an obsolete
+  WebTransport API shape** — `interop/chrome/test_chrome_webtransport.html`
+  obtained the inbound stream via `session.datagrams.incoming.getReader()`.
+  That is the *old draft* shape.  Chrome exposes `session.datagrams` as a
+  container object whose `readable` / `writable` members are the actual
+  streams, so `session.datagrams.incoming` is `undefined` and `.getReader()`
+  raises `TypeError: Cannot read properties of undefined (reading
+  'getReader')`.
+
+  The throw was **not** caught, so it aborted `run()` *before* the harness
+  reached `await session.ready`.  **Every recorded "Case E FAIL" was
+  therefore produced by a harness that never exercised the connection at
+  all** — the failure verdict was an artefact of the harness, not a
+  measurement of the data plane.  The page now resolves the inbound stream
+  across all three shapes (`datagrams.readable` / `datagrams.incoming` /
+  `datagrams` itself) and routes failures through `reportError()` instead
+  of dying silently.
+
+  After the fix the harness reaches the real verdict and reports the
+  underlying defect as `session.ready rejected: WebTransportError: Opening
+  handshake failed.`
+
+### Changed
+
+- **Case E is blocked on a server-side QUIC handshake defect rather than on a
+  missing test environment.**  The case now runs end to end on a developer
+  machine and fails for a well-defined, reproducible reason.  Evidence:
+
+  - Chrome: `net::ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`
+    (`num_undecryptable_packets: 0` — the client never receives a reply),
+    occasionally `ERR_CONNECTION_RESET`.
+  - `demo-wtserver` binds the socket and reports
+    `WebTransport listener started on UDP port 9443`, but the run ends with
+    `0 session(s) handled` — no connection is ever surfaced to the
+    listener's connection callback.
+  - An **independent** QUIC client (`aioquic`, pure Python, no shared code
+    with msquic) fails against the same endpoint, so this is not a
+    Chrome-specific incompatibility.
+
+  Ruled out while diagnosing: Windows Firewall (all three profiles
+  disabled), TLS credential loading (the SChannel cert loads from the
+  Windows store and reports its SHA-1 hash), IPv4/IPv6 family mismatch
+  (a Chrome A/B run forcing `--host-resolver-rules=MAP localhost
+  127.0.0.1` fails identically to the `::1` and default paths), and the
+  msquic fork's forced dummy raw datapath (`RawDataPathInitialize` only
+  nulls out the optional raw path; `datapath_xplat.c` falls back to the
+  classic UDP datapath).
+
+  The remaining suspect is the msquic listener / registration / TLS setup in
+  `src/web_transport/src/web_transport_msquic_listener.cpp`.
+
+### Notes
+
+- **Running the browser-driven e2e cases on a developer machine.**  The
+  harness needs a real Python interpreter plus Playwright; a Windows host
+  whose only `python` is the Microsoft Store execution-alias stub
+  (`%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`, exit code 9009)
+  cannot run it.  `uv` installs a self-contained CPython without admin
+  rights — the working setup used here keeps the environment inside
+  `build/` so the repository root stays clean:
+
+  ```powershell
+  uv python install 3.12
+  uv venv build/venv-e2e --python 3.12
+  uv pip install --python build/venv-e2e playwright websockets
+  build/venv-e2e/Scripts/python.exe -m playwright install chromium
+  build/venv-e2e/Scripts/python.exe tools/run_e2e_acceptance.py --case e_webtransport
+  ```
+
+  The harness defaults to a system Chrome
+  (`C:\Program Files\Google\Chrome\Application\chrome.exe`); override with
+  `NIMRTC_CHROME_PATH` to point at Playwright's bundled Chromium instead.
+  `build/venv-e2e/` is a local environment only and is not tracked.
+
 ### In Progress
 
 - **ADR-017 cross-end timeline seam** —  `nimrtc/rtp/timeline.hpp` (new
@@ -219,13 +295,16 @@ real `## [1.0.0]` block:
 > The tag message body documents the alias relationship to
 > v1.0.0-beta.1 and the v0.x banner unchanged.
 >
-> **Note on previous beta.1 / rc.1 attempts**: the entries
-> below this line (`[0.14.0-beta.1] - 2026-10-19` and
-> `[0.14.0-rc.1] - 2026-10-20`) document two previous
-> attempts to cut this release that were reverted before the
-> tag was pushed.  Neither `v0.14.0-beta.1` nor `v0.14.0-rc.1`
-> exist as git tags.  This entry (`[0.14.0-beta.1] - 2026-10-20`)
-> is the canonical beta.1 cut.
+> **Note on the earlier beta.1 attempt**: the entry directly
+> below this line (`[0.14.0-beta.1] - 2026-10-19`) documents an
+> earlier attempt to cut beta.1 that was reverted before the
+> tag was pushed.  The `v0.14.0-beta.1` git tag in this
+> repository points at the canonical 2026-10-20 cut described
+> by this entry.  The `[0.14.0-rc.1] - 2026-10-20` entry
+> further down describes rc.1 content that is **staged in the
+> tree but not yet tagged** -- there is no `v0.14.0-rc.1` git
+> tag, and `NIMRTC_API_VERSION_PRE_RELEASE` still reads
+> `"beta.1"` until the rc.1 tag is cut.
 
 ### Highlights
 
@@ -629,6 +708,8 @@ real `## [1.0.0]` block:
 | 5 | 公共头 freeze（beta 阶段只 additive） | ✅ 当前无 additive 变更 |
 | 6 | 4-平台 CI green | ✅ windows-2022 + linux-gcc + macos-clang PASS |
 | 7 | usrsctp 仍编译 | ✅ `test_sctp_usrsctp` 4/4 PASS |
+
+## [0.14.0-beta.1] - 2026-10-19
 
 ### Status: Tech Preview
 
@@ -1067,7 +1148,9 @@ real `## [1.0.0]` block:
 > The marketing version stays anchored to the v0.x line
 > ("Tech Preview" banner unchanged from v0.13.0); the
 > `NIMRTC_API_VERSION_PRE_RELEASE` macro cycles to
-> `"rc.1"`.  This is the **regression-only stabilisation**
+> `"rc.1"` at the rc.1 tag cut -- it still reads `"beta.1"`
+> in the tree, because the `v0.14.0-rc.1` tag has not been
+> cut yet.  This is the **regression-only stabilisation**
 > window (no SFU-1 / DC-3 / BENCH-1; §7 = NO, closed
 > 2026-10-19); the only landed feature work is the
 > **DC-1 readiness PR-1** (`EngineConfig::datachannel_backend`
@@ -1081,8 +1164,8 @@ real `## [1.0.0]` block:
 > landed in sequence (rc.1 PR-1 → repair → test-align →
 > CI flake-fix), followed by one attempted-build commit and
 > its revert (`a88383e` → `ef6ff11`, net-zero).  All are
-> pushed as a single stack and the tag points at the
-> post-`ef6ff11` tree.
+> pushed as a single stack; the `v0.14.0-rc.1` tag, when it
+> is cut, points at the post-`ef6ff11` tree.
 
 ### Highlights
 

@@ -1,14 +1,14 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.10.3-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.14.0--rc.1-orange.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#平台支持)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **当前版本**：v0.10.3 技术预览版 — Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证。
-> 见 [当前进度](#当前进度v0100-技术预览版) 看今天能做什么；[路线图](#路线图p1p4-简化版) 看下一步。
+> **当前版本**：v0.14.0-rc.1 技术预览版 — Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证。
+> 见 [当前进度](#当前进度v01400-rc1-技术预览版) 看今天能做什么；[路线图](#路线图p1p4-简化版) 看下一步。
 >
 > 📖 **本文档为英文 README 的中文版本**。技术 canonical 文档以 [`docs/zh/architecture.md`](docs/zh/architecture.md) 为准（ADR-012）。中文 README 与英文 README 内容同步维护。
 
@@ -49,7 +49,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 
 - **是什么**：一个可嵌入的 C++20 媒体引擎，从零开始实现的 WebRTC 替代品，**不是** libwebrtc 的 fork。
 - **存在的原因**：libwebrtc 体积庞大、难以嵌入、加密和编解码不透明。NimRTC 保留同等级协议兼容性的同时，把 monolith 替换成分层 + plugin 适配的引擎，可被检查、可被定制、可被部署在 aarch64 上。
-- **当前状态**：v0.10.3 技术预览版，Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证通过；CI 在 Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均为绿色。生产级别质量在 P3 / P4 落地。
+- **当前状态**：v0.14.0-rc.1 技术预览版，Chrome ↔ NimRTC P2P 音视频互通已在 Windows 上验证通过；CI 在 Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均为绿色。WebTransport / msquic 数据面（DC-1）已接线，但 Chrome e2e Case E（DataChannel over WebTransport / QUIC）**卡在服务端 QUIC 握手缺陷**上 —— harness 已能端到端驱动 Chrome ↔ NimRTC 互通，msquic listener 却始终完不成握手。默认的 `SctpDataChannel`（id `"sctp"`）实际解析到 `SctpStubFactory`（id `"stub"`）桩实现，发送一律返回 `kErrNotReady`，不承载数据；可用的数据通道是 `WebTransportDataChannel`（id `"web_transport"`，ADR-014）。生产级别质量在 P3 / P4 落地。
 
 ---
 
@@ -460,7 +460,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 ---
 
-## 当前进度（v0.10.3 技术预览版）
+## 当前进度（v0.14.0-rc.1 技术预览版）
 
 master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能力：
 
@@ -481,6 +481,13 @@ master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能�
 | PAL Slice 7.5 —— `WebRtcClassicStackFactory`（id=`"webrtc-classic"`） | ✅ | v0.10.3 |
 | PAL Slice 8 —— 4 个传输层 typed registry hook | ✅ | v0.10.2 |
 | H.264 硬件后端（NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ | v0.9.2 |
+| Chrome 媒体互通（Case D：音视频）+ PCM tap（TAP-1）+ Profile 库官方化（PROFILE-1） | ✅ | v0.11.0 |
+| 五种命名传输栈（PAL Slice 7 / 7.6 / 8）+ Profile schema v1.1 + engine 集成 | ✅ | v0.12.0 |
+| P1 UAF-DTLS 类型系统加固 + API 稳定性框架（ADR-015 冻结起点）+ PAL Slice 1.5 | ✅ | v1.0.0-alpha.1 |
+| WebTransport / QUIC 选型（ADR-014）+ `IWebTransportSession` seam + registry 槽位 | ✅ | v0.14.0 |
+| msquic C API 集成 + WebTransport 数据面（DC-1 wire-up）+ `WebTransportMsQuicSession` / `WebTransportDataChannel` | ✅ | v0.14.0-beta.1 |
+| `EngineConfig::datachannel_backend` 分派 + `unregister_datachannel()` + wasm-demo §7 收口 | ✅ | v0.14.0-rc.1 |
+| Chrome e2e Case E（DataChannel over WebTransport / QUIC） | ❌ 服务端 QUIC 握手缺陷（harness 已端到端跑通，msquic listener 握手不完成） | 目标 v1.0.0 |
 
 > v0.10 关闭 v0.9 收尾并落地 PAL Slice 1 结构重构。P2 内容（DataChannel 互通、PCM tap、
 > Profile 库官方化）排入 **v0.11.0**。
@@ -488,6 +495,14 @@ master 分支、`cmake --preset release.msvc` 出来后，今天能跑通的能�
 > （SFU-1 / DC-3 / BENCH-1）在 §7 pre-1.0 决策窗口被关闭为 NO —— SFU
 > 不是项目核心目标。`relay` Profile 的单策略转发仍是 P2 的核心交付物，
 > 但 from-scratch SFU 模块不在 v1.0.x 关键路径上。详见 `docs/plan/v1.0-plan.md` §7 + §12.5。见 [路线图](#路线图p1p4-简化版)。
+>
+> **Case E 现状（2026-10-22）**：harness 原先使用旧草案 WebTransport API 形状
+> （`session.datagrams.incoming`），在 Chrome 上抛异常并**在建立连接之前就中断整轮**，
+> 因此历次 "Case E FAIL" 记录并未真正检验过连接。该缺陷已修正为现行规范形状
+> （`session.datagrams.readable`）；修正后 harness 能真正 `await session.ready` 并报出真实原因：
+> msquic listener 的 QUIC 握手始终不完成（Chrome 报
+> `ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`，服务端绑定端口但 0 会话）。
+> 详见 `CHANGELOG.md` `[Unreleased]`。
 
 ---
 

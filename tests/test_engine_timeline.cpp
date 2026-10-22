@@ -24,6 +24,16 @@
  *      the documented host hand-off; the field defaults to `false` so a
  *      host that forgets to copy it gets the off-state, not the on-state.
  *
+ *   5. **The reconstruction itself.** Cases 1-4 are all about config
+ *      plumbing: they pass whether or not the tracker is wired to
+ *      anything. Cases 5-7 push real RTCP Sender Reports and real RTP
+ *      packets (built with `nimrtc::rtp::SrBuilder` / `PacketBuilder`)
+ *      through `feed_media_inbound()` — the same RTCP-demux → RTP-parse →
+ *      dispatch tail `on_transport_recv()` uses — and assert the capture
+ *      instant that comes back out. This is the only path that would have
+ *      caught the 1.875× audio clock-rate bug, and the only one that
+ *      would catch a regression of it.
+ *
  * The suite uses the "shell" transport strategy (the same sentinel
  * `test_datachannel_engine` uses) so `open()` reaches the open state
  * without binding ICE UDP sockets — these cases are about config
@@ -32,18 +42,23 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/rtp/packet.hpp>
 #include <nimrtc/rtp/timeline.hpp>
 
 namespace {
 
 using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
+using nimrtc::rtp::kAbsSendTimeDefaultLocalId;
+using nimrtc::rtp::kNtpEpochOffset;
 
 class EngineTimeline : public ::testing::Test {
 protected:
@@ -61,6 +76,73 @@ protected:
         // for why the real stack cannot be used on CI runners.
         cfg.transport_strategy_name = "shell";
         return cfg;
+    }
+
+    // ---- Packet factories -------------------------------------------
+    //
+    // These build genuine wire bytes rather than poking the tracker, so
+    // the cases below exercise the *whole* engine seam: the RTCP demux,
+    // the SR parse, the abs-send-time element lookup under the negotiated
+    // extension id, and the per-SSRC clock-rate pinning.
+
+    static std::int64_t now_unix_us() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    /** Wall-clock seconds since the Unix epoch, truncated.
+     *
+     *  The reconstruction asserts an exact microsecond value, so the SR's
+     *  NTP instant must land on a whole second: a fractional second would
+     *  round-trip through the 2^-32 second field with a ±1 µs truncation
+     *  and make the expected value ambiguous. */
+    static std::int64_t whole_second_unix_us() {
+        return (now_unix_us() / 1'000'000LL) * 1'000'000LL;
+    }
+
+    static nimrtc::core::ByteBuffer make_sr(std::uint32_t ssrc,
+                                            std::uint32_t rtp_ts,
+                                            std::int64_t unix_us) {
+        // EXPECT_*, not ASSERT_*: the latter expands to `return;` on
+        // failure, which cannot compile in a value-returning function.
+        EXPECT_EQ(unix_us % 1'000'000LL, 0)
+            << "make_sr() expects a whole-second instant — see "
+               "whole_second_unix_us()";
+        const std::uint64_t ntp =
+            (static_cast<std::uint64_t>(unix_us / 1'000'000LL + kNtpEpochOffset))
+            << 32;
+        nimrtc::rtp::SrBuilder sr;
+        sr.set_ssrc(ssrc).set_ntp_timestamp(ntp).set_rtp_timestamp(rtp_ts);
+        return sr.build();
+    }
+
+    static nimrtc::core::ByteBuffer make_rtp(std::uint32_t ssrc,
+                                             std::uint8_t pt,
+                                             std::uint32_t rtp_ts,
+                                             std::uint32_t ast24) {
+        static const std::uint8_t kPayload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+        nimrtc::rtp::PacketBuilder pb;
+        pb.set_ssrc(ssrc).set_seq(0).set_timestamp(rtp_ts).set_payload_type(pt);
+        pb.set_abs_send_time(nimrtc::rtp::AbsSendTime{ast24},
+                             kAbsSendTimeDefaultLocalId);
+        pb.set_payload(
+            nimrtc::core::ByteSpan(kPayload, sizeof(kPayload)));
+        return pb.build();
+    }
+
+    /** Run the SDP negotiation a real session performs.
+     *
+     *  `observe_timeline()` returns immediately when no peer's `a=extmap`
+     *  was seen, so without this no reconstruction is possible at all.
+     *  A second throwaway engine stands in for the peer and supplies its
+     *  offer — the same handshake order test_dtls_srtp_timing.cpp uses. */
+    static bool negotiate_with_peer(NimRTCEngine& rx, const EngineConfig& cfg) {
+        NimRTCEngine tx(cfg);
+        if (tx.open() != 0) return false;
+        const std::string offer = tx.create_offer();
+        if (offer.empty()) return false;
+        return rx.process_remote_sdp(offer).has_value();
     }
 };
 
@@ -165,6 +247,158 @@ TEST_F(EngineTimeline, TimelineIsOptInByDefault) {
     EXPECT_EQ(defaults.sr_period_ms, nimrtc::rtp::kSrPeriodMs)
         << "the default cadence should track nimrtc::rtp::kSrPeriodMs "
            "(the WebRTC default) so the two do not drift";
+}
+
+// =====================================================================
+// 5. A Sender Report off the wire anchors the reconstruction — at the
+//    right media clock rate.
+//
+// This is the case that would have caught the 1.875× audio bug: the SR
+// and the probe packet both arrive as raw bytes, and the only thing
+// telling the engine that this SSRC runs at 48 kHz is the payload-type
+// demux in handle_rtp(). If that pinning regresses to the 90 kHz
+// default, the assertion below fails by ~467 ms.
+// =====================================================================
+TEST_F(EngineTimeline, SenderReportFromTheWireAnchorsReconstruction) {
+    constexpr std::uint32_t kSsrc = 0x0A0A0A0Au;
+    constexpr std::uint8_t  kPt   = 111;    // Opus, RFC 7587
+    constexpr std::uint32_t kRate = 48000;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled            = true;
+    cfg.audio_codec.payload_type    = kPt;
+    cfg.audio_codec.clock_rate      = kRate;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg))
+        << "the SDP handshake a real session performs must succeed";
+    ASSERT_EQ(rx.remote_abs_send_time_ext_id(), kAbsSendTimeDefaultLocalId)
+        << "no negotiated extmap ⇒ observe_timeline() bails out and no "
+           "reconstruction is possible at all";
+
+    // Anchor the SR a few seconds in the past so the reconstructed
+    // capture instant — and therefore the one-way delay — is positive.
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/48'000, sr_us);
+    ASSERT_FALSE(sr.empty());
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    // The SR is an *anchor*, not a capture instant: the accessors stay
+    // empty until a media packet asks for one.
+    EXPECT_FALSE(rx.capture_ts_us_for_ssrc(kSsrc).has_value())
+        << "an SR alone must not synthesise a capture timestamp";
+    EXPECT_FALSE(rx.last_capture_ts_us().has_value());
+
+    // One second of audio later: 48000 ticks at 48 kHz.
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/96'000, /*ast24=*/0);
+    ASSERT_FALSE(pkt.empty());
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    const auto cap = rx.capture_ts_us_for_ssrc(kSsrc);
+    ASSERT_TRUE(cap.has_value())
+        << "the SR was ingested and the packet carried a negotiated "
+           "abs-send-time element, so a capture instant must exist";
+
+    EXPECT_EQ(*cap, sr_us + 1'000'000LL)
+        << "48000 ticks at 48 kHz is 1 s; got " << (*cap - sr_us)
+        << " µs instead — the per-SSRC clock-rate pinning (plan gap #1) "
+           "has regressed to the 90 kHz default";
+
+    EXPECT_EQ(rx.last_capture_ts_us(), cap)
+        << "the convenience accessor must mirror the per-SSRC one";
+
+    const auto owd = rx.last_one_way_delay_us();
+    ASSERT_TRUE(owd.has_value());
+    // arrival − capture, and the packet arrived ~4.4 s after the capture
+    // instant it reconstructed. This also pins the sign: the accessor used
+    // to return the negation, so a 4 s transit read back as −4 s — a
+    // number no latency consumer can act on.
+    EXPECT_GT(*owd, 3'000'000)
+        << "one-way delay must be arrival minus capture, i.e. positive; "
+           "got " << *owd << " µs";
+    EXPECT_LT(*owd, 6'000'000)
+        << "capture was reconstructed ~4 s before arrival, so the "
+           "one-way delay must be ~4 s, not " << *owd << " µs";
+}
+
+// =====================================================================
+// 6. abs-send-time refinement beats the media-clock extrapolation.
+//
+// The probe below sits 50400 ticks past the SR — 1.05 s at 48 kHz —
+// while its abs-send-time counter says 1.000 s. That 5% gap is a media
+// clock running fast, exactly the error the refinement exists to cancel
+// (ADR-017 §"Decision 2"). The assertion distinguishes the two paths:
+// an unrefined estimate would report +1_050_000 µs.
+// =====================================================================
+TEST_F(EngineTimeline, AbsSendTimeRefinementOverridesMediaClockEstimate) {
+    constexpr std::uint32_t kSsrc      = 0x0B0B0B0Bu;
+    constexpr std::uint8_t  kPt        = 111;
+    constexpr std::uint32_t kAstAnchor = 0x100000u;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled            = true;
+    cfg.audio_codec.payload_type    = kPt;
+    cfg.audio_codec.clock_rate      = 48000;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg));
+    ASSERT_EQ(rx.remote_abs_send_time_ext_id(), kAbsSendTimeDefaultLocalId);
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/0, sr_us);
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    // Anchor packet: sits exactly on the SR's RTP timestamp, so its
+    // abs-send-time value is what the tracker pairs the SR with.
+    const auto anchor = make_rtp(kSsrc, kPt, /*rtp_ts=*/0, kAstAnchor);
+    rx.feed_media_inbound(anchor.data(), anchor.size());
+
+    // 65536 abs-send-time ticks at 65536 Hz is exactly 1 s.
+    const auto probe =
+        make_rtp(kSsrc, kPt, /*rtp_ts=*/50'400, kAstAnchor + 65'536u);
+    rx.feed_media_inbound(probe.data(), probe.size());
+
+    const auto cap = rx.capture_ts_us_for_ssrc(kSsrc);
+    ASSERT_TRUE(cap.has_value());
+    EXPECT_EQ(*cap, sr_us + 1'000'000LL)
+        << "expected the abs-send-time refined value (1.000 s); the "
+           "media-clock extrapolation alone would have given "
+        << (*cap - sr_us)
+        << " µs — so either the refinement did not run, or its "
+           "agreement tolerance rejected a consistent anchor";
+}
+
+// =====================================================================
+// 7. The gate is symmetric: with timeline_enabled=false the engine must
+//    ignore an inbound SR entirely, not merely decline to emit one.
+// =====================================================================
+TEST_F(EngineTimeline, DisabledEngineIgnoresInboundSenderReport) {
+    constexpr std::uint32_t kSsrc = 0x0C0C0C0Cu;
+    constexpr std::uint8_t  kPt   = 111;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled         = false;
+    cfg.audio_codec.payload_type = kPt;
+    cfg.audio_codec.clock_rate   = 48000;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/0, sr_us);
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/50'400, 0x100000u);
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    EXPECT_FALSE(rx.capture_ts_us_for_ssrc(kSsrc).has_value())
+        << "handle_rtcp() must drop the SR when the seam is off — an "
+           "inbound SR is of no use to a disabled tracker";
+    EXPECT_FALSE(rx.last_capture_ts_us().has_value());
+    EXPECT_FALSE(rx.last_one_way_delay_us().has_value());
 }
 
 } // anonymous namespace

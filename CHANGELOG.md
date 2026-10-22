@@ -16,6 +16,20 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after that entry — see ADR-017 and
   `docs/plan/timeline-engine-wiring.md`.)
 
+### Fixed
+
+- **`NimRTCEngine::last_one_way_delay_us()` returned the wrong
+  sign.**  It computed `capture − arrival` instead of
+  `arrival − capture`, so a packet that took 4 s to cross the
+  link reported a one-way delay of **−4 s**.  Every consumer
+  of a latency metric — an agent profile budgeting its
+  closed-loop delay, say — received a negative number it
+  cannot act on.  The accessor is `NIMRTC_API_STABLE`, but at
+  `v0.14.0` (pre-1.0.0) it had no other caller, no test and no
+  documented example depending on the old order, so the
+  correction is a straight bug fix.  Both header comments now
+  state the formula explicitly.
+
 - **Still open across the cycle (carried from rc.1):**
   - The **Chrome e2e Case E DataChannel** acceptance gate
     (DC-1) is blocked on a server-side QUIC handshake
@@ -34,15 +48,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The **cross-end timeline seam** is wired into the engine
     (`EngineConfig::timeline_enabled` gates SDP `a=extmap`
     negotiation, outbound abs-send-time, SR scheduling, and
-    inbound capture reconstruction), but its per-SSRC media
-    clock rate is still not taken from the SDP `a=rtpmap`, so
-    capture timestamps are only correct for 90 kHz (video)
-    SSRCs — audio at 48 kHz is reconstructed against the
-    wrong rate.  The engine-side gate, SDP negotiation and
-    empty-state invariant are covered by
-    `tests/test_engine_timeline.cpp`; the reconstruction path
-    itself is not.  See `docs/plan/timeline-engine-wiring.md`
-    and ADR-017 Decision 6.
+    inbound capture reconstruction).  Both v1.0.0 gaps it had
+    are now closed: the per-SSRC media clock rate is pinned
+    from the payload-type demux (audio at 48 kHz no longer
+    reconstructs against the 90 kHz default), and
+    `tests/test_engine_timeline.cpp` drives real RTCP SRs and
+    abs-send-time-bearing RTP packets through the production
+    dispatch.  What remains is v1.1 work by decision —
+    `sender_recv_skew_us` is still always 0 and the slope is
+    derived rather than fitted.  See
+    `docs/plan/timeline-engine-wiring.md` and ADR-017
+    Decisions 3, 4 and 6.
   - The **L1 strict-priority scheduling policy** (DC-2)
     is v1.0.0-beta.2; rc.1 ships only the cross-plane test.
 

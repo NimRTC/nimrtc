@@ -29,11 +29,17 @@ estimate. That half is done. This plan covers the **engine** half — turning
 | Public read accessors | `last_capture_ts_us()` / `capture_ts_us_for_ssrc()` / `last_one_way_delay_us()` |
 
 Verified: `ctest -C Release` → 590/590 pass on MSVC 14.43 / Release
-(586 pre-existing + 4 new `EngineTimeline` cases).
+(586 pre-existing + 4 new `EngineTimeline` cases). Two further registered
+cases — `SctpUsrsctpTest.LoopbackDatagramRoundTrip` and
+`SctpUsrsctpTest.PartialReliableTtlDrop` — are reported as *not run*:
+`tests/test_sctp_usrsctp.cpp` disables them under `#if defined(_WIN32) ||
+defined(__APPLE__)` because `usrsctp_connect()` never completes on those
+runners. That is an intentional platform skip, not a coverage hole in this
+plan.
 
 ### Engine-level test — **landed**
 
-`tests/test_engine_timeline.cpp` (4 cases, ctest #555–558) covers the
+`tests/test_engine_timeline.cpp` (4 cases, ctest #558–561) covers the
 wiring this plan describes:
 
 | Case | Pins |
@@ -45,41 +51,83 @@ wiring this plan describes:
 
 ### Known gaps
 
-### 1. Per-SSRC clock rate is not wired from SDP — **correctness bug**
+### 1. Per-SSRC clock rate — **closed (landed)**
 
-`SenderReportTracker` extrapolates against a per-SSRC media clock rate. That
-rate is *not* in the Sender Report (RFC 3550 §6.4.1 carries only the RTP
-timestamp); it comes from the SDP `a=rtpmap` line. The engine never calls
-`set_ssrc_clock_rate()`, so every SSRC falls back to the 90 kHz default.
+This was originally recorded here as a correctness bug: the engine never
+called `set_ssrc_clock_rate()`, so every SSRC fell back to the 90 kHz
+default and a 48 kHz audio SSRC was reconstructed off by 90000/48000 ≈
+1.875×.
 
-For video that is accidentally correct. For 48 kHz audio it is wrong by
-90000/48000 ≈ 1.875×: every audio capture instant is stretched by that factor,
-so `last_capture_ts_us()` reports a time well in the future and
-`last_one_way_delay_us()` is garbage.
+The fix has since landed, in `NimRTCEngine::handle_rtp()`
+(`src/engine/src/engine.cpp`), on the `config_.timeline_enabled` branch
+that already ran for every inbound packet:
 
-**This is the one gap that makes the feature actively misleading rather than
-merely incomplete.** An agent profile driving closed-loop latency on the audio
-path would act on a wrong number.
+| Step | Code |
+|---|---|
+| Resolve the rate from the same payload-type demux used for media routing — video PT ⇒ 90000 (RFC 6184 §5.6 H.264), otherwise `EngineConfig::audio_codec.clock_rate` | `clock_rate` local |
+| Pin it on the tracker, once per SSRC | `clock_rate_pinned_ssrcs.insert(...).second` gate → `sr_tracker.set_ssrc_clock_rate(ssrc, clock_rate)` |
+| Leave the extrapolation call itself rate-agnostic | `capture_ts_us_for(..., /*clock_rate_hz=*/0, ...)` — 0 means "use the pinned rate" |
 
-Fix: on SDP processing, walk each media section's `rtpmap`, and for the SSRC
-bound to that m-line call `set_ssrc_clock_rate(ssrc, clock_rate)`. The RTP
-layer does not currently carry an SSRC→m-line mapping, so the pragmatic first
-cut is to apply the audio section's rate to the audio SSRC and the video
-section's to the video SSRC, using the configured SSRCs from
-`EngineConfig::audio_codec` / `video_sender_tuning`.
+Two details worth keeping:
 
-### 2. The reconstruction path itself is untested
+- The pin is **before** `observe_timeline()`, so the very first packet on a
+  new SSRC already reconstructs against the right rate instead of the 90 kHz
+  fallback.
+- The gate is an explicit `std::unordered_set`, **not** the tracker's
+  `state_for()` accessor. `state_for()` would insert on lookup, so asking
+  "have I pinned this yet?" would itself allocate and dirty the tracker on
+  every packet across the whole pre-SR window — the exact hot path this
+  avoids. The set also keeps a second SSRC on the same payload type (RFC 5956
+  simulcast) on its own entry.
 
-`test_engine_timeline.cpp` covers the gate, the SDP negotiation, and
-the empty-state invariant — but not the reconstruction. Nothing drives
-a synthetic SR + an abs-send-time-bearing RTP packet through
-`handle_rtcp()` / `observe_timeline()` and asserts the returned capture
-instant. That is precisely the gap that would have caught #1.
+Known residual: the video rate is the literal 90000 rather than a parse of
+the SDP `a=rtpmap`. Every standardised video RTP payload (H.264/VP8/VP9/AV1)
+is 90 kHz, so this is not a live bug — but a codec that is not would need the
+rate to come off the wire instead.
 
-### 3. `sender_recv_skew_us` is always 0
+### 2. The reconstruction path itself is untested — **closed (landed)**
 
-Reserved for v1.1 by ADR-017 Decision 4 — needs paired local-monotonic
-samples at both the SR instant and the RTP instant threaded through.
+`test_engine_timeline.cpp` now has three reconstruction cases that push
+real wire bytes through `NimRTCEngine::feed_media_inbound()` — the same
+RTCP-demux → RTP-parse → `handle_rtcp()` / `handle_rtp()` tail
+`on_transport_recv()` uses, factored out as the private
+`dispatch_media_inbound()` so the test cannot drift onto a parallel
+implementation:
+
+| Case | What it pins |
+|---|---|
+| `SenderReportFromTheWireAnchorsReconstruction` | SR ingested, probe packet reconstructed at **48 kHz** — the gap-#1 regression guard |
+| `AbsSendTimeRefinementOverridesMediaClockEstimate` | the refined value wins over the media-clock estimate (5% rate error) |
+| `DisabledEngineIgnoresInboundSenderReport` | the gate is symmetric: an inbound SR is dropped, not just an outbound one |
+
+The seam exists because `feed_srtp_inbound()` cannot reach this path: it
+needs a completed DTLS handshake to derive SRTP keys, and a shell-strategy
+engine has no peer to complete one against. It is `NIMRTC_API_UNSTABLE`
+and documented as a test seam in `engine.hpp`.
+
+**Mutation-verified.** Reverting the audio clock-rate line in
+`handle_rtp()` to the 90 kHz default makes
+`SenderReportFromTheWireAnchorsReconstruction` fail with 533 333 µs
+instead of 1 000 000 — exactly the 90000/48000 = 1.875× error. The case
+is load-bearing, not decorative.
+
+Residual: the RTP-side arithmetic itself is still covered separately by
+`src/modules/rtp/tests/test_timeline.cpp`; there is no test that drives a
+*real* two-engine DTLS/SRTP session end to end and checks the timeline
+against it. That needs a paired handshake, not a seam.
+
+### 3. `sender_recv_skew_us` is always 0 — **still open, v1.1 by decision**
+
+`timeline.cpp` writes a hardcoded `0` into the out-parameter and
+`handle_rtp()` passes `nullptr`. Reserved for v1.1 by ADR-017 Decision 4 —
+needs paired local-monotonic samples at both the SR instant and the RTP
+instant threaded through.
+
+### 4. No fitted slope — **still open, v1.1 by decision**
+
+`slope_nsec_per_rtp_ts` is a constant *derived* from `clock_rate_hz`, not a
+fit across ≥ 2 SR samples (ADR-017 Decision 3). Correct to sub-millisecond
+for sessions of a few minutes; degrades after that.
 
 ## Reference-citation corrections
 
@@ -100,8 +148,9 @@ correct.
 
 ## Next steps
 
-1. Wire `set_ssrc_clock_rate()` from SDP `rtpmap` (gap #1) — **do this first**,
-   it is a correctness fix.
-2. Extend `test_engine_timeline.cpp` with a reconstruction case (gap #2) —
-   it pins gap #1 closed.
+1. ~~Wire `set_ssrc_clock_rate()`~~ — **done**, see gap #1 above.
+2. ~~Engine-level reconstruction case~~ — **done**, see gap #2 above.
+   Both v1.0.0 gaps the timeline had are now closed; what remains is
+   gap #3 (`sender_recv_skew_us`) and gap #4 (fitted slope), both of
+   which ADR-017 Decisions 3–4 place in v1.1 by decision.
 3. v1.1: slope estimation + `sender_recv_skew_us` (ADR-017 Decisions 3–4).

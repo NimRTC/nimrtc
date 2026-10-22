@@ -153,19 +153,21 @@ and exposes the reconstruction through `last_capture_ts_us()`,
 | Engine wiring: read `Profile::timeline_enabled`, feed parsed SRs into the tracker, expose capture timestamps | **landed** — `src/engine` |
 | `sender_recv_skew_us` real value | **v1.1** by decision |
 
-### Decision 6 — Known limitation: no engine-side SDP-driven clock rate
+### Decision 6 — Engine-side per-SSRC clock rate: **landed**
 
-`SenderReportTracker` needs each SSRC's media clock rate, which the
-media clock rate does not carry (RFC 3550 §6.4.1) — it comes from the
-SDP `a=rtpmap` line. The engine currently does **not** call
-`set_ssrc_clock_rate()` per SSRC, so an audio SSRC at 48 kHz is
-reconstructed against the 90 kHz default and its capture instants are
-wrong by a factor of 90000/48000 ≈ 1.875.
+`SenderReportTracker` needs each SSRC's media clock rate, which the Sender
+Report does not carry (RFC 3550 §6.4.1) — it comes from the SDP `a=rtpmap`
+line. Leaving it unwired was a real correctness gap: an audio SSRC at 48 kHz
+reconstructed against the 90 kHz default is wrong by 90000/48000 ≈ 1.875, and
+`last_capture_ts_us()` was only trustworthy for video (90 kHz) SSRCs.
 
-This is a real gap, not a documented limitation to accept: until it
-closes, `last_capture_ts_us()` is only trustworthy for video (90 kHz)
-SSRCs. It is tracked as v1.1 work alongside `sender_recv_skew_us`, and
-the fix sequence is in `docs/plan/timeline-engine-wiring.md`.
+`NimRTCEngine::handle_rtp()` now resolves the rate from the same
+payload-type demux used for media routing — video PT ⇒ 90000 (RFC 6184 §5.6
+H.264), otherwise `EngineConfig::audio_codec.clock_rate` — and pins it on the
+tracker once per SSRC via `set_ssrc_clock_rate()`. The pin happens before
+`observe_timeline()`, so the first packet on a new SSRC already reconstructs
+against the correct rate. Implementation detail and rationale: gap #1 in
+`docs/plan/timeline-engine-wiring.md`.
 
 ## Consequences
 
@@ -176,13 +178,13 @@ signature change. The anchoring convention and the SR-authoritative /
 abs-send-time-refining split are decided, which is the part that is
 expensive to reverse.
 
-**Negative.** Reconstruction is only correct for 90 kHz (video) SSRCs
-until the engine wires `set_ssrc_clock_rate()` from the SDP `a=rtpmap`
-(see Decision 6). `sender_recv_skew_us` is reserved but always 0
-(Decision 4). Nothing in the current test suite exercises the engine
-path end-to-end — the timeline unit tests cover the RTP-side tracker
-directly, so a regression in the SDP-negotiation or RTCP-demux wiring
-would not be caught by `ctest`.
+**Negative.** `sender_recv_skew_us` is reserved but always 0 (Decision 4),
+and the estimator extrapolates from a single SR against a *derived* slope
+rather than a fitted one (Decision 3) — both are v1.1 by decision. The
+engine seam is covered by `tests/test_engine_timeline.cpp`, which drives
+real RTCP SRs and abs-send-time-bearing RTP packets through the production
+dispatch; there is still no test that runs a *paired* DTLS/SRTP session
+and checks the timeline against it.
 
 **Neutral.** The `set_ref_frame()` no-op kept on the video-pipeline
 plugin interface is unaffected — the engine reads capture metadata

@@ -150,6 +150,25 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    CI runners (windows, linux-gcc, linux-aarch64, macos-clang). All four must
    be green before proceeding.
 
+   **aarch64 soft-dependency policy (W5).** The `linux-aarch64` leg of
+   `release.yml` is `continue-on-error: true` and is deliberately *not* listed
+   in `publish-release`'s `needs:`. GHA-hosted ARM64 runner capacity is
+   unreliable (a 14+ hour queue was observed at the v0.14.0 cut), so making
+   it a hard gate would block publishing the Windows / Linux x86_64 / macOS
+   arm64 trio. Consequences, all of them explicit rather than silent:
+
+   - The aarch64 bundle is **best-effort**. When the leg does not run or
+     fails, the release is published with the other three bundles and a
+     "Partial release" banner in the release body; the missing bundle is
+     listed by name.
+   - `publish-release` writes the present / missing bundle list and the
+     per-platform 3A status into the run's Step Summary, so a partial
+     release cannot pass unnoticed.
+   - The aarch64 artefact is attached by a follow-up release once runner
+     capacity returns.
+   - The **CI** leg in `ci.yml` (`linux-aarch64`) remains a hard gate. Only
+     the *release* leg is soft.
+
 5. Run the release freeze checklist:
 
    ```bash
@@ -174,10 +193,23 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    **CI vs release build differ on WebRTC APM**: `.github/workflows/ci.yml`
    passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all four Configure steps so
    the runner doesn't need a `meson`+`abseil-cpp` prebuild. The actual release
-   artefact built by `.github/workflows/release.yml` **must** carry real 3A,
+   artefact built by `.github/workflows/release.yml` **should** carry real 3A,
    so the release pipeline runs `python tools/fetch_webrtc_apm.py` once per
-   platform before Configure, then configures with `-DNIMRTC_VENDORED_WEBRTC_APM=ON`.
-   See `docs/zh/architecture.md` §11.5.5 for the rationale.
+   platform before Configure and configures with
+   `-DNIMRTC_VENDORED_WEBRTC_APM=ON`.
+
+   The prebuild is `continue-on-error: true` (W3): the meson build of
+   `webrtc_audio_processing` pulls in `abseil-cpp` as a subproject and is
+   known to fail on the `windows-2022` runner (it aborted the whole
+   `v0.14.0` release cut — see commit `dc15ad8`). A failed prebuild
+   therefore **degrades the bundle to NimRTC's built-in stub 3A path
+   instead of aborting the release**, and Configure picks the mode from
+   the prebuild outcome (`ON` on success, `OFF` otherwise). Each build job
+   records its outcome in `build/3a-status-<platform>.txt`; `publish-release`
+   reads those files and writes the per-platform 3A status into the release
+   body and the run's Step Summary, so a bundle carrying the stub 3A path
+   is never published silently. See `docs/zh/architecture.md` §11.5.5 for
+   the rationale.
 
 ### 3.2 Stabilisation window (T-7 … T-1)
 
@@ -353,8 +385,11 @@ WebRTC APM is **not** part of the Phase 3 migration — it is already vendored
 in `src/third_party/webrtc_audio_processing/` and built by meson (not CMake).
 Its conditional prebuild guard (`NIMRTC_VENDORED_WEBRTC_APM`) is documented in
 `docs/zh/architecture.md` §11.5.5. The short version: CI uses `=OFF`; the
-release pipeline uses `=ON` after running `python tools/fetch_webrtc_apm.py`
-once per platform.
+release pipeline **prefers** `=ON` after running `python tools/fetch_webrtc_apm.py`
+once per platform, but the prebuild is `continue-on-error: true` — a failed
+prebuild falls back to `=OFF` (the built-in stub 3A path) instead of aborting
+the cut, and the per-platform outcome is recorded in `build/3a-status-*.txt`
+and surfaced in the release body. See §3.1 step 4.
 
 ---
 

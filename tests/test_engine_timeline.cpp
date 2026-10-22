@@ -109,9 +109,13 @@ protected:
         EXPECT_EQ(unix_us % 1'000'000LL, 0)
             << "make_sr() expects a whole-second instant — see "
                "whole_second_unix_us()";
-        const std::uint64_t ntp =
-            (static_cast<std::uint64_t>(unix_us / 1'000'000LL + kNtpEpochOffset))
-            << 32;
+        // Split the two halves so the signed→unsigned conversion is
+        // explicit. `unix_us / 1'000'000LL + kNtpEpochOffset` in one
+        // expression makes GCC convert the signed operand to unsigned as
+        // part of the arithmetic (-Wsign-conversion).
+        const std::uint64_t ntp_secs =
+            static_cast<std::uint64_t>(unix_us / 1'000'000LL) + kNtpEpochOffset;
+        const std::uint64_t ntp = ntp_secs << 32;
         nimrtc::rtp::SrBuilder sr;
         sr.set_ssrc(ssrc).set_ntp_timestamp(ntp).set_rtp_timestamp(rtp_ts);
         return sr.build();

@@ -53,6 +53,16 @@ target_include_directories(nimrtc_web_transport
     PRIVATE
         ${CMAKE_BINARY_DIR}/include)
 
+# The WebTransport server seam loads its TLS material from the build
+# directory (wtserver_hash.txt on Windows, wtserver_key.pem +
+# wtserver_cert.pem on Linux/macOS).  Compiling the binary directory in
+# lets the listener find that material no matter which working directory
+# the process was started from (ctest runs from <build>/tests, the Chrome
+# interop harness from the repository root).  NIMRTC_BUILD_ROOT still
+# takes precedence when it is set in the environment.
+target_compile_definitions(nimrtc_web_transport PRIVATE
+    NIMRTC_DEFAULT_BUILD_ROOT="${CMAKE_BINARY_DIR}")
+
 # msquic API is C, so we need to ensure extern "C" is in scope.
 # The msquic header handles this internally, but we also need
 # to set the C++ standard to at least C++17 for std::span etc.

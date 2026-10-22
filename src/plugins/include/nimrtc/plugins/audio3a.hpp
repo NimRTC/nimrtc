@@ -73,7 +73,7 @@ struct NIMRTC_API_STABLE PcmFrameMetadata {
     uint8_t  num_channels   = 1;
     int64_t  timestamp_us   = 0;   // monotonic microseconds
 
-    /** Timeline seam fields (ADR-016, v1.0.0).  Additive — existing
+    /** Timeline seam fields (ADR-017, v1.0.0).  Additive — existing
      *  plugins that ignore them continue to compile and run.  The
      *  engine populates these from the active media path:
      *    - media_ssrc: RTP SSRC the frame belongs to (sender's side)

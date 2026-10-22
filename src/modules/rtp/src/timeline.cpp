@@ -260,7 +260,7 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
     // monotonic" at the SR instant *and* at the RTP instant; we leave
     // 0 for now. Callers needing skew should sample the local mono
     // clock at every SR + at every captured RTP and compute it out-
-    // of-band. See docs/adr/ADR-016 §"Diagnostic skew".
+    // of-band. See ADR-017 §"Decision 4".
     if (out_sender_recv_skew_us) *out_sender_recv_skew_us = 0;
     return capture_unix_us;
 }

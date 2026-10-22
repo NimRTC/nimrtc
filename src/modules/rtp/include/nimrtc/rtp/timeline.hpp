@@ -221,42 +221,54 @@ public:
     std::size_t tracked_ssrc_count() const noexcept;
 
     /** Returns the reconstructed sender-wall-clock capture timestamp
-     *  (microseconds, NTP-anchored) for an inbound RTP packet identified
-     *  by SSRC and carrying `abs_send_time_24` as the 24-bit
-     *  abs-send-time field. Returns std::nullopt when:
+     *  (microseconds, UNIX-anchored) for an inbound RTP packet
+     *  identified by SSRC and carrying `abs_send_time_24` as the
+     *  24-bit abs-send-time field. Returns std::nullopt when:
      *    - No SR has been seen for this SSRC yet; or
      *    - abs_send_time_24 is the sentinel "no extension" value.
      *
      *  IMPORTANT: this is a *microsecond* timestamp on the sender's
-     *  wall clock (1900 NTP epoch). Callers anchor it to their own
+     *  wall clock (1970 Unix epoch). Callers anchor it to their own
      *  monotonic clock via `set_monotonic_origin()`; for end-to-end
      *  capture-vs-display alignment in agent pipelines, prefer storing
      *  the *delta* (sender - local_recv_mono) rather than the absolute
-     *  NTP number.
+     *  Unix number.
+     *
+     *  SRs with ntp_timestamp seconds below `kNtpEpochOffset` (pre-1970
+     *  sender clock — should not happen on the wire but defensively
+     *  guarded here) are clamped to 0 in the seconds field; the
+     *  fractional microsecond component is preserved.
      *
      *  Out-params:
      *    - capture_ts_us : sender's NTP64 wall-clock at send (microsecond
      *      resolution, accurate to ~15 µs by abs-send-time quantization)
-     *    - sender_recv_skew_us : approx capture_ts_us minus the sender's
-     *      monotonic clock at send; positive means capture clock is
-     *      ahead of monotonic. */
+     *    - sender_recv_skew_us (optional; pass nullptr to discard):
+     *      approx capture_ts_us minus the sender's monotonic clock at
+     *      send; positive means capture clock is ahead of monotonic. */
     std::optional<std::int64_t> capture_ts_us_for(
         std::uint32_t ssrc,
         std::uint32_t rtp_ts,
         std::uint32_t abs_send_time_24,
         std::uint32_t clock_rate_hz,
         std::int64_t local_recv_us_since_epoch,
-        std::int64_t& out_sender_recv_skew_us) noexcept;
+        std::int64_t* out_sender_recv_skew_us) noexcept;
 
 private:
     Ntp64 origin_;
     struct Impl;
     Impl* impl_ = nullptr;
+
+    // Free swap() needs to be a friend so it can read/write the pImpl
+    // pointer and the NTP origin.  The body lives below the class as
+    // a namespace-scope inline function (matches the rest of the
+    // modules/rtp API style for free helpers).
+    friend inline void swap(SenderReportTracker& a,
+                            SenderReportTracker& b) noexcept;
 };
 
 // Free function (trivially movable) — defined for the move-ctor.
-NIMRTC_API_STABLE inline void swap(SenderReportTracker& a,
-                                   SenderReportTracker& b) noexcept {
+inline void swap(SenderReportTracker& a,
+                 SenderReportTracker& b) noexcept {
     using std::swap;
     swap(a.origin_, b.origin_);
     swap(a.impl_,   b.impl_);

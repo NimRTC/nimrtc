@@ -43,9 +43,11 @@ Ntp64 ntp64_from(std::chrono::system_clock::time_point t) noexcept {
     const std::int64_t  unix_micros  = since_epoch_us % kMicrosecondsPerSecond;
     const std::uint64_t ntp_seconds  =
         static_cast<std::uint64_t>(unix_seconds) + kNtpEpochOffset;
-    const __int128      frac         =
-        (static_cast<__int128>(unix_micros) * kNtpFracMicro) / 1000000LL;
-    std::uint64_t       frac_u       = static_cast<std::uint64_t>(frac);
+    // Pack the sub-second fraction.  (unix_micros * 2^32) / 1e6 ≤ ~4.3e15,
+    // which comfortably fits in uint64 — no __int128 needed.
+    std::uint64_t frac_u =
+        (static_cast<std::uint64_t>(unix_micros) * kNtpFracMicro) /
+            static_cast<std::uint64_t>(kMicrosecondsPerSecond);
     if (frac_u >= (1ULL << 32)) frac_u = (1ULL << 32) - 1;
     return Ntp64{(ntp_seconds << 32) | frac_u};
 }
@@ -58,10 +60,12 @@ system_clock_from_ntp64(Ntp64 ntp) noexcept {
     std::int64_t        unix_seconds =
         ntp_seconds - static_cast<std::int64_t>(kNtpEpochOffset);
     if (unix_seconds < 0) unix_seconds = 0;
-    const __int128      frac_us128   =
-        (static_cast<__int128>(frac) * 1000000LL) / 4294967296LL;
+    // (frac * 1e6) / 2^32  — frac is 32-bit, so the product (≤ 4.3e15)
+    // and quotient both fit in int64 even without __int128.
+    const std::int64_t      frac_us   =
+        (static_cast<std::int64_t>(frac) * 1000000LL) / 4294967296LL;
     return system_clock::time_point{
-        seconds{unix_seconds} + microseconds{static_cast<std::int64_t>(frac_us128)}};
+        seconds{unix_seconds} + microseconds{frac_us}};
 }
 
 // -----------------------------------------------------------------------------
@@ -80,19 +84,29 @@ std::uint32_t encode_abs_send_time_24(
         std::chrono::microseconds monotonic_us,
         Ntp64 monotonic_origin_ntp64) noexcept {
     (void)monotonic_origin_ntp64;   // origin kept in signature for callers
-    const __int128 ticks128 =
-        (static_cast<__int128>(monotonic_us.count()) * 65536LL) / 1000000LL;
-    return static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(ticks128) & 0xFFFFFFULL);
+    // ticks = (monotonic_us / 1e6) * 65536
+    //       + (monotonic_us % 1e6) * 65536 / 1e6   [via int64, not __int128]
+    // The largest term is `unix_seconds * 65536` ≈ 6.5e13 (int64-safe for
+    // any realistic monotonic duration); the wrap to 24 bits is applied
+    // last.  Negative monotonic_us is clamped to 0 (pre-boot is not
+    // representable on the wire anyway).
+    const std::int64_t us64   = monotonic_us.count() < 0 ? 0 : monotonic_us.count();
+    const std::int64_t us_int = us64 / 1000000LL;
+    const std::int64_t us_rem = us64 % 1000000LL;
+    const std::uint64_t ticks =
+        static_cast<std::uint64_t>(us_int) * 65536ULL +
+        (static_cast<std::uint64_t>(us_rem) * 65536ULL) / 1000000ULL;
+    return static_cast<std::uint32_t>(ticks & 0xFFFFFFULL);
 }
 
 std::chrono::microseconds decode_abs_send_time_24(
         std::uint32_t raw_24,
         Ntp64 monotonic_origin_ntp64) noexcept {
     (void)monotonic_origin_ntp64;
-    const __int128 ticks = static_cast<__int128>(raw_24 & 0xFFFFFFu);
-    const __int128 us128 = (ticks * 1000000LL) / 65536LL;
-    return std::chrono::microseconds{static_cast<std::int64_t>(us128)};
+    // raw_24 ≤ 2^24  ⇒  raw_24 * 1e6 ≤ 1.7e13  ⇒  fits in int64 without __int128.
+    const std::int64_t us64 =
+        (static_cast<std::int64_t>(raw_24 & 0xFFFFFFu) * 1000000LL) / 65536LL;
+    return std::chrono::microseconds{us64};
 }
 
 // -----------------------------------------------------------------------------
@@ -117,11 +131,12 @@ std::chrono::microseconds decode_abs_send_time_24(
 // future v1.x can also produce a "this is the packet at sender wire-
 // time T" lookup; for v1.0.0 we keep it informational.
 //
-// The function returns microseconds since the NTP epoch (i.e. the same
-// anchoring the SR's ntp_timestamp carries). Callers convert to a
-// monotonic clock (their own or the peer's) by subtracting
-// monotonic_origin_us (see `system_clock_from_ntp64` for an end-to-end
-// path).
+// The function returns microseconds since the Unix epoch (1970-01-01),
+// matching the on-the-wire NTP64 timestamp reduced by kNtpEpochOffset
+// for the seconds field and added to the rtp_ts-derived delta.  This
+// is the same anchoring convention WebRTC's RtpDepacketizer / Chrome's
+// NetEq use; it lets callers subtract their own monotonic clock
+// (cast to Unix-microseconds via boot-time) directly.
 
 struct SenderReportTracker::Impl {
     std::unordered_map<std::uint32_t, SsrcTimelineState> by_ssrc;
@@ -190,11 +205,11 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
         std::uint32_t abs_send_time_24,
         std::uint32_t clock_rate_hz,
         std::int64_t local_recv_us_since_epoch,
-        std::int64_t& out_sender_recv_skew_us) noexcept {
+        std::int64_t* out_sender_recv_skew_us) noexcept {
     if (!impl_) return std::nullopt;
     (void)abs_send_time_24;
     (void)local_recv_us_since_epoch;
-    out_sender_recv_skew_us = 0;
+    if (out_sender_recv_skew_us) *out_sender_recv_skew_us = 0;
 
     auto it = impl_->by_ssrc.find(ssrc);
     if (it == impl_->by_ssrc.end() || it->second.sr_count == 0) {
@@ -202,14 +217,20 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
     }
     const SsrcTimelineState& state = it->second;
 
-    // Convert SR's NTP64 to microseconds since the NTP epoch.
+    // Convert SR's NTP64 to microseconds since the UNIX epoch.
+    // (frac * 1e6) / 2^32  fits in int64 without __int128 (frac ≤ 2^32).
     const std::int64_t  ntp_seconds  = static_cast<std::int64_t>(state.sr_ntp64.seconds());
     const std::uint32_t frac         = state.sr_ntp64.fraction();
-    const __int128      ntp_micros128 =
-        (static_cast<__int128>(frac) * 1000000LL) / 4294967296LL;
-    const std::int64_t  sr_ntp_us =
-        ntp_seconds * 1'000'000LL +
-        static_cast<std::int64_t>(ntp_micros128);
+    const std::int64_t  ntpf_micros  =
+        (static_cast<std::int64_t>(frac) * 1000000LL) / 4294967296LL;
+    // Convert NTP-anchored seconds to Unix-anchored seconds.  Clamp
+    // pre-1970 SRs to 0 (callers needing pre-1970 should anchor against
+    // an NTP-origin via system_clock_from_ntp64()).
+    std::int64_t        unix_seconds_at_sr =
+        ntp_seconds - static_cast<std::int64_t>(kNtpEpochOffset);
+    if (unix_seconds_at_sr < 0) unix_seconds_at_sr = 0;
+    const std::int64_t  sr_unix_us =
+        unix_seconds_at_sr * 1'000'000LL + ntpf_micros;
 
     // Wrap detection: if rtp_ts < sr_rtp_ts by more than 2^31 we treat
     // it as a previous cycle; if the gap is <2^31 the SR is recent and
@@ -228,19 +249,20 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
         // to 0 to avoid returning times earlier than the SR.
         rtp_diff_signed = 0;
     }
-    const __int128      delta_us128 =
-        (static_cast<__int128>(rtp_diff_signed) * 1'000'000LL) /
-        static_cast<__int128>(clock_rate_hz);
-    const std::int64_t  delta_us = static_cast<std::int64_t>(delta_us128);
-    const std::int64_t  capture_ntp_us = sr_ntp_us + delta_us;
+    // delta_us = rtp_diff_signed * 1e6 / clock_rate_hz.
+    // rtp_diff_signed ≤ 2^31 ⇒ product ≤ 2.1e15; fits in int64.
+    const std::int64_t  delta_us =
+        (rtp_diff_signed * 1'000'000LL) /
+        static_cast<std::int64_t>(clock_rate_hz);
+    const std::int64_t  capture_unix_us = sr_unix_us + delta_us;
 
     // Skew placeholder — v1.0.0 doesn't carry a paired "local
     // monotonic" at the SR instant *and* at the RTP instant; we leave
     // 0 for now. Callers needing skew should sample the local mono
     // clock at every SR + at every captured RTP and compute it out-
     // of-band. See docs/adr/ADR-016 §"Diagnostic skew".
-    out_sender_recv_skew_us = 0;
-    return capture_ntp_us;
+    if (out_sender_recv_skew_us) *out_sender_recv_skew_us = 0;
+    return capture_unix_us;
 }
 
 } // namespace nimrtc::rtp

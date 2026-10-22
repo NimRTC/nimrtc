@@ -2978,6 +2978,11 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
             }
         }
     }
+    dispatch_media_inbound(view, tried_srtp);
+}
+
+void NimRTCEngine::dispatch_media_inbound(plugins::BufferView view,
+                                          bool tried_srtp) noexcept {
     // ---- RTCP demux before RTP (ADR-017) ---------------------------------
     // RFC 3550 §6.1: an RTCP packet is identified by the second octet's
     // payload-type field falling in 192..223, which cannot collide with an
@@ -2988,9 +2993,9 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     // dropped as "non-RTP".
     //
     // This catches the *unencrypted* case (SRTP not yet keyed, or a peer
-    // that negotiated plaintext RTCP).  The SRTCP case is handled above by
-    // the unprotect_rtcp fallback, where the plaintext PT byte is only
-    // readable after decryption.
+    // that negotiated plaintext RTCP).  The SRTCP case is handled by the
+    // caller (on_transport_recv) with the unprotect_rtcp fallback, where
+    // the plaintext PT byte is only readable after decryption.
     if (view.size() >= 2) {
         const std::uint8_t pt2 = view[1];
         if (pt2 >= 192 && pt2 <= 223) {
@@ -3009,6 +3014,19 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
         core::log::Logger::instance().debug(
             "engine: non-RTP and non-DTLS packet (likely STUN handled by libjuice)");
     }
+}
+
+void NimRTCEngine::feed_media_inbound(const std::uint8_t* pkt,
+                                      std::size_t len) noexcept {
+    if (!pkt || len == 0) return;
+    // Same post-close guard as on_transport_recv(): a harness may deliver
+    // a buffered packet after close() has torn down the state the
+    // handlers below read.
+    if (!is_open()) return;
+    // tried_srtp = true: no SRTP attempt happened on this path, so bytes
+    // that parse as neither RTP nor RTCP are a malformed packet rather than
+    // "probably STUN handled by libjuice". Skip that misleading debug line.
+    dispatch_media_inbound(plugins::BufferView(pkt, len), /*tried_srtp=*/true);
 }
 
 void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
@@ -3461,7 +3479,16 @@ std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept
     if (!impl_->last_capture_us || !impl_->last_arrival_us) {
         return std::nullopt;
     }
-    return *impl_->last_capture_us - *impl_->last_arrival_us;
+    // arrival − capture, i.e. elapsed time between the sender's capture
+    // instant and our receipt of the packet. This is the sign that makes
+    // the value usable as a latency budget: positive when the packet took
+    // time to reach us, zero at the theoretical floor, negative only if
+    // the two clocks disagree (which is itself worth surfacing).
+    //
+    // The previous order (capture − arrival) reported the negation, so a
+    // 4 s transit came back as −4 s — a number no consumer of a latency
+    // metric can act on.
+    return *impl_->last_arrival_us - *impl_->last_capture_us;
 }
 
 } // namespace nimrtc::engine

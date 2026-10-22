@@ -793,6 +793,24 @@ public:
      *  injects into the SRTP pipeline for loopback / harness testing. */
     NIMRTC_API_UNSTABLE uint32_t feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept;
 
+    /** Inbound *plaintext* RTP / RTCP bytes — test seam for the cross-end
+     *  timeline (ADR-017).
+     *
+     *  Feeds `pkt` through the exact RTCP-demux → RTP-parse →
+     *  `handle_rtcp()` / `handle_rtp()` tail that `on_transport_recv()`
+     *  uses once the DTLS and SRTP layers have been peeled off. There is
+     *  deliberately no separate implementation here: a test must exercise
+     *  the production dispatch, not a parallel copy of it that can drift.
+     *
+     *  This is the only way to drive `handle_rtcp()` / `observe_timeline()`
+     *  from a test. `feed_srtp_inbound()` cannot: it needs a completed DTLS
+     *  handshake to derive the SRTP keys, and a shell-strategy engine has
+     *  no peer to complete one against.
+     *
+     *  UNSTABLE: this is a test seam, not a general-purpose API. Feeding it
+     *  cleartext on a real connection bypasses DTLS confidentiality. */
+    NIMRTC_API_UNSTABLE void feed_media_inbound(const std::uint8_t* pkt, std::size_t len) noexcept;
+
     /** Drain packets from the ICE socket and dispatch them.  Returns the
      *  number of packets dispatched (RTP / DTLS / STUN). */
     NIMRTC_API_STABLE int tick() noexcept;
@@ -879,8 +897,8 @@ public:
      *  Empty until the first usable Sender Report has been ingested.
      *  The value lives on the *peer's* wall clock, so it is directly
      *  comparable with a locally computed Unix timestamp (and with the
-     *  peer's own timeline) — subtract the local arrival time to obtain
-     *  the one-way delay. */
+     *  peer's own timeline) — `last_one_way_delay_us()` is that
+     *  comparison already made. */
     NIMRTC_API_STABLE std::optional<std::int64_t> last_capture_ts_us() const noexcept;
 
     /** Same as `last_capture_ts_us()` but for a specific inbound SSRC
@@ -889,9 +907,15 @@ public:
         capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept;
 
     /** One-way delay (microseconds) of the most recently received inbound
-     *  frame: the peer's capture instant minus the local arrival instant,
-     *  both on the Unix timeline.  Empty until the first Sender Report
-     *  has been ingested. */
+     *  frame: the local arrival instant **minus** the peer's capture
+     *  instant, both on the Unix timeline, i.e. how long the packet took
+     *  to get here.
+     *
+     *  Positive in the normal case, zero at the theoretical floor, and
+     *  negative only when the two ends' clocks disagree — which is itself
+     *  worth surfacing rather than clamping.
+     *
+     *  Empty until the first Sender Report has been ingested. */
     NIMRTC_API_STABLE std::optional<std::int64_t> last_one_way_delay_us() const noexcept;
 
     // ---- Transport strategy accessors (v0.12.0 Slice 7.6 PR3) -----------
@@ -1100,6 +1124,10 @@ private:
     // the concrete module headers.  Public API keeps the header free of
     // those headers (Layout Invariant 4).
     void on_transport_recv(const plugins::BufferView& pkt) noexcept;
+    /** The RTCP-demux → RTP-parse → dispatch tail shared by
+     *  `on_transport_recv()` and the `feed_media_inbound()` test seam.
+     *  `tried_srtp` only controls the "probably STUN" debug line. */
+    void dispatch_media_inbound(plugins::BufferView view, bool tried_srtp) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
     void handle_rtcp(plugins::BufferView view) noexcept;
     void observe_timeline(const rtp::PacketView& pv) noexcept;

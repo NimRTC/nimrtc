@@ -56,7 +56,17 @@ if(NIMRTC_VENDORED_WEBRTC_APM)
             add_subdirectory(${CMAKE_SOURCE_DIR}/src/third_party/webrtc_audio_processing
                             ${CMAKE_BINARY_DIR}/_vendor_webrtc_apm_build EXCLUDE_FROM_ALL)
         endif()
-        target_link_libraries(nimrtc_audio3a PRIVATE nimrtc_vendor_webrtc_apm)
+        # PUBLIC (not PRIVATE) so that the WebRTC APM's INTERFACE include
+        # directories -- which carry the bundled abseil-cpp headers that
+        # <api/audio/audio_processing.h> pulls in -- propagate to every
+        # consumer of nimrtc_audio3a (the test / example / benchmark
+        # executables), not just to this compilation unit.  With PRIVATE,
+        # those consumers fail to compile as soon as the vendored APM is
+        # actually enabled (NIMRTC_VENDORED_WEBRTC_APM=ON); the release
+        # workflow therefore had to force the APM off.  See
+        # .github/workflows/release.yml (W3) and
+        # docs/plan/ci-workarounds.md §4.
+        target_link_libraries(nimrtc_audio3a PUBLIC nimrtc_vendor_webrtc_apm)
         target_compile_definitions(nimrtc_audio3a PRIVATE NIMRTC_USE_WEBRTC_APM=1)
         # Forward WebRTC APM INTERFACE include dirs from the imported target so
         # <api/audio/audio_processing.h> resolves in this compilation unit.

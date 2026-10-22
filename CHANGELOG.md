@@ -7,217 +7,44 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Case E WebTransport harness read the datagram stream through an obsolete
-  WebTransport API shape** — `interop/chrome/test_chrome_webtransport.html`
-  obtained the inbound stream via `session.datagrams.incoming.getReader()`.
-  That is the *old draft* shape.  Chrome exposes `session.datagrams` as a
-  container object whose `readable` / `writable` members are the actual
-  streams, so `session.datagrams.incoming` is `undefined` and `.getReader()`
-  raises `TypeError: Cannot read properties of undefined (reading
-  'getReader')`.
-
-  The throw was **not** caught, so it aborted `run()` *before* the harness
-  reached `await session.ready`.  **Every recorded "Case E FAIL" was
-  therefore produced by a harness that never exercised the connection at
-  all** — the failure verdict was an artefact of the harness, not a
-  measurement of the data plane.  The page now resolves the inbound stream
-  across all three shapes (`datagrams.readable` / `datagrams.incoming` /
-  `datagrams` itself) and routes failures through `reportError()` instead
-  of dying silently.
-
-  After the fix the harness reaches the real verdict and reports the
-  underlying defect as `session.ready rejected: WebTransportError: Opening
-  handshake failed.`
-
-### Changed
-
-- **Case E is blocked on a server-side QUIC handshake defect rather than on a
-  missing test environment.**  The case now runs end to end on a developer
-  machine and fails for a well-defined, reproducible reason.  Evidence:
-
-  - Chrome: `net::ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`
-    (`num_undecryptable_packets: 0` — the client never receives a reply),
-    occasionally `ERR_CONNECTION_RESET`.
-  - `demo-wtserver` binds the socket and reports
-    `WebTransport listener started on UDP port 9443`, but the run ends with
-    `0 session(s) handled` — no connection is ever surfaced to the
-    listener's connection callback.
-  - An **independent** QUIC client (`aioquic`, pure Python, no shared code
-    with msquic) fails against the same endpoint, so this is not a
-    Chrome-specific incompatibility.
-
-  Ruled out while diagnosing: Windows Firewall (all three profiles
-  disabled), TLS credential loading (the SChannel cert loads from the
-  Windows store and reports its SHA-1 hash), IPv4/IPv6 family mismatch
-  (a Chrome A/B run forcing `--host-resolver-rules=MAP localhost
-  127.0.0.1` fails identically to the `::1` and default paths), and the
-  msquic fork's forced dummy raw datapath (`RawDataPathInitialize` only
-  nulls out the optional raw path; `datapath_xplat.c` falls back to the
-  classic UDP datapath).
-
-  The remaining suspect is the msquic listener / registration / TLS setup in
-  `src/web_transport/src/web_transport_msquic_listener.cpp`.
-
 ### Notes
 
-- **Running the browser-driven e2e cases on a developer machine.**  The
-  harness needs a real Python interpreter plus Playwright; a Windows host
-  whose only `python` is the Microsoft Store execution-alias stub
-  (`%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`, exit code 9009)
-  cannot run it.  `uv` installs a self-contained CPython without admin
-  rights — the working setup used here keeps the environment inside
-  `build/` so the repository root stays clean:
+- No post-`v0.14.0-rc.1` work has landed yet.  The
+  `[0.14.0-rc.1]` entry below is the authoritative record of
+  the current tree; see `docs/plan/v0.14-plan.md` for the
+  open tracks.  (The cross-end timeline engine wiring landed
+  after that entry — see ADR-017 and
+  `docs/plan/timeline-engine-wiring.md`.)
 
-  ```powershell
-  uv python install 3.12
-  uv venv build/venv-e2e --python 3.12
-  uv pip install --python build/venv-e2e playwright websockets
-  build/venv-e2e/Scripts/python.exe -m playwright install chromium
-  build/venv-e2e/Scripts/python.exe tools/run_e2e_acceptance.py --case e_webtransport
-  ```
-
-  The harness defaults to a system Chrome
-  (`C:\Program Files\Google\Chrome\Application\chrome.exe`); override with
-  `NIMRTC_CHROME_PATH` to point at Playwright's bundled Chromium instead.
-  `build/venv-e2e/` is a local environment only and is not tracked.
-
-### In Progress
-
-- **ADR-017 cross-end timeline seam** —  `nimrtc/rtp/timeline.hpp` (new
-  public header) lands in the Unreleased window behind
-  `Profile::timeline_enabled`.  The header owns `Ntp64` (RFC 5905 §6
-  64-bit timestamp), `ntp64_from` / `system_clock_from_ntp64`,
-  the RFC 6051 `abs-send-time` 24-bit encoder/decoder pair, and
-  the receiver-side `SenderReportTracker` (ingests RTCP SRs,
-  per-SSRC linear RTP-TS → wall-clock extrapolation).  Companion
-  binary `src/modules/rtp/tests/test_timeline.cpp` covers NTP
-  round-trip, abs-send-time encode/decode + the 256 s wrap, SR
-  extrapolation, multi-SSRC isolation, and the no-SR nullopt path
-  (9/9 PASS).
-  Public-header count: bumped 100 → 101 in
-  `tests/test_api_classification.cpp`.
-
-  **Anchoring convention (corrected in the follow-up commit):**
-  `capture_ts_us_for()` returns **microseconds since the 1970 Unix
-  epoch**, not since the 1900 NTP epoch — the seconds field is
-  reduced by `kNtpEpochOffset` and pre-1970 SRs are clamped to 0.
-  This matches the convention Chrome's NetEq / RtpDepacketizer use
-  and lets callers subtract their own monotonic clock (cast to
-  Unix-microseconds) directly.
-
-  **Public signature (corrected in the follow-up commit):**
-  the `sender_recv_skew_us` out-parameter of `capture_ts_us_for()`
-  is a `std::int64_t*` (pass `nullptr` to discard), not a
-  `std::int64_t&`.  The reference form forced every caller —
-  including `std::ignore` — to supply storage.
-
-  **MSVC portability fixes in the follow-up commit:**
-  all four `__int128` uses in `timeline.cpp` were replaced with
-  int64 arithmetic (every intermediate product provably fits: the
-  largest is `frac * 1e6 ≈ 4.3e15`), and the free `swap()` was
-  made a `friend` so it can move the pImpl pointer under MSVC.
-  Both changes are behaviour-preserving.
-
-  `src/modules/rtp/CMakeLists.txt` also gains an explicit
-  `enable_testing()` before `add_subdirectory(tests)` — without
-  it the CMake 4.0 VS generator silently skipped the
-  `CTestTestfile.cmake` at that level, so `ctest` never recursed
-  into `src/modules/rtp/tests/` and the 9 timeline cases were
-  invisible to the suite.
-
-  **Design record: ADR-017** (`docs/adr/ADR-017-cross-end-timeline.md`).
-  The seam was previously referenced as "ADR-016" in code and in this
-  changelog, but number 016 is reserved by `docs/plan/v1.0-plan.md`
-  §12.5 for the (currently deferred, SFU-track) "SFU forwarding
-  skips L2" BWE-interface ADR, and no ADR-016 document ever existed.
-  The timeline seam therefore takes **ADR-017**; the reservation for
-  016 is left intact and is now recorded in `docs/adr/README.md`.
-  All 10 code/doc references were re-pointed.
-
-  **Status: seam landed, feature NOT complete.** `timeline_enabled`
-  is still inert — nothing outside the timeline's own tests consumes
-  `SenderReportTracker`, and no engine path reads the flag. The
-  header's own algorithm comment previously over-claimed (it
-  described a Chrome-shaped slope estimator and abs-send-time
-  participation that were never implemented); it now states the
-  actual single-SR linear extrapolation and enumerates the gaps.
-  Known gaps, all listed in ADR-017 §"Decision 5":
-    - per-SSRC clock rate is hardcoded to 90000 Hz (wrong for audio
-      at 48000 Hz);
-    - the RTP-timestamp wrap branch (`> 2^31`) refuses the
-      legitimate post-wrap forward case instead of adding 2^32;
-    - `abs_send_time_24` and `monotonic_origin_ntp64` are accepted
-      but unused; `kSrPeriodMs`, `kAbsSendTimeUri` and
-      `kAbsSendTimeDefaultLocalId` are declared with zero
-      references (no SR scheduling, no extmap negotiation, no
-      header-extension write);
-    - no engine wiring: the flag is parsed and round-tripped but
-      never acted on;
-    - `sender_recv_skew_us` is reserved for v1.1 and always 0.
-
-- **Chrome e2e Case E — WebTransport server seam (beta.2)** —
-  `IWebTransportServer` (new public header
-  `nimrtc/web_transport/web_transport_server.hpp`) lands in the
-  Unreleased window as beta.2 (per `docs/plan/v0.14-plan.md`
-  §2.1.3 WT-SEVER).  The header exposes the msquic-backed
-  `create_msquic_webtransport_server()` factory and the
-  `IWebTransportServer` interface (start / stop / set_on_session
-  / running).  Companion binary `examples/demo-wtserver/demo-wtserver.cpp`
-  echos datagrams and bidirectional streams for end-to-end probing.
-  `src/web_transport/src/web_transport_msquic_listener.{hpp,cpp}`
-  holds the QUIC_LISTENER_CALLBACK / HTTP/3 SETTINGS / QPACK
-  decoding surface (RFC 9114 + RFC 9204 + RFC 9298).  Companion
-  tooling:
-    - `scripts/generate_wtserver_cert.py` / `.ps1` — generate the
-      self-signed localhost cert, install in `Cert:\CurrentUser\My`,
-      write the SHA-1 thumbprint + raw hash to
-      `build/wtserver_thumbprint.txt` / `build/wtserver_hash.txt`
-      for msquic SChannel `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`.
-    - `interop/chrome/test_chrome_webtransport.html` — headless
-      Chrome harness that opens a WebTransport session against
-      `demo-wtserver` on `https://localhost:9443/webtransport`
-      and exchanges one datagram + one bidirectional stream.
-    - `tests/chrome_interop_harness/run_webtransport_harness.py`
-      — Playwright driver (Case E, WT-SEVER plane).
-  Public-header count: bumped 99 → 100 in
-  `tests/test_api_classification.cpp`.
-
-  **Build status (2026-10-21, this commit):**
-    - `nimrtc_web_transport` library builds clean.
-    - `demo-wtserver.exe` builds clean and **starts a real msquic
-      listener** that loads the cert from `Cert:\CurrentUser\My` and
-      accepts incoming QUIC connections on the configured UDP port
-      (smoke-tested locally with `--port 19443 --duration 2`).
-    - Browser-driven Chrome interop (Playwright +
-      headless Chrome) is **deferred to a CI/WSL environment**
-      with Playwright installed — the harness is in place but
-      the local `python` shim is the Windows Store stub
-      (exit 9009, no Playwright) so the end-to-end run has to
-      happen in a host where the harness dependencies resolve.
-  Status in the §12.3.5 status table: **WT-SEVER landed, Case E
-  Chrome end-to-end still pending**.
-
-- **DC-2 (L1 strict-priority across the DC plane)** — ✅ **verified
-  locally, 17/17 PASS** via `StreamPriorityCrossPlane`
-  (`src/modules/sched/tests/test_sched_priority_dc.cpp`, cross-plane
-  RTP × DC enqueue / reset / stats). Still needs a 4-platform CI run
-  before `v1.0-plan.md` §3 Gate #3 can be marked closed.
-
-- **msquic: point the third-party submodule at a NimRTC fork**
-  (`https://github.com/NimRTC/msquic`, branch `nimrtc-patches`)
-  instead of rewriting the platform `CMakeLists.txt` at configure
-  time.  The fork is upstream `microsoft/msquic` `42376ae4` plus
-  one NimRTC commit (`a5ae3a06e`) that forces the dummy raw datapath
-  on Windows, so the cmake overlay (`_nimrtc_msquic_force_dummy_datapath()`)
-  and the `.gitmodules` `ignore = dirty` hack are gone, the
-  submodule working tree stays vendor-clean after configure + build,
-  and the recorded pin is fetchable from a fresh clone (resolves the
-  v0.14.0-rc.1 / `a88383e` "local-only commit breaks every clone
-  but the author's" class of failure).  See `docs/plan/ci-workarounds.md`
-  W1 — the workaround itself (Windows XDP SDK unavailable in the
-  `windows-2022` runner image) is unchanged.
+- **Still open across the cycle (carried from rc.1):**
+  - The **Chrome e2e Case E DataChannel** acceptance gate
+    (DC-1) is blocked on a server-side QUIC handshake
+    defect in
+    `src/web_transport/src/web_transport_msquic_listener.cpp`
+    (Chrome: `ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`;
+    server: socket bound, `0 session(s) handled`; an
+    independent `aioquic` client fails against the same
+    endpoint).  Full diagnosis, the ruled-out hypotheses,
+    and the mock-only WebTransport unit-coverage caveat
+    are recorded under `[0.14.0-rc.1]` -> Notes -> Known
+    limitations.
+  - The **client/server ALPN mismatch** (client registers
+    the draft-era `"sm"`, the server registers `"h3"`)
+    blocks any NimRTC-to-NimRTC e2e test.
+  - The **cross-end timeline seam** is wired into the engine
+    (`EngineConfig::timeline_enabled` gates SDP `a=extmap`
+    negotiation, outbound abs-send-time, SR scheduling, and
+    inbound capture reconstruction), but its per-SSRC media
+    clock rate is still not taken from the SDP `a=rtpmap`, so
+    capture timestamps are only correct for 90 kHz (video)
+    SSRCs — audio at 48 kHz is reconstructed against the
+    wrong rate.  The engine-side gate, SDP negotiation and
+    empty-state invariant are covered by
+    `tests/test_engine_timeline.cpp`; the reconstruction path
+    itself is not.  See `docs/plan/timeline-engine-wiring.md`
+    and ADR-017 Decision 6.
+  - The **L1 strict-priority scheduling policy** (DC-2)
+    is v1.0.0-beta.2; rc.1 ships only the cross-plane test.
 
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
@@ -230,16 +57,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned highlights, per `docs/plan/v1.0-plan.md` §6:
 
 - **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** over
-  WebTransport / QUIC — *blocked on Case E; see In Progress above.*
+  WebTransport / QUIC — *blocked on Case E; see
+  `[0.14.0-rc.1]` -> Notes -> Known limitations.*
 - **API stability commitment** — every public symbol carries a
   `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` /
   `NIMRTC_API_DEPRECATED` classification; the public header surface is
   frozen through the v1.0.x line; ADR-015 governs the policy.
   `NIMRTC_API_VERSION` and the marker macros already exist; the
-  per-symbol sweep **landed in this dev cycle** across all 100 public
-  headers (626 of 650 namespace-scope symbols classified; 24 internal
+  per-symbol sweep **landed in `v0.14.0-rc.1`** across all 100
+  public headers that existed at the beta.1 cut (626 of 650
+  namespace-scope symbols classified; 24 internal
   symbols exempt per ADR-015 §Decision 1; `Missing: 0` against the
-  gate).  Companion tooling:
+  gate; the public-header count has since moved 100 -> 101 with
+  `nimrtc/rtp/timeline.hpp`).  Companion tooling:
     - `scripts/api_freeze_scan.js` — the per-symbol scanner,
       wired into all four CI platforms (`windows-2022`,
       `linux-gcc`, `macos-clang`, `linux-aarch64`) and into
@@ -267,16 +97,644 @@ real `## [1.0.0]` block:
 | # | Blocker | Ref |
 |---|---|---|
 | 1 | Case E Chrome ↔ NimRTC DataChannel PASS on Windows + Linux x86_64 | `v1.0-plan.md` §3 Gate #1 / #9 |
-| 2 | aarch64 support-matrix decision (4-platform hard gate vs. 3-platform ship) | `docs/plan/ci-workarounds.md` §4, `v1.0-plan.md` §3 Gate #8 |
-| 3 | WebRTC APM in the release artefact: `RELEASING.md` §3.1 says the release pipeline prebuilds APM and configures `NIMRTC_VENDORED_WEBRTC_APM=ON`, but `release.yml` disables the prebuild step and passes `OFF` on all four platforms | `docs/plan/ci-workarounds.md` §3 (W3) |
+| 2 | ~~aarch64 support-matrix decision~~ **Closed** — the 4-platform-hard-gate vs. 3-platform-ship question is settled as a **split decision**: the `linux-aarch64` **CI** leg in `ci.yml` stays a hard gate, while the `linux-aarch64` **release** leg in `release.yml` is `continue-on-error: true` and deliberately excluded from `publish-release`'s `needs:` (GHA ARM64 runner capacity is unreliable — a 14+ hour queue was observed at the v0.14.0 cut). The consequence is explicit, not silent: a missing aarch64 bundle publishes a "Partial release" banner naming the bundle, `publish-release` writes the present/missing bundle list into the Step Summary, and the aarch64 artefact is attached by a follow-up release once capacity returns. | `docs/plan/ci-workarounds.md` §4 (W5), `RELEASING.md` §3.1 step 4, `v1.0-plan.md` §3 Gate #8 |
+| 3 | ~~WebRTC APM in the release artefact~~ **Closed** — `release.yml` no longer disables the prebuild: the `Prebuild WebRTC APM` step runs on all four platforms with `continue-on-error: true`, and Configure picks `-DNIMRTC_VENDORED_WEBRTC_APM=ON` on prebuild success / `OFF` on failure (the stub 3A path) instead of aborting the cut — the meson `abseil-cpp` subproject build that broke the `v0.14.0` cut (`dc15ad8`) can no longer kill a release. The `audio3a` link is now `PUBLIC nimrtc_vendor_webrtc_apm` so the APM's bundled-abseil INTERFACE includes reach the test/example/benchmark consumers, which is what made the `=ON` path unbuildable in the first place. Each job records its outcome in `build/3a-status-<platform>.txt`; `publish-release` surfaces the per-platform 3A status in the release body and the Step Summary, so a stub-3A bundle is never published silently. | `docs/plan/ci-workarounds.md` §3 (W3), `RELEASING.md` §3.1 step 4 |
 | 4 | ~~Public-header per-symbol sweep + freeze~~ **Closed** — every public symbol across 100 public headers is classified; the `scripts/api_freeze_scan.js` gate exits 0 against the current tree and `scripts/check_api_marker_includes.py` confirms every marker-using header pulls in `<nimrtc/core/api_version.hpp>` | `v1.0-plan.md` §3 Gate #2 |
 | 5 | 7-day Case D + Case E soak with no new failures | `v1.0-plan.md` §12.3.5 |
+
+## [0.14.0-rc.1] - 2026-10-22
+
+### Status: Tech Preview
+
+> **Third pre-release of the v0.14.x cycle** — the
+> **v1.0.0-rc.1** release candidate per
+> `docs/plan/v1.0-plan.md` §7 + §8 + §12.2 + §12.3.5.
+> The marketing version stays anchored to the v0.x line
+> ("Tech Preview" banner unchanged from v0.13.0); the
+> `NIMRTC_API_VERSION_PRE_RELEASE` macro reads `"rc.1"`
+> in the tree, matching the `v0.14.0-rc.1` tag cut
+> (it read `"beta.1"` before this cut).  The `v0.14.0-rc.1`
+> tag is cut at the post-`7fc36ff` commit on this branch.
+>
+> The cut is the **regression-stabilisation close-out** of
+> the v0.14.x cycle per `v1.0-plan.md` §12.3.5
+> (`§7 = NO`, closed 2026-10-19; no new SFU-1 / DC-3 /
+> BENCH-1 work), but it also ships the plan-track work that
+> the §7 closure explicitly permitted landing inside the
+> v0.14.x window: the per-symbol `NIMRTC_API_STABLE` /
+> `NIMRTC_API_UNSTABLE` sweep across all 100 public headers,
+> the ADR-016/ADR-017 cross-end timeline seam
+> (with abs-send-time participation), the DC-2 cross-plane
+> sched test, the msquic submodule pin, and the Case E
+> WebTransport server seam.  The physical DTLS-ICE → RFC 9221
+> handoff (rc.1 PR-2) and the L1 strict-priority scheduling
+> policy remain deferred to the v1.0.0 line.
+>
+> **Cut order**: the 10 commits on the `v0.14.0-beta.1..HEAD`
+> range landed in the order listed under Highlights below
+> (per-symbol sweep → Case E server seam + DC-2 cross-plane
+> → ADR-016/017 timeline → msquic fork switch → Case E
+> harness datagram-shape fix → docs refresh), followed by
+> the 8 working-tree changes that this cut folds in
+> (version macro `beta.1` → `rc.1`; `release.yml` W3
+> prebuild fallback; `RELEASING.md` W5 aarch64 soft-gate;
+> `audio3a` PUBLIC link fix; ADR-016/017 abs-send-time
+> refinement with 12 new timeline tests; `v0.14-plan.md`
+> baseline fix; `test_api_version.cpp` cycle;
+> this CHANGELOG rewrite), followed by the Case E
+> cross-platform repair stack (the WebTransport server
+> seam did not compile on Linux/macOS and its server-seam
+> test was red on Windows because the TLS material was
+> never provisioned — see Fixed).  All of these are pushed
+> as a single stack so the `v0.14.0-rc.1` tag points at the
+> post-`7fc36ff` tree with the working-tree changes
+> committed on top.
+
+### Highlights
+
+- **Per-symbol `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE`
+  sweep across all 100 public headers** (the v0.14.x
+  follow-up to the v0.13.0 file-level sweep; ADR-015
+  §Decision 1) — every namespace-scope symbol across the
+  100 public headers is now classified with the per-symbol
+  marker pair.  `Missing: 0` against the
+  `scripts/api_freeze_scan.js` gate; the 4-platform CI
+  matrix (`windows-2022`, `linux-gcc`, `macos-clang`,
+  `linux-aarch64`) and `scripts/check-release-freeze.sh`'s
+  `api-symbols` check are wired to the same scanner.
+  (`ad47a11`, 107 files)
+
+- **ADR-016/ADR-017 cross-end RTP timeline seam
+  (header `nimrtc/rtp/timeline.hpp` lands as the 101st
+  public header)** — `Ntp64` (RFC 5905 §6),
+  `ntp64_from` / `system_clock_from_ntp64`, the RFC 6051
+  `abs-send-time` 24-bit encode/decode pair, and the
+  receiver-side `SenderReportTracker` ingest the SR
+  plus the abs-send-time *delta* to refine the
+  extrapolation.  Public-header count: 100 → 101 in
+  `tests/test_api_classification.cpp`.  Anchoring is
+  microseconds since the 1970 Unix epoch (Chrome convention);
+  the `sender_recv_skew_us` out-parameter of
+  `capture_ts_us_for()` is a `std::int64_t*`
+  (pass `nullptr` to discard); all `__int128` paths in
+  `timeline.cpp` were replaced with int64 arithmetic for
+  MSVC portability.  Companion test binary:
+  `src/modules/rtp/tests/test_timeline.cpp`
+  (21/21 PASS locally, see Tests).  Design record:
+  ADR-017 (`docs/adr/ADR-017-cross-end-timeline.md`).
+  (`8da11c2`, `4f97231`, `0f13440`, `c62e87e`, plus the
+  uncommitted abs-send-time refinement that closes the
+  three remaining tracker gaps — per-SSRC clock rate,
+  RTP-TS wrap handling, AST anchor with a
+  `kAstAgreementToleranceUs = 1 s` sanity tolerance.)
+
+- **msquic submodule pin: point at the NimRTC fork**
+  (`https://github.com/NimRTC/msquic`, branch
+  `nimrtc-patches`) **instead of rewriting the platform
+  `CMakeLists.txt` at configure time.**  The fork is
+  upstream `microsoft/msquic` `42376ae4` plus one NimRTC
+  commit (`a5ae3a06e`) that forces the dummy raw datapath
+  on Windows, so the cmake overlay
+  (`_nimrtc_msquic_force_dummy_datapath()`) and the
+  `.gitmodules` `ignore = dirty` hack are gone, the
+  submodule working tree stays vendor-clean after
+  configure + build, and the recorded pin is fetchable
+  from a fresh clone (resolves the `a88383e` "local-only
+  commit breaks every clone but the author's" class of
+  failure).  See `docs/plan/ci-workarounds.md` W1 — the
+  workaround itself (Windows XDP SDK unavailable in the
+  `windows-2022` runner image) is unchanged.
+  (`cbd82cd`, `98f3947`)
+
+- **Chrome e2e Case E — WebTransport server seam
+  (WT-SEVER).**  `IWebTransportServer` (new public
+  header
+  `nimrtc/web_transport/web_transport_server.hpp`)
+  exposes the msquic-backed
+  `create_msquic_webtransport_server()` factory and the
+  `IWebTransportServer` interface
+  (start / stop / set_on_session / running).
+  `src/web_transport/src/web_transport_msquic_listener.{hpp,cpp}`
+  owns the QUIC_LISTENER_CALLBACK / HTTP/3 SETTINGS / QPACK
+  decoding surface (RFC 9114 + RFC 9204 + RFC 9298).
+  Companion binary `examples/demo-wtserver/demo-wtserver.cpp`
+  echos datagrams and bidirectional streams for end-to-end
+  probing.  Tooling: `scripts/generate_wtserver_cert.py` /
+  `.ps1`, `interop/chrome/test_chrome_webtransport.html`,
+  `tests/chrome_interop_harness/run_webtransport_harness.py`.
+  `demo-wtserver.exe` builds clean and starts a real
+  msquic listener that loads the cert from
+  `Cert:\CurrentUser\My` and accepts incoming QUIC
+  connections on the configured UDP port (smoke-tested
+  locally with `--port 19443 --duration 2`).
+  (`ed8cdc2`, 20 files)
+
+- **DC-2 cross-plane sched test
+  (`StreamPriorityCrossPlane`)** — cross-plane RTP × DC
+  enqueue / reset / stats at L1 strict-priority,
+  `src/modules/sched/tests/test_sched_priority_dc.cpp`,
+  **17/17 PASS** locally.  Lands the regression test
+  surface; the L1 strict-priority *policy* itself
+  (the runtime hook that consumes the test's stats) is
+  still v1.0.0-beta.2 work.
+  (`ed8cdc2`)
+
+- **Case E WebTransport harness datagram shape fix**
+  (the defect that masked the Case E measurement) —
+  `interop/chrome/test_chrome_webtransport.html` now
+  resolves the inbound stream across all three
+  `session.datagrams` shapes
+  (`datagrams.readable` / `datagrams.incoming` /
+  `datagrams` itself) and routes failures through
+  `reportError()` instead of dying silently.  The previous
+  harness threw `TypeError: Cannot read properties of
+  undefined (reading 'getReader')` *before* reaching
+  `await session.ready`, so every recorded "Case E FAIL"
+  was an artefact of the harness, not a measurement of
+  the data plane.  After the fix the harness reaches the
+  real verdict and reports the underlying defect as
+  `session.ready rejected: WebTransportError: Opening
+  handshake failed.`  See Notes for the diagnosis of
+  that underlying defect.
+  (`13dc8f4`)
+
+- **Version macro `beta.1` → `rc.1`** —
+  `NIMRTC_API_VERSION_PRE_RELEASE` now reads `"rc.1"` in
+  the tree (it was `"beta.1"` before this cut);
+  `tests/test_api_version.cpp` `version_macros.are_defined`
+  now asserts the `"rc.1"` value.
+  (`src/core/include/nimrtc/core/api_version.hpp`,
+  `tests/test_api_version.cpp`)
+
+### Added
+
+- `nimrtc/web_transport/web_transport_server.hpp`
+  (public header, 100th) — `IWebTransportServer`
+  + `create_msquic_webtransport_server()` factory.
+  Public-header count 99 → 100.
+  (`ed8cdc2`)
+
+- `nimrtc/rtp/timeline.hpp` (public header, 101st) —
+  `Ntp64`, `ntp64_from`, `system_clock_from_ntp64`,
+  `SenderReportTracker`, abs-send-time
+  encode/decode, `kAstAgreementToleranceUs = 1 s`.
+  Public-header count 100 → 101.
+  (`8da11c2`, uncommitted follow-up)
+
+- Per-symbol `NIMRTC_API_STABLE` /
+  `NIMRTC_API_UNSTABLE` markers across all 100
+  public headers (626 of 650 namespace-scope symbols
+  classified; 24 internal symbols exempt per
+  ADR-015 §Decision 1; `Missing: 0` against the
+  `scripts/api_freeze_scan.js` gate).
+  (`ad47a11`)
+
+### Changed
+
+- **msquic submodule**: `cbd82cd` points the gitlink
+  at the `NimRTC/msquic` fork (`nimrtc-patches`
+  branch, upstream `42376ae4` + NimRTC `a5ae3a06e`)
+  and `98f3947` adds the `ignore = dirty` directive
+  to `.gitmodules` so the vendor tree stays clean
+  after configure + build.
+  (`cbd82cd`, `98f3947`)
+
+- **`src/modules/audio3a/CMakeLists.txt`**: the vendored
+  WebRTC APM link is now **PUBLIC** (not PRIVATE) on
+  `nimrtc_audio3a`, so the abseil-cpp include directories
+  the APM INTERFACE carries propagate to every consumer
+  of `nimrtc_audio3a` (test / example / benchmark
+  executables).  With the old PRIVATE, the consumers
+  failed to compile as soon as
+  `NIMRTC_VENDORED_WEBRTC_APM=ON`; that forced
+  `release.yml` to always pass `-D...=OFF` and broke
+  the real-3A path.  See `release.yml` W3 below.
+
+- **Per-SSRC clock rate**, **RTP-timestamp wrap
+  handling**, and **abs-send-time participation** in
+  `SenderReportTracker` — the three gaps that ADR-017
+  §"Decision 5" recorded for the tracker side all
+  land here.  The 7-argument
+  `capture_ts_us_for(rtp_ts, abs_send_time_24, ...)`
+  overload records the AST observation, anchors the
+  counter against the stored SR, and refines the
+  estimate with the AST *delta* (the sender's own
+  elapsed time, which does not inherit the media
+  clock's rate error).  The 6-argument overload keeps
+  the previous behaviour exactly.
+
+### Fixed
+
+- **Case E WebTransport harness datagram shape**
+  — the `session.datagrams.incoming.getReader()` call
+  was on the *old draft* shape; Chrome exposes
+  `session.datagrams` as a container with
+  `readable`/`writable` members, so `incoming` is
+  `undefined` and the throw aborted `run()` *before*
+  `await session.ready`.  The harness now resolves
+  the inbound stream across all three shapes and
+  routes failures through `reportError()`.  After the
+  fix the harness reaches the real verdict.
+  (`13dc8f4`)
+
+- **Case E WebTransport server seam did not compile on
+  Linux / macOS** — `web_transport_msquic_listener.cpp`
+  called `load_cert_hash_tls_credential()`, which is
+  defined inside `#ifdef _WIN32`, unconditionally; on a
+  POSIX build the whole definition was preprocessed
+  away and the file failed with *"'load_cert_hash_
+  tls_credential' was not declared in this scope"*.
+  The file also used `QUIC_ADDR::si_family`, which
+  only exists on Windows (`SOCKADDR_INET`); the POSIX
+  `QUIC_ADDR` is a union of `Ip` / `Ipv4` / `Ipv6`.
+  Both are fixed — the credential load is now split per
+  TLS backend and the address setup goes through the
+  portable `QuicAddrSetFamily()` helper.  This was a
+  hard build failure on 3 of the 4 CI platforms
+  (`linux-gcc`, `linux-aarch64`, `macos-clang`) and was
+  introduced by `ed8cdc2` *after* the `v0.14.0-beta.1`
+  tag, so it had never been exercised by CI.
+  (Verified locally with GCC 11.4 / `-std=c++20`
+  `-fsyntax-only`: all four `src/web_transport/src/*.cpp`
+  and both WebTransport test translation units compile
+  with zero errors.)
+
+- **Case E WebTransport server seam TLS credential is
+  now portable across the msquic TLS backends** —
+  Windows keeps the SChannel path
+  (`QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`, the
+  certificate lives in `Cert:\CurrentUser\My`); Linux
+  and macOS now use `QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE`
+  with a PEM private key + PEM certificate, which is
+  the shape msquic's OpenSSL / quictls backend accepts.
+  `scripts/generate_wtserver_cert.py` writes the
+  matching `build/wtserver_key.pem` next to
+  `build/wtserver_cert.pem`.
+
+- **Case E WebTransport server seam could not find its
+  TLS material under ctest** — the listener resolved
+  `wtserver_hash.txt` against the current working
+  directory only, but ctest starts the cases from
+  `<build>/tests`, so the file in `<build>/` was never
+  found.  The lookup now walks `$NIMRTC_BUILD_ROOT` →
+  the CMake binary directory (compiled in as
+  `NIMRTC_DEFAULT_BUILD_ROOT`) → the working directory
+  → its parent.
+
+- **Case E WebTransport server seam test was red on
+  Windows** — 4 of the 8 `test_web_transport_server_seam`
+  cases failed with *"failed to load TLS credentials"*
+  because the TLS material was never provisioned, and no
+  CI job provisioned it either — so the cases would have
+  failed on the `windows-2022` CI leg too.  `ci.yml` and
+  `interop.yml` now provision the material on every
+  platform (Windows: `scripts/generate_wtserver_cert.ps1`
+  into the certificate store; Linux/macOS: a
+  self-signed PEM key + certificate pair written into the
+  build directory), and the start-dependent cases now
+  *skip* instead of failing when the material is absent,
+  so a developer without certificates is not blocked.
+
+- **Test classification baseline** —
+  `tests/test_api_classification.cpp` baseline bumped
+  100 → 101 to track the new `nimrtc/rtp/timeline.hpp`
+  header.  CI fails the `api_classification` job if
+  the count drifts from the committed baseline.
+  (`4f97231`)
+
+- **msquic fork fetchability** — the `a88383e` →
+  `ef6ff11` (net-zero) attempt to ship an unpushed
+  msquic commit in the gitlink is now obviated by the
+  fork switch (`cbd82cd`).  The fork lives on
+  `NimRTC/msquic` `nimrtc-patches`, so a fresh clone
+  resolves the pin via `origin/nimrtc-patches`.
+
+### Tests
+
+- `test_api_version` `version_macros.are_defined`
+  asserts `NIMRTC_API_VERSION_PRE_RELEASE == "rc.1"`
+  (was `"beta.1"`).  Full file 7/7 PASS against the
+  rc.1 tree locally (Windows, MSVC 17 / Visual Studio
+  2022, `Debug` preset).  Build host: `windows-2022`.
+
+- `test_api_classification` baseline 101, 0 missing
+  per-symbol markers (`api-symbols` gate).
+
+- `src/modules/rtp/tests/test_timeline.cpp` 21/21
+  PASS locally (was 9/9 in the beta.1 tree).  New
+  cases cover the exact-match AST anchor, the
+  refinement overriding a disagreeing media-clock
+  delta, the recovery of a jitter-reordered packet's
+  true pre-SR instant, the per-SSRC clock rate
+  honouring / overriding / zero-rate-ignored paths,
+  the forward-across-RTP-TS-wrap case, the
+  slightly-older-than-SR clamp, the
+  much-older-than-SR nullopt, the AST-anchor
+  rejection when the abs-send-time counter is
+  broken, and the tolerance-zero disabling
+  refinement.
+
+- `src/modules/sched/tests/test_sched_priority_dc.cpp`
+  `StreamPriorityCrossPlane` 17/17 PASS locally.
+  The L1 strict-priority *policy* itself is still
+  v1.0.0-beta.2; this test pins the cross-plane
+  interface only.
+
+- `test_web_transport_msquic` 15/15 PASS locally.
+  **The test exercises the `IWebTransportSession`
+  surface with `MockWebTransportSession` only** —
+  no real QUIC peer, no real `msquic.dll` link, no
+  Schannel cert provisioning.  Real `msquic create()`
+  requires a reachable QUIC peer and is exercised
+  end-to-end by the Chrome e2e Case E harness
+  (which is currently blocked; see Notes).
+  This is the **mock-only WebTransport unit-coverage
+  limitation** recorded below.
+
+- `test_web_transport_server_seam` 8/8 PASS locally
+  on the rc.1 tree (Windows, MSVC 17 / VS 2022, `Debug`
+  preset) **with the TLS material provisioned** — the
+  four start-dependent cases really open a QUIC listener
+  on a UDP port (`29443` / `29444` / `29445` plus an
+  ephemeral port for `start(0)`), load the certificate
+  and tear the listener down again.  Before the fix the
+  same four cases failed with *"failed to load TLS
+  credentials"*.  Without provisioned material they are
+  reported as *skipped* rather than failed.
+
+- **Full suite: 585/585 PASS** on the rc.1 tree
+  (Windows, MSVC 17 / VS 2022, `Debug` preset) — 0
+  failed, 2 skipped (`SctpUsrsctpTest.LoopbackDatagram-
+  RoundTrip` and `SctpUsrsctpTest.PartialReliableTtlDrop`,
+  both pre-existing environment-dependent skips).
+
+- `test_engine_video_codec`, `test_video_source`,
+  `test_engine_plugin_loading`,
+  `test_datachannel_engine`, `test_dtls_seam` —
+  PASS locally on the rc.1 tree (no regression
+  vs. beta.1's 520/520 baseline on `windows-2022`).
+  `ci-e2e` for the rc.1 tree has not yet been
+  observed by the release manager (CI status
+  unverified locally; the `windows-2022` / linux-gcc
+  / linux-aarch64 / macos-clang GHA runners are
+  not reachable from this cut host).
+
+### Docs
+
+- `docs/adr/ADR-017-cross-end-timeline.md` —
+  design record for the cross-end timeline seam
+  (the seam was previously referenced as "ADR-016"
+  in code and earlier changelog entries, but the
+  016 number is reserved by `v1.0-plan.md` §12.5
+  for the deferred SFU-track "SFU forwarding skips
+  L2" BWE-interface ADR; the timeline seam takes
+  017 instead.  All 10 code/doc references were
+  re-pointed; the 016 reservation is left intact
+  and is now recorded in `docs/adr/README.md`).
+  (`c62e87e`)
+
+- `docs/plan/v0.14-plan.md` — the §"Status" table
+  rows for HEADER-FREEZE-B1 and CI-B1 have their
+  baseline updated from `git diff alpha.2..HEAD` to
+  `git diff v0.14.0..HEAD` (the v0.14.0 tag is the
+  `v1.0.0-alpha.2` alias; there is no separate
+  alpha.2 tag — see
+  "Why v0.14.0 = v1.0.0-alpha.2 + v1.0.0-beta.1").
+
+- `CHANGELOG.md` — `[0.14.0-rc.1]` rewritten to
+  describe the actual `v0.14.0-beta.1..HEAD` delta
+  (the previous entry misattributed the
+  `abfcba4`/`ab54a64`/`b254f15`/`2662513`/`a88383e`/
+  `ef6ff11` stack to rc.1, but those commits are
+  ancestors of the `v0.14.0-beta.1` tag and shipped
+  in beta.1).
+
+### Build / CI
+
+- **`scripts/check-release-freeze.sh` passes 6/6**
+  on the rc.1 tree:
+  `sfu` (no engine wiring), `api` (101 public
+  headers, every header carries a marker), `api-symbols`
+  (skipped locally, `node` not on `PATH`; the same
+  scanner CI runs is the gate), `version`
+  (`NIMRTC_API_VERSION_PRE_RELEASE = "rc.1"`),
+  `submodules` (all five submodules pinned on a
+  reachable remote ref: googletest 15460959cbbf,
+  libopus 22244de5a79b, msquic a5ae3a06ed6e on
+  `origin/nimrtc-patches`, nlohmann_json 9cca280a4d0c,
+  wolfssl ac01707f552c), `root` (no scratch / log /
+  keylog / Testing artifacts at the root).
+
+- **`.github/workflows/release.yml` W3 — APM
+  prebuild `continue-on-error`.**  The meson
+  prebuild of `webrtc_audio_processing` fails on
+  the `windows-2022` runner (meson pulls abseil-cpp
+  as a subproject and ninja then reports a subcommand
+  failure while building `libwebrtc-audio-processing-2.a`;
+  see commit `dc15ad8` for the v0.14.0 release-cut
+  failure that aborted the whole release).  The step
+  is now `continue-on-error: true`; when the prebuild
+  succeeds Configure picks
+  `-DNIMRTC_VENDORED_WEBRTC_APM=ON` and the bundle
+  ships the real WebRTC APM 3A (AEC/ANS/AGC); when
+  it fails, Configure falls back to
+  `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` and the bundle
+  ships the built-in stub 3A path that `ci.yml` also
+  uses.  The per-platform outcome is recorded in
+  `build/3a-status-{windows,linux-x86_64,...}.txt`
+  and surfaced in the release notes
+  (`publish-release` reads them).  The release can
+  no longer be aborted by a prebuild regression.
+  The `audio3a` PUBLIC link fix above is what makes
+  the `=ON` path actually compile; without it the
+  fallback to `=OFF` is forced.
+
+- **`RELEASING.md` W5 — aarch64 soft-dependency
+  policy.**  The `linux-aarch64` leg of
+  `release.yml` is `continue-on-error: true` and
+  is deliberately *not* listed in
+  `publish-release`'s `needs:`.  GHA-hosted ARM64
+  runner capacity is unreliable (a 14+ hour queue
+  was observed at the v0.14.0 cut), so making it a
+  hard gate would block publishing the Windows /
+  Linux x86_64 / macOS arm64 trio.  Consequences,
+  all explicit rather than silent: the aarch64
+  bundle is best-effort; when the leg does not run
+  or fails, the release is published with the other
+  three bundles and a "Partial release" banner; the
+  missing bundle is listed by name; the aarch64
+  artefact is attached by a follow-up release once
+  runner capacity returns.  The **CI** leg in
+  `ci.yml` (`linux-aarch64`) remains a hard gate;
+  only the *release* leg is soft.
+
+- **`scripts/api_freeze_scan.js`** is the per-symbol
+  scanner the freeze script and the four CI
+  platforms all use; the `api-symbols` gate exits
+  0 against the rc.1 tree.
+
+### Notes
+
+- **Known limitations (carried into rc.1).**
+
+  - **The timeline seam is complete on the tracker side
+    but still inert at the engine.**  The three
+    tracker-side gaps ADR-017 §"Decision 5" recorded
+    (per-SSRC clock rate, RTP-TS wrap handling,
+    abs-send-time participation) all land in this cut,
+    but `Profile::timeline_enabled` is still parsed
+    and round-tripped without any engine path acting
+    on it: nothing outside the timeline's own tests
+    consumes `SenderReportTracker`.  The remaining
+    gaps are all engine-side and listed in ADR-017
+    §"Decision 5": `kSrPeriodMs`, `kAbsSendTimeUri`
+    and `kAbsSendTimeDefaultLocalId` are declared
+    with zero references (no SR scheduling, no extmap
+    negotiation, no header-extension write), and
+    `sender_recv_skew_us` is reserved for v1.1 and
+    always 0.  The header's status comment states
+    this explicitly rather than over-claiming a
+    Chrome-shaped slope estimator.
+
+  - **ALPN mismatch between client and server.**
+    `src/web_transport/src/web_transport_msquic_session.cpp`
+    (the *client* session factory) opens its msquic
+    `ConfigurationOpen` with
+    `kAlpn = {'s', 'm'}` — a draft-era WebTransport
+    ALPN name that is not the registered ALPN for
+    WebTransport-over-HTTP/3 (RFC 9114 / RFC 9298,
+    which uses `h3` with the extended CONNECT
+    `:protocol=webtransport`).  The server listener
+    `src/web_transport/src/web_transport_msquic_listener.cpp`
+    registers `kAlpn = "h3"` on both `ConfigurationOpen`
+    and the registration config.  A NimRTC **client**
+    therefore cannot complete a QUIC handshake against
+    the NimRTC **server** today (the ALPN values are
+    not negotiable, and msquic rejects the handshake
+    at `ConfigurationOpen` when the client offers
+    a different ALPN than the server registered).
+    The Chrome e2e Case E only ever speaks to the
+    server, so it bypasses this defect (Chrome also
+    uses `h3`); the defect is invisible to Chrome
+    and to the current CI surface, but it would
+    surface immediately in any NimRTC-to-NimRTC
+    e2e test.  Fixing it is a v0.14.x follow-up
+    that switches the client ALPN to `"h3"` and
+    the `:protocol` signalling accordingly.
+
+  - **WebTransport unit coverage is mock-only.**
+    `tests/test_web_transport_msquic.cpp` exercises
+    the `IWebTransportSessionFactory` / `IWebTransportSession`
+    surface with a `MockWebTransportSession` only
+    (the file's own header comment is explicit on
+    this: "no direct .cpp include, no
+    `LoopbackMsQuicPeer`, no Schannel cert
+    provisioning.  Real msquic `create()` requires
+    a reachable QUIC peer and is exercised end-to-end
+    by the Chrome e2e Case E harness").  The 15
+    `TEST_F` cases in that file therefore cover the
+    factory seam, the registry lookup, the session
+    state machine, the bidi-stream surface, the
+    datagram-facade callbacks, and the close
+    idempotency — but **none** of them exercise a
+    real msquic `ConfigurationOpen`, a real
+    `ConnectionOpen`, a real handshake, or a real
+    datagram send/receive against a real peer.
+    Real msquic coverage today lives in the Chrome
+    e2e Case E harness only, and the Case E
+    acceptance gate is blocked (next bullet).  Any
+    rc.1 evaluation of "WebTransport works" should
+    read the Case E status alongside the 15/15
+    mock number.
+
+  - **Chrome e2e Case E is blocked on a server-side
+    QUIC handshake defect, not on a missing test
+    environment.**  The case now runs end to end on
+    a developer machine and fails for a
+    well-defined, reproducible reason:
+
+    - Chrome: `net::ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`
+      (`num_undecryptable_packets: 0` — the client
+      never receives a reply), occasionally
+      `ERR_CONNECTION_RESET`.
+    - `demo-wtserver` binds the socket and reports
+      `WebTransport listener started on UDP port
+      9443`, but the run ends with `0 session(s)
+      handled` — no connection is ever surfaced to
+      the listener's connection callback.
+    - An **independent** QUIC client
+      (`aioquic`, pure Python, no shared code with
+      msquic) fails against the same endpoint, so
+      this is not a Chrome-specific incompatibility.
+
+    Ruled out while diagnosing: Windows Firewall
+    (all three profiles disabled), TLS credential
+    loading (the SChannel cert loads from the
+    Windows store and reports its SHA-1 hash),
+    IPv4/IPv6 family mismatch (a Chrome A/B run
+    forcing
+    `--host-resolver-rules=MAP localhost 127.0.0.1`
+    fails identically to the `::1` and default
+    paths), and the msquic fork's forced dummy raw
+    datapath (`RawDataPathInitialize` only nulls
+    out the optional raw path; `datapath_xplat.c`
+    falls back to the classic UDP datapath).  The
+    remaining suspect is the msquic listener /
+    registration / TLS setup in
+    `src/web_transport/src/web_transport_msquic_listener.cpp`
+    (the defect is in the server side, not in
+    Chrome; the `aioquic` independent client
+    reproduces it).  DC-1 interop remains blocked
+    on this defect and therefore does not land in
+    rc.1; it is the v1.0.0 acceptance gate per
+    `v1.0-plan.md` §12.3.3 Gate #3.
+
+- `NIMRTC_API_VERSION_PRE_RELEASE` has cycled from
+  `"beta.1"` to `"rc.1"` for this cut.  The
+  v1.0.0 final cut will set it to `""` per
+  §12.3.6 DoD item 2.
+
+- The `v0.14.0-rc.1` tag will be pushed alongside
+  the rc.1 cut commit (the post-`7fc36ff` tree
+  with the 8 working-tree changes listed in
+  Highlights).  `scripts/check-release-freeze.sh`
+  is the pre-tag guardrail; it passes 6/6 on this
+  tree (see Build / CI).
+
+### What is NOT in v0.14.0-rc.1 (deferred to v1.0.0 or later)
+
+- **Physical WebTransport session wiring
+  (DTLS-ICE → RFC 9221 handoff)** — rc.1 PR-2.
+  The dispatch + server seam landed in this cut;
+  the wire-up of a DTLS session's
+  `client_random` / `server_random` /
+  `master_secret` as a QUIC 0-RTT resumption
+  ticket is the v1.0.0 final action.  (Distinct
+  from the Case E blocker above: the seam itself
+  is wired, but a NimRTC DTLS session is not
+  yet wired through it.)
+- **L1 strict-priority scheduling *policy* (DC-2)**
+  — the cross-plane *test* lands in rc.1
+  (17/17 PASS, see Tests); the runtime hook
+  that consumes the test's stats and applies the
+  strict-priority reorder remains v1.0.0-beta.2.
+- **Chrome ↔ NimRTC DataChannel bidirectional
+  interop (DC-1)** — blocked on Case E; see
+  the Known limitations → Case E bullet above.
+- **Composite `sfu-agent` Profile resolution** —
+  closed by §7 = NO; off the v1.0.x critical
+  path; reopens at v1.1.0 only if the SFU track
+  is revisited.
+- **Adaptive JitterBuffer + Goog-CC full mainline
+  BWE** — v1.x.
+- **GM/T 国密 SRTP backend** — v1.x.
+- **AddressSanitizer CI matrix** — v1.x.
 
 ## [0.14.0-beta.1] - 2026-10-20
 
 ### Status: Tech Preview
 
-> **Third pre-release of the v0.14.x cycle** — the
+> **Second pre-release of the v0.14.x cycle** — the
 > **v1.0.0-beta.1** pre-release per `docs/plan/v1.0-plan.md`
 > §8 + §12.2 + §12.3.3.  The marketing version stays anchored
 > to the v0.x line ("Tech Preview" banner unchanged from
@@ -300,11 +758,11 @@ real `## [1.0.0]` block:
 > earlier attempt to cut beta.1 that was reverted before the
 > tag was pushed.  The `v0.14.0-beta.1` git tag in this
 > repository points at the canonical 2026-10-20 cut described
-> by this entry.  The `[0.14.0-rc.1] - 2026-10-20` entry
-> further down describes rc.1 content that is **staged in the
-> tree but not yet tagged** -- there is no `v0.14.0-rc.1` git
-> tag, and `NIMRTC_API_VERSION_PRE_RELEASE` still reads
-> `"beta.1"` until the rc.1 tag is cut.
+> by this entry.  The `[0.14.0-rc.1] - 2026-10-22` entry
+> **above** describes the rc.1 content; it was **staged in
+> the tree but untagged** at the time this entry was written,
+> and `NIMRTC_API_VERSION_PRE_RELEASE` read `"beta.1"` until
+> the `v0.14.0-rc.1` tag was cut.
 
 ### Highlights
 
@@ -643,25 +1101,32 @@ real `## [1.0.0]` block:
 ### What is NOT in v0.14.0-beta.1 (deferred to v0.14.0-rc.1 or later)
 
 - **Chrome e2e Case E acceptance gate** —
-  v0.14.0-rc.1.  The harness at
-  `tests/chrome_interop_harness/` is in; the
-  browser-driven end-to-end test that
-  exchanges an `RTCDataChannel` over
+  **still open after rc.1.**  The harness at
+  `tests/chrome_interop_harness/` and the server
+  seam (`IWebTransportServer`, `demo-wtserver`)
+  both landed; the browser-driven end-to-end
+  exchange of an `RTCDataChannel` over
   WebTransport / QUIC against headless Chrome
-  is the rc.1 follow-up (the harness is the
-  scaffolding).  **Gate #3 in `v1.0-plan.md`
-  §12.3.3 is "In Progress" at the beta.1 cut;
-  documented in the `[Unreleased]` section above.**
+  does **not** pass — it is blocked on a
+  server-side QUIC handshake defect.  **Gate #3
+  in `v1.0-plan.md` §12.3.3 is still open; see
+  `[0.14.0-rc.1]` -> Notes -> Known limitations
+  for the full diagnosis.**
 - **`EngineConfig::datachannel_backend` field** —
-  v0.14.0-rc.1. The registry is wired
-  (`PluginRegistry::get_web_transport("msquic")`
-  resolves at the beta.1 cut), but the engine
-  config surface that maps the user-facing
-  `"msquic"` / `"sctp"` / `"web_transport"`
-  string to a factory lookup is the rc.1
-  follow-up. Until then, the engine's
-  DataChannel is hard-wired to `SctpDataChannel`
-  (id `"sctp"`).
+  **shipped in this cut after all.**  The
+  canonical beta.1 tree does contain both
+  `datachannel_backend` (default `"sctp"`) and
+  `web_transport_name` (default `"msquic"`) in
+  `src/engine/include/nimrtc/engine/engine.hpp`,
+  and `engine.cpp::init_datachannel_registry()` is
+  already the `uint32_t` dispatcher with five
+  resolved branches.  (This entry previously listed
+  the field as an rc.1 follow-up; the field and the
+  dispatcher are both present at the beta.1 tag,
+  `706383a`.)  What beta.1 does **not** do is wire
+  a physical WebTransport session through the
+  dispatch — the DTLS-ICE -> RFC 9221 handoff
+  remains the rc.1 PR-2 / v1.0.0 item.
 - **`EngineConfig::datachannel_backend` default flip
   from `"sctp"` to `"web_transport"`** — follow-up
   v0.14.x patch post-beta.1 (NOT at the beta.1
@@ -1138,257 +1603,6 @@ real `## [1.0.0]` block:
   v0.14.x slip-or-land (the v0.13.0 sweep was
   at the file level; the per-symbol pass is a
   v0.14.x follow-up).
-## [0.14.0-rc.1] - 2026-10-20
-
-### Status: Tech Preview
-
-> **Third pre-release of the v0.14.x cycle** — the
-> **v1.0.0-rc.1** release candidate per
-> `docs/plan/v1.0-plan.md` §7 + §8 + §12.2 + §12.3.5.
-> The marketing version stays anchored to the v0.x line
-> ("Tech Preview" banner unchanged from v0.13.0); the
-> `NIMRTC_API_VERSION_PRE_RELEASE` macro cycles to
-> `"rc.1"` at the rc.1 tag cut -- it still reads `"beta.1"`
-> in the tree, because the `v0.14.0-rc.1` tag has not been
-> cut yet.  This is the **regression-only stabilisation**
-> window (no SFU-1 / DC-3 / BENCH-1; §7 = NO, closed
-> 2026-10-19); the only landed feature work is the
-> **DC-1 readiness PR-1** (`EngineConfig::datachannel_backend`
-> dispatch) deferred from `v0.14.0-beta.1` per that
-> release's `What is NOT in v0.14.0-beta.1` section.
-> Physical DTLS-ICE → RFC 9221 handoff wiring is the
-> rc.1 **PR-2** follow-up; rc.1 ships PR-1 alone so the
-> §12.3.5 "regression-only" gate is preserved.
->
-> **Cut order**: the shipped commits since `v0.14.0-beta.1`
-> landed in sequence (rc.1 PR-1 → repair → test-align →
-> CI flake-fix), followed by one attempted-build commit and
-> its revert (`a88383e` → `ef6ff11`, net-zero).  All are
-> pushed as a single stack; the `v0.14.0-rc.1` tag, when it
-> is cut, points at the post-`ef6ff11` tree.
-
-### Highlights
-
-- **EngineConfig::datachannel_backend dispatch (rc.1
-  PR-1, DC-1 readiness)** — `src/engine/include/nimrtc/engine/engine.hpp`
-  gains two config fields:
-    - `datachannel_backend` (string, default `"sctp"`,
-      empty → falls back to the legacy `datachannel_name`
-      so the v0.x contract is preserved)
-    - `web_transport_name` (string, default `"msquic"`)
-  and `engine.cpp::init_datachannel_registry()` is rewritten
-  as a `uint32_t` dispatcher with five resolved branches
-  (`sctp` / `msquic` / unknown-name error /
-  empty-after-legacy explicit-disable / not-built error).
-  This is the **readiness-verification** surface only —
-  the factory id resolves and the `web_transport_name`
-  slot verifies for web-transport backends; physical
-  WebTransport session creation (DTLS-ICE → RFC 9221
-  handoff) is the PR-2 follow-up.  (`abfcba4`)
-
-- **PluginRegistry::unregister_datachannel() (rc.1 PR-1
-  repair)** — `test_engine_plugin_loading` exposed that
-  `register_datachannel()` had no symmetric tear-down for
-  the in-test re-register case.  Added as the peer to
-  `register_datachannel()`; `test_engine_plugin_loading`
-  goes green on all 4 platforms.  (`ab54a64`)
-
-- **test_datachannel_engine + wasm-demo §7 closure
-  (comment alignment)** — pre-release doc / comment
-  alignment with the `v0.14.0-rc.1` vocabulary; no
-  behaviour change.  (`b254f15`)
-
-- **MemoryVideoSource cv-driven stop handshake +
-  `wait_until_idle()` (CI flake fix)** — `video_source.cpp`
-  replaces the legacy "set `stop_flag_` and let the
-  thread exit on the next frame interval" polling model
-  with a deterministic `loop_mu_` + `cv_` + `exit_cv_`
-  + `thread_exited_` synchronization trio:
-    - `start()` takes `loop_mu_` before spawning the
-      thread to close a `[thread.condition.condvar]`
-      init window on the very first `cv_.wait_until()`
-      entry path.
-    - `stop()` holds `loop_mu_` for the `stop_flag_` write
-      and `notify_all()`s `cv_`, so the cadence loop
-      exits its `cv_.wait_until()` within one
-      scheduling slice rather than after `1 / fps`
-      seconds (33 ms at 30 fps).
-    - The loop holds `loop_mu_` for the entire cycle but
-      releases it around `do_produce()`, so a user-supplied
-      `FrameCallback` that calls back into the source
-      (e.g. `set_callback`, `wait_until_idle`) can never
-      deadlock the producer.
-    - The destructor calls `wait_until_idle(1s)` as a
-      safety net — if a wedged callback holds the producer
-      thread, the destructor logs and joins anyway rather
-      than hanging the test process on shutdown.
-  New public virtual `IVideoSource::wait_until_idle(timeout)`
-  with a default no-op impl so external plugin sources
-  keep compiling without changes; `MemoryVideoSource`
-  overrides.  This is the source-level fix for the CI
-  flake flagged in run 39359503550 test 280
-  (`MemorySource.StartProduceStopLifecycle` failed on a
-  busy runner; the old code parked the producer thread on
-  a preemption-prone `sleep_until()`).  (`2662513`)
-
-### Added
-
-- `IVideoSource::wait_until_idle(std::chrono::milliseconds)`
-  — virtual with default no-op impl returning `true` so
-  existing in-tree plugin sources keep compiling.  Override
-  seam for any source that owns a worker thread.  Public
-  header surface **widening**; release notes flag this
-  as an intentional `v0.14.0-rc.1` surface addition
-  (every in-tree `IVideoSource` override gets the free
-  default; external plugins compile unchanged).
-  (`src/modules/video_source/include/nimrtc/video_source/video_source.hpp`)
-
-- `MemoryVideoSource::wait_until_idle(timeout)` override +
-  the `loop_mu_` / `cv_` / `exit_cv_` / `thread_exited_`
-  synchronization trio.  (`src/modules/video_source/src/video_source.cpp`)
-
-- `PluginRegistry::unregister_datachannel(id)` — symmetric
-  peer to `register_datachannel()`; needed by
-  `test_engine_plugin_loading`.  (`src/core/include/nimrtc/core/plugin_registry.hpp`
-  + `src/core/src/plugin_registry.cpp`)
-
-- `EngineConfig::datachannel_backend` (string, default
-  `"sctp"`) and `EngineConfig::web_transport_name` (string,
-  default `"msquic"`); empty `datachannel_backend` falls
-  back to `datachannel_name` for backward compatibility
-  with the v0.x contract.
-  (`src/engine/include/nimrtc/engine/engine.hpp`)
-
-### Changed
-
-- `engine.cpp::init_datachannel_registry()` rewritten as a
-  `uint32_t` dispatcher with five resolved branches.  The
-  dispatch layer is `v0.14.0-rc.1`-thin by design —
-  physical WebTransport session creation (DTLS-ICE →
-  RFC 9221 handoff) is the rc.1 PR-2 follow-up.  (`abfcba4`)
-
-- `MemoryVideoSource::cadence_loop()` now holds `loop_mu_`
-  for the entire loop with the mutex released around
-  `do_produce()`.  `start()` takes `loop_mu_` before
-  spawning the thread.  These are correctness fixes for
-  the stop-exit-vs-preemption race; the deterministic-exit
-  guarantee is documented in the new
-  `IVideoSource::wait_until_idle` contract.
-  (`src/modules/video_source/src/video_source.cpp`)
-
-### Fixed
-
-- **CI flake (run 39359503550 test 280):
-  `MemorySource.StartProduceStopLifecycle`** — the
-  producer thread could be preempted past several frame
-  intervals after `stop()`, and the only way callers
-  could observe "the producer had actually stopped" was
-  `sleep_for(1.5s)` + re-read the frame counter.  Resolved
-  at the source by changing `stop()` to signal +
-  `notify_all()` rather than rely on the next-frame wake;
-  the test now uses `wait_until_idle(500ms)` (deterministic,
-  <1 ms in practice).  See `Highlights → MemoryVideoSource`
-  for the full synchronization rewrite.  (`2662513`)
-
-- **`test_engine_plugin_loading` build break after PR-1**:
-  the rc.1 PR-1 engine refactor broke the plugin test
-  because `PluginRegistry::unregister_datachannel()` did
-  not exist.  Now added as the symmetric peer to
-  `register_datachannel()`; `test_engine_plugin_loading`
-  goes green on all 4 platforms.  (`ab54a64`)
-
-### Tests
-
-- `test_video_source` 13/13 PASS including
-  `MemorySource.StartProduceStopLifecycle` with the
-  deterministic `wait_until_idle(500ms)` barrier; 8/8
-  repeat runs clean (no race observed on windows-2022
-  MSVC).  No external-`IVideoSource`-impl test broken:
-  the `wait_until_idle` virtual is a pure addition with
-  a default impl that returns `true`.
-
-- `test_engine_plugin_loading` PASS on all 4 platforms
-  after the `PluginRegistry::unregister_datachannel()`
-  symmetrisation.
-
-- `test_datachannel_engine` 5/5 with comment-alignment
-  pass.  The L1-priority / DC-2 follow-up remains as
-  rc.1 PR-2.
-
-- `test_engine_video_codec` PASS — downstream consumer
-  of the `IVideoSource` surface (no test change needed;
-  inherits the new `wait_until_idle` virtual cleanly).
-
-### Docs
-
-- `docs/plan/v1.0-plan.md` §12.3.5 DoD item 6
-  satisfied: the `CHANGELOG [0.14.0-rc.1]` entry is
-  now present.
-
-### Build / CI
-
-- CI re-verified green on the rc.1 tree: `ci-e2e` run
-  39377787364 reports `100% tests passed, 0 tests failed out of 520`
-  on `windows-2022`, clearing the five failures carried from
-  `v0.14.0-beta.1` (`video_source_tests` #280 and
-  `test_datachannel_engine` #480-482/#513).
-- **Configure-time XDP dummy datapath patcher:** `48aca5e` added
-  `_nimrtc_msquic_force_dummy_datapath()` to `src/third_party/CMakeLists.txt`.
-  This function (still present at HEAD) patches `src/third_party/msquic/src/platform/CMakeLists.txt`
-  at configure time, forcing `datapath_raw_dummy.c` instead of the real
-  XDP datapath.  Required because the Windows XDP SDK (`xdp-for-windows`)
-  is not available in the NimRTC CI build environment (windows-2022 image);
-  without this patcher, the Windows build fails at compile time with a
-  missing `xdp/wincommon.h` header.  Idempotent — re-running `cmake` has
-  no additional effect.  The submodule stays vendor-clean (gitlink = upstream
-  `42376ae`); no submodule commits are modified.
-- **MSVC C28020 false-positive suppression:** `48aca5e` also added a
-  `target_compile_options(core PRIVATE /wd28020)` workaround scoped to
-  the msquic `core` library.  This silences a known MSVC `/analyze` false
-  positive on the SAL value-range check in `crypto_tls.c`'s macro-driven
-  switch.  Without this, Windows CI fails with `error C2220: warning
-  treated as error` before the engine links.  Still required at HEAD.
-- `a88383e` moved the msquic gitlink to a commit that existed only on
-  a local unpushed branch; `actions/checkout@v4` could not resolve it
-  (`upload-pack: not our ref a5ae3a06`).  Reverted in `ef6ff11`;
-  gitlink restored to upstream `42376ae`.
-- If a datapath workaround is ever genuinely required, it must ship
-  as a fork of `microsoft/msquic` whose patched branch is pushed and
-  referenced by `.gitmodules`, not as an in-tree gitlink to an
-  unpushed commit.
-
-### Notes
-
-- The 4 functional commits in this stack were authored as a
-  single rc.1 delivery (`abfcba4` → `ab54a64` → `b254f15` →
-  `2662513`), followed by `a88383e` (attempted build fix) and
-  `ef6ff11` (its revert) which net to zero tree delta.  They
-  were pushed in the order above so the `2662513` flake-fix
-  rolls into the rc.1 cut, not into a later pre-release.
-
-- `NIMRTC_API_VERSION_PRE_RELEASE` has cycled from
-  `"beta.1"` to `"rc.1"` for this cut.  The v1.0.0
-  final cut will set it to `""` per §12.3.6 DoD item 2.
-
-### What is NOT in v0.14.0-rc.1 (deferred to v1.0.0 or later)
-
-- **Physical WebTransport session wiring (DTLS-ICE →
-  RFC 9221 handoff)** — rc.1 PR-2 (the dispatch
-  resolved in PR-1 is the seam only; the wire-up
-  lands when the rc.1 soak completes).
-- **DC-2 L1 strict-priority + DC plane** —
-  v1.0.0-beta.2.
-- **Composite `sfu-agent` Profile resolution** —
-  closed by §7 = NO; off the v1.0.x critical path;
-  reopens at v1.1.0 only if the SFU track is
-  revisited.
-- **Adaptive JitterBuffer + Goog-CC full mainline
-  BWE** — v1.x.
-- **GM/T 国密 SRTP backend** — v1.x.
-- **AddressSanitizer CI matrix** — v1.x.
-- **Per-symbol inline stability annotation** —
-  v0.14.x slip-or-land.
-
 ## [0.14.0] - 2026-10-16
 
 ### Status: Tech Preview

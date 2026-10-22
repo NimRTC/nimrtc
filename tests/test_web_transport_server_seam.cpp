@@ -41,10 +41,14 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <nimrtc/core/api_version.hpp>  // NIMRTC_API_UNSTABLE
 #include <nimrtc/plugins/base.hpp>       // plugins::Status
@@ -90,6 +94,55 @@ static_assert(
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// TLS material probe
+// ---------------------------------------------------------------------------
+//
+// The msquic-backed server needs a TLS certificate before it can open a
+// QUIC listener (the QUIC handshake requires TLS 1.3).  The credential
+// material lives in the build directory and is provisioned by
+// scripts/generate_wtserver_cert.ps1 (Windows — the certificate also has
+// to sit in the Windows certificate store) or
+// scripts/generate_wtserver_cert.py (Linux/macOS — PEM key + certificate).
+//
+// The lookup below mirrors the one in
+// src/web_transport/src/web_transport_msquic_listener.cpp.  When the
+// material has not been provisioned, the listener cannot start and there is
+// nothing for the start-dependent assertions below to check, so those cases
+// are skipped rather than failed.  CI provisions the material on every
+// platform, so the assertions really run there.
+std::vector<std::string> credential_search_dirs() {
+    std::vector<std::string> dirs;
+    if (const char* env = std::getenv("NIMRTC_BUILD_ROOT"); env && env[0]) {
+        dirs.emplace_back(env);
+    }
+#ifdef NIMRTC_DEFAULT_BUILD_ROOT
+    dirs.emplace_back(NIMRTC_DEFAULT_BUILD_ROOT);
+#endif
+    dirs.emplace_back(".");
+    dirs.emplace_back("./..");
+    return dirs;
+}
+
+bool credential_file_exists(const char* name) {
+    for (const std::string& dir : credential_search_dirs()) {
+        std::ifstream probe(dir + "/" + name, std::ios::binary);
+        if (probe) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool tls_material_available() {
+#if defined(_WIN32)
+    return credential_file_exists("wtserver_hash.txt");
+#else
+    return credential_file_exists("wtserver_key.pem") &&
+           credential_file_exists("wtserver_cert.pem");
+#endif
+}
+
 class WebTransportServerSeamTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -97,6 +150,16 @@ protected:
         // is fully configured before we test.
         server_ = nimrtc::web_transport::create_msquic_webtransport_server(
             cfg_);
+    }
+
+    // Skip the current case when the TLS material has not been provisioned.
+    void require_tls_material() {
+        if (!tls_material_available()) {
+            GTEST_SKIP()
+                << "WebTransport TLS material is not provisioned "
+                << "(run scripts/generate_wtserver_cert.ps1 on Windows / "
+                << "scripts/generate_wtserver_cert.py on Linux and macOS)";
+        }
     }
 
     // Default config — enough for the server to start.
@@ -120,6 +183,7 @@ TEST_F(WebTransportServerSeamTest, running_is_false_before_start) {
 // this is correct QUIC/Winsock behaviour (port 0 means "pick one for me").
 // The server should report running()=true after this call.
 TEST_F(WebTransportServerSeamTest, start_on_port_zero_assigns_dynamic_port) {
+    require_tls_material();
     // Port 0 is a valid bind target on Windows: the OS assigns an
     // available ephemeral port.  This is useful for test servers that
     // don't need a fixed port.  Verify the server reports running().
@@ -155,6 +219,7 @@ TEST_F(WebTransportServerSeamTest, set_on_session_accepts_noop_lambda) {
 
 // Test: start on an unprivileged port succeeds (smoke — listener binds).
 TEST_F(WebTransportServerSeamTest, start_on_unprivileged_port_succeeds) {
+    require_tls_material();
     // Use a high unprivileged port that is unlikely to be in use.
     constexpr std::uint16_t kTestPort = 29443;
     EXPECT_TRUE(server_->start(kTestPort));
@@ -167,6 +232,7 @@ TEST_F(WebTransportServerSeamTest, start_on_unprivileged_port_succeeds) {
 
 // Test: after stop(), start() can be called again (restart is safe).
 TEST_F(WebTransportServerSeamTest, restart_after_stop_is_safe) {
+    require_tls_material();
     constexpr std::uint16_t kTestPort = 29444;
     EXPECT_TRUE(server_->start(kTestPort));
     EXPECT_TRUE(server_->running());
@@ -184,6 +250,7 @@ TEST_F(WebTransportServerSeamTest, restart_after_stop_is_safe) {
 
 // Test: start() returns false if already running (no double-start).
 TEST_F(WebTransportServerSeamTest, start_when_already_running_returns_false) {
+    require_tls_material();
     constexpr std::uint16_t kTestPort = 29445;
     EXPECT_TRUE(server_->start(kTestPort));
     EXPECT_TRUE(server_->running());

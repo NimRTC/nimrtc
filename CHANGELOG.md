@@ -9,6 +9,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### In Progress
 
+- **ADR-016 cross-end timeline seam** —  `nimrtc/rtp/timeline.hpp` (new
+  public header) lands in the Unreleased window behind
+  `Profile::timeline_enabled`.  The header owns `Ntp64` (RFC 5905 §6
+  64-bit timestamp), `ntp64_from` / `system_clock_from_ntp64`,
+  the RFC 6051 `abs-send-time` 24-bit encoder/decoder pair, and
+  the receiver-side `SenderReportTracker` (ingests RTCP SRs,
+  per-SSRC linear RTP-TS → wall-clock extrapolation).  Companion
+  binary `src/modules/rtp/tests/test_timeline.cpp` covers NTP
+  round-trip, abs-send-time encode/decode + the 256 s wrap, SR
+  extrapolation, multi-SSRC isolation, and the no-SR nullopt path
+  (9/9 PASS).
+  Public-header count: bumped 100 → 101 in
+  `tests/test_api_classification.cpp`.
+
+  **Anchoring convention (corrected in the follow-up commit):**
+  `capture_ts_us_for()` returns **microseconds since the 1970 Unix
+  epoch**, not since the 1900 NTP epoch — the seconds field is
+  reduced by `kNtpEpochOffset` and pre-1970 SRs are clamped to 0.
+  This matches the convention Chrome's NetEq / RtpDepacketizer use
+  and lets callers subtract their own monotonic clock (cast to
+  Unix-microseconds) directly.
+
+  **Public signature (corrected in the follow-up commit):**
+  the `sender_recv_skew_us` out-parameter of `capture_ts_us_for()`
+  is a `std::int64_t*` (pass `nullptr` to discard), not a
+  `std::int64_t&`.  The reference form forced every caller —
+  including `std::ignore` — to supply storage.
+
+  **MSVC portability fixes in the follow-up commit:**
+  all four `__int128` uses in `timeline.cpp` were replaced with
+  int64 arithmetic (every intermediate product provably fits: the
+  largest is `frac * 1e6 ≈ 4.3e15`), and the free `swap()` was
+  made a `friend` so it can move the pImpl pointer under MSVC.
+  Both changes are behaviour-preserving.
+
+  `src/modules/rtp/CMakeLists.txt` also gains an explicit
+  `enable_testing()` before `add_subdirectory(tests)` — without
+  it the CMake 4.0 VS generator silently skipped the
+  `CTestTestfile.cmake` at that level, so `ctest` never recursed
+  into `src/modules/rtp/tests/` and the 9 timeline cases were
+  invisible to the suite.
+
 - **Chrome e2e Case E — WebTransport server seam (beta.2)** —
   `IWebTransportServer` (new public header
   `nimrtc/web_transport/web_transport_server.hpp`) lands in the

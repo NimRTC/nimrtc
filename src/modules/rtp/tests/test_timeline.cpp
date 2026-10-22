@@ -97,7 +97,7 @@ TEST(SenderReportTracker, CaptureAtSREqualsSRSendTime) {
                                           /*abs_send_time_24=*/0,
                                           /*clock_rate_hz=*/90'000,
                                           /*local_recv_us=*/1'001'000,
-                                          skew);
+                                          &skew);
     ASSERT_TRUE(cap.has_value());
     // 1'700'000'000 + kNtpEpochOffset seconds == ... µs.
     const std::int64_t expected_us =
@@ -119,7 +119,7 @@ TEST(SenderReportTracker, LinearExtrapolationForward) {
 
     // Advance rtp_ts by 90'000 ⇒ should land 1 s later.
     auto cap = tracker.capture_ts_us_for(sr.ssrc, sr.rtp_timestamp + 90'000,
-                                          0, 90'000, 0, /*skew*/ std::ignore);
+                                          0, 90'000, 0, /*skew*/ nullptr);
     ASSERT_TRUE(cap.has_value());
     const std::int64_t expected_us =
         static_cast<std::int64_t>(sr.ntp_timestamp >> 32) *
@@ -146,9 +146,9 @@ TEST(SenderReportTracker, MultiSsrc) {
     EXPECT_EQ(tracker.tracked_ssrc_count(), 2u);
 
     auto cap_a = tracker.capture_ts_us_for(0xAAu, 1000, 0, 90'000, 0,
-                                            /*skew*/ std::ignore);
+                                            /*skew*/ nullptr);
     auto cap_b = tracker.capture_ts_us_for(0xBBu, 2000, 0, 90'000, 0,
-                                            /*skew*/ std::ignore);
+                                            /*skew*/ nullptr);
     ASSERT_TRUE(cap_a.has_value());
     ASSERT_TRUE(cap_b.has_value());
     // cap_a is at SR-a's NTP64 (≈ 1'700'000'000 s); cap_b is at SR-b's
@@ -160,7 +160,7 @@ TEST(SenderReportTracker, MultiSsrc) {
 TEST(SenderReportTracker, CaptureWithoutSRReturnsNullopt) {
     SenderReportTracker tracker;
     std::int64_t skew = 0;
-    auto cap = tracker.capture_ts_us_for(0xFFu, 1234u, 0, 90'000, 0, skew);
+    auto cap = tracker.capture_ts_us_for(0xFFu, 1234u, 0, 90'000, 0, &skew);
     EXPECT_FALSE(cap.has_value());
 }
 

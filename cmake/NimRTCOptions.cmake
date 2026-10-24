@@ -124,13 +124,18 @@ function(nimrtc_apply_options target)
             $<$<CONFIG:Debug>:-O0 -g3>
             $<$<CONFIG:Release>:-O2 -DNDEBUG>)
 
-        # -Wduplicated-cond was added in Clang 13. Apple Clang's version
-        # numbering tracks Xcode (not upstream Clang major), and Apple Clang
-        # 15 (the GitHub-hosted macos runner) does NOT actually recognise the
-        # flag — empirically it errors with 'unknown warning option'. Skip
-        # it on Apple to keep -Werror strict; we still get the rest of the
-        # warning set. Linux GCC/Clang always get the flag.
-        if(NOT APPLE)
+        # -Wduplicated-cond (duplicate `if` conditions inside an if/else
+        # chain) is a GCC-only spelling.  Clang has no equivalent
+        # diagnostic — it rejects BOTH '-Wduplicated-cond' and the
+        # '-Wduplicate-cond' variant with "unknown warning option", and
+        # -Werror turns that into a hard build failure.  Verified against
+        # upstream clang 14 and Apple Clang 15; only GCC accepts it.
+        #
+        # Keying this off the compiler ID (not off the platform) matters:
+        # the previous 'if(NOT APPLE)' guard only protected Apple Clang
+        # and left every upstream-Clang build broken.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
+           CMAKE_C_COMPILER_ID STREQUAL "GNU")
             target_compile_options(${target} PRIVATE -Wduplicated-cond)
         endif()
 

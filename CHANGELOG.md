@@ -18,6 +18,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The macOS CI build failed in the `Build` step.**  The
+  `macos-clang / arm64` job died with `Process completed with
+  exit code 2` on every push since the abs-send-time refactor
+  (ADR-016/017), while `windows / msvc` and `linux-gcc /
+  x86_64` stayed green.  The cause was a compiler-diagnostic
+  split between GCC and Clang: `src/modules/rtp/src/timeline.cpp`
+  still declared `kAbsSendTimeCycleUs` (the abs-send-time
+  256 s wrap period expressed in microseconds), but the
+  wrap arithmetic had been rewritten to work on raw ticks via
+  `kAbsSendTimeMask` / `kAbsSendTimeModulus`, so the constant
+  had no remaining reader.  GCC does not diagnose unused
+  `constexpr` variables in C++, but Clang does — and because
+  NimRTC compiles with `-Werror`, `-Wunused-const-variable`
+  turned the dead constant into a hard error on every Apple
+  Clang build.  The dead constant is removed; the 256 s wrap
+  period is now documented on `kAbsSendTimeModulus` instead.
+  (`src/modules/rtp/src/timeline.cpp`)
+
+- **`-Wduplicated-cond` was not a portable warning flag.**
+  The flag is a GCC-only spelling — Clang accepts neither
+  `-Wduplicated-cond` nor the `-Wduplicate-cond` variant and
+  reports `unknown warning option`, which `-Werror` turns
+  into a hard build failure.  The guard was keyed off the
+  platform (`if(NOT APPLE)`), so it protected Apple Clang but
+  left every upstream-Clang build broken.  The flag is now
+  applied based on the compiler ID and reaches GCC only.
+  (`cmake/NimRTCOptions.cmake`)
+
 - **The WebTransport server seam test could not skip.**  Its
   `require_tls_material()` helper called `GTEST_SKIP()`,
   which GoogleTest expands to a `return` statement — so it

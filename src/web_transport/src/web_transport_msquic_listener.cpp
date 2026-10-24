@@ -1093,8 +1093,8 @@ Impl::~Impl() {
 }
 
 void Impl::on_webtransport_request(
-    HQUIC stream,
-    const std::unordered_map<std::string, std::string>& headers) noexcept {
+    [[maybe_unused]] HQUIC stream,
+    [[maybe_unused]] const std::unordered_map<std::string, std::string>& headers) noexcept {
 
     // When this is called, the HTTP/3 200 response has already been queued
     // by Http3Handler::send_webtransport_response().

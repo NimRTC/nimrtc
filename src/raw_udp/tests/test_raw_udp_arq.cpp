@@ -192,13 +192,28 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
                     << "p50=" << p50 << "us p99=" << p99
                     << "us p999=" << p999 << "us n=" << latencies_us.size());
 
-    // Skeleton is allowed to be slow 鈥?we just want a finite number and
+    // Skeleton is allowed to be slow — we just want a finite number and
     // an order of magnitude that's reasonable for an in-process mutex-
     // locked path. Slice 7.5 (lock-free ring) should bring p99 well
     // below this.
+    //
+    // Percentile ordering is a *non-strict* invariant: p50 / p99 / p999
+    // are order statistics of the same sample set, so neighbouring ones
+    // are allowed to tie. They do tie in practice once the distribution
+    // is narrow — on a fast Linux CI runner the whole 200-sample
+    // distribution collapses into a couple of microsecond buckets and
+    // p999 == p99 (25us vs 25us), which made the former strict
+    // EXPECT_GT(p999, p99) a flake even though the numbers are good
+    // news rather than a regression. Assert monotonicity here and keep
+    // the strict (tie-proof) spread check below.
     EXPECT_GT(p50,  0);
-    EXPECT_GT(p99,  p50);
-    EXPECT_GT(p999, p99);
+    EXPECT_GE(p99,  p50);
+    EXPECT_GE(p999, p99);
+
+    // The tail must still be measurably worse than the median. This
+    // compares the maximum against the median, so it still holds when
+    // the top order statistics happen to coincide.
+    EXPECT_GT(p999, p50);
 
     // Sanity: total loopback latency should never exceed the send
     // interval (10 ms = 10 000 us) by more than a small fudge factor

@@ -53,6 +53,12 @@ def main() -> int:
     parser.add_argument("--out-pfx", default=OUT_PFX)
     parser.add_argument("--out-pem", default=OUT_PEM)
     parser.add_argument("--out-key", default=OUT_KEY)
+    parser.add_argument("--out-hash", default=None,
+                        help="path for the lowercase SHA-1 hex file "
+                             "(default: next to --out-pfx)")
+    parser.add_argument("--out-thumbprint", default=None,
+                        help="path for the uppercase SHA-1 hex file "
+                             "(default: next to --out-pfx)")
     args = parser.parse_args()
 
     try:
@@ -60,6 +66,12 @@ def main() -> int:
         from cryptography.x509.oid import NameOID, ExtensionOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
+        # pkcs12 is a sub-module of serialization and is NOT imported by
+        # `from ... import serialization`.  Without this explicit import
+        # `serialization.pkcs12` raises AttributeError on cryptography
+        # 3.x (the version pip installs on Linux/macOS), and the script
+        # dies before it writes the SHA-1 hash files.
+        from cryptography.hazmat.primitives.serialization import pkcs12
         from datetime import datetime, timedelta
     except ImportError:
         print("ERROR: cryptography package not found.", file=sys.stderr)
@@ -129,26 +141,58 @@ def main() -> int:
     # --- 4. Export PFX ---
     # Windows SChannel / msquic expects a PFX blob.
     # We include the private key so SChannel can use it for TLS.
-    pfx_bytes = serialization.pkcs12.serialize_key_and_certificates(
-        name=b"nimrtc-wtserver",
-        key=private_key,
-        cert=cert,
-        cas=None,
-        key_encryption_algorithm=serialization.BestAvailableEncryption(
-            PFX_PASSWORD.encode()),
-    )
-    with open(args.out_pfx, "wb") as f:
-        f.write(pfx_bytes)
-    print(f"  PFX written: {args.out_pfx}  ({len(pfx_bytes):,} bytes)")
+    #
+    # The keyword is `key_encryption_algorithm` from cryptography 37.0
+    # onwards; older releases (3.x — what pip installs on many Linux and
+    # macOS images) spell it `encryption_algorithm`.  Probe the signature
+    # instead of the version number so a backport of either spelling works.
+    #
+    # The PFX is a Windows-only artifact: the Linux / macOS msquic backend
+    # is the OpenSSL/quictls one, which loads the PEM pair and never
+    # touches the PFX.  A failure here must therefore not abort the script
+    # — the PEM pair and the SHA-1 hash files are what those platforms
+    # need, and they are written below.
+    try:
+        import inspect
+        pkcs12_params = inspect.signature(
+            pkcs12.serialize_key_and_certificates).parameters
+        enc_kwarg = ("key_encryption_algorithm"
+                     if "key_encryption_algorithm" in pkcs12_params
+                     else "encryption_algorithm")
+        pfx_bytes = pkcs12.serialize_key_and_certificates(
+            name=b"nimrtc-wtserver",
+            key=private_key,
+            cert=cert,
+            cas=None,
+            **{enc_kwarg: serialization.BestAvailableEncryption(
+                PFX_PASSWORD.encode())},
+        )
+        with open(args.out_pfx, "wb") as f:
+            f.write(pfx_bytes)
+        print(f"  PFX written: {args.out_pfx}  ({len(pfx_bytes):,} bytes)")
+    except Exception as exc:  # noqa: BLE001 - non-fatal, see comment above
+        print(f"  PFX not written ({exc}); "
+              "PFX is only required by the Windows SChannel backend — "
+              "the PEM pair below is what Linux / macOS use.")
 
     # --- 5. Export SHA-1 hash + thumbprint (matches .ps1 sibling) ---
     # msquic SChannel uses QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE which
     # references the cert by its SHA-1 thumbprint in a Windows cert store.
     # lowercase hex → wtserver_hash.txt (C++ reads this via NIMRTC_BUILD_ROOT)
     # uppercase hex → wtserver_thumbprint.txt (matches `New-SelfSignedCertificate`)
+    # The hash / thumbprint files describe the certificate that was just
+    # written, so they follow the certificate's own output directory
+    # instead of the hard-coded BUILD_DIR.  Without this, running the
+    # script from a WSL / Linux host against a shared checkout overwrote
+    # the Windows SChannel hash file with a cert that is not installed in
+    # Cert:\CurrentUser\My — the Windows seam tests then failed to load
+    # their TLS credentials even though the material was "present".
+    out_dir = os.path.dirname(os.path.abspath(args.out_pfx))
+    os.makedirs(out_dir, exist_ok=True)
+    hash_path = args.out_hash or os.path.join(out_dir, "wtserver_hash.txt")
+    thumb_path = args.out_thumbprint or os.path.join(
+        out_dir, "wtserver_thumbprint.txt")
     sha1_hex = cert.fingerprint(hashes.SHA1()).hex()
-    hash_path  = os.path.join(BUILD_DIR, "wtserver_hash.txt")
-    thumb_path = os.path.join(BUILD_DIR, "wtserver_thumbprint.txt")
     with open(hash_path, "w") as f:
         f.write(sha1_hex)
     with open(thumb_path, "w") as f:

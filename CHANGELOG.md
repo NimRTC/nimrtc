@@ -9,14 +9,47 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Notes
 
-- No post-`v0.14.0-rc.1` work has landed yet.  The
-  `[0.14.0-rc.1]` entry below is the authoritative record of
-  the current tree; see `docs/plan/v0.14-plan.md` for the
-  open tracks.  (The cross-end timeline engine wiring landed
-  after that entry — see ADR-017 and
-  `docs/plan/timeline-engine-wiring.md`.)
+- Post-`v0.14.0-rc.1` work is accumulating in this section; the
+  `[0.14.0-rc.1]` entry below remains the authoritative record of
+  everything up to that cut.  See `docs/plan/v0.14-plan.md` for the
+  open tracks.  The **cross-end timeline engine wiring** (ADR-017,
+  `docs/plan/timeline-engine-wiring.md`) landed after the rc.1 cut
+  and is tracked by the `Fixed` entries here.
 
 ### Fixed
+
+- **The WebTransport server seam test could not skip.**  Its
+  `require_tls_material()` helper called `GTEST_SKIP()`,
+  which GoogleTest expands to a `return` statement — so it
+  aborted only the *helper*, and the test body carried on
+  into the assertions that need the TLS material.  On a host
+  without provisioned credentials the four start-dependent
+  cases were reported as **failures** instead of **skips**,
+  turning a missing-artifact condition into a red test.  The
+  check is now a macro (`REQUIRE_TLS_MATERIAL()`) so the
+  `return` lands in the test body itself.  Verified by
+  removing the credential material: the four cases now report
+  `[  SKIPPED ]` and the other four still pass.
+  (`tests/test_web_transport_server_seam.cpp`)
+
+- **`scripts/generate_wtserver_cert.py` failed on
+  cryptography 3.x** — `serialization.pkcs12` is a
+  sub-module and is not imported by
+  `from cryptography.hazmat.primitives import serialization`,
+  so the script raised `AttributeError` and died before
+  writing the SHA-1 hash files; it also used the
+  `key_encryption_algorithm` keyword, which only exists from
+  cryptography 37.0 onwards (older releases spell it
+  `encryption_algorithm`).  The PFX export now probes the
+  installed signature and is non-fatal — the PFX is a
+  Windows-only artefact, and the PEM pair plus the hash files
+  are what the Linux / macOS OpenSSL backend needs.  The hash
+  and thumbprint files also now follow the certificate's own
+  output directory instead of the hard-coded `build/`, so
+  running the script from a WSL host no longer overwrites the
+  Windows SChannel hash file with a certificate that is not
+  installed in `Cert:\CurrentUser\My`.
+  (`scripts/generate_wtserver_cert.py`)
 
 - **`NimRTCEngine::last_one_way_delay_us()` returned the wrong
   sign.**  It computed `capture − arrival` instead of

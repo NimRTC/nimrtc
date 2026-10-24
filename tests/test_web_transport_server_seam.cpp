@@ -143,6 +143,25 @@ bool tls_material_available() {
 #endif
 }
 
+// Skip the current case when the TLS material has not been provisioned.
+//
+// NOTE: GTEST_SKIP() expands to a `return` statement, so it aborts only the
+// function it is written in.  Putting it inside a helper method would
+// return from that helper and let the test body continue into assertions
+// that depend on the missing material — the case would then be reported as
+// a failure instead of a skip.  This macro expands at the call site, which
+// always sits directly in the test body, so the `return` aborts the test.
+#define REQUIRE_TLS_MATERIAL()                                            \
+    do {                                                                  \
+        if (!tls_material_available()) {                                  \
+            GTEST_SKIP()                                                   \
+                << "WebTransport TLS material is not provisioned "         \
+                << "(run scripts/generate_wtserver_cert.ps1 on Windows / " \
+                << "scripts/generate_wtserver_cert.py on Linux and "       \
+                << "macOS)";                                              \
+        }                                                                 \
+    } while (false)
+
 class WebTransportServerSeamTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -150,16 +169,6 @@ protected:
         // is fully configured before we test.
         server_ = nimrtc::web_transport::create_msquic_webtransport_server(
             cfg_);
-    }
-
-    // Skip the current case when the TLS material has not been provisioned.
-    void require_tls_material() {
-        if (!tls_material_available()) {
-            GTEST_SKIP()
-                << "WebTransport TLS material is not provisioned "
-                << "(run scripts/generate_wtserver_cert.ps1 on Windows / "
-                << "scripts/generate_wtserver_cert.py on Linux and macOS)";
-        }
     }
 
     // Default config — enough for the server to start.
@@ -183,7 +192,7 @@ TEST_F(WebTransportServerSeamTest, running_is_false_before_start) {
 // this is correct QUIC/Winsock behaviour (port 0 means "pick one for me").
 // The server should report running()=true after this call.
 TEST_F(WebTransportServerSeamTest, start_on_port_zero_assigns_dynamic_port) {
-    require_tls_material();
+    REQUIRE_TLS_MATERIAL();
     // Port 0 is a valid bind target on Windows: the OS assigns an
     // available ephemeral port.  This is useful for test servers that
     // don't need a fixed port.  Verify the server reports running().
@@ -219,7 +228,7 @@ TEST_F(WebTransportServerSeamTest, set_on_session_accepts_noop_lambda) {
 
 // Test: start on an unprivileged port succeeds (smoke — listener binds).
 TEST_F(WebTransportServerSeamTest, start_on_unprivileged_port_succeeds) {
-    require_tls_material();
+    REQUIRE_TLS_MATERIAL();
     // Use a high unprivileged port that is unlikely to be in use.
     constexpr std::uint16_t kTestPort = 29443;
     EXPECT_TRUE(server_->start(kTestPort));
@@ -232,7 +241,7 @@ TEST_F(WebTransportServerSeamTest, start_on_unprivileged_port_succeeds) {
 
 // Test: after stop(), start() can be called again (restart is safe).
 TEST_F(WebTransportServerSeamTest, restart_after_stop_is_safe) {
-    require_tls_material();
+    REQUIRE_TLS_MATERIAL();
     constexpr std::uint16_t kTestPort = 29444;
     EXPECT_TRUE(server_->start(kTestPort));
     EXPECT_TRUE(server_->running());
@@ -250,7 +259,7 @@ TEST_F(WebTransportServerSeamTest, restart_after_stop_is_safe) {
 
 // Test: start() returns false if already running (no double-start).
 TEST_F(WebTransportServerSeamTest, start_when_already_running_returns_false) {
-    require_tls_material();
+    REQUIRE_TLS_MATERIAL();
     constexpr std::uint16_t kTestPort = 29445;
     EXPECT_TRUE(server_->start(kTestPort));
     EXPECT_TRUE(server_->running());

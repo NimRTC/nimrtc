@@ -730,7 +730,7 @@ MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t 
 }
 
 MsQuicSessionImpl::MsQuicSessionImpl(HQUIC conn, HQUIC registration, HQUIC configuration,
-           const ApiTable* api, const WebTransportConfig& cfg)
+           const ApiTable* api, [[maybe_unused]] const WebTransportConfig& cfg)
     : api_(api), registration_(registration), configuration_(configuration),
       conn_(conn) {
     if (!api_->ok()) {

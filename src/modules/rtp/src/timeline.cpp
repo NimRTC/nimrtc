@@ -33,11 +33,8 @@ constexpr std::uint64_t kRtpTsModulus          = 1ULL << 32;
 // extrapolation will be wrong by 90000/clock_rate.
 constexpr std::uint32_t kDefaultClockRateHz = 90000;
 
-// WebRTC abs-send-time wraps every 2^24 / 65536 = 256 s.  Expressed in
-// microseconds so the wrap-arithmetic below stays in int64.
-constexpr std::int64_t  kAbsSendTimeCycleUs = 256LL * 1'000'000LL;
-
-// 24-bit mask / modulus of the abs-send-time counter.
+// 24-bit mask / modulus of the abs-send-time counter.  The counter
+// wraps every 2^24 ticks, i.e. 2^24 / 65536 = 256 s.
 constexpr std::uint32_t kAbsSendTimeMask     = 0x00FFFFFFu;
 constexpr std::uint32_t kAbsSendTimeModulus = 1u << 24;
 

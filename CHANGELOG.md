@@ -18,6 +18,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Linux CI test step failed on a percentile tie.**  The
+  `linux-gcc / x86_64` job failed in the `Test` step with ctest exit
+  code 8 once the `Build` step had started passing.  The only
+  failing case was `ArqRawUdpLoopback.HundredHertzLatency`: the
+  100 Hz simulated loopback measured `p50=7us p99=25us p999=25us`
+  on the CI runner and tripped `EXPECT_GT(p999, p99)`, even though
+  the Linux latency is *better* than the Windows run
+  (`p50=23us p99=83us p999=136us`).  p99 and p999 are order
+  statistics of the same 200-sample set, so they are allowed to tie
+  once the distribution is narrow enough — the strict comparison was
+  a test defect, not a product regression.  Percentile ordering is
+  now asserted as the non-strict invariant it actually is (`>=`), and
+  the strict spread check is kept in a tie-proof form by comparing
+  the maximum against the median instead.
+  (`src/raw_udp/tests/test_raw_udp_arq.cpp`)
+
 - **The macOS CI build failed in the `Build` step.**  The
   `macos-clang / arm64` job died with `Process completed with
   exit code 2` on every push since the abs-send-time refactor

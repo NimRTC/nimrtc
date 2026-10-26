@@ -260,10 +260,12 @@ protected:
         EngineConfig cfg;
         // No STUN — host candidates only.
         cfg.stun_server_host = "";
-        // Narrow port range so the test does not race with OS-assigned
-        // ports that may already be bound on a busy CI runner.
-        cfg.local_port_range_begin = 51000;
-        cfg.local_port_range_end   = 51100;
+        // No fixed local_port_range: the OS assigns an ephemeral port.
+        // Hardcoded ranges are not safer here — the Windows CI runners
+        // reserve whole port blocks as *excluded ranges* (Hyper-V / HNS),
+        // and a bind inside one of those fails with WSAEACCES (errno
+        // 10013), which would make engine.open() fail.  An OS-assigned
+        // port is picked outside the excluded ranges.
         return cfg;
     }
 };

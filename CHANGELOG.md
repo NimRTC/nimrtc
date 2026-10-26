@@ -324,6 +324,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   passes against the fixed one.  (`src/modules/ice/src/ice.cpp`,
   `src/modules/ice/tests/test_consent_freshness.cpp`)
 
+- **The Windows CI job failed in the `Test` step because a test pinned
+  UDP port ranges that the runner had reserved.**  The `windows / msvc`
+  job failed on `test_dtls_srtp_timing` with
+
+      [FAIL] t03_dtls_state_initial — open() failed
+      [warn] udp.c:151: UDP socket binding failed on port range
+             127.0.0.1:[64200,64299], errno=10013
+      [error] agent.c:235: Connection creation for agent failed
+
+  `errno 10013` is `WSAEACCES`: the Windows runners hand out *excluded
+  port ranges* (Hyper-V / HNS reservations) and a bind inside one of
+  them is refused.  libjuice walks the whole requested range before
+  giving up, so a 100-port block that happened to be reserved made
+  `engine.open()` fail outright — a test defect, not a product
+  regression.
+
+  The three fixtures that bind a real ICE socket
+  (`test_dtls_srtp_timing`, `test_dtls_seam`,
+  `test_engine_plugin_loading`) now leave `local_port_range_begin/end`
+  at 0, so the OS assigns an ephemeral port from outside the excluded
+  ranges.  `test_dtls_srtp_timing` additionally retries `open()` a
+  couple of times, because a failed `open()` tears the transport
+  session down and cannot be repeated on the same engine object.  The
+  fixtures that already use the `shell` transport sentinel — and
+  therefore never bind a socket — are unchanged.
+  (`tests/test_dtls_srtp_timing.cpp`, `tests/test_dtls_seam.cpp`,
+  `tests/test_engine_plugin_loading.cpp`)
+
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
 > **This is a working draft.** v1.0.0 has **not** been released and the

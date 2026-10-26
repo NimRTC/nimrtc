@@ -352,6 +352,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`tests/test_dtls_srtp_timing.cpp`, `tests/test_dtls_seam.cpp`,
   `tests/test_engine_plugin_loading.cpp`)
 
+### Changed
+
+- **The `linux-aarch64` CI leg is TEMP-DISABLED again (2026-10-27).**
+  The GitHub-hosted `ubuntu-22.04-arm64` runner pool failed again after
+  the 2026-10-14 re-enable: CI run #269 (#40370283784) sat `queued` for
+  3+ hours without allocation, and run #268's aarch64 job never received
+  a runner at all.  A job that never starts keeps the whole workflow run
+  in `in_progress`, so the run never reaches a terminal state and no
+  merge or release gate can observe it.  The `linux-aarch64` job in
+  `ci.yml` therefore carries `if: false` again — the same temporary
+  mechanism used for 2026-09-16 → 2026-10-14 — so that the other three
+  platforms (`windows / msvc`, `linux-gcc / x86_64`,
+  `macos-clang / arm64`) can finish and the run can complete.  The
+  reason is recorded in `docs/plan/v0.13.0-release-notes.md` §4 and
+  `docs/plan/ci-workarounds.md` §4, as the workflow comment requires.
+  Re-enable by removing the `if: false` line once the ARM64 pool is
+  healthy.  (`.github/workflows/ci.yml`,
+  `docs/plan/v0.13.0-release-notes.md`, `docs/plan/ci-workarounds.md`)
+
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
 > **This is a working draft.** v1.0.0 has **not** been released and the
@@ -403,7 +422,7 @@ real `## [1.0.0]` block:
 | # | Blocker | Ref |
 |---|---|---|
 | 1 | Case E Chrome ↔ NimRTC DataChannel PASS on Windows + Linux x86_64 | `v1.0-plan.md` §3 Gate #1 / #9 |
-| 2 | ~~aarch64 support-matrix decision~~ **Closed** — the 4-platform-hard-gate vs. 3-platform-ship question is settled as a **split decision**: the `linux-aarch64` **CI** leg in `ci.yml` stays a hard gate, while the `linux-aarch64` **release** leg in `release.yml` is `continue-on-error: true` and deliberately excluded from `publish-release`'s `needs:` (GHA ARM64 runner capacity is unreliable — a 14+ hour queue was observed at the v0.14.0 cut). The consequence is explicit, not silent: a missing aarch64 bundle publishes a "Partial release" banner naming the bundle, `publish-release` writes the present/missing bundle list into the Step Summary, and the aarch64 artefact is attached by a follow-up release once capacity returns. | `docs/plan/ci-workarounds.md` §4 (W5), `RELEASING.md` §3.1 step 4, `v1.0-plan.md` §3 Gate #8 |
+| 2 | ~~aarch64 support-matrix decision~~ **Closed** — the 4-platform-hard-gate vs. 3-platform-ship question is settled as a **split decision**: the `linux-aarch64` **CI** leg in `ci.yml` is a hard gate *while the runner pool is usable* (it is TEMP-DISABLED with `if: false` since 2026-10-27 because the hosted `ubuntu-22.04-arm64` pool sat `queued` for 3+ hours without allocation — see Unreleased -> Changed), while the `linux-aarch64` **release** leg in `release.yml` is `continue-on-error: true` and deliberately excluded from `publish-release`'s `needs:` (GHA ARM64 runner capacity is unreliable — a 14+ hour queue was observed at the v0.14.0 cut). The consequence is explicit, not silent: a missing aarch64 bundle publishes a "Partial release" banner naming the bundle, `publish-release` writes the present/missing bundle list into the Step Summary, and the aarch64 artefact is attached by a follow-up release once capacity returns. | `docs/plan/ci-workarounds.md` §4 (W5), `RELEASING.md` §3.1 step 4, `v1.0-plan.md` §3 Gate #8 |
 | 3 | ~~WebRTC APM in the release artefact~~ **Closed** — `release.yml` no longer disables the prebuild: the `Prebuild WebRTC APM` step runs on all four platforms with `continue-on-error: true`, and Configure picks `-DNIMRTC_VENDORED_WEBRTC_APM=ON` on prebuild success / `OFF` on failure (the stub 3A path) instead of aborting the cut — the meson `abseil-cpp` subproject build that broke the `v0.14.0` cut (`dc15ad8`) can no longer kill a release. The `audio3a` link is now `PUBLIC nimrtc_vendor_webrtc_apm` so the APM's bundled-abseil INTERFACE includes reach the test/example/benchmark consumers, which is what made the `=ON` path unbuildable in the first place. Each job records its outcome in `build/3a-status-<platform>.txt`; `publish-release` surfaces the per-platform 3A status in the release body and the Step Summary, so a stub-3A bundle is never published silently. | `docs/plan/ci-workarounds.md` §3 (W3), `RELEASING.md` §3.1 step 4 |
 | 4 | ~~Public-header per-symbol sweep + freeze~~ **Closed** — every public symbol across 100 public headers is classified; the `scripts/api_freeze_scan.js` gate exits 0 against the current tree and `scripts/check_api_marker_includes.py` confirms every marker-using header pulls in `<nimrtc/core/api_version.hpp>` | `v1.0-plan.md` §3 Gate #2 |
 | 5 | 7-day Case D + Case E soak with no new failures | `v1.0-plan.md` §12.3.5 |

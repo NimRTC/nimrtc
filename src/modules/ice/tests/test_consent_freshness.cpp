@@ -19,6 +19,10 @@
 //   T4 — Null callback: set_on_consent_lost({}) doesn't crash even when the
 //        timer is allowed to expire.
 //
+//   T5 — Race: a notify_binding_received() issued while the consent-lost
+//        callback is still running must clear the pending-loss flag (and
+//        must not be overwritten by the tracker afterwards).
+//
 // The tests use `force_consent_armed_for_testing()` to skip the libjuice
 // connectivity check. Without that, each case would have to wait ~5–10 s
 // for the loopback ICE handshake before the consent timer becomes
@@ -237,6 +241,79 @@ TEST(IceConsentFreshness, T4_NullCallbackDoesNotCrash) {
     t.notify_binding_received();              // clear pending + rearm
     EXPECT_FALSE(t.consent_lost_pending());
     EXPECT_EQ(later_count, 0);
+
+    t.close();
+}
+
+// -----------------------------------------------------------------------------
+// T5 — a notify that races with the consent-lost callback must win
+// -----------------------------------------------------------------------------
+
+TEST(IceConsentFreshness, T5_NotifyDuringCallbackClearsPendingFlag) {
+    // Regression test for the CI flake in
+    // IceConsentFreshness.T3_BindingReceivedRearmsTimer.
+    //
+    // The tracker publishes the "consent lost" state and *then* runs the
+    // user callback.  If the state were published after the callback, a
+    // notify_binding_received() issued while the callback is still running
+    // would be overwritten by the tracker's late store and the pending flag
+    // would come back up — the callback would then fire again inside a
+    // freshly armed timeout window.
+    //
+    // The callback blocks until the test has issued its notify, which pins
+    // the ordering deterministically (no reliance on scheduler luck).
+    IceConfig cfg = MakeConfig();
+    IceTransport t{cfg};
+    ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
+
+    std::atomic<int> lost_count{0};
+    std::mutex mu;
+    std::condition_variable cv;
+    bool callback_entered = false;
+    bool test_notified = false;
+
+    t.set_on_consent_lost([&] {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            ++lost_count;
+            callback_entered = true;
+        }
+        cv.notify_all();
+        // Block until the test has re-armed the timer.  This also proves
+        // the tracker does not hold its internal lock while running the
+        // user callback — otherwise this notify would deadlock.
+        std::unique_lock<std::mutex> lk(mu);
+        cv.wait(lk, [&] { return test_notified; });
+    });
+
+    t.force_consent_armed_for_testing();
+    t.notify_binding_received();
+
+    bool entered = false;
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        entered = cv.wait_for(lk, 5 * kConsentTimeoutMs * 1ms + 500ms,
+                               [&] { return callback_entered; });
+    }
+
+    // Re-arm while the callback is still running, then let the callback
+    // finish.  The notify must win.
+    t.notify_binding_received();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        test_notified = true;
+    }
+    cv.notify_all();
+
+    EXPECT_TRUE(entered) << "on_consent_lost never fired";
+
+    // Give the tracker thread a moment to finish its critical section.
+    std::this_thread::sleep_for(50ms);
+
+    EXPECT_GE(lost_count.load(), 1);
+    EXPECT_FALSE(t.consent_lost_pending())
+        << "notify_binding_received() must clear the pending-loss flag even "
+           "when it races with the consent-lost callback";
 
     t.close();
 }

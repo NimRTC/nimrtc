@@ -217,14 +217,25 @@ struct IceTransport::Impl {
     //
     // All timestamps are wall-clock microseconds since the steady_clock
     // epoch (monotonic, no leap-second issues).
-    std::atomic<std::int64_t>            last_binding_received_us_{0};
-    std::atomic<bool>                    consent_lost_fired_{false};
+    //
+    // The timer state below (last_binding_received_us_ / consent_lost_fired_)
+    // is NOT atomic: it is guarded by consent_mu_ so that the "expired?" check,
+    // the "fired" flag update and the rearm happen as a single critical
+    // section. With plain atomics the tracker thread could read a stale
+    // `last_binding_received_us_` right after notify_binding_received()
+    // reset it and fire a second time *inside* a freshly armed timeout
+    // window. That race is observable on both x86 (store-buffer visibility
+    // lag) and ARM (cache-coherence lag), and it made
+    // IceConsentFreshness.T3_BindingReceivedRearmsTimer flaky on CI.
     std::atomic<bool>                    consent_thread_should_stop_{false};
     std::atomic<bool>                    consent_thread_running_{false};
     /** Test-only override: arm the tracker as if Connected. */
     std::atomic<bool>                    consent_force_armed_{false};
     std::thread                          consent_thread_;
-    std::mutex                           consent_mu_;        // protects on_consent_lost_
+    /** Guards on_consent_lost_ + the consent timer state. */
+    std::mutex                           consent_mu_;
+    std::int64_t                         last_binding_received_us_{0};
+    bool                                 consent_lost_fired_{false};
     plugins::OnConsentLost               on_consent_lost_;
 
     // ---- Plugin injection (BWE + Scheduler) --------------------------------
@@ -442,21 +453,41 @@ struct IceTransport::Impl {
                 }
             }
 
-            const std::int64_t now     = now_us();
-            const std::int64_t last_us = last_binding_received_us_.load(
-                std::memory_order_acquire);
-            if (last_us == 0) continue;   // not yet primed
-            const std::int64_t age_us = now - last_us;
-            if (age_us < timeout_ms * 1000) continue;
+            const std::int64_t now = now_us();
 
-            // Past timeout — fire (once), then rearm so a subsequent loss
-            // event can be observed (matches the docstring: "may fire again
-            // on a subsequent loss event").
+            // ---- Expiry check + fire + rearm (one critical section) --------
+            //
+            // Everything that touches the timer state is serialized by
+            // consent_mu_, so a notify_binding_received() that races with
+            // this tick can never be lost: it either completes before the
+            // check (and is seen by it) or after the rearm (and clears the
+            // flag set below).
             plugins::OnConsentLost cb_copy;
             {
                 std::lock_guard<std::mutex> lk(consent_mu_);
+                const std::int64_t last_us = last_binding_received_us_;
+                if (last_us == 0) continue;   // not yet primed
+                const std::int64_t age_us = now - last_us;
+                if (age_us < timeout_ms * 1000) continue;
+
+                // Past timeout — fire (once per loss event), then rearm so a
+                // subsequent loss event can be observed (matches the
+                // docstring: "may fire again on a subsequent loss event").
                 cb_copy = on_consent_lost_;
+                // Publish the "fired" state *before* running the callback:
+                // a notify_binding_received() that arrives while the callback
+                // is still running must not be overwritten by a late store
+                // from this thread.
+                consent_lost_fired_ = true;
+                // Rearm: pretend we just received a binding request so we
+                // won't re-fire until another full timeout window passes
+                // without a notify_binding_received().
+                last_binding_received_us_ = now;
             }
+
+            // The user callback runs *outside* the lock: it may call back
+            // into the transport (e.g. notify_binding_received()), and
+            // holding consent_mu_ across that call would deadlock.
             if (cb_copy) {
                 try {
                     cb_copy();
@@ -465,21 +496,16 @@ struct IceTransport::Impl {
                     // never die on a misbehaving consumer.
                 }
             }
-            consent_lost_fired_.store(true, std::memory_order_release);
-            // Rearm: pretend we just received a binding request so we
-            // won't re-fire until another full timeout window passes
-            // without a notify_binding_received().
-            last_binding_received_us_.store(now_us(),
-                                            std::memory_order_release);
         }
     }
 
     /** Reset the consent freshness clock to "now". Called by the public
      *  notify_binding_received() to simulate peer STUN Binding traffic. */
     void record_binding_received() {
-        last_binding_received_us_.store(now_us(), std::memory_order_release);
+        std::lock_guard<std::mutex> lk(consent_mu_);
+        last_binding_received_us_ = now_us();
         // Clear the "lost" flag so a re-fired callback is observed.
-        consent_lost_fired_.store(false, std::memory_order_release);
+        consent_lost_fired_ = false;
     }
 };
 
@@ -571,13 +597,17 @@ void IceTransport::close() noexcept {
         juice_destroy(impl_->agent);
         impl_->agent = nullptr;
     }
+    {
+        // Clear the consent "lost" flag and reset the clock so a re-opened
+        // transport starts from a clean slate.  Kept in its own scope so
+        // consent_mu_ is never held together with mu_.
+        std::lock_guard<std::mutex> clk(impl_->consent_mu_);
+        impl_->consent_lost_fired_ = false;
+        impl_->last_binding_received_us_ = 0;
+    }
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->rx_queue.clear();
     impl_->state = plugins::IceState::Disconnected;
-    // Clear the consent "lost" flag and reset the clock so a re-opened
-    // transport starts from a clean slate.
-    impl_->consent_lost_fired_.store(false, std::memory_order_release);
-    impl_->last_binding_received_us_.store(0, std::memory_order_release);
 }
 
 void IceTransport::set_callbacks(plugins::RecvCallback on_recv,
@@ -597,7 +627,8 @@ void IceTransport::notify_binding_received() noexcept {
 }
 
 bool IceTransport::consent_lost_pending() const noexcept {
-    return impl_->consent_lost_fired_.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lk(impl_->consent_mu_);
+    return impl_->consent_lost_fired_;
 }
 
 void IceTransport::force_consent_armed_for_testing() noexcept {

@@ -148,18 +148,31 @@ file.**
 This is `docs/plan/v1.0-plan.md` §3 DoD **Gate #8**, restated in terms of
 what the workflow actually does.
 
-Current factual state, as of 2026-10-21:
+Current factual state, as of 2026-10-27:
 
 | Leg | `ci.yml` (build + unit tests) | `release.yml` (shipped artefact) |
 |---|---|---|
 | windows-2022 / MSVC | active, hard gate | active, hard gate |
 | ubuntu-22.04 / GCC x86_64 | active, hard gate | active, hard gate |
 | macos-14 / Apple Clang arm64 | active, hard gate | active, hard gate |
-| ubuntu-22.04-arm64 / GCC | **active, hard gate** — re-enabled 2026-10-14 in `ci.yml` (see the comment at `ci.yml:181`) | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
+| ubuntu-22.04-arm64 / GCC | ⏸ **TEMP-DISABLED** (`if: false` in the `linux-aarch64` job of `ci.yml`) — re-enabled 2026-10-14, disabled again 2026-10-27 | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
+
+The `ci.yml` leg was active (and a hard gate) from 2026-10-14 to
+2026-10-27.  The GitHub-hosted `ubuntu-22.04-arm64` pool then failed
+again: CI run #269 (#40370283784) sat `queued` for 3+ hours without
+allocation and run #268's aarch64 job never received a runner at all.
+A job that never starts keeps the whole workflow run in `in_progress`,
+so the run never reaches a terminal state and no merge or release gate
+can observe it.  The leg is therefore TEMP-DISABLED again — the same
+temporary mechanism used for 2026-09-16 → 2026-10-14 — so the other
+three platforms can finish and the run can complete.  Re-enable by
+removing the `if: false` line once the ARM64 pool is healthy; the
+reason is recorded in `docs/plan/v0.13.0-release-notes.md` §4.
 
 So the CHANGELOG prose "linux-aarch64 may be TEMP-DISABLED per v0.12.0
-baseline" is **stale**: the CI leg is currently running and is a hard
-gate. The *release artefact* leg is the soft one.
+baseline" is accurate again: the CI leg is TEMP-DISABLED while the
+runner pool is unusable, and the *release artefact* leg is the
+permanently soft one.
 
 That leaves a documentation gap rather than a build gap. `README.md`
 §Platform support currently claims:

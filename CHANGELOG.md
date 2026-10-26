@@ -107,6 +107,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   correction is a straight bug fix.  Both header comments now
   state the formula explicitly.
 
+- **`scripts/install_wtserver_ca.ps1` hung forever when it added the
+  CA to the trusted-root store.**  The script used
+  `Import-Certificate -CertStoreLocation "Cert:\CurrentUser\Root"`,
+  and the `Cert:` provider raises an interactive "security
+  warning" dialog for a root-store write.  In a non-interactive
+  shell (CI, an agent-driven shell, a redirected pipe) nobody
+  ever answers that dialog, so the script blocked until it was
+  killed — the run finished with exit code `0xFFFFFFFF` and no
+  output at all.  The CA is now written with
+  `certutil -addstore Root`, which goes through CAPI and never
+  raises UI; the script verifies the resulting thumbprint
+  afterwards and fails loudly if the CA is not in the store.
+  Two more defects in the same script are fixed at the same
+  time: the uninstall path removed root-store entries with
+  `Remove-Item`, which fails with "access denied"/"no user
+  interface operation" on the shared root store and left the
+  trust anchor behind (it now uses `certutil -delstore Root`),
+  and the script left `build/wtserver_hash.txt` untouched — msquic
+  resolves the server certificate by that SHA-1 hash, so a stale
+  file made the server load a different certificate than the one
+  that had just been installed.  Both thumbprint files are now
+  rewritten from the leaf that was actually installed.
+  (`scripts/install_wtserver_ca.ps1`)
+
 - **Still open across the cycle (carried from rc.1):**
   - The **Chrome e2e Case E DataChannel** acceptance gate
     (DC-1) is blocked on a server-side QUIC handshake

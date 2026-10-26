@@ -282,6 +282,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The **L1 strict-priority scheduling policy** (DC-2)
     is v1.0.0-beta.2; rc.1 ships only the cross-plane test.
 
+- **The ICE consent-freshness tracker could fire its "consent lost"
+  callback twice inside a single timeout window, and the
+  `consent_lost_pending()` flag could come back up after
+  `notify_binding_received()` had cleared it.**  The tracker's timer
+  state (`last_binding_received_us_`, `consent_lost_fired_`) was kept in
+  plain atomics, so the background tracker thread could
+
+  1. read a **stale** `last_binding_received_us_` right after
+     `notify_binding_received()` had reset it — the reset is a plain
+     atomic store and the tracker a plain atomic load, with no
+     synchronisation between the two threads, so nothing forbade the
+     load from observing the pre-reset value.  The tracker then fired a
+     second time **inside** a freshly armed timeout window; and
+
+  2. publish the "consent lost" flag **after** the user callback had
+     returned, so a `notify_binding_received()` issued while the callback
+     was still running was overwritten by the tracker's late store and
+     the pending flag was resurrected.
+
+  Both are real races, not just theoretical ones: the stale-read window
+  exists on x86 (store-buffer visibility lag) as well as on ARM
+  (cache-coherence lag).  This is what made
+  `IceConsentFreshness.T3_BindingReceivedRearmsTimer` fail on the
+  macOS and Windows CI runners.
+
+  The timer state now lives behind the existing `consent_mu_` mutex and
+  the expiry check, the flag update and the rearm form a single critical
+  section, so a `notify_binding_received()` either happens entirely
+  before the check (and is seen by it) or entirely after the rearm (and
+  clears the flag).  The "fired" flag is published *before* the user
+  callback runs, and the callback itself is invoked **outside** the
+  lock so that it may call back into the transport
+  (`notify_binding_received()`) without deadlocking.
+
+  A deterministic regression test was added
+  (`IceConsentFreshness.T5_NotifyDuringCallbackClearsPendingFlag`): the
+  consent-lost callback blocks until the test has issued its
+  `notify_binding_received()`, which pins the ordering instead of
+  relying on scheduler luck.  It fails against the old ordering and
+  passes against the fixed one.  (`src/modules/ice/src/ice.cpp`,
+  `src/modules/ice/tests/test_consent_freshness.cpp`)
+
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
 > **This is a working draft.** v1.0.0 has **not** been released and the

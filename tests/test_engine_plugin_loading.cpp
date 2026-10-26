@@ -127,8 +127,11 @@ TEST_F(EnginePluginLoading, register_is_idempotent) {
 
 TEST_F(EnginePluginLoading, engine_open_uses_registry_for_transport) {
     EngineConfig cfg;
-    cfg.local_port_range_begin = 50000;
-    cfg.local_port_range_end   = 50100;   // narrow range to avoid OS port grab
+    // No fixed local_port_range: the OS assigns an ephemeral port.  The
+    // Windows CI runners reserve whole port blocks as *excluded ranges*
+    // (Hyper-V / HNS); a bind inside one of those fails with WSAEACCES
+    // (errno 10013) and engine.open() would fail for a reason that has
+    // nothing to do with plugin registration.
     cfg.stun_server_host       = "";     // no STUN — pure host candidates
     NimRTCEngine engine(cfg);
 

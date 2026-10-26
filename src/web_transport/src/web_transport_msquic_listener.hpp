@@ -5,9 +5,11 @@
  * NOT part of the public API. Contains private-internal types used
  * by the msquic-backed WebTransport server implementation:
  *
- *   - QpackDecoder    — minimal QPACK decoder for parsing HTTP/3 HEADERS
- *   - Http3Handler    — minimal HTTP/3 state machine per connection
+ *   - Http3Handler    — HTTP/3 state machine (one per QUIC connection)
  *   - Impl  — msquic listener + session lifecycle
+ *
+ * The QPACK codec used to parse HTTP/3 header blocks lives in
+ * web_transport_qpack.hpp (RFC 9204).
  *
  * Consumers should include the public header
  * <nimrtc/web_transport/web_transport_server.hpp> instead.
@@ -40,100 +42,13 @@ extern "C" {
 
 // Must come after nimrtc headers (so QUIC_API_TABLE is defined).
 #include "web_transport_msquic_session.hpp"
+#include "web_transport_qpack.hpp"
 
 namespace nimrtc::web_transport::detail {
 
 // Forward declarations.
 class Http3Handler;
 struct ApiTable;
-
-// ===========================================================================
-// QpackDecoder — minimal QPACK decoder for HTTP/3 HEADERS parsing
-// ===========================================================================
-//
-// Decodes a QPACK-encoded header block (RFC 9204).  This is a minimal
-// implementation sufficient to extract the `:protocol` pseudo-header
-// that Chrome sends in WebTransport requests.
-//
-// QPACK structure:
-//   - Header block prefix: variable-length integer (required insert count)
-//     followed by delta base (encoded with sign bit in low bits)
-//   - Sequence of header entries (indexed or literal)
-//
-// For the NimRTC test server, Chrome typically sends headers like:
-//   :method: CONNECT
-//   :scheme: https
-//   :authority: localhost:PORT
-//   :path: /webtransport
-//   :protocol: webtransport
-//   sec-webtransport-version: ...
-//   sec-webtransport-extensions: ...
-// ===========================================================================
-
-class QpackDecoder {
-public:
-    explicit QpackDecoder() = default;
-
-    /**
-     * @brief Decode a QPACK header block.
-     * @param data Raw QPACK-encoded header block bytes.
-     * @return Map of lowercase header name → value.
-     */
-    [[nodiscard]] std::unordered_map<std::string, std::string>
-    decode(std::span<const std::uint8_t> data) noexcept;
-
-    /**
-     * @brief Maximum dynamic table size to honour during decoding.
-     *        Chrome typically sends a SETTINGS frame advertising
-     *        max_table_capacity = 0, so we don't need a real table.
-     */
-    void set_max_table_size(std::uint32_t size) noexcept {
-        max_table_size_ = size;
-    }
-
-    // Static table entry (predefined per RFC 9204).
-    struct StaticEntry {
-        std::string_view name;
-        std::string_view value;
-    };
-
-    // Dynamic table entry (built up as headers are decoded).
-    struct DynamicEntry {
-        std::string name;
-        std::string value;
-    };
-
-    // Static table — indexed by 1-based position.
-    static const std::vector<StaticEntry>& static_table() noexcept;
-
-    // Helper: decode a variable-length integer (RFC 9000 §16).
-    static std::pair<std::uint64_t, std::span<const std::uint8_t>>
-    decode_varint(std::span<const std::uint8_t> data) noexcept;
-
-private:
-    // Decode one header entry from the bitstream.
-    // Returns true if more entries remain; false on EOS or error.
-    bool decode_entry(
-        std::span<const std::uint8_t>& rem,
-        std::string& out_name,
-        std::string& out_value) noexcept;
-
-    // Helper: decode an indexed header field (S=1 or S=0).
-    bool decode_indexed(std::span<const std::uint8_t>& rem,
-                        bool post_base, std::string& out_name,
-                        std::string& out_value) noexcept;
-
-    // Helper: decode a literal header field with possible name indexing.
-    bool decode_literal(std::span<const std::uint8_t>& rem,
-                        std::string& out_name, std::string& out_value) noexcept;
-
-    // Dynamic table for this stream.
-    std::vector<DynamicEntry> dynamic_table_;
-    // Delta base for QPACK (tracks position in dynamic table).
-    std::int64_t delta_base_ = 0;
-    // Maximum dynamic table size (from SETTINGS_QPACK_MAX_TABLE_CAPACITY).
-    std::uint32_t max_table_size_ = 0;
-};
 
 // ===========================================================================
 // QUIC callbacks — server-side
@@ -207,12 +122,22 @@ public:
 
     /**
      * @brief Called by Http3Handler when a WebTransport request is detected.
-     * @param stream    QUIC stream handle (WebTransport request stream).
-     * @param headers   Parsed HTTP headers (lowercase names).
+     *
+     * @param conn     QUIC connection the request arrived on.
+     * @param stream   QUIC stream handle (WebTransport request stream).
+     * @param headers  Parsed HTTP headers (lowercase names).
+     * @param datagram_send_enabled     Peer supports QUIC datagrams.
+     * @param datagram_max_send_length  Maximum datagram payload size.
+     * @param datagram_state_known      True once msquic reported the
+     *                                 peer's datagram state.
      */
     void on_webtransport_request(
+        HQUIC conn,
         HQUIC stream,
-        const std::unordered_map<std::string, std::string>& headers) noexcept;
+        const std::unordered_map<std::string, std::string>& headers,
+        bool datagram_send_enabled,
+        std::uint16_t datagram_max_send_length,
+        bool datagram_state_known) noexcept;
 
     /** @brief True if the listener is running. */
     [[nodiscard]] bool running() const noexcept {
@@ -250,10 +175,6 @@ private:
     // All accepted connections (kept alive while listener is running).
     std::vector<HQUIC> connections_;
     std::mutex conn_mutex_;
-
-    // HTTP/3 handler — shared across all connections in this listener.
-    // Each connection uses the same Http3Handler instance.
-    std::unique_ptr<Http3Handler> http3_handler_;
 };
 
 // ===========================================================================
@@ -296,13 +217,14 @@ private:
 };
 
 // ===========================================================================
-// Http3Handler — minimal HTTP/3 state machine per connection
+// Http3Handler — HTTP/3 state machine (one instance per connection)
 // ===========================================================================
 //
 // Manages HTTP/3 state for a single QUIC connection:
-//   - Receives HTTP/3 SETTINGS frame from peer
-//   - Parses HEADERS frames (via QpackDecoder)
-//   - Sends SETTINGS + response HEADERS
+//   - Opens the server control stream (RFC 9114 §6.2.1) and sends SETTINGS
+//   - Parses the peer's control stream and QPACK encoder stream
+//   - Parses HEADERS frames on request streams (via the QPACK codec)
+//   - Answers a WebTransport CONNECT request with ":status: 200"
 //   - Calls Impl::on_webtransport_request() when a valid
 //     WebTransport session-start request is detected
 //
@@ -332,9 +254,33 @@ public:
 
     /**
      * @brief Called when the QUIC connection is established.
-     *        Sends the server's HTTP/3 SETTINGS frame.
+     *        Opens the control stream and sends the server's SETTINGS.
      */
     bool on_connect(const ApiTable* api, HQUIC conn) noexcept;
+
+    /**
+     * @brief Called when the peer opens a stream.
+     *
+     * @param stream         QUIC stream handle.
+     * @param unidirectional True for a peer-initiated unidirectional
+     *                        stream (control / QPACK encoder stream).
+     */
+    void on_peer_stream_started(HQUIC stream, bool unidirectional) noexcept;
+
+    /**
+     * @brief Called when the peer's QUIC datagram support is known.
+     *
+     * The state is learned while the QUIC handshake runs, i.e. before the
+     * WebTransport session object exists, so it is remembered here and
+     * handed to the session when it is created.
+     */
+    void on_datagram_state_changed(bool send_enabled,
+                                   std::uint16_t max_send_length) noexcept;
+
+    /** @brief True once msquic reported the peer's datagram state. */
+    [[nodiscard]] bool datagram_state_known() const noexcept {
+        return datagram_state_known_;
+    }
 
     /**
      * @brief Called when data arrives on a stream.
@@ -358,7 +304,33 @@ public:
     }
 
 private:
-    // Send an HTTP/3 SETTINGS frame.
+    /**
+     * @brief Role of a peer-initiated stream inside HTTP/3.
+     */
+    enum class StreamRole : std::uint8_t {
+        /** @brief Unidirectional stream whose type byte is not read yet. */
+        kUnknown,
+        /** @brief Client-initiated bidirectional request stream. */
+        kRequest,
+        /** @brief Client control stream (RFC 9114 §6.2.1). */
+        kControl,
+        /** @brief Client QPACK encoder stream (RFC 9204 §4.3). */
+        kEncoder,
+        /** @brief Client push stream — not allowed (RFC 9114 §6.2.2). */
+        kPush,
+        /** @brief Client QPACK decoder stream — not allowed. */
+        kDecoder,
+    };
+
+    // Per-stream receive state.
+    struct StreamState {
+        StreamRole role = StreamRole::kUnknown;
+        std::vector<std::uint8_t> buf;  // reassembly queue
+        bool fin_seen = false;
+        bool webtransport_sent = false;  // response sent for this stream
+    };
+
+    // Send an HTTP/3 SETTINGS frame on the server control stream.
     bool send_settings(const ApiTable* api, HQUIC conn) noexcept;
 
     // Send a HEADERS response for a WebTransport request.
@@ -368,35 +340,46 @@ private:
     // Send a generic HTTP/3 frame.
     bool send_frame(const ApiTable* api, HQUIC conn, HQUIC stream,
                     std::uint8_t frame_type,
-                    std::span<const std::uint8_t> payload) noexcept;
+                    std::span<const std::uint8_t> payload,
+                    bool fin) noexcept;
 
     // Parse a SETTINGS frame.
     bool parse_settings(std::span<const std::uint8_t> payload) noexcept;
 
     // Parse a HEADERS frame and check for WebTransport.
     // On success, triggers Impl::on_webtransport_request().
-    bool parse_headers(HQUIC stream, std::span<const std::uint8_t> payload) noexcept;
+    bool parse_headers(HQUIC stream,
+                       std::span<const std::uint8_t> payload) noexcept;
 
-    // QPACK decoder (shared across streams for dynamic table).
+    // Consume as many complete HTTP/3 frames as the buffer holds.
+    bool process_request_frames(HQUIC stream,
+                                std::vector<std::uint8_t>& buf) noexcept;
+
+    // Consume as many complete HTTP/3 frames as the buffer holds.
+    bool process_control_frames(std::vector<std::uint8_t>& buf) noexcept;
+
+    // QPACK decoder (per connection: the dynamic table is connection-wide).
     QpackDecoder qpack_;
     std::atomic<bool> settings_received_{false};
+
+    // Peer QUIC datagram support, learned during the QUIC handshake.
+    // datagram_state_known_ is false until msquic reports the peer's
+    // datagram state via QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED.
+    bool datagram_state_known_ = false;
+    bool datagram_send_enabled_ = false;
+    std::uint16_t datagram_max_send_length_ = 0;
 
     // Back-pointer to the owning listener (never null during lifetime).
     Impl* listener_impl_;
 
-    // Per-stream receive state.
-    struct StreamState {
-        std::vector<std::vector<std::uint8_t>> buf;  // reassembly queue
-        bool fin_seen = false;
-        bool webtransport_sent = false;  // response sent for this stream
-        std::uint64_t stream_id = 0;
-    };
+    // The connection this handler belongs to (set in on_connect()).
+    HQUIC conn_ = nullptr;
 
     // Per-stream receive state.
     std::unordered_map<HQUIC, StreamState> stream_states_;
     std::mutex stream_mutex_;
 };
 
-} // namespace nimrtc::web_transport::detail
+}  // namespace nimrtc::web_transport::detail
 
-#endif // NIMRTC_WEB_TRANSPORT_MSQUIC_LISTENER_HPP
+#endif  // NIMRTC_WEB_TRANSPORT_MSQUIC_LISTENER_HPP

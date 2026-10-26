@@ -81,3 +81,11 @@ nimrtc_apply_options(demo-wtserver)
 target_link_libraries(demo-wtserver PRIVATE
     nimrtc::web_transport  # IWebTransportServer + msquic listener
 )
+
+# dbghelp (SymFromAddr) is used by the Windows crash backtrace.  The
+# library must therefore be linked conditionally: an unconditional link
+# fails with "cannot find -ldbghelp" on Linux and macOS, which breaks
+# their CI jobs.
+if(WIN32)
+    target_link_libraries(demo-wtserver PRIVATE dbghelp)
+endif()

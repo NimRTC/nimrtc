@@ -350,6 +350,20 @@ public:
     /** Context pointer stored in the msquic connection handle. */
     static MsQuicSessionImpl* from_context(void* ctx) noexcept;
 
+    /**
+     * @brief Seed the peer datagram state learned before this session
+     *        object existed (server side).
+     *
+     * @param known  False when the peer state is still unknown, i.e.
+     *               when msquic has not reported it yet.  In that case
+     *               the session keeps its "unknown" state so that
+     *               send_datagram() lets msquic decide instead of
+     *               dropping the datagram locally.
+     */
+    void seed_datagram_state(bool send_enabled,
+                             uint16_t max_send_length,
+                             bool known) noexcept;
+
 private:
     friend class MsQuicBidiStream;
     friend class MsQuicUniStream;
@@ -370,11 +384,39 @@ private:
     std::vector<std::unique_ptr<MsQuicUniStream>>  uni_streams_;
     std::mutex streams_mutex_;
 
+    // True when this session created registration_ / configuration_
+    // itself (client mode).  In server mode those handles belong to
+    // the listener and must not be closed here — the listener keeps
+    // serving other connections after this one goes away.
+    bool owns_registration_ = false;
+    bool owns_configuration_ = false;
+
+    // True when this session opened the connection itself (client
+    // mode).  In server mode the connection handle was created by the
+    // listener (QUIC_LISTENER_EVENT_NEW_CONNECTION) and the listener
+    // closes it when it stops — closing it here as well would release
+    // the same handle twice, which trips an assert inside msquic
+    // (`QuicConnectionClose` asserts that the handle was not closed
+    // before) and kills the process with STATUS_ASSERTION_FAILURE.
+    bool owns_connection_ = false;
+
     // Inbound datagram callback.
     OnDatagramCb on_datagram_cb_;
     std::mutex cb_mutex_;
 
     // Datagram send state (set by DATAGRAM_STATE_CHANGED event).
+    //
+    // `datagram_state_known_` distinguishes "msquic has not told us
+    // yet" from "msquic told us the peer has no DATAGRAM support".
+    // The distinction matters on the server side: msquic suppresses
+    // the DATAGRAM_STATE_CHANGED event that reports the peer's
+    // transport parameters until the application owns the
+    // connection, so the first indication can arrive *after* the
+    // first application datagram.  While the state is unknown we let
+    // msquic decide (it queues datagrams until the peer's parameters
+    // are known and cancels them if the peer turns out not to support
+    // datagrams), instead of dropping the datagram locally.
+    bool datagram_state_known_ = false;
     bool datagram_send_enabled_ = false;
     uint16_t datagram_max_send_length_ = 0;
     std::mutex datagram_mutex_;
@@ -498,6 +540,23 @@ public:
         std::span<const std::uint8_t> bytes) noexcept override;
     void set_on_datagram(OnDatagramCb cb) noexcept override;
     void close() noexcept override;
+
+    /**
+     * @brief Apply the QUIC datagram state learned before this session
+     *        object existed (server side).
+     *
+     * The peer advertises QUIC datagram support in its transport
+     * parameters, which arrive during the handshake — before the
+     * server-side session is created.  The listener remembers the state
+     * and hands it over here so datagram sending works right away.
+     *
+     * @param known  False when the listener has not received a
+     *               DATAGRAM_STATE_CHANGED event yet, i.e. when the
+     *               peer state is still unknown.
+     */
+    void apply_datagram_state(bool send_enabled,
+                               std::uint16_t max_send_length,
+                               bool known) noexcept;
 
 private:
     std::unique_ptr<detail::MsQuicSessionImpl> impl_;

@@ -38,6 +38,7 @@
 
 #ifdef _WIN32
     #include <windows.h>
+    #include <DbgHelp.h>
 #endif
 
 #include <atomic>
@@ -47,6 +48,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -122,6 +124,86 @@ void run_session(nimrtc::web_transport::IWebTransportSession* session) {
                  "[demo-wtserver] session handler installed\n");
 }
 
+// ---- Crash diagnostics ----------------------------------------------------
+//
+// The WebTransport listener runs inside msquic's worker threads, so an
+// access violation there kills the process with no diagnostic at all.
+// This vectored exception handler prints the faulting address and a
+// symbolised backtrace before letting the crash proceed, which is the
+// only practical way to diagnose the msquic callback paths from CI.
+
+#if defined(_WIN32)
+namespace {
+
+std::atomic<bool> g_crash_reported{false};
+
+void print_symbol(const char* label, void* addr) {
+    HANDLE process = GetCurrentProcess();
+    char sym_buf[sizeof(SYMBOL_INFO) + 512] = {};
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(sym_buf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 511;
+    DWORD64 disp = 0;
+    if (SymFromAddr(process, reinterpret_cast<DWORD64>(addr), &disp, sym)) {
+        std::fprintf(stderr, "[crash] %s %s +0x%llX\n", label, sym->Name,
+                     static_cast<unsigned long long>(disp));
+    } else {
+        std::fprintf(stderr, "[crash] %s %p\n", label, addr);
+    }
+}
+
+LONG WINAPI crash_veh(EXCEPTION_POINTERS* ep) {
+    if (ep == nullptr || ep->ExceptionRecord == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    // 0xC0000374 = STATUS_HEAP_CORRUPTION, 0xC0000018 = STATUS_INVALID_HEAP.
+    // Both are raised by the ntdll heap manager on the thread that touched
+    // the corrupted block, so the backtrace below points at the offending
+    // free/alloc (not at the code that corrupted the heap earlier).
+    if (code != EXCEPTION_ACCESS_VIOLATION &&
+        code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != 0xC0000374u &&
+        code != 0xC0000018u) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (g_crash_reported.exchange(true)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(process, nullptr, TRUE);
+
+    std::fprintf(stderr, "\n[crash] *** unhandled exception 0x%08X ***\n",
+                 code);
+    std::fprintf(stderr, "[crash] fault address: %p\n",
+                 ep->ExceptionRecord->ExceptionAddress);
+    if (ep->ExceptionRecord->NumberParameters >= 2) {
+        std::fprintf(stderr, "[crash] param1: %llu  param2: %p\n",
+                     static_cast<unsigned long long>(
+                         ep->ExceptionRecord->ExceptionInformation[0]),
+                     reinterpret_cast<void*>(
+                         ep->ExceptionRecord->ExceptionInformation[1]));
+    }
+    print_symbol("fault:", ep->ExceptionRecord->ExceptionAddress);
+
+    void* frames[64];
+    const USHORT count = CaptureStackBackTrace(0, 64, frames, nullptr);
+    std::fprintf(stderr, "[crash] backtrace (%u frames):\n",
+                 static_cast<unsigned>(count));
+    for (USHORT i = 0; i < count; ++i) {
+        print_symbol("frame:", frames[i]);
+    }
+    std::fflush(stderr);
+    SymCleanup(process);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+}  // namespace
+#endif
+
 // ---- Main -----------------------------------------------------------------
 
 std::atomic<bool> g_running{true};
@@ -159,6 +241,7 @@ int main(int argc, char** argv) {
     // Wire ^C / SIGTERM → graceful stop.
 #ifdef _WIN32
     SetConsoleCtrlHandler(console_handler, TRUE);
+    AddVectoredExceptionHandler(1, &crash_veh);
 #else
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -181,14 +264,33 @@ int main(int argc, char** argv) {
     // Track connection count for exit status.
     std::atomic<int> session_count{0};
 
+    // Every accepted session is kept alive for the lifetime of the
+    // process.
+    //
+    // The on_session callback hands us ownership of the session, and the
+    // session owns the underlying QUIC connection.  Dropping it here
+    // would shut the connection down immediately — which cancels the
+    // HTTP/3 response that has just been queued and leaves the peer
+    // waiting for a :status that never arrives.  It would also leave
+    // the datagram-echo callback pointing at a destroyed session.
+    std::vector<std::unique_ptr<nimrtc::web_transport::IWebTransportSession>>
+        sessions;
+    std::mutex sessions_mutex;
+
     // Install the per-session handler.
     server->set_on_session(
-        [&session_count](std::unique_ptr<nimrtc::web_transport::IWebTransportSession> session) {
+        [&session_count, &sessions, &sessions_mutex](
+            std::unique_ptr<nimrtc::web_transport::IWebTransportSession> session) {
             const int id = session_count.fetch_add(1, std::memory_order_relaxed);
             std::fprintf(stderr,
                          "[demo-wtserver] [%d] new session (total=%d)\n",
                          id, session_count.load());
+            // run_session() installs the echo handlers on the session
+            // before it is handed over, so the raw pointer stays valid
+            // for as long as the session is kept alive below.
             run_session(session.get());
+            std::lock_guard<std::mutex> l{sessions_mutex};
+            sessions.push_back(std::move(session));
         });
 
     // Start listening.
@@ -217,6 +319,13 @@ int main(int argc, char** argv) {
     // Shutdown.
     std::fprintf(stderr, "[demo-wtserver] stopping server\n");
     server->stop();
+
+    // Drop the accepted sessions last: they own the QUIC connections
+    // that the listener accepted.
+    {
+        std::lock_guard<std::mutex> l{sessions_mutex};
+        sessions.clear();
+    }
 
     const int count = session_count.load();
     std::fprintf(stderr, "[demo-wtserver] done — %d session(s) handled\n", count);

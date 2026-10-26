@@ -24,6 +24,7 @@
 set(_wt_srcs
     src/web_transport_msquic_session.cpp
     src/web_transport_msquic_listener.cpp
+    src/web_transport_qpack.cpp
     src/web_transport_data_channel.cpp
     src/web_transport_plugin.cpp
     )

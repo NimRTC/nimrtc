@@ -41,6 +41,8 @@
 
 #include "web_transport_msquic_listener.hpp"
 
+#include "web_transport_msquic_send.hpp"
+
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -296,316 +298,125 @@ bool load_tls_credential(const ApiTable* api, HQUIC configuration) noexcept {
 }  // anonymous namespace
 
 // ===========================================================================
-// QpackDecoder — minimal QPACK decoder (RFC 9204)
+// HTTP/3 framing helpers
+// ===========================================================================
+//
+// HTTP/3 (RFC 9114) frames the request/response streams with QUIC
+// variable-length integers (RFC 9000 §16).  The helpers below are used
+// for the frame type and the frame length of every HTTP/3 frame, and for
+// the SETTINGS identifiers and values.
 // ===========================================================================
 
-namespace qpack {
+namespace {
 
-// RFC 9204 static table — pre-defined header field mappings (indices 1-61).
-struct StaticEntry {
-    std::string_view name;
-    std::string_view value;
-};
-
-// clang-format off
-static const StaticEntry k_static_table[] = {
-    { "", "" },             // 0: reserved
-    { ":authority", "" },           // 1
-    { ":method", "GET" },          // 2
-    { ":method", "POST" },         // 3
-    { ":method", "CONNECT" },       // 4
-    { ":method", "OPTIONS" },       // 5
-    { ":method", "HEAD" },          // 6
-    { ":path", "/" },              // 7
-    { ":path", "/index.html" },    // 8
-    { ":scheme", "http" },          // 9
-    { ":scheme", "https" },         // 10
-    { ":status", "200" },           // 11
-    { ":status", "204" },           // 12
-    { ":status", "206" },           // 13
-    { ":status", "304" },           // 14
-    { ":status", "400" },           // 15
-    { ":status", "404" },           // 16
-    { ":status", "500" },           // 17
-    { "accept-charset", "" },       // 18
-    { "accept-encoding", "gzip, deflate" }, // 19
-    { "accept-language", "" },       // 20
-    { "accept-ranges", "" },        // 21
-    { "accept", "" },              // 22
-    { "access-control-allow-origin", "" }, // 23
-    { "age", "" },                 // 24
-    { "allow", "" },               // 25
-    { "authorization", "" },        // 26
-    { "cache-control", "" },       // 27
-    { "content-encoding", "" },     // 28
-    { "content-language", "" },     // 29
-    { "content-length", "" },       // 30
-    { "content-location", "" },     // 31
-    { "content-range", "" },        // 32
-    { "content-type", "" },         // 33
-    { "cookie", "" },               // 34
-    { "date", "" },                 // 35
-    { "etag", "" },                 // 36
-    { "expect", "" },               // 37
-    { "expires", "" },              // 38
-    { "from", "" },                 // 39
-    { "host", "" },                 // 40
-    { "if-match", "" },             // 41
-    { "if-modified-since", "" },    // 42
-    { "if-none-match", "" },        // 43
-    { "if-range", "" },             // 44
-    { "if-unmodified-since", "" },  // 45
-    { "last-modified", "" },         // 46
-    { "link", "" },                 // 47
-    { "location", "" },             // 48
-    { "max-forwards", "" },         // 49
-    { "proxy-authenticate", "" },   // 50
-    { "proxy-authorization", "" },  // 51
-    { "range", "" },                // 52
-    { "referer", "" },              // 53
-    { "refresh", "" },              // 54
-    { "retry-after", "" },          // 55
-    { "sec-websocket-accept", "" }, // 56
-    { "sec-websocket-extensions", "" }, // 57
-    { "sec-websocket-key", "" },    // 58
-    { "sec-websocket-protocol", "" }, // 59
-    { "sec-websocket-version", "" },  // 60
-    { "set-cookie", "" },           // 61
-};
-// clang-format on
-
-static_assert(std::size(qpack::k_static_table) == 62, "static table should have 62 entries");
-
-}  // namespace qpack
-
-const std::vector<QpackDecoder::StaticEntry>& QpackDecoder::static_table() noexcept {
-    static const std::vector<StaticEntry> k_table = []() {
-        std::vector<StaticEntry> v;
-        v.reserve(std::size(qpack::k_static_table));
-        for (const auto& e : qpack::k_static_table) {
-            v.push_back({e.name, e.value});
-        }
-        return v;
-    }();
-    return k_table;
-}
-
-// RFC 9000 §16 — variable-length integer encoding.
-//   00 → 6-bit (0-63)
-//   01 → 14-bit (64-16383)
-//   10 → 30-bit
-std::pair<std::uint64_t, std::span<const std::uint8_t>>
-QpackDecoder::decode_varint(std::span<const std::uint8_t> data) noexcept {
-    if (data.empty()) return {0, {}};
+/**
+ * @brief Decode a QUIC variable-length integer (RFC 9000 §16).
+ *
+ * @param data  In/out cursor; advanced past the integer on success.
+ * @param value Receives the decoded value.
+ * @return False when @p data does not hold a complete integer.
+ */
+bool quic_varint_decode(std::span<const std::uint8_t>& data,
+                        std::uint64_t& value) noexcept {
+    if (data.empty()) return false;
     const std::uint8_t lead = data[0];
-
-    if ((lead & 0xC0) == 0x00) {
-        return {lead & 0x3F, data.subspan(1)};
-    } else if ((lead & 0xC0) == 0x40) {
-        if (data.size() < 2) return {0, {}};
-        return {((static_cast<std::uint64_t>(lead & 0x3F) << 8) |
-                 static_cast<std::uint64_t>(data[1])),
-                data.subspan(2)};
-    } else if ((lead & 0xC0) == 0x80) {
-        if (data.size() < 4) return {0, {}};
-        return {((static_cast<std::uint64_t>(lead & 0x3F) << 24) |
-                 (static_cast<std::uint64_t>(data[1]) << 16) |
-                 (static_cast<std::uint64_t>(data[2]) << 8) |
-                 static_cast<std::uint64_t>(data[3])),
-                data.subspan(4)};
+    const std::size_t width = std::size_t{1} << (lead >> 6);
+    if (data.size() < width) return false;
+    std::uint64_t v = lead & 0x3Fu;
+    for (std::size_t i = 1; i < width; ++i) {
+        v = (v << 8) | data[i];
     }
-    return {0, data.subspan(1)};  // consume 1 byte on unknown prefix
-}
-
-bool QpackDecoder::decode_indexed(
-    std::span<const std::uint8_t>& rem,
-    bool post_base,
-    std::string& out_name,
-    std::string& out_value) noexcept {
-
-    auto [idx_data, next] = decode_varint(rem);
-    rem = next;
-    const auto& table = static_table();
-
-    if (idx_data < table.size()) {
-        if (idx_data > 0) {
-            out_name  = std::string(table[idx_data].name);
-            out_value = std::string(table[idx_data].value);
-        }
-    } else {
-        // Dynamic table reference.
-        std::size_t di = static_cast<std::size_t>(idx_data) - table.size();
-        if (post_base && di < dynamic_table_.size()) {
-            auto& e = dynamic_table_[di];
-            out_name  = e.name;
-            out_value = e.value;
-        } else if (!post_base && di < dynamic_table_.size()) {
-            auto& e = dynamic_table_[di];
-            out_name  = e.name;
-            out_value = e.value;
-        }
-    }
-    return !rem.empty();
-}
-
-bool QpackDecoder::decode_literal(
-    std::span<const std::uint8_t>& rem,
-    std::string& out_name,
-    std::string& out_value) noexcept {
-
-    if (rem.empty()) return false;
-    const std::uint8_t b0 = rem[0];
-    rem = rem.subspan(1);
-
-    // Bit 6 (N): 1 = no name indexing
-    bool no_indexing = ((b0 & 0x08) != 0);
-    // Bit 4 (H): 1 = value is indexed (reference to previous literal value)
-    bool value_indexed = ((b0 & 0x10) != 0);
-    // Bit 6-7: representation
-    // 00 = literal, 01 = literal with name reference, 10 = literal, 11 = indexed
-
-    bool name_indexed = ((b0 & 0x40) != 0);
-
-    // Decode name.
-    if (name_indexed) {
-        auto [ni, next] = decode_varint(
-            std::span<const std::uint8_t>{rem.data(),
-                                           static_cast<std::size_t>(rem.size())});
-        rem = next;
-        const auto& table = static_table();
-        if (ni < table.size() && ni > 0) {
-            out_name = std::string(table[ni].name);
-        }
-    } else {
-        // Literal name: varint length + raw bytes.
-        auto [name_len, n1] = decode_varint(rem);
-        rem = n1;
-        if (name_len > rem.size()) return false;
-        out_name = std::string(reinterpret_cast<const char*>(rem.data()),
-                               static_cast<std::size_t>(name_len));
-        rem = rem.subspan(static_cast<std::size_t>(name_len));
-    }
-
-    // Decode value.
-    if (value_indexed) {
-        // Value indexed in dynamic table (rare in practice).
-        auto [vi, next] = decode_varint(rem);
-        rem = next;
-        (void)vi;  // not needed for our minimal decoder
-        out_value = "";
-    } else {
-        // Literal value: varint length + raw bytes.
-        auto [val_len, n2] = decode_varint(rem);
-        rem = n2;
-        if (val_len > rem.size()) return false;
-        out_value = std::string(reinterpret_cast<const char*>(rem.data()),
-                                static_cast<std::size_t>(val_len));
-        rem = rem.subspan(static_cast<std::size_t>(val_len));
-    }
-
-    // If not no-indexing, add to dynamic table.
-    if (!no_indexing && !out_name.empty()) {
-        if (dynamic_table_.size() < 1000) {
-            dynamic_table_.push_back({std::string(out_name),
-                                       std::string(out_value)});
-        }
-    }
-
+    value = v;
+    data = data.subspan(width);
     return true;
 }
 
-std::unordered_map<std::string, std::string>
-QpackDecoder::decode(std::span<const std::uint8_t> data) noexcept {
-    std::unordered_map<std::string, std::string> result;
-
-    if (data.empty()) return result;
-
-    std::span<const std::uint8_t> rem = data;
-
-    // Header block prefix.
-    if (rem.empty()) return result;
-    const std::uint8_t byte0 = rem[0];
-    rem = rem.subspan(1);
-
-    // First 6 bits: RequiredInsertCount (high bits).
-    std::uint64_t req_count_high = (byte0 >> 2) & 0x3F;
-    // Bit 1: S (sign of delta base)
-    bool delta_sign = ((byte0 & 0x02) != 0);
-    // Bit 0: Delta Base (low bit)
-    std::uint64_t delta_low = (byte0 & 0x01);
-
-    // Extra bits (rarely used in practice).
-    std::uint64_t extra = 0;
-    if ((byte0 & 0x03) != 0) {
-        auto [e, next] = decode_varint(rem);
-        extra = e;
-        rem = next;
-    }
-
-    std::uint64_t req_count = req_count_high;
-    std::int64_t delta_base = delta_sign
-        ? static_cast<std::int64_t>(delta_low)
-        : -static_cast<std::int64_t>(delta_low + 1);
-    if (extra > 0) {
-        req_count = req_count_high + (extra >> 2);
-        std::int64_t delta_extra = static_cast<std::int64_t>(extra & 0x03);
-        if (delta_sign) delta_base += delta_extra;
-        else delta_base -= delta_extra;
-    }
-    (void)req_count;
-    delta_base_ = delta_base;
-
-    // Decode header entries.
-    while (!rem.empty()) {
-        std::string name, value;
-        if (rem.empty()) break;
-        const std::uint8_t first = rem[0];
-
-        if ((first & 0x80) == 0x80) {
-            // Indexed: 11xx xxxx
-            bool post_base = ((first & 0x40) != 0);
-            if (!decode_indexed(rem, post_base, name, value)) break;
-        } else if ((first & 0x40) == 0x40) {
-            // Literal with name reference: 01xx xxxx
-            if (!decode_literal(rem, name, value)) break;
-        } else {
-            // Literal: 00xx xxxx
-            if (!decode_literal(rem, name, value)) break;
-        }
-
-        if (!name.empty()) {
-            std::string key = name;
-            for (auto& ch : key) {
-                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-            }
-            result[key] = value;
+/**
+ * @brief Append a QUIC variable-length integer (RFC 9000 §16).
+ */
+void quic_varint_encode(std::vector<std::uint8_t>& out,
+                        std::uint64_t value) noexcept {
+    if (value < (1ull << 6)) {
+        out.push_back(static_cast<std::uint8_t>(value));
+    } else if (value < (1ull << 14)) {
+        out.push_back(static_cast<std::uint8_t>(0x40u | (value >> 8)));
+        out.push_back(static_cast<std::uint8_t>(value & 0xFFu));
+    } else if (value < (1ull << 30)) {
+        out.push_back(static_cast<std::uint8_t>(0x80u | (value >> 24)));
+        out.push_back(static_cast<std::uint8_t>((value >> 16) & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>(value & 0xFFu));
+    } else {
+        out.push_back(static_cast<std::uint8_t>(0xC0u | (value >> 56)));
+        for (int shift = 48; shift >= 0; shift -= 8) {
+            out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFFu));
         }
     }
-
-    return result;
 }
 
+/** @brief HTTP/3 frame types (RFC 9114 §7.2). */
+constexpr std::uint8_t kFrameData = 0x00;
+constexpr std::uint8_t kFrameHeaders = 0x01;
+constexpr std::uint8_t kFrameSettings = 0x04;
+
+/** @brief HTTP/3 setting identifiers (RFC 9114 §7.2.4, RFC 9204 §5). */
+constexpr std::uint64_t kSettingQpackMaxTableCapacity = 0x01;
+constexpr std::uint64_t kSettingQpackBlockedStreams = 0x07;
+constexpr std::uint64_t kSettingEnableConnectProtocol = 0x08;
+
+/** @brief Unidirectional stream types (RFC 9114 §6.2, RFC 9204 §4.3). */
+constexpr std::uint8_t kUniControlStream = 0x00;
+constexpr std::uint8_t kUniPushStream = 0x01;
+constexpr std::uint8_t kUniQpackEncoder = 0x02;
+constexpr std::uint8_t kUniQpackDecoder = 0x03;
+
+}  // anonymous namespace
+
 // ===========================================================================
-// Http3Handler — minimal HTTP/3 state machine
+// Http3Handler — HTTP/3 state machine (one instance per connection)
 // ===========================================================================
 
 Http3Handler::Http3Handler(Impl* listener_impl) noexcept
     : listener_impl_(listener_impl) {}
 
+bool Http3Handler::on_connect(const ApiTable* api, HQUIC conn) noexcept {
+    conn_ = conn;
+    return send_settings(api, conn);
+}
+
+void Http3Handler::on_peer_stream_started(HQUIC stream,
+                                          bool unidirectional) noexcept {
+    std::lock_guard<std::mutex> l{stream_mutex_};
+    auto& state = stream_states_[stream];
+    // Bidirectional peer streams are request streams (RFC 9114 §6.2.1);
+    // unidirectional ones carry their type in the first byte.
+    state.role = unidirectional ? StreamRole::kUnknown : StreamRole::kRequest;
+}
+
+void Http3Handler::on_datagram_state_changed(bool send_enabled,
+                                             std::uint16_t max_send_length) noexcept {
+    datagram_state_known_ = true;
+    datagram_send_enabled_ = send_enabled;
+    datagram_max_send_length_ = max_send_length;
+}
+
 bool Http3Handler::send_settings(const ApiTable* api, HQUIC conn) noexcept {
     if (conn == nullptr) return false;
 
-    // Open HTTP/3 control stream (stream 0 = bidirectional).
+    // The HTTP/3 control stream MUST be a unidirectional stream
+    // (RFC 9114 §6.2.1).  Opening a bidirectional stream here would
+    // collide with the client's request stream.
     HQUIC ctrl_stream = nullptr;
     const QUIC_STATUS rc_open = api->StreamOpen(
         conn,
-        QUIC_STREAM_OPEN_FLAG_NONE,
+        QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
         &quic_server_stream_callback,
         this,
         &ctrl_stream);
     if (QUIC_FAILED(rc_open) || ctrl_stream == nullptr) {
         nimrtc::core::log::Logger::instance().error(
-            "Http3Handler: StreamOpen(ctrl) failed: " + std::to_string(rc_open));
+            "Http3Handler: StreamOpen(control) failed: " +
+            std::to_string(rc_open));
         return false;
     }
 
@@ -616,128 +427,48 @@ bool Http3Handler::send_settings(const ApiTable* api, HQUIC conn) noexcept {
         return false;
     }
 
-    // HTTP/3 SETTINGS frame: type=0x04, length=0.
-    // Encoded as a STREAM frame on stream 0 with FIN.
-    // Stream frame header: stream_id (varint=0) + offset (0) + length (varint)
-    // For stream 0 (id=0), the varint encoding is just 0x00.
-    // Then: frame type (0x04) + length (0x00) + FIN flag.
-    std::uint8_t frame[] = {
-        0x04,   // SETTINGS frame type
-        0x00,   // length = 0 (varint)
-    };
+    // SETTINGS payload.
+    std::vector<std::uint8_t> settings;
+    // The server never uses a dynamic table, so the encoder is told to
+    // keep the QPACK dynamic table empty (RFC 9204 §5).
+    quic_varint_encode(settings, kSettingQpackMaxTableCapacity);
+    quic_varint_encode(settings, 0);
+    quic_varint_encode(settings, kSettingQpackBlockedStreams);
+    quic_varint_encode(settings, 0);
+    // Extended CONNECT support — required for WebTransport (RFC 9220 §3).
+    quic_varint_encode(settings, kSettingEnableConnectProtocol);
+    quic_varint_encode(settings, 1);
 
-    QUIC_BUFFER buf{};
-    buf.Buffer = frame;
-    buf.Length = sizeof(frame);
+    // Control stream content: the stream type byte followed by the
+    // SETTINGS frame.
+    std::vector<std::uint8_t> payload;
+    payload.push_back(kUniControlStream);
+    payload.push_back(kFrameSettings);
+    quic_varint_encode(payload, settings.size());
+    payload.insert(payload.end(), settings.begin(), settings.end());
 
+    // msquic reads the payload asynchronously (it is copied into
+    // msquic's own send buffer only when the data is flushed into a
+    // packet), so both the QUIC_BUFFER descriptor and the bytes it
+    // points at must stay alive until the matching
+    // QUIC_STREAM_EVENT_SEND_COMPLETE.  OutboundPayload owns both and
+    // is released by the stream callback.
+    auto* outbound = new OutboundPayload(payload);
+
+    // The control stream stays open for the lifetime of the connection,
+    // hence no FIN flag.
     const QUIC_STATUS rc_send = api->StreamSend(
-        ctrl_stream, &buf, 1, QUIC_SEND_FLAG_FIN, nullptr);
+        ctrl_stream, outbound->buffers(), 1, QUIC_SEND_FLAG_NONE, outbound);
     if (QUIC_FAILED(rc_send)) {
+        // The send was rejected, so no completion event will arrive and
+        // the payload has to be released here.
+        release_outbound_payload(outbound);
         api->StreamClose(ctrl_stream);
         return false;
     }
 
-    return true;
-}
-
-bool Http3Handler::on_connect(const ApiTable* api, HQUIC conn) noexcept {
-    return send_settings(api, conn);
-}
-
-bool Http3Handler::send_frame(const ApiTable* api, HQUIC, HQUIC stream,
-                               std::uint8_t frame_type,
-                               std::span<const std::uint8_t> payload) noexcept {
-    if (stream == nullptr) return false;
-
-    std::vector<std::uint8_t> frame;
-    frame.push_back(frame_type);
-
-    // Length as varint (single byte for lengths 0-63).
-    if (payload.size() < 64) {
-        frame.push_back(static_cast<std::uint8_t>(payload.size()));
-    } else if (payload.size() < 16384) {
-        frame.push_back(0x40 | static_cast<std::uint8_t>(payload.size() >> 8));
-        frame.push_back(static_cast<std::uint8_t>(payload.size() & 0xFF));
-    } else {
-        frame.push_back(static_cast<std::uint8_t>(std::min<std::size_t>(
-            payload.size(), 63)));
-    }
-
-    frame.insert(frame.end(), payload.begin(), payload.end());
-
-    QUIC_BUFFER buf{};
-    buf.Buffer = frame.data();
-    buf.Length = static_cast<std::uint32_t>(frame.size());
-
-    const QUIC_STATUS rc = api->StreamSend(
-        stream, &buf, 1, QUIC_SEND_FLAG_FIN, nullptr);
-    return !QUIC_FAILED(rc);
-}
-
-bool Http3Handler::send_webtransport_response(
-    const ApiTable* api, HQUIC conn, HQUIC stream) noexcept {
-
-    // QPACK-encoded 200 response:
-    //   Block: [prefix=0x00] [status=0xC0] [sec-webtransport-version entry]
-    //
-    // Entry 1: :status: 200
-    //   Indexed with post-base (S=1), dynamic index 0 → 0xC0
-    //
-    // Entry 2: sec-webtransport-version: 1
-    //   Literal with name reference (index 13), H=1, incremental → 0x4d
-    //   Value: varint 1 + '1'
-
-    std::vector<std::uint8_t> block;
-    block.push_back(0x00);   // prefix: RequiredInsertCount=0, DeltaBase=0
-    block.push_back(0xC0);   // :status: 200 (indexed, post-base, idx=0)
-    block.push_back(0x4d);   // sec-webtransport-version: name idx 13, H=1, N=0
-    block.push_back(0x01);   // value length varint = 1
-    block.push_back('1');    // value
-
-    return send_frame(api, conn, stream, 0x01, block);
-}
-
-bool Http3Handler::parse_settings(
-    std::span<const std::uint8_t> payload) noexcept {
-    // Empty SETTINGS frame is the norm.
-    std::span<const std::uint8_t> rem = payload;
-    while (rem.size() >= 2) {
-        auto [id_data, n1] = QpackDecoder::decode_varint(rem);
-        rem = n1;
-        if (rem.empty()) break;
-        auto [val_data, n2] = QpackDecoder::decode_varint(rem);
-        rem = n2;
-
-        if (id_data == 0x02) {  // SETTINGS_QPACK_MAX_TABLE_CAPACITY
-            qpack_.set_max_table_size(static_cast<std::uint32_t>(val_data));
-        }
-    }
-    settings_received_.store(true, std::memory_order_release);
-    return true;
-}
-
-bool Http3Handler::parse_headers(
-    HQUIC stream, std::span<const std::uint8_t> payload) noexcept {
-
-    auto headers = qpack_.decode(payload);
-
-    auto it = headers.find(":protocol");
-    if (it != headers.end() && it->second == "webtransport") {
-        nimrtc::core::log::Logger::instance().info(
-            "Http3Handler: WebTransport request detected on stream");
-
-        // Mark that we've sent the response for this stream.
-        {
-            std::lock_guard<std::mutex> l{stream_mutex_};
-            auto& state = stream_states_[stream];
-            if (!state.webtransport_sent) {
-                state.webtransport_sent = true;
-                // Trigger session creation on Impl.
-                listener_impl_->on_webtransport_request(stream, headers);
-            }
-        }
-    }
-
+    nimrtc::core::log::Logger::instance().info(
+        "Http3Handler: control stream opened, SETTINGS sent");
     return true;
 }
 
@@ -746,72 +477,288 @@ bool Http3Handler::on_stream_data(
     std::span<const std::uint8_t> data,
     bool fin) noexcept {
 
+    StreamRole role = StreamRole::kUnknown;
+    std::vector<std::uint8_t> buf;
+
     {
         std::lock_guard<std::mutex> l{stream_mutex_};
-        auto& state = stream_states_[stream];
-        state.fin_seen = fin || state.fin_seen;
-
-        if (!data.empty()) {
-            state.buf.emplace_back(data.begin(), data.end());
+        auto it = stream_states_.find(stream);
+        if (it == stream_states_.end()) {
+            // Data for a stream we do not know about — ignore it.
+            return true;
         }
+        auto& state = it->second;
+        state.fin_seen = state.fin_seen || fin;
+        state.buf.insert(state.buf.end(), data.begin(), data.end());
+        role = state.role;
+        buf = state.buf;
+    }
 
-        // Accumulate and process complete frames.
-        std::vector<std::uint8_t> accumulated;
-        for (const auto& chunk : state.buf) {
-            accumulated.insert(accumulated.end(), chunk.begin(), chunk.end());
+    // Resolve the stream type of a unidirectional stream (RFC 9114 §6.2).
+    if (role == StreamRole::kUnknown) {
+        if (buf.empty()) return true;
+        const std::uint8_t type = buf.front();
+        buf.erase(buf.begin());
+        switch (type) {
+            case kUniControlStream:
+                role = StreamRole::kControl;
+                break;
+            case kUniQpackEncoder:
+                role = StreamRole::kEncoder;
+                break;
+            case kUniPushStream:
+            case kUniQpackDecoder:
+            default:
+                // Neither is valid coming from a client.
+                role = StreamRole::kPush;
+                break;
         }
-        std::span<const std::uint8_t> rem{accumulated.data(), accumulated.size()};
+        std::lock_guard<std::mutex> l{stream_mutex_};
+        auto it = stream_states_.find(stream);
+        if (it != stream_states_.end()) it->second.role = role;
+    }
 
-        while (!rem.empty()) {
-            if (rem.size() < 2) break;
-
-            auto [ft_val, n1] = QpackDecoder::decode_varint(rem);
-            rem = n1;
-            std::uint8_t frame_type = static_cast<std::uint8_t>(ft_val);
-
-            if (rem.empty()) break;
-            auto [fl_val, n2] = QpackDecoder::decode_varint(rem);
-            rem = n2;
-            std::size_t frame_len = static_cast<std::size_t>(fl_val);
-
-            if (frame_len > rem.size()) break;  // incomplete
-
-            std::span<const std::uint8_t> frame_payload = rem.first(frame_len);
-            rem = rem.subspan(frame_len);
-
-            switch (frame_type) {
-                case 0x04:  // SETTINGS
-                    parse_settings(frame_payload);
-                    break;
-                case 0x01: {  // HEADERS
-                    std::lock_guard<std::mutex> ll{stream_mutex_};
-                    auto it_s = stream_states_.find(stream);
-                    if (it_s != stream_states_.end() &&
-                        !it_s->second.webtransport_sent) {
-                        parse_headers(stream, frame_payload);
-                    }
-                    break;
-                }
-                default:
-                    break;
+    switch (role) {
+        case StreamRole::kRequest: {
+            process_request_frames(stream, buf);
+            std::lock_guard<std::mutex> l{stream_mutex_};
+            auto it = stream_states_.find(stream);
+            if (it != stream_states_.end()) it->second.buf = std::move(buf);
+            return true;
+        }
+        case StreamRole::kControl: {
+            process_control_frames(buf);
+            std::lock_guard<std::mutex> l{stream_mutex_};
+            auto it = stream_states_.find(stream);
+            if (it != stream_states_.end()) it->second.buf = std::move(buf);
+            return true;
+        }
+        case StreamRole::kEncoder: {
+            // The QPACK encoder stream is unframed; the decoder buffers
+            // partial instructions itself (RFC 9204 §4.3).
+            qpack_.feed_encoder_stream(buf);
+            if (qpack_.failed()) {
+                nimrtc::core::log::Logger::instance().error(
+                    "Http3Handler: malformed QPACK encoder stream");
             }
+            std::lock_guard<std::mutex> l{stream_mutex_};
+            auto it = stream_states_.find(stream);
+            if (it != stream_states_.end()) it->second.buf.clear();
+            return true;
         }
+        default:
+            return true;
+    }
+}
 
-        // Keep unprocessed remainder.
-        if (rem.empty()) {
-            state.buf.clear();
-        } else {
-            state.buf.clear();
-            state.buf.emplace_back(rem.begin(), rem.end());
+bool Http3Handler::process_request_frames(
+    HQUIC stream, std::vector<std::uint8_t>& buf) noexcept {
+
+    std::span<const std::uint8_t> rem{buf.data(), buf.size()};
+
+    while (!rem.empty()) {
+        std::span<const std::uint8_t> cursor = rem;
+
+        std::uint64_t frame_type = 0;
+        if (!quic_varint_decode(cursor, frame_type)) break;
+        std::uint64_t frame_len = 0;
+        if (!quic_varint_decode(cursor, frame_len)) break;
+        if (cursor.size() < frame_len) break;  // incomplete frame
+
+        const std::span<const std::uint8_t> payload =
+            cursor.first(static_cast<std::size_t>(frame_len));
+        rem = cursor.subspan(static_cast<std::size_t>(frame_len));
+
+        switch (frame_type) {
+            case kFrameHeaders: {
+                bool answered = false;
+                {
+                    std::lock_guard<std::mutex> l{stream_mutex_};
+                    auto it = stream_states_.find(stream);
+                    answered = (it != stream_states_.end()) &&
+                               it->second.webtransport_sent;
+                }
+                if (!answered) {
+                    parse_headers(stream, payload);
+                }
+                break;
+            }
+            case kFrameData:
+                // Session payload of an established WebTransport session.
+                // The demo server echoes datagrams, not stream data.
+                break;
+            default:
+                break;
         }
     }
 
+    buf.assign(rem.begin(), rem.end());
+    return true;
+}
+
+bool Http3Handler::process_control_frames(
+    std::vector<std::uint8_t>& buf) noexcept {
+
+    std::span<const std::uint8_t> rem{buf.data(), buf.size()};
+
+    while (!rem.empty()) {
+        std::span<const std::uint8_t> cursor = rem;
+
+        std::uint64_t frame_type = 0;
+        if (!quic_varint_decode(cursor, frame_type)) break;
+        std::uint64_t frame_len = 0;
+        if (!quic_varint_decode(cursor, frame_len)) break;
+        if (cursor.size() < frame_len) break;  // incomplete frame
+
+        const std::span<const std::uint8_t> payload =
+            cursor.first(static_cast<std::size_t>(frame_len));
+        rem = cursor.subspan(static_cast<std::size_t>(frame_len));
+
+        if (frame_type == kFrameSettings) {
+            parse_settings(payload);
+        }
+        // Everything else on the control stream is informational for us.
+    }
+
+    buf.assign(rem.begin(), rem.end());
+    return true;
+}
+
+bool Http3Handler::parse_settings(
+    std::span<const std::uint8_t> payload) noexcept {
+
+    std::span<const std::uint8_t> rem = payload;
+    while (!rem.empty()) {
+        std::uint64_t id = 0;
+        if (!quic_varint_decode(rem, id)) break;
+        std::uint64_t value = 0;
+        if (!quic_varint_decode(rem, value)) break;
+
+        switch (id) {
+            case kSettingQpackMaxTableCapacity:
+                // The peer's decoder capacity.  Our encoder never uses a
+                // dynamic table, so the value does not constrain us.
+                break;
+            case kSettingQpackBlockedStreams:
+            case kSettingEnableConnectProtocol:
+            default:
+                break;
+        }
+    }
+
+    settings_received_.store(true, std::memory_order_release);
+    return true;
+}
+
+bool Http3Handler::parse_headers(
+    HQUIC stream, std::span<const std::uint8_t> payload) noexcept {
+
+    std::vector<QpackHeaderField> fields;
+    if (!qpack_.decode(payload, fields)) {
+        nimrtc::core::log::Logger::instance().error(
+            "Http3Handler: QPACK decoding of the HEADERS frame failed");
+        return false;
+    }
+
+    std::unordered_map<std::string, std::string> headers;
+    headers.reserve(fields.size());
+    for (const QpackHeaderField& field : fields) {
+        headers.emplace(field.name, field.value);
+    }
+
+    const auto method = headers.find(":method");
+    if (method == headers.end() || method->second != "CONNECT") {
+        return false;  // not an Extended CONNECT request
+    }
+    const auto protocol = headers.find(":protocol");
+    if (protocol == headers.end() || protocol->second != "webtransport") {
+        return false;  // not a WebTransport request
+    }
+
+    // Mark the stream as answered before the response is sent so that a
+    // second HEADERS frame cannot start a second session.
+    {
+        std::lock_guard<std::mutex> l{stream_mutex_};
+        auto& state = stream_states_[stream];
+        if (state.webtransport_sent) return false;
+        state.webtransport_sent = true;
+    }
+
+    nimrtc::core::log::Logger::instance().info(
+        "Http3Handler: WebTransport CONNECT request received");
+
+    // Answer the request with ":status: 200" (RFC 9297 §3).
+    if (!send_webtransport_response(&ApiTable::instance(), conn_, stream)) {
+        nimrtc::core::log::Logger::instance().error(
+            "Http3Handler: failed to send the 200 response");
+        return false;
+    }
+
+    if (listener_impl_ != nullptr) {
+        listener_impl_->on_webtransport_request(
+            conn_, stream, headers,
+            datagram_send_enabled_, datagram_max_send_length_,
+            datagram_state_known_);
+    }
+    return true;
+}
+
+bool Http3Handler::send_webtransport_response(
+    const ApiTable* api, HQUIC conn, HQUIC stream) noexcept {
+
+    std::vector<QpackHeaderField> fields;
+    fields.push_back(QpackHeaderField{":status", "200"});
+    fields.push_back(QpackHeaderField{"sec-webtransport-version", "1"});
+
+    std::vector<std::uint8_t> block;
+    if (!encode_field_section(fields, block)) return false;
+
+    // The CONNECT stream carries the session data, so the response must
+    // not close it with a FIN.
+    return send_frame(api, conn, stream, kFrameHeaders, block, false);
+}
+
+bool Http3Handler::send_frame(const ApiTable* api, HQUIC, HQUIC stream,
+                               std::uint8_t frame_type,
+                               std::span<const std::uint8_t> payload,
+                               bool fin) noexcept {
+    if (stream == nullptr) return false;
+
+    std::vector<std::uint8_t> frame;
+    frame.push_back(frame_type);
+    quic_varint_encode(frame, payload.size());
+    frame.insert(frame.end(), payload.begin(), payload.end());
+
+    // The frame bytes are read by msquic asynchronously, so both the
+    // QUIC_BUFFER descriptor and the bytes it points at have to stay
+    // alive until QUIC_STREAM_EVENT_SEND_COMPLETE (see
+    // OutboundPayload for the details).
+    auto* outbound = new OutboundPayload(frame);
+
+    const QUIC_STATUS rc = api->StreamSend(
+        stream, outbound->buffers(), 1,
+        fin ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE, outbound);
+    if (QUIC_FAILED(rc)) {
+        // No completion event will arrive for a rejected send.
+        release_outbound_payload(outbound);
+        return false;
+    }
     return true;
 }
 
 void Http3Handler::on_stream_closed(HQUIC stream) noexcept {
-    std::lock_guard<std::mutex> l{stream_mutex_};
-    stream_states_.erase(stream);
+    {
+        std::lock_guard<std::mutex> l{stream_mutex_};
+        stream_states_.erase(stream);
+    }
+
+    // The application owns every stream handle it receives from msquic
+    // and has to close it exactly once.  Not closing the request stream
+    // (the WebTransport CONNECT stream) keeps a reference to the QUIC
+    // connection alive, so the connection is never destroyed -- and the
+    // registration's rundown never completes, which makes
+    // MsQuicRegistrationClose() block forever at shutdown.
+    ApiTable::instance().StreamClose(stream);
 }
 
 // ===========================================================================
@@ -820,7 +767,9 @@ void Http3Handler::on_stream_closed(HQUIC stream) noexcept {
 
 // Per-connection HTTP/3 handler context stored in the connection handle.
 struct ServerConnCtx {
-    Http3Handler* handler;          // owned by Impl
+    // The HTTP/3 handler is per connection: the QPACK dynamic table and
+    // the stream map are connection-wide resources (RFC 9204 §3.2).
+    std::unique_ptr<Http3Handler> handler;
     HQUIC conn;                    // accepted connection handle
     std::atomic<bool> http3_ready{false};
 };
@@ -835,6 +784,8 @@ QUIC_STATUS QUIC_API quic_server_conn_callback(
 
     switch (Event->Type) {
         case QUIC_CONNECTION_EVENT_CONNECTED:
+            nimrtc::core::log::Logger::instance().info(
+                "QUIC connection established (handshake complete)");
             if (ctx && ctx->handler) {
                 // Use the ApiTable singleton for the server-side connection.
                 ctx->handler->on_connect(
@@ -844,20 +795,48 @@ QUIC_STATUS QUIC_API quic_server_conn_callback(
             return QUIC_STATUS_SUCCESS;
 
         case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+            nimrtc::core::log::Logger::instance().error(
+                "QUIC connection shut down by transport: status=0x" +
+                std::to_string(Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status) +
+                " error_code=0x" +
+                std::to_string(
+                    Event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode));
+            return QUIC_STATUS_SUCCESS;
+
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+            nimrtc::core::log::Logger::instance().warn(
+                "QUIC connection shut down by peer: error_code=0x" +
+                std::to_string(
+                    Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode));
             return QUIC_STATUS_SUCCESS;
 
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             if (ctx) delete ctx;
             return QUIC_STATUS_SUCCESS;
 
+        case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED:
+            // The peer advertised QUIC datagram support.  It is learned
+            // during the handshake, i.e. before the WebTransport session
+            // object exists, so the state is remembered here.
+            if (ctx && ctx->handler) {
+                ctx->handler->on_datagram_state_changed(
+                    Event->DATAGRAM_STATE_CHANGED.SendEnabled != 0,
+                    Event->DATAGRAM_STATE_CHANGED.MaxSendLength);
+            }
+            return QUIC_STATUS_SUCCESS;
+
         case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
             HQUIC stream = Event->PEER_STREAM_STARTED.Stream;
+            const bool unidirectional =
+                (Event->PEER_STREAM_STARTED.Flags &
+                 QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0;
             if (ctx && ctx->handler) {
-                ApiTable::instance().SetContext(stream, ctx->handler);
+                ApiTable::instance().SetContext(stream, ctx->handler.get());
                 ApiTable::instance().SetCallbackHandler(
                     stream,
                     reinterpret_cast<void*>(&quic_server_stream_callback),
-                    ctx->handler);
+                    ctx->handler.get());
+                ctx->handler->on_peer_stream_started(stream, unidirectional);
             }
             return QUIC_STATUS_SUCCESS;
         }
@@ -871,6 +850,15 @@ QUIC_STATUS QUIC_API quic_server_stream_callback(
     HQUIC Stream,
     void* Context,
     QUIC_STREAM_EVENT* Event) noexcept {
+
+    // The payload of a completed send is released here.  This is done
+    // before the handler is touched, because the completion event may
+    // arrive after the connection (and with it the HTTP/3 handler) is
+    // gone.
+    if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
+        release_outbound_payload(Event->SEND_COMPLETE.ClientContext);
+        return QUIC_STATUS_SUCCESS;
+    }
 
     auto* handler = static_cast<Http3Handler*>(Context);
     if (!handler) return QUIC_STATUS_INVALID_PARAMETER;
@@ -914,8 +902,12 @@ QUIC_STATUS QUIC_API quic_listener_callback(
             auto* impl = static_cast<Impl*>(Context);
             if (!impl) return QUIC_STATUS_INVALID_PARAMETER;
 
-            // Create ServerConnCtx with the Http3Handler and connection handle.
-            auto* ctx = new ServerConnCtx{impl->http3_handler_.get(), conn, false};
+            // Create the per-connection HTTP/3 handler and its context.
+            auto* ctx = new ServerConnCtx{
+                std::make_unique<Http3Handler>(impl), conn, false};
+
+            nimrtc::core::log::Logger::instance().info(
+                "QUIC connection accepted by listener");
 
             // Register the connection so it can be looked up for session creation.
             {
@@ -929,6 +921,31 @@ QUIC_STATUS QUIC_API quic_listener_callback(
                 conn,
                 reinterpret_cast<void*>(&quic_server_conn_callback),
                 ctx);
+
+            // Attach the server configuration to the accepted connection.
+            //
+            // msquic contract (docs/api/ListenerStart.md): "The server
+            // application must call ConnectionSetConfiguration on the
+            // connection, either before returning from the
+            // QUIC_LISTENER_EVENT_NEW_CONNECTION callback, or on its own
+            // after returning from the callback, otherwise the connection
+            // handshake will stall and timeout."
+            //
+            // Without this call the listener still receives and ACKs the
+            // client's Initial packet, but msquic never starts the TLS 1.3
+            // handshake, so the client never sees a ServerHello and the
+            // WebTransport session never comes up.
+            const QUIC_STATUS rc_cfg =
+                ApiTable::instance().ConnectionSetConfiguration(
+                    conn, impl->configuration());
+            if (QUIC_FAILED(rc_cfg)) {
+                nimrtc::core::log::Logger::instance().error(
+                    "MsQuicConnectionSetConfiguration failed on accepted "
+                    "connection: 0x" + std::to_string(rc_cfg));
+                ApiTable::instance().ConnectionClose(conn);
+                delete ctx;
+                return QUIC_STATUS_SUCCESS;
+            }
 
             return QUIC_STATUS_SUCCESS;
         }
@@ -956,9 +973,6 @@ Impl::Impl(
         throw std::runtime_error(
             "WebTransport listener: msquic API not available");
     }
-
-    // Create the HTTP/3 handler (shared across all connections).
-    http3_handler_ = std::make_unique<Http3Handler>(this);
 
     // ---- Registration ----
     {
@@ -1093,28 +1107,19 @@ Impl::~Impl() {
 }
 
 void Impl::on_webtransport_request(
+    HQUIC conn,
     [[maybe_unused]] HQUIC stream,
-    [[maybe_unused]] const std::unordered_map<std::string, std::string>& headers) noexcept {
+    [[maybe_unused]] const std::unordered_map<std::string, std::string>& headers,
+    bool datagram_send_enabled,
+    std::uint16_t datagram_max_send_length,
+    bool datagram_state_known) noexcept {
 
     // When this is called, the HTTP/3 200 response has already been queued
     // by Http3Handler::send_webtransport_response().
     // Chrome's WebTransport API will now treat the QUIC connection as
     // a connected WebTransport session.
     //
-    // We need to create a WebTransportMsQuicSession wrapping the QUIC
-    // connection.  The connection handle is not directly available here
-    // (the Http3Handler received the stream handle, not the conn handle).
-    //
-    // The accepted connections are stored in connections_ list.
-    // We retrieve the most recently accepted connection.
-    HQUIC conn = nullptr;
-    {
-        std::lock_guard<std::mutex> l{conn_mutex_};
-        if (!connections_.empty()) {
-            conn = connections_.back();
-        }
-    }
-
+    // The session wraps the QUIC connection the request arrived on.
     if (conn == nullptr) {
         nimrtc::core::log::Logger::instance().error(
             "WebTransport request: no connection handle available");
@@ -1124,12 +1129,12 @@ void Impl::on_webtransport_request(
     // Create a server-side WebTransportMsQuicSession.
     // The session is already connected (QUIC handshake was done by the time
     // the CONNECTED event fired on this connection).
-    std::unique_ptr<IWebTransportSession> session;
+    std::unique_ptr<WebTransportMsQuicSession> wt_session;
     try {
         // The WebTransportMsQuicSession constructor takes the connection
         // handle and transitions it to kConnected state.
         // For server-side, we use the server-side Impl constructor.
-        session = std::make_unique<WebTransportMsQuicSession>(
+        wt_session = std::make_unique<WebTransportMsQuicSession>(
             conn, registration_, configuration_,
             api_, cfg_);
     } catch (const std::exception& e) {
@@ -1137,6 +1142,15 @@ void Impl::on_webtransport_request(
             std::string("WebTransport session creation failed: ") + e.what());
         return;
     }
+
+    // The peer advertised QUIC datagram support during the handshake,
+    // i.e. before this session object existed.  Seed the session with
+    // that state so datagram sending works right away.
+    wt_session->apply_datagram_state(datagram_send_enabled,
+                                     datagram_max_send_length,
+                                     datagram_state_known);
+
+    std::unique_ptr<IWebTransportSession> session = std::move(wt_session);
 
     nimrtc::core::log::Logger::instance().info(
         "WebTransport session created and delivered");
@@ -1156,12 +1170,23 @@ void Impl::stop() noexcept {
         listener_ = nullptr;
     }
 
+    // Close the connections that are still open.  The list is taken
+    // under the lock but the handles are closed outside of it: msquic
+    // delivers the shutdown events on its own worker threads and those
+    // callbacks take the same lock.
+    //
+    // The listener owns the connection handles it accepted (the
+    // server-side session only borrows them), so each handle is closed
+    // exactly once, here.
+    std::vector<HQUIC> conns;
     {
         std::lock_guard<std::mutex> l{conn_mutex_};
-        for (HQUIC conn : connections_) {
+        conns.swap(connections_);
+    }
+    for (HQUIC conn : conns) {
+        if (conn != nullptr) {
             api_->ConnectionClose(conn);
         }
-        connections_.clear();
     }
 
     if (configuration_ != nullptr) {

@@ -55,10 +55,13 @@
 
 #include "web_transport_msquic_session.hpp"
 
+#include "web_transport_msquic_send.hpp"
+
 #include <algorithm>
 #include <climits>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -197,16 +200,22 @@ plugins::Status MsQuicBidiStream::send(
     }
     if (bytes.empty()) return plugins::kOk;
 
-    QUIC_BUFFER buf{};
-    buf.Length = static_cast<uint32_t>(bytes.size());
-    buf.Buffer = const_cast<std::uint8_t*>(bytes.data());
+    // msquic reads the payload asynchronously, so both the QUIC_BUFFER
+    // descriptor and the bytes it points at have to stay alive until
+    // QUIC_STREAM_EVENT_SEND_COMPLETE.  OutboundPayload owns both and
+    // is released by the stream callback.
+    auto* outbound = new (std::nothrow) OutboundPayload(bytes);
+    if (outbound == nullptr) return plugins::kErrInternal;
 
     // The stream was already started via StreamStart in open_bidi_stream().
     // Subsequent sends use QUIC_SEND_FLAG_NONE (no START, no FIN here —
     // FIN is sent by close()).
-    const QUIC_STATUS rc = api_->StreamSend(stream_, &buf, 1,
-                                              QUIC_SEND_FLAG_NONE, nullptr);
+    const QUIC_STATUS rc = api_->StreamSend(stream_, outbound->buffers(), 1,
+                                              QUIC_SEND_FLAG_NONE, outbound);
     if (QUIC_FAILED(rc)) {
+        // No completion event will arrive for a rejected send, so the
+        // payload is released here.
+        release_outbound_payload(outbound);
         // Distinguish permanent vs transient failures.
         // QUIC_STATUS_CONNECTION_IDLE means the stream's send path is done.
         if (rc == QUIC_STATUS_CONNECTION_IDLE) {
@@ -376,14 +385,18 @@ plugins::Status MsQuicUniStream::send(
     }
     if (bytes.empty()) return plugins::kOk;
 
-    QUIC_BUFFER buf{};
-    buf.Length = static_cast<uint32_t>(bytes.size());
-    buf.Buffer = const_cast<std::uint8_t*>(bytes.data());
+    // msquic reads the payload asynchronously, so both the QUIC_BUFFER
+    // descriptor and the bytes it points at have to stay alive until
+    // QUIC_STREAM_EVENT_SEND_COMPLETE (see OutboundPayload).
+    auto* outbound = new (std::nothrow) OutboundPayload(bytes);
+    if (outbound == nullptr) return plugins::kErrInternal;
 
-    const QUIC_STATUS rc = api_->StreamSend(stream_, &buf, 1,
+    const QUIC_STATUS rc = api_->StreamSend(stream_, outbound->buffers(), 1,
                                               QUIC_SEND_FLAG_START |
-                                              QUIC_SEND_FLAG_FIN, nullptr);
+                                              QUIC_SEND_FLAG_FIN, outbound);
     if (QUIC_FAILED(rc)) {
+        // No completion event will arrive for a rejected send.
+        release_outbound_payload(outbound);
         if (rc == QUIC_STATUS_CONNECTION_IDLE) return plugins::kErrClosed;
         return plugins::kErrInternal;
     }
@@ -515,6 +528,15 @@ QUIC_STATUS QUIC_API quic_stream_callback(
     // IMPLEMENTED: we use this tagged-pointer scheme in stream open.
     // Here we decode it.
 
+    // The payload of a completed send is released here.  This is done
+    // before the stream wrapper is touched, because the completion
+    // event may be delivered while (or just after) the wrapper is
+    // being torn down.
+    if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
+        release_outbound_payload(Event->SEND_COMPLETE.ClientContext);
+        return QUIC_STATUS_SUCCESS;
+    }
+
     // Decode tagged context.
     // The tag bit is the LSB.  If set, it's a uni stream; otherwise bidi.
     const uintptr_t tagged = reinterpret_cast<uintptr_t>(Context);
@@ -587,6 +609,11 @@ QUIC_STATUS quic_stream_callback_uni_impl(
 MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t peer_port,
            const ApiTable* api, const WebTransportConfig& cfg)
     : api_(api) {
+    // Client mode: this session creates its own registration and
+    // configuration, so it also owns their lifetime.
+    owns_registration_ = true;
+    owns_configuration_ = true;
+
     if (!api_->ok()) {
         throw std::runtime_error(
             "WebTransportMsQuicSession: msquic API not available");
@@ -694,6 +721,10 @@ MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t 
         api_->SetCallbackHandler(conn_,
                                    reinterpret_cast<void*>(&quic_connection_callback),
                                    this);
+
+        // The connection was opened by this session, so this session
+        // closes it (see owns_connection_).
+        owns_connection_ = true;
 
         // Attach the configuration.
         const QUIC_STATUS rc2 = api_->ConnectionSetConfiguration(conn_,
@@ -861,23 +892,50 @@ plugins::Status MsQuicSessionImpl::send_datagram(
     if (bytes.empty()) return plugins::kOk;
 
     std::lock_guard<std::mutex> l{datagram_mutex_};
-    if (!datagram_send_enabled_) {
-        // Peer has not advertised DATAGRAM support (RFC 9221 §3.1).
+    if (datagram_state_known_ && !datagram_send_enabled_) {
+        // msquic told us the peer did not advertise DATAGRAM support
+        // (RFC 9221 §3.1), so the datagram cannot be sent at all.
         return plugins::kErrBufferTooSmall;  // closest approximation
     }
-
-    QUIC_BUFFER buf{};
-    buf.Length = static_cast<uint32_t>(bytes.size());
-    buf.Buffer = const_cast<std::uint8_t*>(bytes.data());
+    // Note: when the peer state is still unknown we deliberately do
+    // *not* reject the datagram.  msquic queues datagrams until the
+    // peer's transport parameters are known and cancels them (with a
+    // QUIC_DATAGRAM_SEND_CANCELED notification) if the peer turns
+    // out not to support datagrams, so msquic — not this layer — is
+    // the right place to enforce the constraint.  Rejecting here
+    // would silently drop the first datagrams of a server-side
+    // session, because msquic only reports the peer's transport
+    // parameters to the application once it owns the connection,
+    // which can be *after* the first application datagram arrived.
 
     // MsQuic's DatagramSend API doesn't take a special flag — the
     // datagram type is implicit (the API itself wraps a DATAGRAM
     // frame).  QUIC_SEND_FLAG_NONE is the correct value here.
+    //
+    // The payload is encoded into a packet later, so both the
+    // QUIC_BUFFER descriptor and the bytes it points at have to stay
+    // alive until the matching
+    // QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED event.  This
+    // matters in particular for the echo path, where `bytes` points
+    // straight into msquic's receive buffer.
+    auto* outbound = new (std::nothrow) OutboundPayload(bytes);
+    if (outbound == nullptr) return plugins::kErrInternal;
+
     const QUIC_STATUS rc = api_->DatagramSend(
-        conn_, &buf, 1, QUIC_SEND_FLAG_NONE, nullptr);
+        conn_, outbound->buffers(), 1, QUIC_SEND_FLAG_NONE, outbound);
     if (QUIC_FAILED(rc)) {
+        // No send-state event will arrive for a rejected send.
+        release_outbound_payload(outbound);
         if (rc == QUIC_STATUS_CONNECTION_IDLE) {
             return plugins::kErrClosed;
+        }
+        if (rc == QUIC_STATUS_INVALID_STATE) {
+            // The peer does not support QUIC datagrams.
+            return plugins::kErrBufferTooSmall;
+        }
+        if (rc == QUIC_STATUS_INVALID_PARAMETER) {
+            // The payload exceeds max_datagram_frame_size.
+            return plugins::kErrBufferTooSmall;
         }
         return plugins::kErrInternal;
     }
@@ -898,9 +956,17 @@ void MsQuicSessionImpl::close() noexcept {
 
     // Shutdown the connection gracefully.
     if (conn_ != nullptr) {
-        api_->ConnectionShutdown(conn_,
-                                   QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-                                   0);  // no application protocol error
+        if (owns_connection_) {
+            api_->ConnectionShutdown(conn_,
+                                       QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                                       0);  // no application protocol error
+        } else {
+            // Server mode: the connection handle belongs to the listener,
+            // which closes it when it stops.  Touching it here could hit a
+            // handle that the listener has already closed, so the session
+            // just forgets it.
+            conn_ = nullptr;
+        }
     }
 }
 
@@ -934,14 +1000,22 @@ void MsQuicSessionImpl::on_shutdown_complete() noexcept {
     uni_streams_.clear();
 
     if (conn_ != nullptr) {
-        api_->ConnectionClose(conn_);
+        // In server mode the connection handle belongs to the listener:
+        // it closes every connection it accepted when it stops.  Closing
+        // it here as well would release the same handle twice, and msquic
+        // asserts on that (`QuicConnectionClose` asserts that the handle
+        // was not closed before), which kills the process with
+        // STATUS_ASSERTION_FAILURE.
+        if (owns_connection_) {
+            api_->ConnectionClose(conn_);
+        }
         conn_ = nullptr;
     }
-    if (configuration_ != nullptr) {
+    if (owns_configuration_ && configuration_ != nullptr) {
         api_->ConfigurationClose(configuration_);
         configuration_ = nullptr;
     }
-    if (registration_ != nullptr) {
+    if (owns_registration_ && registration_ != nullptr) {
         api_->RegistrationClose(registration_);
         registration_ = nullptr;
     }
@@ -969,8 +1043,20 @@ void MsQuicSessionImpl::on_peer_stream_started(HQUIC stream,
 void MsQuicSessionImpl::on_datagram_state_changed(bool send_enabled,
                                       uint16_t max_send_length) noexcept {
     std::lock_guard<std::mutex> l{datagram_mutex_};
+    datagram_state_known_ = true;
     datagram_send_enabled_ = send_enabled;
     datagram_max_send_length_ = max_send_length;
+}
+
+void MsQuicSessionImpl::seed_datagram_state(bool send_enabled,
+                                            uint16_t max_send_length,
+                                            bool known) noexcept {
+    std::lock_guard<std::mutex> l{datagram_mutex_};
+    datagram_state_known_ = known;
+    if (known) {
+        datagram_send_enabled_ = send_enabled;
+        datagram_max_send_length_ = max_send_length;
+    }
 }
 
 void MsQuicSessionImpl::on_datagram_received(const uint8_t* data,
@@ -1042,12 +1128,34 @@ QUIC_STATUS QUIC_API quic_connection_callback(
                 Event->DATAGRAM_RECEIVED.Buffer->Length);
             return QUIC_STATUS_SUCCESS;
 
+        case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
+            // msquic reports a datagram's send state more than once:
+            // first QUIC_DATAGRAM_SEND_SENT (the DATAGRAM frame was
+            // written into a packet, but the datagram stays tracked
+            // while it awaits acknowledgment), then a final state
+            // (ACKNOWLEDGED / LOST_DISCARDED / CANCELED).  The client
+            // context is the *same* pointer on every notification, so
+            // the payload may only be released once — on the final
+            // state.  Releasing it on SENT double-frees the payload
+            // (heap corruption on the next notification).
+            //
+            // Every tracked datagram reaches a final state: it is
+            // either acknowledged, discarded as lost (when the
+            // connection tears down the sent-packet metadata, see
+            // QuicSentPacketMetadataReleaseFrames), or cancelled.
+            if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(
+                    Event->DATAGRAM_SEND_STATE_CHANGED.State)) {
+                release_outbound_payload(
+                    Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+            }
+            return QUIC_STATUS_SUCCESS;
+        }
+
         case QUIC_CONNECTION_EVENT_LOCAL_ADDRESS_CHANGED:
         case QUIC_CONNECTION_EVENT_PEER_ADDRESS_CHANGED:
         case QUIC_CONNECTION_EVENT_STREAMS_AVAILABLE:
         case QUIC_CONNECTION_EVENT_PEER_NEEDS_STREAMS:
         case QUIC_CONNECTION_EVENT_IDEAL_PROCESSOR_CHANGED:
-        case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
             // Informational events — nothing to do.
             return QUIC_STATUS_SUCCESS;
 
@@ -1145,6 +1253,13 @@ WebTransportMsQuicSession::send_datagram(
 
 void WebTransportMsQuicSession::set_on_datagram(OnDatagramCb cb) noexcept {
     impl_->set_on_datagram(std::move(cb));
+}
+
+void WebTransportMsQuicSession::apply_datagram_state(
+    bool send_enabled, std::uint16_t max_send_length, bool known) noexcept {
+    if (impl_) {
+        impl_->seed_datagram_state(send_enabled, max_send_length, known);
+    }
 }
 
 void WebTransportMsQuicSession::close() noexcept {

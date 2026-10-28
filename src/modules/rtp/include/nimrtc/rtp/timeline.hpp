@@ -31,11 +31,6 @@
  *
  * ## Non-goals
  *
- *   - Drift-tolerant long-running alignment (Kalman / EWMA) and
- *     multi-SR slope estimation: we extrapolate linearly from a
- *     single SR and leave the filter for v1.x.  The linear model is
- *     correct for short sessions (<5 min typical) and degrades
- *     gracefully beyond that.
  *   - Audio sample-level sync: out of scope (PCM path needs a
  *     SRTP-indexed adapter; see ADR-017 §"Audio carry").
  *
@@ -46,6 +41,11 @@
  *   origin anchoring all landed.  The *engine* is what turns the
  *   flag into behaviour — see ADR-017 §"Decision 5" for the
  *   per-layer breakdown.
+ *
+ *   The estimator itself was completed in the same cycle
+ *   (ADR-017 §"Decision 7"): the tracker now fits a slope across
+ *   the retained Sender Reports, smooths it with an EWMA, and
+ *   reports a real `sender_recv_skew_us`.
  *
  * ## Stability
  *
@@ -192,46 +192,116 @@ NIMRTC_API_STABLE std::chrono::microseconds
 // SenderReportTracker — receiver-side NTP ↔ RTP-TS mapping (RFC 3550 §4.5,
 // §8.1) and per-SSRC abs-send-time → wall-clock lookup.
 //
-// Algorithm (v1.0.0 — single-SR linear extrapolation):
+// Algorithm (v1.0.0 — fitted slope + EWMA, ADR-017 §"Decision 7"):
 //
-//   For each remote SSRC we keep the most-recent SR only:
-//     - sr_ntp64          (RFC 3550 §6.4.1 sender info)
-//     - sr_rtp_ts         (paired RTP-TS at the SR instant)
+//   For each remote SSRC we retain a short window of Sender Reports:
+//     - (sr_ntp_us, sr_rtp_ts)   the peer's wall clock and media clock
+//                                paired at the SR instant
+//     - local_recv_us            our monotonic clock at SR receipt
 //
-//   For any incoming RTP with rtp_ts X:
-//     capture_us = sr_ntp_us + (X − sr_rtp_ts) × 1e6 / clock_rate_hz
+//   1. The *anchor* is the most-recent SR.  The RTP timestamp
+//      difference is computed modulo 2^32 (RFC 3550 Appendix A.1) so a
+//      packet that crosses the wrap boundary after the SR still
+//      extrapolates forward.
 //
-//   NOT implemented in v1.0.0 — see ADR-017 §"Decision 5":
-//     - slope estimation across ≥ 2 SR samples (there is no SR history;
-//       `slope_nsec_per_rtp_ts` is a derived constant, not a fit)
-//     - EWMA / Kalman smoothing (v1.1+; the linear model above is the
-//       deliberate v1.0.0 trade-off)
+//   2. The *slope* (wall-clock µs per RTP tick) is fitted by least
+//      squares across the retained SR window and then smoothed with an
+//      exponentially-weighted moving average (EWMA).  The nominal slope
+//      implied by the negotiated media clock rate is used until the
+//      window holds enough samples to fit.
 //
-//   The abs-send-time field participates as a *refinement* (ADR-017
-//   §"Decision 2"): the SR supplies the epoch, abs-send-time supplies
-//   the sender's own elapsed wall-clock time, which does not inherit
-//   the media clock's rate error.  See the 7-argument overload of
-//   `capture_ts_us_for()` for the exact rules.
+//      capture_us = sr_ntp_us + (rtp_ts − sr_rtp_ts) × slope
+//
+//   3. The abs-send-time field participates as a *refinement*
+//      (ADR-017 §"Decision 2"): the SR supplies the epoch,
+//      abs-send-time supplies the sender's own elapsed wall-clock
+//      time, which does not inherit the media clock's rate error.
+//      See the 7-argument overload of `capture_ts_us_for()` for the
+//      exact rules.
+//
+//   4. `sender_recv_skew_us` reports the discrepancy between the
+//      peer's elapsed clock time and ours over the SR → packet
+//      interval — the inter-clock skew, in the sense of RFC 3550
+//      §8.1 (a *rate* difference between two clocks).
 //
 //   `local_recv_us_since_epoch` is recorded per SR so callers can
-//   measure the estimate's error out-of-band; the tracker itself does
-//   not use it.
+//   measure the estimate's error out-of-band; the tracker uses it for
+//   the skew computation.
 // -----------------------------------------------------------------------------
+
+/** Configuration of the Sender Report slope estimator
+ *  (ADR-017 §"Decision 7").
+ *
+ *  The estimator answers one question: *how many wall-clock
+ *  microseconds does one RTP timestamp tick correspond to?*  A peer's
+ *  media clock is nominally exact (48 kHz Opus ticks 48000 times a
+ *  second), but the crystal that drives it is not, and the peer's
+ *  wall clock is a different crystal again.  Over a long session the
+ *  two drift apart, and a single-SR extrapolation inherits the media
+ *  clock's error one sample at a time.  Fitting the slope across
+ *  several Sender Reports measures the *combined* rate of the peer's
+ *  media clock and wall clock, which is exactly the quantity the
+ *  capture timestamp needs.
+ */
+struct NIMRTC_API_STABLE SlopeFilterConfig {
+    /** Number of Sender Reports that must be retained before a fitted
+     *  slope is used.  1 disables the fit entirely (the nominal rate
+     *  from the negotiated `a=rtpmap` clock rate is used, which is the
+     *  pre-v1.0.0 behaviour).  2 is the smallest value that lets the
+     *  estimator distinguish "the clock rate changed" from "the clock
+     *  is jittery", and is the default. */
+    std::uint32_t min_samples = 2;
+
+    /** Number of Sender Reports retained per SSRC.  The fit runs over
+     *  this window; older samples are dropped.  16 (the default) is
+     *  ~16 s of a 1 Hz SR cadence — long enough to average out
+     *  per-report noise, short enough that a peer that changes its
+     *  media clock rate is re-fitted within a few seconds. */
+    std::uint32_t max_samples = 16;
+
+    /** Weight of the newest fit in the EWMA, in per-mille.  250 (the
+     *  default) means the newest fit counts for 25 % of the smoothed
+     *  slope and the previous value for 75 % — a time constant of
+     *  roughly four reports.  1000 disables the smoothing (the
+     *  newest fit wins outright). */
+    std::uint32_t ewma_alpha_permille = 250;
+};
 
 struct NIMRTC_API_STABLE SsrcTimelineState {
     Ntp64          sr_ntp64           = Ntp64{0};
     std::uint32_t  sr_rtp_ts          = 0;
     std::int64_t   sr_local_recv_us   = 0;
-    // Nanoseconds per RTP timestamp tick.  In v1.0.0 this is a
-    // constant derived from `clock_rate_hz`, NOT a fitted slope — there
-    // is no multi-SR history.  See ADR-017 §"Decision 5".
+    // Nanoseconds per RTP timestamp tick — the *fitted* slope, i.e.
+    // the measured rate of the peer's media clock relative to its
+    // wall clock (ADR-017 §"Decision 7").  Before enough Sender
+    // Reports were retained to fit anything, this is the nominal
+    // value derived from `clock_rate_hz`.
+    //
+    // The value is rounded to whole nanoseconds, which at 90 kHz is
+    // a 10 ppm quantisation — enough to matter over an hour, which
+    // is why the tracker's own arithmetic uses the picosecond-precision
+    // `slope_psec_per_rtp_ts` below.  Read this field for
+    // diagnostics; read `slope_psec_per_rtp_ts` when the precision
+    // matters.
     std::int64_t   slope_nsec_per_rtp_ts = 0;
+    // The same slope in picoseconds per RTP tick — the precision the
+    // tracker actually extrapolates with.  1'000'000'000'000 ps per
+    // tick would be a 1 Hz clock.
+    std::int64_t   slope_psec_per_rtp_ts = 0;
     std::uint32_t  clock_rate_hz         = 90000;
-    // Number of SRs ingested for this SSRC (running count).  Only the
-    // most-recent SR is *retained* — the count is a diagnostic, not a
-    // sample history.  0 means "no SR seen yet".  See ADR-017
-    // §"Decision 5".
+    // Number of SRs ingested for this SSRC (running count).  A
+    // diagnostic: the *window* below is what the slope fit consumes.
+    // 0 means "no SR seen yet".
     std::uint32_t  sr_count              = 0;
+    // Number of Sender Reports currently retained in the fit window
+    // for this SSRC.  Equal to `sr_count` until the window starts
+    // dropping the oldest samples.
+    std::uint32_t  slope_sample_count    = 0;
+    // True when the slope in `slope_psec_per_rtp_ts` comes from an
+    // actual least-squares fit (rather than the nominal rate implied
+    // by `clock_rate_hz`).  False until `slope_sample_count` reaches
+    // `SlopeFilterConfig::min_samples`.
+    bool           slope_fitted          = false;
     // The abs-send-time anchor for this SSRC: the 24-bit counter value
     // that was current at the instant of the stored Sender Report,
     // decoded to microseconds within the 256 s abs-send-time wrap
@@ -259,16 +329,42 @@ public:
     SenderReportTracker(SenderReportTracker&& other) noexcept;
     SenderReportTracker& operator=(SenderReportTracker&& other) noexcept;
 
-    /** Origin the sender's monotonic clock is anchored to. Engine passes
-     *  its own boot-time-equivalent (SteadyClock::now() at construction).
+    /** Anchor the *local monotonic clock* to the wall clock.
      *
-     *  NOTE: in v1.0.0 this value is stored but not consumed by any
-     *  lookup — `capture_ts_us_for` resolves capture time from the SR
-     *  alone.  Reserved for the v1.1 origin-anchored form.  See
-     *  ADR-017 §"Decision 5". */
+     *  `origin_ntp64` is the wall-clock instant (RFC 5905) that
+     *  corresponds to a local monotonic reading of **zero**.  A local
+     *  monotonic sample of `m` microseconds therefore sits at the Unix
+     *  instant `unix_us(origin) + m`, and that is how the tracker
+     *  places our own clock readings on the same timeline as the
+     *  peer's wall clock when it computes the skew.
+     *
+     *  The engine samples the system clock and the steady clock back
+     *  to back at open() and passes `system_now − steady_now` here;
+     *  the residual between the two reads is one scheduling jitter
+     *  (~µs), an order of magnitude below the 15.26 µs abs-send-time
+     *  quantisation.
+     *
+     *  The value does **not** affect the reconstructed capture instant:
+     *  the SR carries the epoch in absolute terms, so the capture
+     *  timestamp is the same whether or not an origin was set.  It is
+     *  what makes the *skew* — a comparison between the peer's clock
+     *  and ours — well defined. */
     void set_monotonic_origin(Ntp64 origin_ntp64) noexcept;
 
     Ntp64 monotonic_origin() const noexcept { return origin_; }
+
+    /** Configure the slope estimator (ADR-017 §"Decision 7").
+     *
+     *  `min_samples = 1` disables the fit: the nominal rate implied
+     *  by the negotiated media clock rate is used, which is the
+     *  pre-v1.0.0 behaviour.  `ewma_alpha_permille = 1000` disables
+     *  the smoothing.  Values are clamped into their valid ranges
+     *  (`min_samples` ≥ 1, `max_samples` ≥ `min_samples`,
+     *  `ewma_alpha_permille` in 1..1000). */
+    void set_slope_filter_config(const SlopeFilterConfig& config) noexcept;
+
+    /** The slope-estimator configuration currently in force. */
+    SlopeFilterConfig slope_filter_config() const noexcept;
 
     /** Maximum disagreement (µs) tolerated between the SR-based estimate
      *  and the abs-send-time-derived estimate before the tracker keeps
@@ -302,9 +398,10 @@ public:
 
     /** Ingest an inbound Sender Report. `local_recv_us_since_epoch` is
      *  the monotonic-clock microseconds at which the engine *received*
-     *  the SR packet (before any queueing). Recorded per SSRC so a
-     *  caller can measure the estimate's error out-of-band; the
-     *  tracker itself does not use it. */
+     *  the SR packet (before any queueing).  The tracker needs it to
+     *  place our own clock on the wall-clock timeline, so it can report
+     *  the inter-clock skew (ADR-017 §"Decision 4"); the SR instant
+     *  itself is what anchors the capture reconstruction. */
     void on_sender_report(const SenderReport& sr,
                           std::int64_t local_recv_us_since_epoch) noexcept;
 
@@ -367,19 +464,29 @@ public:
      *  Parameters:
      *    - ssrc / rtp_ts : identify the packet and its media-clock
      *      position; the timestamp is extrapolated from the stored SR.
-     *    - abs_send_time_24 : accepted for wire compatibility; NOT
-     *      used by the v1.0.0 estimate (see ADR-017 §"Decision 2").
+     *    - abs_send_time_24 : accepted for wire compatibility; this
+     *      overload ignores it (it neither records an observation nor
+     *      refines the estimate).  Use the 7-argument overload to let
+     *      the field participate (ADR-017 §"Decision 2").
      *    - clock_rate_hz : the media clock rate to extrapolate against.
      *      Pass 0 to use the rate configured via
      *      `set_ssrc_clock_rate()`; a non-zero value overrides it for
      *      this call only.
-     *    - local_recv_us_since_epoch : accepted for symmetry with
-     *      `on_sender_report`; not used by the estimate.
+     *    - local_recv_us_since_epoch : our monotonic reading at the
+     *      moment the packet arrived.  It does not affect the capture
+     *      instant (the SR carries the epoch in absolute terms), but it
+     *      is what the skew is computed from.
      *
      *  Out-params:
      *    - sender_recv_skew_us (optional; pass nullptr to discard):
-     *      reserved for v1.1 — always 0 in v1.0.0.  See ADR-017
-     *      §"Decision 4". */
+     *      the *change*, since the stored Sender Report, of the offset
+     *      between our clock and the peer's — the inter-clock skew in
+     *      the sense of RFC 3550 §8.1.  A peer clock running fast
+     *      shows up as a negative value (our clock falls behind).
+     *      The value is 0 when no monotonic origin was set: without one
+     *      the tracker cannot place our own clock on the wall-clock
+     *      timeline and reports nothing rather than a made-up number.
+     *      See ADR-017 §"Decision 4". */
     std::optional<std::int64_t> capture_ts_us_for(
         std::uint32_t ssrc,
         std::uint32_t rtp_ts,
@@ -456,6 +563,16 @@ private:
      *  clears the anchor when no observation can be paired with the
      *  SR's RTP timestamp. */
     void try_anchor_ast(std::uint32_t ssrc) noexcept;
+
+    /** Re-fit the slope for one SSRC from its retained Sender Report
+     *  window and publish the result into the public state
+     *  (ADR-017 §"Decision 7").
+     *
+     *  Called after every SR ingestion and whenever the slope-filter
+     *  configuration changes.  A fit that is rejected as broken (an NTP
+     *  step, a rate that contradicts the negotiated one) leaves the
+     *  previous slope in place. */
+    void refit_ssrc(std::uint32_t ssrc) noexcept;
 
     // Free swap() needs to be a friend so it can read/write the pImpl
     // pointer and the NTP origin.  The body lives below the class as

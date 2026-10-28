@@ -34,6 +34,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <span>
 #include <vector>
 
 #include <nimrtc/core/log.hpp>
@@ -115,6 +116,44 @@ void trace(const char* fmt, ...) noexcept {
 #else
     (void)fmt;
 #endif
+}
+
+/** The local monotonic clock, in microseconds.
+ *
+ *  This is the clock the timeline seam is defined in terms of: it never
+ *  jumps (no NTP steps, no manual clock changes) and it is what the
+ *  tracker's `local_recv_us_since_epoch` argument carries.  The wall
+ *  clock is the *peer's* domain — the SR's NTP instant and the
+ *  reconstructed capture timestamp live there — so the two are related
+ *  through the monotonic origin, never mixed directly.
+ *
+ *  The steady clock's epoch is the boot time on every platform we
+ *  support, so the reading is "microseconds since boot". */
+std::int64_t steady_now_us() noexcept {
+    return static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            core::SteadyClock::now().time_since_epoch()).count());
+}
+
+/** Parse a payload type out of an SDP `a=rtpmap:<fmt>` token.
+ *
+ *  The token is the format as it appeared in the SDP: a decimal number
+ *  for both the static (0..95) and the dynamic (96..127) ranges.  A
+ *  wildcard or a non-numeric token yields false.
+ *
+ *  Deliberately hand-rolled rather than `std::stoul`: the caller runs
+ *  inside a `noexcept` function, where a thrown `std::invalid_argument`
+ *  would terminate the process. */
+bool parse_payload_type(std::string_view fmt, std::uint8_t& out) noexcept {
+    if (fmt.empty() || fmt.size() > 3) return false;
+    std::uint32_t v = 0;
+    for (char c : fmt) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + static_cast<std::uint32_t>(c - '0');
+        if (v > 127) return false;
+    }
+    out = static_cast<std::uint8_t>(v);
+    return true;
 }
 
 std::string make_session_id() {
@@ -298,6 +337,33 @@ struct NimRTCEngine::Impl {
     // process_remote_sdp() runs; defaults to "active" if unset.
     std::string dtls_local_setup;
 
+    /** The DTLS role this engine ended up playing (RFC 5763 §5).
+     *
+     *  `true`  = DTLS **Client** — we send the ClientHello.
+     *  `false` = DTLS **Server** — we wait for the peer's ClientHello.
+     *
+     *  The role decides two things:
+     *
+     *    1. which `a=setup` attribute we advertise in the answer, and
+     *    2. which half of the DTLS-SRTP keying material is *ours*
+     *       (RFC 5764 §4.2): the client uses `client_master_key` for its
+     *       outbound stream, the server uses `server_master_key`.
+     *
+     *  It is resolved from the peer's `a=setup` attribute when we are the
+     *  answerer, and from the answer's attribute when we are the offerer
+     *  (see `process_remote_sdp()`). */
+    bool dtls_is_client = false;
+
+    /** The `o=` session id of the offer we produced, if any.
+     *
+     *  RFC 3264 §5.1: the answer carries the *offer's* session id, so the
+     *  offerer can tell "this is the answer to my offer" from "this is a
+     *  fresh offer" by comparing the ids.  That distinction is what lets
+     *  `process_remote_sdp()` pick the right DTLS role (the answer commits
+     *  the roles, an offer does not) and skip generating an answer for an
+     *  answer.  Empty when we never produced an offer. */
+    std::string local_session_id;
+
     // ---- send_audio scratch buffers (P0#4) --------------------------------
     // Reusable per-engine buffers for the audio capture→encode→RTP→SRTP
     // path.  Capacity grows monotonically across calls, avoiding the heap
@@ -345,16 +411,29 @@ struct NimRTCEngine::Impl {
      *  advertised the extension, so no inbound refinement is possible. */
     std::uint16_t remote_abs_send_time_id = 0;
 
-    /** Monotonic-clock origin for `encode_abs_send_time_24`.  Set once at
-     *  open() from the system clock so the encoded 24-bit value represents
-     *  the absolute send instant on the Unix timeline (modulo the 256 s
-     *  wrap the receiver resolves against the SR). */
-    rtp::Ntp64 abs_send_time_origin_ntp64{0};
+    /** Monotonic-clock origin, shared by the abs-send-time encoder and
+     *  `SenderReportTracker::set_monotonic_origin()`.
+     *
+     *  The value is the wall-clock instant (RFC 5905) that corresponds
+     *  to a local **monotonic** reading of zero — i.e. the boot epoch.
+     *  A monotonic sample of `m` µs therefore sits at the Unix instant
+     *  `unix_us(origin) + m`, which is what both the encoder and the
+     *  tracker's skew computation assume.
+     *
+     *  It is NOT "the wall clock at open()": that value would make the
+     *  tracker's `origin + monotonic_reading` double-count the epoch
+     *  (the tracker adds the monotonic reading to the origin) and every
+     *  skew sample would be off by the whole Unix epoch. */
+    rtp::Ntp64 monotonic_origin_ntp64{0};
 
     /** Local wall clock (µs since Unix epoch) at open() minus the steady
      *  clock reading taken at the same instant.  Lets the abs-send-time
      *  encoder convert a send-time monotonic stamp into Unix-anchored
-     *  microseconds without a second clock read per packet. */
+     *  microseconds without a second clock read per packet.
+     *
+     *  This is the same quantity as `unix_us(monotonic_origin_ntp64)` —
+     *  kept as a plain integer so the per-packet path does not have to
+     *  re-derive it from the NTP64. */
     std::int64_t boot_epoch_offset_us = 0;
 
     /** Last reconstructed capture instant per inbound SSRC (µs since Unix
@@ -371,11 +450,34 @@ struct NimRTCEngine::Impl {
     std::optional<std::int64_t> last_capture_us;
     std::optional<std::int64_t> last_arrival_us;
 
+    /** Inter-clock skew of the most recent inbound frame (µs) — the
+     *  change since the last Sender Report of the offset between our
+     *  clock and the peer's (RFC 3550 §8.1).  Backs
+     *  `last_sender_recv_skew_us()`. */
+    std::optional<std::int64_t> last_skew_us;
+
+    /** Inter-clock skew per inbound SSRC — backs
+     *  `sender_recv_skew_us_for_ssrc()`. */
+    std::map<std::uint32_t, std::int64_t> skew_us_by_ssrc;
+
     /** SSRCs whose media clock rate has already been pinned on the tracker.
      *  Membership means "configured once" — the payload-type → clock-rate
      *  resolution in `handle_rtp()` runs only on the first packet of each
      *  SSRC, keeping the media hot path free of per-packet map work. */
     std::set<std::uint32_t> clock_rate_pinned_ssrcs;
+
+    /** Payload type → media clock rate (Hz), taken from the *remote*
+     *  SDP's `a=rtpmap:` lines.
+     *
+     *  The media clock rate is a property of the codec the *peer* sends
+     *  with, so the peer's own description is the authoritative source
+     *  (RFC 3550 §6.4.1: the Sender Report does not carry it).  A
+     *  payload type may appear in several m-sections; the first
+     *  declaration wins and a conflicting later one is logged and
+     *  ignored — the RTP layer does not track which m-section an SSRC
+     *  belongs to, so a per-m-line table could not be consulted
+     *  anyway. */
+    std::unordered_map<std::uint8_t, std::uint32_t> remote_clock_rate_hz;
 
     // ---- Outbound Sender Report state --------------------------------------
     // `sr_*` carry the values an SR body reports for the audio stream
@@ -390,6 +492,38 @@ struct NimRTCEngine::Impl {
     std::uint32_t video_rtp_timestamp   = 0;
     std::uint32_t video_packet_count    = 0;
     std::uint32_t video_octet_count     = 0;
+
+    /** Wall-clock instant (µs since the Unix epoch) of the **last outbound
+     *  audio packet**, sampled at the very moment its abs-send-time
+     *  element was stamped.
+     *
+     *  The Sender Report pairs an NTP instant with an RTP timestamp, and
+     *  for the pair to describe *one* point on the media timeline the two
+     *  must refer to the same moment.  RFC 3550 §6.4.1 words the NTP
+     *  field as "the wallclock time when the report was sent" while the
+     *  RTP timestamp is that of the last packet sent — a pairing that is
+     *  internally inconsistent by exactly the gap between the two events.
+     *
+     *  That gap is not a rounding detail: with a 1 s Sender-Report
+     *  cadence it is up to a full second, and with continuous audio it
+     *  is one frame interval.  A receiver that reconstructs the capture
+     *  instant from the pair inherits the whole offset — every packet
+     *  comes out systematically late, and the one-way delay reads a
+     *  second too small.  The abs-send-time refinement does not rescue
+     *  it either: the refinement adds the *elapsed* time since the
+     *  anchor to the SR's NTP instant, so a late NTP instant stays late.
+     *
+     *  So the engine stamps the send instant on the packet itself and
+     *  reuses it in the SR.  The SR's NTP field then denotes the exact
+     *  instant of the packet whose RTP timestamp it carries — the same
+     *  instant the abs-send-time field encodes, to within the 15.26 µs
+     *  abs-send-time quantisation.  The peer's reconstruction is
+     *  therefore free of the report-cadence bias, and the one-way delay
+     *  measures the wire, not the report schedule.
+     *
+     *  Zero means "no packet sent yet"; the SR path already refuses to
+     *  emit a report before the first packet. */
+    std::int64_t audio_last_send_unix_us = 0;
 
     // Reusable buffer for the outbound SRTCP packet (avoid a per-tick
     // allocation; SR is 1 Hz by default so this is not hot, but tick() is
@@ -1349,12 +1483,18 @@ uint32_t NimRTCEngine::open() noexcept {
 
     // ---- Cross-end timeline anchor (ADR-017) --------------------------------
     //
-    // Sample both clocks once, back to back, so `abs_send_time_origin_ntp64`
-    // plus `boot_epoch_offset_us` convert a steady-clock reading at send
-    // time into a Unix-anchored instant without a second clock read per
-    // packet.  Sampling both here (rather than deriving one from the other)
-    // keeps the residual offset inside one scheduling jitter (~µs), which is
-    // an order of magnitude below the 15.26 µs abs-send-time quantisation.
+    // Sample both clocks once, back to back, so the monotonic origin
+    // converts a steady-clock reading into a Unix-anchored instant
+    // without a second clock read per packet.  Sampling both here
+    // (rather than deriving one from the other) keeps the residual offset
+    // inside one scheduling jitter (~µs), which is an order of magnitude
+    // below the 15.26 µs abs-send-time quantisation.
+    //
+    // The origin is the wall clock at *monotonic zero* (the boot epoch),
+    // NOT the wall clock at open(): `SenderReportTracker` computes our
+    // own instant as `unix_us(origin) + monotonic_reading`, so an origin
+    // that already carries "now" would add the epoch twice and make every
+    // skew sample meaningless (ADR-017 §"Decision 4").
     //
     // Nothing is sent here: with `timeline_enabled = false` the tracker stays
     // empty, no extmap is advertised, and no SR is scheduled.
@@ -1367,9 +1507,31 @@ uint32_t NimRTCEngine::open() noexcept {
         const std::int64_t system_us =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 system_now.time_since_epoch()).count();
-        impl_->boot_epoch_offset_us      = system_us - steady_us;
-        impl_->abs_send_time_origin_ntp64 = rtp::ntp64_from(system_now);
-        impl_->sr_tracker.set_monotonic_origin(impl_->abs_send_time_origin_ntp64);
+        impl_->boot_epoch_offset_us = system_us - steady_us;
+        // The same instant expressed as an NTP64 (RFC 5905): the wall
+        // clock that corresponds to a monotonic reading of zero.
+        impl_->monotonic_origin_ntp64 = rtp::ntp64_from(
+            std::chrono::system_clock::time_point{
+                std::chrono::microseconds{impl_->boot_epoch_offset_us}});
+        // Re-derive the offset *from the NTP64* so that the offset and
+        // the origin denote exactly the same instant.
+        //
+        // The NTP64 fraction is 2^-32 s (0.233 µs), so converting the
+        // wall clock into NTP64 and back truncates by up to 0.233 µs.
+        // That is irrelevant for the arrival instant — but it would
+        // *not* be irrelevant for the Sender Report, whose NTP field has
+        // to agree with the abs-send-time element of the packet it
+        // describes to the last microsecond.  The abs-send-time encoder
+        // adds the monotonic reading to `unix_us(origin)`, so the engine's
+        // own instants have to be built on that same basis: take the
+        // offset from the origin, not the other way round.
+        impl_->boot_epoch_offset_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(
+            rtp::system_clock_from_ntp64(impl_->monotonic_origin_ntp64)
+                .time_since_epoch())
+                                           .count();
+        impl_->sr_tracker.set_monotonic_origin(
+            impl_->monotonic_origin_ntp64);
         impl_->sr_last_sent = steady_now;   // first SR fires one period in
         if (config_.timeline_enabled) {
             core::log::Logger::instance().info(
@@ -1853,6 +2015,12 @@ std::string NimRTCEngine::create_offer() noexcept {
     sdp.bundle_mids = {"0"};
     sdp.msid_semantic_token = "WMS";
 
+    // Remember the session id so `process_remote_sdp()` can recognise the
+    // peer's answer (RFC 3264 §5.1: the answer echoes the offer's session
+    // id).  Without it the offerer would treat the answer as a fresh offer
+    // and keep its default DTLS role.
+    impl_->local_session_id = sdp.origin_session_id;
+
     sdp::MediaDescription audio;
     audio.type            = sdp::MediaType::Audio;
     audio.port            = 9;
@@ -2119,6 +2287,89 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         std::string("process_remote_sdp: parsed ok; media.size=") + std::to_string(remote.media.size())
         + " extra_attrs.size=" + std::to_string(remote.extra_attrs.size()));
 
+    // ---- Offer or answer? (RFC 3264 §5.1) --------------------------------
+    //
+    // The answer echoes the offer's `o=` session id, so the offerer can
+    // tell "this is the answer to my offer" from "this is a fresh offer"
+    // by comparing the ids.  The distinction is load-bearing:
+    //
+    //   * an **offer** leaves the DTLS roles undecided (RFC 5763 §5 — the
+    //     offerer says "actpass"), so we answer and pick a role;
+    //   * an **answer** *commits* the roles, so we adopt the role the
+    //     answer implies and must NOT answer an answer.
+    //
+    // Before this distinction existed the engine answered every remote
+    // description, which meant an offerer never adopted the role its
+    // answer committed it to — and two NimRTC engines could therefore
+    // never complete a DTLS handshake (both ended up as servers).
+    const bool remote_is_answer =
+        !impl_->local_session_id.empty() &&
+        remote.origin_session_id == impl_->local_session_id;
+    core::log::Logger::instance().info(
+        std::string("process_remote_sdp: remote description is an ")
+        + (remote_is_answer ? "ANSWER" : "OFFER")
+        + (remote_is_answer ? " to our offer" : " — we answer it"));
+
+    // ---- Remote media clock rates (ADR-017 §"Decision 6") ----------------
+    //
+    // The timeline needs each SSRC's media clock rate, and the only
+    // place that rate is written down is the peer's `a=rtpmap:` line
+    // (RFC 3550 §6.4.1: the Sender Report does not carry it).  The
+    // peer *sends* the media, so its description is authoritative for
+    // the inbound packets — not our own configuration.
+    //
+    // Collecting it here means `handle_rtp()` can pin the right rate on
+    // the tracker per SSRC instead of assuming "video ⇒ 90 kHz", which
+    // happens to be right for every standardised video codec but is a
+    // guess rather than a reading of the wire.
+    impl_->remote_clock_rate_hz.clear();
+    for (const auto& m : remote.media) {
+        for (const auto& [fmt, map] : m.rtpmap) {
+            std::uint8_t pt = 0;
+            if (!parse_payload_type(fmt, pt)) continue;
+            if (map.clock_rate == 0) continue;
+            auto [it, inserted] =
+                impl_->remote_clock_rate_hz.emplace(pt, map.clock_rate);
+            if (!inserted && it->second != map.clock_rate) {
+                // The same payload type declared with two different
+                // rates across m-sections.  The RTP layer does not
+                // track which m-section an SSRC belongs to, so the
+                // first declaration wins and the conflict is logged.
+                core::log::Logger::instance().warn(
+                    "engine[timeline]: payload type " + std::to_string(pt) +
+                    " declared with two clock rates (" +
+                    std::to_string(it->second) + " and " +
+                    std::to_string(map.clock_rate) +
+                    "); keeping the first");
+            }
+        }
+    }
+    // RFC 3551 §4.4: the static payload types have a fixed meaning and
+    // need no `a=rtpmap:` line.  Cover the audio ones a peer may
+    // legally omit the line for; the dynamic range (96..127) always
+    // carries an rtpmap.
+    struct StaticRate {
+        std::uint8_t  pt;
+        std::uint32_t hz;
+    };
+    static constexpr StaticRate kStaticRates[] = {
+        {0, 8000},    // PCMU
+        {8, 8000},    // PCMA
+        {9, 8000},    // G722
+    };
+    for (const auto& sr : kStaticRates) {
+        impl_->remote_clock_rate_hz.emplace(sr.pt, sr.hz);
+    }
+    if (!impl_->remote_clock_rate_hz.empty()) {
+        std::string rates;
+        for (const auto& [pt, rate] : impl_->remote_clock_rate_hz) {
+            if (!rates.empty()) rates += ", ";
+            rates += std::to_string(pt) + "→" + std::to_string(rate) + "Hz";
+        }
+        core::log::Logger::instance().info(
+            "engine[timeline]: remote payload-type clock rates: " + rates);
+    }
+
     // Apply ICE credentials + candidates through the plugin seam.
     //
     // RFC 8829 / WebRTC BUNDLE: when the SDP uses BUNDLE, ice-ufrag/ice-pwd
@@ -2214,19 +2465,57 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         std::string peer_setup = rm.dtls_setup;
         if (peer_setup.empty()) peer_setup = "actpass";
 
-        // DEBUG-TEMP: force NimRTC to be the DTLS SERVER (passive) for
-        // Chrome interop.  Recent Chrome 124+ BoringSSL rejects every
-        // variant of anonymous client response to CertificateRequest
-        // (empty list → handshake_failure, omitted → unexpected_message,
-        // self-signed cert → certificate_unknown) — but as the SERVER we
-        // never receive a CertReq so the question doesn't arise.  This
-        // is purely a workaround for the Chrome-side rejection of RFC
-        // 5246 §7.4.6 anonymous clients; restore the original logic
-        // once Chrome's BoringSSL relaxes this.
         nimrtc::dtls::DtlsRole desired_role  = nimrtc::dtls::DtlsRole::Server;
         std::string    local_setup_attr = "passive";
-        (void)peer_setup;
+
+        if (remote_is_answer) {
+            // ---- We are the OFFERER: the answer commits the roles ------
+            //
+            // RFC 5763 §5: the answerer picks "active" (it is the DTLS
+            // client) or "passive" (it is the DTLS server), and the
+            // offerer takes the complementary role.  This is the branch
+            // that lets two NimRTC engines pair up: our answerer always
+            // prefers to be the server (see below), so the answer says
+            // "passive" and we — the offerer — become the client and send
+            // the ClientHello.
+            //
+            // "active" in the answer ⇒ the peer is the client ⇒ we are the
+            // server.  "passive" ⇒ the peer is the server ⇒ we are the
+            // client.  "actpass" in an *answer* is non-compliant (RFC 5763
+            // §5 allows it only in an offer); we fall back to the WebRTC
+            // convention, in which the offerer is the DTLS server.
+            if (peer_setup == "passive") {
+                desired_role     = nimrtc::dtls::DtlsRole::Client;
+                local_setup_attr = "active";
+            } else if (peer_setup == "active") {
+                desired_role     = nimrtc::dtls::DtlsRole::Server;
+                local_setup_attr = "passive";
+            } else {
+                desired_role     = nimrtc::dtls::DtlsRole::Server;
+                local_setup_attr = "passive";
+            }
+        } else {
+            // ---- We are the ANSWERER: we pick the role ------------------
+            //
+            // DEBUG-TEMP: force NimRTC to be the DTLS SERVER (passive) for
+            // Chrome interop.  Recent Chrome 124+ BoringSSL rejects every
+            // variant of anonymous client response to CertificateRequest
+            // (empty list → handshake_failure, omitted → unexpected_message,
+            // self-signed cert → certificate_unknown) — but as the SERVER we
+            // never receive a CertReq so the question doesn't arise.  This
+            // is purely a workaround for the Chrome-side rejection of RFC
+            // 5246 §7.4.6 anonymous clients; restore the original logic
+            // once Chrome's BoringSSL relaxes this.
+            //
+            // The counterpart of this policy is the offerer branch above:
+            // a peer that answers "passive" gets a client, so a
+            // NimRTC-to-NimRTC session still has exactly one ClientHello
+            // sender.
+            desired_role     = nimrtc::dtls::DtlsRole::Server;
+            local_setup_attr = "passive";
+        }
         d->set_role(desired_role);
+        impl_->dtls_is_client  = (desired_role == nimrtc::dtls::DtlsRole::Client);
         impl_->dtls_local_setup = local_setup_attr;
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: dtls role resolved peer_setup='")
@@ -2250,11 +2539,94 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
     if (ice_t_) ice_t_->wait_for_gathering(1500);
 
+    // ---- Cross-end timeline: the peer's abs-send-time extension id ------
+    //
+    // RFC 5285 §6: the extension id is negotiated per direction.  The id
+    // the peer advertised in ITS description is the id it will send under,
+    // so that is the id we parse their inbound packets with.  We accept the
+    // extension if — and only if — we offered it too; advertising an
+    // extension the peer never offered is not a negotiation (RFC 3264 §6.1)
+    // and Chrome silently drops it.
+    //
+    // This runs for BOTH descriptions — an offer (we are the answerer) and
+    // an answer (we are the offerer) — because in both cases the peer's
+    // description carries the id it will use when it sends to us.  It is
+    // read from the FIRST m-section that advertises it and then reused for
+    // the remaining ones: Chrome uses the same id across its audio and
+    // video m-lines, and a per-m-section id would require tracking which
+    // m-line a given SSRC belongs to before we could parse it — which the
+    // RTP layer does not currently carry.
+    if (config_.timeline_enabled) {
+        for (const auto& rm : remote.media) {
+            if (rm.type == sdp::MediaType::Application) continue;
+            for (const auto& em : rm.extmap) {
+                if (em.uri != rtp::kAbsSendTimeUri) continue;
+                if (em.direction == sdp::Direction::Inactive) continue;
+                // Direction semantics: SendOnly means the peer sends and we
+                // receive, so its packets carry the extension.  SendRecv
+                // means both.  RecvOnly means the peer only receives, so it
+                // will not send us the extension.
+                const bool peer_sends =
+                    em.direction == sdp::Direction::SendRecv ||
+                    em.direction == sdp::Direction::SendOnly;
+                if (!peer_sends) continue;
+                if (em.id <= 0 || em.id > 255) continue;
+                if (impl_->remote_abs_send_time_id == 0) {
+                    impl_->remote_abs_send_time_id =
+                        static_cast<std::uint16_t>(em.id);
+                    core::log::Logger::instance().info(
+                        "engine[timeline]: peer advertised abs-send-time "
+                        "under extension id " + std::to_string(em.id));
+                }
+                break;
+            }
+            if (impl_->remote_abs_send_time_id != 0) break;
+        }
+    }
+
+    // ---- An answer needs no answer ---------------------------------------
+    //
+    // We are the offerer and the peer answered: the ICE credentials, the
+    // DTLS role and the peer fingerprint are already applied above, and
+    // there is nothing left to send back.  Returning an *empty* string
+    // (rather than std::nullopt) keeps the "the call succeeded" signal
+    // that every caller in the tree checks for — an answer is a successful
+    // call that produces no SDP.
+    if (remote_is_answer) {
+        core::log::Logger::instance().info(
+            "process_remote_sdp: answer applied — no answer generated "
+            "(dtls role=" +
+            std::string(impl_->dtls_is_client ? "Client" : "Server") + ")");
+        return std::string{};
+    }
+
     sdp::SessionDescription ans;
     ans.version = 0;
     ans.origin_username         = "-";
-    ans.origin_session_id      = make_session_id();
+    // RFC 3264 §5.1: the answer carries the *offer's* session id and the
+    // offer's session version incremented by one.  Echoing the id is what
+    // lets the offerer recognise the answer (and adopt the DTLS role it
+    // commits); a fresh id here would leave the offerer guessing.
+    ans.origin_session_id      = remote.origin_session_id;
     ans.origin_session_version = "1";
+    {
+        // The offer's version is a decimal counter ("1", "2", …).  Bump it
+        // when it parses; a non-numeric version is left alone rather than
+        // mangled.
+        const std::string& v = remote.origin_session_version;
+        bool numeric = !v.empty() && v.size() <= 9;
+        for (char c : v) {
+            if (c < '0' || c > '9') { numeric = false; break; }
+        }
+        if (numeric) {
+            ans.origin_session_version =
+                std::to_string(std::stoul(v) + 1);
+        } else if (v.empty()) {
+            ans.origin_session_version = "1";
+        } else {
+            ans.origin_session_version = v;
+        }
+    }
     ans.origin_address          = "0.0.0.0";
     ans.session_name            = "-";
     ans.bundle_mids             = remote.bundle_mids;
@@ -2340,43 +2712,13 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
         // ---- Cross-end timeline extmap (ADR-017) --------------------------
         //
-        // RFC 5285 §6: the extension id is negotiated per direction.  The id
-        // the peer advertised in ITS offer is the id it will send under, so
-        // that is the id we parse their inbound packets with.  We accept the
-        // extension if — and only if — we offered it too; advertising an
-        // extension the answerer never offered is not a negotiation (RFC 3264
-        // §6.1) and Chrome silently drops it.
+        // The *peer's* extension id was resolved above (before the answer
+        // construction) so that the offer path and the answer path share
+        // one resolution.  What is left here is the *echo*: RFC 5285 §6
+        // requires the answer to carry the same id we advertised in our own
+        // offer, otherwise the peer treats the extension as rejected and
+        // never parses our abs-send-time.
         //
-        // The id is read from the FIRST m-section that advertises it and then
-        // reused for the remaining ones.  Chrome uses the same id across its
-        // audio and video m-lines, and a per-m-section id would require
-        // tracking which m-line a given SSRC belongs to before we could parse
-        // it — which the RTP layer does not currently carry.
-        if (config_.timeline_enabled &&
-            rm.type != sdp::MediaType::Application) {
-            for (const auto& em : rm.extmap) {
-                if (em.uri != rtp::kAbsSendTimeUri) continue;
-                if (em.direction == sdp::Direction::Inactive) continue;
-                // Direction semantics on the *offer* side: SendOnly means the
-                // peer sends and we receive, so its packets carry the
-                // extension.  SendRecv means both.  RecvOnly means the peer
-                // only receives, so it will not send us the extension.
-                const bool peer_sends =
-                    em.direction == sdp::Direction::SendRecv ||
-                    em.direction == sdp::Direction::SendOnly;
-                if (!peer_sends) continue;
-                if (em.id <= 0 || em.id > 255) continue;
-                if (impl_->remote_abs_send_time_id == 0) {
-                    impl_->remote_abs_send_time_id =
-                        static_cast<std::uint16_t>(em.id);
-                    core::log::Logger::instance().info(
-                        "engine[timeline]: peer advertised abs-send-time "
-                        "under extension id " + std::to_string(em.id));
-                }
-                break;
-            }
-        }
-
         // For data channel (application): carry sctp-port / max-message-size
         // attributes verbatim.  We use `extra_attrs` (the catch-all
         // a= bucket in `MediaDescription`) for `sctp-port` because the
@@ -2554,21 +2896,35 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // value is the sender's wall-clock send instant (24 bits at 65536 Hz,
     // 256 s wrap) on the Unix timeline; the receiver resolves the wrap
     // against our Sender Report, which is why the two are gated together.
-    if (config_.timeline_enabled && impl_->local_abs_send_time_id != 0) {
-        // `boot_epoch_offset_us` was sampled at open() as (system - steady),
-        // so adding it to a steady-clock stamp yields Unix microseconds
-        // without a second clock read per packet.
+    //
+    // The same reading also records the packet's send instant for the
+    // Sender Report (see `Impl::audio_last_send_unix_us`): the report
+    // must pair its NTP instant with the RTP timestamp of a packet that
+    // was *actually sent at that instant*, or every reconstruction
+    // downstream inherits the gap between the packet and the report.
+    //
+    // The monotonic reading is taken once and serves both purposes — the
+    // abs-send-time encoder turns it into the wall-clock instant on the
+    // Unix timeline, and the SR reuses the same value.
+    if (config_.timeline_enabled) {
+        // The encoder sums `unix_us(origin) + monotonic_us`; the origin is
+        // the wall clock at monotonic zero and the term is the monotonic
+        // reading, so the sum is the send instant on the Unix timeline.
+        // Both are already available — no second clock read per packet.
         const std::int64_t steady_us =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 core::SteadyClock::now().time_since_epoch()).count();
-        const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
-        // The encoder sums `unix_us_from_ntp64(origin) + monotonic_us`; a
-        // zero Ntp64 contributes 0 µs, so passing the absolute instant as
-        // the "monotonic" term and a zero origin encodes it verbatim.
-        const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
-            std::chrono::microseconds{unix_us}, rtp::Ntp64{0});
-        pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                             impl_->local_abs_send_time_id);
+        // `boot_epoch_offset_us` is the wall clock at monotonic zero, so
+        // the sum is this packet's send instant on the Unix timeline —
+        // the same basis the abs-send-time encoder uses.
+        impl_->audio_last_send_unix_us = impl_->boot_epoch_offset_us + steady_us;
+        if (impl_->local_abs_send_time_id != 0) {
+            const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+                std::chrono::microseconds{steady_us},
+                impl_->monotonic_origin_ntp64);
+            pb.set_abs_send_time(rtp::AbsSendTime{ast24},
+                                 impl_->local_abs_send_time_id);
+        }
     }
 
     pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
@@ -2756,15 +3112,33 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     if (impl_->audio_packet_count == 0) return;
 
     // RFC 3550 §6.4.1: the SR pairs the sender's wall-clock instant with
-    // the RTP timestamp of the media it describes. The NTP64 must be the
-    // *same instant* the RTP timestamp corresponds to, so sample the wall
-    // clock once here and use `audio_rtp_timestamp` — the timestamp of the
-    // last packet actually sent — rather than extrapolating a new one. The
-    // residual (the send-to-tick gap) is bounded by the frame interval.
-    const auto wall = std::chrono::system_clock::now();
+    // the RTP timestamp of the media it describes.
+    //
+    // The two must denote the *same* instant, or the pair is internally
+    // inconsistent and every receiver that reconstructs from it inherits
+    // the gap.  RFC 3550 words the NTP field as "the wallclock time when
+    // the report was sent" while the RTP timestamp is that of the last
+    // packet sent — two different moments, and the difference between
+    // them (up to a whole report period) is the bias.
+    //
+    // The engine therefore uses the *packet's* send instant, recorded
+    // when the packet was built and stamped with its abs-send-time
+    // (see `Impl::audio_last_send_unix_us`).  That is the same instant
+    // the abs-send-time field encodes, so the peer's reconstruction has
+    // no report-cadence bias: the one-way delay it reports is the wire,
+    // not the report schedule.
+    //
+    // Falling back to "now" would only be correct if no packet had been
+    // sent yet — but that case is already excluded above (a report with
+    // a zero packet count describes no media position).
+    const std::int64_t send_unix_us = impl_->audio_last_send_unix_us;
+    if (send_unix_us <= 0) return;
     rtp::SrBuilder sr;
     sr.set_ssrc(impl_->audio_ssrc)
-      .set_ntp_timestamp(rtp::ntp64_from(wall).value)
+      .set_ntp_timestamp(rtp::ntp64_from(
+                             std::chrono::system_clock::time_point{
+                                 std::chrono::microseconds{send_unix_us}})
+                             .value)
       .set_rtp_timestamp(impl_->audio_rtp_timestamp)
       .set_sender_packet_count(impl_->audio_packet_count)
       .set_sender_octet_count(impl_->audio_octet_count);
@@ -3057,10 +3431,14 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             rtp::Parser rp;
             auto sr = rp.parse_sr(view.subspan(off, sub_len));
             if (sr) {
-                const auto now_us = static_cast<std::int64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count());
-                impl_->sr_tracker.on_sender_report(sr.value(), now_us);
+                // The tracker wants our *monotonic* clock reading at
+                // receipt: it combines it with the monotonic origin to
+                // place our own clock on the peer's wall-clock timeline
+                // (ADR-017 §"Decision 4").  Passing a wall-clock reading
+                // here would double-count the epoch and make the skew
+                // meaningless.
+                impl_->sr_tracker.on_sender_report(sr.value(),
+                                                  steady_now_us());
             }
         }
         (void)count;  // report-block count is parsed inside parse_sr()
@@ -3149,54 +3527,76 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
 
     // RFC 5764 §4.2 — DTLS-SRTP key derivation produces:
     //   client_master_key || client_master_salt || server_master_key || server_master_salt
-    // Each side uses its OWN direction's keys for outbound, peer's for inbound.
-    // NimRTC uses client_master_key for inbound (we are the controlled/answerer).
-    std::vector<std::uint8_t> ck(km->client_master_key.begin(),
-                                 km->client_master_key.end());
-    std::vector<std::uint8_t> cs(km->client_master_salt.begin(),
-                                 km->client_master_salt.end());
-
+    // Each side uses its OWN direction's keys for outbound, the peer's for
+    // inbound.  Which half is "ours" depends on the DTLS role we ended up
+    // playing (RFC 5763 §5):
+    //
+    //   we are the DTLS **Client** → we send the ClientHello, so the
+    //     *client* master key is ours: client_* for outbound, server_* for
+    //     inbound.
+    //   we are the DTLS **Server** → the peer sends the ClientHello, so the
+    //     *server* master key is ours: server_* for outbound, client_* for
+    //     inbound.
+    //
+    // The previous code hard-coded the server assumption ("NimRTC uses
+    // client_master_key for inbound, we are the controlled/answerer"),
+    // which silently produced undecryptable inbound traffic whenever the
+    // negotiation made NimRTC the client — the case a NimRTC-to-NimRTC
+    // session hits.
     auto& log = core::log::Logger::instance();
     log.info("engine[dtls→srtp]: derived keying material:");
     log.info("  - profile        = 0x" + std::to_string(static_cast<int>(km->profile)));
-    log.info("  - key_len        = " + std::to_string(ck.size()));
-    log.info("  - salt_len       = " + std::to_string(cs.size()));
+    log.info("  - key_len        = " + std::to_string(km->client_master_key.size()));
+    log.info("  - salt_len       = " + std::to_string(km->client_master_salt.size()));
     log.info("  - lifetime       = " + std::to_string(km->lifetime));
-    if (!ck.empty()) {
-        log.info("  - master_key[0..7] = " + [&]{
+    log.info("  - dtls role      = " +
+             std::string(impl_->dtls_is_client ? "Client" : "Server"));
+
+    // The keying material is a set of fixed-size std::array members, so
+    // the four views below are *spans into the optional's storage* — the
+    // `std::optional` local outlives every use of them.  (A ternary of
+    // two arrays would yield a prvalue copy whose lifetime the span
+    // cannot extend; binding each branch explicitly avoids that.)
+    const std::span<const std::uint8_t> own_key =
+        impl_->dtls_is_client
+            ? std::span<const std::uint8_t>(km->client_master_key)
+            : std::span<const std::uint8_t>(km->server_master_key);
+    const std::span<const std::uint8_t> own_salt =
+        impl_->dtls_is_client
+            ? std::span<const std::uint8_t>(km->client_master_salt)
+            : std::span<const std::uint8_t>(km->server_master_salt);
+    const std::span<const std::uint8_t> peer_key =
+        impl_->dtls_is_client
+            ? std::span<const std::uint8_t>(km->server_master_key)
+            : std::span<const std::uint8_t>(km->client_master_key);
+    const std::span<const std::uint8_t> peer_salt =
+        impl_->dtls_is_client
+            ? std::span<const std::uint8_t>(km->server_master_salt)
+            : std::span<const std::uint8_t>(km->client_master_salt);
+
+    if (!own_key.empty()) {
+        log.info("  - own master_key[0..7] = " + [&]{
             std::string s;
-            for (std::size_t i = 0; i < std::min<std::size_t>(8, ck.size()); ++i) {
-                char buf[8]; std::snprintf(buf, sizeof(buf), "%02x", ck[i]);
+            for (std::size_t i = 0; i < std::min<std::size_t>(8, own_key.size()); ++i) {
+                char buf[8]; std::snprintf(buf, sizeof(buf), "%02x", own_key[i]);
                 s += buf;
-                if (i + 1 < std::min<std::size_t>(8, ck.size())) s += ":";
-            }
-            return s;
-        }());
-        log.info("  - master_salt[0..7] = " + [&]{
-            std::string s;
-            for (std::size_t i = 0; i < std::min<std::size_t>(8, cs.size()); ++i) {
-                char buf[8]; std::snprintf(buf, sizeof(buf), "%02x", cs[i]);
-                s += buf;
-                if (i + 1 < std::min<std::size_t>(8, cs.size())) s += ":";
+                if (i + 1 < std::min<std::size_t>(8, own_key.size())) s += ":";
             }
             return s;
         }());
     }
 
-    // Install the PEER's keys for INBOUND (decrypting packets from Chrome).
-    impl_->srtp->derive_keys_for_remote(ck, cs, srtp::CryptoSuite::Aes128CmSha1_80);
+    // Install the PEER's keys for INBOUND (decrypting the peer's packets).
+    impl_->srtp->derive_keys_for_remote(peer_key, peer_salt,
+                                        srtp::CryptoSuite::Aes128CmSha1_80);
 
-    // Install NimRTC's OWN (server) keys for OUTBOUND (encrypting packets to Chrome).
-    // RFC 5764 §4.2: each side uses its OWN direction's keys for outbound.
-    std::vector<std::uint8_t> sk(km->server_master_key.begin(),
-                                 km->server_master_key.end());
-    std::vector<std::uint8_t> ss(km->server_master_salt.begin(),
-                                 km->server_master_salt.end());
-    if (!sk.empty() && !ss.empty()) {
-        impl_->srtp->derive_keys_for_local(sk, ss, srtp::CryptoSuite::Aes128CmSha1_80);
+    // Install our OWN keys for OUTBOUND (encrypting our packets).
+    if (!own_key.empty() && !own_salt.empty()) {
+        impl_->srtp->derive_keys_for_local(own_key, own_salt,
+                                            srtp::CryptoSuite::Aes128CmSha1_80);
     } else {
         core::log::Logger::instance().warn(
-            "engine[dtls→srtp]: server_master_key/salt missing — outbound SRTP will fail");
+            "engine[dtls→srtp]: own master_key/salt missing — outbound SRTP will fail");
     }
 
     // Mark installed; subsequent calls will short-circuit.
@@ -3263,9 +3663,15 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
         (static_cast<std::uint32_t>(e[1]) <<  8) |
          static_cast<std::uint32_t>(e[2]);
 
-    const auto now_us = static_cast<std::int64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
+    // Two clocks, one instant: the monotonic reading is what the tracker
+    // needs (it combines it with the monotonic origin to place our own
+    // clock on the peer's wall-clock timeline), and the wall-clock
+    // reading is what the one-way delay is computed from (arrival −
+    // capture, both on the Unix timeline).  The wall-clock value is
+    // derived from the monotonic one through the origin sampled at
+    // open(), so the two never disagree by more than the sampling jitter.
+    const std::int64_t steady_us = steady_now_us();
+    const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
 
     // The 7-argument overload records the (rtp_ts, ast) observation itself
     // and refines the SR-based estimate per ADR-017 §"Decision 2". The
@@ -3276,20 +3682,29 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // established, and the refinement silently dead.
     // clock_rate_hz = 0 => use the rate configured via set_ssrc_clock_rate()
     // for this SSRC (the engine wires that from the SDP rtpmap).
+    //
+    // The skew out-parameter is the inter-clock discrepancy in the
+    // sense of RFC 3550 §8.1 (ADR-017 §"Decision 4").  It is only
+    // meaningful when the engine set a monotonic origin — which it always
+    // does at open() — so the value is captured and published rather than
+    // discarded.
+    std::int64_t skew_us = 0;
     auto cap = impl_->sr_tracker.capture_ts_us_for(
         pv.ssrc, pv.timestamp, ast24,
         /*has_abs_send_time=*/true,
         /*clock_rate_hz=*/0,
-        now_us,
-        /*out_sender_recv_skew_us=*/nullptr);
+        steady_us,
+        /*out_sender_recv_skew_us=*/&skew_us);
     if (!cap) {
         return;  // No SR for this SSRC yet, or the packet predates it.
     }
 
     impl_->capture_ts_us_by_ssrc[pv.ssrc] = *cap;
-    impl_->arrival_us_by_ssrc[pv.ssrc]    = now_us;
+    impl_->arrival_us_by_ssrc[pv.ssrc]    = unix_us;
+    impl_->skew_us_by_ssrc[pv.ssrc]       = skew_us;
     impl_->last_capture_us                = *cap;
-    impl_->last_arrival_us                = now_us;
+    impl_->last_arrival_us                = unix_us;
+    impl_->last_skew_us                   = skew_us;
 }
 
 void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
@@ -3304,13 +3719,17 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // tracker for a capture instant — the reconstruction depends on
         // it, and the tracker has no way to learn it from the wire.
         //
+        // The rate is a property of the codec the *peer* sends with, so
+        // the peer's own `a=rtpmap:` line is the authoritative source
+        // (RFC 3550 §6.4.1: the Sender Report does not carry it).  It
+        // was collected in `process_remote_sdp()` into
+        // `remote_clock_rate_hz`; the fallbacks below only apply when
+        // the peer did not declare the payload type.
+        //
         // `SenderReportTracker` falls back to 90 kHz when an SSRC has no
         // configured rate, which is correct for video (RFC 6184 H.264) and
         // ~2x wrong for Opus at 48 kHz — the reconstructed capture instant
-        // would drift by 87.5% of the media duration.  The RTP layer does not
-        // carry the clock rate (it is an SDP `a=rtpmap` property), so the
-        // engine resolves it here from the same payload-type demux used for
-        // media routing, and pins it on the tracker once per SSRC.
+        // would drift by 87.5% of the media duration.
         //
         // The gate is an explicit per-SSRC set rather than `state_for()`: the
         // tracker returns nullopt until the first SR arrives, so using it here
@@ -3319,10 +3738,16 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // keeps a second SSRC on the same PT (RFC 5956 simulcast) on its own
         // entry, so each gets configured once.
         std::uint32_t clock_rate = 0;
-        if (pv.payload_type == config_.video_receiver_tuning.payload_type) {
-            clock_rate = 90000;                    // RFC 6184 §5.6 H.264
-        } else {
-            clock_rate = config_.audio_codec.clock_rate;  // 48 kHz for Opus
+        {
+            auto rit = impl_->remote_clock_rate_hz.find(pv.payload_type);
+            if (rit != impl_->remote_clock_rate_hz.end()) {
+                clock_rate = rit->second;
+            } else if (pv.payload_type ==
+                       config_.video_receiver_tuning.payload_type) {
+                clock_rate = 90000;                    // RFC 6184 §5.6 H.264
+            } else {
+                clock_rate = config_.audio_codec.clock_rate;  // 48 kHz for Opus
+            }
         }
         if (clock_rate != 0 &&
             impl_->clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
@@ -3489,6 +3914,20 @@ std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept
     // 4 s transit came back as −4 s — a number no consumer of a latency
     // metric can act on.
     return *impl_->last_arrival_us - *impl_->last_capture_us;
+}
+
+std::optional<std::int64_t>
+NimRTCEngine::last_sender_recv_skew_us() const noexcept {
+    return impl_->last_skew_us;
+}
+
+std::optional<std::int64_t>
+NimRTCEngine::sender_recv_skew_us_for_ssrc(std::uint32_t ssrc) const noexcept {
+    auto it = impl_->skew_us_by_ssrc.find(ssrc);
+    if (it != impl_->skew_us_by_ssrc.end()) {
+        return it->second;
+    }
+    return std::nullopt;
 }
 
 } // namespace nimrtc::engine

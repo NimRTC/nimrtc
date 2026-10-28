@@ -34,6 +34,15 @@
  *      caught the 1.875× audio clock-rate bug, and the only one that
  *      would catch a regression of it.
  *
+ *   6. **The inter-clock skew.** The skew accessor
+ *      (`last_sender_recv_skew_us()` / `sender_recv_skew_us_for_ssrc()`)
+ *      is the difference between how far *our* clock advanced and how
+ *      far the peer's *media* clock advanced between the Sender Report
+ *      and the packet. It is the quantity a jitter-buffer controller
+ *      needs, and it is the one accessor that is easy to publish
+ *      without ever having computed anything — so cases 8-11 pin both
+ *      the value and the "empty when there is nothing to say" contract.
+ *
  * The suite uses the "shell" transport strategy (the same sentinel
  * `test_datachannel_engine` uses) so `open()` reaches the open state
  * without binding ICE UDP sockets — these cases are about config
@@ -232,6 +241,12 @@ TEST_F(EngineTimeline, ReconstructionAccessorsAreEmptyWithoutSenderReport) {
     EXPECT_FALSE(engine.last_one_way_delay_us().has_value())
         << "the one-way delay is a difference of two instants, both of "
            "which require an SR";
+    EXPECT_FALSE(engine.last_sender_recv_skew_us().has_value())
+        << "the inter-clock skew is measured between an SR and a packet; "
+           "with neither seen there is nothing to report";
+    EXPECT_FALSE(engine.sender_recv_skew_us_for_ssrc(0xDEADBEEF).has_value())
+        << "the per-SSRC skew accessor must be empty for an SSRC the "
+           "engine has never seen";
 
     engine.close();
 }
@@ -403,6 +418,149 @@ TEST_F(EngineTimeline, DisabledEngineIgnoresInboundSenderReport) {
            "inbound SR is of no use to a disabled tracker";
     EXPECT_FALSE(rx.last_capture_ts_us().has_value());
     EXPECT_FALSE(rx.last_one_way_delay_us().has_value());
+    EXPECT_FALSE(rx.last_sender_recv_skew_us().has_value())
+        << "the skew is computed on the same path as the capture "
+           "instant, so a disabled seam must publish neither";
+    EXPECT_FALSE(rx.sender_recv_skew_us_for_ssrc(kSsrc).has_value());
+}
+
+// =====================================================================
+// 8. The inter-clock skew is published once there is something to say.
+//
+// The skew answers: "how far did the peer's *media* clock advance
+// between the Sender Report and this packet, compared with how far
+// *our* clock advanced in the same interval?"  Concretely,
+//
+//   skew = (our clock at packet) − (our clock at SR) − (media delta)
+//
+// The two `feed_media_inbound()` calls below are microseconds apart, so
+// the first term is ~0 and the skew is essentially minus the media
+// delta: the peer's media clock claims 1 s passed while our clock says
+// essentially none did.
+//
+// The sign matters.  A skew that came back positive would tell a
+// jitter-buffer controller to *shorten* its buffer by the reported
+// amount, which is the opposite of what a peer whose media clock runs
+// fast needs.
+// =====================================================================
+TEST_F(EngineTimeline, SenderReportFromTheWirePublishesTheInterClockSkew) {
+    constexpr std::uint32_t kSsrc = 0x0D0D0D0Du;
+    constexpr std::uint8_t  kPt   = 111;    // Opus, RFC 7587
+    constexpr std::uint32_t kRate = 48000;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled            = true;
+    cfg.audio_codec.payload_type    = kPt;
+    cfg.audio_codec.clock_rate      = kRate;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg));
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/48'000, sr_us);
+    ASSERT_FALSE(sr.empty());
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    // One second of audio later: 48000 ticks at 48 kHz.  ast24 = 0 is
+    // an unrepresentable abs-send-time value, so the tracker ignores the
+    // element and the estimate comes from the media clock alone — which
+    // is what makes the expected skew exact.
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/96'000, /*ast24=*/0);
+    ASSERT_FALSE(pkt.empty());
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    const auto skew = rx.last_sender_recv_skew_us();
+    ASSERT_TRUE(skew.has_value())
+        << "the SR was ingested and the packet reconstructed, so the "
+           "inter-clock skew must be published";
+
+    // 1 s of media, and the two feeds are microseconds apart ⇒ the skew
+    // is −1 s.  The tolerance absorbs the feed-to-feed interval and the
+    // scheduling jitter around it, while still being an order of
+    // magnitude tighter than the 2 s case below.
+    EXPECT_NEAR(static_cast<double>(*skew), -1'000'000.0, 20'000.0)
+        << "the skew must be the media-advance discrepancy (≈ −1 s for "
+           "1 s of media), got " << *skew << " µs";
+
+    EXPECT_EQ(rx.sender_recv_skew_us_for_ssrc(kSsrc), skew)
+        << "the per-SSRC accessor must agree with the convenience one";
+}
+
+// =====================================================================
+// 9. The skew is not a constant: it tracks the media advance.
+//
+// A publisher that returned a fixed value (or the negation of the
+// media delta) would pass case 8 and be useless to a consumer.  The
+// magnitude here is twice case 8's, and the sign is the same.
+// =====================================================================
+TEST_F(EngineTimeline, SkewMagnitudeTracksTheMediaAdvance) {
+    constexpr std::uint32_t kSsrc = 0x0E0E0E0Eu;
+    constexpr std::uint8_t  kPt   = 111;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled            = true;
+    cfg.audio_codec.payload_type    = kPt;
+    cfg.audio_codec.clock_rate      = 48000;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg));
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/0, sr_us);
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    // Two seconds of audio: 96000 ticks at 48 kHz.
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/96'000, /*ast24=*/0);
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    const auto skew = rx.last_sender_recv_skew_us();
+    ASSERT_TRUE(skew.has_value());
+    EXPECT_NEAR(static_cast<double>(*skew), -2'000'000.0, 20'000.0)
+        << "2 s of media advance must read back as ≈ −2 s of inter-clock "
+           "discrepancy, got " << *skew << " µs";
+}
+
+// =====================================================================
+// 10. The skew is published per SSRC.
+//
+// Two streams on one connection have two independent clock pairs
+// (RFC 5956 simulcast, or audio + video), so a single "last skew"
+// number cannot describe them.  The per-SSRC accessor must answer for
+// the stream that was actually observed and stay empty for the others.
+// =====================================================================
+TEST_F(EngineTimeline, SkewIsPublishedPerSsrc) {
+    constexpr std::uint32_t kSsrcA = 0x0F0F0F0Fu;
+    constexpr std::uint32_t kSsrcB = 0x10101010u;
+    constexpr std::uint8_t  kPt    = 111;
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled            = true;
+    cfg.audio_codec.payload_type    = kPt;
+    cfg.audio_codec.clock_rate      = 48000;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg));
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrcA, /*rtp_ts=*/0, sr_us);
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    const auto pkt = make_rtp(kSsrcA, kPt, /*rtp_ts=*/48'000, /*ast24=*/0);
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    const auto skew_a = rx.sender_recv_skew_us_for_ssrc(kSsrcA);
+    ASSERT_TRUE(skew_a.has_value())
+        << "the observed stream must have a skew";
+    EXPECT_NEAR(static_cast<double>(*skew_a), -1'000'000.0, 20'000.0);
+
+    EXPECT_FALSE(rx.sender_recv_skew_us_for_ssrc(kSsrcB).has_value())
+        << "a stream that was never observed must not inherit the other "
+           "stream's skew";
+    EXPECT_EQ(rx.last_sender_recv_skew_us(), skew_a)
+        << "the convenience accessor mirrors the most recent stream";
 }
 
 } // anonymous namespace

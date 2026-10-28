@@ -30,11 +30,8 @@ on:
     branches: [main, feat/**, fix/**, chore/**, release/**]
   pull_request:
     branches: [main]
-  # Manual trigger.  The release gate needs a full 4-platform run on
-  # demand (see the `linux-aarch64` job below: its leg is gated on the
-  # NIMRTC_ARM64_CI repository variable, so a manual run is how the
-  # release manager gets the ARM64 leg to execute without landing a
-  # code change first).
+  # Manual trigger.  Useful for re-running the 4-platform matrix on
+  # demand (e.g. after a runner-side hiccup) without pushing a commit.
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref (branch or PR). Each job below
@@ -245,34 +242,46 @@ jobs:
   # ---------------------------------------------------------------------------
   # Linux aarch64: GCC on a native arm64 runner
   #
-  # The hosted ARM64 runner pool has been unreliable on and off:
-  # 2026-09-16 run #35049874137 queued 11+ hours without allocation,
-  # 2026-10-27 run #269 (#40370283784) sat queued for 3+ hours and
-  # run #268's job never received a runner at all.  A job that never
-  # starts keeps the whole workflow run in `in_progress`, so no merge
-  # or release gate can observe a terminal state — that is why this
-  # leg cannot simply be left enabled and allowed to hang.
+  # ROOT CAUSE (corrected 2026-10-28): the "ARM64 runner pool is
+  # unreliable" story in the CHANGELOG was a misdiagnosis.  The label
+  # `ubuntu-22.04-arm64` was never a valid GitHub-hosted runner label
+  # -- the documented ARM64 labels are `ubuntu-26.04-arm`,
+  # `ubuntu-24.04-arm` and `ubuntu-22.04-arm` (see the "Available
+  # Images" table in actions/runner-images' README).  A job asking for
+  # a label that matches no runner sits in `queued` forever: the
+  # check-run stays `queued`, `started_at == created_at`, and
+  # `runner_name` stays empty.
   #
-  # The leg is therefore gated on the **NIMRTC_ARM64_CI repository
-  # variable** (Settings → Secrets and variables → Actions →
-  # Variables → New repository variable; name `NIMRTC_ARM64_CI`, value
-  # `on`).  While the variable is unset the leg is skipped and the other
-  # three platforms finish normally; the release manager sets it to
-  # `on` and triggers the workflow manually (`workflow_dispatch`) to
-  # run the 4-platform release gate.  Setting the variable back to
-  # `off` restores the skip.  No code change is needed either way.
+  # That is exactly what the historical runs show.  Run #269
+  # (#40370283784, 2026-10-26) had an aarch64 job with
+  # `labels: [ubuntu-22.04-arm64]` and an empty `runner_name`, while
+  # the other three jobs in the same run were allocated a runner within
+  # 5 seconds.  Commit 4467cd8's aarch64 check-run sat queued for
+  # exactly 24 h (2026-09-11T02:30:03Z -> 2026-09-12T02:30:03Z) and
+  # was then cancelled -- the signature of "no runner matches this
+  # label", not of "the pool is saturated".  The label was introduced
+  # by 4467cd8 (2026-09-11); before it, 21e883f used the valid
+  # `ubuntu-22.04-arm`.
   #
-  # The runner label is `ubuntu-24.04-arm`, the current public-repo
-  # arm64 image (the previous `ubuntu-22.04-arm64` label is no longer
-  # part of the documented label set).  The 24.04 ARM64 pool is
-  # materially larger than the 22.04 one, which is what made the
-  # difference between "queued for hours" and "started".
+  # The label is now `ubuntu-24.04-arm`, which IS in the documented
+  # label set, so the leg is a plain hard gate again -- no repository
+  # variable, no `if:`.  A queued-forever job blocks the whole run
+  # from reaching a terminal state, so keeping an escape hatch is
+  # worth it, but the escape hatch must not be the default: the
+  # previous `vars.NIMRTC_ARM64_CI` gate meant the 4-platform matrix
+  # could never be observed green on a normal push, which is what
+  # v1.0-plan.md §3 Gate #8 requires.
+  #
+  # If this leg ever has to be skipped, use a code change (as
+  # 34a6ace / d2152ff did) rather than a variable -- a variable gate
+  # makes "is the ARM64 leg actually running?" a question that has to
+  # be answered out of band, which is what this register exists to
+  # prevent.
   #
   # See `docs/plan/ci-workarounds.md` §4 (W5) for the full record.
   # ---------------------------------------------------------------------------
   linux-aarch64:
     name: linux-gcc / aarch64
-    if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     concurrency:

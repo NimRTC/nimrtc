@@ -343,16 +343,18 @@ jobs:
     needs: preflight
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
-    # GHA-hosted ARM64 runners have limited capacity; on busy days
-    # ARM64 jobs can sit in the queue for hours. Treat this job as
-    # best-effort: if it fails or never gets a runner,
-    # the publish job still ships the other 3 platforms (windows,
-    # linux-gcc, macos-clang). The aarch64 artefact is filled in
-    # later as a follow-up release when runner capacity returns.
-    # The label is `ubuntu-24.04-arm` (the current public-repo arm64
-    # image); the older `ubuntu-22.04-arm64` label is no longer part of
-    # the documented label set and its pool was the one that queued for
-    # hours.
+    # The label is `ubuntu-24.04-arm`, which IS in GitHub's documented
+    # runner-label set.  (The older `ubuntu-22.04-arm64` label was
+    # never a real label, so jobs requesting it sat queued forever —
+    # that, not runner-pool capacity, is what the historical "ARM64
+    # queue" reports actually were.  See docs/plan/ci-workarounds.md
+    # §4.1.)
+    #
+    # This leg still runs soft because the *release* aarch64 build has
+    # never been observed to complete — the CI leg and this leg are
+    # different jobs with different build settings.  Once this job has
+    # completed green once, drop `continue-on-error: true` and add
+    # `build-linux-aarch64` to publish-release's `needs:`.
     # Also see publish-release's `if:` which lets publish run
     # regardless of this job's result.
     continue-on-error: true
@@ -574,16 +576,18 @@ jobs:
       - build-linux-gcc
       - build-macos-clang
       # build-linux-aarch64 is intentionally NOT in `needs:` — see the
-      # `continue-on-error: true` note on that job. GHA ARM64 runner
-      # capacity is unreliable (a 14+ hour queue is a real failure
-      # mode, not a hypothetical); making it a hard gate would block
-      # publishing the Windows / Linux x86_64 / macOS arm64 artefact
-      # trio. The aarch64 artefact is filled in later as a follow-up
-      # release when runner capacity returns. The download step below
-      # still picks up `nimrtc-linux-aarch64-gcc` if it was uploaded
-      # (download-artifact with `merge-multiple: true` grabs every
-      # artefact in the run regardless of `needs:`), and the Draft
-      # step uses `fail_on_unmatched_files: false` so a missing
+      # `continue-on-error: true` note on that job. That leg's aarch64
+      # build has not yet been observed to complete, so publishing
+      # waits on a bundle that might not build; the other three
+      # artefacts ship regardless. (The historical reason given here
+      # was "ARM64 runner capacity is unreliable" — that was a
+      # misdiagnosis: the runner label was invalid, so the job could
+      # never be scheduled at all. See docs/plan/ci-workarounds.md §4.)
+      # The aarch64 artefact is filled in later as a follow-up release.
+      # The download step below still picks up `nimrtc-linux-aarch64-gcc`
+      # if it was uploaded (download-artifact with `merge-multiple: true`
+      # grabs every artefact in the run regardless of `needs:`), and the
+      # Draft step uses `fail_on_unmatched_files: false` so a missing
       # aarch64 bundle is non-fatal.
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -152,10 +152,10 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
 
    **aarch64 soft-dependency policy (W5).** The `linux-aarch64` leg of
    `release.yml` is `continue-on-error: true` and is deliberately *not* listed
-   in `publish-release`'s `needs:`. GHA-hosted ARM64 runner capacity is
-   unreliable (a 14+ hour queue was observed at the v0.14.0 cut), so making
-   it a hard gate would block publishing the Windows / Linux x86_64 / macOS
-   arm64 trio. Consequences, all of them explicit rather than silent:
+   in `publish-release`'s `needs:`. This leg's aarch64 build has not yet been
+   observed to complete, so a hard gate would risk blocking publishing the
+   Windows / Linux x86_64 / macOS arm64 trio on a bundle that might not
+   build. Consequences, all of them explicit rather than silent:
 
    - The aarch64 bundle is **best-effort**. When the leg does not run or
      fails, the release is published with the other three bundles and a
@@ -164,29 +164,20 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    - `publish-release` writes the present / missing bundle list and the
      per-platform 3A status into the run's Step Summary, so a partial
      release cannot pass unnoticed.
-   - The aarch64 artefact is attached by a follow-up release once runner
-     capacity returns.
-   - The **CI** leg in `ci.yml` (`linux-aarch64`) remains a hard gate. Only
+   - The aarch64 artefact is attached by a follow-up release.
+   - The **CI** leg in `ci.yml` (`linux-aarch64`) is a hard gate. Only
      the *release* leg is soft.
 
-   **Arming the CI leg.**  Since 2026-10-28 the `linux-aarch64` job in
-   `ci.yml` is gated on the **repository variable `NIMRTC_ARM64_CI`**
-   (`Settings -> Secrets and variables -> Actions -> Variables`), not on
-   a source edit. The job's condition is
-   `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}`:
+   **The runner label is `ubuntu-24.04-arm`**, which is in GitHub's
+   documented runner-label set. The older `ubuntu-22.04-arm64` label was
+   never a valid label, so jobs requesting it sat in `queued` forever —
+   that, not runner-pool capacity, is what the historical "ARM64 queued
+   for hours" reports were. See `docs/plan/ci-workarounds.md` §4.1.
 
-   - While the variable is unset, the job is skipped and the other three
-     platforms finish; the run still reaches a terminal state.
-   - To run the full 4-platform gate, set the variable to `on` and
-     trigger `ci.yml` manually (`workflow_dispatch`). The release
-     manager must therefore set the variable *before* the tag push if
-     the ARM64 leg is to be part of that tag's CI evidence.
-   - Set it back to `off` (or remove it) to restore the skip.
-
-   The runner label is `ubuntu-24.04-arm`; the older
-   `ubuntu-22.04-arm64` label is no longer part of the documented
-   runner set and its pool was the one that queued for hours. See
-   `docs/plan/ci-workarounds.md` section 4 for the full record.
+   **Once the `linux-aarch64` release job has completed green once**
+   (it has not yet, as of 2026-10-28), drop `continue-on-error: true`
+   from that job, add `build-linux-aarch64` to `publish-release`'s
+   `needs:`, and delete row W5 from `docs/plan/ci-workarounds.md`.
 
 5. Run the release freeze checklist:
 

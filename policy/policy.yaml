@@ -1,0 +1,117 @@
+# zelto policy rules
+# Auto-generated for "nimrtc-zelto"
+
+rules:
+
+  - id: allow-write-0
+    match:
+      path: "src/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-0"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-1
+    match:
+      path: "cmake/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-1"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-2
+    match:
+      path: "docs/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-2"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-3
+    match:
+      path: "examples/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-3"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-4
+    match:
+      path: "interop/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-4"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-5
+    match:
+      path: "profiles/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-5"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-6
+    match:
+      path: "scripts/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-6"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-7
+    match:
+      path: "specs/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-7"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-8
+    match:
+      path: "tests/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-8"
+    reason: "Source directory — agents may write"
+
+  - id: allow-write-9
+    match:
+      path: "tools/**"
+      operation: "write"
+    action: allow
+    basis: "policy.yaml#allow-write-9"
+    reason: "Source directory — agents may write"
+
+  - id: allow-read-all
+    match:
+      path: "**"
+      operation: "read"
+    action: allow
+    basis: "policy.yaml#allow-read-all"
+    priority: 0
+    reason: "All files are readable"
+
+  - id: protect-policy
+    match:
+      path: "policy/**"
+    action: deny
+    basis: "policy.yaml#protect-policy"
+    reason: "Policy directory is the truth source"
+
+  - id: protect-zelto
+    match:
+      path: ".zelto/**"
+    action: deny
+    basis: "policy.yaml#protect-zelto"
+    reason: "zelto state is managed by zelto itself"
+
+  - id: protect-agents
+    match:
+      path: "AGENTS.md"
+    action: deny
+    basis: "policy.yaml#protect-agents"
+    reason: "Project instructions are read-only"
+
+anchors:
+  policy: "sha256:init"

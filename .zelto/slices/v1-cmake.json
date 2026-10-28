@@ -1,0 +1,45 @@
+{
+  "id": "v1-cmake",
+  "title": "CMake 构建系统配置",
+  "state": "draft",
+  "spec": {
+    "path": "specs/slices/v1-cmake.md",
+    "frozenHash": null,
+    "frozenAt": null
+  },
+  "acceptance": {
+    "dir": "tests/acceptance/v1-cmake/",
+    "frozenHash": null,
+    "oracleSrc": null
+  },
+  "baseCommit": null,
+  "drift": {
+    "detected": false,
+    "reason": null,
+    "at": null
+  },
+  "trace": {
+    "requirements": [
+      "R1: CMake 构建系统支持 VS 2022 和 GCC",
+      "R2: Debug/Release 双配置"
+    ],
+    "contracts": [],
+    "tests": [
+      "ctest --test-dir build"
+    ]
+  },
+  "traceWaiver": null,
+  "writes": [
+    "CMakeLists.txt",
+    "cmake/**",
+    "CMakePresets.json"
+  ],
+  "runs": [],
+  "stall": {
+    "class": null,
+    "autoResolved": 0,
+    "gateRetries": 0
+  },
+  "createdAt": "2026-10-28T09:07:26.565Z",
+  "updatedAt": "2026-10-28T09:07:26.567Z"
+}

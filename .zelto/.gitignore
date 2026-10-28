@@ -1,0 +1,10 @@
+# zelto runtime state — transient data only
+# Slice files (slices/*.json) ARE committed — they are project state
+events/**
+locks/**
+design/**
+designs/**
+requirements/**
+versions/**
+project-map.json
+v0-*-bundle.json

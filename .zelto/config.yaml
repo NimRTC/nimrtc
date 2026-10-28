@@ -1,0 +1,23 @@
+# zelto project configuration — nimrtc-zelto
+# Gate commands are Windows-compatible (VS 2022 + CMake)
+
+gate:
+  commands:
+    - name: build
+      run: cmake --build build --config Debug
+    - name: test
+      run: ctest --test-dir build --output-on-failure -C Debug
+  timeoutSec: 300
+  retry:
+    max: 1
+
+agent:
+  command: "npx @anthropic-ai/claude-code"
+
+# LLM config: API key loaded from env var for security
+# Set NIMRTC_LLM_API_KEY in your shell before using AI pipeline commands
+llm:
+  provider: deepseek
+  apiKey: "${NIMRTC_LLM_API_KEY}"
+  baseUrl: "https://api.haimacloud.com"
+  model: deepseek-ai/DeepSeek-V3

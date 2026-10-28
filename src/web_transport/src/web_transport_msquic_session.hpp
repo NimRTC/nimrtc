@@ -263,7 +263,8 @@ public:
             api_->SetCallbackHandler(
                 stream_,
                 reinterpret_cast<void*>(&quic_stream_callback),
-                reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) | 1u));
+                reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) |
+                                         uintptr_t{1}));
         }
     }
 

@@ -59,11 +59,17 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <new>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 // Windows macros `min` and `max` conflict with std::min / std::max.
 // Undef them before any standard headers that might use them.
@@ -303,15 +309,25 @@ void MsQuicBidiStream::on_receive(
     {
         std::lock_guard<std::mutex> l{recv_mutex_};
         if (fin) recv_fin_seen_ = true;
-        recv_queue_.emplace_back(bytes.begin(), bytes.end());
+        try {
+            recv_queue_.emplace_back(bytes.begin(), bytes.end());
+        } catch (...) {
+            // OOM on the msquic worker thread: drop this chunk but still
+            // report it consumed so msquic can make progress.
+            return;
+        }
         fin_seen = recv_fin_seen_;
         // Take a snapshot of the callback.  set_on_data() takes the
         // same lock, so any later update will block until we release.
         cb_copy = on_data_cb_;
-        // Copy the first queued chunk for the callback.
+        // Deliver the bytes that just arrived — not the queue front, which
+        // may hold an older chunk when RECEIVE events coalesce.
         if (cb_copy) {
-            const auto& front = recv_queue_.front();
-            data_copy.assign(front.begin(), front.end());
+            try {
+                data_copy.assign(bytes.begin(), bytes.end());
+            } catch (...) {
+                cb_copy = nullptr;
+            }
         }
     }
 
@@ -1023,21 +1039,150 @@ void MsQuicSessionImpl::on_shutdown_complete() noexcept {
 
 void MsQuicSessionImpl::on_peer_stream_started(HQUIC stream,
                                    QUIC_STREAM_OPEN_FLAGS flags) noexcept {
-    // An inbound stream started on the connection.  We currently don't
-    // handle inbound streams (we are a client only).  msquic requires
-    // a callback return value that tells it whether to accept or ignore
-    // the stream.  For now, accept it but just close it immediately.
-    (void)flags;
+    // Inbound stream from the peer.  Unidirectional streams are not
+    // part of the Case E data plane — abort them as before.  Client-
+    // initiated bidirectional streams are WebTransport data streams
+    // (RFC draft-ietf-webtrans-http3 §4.2): accept each one and echo
+    // the application payload back to the peer.  The stream carries a
+    // two-varint header first (signal 0x41 + session id); the header
+    // is consumed locally and only the payload is echoed, because
+    // Chrome's WebTransport readable side already strips the header
+    // before delivering bytes to JS.
     if (stream == nullptr) return;
+    const bool unidirectional =
+        (flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0;
+    if (unidirectional) {
+        api_->StreamShutdown(stream,
+                              QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND |
+                              QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE,
+                              0);
+        api_->StreamClose(stream);
+        return;
+    }
 
-    // Accept the stream (return QUIC_STATUS_SUCCESS from callback).
-    // We don't have a session-level listener for inbound streams yet
-    // (that lands in beta.2 / v1.x).  For now, just close the stream.
-    api_->StreamShutdown(stream,
-                          QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND |
-                          QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE,
-                          0);
-    api_->StreamClose(stream);
+    // Wrap the accepted stream so its lifetime is tied to the session
+    // (the wrapper closes the handle on teardown, exactly like
+    // locally-opened streams).  The wrapper is registered in
+    // bidi_streams_ so shutdown/cleanup paths stay single-owner.
+    std::unique_ptr<MsQuicBidiStream> wrapper;
+    try {
+        wrapper = std::make_unique<MsQuicBidiStream>(nullptr, api_, this);
+    } catch (...) {
+        api_->StreamShutdown(stream,
+                              QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND |
+                              QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE,
+                              0);
+        api_->StreamClose(stream);
+        return;
+    }
+    MsQuicBidiStream* raw = wrapper.get();
+    {
+        std::lock_guard<std::mutex> l{streams_mutex_};
+        bidi_streams_.push_back(std::move(wrapper));
+    }
+    raw->init_msquic_context(stream);
+
+    // Per-stream echo state: reassembles the split WebTransport header
+    // (signal varint + session-id varint) across RECEIVE events, then
+    // echoes pure payload bytes.  Shared with the on-data lambda; the
+    // mutex serialises msquic worker callbacks for this stream.
+    struct EchoState {
+        std::mutex mutex;
+        std::vector<std::uint8_t> pending;
+        bool header_done = false;
+    };
+    std::shared_ptr<EchoState> echo_state;
+    try {
+        echo_state = std::make_shared<EchoState>();
+    } catch (...) {
+        std::lock_guard<std::mutex> l{streams_mutex_};
+        // Drop the wrapper we just registered; its destructor shuts the
+        // stream down gracefully and closes the handle.
+        for (auto it = bidi_streams_.begin(); it != bidi_streams_.end();
+             ++it) {
+            if (it->get() == raw) {
+                bidi_streams_.erase(it);
+                break;
+            }
+        }
+        return;
+    }
+
+    // QUIC varint decode that tolerates a split header: returns false
+    // when the buffer does not yet hold a complete integer.
+    auto try_decode_varint = [](std::vector<std::uint8_t>& buf,
+                                std::size_t& pos,
+                                std::uint64_t& value) noexcept -> bool {
+        if (pos >= buf.size()) return false;
+        const std::uint8_t lead = buf[pos];
+        const std::size_t width = std::size_t{1} << (lead >> 6);
+        if (buf.size() - pos < width) return false;
+        std::uint64_t v = lead & 0x3Fu;
+        for (std::size_t i = 1; i < width; ++i) {
+            v = (v << 8) | buf[pos + i];
+        }
+        value = v;
+        pos += width;
+        return true;
+    };
+
+    // Install the echo handler.  on_receive() fires the callback outside
+    // its internal lock, so taking echo_state->mutex here cannot deadlock
+    // against the stream's own recv_mutex_.
+    raw->set_on_data(
+        [raw, echo_state, try_decode_varint](
+            std::span<const std::uint8_t> bytes) noexcept {
+            if (bytes.empty() || raw == nullptr) return;
+            std::vector<std::uint8_t> to_echo;
+            try {
+                std::lock_guard<std::mutex> l{echo_state->mutex};
+                echo_state->pending.insert(echo_state->pending.end(),
+                                           bytes.begin(), bytes.end());
+                std::size_t pos = 0;
+                if (!echo_state->header_done) {
+                    std::uint64_t signal = 0;
+                    std::size_t after_signal = 0;
+                    {
+                        std::size_t p = pos;
+                        if (!try_decode_varint(echo_state->pending, p,
+                                               signal)) {
+                            return;  // split header — wait for more bytes
+                        }
+                        after_signal = p;
+                    }
+                    if (signal != 0x41u) {
+                        // Not a WebTransport data stream after all; stop
+                        // echoing and leave the bytes queued for recv().
+                        echo_state->header_done = true;
+                        echo_state->pending.clear();
+                        return;
+                    }
+                    std::uint64_t session_id = 0;
+                    {
+                        std::size_t p = after_signal;
+                        if (!try_decode_varint(echo_state->pending, p,
+                                               session_id)) {
+                            return;  // split header — wait for more bytes
+                        }
+                        pos = p;
+                    }
+                    (void)session_id;
+                    echo_state->header_done = true;
+                }
+                if (pos < echo_state->pending.size()) {
+                    to_echo.assign(echo_state->pending.begin() +
+                                       static_cast<std::ptrdiff_t>(pos),
+                                   echo_state->pending.end());
+                }
+                echo_state->pending.clear();
+            } catch (...) {
+                return;
+            }
+            if (!to_echo.empty()) {
+                raw->send(std::span<const std::uint8_t>{
+                    to_echo.data(), to_echo.size()});
+            }
+        });
 }
 
 void MsQuicSessionImpl::on_datagram_state_changed(bool send_enabled,

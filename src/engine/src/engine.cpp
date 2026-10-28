@@ -178,8 +178,18 @@ std::vector<std::uint8_t> base64_decode(std::string_view sv) {
     int val = 0, bits = 0;
     for (char c : sv) {
         if (c == '=') break;
-        if (c < 0 || kIdx[static_cast<uint8_t>(c)] < 0) continue;
-        val = (val << 6) | kIdx[static_cast<uint8_t>(c)];
+        // `char` is signed on x86_64 but UNSIGNED on aarch64 and on
+        // macOS arm64, so a `c < 0` guard would be an always-false
+        // comparison there -- rejected by -Werror=type-limits.  It is
+        // also redundant: kIdx is a 256-entry table initialised to -1
+        // and only the 64 base64 alphabet bytes are given a non-negative
+        // index, so kIdx[byte] < 0 already rejects every non-alphabet
+        // byte, including all bytes >= 0x80.  Iterate over the byte
+        // value directly instead of the (signedness-dependent) char.
+        const auto uc = static_cast<unsigned char>(c);
+        const int8_t idx = kIdx[uc];
+        if (idx < 0) continue;
+        val = (val << 6) | idx;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;

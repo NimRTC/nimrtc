@@ -10,7 +10,7 @@
 # Build matrix mirrors the 1.0.0 support matrix in RELEASING.md §6:
 #   - windows       : MSVC 19.43 on windows-2022         (static .lib + headers)
 #   - linux-gcc     : GCC 11 on ubuntu-22.04             (.a + headers, x86_64)
-#   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64       (.a + headers, arm64)
+#   - linux-aarch64 : GCC 11 on ubuntu-24.04-arm         (.a + headers, arm64)
 #   - macos-clang   : Apple Clang 15 on macos-14         (.a + headers, arm64)
 #
 # Required secrets (v1.0.0+ only; pre-1.0 Tech Preview can run with these
@@ -341,14 +341,18 @@ jobs:
   build-linux-aarch64:
     name: release / build / linux-aarch64
     needs: preflight
-    runs-on: ubuntu-22.04-arm64
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     # GHA-hosted ARM64 runners have limited capacity; on busy days
-    # `ubuntu-22.04-arm64` jobs can sit in the queue for hours. Treat
-    # this job as best-effort: if it fails or never gets a runner,
+    # ARM64 jobs can sit in the queue for hours. Treat this job as
+    # best-effort: if it fails or never gets a runner,
     # the publish job still ships the other 3 platforms (windows,
     # linux-gcc, macos-clang). The aarch64 artefact is filled in
     # later as a follow-up release when runner capacity returns.
+    # The label is `ubuntu-24.04-arm` (the current public-repo arm64
+    # image); the older `ubuntu-22.04-arm64` label is no longer part of
+    # the documented label set and its pool was the one that queued for
+    # hours.
     # Also see publish-release's `if:` which lets publish run
     # regardless of this job's result.
     continue-on-error: true
@@ -359,9 +363,16 @@ jobs:
 
       - name: Install ninja + cmake + xz
         shell: bash
+        # `g++` (the native arm64 package on this image) is what
+        # `cmake/toolchains/aarch64-linux-gnu.cmake` uses here: the
+        # runner is a native arm64 host, so the toolchain file takes its
+        # "host is already aarch64" branch and leaves CMAKE_CXX_COMPILER
+        # to CMake's own detection.  The cross package must NOT be
+        # installed -- it would win the toolchain file's probe and point
+        # CMAKE_SYSROOT at a sysroot this image does not have.
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build xz-utils python3 python3-pip
+          sudo apt-get install -y ninja-build xz-utils python3 python3-pip g++
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -793,7 +804,7 @@ jobs:
                 echo "> - \`${m}\`"
               done
               echo "> Cause: GHA-hosted ARM64 runner capacity (14+ hour queue"
-              echo "> was observed at v0.14.0 cut) for \`ubuntu-22.04-arm64\`."
+              echo "> was observed at v0.14.0 cut) for the \`ubuntu-*-arm\` pool."
               echo "> Follow-up release will ship the missing platform when"
               echo "> runner capacity returns."
             } >> dist/release_notes.md

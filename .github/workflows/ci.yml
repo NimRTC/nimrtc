@@ -4,7 +4,7 @@
 # Matrix (1.0.0):
 #   - windows       : MSVC 19.43 on windows-2022        (primary dev env)
 #   - linux-gcc     : GCC 11 on ubuntu-22.04            (x86_64)
-#   - linux-aarch64 : GCC 11 on ubuntu-22.04-arm64      (native arm64 runner)
+#   - linux-aarch64 : GCC 11 on ubuntu-24.04-arm        (native arm64 runner)
 #   - macos-clang   : Apple Clang 15 on macos-14        (arm64; runs x86_64 binaries
 #                                                          under Rosetta)
 #
@@ -30,6 +30,12 @@ on:
     branches: [main, feat/**, fix/**, chore/**, release/**]
   pull_request:
     branches: [main]
+  # Manual trigger.  The release gate needs a full 4-platform run on
+  # demand (see the `linux-aarch64` job below: its leg is gated on the
+  # NIMRTC_ARM64_CI repository variable, so a manual run is how the
+  # release manager gets the ARM64 leg to execute without landing a
+  # code change first).
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref (branch or PR). Each job below
 # overrides `concurrency.group` so the macOS runner doesn't gate the Linux
@@ -237,30 +243,37 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Linux aarch64: GCC cross (or native) on ubuntu-22.04-arm64
+  # Linux aarch64: GCC on a native arm64 runner
   #
-  # TEMP-DISABLED (2026-10-27): the ubuntu-22.04-arm64 hosted runner pool
-  # is stuck again.  CI run #269 (#40370283784) sat `queued` for 3+ hours
-  # without allocation, and run #268's aarch64 job never received a runner
-  # either.  A job that never starts keeps the whole workflow run in
-  # `in_progress`, so the run never reaches a terminal state and no merge
-  # or release gate can observe it.  Skip this job so the remaining three
-  # platforms (windows/msvc, linux-gcc/x86_64, macos-clang/arm64) can
-  # finish and the run can complete.  Re-enable by removing the `if: false`
-  # line once GitHub's ARM64 runner pool is healthy again.
+  # The hosted ARM64 runner pool has been unreliable on and off:
+  # 2026-09-16 run #35049874137 queued 11+ hours without allocation,
+  # 2026-10-27 run #269 (#40370283784) sat queued for 3+ hours and
+  # run #268's job never received a runner at all.  A job that never
+  # starts keeps the whole workflow run in `in_progress`, so no merge
+  # or release gate can observe a terminal state — that is why this
+  # leg cannot simply be left enabled and allowed to hang.
   #
-  # RE-ENABLED 2026-10-14 (v0.13.0 / v1.0.0-alpha.1): the
-  # ubuntu-22.04-arm64 hosted runner pool is assumed recovered
-  # (was stuck 2026-09-16 → 2026-10-14 with run #35049874137
-  # queued 11+ hours without allocation). If the pool is still
-  # unstable, set `if: false` again here and document the
-  # reason in `docs/plan/v0.13.0-release-notes.md` §4-platform
-  # CI status.
+  # The leg is therefore gated on the **NIMRTC_ARM64_CI repository
+  # variable** (Settings → Secrets and variables → Actions →
+  # Variables → New repository variable; name `NIMRTC_ARM64_CI`, value
+  # `on`).  While the variable is unset the leg is skipped and the other
+  # three platforms finish normally; the release manager sets it to
+  # `on` and triggers the workflow manually (`workflow_dispatch`) to
+  # run the 4-platform release gate.  Setting the variable back to
+  # `off` restores the skip.  No code change is needed either way.
+  #
+  # The runner label is `ubuntu-24.04-arm`, the current public-repo
+  # arm64 image (the previous `ubuntu-22.04-arm64` label is no longer
+  # part of the documented label set).  The 24.04 ARM64 pool is
+  # materially larger than the 22.04 one, which is what made the
+  # difference between "queued for hours" and "started".
+  #
+  # See `docs/plan/ci-workarounds.md` §4 (W5) for the full record.
   # ---------------------------------------------------------------------------
   linux-aarch64:
     name: linux-gcc / aarch64
-    if: false   # TEMP-DISABLED: see block comment above
-    runs-on: ubuntu-22.04-arm64
+    if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-aarch64
@@ -291,10 +304,19 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
 
-      - name: Install ninja + g++ + aarch64 cross toolchain + Python
+      - name: Install ninja + g++ + Python
+        # The runner is a *native* arm64 host, so the cross toolchain is
+        # not needed: `cmake/toolchains/aarch64-linux-gnu.cmake` detects
+        # `uname -m == aarch64` and uses the system compiler directly
+        # (its "native aarch64" branch, which is checked *before* the
+        # cross-toolchain probe).  Installing the cross package here
+        # would have made the toolchain file pick the cross compiler
+        # and point `CMAKE_SYSROOT` at a sysroot the native image does
+        # not have.  `g++` (not `g++-aarch64-linux-gnu`) is the native
+        # arm64 package on this image.
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build python3 g++-aarch64-linux-gnu
+          sudo apt-get install -y ninja-build python3 g++
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

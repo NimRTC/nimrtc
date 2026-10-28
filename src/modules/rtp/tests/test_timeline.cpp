@@ -605,4 +605,422 @@ TEST(SenderReportTracker, IllegalAbsSendTimeIsIgnored) {
         << "an illegal 24-bit value must not be recorded as an anchor";
 }
 
+// ---------------------------------------------------------------------------
+// Slope estimator — multi-SR fit + EWMA (ADR-017 §"Decision 7").
+//
+// The single-SR linear model of v1.0.0 inherited the peer's media-clock
+// rate error one sample at a time.  The tracker now retains a short
+// window of Sender Reports and fits the slope across it, which measures
+// the *combined* rate of the peer's media clock and wall clock.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// NTP64 for an explicit Unix instant (µs since the epoch).  Unlike the
+// `(secs + kNtpEpochOffset) << 32` idiom used elsewhere in this file,
+// this keeps the sub-second part — the skew cases need it.
+//
+// The NTP fraction is a 32-bit truncation of the microsecond value, so
+// the round trip through the tracker loses up to 1 µs; the assertions
+// below allow for that.
+std::uint64_t ntp64_from_unix_us(std::int64_t unix_us) {
+    const std::uint64_t secs =
+        static_cast<std::uint64_t>(unix_us / 1'000'000LL) + kNtpEpochOffset;
+    const std::uint64_t rem =
+        static_cast<std::uint64_t>(unix_us % 1'000'000LL);
+    const std::uint64_t frac = (rem * 4294967296ULL) / 1'000'000ULL;
+    return (secs << 32) | frac;
+}
+
+// The Unix instant the tracker's monotonic origin is anchored to, used
+// as the "wall clock" of the local end in the skew cases.
+constexpr std::int64_t kLocalWallOriginUs = 1'700'000'000'000'000LL;
+
+// Feed one Sender Report: peer wall clock at `peer_us`, peer media
+// clock at `rtp_ts`, received locally at monotonic `local_us`.
+void feed_sr(SenderReportTracker& tracker,
+             std::uint32_t ssrc,
+             std::int64_t peer_us,
+             std::uint32_t rtp_ts,
+             std::int64_t local_us) {
+    SenderReport sr{};
+    sr.ssrc          = ssrc;
+    sr.ntp_timestamp = ntp64_from_unix_us(peer_us);
+    sr.rtp_timestamp = rtp_ts;
+    tracker.on_sender_report(sr, local_us);
+}
+
+// The tracker's monotonic origin: our wall clock reads `unix_us` when
+// the local monotonic clock reads zero.
+Ntp64 local_origin() {
+    return ntp64_from(std::chrono::system_clock::time_point{
+        std::chrono::microseconds{kLocalWallOriginUs}});
+}
+
+} // namespace
+
+// A media clock running 1 % fast is invisible to the single-SR model:
+// every extrapolation repeats the same rate error.  With a fit over two
+// Sender Reports the tracker measures the rate and extrapolates with it.
+TEST(SenderReportTracker, FittedSlopeTracksMediaClockRateError) {
+    SenderReportTracker tracker;
+    tracker.set_ssrc_clock_rate(0xE0u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    // The peer's media clock runs 1 % fast: 90900 ticks per wall second.
+    feed_sr(tracker, 0xE0u, t0,             0,      0);
+    feed_sr(tracker, 0xE0u, t0 + 1'000'000, 90'900, 1'000'000);
+    feed_sr(tracker, 0xE0u, t0 + 2'000'000, 181'800, 2'000'000);
+
+    const auto state = tracker.state_for(0xE0u);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_TRUE(state->slope_fitted)
+        << "two Sender Reports 1 s apart must be enough to fit a slope";
+    EXPECT_EQ(state->slope_sample_count, 3u);
+
+    // The measured slope is 1e6 µs per 90'900 ticks = 11.0011 µs/tick
+    // = 11'001'100 ps/tick (the nominal 90 kHz slope is 11'111'111).
+    EXPECT_NEAR(static_cast<double>(state->slope_psec_per_rtp_ts),
+                11'001'100.0, 1.0);
+
+    // A packet one media-second past the last SR.
+    auto cap = tracker.capture_ts_us_for(0xE0u, 181'800 + 90'900, 0,
+                                          /*clock_rate_hz=*/0, 0,
+                                          /*skew*/ nullptr);
+    ASSERT_TRUE(cap.has_value());
+    // The fitted slope says 90'900 ticks ≈ 1'000'000 µs: the media clock
+    // runs fast, so 90'900 ticks is one *wall* second.  The nominal rate
+    // would have said 1'010'000 µs — a 10 ms difference.
+    EXPECT_NEAR(static_cast<double>(*cap - (t0 + 2'000'000)),
+                1'000'000.0, 5.0);
+}
+
+// `min_samples = 1` disables the fit: the nominal rate is used, which is
+// the pre-v1.0.0 behaviour.
+TEST(SenderReportTracker, MinSamplesOneDisablesTheFit) {
+    SenderReportTracker tracker;
+    SlopeFilterConfig cfg;
+    cfg.min_samples         = 1;
+    cfg.max_samples         = 16;
+    cfg.ewma_alpha_permille = 1000;
+    tracker.set_slope_filter_config(cfg);
+
+    tracker.set_ssrc_clock_rate(0xE1u, 90'000);
+    const std::int64_t t0 = kLocalWallOriginUs;
+    feed_sr(tracker, 0xE1u, t0,             0,      0);
+    feed_sr(tracker, 0xE1u, t0 + 1'000'000, 90'900, 1'000'000);
+    feed_sr(tracker, 0xE1u, t0 + 2'000'000, 181'800, 2'000'000);
+
+    const auto state = tracker.state_for(0xE1u);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_FALSE(state->slope_fitted);
+
+    auto cap = tracker.capture_ts_us_for(0xE1u, 181'800 + 90'900, 0,
+                                          /*clock_rate_hz=*/0, 0,
+                                          /*skew*/ nullptr);
+    ASSERT_TRUE(cap.has_value());
+    // The nominal 90 kHz rate: 90900 ticks = 1'010'000 µs.
+    EXPECT_NEAR(static_cast<double>(*cap - (t0 + 2'000'000)),
+                1'010'000.0, 5.0);
+}
+
+// The EWMA damps the per-report noise: with alpha = 1000 the newest fit
+// wins outright, with the default 250 the smoothed value lags towards
+// the previous one.
+TEST(SenderReportTracker, EwmaSmoothsTheSlope) {
+    const std::int64_t t0 = kLocalWallOriginUs;
+
+    auto run_with_alpha = [&](std::uint32_t alpha) {
+        SenderReportTracker tracker;
+        SlopeFilterConfig cfg;
+        cfg.min_samples         = 2;
+        cfg.max_samples         = 16;
+        cfg.ewma_alpha_permille = alpha;
+        tracker.set_slope_filter_config(cfg);
+        tracker.set_ssrc_clock_rate(0xE2u, 90'000);
+
+        // Two clean seconds, then a 10 ms media-clock glitch.
+        feed_sr(tracker, 0xE2u, t0,             0,       0);
+        feed_sr(tracker, 0xE2u, t0 + 1'000'000, 90'000,  1'000'000);
+        feed_sr(tracker, 0xE2u, t0 + 2'000'000, 180'900, 2'000'000);
+
+        const auto state = tracker.state_for(0xE2u);
+        EXPECT_TRUE(state.has_value());
+        return state ? state->slope_psec_per_rtp_ts : 0;
+    };
+
+    const std::int64_t unsmoothed = run_with_alpha(1000);
+    const std::int64_t smoothed   = run_with_alpha(250);
+
+    // The unsmoothed value is the raw least-squares fit over three
+    // samples.  The samples are (0, 0), (90'000, 1e6) and (180'900,
+    // 2e6) — the third one sits 10 ms *below* the line the first two
+    // define, so the fit tilts towards it:
+    //
+    //   Sxy = 180'900'000'000      Sxx = 16'362'540'000
+    //   slope = Sxy / Sxx = 11.055741 µs per tick
+    EXPECT_NEAR(static_cast<double>(unsmoothed), 11'055'741.0, 5.0);
+    // The smoothed value lags towards the previous (nominal) slope, so
+    // it sits *above* the raw fit but still below the nominal 11'111'111.
+    EXPECT_GT(smoothed, unsmoothed);
+    EXPECT_LT(smoothed, 11'111'111LL);
+}
+
+// A broken fit — an NTP step on the peer, or a rate that contradicts the
+// negotiated one — must not poison the reconstruction.
+TEST(SenderReportTracker, BrokenFitIsRejected) {
+    SenderReportTracker tracker;
+    tracker.set_ssrc_clock_rate(0xE3u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    feed_sr(tracker, 0xE3u, t0,             0,      0);
+    feed_sr(tracker, 0xE3u, t0 + 1'000'000, 90'000, 1'000'000);
+    // The peer's wall clock jumped a whole second: the implied slope is
+    // 2e6 µs per 90'000 ticks = 22'222'222 ps/tick, twice the nominal.
+    feed_sr(tracker, 0xE3u, t0 + 3'000'000, 180'000, 3'000'000);
+
+    const auto state = tracker.state_for(0xE3u);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_NEAR(static_cast<double>(state->slope_psec_per_rtp_ts),
+                11'111'111.0, 5.0)
+        << "the broken fit must be rejected and the previous slope kept";
+}
+
+// The fit window survives the 2^32 RTP-timestamp wrap: the samples are
+// positioned on a continuous axis, so the wrap is just another delta.
+TEST(SenderReportTracker, FitSurvivesTheRtpTimestampWrap) {
+    SenderReportTracker tracker;
+    tracker.set_ssrc_clock_rate(0xE4u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    // 90'000 ticks across the wrap = exactly 1 s at 90 kHz.  The samples
+    // are positioned on a continuous axis, so the wrap is just another
+    // delta: 0xFFFF'0000 + 90'000 = 0x1'0000'5F90 ⇒ 0x0000'5F90.
+    feed_sr(tracker, 0xE4u, t0,                     0xFFFF'0000u, 0);
+    feed_sr(tracker, 0xE4u, t0 + 1'000'000,         0x0000'5F90u, 1'000'000);
+
+    const auto state = tracker.state_for(0xE4u);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_TRUE(state->slope_fitted);
+    EXPECT_NEAR(static_cast<double>(state->slope_psec_per_rtp_ts),
+                11'111'111.0, 5.0);
+}
+
+// Two SSRCs keep independent fits: one runs its media clock fast, the
+// other does not.
+TEST(SenderReportTracker, FitIsPerSsrc) {
+    SenderReportTracker tracker;
+    tracker.set_ssrc_clock_rate(0xE5u, 90'000);
+    tracker.set_ssrc_clock_rate(0xE6u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    feed_sr(tracker, 0xE5u, t0,             0,      0);
+    feed_sr(tracker, 0xE5u, t0 + 1'000'000, 90'900, 1'000'000);
+    feed_sr(tracker, 0xE6u, t0,             0,      0);
+    feed_sr(tracker, 0xE6u, t0 + 1'000'000, 90'000, 1'000'000);
+
+    const auto fast = tracker.state_for(0xE5u);
+    const auto slow = tracker.state_for(0xE6u);
+    ASSERT_TRUE(fast.has_value());
+    ASSERT_TRUE(slow.has_value());
+    EXPECT_NEAR(static_cast<double>(fast->slope_psec_per_rtp_ts),
+                11'001'100.0, 1.0);
+    EXPECT_NEAR(static_cast<double>(slow->slope_psec_per_rtp_ts),
+                11'111'111.0, 5.0);
+}
+
+// The slope-filter configuration is clamped into its valid ranges.
+TEST(SenderReportTracker, SlopeFilterConfigIsClamped) {
+    SenderReportTracker tracker;
+
+    SlopeFilterConfig bad;
+    bad.min_samples         = 0;
+    bad.max_samples         = 0;
+    bad.ewma_alpha_permille = 0;
+    tracker.set_slope_filter_config(bad);
+    auto cfg = tracker.slope_filter_config();
+    EXPECT_EQ(cfg.min_samples, 1u);
+    EXPECT_EQ(cfg.max_samples, 1u);
+    EXPECT_EQ(cfg.ewma_alpha_permille, 1u);
+
+    SlopeFilterConfig wide;
+    wide.min_samples         = 4;
+    wide.max_samples         = 2;      // below min_samples ⇒ clamped up
+    wide.ewma_alpha_permille = 5000;   // above 1000 ⇒ clamped down
+    tracker.set_slope_filter_config(wide);
+    cfg = tracker.slope_filter_config();
+    EXPECT_EQ(cfg.min_samples, 4u);
+    EXPECT_EQ(cfg.max_samples, 4u);
+    EXPECT_EQ(cfg.ewma_alpha_permille, 1000u);
+}
+
+// ---------------------------------------------------------------------------
+// Inter-clock skew (ADR-017 §"Decision 4").
+//
+// The skew is the *change*, since the stored Sender Report, of the
+// offset between our clock and the peer's:
+//
+//   skew = (our_wall(packet) - peer_capture(packet))
+//        - (our_wall(SR)     - peer_capture(SR))
+//
+// A *constant* offset between the two clocks cancels; what is left is
+// the rate difference accumulated over the SR -> packet interval - plus
+// the change in transit delay, so the value is a per-packet estimate
+// whose *trend* over many packets is the clock skew.
+//
+// Sign convention: a peer clock that runs *fast* shows up as a
+// *negative* skew (our clock falls behind the peer's).  The
+// reconstructed capture instant lives in the *peer's* clock domain, so
+// subtracting the skew moves it onto our own timeline.
+//
+// Placing our own reading on the wall-clock timeline needs the
+// monotonic origin: `unix_us(origin) + local_recv_us` is the Unix
+// instant of our reading.  Without an origin the tracker cannot place
+// our clock at all, and the skew stays 0.
+//
+// The scenarios below keep the transit delay at zero (our wall clock
+// reads exactly the peer's timestamp at the moment we receive the SR)
+// so that the only thing the skew can report is the clock difference.
+// ---------------------------------------------------------------------------
+
+// Without an origin the tracker cannot place our clock: the skew is
+// reported as 0 rather than as a made-up number.
+TEST(SenderReportTracker, SkewNeedsTheMonotonicOrigin) {
+    SenderReportTracker tracker;
+    tracker.set_ssrc_clock_rate(0xF0u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    feed_sr(tracker, 0xF0u, t0,             0,      0);
+    feed_sr(tracker, 0xF0u, t0 + 1'000'000, 90'000, 1'000'000);
+
+    std::int64_t skew = 12345;
+    auto cap = tracker.capture_ts_us_for(0xF0u, 180'000, 0,
+                                          /*clock_rate_hz=*/0,
+                                          /*local_recv_us=*/2'000'000,
+                                          &skew);
+    ASSERT_TRUE(cap.has_value());
+    EXPECT_EQ(skew, 0)
+        << "without set_monotonic_origin() the tracker cannot place our "
+           "own clock on the wall-clock timeline, so it must report no "
+           "skew rather than a fabricated one";
+}
+
+// A peer clock that runs 500 ppm fast for one second shows up as a
+// -500 µs skew: our clock fell behind the peer's by that much over
+// the SR -> packet interval.
+TEST(SenderReportTracker, SkewReportsTheInterClockDiscrepancy) {
+    SenderReportTracker tracker;
+    tracker.set_monotonic_origin(local_origin());
+    tracker.set_ssrc_clock_rate(0xF2u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    // The two clocks agree at the first SR ...
+    feed_sr(tracker, 0xF2u, t0,             0,      0);
+    // ... and the peer's clock has gained 500 µs (500 ppm) by the second
+    // one, while ours has not.
+    feed_sr(tracker, 0xF2u, t0 + 1'000'500, 90'000, 1'000'000);
+
+    std::int64_t skew = 0;
+    auto cap = tracker.capture_ts_us_for(0xF2u, 180'000, 0,
+                                          /*clock_rate_hz=*/0,
+                                          /*local_recv_us=*/2'000'000,
+                                          &skew);
+    ASSERT_TRUE(cap.has_value());
+    EXPECT_NEAR(static_cast<double>(skew), -500.0, 2.0)
+        << "a peer clock running 500 ppm fast must show up as a negative "
+           "skew of 500 µs over one second";
+}
+
+// A peer whose clock runs *fast* shows up as a negative skew that grows
+// with the interval — the inter-clock rate difference of RFC 3550 §8.1.
+TEST(SenderReportTracker, SkewAccumulatesWithTheClockRateDifference) {
+    SenderReportTracker tracker;
+    tracker.set_monotonic_origin(local_origin());
+    tracker.set_ssrc_clock_rate(0xF3u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    // Our clock and the peer's agree at the SR ...
+    feed_sr(tracker, 0xF3u, t0,             0,      0);
+    // ... and the peer's clock has gained 100 µs (100 ppm) by the second
+    // report, while ours has not.
+    feed_sr(tracker, 0xF3u, t0 + 1'000'100, 90'000, 1'000'000);
+
+    std::int64_t skew = 0;
+    auto cap = tracker.capture_ts_us_for(0xF3u, 180'000, 0,
+                                          /*clock_rate_hz=*/0,
+                                          /*local_recv_us=*/2'000'000,
+                                          &skew);
+    ASSERT_TRUE(cap.has_value());
+    EXPECT_NEAR(static_cast<double>(skew), -100.0, 2.0)
+        << "a peer clock running 100 ppm fast must show up as a negative "
+           "skew of 100 µs over one second";
+}
+
+// Two clocks in step, zero transit delay: no skew at all.  This is the
+// null hypothesis the rate-difference cases above depart from.
+TEST(SenderReportTracker, SkewIsZeroWhenTheClocksAgree) {
+    SenderReportTracker tracker;
+    tracker.set_monotonic_origin(local_origin());
+    tracker.set_ssrc_clock_rate(0xF1u, 90'000);
+
+    const std::int64_t t0 = kLocalWallOriginUs;
+    // Our wall clock reads the peer's timestamp at the moment we
+    // receive each report - no transit delay to speak of.
+    feed_sr(tracker, 0xF1u, t0,             0,      0);
+    feed_sr(tracker, 0xF1u, t0 + 1'000'000, 90'000, 1'000'000);
+
+    std::int64_t skew = 0;
+    auto cap = tracker.capture_ts_us_for(0xF1u, 180'000, 0,
+                                          /*clock_rate_hz=*/0,
+                                          /*local_recv_us=*/2'000'000,
+                                          &skew);
+    ASSERT_TRUE(cap.has_value());
+    EXPECT_NEAR(static_cast<double>(skew), 0.0, 2.0)
+        << "two clocks in step must not produce a skew";
+}
+
+// The skew needs the *fitted* slope: with a single Sender Report the
+// media-clock extrapolation absorbs the peer's rate error, and the
+// discrepancy becomes invisible.  Two reports are what makes it
+// observable - which is why the two features land together.
+TEST(SenderReportTracker, SkewNeedsTheFittedSlope) {
+    const std::int64_t t0 = kLocalWallOriginUs;
+
+    // One SR only: the nominal rate hides the peer's 100 ppm.
+    {
+        SenderReportTracker tracker;
+        tracker.set_monotonic_origin(local_origin());
+        tracker.set_ssrc_clock_rate(0xF4u, 90'000);
+        feed_sr(tracker, 0xF4u, t0 + 1'000'100, 90'000, 1'000'000);
+
+        std::int64_t skew = 0;
+        auto cap = tracker.capture_ts_us_for(0xF4u, 180'000, 0,
+                                              /*clock_rate_hz=*/0,
+                                              /*local_recv_us=*/2'000'000,
+                                              &skew);
+        ASSERT_TRUE(cap.has_value());
+        EXPECT_NEAR(static_cast<double>(skew), 0.0, 2.0)
+            << "without a second Sender Report there is nothing to fit, "
+               "so the nominal rate hides the peer's rate error";
+    }
+
+    // Two SRs: the fit measures the peer's rate and the skew appears.
+    {
+        SenderReportTracker tracker;
+        tracker.set_monotonic_origin(local_origin());
+        tracker.set_ssrc_clock_rate(0xF5u, 90'000);
+        feed_sr(tracker, 0xF5u, t0,             0,      0);
+        feed_sr(tracker, 0xF5u, t0 + 1'000'100, 90'000, 1'000'000);
+
+        std::int64_t skew = 0;
+        auto cap = tracker.capture_ts_us_for(0xF5u, 180'000, 0,
+                                              /*clock_rate_hz=*/0,
+                                              /*local_recv_us=*/2'000'000,
+                                              &skew);
+        ASSERT_TRUE(cap.has_value());
+        EXPECT_NEAR(static_cast<double>(skew), -100.0, 2.0)
+            << "the fitted slope must expose the peer's rate error";
+    }
+}
+
 } // anonymous namespace

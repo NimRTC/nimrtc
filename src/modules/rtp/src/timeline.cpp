@@ -106,6 +106,94 @@ std::int64_t unix_us_from_ntp64(Ntp64 ntp) noexcept {
     }
     return unix_seconds * kMicrosecondsPerSecond + frac_us;
 }
+
+// -----------------------------------------------------------------------------
+// Slope estimator (ADR-017 §"Decision 7").
+// -----------------------------------------------------------------------------
+
+/** One retained Sender Report sample.
+ *
+ *  The pair (ntp_unix_us, rtp_ts) is the peer's wall clock and its media
+ *  clock observed at the *same* instant — the raw material of the slope
+ *  fit.  `local_recv_us` is our own monotonic reading at receipt; it is
+ *  kept per sample so the tracker can report the inter-clock skew
+ *  (Decision 4).
+ *
+ *  `tick_pos` is the sample's position on a *continuous* media-clock
+ *  axis: the RTP timestamp is a 32-bit modulo counter (RFC 3550
+ *  Appendix A.1), so the difference to the previous sample is added to
+ *  the previous position.  That keeps the regression immune to the
+ *  2^32 wrap as long as consecutive samples are less than half the
+ *  counter space apart — which the fit enforces separately. */
+struct SrSample {
+    std::int64_t  ntp_unix_us   = 0;   // peer wall clock, µs since Unix epoch
+    std::uint32_t rtp_ts        = 0;   // peer media clock at the SR instant
+    std::int64_t  local_recv_us = 0;   // our monotonic clock at SR receipt
+    std::int64_t  tick_pos      = 0;   // cumulative media-clock position
+};
+
+/** Picoseconds per RTP timestamp tick implied by a nominal clock rate.
+ *  One second is 10^12 ps, so a 90 kHz clock ticks every 11111111.11 ps
+ *  and a 48 kHz clock every 20833333.33 ps. */
+std::int64_t nominal_slope_psec(std::uint32_t clock_rate_hz) noexcept {
+    if (clock_rate_hz == 0) return 0;
+    return 1'000'000'000'000LL / static_cast<std::int64_t>(clock_rate_hz);
+}
+
+/** Minimum wall-clock span (µs) the fit window must cover before a slope
+ *  is fitted.  Two samples a few milliseconds apart carry mostly
+ *  quantisation noise; 50 ms keeps the fit's own relative error well
+ *  below the crystal error it is meant to measure. */
+constexpr std::int64_t kMinFitSpanUs = 50'000;
+
+/** Largest relative deviation from the nominal slope a fit may show
+ *  before it is rejected as broken (an NTP step, a mismatched rate).
+ *  5 % is far above any real crystal error (tens of ppm) and far below
+ *  the point where a wrong rate would go unnoticed. */
+constexpr double kMaxFitDeviationRatio = 0.05;
+
+/** Least-squares fit of the peer's wall clock against its media clock.
+ *
+ *  Returns the slope in picoseconds per RTP tick, or 0 when the window
+ *  cannot support a fit: fewer than two samples, no tick separation
+ *  between the samples, or a wall-clock span below `kMinFitSpanUs`.
+ *
+ *  The regression runs on *centered* coordinates: the tick positions and
+ *  the wall-clock microseconds are both shifted by the first sample's
+ *  value.  The raw wall-clock value is ~1.7e15 µs — exactly
+ *  representable as a double (it is below 2^53) — but the *products* in
+ *  the regression are not, and centering keeps every intermediate small
+ *  enough to stay exact. */
+std::int64_t fit_slope_psec(const std::vector<SrSample>& samples) noexcept {
+    const std::size_t n = samples.size();
+    if (n < 2) return 0;
+
+    const double x0 = static_cast<double>(samples.front().tick_pos);
+    const double y0 = static_cast<double>(samples.front().ntp_unix_us);
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    double ymin = 0.0, ymax = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(samples[i].tick_pos) - x0;
+        const double y = static_cast<double>(samples[i].ntp_unix_us) - y0;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        if (i == 0 || y < ymin) ymin = y;
+        if (i == 0 || y > ymax) ymax = y;
+    }
+
+    const double dn = static_cast<double>(n);
+    const double den = sxx - (sx * sx) / dn;
+    if (!(den > 0.0)) return 0;                       // no tick separation
+    if ((ymax - ymin) < static_cast<double>(kMinFitSpanUs)) return 0;
+
+    const double num = sxy - (sx * sy) / dn;
+    const double us_per_tick = num / den;
+    if (!(us_per_tick > 0.0)) return 0;               // non-increasing clock
+    return static_cast<std::int64_t>(us_per_tick * 1'000'000.0);
+}
 } // namespace
 
 Ntp64 ntp64_from_system_clock() noexcept {
@@ -248,12 +336,24 @@ struct AstAnchor {
     std::uint32_t ticks = 0;   // 24-bit counter value at the SR instant
 };
 
+/** Per-SSRC estimator state: the retained Sender Report window plus the
+ *  EWMA accumulator that smooths the successive fits. */
+struct SsrcFit {
+    std::vector<SrSample> samples;   // oldest first, at most max_samples
+    std::int64_t ewma_psec = 0;       // EWMA-smoothed slope, ps per RTP tick
+    bool        seeded    = false;    // true once a fit seeded the EWMA
+};
+
 struct SenderReportTracker::Impl {
     std::unordered_map<std::uint32_t, SsrcTimelineState> by_ssrc;
     // Per-SSRC ring of observed (RTP-TS, abs-send-time) pairs.
     std::unordered_map<std::uint32_t, std::vector<AstObservation>> ast_obs;
     // Per-SSRC abs-send-time anchor derived from the stored SR.
     std::unordered_map<std::uint32_t, AstAnchor> ast_anchor;
+    // Per-SSRC slope-estimator state (SR window + EWMA accumulator).
+    std::unordered_map<std::uint32_t, SsrcFit> fits;
+    // Slope-estimator configuration (ADR-017 §"Decision 7").
+    SlopeFilterConfig slope_cfg;
 };
 
 SenderReportTracker::SenderReportTracker() noexcept : origin_(Ntp64{0}) {
@@ -294,6 +394,34 @@ void SenderReportTracker::set_monotonic_origin(Ntp64 origin_ntp64) noexcept {
     origin_ = origin_ntp64;
 }
 
+void SenderReportTracker::set_slope_filter_config(
+        const SlopeFilterConfig& config) noexcept {
+    if (!impl_) return;
+    SlopeFilterConfig cfg = config;
+    // Clamp into the valid ranges documented in the header: a zero
+    // `min_samples` would mean "never fit" (the estimator would have no
+    // defined slope at all), and `max_samples` below `min_samples` would
+    // make the window unable to satisfy its own requirement.
+    if (cfg.min_samples < 1) cfg.min_samples = 1;
+    if (cfg.max_samples < cfg.min_samples) cfg.max_samples = cfg.min_samples;
+    if (cfg.ewma_alpha_permille < 1) cfg.ewma_alpha_permille = 1;
+    if (cfg.ewma_alpha_permille > 1000) cfg.ewma_alpha_permille = 1000;
+    impl_->slope_cfg = cfg;
+
+    // Re-fit every SSRC under the new configuration: a different window
+    // size or smoothing weight changes the slope the tracker extrapolates
+    // with, and the retained samples make that possible without waiting
+    // for the next Sender Report.
+    for (auto& entry : impl_->fits) {
+        refit_ssrc(entry.first);
+    }
+}
+
+SlopeFilterConfig SenderReportTracker::slope_filter_config() const noexcept {
+    if (!impl_) return SlopeFilterConfig{};
+    return impl_->slope_cfg;
+}
+
 void SenderReportTracker::set_ast_agreement_tolerance_us(
         std::int64_t tolerance_us) noexcept {
     ast_tolerance_us_ = tolerance_us < 0 ? 0 : tolerance_us;
@@ -313,8 +441,77 @@ void SenderReportTracker::set_ssrc_clock_rate(
     if (!impl_ || clock_rate_hz == 0) return;
     auto& state = impl_->by_ssrc[ssrc];
     state.clock_rate_hz = clock_rate_hz;
-    state.slope_nsec_per_rtp_ts =
-        1'000'000'000LL / static_cast<std::int64_t>(clock_rate_hz);
+
+    // A rate change invalidates the retained window: the samples were
+    // recorded against the previous media clock, and the fit's acceptance
+    // band is relative to the nominal slope of *this* rate.  Drop the
+    // window and let the next Sender Report start a new one.
+    impl_->fits.erase(ssrc);
+    state.slope_fitted       = false;
+    state.slope_sample_count = 0;
+    const std::int64_t nominal = nominal_slope_psec(clock_rate_hz);
+    state.slope_psec_per_rtp_ts = nominal;
+    state.slope_nsec_per_rtp_ts = (nominal + 500) / 1000;
+}
+
+void SenderReportTracker::refit_ssrc(std::uint32_t ssrc) noexcept {
+    if (!impl_) return;
+    auto fit_it = impl_->fits.find(ssrc);
+    if (fit_it == impl_->fits.end()) return;
+    auto st_it = impl_->by_ssrc.find(ssrc);
+    if (st_it == impl_->by_ssrc.end()) return;
+
+    SsrcFit&             fit = fit_it->second;
+    SsrcTimelineState&   st  = st_it->second;
+    const SlopeFilterConfig& cfg = impl_->slope_cfg;
+
+    const std::int64_t nominal = nominal_slope_psec(st.clock_rate_hz);
+    st.slope_sample_count = static_cast<std::uint32_t>(fit.samples.size());
+
+    // Not enough samples yet (or the fit is disabled outright): the
+    // nominal rate stays in force.  `slope_fitted` stays false so the
+    // lookup knows to use the exact rational form.
+    if (cfg.min_samples < 2 || fit.samples.size() < cfg.min_samples) {
+        st.slope_fitted          = false;
+        st.slope_psec_per_rtp_ts = nominal;
+        st.slope_nsec_per_rtp_ts = (nominal + 500) / 1000;
+        return;
+    }
+
+    const std::int64_t fitted = fit_slope_psec(fit.samples);
+    if (fitted <= 0) {
+        // The window cannot support a fit (too short, or no separation).
+        // Keep whatever the EWMA already holds.
+        return;
+    }
+    const std::int64_t deviation = fitted > nominal ? fitted - nominal
+                                                     : nominal - fitted;
+    if (static_cast<double>(deviation) >
+        static_cast<double>(nominal) * kMaxFitDeviationRatio) {
+        // A fit this far from the negotiated rate means something is
+        // broken (an NTP step on the peer, a rate that is not what the SDP
+        // says).  Reject it and keep the previous slope rather than
+        // poisoning the reconstruction.
+        return;
+    }
+
+    const std::int64_t alpha =
+        static_cast<std::int64_t>(cfg.ewma_alpha_permille);
+    if (!fit.seeded) {
+        // The first fit seeds the EWMA: there is no history to smooth
+        // against yet, and adopting the measured rate immediately is
+        // strictly better than continuing to use the nominal one.
+        fit.ewma_psec = fitted;
+        fit.seeded    = true;
+    } else {
+        // alpha == 1000 ⇒ the newest fit wins outright (no smoothing).
+        fit.ewma_psec =
+            (fit.ewma_psec * (1000 - alpha) + fitted * alpha) / 1000;
+    }
+
+    st.slope_fitted          = true;
+    st.slope_psec_per_rtp_ts = fit.ewma_psec;
+    st.slope_nsec_per_rtp_ts = (fit.ewma_psec + 500) / 1000;
 }
 
 void SenderReportTracker::on_sender_report(
@@ -333,12 +530,49 @@ void SenderReportTracker::on_sender_report(
     // 90000 unconditionally (the pre-v1.0.0 behaviour) produced wrong
     // capture times for 48 kHz audio.
     if (state.clock_rate_hz == 0) state.clock_rate_hz = kDefaultClockRateHz;
-    state.slope_nsec_per_rtp_ts =
-        1'000'000'000LL / static_cast<std::int64_t>(state.clock_rate_hz);
-    // Running count of SRs seen for this SSRC.  Only the most-recent
-    // SR is *retained* (the state is overwritten above) — the count is
-    // a diagnostic, not a sample history.
+    // Running count of SRs seen for this SSRC.  The count is a
+    // diagnostic; the *window* below is what the slope fit consumes.
     ++state.sr_count;
+
+    // ---- Retain the sample for the slope fit (ADR-017 §"Decision 7") ----
+    //
+    // The fit needs several (wall clock, media clock) pairs to measure
+    // how fast the peer's media clock runs against its wall clock.  The
+    // samples are kept per SSRC in a bounded window.
+    SsrcFit& fit = impl_->fits[sr.ssrc];
+
+    SrSample sample;
+    sample.ntp_unix_us   = unix_us_from_ntp64(Ntp64{sr.ntp_timestamp});
+    sample.rtp_ts        = sr.rtp_timestamp;
+    sample.local_recv_us = local_recv_us_since_epoch;
+
+    const std::int64_t rate = static_cast<std::int64_t>(
+        state.clock_rate_hz ? state.clock_rate_hz : kDefaultClockRateHz);
+    if (fit.samples.empty()) {
+        sample.tick_pos = 0;
+    } else {
+        const std::int64_t delta = rtp_ts_signed_diff(
+            sr.rtp_timestamp, fit.samples.back().rtp_ts);
+        // A delta that is not a plausible media-clock advance means the
+        // peer's clock restarted (or the SSRC was reused for a new
+        // stream).  Drop the window instead of fitting across the
+        // discontinuity; one hour of media time is far beyond any
+        // plausible SR cadence.
+        if (delta < 0 || delta > rate * 3600) {
+            fit.samples.clear();
+            fit.seeded = false;
+            sample.tick_pos = 0;
+        } else {
+            sample.tick_pos = fit.samples.back().tick_pos + delta;
+        }
+    }
+    fit.samples.push_back(sample);
+    while (fit.samples.size() > impl_->slope_cfg.max_samples) {
+        fit.samples.erase(fit.samples.begin());
+    }
+
+    // Re-fit the slope over the (possibly extended) window.
+    refit_ssrc(sr.ssrc);
 
     // A new SR invalidates the previous abs-send-time anchor (it was
     // computed against the old SR's RTP timestamp).  Re-derive it from
@@ -484,7 +718,6 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
         std::int64_t local_recv_us_since_epoch,
         std::int64_t* out_sender_recv_skew_us) noexcept {
     if (!impl_) return std::nullopt;
-    (void)local_recv_us_since_epoch;
     if (out_sender_recv_skew_us) *out_sender_recv_skew_us = 0;
 
     // Record the (rtp_ts, abs_send_time_24) pair *before* reading the
@@ -561,8 +794,22 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
     }
     // delta_us = forward_ticks * 1e6 / rate_hz.
     // forward_ticks ≤ 2^31 ⇒ product ≤ 2.1e15; fits in int64.
-    const std::int64_t  delta_us =
-        (forward_ticks * 1'000'000LL) / rate_hz;
+    //
+    // When the slope estimator holds a *fitted* slope (ADR-017
+    // §"Decision 7"), the media-clock delta is computed from the
+    // measured rate of the peer's media clock against its wall clock
+    // instead of from the nominal rate.  The fitted slope is carried in
+    // picoseconds per tick so the arithmetic keeps its precision: at
+    // 90 kHz one tick is ~11111111 ps, and the product
+    // forward_ticks × slope stays well inside int64.
+    std::int64_t delta_us = 0;
+    if (state.slope_fitted && state.slope_psec_per_rtp_ts > 0) {
+        delta_us = (forward_ticks * state.slope_psec_per_rtp_ts) / 1'000'000LL;
+    } else {
+        // Nominal rate: the exact rational form, so a 90 kHz clock
+        // advances exactly 1'000'000 µs per 90'000 ticks.
+        delta_us = (forward_ticks * 1'000'000LL) / rate_hz;
+    }
     std::int64_t  capture_unix_us = sr_unix_us + delta_us;
 
     // -----------------------------------------------------------------
@@ -623,12 +870,48 @@ std::optional<std::int64_t> SenderReportTracker::capture_ts_us_for(
         }
     }
 
-    // Skew placeholder — v1.0.0 doesn't carry a paired "local
-    // monotonic" at the SR instant *and* at the RTP instant; we leave
-    // 0 for now. Callers needing skew should sample the local mono
-    // clock at every SR + at every captured RTP and compute it out-
-    // of-band. See ADR-017 §"Decision 4".
-    if (out_sender_recv_skew_us) *out_sender_recv_skew_us = 0;
+    // -----------------------------------------------------------------
+    // Inter-clock skew (ADR-017 §"Decision 4").
+    // -----------------------------------------------------------------
+    //
+    // The skew is the change, since the stored Sender Report, of the
+    // offset between our clock and the peer's:
+    //
+    //   offset(t) = our_wall_clock(t) − peer_wall_clock(t)
+    //
+    // evaluated at the packet and at the SR.  The *difference* of the
+    // two offsets is what survives: the two clocks' constant phase
+    // difference cancels, and so does the constant part of the network
+    // delay.  What is left is the accumulated rate difference between
+    // the two clocks over the SR → packet interval — the inter-clock
+    // skew in the sense of RFC 3550 §8.1.  A peer whose wall clock runs
+    // 100 ppm fast against ours shows up as roughly −100 µs per second
+    // of session.
+    //
+    // Placing our own reading on the wall-clock timeline needs the
+    // monotonic origin: `unix_us(origin) + local_recv_us` is the Unix
+    // instant of our reading.  Without an origin the tracker cannot
+    // place our clock at all, and the skew stays 0 — which is exactly
+    // why `set_monotonic_origin()` is a prerequisite for the skew and
+    // not merely a nicety.
+    //
+    // Caveat: the value also carries the *difference in transit delay*
+    // between the Sender Report and the packet (jitter).  A single
+    // sample is therefore noisy at the millisecond level; the trend over
+    // many packets is the clock skew.
+    if (out_sender_recv_skew_us) {
+        *out_sender_recv_skew_us = 0;
+        if (origin_.value != 0) {
+            const std::int64_t origin_unix_us = unix_us_from_ntp64(origin_);
+            const std::int64_t local_unix_us =
+                origin_unix_us + local_recv_us_since_epoch;
+            const std::int64_t sr_local_unix_us =
+                origin_unix_us + state.sr_local_recv_us;
+            const std::int64_t offset_at_packet = local_unix_us - capture_unix_us;
+            const std::int64_t offset_at_sr     = sr_local_unix_us - sr_unix_us;
+            *out_sender_recv_skew_us = offset_at_packet - offset_at_sr;
+        }
+    }
     return capture_unix_us;
 }
 

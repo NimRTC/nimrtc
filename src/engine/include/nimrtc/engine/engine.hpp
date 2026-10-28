@@ -918,6 +918,33 @@ public:
      *  Empty until the first Sender Report has been ingested. */
     NIMRTC_API_STABLE std::optional<std::int64_t> last_one_way_delay_us() const noexcept;
 
+    /** Inter-clock skew (microseconds) of the most recently received
+     *  inbound frame — the *change*, since the peer's last Sender Report,
+     *  of the offset between our clock and the peer's.
+     *
+     *  This is the quantity RFC 3550 §8.1 calls inter-clock skew: a
+     *  *rate* difference between the two ends' clocks, which is what
+     *  makes a long session's capture timestamps drift.  A peer whose
+     *  wall clock runs fast shows up as a negative value.
+     *
+     *  The constant phase difference between the two clocks cancels out;
+     *  what remains is the accumulated rate difference over the
+     *  Sender-Report → packet interval, plus the difference in transit
+     *  delay between the two packets.  A single sample is therefore
+     *  noisy at the millisecond level — the *trend* over many packets is
+     *  the clock skew.
+     *
+     *  Empty until the first Sender Report has been ingested.  Requires
+     *  the engine's monotonic origin, which is established at `open()`,
+     *  so the value is available as soon as a reconstruction exists. */
+    NIMRTC_API_STABLE std::optional<std::int64_t>
+        last_sender_recv_skew_us() const noexcept;
+
+    /** Same as `last_sender_recv_skew_us()` but for a specific inbound
+     *  SSRC (each stream carries its own clock pair). */
+    NIMRTC_API_STABLE std::optional<std::int64_t>
+        sender_recv_skew_us_for_ssrc(std::uint32_t ssrc) const noexcept;
+
     // ---- Transport strategy accessors (v0.12.0 Slice 7.6 PR3) -----------
     //
     // These expose the resolved (validated + Selector-applied) state of

@@ -16,7 +16,80 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/plan/timeline-engine-wiring.md`) landed after the rc.1 cut
   and is tracked by the `Fixed` entries here.
 
+### Added
+
+- **The Sender Report tracker now measures the peer's media clock
+  instead of assuming it** (ADR-017 §"Decision 7").  The v0.14
+  reconstruction extrapolated a capture instant from a *single*
+  Sender Report using the nominal clock rate from the SDP
+  `a=rtpmap:` line, so every crystal error in the peer's media clock
+  was inherited one sample at a time.  The tracker now retains a
+  bounded window of Sender Reports per SSRC and fits the peer's wall
+  clock against its media clock by least squares, then smooths the
+  successive fits with an exponentially-weighted moving average:
+
+  - `SlopeFilterConfig` (`min_samples`, `max_samples`,
+    `ewma_alpha_permille`) configures the estimator; the values are
+    clamped on the way in, and changing them re-fits every SSRC from
+    the retained samples rather than waiting for the next report.
+  - The fit is rejected when it deviates from the negotiated rate by
+    more than 5 % (an NTP step on the peer, or a rate the SDP does not
+    describe), and the previous slope is kept rather than poisoning
+    the reconstruction.
+  - The window is immune to the 32-bit RTP timestamp wrap: the
+    regression runs on a cumulative media-clock position, and a
+    non-plausible advance (a peer clock restart, or an SSRC reused
+    for a new stream) drops the window instead of fitting across the
+    discontinuity.
+  - `SenderReportTracker::set_slope_filter_config()` /
+    `slope_filter_config()` expose the configuration.
+
+- **The inter-clock skew is now observable through the engine**
+  (ADR-017 §"Decision 4").  `NimRTCEngine::last_sender_recv_skew_us()`
+  and `NimRTCEngine::sender_recv_skew_us_for_ssrc(ssrc)` report the
+  difference between how far the peer's *media* clock advanced and how
+  far *our* clock advanced between the Sender Report and the packet —
+  the rate discrepancy between the two ends' crystals, in the sense of
+  RFC 3550 §8.1.  The constant phase difference between the clocks
+  cancels, so the value is the drift, not the offset.  A peer whose
+  media clock runs 100 ppm fast shows up as roughly 100 µs per second
+  of session.  The value also carries the *difference in transit
+  delay* between the report and the packet, so a single sample is
+  noisy at the millisecond level; the trend over many packets is the
+  skew.  Both accessors stay empty until a Sender Report has been
+  ingested, and the per-SSRC accessor only answers for a stream the
+  engine has actually observed.
+
+- **Engine-level coverage for the skew** (`tests/test_engine_timeline.cpp`):
+  three new cases pin the published value against the media advance
+  (1 s and 2 s of media at 48 kHz), the per-SSRC routing, and the
+  "empty when there is nothing to say" contract on both the
+  convenience and the per-SSRC accessor.
+
 ### Fixed
+
+- **The Sender Report the engine sent described a different instant
+  than the media it was paired with.**  RFC 3550 §6.4.1 words the
+  NTP field as "the wallclock time when the report was sent", while
+  the RTP timestamp in the same report is the timestamp of the last
+  packet *sent* — two different moments, up to a whole report period
+  apart.  The engine took its wall-clock reading when it built the
+  report, so every receiver that reconstructed a capture instant from
+  it inherited the report-cadence bias: a capture timestamp that was
+  systematically late by up to `sr_period_ms` (1 s by default).  The
+  engine now records the packet's send instant when the packet is
+  built — the same instant the abs-send-time field encodes — and
+  reuses it for the report, so the two halves of the report denote
+  the same instant and the reconstruction carries no cadence bias.
+
+- **The DTLS-derived SRTP keying material assumed NimRTC was always
+  the DTLS server.**  The key derivation picked the *client* master
+  key for inbound traffic and the *server* master key for outbound,
+  which is correct only when the peer sent the ClientHello.  When the
+  negotiation made NimRTC the DTLS *client* — the case a
+  NimRTC-to-NimRTC session hits — the two halves came out swapped and
+  the inbound traffic was undecryptable.  The direction is now taken
+  from the negotiated DTLS role (RFC 5763 §5).
 
 - **The msquic-backed WebTransport server corrupted the heap and
   dropped the first datagram of every session.**  Three defects in

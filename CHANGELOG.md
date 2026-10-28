@@ -427,35 +427,47 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **The `linux-aarch64` CI leg is now gated on a repository variable
-  rather than on a source edit (2026-10-28).**  The GitHub-hosted
-  ARM64 runner pool failed again after the 2026-10-14 re-enable: CI
-  run #269 (#40370283784) sat `queued` for 3+ hours without allocation,
-  and run #268's aarch64 job never received a runner at all.  A job
-  that never starts keeps the whole workflow run in `in_progress`, so
-  no merge or release gate can observe a terminal state.  The leg was
-  therefore disabled on 2026-10-27 — but disabling it with a
-  hard-coded `if: false` meant every re-enable cost a code change, and
-  the source and the runner pool's actual health could drift apart
-  unnoticed.
+- **The `linux-aarch64` CI leg's real problem was an invalid runner
+  label, not runner-pool capacity (2026-10-28).**  The CHANGELOG
+  history for this leg attributed every failure to "the GitHub-hosted
+  ARM64 runner pool is unreliable" — run #269 queued 3+ hours without
+  allocation, run #268's job never received a runner, run #35049874137
+  queued 11+ hours.  That diagnosis was wrong.  The label the job
+  requested was `ubuntu-22.04-arm64`, and **no such GitHub-hosted
+  label exists**: GitHub's documented Linux ARM64 labels are
+  `ubuntu-26.04-arm`, `ubuntu-24.04-arm` and `ubuntu-22.04-arm` (see
+  the "Available Images" table in `actions/runner-images`' README).
+  The label was introduced by `4467cd8` (2026-09-11); the project's own
+  earlier commits used the valid `ubuntu-22.04-arm`.
 
-  The mechanism is now a **switch**:
+  A job requesting a label that matches no runner does not fail — it
+  sits `queued` **forever**, with `started_at == created_at` and an
+  empty `runner_name`.  Both historical observations have exactly that
+  signature: run #269's aarch64 job reports
+  `labels: [ubuntu-22.04-arm64]` with an empty `runner_name` while the
+  other three jobs *in the same run* were allocated a runner within
+  five seconds; and `4467cd8`'s aarch64 check-run sat queued for
+  exactly 24 h (`2026-09-11T02:30:03Z` → `2026-09-12T02:30:03Z`)
+  before being cancelled.  A saturated pool cannot be selective like
+  that, and 24 h is the point at which the platform gives up on a job
+  it can never schedule.
 
-  - The `linux-aarch64` job's condition is
-    `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}`.  The variable lives in
-    `Settings → Secrets and variables → Actions → Variables`; while
-    it is unset the leg is skipped and the other three platforms
-    (`windows / msvc`, `linux-gcc / x86_64`, `macos-clang / arm64`)
-    finish normally.  Setting it to `on` and triggering the workflow
-    manually (`workflow_dispatch`, newly added to `ci.yml`) runs the
-    4-platform gate; setting it back to `off` restores the skip.
-    Neither direction touches the source tree.
-  - The runner label moved from `ubuntu-22.04-arm64` to
-    **`ubuntu-24.04-arm`** — the current public-repo arm64 image in
-    GitHub's documented runner set.  The 22.04 label is no longer
-    listed there, and its pool was the one that queued for hours.  The
-    `release.yml` leg moved with it (that leg stays
-    `continue-on-error: true` either way).
+  So the three "queue" reports were one bug seen three times, and the
+  elaborate response to it (a TEMP-DISABLE, then a
+  `vars.NIMRTC_ARM64_CI` repository-variable switch, then a
+  3-platform-vs-4-platform shipping decision) was built on a
+  misdiagnosis.  Concretely, this change:
+
+  - Corrects the runner label to **`ubuntu-24.04-arm`** (a real label).
+    `release.yml` moved with it.
+  - **Removes the `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}` gate and the
+    `NIMRTC_ARM64_CI` repository variable entirely.**  The `linux-aarch64`
+    job in `ci.yml` is a plain hard gate again.  The variable gate had
+    a second cost beyond the one it was meant to solve: with the
+    variable unset the leg was *always* skipped, so the 4-platform
+    matrix could never be observed green on a normal push — which is
+    exactly what `v1.0-plan.md` §3 Gate #8 requires.  `workflow_dispatch`
+    is kept, since re-running the matrix on demand is useful anyway.
   - The `linux-aarch64` job no longer installs the
     `g++-aarch64-linux-gnu` cross toolchain.  The runner is a *native*
     arm64 host, and `cmake/toolchains/aarch64-linux-gnu.cmake` has a
@@ -463,14 +475,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the cross package would have made the toolchain file prefer the
     cross compiler and point `CMAKE_SYSROOT` at a sysroot the native
     image does not carry.
+  - Keeps `build-linux-aarch64` in `release.yml` at
+    `continue-on-error: true` — but on the honest ground that the
+    *release* aarch64 build has not yet been observed to complete (it is
+    a different job with different build settings than the CI leg), not
+    on the ground that the runner pool might be busy.  Once it has
+    completed green once, it becomes a hard gate and row W5 is deleted
+    from `docs/plan/ci-workarounds.md`.
 
-  The 2026-10-27 TEMP-DISABLE state is therefore superseded rather
-  than merely reversed: the leg is *skipped* while the pool is
-  unusable, but it is skipped by configuration instead of by a source
-  edit.  The reason is recorded in `docs/plan/v0.13.0-release-notes.md`
-  §4 and `docs/plan/ci-workarounds.md` §4.
+  The full record, including the label evidence, is in
+  `docs/plan/ci-workarounds.md` §4.1.
   (`.github/workflows/ci.yml`, `.github/workflows/release.yml`,
-  `docs/plan/v0.13.0-release-notes.md`, `docs/plan/ci-workarounds.md`)
+  `RELEASING.md`, `docs/plan/v0.13.0-release-notes.md`,
+  `docs/plan/ci-workarounds.md`)
 
 ### v1.0.0 "Stable" release notes — DRAFT, not cut
 
@@ -523,7 +540,7 @@ real `## [1.0.0]` block:
 | # | Blocker | Ref |
 |---|---|---|
 | 1 | Case E Chrome ↔ NimRTC DataChannel PASS on Windows + Linux x86_64 | `v1.0-plan.md` §3 Gate #1 / #9 |
-| 2 | ~~aarch64 support-matrix decision~~ **Closed** — the 4-platform-hard-gate vs. 3-platform-ship question is settled as a **split decision**: the `linux-aarch64` **CI** leg in `ci.yml` is a hard gate *while the runner pool is usable* (its condition is `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}` since 2026-10-28, so the leg is skipped while the hosted ARM64 pool is unusable — the `ubuntu-22.04-arm64` pool sat `queued` for 3+ hours without allocation, and the runner label has since moved to `ubuntu-24.04-arm`; see Unreleased -> Changed), while the `linux-aarch64` **release** leg in `release.yml` is `continue-on-error: true` and deliberately excluded from `publish-release`'s `needs:` (GHA ARM64 runner capacity is unreliable — a 14+ hour queue was observed at the v0.14.0 cut). The consequence is explicit, not silent: a missing aarch64 bundle publishes a "Partial release" banner naming the bundle, `publish-release` writes the present/missing bundle list into the Step Summary, and the aarch64 artefact is attached by a follow-up release once capacity returns. | `docs/plan/ci-workarounds.md` §4 (W5), `RELEASING.md` §3.1 step 4, `v1.0-plan.md` §3 Gate #8 |
+| 2 | ~~aarch64 support-matrix decision~~ **Closed** — the 4-platform-hard-gate vs. 3-platform-ship question is settled as a **split decision**: the `linux-aarch64` **CI** leg in `ci.yml` is a **plain hard gate** (no `if:`, no repository variable) since 2026-10-28 — the "ARM64 runner pool is unreliable" rationale behind the earlier `vars.NIMRTC_ARM64_CI` switch was a misdiagnosis (the runner label was `ubuntu-22.04-arm64`, which is not a GitHub-hosted label at all, so the job could never be scheduled; the label is now the valid `ubuntu-24.04-arm`; see Unreleased -> Changed and `docs/plan/ci-workarounds.md` §4.1), while the `linux-aarch64` **release** leg in `release.yml` is `continue-on-error: true` and deliberately excluded from `publish-release`'s `needs:` — that leg is a *different job with different build settings* and has not yet been observed to complete, so it stays soft until its first green run. The consequence is explicit, not silent: a missing aarch64 bundle publishes a "Partial release" banner naming the bundle, `publish-release` writes the present/missing bundle list into the Step Summary, and the aarch64 artefact is attached by a follow-up release. | `docs/plan/ci-workarounds.md` §4 (W5), `RELEASING.md` §3.1 step 4, `v1.0-plan.md` §3 Gate #8 |
 | 3 | ~~WebRTC APM in the release artefact~~ **Closed** — `release.yml` no longer disables the prebuild: the `Prebuild WebRTC APM` step runs on all four platforms with `continue-on-error: true`, and Configure picks `-DNIMRTC_VENDORED_WEBRTC_APM=ON` on prebuild success / `OFF` on failure (the stub 3A path) instead of aborting the cut — the meson `abseil-cpp` subproject build that broke the `v0.14.0` cut (`dc15ad8`) can no longer kill a release. The `audio3a` link is now `PUBLIC nimrtc_vendor_webrtc_apm` so the APM's bundled-abseil INTERFACE includes reach the test/example/benchmark consumers, which is what made the `=ON` path unbuildable in the first place. Each job records its outcome in `build/3a-status-<platform>.txt`; `publish-release` surfaces the per-platform 3A status in the release body and the Step Summary, so a stub-3A bundle is never published silently. | `docs/plan/ci-workarounds.md` §3 (W3), `RELEASING.md` §3.1 step 4 |
 | 4 | ~~Public-header per-symbol sweep + freeze~~ **Closed** — every public symbol across 100 public headers is classified; the `scripts/api_freeze_scan.js` gate exits 0 against the current tree and `scripts/check_api_marker_includes.py` confirms every marker-using header pulls in `<nimrtc/core/api_version.hpp>` | `v1.0-plan.md` §3 Gate #2 |
 | 5 | 7-day Case D + Case E soak with no new failures | `v1.0-plan.md` §12.3.5 |
@@ -983,7 +1000,11 @@ real `## [1.0.0]` block:
   runner capacity is unreliable (a 14+ hour queue
   was observed at the v0.14.0 cut), so making it a
   hard gate would block publishing the Windows /
-  Linux x86_64 / macOS arm64 trio.  Consequences,
+  Linux x86_64 / macOS arm64 trio.  *(Corrected
+  2026-10-28: the "capacity" explanation was wrong
+  — the runner label was invalid, so the job could
+  never be scheduled.  See `[Unreleased]` → Changed.)*
+  Consequences,
   all explicit rather than silent: the aarch64
   bundle is best-effort; when the leg does not run
   or fails, the release is published with the other

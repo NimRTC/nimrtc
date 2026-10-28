@@ -43,7 +43,7 @@ history. This register answers that in one table.
 | **W2** | `target_compile_options(core PRIVATE /wd28020)` | `src/third_party/CMakeLists.txt` | msquic's `core` target compiles `src/core/crypto_tls.c` under MSVC `/analyze /WX /sdl`, tripping a known false-positive `C28020` (SAL value-range) on a macro-driven `TlsRead`/`TlsWrite` switch. Scoped `PRIVATE` to the vendored `core` target so it does not leak into NimRTC's own `/W4 /WX` targets. | MSVC analysis fails the msquic build. | Upstream msquic suppresses or fixes C28020; or NimRTC stops building msquic with `/analyze`. | No |
 | **W3** | `Prebuild WebRTC APM` step disabled via `if: ${{ false }}` (×4) | `.github/workflows/release.yml` lines 186, 273, 350, 445 | The step's output was unused: the release Configure passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`, so `audio3a` links the same system/stub APM path CI uses. Caused a `release / build / windows` failure during the v0.14.0 release cut. | Nothing today — the step is dead weight. Restoring it *without* also flipping the Configure flag would reintroduce the failure. | Make `target_link_libraries(audio3a PUBLIC webrtc_apm::webrtc_apm)` so abseil's `INCLUDE_DIRECTORIES` propagate to the consumer, then restore the `if:` line **and** configure with `NIMRTC_VENDORED_WEBRTC_APM=ON`. | **See §3 — this is a release-artifact gap** |
 | **W4** | Vendor manifest check is `continue-on-error: true` | `.github/workflows/ci.yml` (×4), `.github/workflows/interop.yml` (×2) | The drift gate (`tools/check_vendor.py`) only runs when `src/third_party/vendor.json` exists. Warn-only pre-1.0 so an unrelated PR is not blocked by vendor bookkeeping. | Unrelated PRs start failing on vendor drift. | **Intentional through v0.x.** At v1.0.0 the check becomes a hard gate and `continue-on-error` is removed. | No (but see §3) |
-| **W5** | `build-linux-aarch64` is `continue-on-error: true` and excluded from `publish-release`'s `needs:` | `.github/workflows/release.yml` lines 322, 505 | GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14). Making it a hard gate would block the Windows / Linux x86_64 / macOS trio. | Either releases block for hours waiting for a runner, or aarch64 silently stops shipping. | GHA ARM64 runner capacity is reliably available. Until then the `dist/` bundle scan (lines 710-718) prints a "Partial release" banner when the aarch64 tarball is missing. | **See §4 — this is a support-matrix question** |
+| **W5** | `build-linux-aarch64` is `continue-on-error: true` and excluded from `publish-release`'s `needs:` | `.github/workflows/release.yml` lines 341, 576 | **Original rationale was wrong.** The entry used to read "GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14)". The queue was not a capacity problem: the runner label was `ubuntu-22.04-arm64`, which is **not a GitHub-hosted label at all**, so the job could never be allocated a runner (see §4). With the label corrected to `ubuntu-24.04-arm` this leg runs like the other three. The soft gate is nevertheless retained for the v1.0.0 cut because the *release* leg's aarch64 build has never actually been observed to complete — the CI leg and the release leg are different jobs with different build settings. | A release cut that includes an aarch64 bundle would block on that bundle; if the aarch64 release build has a real defect, the release ships a known-bad artefact. | The `linux-aarch64` **release** job completes green at least once with the corrected label, then this row is removed and the job is added to `publish-release`'s `needs:`. Until then the `dist/` bundle scan prints a "Partial release" banner naming the missing bundle. | **See §4 — this is a support-matrix question** |
 
 ---
 
@@ -148,42 +148,80 @@ file.**
 This is `docs/plan/v1.0-plan.md` §3 DoD **Gate #8**, restated in terms of
 what the workflow actually does.
 
-Current factual state, as of 2026-10-28:
+### 4.1 The root cause was a wrong runner label, not runner capacity
+
+Everything this section used to say about "the GitHub-hosted ARM64 pool
+is unreliable" was a **misdiagnosis**. The ARM64 leg never failed
+because the pool was saturated. It never failed *at all* — it was
+**unschedulable**, because the label it asked for was not a label that
+exists.
+
+`ubuntu-22.04-arm64` was introduced by commit `4467cd8` (2026-09-11).
+GitHub's published runner-label set (`actions/runner-images` README,
+"Available Images" table) lists exactly three Linux ARM64 labels:
+
+| Image | Architecture | YAML Label |
+|---|---|---|
+| Ubuntu 26.04 Arm64 | arm64 | `ubuntu-26.04-arm` |
+| Ubuntu 24.04 Arm64 | arm64 | `ubuntu-24.04-arm` |
+| Ubuntu 22.04 Arm64 | arm64 | `ubuntu-22.04-arm` |
+
+There is no `-arm64` suffix variant. (The `-arm64` string does appear
+in that README, but only in the *image-directory* link targets —
+`Ubuntu2204-Arm64-Readme.md` — never in the "YAML Label" column.) The
+project's own earlier history used the valid label: `21e883f` and
+`70e9de1` both requested `ubuntu-22.04-arm`, and `4467cd8` is the
+commit that changed it to `ubuntu-22.04-arm64`.
+
+A job that requests a label matching no runner does not fail — it sits
+in `queued` **forever**. The check-run stays `queued`, `started_at`
+equals `created_at`, and `runner_name` stays empty. Two independent
+observations confirm exactly this signature, and neither of them is
+what pool saturation looks like:
+
+- **Run #269** (`#40370283784`, 2026-10-26). Its aarch64 job reports
+  `labels: [ubuntu-22.04-arm64]` with an **empty `runner_name`**, and
+  `started_at == created_at == 17:37:02Z`. The other three jobs in the
+  *same run* — `macos-clang / arm64`, `windows / msvc`,
+  `linux-gcc / x86_64` — were each allocated a runner within **five
+  seconds** of creation. A saturated pool cannot be selective like
+  that; a bad label affects exactly one leg and no other.
+- **Commit `4467cd8`**'s aarch64 check-run sat queued for exactly
+  **24 hours** (`2026-09-11T02:30:03Z` → `2026-09-12T02:30:03Z`) and
+  was then cancelled. 24 h is the point at which the platform gives
+  up on a job it can never schedule — not a point at which a busy
+  queue drains.
+
+So "the pool queued for 11+ hours", "the pool queued for 3+ hours"
+and "run #268's job never received a runner at all" are all the same
+single bug observed three times. The project then built an elaborate
+narrative on top of it — a TEMP-DISABLE, then a `vars.NIMRTC_ARM64_CI`
+repository-variable switch, then a support-matrix decision about
+whether to ship 3 platforms or 4 — all of which was treating a
+one-character typo in a label as an infrastructure capacity problem.
+
+### 4.2 Current factual state, as of 2026-10-28
 
 | Leg | `ci.yml` (build + unit tests) | `release.yml` (shipped artefact) |
 |---|---|---|
 | windows-2022 / MSVC | active, hard gate | active, hard gate |
 | ubuntu-22.04 / GCC x86_64 | active, hard gate | active, hard gate |
 | macos-14 / Apple Clang arm64 | active, hard gate | active, hard gate |
-| ubuntu-24.04-arm / GCC | ⏸ **gated on the `NIMRTC_ARM64_CI` repository variable** (skipped while the variable is unset) — run on demand via `workflow_dispatch` | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
+| ubuntu-24.04-arm / GCC | **active, hard gate** — no `if:`, no variable | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
 
-The `ci.yml` leg was active (and a hard gate) from 2026-10-14 to
-2026-10-27.  The GitHub-hosted ARM64 pool then failed again: CI run
-#269 (#40370283784) sat `queued` for 3+ hours without allocation and
-run #268's aarch64 job never received a runner at all.  A job that
-never starts keeps the whole workflow run in `in_progress`, so the run
-never reaches a terminal state and no merge or release gate can
-observe it.  The leg is therefore gated — but **not** by a code change
-any more.
+**What changed on 2026-10-28.** Three things:
 
-**What changed on 2026-10-28.**  Three things, so that re-enabling the
-leg is a settings change rather than a PR:
-
-1. The gate is now the **repository variable `NIMRTC_ARM64_CI`**
-   (`Settings → Secrets and variables → Actions → Variables`).  The
-   job's condition is `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}`.  With
-   the variable unset the leg is skipped and the other three platforms
-   finish normally; setting it to `on` and triggering the workflow
-   manually (`workflow_dispatch`, which this change also added to
-   `ci.yml`) runs the 4-platform gate.  Setting it back to `off`
-   restores the skip.  The previous mechanism was a hard-coded
-   `if: false`, which meant every re-enable cost a code change.
-2. The runner label moved from `ubuntu-22.04-arm64` to
-   **`ubuntu-24.04-arm`**.  The 24.04 ARM64 image is the current
-   public-repo arm64 label in GitHub's documented runner set; the
-   22.04 one is not listed there any more, and its pool was the one
-   that queued for hours.  The `release.yml` leg moved with it (that
-   leg stays `continue-on-error: true` either way).
+1. The runner label is **`ubuntu-24.04-arm`** — a real label, in the
+   documented set. The `release.yml` leg moved with it.
+2. The `linux-aarch64` job in `ci.yml` is a **plain hard gate again**.
+   The `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}` condition and the
+   `NIMRTC_ARM64_CI` repository variable are both gone. That variable
+   was a workaround for a non-existent problem, and it had a second
+   cost that was easy to overlook: with the variable unset the leg
+   was *always* skipped, so the 4-platform matrix could never be
+   observed green on a normal push — which is precisely what Gate #8
+   asks for. `workflow_dispatch` is kept, since re-running the matrix
+   on demand is useful regardless.
 3. The `linux-aarch64` job no longer installs the
    `g++-aarch64-linux-gnu` cross toolchain.  The runner is a *native*
    arm64 host, and `cmake/toolchains/aarch64-linux-gnu.cmake` has a
@@ -192,11 +230,22 @@ leg is a settings change rather than a PR:
    prefer the cross compiler and point `CMAKE_SYSROOT` at a sysroot
    the native image does not carry.
 
-So the CHANGELOG prose "linux-aarch64 may be TEMP-DISABLED per v0.12.0
-baseline" remains accurate: the CI leg is *skipped* while the runner
-pool is unusable, and the *release artefact* leg is the permanently
-soft one.  What changed is that the skip is now a switch rather than
-a source edit.
+If the ARM64 leg ever has to be skipped again, use a code change (as
+`34a6ace` / `d2152ff` did) rather than a repository variable. A
+variable gate makes "is the ARM64 leg actually running?" a question
+that must be answered out of band — which is the failure mode this
+register exists to prevent.
+
+### 4.3 What is still open
+
+The **CI** leg and the **release** leg are different jobs with
+different build settings (`debug.aarch64` + `ctest` versus
+`release.aarch64` + packaging), and only the CI leg has been
+observed to run to completion. So `build-linux-aarch64` in
+`release.yml` keeps `continue-on-error: true` and stays out of
+`publish-release`'s `needs:` for now, on the honest ground that its
+first observed green run is still pending — **not** on the ground
+that the runner pool might be busy.
 
 That leaves a documentation gap rather than a build gap. `README.md`
 §Platform support currently claims:
@@ -208,17 +257,22 @@ an aarch64 release tarball may be absent from a given release. The
 `dist/` scan prints a "Partial release" banner when it is missing, so
 the information exists — it just is not in the README.
 
-**Gate #8 cannot be closed by CI alone.** The release manager must pick:
+**Gate #8 needs one more observation, not a decision.** Once the
+`linux-aarch64` **release** job has completed green once with the
+corrected label, the release manager still has to pick:
 
 - **Ship aarch64 as a supported platform at v1.0.0** → make
   `build-linux-aarch64` a hard gate (drop `continue-on-error`, add it to
-  `needs:`), accept the runner-queue risk, and keep the README ✅.
+  `needs:`), and keep the README ✅.
 - **Ship v1.0.0 as 3-platform** → remove the `ubuntu-*-arm` runner from
   the README support table and the 4-platform CI badge, and say so in
   the release notes.
 
 The current state — README says 4 platforms, release ships 3-plus-one-
-maybe — is the one option that should not survive to the tag.
+maybe — is the one option that should not survive to the tag. But
+unlike before, the choice is no longer being forced by an
+infrastructure failure that the project could not fix; it is a
+shipping decision that can be made on evidence.
 
 ---
 

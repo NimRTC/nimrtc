@@ -263,8 +263,20 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
             "--disable-dev-shm-usage",
             "--use-fake-ui-for-media-stream",
             # Self-signed cert on localhost:9443 — accept it unconditionally.
+            #
+            # --ignore-certificate-errors alone is NOT enough: Chromium's
+            # WebTransport client rejects every server certificate that is
+            # not anchored in a *known root*, even when the certificate
+            # verifier reports OK.  net/quic/crypto/proof_verifier_chromium.cc
+            # turns a successful verification with is_issued_by_known_root ==
+            # false into ERR_QUIC_CERT_ROOT_NOT_KNOWN, which quiche surfaces
+            # as "46: certificate unknown" (QUIC_TLS_CERTIFICATE_UNKNOWN).
+            # switches::kWebTransportDeveloperMode ("--webtransport-developer-mode")
+            # disables exactly that known-root check, but only for WebTransport
+            # connections — see net/quic/quic_context.h.
             # This is safe ONLY for a local test harness.  Do NOT use in
             # production or open networks.
+            "--webtransport-developer-mode",
             "--ignore-certificate-errors",
             "--allow-running-insecure-content",
             "--enable-logging=stderr",

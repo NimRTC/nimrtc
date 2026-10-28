@@ -183,7 +183,8 @@ void MsQuicBidiStream::init_msquic_context(HQUIC stream) noexcept {
         api_->SetCallbackHandler(
             stream_,
             reinterpret_cast<void*>(&quic_stream_callback),
-            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) & ~1u));
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) &
+                                     ~uintptr_t{1}));
     }
 }
 
@@ -556,8 +557,8 @@ QUIC_STATUS QUIC_API quic_stream_callback(
     // Decode tagged context.
     // The tag bit is the LSB.  If set, it's a uni stream; otherwise bidi.
     const uintptr_t tagged = reinterpret_cast<uintptr_t>(Context);
-    const bool is_uni = (tagged & 1u) != 0;
-    void* wrapper_ptr = reinterpret_cast<void*>(tagged & ~1u);
+    const bool is_uni = (tagged & uintptr_t{1}) != 0;
+    void* wrapper_ptr = reinterpret_cast<void*>(tagged & ~uintptr_t{1});
 
     if (is_uni) {
         auto* s = static_cast<MsQuicUniStream*>(wrapper_ptr);
@@ -826,7 +827,8 @@ IBidirectionalStream* MsQuicSessionImpl::open_bidi_stream() noexcept {
         conn_,
         QUIC_STREAM_OPEN_FLAG_NONE,  // bidirectional by default
         quic_stream_callback,
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) & ~1u),
+        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) &
+                                 ~uintptr_t{1}),
         &stream_handle);
     if (QUIC_FAILED(rc_open) || stream_handle == nullptr) {
         return nullptr;
@@ -877,7 +879,8 @@ IUnidirectionalStream* MsQuicSessionImpl::open_uni_stream() noexcept {
         QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
         quic_stream_callback,
         // Tagged context: uni stream (LSB = 1) — decoded in quic_stream_callback.
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) | 1u),
+        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) |
+                                 uintptr_t{1}),
         &stream_handle);
     if (QUIC_FAILED(rc_open) || stream_handle == nullptr) {
         return nullptr;

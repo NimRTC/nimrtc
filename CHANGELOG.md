@@ -68,6 +68,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The engine did not compile on the platforms where `char` is
+  unsigned.**  `base64_decode()` guarded the alphabet lookup with
+  `if (c < 0 || kIdx[static_cast<uint8_t>(c)] < 0) continue;`.  On
+  x86_64 `char` is signed, so the `c < 0` test is meaningful; on
+  aarch64 Linux and on macOS arm64 `char` is *unsigned*, which turns
+  the comparison into "always false" and GCC/Clang reject it under
+  `-Werror=type-limits`:
+
+      src/engine/src/engine.cpp:181:15: error: comparison is always
+      false due to limited range of data type [-Werror=type-limits]
+
+  The guard was redundant anyway: `kIdx` is a 256-entry table
+  initialised to -1 whose only non-negative entries are the 64
+  base64 alphabet bytes, so `kIdx[byte] < 0` already rejects every
+  non-alphabet byte, including every byte >= 0x80.  The decoder now
+  iterates over the byte value directly (`unsigned char`) and keeps
+  only the table lookup, so it builds identically on every supported
+  target.  This unblocked the `linux-gcc / aarch64` and
+  `macos-clang / arm64` CI legs.
+
 - **The Sender Report the engine sent described a different instant
   than the media it was paired with.**  RFC 3550 §6.4.1 words the
   NTP field as "the wallclock time when the report was sent", while

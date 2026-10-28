@@ -148,31 +148,55 @@ file.**
 This is `docs/plan/v1.0-plan.md` §3 DoD **Gate #8**, restated in terms of
 what the workflow actually does.
 
-Current factual state, as of 2026-10-27:
+Current factual state, as of 2026-10-28:
 
 | Leg | `ci.yml` (build + unit tests) | `release.yml` (shipped artefact) |
 |---|---|---|
 | windows-2022 / MSVC | active, hard gate | active, hard gate |
 | ubuntu-22.04 / GCC x86_64 | active, hard gate | active, hard gate |
 | macos-14 / Apple Clang arm64 | active, hard gate | active, hard gate |
-| ubuntu-22.04-arm64 / GCC | ⏸ **TEMP-DISABLED** (`if: false` in the `linux-aarch64` job of `ci.yml`) — re-enabled 2026-10-14, disabled again 2026-10-27 | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
+| ubuntu-24.04-arm / GCC | ⏸ **gated on the `NIMRTC_ARM64_CI` repository variable** (skipped while the variable is unset) — run on demand via `workflow_dispatch` | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
 
 The `ci.yml` leg was active (and a hard gate) from 2026-10-14 to
-2026-10-27.  The GitHub-hosted `ubuntu-22.04-arm64` pool then failed
-again: CI run #269 (#40370283784) sat `queued` for 3+ hours without
-allocation and run #268's aarch64 job never received a runner at all.
-A job that never starts keeps the whole workflow run in `in_progress`,
-so the run never reaches a terminal state and no merge or release gate
-can observe it.  The leg is therefore TEMP-DISABLED again — the same
-temporary mechanism used for 2026-09-16 → 2026-10-14 — so the other
-three platforms can finish and the run can complete.  Re-enable by
-removing the `if: false` line once the ARM64 pool is healthy; the
-reason is recorded in `docs/plan/v0.13.0-release-notes.md` §4.
+2026-10-27.  The GitHub-hosted ARM64 pool then failed again: CI run
+#269 (#40370283784) sat `queued` for 3+ hours without allocation and
+run #268's aarch64 job never received a runner at all.  A job that
+never starts keeps the whole workflow run in `in_progress`, so the run
+never reaches a terminal state and no merge or release gate can
+observe it.  The leg is therefore gated — but **not** by a code change
+any more.
+
+**What changed on 2026-10-28.**  Three things, so that re-enabling the
+leg is a settings change rather than a PR:
+
+1. The gate is now the **repository variable `NIMRTC_ARM64_CI`**
+   (`Settings → Secrets and variables → Actions → Variables`).  The
+   job's condition is `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}`.  With
+   the variable unset the leg is skipped and the other three platforms
+   finish normally; setting it to `on` and triggering the workflow
+   manually (`workflow_dispatch`, which this change also added to
+   `ci.yml`) runs the 4-platform gate.  Setting it back to `off`
+   restores the skip.  The previous mechanism was a hard-coded
+   `if: false`, which meant every re-enable cost a code change.
+2. The runner label moved from `ubuntu-22.04-arm64` to
+   **`ubuntu-24.04-arm`**.  The 24.04 ARM64 image is the current
+   public-repo arm64 label in GitHub's documented runner set; the
+   22.04 one is not listed there any more, and its pool was the one
+   that queued for hours.  The `release.yml` leg moved with it (that
+   leg stays `continue-on-error: true` either way).
+3. The `linux-aarch64` job no longer installs the
+   `g++-aarch64-linux-gnu` cross toolchain.  The runner is a *native*
+   arm64 host, and `cmake/toolchains/aarch64-linux-gnu.cmake` has a
+   native branch (`uname -m == aarch64` → use the system compiler);
+   installing the cross package would have made the toolchain file
+   prefer the cross compiler and point `CMAKE_SYSROOT` at a sysroot
+   the native image does not carry.
 
 So the CHANGELOG prose "linux-aarch64 may be TEMP-DISABLED per v0.12.0
-baseline" is accurate again: the CI leg is TEMP-DISABLED while the
-runner pool is unusable, and the *release artefact* leg is the
-permanently soft one.
+baseline" remains accurate: the CI leg is *skipped* while the runner
+pool is unusable, and the *release artefact* leg is the permanently
+soft one.  What changed is that the skip is now a switch rather than
+a source edit.
 
 That leaves a documentation gap rather than a build gap. `README.md`
 §Platform support currently claims:
@@ -189,9 +213,9 @@ the information exists — it just is not in the README.
 - **Ship aarch64 as a supported platform at v1.0.0** → make
   `build-linux-aarch64` a hard gate (drop `continue-on-error`, add it to
   `needs:`), accept the runner-queue risk, and keep the README ✅.
-- **Ship v1.0.0 as 3-platform** → remove `ubuntu-22.04-arm64` from the
-  README support table and the 4-platform CI badge, and say so in the
-  release notes.
+- **Ship v1.0.0 as 3-platform** → remove the `ubuntu-*-arm` runner from
+  the README support table and the 4-platform CI badge, and say so in
+  the release notes.
 
 The current state — README says 4 platforms, release ships 3-plus-one-
 maybe — is the one option that should not survive to the tag.

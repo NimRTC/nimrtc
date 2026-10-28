@@ -169,6 +169,25 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    - The **CI** leg in `ci.yml` (`linux-aarch64`) remains a hard gate. Only
      the *release* leg is soft.
 
+   **Arming the CI leg.**  Since 2026-10-28 the `linux-aarch64` job in
+   `ci.yml` is gated on the **repository variable `NIMRTC_ARM64_CI`**
+   (`Settings -> Secrets and variables -> Actions -> Variables`), not on
+   a source edit. The job's condition is
+   `if: ${{ vars.NIMRTC_ARM64_CI == 'on' }}`:
+
+   - While the variable is unset, the job is skipped and the other three
+     platforms finish; the run still reaches a terminal state.
+   - To run the full 4-platform gate, set the variable to `on` and
+     trigger `ci.yml` manually (`workflow_dispatch`). The release
+     manager must therefore set the variable *before* the tag push if
+     the ARM64 leg is to be part of that tag's CI evidence.
+   - Set it back to `off` (or remove it) to restore the skip.
+
+   The runner label is `ubuntu-24.04-arm`; the older
+   `ubuntu-22.04-arm64` label is no longer part of the documented
+   runner set and its pool was the one that queued for hours. See
+   `docs/plan/ci-workarounds.md` section 4 for the full record.
+
 5. Run the release freeze checklist:
 
    ```bash

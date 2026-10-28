@@ -22,7 +22,12 @@
  *
  * The server must:
  *   1. Complete QUIC handshake (CONNECTED event).
- *   2. Exchange HTTP/3 SETTINGS frames (empty SETTINGS is sufficient).
+ *   2. Send HTTP/3 SETTINGS that advertise Extended CONNECT, HTTP
+ *      Datagrams, and a WebTransport session limit.  Chromium's
+ *      DedicatedWebTransportHttp3Client::DoConnectComplete() calls
+ *      session_->SupportsWebTransport() on the received SETTINGS and
+ *      maps a false result to ERR_METHOD_NOT_SUPPORTED without ever
+ *      sending the CONNECT request.
  *   3. Parse the HEADERS frame (QPACK-encoded) to extract `:protocol: webtransport`.
  *   4. Send a 200 response HEADERS frame.
  *   5. Hand the QUIC connection to a WebTransportMsQuicSession (server-side).
@@ -359,10 +364,17 @@ constexpr std::uint8_t kFrameData = 0x00;
 constexpr std::uint8_t kFrameHeaders = 0x01;
 constexpr std::uint8_t kFrameSettings = 0x04;
 
-/** @brief HTTP/3 setting identifiers (RFC 9114 §7.2.4, RFC 9204 §5). */
-constexpr std::uint64_t kSettingQpackMaxTableCapacity = 0x01;
-constexpr std::uint64_t kSettingQpackBlockedStreams = 0x07;
-constexpr std::uint64_t kSettingEnableConnectProtocol = 0x08;
+/** @brief HTTP/3 setting identifiers. */
+constexpr std::uint64_t kSettingQpackMaxTableCapacity = 0x01;      // RFC 9204 §5
+constexpr std::uint64_t kSettingQpackBlockedStreams = 0x07;        // RFC 9204 §5
+constexpr std::uint64_t kSettingEnableConnectProtocol = 0x08;      // RFC 9220 §3
+constexpr std::uint64_t kSettingH3Datagram = 0x33;                 // RFC 9297 §2.1.1
+// draft-ietf-webtrans-http3-02 SETTINGS_ENABLE_WEBTRANSPORT.
+constexpr std::uint64_t kSettingEnableWebtransportDraft02 = 0x2b603743ull;
+// draft-ietf-webtrans-http3-07 SETTINGS_WEBTRANSPORT_MAX_SESSIONS.
+constexpr std::uint64_t kSettingWebtransportMaxSessionsDraft07 = 0x2b603742ull;
+// IANA HTTP/3 Settings registry: SETTINGS_WEBTRANSPORT_MAX_SESSIONS.
+constexpr std::uint64_t kSettingWebtransportMaxSessions = 0xc671706aull;
 
 /** @brief Unidirectional stream types (RFC 9114 §6.2, RFC 9204 §4.3). */
 constexpr std::uint8_t kUniControlStream = 0x00;
@@ -427,7 +439,12 @@ bool Http3Handler::send_settings(const ApiTable* api, HQUIC conn) noexcept {
         return false;
     }
 
-    // SETTINGS payload.
+    // SETTINGS payload.  Chromium refuses the WebTransport handshake
+    // (ERR_METHOD_NOT_SUPPORTED) unless the peer advertises all three
+    // of: Extended CONNECT, HTTP Datagrams, and a non-zero WebTransport
+    // session limit.  Both the draft-07 and IANA identifiers are sent
+    // because Chrome versions in the wild still recognise either one;
+    // RFC 9114 §7.2.4 requires unknown settings to be ignored.
     std::vector<std::uint8_t> settings;
     // The server never uses a dynamic table, so the encoder is told to
     // keep the QPACK dynamic table empty (RFC 9204 §5).
@@ -435,8 +452,15 @@ bool Http3Handler::send_settings(const ApiTable* api, HQUIC conn) noexcept {
     quic_varint_encode(settings, 0);
     quic_varint_encode(settings, kSettingQpackBlockedStreams);
     quic_varint_encode(settings, 0);
-    // Extended CONNECT support — required for WebTransport (RFC 9220 §3).
     quic_varint_encode(settings, kSettingEnableConnectProtocol);
+    quic_varint_encode(settings, 1);
+    quic_varint_encode(settings, kSettingH3Datagram);
+    quic_varint_encode(settings, 1);
+    quic_varint_encode(settings, kSettingEnableWebtransportDraft02);
+    quic_varint_encode(settings, 1);
+    quic_varint_encode(settings, kSettingWebtransportMaxSessionsDraft07);
+    quic_varint_encode(settings, 1);
+    quic_varint_encode(settings, kSettingWebtransportMaxSessions);
     quic_varint_encode(settings, 1);
 
     // Control stream content: the stream type byte followed by the
@@ -641,6 +665,10 @@ bool Http3Handler::parse_settings(
                 break;
             case kSettingQpackBlockedStreams:
             case kSettingEnableConnectProtocol:
+            case kSettingH3Datagram:
+            case kSettingEnableWebtransportDraft02:
+            case kSettingWebtransportMaxSessionsDraft07:
+            case kSettingWebtransportMaxSessions:
             default:
                 break;
         }

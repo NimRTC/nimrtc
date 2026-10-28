@@ -42,6 +42,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/base.hpp>
@@ -54,7 +55,9 @@ using nimrtc::ice::IceConfig;
 using nimrtc::ice::IceTransport;
 using nimrtc::ice::Role;
 
-// Small timeouts so each test finishes in well under a second.
+// Small timeouts so each test finishes in well under a second.  T3 is the
+// exception: it needs a 1000 ms consent timeout so that its re-arm notify
+// is not racing the tracker's own auto-rearm (see the comment in T3).
 constexpr std::int64_t kConsentTimeoutMs  = 200;
 constexpr std::int64_t kConsentIntervalMs = 100;
 
@@ -171,43 +174,100 @@ TEST(IceConsentFreshness, T2_PeerStoppedFiresAfterTimeout) {
 // -----------------------------------------------------------------------------
 
 TEST(IceConsentFreshness, T3_BindingReceivedRearmsTimer) {
-    IceConfig cfg = MakeConfig();
+    // T3 needs a longer consent timeout than the other cases, and it has to
+    // compare *timestamps* instead of counting fires across a wall-clock
+    // sleep.
+    //
+    // Why: the tracker auto-rearms after it fires (it resets
+    // last_binding_received_us_ to "now" when the callback runs), so a
+    // second fire is expected one timeout after the first one unless the
+    // test's re-arm notify lands first.  The previous version of this test
+    // used the shared 200 ms timeout and asserted "the fire count is
+    // unchanged after a 100 ms sleep" -- i.e. it left the runner only
+    // 100 ms of slack.  On the macOS runner of ci run #275 the test thread
+    // was descheduled for longer than that, the auto-rearm fired inside
+    // the "fresh window" and the count came out as 2 instead of 1:
+    //
+    //   test_consent_freshness.cpp:201: Failure
+    //   Expected equality of these values:
+    //     lost_count.load()  Which is: 2
+    //     after_first        Which is: 1
+    //   callback must not refire inside a fresh timeout window
+    //
+    // The rewritten test states the same property in a scheduler-proof
+    // way: the *first* fire after the re-arm must not happen earlier than
+    // a full timeout after the re-arm.  That is exactly what the
+    // implementation guarantees (it fires when
+    // now - last_binding_received_us_ >= timeout), so the assertion holds
+    // no matter when the test thread happens to be scheduled.  The 1000 ms
+    // timeout additionally gives the test a full second to issue the
+    // re-arm before the tracker's own auto-rearm can fire.
+    constexpr std::int64_t kTimeoutMs  = 1000;
+    constexpr std::int64_t kIntervalMs = 100;
+    // The tracker stamps its re-arm instant inside
+    // notify_binding_received(); rearm_at is read a hair later, so the
+    // measured window is never over-estimated.  50 ms of tolerance
+    // absorbs that gap (and the clock granularity) without weakening the
+    // assertion.
+    constexpr std::int64_t kToleranceMs = 50;
+
+    IceConfig cfg = MakeConfig({kTimeoutMs, kIntervalMs});
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
 
     std::atomic<int> lost_count{0};
-    t.set_on_consent_lost([&] { ++lost_count; });
+    std::mutex mu;
+    std::vector<std::chrono::steady_clock::time_point> fire_times;
+    t.set_on_consent_lost([&] {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            fire_times.push_back(std::chrono::steady_clock::now());
+        }
+        ++lost_count;
+    });
 
     t.force_consent_armed_for_testing();
     t.notify_binding_received();
 
-    // 1. Wait for first loss (timeout ≈ 200 ms + tick interval ≈ 100 ms).
-    //    Budget matches T2 (5×timeout + 500 ms) so that a slow macOS CI
-    //    runner, where the consent tracker tick can land late, doesn't
-    //    flake the test.  3×timeout (the previous value) was tight enough
-    //    that arming+fire took ~600 ms on Apple-Silicon GitHub runners.
+    // 1. Wait for the first loss.  The tracker ticks every 100 ms, so the
+    //    fire lands between kTimeoutMs and kTimeoutMs + 100 ms.
     ASSERT_TRUE(WaitFor([&] { return lost_count.load() >= 1; },
-                        5 * kConsentTimeoutMs * 1ms + 500ms));
-    EXPECT_GE(lost_count.load(), 1);
+                        5 * kTimeoutMs * 1ms + 500ms));
     const int after_first = lost_count.load();
 
     // 2. Rearm by simulating a fresh STUN Binding request.
     t.notify_binding_received();
+    const auto rearm_at = std::chrono::steady_clock::now();
     EXPECT_FALSE(t.consent_lost_pending())
         << "notify_binding_received must clear the pending-loss flag";
 
-    // 3. Within the timeout window, no second fire should occur.
-    std::this_thread::sleep_for(kConsentTimeoutMs * 1ms / 2);
-    EXPECT_EQ(lost_count.load(), after_first)
-        << "callback must not refire inside a fresh timeout window";
-
-    // 4. Past the rearmed window, it should fire again.  Generous budget
-    //    (matches step 1) so a slow CI runner doesn't flake.
+    // 3. The next fire must not happen before a full timeout has elapsed
+    //    since the re-arm -- that is what "the re-arm restarted the
+    //    timer" means.
     const bool second = WaitFor(
         [&] { return lost_count.load() > after_first; },
-        5 * kConsentTimeoutMs * 1ms + 500ms);
-    EXPECT_TRUE(second)
+        5 * kTimeoutMs * 1ms + 500ms);
+    ASSERT_TRUE(second)
         << "callback should fire again after a full rearmed timeout";
+
+    // 4. Exactly one more fire, and it must be at least a full timeout
+    //    after the re-arm.
+    EXPECT_EQ(lost_count.load(), after_first + 1)
+        << "exactly one fire is expected after the re-arm";
+
+    std::chrono::steady_clock::time_point next_fire{};
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        ASSERT_GT(fire_times.size(), static_cast<std::size_t>(after_first));
+        next_fire = fire_times[static_cast<std::size_t>(after_first)];
+    }
+    const auto since_rearm = next_fire - rearm_at;
+    EXPECT_GE(since_rearm, std::chrono::milliseconds(kTimeoutMs - kToleranceMs))
+        << "the first fire after the re-arm must not be sooner than "
+        << (kTimeoutMs - kToleranceMs) << "ms after the re-arm (measured "
+        << since_rearm.count() << "ms)";
+    EXPECT_LT(since_rearm, std::chrono::milliseconds(5 * kTimeoutMs))
+        << "the re-armed timer must still fire";
 
     t.close();
 }
@@ -336,7 +396,7 @@ TEST(IceConsentFreshness, ITransportInterfaceForwardsConsentLost) {
     t.notify_binding_received();
 
     const bool fired = WaitFor([&] { return lost_count.load() >= 1; },
-                               3 * kConsentTimeoutMs * 1ms);
+                               5 * kConsentTimeoutMs * 1ms + 500ms);
     EXPECT_TRUE(fired);
 
     t.close();

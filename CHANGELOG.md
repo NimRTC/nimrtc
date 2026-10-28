@@ -88,6 +88,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   target.  This unblocked the `linux-gcc / aarch64` and
   `macos-clang / arm64` CI legs.
 
+- **The ICE consent-freshness re-arm test was scheduler-dependent.**
+  `IceConsentFreshness.T3_BindingReceivedRearmsTimer` asserted that
+  the consent-lost callback does not fire again inside a freshly
+  armed timeout window by sleeping for half a timeout and comparing
+  the fire *count*.  The consent tracker, however, auto-rearms after
+  it fires (it resets the last-binding timestamp to "now" when the
+  callback runs), so a second fire is legitimately due one timeout
+  after the first one unless the test's re-arm notify lands first.
+  The old test left the runner only 100 ms of slack, and on the
+  macOS CI runner of run #275 the test thread was descheduled for
+  longer than that: the auto-rearm fired inside the "fresh window"
+  and the count came out as 2 instead of 1.  The test now uses a
+  1000 ms consent timeout and states the property in a
+  scheduler-proof way — the first fire *after* the re-arm must not
+  be closer than a full timeout to the re-arm — which is exactly
+  what the implementation guarantees.
+
 - **The Sender Report the engine sent described a different instant
   than the media it was paired with.**  RFC 3550 §6.4.1 words the
   NTP field as "the wallclock time when the report was sent", while

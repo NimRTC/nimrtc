@@ -1,11 +1,11 @@
 {
   "id": "v1-cmake",
   "title": "CMake 构建系统配置",
-  "state": "draft",
+  "state": "completed",
   "spec": {
     "path": "specs/slices/v1-cmake.md",
-    "frozenHash": null,
-    "frozenAt": null
+    "frozenHash": "sha256:2f5b2b9e30e391bd983abb24f2aca8b1caf4c54c93123252fced6f1a77aa64cd",
+    "frozenAt": "2026-10-28T11:03:27.874Z"
   },
   "acceptance": {
     "dir": "tests/acceptance/v1-cmake/",
@@ -28,7 +28,7 @@
       "ctest --test-dir build"
     ]
   },
-  "traceWaiver": null,
+  "traceWaiver": "C++ 项目不使用 JSON Schema 契约",
   "writes": [
     "CMakeLists.txt",
     "cmake/**",
@@ -36,10 +36,10 @@
   ],
   "runs": [],
   "stall": {
-    "class": null,
+    "class": "gate_retry",
     "autoResolved": 0,
-    "gateRetries": 0
+    "gateRetries": 2
   },
   "createdAt": "2026-10-28T09:07:26.565Z",
-  "updatedAt": "2026-10-28T09:07:26.567Z"
+  "updatedAt": "2026-10-29T01:05:33.110Z"
 }

@@ -1,0 +1,45 @@
+{
+  "id": "v0-cmake",
+  "title": "v0 基线 — cmake 辅助模块",
+  "state": "completed",
+  "spec": {
+    "path": "specs/slices/v0-cmake.md",
+    "frozenHash": "sha256:a7484df4aaf131f52546c4b2c2feca60f2520b067d5c046a80daf8e9f6d18b0b",
+    "frozenAt": "2026-10-29T01:15:56.550Z"
+  },
+  "acceptance": {
+    "dir": null,
+    "frozenHash": null,
+    "oracleSrc": null
+  },
+  "baseCommit": null,
+  "drift": {
+    "detected": false,
+    "reason": null,
+    "at": null
+  },
+  "trace": {
+    "requirements": [
+      "R1: cmake/*.cmake 辅助模块可用",
+      "R2: cmake/toolchains/*.cmake 交叉编译工具链可用"
+    ],
+    "contracts": [],
+    "tests": [
+      "cmake --build build --config Debug",
+      "ctest --test-dir build --output-on-failure -C Debug"
+    ]
+  },
+  "traceWaiver": "C++ 项目不使用 JSON Schema 契约",
+  "writes": [
+    "cmake/*.cmake",
+    "cmake/toolchains/*.cmake"
+  ],
+  "runs": [],
+  "stall": {
+    "class": null,
+    "autoResolved": 0,
+    "gateRetries": 0
+  },
+  "createdAt": "2026-10-29T09:10:00.000Z",
+  "updatedAt": "2026-10-29T01:16:16.169Z"
+}

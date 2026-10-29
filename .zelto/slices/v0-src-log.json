@@ -1,0 +1,42 @@
+{
+  "id": "v0-src-log",
+  "title": "v0 基线 — src/log 日志实现",
+  "state": "completed",
+  "spec": {
+    "path": "specs/slices/v0-src-log.md",
+    "frozenHash": "sha256:6714cb834b20c32b481e40392922b7b8269890458ffed4035fdcb8fa0aef035b",
+    "frozenAt": "2026-10-29T01:24:32.915Z"
+  },
+  "acceptance": {
+    "dir": null,
+    "frozenHash": null,
+    "oracleSrc": null
+  },
+  "baseCommit": null,
+  "drift": {
+    "detected": false,
+    "reason": null,
+    "at": null
+  },
+  "trace": {
+    "requirements": [
+      "R1: src/log/* 日志库可编译"
+    ],
+    "contracts": [],
+    "tests": [
+      "cmake --build build --config Debug"
+    ]
+  },
+  "traceWaiver": "C++ 项目不使用 JSON Schema 契约",
+  "writes": [
+    "src/log/*"
+  ],
+  "runs": [],
+  "stall": {
+    "class": null,
+    "autoResolved": 0,
+    "gateRetries": 0
+  },
+  "createdAt": "2026-10-29T09:20:00.000Z",
+  "updatedAt": "2026-10-29T01:24:49.604Z"
+}

@@ -1,13 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.15.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.0.0-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.15.0 (Tech Preview) — WebTransport / msquic data plane (DC-1), `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome WebTransport interop harness. Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §12.3.3 DoD gates for status. v0.15.0 is the WT product-route cut per `specs/slices/v0-15-0-web-transport-product-route.md`.
+> **Current:** v1.0.0 (Stable) — first stable release. Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10000, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.0]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
@@ -48,13 +48,14 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.15.0 Tech Preview — WebTransport / msquic data plane (DC-1),
+- **Current state:** v1.0.0 Stable — WebTransport / msquic data plane (DC-1),
   `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome WebTransport interop harness.
   Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6**
   (datagram + bidi-stream echo against `examples/demo-wtserver`).
   `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit
   `"sctp"` keeps the legacy path.
-  `WebTransportDataChannel` (id `"web_transport"`) is the v1.0 production backend per ADR-014.
+  `WebTransportDataChannel` (id `"web_transport"`) is the production backend per ADR-014.
+  Public API is frozen per ADR-015; breaking changes require a MINOR/MAJOR bump.
   **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
   benchmark (BENCH-1) are deferred to v1.1.0** per `docs/plan/v1.0-plan.md` §7
   (closed 2026-10-19, BDFL: SFU is not a project core goal); they are **off the
@@ -424,7 +425,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |
 | **ref_frame / frame-aligned timeline** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **Wire-level Chrome interop** | ✅ Case D green | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
-| **Production maturity (2026)** | Tech Preview | Production-grade | Production-grade | Production-grade | Production-grade |
+| **Production maturity (2026)** | Stable (v1.0.0) | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **Where NimRTC wins outright:** aarch64 embedded, GM/T crypto, AI Agent hooks, single-trunk
 P2P+relay (where `relay` is the single-strategy gateway profile that compiles out L2 codecs; a from-scratch SFU module is not a v1.0.0 deliverable — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19).
@@ -470,7 +471,7 @@ Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.
 
 ---
 
-## Current progress (v0.15.0 Tech Preview)
+## Current progress (v1.0.0 Stable)
 
 What you can do today, in the main trunk, against a stock `cmake --preset release.msvc` build (full suite 616/616 PASS on Windows/MSVC Debug):
 
@@ -501,21 +502,22 @@ What you can do today, in the main trunk, against a stock `cmake --preset releas
 | TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
 | ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
 | DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
-| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Shipped in v0.15.0. |
-| DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ⏸️ **Deferred to v1.x** | The RTP-only strict-priority path is already covered by `test_sched_priority.cpp` from v0.10.x; the DC-plane cross-traffic case waits for DC-1. |
+| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
+| DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ✅ | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ⏸️ **Deferred to v1.1.0** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the v1.0.x critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ⏸️ **Deferred to v1.1.0** | Inherits from SFU-1 (closed 2026-10-19); off the v1.0.x critical path. |
 | H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
 
-> v0.15.0 is the **Tech Preview** release — WebTransport / msquic data plane (DC-1 product route),
-> `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome WebTransport interop harness.
+> v1.0.0 is the **Stable** release — public API frozen per ADR-015
+> (`NIMRTC_API_VERSION` = 10000, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);
+> WebTransport / msquic data plane (DC-1) + cross-plane scheduling (DC-2);
 > Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6** —
 > datagram + bidi-stream echo against `examples/demo-wtserver` via
 > `tests/chrome_interop_harness/run_webtransport_harness.py`.
 > `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"`
 > keeps the legacy path.
-> `WebTransportDataChannel` (id `"web_transport"`) is the v1.0 production backend per ADR-014.
+> `WebTransportDataChannel` (id `"web_transport"`) is the production backend per ADR-014.
 > **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
 > benchmark (BENCH-1) are deferred to v1.1.0** per `docs/plan/v1.0-plan.md` §7
 > (closed 2026-10-19, BDFL: SFU is not a project core goal); they are **off the

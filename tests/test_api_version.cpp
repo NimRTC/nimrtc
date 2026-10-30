@@ -4,12 +4,12 @@
 
 /**
  * @file tests/test_api_version.cpp
- * @brief v1.0.0-alpha.1 Sec.12.3.1 DoD gate #6 -- API version smoke test.
+ * @brief v1.0.0 Sec.3 DoD gate #4 -- API version smoke test.
  *
  * ## What this test verifies
  *
  * 1. `version_macros_are_defined` -- canonical version triplet matches
- *    v1.0.0-alpha.1 (MAJOR=1, MINOR=0, PATCH=0, PRE_RELEASE="alpha.1").
+ *    v1.0.0 final (MAJOR=1, MINOR=0, PATCH=0, PRE_RELEASE="").
  *
  * 2. `encoded_version_is_correct` -- `NIMRTC_API_VERSION` equals 10000
  *    for v1.0.0 (MAJOR*10000 + MINOR*100 + PATCH).
@@ -24,7 +24,7 @@
  * 5. `stability_markers_expand_to_something` -- `NIMRTC_API_STABLE`
  *    and `NIMRTC_API_UNSTABLE` expand to valid C++ when applied to a
  *    function declaration (compile-time smoke; no runtime effect in
- *    v1.0.0-alpha.1 because both macros are empty).
+ *    v1.0.0 because both macros are empty).
  *
  * 6. `deprecated_expands_to_valid_attribute` -- `NIMRTC_API_DEPRECATED(msg)`
  *    is syntactically valid C++ when applied to a function declaration.
@@ -57,7 +57,7 @@ TEST(version_macros, are_defined) {
     // ::strcmp is constexpr.  Switching to a runtime check costs us
     // zero release-build perf (the test runs once) and keeps the
     // assertion portable to MSVC 19.30+, GCC 10+, Clang 12+.
-    EXPECT_STREQ(NIMRTC_API_VERSION_PRE_RELEASE, "rc.1");
+    EXPECT_STREQ(NIMRTC_API_VERSION_PRE_RELEASE, "");
 }
 
 // -----------------------------------------------------------------------------

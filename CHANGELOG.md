@@ -7,6 +7,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> Post-`v0.15.0` work accumulates here. The `## [0.15.0]` entry below
+> is the authoritative record of everything up to that cut.
+
+## [0.15.0] - 2026-10-30
+
+### Status: Tech Preview
+
+> **WT product-route cut** — `EngineConfig::datachannel_backend`
+> defaults to `"web_transport"`; Case E E1–E6 PASS. Per
+> `specs/slices/v0-15-0-web-transport-product-route.md` and
+> `docs/plan/v0.15-plan.md`.
+
 ### Added — v0.15.0 WebTransport product route (spec:
 ### `specs/slices/v0-15-0-web-transport-product-route.md`)
 

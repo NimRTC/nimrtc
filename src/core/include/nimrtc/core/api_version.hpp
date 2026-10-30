@@ -8,7 +8,7 @@
 /**
  * @file nimrtc/core/api_version.hpp
  * @brief NIMRTC_API_VERSION -- version constants + stability classification
- * markers (v1.0.0-beta.1, PAL API-FREEZE framework).
+ * markers (v1.0.0 final, PAL API-FREEZE framework).
  *
  * ## What this is
  *
@@ -29,11 +29,11 @@
  * 3. **Stability classification markers** -- `NIMRTC_API_STABLE`,
  *    `NIMRTC_API_UNSTABLE`, and `NIMRTC_API_DEPRECATED(msg)`.  These are
  *    applied to every public symbol in `src/<mod>/include/nimrtc/<mod>/<name>.hpp` as
- *    part of the v1.0.0-alpha.1 public-header classification sweep
- *    (PR #3).  The sweep is mechanical: it tags symbols without changing
+ *    part of the v1.0.0 public-header classification sweep.
+ *    The sweep is mechanical: it tags symbols without changing
  *    compilation semantics.
  *
- * ## v1.0.0-alpha.1 design decision: STABLE / UNSTABLE are empty
+ * ## v1.0.0 design decision: STABLE / UNSTABLE are empty
  *
  * `NIMRTC_API_STABLE` and `NIMRTC_API_UNSTABLE` expand to nothing
  * (empty macro) in this release.  They are **visual / documentation
@@ -46,7 +46,7 @@
  * `NIMRTC_API_UNSTABLE` to emit a `[[deprecated]]` attribute and
  * trigger `-Wdeprecated-declarations` (GCC/Clang) / `C4996` (MSVC) at
  * every callsite of an UNSTABLE symbol.  This is deferred to a
- * post-alpha.1 follow-up; the pre-release split document
+ * post-1.0 follow-up; the pre-release split document
  * (`docs/plan/v1.0-plan.md` Sec.12) captures the design rationale.
  *
  * `NIMRTC_API_DEPRECATED(msg)` is **always active**: it expands to the
@@ -61,7 +61,7 @@
  * stability classification.  The policy is documented in
  * `docs/adr/ADR-015-api-stability-policy.md`.
  *
- * ## Sec.12.3.1 v1.0.0-alpha.1 DoD gate #6
+ * ## Sec.3 v1.0.0 DoD gate #4
  *
  * `tests/test_api_version.cpp` 7/7 PASS verifies the macro + namespace
  * constants are well-formed, that STABLE/UNSTABLE/DEPRECATED
@@ -85,13 +85,13 @@
 /// Patch version number of the NimRTC public API.
 #define NIMRTC_API_VERSION_PATCH 0
 
-/// Pre-release identifier for v1.0.0-rc.1.  Empty string for final releases.
+/// Pre-release identifier for v1.0.0 final.  Empty string for final releases.
 ///
 /// The label tracks the release stage of the current cycle
 /// (ADR-015 Verification table): it cycles `"alpha.2"` -> `"beta.1"` ->
 /// `"rc.1"` -> `""` as the tags are cut, and it must be `""` under
 /// `scripts/check-release-freeze.sh --final-tag`.
-#define NIMRTC_API_VERSION_PRE_RELEASE "rc.1"
+#define NIMRTC_API_VERSION_PRE_RELEASE ""
 
 /// Encoded integer version for compile-time comparisons.
 /// Format: MAJOR*10000 + MINOR*100 + PATCH.  v1.0.0 = 10000.
@@ -136,7 +136,7 @@
 // -----------------------------------------------------------------------------
 // Stability classification markers
 //
-// v1.0.0-alpha.1 decision: STABLE and UNSTABLE are empty (visual only).
+// v1.0.0 decision: STABLE and UNSTABLE are empty (visual only).
 // NIMRTC_API_DEPRECATED(msg) is always active (cross-compiler attribute).
 // Future: NIMRTC_ENABLE_API_STABILITY_ANNOTATIONS=1 will cause
 // NIMRTC_API_UNSTABLE to emit [[gnu::deprecated]] warnings.
@@ -150,8 +150,8 @@
  * patch release and whose removal from the public surface requires
  * a MINOR or MAJOR version bump per the stability policy.
  *
- * v1.0.0-alpha.1: empty expansion (visual / documentation only).
- * Compile-time annotation is deferred to a post-alpha.1 follow-up
+ * v1.0.0: empty expansion (visual / documentation only).
+ * Compile-time annotation is deferred to a post-1.0 follow-up
  * that activates when NIMRTC_ENABLE_API_STABILITY_ANNOTATIONS=1.
  */
 #define NIMRTC_API_STABLE
@@ -165,7 +165,7 @@
  * change or be removed in any release without a version bump
  * announcement.
  *
- * v1.0.0-alpha.1: empty expansion (visual / documentation only).
+ * v1.0.0: empty expansion (visual / documentation only).
  * Compile-time annotation is deferred to a post-alpha.1 follow-up
  * that activates when NIMRTC_ENABLE_API_STABILITY_ANNOTATIONS=1.
  */

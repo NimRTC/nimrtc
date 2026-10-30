@@ -7,8 +7,44 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Post-`v0.15.0` work accumulates here. The `## [0.15.0]` entry below
-> is the authoritative record of everything up to that cut.
+> Post-`v1.0.0` work accumulates here. The `## [1.0.0]` entry below
+> is the authoritative record of the first stable cut.
+
+## [1.0.0] - 2026-10-30
+
+### Status: Stable
+
+> **First stable release.** The "experimental through v1.0.0" banner is
+> dropped. Public API is frozen per ADR-015; breaking changes require a
+> MINOR/MAJOR bump. See `docs/plan/v1.0-plan.md` §3 + §12.3.6 for the DoD.
+
+### Added
+
+- **Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1)** over
+  WebTransport / QUIC — Case E E1–E6 PASS via
+  `tests/chrome_interop_harness/run_webtransport_harness.py` +
+  `interop/chrome/test_chrome_webtransport.html` against
+  `examples/demo-wtserver` (datagram + bidi-stream echo).
+  `EngineConfig::datachannel_backend` defaults to `"web_transport"`;
+  explicit `"sctp"` keeps the legacy path.
+- **API stability commitment** — every public symbol carries
+  `NIMRTC_API_STABLE` / `NIMRTC_API_UNSTABLE` / `NIMRTC_API_DEPRECATED`
+  (102 headers, `Missing: 0` via `scripts/api_freeze_scan.js`);
+  `NIMRTC_API_VERSION` = 10000, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
+- **L1 strict-priority scheduling cross-plane test (DC-2)** —
+  `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17.
+- **Vendor drift is a hard CI gate (W4 removed)** — `tools/check_vendor.py`
+  red-blocks merges in `ci.yml` (×4) + `interop.yml` (×2); 9/9 match.
+
+### Notes
+
+- `test_datachannel_engine` 5/5 stays green (in-process regression).
+- `test_sctp_usrsctp` 4/4 stays green; usrsctp stays `@deprecated` in tree
+  through v1.1.x, removal at v1.2.0.
+- aarch64 release bundle stays best-effort (W5): CI leg is a hard gate,
+  release leg is `continue-on-error` until its first observed green run.
+- Per-platform 3A variance (W3): release bundles ship real WebRTC APM 3A
+  where the meson prebuild succeeds, stub 3A otherwise; never silent.
 
 ## [0.15.0] - 2026-10-30
 

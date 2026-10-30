@@ -7,6 +7,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — v0.15.0 WebTransport product route (spec:
+### `specs/slices/v0-15-0-web-transport-product-route.md`)
+
+- **WebTransport/QUIC is now the default DataChannel backend.**
+  `EngineConfig::datachannel_backend` flipped from `"sctp"` to
+  `"web_transport"`; `create_data_channel(label)` delegates to the new
+  `create_data_channel(label, reliability)` overload; the WT session is
+  created lazily and shared by all channels of the engine
+  (`web_transport_peer_host` default empty = loopback,
+  `web_transport_peer_port` default 443).
+- **`create_offer()` skips `m=application` in WebTransport mode** and
+  the engine `tick()` polls `wt_session->state()` into
+  `on_data_state_("open"/"error"/"closed")`.
+- **Case E interop gate is green**: Chrome ↔ NimRTC WebTransport
+  datagram + bidi-stream echo PASS (E1–E6) via
+  `tests/chrome_interop_harness/run_webtransport_harness.py` +
+  `interop/chrome/test_chrome_webtransport.html` against
+  `examples/demo-wtserver` (exit 0 = session + data).
+- **QUIC stream callbacks no longer use tagged pointers**: separate
+  `quic_stream_callback_bidi` / `quic_stream_callback_uni` carry the
+  plain wrapper pointer as context.
+- **Full suite: 616/616 PASS** (Windows/MSVC Debug; 2 usrsctp
+  conditional skips). `test_api_classification` baseline 101 → 102
+  for the new `src/sctp/include/nimrtc/sctp/dcep.hpp` DCEP codec
+  header (carries `NIMRTC_API_STABLE`).
+
 ### Notes
 
 - Post-`v0.14.0-rc.1` work is accumulating in this section; the

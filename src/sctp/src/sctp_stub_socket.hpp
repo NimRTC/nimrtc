@@ -44,14 +44,33 @@ public:
 
     void set_on_recv(plugins::OnSctpRecvCb cb) noexcept override;
 
-    // ---- Test helpers ----------------------------------------------------
+    void set_on_recv_with_ppid(
+        plugins::OnSctpRecvWithPpidCb cb) noexcept override;
+    void set_on_packet(plugins::OnSctpPacketCb cb) noexcept override;
+
+    // ---- Test-only accessors --------------------------------------------
 
     /** Returns true if a non-empty recv callback has been registered.
      *  Used by tests/test_sctp_factory.cpp to verify registration works. */
     bool has_recv_callback() const noexcept { return static_cast<bool>(on_recv_); }
 
+    /** Returns true if a PPID-aware recv callback is registered (v0.14.x
+     *  DataChannel wiring). The MockSctpSocket in datachannel tests does
+     *  not override it, so the legacy path keeps working unchanged. */
+    bool has_recv_with_ppid_callback() const noexcept {
+        return static_cast<bool>(on_recv_ppid_);
+    }
+
+    /** Fire the PPID-aware callback (test helper for PPID demux tests). */
+    void simulate_recv_with_ppid(std::uint16_t stream, std::uint32_t ppid,
+                                 nimrtc::core::ByteSpan data) {
+        if (on_recv_ppid_) on_recv_ppid_(stream, ppid, data);
+    }
+
 private:
     plugins::OnSctpRecvCb on_recv_;
+    plugins::OnSctpRecvWithPpidCb on_recv_ppid_;
+    plugins::OnSctpPacketCb on_packet_;
 };
 
 } // namespace nimrtc::sctp

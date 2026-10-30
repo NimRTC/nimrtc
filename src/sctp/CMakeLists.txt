@@ -50,6 +50,7 @@ add_library(nimrtc_sctp STATIC
     src/sctp_stub_socket.cpp
     src/sctp_stub_factory.cpp
     src/sctp_plugin.cpp
+    src/dcep.cpp
     # usrsctp production backend (id="usrsctp"). @deprecated v0.11.0 —
     # see file header and sctp_plugin.cpp for the v0.11.0 cut rationale.
     # The sources are kept so the class compiles for opt-in callers

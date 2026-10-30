@@ -20,6 +20,13 @@
 #
 #     python tools/fetch_webrtc_apm.py    # clone + meson build (one-shot)
 #
+# The APM source tree is NOT vendored into git — it is cloned at build
+# time and then patched. NimRTC's changes to upstream travel as versioned
+# patches under src/third_party/webrtc_audio_processing/patches/, applied
+# by tools/apply_webrtc_apm_patches.py (called from the fetch script and
+# from both build scripts). The current patch raises the Meson build to
+# C++20, which agc2/*.cc requires.
+#
 # On Windows the legacy path build\build_webrtc_apm.cmd is also recognised
 # by the Python helper but is gitignored and will be removed.  The
 # audio3a module's CMakeLists only locates the resulting pre-built static

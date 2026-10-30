@@ -53,9 +53,12 @@
 #include <nimrtc/core/api_version.hpp>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -148,6 +151,12 @@ public:
     /** Replace the state callback. */
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
+    /** Subscribe this channel to the session's inbound datagrams and
+     *  peer-initiated streams (Case E product path). Safe to call after
+     *  both `open(cfg)` overloads; re-subscribing replaces the session
+     *  callbacks. `close()` unregisters them. */
+    void attach_session_callbacks() noexcept;
+
     // ---- Test-only -------------------------------------------------------
 
     /** Returns true if the channel has an open stream or has ever sent
@@ -173,6 +182,23 @@ private:
     /** Callback invoked when the stream is closed or reset. */
     void on_stream_closed() noexcept;
 
+    /** Callback invoked for a peer-initiated bidi stream. */
+    void on_peer_stream(IBidirectionalStream* stream) noexcept;
+
+    /** Callback invoked for an inbound session datagram. */
+    void on_session_datagram(std::span<const std::uint8_t> bytes) noexcept;
+
+    /** Inbound data path for the adopted peer stream: strips the
+     *  WebTransport stream-type header, then delivers the payload
+     *  via `on_stream_data`. Tolerates a header split across
+     *  multiple `on_data` invocations. */
+    void on_peer_stream_data(plugins::BufferView data) noexcept;
+
+    /** Drop the adopted peer stream (if any) and reset the header
+     *  reassembly state. The stream itself stays owned by the
+     *  session; only our `on_data` subscription is removed. */
+    void detach_peer_stream() noexcept;
+
     /** Map DataChannelReliability to a human-readable state string. */
     static const char* state_from_reliability(plugins::DataChannelReliability r,
                                                bool connected) noexcept;
@@ -185,6 +211,16 @@ private:
     // (or the test harness) owns the stream object.  The engine
     // owns the session, so lifetime is safe.
     IBidirectionalStream*              stream_raw_ = nullptr;
+    // Non-owning pointer to the adopted peer-initiated stream
+    // (Case E inbound path).  Owned by the session; we only hold
+    // it to deliver `on_stream_data` and to detach on close().
+    IBidirectionalStream*              peer_stream_raw_ = nullptr;
+    // WebTransport stream-type header reassembly for the adopted
+    // peer stream: signal varint (0x41) + session-id varint may be
+    // split across multiple on_data invocations.  Once `peer_header_done_`
+    // is true, bytes flow straight to `on_stream_data`.
+    bool                               peer_header_done_ = false;
+    std::vector<std::uint8_t>          peer_header_pending_;
     std::atomic<bool>                  opened_{false};
     std::atomic<bool>                  stream_ready_{false};
     std::chrono::steady_clock::time_point pr_ttl_deadline_{};
@@ -234,9 +270,13 @@ private:
  * Registered under id `"web_transport"` (matching
  * `EngineConfig::datachannel_backend = "web_transport"`).
  *
- * The factory itself is a thin shell — it requires a session to
- * be injected at channel construction time.  The engine owns the
- * session and creates channels via `create(IWebTransportSession*)`.
+ * Two creation paths:
+ *   - `create(IWebTransportSession*)` — production path.  The engine
+ *     owns the session and binds it at construction time.
+ *   - `create()` (no session) — negotiation probe.  The engine calls
+ *     this once at `init_datachannel_registry()` time to verify the
+ *     factory is registered; the returned channel stays in
+ *     `kErrNotReady` until bound to a live session.  Not for data use.
  */
 class NIMRTC_API_UNSTABLE WebTransportDataChannelFactory final
     : public plugins::IDataChannelFactory {
@@ -255,8 +295,9 @@ public:
         return "WebTransport-backed DataChannel (QUIC / msquic, RFC 9221)";
     }
 
-    /** Create a channel without a session (stub — use `create(IWebTransportSession*)`
-     *  for production).  Returns a channel in kErrNotReady state. */
+    /** Create an unbound negotiation probe (no session).
+     *  Returns a channel in kErrNotReady state; bind a live session via
+     *  `create(IWebTransportSession*)` for production use. */
     plugins::IDataChannel* create() const override;
 
     /** Create a channel backed by an existing session. */

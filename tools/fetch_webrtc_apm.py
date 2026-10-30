@@ -166,6 +166,26 @@ def clone_source(source_dir, mirror_url, branch):
     return ok
 
 
+def apply_patches(project_root, source_dir):
+    """Apply the NimRTC APM patch series to source_dir.
+
+    Delegates to tools/apply_webrtc_apm_patches.py so that the fetch
+    script and the build scripts share one implementation of "how the
+    APM tree is patched".  Returns True on success.
+    """
+    script = project_root / "tools" / "apply_webrtc_apm_patches.py"
+    if not script.exists():
+        print(f"[ERROR] Patch applier not found at {script}")
+        return False
+
+    ok, _ = run(
+        [sys.executable, str(script), "--source-dir", str(source_dir)],
+        cwd=str(project_root),
+        check=False,
+    )
+    return ok
+
+
 def find_build_script(project_root):
     """Locate the appropriate build script for the current OS."""
     if platform.system() == "Windows":
@@ -286,6 +306,22 @@ def main():
         return 1
 
     print(f"[OK] Source cloned to: {source_dir}")
+    print()
+
+    # Step 1b: apply the NimRTC patch series to the freshly cloned tree.
+    #
+    # The APM tree is fetched at build time, not vendored into git, so any
+    # change NimRTC needs in it travels as a versioned patch under
+    # src/third_party/webrtc_audio_processing/patches/.  Applying them
+    # here (rather than only in the build scripts) guarantees the tree is
+    # in a known state no matter which build entry point is used.
+    print("[STEP 1b] Applying NimRTC patches...")
+    if not apply_patches(project_root, source_dir):
+        print()
+        print("[ERROR] Patch application failed.")
+        print("The audio3a module will fall back to the stub implementation.")
+        return 1
+
     print()
     print(f"[OK] WebRTC APM source fetched successfully!")
     print()

@@ -1,20 +1,20 @@
-/**
+﻿/**
  * @file src/engine/src/engine.cpp
- * @brief NimRTCEngine — wires ICE + SDP + RTP + JB + Audio3A + DTLS + SRTP + Opus.
+ * @brief NimRTCEngine ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ wires ICE + SDP + RTP + JB + Audio3A + DTLS + SRTP + Opus.
  *
  * P1.1 implementation:
- *   - open(): create ICE transport via PluginRegistry (id="ice" → IceTransport),
+ *   - open(): create ICE transport via PluginRegistry (id="ice" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ IceTransport),
  *     SDP parser/munger, Audio3A, Opus codec, DTLS session, SRTP context.
  *   - create_offer: emit RFC 8829-compliant audio-only offer with Opus payload,
  *     BUNDLE, rtcp-mux, ICE credentials, candidates, DTLS fingerprint.
  *   - process_remote_sdp: parse remote SDP, apply ICE credentials + candidates,
  *     configure DTLS role + peer fingerprint, emit answer.
  *   - tick: drain transport.recv() + drain_dtls(); demux by first byte.
- *   - send_audio: 3A → Opus encode → RTP packetise → SRTP encrypt → ICE.send.
+ *   - send_audio: 3A ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Opus encode ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ RTP packetise ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ SRTP encrypt ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ ICE.send.
  *
  * ICE-specific methods (state(), local_ufrag(), wait_for_gathering(),
  * gathered_local_candidates(), set_remote_description(), etc.) are accessed
- * through `plugins::IICETransport*` — the engine stores the resolved
+ * through `plugins::IICETransport*` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the engine stores the resolved
  * IICETransport as `ice_t_` and calls through that virtual interface; no
  * `dynamic_cast<ice::IceTransport*>` happens at the engine layer (the only
  * remaining cast is a one-shot safety-net inside open()/pre_open() that
@@ -40,9 +40,9 @@
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/time.hpp>
 #include <nimrtc/core/registry.hpp>
-#include <nimrtc/core/engine_errors.hpp>   // P1#9 — module error-code constants
+#include <nimrtc/core/engine_errors.hpp>   // P1#9 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ module error-code constants
 #include <nimrtc/engine/pal/engine_plugin_resolver.hpp>
-#include <nimrtc/engine/pal/make_plugin.hpp>     // PAL Slice 1.5 — plugin
+#include <nimrtc/engine/pal/make_plugin.hpp>     // PAL Slice 1.5 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ plugin
                                                 // 5-step dance helper
 #include <nimrtc/ice/ice.hpp>
 #include <nimrtc/plugins/transport.hpp>
@@ -58,7 +58,7 @@
 #include <nimrtc/transport/transport_selector.hpp>
 #include <nimrtc/transport/transport_strategy.hpp>
 // Slice 7.6 PR3 (v0.12.0): TransportSession + ITransportStackFactory.
-// The factory lookups (get_transport_stack by §5.3-rule-derived ids) are
+// The factory lookups (get_transport_stack by ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3-rule-derived ids) are
 // expressed inline in init_modules_once(); transport_plugin.hpp is NOT
 // included to avoid a PUBLIC link dependency on make_transport_instance().
 #include <nimrtc/transport/transport_stack.hpp>
@@ -66,7 +66,7 @@
 #include <nimrtc/h264/codec_plugin.hpp>
 #endif
 
-// Concrete module headers — required by NimRTCEngine::Impl which lives in
+// Concrete module headers ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ required by NimRTCEngine::Impl which lives in
 // this translation unit.  The public header (engine.hpp) does NOT include
 // any of these; consumers only need the plugin interfaces.
 #include <nimrtc/sdp/session_description.hpp>
@@ -80,19 +80,22 @@
 // = default = built-in wolfSSL factory at id="wolfssl"); the engine
 // resolves the factory through `core::PluginRegistry::get_dtls_session(id)`
 // at open() time, exactly as the Slice 8 typed registry hook requires
-// (see `src/core/include/nimrtc/core/registry.hpp` §5.4).
+// (see `src/core/include/nimrtc/core/registry.hpp` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.4).
 //
 // As of TPAL-4 (v0.11.0) the `Impl::dtls` field stores
 // `unique_ptr<IDtlsSession>` so the engine never downcasts to the
-// concrete backend — `DtlsSessionWolfSSL`, `DtlsSession` and any
-// future 国密 / OpenSSL / BoringSSL / mbedTLS backend now implement
+// concrete backend ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ `DtlsSessionWolfSSL`, `DtlsSession` and any
+// future ÃÂÃÂÃÂÃÂ¥ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ½ÃÂÃÂÃÂÃÂ¥ÃÂÃÂÃÂÃÂ¯ÃÂÃÂÃÂÃÂ / OpenSSL / BoringSSL / mbedTLS backend now implement
 // the same surface (set_role(DtlsRole) / local_fingerprint() /
 // feed_inbound() / take_outbound() / tick() / state() /
 // is_connected() / srtp_keying_material() / set_peer_fingerprint()).
 #include <nimrtc/dtls/dtls_session_iface.hpp>
+#include <nimrtc/web_transport/web_transport_config.hpp>
+#include <nimrtc/web_transport/web_transport_session_factory.hpp>
+#include <nimrtc/web_transport/web_transport_session_iface.hpp>
 // TPAL-4 cleanup: `DtlsSession::state_name()` is a static method on the
 // concrete module class (used by the engine's state-transition logger
-// below).  Including the concrete header here is allowed — Layout
+// below).  Including the concrete header here is allowed ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Layout
 // Invariant 4 constrains only `engine.hpp`, not the .cpp.  Keeping the
 // include next to the seam header so reviewers see both in context.
 #include <nimrtc/dtls/dtls.hpp>
@@ -123,8 +126,8 @@ void trace(const char* fmt, ...) noexcept {
  *  This is the clock the timeline seam is defined in terms of: it never
  *  jumps (no NTP steps, no manual clock changes) and it is what the
  *  tracker's `local_recv_us_since_epoch` argument carries.  The wall
- *  clock is the *peer's* domain — the SR's NTP instant and the
- *  reconstructed capture timestamp live there — so the two are related
+ *  clock is the *peer's* domain ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the SR's NTP instant and the
+ *  reconstructed capture timestamp live there ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ so the two are related
  *  through the monotonic origin, never mixed directly.
  *
  *  The steady clock's epoch is the boot time on every platform we
@@ -232,7 +235,7 @@ std::vector<std::uint8_t> hex_colon_decode(std::string_view sv) {
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// NimRTCEngine::Impl — all concrete-module state lives here.
+// NimRTCEngine::Impl ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ all concrete-module state lives here.
 //
 // Layout Invariant 4 forbids NimRTCEngine from depending on concrete
 // module headers in its public API.  engine.hpp forward-declares the
@@ -246,15 +249,15 @@ struct NimRTCEngine::Impl {
     std::unique_ptr<sdp::Parser>    sdp_parser = std::make_unique<sdp::Parser>();
     std::unique_ptr<sdp::Munger>    sdp_munger = std::make_unique<sdp::Munger>();
 
-    // Jitter buffers — keyed by SSRC.
+    // Jitter buffers ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ keyed by SSRC.
     std::map<std::uint32_t, std::unique_ptr<jb::JitterBuffer>> jitter_buffers;
 
     // Concrete fallback classes (when no plugin adapter is registered).
     std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
 
-    // SRTP / DTLS / Opus — DTLS is now PAL Slice 4 seam-exposed (TPAL-4
+    // SRTP / DTLS / Opus ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DTLS is now PAL Slice 4 seam-exposed (TPAL-4
     // v0.11.0).  `Impl::dtls` holds a NON-OWNING pointer to
-    // `nimrtc::dtls::IDtlsSession` — the OWNING instance lives inside
+    // `nimrtc::dtls::IDtlsSession` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the OWNING instance lives inside
     // the media `ITransportStack` (see `Impl::session` below, built by
     // `make_transport_instance()` in `init_modules_once()`).
     //
@@ -265,7 +268,7 @@ struct NimRTCEngine::Impl {
     //     into `WebRtcClassicStackFactory` (the "webrtc-classic" stack
     //     factory), which produces a `WebRtcClassicStack` that owns
     //     the DTLS session. The engine no longer builds DTLS
-    //     independently — the stack's factory does, and the engine
+    //     independently ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the stack's factory does, and the engine
     //     reaches the resulting session through the stack's
     //     `dtls_weak()` accessor.
     //   - Storing a `unique_ptr<dtls>` AND a stack-owned DTLS
@@ -301,13 +304,13 @@ struct NimRTCEngine::Impl {
     //
     // For the 4 browser-interop strategies (browser-call, agent-gateway,
     // sfu-relay, cross-network-peer):
-    //   - `session.media_stack`  → WebRtcClassicStack (owns ICE / DTLS / RTP / SCTP)
-    //   - `session.control_stack` → null (browser-call / sfu-relay / cross-network-peer)
-    //                              RawUdpArqStack (agent-gateway — high-freq control)
+    //   - `session.media_stack`  ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ WebRtcClassicStack (owns ICE / DTLS / RTP / SCTP)
+    //   - `session.control_stack` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ null (browser-call / sfu-relay / cross-network-peer)
+    //                              RawUdpArqStack (agent-gateway ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ high-freq control)
     //
-    // For teleop-ultra-low-latency (§5.3 Rule 2):
-    //   - `session.media_stack`  → RawUdpArqStack (no DTLS — not browser-interop)
-    //   - `session.control_stack` → RawUdpArqStack
+    // For teleop-ultra-low-latency (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3 Rule 2):
+    //   - `session.media_stack`  ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ RawUdpArqStack (no DTLS ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ not browser-interop)
+    //   - `session.control_stack` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ RawUdpArqStack
     //   - `impl_->dtls` = nullptr (no DTLS in media path for this strategy)
     //   - Audio pipeline falls back to null-encoder; ICE/DTLS work via
     //     the control stack's raw-UDP ARQ
@@ -347,16 +350,16 @@ struct NimRTCEngine::Impl {
     // process_remote_sdp() runs; defaults to "active" if unset.
     std::string dtls_local_setup;
 
-    /** The DTLS role this engine ended up playing (RFC 5763 §5).
+    /** The DTLS role this engine ended up playing (RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5).
      *
-     *  `true`  = DTLS **Client** — we send the ClientHello.
-     *  `false` = DTLS **Server** — we wait for the peer's ClientHello.
+     *  `true`  = DTLS **Client** ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we send the ClientHello.
+     *  `false` = DTLS **Server** ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we wait for the peer's ClientHello.
      *
      *  The role decides two things:
      *
      *    1. which `a=setup` attribute we advertise in the answer, and
      *    2. which half of the DTLS-SRTP keying material is *ours*
-     *       (RFC 5764 §4.2): the client uses `client_master_key` for its
+     *       (RFC 5764 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.2): the client uses `client_master_key` for its
      *       outbound stream, the server uses `server_master_key`.
      *
      *  It is resolved from the peer's `a=setup` attribute when we are the
@@ -366,7 +369,7 @@ struct NimRTCEngine::Impl {
 
     /** The `o=` session id of the offer we produced, if any.
      *
-     *  RFC 3264 §5.1: the answer carries the *offer's* session id, so the
+     *  RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.1: the answer carries the *offer's* session id, so the
      *  offerer can tell "this is the answer to my offer" from "this is a
      *  fresh offer" by comparing the ids.  That distinction is what lets
      *  `process_remote_sdp()` pick the right DTLS role (the answer commits
@@ -375,7 +378,7 @@ struct NimRTCEngine::Impl {
     std::string local_session_id;
 
     // ---- send_audio scratch buffers (P0#4) --------------------------------
-    // Reusable per-engine buffers for the audio capture→encode→RTP→SRTP
+    // Reusable per-engine buffers for the audio captureÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂencodeÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂRTPÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂSRTP
     // path.  Capacity grows monotonically across calls, avoiding the heap
     // allocations that a fresh `std::vector` per call would incur.
     //
@@ -395,7 +398,7 @@ struct NimRTCEngine::Impl {
     // ---- Cross-end timeline (ADR-017) --------------------------------------
     //
     // `EngineConfig::timeline_enabled` turns this seam on.  Four things
-    // hang off it (ADR-017 §"Decision 5" — the engine side):
+    // hang off it (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 5" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the engine side):
     //
     //   1. extmap negotiation in create_offer() / process_remote_sdp()
     //      (`local_abs_send_time_id` / `remote_abs_send_time_id`);
@@ -408,7 +411,7 @@ struct NimRTCEngine::Impl {
     //      exposed through the `capture_ts_us_*` accessors.
     //
     // While the flag is false, every field here stays at its default and
-    // no abs-send-time / SR is ever emitted (ADR-017 §"Decision 5").
+    // no abs-send-time / SR is ever emitted (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 5").
     rtp::SenderReportTracker sr_tracker;
 
     /** The RTP header-extension id WE advertise for abs-send-time in our
@@ -425,8 +428,8 @@ struct NimRTCEngine::Impl {
      *  `SenderReportTracker::set_monotonic_origin()`.
      *
      *  The value is the wall-clock instant (RFC 5905) that corresponds
-     *  to a local **monotonic** reading of zero — i.e. the boot epoch.
-     *  A monotonic sample of `m` µs therefore sits at the Unix instant
+     *  to a local **monotonic** reading of zero ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ i.e. the boot epoch.
+     *  A monotonic sample of `m` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs therefore sits at the Unix instant
      *  `unix_us(origin) + m`, which is what both the encoder and the
      *  tracker's skew computation assume.
      *
@@ -436,62 +439,62 @@ struct NimRTCEngine::Impl {
      *  skew sample would be off by the whole Unix epoch. */
     rtp::Ntp64 monotonic_origin_ntp64{0};
 
-    /** Local wall clock (µs since Unix epoch) at open() minus the steady
+    /** Local wall clock (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs since Unix epoch) at open() minus the steady
      *  clock reading taken at the same instant.  Lets the abs-send-time
      *  encoder convert a send-time monotonic stamp into Unix-anchored
      *  microseconds without a second clock read per packet.
      *
-     *  This is the same quantity as `unix_us(monotonic_origin_ntp64)` —
+     *  This is the same quantity as `unix_us(monotonic_origin_ntp64)` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ
      *  kept as a plain integer so the per-packet path does not have to
      *  re-derive it from the NTP64. */
     std::int64_t boot_epoch_offset_us = 0;
 
-    /** Last reconstructed capture instant per inbound SSRC (µs since Unix
+    /** Last reconstructed capture instant per inbound SSRC (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs since Unix
      *  epoch, on the *peer's* wall clock).  Ordered so `last_capture_ts`
      *  can report the most recently updated stream. */
     std::map<std::uint32_t, std::int64_t> capture_ts_us_by_ssrc;
 
-    /** Local arrival instant (µs since Unix epoch) of the same frame, used
+    /** Local arrival instant (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs since Unix epoch) of the same frame, used
      *  to derive the one-way delay.  Parallel to the map above. */
     std::map<std::uint32_t, std::int64_t> arrival_us_by_ssrc;
 
     /** Capture instant + arrival of the most recent inbound frame across
-     *  all SSRCs — backs `last_capture_ts_us()` / `last_one_way_delay_us()`. */
+     *  all SSRCs ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ backs `last_capture_ts_us()` / `last_one_way_delay_us()`. */
     std::optional<std::int64_t> last_capture_us;
     std::optional<std::int64_t> last_arrival_us;
 
-    /** Inter-clock skew of the most recent inbound frame (µs) — the
+    /** Inter-clock skew of the most recent inbound frame (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the
      *  change since the last Sender Report of the offset between our
-     *  clock and the peer's (RFC 3550 §8.1).  Backs
+     *  clock and the peer's (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§8.1).  Backs
      *  `last_sender_recv_skew_us()`. */
     std::optional<std::int64_t> last_skew_us;
 
-    /** Inter-clock skew per inbound SSRC — backs
+    /** Inter-clock skew per inbound SSRC ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ backs
      *  `sender_recv_skew_us_for_ssrc()`. */
     std::map<std::uint32_t, std::int64_t> skew_us_by_ssrc;
 
     /** SSRCs whose media clock rate has already been pinned on the tracker.
-     *  Membership means "configured once" — the payload-type → clock-rate
+     *  Membership means "configured once" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the payload-type ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ clock-rate
      *  resolution in `handle_rtp()` runs only on the first packet of each
      *  SSRC, keeping the media hot path free of per-packet map work. */
     std::set<std::uint32_t> clock_rate_pinned_ssrcs;
 
-    /** Payload type → media clock rate (Hz), taken from the *remote*
+    /** Payload type ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ media clock rate (Hz), taken from the *remote*
      *  SDP's `a=rtpmap:` lines.
      *
      *  The media clock rate is a property of the codec the *peer* sends
      *  with, so the peer's own description is the authoritative source
-     *  (RFC 3550 §6.4.1: the Sender Report does not carry it).  A
+     *  (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1: the Sender Report does not carry it).  A
      *  payload type may appear in several m-sections; the first
      *  declaration wins and a conflicting later one is logged and
-     *  ignored — the RTP layer does not track which m-section an SSRC
+     *  ignored ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the RTP layer does not track which m-section an SSRC
      *  belongs to, so a per-m-line table could not be consulted
      *  anyway. */
     std::unordered_map<std::uint8_t, std::uint32_t> remote_clock_rate_hz;
 
     // ---- Outbound Sender Report state --------------------------------------
     // `sr_*` carry the values an SR body reports for the audio stream
-    // (RFC 3550 §6.4.1 sender info).  Video is folded into the same SR via
+    // (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1 sender info).  Video is folded into the same SR via
     // report blocks only when a video sender is active; the audio stream is
     // the SR's own media source because it is always the first one out.
     std::chrono::steady_clock::time_point sr_last_sent{};
@@ -503,21 +506,21 @@ struct NimRTCEngine::Impl {
     std::uint32_t video_packet_count    = 0;
     std::uint32_t video_octet_count     = 0;
 
-    /** Wall-clock instant (µs since the Unix epoch) of the **last outbound
+    /** Wall-clock instant (ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs since the Unix epoch) of the **last outbound
      *  audio packet**, sampled at the very moment its abs-send-time
      *  element was stamped.
      *
      *  The Sender Report pairs an NTP instant with an RTP timestamp, and
      *  for the pair to describe *one* point on the media timeline the two
-     *  must refer to the same moment.  RFC 3550 §6.4.1 words the NTP
+     *  must refer to the same moment.  RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1 words the NTP
      *  field as "the wallclock time when the report was sent" while the
-     *  RTP timestamp is that of the last packet sent — a pairing that is
+     *  RTP timestamp is that of the last packet sent ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ a pairing that is
      *  internally inconsistent by exactly the gap between the two events.
      *
      *  That gap is not a rounding detail: with a 1 s Sender-Report
      *  cadence it is up to a full second, and with continuous audio it
      *  is one frame interval.  A receiver that reconstructs the capture
-     *  instant from the pair inherits the whole offset — every packet
+     *  instant from the pair inherits the whole offset ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ every packet
      *  comes out systematically late, and the one-way delay reads a
      *  second too small.  The abs-send-time refinement does not rescue
      *  it either: the refinement adds the *elapsed* time since the
@@ -525,8 +528,8 @@ struct NimRTCEngine::Impl {
      *
      *  So the engine stamps the send instant on the packet itself and
      *  reuses it in the SR.  The SR's NTP field then denotes the exact
-     *  instant of the packet whose RTP timestamp it carries — the same
-     *  instant the abs-send-time field encodes, to within the 15.26 µs
+     *  instant of the packet whose RTP timestamp it carries ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the same
+     *  instant the abs-send-time field encodes, to within the 15.26 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs
      *  abs-send-time quantisation.  The peer's reconstruction is
      *  therefore free of the report-cadence bias, and the one-way delay
      *  measures the wire, not the report schedule.
@@ -543,21 +546,21 @@ struct NimRTCEngine::Impl {
     // ---- DataChannel DTLS-transport cookie (v1.x follow-up) ---------
     //
     // Placeholder for the physical SCTP-over-DTLS wiring that lands
-    // in the **v1.x WebTransport / QUIC** re-design — see
-    // `docs/plan/v0.11-plan.md` §2.2 (DC-1 / DC-2 / TPAL-5 deferred)
-    // and §10 (forward direction). v0.11.0 falls back to the
-    // in-process `tests/test_datachannel_engine` 5/5 PASS as the §7
+    // in the **v1.x WebTransport / QUIC** re-design ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see
+    // `docs/plan/v0.11-plan.md` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.2 (DC-1 / DC-2 / TPAL-5 deferred)
+    // and ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§10 (forward direction). v0.11.0 falls back to the
+    // in-process `tests/test_datachannel_engine` 5/5 PASS as the ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§7
     // substitute, made permanent.
     //
     // Typed as `nimrtc::dtls::IDtlsSession*` (non-owning) so the field
-    // is self-describing — the v1.x wiring PR that swaps to
+    // is self-describing ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the v1.x wiring PR that swaps to
     // WebTransport will replace this with a tagged union over
     // {IDtlsSession*, IWebTransportSession*} rather than juggling a
     // raw `void*` cast.  Lifetime (v0.13.0): weak_ptr into the
     // media_stack's DTLS session; expired automatically after
     // close() tears down the stack.
     //
-    // Initialised as an empty weak_ptr in init_modules_once() — at that point
+    // Initialised as an empty weak_ptr in init_modules_once() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ at that point
     // `impl_->dtls` is a weak_ptr into `impl_->session.media_stack`. By the
     // time this method runs, `init_modules_once()` has built the session and
     // either set `impl_->dtls` to the stack's DTLS session (browser-interop
@@ -568,9 +571,28 @@ struct NimRTCEngine::Impl {
     // init_modules_once().
     //
     // v0.13.0 (this change): changed from raw pointer to weak_ptr, aligned
-    // with Impl::dtls.  The cookie is informational — callers must .lock()
+    // with Impl::dtls.  The cookie is informational ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ callers must .lock()
     // before use; they get nullptr after close() automatically.
     std::weak_ptr<nimrtc::dtls::IDtlsSession> datachannel_transport_cookie;
+
+    // ---- WebTransport session ownership (v0.14.0-rc.1 follow-up) ----
+    //
+    // Created lazily by create_data_channel() when
+    // `resolved_dc_factory_id_ == "web_transport"`, from
+    // `config_.web_transport_name` + `web_transport_peer_host/port`.
+    // Shared (not unique) so every channel created by this engine sits
+    // on one QUIC connection. Channels hold a non-owning pointer into
+    // it ÃÂ¢ÃÂÃÂ callers must destroy channels before close() (same contract
+    // as the non-owning ice_t_ handle). Torn down in close().
+    std::shared_ptr<nimrtc::web_transport::IWebTransportSession> wt_session;
+
+    // Last polled WebTransport session state (v0.15.0, product route).
+    // Polled in tick(); transitions to kConnected/kFailed are reported
+    // via on_data_state_("open"/"error") so engine integrators get the
+    // same callback shape as the reliable-stream open path.
+    // `std::uint8_t` (not the enum) so the header stays free of the
+    // web_transport include; the .cpp maps it back to WebTransportState.
+    std::uint8_t wt_last_state = 0;  // kConnecting
 
     // ---- Resolved transport strategy (v0.12.0 Slice 7.6 PR3) ---------
     //
@@ -580,7 +602,7 @@ struct NimRTCEngine::Impl {
     // (or "browser-call" when empty); the factory ids come from
     // `CapabilitySelector::last_trace()`.  The ids are stored as
     // `std::string` (owned) because the Selector's trace returns
-    // `std::string` values that are local to the call site — string_views
+    // `std::string` values that are local to the call site ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ string_views
     // into the trace would dangle as soon as the local goes out of scope.
     std::string      resolved_strategy_name;       // owned
     std::string      resolved_media_factory_id;     // owned
@@ -607,7 +629,7 @@ NimRTCEngine::~NimRTCEngine() {
 // ---------------------------------------------------------------------------
 // Transport strategy accessors (v0.12.0 Slice 7.6 PR3)
 //
-// Out-of-line because they dereference `Impl` (pImpl idiom) — Impl is
+// Out-of-line because they dereference `Impl` (pImpl idiom) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Impl is
 // forward-declared in the public header, so an inline definition there
 // would not compile.  The body is intentionally trivial: read the
 // strings `init_transport_strategy()` (called from `init_modules_once()`)
@@ -628,9 +650,9 @@ NimRTCEngine::transport_strategy_session() const noexcept {
 void NimRTCEngine::init_bwe_scheduler() noexcept {
     // ---- BWE plugin -------------------------------------------------------
     // Created and opened here; injected into ice_t_ via set_bwe().
-    // If bwe_name is empty, BWE is skipped (passthrough — "transport" profile).
+    // If bwe_name is empty, BWE is skipped (passthrough ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ "transport" profile).
     if (!config_.bwe_name.empty() && !bwe_) {
-        // Failure policy: Warn (matches pre-Slice-1.5 behaviour — BWE is
+        // Failure policy: Warn (matches pre-Slice-1.5 behaviour ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ BWE is
         // optional, so a missing or broken plugin degrades to "no BWE"
         // with a diagnostic log line, not an on_error_ fire).
         (void)pal::make_plugin<&pal::resolve_bwe>(
@@ -691,21 +713,21 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     const uint32_t rc = init_modules_once();
     if (rc != 0) return rc;
 
-    // State stays kConstructed — open() will call ice_t_->open()
+    // State stays kConstructed ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ open() will call ice_t_->open()
     // and set state to kOpen when invoked.
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// init_modules_once() — thin orchestrator (P0 refactor, see engine.hpp).
+// init_modules_once() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ thin orchestrator (P0 refactor, see engine.hpp).
 //
 // Splits the pre-refactor ~460-line monolith into 5 phase helpers:
-//   1. init_transport_strategy()  — validate + Selector
-//   2. init_transport_session()   — TransportSession build + ICE pre-open config
-//   3. init_bwe_scheduler()       — already-extracted (PAL Slice 1.5 era)
-//   4. init_audio_modules()       — audio3a + codec (Silent fallback paths)
-//   5. init_datachannel_registry()— DataChannel factory verification
-//   6. init_dtls_handshake()      — SRTP context + DTLS open + ICE callbacks
+//   1. init_transport_strategy()  ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ validate + Selector
+//   2. init_transport_session()   ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ TransportSession build + ICE pre-open config
+//   3. init_bwe_scheduler()       ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ already-extracted (PAL Slice 1.5 era)
+//   4. init_audio_modules()       ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ audio3a + codec (Silent fallback paths)
+//   5. init_datachannel_registry()ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DataChannel factory verification
+//   6. init_dtls_handshake()      ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ SRTP context + DTLS open + ICE callbacks
 //
 // Phase ordering matches the pre-refactor inline order exactly; behaviour
 // is unchanged.
@@ -731,7 +753,7 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1 — transport strategy validation + CapabilitySelector.
+// Phase 1 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ transport strategy validation + CapabilitySelector.
 //
 // Resolve the strategy name and apply the CapabilitySelector BEFORE any
 // module is created.  This is the single place where the engine validates
@@ -740,11 +762,11 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
 //
 // Failure modes:
 //   - Unknown strategy name (non-empty, not in the 5-id catalog)
-//     → std::invalid_argument from `strategy_by_name()`.  We catch it
+//     ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ std::invalid_argument from `strategy_by_name()`.  We catch it
 //     and convert to kEngineInvalidParam (0x1001) so callers see a
 //     uniform non-zero return code (the engine API does not throw).
 //   - Selector returning an empty media_stack (the CapabilitySelector
-//     default ctor returns empty stacks when no resolver is injected) →
+//     default ctor returns empty stacks when no resolver is injected) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ
 //     kEngineInternal.  This shouldn't happen with a well-formed
 //     strategy but is caught defensively.
 //
@@ -770,7 +792,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         //     (render-only / source-only demos).
         // The "shell" sentinel bypasses Selector validation by handling
         // the unmatched name here and never calling
-        // `requirements_from_profile_input()` — the Sentinel is a
+        // `requirements_from_profile_input()` ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the Sentinel is a
         // well-known reserved name documented in the public EngineConfig
         // header (see engine.hpp).
         // ==================================================================
@@ -779,7 +801,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
             impl_->resolved_media_factory_id  = "default";
             impl_->resolved_control_factory_id = "";     // no control plane
             core::log::Logger::instance().info(
-                "engine: transport strategy 'shell' — using Slice 8 "
+                "engine: transport strategy 'shell' ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ using Slice 8 "
                 "shell stack factory (id=\"default\"); ICE/DTLS/SRTP "
                 "are inactive by design");
             return 0;
@@ -791,7 +813,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         std::string_view resolved_name;
         try {
             // requirements_from_profile_input() throws on unknown names.
-            // The base call below has no per-instance overrides — it
+            // The base call below has no per-instance overrides ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ it
             // returns the strategy's canonical TransportRequirements.
             ProfileTransportInput in;
             in.strategy = config_.transport_strategy_name;
@@ -811,7 +833,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // Apply the Selector.  We construct a default CapabilitySelector
         // (no resolver hooks), which in "rule-only mode" returns empty
         // stacks but records the chosen factory ids in `last_trace()`.
-        // Those ids are the §5.3-rule-derived factory names — exactly
+        // Those ids are the ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3-rule-derived factory names ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ exactly
         // what the engine's accessors need to expose.
         CapabilitySelector selector;
         TransportRequirements req;
@@ -819,7 +841,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
             req = requirements_from_profile_input(
                 ProfileTransportInput{resolved_name});
         } catch (const std::invalid_argument&) {
-            // Unreachable — we just validated the name above.  Keep the
+            // Unreachable ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we just validated the name above.  Keep the
             // catch as a defensive belt-and-braces; if it ever fires
             // it indicates a logic bug, not a config error.
             impl_->last_open_rc = core::kEngineInternal;
@@ -828,11 +850,11 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         TransportSession session = selector.select(req);
         const auto trace = selector.last_trace();
 
-        // The Selector's trace carries the §5.3-rule-derived factory
+        // The Selector's trace carries the ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3-rule-derived factory
         // ids.  An empty trace.media_factory_id means the Selector
         // could not resolve a media stack (rule 3 / `webrtc-quic` is
         // not yet implemented; the `webrtc-quic-call` strategy lands
-        // in v1.x per transport-strategies.md §6 #1).
+        // in v1.x per transport-strategies.md ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6 #1).
         //
         // The "shell" sentinel (no real ICE/DTLS) is handled earlier
         // in `init_transport_strategy()` and never reaches this block.
@@ -854,14 +876,14 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         }
         impl_->resolved_control_factory_id = trace.control_factory_id;
 
-        // (void)session — the rule-only Selector returns empty stacks.
+        // (void)session ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the rule-only Selector returns empty stacks.
         // We log the trace instead so diagnostics still see what the
         // Selector would have chosen in production.
         (void)session;
         core::log::Logger::instance().info(
             std::string{"transport: strategy '"} +
             impl_->resolved_strategy_name +
-            "' resolved — media_factory_id='" +
+            "' resolved ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ media_factory_id='" +
             impl_->resolved_media_factory_id +
             "', control_factory_id='" +
             impl_->resolved_control_factory_id + "'");
@@ -870,23 +892,23 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 — TransportSession build + ICE pre-open configuration.
+// Phase 2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ TransportSession build + ICE pre-open configuration.
 //
 // Slice 7.6 PR3 replaces the pre-PR3 manual ICE + DTLS construction
 // path with a TransportSession that owns the media_stack and
 // control_stack.  The factory lookups are expressed inline here (rather
 // than via a helper in the transport module) to keep the engine's
-// link surface unchanged for existing consumers — nimrtc::transport is
+// link surface unchanged for existing consumers ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ nimrtc::transport is
 // still linked, but the PUBLIC link is sufficient; no new API
 // boundary is required.
 //
 // StackConfig defaults mirror what the pre-PR3 engine set on each
-// plugin individually.  The §5.3 factory ids (webrtc-classic /
+// plugin individually.  The ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3 factory ids (webrtc-classic /
 // raw-udp-arq) are stored in impl_->resolved_media_factory_id /
 // control_factory_id.
 //
 // Rule 2 caveat (teleop-ultra-low-latency):
-//   §5.3 Rule 2 maps "no browser interop + high-freq control" to
+//   ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.3 Rule 2 maps "no browser interop + high-freq control" to
 //   media=raw-udp-arq.  That stack has no DTLS.  Audio falls back to
 //   null-encoder; ICE/connectivity work via raw-UDP ARQ.
 // ---------------------------------------------------------------------------
@@ -905,7 +927,7 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 
         auto& reg = core::PluginRegistry::instance();
 
-        // Media stack — must succeed.
+        // Media stack ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ must succeed.
         const ITransportStackFactory* media_f =
             reg.get_transport_stack(impl_->resolved_media_factory_id);
         if (!media_f) {
@@ -932,7 +954,7 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
             return core::kEngineInternal;
         }
 
-        // Control stack — optional (null for strategies without
+        // Control stack ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ optional (null for strategies without
         // high-freq control).
         if (!impl_->resolved_control_factory_id.empty()) {
             const ITransportStackFactory* ctrl_f =
@@ -943,23 +965,23 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
                     core::log::Logger::instance().warn(
                         std::string{"engine: control stack factory '"} +
                         impl_->resolved_control_factory_id +
-                        "' returned null — control plane inactive for this strategy.");
+                        "' returned null ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ control plane inactive for this strategy.");
                 }
             } else {
                 core::log::Logger::instance().warn(
                     std::string{"engine: control stack factory '"} +
                     impl_->resolved_control_factory_id +
-                    "' not registered — control plane inactive for this strategy.");
+                    "' not registered ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ control plane inactive for this strategy.");
             }
         }
 
         // Extract handles into the owned session.
         //   - ice_t_: raw pointer (out of v0.13.0 scope; still safe because
-        //     the engine never outlives the session's media_stack — see
+        //     the engine never outlives the session's media_stack ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see
         //     ~NimRTCEngine's delete impl_ ordering).
         //   - impl_->dtls: weak_ptr (v0.13.0; auto-expires after close()).
         ice_t_      = &impl_->session.media_stack->ice();
-        impl_->dtls = impl_->session.media_stack->dtls_weak();   // weak_ptr — auto-expires after close()
+        impl_->dtls = impl_->session.media_stack->dtls_weak();   // weak_ptr ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ auto-expires after close()
 
         // Rule 2 warning: raw-udp-arq media has no DTLS.
         if (!impl_->dtls.lock()) {
@@ -968,13 +990,13 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
                 impl_->resolved_strategy_name +
                 "' uses media_factory_id='" +
                 impl_->resolved_media_factory_id +
-                "' with no DTLS (Rule 2 — raw-udp-arq media). "
+                "' with no DTLS (Rule 2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ raw-udp-arq media). "
                 "Audio pipeline uses null-encoder; "
                 "DTLS-dependent features (SRTP, DataChannel) inactive.");
         }
 
         core::log::Logger::instance().info(
-            std::string{"engine: TransportSession built — "
+            std::string{"engine: TransportSession built ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ "
                         "media='"} +
             impl_->resolved_media_factory_id +
             "', control='" +
@@ -990,13 +1012,13 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
     ice_t_->set_local_port_range(config_.local_port_range_begin,
                                   config_.local_port_range_end);
     // TURN servers are added via NimRTCEngine::add_turn_server() *before*
-    // open() — they're applied to ice_t_ at that time, so no loop here.
+    // open() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ they're applied to ice_t_ at that time, so no loop here.
 
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 — audio3a + codec plugin creation.
+// Phase 4 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ audio3a + codec plugin creation.
 //
 // Original order: set_callbacks() BEFORE open().  We preserve that
 // ordering via make_plugin's post_create hook.  The audio3a plugin's
@@ -1004,16 +1026,16 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 // captured-this lambda.
 //
 // Failure policy:
-//   - audio3a — silent on missing (concrete NullAudio3A fallback below
+//   - audio3a ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ silent on missing (concrete NullAudio3A fallback below
 //     covers the gap), Error on open fail (callers want to know the
 //     configured plugin misbehaved even though we fall back).
-//   - codec — Silent on missing / open fail / create returns null.  The
+//   - codec ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Silent on missing / open fail / create returns null.  The
 //     engine falls back to the statically-linked opus module
 //     (NIMRTC_HAS_OPUS).  Callers do not need an error notification
 //     because the fallback is "the same codec from a different path".
 //     This matches the pre-Slice-1.5 behaviour.
 //
-// Returns void — failures surface through `on_error_` and the
+// Returns void ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ failures surface through `on_error_` and the
 // `unique_ptr` slot is reset to `nullptr` so the fallback path runs.
 // ---------------------------------------------------------------------------
 void NimRTCEngine::init_audio_modules() noexcept {
@@ -1026,7 +1048,7 @@ void NimRTCEngine::init_audio_modules() noexcept {
                                            // nullptr_t branch in helper)
         {.err_open_failed = core::kAudio3APluginOpenFailed,
          .open_fail_mode = pal::PluginFailureMode::Error,
-         .missing_mode = pal::PluginFailureMode::Silent,  // missing → silent fallback
+         .missing_mode = pal::PluginFailureMode::Silent,  // missing ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ silent fallback
          .on_error = on_error_},
         /*post_create=*/[this](plugins::IAudio3A& p) {
             p.set_callbacks(
@@ -1079,11 +1101,11 @@ void NimRTCEngine::init_audio_modules() noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 — DataChannel factory verification.
+// Phase 5 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DataChannel factory verification.
 //
 // Verify the IDataChannelFactory registered under
 // `cfg.datachannel_name` resolves via PluginRegistry.  The engine
-// does NOT auto-create any channel — callers explicitly invoke
+// does NOT auto-create any channel ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ callers explicitly invoke
 // `create_data_channel(label)` after open() succeeds (mirrors the JS
 // `peer.createDataChannel()` API).
 //
@@ -1092,20 +1114,20 @@ void NimRTCEngine::init_audio_modules() noexcept {
 // side silently drops the peer's `m=application` line, and
 // `create_data_channel()` returns nullptr.
 //
-// The factory lookup is intentionally lazy — we don't construct any
+// The factory lookup is intentionally lazy ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we don't construct any
 // IDataChannel at init time.  The default `SctpDataChannelFactory`
 // registers at static-init time via `register_default_plugins()`,
 // so by the time `init_modules_once()` runs, the factory is
 // already in the registry.
 //
-// NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport /
-// QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
-// DC-2 / TPAL-5 deferred) and §10 (forward direction).  v0.11.0
-// falls back to the in-process `tests/test_datachannel_engine`
-// 5/5 PASS as the §7 substitute, made permanent.  Chrome is moving
-// DataChannel to WebTransport over QUIC; v1.x will redesign the
-// data plane on top of that path (likely msquic, MIT-licensed,
-// Windows-first, cross-platform CI).
+// NOTE (v0.15.0): the WebTransport/QUIC data plane has landed.  The default
+// backend is now "web_transport" (msquic-backed); the session is created lazily
+// in create_data_channel() and shared by all channels of this engine.  The notes
+// below describe the legacy "sctp" backend, retained for backward compatibility.
+//
+// (historical note: the v0.11 plan deferred the SCTP-over-DTLS wiring; the SCTP
+// backend below is the retained legacy path.)
+//
 //
 // The full DataChannel lifecycle requires plumbing the DTLS
 // transport's outbound datagram path into the SCTP socket:
@@ -1113,16 +1135,14 @@ void NimRTCEngine::init_audio_modules() noexcept {
 //      keying material and feed it into the SCTP socket via the
 //      `ISctpSocket::set_dtls_keys()` hook.
 //   2. Hook the DTLS transport's outbound (encrypted) side to
-//      the SCTP socket's `send_datagram()` — that's where
+//      the SCTP socket's `send_datagram()` -- that's where
 //      SCTP-over-DTLS packets are emitted onto the wire.
 //   3. Hook the DTLS transport's inbound (decrypted) datagrams
 //      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
 //      can drain its receive queue.
 //   This skeleton only reserves the (void*) transport pointer
-// placeholder (`Impl::datachannel_transport_cookie`) — the v1.x
-// wiring PR replaces it with the physical plumbing on top of
-// WebTransport / QUIC.
-//
+// placeholder (`Impl::datachannel_transport_cookie`) -- the SCTP path reserves it;
+// the WebTransport path owns `Impl::wt_session` instead.
 // Returns `core::kEngineInternal` when `cfg.datachannel_backend` holds
 // an unrecognised value (no silent fallback to "sctp"); a missing
 // factory only logs a warning and `create_data_channel()` will return
@@ -1137,18 +1157,18 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     //      callers).  After this step the field is treated as the new
     //      `datachannel_backend` (might be "sctp", "web_transport", "...").
     //   2. Dispatch on the resolved backend id:
-    //        "sctp"          — pick factory id "sctp" (or `datachannel_name`
+    //        "sctp"          ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ pick factory id "sctp" (or `datachannel_name`
     //                          override when non-empty).
-    //        "web_transport" — pick factory id "web_transport" (the
+    //        "web_transport" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ pick factory id "web_transport" (the
     //                          `datachannel_name` override is ignored in
     //                          this mode); also verify the
     //                          `web_transport_name` session factory
     //                          resolves (readiness-only; physical
     //                          session creation follows in the next rc.1
-    //                          PR that wires DTLS↔WebTransport).
-    //        ""              — DataChannel disabled (resolved id stays
+    //                          PR that wires DTLSÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂWebTransport).
+    //        ""              ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DataChannel disabled (resolved id stays
     //                          empty).
-    //        <other>         — hard error: `kEngineInternal` is returned
+    //        <other>         ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ hard error: `kEngineInternal` is returned
     //                          so `open()` fails and surfaces the problem
     //                          via `on_error_`; the factory id is left
     //                          empty and `create_data_channel()` returns
@@ -1186,7 +1206,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
             backend = "sctp";   // explicit even though "sctp" is also the default
         } else {
             // Power-user factory override.  Treat the value as a direct
-            // factory id rather than a backend family — flagging it keeps
+            // factory id rather than a backend family ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ flagging it keeps
             // the dispatch below from reporting it as an unrecognised
             // `datachannel_backend` value.
             backend              = config_.datachannel_name;
@@ -1196,7 +1216,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 
     // Step 2: dispatch.
     if (backend.empty()) {
-        // Disabled — resolved id stays empty, no factory resolution.
+        // Disabled ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ resolved id stays empty, no factory resolution.
         core::log::Logger::instance().debug(
             "engine: DataChannel disabled (datachannel_backend == \"\" "
             "&& datachannel_name.empty())");
@@ -1205,7 +1225,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 
     if (legacy_direct_factory_id) {
         // v0.x power-user path: `datachannel_name` held a custom factory id.
-        // Resolve it directly through the registry — no family dispatch, no
+        // Resolve it directly through the registry ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ no family dispatch, no
         // hard error (this is the pre-rc.1 contract).
         resolved_dc_factory_id_ = backend;
         const plugins::IDataChannelFactory* dcf =
@@ -1283,7 +1303,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 
         // Also verify the WebTransport session factory (readiness only;
         // physical session creation is the v0.14.0-rc.1 follow-up PR that
-        // wires DTLS↔WebTransport plumbing).
+        // wires DTLSÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂWebTransport plumbing).
         if (config_.web_transport_name.empty()) {
             core::log::Logger::instance().warn(
                 "engine: DataChannel backend='web_transport' but "
@@ -1304,19 +1324,19 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
                         .append("' not registered (the engine will not be "
                                 "able to create the session; this becomes "
                                 "fatal in the rc.1 PR that wires "
-                                "DTLS↔WebTransport plumbing)"));
+                                "DTLSÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂWebTransport plumbing)"));
             }
         }
         return 0;
     }
 
-    // Unknown backend — hard error.  `open()` propagates the return code
+    // Unknown backend ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ hard error.  `open()` propagates the return code
     // so the caller sees a non-zero rc; there is deliberately no silent
     // fallback to "sctp" (a typo'd backend id would otherwise mask an
     // integrator error).
     std::string msg = std::string("engine: datachannel_backend='") + backend
         + "' is not recognised (valid: \"sctp\", \"web_transport\", \"\"; "
-          "see docs/plan/v0.14-plan.md §2.1 / docs/plan/v1.0-plan.md §2.1.1)";
+          "see docs/plan/v0.14-plan.md ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.1 / docs/plan/v1.0-plan.md ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.1.1)";
     core::log::Logger::instance().error(msg);
     impl_->last_open_rc = core::kEngineInternal;
     if (on_error_) on_error_(core::kEngineInternal, msg);
@@ -1325,7 +1345,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6 — SRTP context creation + DTLS open + ICE callbacks.
+// Phase 6 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ SRTP context creation + DTLS open + ICE callbacks.
 //
 // Slice 7.6 PR3 (v0.12.0): DTLS session ownership moved from the
 // engine (direct `reg.get_dtls_session()` + `factory->create()`) to
@@ -1337,10 +1357,10 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 // nullptr automatically after close(), eliminating the UAF class.
 //
 // The factory's `create()` already built a default DtlsConfig with
-// role=Server / srtp_profile=Aes128CmSha1_80 — matching what the
+// role=Server / srtp_profile=Aes128CmSha1_80 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ matching what the
 // pre-PR3 engine set here.  The DTLS role is still a placeholder;
 // `process_remote_sdp()` resolves the real role from the peer's
-// `a=setup` attribute (RFC 5763 §5) and calls `dtls->set_role()`
+// `a=setup` attribute (RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5) and calls `dtls->set_role()`
 // before the handshake.  See P0#1 (DTLS role negotiation).
 //
 // Rule 2 caveat (teleop-ultra-low-latency):
@@ -1355,9 +1375,9 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 //   for all 4 browser-interop strategies) but the user-supplied
 //   `dtls_name` doesn't resolve to a registered factory, the
 //   stack's factory returns the stack with dtls_=null (defensive
-//   — see webrtc_classic_stack.cpp create()'s "DTLS factory not
+//   ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see webrtc_classic_stack.cpp create()'s "DTLS factory not
 //   found" branch).  The engine must NOT silently proceed without
-//   DTLS in that case — it must surface kDtlsOpenFailed (the same
+//   DTLS in that case ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ it must surface kDtlsOpenFailed (the same
 //   error the pre-PR3 path produced when `reg.get_dtls_session()`
 //   returned null).  Rule 2 (raw-udp-arq media) is the only case
 //   where null DTLS is OK; the strategy id is checked here to
@@ -1386,10 +1406,10 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
     } else if (impl_->resolved_media_factory_id == "raw-udp-arq" ||
                impl_->resolved_media_factory_id == "default") {
         // No-DTLS-by-design media stack:
-        //   - "raw-udp-arq"  — Rule 2 strategy (teleop-ultra-low-latency).
+        //   - "raw-udp-arq"  ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Rule 2 strategy (teleop-ultra-low-latency).
         //     Strategically chosen for high-freq control without browser
         //     interop, so DTLS is omitted from the media plane.
-        //   - "default"      — Slice 8 shell stack used by the "shell"
+        //   - "default"      ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Slice 8 shell stack used by the "shell"
         //     transport strategy (no ICE/DTLS/SRTP at all). The shell
         //     is intended for in-process engine wiring tests and
         //     render-only / source-only SDK demos that bypass
@@ -1399,7 +1419,7 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
         // debug level so the trace shows the session was built
         // without DTLS.
         core::log::Logger::instance().debug(
-            "engine: dtls_->open() skipped — media stack id='" +
+            "engine: dtls_->open() skipped ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ media stack id='" +
             impl_->resolved_media_factory_id +
             "' has no DTLS in its media path by design");
     } else {
@@ -1418,7 +1438,7 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
             config_.dtls_name +
             "' not registered (required by media stack '" +
             impl_->resolved_media_factory_id +
-            "' — no DTLS in the resolved stack). Check "
+            "' ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ no DTLS in the resolved stack). Check "
             "nimrtc::dtls::register_default_plugins() ran before "
             "engine construction.";
         core::log::Logger::instance().error(msg);
@@ -1443,13 +1463,13 @@ uint32_t NimRTCEngine::open() noexcept {
     // to opening the transport (which triggers gather_candidates with the
     // correct role set by set_remote_ice()).
     if (!ice_t_) {
-        // Normal path: modules not yet created — run the full init via the
+        // Normal path: modules not yet created ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ run the full init via the
         // shared helper. pre_open() takes the same path.
         const uint32_t rc = init_modules_once();
         if (rc != 0) return rc;
     } else {
         core::log::Logger::instance().debug(
-            "op7b transport pre_open→open");
+            "op7b transport pre_openÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂopen");
     }
 
     // ---- Session start triggers ICE gather_candidates() (Slice 7.6 PR3) ----
@@ -1480,7 +1500,7 @@ uint32_t NimRTCEngine::open() noexcept {
         impl_->last_open_rc = core::kEngineInternal;
         core::log::Logger::instance().error(std::string(err));
         if (on_error_) on_error_(core::kEngineInternal, err);
-        ice_t_ = nullptr;  // raw pointer — null after failure
+        ice_t_ = nullptr;  // raw pointer ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ null after failure
         return core::kEngineInternal;
     }
     core::log::Logger::instance().debug("op7 transport open ok");
@@ -1497,14 +1517,14 @@ uint32_t NimRTCEngine::open() noexcept {
     // converts a steady-clock reading into a Unix-anchored instant
     // without a second clock read per packet.  Sampling both here
     // (rather than deriving one from the other) keeps the residual offset
-    // inside one scheduling jitter (~µs), which is an order of magnitude
-    // below the 15.26 µs abs-send-time quantisation.
+    // inside one scheduling jitter (~ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs), which is an order of magnitude
+    // below the 15.26 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs abs-send-time quantisation.
     //
     // The origin is the wall clock at *monotonic zero* (the boot epoch),
     // NOT the wall clock at open(): `SenderReportTracker` computes our
     // own instant as `unix_us(origin) + monotonic_reading`, so an origin
     // that already carries "now" would add the epoch twice and make every
-    // skew sample meaningless (ADR-017 §"Decision 4").
+    // skew sample meaningless (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 4").
     //
     // Nothing is sent here: with `timeline_enabled = false` the tracker stays
     // empty, no extmap is advertised, and no SR is scheduled.
@@ -1526,9 +1546,9 @@ uint32_t NimRTCEngine::open() noexcept {
         // Re-derive the offset *from the NTP64* so that the offset and
         // the origin denote exactly the same instant.
         //
-        // The NTP64 fraction is 2^-32 s (0.233 µs), so converting the
-        // wall clock into NTP64 and back truncates by up to 0.233 µs.
-        // That is irrelevant for the arrival instant — but it would
+        // The NTP64 fraction is 2^-32 s (0.233 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs), so converting the
+        // wall clock into NTP64 and back truncates by up to 0.233 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂµs.
+        // That is irrelevant for the arrival instant ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ but it would
         // *not* be irrelevant for the Sender Report, whose NTP field has
         // to agree with the abs-send-time element of the packet it
         // describes to the last microsecond.  The abs-send-time encoder
@@ -1586,17 +1606,17 @@ void NimRTCEngine::set_video_source(
 }
 
 void NimRTCEngine::init_video_plugins() noexcept {
-    // PHASE 1 — create all plugins (order: sink, source, receiver, sender,
+    // PHASE 1 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ create all plugins (order: sink, source, receiver, sender,
     // codec). The 5-step factory dance for each plugin is consolidated
     // into pal::make_plugin() (PAL Slice 1.5); see make_plugin.hpp.
-    // PHASE 2 — wire pipeline callbacks (down below the make_plugin
+    // PHASE 2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ wire pipeline callbacks (down below the make_plugin
     // blocks).  Splitting the function into two phases ensures that by
     // the time any callback fires, every plugin slot is already filled.
 
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
-        // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
-        // → open → report" dance with one helper call. The Error/Error
+        // PAL Slice 1.5 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replaces the 5-step "factory ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ create ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ null-check
+        // ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ open ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ report" dance with one helper call. The Error/Error
         // policy matches the original on_error_ path.
         (void)pal::make_plugin<&pal::resolve_video_sink>(
             config_.video_sink_name,
@@ -1695,10 +1715,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
     }
 
     // ========================================================================
-    // PHASE 2 — wire all pipeline callbacks (all plugins now exist)
+    // PHASE 2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ wire all pipeline callbacks (all plugins now exist)
     // ========================================================================
 
-    // ---- Video send pipeline: source → codec → sender → RTP+SRTP → scheduler
+    // ---- Video send pipeline: source ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ codec ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ sender ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ RTP+SRTP ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ scheduler
     //
     // Tracking state: the codec's force_keyframe() causes the NEXT encoded
     // frame to be a keyframe. We track it in impl_->video_keyframe_pending_
@@ -1707,17 +1727,17 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // The video_source frame callback is NOT wired to the encode path
     // here (IVideoCodec / IVideoSender are NOT thread-safe; the source
     // cadence thread would race with any concurrent user thread).
-    // Users drive video through send_video() — see engine.hpp.
+    // Users drive video through send_video() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see engine.hpp.
 
     if (video_sender_) {
-        // video_sender packet callback: build RTP header → SRTP protect → enqueue
+        // video_sender packet callback: build RTP header ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ SRTP protect ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ enqueue
         video_sender_->set_packet_callback(
             [this](plugins::BufferView payload,
                                           std::uint32_t rtp_ts,
                                           std::uint16_t seq,
                                           bool marker) {
                 // ---- Build 12-byte RTP header ---------------------------------
-                // byte 0: V=2 P=0 X=0 CC=0 → 0x80
+                // byte 0: V=2 P=0 X=0 CC=0 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ 0x80
                 // byte 1: M=X(1) PT(7)
                 std::uint8_t pt = config_.video_sender_tuning.payload_type;
                 std::uint8_t hdr[12] = {
@@ -1747,7 +1767,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     auto* sess = impl_->srtp->get_session(
                         config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                     if (!sess) {
-                        // SRTP not ready — drop this packet silently.
+                        // SRTP not ready ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ drop this packet silently.
                         return;
                     }
                     core::ByteSpan span(rtp_pkt.data(), rtp_pkt.size());
@@ -1776,7 +1796,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
             });
     }
 
-    // ---- Video receive pipeline: receiver → codec → sink
+    // ---- Video receive pipeline: receiver ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ codec ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ sink
     //
     // On each assembled frame from the receiver:
     //   1. Decode via video_codec_
@@ -1882,7 +1902,7 @@ void NimRTCEngine::close() noexcept {
     // SCTP / raw-UDP teardown in the right order. The session's own
     // close() also nulls `session.media_stack` / `session.control_stack`,
     // so after this call `ice_t_` becomes dangling and `impl_->dtls`
-    // (weak_ptr into those stacks) auto-expires — but no code dereferences
+    // (weak_ptr into those stacks) auto-expires ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ but no code dereferences
     // them after close() returns (P0 v0.12.0 is_open() guards prevent API
     // surface use; v0.13.0 weak_ptr eliminates the UAF class entirely).
     //
@@ -1892,7 +1912,7 @@ void NimRTCEngine::close() noexcept {
     // (which the destructor does itself when `state_ == State::kOpen`).
     impl_->session.close();
     ice_t_ = nullptr;
-    // weak_ptr: no explicit reset needed — auto-expires when stack dies
+    // weak_ptr: no explicit reset needed ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ auto-expires when stack dies
     impl_->jitter_buffers.clear();
     audio3a_plugin_.reset();
     impl_->audio3a_concrete.reset();
@@ -1902,6 +1922,17 @@ void NimRTCEngine::close() noexcept {
     impl_->opus_decoder.reset();
 #endif
     impl_->srtp.reset();
+    // ---- WebTransport session teardown (v0.14.0-rc.1 follow-up) ----
+    // Channels hold a non-owning pointer into wt_session Ã¢ÂÂ close it here
+    // so no QUIC worker outlives the engine. Callers must destroy their
+    // channels before close() returns (same contract as ice_t_).
+    if (impl_->wt_session) {
+        try {
+            impl_->wt_session->close();
+        } catch (...) {
+        }
+        impl_->wt_session.reset();
+    }
     // weak_ptr reset (no implicit nullptr conversion in C++20)
     impl_->datachannel_transport_cookie.reset();
     state_ = State::kClosed;
@@ -1909,7 +1940,7 @@ void NimRTCEngine::close() noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// create_data_channel — creates a new IDataChannel via the factory resolved
+// create_data_channel ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ creates a new IDataChannel via the factory resolved
 // from `core::PluginRegistry::instance().get_datachannel(datachannel_name)`.
 //
 // P2/TPAL-5 wiring contract:
@@ -1918,29 +1949,37 @@ void NimRTCEngine::close() noexcept {
 //     needing a separate "is_available()" probe).
 //   - The returned IDataChannel is open()ed with a default config
 //     (label = @p label, reliability = kReliableOrdered, priority = 128,
-//     ordered = true) — matches WebRTC's default ordered/reliable
-//     channel (RFC 8831 §6.2).
+//     ordered = true) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ matches WebRTC's default ordered/reliable
+//     channel (RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.2).
 //   - on_data_message_ / on_data_state_ are installed BEFORE open() so the
 //     callback pipeline is hot the moment the channel transitions to
 //     "open".
 //   - DTLS-transport wiring is deferred to the **v1.x WebTransport /
-//     QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
-//     DC-2 / TPAL-5 deferred) and §10 (forward direction).  For now
+//     QUIC** re-design ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see `docs/plan/v0.11-plan.md` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.2 (DC-1 /
+//     DC-2 / TPAL-5 deferred) and ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§10 (forward direction).  For now
 //     `impl_->dtls` is a weak_ptr into the session's media_stack;
 //     `datachannel_transport_cookie` also holds a weak_ptr (v0.13.0).
 //     See the comment block in init_modules_once() for the full scope.
-//     v0.11.0 satisfies the data-plane DoD gate via the §7 fallback
+//     v0.11.0 satisfies the data-plane DoD gate via the ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§7 fallback
 //     (in-process `test_datachannel_engine` 5/5 PASS), made permanent.
 // ---------------------------------------------------------------------------
 std::unique_ptr<plugins::IDataChannel>
 NimRTCEngine::create_data_channel(std::string_view label) noexcept {
+    return create_data_channel(
+        label, plugins::DataChannelReliability::kReliableOrdered);
+}
+
+std::unique_ptr<plugins::IDataChannel>
+NimRTCEngine::create_data_channel(
+    std::string_view label,
+    plugins::DataChannelReliability reliability) noexcept {
     // Gate 1: DataChannel disabled by config (resolved factory id empty).
     //
     // v0.14.0-rc.1: the resolved id is set by init_datachannel_registry()
     // and reflects the dispatch on `cfg.datachannel_backend` +
     // `cfg.datachannel_name` (with the v0.x legacy fallback for empty
     // `datachannel_backend`).  When the resolved id is empty, DataChannel
-    // is disabled — `create_offer()` does not emit `m=application`,
+    // is disabled ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ `create_offer()` does not emit `m=application`,
     // process_remote_sdp() silently drops the peer's `m=application` line,
     // and create_data_channel() returns nullptr.
     if (resolved_dc_factory_id_.empty()) {
@@ -1955,6 +1994,76 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
         if (on_error_) on_error_(core::kEngineNotReady,
             "create_data_channel(): engine not open");
         return nullptr;
+    }
+
+    // WebTransport backend (v0.14.0-rc.1 follow-up): session-aware creation.
+    //
+    // The session is created lazily on the first call and owned by Impl
+    // (shared_ptr) so every channel from this engine shares one QUIC
+    // connection. The channel comes from
+    // `IWebTransportSessionFactory::create_data_channel(session)` â the
+    // seam-designed path (the msquic factory binds + attaches session
+    // callbacks internally). Both open() overloads run: open(cfg) caches
+    // the channel config, open() arms the stream/datagram path.
+    if (resolved_dc_factory_id_ == "web_transport") {
+        if (!impl_->wt_session) {
+            const web_transport::IWebTransportSessionFactory* wtf =
+                pal::resolve_web_transport(config_.web_transport_name);
+            if (!wtf) {
+                if (on_error_) on_error_(core::kEngineInternal,
+                    std::string("create_data_channel(): WebTransport session factory '")
+                        .append(config_.web_transport_name)
+                        .append("' not registered"));
+                return nullptr;
+            }
+            web_transport::WebTransportConfig wcfg;
+            wcfg.peer_hostname = config_.web_transport_peer_host;
+            wcfg.peer_port = config_.web_transport_peer_port;
+            std::unique_ptr<web_transport::IWebTransportSession> sess;
+            try {
+                sess = wtf->create(wcfg);
+            } catch (...) {
+                sess.reset();
+            }
+            if (!sess) {
+                if (on_error_) on_error_(core::kEngineInternal,
+                    "create_data_channel(): WebTransport session factory->create() failed");
+                return nullptr;
+            }
+            impl_->wt_session =
+                std::shared_ptr<web_transport::IWebTransportSession>(std::move(sess));
+            core::log::Logger::instance().info(
+                std::string("engine: WebTransport session created (factory '")
+                    .append(wtf->id())
+                    .append("', peer '")
+                    .append(config_.web_transport_peer_host)
+                    .append("')"));
+        }
+        const web_transport::IWebTransportSessionFactory* wtf =
+            pal::resolve_web_transport(config_.web_transport_name);
+        std::unique_ptr<plugins::IDataChannel> wch;
+        if (wtf) {
+            try {
+                wch = wtf->create_data_channel(*impl_->wt_session);
+            } catch (...) {
+                wch.reset();
+            }
+        }
+        if (!wch) {
+            if (on_error_) on_error_(core::kEngineInternal,
+                "create_data_channel(): WebTransport session factory->create_data_channel() returned nullptr");
+            return nullptr;
+        }
+        if (on_data_message_) wch->set_on_message(on_data_message_);
+        if (on_data_state_)   wch->set_on_state(on_data_state_);
+        plugins::DataChannelConfig wdc_cfg;
+        wdc_cfg.label       = std::string{label};
+        wdc_cfg.reliability = reliability;
+        wdc_cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
+        wdc_cfg.priority    = 128;
+        wch->open(wdc_cfg);
+        wch->open();
+        return wch;
     }
 
     const plugins::IDataChannelFactory* f =
@@ -1974,26 +2083,25 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
         return nullptr;
     }
 
-    // Install callbacks BEFORE open() — the IDataChannel contract
+    // Install callbacks BEFORE open() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the IDataChannel contract
     // requires set_on_message / set_on_state to be called before open()
-    // (per `plugins/datachannel.hpp` §"Thread safety").
+    // (per `plugins/datachannel.hpp` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Thread safety").
     if (on_data_message_) ch->set_on_message(on_data_message_);
     if (on_data_state_)   ch->set_on_state(on_data_state_);
 
     // Default config: matches WebRTC's ordered+reliable channel
-    // (the common case for control / telemetry).  Per-channel QoS
-    // can be added later via a new overload that takes an explicit
-    // DataChannelConfig — out of scope for this P2 skeleton.
+    // (the common case for control / telemetry).  The reliability-aware
+    // overload (v0.15.0, WebTransport product route) forwards here.
     plugins::DataChannelConfig cfg;
     cfg.label       = std::string{label};
-    cfg.reliability = plugins::DataChannelReliability::kReliableOrdered;
-    cfg.ordered     = true;
+    cfg.reliability = reliability;
+    cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
     cfg.priority    = 128;
     ch->open(cfg);
 
     // NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport
-    // / QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
-    // DC-2 / TPAL-5 deferred) and §10 (forward direction).  Stash the
+    // / QUIC** re-design ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see `docs/plan/v0.11-plan.md` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.2 (DC-1 /
+    // DC-2 / TPAL-5 deferred) and ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§10 (forward direction).  Stash the
     // DTLS transport handle as a placeholder so the v1.x wiring PR
     // has a single, well-known place to look for the underlying
     // transport.  v0.13.0: the cookie is typed as
@@ -2002,10 +2110,10 @@ NimRTCEngine::create_data_channel(std::string_view label) noexcept {
     // redesign will replace this field with a tagged union over
     // {IDtlsSession*, IWebTransportSession*}.
     //
-    // For now, the cookie is informational — the channel's own open()
+    // For now, the cookie is informational ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the channel's own open()
     // succeeds, but its send() / on_message callbacks will be no-ops
     // until the v1.x wiring PR lands.  v0.11.0 satisfies the
-    // data-plane DoD gate via the §7 fallback (in-process
+    // data-plane DoD gate via the ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§7 fallback (in-process
     // `test_datachannel_engine` 5/5 PASS), made permanent.
     impl_->datachannel_transport_cookie = impl_->dtls;
 
@@ -2026,7 +2134,7 @@ std::string NimRTCEngine::create_offer() noexcept {
     sdp.msid_semantic_token = "WMS";
 
     // Remember the session id so `process_remote_sdp()` can recognise the
-    // peer's answer (RFC 3264 §5.1: the answer echoes the offer's session
+    // peer's answer (RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.1: the answer echoes the offer's session
     // id).  Without it the offerer would treat the answer as a fresh offer
     // and keep its default DTLS role.
     impl_->local_session_id = sdp.origin_session_id;
@@ -2059,18 +2167,34 @@ std::string NimRTCEngine::create_offer() noexcept {
     if (!config_.audio_codec.fmtp.empty())
         audio.fmtp[pt] = config_.audio_codec.fmtp;
 
+    // a=ssrc:<audio_ssrc> cname:nimrtc-audio (RFC 5576 section 4.1).
+    // Chrome only populates `inbound-rtp` (and fires `ontrack` audio
+    // playout stats) when the offer SDP carries an a=ssrc line whose
+    // value matches the RTP-header SSRC on the wire.  The wire value is
+    // stamped in send_audio() (`ssrc_val{0xDEADBEEF}`); keep this line in
+    // lockstep with it.  Video already emits its own a=ssrc below; audio
+    // was missing it, which broke the NimRTC-offer -> Chrome-answer
+    // direction (Chrome never counted inbound RTP).
+    {
+        char ssrc_line[96];
+        std::snprintf(ssrc_line, sizeof(ssrc_line),
+                      "%u cname:nimrtc-audio",
+                      static_cast<unsigned>(0xDEADBEEFu));
+        audio.extra_attrs.emplace_back("ssrc", ssrc_line);
+    }
+
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
     //
     // a=extmap:4 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
     //
-    // RFC 5285 §6 negotiates the id *per direction*: the id a sender uses on
+    // RFC 5285 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6 negotiates the id *per direction*: the id a sender uses on
     // the wire is the one it advertised itself, and it is the receiver's job to
     // echo it back.  So advertising `kAbsSendTimeDefaultLocalId` here means:
     // "packets I send carry abs-send-time under id 4".  The peer's answer
     // carries its own id, which is what we parse *their* packets with.
     //
     // Direction is sendrecv (not sendonly) because both ends of a NimRTC
-    // session are symmetric here — the remote-answer path resolves the peer
+    // session are symmetric here ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the remote-answer path resolves the peer
     // id separately (see process_remote_sdp).  The id is deliberately left at
     // the well-known 4 rather than randomised: Chrome's WebRTC stack has used
     // 4 for abs-send-time for years and a mismatch here is a silent
@@ -2107,11 +2231,11 @@ std::string NimRTCEngine::create_offer() noexcept {
 
     sdp.media.push_back(std::move(audio));
 
-    // ---- Video m-line (RFC 8829 §5, H.264 via RFC 6184) -----------------
+    // ---- Video m-line (RFC 8829 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5, H.264 via RFC 6184) -----------------
     // Emit a video m-line only when at least one video plugin was resolved
     // (video_receiver_ / video_sender_ / video_codec_).  The default H.264
-    // codec plugin is decoder-only — for encode we'd need a real codec
-    // plugin — but the SDP/SDP-answer plumbing is correct regardless so
+    // codec plugin is decoder-only ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ for encode we'd need a real codec
+    // plugin ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ but the SDP/SDP-answer plumbing is correct regardless so
     // that browsers see the negotiation succeed even on a one-way demo.
     if (video_receiver_ || video_sender_) {
         sdp::MediaDescription video;
@@ -2134,7 +2258,7 @@ std::string NimRTCEngine::create_offer() noexcept {
             video.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
-        // a=rtpmap:<vpt> H264/90000  (RFC 6184 §5.6)
+        // a=rtpmap:<vpt> H264/90000  (RFC 6184 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.6)
         sdp::MediaDescription::RtpMap video_map;
         video_map.encoding   = "H264";
         video_map.clock_rate = 90000;
@@ -2142,7 +2266,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.rtpmap[vpt]    = video_map;
 
         // Cross-end timeline extmap (ADR-017).  Same id and rationale as the
-        // audio m-line: the ids are negotiated per m-section in RFC 5285 §6,
+        // audio m-line: the ids are negotiated per m-section in RFC 5285 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6,
         // and Chrome uses 4 on both.  Advertising the same id on both keeps a
         // peer that multiplexes by mid (rather than per-m-line) unambiguous.
         if (config_.timeline_enabled) {
@@ -2155,7 +2279,7 @@ std::string NimRTCEngine::create_offer() noexcept {
 
         // a=fmtp:<vpt> profile-level-id=42E01F;packetization-mode=1;
         //                  sprop-parameter-sets=Z0LAHtkA,aM4G4g==
-        // Baseline profile, level 3.1 — matches the synthetic SPS/PPS our
+        // Baseline profile, level 3.1 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ matches the synthetic SPS/PPS our
         // H.264 stub encoder emits (see h264::StubEncoder::encode).  When
         // a real codec plugin replaces the stub, the codec should override
         // these via a getter or config (out of scope for this round).
@@ -2170,7 +2294,7 @@ std::string NimRTCEngine::create_offer() noexcept {
                 "profile-level-id=42E01F;packetization-mode=1";
         }
 
-        // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
+        // a=rtcp-fb:<vpt> nack pli  (RFC 4585 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.2.1 + WebRTC ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.2)
         // NACK + Picture Loss Indication are the two feedbacks Chrome's
         // SFU expects on a recvonly/sendrecv video track.  We add both
         // unconditionally so the answer side mirrors them verbatim.
@@ -2178,7 +2302,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.rtcp_fb.push_back(vpt + " nack pli");
         video.rtcp_fb.push_back(vpt + " goog-remb");
 
-        // a=ssrc:<video_ssrc> cname:nimrtc-video  (RFC 5576 §4.1)
+        // a=ssrc:<video_ssrc> cname:nimrtc-video  (RFC 5576 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.1)
         // WebRTC browsers count inbound-rtp only when the answer SDP
         // carries an a=ssrc line that matches the wire SSRC.  Emit it
         // here on the offer side as well so we have it for renegotiation.
@@ -2196,7 +2320,7 @@ std::string NimRTCEngine::create_offer() noexcept {
 
     // ---- DataChannel m=application line (RFC 8831 / RFC 8260) ----------
     //
-    // P2 simplification (RFC 8831 §5 "SCTP over DTLS"):
+    // P2 simplification (RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5 "SCTP over DTLS"):
     //   We emit the canonical `m=application ... UDP/DTLS/SCTP <port>`
     //   line + an `a=sctp-port:<port>` attribute when
     //   `cfg.datachannel_name` is non-empty.  This is the bare minimum
@@ -2204,8 +2328,8 @@ std::string NimRTCEngine::create_offer() noexcept {
     //   and run DCEP (Data Channel Establishment Protocol, RFC 8832).
     //
     //   We deliberately do NOT emit `a=dcep` attributes or full DCEP
-    //   handshake support — DCEP handshake is a **v1.x WebTransport /
-    //   QUIC** re-design (see `docs/plan/v0.11-plan.md` §2.2 / §10).
+    //   handshake support ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DCEP handshake is a **v1.x WebTransport /
+    //   QUIC** re-design (see `docs/plan/v0.11-plan.md` ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§2.2 / ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§10).
     //   v0.11.0 emits only the `m=application` line + `a=sctp-port:<port>`,
     //   which is the minimum Chrome needs to populate its peer
     //   connection's SCTP transport.
@@ -2214,23 +2338,35 @@ std::string NimRTCEngine::create_offer() noexcept {
     //   advertise `m=application` with the same SCTP port and the
     //   DTLS fingerprint matches, the SCTP association is negotiated
     //   in-band once usrsctp starts emitting INIT chunks.
-    if (!config_.datachannel_name.empty()) {
+    //
+    //   v0.15.0 (WebTransport product route): when
+    //   `datachannel_backend == "web_transport"` the DataChannel rides
+    //   a dedicated QUIC connection (msquic), not the ICE/DTLS 5-tuple,
+    //   so no `m=application` line is emitted.  The backend dispatch
+    //   uses `resolved_dc_factory_id_` (authoritative post-open value)
+    //   with a pre-open fallback to the raw config, so unit tests that
+    //   call create_offer() without open() still observe the split.
+    const bool wt_backend =
+        (!resolved_dc_factory_id_.empty()
+             ? (resolved_dc_factory_id_ == "web_transport")
+             : (config_.datachannel_backend == "web_transport"));
+    if (!wt_backend && !config_.datachannel_name.empty()) {
         sdp::MediaDescription app;
         app.type     = sdp::MediaType::Application;
         app.port     = 9;
-        // Per RFC 8260 §6 / RFC 8831 §5: `UDP/DTLS/SCTP` is the
+        // Per RFC 8260 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6 / RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5: `UDP/DTLS/SCTP` is the
         // canonical protocol token for SCTP-over-DTLS.  The legacy
         // `DTLS/SCTP` token from RFC 8261 is also seen in the wild;
-        // emitting both via the protocol string is fine — the parser
+        // emitting both via the protocol string is fine ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the parser
         // round-trips whichever the peer picked.
         app.protocol = "UDP/DTLS/SCTP";
-        // RFC 8831 §6.1: the format list is empty for SCTP
+        // RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1: the format list is empty for SCTP
         // (the payload type is implicit).  We keep it as an empty
-        // list rather than a placeholder — the munger emits
+        // list rather than a placeholder ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the munger emits
         // `m=application 9 UDP/DTLS/SCTP` with no trailing formats.
         app.formats.clear();
         app.direction       = sdp::Direction::SendRecv;
-        // Third BUNDLE mid — keep mids 0=audio, 1=video, 2=application
+        // Third BUNDLE mid ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ keep mids 0=audio, 1=video, 2=application
         // to match the wire order.
         app.mid             = "2";
         app.rtcp_mux_value  = "";    // rtcp-mux is RTP-specific; not valid for SCTP.
@@ -2244,13 +2380,13 @@ std::string NimRTCEngine::create_offer() noexcept {
             app.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
-        // a=sctp-port:<port>  (RFC 8831 §6.1 — mandatory for SCTP).
+        // a=sctp-port:<port>  (RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ mandatory for SCTP).
         // Using extra_attrs keeps the munger's a= emission order stable
         // (extra_attrs come after rtcp-fb / extmap).
         app.extra_attrs.emplace_back(
             "sctp-port", std::to_string(config_.sctp_port));
 
-        // a=max-message-size:<bytes>  (RFC 8831 §6.2 — optional, but
+        // a=max-message-size:<bytes>  (RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ optional, but
         // Chrome emits it; matching the peer's value avoids
         // `Bundled SCTP negotiation` warnings in chrome://webrtc-internals).
         // 6556 matches Chrome's default since M85.
@@ -2258,7 +2394,7 @@ std::string NimRTCEngine::create_offer() noexcept {
 
         push_candidates_into(app);
         sdp.media.push_back(std::move(app));
-        // Update BUNDLE mids — the application mid always appends.
+        // Update BUNDLE mids ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the application mid always appends.
         // We rebuild from sdp.media to keep the order in sync (audio=0,
         // video=1, application=2).  When video is disabled, the audio mid
         // is still 0 and the application mid slides to 1 to keep the
@@ -2297,20 +2433,20 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         std::string("process_remote_sdp: parsed ok; media.size=") + std::to_string(remote.media.size())
         + " extra_attrs.size=" + std::to_string(remote.extra_attrs.size()));
 
-    // ---- Offer or answer? (RFC 3264 §5.1) --------------------------------
+    // ---- Offer or answer? (RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.1) --------------------------------
     //
     // The answer echoes the offer's `o=` session id, so the offerer can
     // tell "this is the answer to my offer" from "this is a fresh offer"
     // by comparing the ids.  The distinction is load-bearing:
     //
-    //   * an **offer** leaves the DTLS roles undecided (RFC 5763 §5 — the
+    //   * an **offer** leaves the DTLS roles undecided (RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the
     //     offerer says "actpass"), so we answer and pick a role;
     //   * an **answer** *commits* the roles, so we adopt the role the
     //     answer implies and must NOT answer an answer.
     //
     // Before this distinction existed the engine answered every remote
     // description, which meant an offerer never adopted the role its
-    // answer committed it to — and two NimRTC engines could therefore
+    // answer committed it to ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ and two NimRTC engines could therefore
     // never complete a DTLS handshake (both ended up as servers).
     const bool remote_is_answer =
         !impl_->local_session_id.empty() &&
@@ -2318,18 +2454,18 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     core::log::Logger::instance().info(
         std::string("process_remote_sdp: remote description is an ")
         + (remote_is_answer ? "ANSWER" : "OFFER")
-        + (remote_is_answer ? " to our offer" : " — we answer it"));
+        + (remote_is_answer ? " to our offer" : " ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we answer it"));
 
-    // ---- Remote media clock rates (ADR-017 §"Decision 6") ----------------
+    // ---- Remote media clock rates (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 6") ----------------
     //
     // The timeline needs each SSRC's media clock rate, and the only
     // place that rate is written down is the peer's `a=rtpmap:` line
-    // (RFC 3550 §6.4.1: the Sender Report does not carry it).  The
+    // (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1: the Sender Report does not carry it).  The
     // peer *sends* the media, so its description is authoritative for
-    // the inbound packets — not our own configuration.
+    // the inbound packets ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ not our own configuration.
     //
     // Collecting it here means `handle_rtp()` can pin the right rate on
-    // the tracker per SSRC instead of assuming "video ⇒ 90 kHz", which
+    // the tracker per SSRC instead of assuming "video ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ 90 kHz", which
     // happens to be right for every standardised video codec but is a
     // guess rather than a reading of the wire.
     impl_->remote_clock_rate_hz.clear();
@@ -2354,7 +2490,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             }
         }
     }
-    // RFC 3551 §4.4: the static payload types have a fixed meaning and
+    // RFC 3551 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.4: the static payload types have a fixed meaning and
     // need no `a=rtpmap:` line.  Cover the audio ones a peer may
     // legally omit the line for; the dynamic range (96..127) always
     // carries an rtpmap.
@@ -2374,7 +2510,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         std::string rates;
         for (const auto& [pt, rate] : impl_->remote_clock_rate_hz) {
             if (!rates.empty()) rates += ", ";
-            rates += std::to_string(pt) + "→" + std::to_string(rate) + "Hz";
+            rates += std::to_string(pt) + "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ" + std::to_string(rate) + "Hz";
         }
         core::log::Logger::instance().info(
             "engine[timeline]: remote payload-type clock rates: " + rates);
@@ -2385,7 +2521,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // RFC 8829 / WebRTC BUNDLE: when the SDP uses BUNDLE, ice-ufrag/ice-pwd
     // often live at the *session* level (since there is effectively one
     // transport), not at the media level.  Try session-level first, then
-    // fall back to media-level — whichever has credentials wins.
+    // fall back to media-level ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ whichever has credentials wins.
     std::string ice_block;
 
     // 1. Session-level fallback (Chrome BUNDLE answer).  The concrete
@@ -2447,7 +2583,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // Configure DTLS role + peer fingerprint from the FIRST m-line we
     // recognise (audio / video / application).  The DTLS session is
     // BUNDLE-shared, so all m= lines use the same DTLS role + fingerprint
-    // — we only need to read the offer's setup once.
+    // ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we only need to read the offer's setup once.
     for (const auto& rm : remote.media) {
         if (rm.type != sdp::MediaType::Audio &&
             rm.type != sdp::MediaType::Video &&
@@ -2456,18 +2592,18 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
         if (auto d = impl_->dtls.lock()) {
         // DTLS role is determined by the remote peer's `a=setup` attribute
-        // (RFC 5763 §5):
+        // (RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5):
         //
-        //   remote "actpass" → the peer did not commit to a role; we are the
+        //   remote "actpass" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer did not commit to a role; we are the
         //                      answerer and we decide.  WebRTC convention
         //                      (libwebrtc / Chrome): answerer is the DTLS
         //                      Client (sends ClientHello).  We therefore
         //                      become Client and advertise "active".
-        //   remote "active"  → the peer will send ClientHello; we are Server
+        //   remote "active"  ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer will send ClientHello; we are Server
         //                      (passive), advertise "passive".
-        //   remote "passive" → the peer is waiting for our ClientHello;
+        //   remote "passive" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer is waiting for our ClientHello;
         //                      we are Client (active), advertise "active".
-        //   remote ""        → missing setup attribute; treat as "actpass"
+        //   remote ""        ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ missing setup attribute; treat as "actpass"
         //                      (we answerer, become Client, advertise "active").
         //
         // The resulting local setup attribute is also captured for the
@@ -2481,18 +2617,18 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         if (remote_is_answer) {
             // ---- We are the OFFERER: the answer commits the roles ------
             //
-            // RFC 5763 §5: the answerer picks "active" (it is the DTLS
+            // RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5: the answerer picks "active" (it is the DTLS
             // client) or "passive" (it is the DTLS server), and the
             // offerer takes the complementary role.  This is the branch
             // that lets two NimRTC engines pair up: our answerer always
             // prefers to be the server (see below), so the answer says
-            // "passive" and we — the offerer — become the client and send
+            // "passive" and we ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the offerer ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ become the client and send
             // the ClientHello.
             //
-            // "active" in the answer ⇒ the peer is the client ⇒ we are the
-            // server.  "passive" ⇒ the peer is the server ⇒ we are the
+            // "active" in the answer ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer is the client ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we are the
+            // server.  "passive" ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer is the server ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we are the
             // client.  "actpass" in an *answer* is non-compliant (RFC 5763
-            // §5 allows it only in an offer); we fall back to the WebRTC
+            // ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5 allows it only in an offer); we fall back to the WebRTC
             // convention, in which the offerer is the DTLS server.
             if (peer_setup == "passive") {
                 desired_role     = nimrtc::dtls::DtlsRole::Client;
@@ -2510,11 +2646,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // DEBUG-TEMP: force NimRTC to be the DTLS SERVER (passive) for
             // Chrome interop.  Recent Chrome 124+ BoringSSL rejects every
             // variant of anonymous client response to CertificateRequest
-            // (empty list → handshake_failure, omitted → unexpected_message,
-            // self-signed cert → certificate_unknown) — but as the SERVER we
+            // (empty list ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ handshake_failure, omitted ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ unexpected_message,
+            // self-signed cert ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ certificate_unknown) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ but as the SERVER we
             // never receive a CertReq so the question doesn't arise.  This
             // is purely a workaround for the Chrome-side rejection of RFC
-            // 5246 §7.4.6 anonymous clients; restore the original logic
+            // 5246 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§7.4.6 anonymous clients; restore the original logic
             // once Chrome's BoringSSL relaxes this.
             //
             // The counterpart of this policy is the offerer branch above:
@@ -2551,20 +2687,20 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
     // ---- Cross-end timeline: the peer's abs-send-time extension id ------
     //
-    // RFC 5285 §6: the extension id is negotiated per direction.  The id
+    // RFC 5285 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6: the extension id is negotiated per direction.  The id
     // the peer advertised in ITS description is the id it will send under,
     // so that is the id we parse their inbound packets with.  We accept the
-    // extension if — and only if — we offered it too; advertising an
-    // extension the peer never offered is not a negotiation (RFC 3264 §6.1)
+    // extension if ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ and only if ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we offered it too; advertising an
+    // extension the peer never offered is not a negotiation (RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1)
     // and Chrome silently drops it.
     //
-    // This runs for BOTH descriptions — an offer (we are the answerer) and
-    // an answer (we are the offerer) — because in both cases the peer's
+    // This runs for BOTH descriptions ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ an offer (we are the answerer) and
+    // an answer (we are the offerer) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ because in both cases the peer's
     // description carries the id it will use when it sends to us.  It is
     // read from the FIRST m-section that advertises it and then reused for
     // the remaining ones: Chrome uses the same id across its audio and
     // video m-lines, and a per-m-section id would require tracking which
-    // m-line a given SSRC belongs to before we could parse it — which the
+    // m-line a given SSRC belongs to before we could parse it ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which the
     // RTP layer does not currently carry.
     if (config_.timeline_enabled) {
         for (const auto& rm : remote.media) {
@@ -2600,11 +2736,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // DTLS role and the peer fingerprint are already applied above, and
     // there is nothing left to send back.  Returning an *empty* string
     // (rather than std::nullopt) keeps the "the call succeeded" signal
-    // that every caller in the tree checks for — an answer is a successful
+    // that every caller in the tree checks for ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ an answer is a successful
     // call that produces no SDP.
     if (remote_is_answer) {
         core::log::Logger::instance().info(
-            "process_remote_sdp: answer applied — no answer generated "
+            "process_remote_sdp: answer applied ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ no answer generated "
             "(dtls role=" +
             std::string(impl_->dtls_is_client ? "Client" : "Server") + ")");
         return std::string{};
@@ -2613,14 +2749,14 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     sdp::SessionDescription ans;
     ans.version = 0;
     ans.origin_username         = "-";
-    // RFC 3264 §5.1: the answer carries the *offer's* session id and the
+    // RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.1: the answer carries the *offer's* session id and the
     // offer's session version incremented by one.  Echoing the id is what
     // lets the offerer recognise the answer (and adopt the DTLS role it
     // commits); a fresh id here would leave the offerer guessing.
     ans.origin_session_id      = remote.origin_session_id;
     ans.origin_session_version = "1";
     {
-        // The offer's version is a decimal counter ("1", "2", …).  Bump it
+        // The offer's version is a decimal counter ("1", "2", ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¦).  Bump it
         // when it parses; a non-numeric version is left alone rather than
         // mangled.
         const std::string& v = remote.origin_session_version;
@@ -2656,7 +2792,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         am.port = 9;
         am.protocol = rm.protocol.empty() ? "UDP/TLS/RTP/SAVPF" : rm.protocol;
         am.formats  = rm.formats;
-        // RFC 3264 §6.1: the answer's media direction is the answerer's
+        // RFC 3264 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1: the answer's media direction is the answerer's
         // capability intersected with the offer's direction.  For our
         // demo the answerer always has SendRecv capability, so the
         // answer direction reduces to the inverse of the offer for
@@ -2678,7 +2814,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // Preserve the remote mid when present (BUNDLE); fall back to a
         // positional assignment by index for the legacy single-m-line case.
         am.mid      = rm.mid.empty() ? std::to_string(remote.media.size()) : rm.mid;
-        // rtcp-mux is RTP-specific — invalid on an SCTP m-line.  The
+        // rtcp-mux is RTP-specific ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ invalid on an SCTP m-line.  The
         // munger emits `a=rtcp-mux` whenever the field is non-empty;
         // we set it only for audio/video to avoid spurious lines
         // on the SCTP m-line.
@@ -2724,7 +2860,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         //
         // The *peer's* extension id was resolved above (before the answer
         // construction) so that the offer path and the answer path share
-        // one resolution.  What is left here is the *echo*: RFC 5285 §6
+        // one resolution.  What is left here is the *echo*: RFC 5285 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6
         // requires the answer to carry the same id we advertised in our own
         // offer, otherwise the peer treats the extension as rejected and
         // never parses our abs-send-time.
@@ -2745,7 +2881,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // Echo any peer-supplied `a=sctp-port:` value.  When the
             // peer didn't include one, fall back to the engine's own
             // configured port so the answer never omits the attribute
-            // (RFC 8831 §6.1 calls sctp-port mandatory for SCTP).
+            // (RFC 8831 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1 calls sctp-port mandatory for SCTP).
             bool found_sctp_port = false;
             for (const auto& [k, v] : rm.extra_attrs) {
                 if (k == "sctp-port" && !v.empty()) {
@@ -2757,7 +2893,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 am.extra_attrs.emplace_back(
                     "sctp-port", std::to_string(config_.sctp_port));
             }
-            // Likewise for max-message-size — echo if present, default
+            // Likewise for max-message-size ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ echo if present, default
             // to 6556 (Chrome M85+) when absent.
             bool found_max_msg = false;
             for (const auto& [k, v] : rm.extra_attrs) {
@@ -2772,15 +2908,15 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
 
         // Echo the abs-send-time extmap back on the RTP m-sections (ADR-017).
-        // RFC 5285 §6: an answer that omits an extension the offer advertised
-        // is a rejection of that extension, and Chrome treats it as one — the
+        // RFC 5285 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6: an answer that omits an extension the offer advertised
+        // is a rejection of that extension, and Chrome treats it as one ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the
         // peer then never parses our abs-send-time.  The id must be the SAME
         // one we advertised in our own offer (or, when answering a peer's
         // offer, the one the peer advertised for its send direction).
         //
         // `local_abs_send_time_id` is set by create_offer(); when this engine
         // is the answerer and never produced an offer, it is still 0 and we
-        // fall back to the documented default — the answer then declares id 4
+        // fall back to the documented default ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the answer then declares id 4
         // and we build our outbound packets with the same id.
         if (config_.timeline_enabled &&
             rm.type != sdp::MediaType::Application) {
@@ -2841,7 +2977,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samples) noexcept {
     if (!is_open()) return core::kEngineNotReady;
     if (!pcm_samples || num_samples == 0) return core::kEngineInvalidParam;
-    // Gate on DTLS being Connected — otherwise RTP packets would reach the
+    // Gate on DTLS being Connected ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ otherwise RTP packets would reach the
     // peer over plaintext UDP (no SRTP key), or get sent into a half-open
     // session that the peer has already torn down (e.g. after a fatal
     // DTLS alert).  Without this check, demo-p2p would continue logging
@@ -2852,9 +2988,9 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         return core::kEngineNotReady;
     }
 
-    // 3A — prefer plugin adapter; fall back to concrete NullAudio3A.
+    // 3A ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ prefer plugin adapter; fall back to concrete NullAudio3A.
     if (audio3a_plugin_) {
-        // Plugin API takes raw (ptr, samples, channels) — same shape we have.
+        // Plugin API takes raw (ptr, samples, channels) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ same shape we have.
         audio3a_plugin_->process_capture(
             const_cast<float*>(pcm_samples),
             num_samples,
@@ -2868,8 +3004,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio3a_concrete->process_capture(frame);
     }
 
-    // Codec — prefer plugin adapter; fall back to concrete opus::Encoder.
-    // Reuse Impl::audio_codec_pkt (P0#4) — capacity grows monotonically.
+    // Codec ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ prefer plugin adapter; fall back to concrete opus::Encoder.
+    // Reuse Impl::audio_codec_pkt (P0#4) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ capacity grows monotonically.
     const std::size_t needed = num_samples * sizeof(float) + 64;
     if (impl_->audio_codec_pkt.size() < needed) {
         impl_->audio_codec_pkt.resize(needed);
@@ -2913,19 +3049,19 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // was *actually sent at that instant*, or every reconstruction
     // downstream inherits the gap between the packet and the report.
     //
-    // The monotonic reading is taken once and serves both purposes — the
+    // The monotonic reading is taken once and serves both purposes ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the
     // abs-send-time encoder turns it into the wall-clock instant on the
     // Unix timeline, and the SR reuses the same value.
     if (config_.timeline_enabled) {
         // The encoder sums `unix_us(origin) + monotonic_us`; the origin is
         // the wall clock at monotonic zero and the term is the monotonic
         // reading, so the sum is the send instant on the Unix timeline.
-        // Both are already available — no second clock read per packet.
+        // Both are already available ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ no second clock read per packet.
         const std::int64_t steady_us =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 core::SteadyClock::now().time_since_epoch()).count();
         // `boot_epoch_offset_us` is the wall clock at monotonic zero, so
-        // the sum is this packet's send instant on the Unix timeline —
+        // the sum is this packet's send instant on the Unix timeline ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ
         // the same basis the abs-send-time encoder uses.
         impl_->audio_last_send_unix_us = impl_->boot_epoch_offset_us + steady_us;
         if (impl_->local_abs_send_time_id != 0) {
@@ -2941,7 +3077,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     auto pkt_buf = pb.build();
     if (pkt_buf.empty()) return 0;
 
-    // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
+    // Count for the Sender Report body (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1 sender info). The
     // RTP timestamp is sampled *before* SRTP so the SR and the media packet
     // it anchors describe the same media position; the octet count is the
     // payload length, which is what the peer subtracts to check.
@@ -2949,17 +3085,17 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
     impl_->audio_rtp_timestamp = cur_ts;
     // Record the SSRC so the Sender Report can name the media source it
-    // describes (RFC 3550 §6.4.1). The value comes from a function-local
+    // describes (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1). The value comes from a function-local
     // static, so tick() has no other way to learn it.
     impl_->audio_ssrc = curr_ssrc;
 
     // SRTP protect (or pass-through when not yet keyed).
-    // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
+    // Reuse Impl::audio_send_buf (P0#4) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ one allocation ever, then in-place.
     core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
     if (impl_->srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(curr_ssrc, /*outgoing=*/true);
         if (!sess) {
-            // SRTP installed but no session for this SSRC — drop.
+            // SRTP installed but no session for this SSRC ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ drop.
             return 0;
         }
         auto enc = sess->protect_rtp(out_payload, curr_ssrc, cur_ts);
@@ -2982,7 +3118,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         return 0;
     }
 
-    // Fallback: no scheduler — send directly through ICE (transport profile).
+    // Fallback: no scheduler ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ send directly through ICE (transport profile).
     plugins::BufferView bv{impl_->audio_send_buf.data(),
                            impl_->audio_send_buf.size()};
     const auto rc = ice_t_->send(bv, {});
@@ -3012,7 +3148,7 @@ plugins::Status NimRTCEngine::send_video(
     if (!is_open()) return plugins::kErrNotReady;
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
 
-    // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
+    // Translate plugins::VideoSourceFrame ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ plugins::VideoFrame for the codec.
     // P0: only the metadata is propagated; the actual pixel storage is
     // owned by `frame.plane_y/u/v` and must outlive the encode call.
     plugins::VideoFrame raw{};
@@ -3020,11 +3156,11 @@ plugins::Status NimRTCEngine::send_video(
     raw.info.frame_seq     = frame.frame_seq;
     raw.info.rtp_timestamp = frame.rtp_timestamp;
 
-    // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
+    // Encode ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
     // size on first use; subsequent calls within the same capacity reuse
     // the storage and only pay the per-byte conversion cost inside the
     // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
-    // — when that happens we resize and pay one reallocation.
+    // ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ when that happens we resize and pay one reallocation.
     constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
     if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
         impl_->video_enc_buf.reserve(kInitialVideoEncCap);
@@ -3065,6 +3201,26 @@ plugins::Status NimRTCEngine::send_video(
 int NimRTCEngine::tick() noexcept {
     if (!is_open()) return 0;
 
+    // ---- WebTransport session state poll (v0.15.0 product route) --------
+    // ` wt_session` is created lazily by create_data_channel(); poll it
+    // here and surface kConnected/kFailed transitions via on_data_state_.
+    if (impl_->wt_session) {
+        const auto st = impl_->wt_session->state();
+        const auto cur = static_cast<std::uint8_t>(st);
+        if (cur != impl_->wt_last_state) {
+            impl_->wt_last_state = cur;
+            // WebTransportState: 0=kConnecting 1=kConnected 2=kClosing
+            // 3=kClosed 4=kFailed (see web_transport_state.hpp).
+            if (cur == 1) {
+                if (on_data_state_) on_data_state_("open");
+            } else if (cur == 4) {
+                if (on_data_state_) on_data_state_("error");
+            } else if (cur == 3) {
+                if (on_data_state_) on_data_state_("closed");
+            }
+        }
+    }
+
     // ---- Push BWE estimate into the scheduler (P2/P3 wiring) -------------
     // estimate() is cheap (reads an atomic snapshot in the AIMD impl) and
     // tick is on the engine thread, so no extra locks.  We skip the push
@@ -3103,7 +3259,7 @@ int NimRTCEngine::tick() noexcept {
 }
 
 void NimRTCEngine::maybe_send_sender_report() noexcept {
-    // Cross-end timeline (ADR-017 §"Decision 5"). Gated so that with
+    // Cross-end timeline (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 5"). Gated so that with
     // `timeline_enabled = false` the engine emits *no* RTCP at all: the
     // flag must cost nothing on the wire when off.
     if (!config_.timeline_enabled || config_.sr_period_ms == 0) return;
@@ -3116,19 +3272,19 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     if (elapsed < static_cast<std::int64_t>(config_.sr_period_ms)) return;
     impl_->sr_last_sent = now;
 
-    // No audio has gone out yet — an SR with a zero RTP timestamp and a
+    // No audio has gone out yet ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ an SR with a zero RTP timestamp and a
     // zero packet count describes no media position, and would poison the
     // peer's extrapolation anchor. Wait for the first frame instead.
     if (impl_->audio_packet_count == 0) return;
 
-    // RFC 3550 §6.4.1: the SR pairs the sender's wall-clock instant with
+    // RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1: the SR pairs the sender's wall-clock instant with
     // the RTP timestamp of the media it describes.
     //
     // The two must denote the *same* instant, or the pair is internally
     // inconsistent and every receiver that reconstructs from it inherits
     // the gap.  RFC 3550 words the NTP field as "the wallclock time when
     // the report was sent" while the RTP timestamp is that of the last
-    // packet sent — two different moments, and the difference between
+    // packet sent ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ two different moments, and the difference between
     // them (up to a whole report period) is the bias.
     //
     // The engine therefore uses the *packet's* send instant, recorded
@@ -3139,7 +3295,7 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     // not the report schedule.
     //
     // Falling back to "now" would only be correct if no packet had been
-    // sent yet — but that case is already excluded above (a report with
+    // sent yet ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ but that case is already excluded above (a report with
     // a zero packet count describes no media position).
     const std::int64_t send_unix_us = impl_->audio_last_send_unix_us;
     if (send_unix_us <= 0) return;
@@ -3155,8 +3311,8 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     const core::ByteBuffer sr_bytes = sr.build();
     if (sr_bytes.empty()) return;
 
-    // RTCP leaves the engine as SRTCP (RFC 3711 §3.4) once SRTP is keyed,
-    // which is a *different* crypto context from SRTP — using protect_rtp
+    // RTCP leaves the engine as SRTCP (RFC 3711 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§3.4) once SRTP is keyed,
+    // which is a *different* crypto context from SRTP ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ using protect_rtp
     // here would produce a packet the peer's unprotect_rtcp rejects, and
     // the SR would be silently dropped.
     core::ByteSpan out(sr_bytes.data(), sr_bytes.size());
@@ -3164,7 +3320,7 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     if (impl_->srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
                                               /*outgoing=*/true);
-        if (!sess) return;   // SRTP installed but no keying yet — skip.
+        if (!sess) return;   // SRTP installed but no keying yet ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ skip.
         auto r = sess->protect_rtcp(out);
         if (!r) {
             core::log::Logger::instance().warn(
@@ -3260,7 +3416,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     bool looks_like_dtls = (b0 == 22 || b0 == 23 || b0 == 21);
     if (looks_like_dtls) {
         auto d = impl_->dtls.lock();
-        if (!d) return;  // weak_ptr expired — engine is closed; drop packet
+        if (!d) return;  // weak_ptr expired ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ engine is closed; drop packet
         core::log::Logger::instance().info(
             std::string("engine[dtls]: rx dtls ct=") + std::to_string(b0) +
             " len=" + std::to_string(pkt.size()) +
@@ -3274,7 +3430,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
         //
         // NOTE: `ice_t_->remote_addr()` returns a text-encoded "host:port"
         // string packed into a plugins::Addr structure.  The DtlsAddr uses
-        // plain "host" + port fields — the parsing below extracts those fields.
+        // plain "host" + port fields ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the parsing below extracts those fields.
         nimrtc::dtls::DtlsAddr from;
         if (ice_t_) {
             plugins::Addr raw = ice_t_->remote_addr();
@@ -3308,7 +3464,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
     // the receiving side can complete its state machine.
     if (b0 == nimrtc::dtls::kDtlsChangeCipherSpec) {
         auto d = impl_->dtls.lock();
-        if (!d) return;  // weak_ptr expired — engine is closed; drop packet
+        if (!d) return;  // weak_ptr expired ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ engine is closed; drop packet
         std::span<const std::uint8_t> bytes(pkt.data(), pkt.size());
         // Same peer-address derivation as the DTLS path above.
         nimrtc::dtls::DtlsAddr from;
@@ -3338,10 +3494,10 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
         auto* sess = impl_->srtp->get_session(0, /*outgoing=*/false);
         if (sess) {
             // SRTP and SRTCP use *different* key derivations and independent
-            // sequence-index spaces (RFC 3711 §3.3), so an SRTCP packet fed
+            // sequence-index spaces (RFC 3711 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§3.3), so an SRTCP packet fed
             // to srtp_unprotect fails the auth tag and is reported as a
             // decryption error.  The two are indistinguishable on the wire
-            // under rtcp-mux (RFC 5761 — same 5-tuple, no port to demux on),
+            // under rtcp-mux (RFC 5761 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ same 5-tuple, no port to demux on),
             // so the only way to tell them apart is to try one and fall back
             // to the other.  Trying RTP first preserves the existing hot
             // path: a media packet succeeds on the first attempt and never
@@ -3351,7 +3507,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
                 view = r.value();
                 tried_srtp = true;
             } else {
-                // Not an SRTP packet — try the RTCP context before giving up.
+                // Not an SRTP packet ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ try the RTCP context before giving up.
                 auto rc = sess->unprotect_rtcp(view);
                 if (rc) {
                     handle_rtcp(rc.value());
@@ -3368,7 +3524,7 @@ void NimRTCEngine::on_transport_recv(const plugins::BufferView& pkt) noexcept {
 void NimRTCEngine::dispatch_media_inbound(plugins::BufferView view,
                                           bool tried_srtp) noexcept {
     // ---- RTCP demux before RTP (ADR-017) ---------------------------------
-    // RFC 3550 §6.1: an RTCP packet is identified by the second octet's
+    // RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1: an RTCP packet is identified by the second octet's
     // payload-type field falling in 192..223, which cannot collide with an
     // RTP payload type (0..127) or an RTCP packet riding the same socket
     // under rtcp-mux (RFC 5761).  Sender Reports are the anchor the
@@ -3416,15 +3572,15 @@ void NimRTCEngine::feed_media_inbound(const std::uint8_t* pkt,
 void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     if (!config_.timeline_enabled) {
         // The engine MUST NOT schedule SRs while the flag is false
-        // (ADR-017 §"Decision 5"), and symmetrically there is no anchor to
-        // maintain — an inbound SR is of no use to a disabled seam.
+        // (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 5"), and symmetrically there is no anchor to
+        // maintain ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ an inbound SR is of no use to a disabled seam.
         return;
     }
 
     // Compound RTCP packets are a concatenation of sub-packets sharing one
-    // header (RFC 3550 §6.1). Walk them so an SR that follows an RR in the
+    // header (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.1). Walk them so an SR that follows an RR in the
     // same compound datagram is not missed. A malformed length field ends
-    // the walk rather than throwing — the rest of the datagram is
+    // the walk rather than throwing ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the rest of the datagram is
     // unparseable, but that is not an error worth failing the read path for.
     std::size_t off = 0;
     while (off + 4 <= view.size()) {
@@ -3444,7 +3600,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // The tracker wants our *monotonic* clock reading at
                 // receipt: it combines it with the monotonic origin to
                 // place our own clock on the peer's wall-clock timeline
-                // (ADR-017 §"Decision 4").  Passing a wall-clock reading
+                // (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 4").  Passing a wall-clock reading
                 // here would double-count the epoch and make the skew
                 // meaningless.
                 impl_->sr_tracker.on_sender_report(sr.value(),
@@ -3461,7 +3617,7 @@ int NimRTCEngine::drain_dtls() noexcept {
     auto d = impl_->dtls.lock();
     if (!d) return 0;
 
-    // Drive the wolfSSL retransmit timer (RFC 6347 §4.2.4).  Without
+    // Drive the wolfSSL retransmit timer (RFC 6347 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.2.4).  Without
     // this pump, a stalled handshake (e.g. lost HelloVerifyRequest
     // cookie exchange) hangs forever.  tick() is a no-op once the
     // session reaches Connected/Failed/Closed.
@@ -3481,16 +3637,16 @@ int NimRTCEngine::drain_dtls() noexcept {
     if (new_state != impl_->last_dtls_state) {
         core::log::Logger::instance().info(
             "engine[dtls]: state transition " +
-            std::string(nimrtc::dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " → " +
+            std::string(nimrtc::dtls::DtlsSession::state_name(impl_->last_dtls_state)) + " ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ " +
             std::string(nimrtc::dtls::DtlsSession::state_name(new_state)));
         impl_->last_dtls_state = new_state;
     }
 
     if (new_state == nimrtc::dtls::DtlsState::Connected) {
-        // SRTP key installation happens here — this is the critical
+        // SRTP key installation happens here ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ this is the critical
         // handshake boundary the P1 interop tests verify.
         core::log::Logger::instance().info(
-            "engine[dtls→srtp]: DTLS reached Connected, "
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: DTLS reached Connected, "
             "calling maybe_install_srtp_keys()");
         maybe_install_srtp_keys();
     }
@@ -3501,28 +3657,28 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // Idempotency: only install once per DTLS connection.
     if (impl_->srtp_installed) {
         core::log::Logger::instance().debug(
-            "engine[dtls→srtp]: already installed, skipping");
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: already installed, skipping");
         return;
     }
     auto d = impl_->dtls.lock();
     if (!d) {
         core::log::Logger::instance().debug(
-            "engine[dtls→srtp]: dtls_ is null, skipping");
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: dtls_ is null, skipping");
         return;
     }
     if (!impl_->srtp) {
         core::log::Logger::instance().debug(
-            "engine[dtls→srtp]: srtp_ is null, skipping");
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: srtp_ is null, skipping");
         return;
     }
 
-    // Pre-condition: DTLS MUST be Connected (RFC 5764 §4.2 — keying material
+    // Pre-condition: DTLS MUST be Connected (RFC 5764 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ keying material
     // is only available after the Finished message).  Re-check inside this
     // function to avoid races between drain_dtls()'s state read and our own.
     const auto dtls_state = d->state();
     if (dtls_state != nimrtc::dtls::DtlsState::Connected) {
         core::log::Logger::instance().debug(
-            "engine[dtls→srtp]: dtls_state=" +
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: dtls_state=" +
             std::to_string(static_cast<int>(dtls_state)) +
             " (not Connected, skipping key install)");
         return;
@@ -3531,30 +3687,30 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     auto km = d->srtp_keying_material();
     if (!km) {
         core::log::Logger::instance().warn(
-            "engine[dtls→srtp]: dtls reports Connected but no keying material");
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: dtls reports Connected but no keying material");
         return;
     }
 
-    // RFC 5764 §4.2 — DTLS-SRTP key derivation produces:
+    // RFC 5764 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§4.2 ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ DTLS-SRTP key derivation produces:
     //   client_master_key || client_master_salt || server_master_key || server_master_salt
     // Each side uses its OWN direction's keys for outbound, the peer's for
     // inbound.  Which half is "ours" depends on the DTLS role we ended up
-    // playing (RFC 5763 §5):
+    // playing (RFC 5763 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5):
     //
-    //   we are the DTLS **Client** → we send the ClientHello, so the
+    //   we are the DTLS **Client** ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ we send the ClientHello, so the
     //     *client* master key is ours: client_* for outbound, server_* for
     //     inbound.
-    //   we are the DTLS **Server** → the peer sends the ClientHello, so the
+    //   we are the DTLS **Server** ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the peer sends the ClientHello, so the
     //     *server* master key is ours: server_* for outbound, client_* for
     //     inbound.
     //
     // The previous code hard-coded the server assumption ("NimRTC uses
     // client_master_key for inbound, we are the controlled/answerer"),
     // which silently produced undecryptable inbound traffic whenever the
-    // negotiation made NimRTC the client — the case a NimRTC-to-NimRTC
+    // negotiation made NimRTC the client ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the case a NimRTC-to-NimRTC
     // session hits.
     auto& log = core::log::Logger::instance();
-    log.info("engine[dtls→srtp]: derived keying material:");
+    log.info("engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: derived keying material:");
     log.info("  - profile        = 0x" + std::to_string(static_cast<int>(km->profile)));
     log.info("  - key_len        = " + std::to_string(km->client_master_key.size()));
     log.info("  - salt_len       = " + std::to_string(km->client_master_salt.size()));
@@ -3563,7 +3719,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
              std::string(impl_->dtls_is_client ? "Client" : "Server"));
 
     // The keying material is a set of fixed-size std::array members, so
-    // the four views below are *spans into the optional's storage* — the
+    // the four views below are *spans into the optional's storage* ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the
     // `std::optional` local outlives every use of them.  (A ternary of
     // two arrays would yield a prvalue copy whose lifetime the span
     // cannot extend; binding each branch explicitly avoids that.)
@@ -3606,15 +3762,15 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
                                             srtp::CryptoSuite::Aes128CmSha1_80);
     } else {
         core::log::Logger::instance().warn(
-            "engine[dtls→srtp]: own master_key/salt missing — outbound SRTP will fail");
+            "engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: own master_key/salt missing ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ outbound SRTP will fail");
     }
 
     // Mark installed; subsequent calls will short-circuit.
     impl_->srtp_installed = true;
 
-    log.info("engine[dtls→srtp]: SRTP keys INSTALLED ✓ "
+    log.info("engine[dtlsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂsrtp]: SRTP keys INSTALLED ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ "
              "(state=" + std::string(state_ == State::kOpen ? "Open" : "Other") +
-             ") — RTP from peer will now be unprotectable");
+             ") ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ RTP from peer will now be unprotectable");
 }
 
 uint32_t NimRTCEngine::feed_srtp_inbound(const std::uint8_t* srtp_packet, std::size_t len) noexcept {
@@ -3639,7 +3795,7 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
                                   std::string_view password) noexcept {
     if (!ice_t_) {
         core::log::Logger::instance().error(
-            "add_turn_server: ICE transport not yet created — call pre_open() first");
+            "add_turn_server: ICE transport not yet created ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ call pre_open() first");
         return -1;
     }
     ice_t_->add_turn_server(host, port, username, password);
@@ -3676,7 +3832,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // Two clocks, one instant: the monotonic reading is what the tracker
     // needs (it combines it with the monotonic origin to place our own
     // clock on the peer's wall-clock timeline), and the wall-clock
-    // reading is what the one-way delay is computed from (arrival −
+    // reading is what the one-way delay is computed from (arrival ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ
     // capture, both on the Unix timeline).  The wall-clock value is
     // derived from the monotonic one through the origin sampled at
     // open(), so the two never disagree by more than the sampling jitter.
@@ -3684,19 +3840,19 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
 
     // The 7-argument overload records the (rtp_ts, ast) observation itself
-    // and refines the SR-based estimate per ADR-017 §"Decision 2". The
+    // and refines the SR-based estimate per ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 2". The
     // `true` is exact: we only reach this point after resolving the
     // negotiated element from the wire, so the packet really does carry it.
     // Without the flag the call would resolve to the 6-argument overload,
-    // which ignores the field entirely — no observation recorded, no anchor
+    // which ignores the field entirely ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ no observation recorded, no anchor
     // established, and the refinement silently dead.
     // clock_rate_hz = 0 => use the rate configured via set_ssrc_clock_rate()
     // for this SSRC (the engine wires that from the SDP rtpmap).
     //
     // The skew out-parameter is the inter-clock discrepancy in the
-    // sense of RFC 3550 §8.1 (ADR-017 §"Decision 4").  It is only
-    // meaningful when the engine set a monotonic origin — which it always
-    // does at open() — so the value is captured and published rather than
+    // sense of RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§8.1 (ADR-017 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§"Decision 4").  It is only
+    // meaningful when the engine set a monotonic origin ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ which it always
+    // does at open() ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ so the value is captured and published rather than
     // discarded.
     std::int64_t skew_us = 0;
     auto cap = impl_->sr_tracker.capture_ts_us_for(
@@ -3726,25 +3882,25 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // only pulls RTP (no decoded frames) still gets timestamps.
     if (config_.timeline_enabled) {
         // Pin this SSRC's media clock rate before anything can ask the
-        // tracker for a capture instant — the reconstruction depends on
+        // tracker for a capture instant ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the reconstruction depends on
         // it, and the tracker has no way to learn it from the wire.
         //
         // The rate is a property of the codec the *peer* sends with, so
         // the peer's own `a=rtpmap:` line is the authoritative source
-        // (RFC 3550 §6.4.1: the Sender Report does not carry it).  It
+        // (RFC 3550 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§6.4.1: the Sender Report does not carry it).  It
         // was collected in `process_remote_sdp()` into
         // `remote_clock_rate_hz`; the fallbacks below only apply when
         // the peer did not declare the payload type.
         //
         // `SenderReportTracker` falls back to 90 kHz when an SSRC has no
         // configured rate, which is correct for video (RFC 6184 H.264) and
-        // ~2x wrong for Opus at 48 kHz — the reconstructed capture instant
+        // ~2x wrong for Opus at 48 kHz ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the reconstructed capture instant
         // would drift by 87.5% of the media duration.
         //
         // The gate is an explicit per-SSRC set rather than `state_for()`: the
         // tracker returns nullopt until the first SR arrives, so using it here
         // would re-enter this branch on every packet for the whole pre-SR
-        // window — the exact hot path this is trying to stay off. The set also
+        // window ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ the exact hot path this is trying to stay off. The set also
         // keeps a second SSRC on the same PT (RFC 5956 simulcast) on its own
         // entry, so each gets configured once.
         std::uint32_t clock_rate = 0;
@@ -3754,7 +3910,7 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
                 clock_rate = rit->second;
             } else if (pv.payload_type ==
                        config_.video_receiver_tuning.payload_type) {
-                clock_rate = 90000;                    // RFC 6184 §5.6 H.264
+                clock_rate = 90000;                    // RFC 6184 ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§5.6 H.264
             } else {
                 clock_rate = config_.audio_codec.clock_rate;  // 48 kHz for Opus
             }
@@ -3774,7 +3930,7 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // The audio_codec PT is configured in EngineConfig; the video codec PT
     // lives in the video_receiver/video_sender tuning. We first check
     // whether this packet matches the video PT (and a video_receiver
-    // plugin is wired up) — if so, push it through the video receiver
+    // plugin is wired up) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ if so, push it through the video receiver
     // pipeline; otherwise treat it as audio.
     if (video_receiver_ &&
         pv.payload_type == config_.video_receiver_tuning.payload_type) {
@@ -3830,7 +3986,7 @@ void NimRTCEngine::default_on_error(uint32_t err, std::string_view msg) noexcept
 //
 // These used to be `inline` in the public header.  They reference concrete
 // module state (DTLS, SRTP, ICE plugin) and therefore pull in concrete
-// module headers — keeping them out-of-line lets engine.hpp stay free of
+// module headers ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ keeping them out-of-line lets engine.hpp stay free of
 // those headers (Layout Invariant 4).
 // ---------------------------------------------------------------------------
 
@@ -3884,7 +4040,7 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
 //
 // Absent a negotiated `a=extmap` id for abs-send-time (peer never
 // advertised it), the extension is not read and no capture instant is
-// reconstructed — `remote_abs_send_time_id` stays 0 and every
+// reconstructed ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ `remote_abs_send_time_id` stays 0 and every
 // accessor returns `std::nullopt`. That is the correct pre-negotiation
 // state, not an error.
 // -----------------------------------------------------------------------------
@@ -3914,14 +4070,14 @@ std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept
     if (!impl_->last_capture_us || !impl_->last_arrival_us) {
         return std::nullopt;
     }
-    // arrival − capture, i.e. elapsed time between the sender's capture
+    // arrival ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ capture, i.e. elapsed time between the sender's capture
     // instant and our receipt of the packet. This is the sign that makes
     // the value usable as a latency budget: positive when the packet took
     // time to reach us, zero at the theoretical floor, negative only if
     // the two clocks disagree (which is itself worth surfacing).
     //
-    // The previous order (capture − arrival) reported the negation, so a
-    // 4 s transit came back as −4 s — a number no consumer of a latency
+    // The previous order (capture ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ arrival) reported the negation, so a
+    // 4 s transit came back as ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ4 s ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ a number no consumer of a latency
     // metric can act on.
     return *impl_->last_arrival_us - *impl_->last_capture_us;
 }

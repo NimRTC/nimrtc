@@ -349,6 +349,16 @@ endfunction()
 add_dtls_handshake_test(test_dtls_handshake_e2e test_dtls_handshake_e2e.cpp)
 
 # ----------------------------------------------------------------------------
+# DTLS ApplicationData (ct=23) loopback test (v0.14.x DataChannel wiring).
+#
+# Two in-process DtlsSession objects complete a real wolfSSL DTLS 1.2
+# handshake, then exchange encrypted AppData in both directions via
+# send_app_data() / take_outbound() -> feed_inbound() / take_app_data().
+# Also verifies the pre-Connected kErrNotReady guard.
+# ----------------------------------------------------------------------------
+add_dtls_handshake_test(test_dtls_app_data_loopback test_dtls_app_data_loopback.cpp)
+
+# ----------------------------------------------------------------------------
 # ADR-013 (v0.12.0) — GMSSL TLCP DTLS 1.2 handshake round-trip test.
 #
 # OH-DOD-4 gate: verifies DtlsSessionGmSSL completes a full TLCP

@@ -56,6 +56,7 @@
 #include <string_view>
 
 #include <nimrtc/core/api_version.hpp>   // NIMRTC_API_UNSTABLE
+#include <nimrtc/plugins/datachannel.hpp>  // IDataChannel (complete type for unique_ptr return)
 #include <nimrtc/web_transport/web_transport_config.hpp>  // WebTransportConfig
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>  // IWebTransportSession
 
@@ -119,6 +120,19 @@ public:
      */
     virtual std::unique_ptr<IWebTransportSession> create(
         const WebTransportConfig& cfg) const = 0;
+
+    /**
+     * @brief Create a data channel bound to an existing session.
+     *
+     * Default returns nullptr so older backends / mocks keep compiling.
+     * The msquic factory overrides this to return a
+     * `WebTransportDataChannel` bound to `session`.
+     */
+    virtual std::unique_ptr<plugins::IDataChannel> create_data_channel(
+        IWebTransportSession& session) const {
+        (void)session;
+        return nullptr;
+    }
 };
 
 } // namespace nimrtc::web_transport

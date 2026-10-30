@@ -53,4 +53,13 @@ void SctpStubSocket::set_on_recv(plugins::OnSctpRecvCb cb) noexcept {
     on_recv_ = std::move(cb);
 }
 
+void SctpStubSocket::set_on_recv_with_ppid(
+    plugins::OnSctpRecvWithPpidCb cb) noexcept {
+    on_recv_ppid_ = std::move(cb);
+}
+
+void SctpStubSocket::set_on_packet(plugins::OnSctpPacketCb cb) noexcept {
+    on_packet_ = std::move(cb);
+}
+
 } // namespace nimrtc::sctp

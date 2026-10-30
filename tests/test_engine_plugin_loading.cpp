@@ -1134,18 +1134,16 @@ static const StubFactory k_stub_factory;
 } // namespace dc0141_legacy_stub_namespace
 
 TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
-    // v0.14.0-rc.1 contract: the default `datachannel_backend = "sctp"`
-    // resolves the `SctpDataChannelFactory` (id="sctp") through
-    // `core::PluginRegistry::get_datachannel("sctp")`.  The
-    // engine's `init_datachannel_registry()` then records the
-    // resolved factory id (default "sctp") into
-    // `resolved_dc_factory_id_`; an empty string means
-    // DataChannel is disabled.
+    // v0.14.0-rc.1 contract (updated v0.15.0): the default
+    // `datachannel_backend = "web_transport"` (product route) resolves
+    // the `WebTransportDataChannelFactory` (id="web_transport").
+    // Explicit `datachannel_backend = "sctp"` keeps resolving the
+    // `SctpDataChannelFactory` (id="sctp") — verified below.
     EngineConfig cfg;
-    EXPECT_EQ(cfg.datachannel_backend, "sctp")
-        << "v0.14.0-rc.1: default datachannel_backend must be \"sctp\" "
-           "(backward compat: every v0.x caller that did not set the "
-           "field continues to land on the SCTP family)";
+    EXPECT_EQ(cfg.datachannel_backend, "web_transport")
+        << "v0.15.0: default datachannel_backend must be \"web_transport\" "
+           "(product route: every caller that did not set the field lands "
+           "on the WebTransport family)";
     EXPECT_EQ(cfg.web_transport_name, "msquic")
         << "v0.14.0-rc.1: default web_transport_name must be \"msquic\" "
            "(matches list_web_transports() at the v0.14.0-beta.1 cut)";
@@ -1162,10 +1160,19 @@ TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
            "(this is the pre-rc.1 contract; the rc.1 dispatcher "
            "relies on it for the \"sctp\" backend lookup)";
 
+    // The WebTransport DataChannel factory must be auto-registered too
+    // (v0.14.0-beta.1 cut; the v0.15.0 default dispatcher relies on it).
+    const auto* wt_factory =
+        PluginRegistry::instance().get_datachannel("web_transport");
+    ASSERT_NE(wt_factory, nullptr)
+        << "v0.15.0: WebTransportDataChannelFactory (\"web_transport\") "
+           "must be auto-registered (the default-backend dispatcher "
+           "relies on it)";
+
     // EngineConstruction + open() must not surface an error for
-    // the default config (the default backend is "sctp", the
-    // factory resolves; `init_datachannel_registry()` should log
-    // readiness and silently fall through to the existing
+    // the default config (the default backend is "web_transport", both
+    // factories resolve; `init_datachannel_registry()` should log
+    // readiness and silently fall through to the WebTransport
     // create_data_channel() path).
     NimRTCEngine engine(cfg);
     std::atomic<std::uint32_t> err_code{0};
@@ -1176,14 +1183,28 @@ TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
     });
     const uint32_t rc = engine.open();
     EXPECT_EQ(rc, 0u)
-        << "v0.14.0-rc.1: default config (datachannel_backend=\"sctp\") "
+        << "v0.15.0: default config (datachannel_backend=\"web_transport\") "
            "must open() cleanly; on_error fired with code 0x"
         << std::hex << err_code.load() << std::dec
         << " (err_called=" << (err_called.load() ? 1 : 0) << ")";
     EXPECT_FALSE(err_called.load())
-        << "v0.14.0-rc.1: default config must NOT invoke on_error_ "
+        << "v0.15.0: default config must NOT invoke on_error_ "
            "during open()";
     engine.close();
+
+    // Explicit SCTP backend still resolves the sctp factory path.
+    EngineConfig sctp_cfg;
+    sctp_cfg.datachannel_backend = "sctp";
+    sctp_cfg.datachannel_name = "sctp";
+    NimRTCEngine sctp_engine(sctp_cfg);
+    sctp_engine.set_on_error([&](std::uint32_t, std::string_view) {
+        err_called = true;
+    });
+    EXPECT_EQ(sctp_engine.open(), 0u)
+        << "v0.15.0: explicit datachannel_backend=\"sctp\" must still "
+           "open() cleanly (legacy SCTP-over-DTLS path preserved)";
+    EXPECT_FALSE(err_called.load());
+    sctp_engine.close();
 }
 
 TEST_F(EnginePluginLoading,

@@ -7,9 +7,11 @@
  *   2. For each Chrome WebTransport connection that arrives:
  *        - Accepts the session.
  *        - Sets up a datagram echo: every inbound datagram is sent back.
- *        - Sets up bidirectional stream echo: every inbound bidirectional
- *          stream receives the bytes written on its writable half echoed
- *          back on its readable half.
+ *        - Sets up bidirectional stream echo: every peer-initiated
+ *          bidirectional stream gets an on_data handler that echoes
+ *          each chunk verbatim (preserving the WebTransport stream
+ *          framing so Chrome's readable side strips the same header
+ *          on the way back).
  *
  * This binary is the NimRTC side of the Case E WebTransport end-to-end
  * acceptance test (Chrome ↔ NimRTC WebTransport interop via msquic).
@@ -22,9 +24,10 @@
  *
  * ## Exit codes
  *
- *   0  — at least one session connected and data was exchanged
+ *   0  — at least one session connected AND data was exchanged
+ *        (echoed bytes > 0 on either plane)
  *   1  — server failed to start
- *   2  — timeout / no sessions connected
+ *   2  — timeout / no sessions connected / connected but no data
  *
  * ## Chrome connection URL
  *
@@ -54,6 +57,8 @@
 #include <vector>
 
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/plugins/base.hpp>
+#include <nimrtc/web_transport/bidi_stream_iface.hpp>
 #include <nimrtc/web_transport/web_transport_config.hpp>
 #include <nimrtc/web_transport/web_transport_server.hpp>
 
@@ -101,12 +106,20 @@ Options parse_args(int argc, char** argv) {
 }
 
 // ---- Session driver -------------------------------------------------------
+//
+// v0.15.0 convergence: explicit echo on BOTH planes so the exit-code
+// contract ("0 = session connected AND data exchanged") is deterministic
+// and does not depend on the msquic session's legacy fallback echo.
+// Counters are process-wide atomics (msquic fires callbacks on its own
+// worker threads); main() requires echoed_bytes > 0 for exit 0.
+std::atomic<std::uint64_t> g_datagram_echo_bytes{0};
+std::atomic<std::uint64_t> g_stream_echo_bytes{0};
 
 void run_session(nimrtc::web_transport::IWebTransportSession* session) {
     std::fprintf(stderr, "[demo-wtserver] session state: %d\n",
                  static_cast<int>(session->state()));
 
-    // Set up datagram echo.
+    // Set up datagram echo (RFC 9221 §3 plane).
     session->set_on_datagram(
         [session](std::span<const std::uint8_t> bytes) {
             std::fprintf(stderr,
@@ -117,11 +130,49 @@ void run_session(nimrtc::web_transport::IWebTransportSession* session) {
                 std::fprintf(stderr,
                              "[demo-wtserver] datagram echo failed: 0x%X\n",
                              static_cast<unsigned>(rc));
+                return;
             }
+            g_datagram_echo_bytes.fetch_add(bytes.size(),
+                                            std::memory_order_relaxed);
+        });
+
+    // Set up bidirectional-stream echo (Case E stream plane). The session
+    // hands us each peer-initiated bidi stream; we install an on_data
+    // handler that echoes every chunk verbatim. Verbatim echo preserves
+    // the WebTransport (signal 0x41 + session-id + payload) framing so
+    // Chrome's readable side strips the same header on the way back.
+    session->set_on_peer_stream(
+        [](nimrtc::web_transport::IBidirectionalStream* stream) {
+            if (stream == nullptr) return;
+            std::fprintf(stderr, "[demo-wtserver] peer stream accepted\n");
+            stream->set_on_data(
+                [stream](std::span<const std::uint8_t> bytes) {
+                    if (bytes.empty() || stream == nullptr) return;
+                    std::fprintf(stderr,
+                                 "[demo-wtserver] stream recv %zuB — echoing\n",
+                                 bytes.size());
+                    std::vector<std::uint8_t> to_echo;
+                    try {
+                        to_echo.assign(bytes.begin(), bytes.end());
+                    } catch (...) {
+                        return;
+                    }
+                    auto rc = stream->send(std::span<const std::uint8_t>{
+                        to_echo.data(), to_echo.size()});
+                    if (rc != nimrtc::plugins::kOk) {
+                        std::fprintf(stderr,
+                                     "[demo-wtserver] stream echo failed: 0x%X\n",
+                                     static_cast<unsigned>(rc));
+                        return;
+                    }
+                    g_stream_echo_bytes.fetch_add(bytes.size(),
+                                                  std::memory_order_relaxed);
+                });
         });
 
     std::fprintf(stderr,
-                 "[demo-wtserver] session handler installed\n");
+                 "[demo-wtserver] session handler installed "
+                 "(datagram + bidi-stream echo)\n");
 }
 
 // ---- Crash diagnostics ----------------------------------------------------
@@ -328,8 +379,20 @@ int main(int argc, char** argv) {
     }
 
     const int count = session_count.load();
-    std::fprintf(stderr, "[demo-wtserver] done — %d session(s) handled\n", count);
+    const std::uint64_t dg_bytes =
+        g_datagram_echo_bytes.load(std::memory_order_relaxed);
+    const std::uint64_t st_bytes =
+        g_stream_echo_bytes.load(std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[demo-wtserver] done — %d session(s) handled, "
+                 "datagram echo %lluB, stream echo %lluB\n",
+                 count,
+                 static_cast<unsigned long long>(dg_bytes),
+                 static_cast<unsigned long long>(st_bytes));
 
-    // Exit 0 if at least one session connected; 2 if none.
-    return count > 0 ? 0 : 2;
+    // Exit 0 only when at least one session connected AND data was
+    // exchanged on either plane; 2 covers timeout / no sessions /
+    // connected-but-idle. This matches the Case E harness contract
+    // (E3 datagram echo + E4 stream echo).
+    return (count > 0 && (dg_bytes + st_bytes) > 0) ? 0 : 2;
 }

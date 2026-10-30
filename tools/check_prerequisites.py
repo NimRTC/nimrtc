@@ -304,13 +304,54 @@ def check_webrtc_apm(verbose: bool) -> bool:
     apm_src = root / "src" / "third_party" / "webrtc_audio_processing" / "src"
     meson_build = apm_src / "meson.build"
     if meson_build.exists():
+        # The APM tree is cloned at build time and then patched.  A clone
+        # without the NimRTC patches does not compile (agc2 needs C++20),
+        # so surface an unpatched tree here rather than letting it fail
+        # deep inside the Meson build.
+        patch_status = check_apm_patches(root, apm_src)
         lib_static = root / "build" / "_vendor_webrtc_apm_build" / "libwebrtc_audio_processing.a"
-        status = "built" if lib_static.exists() else "source present (run build_webrtc_apm.cmd)"
+        if patch_status is None:
+            status = "built" if lib_static.exists() else "source present (run build_webrtc_apm.cmd)"
+        else:
+            status = patch_status
         return report("WebRTC APM", True, status, "optional", "OK -- 3A support enabled")
     return report("WebRTC APM", True, "not found",
                   "optional",
                   "Optional:  python tools/fetch_webrtc_apm.py  -- enables AEC/ANS/AGC\n"
                   "           Or pass  -DNIMRTC_VENDORED_WEBRTC_APM=OFF  to skip 3A")
+
+
+def check_apm_patches(root, apm_src):
+    """Return a status string if the APM patch series is not fully applied.
+
+    Returns None when the tree looks correct (no patches defined, or all
+    patches already present).
+    """
+    patch_dir = root / "src" / "third_party" / "webrtc_audio_processing" / "patches"
+    if not patch_dir.is_dir():
+        return None
+    patches = sorted(patch_dir.glob("*.patch"))
+    if not patches:
+        return None
+
+    missing = []
+    for patch in patches:
+        result = subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(patch)],
+            cwd=str(apm_src),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            missing.append(patch.name)
+
+    if not missing:
+        return None
+    return (
+        f"source present but {len(missing)} patch(es) not applied: "
+        f"{', '.join(missing)} -- run: python tools/apply_webrtc_apm_patches.py"
+    )
 
 
 # ---------------------------------------------------------------------------

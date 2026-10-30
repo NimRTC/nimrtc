@@ -141,17 +141,21 @@ struct ApiTable {
 // declared before the full MsQuicSessionImpl class definition below.
 class MsQuicSessionImpl;
 
-// Forward declaration of the QUIC stream callback so that
-// `MsQuicUniStream::set_handle` (inline-defined inside the class
-// body) can take its address.  The full definition lives in the
-// .cpp file; we declare it here to satisfy the inline body.
-QUIC_STATUS QUIC_API quic_stream_callback(
+// Two QUIC stream callbacks (one per stream direction) so that the
+// msquic `void* Context` carries the plain wrapper pointer — no tagged
+// pointers.  Full definitions live in the .cpp file.  `set_handle` (inline
+// below) takes their addresses, hence the forward declarations here.
+QUIC_STATUS QUIC_API quic_stream_callback_bidi(
+    HQUIC Stream,
+    void* Context,
+    QUIC_STREAM_EVENT* Event) noexcept;
+QUIC_STATUS QUIC_API quic_stream_callback_uni(
     HQUIC Stream,
     void* Context,
     QUIC_STREAM_EVENT* Event) noexcept;
 
-// Internal dispatch helpers used by quic_stream_callback.  Defined
-// in the .cpp; declared here so the callback function can call them.
+// Internal dispatch helpers used by the stream callbacks.  Defined
+// in the .cpp; declared here so the callbacks can call them.
 class MsQuicBidiStream;
 class MsQuicUniStream;
 QUIC_STATUS quic_stream_callback_bidi_impl(
@@ -262,9 +266,8 @@ public:
             api_->SetContext(stream_, this);
             api_->SetCallbackHandler(
                 stream_,
-                reinterpret_cast<void*>(&quic_stream_callback),
-                reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) |
-                                         uintptr_t{1}));
+                reinterpret_cast<void*>(&quic_stream_callback_uni),
+                this);
         }
     }
 
@@ -333,6 +336,7 @@ public:
     IUnidirectionalStream* open_uni_stream() noexcept;
     plugins::Status send_datagram(std::span<const std::uint8_t> bytes) noexcept;
     void set_on_datagram(OnDatagramCb cb) noexcept { std::lock_guard<std::mutex> l{cb_mutex_}; on_datagram_cb_ = std::move(cb); }
+    void set_on_peer_stream(OnPeerStreamCb cb) noexcept { std::lock_guard<std::mutex> l{cb_mutex_}; on_peer_stream_cb_ = std::move(cb); }
     void close() noexcept;
 
     /** Called by the QUIC connection callback. */
@@ -403,6 +407,8 @@ private:
 
     // Inbound datagram callback.
     OnDatagramCb on_datagram_cb_;
+    // Peer-initiated bidi stream callback (Case E routing). Empty = legacy echo.
+    OnPeerStreamCb on_peer_stream_cb_;
     std::mutex cb_mutex_;
 
     // Datagram send state (set by DATAGRAM_STATE_CHANGED event).
@@ -446,17 +452,22 @@ QUIC_STATUS QUIC_API quic_connection_callback(
     QUIC_CONNECTION_EVENT* Event) noexcept;
 
 /**
- * @brief QUIC stream callback function.
+ * @brief QUIC stream callbacks (one per direction).
  *
- * This is the single C callback that msquic invokes for all stream
- * events on a given HQUIC stream handle.  It dispatches to the
- * appropriate stream wrapper based on the stream's context.
+ * msquic invokes the registered callback for every stream event on a
+ * given HQUIC stream handle.  Each callback casts Context to its own
+ * wrapper type — bidi streams register `quic_stream_callback_bidi`
+ * with the `MsQuicBidiStream*` as context, uni streams register
+ * `quic_stream_callback_uni` with the `MsQuicUniStream*`.  No tagged
+ * pointers: the direction is fixed at StreamOpen time.
  *
  * Registered via QUIC_STREAM_CALLBACK_HANDLER at stream open.
- * The stream wrapper pointer (MsQuicBidiStream* or MsQuicUniStream*)
- * is stored as the stream context via SetContext.
  */
-QUIC_STATUS QUIC_API quic_stream_callback(
+QUIC_STATUS QUIC_API quic_stream_callback_bidi(
+    HQUIC Stream,
+    void* Context,
+    QUIC_STREAM_EVENT* Event) noexcept;
+QUIC_STATUS QUIC_API quic_stream_callback_uni(
     HQUIC Stream,
     void* Context,
     QUIC_STREAM_EVENT* Event) noexcept;
@@ -540,6 +551,7 @@ public:
     plugins::Status send_datagram(
         std::span<const std::uint8_t> bytes) noexcept override;
     void set_on_datagram(OnDatagramCb cb) noexcept override;
+    void set_on_peer_stream(OnPeerStreamCb cb) noexcept override;
     void close() noexcept override;
 
     /**

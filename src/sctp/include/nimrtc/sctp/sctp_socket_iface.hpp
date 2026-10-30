@@ -95,6 +95,62 @@ public:
         plugins::BufferView data,
         std::chrono::milliseconds ttl) noexcept = 0;
 
+    // ---- RFC 8831 PPID-aware send surface (v0.14.x DataChannel wiring) ---
+    //
+    // Non-pure-virtual with safe defaults so existing backends keep
+    // compiling: the default routes through the matching legacy send
+    // (unordered / ordered / partial-reliable) and ignores `ppid` /
+    // `unordered`. Backends that speak real SCTP (usrsctp AF_CONN)
+    // override to stamp the wire PPID (DCEP=50, string=51, binary=53).
+    //
+    // `unordered=true` forces SCTP_UNORDERED regardless of reliability.
+    // All methods are `noexcept` per §5.2 contract.
+    virtual plugins::Status send_stream_with_ppid(std::uint16_t stream,
+                                                  plugins::BufferView data,
+                                                  std::uint32_t ppid) noexcept {
+        (void)ppid;
+        return send_stream(stream, data);
+    }
+    virtual plugins::Status send_datagram_with_ppid(std::uint16_t stream,
+                                                    plugins::BufferView data,
+                                                    std::uint32_t ppid) noexcept {
+        (void)ppid;
+        return send_datagram(stream, data);
+    }
+    virtual plugins::Status send_partial_reliable_with_ppid(
+        std::uint16_t stream,
+        plugins::BufferView data,
+        std::chrono::milliseconds ttl,
+        std::uint32_t ppid,
+        bool unordered) noexcept {
+        (void)ppid;
+        (void)unordered;
+        return send_partial_reliable(stream, data, ttl);
+    }
+
+    // ---- SCTP-over-DTLS packet transport (RFC 8831 §5) ------------------
+    //
+    // Non-pure-virtual with safe defaults so AF_INET loopback backends
+    // keep compiling. AF_CONN backends override:
+    //   - `set_on_packet` — usrsctp `conn_output` trampoline forwards
+    //     each outbound SCTP packet here; the engine encrypts it via
+    //     IDtlsSession::send_app_data.
+    //   - `feed_inbound_packet` — engine feeds DTLS-decrypted SCTP
+    //     packets here; the backend passes them to usrsctp_conninput.
+    //   - `set_on_recv_with_ppid` — PPID-aware inbound delivery.
+    virtual void set_on_packet(plugins::OnSctpPacketCb cb) noexcept {
+        (void)cb;
+    }
+    virtual plugins::Status feed_inbound_packet(
+        plugins::BufferView packet) noexcept {
+        (void)packet;
+        return plugins::kErrNotReady;
+    }
+    virtual void set_on_recv_with_ppid(
+        plugins::OnSctpRecvWithPpidCb cb) noexcept {
+        (void)cb;
+    }
+
     // ---- Recv side ------------------------------------------------------
 
     /** Register the inbound message callback. Must be called before the first

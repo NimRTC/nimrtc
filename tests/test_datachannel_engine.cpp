@@ -218,8 +218,12 @@ protected:
         cfg.stun_server_host       = "";
         cfg.local_port_range_begin = 52000;
         cfg.local_port_range_end   = 52100;
-        // datachannel_name defaults to "sctp" — tests that need a different
-        // id (e.g. the "nope" unknown-id test) override it locally.
+        // v0.15.0: EngineConfig defaults datachannel_backend to
+        // "web_transport" (product route), which ignores datachannel_name.
+        // These legacy SCTP-path tests pin the backend to "" so the
+        // legacy datachannel_name dispatch stays authoritative
+        // (stub_dc / unknown-id / disabled cases below).
+        cfg.datachannel_backend = "";
 
         // Use the "shell" transport strategy (Slice 8 sentinel in
         // engine.hpp) so engine.open() does NOT actually try to bind

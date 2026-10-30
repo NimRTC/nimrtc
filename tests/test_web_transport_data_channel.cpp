@@ -88,6 +88,12 @@ public:
     void close() noexcept override { closed = true; }
     void reset() noexcept override { reset_called = true; closed = true; }
 
+    // Test helper: drive bytes through the installed on_data callback.
+    void fire_on_data(std::span<const std::uint8_t> bytes) {
+        if (on_data_cb_) on_data_cb_(nimrtc::plugins::BufferView{
+            bytes.data(), bytes.size()});
+    }
+
 private:
     nimrtc::web_transport::OnStreamDataCb on_data_cb_;
 };
@@ -137,7 +143,13 @@ public:
         return nimrtc::plugins::kOk;
     }
     void set_on_datagram(
-        nimrtc::web_transport::OnDatagramCb /*cb*/) noexcept override {}
+        nimrtc::web_transport::OnDatagramCb cb) noexcept override {
+        on_datagram_cb_ = std::move(cb);
+    }
+    void set_on_peer_stream(
+        nimrtc::web_transport::OnPeerStreamCb cb) noexcept override {
+        on_peer_stream_cb_ = std::move(cb);
+    }
     void close() noexcept override {
         close_called = true;
         state_ = nimrtc::web_transport::WebTransportState::kClosed;
@@ -145,6 +157,8 @@ public:
 
     // Test inspection — public for ease of test access.
     std::vector<std::unique_ptr<MockBidiStream>> held_streams;
+    nimrtc::web_transport::OnDatagramCb on_datagram_cb_;
+    nimrtc::web_transport::OnPeerStreamCb on_peer_stream_cb_;
 };
 
 } // namespace nimrtc_wt_dc_test
@@ -428,4 +442,141 @@ TEST_F(WebTransportDataChannelTest, set_on_message_does_not_crash) {
     // No crash, no exception.  The callback isn't fired here because
     // we haven't sent/received anything.
     EXPECT_FALSE(called);
+}
+
+TEST_F(WebTransportDataChannelTest, attach_registers_session_callbacks) {
+    nimrtc_wt_dc_test::MockWebTransportSession session;
+    nimrtc::web_transport::WebTransportDataChannelFactory factory;
+
+    std::unique_ptr<nimrtc::web_transport::WebTransportDataChannel> channel{
+        factory.create(&session)};
+
+    nimrtc::plugins::DataChannelConfig cfg{};
+    cfg.reliability = nimrtc::plugins::DataChannelReliability::kReliableOrdered;
+    channel->open(cfg);
+    channel->attach_session_callbacks();
+
+    EXPECT_TRUE(static_cast<bool>(session.on_datagram_cb_));
+    EXPECT_TRUE(static_cast<bool>(session.on_peer_stream_cb_));
+}
+
+TEST_F(WebTransportDataChannelTest, inbound_datagram_delivers_in_unreliable_mode) {
+    nimrtc_wt_dc_test::MockWebTransportSession session;
+    session.state_ = nimrtc::web_transport::WebTransportState::kConnected;
+    nimrtc::web_transport::WebTransportDataChannelFactory factory;
+
+    std::unique_ptr<nimrtc::web_transport::WebTransportDataChannel> channel{
+        factory.create(&session)};
+
+    nimrtc::plugins::DataChannelConfig cfg{};
+    cfg.reliability = nimrtc::plugins::DataChannelReliability::kUnreliable;
+    channel->open(cfg);
+    ASSERT_EQ(channel->open(), nimrtc::plugins::kOk);
+    channel->attach_session_callbacks();
+    ASSERT_TRUE(static_cast<bool>(session.on_datagram_cb_));
+
+    std::vector<std::uint8_t> received;
+    channel->set_on_message(
+        [&received](nimrtc::plugins::BufferView data) {
+            received.assign(data.begin(), data.end());
+        });
+
+    constexpr std::uint8_t payload[] = {0x11, 0x22, 0x33};
+    session.on_datagram_cb_(
+        std::span<const std::uint8_t>{payload, sizeof(payload)});
+
+    ASSERT_EQ(received.size(), sizeof(payload));
+    EXPECT_EQ(received[0], 0x11);
+    EXPECT_EQ(received[2], 0x33);
+}
+
+TEST_F(WebTransportDataChannelTest, inbound_datagram_ignored_in_reliable_mode) {
+    nimrtc_wt_dc_test::MockWebTransportSession session;
+    session.state_ = nimrtc::web_transport::WebTransportState::kConnected;
+    nimrtc::web_transport::WebTransportDataChannelFactory factory;
+
+    std::unique_ptr<nimrtc::web_transport::WebTransportDataChannel> channel{
+        factory.create(&session)};
+
+    nimrtc::plugins::DataChannelConfig cfg{};
+    cfg.reliability = nimrtc::plugins::DataChannelReliability::kReliableOrdered;
+    channel->open(cfg);
+    ASSERT_EQ(channel->open(), nimrtc::plugins::kOk);
+    channel->attach_session_callbacks();
+
+    bool called = false;
+    channel->set_on_message(
+        [&called](nimrtc::plugins::BufferView /*data*/) { called = true; });
+
+    constexpr std::uint8_t payload[] = {0xAA};
+    session.on_datagram_cb_(
+        std::span<const std::uint8_t>{payload, sizeof(payload)});
+    EXPECT_FALSE(called);
+}
+
+TEST_F(WebTransportDataChannelTest, inbound_peer_stream_strips_header_and_delivers) {
+    nimrtc_wt_dc_test::MockWebTransportSession session;
+    session.state_ = nimrtc::web_transport::WebTransportState::kConnected;
+    nimrtc::web_transport::WebTransportDataChannelFactory factory;
+
+    std::unique_ptr<nimrtc::web_transport::WebTransportDataChannel> channel{
+        factory.create(&session)};
+
+    nimrtc::plugins::DataChannelConfig cfg{};
+    cfg.reliability = nimrtc::plugins::DataChannelReliability::kReliableOrdered;
+    channel->open(cfg);
+    ASSERT_EQ(channel->open(), nimrtc::plugins::kOk);
+    channel->attach_session_callbacks();
+    ASSERT_TRUE(static_cast<bool>(session.on_peer_stream_cb_));
+
+    std::vector<std::uint8_t> received;
+    channel->set_on_message(
+        [&received](nimrtc::plugins::BufferView data) {
+            received.insert(received.end(), data.begin(), data.end());
+        });
+
+    // Peer-initiated stream: WebTransport data stream header is
+    // signal varint 0x41 + session-id varint (here session id 0),
+    // followed by the payload.
+    auto peer = std::make_unique<nimrtc_wt_dc_test::MockBidiStream>();
+    nimrtc_wt_dc_test::MockBidiStream* peer_raw = peer.get();
+    session.held_streams.push_back(std::move(peer));
+
+    session.on_peer_stream_cb_(peer_raw);
+    ASSERT_TRUE(peer_raw->on_data_set);
+
+    // Split delivery: header first, payload second — exercises the
+    // header reassembly path for headers fragmented across on_data
+    // calls.
+    constexpr std::uint8_t header[] = {0x41, 0x00};
+    constexpr std::uint8_t payload[] = {0xCA, 0xFE, 0x01};
+    peer_raw->fire_on_data(
+        std::span<const std::uint8_t>{header, sizeof(header)});
+    EXPECT_TRUE(received.empty())
+        << "Header-only chunk must not deliver payload yet";
+    peer_raw->fire_on_data(
+        std::span<const std::uint8_t>{payload, sizeof(payload)});
+
+    ASSERT_EQ(received.size(), sizeof(payload));
+    EXPECT_EQ(received[0], 0xCA);
+    EXPECT_EQ(received[1], 0xFE);
+    EXPECT_EQ(received[2], 0x01);
+}
+
+TEST_F(WebTransportDataChannelTest, close_unregisters_session_callbacks) {
+    nimrtc_wt_dc_test::MockWebTransportSession session;
+    nimrtc::web_transport::WebTransportDataChannelFactory factory;
+
+    std::unique_ptr<nimrtc::web_transport::WebTransportDataChannel> channel{
+        factory.create(&session)};
+
+    nimrtc::plugins::DataChannelConfig cfg{};
+    cfg.reliability = nimrtc::plugins::DataChannelReliability::kUnreliable;
+    channel->open(cfg);
+    channel->attach_session_callbacks();
+    ASSERT_TRUE(static_cast<bool>(session.on_datagram_cb_));
+
+    channel->close();
+    EXPECT_FALSE(static_cast<bool>(session.on_datagram_cb_));
+    EXPECT_FALSE(static_cast<bool>(session.on_peer_stream_cb_));
 }

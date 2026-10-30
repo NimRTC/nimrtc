@@ -137,6 +137,15 @@ plugins::Status DtlsSession::export_srtp_key_material(
     return plugins::kOk;
 }
 
+plugins::Status DtlsSession::send_app_data(
+    std::span<const std::uint8_t> bytes) noexcept {
+    return impl_->inner.send_app_data(bytes);
+}
+
+std::vector<std::vector<std::uint8_t>> DtlsSession::take_app_data() noexcept {
+    return impl_->inner.take_app_data();
+}
+
 // ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------

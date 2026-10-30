@@ -465,6 +465,46 @@ TEST(SdpRoundTrip, WebRtcOfferPreservesBundleAndMids) {
 }
 
 // -----------------------------------------------------------------------------
+// Munger — a=ssrc round-trip (NimRTC offer -> Chrome answer audio gate)
+// -----------------------------------------------------------------------------
+//
+// Release gate #1 (bidirectional audio) needs the engine's audio offer to
+// carry `a=ssrc:<wire-ssrc> cname:...` on the audio m-line: Chrome only
+// populates `inbound-rtp` (and fires audio playout stats) when the offer
+// SDP declares the SSRC that matches the RTP header on the wire
+// (send_audio() stamps `ssrc_val{0xDEADBEEF}`).  This case pins the
+// munger half of that contract; the engine half is covered by the
+// offer-side a=ssrc assertion in the engine test suite.
+TEST(SdpMunger, EmitsAudioSsrcLine) {
+    SessionDescription sdp;
+    sdp.version = 0;
+    sdp.origin_username = "-";
+    sdp.origin_session_id = "1";
+    sdp.origin_session_version = "1";
+    sdp.session_name = "-";
+    sdp.bundle_mids = {"0"};
+    sdp.msid_semantic_token = "WMS";
+
+    MediaDescription audio;
+    audio.type = MediaType::Audio;
+    audio.port = 9;
+    audio.protocol = "UDP/TLS/RTP/SAVPF";
+    audio.formats = {"111"};
+    audio.direction = Direction::SendRecv;
+    audio.mid = "0";
+    audio.extra_attrs.emplace_back("ssrc", "3735928559 cname:nimrtc-audio");
+
+    sdp.media.push_back(std::move(audio));
+
+    Munger m;
+    auto r = m.to_sdp(sdp);
+    ASSERT_TRUE(r.ok()) << r.error().message();
+    EXPECT_NE(r.value().find("a=ssrc:3735928559 cname:nimrtc-audio"),
+              std::string::npos)
+        << "audio offer MUST carry a=ssrc so Chrome counts inbound RTP";
+}
+
+// -----------------------------------------------------------------------------
 // Debug: parse a real Chrome offer SDP (test_chrome_opus.html with recvonly
 // audio transceiver).  This test prints diagnostic info so we can see whether
 // the parser extracts media-level ICE creds, candidates, DTLS fingerprint, etc.

@@ -467,14 +467,28 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
         return 0;
     }
 
-    // Forward DATA payloads to the user callback under recv_mu_ so
-    // set_on_recv can swap the function pointer safely.
+    // Forward DATA payloads to the user callbacks under recv_mu_ so
+    // set_on_recv / set_on_recv_with_ppid can swap the function
+    // pointers safely. BOTH callbacks fire when registered (fan-out,
+    // not either/or): the legacy callback keeps existing AF_INET
+    // loopback tests passing unchanged, while the PPID-aware callback
+    // feeds SctpDataChannel's DCEP demux. rcv_ppid arrives in network
+    // byte order — convert with ntohl() per the OnSctpRecvWithPpidCb
+    // host-byte-order contract.
     std::lock_guard<std::mutex> lk(self->recv_mu_);
     if (self->on_recv_) {
         self->on_recv_(static_cast<std::uint16_t>(rcvinfo.rcv_sid),
                        plugins::BufferView{
                            static_cast<const std::uint8_t*>(data),
                            datalen});
+    }
+    if (self->on_recv_ppid_) {
+        self->on_recv_ppid_(
+            static_cast<std::uint16_t>(rcvinfo.rcv_sid),
+            ntohl(rcvinfo.rcv_ppid),
+            plugins::BufferView{
+                static_cast<const std::uint8_t*>(data),
+                datalen});
     }
     return 0;   // returning 0 lets usrsctp keep processing
 }
@@ -1206,6 +1220,181 @@ plugins::Status UsrsctpSocket::send_partial_reliable(
         return plugins::kErrInternal;
     }
     return plugins::kOk;
+}
+
+// ---------------------------------------------------------------------------
+// PPID-aware + SCTP-over-DTLS packet surface (v0.14.x, RFC 8831 §5/§6)
+//
+// Wire PPID (DCEP=50, string=51, binary=53) is stamped in network byte
+// order via htonl(), matching usrsctp's own examples (rtcweb.c uses
+// htonl(DATA_CHANNEL_PPID_*)). Inbound rcv_ppid arrives in network byte
+// order and is converted with ntohl() before reaching the PPID demux,
+// whose contract is host byte order (see OnSctpRecvWithPpidCb).
+//
+// AF_INET limitation: listen()/connect() build an AF_INET association
+// whose outbound path is usrsctp's internal UDP encapsulation, NOT the
+// AF_CONN conn_output trampoline. feed_inbound_packet() therefore has
+// no valid target on an AF_INET socket and returns kErrUnsupported so
+// callers do not mistake it for a working SCTP-over-DTLS path. The
+// set_on_packet() sink is stored regardless so AF_CONN callers (future)
+// and unit tests can register without error.
+// ---------------------------------------------------------------------------
+
+plugins::Status UsrsctpSocket::send_stream_with_ppid(
+    std::uint16_t stream,
+    plugins::BufferView data,
+    std::uint32_t ppid) noexcept {
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (sock_ == nullptr) {
+            return plugins::kErrInternal;
+        }
+        if (!s_sendable_state(state_)) {
+            return plugins::kErrNotReady;
+        }
+    }
+    if (data.empty()) {
+        return plugins::kErrInvalidParam;
+    }
+    sctp_sndinfo info{};
+    info.snd_sid     = stream;
+    info.snd_flags   = 0;  // reliable ordered
+    info.snd_ppid    = htonl(ppid);
+    info.snd_context = 0;
+
+    const ssize_t rc = ::usrsctp_sendv(
+        static_cast<struct socket*>(sock_),
+        data.data(),
+        data.size(),
+        /*to=*/nullptr,
+        /*addrcnt=*/0,
+        /*info=*/&info,
+        /*infolen=*/sizeof(info),
+        /*infotype=*/SCTP_SENDV_SNDINFO,
+        /*flags=*/0);
+
+    return (rc >= 0) ? plugins::kOk : plugins::kErrInternal;
+}
+
+plugins::Status UsrsctpSocket::send_datagram_with_ppid(
+    std::uint16_t stream,
+    plugins::BufferView data,
+    std::uint32_t ppid) noexcept {
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (sock_ == nullptr) {
+            return plugins::kErrInternal;
+        }
+        if (!s_sendable_state(state_)) {
+            return plugins::kErrNotReady;
+        }
+    }
+    if (data.empty()) {
+        return plugins::kErrInvalidParam;
+    }
+    sctp_sndinfo info{};
+    info.snd_sid     = stream;
+    info.snd_flags   = SCTP_UNORDERED;
+    info.snd_ppid    = htonl(ppid);
+    info.snd_context = 0;
+
+    const ssize_t rc = ::usrsctp_sendv(
+        static_cast<struct socket*>(sock_),
+        data.data(),
+        data.size(),
+        /*to=*/nullptr,
+        /*addrcnt=*/0,
+        /*info=*/&info,
+        /*infolen=*/sizeof(info),
+        /*infotype=*/SCTP_SENDV_SNDINFO,
+        /*flags=*/0);
+
+    return (rc >= 0) ? plugins::kOk : plugins::kErrInternal;
+}
+
+plugins::Status UsrsctpSocket::send_partial_reliable_with_ppid(
+    std::uint16_t stream,
+    plugins::BufferView data,
+    std::chrono::milliseconds ttl,
+    std::uint32_t ppid,
+    bool unordered) noexcept {
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (sock_ == nullptr) {
+            return plugins::kErrInternal;
+        }
+        if (!s_sendable_state(state_)) {
+            return plugins::kErrNotReady;
+        }
+    }
+    if (data.empty()) {
+        return plugins::kErrInvalidParam;
+    }
+    // SENDV_SPA carries both: SNDINFO (stream + PPID + unordered flag)
+    // and PRINFO (TTL policy). PRINFO alone (SCTP_SENDV_PRINFO, used by
+    // the legacy send_partial_reliable above) forces stream 0 and no
+    // PPID — SPA is required here so the DCEP/string/binary stamp
+    // survives on partial-reliable messages.
+    struct sctp_sendv_spa spa{};
+    spa.sendv_flags                    = SCTP_SEND_SNDINFO_VALID |
+                                         SCTP_SEND_PRINFO_VALID;
+    spa.sendv_sndinfo.snd_sid          = stream;
+    spa.sendv_sndinfo.snd_flags        = unordered ? SCTP_UNORDERED : 0;
+    spa.sendv_sndinfo.snd_ppid         = htonl(ppid);
+    spa.sendv_sndinfo.snd_context      = 0;
+    spa.sendv_sndinfo.snd_assoc_id     = 0;
+    spa.sendv_prinfo.pr_policy         = SCTP_PR_SCTP_TTL;
+    spa.sendv_prinfo.pr_value          =
+        static_cast<std::uint32_t>(ttl.count());
+
+    const ssize_t rc = ::usrsctp_sendv(
+        static_cast<struct socket*>(sock_),
+        data.data(),
+        data.size(),
+        /*to=*/nullptr,
+        /*addrcnt=*/0,
+        /*info=*/&spa,
+        /*infolen=*/sizeof(spa),
+        /*infotype=*/SCTP_SENDV_SPA,
+        /*flags=*/0);
+
+    if (rc < 0) {
+        const int syserr = errno;
+        core::log::Logger::instance().warn(
+            "nimrtc::sctp::UsrsctpSocket::send_partial_reliable_with_ppid: "
+            "usrsctp_sendv() failed; errno=" +
+            std::to_string(syserr) +
+            " stream=" + std::to_string(stream) +
+            " ttl_ms=" + std::to_string(ttl.count()) +
+            " len=" + std::to_string(data.size()));
+        return plugins::kErrInternal;
+    }
+    return plugins::kOk;
+}
+
+void UsrsctpSocket::set_on_packet(plugins::OnSctpPacketCb cb) noexcept {
+    std::lock_guard<std::mutex> lk(recv_mu_);
+    on_packet_ = std::move(cb);
+}
+
+plugins::Status UsrsctpSocket::feed_inbound_packet(
+    plugins::BufferView packet) noexcept {
+    if (packet.empty()) {
+        return plugins::kErrInvalidParam;
+    }
+    // AF_INET sockets route inbound through usrsctp's internal UDP
+    // listener; there is no conninput entry point for an already-framed
+    // SCTP packet on this path. Return kErrUnsupported (NOT kErrNotReady)
+    // so callers do not retry as if the association were merely down.
+    // A future AF_CONN backend overrides this with usrsctp_conninput().
+    (void)packet;
+    return plugins::kErrUnsupported;
+}
+
+void UsrsctpSocket::set_on_recv_with_ppid(
+    plugins::OnSctpRecvWithPpidCb cb) noexcept {
+    std::lock_guard<std::mutex> lk(recv_mu_);
+    on_recv_ppid_ = std::move(cb);
 }
 
 // ---------------------------------------------------------------------------

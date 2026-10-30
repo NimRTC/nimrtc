@@ -66,11 +66,9 @@ jobs:
           submodules: recursive
 
       # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
-      # Pre-1.0: warn-only (`continue-on-error: true`) so unrelated PRs are
-      # not blocked. Post-1.0: drift = red CI = blocked merge.
+      # v1.0+: hard gate — drift = red CI = blocked merge.
       - name: Verify vendor manifests
         if: hashFiles('src/third_party/vendor.json') != ''
-        continue-on-error: true
         shell: pwsh
         run: python tools/check_vendor.py
 
@@ -158,11 +156,9 @@ jobs:
           submodules: recursive
 
       # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
-      # Pre-1.0: warn-only (`continue-on-error: true`) so unrelated PRs are
-      # not blocked. Post-1.0: drift = red CI = blocked merge.
+      # v1.0+: hard gate — drift = red CI = blocked merge.
       - name: Verify vendor manifests
         if: hashFiles('src/third_party/vendor.json') != ''
-        continue-on-error: true
         run: python tools/check_vendor.py
 
       - name: API freeze — per-symbol classification
@@ -295,7 +291,6 @@ jobs:
       # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
       - name: Verify vendor manifests
         if: hashFiles('src/third_party/vendor.json') != ''
-        continue-on-error: true
         run: python tools/check_vendor.py
 
       - name: API freeze — per-symbol classification
@@ -397,7 +392,6 @@ jobs:
       # Vendor manifest drift gate (Phase 4 of docs/plan/vendor-migration.md).
       - name: Verify vendor manifests
         if: hashFiles('src/third_party/vendor.json') != ''
-        continue-on-error: true
         run: python tools/check_vendor.py
 
       - name: API freeze — per-symbol classification

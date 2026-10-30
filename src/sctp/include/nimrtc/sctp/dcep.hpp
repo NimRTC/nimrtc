@@ -24,18 +24,18 @@
 namespace nimrtc::sctp {
 
 // ---- PPID (RFC 8831 §6) -------------------------------------------------
-inline constexpr std::uint32_t kPpidDcep   = 50;
-inline constexpr std::uint32_t kPpidString = 51;
-inline constexpr std::uint32_t kPpidBinary = 53;
+NIMRTC_API_STABLE inline constexpr std::uint32_t kPpidDcep   = 50;
+NIMRTC_API_STABLE inline constexpr std::uint32_t kPpidString = 51;
+NIMRTC_API_STABLE inline constexpr std::uint32_t kPpidBinary = 53;
 
 // ---- DCEP message types (RFC 8832 §5) ------------------------------------
-inline constexpr std::uint8_t kDcepAck  = 0x02;
-inline constexpr std::uint8_t kDcepOpen = 0x03;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kDcepAck  = 0x02;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kDcepOpen = 0x03;
 
 // ---- DCEP reliability types (RFC 8832 §5.1) -------------------------------
-inline constexpr std::uint8_t kDcepReliable            = 0x00;
-inline constexpr std::uint8_t kDcepPartialReliableRexmit = 0x01;
-inline constexpr std::uint8_t kDcepPartialReliableTimed  = 0x02;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kDcepReliable            = 0x00;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kDcepPartialReliableRexmit = 0x01;
+NIMRTC_API_STABLE inline constexpr std::uint8_t kDcepPartialReliableTimed  = 0x02;
 
 /** Decoded DATA_CHANNEL_OPEN parameters. */
 struct NIMRTC_API_STABLE DcepOpenParams {

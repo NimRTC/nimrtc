@@ -219,6 +219,13 @@ public:
         std::uint64_t alerts_in     = 0;
         std::uint64_t alerts_out    = 0;
         std::uint64_t errors        = 0;
+        // --- Hang-diagnosis counters (v0.14.x, ARM CI loopback stall) ---
+        std::uint64_t pump_calls       = 0;
+        std::uint64_t want_read_stalls = 0;
+        int           last_error       = 0;
+        int           last_wolf_state  = 0;
+        std::uint64_t recv_pending     = 0;
+        std::uint64_t send_pending     = 0;
     };
     Stats stats() const noexcept;
 

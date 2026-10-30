@@ -203,11 +203,24 @@ jobs:
           $apm = "OFF"
           if ("${{ steps.apm_prebuild.outcome }}" -eq "success") { $apm = "ON" }
           Write-Host "WebRTC APM (3A) bundled in this bundle: $apm"
-          cmake --preset release.msvc `
-            -DNIMRTC_BUILD_EXAMPLES=OFF `
-            -DNIMRTC_BUILD_TESTS=OFF `
-            -DNIMRTC_VENDORED_WEBRTC_APM=$apm `
-            -DNIMRTC_INSTALL=ON
+          # NOTE: pass a literal ON/OFF (not -D...=$apm).  A variable-expanded
+          # -D value that ever arrives as a non-empty unknown string (e.g. a
+          # literal "$apm") is truthy in CMake's if(), so the APM wrapper
+          # would take the FATAL_ERROR branch even though the log says OFF.
+          # Literal branches make the configured value unambiguous.
+          if ($apm -eq "ON") {
+            cmake --preset release.msvc `
+              -DNIMRTC_BUILD_EXAMPLES=OFF `
+              -DNIMRTC_BUILD_TESTS=OFF `
+              -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON `
+              -DNIMRTC_INSTALL=ON
+          } else {
+            cmake --preset release.msvc `
+              -DNIMRTC_BUILD_EXAMPLES=OFF `
+              -DNIMRTC_BUILD_TESTS=OFF `
+              -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=OFF `
+              -DNIMRTC_INSTALL=ON
+          }
           New-Item -ItemType Directory -Force -Path build | Out-Null
           "3a=$apm" | Set-Content -Path build/3a-status-windows.txt
 

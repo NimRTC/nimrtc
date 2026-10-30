@@ -68,6 +68,24 @@ endforeach()
 
 set(_abs_root    "${_vendor_root}/subprojects/abseil-cpp-20240722.0")
 set(_include_root "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# The abseil subproject dir is version-pinned by the upstream wrap file
+# and drifts over time (e.g. abseil-cpp-20240722.0 -> newer).  Discover
+# every candidate root dynamically under both the meson build tree and
+# the fetched source tree, and keep the ones that actually carry the
+# headers, so the include path keeps working after a wrap bump.
+file(GLOB _abs_build_roots "${_vendor_root}/subprojects/abseil-cpp-*")
+file(GLOB _abs_src_roots "${CMAKE_CURRENT_SOURCE_DIR}/src/subprojects/abseil-cpp-*")
+set(_abs_include_dirs "")
+foreach(_abs_candidate IN LISTS _abs_build_roots _abs_src_roots)
+    if(IS_DIRECTORY "${_abs_candidate}"
+       AND EXISTS "${_abs_candidate}/absl/base/config.h")
+        list(APPEND _abs_include_dirs "${_abs_candidate}")
+    endif()
+endforeach()
+if(IS_DIRECTORY "${_abs_root}" AND EXISTS "${_abs_root}/absl/base/config.h")
+    list(APPEND _abs_include_dirs "${_abs_root}")
+endif()
+list(REMOVE_DUPLICATES _abs_include_dirs)
 
 if(NOT _apm_lib)
     # The prebuilt static library (.a / .lib) is not present.  This is the
@@ -134,6 +152,13 @@ file(GLOB _absl_libs
     "${_abs_root}/libabsl_*.a"
     "${_abs_root}/libabsl_*/*.a"
 )
+foreach(_abs_candidate IN LISTS _abs_build_roots)
+    file(GLOB _absl_extra
+        "${_abs_candidate}/libabsl_*.a"
+        "${_abs_candidate}/libabsl_*/*.a"
+    )
+    list(APPEND _absl_libs ${_absl_extra})
+endforeach()
 
 if(NOT _absl_libs)
     message(WARNING
@@ -169,7 +194,7 @@ set_target_properties(nimrtc_vendor_webrtc_apm PROPERTIES
     #      file or directory` on the first #include (see
     #      src/modules/audio3a/src/webrtc_audio3a.cpp:45, which itself
     #      includes audio_processing.h that pulls in absl headers).
-    INTERFACE_INCLUDE_DIRECTORIES "${_include_root}/webrtc;${_abs_root}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_include_root}/webrtc;${_abs_include_dirs}"
     INTERFACE_COMPILE_DEFINITIONS "WEBRTC_POSIX=1;WEBRTC_WIN=1;WEBRTC_AUDIO_PROCESSING_ONLY_BUILD=1"
     INTERFACE_LINK_LIBRARIES      "${_imported_libraries}"
 )

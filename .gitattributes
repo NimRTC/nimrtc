@@ -25,6 +25,9 @@
 *.yaml  text eol=lf
 *.toml  text eol=lf
 
+# Patches (unified diffs must keep LF so `git apply` works on Windows)
+*.patch  text eol=lf
+
 # Binary files — do not normalise
 *.png   binary
 *.jpg   binary

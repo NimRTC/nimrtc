@@ -200,6 +200,15 @@ public:
     plugins::Status export_srtp_key_material(
         std::span<std::uint8_t, 60> out) noexcept override;
 
+    /** @override IDtlsSession — delegates to the inner wolfSSL session's
+     *  send_app_data(). */
+    plugins::Status send_app_data(
+        std::span<const std::uint8_t> bytes) noexcept override;
+
+    /** @override IDtlsSession — delegates to the inner wolfSSL session's
+     *  take_app_data(). */
+    std::vector<std::vector<std::uint8_t>> take_app_data() noexcept override;
+
     // ---- Stats ------------------------------------------------------------
 
     struct Stats {

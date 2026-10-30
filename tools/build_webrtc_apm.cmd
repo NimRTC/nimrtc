@@ -100,6 +100,31 @@ echo [INFO] meson:  !meson --version!
 echo [INFO] ninja:  !ninja --version!
 
 REM ---------------------------------------------------------------------------
+REM Step 0: apply the NimRTC patch series (C++20 for agc2)
+REM
+REM The APM tree is fetched at build time, so NimRTC's changes to it live as
+REM versioned patches under src\third_party\webrtc_audio_processing\patches\.
+REM tools\apply_webrtc_apm_patches.py applies them idempotently — a patch
+REM that is already present is skipped.
+REM ---------------------------------------------------------------------------
+echo.
+echo [STEP 0] Applying NimRTC patches...
+set "PATCH_SCRIPT=%PROJECT_ROOT%\tools\apply_webrtc_apm_patches.py"
+if not exist "%PATCH_SCRIPT%" (
+    echo [ERROR] Patch applier not found at %PATCH_SCRIPT%
+    exit /b 1
+)
+where python >nul 2>&1 || (
+    echo [ERROR] python not found. Install Python 3.9+ and add it to PATH.
+    exit /b 1
+)
+python "%PATCH_SCRIPT%" --source-dir "%SRC_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Patch application failed.
+    echo         The upstream APM tree may have drifted from the pinned commit.
+    exit /b 1
+)
+REM ---------------------------------------------------------------------------
 REM Step 1: meson setup
 REM ---------------------------------------------------------------------------
 if not exist "%BUILD_DIR%\build.ninja" (

@@ -329,9 +329,9 @@ struct NIMRTC_API_STABLE EngineConfig {
     // (peer.createDataChannel()) and lets callers attach distinct on_message /
     // on_state callbacks per channel.
     //
-    // Default = "sctp" (matches the usrsctp-backed SctpDataChannelFactory
-    // id registered at static-init time).  Empty disables DataChannel
-    // entirely:
+    // Default = "web_transport" (since v0.15.0; WebTransport/QUIC path).
+    // `"sctp"` remains available as the legacy SCTP-over-DTLS path.
+    // Empty disables DataChannel entirely:
     //   - create_offer() does NOT emit m=application
     //   - process_remote_sdp() silently drops any m=application from the peer
     //   - create_data_channel() returns nullptr
@@ -339,7 +339,9 @@ struct NIMRTC_API_STABLE EngineConfig {
     // See `src/plugins/include/nimrtc/plugins/datachannel.hpp` for the
     // IDataChannel / IDataChannelFactory contract.
 
-    /** IDataChannel plugin id. Default = "sctp". Empty = no DataChannel.
+    /** IDataChannel plugin id. Default = "sctp" (low-level factory slot;
+     *  the effective backend is selected by `datachannel_backend`,
+     *  default `"web_transport"` since v0.15.0). Empty = no DataChannel.
      *  This is the **low-level** factory-slot selector: the engine resolves
      *  `core::PluginRegistry::get_datachannel(datachannel_name)` at
      *  `init_modules_once()` time and uses the result for
@@ -362,12 +364,13 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  `IWebTransportSessionFactory` from `core::PluginRegistry`.
      *
      *  Valid values:
-     *    - `"sctp"` (default) — SCTP-over-DTLS path (legacy).  Uses the
+     *    - `"web_transport"` (default since v0.15.0) — WebTransport / QUIC
+     *      path (v1.0.0 production). Uses the `"web_transport"` DataChannel
+     *      factory + the `web_transport_name` (default `"msquic"`)
+     *      WebTransport session factory. `datachannel_name` is ignored
+     *      in this mode.
+     *    - `"sctp"` — SCTP-over-DTLS path (legacy).  Uses the
      *      `"sctp"` DataChannel factory; `datachannel_name` may override.
-     *    - `"web_transport"`  — WebTransport / QUIC path (v1.0.0 production).
-     *      Uses the `"web_transport"` DataChannel factory + the
-     *      `web_transport_name` (default `"msquic"`) WebTransport session
-     *      factory.  `datachannel_name` is ignored in this mode.
      *    - `""`               — DataChannel disabled (same as
      *      `datachannel_name = ""`); falls back to `datachannel_name` if
      *      non-empty (backward compatibility for v0.x callers that set
@@ -380,8 +383,11 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  Added in v0.14.0-rc.1 per `docs/plan/v1.0-plan.md` §2.1.1 PR-3
      *  (DC-1-LAND dependency) and the v0.14.0-beta.1 release notes
      *  "What is NOT in v0.14.0-beta.1" deferred-list entry for
-     *  `EngineConfig::datachannel_backend`. */
-    std::string datachannel_backend = "sctp";
+     *  `EngineConfig::datachannel_backend`.
+     *
+     *  v0.15.0: default flipped from `"sctp"` to `"web_transport"`
+     *  (WebTransport / QUIC product route). */
+    std::string datachannel_backend = "web_transport";
 
     /** IWebTransportSession factory id (v0.14.0-rc.1, DC-1 v1.0.0
      *  headline gate).  Consumed only when `datachannel_backend ==
@@ -398,6 +404,16 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  warning and `datachannel_backend = "web_transport"` then fails at
      *  `open()` with a clear error). */
     std::string web_transport_name = "msquic";
+
+    /** WebTransport peer host (client mode, Case E).  Consumed only when
+     *  `datachannel_backend == "web_transport"`; the engine copies it into
+     *  `WebTransportConfig::peer_hostname` when creating the client-side
+     *  `IWebTransportSession`.  Empty = in-process loopback (unit tests). */
+    std::string web_transport_peer_host;
+
+    /** WebTransport peer QUIC port (client mode, Case E).  Default = 443
+     *  (standard WebTransport port; demo-wtserver uses 9443). */
+    std::uint16_t web_transport_peer_port = 443;
 
     /** SCTP port advertised in `m=application` SDP lines (RFC 8831 §6.1).
      *  Default = 5000 (matches Chrome / WebRTC interop).  Only used when
@@ -654,6 +670,21 @@ public:
     [[nodiscard]]
     std::unique_ptr<plugins::IDataChannel>
     create_data_channel(std::string_view label) noexcept;
+
+    /** Create a data channel with explicit reliability.
+     *
+     *  v0.15.0 (WebTransport product route): exposes the reliability
+     *  selector that the label-only overload pins to kReliableOrdered.
+     *  `kUnreliable` routes to the WebTransport datagram plane
+     *  (`send_datagram`); `kReliableOrdered` routes to a bidirectional
+     *  QUIC stream.  SCTP backend keeps its existing mapping.
+     *
+     *  The label-only overload delegates here with kReliableOrdered. */
+    NIMRTC_API_STABLE
+    [[nodiscard]]
+    std::unique_ptr<plugins::IDataChannel>
+    create_data_channel(std::string_view label,
+                        plugins::DataChannelReliability reliability) noexcept;
 
     // SDP — RFC 8829 compliant -----------------------------------------
     //

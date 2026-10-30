@@ -28,7 +28,7 @@
       "submodule_path": "src/third_party/webrtc_audio_processing/src",
       "license": "BSD-3-Clause",
       "build": "external (Meson) — see tools/build_webrtc_apm.{cmd,sh}; CMake only consumes pre-built artifacts under build_meson/",
-      "notes": "WebRTC APM. Built out-of-tree via Meson (not CMake) because upstream is Meson-first. After clone, run tools/build_webrtc_apm.sh (Linux/macOS) or tools/build_webrtc_apm.cmd (Windows).",
+      "notes": "WebRTC APM. Built out-of-tree via Meson (not CMake) because upstream is Meson-first. The source tree is NOT vendored into git: it is cloned at build time by tools/fetch_webrtc_apm.py and patched by tools/apply_webrtc_apm_patches.py. NimRTC's changes to the upstream tree live as versioned patches in src/third_party/webrtc_audio_processing/patches/ (currently 0001-cxx20.patch, which raises the Meson build to C++20 — required by agc2/*.cc). After clone, run tools/build_webrtc_apm.sh (Linux/macOS) or tools/build_webrtc_apm.cmd (Windows).",
       "size_estimate": "121 MB / 2.7k files"
     },
     {

@@ -153,6 +153,17 @@ public:
     plugins::Status export_srtp_key_material(
         std::span<std::uint8_t, 60> out) noexcept override;
 
+    /** @override IDtlsSession — encrypt `bytes` as DTLS ApplicationData
+     *  (ct=23) via wolfSSL_write() into send_buf_; the ciphertext is
+     *  surfaced through take_outbound().  Returns kErrNotReady when
+     *  state() != Connected. */
+    plugins::Status send_app_data(
+        std::span<const std::uint8_t> bytes) noexcept override;
+
+    /** @override IDtlsSession — drain plaintext ApplicationData payloads
+     *  decrypted from inbound ct=23 records (see feed_inbound). */
+    std::vector<std::vector<std::uint8_t>> take_app_data() noexcept override;
+
     struct Stats {
         std::uint64_t records_in    = 0;
         std::uint64_t records_out   = 0;

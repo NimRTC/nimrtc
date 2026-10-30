@@ -5,7 +5,8 @@
 #
 # What this script does:
 #   1. Locates the project root relative to itself (no hard-coded paths).
-#   2. Patches meson.build to use C++20 (required by agc2/*.cc).
+#   2. Applies the NimRTC patch series to the APM tree (C++20, required
+#      by agc2/*.cc) via tools/apply_webrtc_apm_patches.py.
 #   3. Configures with meson (auto-downloads abseil-cpp via wrap).
 #   4. Builds with ninja (static library + abseil-cpp).
 #
@@ -111,19 +112,23 @@ if [[ ! -f "${SRC_DIR}/meson.build" ]]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Step 2: patch meson.build for C++20
+# Step 2: apply the NimRTC patch series (C++20 for agc2)
+#
+# The APM tree is fetched at build time, so NimRTC's changes to it live as
+# versioned patches under src/third_party/webrtc_audio_processing/patches/.
+# tools/apply_webrtc_apm_patches.py applies them idempotently — a patch
+# that is already present is skipped.
 # ----------------------------------------------------------------------------
-ROOT_MESON="${SRC_DIR}/meson.build"
-APM_MESON="${SRC_DIR}/webrtc/modules/audio_processing/meson.build"
-
-if grep -q "cpp_std=c++20" "${ROOT_MESON}" 2>/dev/null; then
-    echo "[STEP 2] meson.build already patched for C++20"
-else
-    echo "[STEP 2] Patching meson.build for C++20..."
-    sed -i.bak "s/'cpp_std=c++17'/'cpp_std=c++20'/" "${ROOT_MESON}"
-    sed -i.bak "s|cpp_args: common_cxxflags + apm_flags + avx_flags$|cpp_args: common_cxxflags + apm_flags + avx_flags + ['-std=c++20']|" "${APM_MESON}"
-    sed -i.bak "s|cpp_args: common_cxxflags + apm_flags,$|cpp_args: common_cxxflags + apm_flags + ['-std=c++20'],\n    override_options: ['cpp_std=c++20'],|" "${APM_MESON}"
-    rm -f "${ROOT_MESON}.bak" "${APM_MESON}.bak"
+echo "[STEP 2] Applying NimRTC patches..."
+PATCH_SCRIPT="${PROJECT_ROOT}/tools/apply_webrtc_apm_patches.py"
+if [[ ! -f "${PATCH_SCRIPT}" ]]; then
+    echo "[ERROR] Patch applier not found at ${PATCH_SCRIPT}"
+    exit 1
+fi
+if ! python3 "${PATCH_SCRIPT}" --source-dir "${SRC_DIR}"; then
+    echo "[ERROR] Patch application failed."
+    echo "        The upstream APM tree may have drifted from the pinned commit."
+    exit 1
 fi
 
 # ----------------------------------------------------------------------------

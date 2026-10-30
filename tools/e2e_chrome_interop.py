@@ -87,21 +87,33 @@ def show_file_state() -> None:
             print(f"  {p.name}: MISSING")
 
 
-async def run_e2e() -> int:
+async def run_e2e(direction: str = "chrome-offer") -> int:
     if not CHROME_EXE.exists():
         sys.exit(f"Chrome not found at {CHROME_EXE}")
     if not CHROME_HTML.exists():
         sys.exit(f"Chrome test HTML not found at {CHROME_HTML}")
-    if not (E2E / "nimrtc_chrome.keylog").exists():
+    # Reverse direction (NimRTC offer -> Chrome answer) writes its own
+    # artifacts so the forward run's logs are never clobbered.
+    rev = direction == "nimrtc-offer"
+    keylog_name = "nimrtc_chrome_rev.keylog" if rev else "nimrtc_chrome.keylog"
+    trace_name = "nimrtc_chrome_rev.trace" if rev else "nimrtc_chrome.trace"
+    console_name = "chrome_console_rev.log" if rev else "chrome_console.log"
+    verbose_name = "chrome_verbose_rev.log" if rev else "chrome_verbose.log"
+    chrome_keylog_name = "chrome_chrome_rev.keylog" if rev else "chrome_chrome.keylog"
+    if not (E2E / keylog_name).exists():
         # ensure the file exists so we can see the empty-state pre-test
-        (E2E / "nimrtc_chrome.keylog").write_text("", encoding="utf-8")
-    if not (E2E / "nimrtc_chrome.trace").exists():
-        (E2E / "nimrtc_chrome.trace").write_text("", encoding="utf-8")
+        (E2E / keylog_name).write_text("", encoding="utf-8")
+    if not (E2E / trace_name).exists():
+        (E2E / trace_name).write_text("", encoding="utf-8")
 
     from playwright.async_api import async_playwright
 
-    url = CHROME_HTML.as_uri() + "?ws=" + WS_URL + "&room=interop&offerer=1"
-    print(f"[E2E] Loading: {url}")
+    # Forward (default): Chrome is the offerer (page creates the offer).
+    # Reverse: NimRTC (demo-p2p offerer) creates the offer; the page only
+    # answers, so omit &offerer=1.
+    offerer_qs = "&offerer=1" if not rev else ""
+    url = CHROME_HTML.as_uri() + "?ws=" + WS_URL + "&room=interop" + offerer_qs
+    print(f"[E2E] direction={direction} Loading: {url}")
 
     # BoringSSL's DTLS path runs WebRTC's self-signed cert through the
     # same verifier as HTTPS; without an explicit allow-list Chrome
@@ -139,7 +151,7 @@ async def run_e2e() -> int:
                 "--use-fake-device-for-media-stream",
                 # BoringSSL writes its CLIENT_RANDOM lines here when set;
                 # works alongside NimRTC's keylog.
-                f"--ssl-key-log-file={E2E / 'chrome_chrome.keylog'}",
+                f"--ssl-key-log-file={E2E / chrome_keylog_name}",
                 # Surface DTLS/SSL errors on stderr (doesn't help with DTLS
                 # but useful when checking protocol versions).
                 "--enable-logging=stderr",
@@ -151,7 +163,7 @@ async def run_e2e() -> int:
                 "--log-level=0",
                 # Pin Chrome's verbose logs to a file we can read after the
                 # run (Playwright discards Chrome's stderr).
-                f"--log-file={E2E / 'chrome_verbose.log'}",
+                f"--log-file={E2E / verbose_name}",
                 # Whitelist NimRTC's local cert so BoringSSL accepts the
                 # self-signed handshake.  Empty list = key unchanged from
                 # previous runs; if the file is missing or empty we omit
@@ -165,7 +177,7 @@ async def run_e2e() -> int:
         page = await context.new_page()
 
         # Tee Chrome console to disk for later inspection.
-        console_log = E2E / "chrome_console.log"
+        console_log = E2E / console_name
         console_log.write_text("", encoding="utf-8")
         msgs: list[str] = []
         page.on("console", lambda m: msgs.append(f"[{m.type}] {m.text}"))
@@ -257,13 +269,18 @@ async def run_e2e() -> int:
     return 0 if results.get("iceConnected") else 1
 
 
-def summarize() -> None:
+def summarize(direction: str = "chrome-offer") -> None:
     try:
-        print("\n=== NimRTC <-> Chrome DTLS post-mortem ===")
+        rev = direction == "nimrtc-offer"
+        trace_name = "nimrtc_chrome_rev.trace" if rev else "nimrtc_chrome.trace"
+        keylog_name = "nimrtc_chrome_rev.keylog" if rev else "nimrtc_chrome.keylog"
+        chrome_keylog_name = ("chrome_chrome_rev.keylog" if rev
+                              else "chrome_chrome.keylog")
+        print(f"\n=== NimRTC <-> Chrome DTLS post-mortem ({direction}) ===")
         show_file_state()
 
         # Show NimRTC trace tail (master_sec + verify_data lines).
-        trace = E2E / "nimrtc_chrome.trace"
+        trace = E2E / trace_name
         if trace.exists():
             print("\n--- NimRTC DTLS TRACE (last 20 lines) ---")
             lines = trace.read_text(errors="replace").splitlines()
@@ -274,14 +291,14 @@ def summarize() -> None:
 
         # Show both keylogs side by side.
         print("\n--- NimRTC keylog ---")
-        p_n = E2E / "nimrtc_chrome.keylog"
+        p_n = E2E / keylog_name
         if p_n.exists() and p_n.stat().st_size:
             print(p_n.read_text(errors="replace"))
         else:
             print("  (empty — NimRTC has not yet derived master_secret)")
 
         print("\n--- Chrome keylog (BoringSSL --ssl-key-log-file) ---")
-        p_c = E2E / "chrome_chrome.keylog"
+        p_c = E2E / chrome_keylog_name
         if p_c.exists() and p_c.stat().st_size:
             print(p_c.read_text(errors="replace"))
         else:
@@ -301,6 +318,13 @@ def summarize() -> None:
 
 
 if __name__ == "__main__":
-    rc = asyncio.run(run_e2e())
-    summarize()
+    import argparse as _ap
+    _p = _ap.ArgumentParser()
+    _p.add_argument("--direction", default="chrome-offer",
+                    choices=["chrome-offer", "nimrtc-offer"],
+                    help="chrome-offer: Chrome creates the offer (default); "
+                         "nimrtc-offer: NimRTC creates the offer, Chrome answers")
+    _ns = _p.parse_args()
+    rc = asyncio.run(run_e2e(_ns.direction))
+    summarize(_ns.direction)
     sys.exit(rc)

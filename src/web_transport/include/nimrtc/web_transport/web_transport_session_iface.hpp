@@ -109,6 +109,21 @@ enum class NIMRTC_API_UNSTABLE WebTransportState : std::uint8_t;
 using NIMRTC_API_UNSTABLE OnDatagramCb =
     std::function<void(std::span<const std::uint8_t> bytes)>;
 
+/**
+ * @brief One-shot inbound peer-stream callback (Case E product path).
+ *
+ * Fired once per peer-initiated bidirectional QUIC stream accepted by
+ * the session. The stream is owned by the session; consumers MUST NOT
+ * delete it. Consumers typically install `set_on_data` on the stream
+ * to receive bytes.
+ *
+ * Default: empty (no routing). The msquic session falls back to its
+ * legacy echo handler when no callback is installed, so existing
+ * harness/demo behavior is preserved.
+ */
+using NIMRTC_API_UNSTABLE OnPeerStreamCb =
+    std::function<void(IBidirectionalStream* stream)>;
+
 } // namespace nimrtc::web_transport
 
 namespace nimrtc::web_transport {
@@ -211,6 +226,16 @@ public:
      * only from the engine thread.
      */
     virtual void set_on_datagram(OnDatagramCb cb) noexcept = 0;
+
+    /**
+     * @brief Register the inbound peer-stream callback (Case E).
+     *
+     * The callback fires once per peer-initiated bidirectional stream.
+     * Default implementation is a no-op so existing `IWebTransportSession`
+     * implementations (mocks, older backends) keep compiling without
+     * changes. Pass an empty std::function to unregister.
+     */
+    virtual void set_on_peer_stream(OnPeerStreamCb cb) noexcept { (void)cb; }
 
     // -------------------------------------------------------------------
     // Lifecycle

@@ -215,6 +215,51 @@ public:
         std::span<std::uint8_t, 60> out) noexcept = 0;
 
     // -------------------------------------------------------------------
+    // AppData surface (v0.14.x DataChannel wiring) — encrypted SCTP-over-
+    // DTLS payload transport (RFC 8261 §5).
+    //
+    // Non-pure-virtual with safe defaults so existing backends keep
+    // compiling while each backend lands its real implementation:
+    //   - `send_app_data` default: kErrNotReady (no keying yet).
+    //   - `take_app_data` default: empty (nothing decrypted yet).
+    //
+    // Backends override both once they can drive their TLS library's
+    // record-layer write/read path (wolfSSL_write/wolfSSL_read,
+    // GMSSL SSL_write/SSL_read) after state() == Connected.
+    //
+    // Thread model: same as the rest of IDtlsSession — NOT thread-safe,
+    // engine thread only. `send_app_data` encrypts into the outbound
+    // queue drained by `take_outbound()`; `take_app_data` drains the
+    // inbound plaintext queue filled by `feed_inbound()`.
+    // -------------------------------------------------------------------
+
+    /**
+     * @brief Encrypt `bytes` as a DTLS ApplicationData (ct=23) record
+     *        and queue it for transport via `take_outbound()`.
+     *
+     * @return kOk if the bytes were accepted for encryption;
+     *         kErrNotReady if the handshake has not reached Connected;
+     *         kErrBufferTooSmall / kErrInternal on backend failure.
+     */
+    virtual plugins::Status send_app_data(
+        std::span<const std::uint8_t> bytes) noexcept {
+        (void)bytes;
+        return plugins::kErrNotReady;
+    }
+
+    /**
+     * @brief Drain plaintext ApplicationData payloads decrypted from
+     *        inbound ct=23 records since the last call.
+     *
+     * Each element is one decrypted record payload (record boundaries
+     * preserved). Returns empty when no app data arrived or the
+     * handshake has not completed.
+     */
+    virtual std::vector<std::vector<std::uint8_t>> take_app_data() noexcept {
+        return {};
+    }
+
+    // -------------------------------------------------------------------
     // Legacy engine-facing surface — preserved for `engine.cpp` and
     // other direct consumers that pre-date the Slice 4 seam refactor.
     // Concrete backends (e.g. DtlsSession) implement BOTH this legacy

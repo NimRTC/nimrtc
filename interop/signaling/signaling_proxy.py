@@ -60,7 +60,8 @@ class NimRTCSubprocess:
                  bind: str = "", stun_host: str = "", stun_port: int = 0,
                  no_stun: bool = False,
                  turn_host: str = "", turn_port: int = 3478,
-                 turn_user: str = "", turn_pass: str = ""):
+                 turn_user: str = "", turn_pass: str = "",
+                 datachannel: bool = True):
         self.binary = binary
         self.answerer = answerer
         self.duration = duration
@@ -72,6 +73,7 @@ class NimRTCSubprocess:
         self.turn_port = turn_port
         self.turn_user = turn_user
         self.turn_pass = turn_pass
+        self.datachannel = datachannel
         self.proc: Optional[subprocess.Popen] = None
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._closed = False
@@ -98,6 +100,8 @@ class NimRTCSubprocess:
             if self.turn_user:
                 cmd += ["--turn-user", self.turn_user,
                         "--turn-pass", self.turn_pass]
+        if not self.datachannel:
+            cmd.append("--no-datachannel")
         logger.info("Spawning demo-p2p: %s", shlex.join(cmd))
         # Send demo-p2p's stderr to a dedicated file so we can inspect the
         # engine's answerer logs after the run.  Without this, demo-p2p's
@@ -401,6 +405,10 @@ async def main() -> int:
                     help="If > 0, append a=ssrc:<value> cname:nimrtc-cname to "
                          "the last media section of every forwarded answer SDP "
                          "(required for Chrome interop — see _inject_ssrc_into_sdp)")
+    ap.add_argument("--no-datachannel", action="store_true",
+                    help="Pass --no-datachannel to demo-p2p (audio-only SDP, "
+                         "no m=application line; use for audio reverse-direction "
+                         "interop runs)")
     args = ap.parse_args()
 
     binary = Path(args.binary)
@@ -423,7 +431,8 @@ async def main() -> int:
                            bind=args.bind, stun_host=args.stun_host,
                            stun_port=args.stun_port, no_stun=args.no_stun,
                            turn_host=args.turn_host, turn_port=args.turn_port,
-                           turn_user=args.turn_user, turn_pass=args.turn_pass)
+                           turn_user=args.turn_user, turn_pass=args.turn_pass,
+                           datachannel=not args.no_datachannel)
     await sub.start()
 
     logger.info("Connecting to signaling server: %s", args.signaling)

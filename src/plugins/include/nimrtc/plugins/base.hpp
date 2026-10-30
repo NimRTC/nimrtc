@@ -172,6 +172,20 @@ using NIMRTC_API_STABLE OnDatagramCb = std::function<void(BufferView)>;
 using NIMRTC_API_STABLE OnSctpRecvCb = std::function<void(uint16_t stream,
                                         core::ByteSpan data)>;
 
+/** Inbound SCTP message callback with PPID (RFC 8831 §6 / RFC 8832 DCEP).
+ *  `ppid` is the SCTP Payload Protocol Identifier in host byte order:
+ *  DCEP = 50, string = 51, binary = 53. Engine-side demux uses it to
+ *  separate DCEP control from user payloads without reparsing. */
+using NIMRTC_API_STABLE OnSctpRecvWithPpidCb = std::function<void(uint16_t stream,
+                                        std::uint32_t ppid,
+                                        core::ByteSpan data)>;
+
+/** Outbound SCTP packet sink for SCTP-over-DTLS (RFC 8831 §5).
+ *  The usrsctp AF_CONN `conn_output` trampoline calls this with one
+ *  complete SCTP packet; the engine encrypts it via
+ *  IDtlsSession::send_app_data. Returns 0 on accept, non-zero on drop. */
+using NIMRTC_API_STABLE OnSctpPacketCb = std::function<int(core::ByteSpan packet)>;
+
 // ---------------------------------------------------------------------------
 // Media sample (aligned to RTP payload)
 // ---------------------------------------------------------------------------

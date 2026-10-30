@@ -153,6 +153,80 @@ def kill_port(port: int) -> None:
             pass
 
 
+def _parse_chrome_results(chrome_log) -> dict:
+    """Extract the `window._interopResults` JSON block from a chrome log."""
+    results_obj: dict = {}
+    try:
+        text = chrome_log.read_text(errors="replace")
+        # Look for the JSON results block between markers.
+        marker = "=== Chrome interop results ==="
+        i = text.find(marker)
+        if i < 0:
+            print("[FAIL] no results marker found in chrome log")
+            return results_obj
+        tail_block = text[i + len(marker):].lstrip()
+        # Find JSON object boundaries by counting braces.
+        # The Chrome interop script dumps json.dumps(results, indent=2)
+        # so the output spans multiple lines.  Simply finding the first
+        # "}" would incorrectly truncate nested objects (e.g.
+        # {"errors": []}).  Instead, we walk the string and count
+        # nesting depth to find the matching closing brace.
+        depth = 0
+        start = -1
+        end = -1
+        for idx, ch in enumerate(tail_block):
+            if ch == '{':
+                if start < 0:
+                    start = idx
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = idx + 1
+                    break
+        if start < 0 or end < 0:
+            print("[FAIL] could not locate JSON braces in results block")
+            return results_obj
+        cand = tail_block[start:end]
+        try:
+            results_obj = json.loads(cand)
+        except json.JSONDecodeError as e:
+            print(f"[FAIL] JSON decode error: {e}")
+    except Exception as e:
+        print(f"[FAIL] error parsing chrome log: {e}")
+    return results_obj
+
+
+def _check_audio_results(results_obj: dict, *, direction: str) -> bool:
+    """Shared audio-interop assertions (Case D forward + reverse).
+
+    Evidence (audio-first release gate #1):
+      wsConnected   — signaling plane
+      iceConnected  — ICE completed
+      sdpOfferSeen  — an offer was seen (either side may offer)
+      audioReceived — Chrome actually received RTP audio (i.e. DTLS
+                      handshake finished AND SRTP unwrap worked)
+      rtpPackets    — sanity check that media flowed
+      errors        — must be empty
+    We do NOT treat "ICE Connected but DTLS failed" as PASS — that was
+    a bug in earlier revisions of this script.
+    """
+    if not results_obj:
+        return False
+    checks = {
+        "wsConnected":   results_obj.get("wsConnected")  is True,
+        "iceConnected":  results_obj.get("iceConnected") is True,
+        "sdpOfferSeen":  results_obj.get("sdpOfferSeen") is True,
+        "audioReceived": results_obj.get("audioReceived") is True,
+        "rtpPackets>0":  (results_obj.get("rtpPackets") or 0) > 0,
+        "errors==[]":    not results_obj.get("errors"),
+    }
+    print(f"   | direction={direction}")
+    for name, passed in checks.items():
+        print(f"   | check {name:18s}: {'OK' if passed else 'FAIL'}")
+    return all(checks.values())
+
+
 def run_chrome_interop() -> bool:
     print("\n[run] case D: NimRTC <-> Chrome interop")
 
@@ -246,69 +320,11 @@ def run_chrome_interop() -> bool:
             print(f"   | {ln}")
         print(f"[rc]  e2e_chrome_interop.py exit={rc_chrome}")
 
-        # Real pass/fail is in the JSON block.  We assert on:
-        #   wsConnected   — signaling plane
-        #   iceConnected  — ICE completed
-        #   sdpOfferSeen  — Chrome produced an offer (offerer side)
-        #   audioReceived — Chrome actually received RTP audio (i.e. DTLS
-        #                   handshake finished AND SRTP unwrap worked)
-        #   rtpPackets    — sanity check that media flowed
-        #   errors        — must be empty
-        # We do NOT treat "ICE Connected but DTLS failed" as PASS — that was
-        # a bug in earlier revisions of this script.
+        # Real pass/fail is in the JSON block (shared audio assertions).
         ok = False
-        results_obj: dict = {}
-        try:
-            text = chrome_log.read_text(errors="replace")
-            # Look for the JSON results block between markers.
-            marker = "=== Chrome interop results ==="
-            i = text.find(marker)
-            if i < 0:
-                print("[FAIL] no results marker found in chrome log")
-            else:
-                tail_block = text[i + len(marker):].lstrip()
-                # Find JSON object boundaries by counting braces.
-                # The Chrome interop script dumps json.dumps(results, indent=2)
-                # so the output spans multiple lines.  Simply finding the first
-                # "}" would incorrectly truncate nested objects (e.g.
-                # {"errors": []}).  Instead, we walk the string and count
-                # nesting depth to find the matching closing brace.
-                depth = 0
-                start = -1
-                end = -1
-                for idx, ch in enumerate(tail_block):
-                    if ch == '{':
-                        if start < 0:
-                            start = idx
-                        depth += 1
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0:
-                            end = idx + 1
-                            break
-                if start < 0 or end < 0:
-                    print("[FAIL] could not locate JSON braces in results block")
-                else:
-                    cand = tail_block[start:end]
-                    try:
-                        results_obj = json.loads(cand)
-                    except json.JSONDecodeError as e:
-                        print(f"[FAIL] JSON decode error: {e}")
-        except Exception as e:
-            print(f"[FAIL] error parsing chrome log: {e}")
-
+        results_obj = _parse_chrome_results(chrome_log)
         if results_obj:
-            checks = {
-                "wsConnected":   results_obj.get("wsConnected")  is True,
-                "iceConnected":  results_obj.get("iceConnected") is True,
-                "sdpOfferSeen":  results_obj.get("sdpOfferSeen") is True,
-                "audioReceived": results_obj.get("audioReceived") is True,
-                "rtpPackets>0":  (results_obj.get("rtpPackets") or 0) > 0,
-                "errors==[]":    not results_obj.get("errors"),
-            }
-            for name, passed in checks.items():
-                print(f"   | check {name:18s}: {'OK' if passed else 'FAIL'}")
-            ok = all(checks.values())
+            ok = _check_audio_results(results_obj, direction="chrome-offer")
 
         if not ok and rc_chrome == 0:
             print("[FAIL] chrome script exit=0 but result assertions FAILED")
@@ -317,6 +333,112 @@ def run_chrome_interop() -> bool:
 
     finally:
         # Tear everything down (port-first, then process).
+        for name, p in reversed(procs):
+            try:
+                if p.poll() is None:
+                    p.terminate()
+            except Exception:
+                pass
+        time.sleep(0.5)
+        for name, p in reversed(procs):
+            try:
+                if p.poll() is None:
+                    p.kill()
+            except Exception:
+                pass
+        kill_port(SIGNAL_PORT)
+        log_signal.close()
+        log_proxy.close()
+        log_proxy_e.close()
+
+
+def run_chrome_interop_reverse() -> bool:
+    """Case D-rev: NimRTC offer -> Chrome answer (reverse audio direction).
+
+    Same evidence gates as Case D, but the roles flip: demo-p2p runs as
+    OFFERER (no --answerer) and the Chrome page answers (no &offerer=1).
+    Audio-only SDP (--no-datachannel on the proxy) keeps the reverse run
+    focused on release gate #1 (bidirectional audio).
+    """
+    print("\n[run] case D-rev: NimRTC offer -> Chrome answer interop")
+
+    log_signal  = open(E2E / "case_d_rev_signal_server.log", "w", encoding="utf-8")
+    log_proxy   = open(E2E / "case_d_rev_proxy.out", "w", encoding="utf-8")
+    log_proxy_e = open(E2E / "case_d_rev_proxy.err", "w", encoding="utf-8")
+
+    procs: list[tuple[str, subprocess.Popen]] = []
+
+    def _start(name: str, argv, stdout=None, stderr=None) -> subprocess.Popen:
+        kw = dict(stdout=stdout or subprocess.DEVNULL,
+                  stderr=stderr  or subprocess.DEVNULL)
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen(argv, **kw)
+        procs.append((name, p))
+        print(f"   started {name} (pid={p.pid})")
+        return p
+
+    rc_overall = 1
+    try:
+        kill_port(SIGNAL_PORT)
+        time.sleep(0.3)
+
+        os.environ["NIMRTC_DTLS_KEYLOG"] = str(E2E / "nimrtc_chrome_rev.keylog")
+        os.environ["NIMRTC_DTLS_TRACE"]  = str(E2E / "nimrtc_chrome_rev.trace")
+        os.environ["NIMRTC_DTLS_DUMP"]   = "1"
+        os.environ["NIMRTC_DTLS_SPKI_FILE"] = str(E2E / "nimrtc_chrome_rev_spki.b64")
+        if not (E2E / "nimrtc_chrome_rev_spki.b64").exists():
+            (E2E / "nimrtc_chrome_rev_spki.b64").write_text("", encoding="utf-8")
+
+        _start(
+            "signaling_server",
+            [sys.executable, str(SIGNALING_SERVER), "--port", str(SIGNAL_PORT)],
+            stdout=log_signal, stderr=subprocess.STDOUT,
+        )
+        if not wait_for_port(SIGNAL_PORT, timeout_s=5.0):
+            print(f"[FAIL] signaling_server did not open :{SIGNAL_PORT}")
+            return False
+        print(f"   signaling_server listening on :{SIGNAL_PORT}")
+
+        # NimRTC side is the OFFERER here (no --answerer): demo-p2p emits
+        # its offer + candidates immediately on startup.
+        _start(
+            "signaling_proxy",
+            [
+                sys.executable, str(SIGNALING_PROXY),
+                "--signaling", f"ws://127.0.0.1:{SIGNAL_PORT}/interop",
+                "--binary", str(EXE_DEMO),
+                "--bind", "0.0.0.0",
+                "--no-stun",
+                "--no-datachannel",
+                "--duration", str(PROXY_DURATION),
+            ],
+            stdout=log_proxy, stderr=log_proxy_e,
+        )
+
+        time.sleep(1.5)
+
+        chrome_log = E2E / "case_d_rev_chrome.log"
+        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py"),
+               "--direction", "nimrtc-offer"]
+        with open(chrome_log, "w", encoding="utf-8") as f:
+            rc_chrome = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT,
+                                        timeout=PROXY_DURATION + 30)
+        tail = chrome_log.read_text(errors="replace").splitlines()[-30:]
+        for ln in tail:
+            print(f"   | {ln}")
+        print(f"[rc]  e2e_chrome_interop.py --direction nimrtc-offer exit={rc_chrome}")
+
+        ok = False
+        results_obj = _parse_chrome_results(chrome_log)
+        if results_obj:
+            ok = _check_audio_results(results_obj, direction="nimrtc-offer")
+
+        if not ok and rc_chrome == 0:
+            print("[FAIL] chrome script exit=0 but result assertions FAILED")
+        rc_overall = rc_chrome
+        return ok
+
+    finally:
         for name, p in reversed(procs):
             try:
                 if p.poll() is None:
@@ -536,11 +658,13 @@ def main() -> int:
     parser.add_argument(
         "--case",
         default="all",
-        choices=["all", "a", "b", "c", "d", "e", "e_webtransport",
+        choices=["all", "a", "b", "c", "d", "d_rev", "e", "e_webtransport",
                  "ab", "abc", "abcd"],
         help=(
             "Which case(s) to run.  "
             "'all' runs A+B+C+D (Case E excluded unless explicitly listed).  "
+            "'d_rev' runs the reverse audio direction (NimRTC offer -> "
+            "Chrome answer).  "
             "'e' runs Case E only (DTLS-only interop).  "
             "'e_webtransport' runs Case E WebTransport interop.  "
             "Default: all."
@@ -553,6 +677,7 @@ def main() -> int:
     run_b    = run_all or args.case in ("b",    "ab",    "abc",    "abcd")
     run_c    = run_all or args.case in ("c",    "abc",   "abcd")
     run_d    = run_all or args.case in ("d",    "abcd")
+    run_d_rev = args.case in ("d_rev",)  # reverse audio direction (explicit only)
     run_e    = args.case in ("e",)   # Case E DTLS-only when explicitly requested
     run_e_wt = args.case in ("e_webtransport",)  # Case E WebTransport when explicitly requested
 
@@ -603,6 +728,13 @@ def main() -> int:
             results["d_chrome"] = True
         else:
             results["d_chrome"] = run_chrome_interop()
+
+    if run_d_rev:
+        if skip_case_d:
+            print("\n[run] case D-rev: SKIPPED (NIMRTC_SKIP_CASE_D=1)")
+            results["d_chrome_rev"] = True
+        else:
+            results["d_chrome_rev"] = run_chrome_interop_reverse()
 
     if run_e:
         results["e_dtls"] = run_case_e_dtls()

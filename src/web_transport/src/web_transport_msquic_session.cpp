@@ -82,6 +82,7 @@
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/plugin_id.hpp>
+#include <nimrtc/web_transport/web_transport_data_channel.hpp>
 #include <nimrtc/web_transport/web_transport_plugin.hpp>
 #include <nimrtc/web_transport/web_transport_session_factory.hpp>
 
@@ -182,9 +183,8 @@ void MsQuicBidiStream::init_msquic_context(HQUIC stream) noexcept {
         api_->SetContext(stream_, this);
         api_->SetCallbackHandler(
             stream_,
-            reinterpret_cast<void*>(&quic_stream_callback),
-            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) &
-                                     ~uintptr_t{1}));
+            reinterpret_cast<void*>(&quic_stream_callback_bidi),
+            this);
     }
 }
 
@@ -339,8 +339,15 @@ void MsQuicBidiStream::on_receive(
     }
     (void)fin_seen;  // captured for future use (currently no-op)
 
-    // Tell msquic we've consumed this data.
-    api_->StreamReceiveComplete(stream_, bytes.size());
+    // NOTE: no StreamReceiveComplete() here.  This RECEIVE is handled
+    // synchronously (the callback returns QUIC_STATUS_SUCCESS), so msquic
+    // already treats every byte as accepted.  Calling StreamReceiveComplete()
+    // on top races with the next RECEIVE event and completes it with a
+    // stale length, which msquic interprets as a partial accept — that
+    // disables further RECEIVE callbacks until StreamReceiveSetEnabled()
+    // and stalls the stream (observed as: 3B WT header arrives, 24B payload
+    // never arrives, Chrome times out with "Connection lost").
+    (void)bytes;
 }
 
 void MsQuicBidiStream::on_peer_send_shutdown() noexcept {
@@ -465,85 +472,14 @@ MsQuicUniStream* MsQuicUniStream::from_context(void* ctx) noexcept {
 // QUIC stream callback
 // ===========================================================================
 
-QUIC_STATUS QUIC_API quic_stream_callback(
+QUIC_STATUS QUIC_API quic_stream_callback_bidi(
     HQUIC Stream,
     void* Context,
     QUIC_STREAM_EVENT* Event) noexcept {
-    // Determine which stream wrapper owns this callback.
-    // We stored the wrapper pointer (MsQuicBidiStream* or MsQuicUniStream*)
-    // as the stream context.  We can distinguish them by the value
-    // of the first byte of the pointer alignment (bidi vs uni are distinct
-    // subclasses), but the simplest approach is to check the stream flags.
-    //
-    // However, msquic doesn't pass the stream flags in the event.
-    // Instead, we use a tag: we store the pointer and a type tag in a
-    // small struct, or we can just use a reinterpret_cast with a heuristic.
-    //
-    // Simpler: store the MsQuicSessionImpl* as context (not the stream wrapper) and
-    // dispatch from the connection callback for PEER_STREAM_STARTED.
-    // For stream callbacks, the context is the stream wrapper itself.
-    //
-    // Approach: we always store the stream wrapper pointer as context.
-    // We need to know whether it's a bidi or uni stream.  We can use
-    // dynamic_cast (the wrapper has RTTI), or we can use a base-class
-    // tag.  The simplest is to store the MsQuicSessionImpl* as context for ALL
-    // streams and handle everything in the connection callback, but
-    // that's awkward for recv data.
-    //
-    // Best approach: store the stream wrapper as context and use a
-    // virtual method for dispatch.  But the wrappers don't inherit from
-    // a common base with a virtual callback method here.
-    //
-    // Final approach: use two separate callback functions, registered
-    // with the correct context.  We need a way to know which wrapper
-    // owns the stream.  We store the wrapper pointer and a flag.
-    // Since we can't easily store two values in the void* context, we
-    // use the MSB of the pointer as a type tag (pointer alignment
-    // guarantees the low bits are zero).  This is hacky but works for
-    // our use case.
-    //
-    // Cleaner: we store the wrapper pointer in the context and cast based
-    // on knowing the stream type from the QUIC_STREAM_OPEN_FLAGS that were
-    // used when opening.  But the callback doesn't receive the flags.
-    //
-    // Best clean approach: use a small tagged union as context.
-    // For now, let's use the MsQuicSessionImpl* as context (set via SetContext on the
-    // stream) and handle PEER_STREAM_STARTED only in the connection
-    // callback.  Stream callbacks that need per-stream dispatch
-    // (RECEIVE, SEND_COMPLETE, etc.) will use a different mechanism.
-    //
-    // Re-thinking: the cleanest way is to register DIFFERENT callbacks
-    // for bidi vs uni streams, passing the wrapper pointer as context.
-    // We distinguish them by the QUIC_STREAM_OPEN_FLAGS passed to StreamOpen:
-    //   - Bidi: no flags (default = bidirectional)
-    //   - Uni:  QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL
-    // We register quic_stream_callback_bidi or quic_stream_callback_uni
-    // depending on the type, and each callback receives the correct
-    // wrapper pointer as context.
-    //
-    // Let's use this approach: we need to register separate callbacks.
-    // But QUIC_STREAM_CALLBACK_HANDLER is a single void* callback.
-    // We can store the wrapper pointer as context and distinguish by
-    // looking at the callback handler that was registered.
-    //
-    // The msquic docs say: "The type of the handler must be appropriate
-    // for the type of the handle." For a stream handle, we need a stream
-    // callback.  We can register the same callback for both bidi and uni
-    // streams and distinguish by the context.
-    //
-    // Since both MsQuicBidiStream and MsQuicUniStream are different types,
-    // we can check if the context pointer points to a valid MsQuicBidiStream
-    // by checking if the stream is bidirectional.  But there's no direct
-    // way to tell from the context alone.
-    //
-    // Best approach: we use a simple tagged-pointer technique.
-    // The context is the stream wrapper pointer, but we OR in a tag bit.
-    // Bidi: context = MsQuicBidiStream* (tag = 0)
-    // Uni:  context = MsQuicUniStream* | 1 (tag = 1)
-    // This lets us distinguish in the callback.
-    //
-    // IMPLEMENTED: we use this tagged-pointer scheme in stream open.
-    // Here we decode it.
+    // Bidirectional stream: Context is the plain MsQuicBidiStream*
+    // registered at StreamOpen time (see open_bidi_stream /
+    // on_peer_stream_started).  The direction is fixed by which
+    // callback was registered, so no tag bit is needed.
 
     // The payload of a completed send is released here.  This is done
     // before the stream wrapper is touched, because the completion
@@ -554,21 +490,25 @@ QUIC_STATUS QUIC_API quic_stream_callback(
         return QUIC_STATUS_SUCCESS;
     }
 
-    // Decode tagged context.
-    // The tag bit is the LSB.  If set, it's a uni stream; otherwise bidi.
-    const uintptr_t tagged = reinterpret_cast<uintptr_t>(Context);
-    const bool is_uni = (tagged & uintptr_t{1}) != 0;
-    void* wrapper_ptr = reinterpret_cast<void*>(tagged & ~uintptr_t{1});
+    auto* s = static_cast<MsQuicBidiStream*>(Context);
+    return s ? quic_stream_callback_bidi_impl(Stream, s, Event)
+             : QUIC_STATUS_INVALID_STATE;
+}
 
-    if (is_uni) {
-        auto* s = static_cast<MsQuicUniStream*>(wrapper_ptr);
-        return s ? quic_stream_callback_uni_impl(Stream, s, Event)
-                 : QUIC_STATUS_INVALID_STATE;
-    } else {
-        auto* s = static_cast<MsQuicBidiStream*>(wrapper_ptr);
-        return s ? quic_stream_callback_bidi_impl(Stream, s, Event)
-                 : QUIC_STATUS_INVALID_STATE;
+QUIC_STATUS QUIC_API quic_stream_callback_uni(
+    HQUIC Stream,
+    void* Context,
+    QUIC_STREAM_EVENT* Event) noexcept {
+    // Unidirectional stream: Context is the plain MsQuicUniStream*
+    // registered at StreamOpen time (see open_uni_stream).
+    if (Event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
+        release_outbound_payload(Event->SEND_COMPLETE.ClientContext);
+        return QUIC_STATUS_SUCCESS;
     }
+
+    auto* s = static_cast<MsQuicUniStream*>(Context);
+    return s ? quic_stream_callback_uni_impl(Stream, s, Event)
+             : QUIC_STATUS_INVALID_STATE;
 }
 
 QUIC_STATUS quic_stream_callback_bidi_impl(
@@ -826,9 +766,8 @@ IBidirectionalStream* MsQuicSessionImpl::open_bidi_stream() noexcept {
     const QUIC_STATUS rc_open = api_->StreamOpen(
         conn_,
         QUIC_STREAM_OPEN_FLAG_NONE,  // bidirectional by default
-        quic_stream_callback,
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) &
-                                 ~uintptr_t{1}),
+        quic_stream_callback_bidi,
+        s.get(),
         &stream_handle);
     if (QUIC_FAILED(rc_open) || stream_handle == nullptr) {
         return nullptr;
@@ -877,10 +816,10 @@ IUnidirectionalStream* MsQuicSessionImpl::open_uni_stream() noexcept {
     const QUIC_STATUS rc_open = api_->StreamOpen(
         conn_,
         QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
-        quic_stream_callback,
-        // Tagged context: uni stream (LSB = 1) — decoded in quic_stream_callback.
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(s.get()) |
-                                 uintptr_t{1}),
+        quic_stream_callback_uni,
+        // Plain wrapper pointer — the direction is fixed by the
+        // registered callback, no tag bit needed.
+        s.get(),
         &stream_handle);
     if (QUIC_FAILED(rc_open) || stream_handle == nullptr) {
         return nullptr;
@@ -1085,99 +1024,38 @@ void MsQuicSessionImpl::on_peer_stream_started(HQUIC stream,
     }
     raw->init_msquic_context(stream);
 
-    // Per-stream echo state: reassembles the split WebTransport header
-    // (signal varint + session-id varint) across RECEIVE events, then
-    // echoes pure payload bytes.  Shared with the on-data lambda; the
-    // mutex serialises msquic worker callbacks for this stream.
-    struct EchoState {
-        std::mutex mutex;
-        std::vector<std::uint8_t> pending;
-        bool header_done = false;
-    };
-    std::shared_ptr<EchoState> echo_state;
-    try {
-        echo_state = std::make_shared<EchoState>();
-    } catch (...) {
-        std::lock_guard<std::mutex> l{streams_mutex_};
-        // Drop the wrapper we just registered; its destructor shuts the
-        // stream down gracefully and closes the handle.
-        for (auto it = bidi_streams_.begin(); it != bidi_streams_.end();
-             ++it) {
-            if (it->get() == raw) {
-                bidi_streams_.erase(it);
-                break;
-            }
+    // Case E routing: when a peer-stream subscriber exists (engine-owned
+    // WebTransportDataChannel), hand the accepted stream to it and skip the
+    // legacy echo handler. The channel strips the WT header itself before
+    // delivering payload bytes to the engine callback.
+    {
+        OnPeerStreamCb peer_cb;
+        {
+            std::lock_guard<std::mutex> l{cb_mutex_};
+            peer_cb = on_peer_stream_cb_;
         }
-        return;
+        if (peer_cb) {
+            try {
+                peer_cb(static_cast<IBidirectionalStream*>(raw));
+            } catch (...) {
+            }
+            return;
+        }
     }
 
-    // QUIC varint decode that tolerates a split header: returns false
-    // when the buffer does not yet hold a complete integer.
-    auto try_decode_varint = [](std::vector<std::uint8_t>& buf,
-                                std::size_t& pos,
-                                std::uint64_t& value) noexcept -> bool {
-        if (pos >= buf.size()) return false;
-        const std::uint8_t lead = buf[pos];
-        const std::size_t width = std::size_t{1} << (lead >> 6);
-        if (buf.size() - pos < width) return false;
-        std::uint64_t v = lead & 0x3Fu;
-        for (std::size_t i = 1; i < width; ++i) {
-            v = (v << 8) | buf[pos + i];
-        }
-        value = v;
-        pos += width;
-        return true;
-    };
-
-    // Install the echo handler.  on_receive() fires the callback outside
-    // its internal lock, so taking echo_state->mutex here cannot deadlock
-    // against the stream's own recv_mutex_.
+    // Case E interop: verbatim echo.  Chrome's WebTransport layer frames
+    // every data stream on the wire as (signal 0x41 + session-id + payload)
+    // and strips that header before delivering bytes to JS.  The server must
+    // therefore return the wire bytes unchanged so Chrome can strip the
+    // same header on the way back.  Stripping here and echoing payload-only
+    // makes Chrome see an invalid stream-type header and drop the stream
+    // (observed as streamRecv=false + "Connection lost").
     raw->set_on_data(
-        [raw, echo_state, try_decode_varint](
-            std::span<const std::uint8_t> bytes) noexcept {
+        [raw](std::span<const std::uint8_t> bytes) noexcept {
             if (bytes.empty() || raw == nullptr) return;
             std::vector<std::uint8_t> to_echo;
             try {
-                std::lock_guard<std::mutex> l{echo_state->mutex};
-                echo_state->pending.insert(echo_state->pending.end(),
-                                           bytes.begin(), bytes.end());
-                std::size_t pos = 0;
-                if (!echo_state->header_done) {
-                    std::uint64_t signal = 0;
-                    std::size_t after_signal = 0;
-                    {
-                        std::size_t p = pos;
-                        if (!try_decode_varint(echo_state->pending, p,
-                                               signal)) {
-                            return;  // split header — wait for more bytes
-                        }
-                        after_signal = p;
-                    }
-                    if (signal != 0x41u) {
-                        // Not a WebTransport data stream after all; stop
-                        // echoing and leave the bytes queued for recv().
-                        echo_state->header_done = true;
-                        echo_state->pending.clear();
-                        return;
-                    }
-                    std::uint64_t session_id = 0;
-                    {
-                        std::size_t p = after_signal;
-                        if (!try_decode_varint(echo_state->pending, p,
-                                               session_id)) {
-                            return;  // split header — wait for more bytes
-                        }
-                        pos = p;
-                    }
-                    (void)session_id;
-                    echo_state->header_done = true;
-                }
-                if (pos < echo_state->pending.size()) {
-                    to_echo.assign(echo_state->pending.begin() +
-                                       static_cast<std::ptrdiff_t>(pos),
-                                   echo_state->pending.end());
-                }
-                echo_state->pending.clear();
+                to_echo.assign(bytes.begin(), bytes.end());
             } catch (...) {
                 return;
             }
@@ -1403,6 +1281,10 @@ void WebTransportMsQuicSession::set_on_datagram(OnDatagramCb cb) noexcept {
     impl_->set_on_datagram(std::move(cb));
 }
 
+void WebTransportMsQuicSession::set_on_peer_stream(OnPeerStreamCb cb) noexcept {
+    impl_->set_on_peer_stream(std::move(cb));
+}
+
 void WebTransportMsQuicSession::apply_datagram_state(
     bool send_enabled, std::uint16_t max_send_length, bool known) noexcept {
     if (impl_) {
@@ -1447,6 +1329,13 @@ public:
             cfg.peer_hostname.empty() ? "" : std::string(cfg.peer_hostname),
             cfg.peer_port,
             cfg);
+    }
+
+    std::unique_ptr<plugins::IDataChannel> create_data_channel(
+        IWebTransportSession& session) const override {
+        auto ch = std::make_unique<WebTransportDataChannel>(&session);
+        ch->attach_session_callbacks();
+        return ch;
     }
 
 private:

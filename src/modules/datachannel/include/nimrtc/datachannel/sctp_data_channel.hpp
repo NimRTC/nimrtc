@@ -6,6 +6,17 @@
  * is the public module surface for the production channel; concrete
  * behaviour lives in `sctp_data_channel.cpp`.
  *
+ * v0.14.x SCTP-over-DTLS wiring (RFC 8831 §5 / RFC 8832 DCEP):
+ *   - `route_send()` stamps the wire PPID via the ISctpSocket
+ *     `*_with_ppid` seam (DCEP=50 on the opening message, string=51 /
+ *     binary=53 on user payloads) instead of the legacy plain sends.
+ *   - inbound delivery prefers `set_on_recv_with_ppid`; the PPID demux
+ *     consumes DCEP OPEN (replies ACK, reports "open") and DCEP ACK
+ *     (reports "open"), and forwards string/binary payloads to
+ *     `on_msg_`. Legacy `set_on_recv` remains the fallback for
+ *     backends that do not speak the PPID seam (e.g. in-process test
+ *     mocks), so existing tests keep passing.
+ *
  * ## Thread model
  *
  * The engine owns one `IDataChannel*` per logical channel (e.g. one for
@@ -216,6 +227,13 @@ public:
     /** Replace the state callback. noexcept per the seam contract. */
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
+    /** Emit DATA_CHANNEL_OPEN (RFC 8832 §5.1, PPID=50) on stream 0.
+     *  v0.14.x SCTP-over-DTLS wiring: the engine (or peer-open path)
+     *  may call this once per channel after open(cfg); inbound DCEP ACK
+     *  completes the handshake via on_state_("open"). Best-effort:
+     *  returns void, failures surface as on_state_("error"). */
+    void send_dcep_open() noexcept;
+
     // ---- Test-only accessors --------------------------------------------
 
     /** Returns true if the channel has a non-null underlying socket.
@@ -230,17 +248,25 @@ public:
 
 private:
     /** Translate a DataChannelReliability to the matching ISctpSocket
-     *  send method on `sock_`. Returns the result of that send. */
+     *  PPID-aware send method on `sock_` (DCEP/string/binary PPIDs via
+     *  the v0.14.x seam). Returns the result of that send. */
     Status route_send(plugins::BufferView data) noexcept;
 
     /** Forwarding trampoline from usrsctp's recv thread to `on_msg_`. */
     void on_sctp_recv(uint16_t stream, core::ByteSpan data) noexcept;
+
+    /** PPID-aware inbound demux (v0.14.x): DCEP OPEN → reply ACK and
+     *  report "open"; DCEP ACK → report "open"; string/binary → forward
+     *  to `on_msg_`. Unknown PPIDs are dropped. */
+    void on_sctp_recv_with_ppid(uint16_t stream, std::uint32_t ppid,
+                                core::ByteSpan data) noexcept;
 
     plugins::DataChannelConfig        cfg_{};
     plugins::DataMessageCallback      on_msg_;
     plugins::DataChannelStateCallback on_state_;
     std::unique_ptr<sctp::ISctpSocket> sock_;
     bool                              opened_ = false;
+    bool                              dcep_open_sent_ = false;
 };
 
 #ifdef _MSC_VER

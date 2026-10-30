@@ -27,7 +27,7 @@
 // web_transport_session_iface.hpp for the rationale.
 #include <nimrtc/core/api_version.hpp>
 #include <cstdint>
-#include <string_view>
+#include <string>
 
 namespace nimrtc::web_transport {
 
@@ -100,8 +100,12 @@ struct NIMRTC_API_UNSTABLE WebTransportConfig {
      * (loopback, for unit-test use only).
      *
      * msquic mapping: `ConnectionStart` `RemoteAddress` parameter.
+     *
+     * Owned `std::string` (not `string_view`): the config is copied into
+     * the session factory and outlives the call site, so a view would
+     * dangle when the caller passes a temporary.
      */
-    std::string_view peer_hostname;
+    std::string peer_hostname;
 
     /**
      * @brief Peer QUIC port number.

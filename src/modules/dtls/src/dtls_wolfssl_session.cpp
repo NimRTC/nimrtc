@@ -375,6 +375,12 @@ struct DtlsSessionWolfSSL::Impl {
     std::vector<std::uint8_t> send_buf_;
     std::vector<nimrtc::dtls::DtlsRecord> outbound_;
 
+    // -- AppData plaintext queue (v0.14.x DataChannel wiring) -------------
+    // feed_inbound() decrypts inbound ct=23 records via wolfSSL_read()
+    // once state == Connected and pushes each plaintext payload here;
+    // take_app_data() drains the queue (record boundaries preserved).
+    std::vector<std::vector<std::uint8_t>> inbound_app_;
+
     SOCKADDR_IN   peer_addr{};
     bool          peer_set  = false;
     std::string   peer_host;
@@ -803,6 +809,55 @@ struct DtlsSessionWolfSSL::Impl {
         outbound_.push_back(std::move(rec));
         ++stats_instance.records_out;
         send_buf_.clear();
+    }
+
+    // -- AppData decrypt pump (v0.14.x DataChannel wiring) ----------------
+    //
+    // Called from feed_inbound() after the handshake pump, only when
+    // state == Connected. wolfSSL_read() consumes ct=23 records from
+    // recv_buf_ (via the io_recv callback) and returns the decrypted
+    // plaintext; each successful read is pushed onto inbound_app_.
+    //
+    // Loop until wolfSSL reports WANT_READ (recv_buf_ drained of app
+    // data) or a fatal error. Non-fatal WANT_READ/WANT_WRITE just ends
+    // the drain — more bytes will arrive via the next feed_inbound().
+    // The loop is bounded by recv_buf_ progress: each iteration either
+    // consumes input or exits, so no infinite loop on a stuck record.
+    void drain_app_data() {
+        if (!ssl ||
+            state != nimrtc::dtls::DtlsState::Connected) {
+            return;
+        }
+        // DTLS records carry at most ~16 KiB plaintext (2^14 per
+        // RFC 6347 §4.1 + compression overhead, though DTLS 1.2
+        // negotiates null compression — 16 KiB is a safe ceiling).
+        static constexpr int kMaxPlain = 16384;
+        std::vector<std::uint8_t> plain(
+            static_cast<std::size_t>(kMaxPlain));
+        for (;;) {
+            const int rc = wolfSSL_read(
+                ssl, reinterpret_cast<char*>(plain.data()), kMaxPlain);
+            if (rc > 0) {
+                inbound_app_.emplace_back(plain.begin(),
+                                          plain.begin() + rc);
+                ++stats_instance.records_in;
+                continue;
+            }
+            const int err = wolfSSL_get_error(ssl, rc);
+            if (err == WOLFSSL_ERROR_WANT_READ ||
+                err == WOLFSSL_ERROR_WANT_WRITE) {
+                break;  // no more app data buffered — wait for next feed
+            }
+            // Fatal decrypt error (bad MAC / bad epoch / closed). Log
+            // and stop draining; the session stays Connected so a
+            // subsequent feed may still recover (e.g. retransmitted
+            // record arrives out of order).
+            ++stats_instance.errors;
+            nimrtc::core::log::Logger::instance().error(
+                std::string("wolfSSL: AppData wolfSSL_read failed err=") +
+                std::to_string(err));
+            break;
+        }
     }
 
     bool pump_handshake() {
@@ -1337,6 +1392,15 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
 
     impl_->pump_handshake();
 
+    // AppData drain (v0.14.x DataChannel wiring): once Connected, any
+    // ct=23 bytes the peer already delivered sit in recv_buf_ (the
+    // handshake pump leaves them unread — accept()/connect() only
+    // consumes handshake/CCS records). Decrypt them now via
+    // wolfSSL_read() and queue the plaintext into inbound_app_.
+    if (impl_->state == nimrtc::dtls::DtlsState::Connected) {
+        impl_->drain_app_data();
+    }
+
     return bytes.size();
 }
 
@@ -1596,6 +1660,50 @@ plugins::Status DtlsSessionWolfSSL::export_srtp_key_material(
     std::memcpy(out.data() + 32, km->client_master_salt.data(), 14);
     std::memcpy(out.data() + 46, km->server_master_salt.data(), 14);
     return plugins::kOk;
+}
+
+plugins::Status DtlsSessionWolfSSL::send_app_data(
+    std::span<const std::uint8_t> bytes) noexcept {
+    if (!impl_->ssl ||
+        impl_->state != nimrtc::dtls::DtlsState::Connected) {
+        return plugins::kErrNotReady;
+    }
+    if (bytes.empty()) return plugins::kOk;
+    const int rc = wolfSSL_write(
+        impl_->ssl, reinterpret_cast<const char*>(bytes.data()),
+        static_cast<int>(bytes.size()));
+    if (rc < 0) {
+        const int err = wolfSSL_get_error(impl_->ssl, rc);
+        if (err == WOLFSSL_ERROR_WANT_READ ||
+            err == WOLFSSL_ERROR_WANT_WRITE) {
+            // Non-blocking back-pressure: ciphertext (if any) is already
+            // in send_buf_; the caller retries on the next tick. Report
+            // NotReady so the engine re-queues rather than dropping.
+            impl_->flush_send_buf();
+            return plugins::kErrNotReady;
+        }
+        ++impl_->stats_instance.errors;
+        nimrtc::core::log::Logger::instance().error(
+            std::string("wolfSSL: AppData wolfSSL_write failed err=") +
+            std::to_string(err));
+        return plugins::kErrInternal;
+    }
+    // wolfSSL_write may do a partial write on non-blocking DTLS; the
+    // unwritten tail stays the caller's responsibility. We report kOk
+    // only on a full write so the engine's retry logic stays correct.
+    if (static_cast<std::size_t>(rc) != bytes.size()) {
+        impl_->flush_send_buf();
+        return plugins::kErrBufferTooSmall;
+    }
+    impl_->flush_send_buf();
+    return plugins::kOk;
+}
+
+std::vector<std::vector<std::uint8_t>>
+DtlsSessionWolfSSL::take_app_data() noexcept {
+    auto out = std::move(impl_->inbound_app_);
+    impl_->inbound_app_.clear();
+    return out;
 }
 
 } // namespace nimrtc::dtls

@@ -194,6 +194,35 @@ public:
 
     void set_on_recv(plugins::OnSctpRecvCb cb) noexcept override;
 
+    // ---- v0.14.x SCTP-over-DTLS surface (RFC 8831 §5 / RFC 8832) --------
+    //
+    // PPID-aware sends stamp the wire PPID (DCEP=50, string=51,
+    // binary=53) via SCTP_SENDV_SNDINFO; unordered forces SCTP_UNORDERED.
+    // Inbound delivery fans out to both the legacy callback (no PPID,
+    // for existing AF_INET loopback tests) and the PPID-aware callback
+    // (for SctpDataChannel's DCEP demux). The packet hooks bridge the
+    // engine's DTLS AppData pump: set_on_packet forwards usrsctp
+    // conn_output bytes to IDtlsSession::send_app_data, and
+    // feed_inbound_packet passes DTLS-decrypted bytes to
+    // usrsctp_conninput.
+    plugins::Status send_stream_with_ppid(std::uint16_t stream,
+                                          plugins::BufferView data,
+                                          std::uint32_t ppid) noexcept override;
+    plugins::Status send_datagram_with_ppid(std::uint16_t stream,
+                                            plugins::BufferView data,
+                                            std::uint32_t ppid) noexcept override;
+    plugins::Status send_partial_reliable_with_ppid(
+        std::uint16_t stream,
+        plugins::BufferView data,
+        std::chrono::milliseconds ttl,
+        std::uint32_t ppid,
+        bool unordered) noexcept override;
+    void set_on_packet(plugins::OnSctpPacketCb cb) noexcept override;
+    plugins::Status feed_inbound_packet(
+        plugins::BufferView packet) noexcept override;
+    void set_on_recv_with_ppid(
+        plugins::OnSctpRecvWithPpidCb cb) noexcept override;
+
     // ---- Stage 2: association handshake API -----------------------------
     //
     // These methods are concrete UsrsctpSocket operations (NOT part of
@@ -243,6 +272,11 @@ private:
     /** Per-instance receive callback (usrsctp's worker thread fires it).
      *  The recv-dispatch trampoline holds `recv_mu_` while calling it. */
     plugins::OnSctpRecvCb on_recv_;
+    /** PPID-aware inbound callback (v0.14.x DCEP demux). Same guard. */
+    plugins::OnSctpRecvWithPpidCb on_recv_ppid_;
+    /** Outbound SCTP packet sink (v0.14.x SCTP-over-DTLS). Guarded by
+     *  `recv_mu_` for simplicity — set once from the engine thread. */
+    plugins::OnSctpPacketCb on_packet_;
     /** Mutex guarding `on_recv_` access from the usrsctp worker thread
      *  and the engine thread (set_on_recv). */
     mutable std::mutex recv_mu_;

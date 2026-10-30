@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v0.14.0-rc.1 (Tech Preview) — WebTransport / msquic data plane (DC-1), `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome DTLS interop harness. Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) is **Blocked on a server-side QUIC handshake defect** — the harness now drives the full Chrome ↔ NimRTC interop end to end, but the msquic listener never completes the QUIC handshake (Chrome reports `ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`; the server binds the socket yet handles 0 sessions). The data plane (DataChannel interop / usrsctp / SCTP-over-DTLS) is **deferred to v1.x** — Chrome is moving DataChannel to WebTransport over QUIC, and v0.14.0 ships the data-plane wire-up without committing to the SCTP path. See [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §12.3.3 DoD gates for status. v0.14.0 is the **v1.0.0-rc.1** pre-release per `docs/plan/v1.0-plan.md` §8 + §12.2 + §12.3.3.
+> **Current:** v0.15.0 (Tech Preview) — WebTransport / msquic data plane (DC-1), `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome WebTransport interop harness. Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §12.3.3 DoD gates for status. v0.15.0 is the WT product-route cut per `specs/slices/v0-15-0-web-transport-product-route.md`.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
@@ -48,15 +48,12 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
-- **Current state:** v0.14.0-rc.1 Tech Preview — WebTransport / msquic data plane (DC-1 wire-up),
-  `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome DTLS interop harness.
-  Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) is **Blocked on a server-side
-  QUIC handshake defect** — the harness drives the full interop end to end, but the msquic
-  listener never completes the handshake (Chrome: `ERR_QUIC_PROTOCOL_ERROR.QUIC_HANDSHAKE_TIMEOUT`;
-  server: socket bound, 0 sessions handled).
-  The `SctpDataChannel` (id `"sctp"`) remains the default, but it resolves to the
-  `SctpStubFactory` (id `"stub"`) — every send returns `kErrNotReady`, so the default
-  SCTP path carries no data;
+- **Current state:** v0.15.0 Tech Preview — WebTransport / msquic data plane (DC-1),
+  `WebTransportMsQuicSession`, `WebTransportDataChannel`, Chrome WebTransport interop harness.
+  Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6**
+  (datagram + bidi-stream echo against `examples/demo-wtserver`).
+  `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit
+  `"sctp"` keeps the legacy path.
   `WebTransportDataChannel` (id `"web_transport"`) is the v1.0 production backend per ADR-014.
   **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
   benchmark (BENCH-1) are deferred to v1.1.0** per `docs/plan/v1.0-plan.md` §7

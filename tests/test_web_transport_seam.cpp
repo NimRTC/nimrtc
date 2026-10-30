@@ -140,28 +140,12 @@ static_assert(
 
 // The default values on WebTransportConfig must match the v1.0-plan.md
 // §10.4 / RFC 9000 defaults.
-static_assert(
-    nimrtc::web_transport::WebTransportConfig{}.max_idle_timeout_ms ==
-        30'000,
-    "v0.14.0 alpha.2 seam: WebTransportConfig::max_idle_timeout_ms "
-    "default must be 30000 (RFC 9000 §10.1 default).");
-
-static_assert(
-    nimrtc::web_transport::WebTransportConfig{}.initial_max_stream_data ==
-        65'536,
-    "v0.14.0 alpha.2 seam: WebTransportConfig::initial_max_stream_data "
-    "default must be 65536 (RFC 9000 §19.10 default).");
-
-static_assert(
-    nimrtc::web_transport::WebTransportConfig{}.initial_max_data ==
-        1'048'576,
-    "v0.14.0 alpha.2 seam: WebTransportConfig::initial_max_data "
-    "default must be 1048576 (RFC 9000 §19.9 default).");
-
-static_assert(
-    nimrtc::web_transport::WebTransportConfig{}.keep_alive_interval_ms == 0,
-    "v0.14.0 alpha.2 seam: WebTransportConfig::keep_alive_interval_ms "
-    "default must be 0 (keep-alives disabled by default).");
+//
+// NOTE: these are verified at RUNTIME (see the
+// `config_defaults_match_rfc9000` test below), not with static_assert:
+// WebTransportConfig owns a std::string (peer_hostname), so it is not
+// a literal type and `WebTransportConfig{}` cannot appear in a constant
+// expression under GCC's libstdc++ (non-constant static_assert condition).
 
 // The OnDatagramCb / OnStreamDataCb callback aliases accept
 // std::function<void(span<const uint8_t>)> — verify the std::function
@@ -257,6 +241,17 @@ TEST_F(WebTransportSeamCompileOnly, seam_interfaces_are_abstract) {
         nimrtc::web_transport::IUnidirectionalStream>);
     EXPECT_FALSE(std::is_abstract_v<
         nimrtc::web_transport::DatagramFacade>);
+}
+
+TEST_F(WebTransportSeamCompileOnly, config_defaults_match_rfc9000) {
+    // Runtime counterpart of the RFC 9000 default-value contract
+    // (see the NOTE above the static_assert block: WebTransportConfig
+    // is not a literal type, so static_assert cannot be used here).
+    const nimrtc::web_transport::WebTransportConfig cfg{};
+    EXPECT_EQ(cfg.max_idle_timeout_ms, 30'000u);
+    EXPECT_EQ(cfg.initial_max_stream_data, 65'536u);
+    EXPECT_EQ(cfg.initial_max_data, 1'048'576u);
+    EXPECT_EQ(cfg.keep_alive_interval_ms, 0u);
 }
 
 TEST_F(WebTransportSeamCompileOnly, datagram_facade_forwards_to_session) {

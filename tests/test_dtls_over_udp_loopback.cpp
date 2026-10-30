@@ -364,9 +364,44 @@ bool run_test() {
     b.start_reader();
 
     // ---- Wait for both sides to connect ----------------------------------
+    // Periodic hang-diagnosis dump: every 2 s print per-side pump/error
+    // state so a CI timeout log alone shows whether the state machine
+    // is spinning (pumps climbing) or wedged (pumps frozen).
     auto deadline = clk::now() + std::chrono::seconds(10);
+    auto last_dump = clk::now();
     while (clk::now() < deadline) {
         if (a.connected.load() && b.connected.load()) break;
+        if (clk::now() - last_dump >= std::chrono::seconds(2)) {
+            last_dump = clk::now();
+            auto as = a.session->stats();
+            auto bs = b.session->stats();
+            std::fprintf(stderr,
+                "[A] progress A state=%s pumps=%llu stalls=%llu err=%d "
+                "wstate=%d recv_pend=%llu send_pend=%llu "
+                "rec_in=%llu rec_out=%llu rx_pkts=%d\n",
+                nimrtc::dtls::DtlsSession::state_name(a.session->state()),
+                (unsigned long long)as.pump_calls,
+                (unsigned long long)as.want_read_stalls,
+                as.last_error, as.last_wolf_state,
+                (unsigned long long)as.recv_pending,
+                (unsigned long long)as.send_pending,
+                (unsigned long long)as.records_in,
+                (unsigned long long)as.records_out,
+                a.recv_packets.load());
+            std::fprintf(stderr,
+                "[A] progress B state=%s pumps=%llu stalls=%llu err=%d "
+                "wstate=%d recv_pend=%llu send_pend=%llu "
+                "rec_in=%llu rec_out=%llu rx_pkts=%d\n",
+                nimrtc::dtls::DtlsSession::state_name(b.session->state()),
+                (unsigned long long)bs.pump_calls,
+                (unsigned long long)bs.want_read_stalls,
+                bs.last_error, bs.last_wolf_state,
+                (unsigned long long)bs.recv_pending,
+                (unsigned long long)bs.send_pending,
+                (unsigned long long)bs.records_in,
+                (unsigned long long)bs.records_out,
+                b.recv_packets.load());
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
@@ -393,20 +428,40 @@ bool run_test() {
         a_conn && b_conn);
     std::fprintf(stderr,
         "[A] A: rec_in=%llu rec_out=%llu retrans=%llu alerts_in=%llu "
-        "alerts_out=%llu\n",
+        "alerts_out=%llu pumps=%llu stalls=%llu err=%d wstate=%d "
+        "recv_pend=%llu send_pend=%llu errors=%llu rx_pkts=%d fed=%d "
+        "took=%d sent=%d\n",
         (unsigned long long)a_stats.records_in,
         (unsigned long long)a_stats.records_out,
         (unsigned long long)a_stats.retransmits,
         (unsigned long long)a_stats.alerts_in,
-        (unsigned long long)a_stats.alerts_out);
+        (unsigned long long)a_stats.alerts_out,
+        (unsigned long long)a_stats.pump_calls,
+        (unsigned long long)a_stats.want_read_stalls,
+        a_stats.last_error, a_stats.last_wolf_state,
+        (unsigned long long)a_stats.recv_pending,
+        (unsigned long long)a_stats.send_pending,
+        (unsigned long long)a_stats.errors,
+        a.recv_packets.load(), a.feed_bytes.load(),
+        a.take_records.load(), a.sent_records.load());
     std::fprintf(stderr,
         "[A] B: rec_in=%llu rec_out=%llu retrans=%llu alerts_in=%llu "
-        "alerts_out=%llu\n",
+        "alerts_out=%llu pumps=%llu stalls=%llu err=%d wstate=%d "
+        "recv_pend=%llu send_pend=%llu errors=%llu rx_pkts=%d fed=%d "
+        "took=%d sent=%d\n",
         (unsigned long long)b_stats.records_in,
         (unsigned long long)b_stats.records_out,
         (unsigned long long)b_stats.retransmits,
         (unsigned long long)b_stats.alerts_in,
-        (unsigned long long)b_stats.alerts_out);
+        (unsigned long long)b_stats.alerts_out,
+        (unsigned long long)b_stats.pump_calls,
+        (unsigned long long)b_stats.want_read_stalls,
+        b_stats.last_error, b_stats.last_wolf_state,
+        (unsigned long long)b_stats.recv_pending,
+        (unsigned long long)b_stats.send_pending,
+        (unsigned long long)b_stats.errors,
+        b.recv_packets.load(), b.feed_bytes.load(),
+        b.take_records.load(), b.sent_records.load());
     std::fprintf(stderr,
         "[A] SRTP keys: A=%s B=%s\n",
         a_keys ? "present" : "missing",

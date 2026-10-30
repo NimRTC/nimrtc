@@ -172,6 +172,19 @@ public:
         std::uint64_t alerts_in     = 0;
         std::uint64_t alerts_out    = 0;
         std::uint64_t errors        = 0;
+        // --- Hang-diagnosis counters (v0.14.x, ARM CI loopback stall) ---
+        // pump_calls: total pump_handshake() invocations (accept/connect).
+        // want_read_stalls: pumps that returned WANT_READ/WANT_WRITE
+        //   (state machine alive but waiting for peer bytes).
+        // last_error: last wolfSSL_get_error() code (WANT_READ = -323 etc).
+        // last_wolf_state: last wolfSSL_get_state() value (internal FSM).
+        // recv_pending/send_pending: buffered bytes at the last pump.
+        std::uint64_t pump_calls       = 0;
+        std::uint64_t want_read_stalls = 0;
+        int           last_error       = 0;
+        int           last_wolf_state  = 0;
+        std::uint64_t recv_pending     = 0;
+        std::uint64_t send_pending     = 0;
     };
     Stats stats() const noexcept;
 

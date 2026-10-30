@@ -275,6 +275,12 @@ inline const char* keylog_path() { static const char* p = std::getenv("NIMRTC_DT
 inline bool        dump_enabled(){ static const bool b = []{
     const char* v = std::getenv("NIMRTC_DTLS_DUMP"); return v && v[0] && v[0] != '0';
 }(); return b; }
+// Verbose hang-diagnosis trace: NIMRTC_DTLS_VERBOSE=1 enables per-pump
+// state lines (throttled) even when NIMRTC_DTLS_TRACE is unset — the
+// lines go through the Logger (stderr) so they always show in CI logs.
+inline bool        verbose_enabled(){ static const bool b = []{
+    const char* v = std::getenv("NIMRTC_DTLS_VERBOSE"); return v && v[0] && v[0] != '0';
+}(); return b; }
 
 inline std::ofstream& trace_stream() {
     static std::ofstream s{trace_path() ? trace_path() : "",
@@ -375,6 +381,13 @@ struct DtlsSessionWolfSSL::Impl {
     std::vector<std::uint8_t> send_buf_;
     std::vector<nimrtc::dtls::DtlsRecord> outbound_;
 
+    // Hang-diagnosis: throttle per-pump stderr/trace lines so a tight
+    // loopback spin (~10 kHz) does not flood CI logs; emit at most one
+    // line per side per second plus every state transition.
+    std::chrono::steady_clock::time_point last_diag_{};
+    int last_err_logged_ = 0;
+    int last_state_logged_ = 0;
+
     // -- AppData plaintext queue (v0.14.x DataChannel wiring) -------------
     // feed_inbound() decrypts inbound ct=23 records via wolfSSL_read()
     // once state == Connected and pushes each plaintext payload here;
@@ -437,6 +450,12 @@ struct DtlsSessionWolfSSL::Impl {
         std::memcpy(buf, self->recv_buf_.data(), static_cast<std::size_t>(n));
         self->recv_buf_.erase(self->recv_buf_.begin(),
                               self->recv_buf_.begin() + n);
+        if (n >= 13 && (buf[0] == 21)) {
+            // Inbound Alert record consumed by wolfSSL — count it so the
+            // test's alerts_in stat actually reflects peer alerts instead
+            // of staying 0 through a silent stall.
+            ++self->stats_instance.alerts_in;
+        }
         nimrtc::dtls::diag::hex_dump_record("RECV", buf,
                                             static_cast<std::size_t>(n));
         return n;
@@ -450,6 +469,9 @@ struct DtlsSessionWolfSSL::Impl {
         self->send_buf_.resize(old + static_cast<std::size_t>(len));
         std::memcpy(self->send_buf_.data() + old, buf,
                     static_cast<std::size_t>(len));
+        if (len >= 13 && (buf[0] == 21)) {
+            ++self->stats_instance.alerts_out;
+        }
         nimrtc::dtls::diag::hex_dump_record("SEND", buf,
                                             static_cast<std::size_t>(len));
         return len;
@@ -893,6 +915,14 @@ struct DtlsSessionWolfSSL::Impl {
                    ? wolfSSL_accept(ssl)
                    : wolfSSL_connect(ssl);
 
+        ++stats_instance.pump_calls;
+        stats_instance.recv_pending = recv_buf_.size();
+        stats_instance.send_pending = send_buf_.size();
+        {
+            const int ws = ssl ? wolfSSL_get_state(ssl) : -1;
+            stats_instance.last_wolf_state = ws;
+        }
+
         if (rc == WOLFSSL_SUCCESS) {
             // SPKI fingerprint pinning must run BEFORE we export SRTP keys
             // or mark the session Connected — a pinned-mismatch must take
@@ -923,9 +953,56 @@ struct DtlsSessionWolfSSL::Impl {
         }
 
         int err = wolfSSL_get_error(ssl, rc);
+        stats_instance.last_error = err;
         if (err == WOLFSSL_ERROR_WANT_READ ||
             err == WOLFSSL_ERROR_WANT_WRITE) {
+            ++stats_instance.want_read_stalls;
             flush_send_buf();
+            // Throttled hang-diagnosis line: emitted at most once per
+            // second per side, plus on error/state change. Visible in CI
+            // logs without any env var; per-pump detail goes to the
+            // trace file when NIMRTC_DTLS_TRACE / VERBOSE is set.
+            {
+                const auto now = std::chrono::steady_clock::now();
+                const int ws = stats_instance.last_wolf_state;
+                const bool state_changed =
+                    (ws != last_state_logged_) || (err != last_err_logged_);
+                if (state_changed ||
+                    now - last_diag_ >= std::chrono::seconds(1)) {
+                    last_diag_ = now;
+                    last_err_logged_ = err;
+                    last_state_logged_ = ws;
+                    char line[320];
+                    std::snprintf(line, sizeof(line),
+                        "wolfSSL pump stall role=%s pumps=%llu stalls=%llu "
+                        "err=%d wolf_state=%d recv_pending=%llu "
+                        "send_pending=%llu outbound=%zu reasm=%zu",
+                        (config.role == DtlsRole::Server ? "Server" : "Client"),
+                        static_cast<unsigned long long>(
+                            stats_instance.pump_calls),
+                        static_cast<unsigned long long>(
+                            stats_instance.want_read_stalls),
+                        err, ws,
+                        static_cast<unsigned long long>(
+                            stats_instance.recv_pending),
+                        static_cast<unsigned long long>(
+                            stats_instance.send_pending),
+                        outbound_.size(), reassembler_.size());
+                    nimrtc::core::log::Logger::instance().info(line);
+                    nimrtc::dtls::diag::trace(line);
+                } else if (nimrtc::dtls::diag::verbose_enabled()) {
+                    char vline[256];
+                    std::snprintf(vline, sizeof(vline),
+                        "PUMP role=%s pump=%llu err=%d ws=%d recv=%llu",
+                        (config.role == DtlsRole::Server ? "Server" : "Client"),
+                        static_cast<unsigned long long>(
+                            stats_instance.pump_calls),
+                        err, ws,
+                        static_cast<unsigned long long>(
+                            stats_instance.recv_pending));
+                    nimrtc::dtls::diag::trace(vline);
+                }
+            }
             return false;
         }
 
@@ -955,11 +1032,27 @@ struct DtlsSessionWolfSSL::Impl {
             }
         }
         const char* reason = wolfSSL_ERR_reason_error_string(static_cast<unsigned long>(err));
+        // Full hang-diagnosis context on the fatal path: last internal
+        // state + pending buffers + pump totals so a CI failure log
+        // alone pinpoints whether we stalled waiting for peer bytes
+        // (recv_pending>0 with wolf_state stuck) or died on crypto.
+        char fail_ctx[160];
+        std::snprintf(fail_ctx, sizeof(fail_ctx),
+            " [pumps=%llu stalls=%llu wolf_state=%d recv_pending=%llu "
+            "send_pending=%llu]",
+            static_cast<unsigned long long>(stats_instance.pump_calls),
+            static_cast<unsigned long long>(
+                stats_instance.want_read_stalls),
+            stats_instance.last_wolf_state,
+            static_cast<unsigned long long>(stats_instance.recv_pending),
+            static_cast<unsigned long long>(stats_instance.send_pending));
         nimrtc::core::log::Logger::instance().error(
             std::string("wolfSSL handshake failed: ") +
-            std::to_string(err) + " " + (reason ? reason : "") + alert_detail);
+            std::to_string(err) + " " + (reason ? reason : "") + alert_detail +
+            fail_ctx);
         nimrtc::dtls::diag::trace(std::string("HS_FAIL err=") +
-            std::to_string(err) + " " + (reason ? reason : "") + alert_detail);
+            std::to_string(err) + " " + (reason ? reason : "") + alert_detail +
+            fail_ctx);
         state = nimrtc::dtls::DtlsState::Failed;
         ++stats_instance.errors;
         flush_send_buf();
@@ -1390,6 +1483,37 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
     impl_->recv_buf_.resize(old + bytes.size());
     std::memcpy(impl_->recv_buf_.data() + old, bytes.data(), bytes.size());
 
+    // Verbose per-record line: first DTLS record header (ct/ver/epoch/
+    // seq/len) so a CI log alone shows whether the Server ever saw the
+    // ClientHello flight and vice versa. Throttled to 1/s per side to
+    // avoid flooding; full hex stays behind NIMRTC_DTLS_DUMP.
+    if (nimrtc::dtls::diag::verbose_enabled() && bytes.size() >= 13) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - impl_->last_diag_ >= std::chrono::seconds(1)) {
+            impl_->last_diag_ = now;
+            const auto* p = bytes.data();
+            const char* ct = "?";
+            switch (p[0]) {
+                case 20: ct = "CCS"; break;
+                case 21: ct = "Alert"; break;
+                case 22: ct = "HS"; break;
+                case 23: ct = "App"; break;
+                default: break;
+            }
+            char rline[256];
+            std::snprintf(rline, sizeof(rline),
+                "feed_inbound role=%s %zuB ct=%u(%s) ver=%02x%02x "
+                "epoch=%u seqlast=%02x%02x len=%u recv_buf=%zu",
+                (impl_->config.role == DtlsRole::Server ? "Server" : "Client"),
+                bytes.size(), p[0], ct, p[1], p[2],
+                static_cast<unsigned>((p[3] << 8) | p[4]),
+                p[9], p[10],
+                static_cast<unsigned>((p[11] << 8) | p[12]),
+                impl_->recv_buf_.size());
+            nimrtc::dtls::diag::trace(rline);
+        }
+    }
+
     impl_->pump_handshake();
 
     // AppData drain (v0.14.x DataChannel wiring): once Connected, any
@@ -1471,6 +1595,25 @@ void DtlsSessionWolfSSL::tick() noexcept {
     const int ret = wolfSSL_dtls_got_timeout(impl_->ssl);
     if (ret <= 0) return;  // no retransmit pending, or wolfSSL errored
     ++impl_->stats_instance.retransmits;
+    // Hang-diagnosis: log each retransmit with role/pump totals so a CI
+    // log shows whether retransmits keep firing while the peer's bytes
+    // never advance the state machine (classic "both sides retransmit
+    // but nobody progresses" stall signature).
+    {
+        char rline[256];
+        std::snprintf(rline, sizeof(rline),
+            "wolfSSL retransmit role=%s count=%llu pumps=%llu stalls=%llu "
+            "err=%d wolf_state=%d",
+            (impl_->config.role == DtlsRole::Server ? "Server" : "Client"),
+            static_cast<unsigned long long>(impl_->stats_instance.retransmits),
+            static_cast<unsigned long long>(impl_->stats_instance.pump_calls),
+            static_cast<unsigned long long>(
+                impl_->stats_instance.want_read_stalls),
+            impl_->stats_instance.last_error,
+            impl_->stats_instance.last_wolf_state);
+        nimrtc::core::log::Logger::instance().info(rline);
+        nimrtc::dtls::diag::trace(rline);
+    }
     // Flush whatever wolfSSL re-emitted into send_buf_ as part of the
     // retransmit into outbound_.  We do NOT pump the handshake here:
     //

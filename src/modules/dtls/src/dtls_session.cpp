@@ -159,6 +159,12 @@ DtlsSession::Stats DtlsSession::stats() const noexcept {
     out.alerts_in     = s.alerts_in;
     out.alerts_out    = s.alerts_out;
     out.errors        = s.errors;
+    out.pump_calls       = s.pump_calls;
+    out.want_read_stalls = s.want_read_stalls;
+    out.last_error       = s.last_error;
+    out.last_wolf_state  = s.last_wolf_state;
+    out.recv_pending     = s.recv_pending;
+    out.send_pending     = s.send_pending;
     return out;
 }
 

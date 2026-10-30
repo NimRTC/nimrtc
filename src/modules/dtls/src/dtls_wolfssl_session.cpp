@@ -414,6 +414,14 @@ struct DtlsSessionWolfSSL::Impl {
 
     Stats         stats_instance{};
     std::chrono::steady_clock::time_point handshake_start_{};
+    // Wall-clock gate for wolfSSL_dtls_got_timeout(): the tick() hot loop
+    // runs at ~10 kHz but RFC 6347 retransmit backoff is in seconds
+    // (init 1 s, doubling to max 64 s).  Calling got_timeout() without
+    // waiting expires the backoff in ~6 calls and wolfSSL then sets
+    // ssl->error = SOCKET_ERROR_E (-308), permanently poisoning the
+    // handshake.  We only forward to wolfSSL once the current timeout
+    // has actually elapsed since the last check.
+    std::chrono::steady_clock::time_point last_rtx_check_{};
 
     // -- PAL Slice 4 seam additions --------------------------------------
     // One-shot handshake-complete callback installed by
@@ -1483,6 +1491,15 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
     impl_->recv_buf_.resize(old + bytes.size());
     std::memcpy(impl_->recv_buf_.data() + old, bytes.data(), bytes.size());
 
+    // Inbound bytes prove the peer is alive: re-arm the retransmit
+    // wall-clock gate so tick() measures the next timeout from *now*
+    // instead of from a stale checkpoint.  Without this, a healthy
+    // handshake that just exchanged a flight could still fire a
+    // spurious retransmit (and its duplicate flight) on the next
+    // tick that passes the gate — harmless on loopback, but Chrome
+    // treats duplicated flights as a protocol violation.
+    impl_->last_rtx_check_ = std::chrono::steady_clock::now();
+
     // Verbose per-record line: first DTLS record header (ct/ver/epoch/
     // seq/len) so a CI log alone shows whether the Server ever saw the
     // ClientHello flight and vice versa. Throttled to 1/s per side to
@@ -1586,12 +1603,41 @@ void DtlsSessionWolfSSL::tick() noexcept {
     // exponential backoff up to 60 s.  Without this pump, a stalled
     // handshake (e.g. lost HelloVerifyRequest) hangs forever.
     //
+    // CALLER-CONTRACT WARNING: wolfSSL_dtls_got_timeout() MUST only be
+    // called after the current timeout has actually elapsed — each call
+    // unconditionally doubles ssl->dtls_timeout (1→2→4…→max 64 s), and
+    // once the backoff saturates wolfSSL sets ssl->error =
+    // SOCKET_ERROR_E (-308), permanently poisoning the handshake.  The
+    // tick() hot loop spins at ~10 kHz, so calling got_timeout() on
+    // every tick burns the whole backoff in ~6 iterations (<1 ms) and
+    // the next accept()/connect() fails with -308 even though no
+    // packet was ever lost.  That is the CI flake signature (Run 279
+    // aarch64: pumps spinning, err=-308, 10 s test timeout).  Hence
+    // the wall-clock gate below: forward to wolfSSL at most once per
+    // current-timeout interval, measured from the last check; inbound
+    // bytes reset the gate in feed_inbound() so a live peer never
+    // triggers a spurious retransmit.
+    //
     // wolfSSL_dtls_got_timeout() returns:
     //   0  — timer not yet fired, nothing to do
     //   1  — timer fired; wolfSSL re-emitted the last flight (caller
     //        should call accept()/connect() again to drive the state
     //        machine forward)
     //  <0  — wolfSSL error (treat as timer-not-fired)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (impl_->last_rtx_check_ == std::chrono::steady_clock::time_point{}) {
+            // First tick of this handshake: arm the gate, do not fire.
+            impl_->last_rtx_check_ = now;
+            return;
+        }
+        const int cur_timeout_s = wolfSSL_dtls_get_current_timeout(impl_->ssl);
+        const auto elapsed = now - impl_->last_rtx_check_;
+        if (elapsed < std::chrono::seconds(cur_timeout_s > 0 ? cur_timeout_s : 1)) {
+            return;  // backoff interval not yet elapsed — do not touch wolfSSL
+        }
+        impl_->last_rtx_check_ = now;
+    }
     const int ret = wolfSSL_dtls_got_timeout(impl_->ssl);
     if (ret <= 0) return;  // no retransmit pending, or wolfSSL errored
     ++impl_->stats_instance.retransmits;

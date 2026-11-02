@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NimRTC — a from-scratch C++20 WebRTC engine</title>
-<meta name="description" content="NimRTC is a from-scratch C++20 WebRTC engine. ~5.6 MB static lib, 4-platform CI, pluggable crypto, embeddable on aarch64. Wire-level Chrome / Firefox / libwebrtc interop.">
+<meta name="description" content="NimRTC is a from-scratch C++20 WebRTC engine. <15 MB static lib, 4-platform CI, pluggable crypto, embeddable on aarch64. Wire-level Chrome / Firefox / libwebrtc interop.">
 <meta name="theme-color" content="#0d1117">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
@@ -33,8 +33,8 @@
 
 <section class="hero">
   <div class="container">
-    <p class="eyebrow">v0.11.0 Beta 前哨 · 2026-10-09</p>
-    <h1>A from-scratch C++20 WebRTC engine.<br><span class="muted">~5.6 MB. Four platforms. No fork.</span></h1>
+    <p class="eyebrow">v1.0.1 Stable · 2026-11-02</p>
+    <h1>A from-scratch C++20 WebRTC engine.<br><span class="muted">&lt;15 MB. Four platforms. No fork.</span></h1>
     <p class="lead">
       NimRTC is an embeddable media engine that keeps the wire-level WebRTC
       interop you need (Chrome, Firefox, libwebrtc peers) and replaces the
@@ -47,12 +47,12 @@
       header-only plugin interfaces.
     </p>
     <div class="hero-cta">
-      <a class="btn primary" href="#start">Build it in 60s →</a>
+      <a class="btn primary" href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">Download v1.0.1 →</a>
       <a class="btn" href="https://github.com/NimRTC/nimrtc">★ on GitHub</a>
       <a class="btn ghost" href="#demo">see it run ↓</a>
     </div>
     <ul class="hero-numbers">
-      <li><b>5.63 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
+      <li><b>&lt;15 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
       <li><b>4 platforms</b><span>Windows · Linux x86_64 · macOS arm64 · Linux aarch64</span></li>
       <li><b>~50k LOC</b><span>of C++20, end-to-end<br>(libwebrtc is ~5.5M)</span></li>
       <li><b>5 profiles</b><span>transport · relay · agent · cloudgame · relay-agent</span></li>
@@ -89,9 +89,13 @@
   <div class="container">
     <h2>Quick start</h2>
     <p class="section-lead">
-      Build the loopback example and run it locally. Total time on a clean
-      clone: <b>~3 minutes</b> on a 4-core x86_64. All third-party deps are
-      git submodules, SHA-pinned in <code>src/third_party/vendor.json</code>.
+      No build needed to evaluate: download the
+      <a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">v1.0.1 prebuilt bundle</a>
+      (headers + <code>NimRTCConfig.cmake</code> + static lib, with
+      <code>.sha256</code> + <code>.asc</code>). Or build the loopback
+      example locally in <b>~3 minutes</b> on a 4-core x86_64. All
+      third-party deps are git submodules, SHA-pinned in
+      <code>src/third_party/vendor.json</code>.
     </p>
     <ol class="steps">
       <li>
@@ -123,9 +127,10 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
     <h2>What's working · what's not (be honest)</h2>
     <div class="grid two">
       <div>
-        <h3>Shipped in v0.11.0</h3>
+        <h3>Shipped in v1.0.1 (Stable)</h3>
         <ul class="check">
-          <li>Chrome ↔ NimRTC P2P audio + video interop, Case D, on all four platforms (CI green).</li>
+          <li>First published stable release (<a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">v1.0.1, 2026-11-02</a>): 4-platform bundles + SBOM + detached GPG signatures.</li>
+          <li>Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC, PASS E1–E6.</li>
           <li>5-variant profile library (<code>relay</code> / <code>transport</code> / <code>agent</code> / <code>cloudgame</code> / <code>relay-agent</code>) with strict JSON↔C++ round-trip tests.</li>
           <li>Pre/post-3A PCM tap (race-free <code>set_pre_process_tap</code> / <code>set_post_process_tap</code>, int16 ASR variant).</li>
           <li>PAL Slice 1&ndash;8 — plugin-capability resolution, zero runtime overhead, public API unchanged.</li>
@@ -138,7 +143,7 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
         <ul class="cross">
           <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; v1.x re-platforms on <code>msquic</code>. The <code>usrsctp</code> socket class is <code>@deprecated</code> and still compiles for opt-in callers.</li>
           <li><b>iOS / Android native.</b> Roadmap, not P1. No ETA yet.</li>
-          <li><b>Production-grade hardening.</b> Lands in P3 / P4. v0.11.0 is a <em>Beta 前哨</em> — API experimental through v1.0.0.</li>
+          <li><b>Production-grade hardening.</b> API frozen at v1.0.0 per ADR-015; SemVer guarantees apply from v1.0.1 (first published stable).</li>
         </ul>
         <h3>On the v0.12.0 roadmap</h3>
         <ul class="bullet">

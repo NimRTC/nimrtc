@@ -36,9 +36,10 @@ on HN, the "controversy" ranking punishes title edits.
 ## First post (target ~400 words)
 
 Hi HN — I've been building NimRTC, a from-scratch C++20 implementation of the
-WebRTC media plane, on and off, since late 2025. v0.11.0 just shipped and
-Chrome ↔ NimRTC audio + video interop is green on the full 4-platform CI
-matrix (Windows, Linux x86_64, macOS arm64, Linux aarch64).
+WebRTC media plane, on and off, since late 2025. v1.0.1 just shipped as the
+first published stable: 4-platform bundles + SBOM + detached GPG signatures,
+and Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over
+WebTransport / QUIC PASS E1–E6.
 
 ### Why a new WebRTC engine in 2026
 
@@ -77,18 +78,24 @@ I would just use it. But:
 
 ### What's working vs. what's not (be honest)
 
+- ✅ Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC, PASS E1–E6.
 - ✅ Chrome ↔ NimRTC audio + video Case D, 4 platforms.
 - ✅ 5 assembly profiles (`relay` / `transport` / `agent` / `agent-gateway` / `relay-agent`) with
   strict JSON↔C++ round-trip tests.
 - ✅ Pre/post-3A PCM tap with race-free setter semantics.
-- ❌ DataChannel over SCTP-over-DTLS is **deferred to v1.x** — Chrome
-  is moving DataChannel to WebTransport over QUIC and I followed that
-  signal. v1.x will land on msquic.
+- ✅ Public API frozen at v1.0.0 per ADR-015; SemVer guarantees apply from v1.0.1.
+- ❌ DataChannel over SCTP-over-DTLS stays legacy — WebTransport is the default backend.
 - ❌ iOS / Android native builds are roadmap, not P1.
-- ❌ Production-grade quality lands in P3 / P4. v0.11.0 is a "Beta 前哨"
-  — API experimental through v1.0.0.
 
 ### Try it
+
+No build needed — grab the prebuilt v1.0.1 bundle (headers + `NimRTCConfig.cmake` + static lib):
+
+```
+https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1
+```
+
+Or build from source:
 
 ```
 git clone --recurse-submodules https://github.com/NimRTC/nimrtc
@@ -99,7 +106,7 @@ cmake --build build --target loopback-p2p
 ```
 
 Five-min "Hello, World" is in the README; longer-form design notes are in
-`docs/`. A Wasm browser demo is on the roadmap for v0.12.0.
+`docs/`. Live WASM loopback demo: https://nimrtc.github.io/nimrtc/wasm/.
 
 ### What I want from HN
 
@@ -117,7 +124,7 @@ Five-min "Hello, World" is in the README; longer-form design notes are in
 
 Repo: <https://github.com/NimRTC/nimrtc>
 License: Apache-2.0
-Version: v0.11.0 Beta 前哨 (tagged 2026-10-09)
+Version: v1.0.1 Stable (tagged 2026-11-02, first published stable)
 
 ---
 
@@ -144,7 +151,7 @@ Version: v0.11.0 Beta 前哨 (tagged 2026-10-09)
 > Static lib size: <15 MB (v1.0.1 measured ~12.5 MB; Release, MSVC, x86_64). Source LOC: ~50k
 > excluding tests. The Chrome interop case D runs in CI on every push
 > across 4 platforms; `tools/run_e2e_acceptance.py` is the entry point.
-> I don't have public throughput/JIT numbers yet — that's a v0.12.0 item.
+> I don't have public throughput/JIT numbers yet — that's a v1.1.0 item.
 
 ---
 

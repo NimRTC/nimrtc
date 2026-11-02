@@ -1,4 +1,4 @@
-# HN Replies Cheatsheet — NimRTC v0.11.0
+# HN Replies Cheatsheet — NimRTC v1.0.1
 
 > **Purpose:** 1-line answers to the 5 highest-frequency HN questions, plus a
 > 3-item "if asked" appendix. Use these as-is for the first comment; expand
@@ -52,7 +52,7 @@
 > interop-network benchmark yet. **Honest answer:** p50/p99 are real,
 > MOS is unknown. Repro: `python tools/run_e2e_acceptance.py`, artifacts
 > in `build/e2e/`. Profile-specific numbers (P2 / P3 with BWE) are
-> scheduled for the P3 milestone, not v0.11.0.
+> scheduled for the P3 milestone, not in v1.0.1.
 >
 > ↳ Long-form: `show-hn-post.md` §Reply-C.
 
@@ -62,8 +62,8 @@
 > of WebTransport over QUIC. We made a deliberate call not to ship the
 > SCTP path on trunk; the v0.10.x `UsrsctpSocket` class is `@deprecated`
 > and still compiles for opt-in callers, but is not registered by
-> default. v0.11.0 commits to the WebTransport/QUIC forward direction
-> in v1.x. The in-process `test_datachannel_engine` 5/5 PASS covers the
+> default. v1.0.1 ships the WebTransport/QUIC forward direction
+> (DC-1 PASS E1–E6). The in-process `test_datachannel_engine` 5/5 PASS covers the
 > `IDataChannel` API surface against the stub SCTP socket.
 >
 > ↳ Full rationale: `docs/plan/v0.11-plan.md` §2.2 (out of scope) and
@@ -78,7 +78,7 @@
 > loopback: `README.md` §"Quick Start" §"Run the loopback-p2p smoke test".
 >
 > **Caveat:** the WASM build is single-threaded, audio-only; full video
-> on WASM is not in v0.11.0.
+> on WASM is not in v1.0.1.
 
 ---
 
@@ -88,9 +88,9 @@
 
 > DTLS via wolfSSL v5.9.2 (FIPS-ready build available upstream; we have
 > not run a FIPS validation pass on the embedded configuration). GMSSL
-> is a compile-time swap: `EngineConfig::dtls_name = "gmssl"` in
-> v0.12.0 (registered through `core::PluginRegistry::register_dtls_session("gmssl")`,
-> behind `NIMRTC_ENABLE_DTLS_GMSSL=ON`, default `OFF`). The GMSSL
+> is a compile-time swap: `EngineConfig::dtls_name = "gmssl"`
+> (registered through `core::PluginRegistry::register_dtls_session("gmssl")`,
+> behind `NIMRTC_ENABLE_DTLS_GMSSL=ON`, default `OFF`, available in v1.0.1). The GMSSL
 > production rollout is on the P4 roadmap behind a paid enterprise
 > reference (per `README.md` §Roadmap).
 

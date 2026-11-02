@@ -1,7 +1,7 @@
-# Cross-post Plan — NimRTC v0.11.0 Show HN
+# Cross-post Plan — NimRTC v1.0.1 Show HN
 
 > **Anchor:** T+0 = the moment the HN main-feed post goes live.
-> **Window:** Tue 13 Oct / Wed 14 Oct 2026, 9:00–11:00 PT (US-Pacific
+> **Window:** Tue 3 Nov / Wed 4 Nov 2026, 9:00–11:00 PT (US-Pacific
 > morning, peak HN traffic).
 > **Do not retitle the HN post** after it goes live — HN's "controversy"
 > ranking penalises edits, and the title is locked (see
@@ -20,7 +20,7 @@
 |---|---|---|---|
 | https://news.ycombinator.com/submit **(HN main, "Show HN")** | `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib` | T+0 (Tue/Wed 9-11am PT) | https://github.com/NimRTC/NimRTC |
 | (same HN post, follow-up comment) | `Update:` — 30-second demo clip + build-from-scratch command + 1-line "if you want to try it" | T+6 h, **only if** HN post has >50 net votes | docs/demos/demo-agent-gateway-30s.mp4 + `README.md` §Quick Start |
-| https://twitter.com/compose/post **(Twitter / X thread, 7 tweets)** | T1: "Just shipped v0.11.0 — a from-scratch C++20 WebRTC engine, <15MB static lib, 4-platform CI green. Show HN today → [link]" | T+0 (right after HN goes live, ≤ 5 min) | HN post URL + repo + `#showhn` |
+| https://twitter.com/compose/post **(Twitter / X thread, 7 tweets)** | T1: "Just shipped v1.0.1 Stable — a from-scratch C++20 WebRTC engine, <15MB static lib, 4-platform CI green. Show HN today → [link]" | T+0 (right after HN goes live, ≤ 5 min) | HN post URL + repo + `#showhn` |
 | https://lobste.rs/new **(lobste.rs)** | `NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib` | T+4 h, **only if** HN is trending (>30 net votes) | https://github.com/NimRTC/NimRTC |
 | https://www.reddit.com/r/cpp/submit **(r/cpp)** | `NimRTC: embeddable C++20 WebRTC engine, 4-platform CI green` | T+24 h, **only if** HN still on front page | repo + HN post URL (comment body, not title) |
 | https://www.reddit.com/r/programming/submit **(r/programming)** | `NimRTC: a from-scratch C++20 WebRTC engine` | T+24 h | HN post URL |
@@ -44,7 +44,7 @@
   reshuffling.
 - **Do not post to r/netsec, r/cryptography, or any "security"-tagged
   subreddit** during the launch window. The "GM/T cryptography" story
-  is a magnet for "but is it audited?" threads, and v0.11.0 has no
+  is a magnet for "but is it audited?" threads, and v1.0.1 has no
   third-party audit. Save the security discussion for a dedicated post
   with the audit doc attached.
 - **Do not post to Hacker News "Ask HN"** in the same week. HN
@@ -124,9 +124,9 @@
 |---|---|
 | HN post flagged/killed within 30 min | Do nothing. HN sometimes kills the first resubmit; resubmit tomorrow at the same window. |
 | HN post <20 votes after 4 h | Skip lobste.rs. Wait 1 week, then repost with title #2 (`I rebuilt WebRTC's media plane in C++20`) at the same window. |
-| HN post >200 votes after 12 h | Add a 2nd "Update:" comment with a 30-second demo clip and a pointer to a 5-line hello world. Consider cutting a v0.11.1 patch release to capitalise on attention. |
+| HN post >200 votes after 12 h | Add a 2nd "Update:" comment with a 30-second demo clip and a pointer to a 5-line hello world. Consider cutting a v1.0.2 patch release to capitalise on attention. |
 | Lobste.rs front-paged | Cross-post the lobste.rs thread to r/cpp at T+24 h instead of the HN thread — lobste.rs comments are more relevant to r/cpp's audience. |
-| A commenter files a credible bug | Acknowledge publicly in-thread within 4 h. If the fix is <1 day, ship v0.11.1 and add a 3rd "Update:" with the fix. |
+| A commenter files a credible bug | Acknowledge publicly in-thread within 4 h. If the fix is <1 day, ship v1.0.2 and add a 3rd "Update:" with the fix. |
 | A commenter asks about iOS/Android | Reply with Tier-2 #7 from `hn-replies-cheatsheet.md`. Do not promise a date. |
 | A Chinese-channel post goes viral before HN | Accept the win; HN becomes a secondary surface, not the primary. |
 | "AI wrote this" accusations | Don't engage. The codebase and commit history are public; the accusation will be answered by other commenters, not by you. |
@@ -142,7 +142,7 @@
 - **Star watch:** GitHub repo → Watch → "Custom" → "Releases only"
   for the launch week. A spike in stars within 24 h post-launch
   correlates with HN success — useful for triggering the
-  "v0.11.1 fast cut" decision.
+  "v1.0.2 fast cut" decision.
 - **Cross-link audit:** T+96 h, do a final sweep: every post should
   have a working link to the repo + (for non-HN posts) to the
   canonical blog URL. Dead links in cross-posts are a common

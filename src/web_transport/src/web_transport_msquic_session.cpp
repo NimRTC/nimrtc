@@ -49,12 +49,16 @@
  *
  * ## ALPN
  *
- * The WebTransport over QUIC ALPN is "sm" (IANA-assigned for WebTransport).
- * See: https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml
+ * The WebTransport transport ALPN is the HTTP/3 token "h3"
+ * (RFC 9114 §3.1); WebTransport itself is HTTP/3 with the extended
+ * CONNECT method (RFC 9297).  The client MUST offer exactly the same
+ * ALPN as the server (see web_transport_msquic_alpn.hpp), otherwise
+ * the QUIC handshake is rejected.
  */
 
 #include "web_transport_msquic_session.hpp"
 
+#include "web_transport_msquic_alpn.hpp"
 #include "web_transport_msquic_send.hpp"
 
 #include <algorithm>
@@ -87,6 +91,28 @@
 #include <nimrtc/web_transport/web_transport_session_factory.hpp>
 
 namespace nimrtc::web_transport::detail {
+
+// ===========================================================================
+// ALPN — the single token both peers must offer (see
+// web_transport_msquic_alpn.hpp).  "h3" is the HTTP/3 ALPN from
+// RFC 9114 §3.1; WebTransport is HTTP/3 with extended CONNECT
+// (RFC 9297).  The client used to offer "sm" here, which no server
+// advertised, so every NimRTC-to-NimRTC handshake was rejected.
+// ===========================================================================
+
+namespace {
+constexpr std::uint8_t kSessionAlpn[] = {'h', '3'};
+// msquic may keep a reference to the ALPN buffer for the lifetime of the
+// configuration, so it must outlive the constructor — hence file scope.
+const QUIC_BUFFER kSessionAlpnBuffer = {
+    static_cast<uint32_t>(sizeof(kSessionAlpn)),
+    const_cast<uint8_t*>(kSessionAlpn)
+};
+}  // anonymous namespace
+
+std::span<const std::uint8_t> session_alpn() {
+    return std::span<const std::uint8_t>(kSessionAlpn, sizeof(kSessionAlpn));
+}
 
 // ===========================================================================
 // ApiTable — global singleton
@@ -594,12 +620,9 @@ MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t 
 
     // ---- Configuration ----
     {
-        // ALPN: "sm" is the WebTransport over QUIC protocol.
-        // See: https://www.iana.org/assignments/tls-extensiontype-values/
-        constexpr uint8_t kAlpn[] = {'s', 'm'};
-        QUIC_BUFFER alpn_buf{};
-        alpn_buf.Buffer = const_cast<uint8_t*>(kAlpn);
-        alpn_buf.Length = sizeof(kAlpn);
+        // ALPN: "h3" — the HTTP/3 token (RFC 9114 §3.1).  MUST match the
+        // listener's ALPN exactly; a mismatch aborts the QUIC handshake.
+        // See web_transport_msquic_alpn.hpp for the single source of truth.
 
         // Map WebTransportConfig to QUIC_SETTINGS.
         QUIC_SETTINGS settings{};
@@ -646,7 +669,7 @@ MsQuicSessionImpl::MsQuicSessionImpl(const std::string& peer_hostname, uint16_t 
         settings.PeerUnidiStreamCount = 10;
 
         const QUIC_STATUS rc = api_->ConfigurationOpen(
-            registration_, &alpn_buf, 1,
+            registration_, &kSessionAlpnBuffer, 1,
             &settings, sizeof(settings),
             nullptr,  // no async credential loading
             &configuration_);

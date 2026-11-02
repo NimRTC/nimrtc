@@ -46,6 +46,7 @@
 
 #include "web_transport_msquic_listener.hpp"
 
+#include "web_transport_msquic_alpn.hpp"
 #include "web_transport_msquic_send.hpp"
 
 #include <algorithm>
@@ -78,6 +79,29 @@
 #endif
 
 namespace nimrtc::web_transport::detail {
+
+// ===========================================================================
+// ALPN — the single token both peers must offer (see
+// web_transport_msquic_alpn.hpp).  "h3" is the HTTP/3 ALPN from
+// RFC 9114 §3.1; WebTransport is HTTP/3 with extended CONNECT
+// (RFC 9297), and Chrome's WebTransport JS API sends exactly that
+// token in its QUIC ClientHello.
+// ===========================================================================
+
+namespace {
+constexpr std::uint8_t kListenerAlpn[] = {'h', '3'};
+// msquic may keep a reference to the ALPN buffer for the lifetime of the
+// configuration / listener, so it must outlive the constructor — hence
+// file scope.
+const QUIC_BUFFER kListenerAlpnBuffer = {
+    static_cast<uint32_t>(sizeof(kListenerAlpn)),
+    const_cast<uint8_t*>(kListenerAlpn)
+};
+}  // anonymous namespace
+
+std::span<const std::uint8_t> listener_alpn() {
+    return std::span<const std::uint8_t>(kListenerAlpn, sizeof(kListenerAlpn));
+}
 
 // ===========================================================================
 // TLS credential loading (portable across the msquic TLS backends)
@@ -1021,10 +1045,7 @@ Impl::Impl(
         // Chrome's WebTransport JS API sends QUIC ClientHello with ALPN="h3".
         // The configuration must advertise the same ALPN or msquic will reject
         // the handshake at ConfigOpen time (before any connection is accepted).
-        static const QUIC_BUFFER kAlpn = {
-            2,  // sizeof("h3") - 1
-            (uint8_t*)"h3"
-        };
+        // See web_transport_msquic_alpn.hpp for the single source of truth.
 
         QUIC_SETTINGS settings{};
         std::memset(&settings, 0, sizeof(settings));
@@ -1041,7 +1062,7 @@ Impl::Impl(
         settings.PeerUnidiStreamCount = 10;
 
         const QUIC_STATUS rc = api_->ConfigurationOpen(
-            registration_, &kAlpn, 1,
+            registration_, &kListenerAlpnBuffer, 1,
             &settings, sizeof(settings),
             nullptr,
             &configuration_);
@@ -1105,13 +1126,12 @@ Impl::Impl(
 #endif
         QuicAddrSetPort(&addr, port);
 
-        static const QUIC_BUFFER kAlpn = {
-            2,  // sizeof("h3") - 1
-            (uint8_t*)"h3"
-        };
+        // WebTransport uses HTTP/3 (RFC 9114) as its transport protocol.
+        // The ALPN "h3" (RFC 9114) is the standard HTTP/3 ALPN and must
+        // match the client's offer — see web_transport_msquic_alpn.hpp.
         const QUIC_STATUS rc_start = api_->ListenerStart(
             listener_,
-            &kAlpn,
+            &kListenerAlpnBuffer,
             1,
             &addr);
         if (QUIC_FAILED(rc_start)) {

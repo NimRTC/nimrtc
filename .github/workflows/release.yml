@@ -700,6 +700,41 @@ jobs:
             fi
           done
 
+      # The detached `.asc` signatures are useless to a consumer who cannot
+      # obtain the public key: the v1.0.1 release shipped signed assets
+      # while the signing key stayed private, so `gpg --verify` failed for
+      # every downstream user. Export the public half of the signing key and
+      # publish it as a release asset next to the signatures, and push it to
+      # the public keyservers at the same time. Both are best-effort: the
+      # asset upload is the reliable channel, the keyserver push only
+      # succeeds for keys that have an email address on file.
+      - name: Export the signing public key
+        if: needs.preflight.outputs.configured == 'true'
+        shell: bash
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          gpg --armor --export "$GPG_FINGERPRINT" > dist/nimrtc-signing-key.asc
+          echo "[+] exported dist/nimrtc-signing-key.asc ($(wc -c < dist/nimrtc-signing-key.asc) bytes)"
+          gpg --fingerprint "$GPG_FINGERPRINT"
+
+      - name: Publish the signing key to the public keyservers
+        if: needs.preflight.outputs.configured == 'true'
+        shell: bash
+        continue-on-error: true
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          for keyserver in keyserver.ubuntu.com keys.openpgp.org; do
+            if gpg --keyserver "hkps://$keyserver" --send-keys "$GPG_FINGERPRINT"; then
+              echo "[+] sent the signing key to $keyserver"
+            else
+              echo "::warning::could not send the signing key to $keyserver"
+            fi
+          done
+
       - name: Generate SBOM (CycloneDX)
         shell: bash
         run: |
@@ -820,6 +855,25 @@ jobs:
               echo "> Verify integrity using the per-platform `.sha256` files only."
               echo "> Signed releases resume with v1.0.0 (see RELEASING.md §3.3)."
             } >> dist/release_notes.md
+          else
+            {
+              echo
+              echo "---"
+              echo
+              echo "> **Verifying the signature**"
+              echo
+              echo "> The public half of the signing key ships with this"
+              echo "> release as \`nimrtc-signing-key.asc\`. To verify a bundle:"
+              echo
+              echo "> ```bash"
+              echo "> gpg --import nimrtc-signing-key.asc"
+              echo "> gpg --verify nimrtc-<platform>.tar.xz.asc nimrtc-<platform>.tar.xz"
+              echo "> ```"
+              echo
+              echo "> The signing key fingerprint is \`${{ vars.GPG_FINGERPRINT }}\`."
+              echo "> Check it against the fingerprint shown by \`gpg --fingerprint\`"
+              echo "> after importing — do not trust the key file blindly."
+            } >> dist/release_notes.md
           fi
           echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
 
@@ -907,6 +961,7 @@ jobs:
             dist/*.tar.xz
             dist/*.tar.xz.asc
             dist/*.tar.xz.sha256
+            dist/nimrtc-signing-key.asc
             dist/sbom.json
           fail_on_unmatched_files: false
 

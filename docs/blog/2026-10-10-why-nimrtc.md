@@ -40,7 +40,7 @@ is false.** Specifically:
 
 - **Embedded Linux aarch64.** Robotics, industrial SBCs, Raspberry
   Pi-class boards. libwebrtc at 150–250 MB is not a small binary in
-  this context. NimRTC is ~5.6 MB.
+  this context. NimRTC is <15 MB (v1.0.1 measured ~12.5 MB).
 - **Xinchuang / GM/T-regulated deployments.** The audit trail is the
   point. Forking libwebrtc to swap the DTLS backend is a months-long
   project and produces a fork you have to maintain. NimRTC's
@@ -226,7 +226,7 @@ What I'd most want from someone reading this:
 ## Appendix: numbers
 
 - **Source LOC** (L0–L3, excluding tests / examples / docs): ~50k.
-- **Static lib size** (Release, MSVC, x86_64): 5.6 MB.
+- **Static lib size** (Release, MSVC, x86_64): <15 MB (v1.0.1 measured ~12.5 MB).
 - **CI matrix:** Windows / Linux x86_64 / macOS arm64 / Linux aarch64
   — all four pass build + unit tests on every push.
 - **Wire interop:** Chrome, Firefox, libwebrtc (verified by

@@ -67,7 +67,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 | | | |
 |---|---|---|
-| 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **~5.6 MB static lib** (vs libwebrtc 150–250 MB) |
+| 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **<15 MB static lib** (vs libwebrtc 150–250 MB) |
 | 🧩 **Profiles for scenes, not forks** — `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **Swappable crypto** — OpenSSL ↔ mbedTLS ↔ GMSSL with no API change | 🛡️ **GM/T cryptography ready** — production-credible path for Xinchuang |
 | 📡 **Wire-level interop** — Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
 
@@ -359,12 +359,12 @@ The headline reason to choose NimRTC over libwebrtc is **size** — both binary 
 
 | Artifact | NimRTC | libwebrtc (reference) |
 |---|---|---|
-| Static lib `nimrtc_engine` | **5.63 MB** | 150–250 MB |
-| Example `loopback-p2p` (full client) | **6.61 MB** | 50–80 MB (typical WebRTC sample) |
-| Example `demo-p2p` | **6.66 MB** | — |
-| **Estimated static-link footprint** | **~15.5 MB** | **~100 MB minimum** |
+| Static lib `nimrtc_engine` | **~12.5 MB (<15 MB)** | 150–250 MB |
+| Example `loopback-p2p` (full client) | **1.74 MB** | 50–80 MB (typical WebRTC sample) |
+| Example `demo-p2p` | **1.78 MB** | — |
+| **Estimated static-link footprint** | **~22.4 MB** | **~100 MB minimum** |
 
-> Measured on: Windows 10 x86_64, MSVC, Release. Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
+> Measured on: Windows 10 x86_64, MSVC, Release (local `build/`, `nimrtc_engine.lib` 12.46 MB). Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
 
 ### Source-tree complexity
 
@@ -419,7 +419,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **Language** | C++20 | C++ (mixed C++03/17) | Go | C++ | Go |
 | **P2P client + relay from one codebase** | ✅ | ⚠️ libwebrtc + separate server | ❌ | ❌ SFU only | ❌ SFU only |
 | **Public plugin seam** | ✅ every layer | ❌ internal | ⚠️ partial | ⚠️ server-side | ⚠️ server-side |
-| **Static-link footprint** | **~5.6 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
+| **Static-link footprint** | **<15 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
 | **Embedded Linux aarch64** | ✅ CI green | ⚠️ unmaintained ports | ❌ | ❌ | ❌ |
 | **GM/T (GMSSL) crypto swap** | ✅ plugin swap, no fork | ❌ patch and rebuild | ❌ | ❌ | ❌ |
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |

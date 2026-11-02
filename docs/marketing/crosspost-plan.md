@@ -18,10 +18,10 @@
 
 | URL (channel) | Title | Delay (T+X) | Link target |
 |---|---|---|---|
-| https://news.ycombinator.com/submit **(HN main, "Show HN")** | `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, ~5.6MB static lib` | T+0 (Tue/Wed 9-11am PT) | https://github.com/NimRTC/NimRTC |
+| https://news.ycombinator.com/submit **(HN main, "Show HN")** | `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib` | T+0 (Tue/Wed 9-11am PT) | https://github.com/NimRTC/NimRTC |
 | (same HN post, follow-up comment) | `Update:` — 30-second demo clip + build-from-scratch command + 1-line "if you want to try it" | T+6 h, **only if** HN post has >50 net votes | docs/demos/demo-agent-gateway-30s.mp4 + `README.md` §Quick Start |
-| https://twitter.com/compose/post **(Twitter / X thread, 7 tweets)** | T1: "Just shipped v0.11.0 — a from-scratch C++20 WebRTC engine, 5.6MB static lib, 4-platform CI green. Show HN today → [link]" | T+0 (right after HN goes live, ≤ 5 min) | HN post URL + repo + `#showhn` |
-| https://lobste.rs/new **(lobste.rs)** | `NimRTC – A from-scratch C++20 WebRTC engine, ~5.6MB static lib` | T+4 h, **only if** HN is trending (>30 net votes) | https://github.com/NimRTC/NimRTC |
+| https://twitter.com/compose/post **(Twitter / X thread, 7 tweets)** | T1: "Just shipped v0.11.0 — a from-scratch C++20 WebRTC engine, <15MB static lib, 4-platform CI green. Show HN today → [link]" | T+0 (right after HN goes live, ≤ 5 min) | HN post URL + repo + `#showhn` |
+| https://lobste.rs/new **(lobste.rs)** | `NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib` | T+4 h, **only if** HN is trending (>30 net votes) | https://github.com/NimRTC/NimRTC |
 | https://www.reddit.com/r/cpp/submit **(r/cpp)** | `NimRTC: embeddable C++20 WebRTC engine, 4-platform CI green` | T+24 h, **only if** HN still on front page | repo + HN post URL (comment body, not title) |
 | https://www.reddit.com/r/programming/submit **(r/programming)** | `NimRTC: a from-scratch C++20 WebRTC engine` | T+24 h | HN post URL |
 | https://www.reddit.com/r/China_Developers/submit **(/r/China_Developers)** | `NimRTC: C++20 WebRTC engine, GMSSL-ready, 4-platform green` | T+48 h | repo + `docs/blog/2026-10-10-why-nimrtc.zh.md` |

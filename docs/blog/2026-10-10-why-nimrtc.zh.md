@@ -28,7 +28,7 @@ Linux；二进制里多几百 MB 不心疼；加密路径就是 libwebrtc 自带
 我真正在优化的场景是**这五条里有至少一条不成立**。具体说：
 
 - **嵌入式 Linux aarch64。** 机器人、工业 SBC、Raspberry Pi 级别的板子。
-  libwebrtc 的 150–250 MB 在这个语境下不是个小数字。NimRTC 是 5.6 MB。
+  libwebrtc 的 150–250 MB 在这个语境下不是个小数字。NimRTC 是 <15 MB (v1.0.1 measured ~12.5 MB)。
 - **信创 / GM/T 监管场景。** 审计链是目的本身。fork libwebrtc 换 DTLS
   后端是一个月级别的工程，产出一个你需要长期维护的分支。NimRTC 的
   `EngineConfig::dtls_name` 让你写几百行头文件 + .cpp 就能注册一个新
@@ -188,7 +188,7 @@ Windows 优先，跨平台 CI）。`IDataChannel` 缝面保持不变；下面的
 ## 附录：数字
 
 - **源码 LOC**（L0–L3，不含 tests / examples / docs）：~5 万。
-- **静态库大小**（Release，MSVC，x86_64）：5.6 MB。
+- **静态库大小**（Release，MSVC，x86_64）：<15 MB (v1.0.1 measured ~12.5 MB)。
 - **CI 矩阵：** Windows / Linux x86_64 / macOS arm64 / Linux aarch64
   —— 每次 push 四个平台都过 build + 单元测试。
 - **协议互操作：** Chrome、Firefox、libwebrtc（通过

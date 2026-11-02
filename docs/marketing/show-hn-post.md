@@ -5,16 +5,16 @@
 > "What I want from HN" go in follow-up comments, not the first post.
 >
 > **Final chosen title:**
-> `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, ~5.6MB static lib`
+> `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib`
 
 ---
 
 ## Selected title (locked)
 
-1. ✓ **SELECTED — `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, ~5.6MB static lib`**
+1. ✓ **SELECTED — `Show HN: NimRTC – A from-scratch C++20 WebRTC engine, <15MB static lib`**
 
 Rationale: 3 hits in one title — (a) "Show HN" tag, (b) "WebRTC" keyword
-for search, (c) "5.6MB static lib" is the single most-memorable number in
+for search, (c) "<15MB static lib" is the single most-memorable number in
 the project and the differentiator vs. libwebrtc at 150–250 MB. Most
 information per character for a 70-character HN title limit.
 
@@ -141,7 +141,7 @@ Version: v0.11.0 Beta 前哨 (tagged 2026-10-09)
 
 ## Reply template for "benchmarks?"
 
-> Static lib size: 5.6 MB (Release, MSVC, x86_64). Source LOC: ~50k
+> Static lib size: <15 MB (v1.0.1 measured ~12.5 MB; Release, MSVC, x86_64). Source LOC: ~50k
 > excluding tests. The Chrome interop case D runs in CI on every push
 > across 4 platforms; `tools/run_e2e_acceptance.py` is the entry point.
 > I don't have public throughput/JIT numbers yet — that's a v0.12.0 item.

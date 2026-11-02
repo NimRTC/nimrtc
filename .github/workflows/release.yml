@@ -259,8 +259,21 @@ jobs:
 
           # Bundle name: nimrtc-${version}-windows-x86_64-msvc.tar.xz
           $bundle = "build/nimrtc-$version-windows-x86_64-msvc.tar.xz"
-          # Use 7z (already on windows-2022) for deterministic xz output.
-          7z a -ttar -so $staging | 7z a -txz -si $bundle
+          # Pack the staging tree ONLY.  The previous implementation was
+          # `7z a -ttar -so $staging | 7z a -txz -si $bundle`, which is
+          # broken: with -so 7-Zip consumes the first positional argument as
+          # the archive name (discarded, because the archive goes to stdout)
+          # and, with no file list left, it packs the CURRENT WORKING
+          # DIRECTORY.  The published v1.0.1 Windows asset therefore shipped
+          # the whole CI workspace (sources, .git and the complete MSVC
+          # build tree) instead of the install staging tree -- 822 MB against
+          # 2-3 MB for the other three platforms.
+          #
+          # tools/make_release_bundle.py packs exactly the staging tree with
+          # members relative to the staging root, matching the `tar -C ... .`
+          # layout of the Linux/macOS jobs, and fails the step if the bundle
+          # comes out empty or unreasonably large.
+          python tools/make_release_bundle.py --staging $staging --output $bundle
           # `Get-FileHash` as a pipeline command writes a 3-column tabular
           # line (Algorithm/Hash/Path) which is PowerShell-specific and not
           # consumable by `sha256sum -c` on Linux/macOS downstream. Read
@@ -363,6 +376,15 @@ jobs:
           staging="build/_install/linux-x86_64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" .
+          # Sanity guard: a correct bundle is a few MB.  A bundle that grew
+          # to hundreds of MB means the wrong directory was archived (that
+          # is exactly what happened to the v1.0.1 Windows asset) — fail
+          # the release here instead of publishing it.
+          size=$(stat -c%s "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz")
+          if [ "$size" -gt 67108864 ]; then
+            echo "::error::bundle is $size bytes — refusing to publish"
+            exit 1
+          fi
           sha256sum "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" \
             > "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz.sha256"
 
@@ -472,6 +494,15 @@ jobs:
           staging="build/_install/linux-aarch64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" .
+          # Sanity guard: a correct bundle is a few MB.  A bundle that grew
+          # to hundreds of MB means the wrong directory was archived (that
+          # is exactly what happened to the v1.0.1 Windows asset) — fail
+          # the release here instead of publishing it.
+          size=$(stat -c%s "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz")
+          if [ "$size" -gt 67108864 ]; then
+            echo "::error::bundle is $size bytes — refusing to publish"
+            exit 1
+          fi
           sha256sum "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" \
             > "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz.sha256"
 
@@ -582,6 +613,15 @@ jobs:
           staging="build/_install/macos-arm64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
+          # Sanity guard: a correct bundle is a few MB.  A bundle that grew
+          # to hundreds of MB means the wrong directory was archived (that
+          # is exactly what happened to the v1.0.1 Windows asset) — fail
+          # the release here instead of publishing it.
+          size=$(stat -f%z "build/nimrtc-${version}-macos-arm64-clang.tar.xz")
+          if [ "$size" -gt 67108864 ]; then
+            echo "::error::bundle is $size bytes — refusing to publish"
+            exit 1
+          fi
           # macOS / BSD userland does not ship GNU coreutils' `sha256sum`;
           # use the Perl-portable `shasum -a 256` (also available on Linux
           # distros that ship the perl-String-Util package; for Linux we

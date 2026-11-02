@@ -7,10 +7,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Post-`v1.0.1` work accumulates here. The `## [1.0.1]` entry below
-> is the authoritative record of the first published stable cut
-> (`v1.0.0` tag exists as a source milestone only and was never
-> published as a GitHub Release).
+> Post-`v1.0.2` work accumulates here. The `## [1.0.2]` entry below
+> is the authoritative record of the current published stable cut.
+
+## [1.0.2] - 2026-11-02
+
+### Status: Stable
+
+> **Patch release fixing two defects in `v1.0.1`.** `v1.0.1` remains
+> published and its tag is unchanged; per `RELEASING.md` §2.3 a
+> post-announcement fix becomes a new patch version. Public API is
+> unchanged (`NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE`
+> = `""`).
+
+### Fixed
+
+- **WebTransport ALPN mismatch (NimRTC ↔ NimRTC handshakes were
+  rejected).** The listener advertised the HTTP/3 token `"h3"`
+  (RFC 9114 §3.1) while the session advertised the legacy draft
+  token `"sm"`, so every NimRTC-to-NimRTC WebTransport handshake was
+  refused during ALPN negotiation (Chrome interop was unaffected —
+  Chrome offers `"h3"`). Both sides now share one definition in
+  `src/web_transport/src/web_transport_msquic_alpn.hpp`
+  (`session_alpn()` / `listener_alpn()`), and
+  `src/web_transport/tests/test_web_transport_alpn.cpp` pins the
+  invariant so the two cannot drift apart again.
+- **Windows release bundle contained the whole CI workspace
+  (822 MB).** `release.yml` packed the Windows bundle with
+  `7z a -ttar -so "$staging" | 7z a -txz -si "$bundle"`. With `-so`,
+  7-Zip consumes the first positional argument as the archive name
+  (discarded, because the archive goes to stdout) and, with no file
+  list left, it packs the *current working directory* — so the
+  published v1.0.1 Windows asset shipped the sources, `.git` and the
+  complete MSVC build tree instead of the install staging tree
+  (822,079,464 bytes against 2.3-2.9 MB for the other three
+  platforms). The Windows job now uses
+  `tools/make_release_bundle.py`, which packs exactly the staging
+  tree with members relative to the staging root — the same layout as
+  the `tar -C ... .` of the Linux/macOS jobs — and all four jobs now
+  refuse to publish a bundle larger than 64 MB.
+- **The signing public key is now shipped with the release.** `v1.0.1`
+  published detached `.asc` signatures while the signing key stayed
+  private, so `gpg --verify` failed for every downstream consumer.
+  The publish job now exports the public half of the signing key as
+  the `nimrtc-signing-key.asc` release asset, pushes it to
+  keyserver.ubuntu.com and keys.openpgp.org, and the release body
+  carries the verification recipe together with the fingerprint
+  (`114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`).
+
+### Known issues
+
+- **The `v1.0.1` Windows asset stays broken.** The published
+  `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is still the 822 MB
+  archive that contains the CI workspace rather than the install
+  tree; `v1.0.1` is immutable now, so the usable Windows artefact is
+  the one in this release.
+
+### Notes
+
+- Public API is unchanged vs `v1.0.1`; `NIMRTC_API_VERSION` = 10002,
+  `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
+- The `windows` bundle ships the stub 3A path (the WebRTC APM meson
+  prebuild is allowed to fail on the windows runners), same as in
+  `v1.0.1`.
 
 ## [1.0.1] - 2026-11-02
 
@@ -20,9 +79,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > is retained as a source-tree milestone tag only; it was never
 > published as a GitHub Release. `v1.0.1` is the first 1.0-line
 > release cut through `.github/workflows/release.yml` with
-> four-platform artefacts + SBOM (GPG signatures follow once
-> `GPG_PRIVATE_KEY` / `GPG_FINGERPRINT` are configured per
-> `RELEASING.md` §3.3).
+> four-platform artefacts + SBOM + detached GPG signatures.
+>
+> **Signing.** The tag-push run published the assets unsigned (no
+> `GPG_PRIVATE_KEY` configured at that point, so the publish job
+> skipped the signing steps). The release was then re-cut through the
+> `workflow_dispatch` path, which produced the signed assets that are
+> published today: every platform bundle ships with a `.sha256`
+> sidecar and a detached `.asc` signature made with key
+> `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`. The public part of
+> that key was **not** published on any keyserver, so `gpg --verify`
+> could not succeed for downstream consumers (see "Known issues"
+> below; fixed in `v1.0.2`).
 
 ### Fixed
 
@@ -38,6 +106,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proxy/demo-p2p stderr and DTLS artefacts route under `build/e2e` for
   upload; macOS arm64 `CadenceProducesApproxFps` bound relaxed 8→4 for
   runner stutter. (`4e312e3`, `5a582c5`)
+
+### Known issues
+
+- **Windows bundle is 822 MB instead of ~3 MB.** The Windows job
+  packed the whole CI workspace instead of the install staging tree.
+  The published `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is therefore
+  not a usable drop-in artefact: extract `build/_install/windows/`
+  from it for the actual install tree. Fixed in `v1.0.2`.
+- **The signing key is not published.** The fingerprint
+  `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` is not on the GitHub
+  account's GPG key list, keys.openpgp.org or keyserver.ubuntu.com,
+  although `RELEASING.md` §3.3 requires `gpg --send-keys`. Consumers
+  cannot verify the `.asc` signatures. Fixed in `v1.0.2`.
 
 ### Notes
 

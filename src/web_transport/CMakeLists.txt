@@ -27,6 +27,7 @@ set(_wt_srcs
     src/web_transport_qpack.cpp
     src/web_transport_data_channel.cpp
     src/web_transport_plugin.cpp
+    src/web_transport_msquic_alpn.hpp
     )
 
 add_library(nimrtc_web_transport STATIC

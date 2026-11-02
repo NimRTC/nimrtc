@@ -155,4 +155,15 @@ correct.
 1. ~~Wire `set_ssrc_clock_rate()`~~ — **done**, see gap #1 above.
 2. ~~Engine-level reconstruction case~~ — **done**, see gap #2 above.
 3. ~~slope estimation + `sender_recv_skew_us` (ADR-017 Decisions 3–4)~~ — **done (`ee8228e`)**, see gaps #3–#4 above.
-4. v1.1 validation: long-session slope quality note + paired DTLS/SRTP timeline e2e (still open, no new seam).
+4. v1.1 validation (B3) — **documented, no new seam**.
+   - Long-session slope quality: fitted slope (least-squares + EWMA,
+     5% guard, wrap-immune) holds sub-millisecond reconstruction for
+     sessions of a few minutes; degrades after that as drift
+     accumulates. Single-SR linear extrapolation remains the fallback
+     when the SR window is too small.
+   - Paired-session gap: still no test that runs a real two-engine
+     DTLS/SRTP session end to end and checks the timeline against it.
+     `tests/test_engine_timeline.cpp` drives real wire bytes through
+     `dispatch_media_inbound()`, but `feed_srtp_inbound()` needs a
+     completed DTLS handshake. Recorded as known gap, not a v1.1
+     blocker.

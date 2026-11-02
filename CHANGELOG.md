@@ -20,7 +20,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plane) and emits `build/e2e/bench_dc.json` with pps + Mbps per size.
   README Benchmarks (EN + ZH) now cites measured transport-floor
   numbers for `bench_latency.json` + `bench_dc.json` with reproduce
-  commands.
+  commands. Re-verified 2026-11-02 on Windows 10 x86_64: latency
+  p50 ~9.7 µs / p99 ~17.2 µs / jitter ~0.2 µs (1000 × 172 B); DC
+  256 B ~74.8k pps / ~153 Mbps, 1200 B ~76.6k pps / ~735 Mbps,
+  16384 B bidi-stream-chunk ~67.1k pps / ~8.8 Gbps (2000 msgs each);
+  all inside the README cited ranges.
+- **Track B timeline收尾 B3 (docs only, no new seam).**
+  `docs/plan/timeline-engine-wiring.md` step 4 now records the
+  long-session slope quality note (sub-ms for minutes, degrades
+  after; single-SR fallback) plus the paired DTLS/SRTP timeline e2e
+  gap (`feed_srtp_inbound()` needs a completed handshake).
+  ADR-017 Consequences already carried the same two statements, so
+  B1/B2 have no stale "always 0" / "single-SR only" text left.
+- **Track A size bench A3.** `python tools/benchmark_size.py
+  --markdown` reports static lib `nimrtc_engine` 12.46 MB (<15 MB);
+  matches the README static-lib claim. Freeze script
+  `scripts/check-release-freeze.sh` passes 6/6 (additive-only API).
+
+### Known limitations (v1.1 C-track, still open)
+
+- W3 (Windows APM prebuild `continue-on-error`) and W5
+  (`build-linux-aarch64` soft gate) stay as-is until a four-platform
+  release leg is observed green; flipping them without that evidence
+  would risk blocking the release. `docs/plan/ci-workarounds.md`
+  W3/W5 remain the source of truth.
 
 ## [1.0.1] - 2026-11-02
 

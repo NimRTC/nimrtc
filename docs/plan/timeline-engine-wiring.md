@@ -116,18 +116,22 @@ Residual: the RTP-side arithmetic itself is still covered separately by
 *real* two-engine DTLS/SRTP session end to end and checks the timeline
 against it. That needs a paired handshake, not a seam.
 
-### 3. `sender_recv_skew_us` is always 0 — **still open, v1.1 by decision**
+### 3. `sender_recv_skew_us` — **landed (`ee8228e`)**
 
-`timeline.cpp` writes a hardcoded `0` into the out-parameter and
-`handle_rtp()` passes `nullptr`. Reserved for v1.1 by ADR-017 Decision 4 —
-needs paired local-monotonic samples at both the SR instant and the RTP
-instant threaded through.
+`timeline.cpp` now computes the RFC 3550 §8.1 skew when a monotonic
+origin is set, and `handle_rtp()` threads `steady_us` + `&skew_us`
+through `observe_timeline()` into `skew_us_by_ssrc` /
+`last_skew_us`. Engine accessors `last_sender_recv_skew_us()` /
+`sender_recv_skew_us_for_ssrc()` publish it. Without an origin the
+value stays 0 by design; single samples carry jitter, the trend is
+the skew.
 
-### 4. No fitted slope — **still open, v1.1 by decision**
+### 4. Fitted slope — **landed (`ee8228e`)**
 
-`slope_nsec_per_rtp_ts` is a constant *derived* from `clock_rate_hz`, not a
-fit across ≥ 2 SR samples (ADR-017 Decision 3). Correct to sub-millisecond
-for sessions of a few minutes; degrades after that.
+`SlopeFilterConfig` (`min_samples` / `max_samples` /
+`ewma_alpha_permille`) drives a bounded-window least-squares fit with
+EWMA smoothing, 5% guard vs nominal, wrap-immune cumulative positions.
+Sub-millisecond for sessions of a few minutes; degrades after that.
 
 ## Reference-citation corrections
 
@@ -150,7 +154,5 @@ correct.
 
 1. ~~Wire `set_ssrc_clock_rate()`~~ — **done**, see gap #1 above.
 2. ~~Engine-level reconstruction case~~ — **done**, see gap #2 above.
-   Both v1.0.0 gaps the timeline had are now closed; what remains is
-   gap #3 (`sender_recv_skew_us`) and gap #4 (fitted slope), both of
-   which ADR-017 Decisions 3–4 place in v1.1 by decision.
-3. v1.1: slope estimation + `sender_recv_skew_us` (ADR-017 Decisions 3–4).
+3. ~~slope estimation + `sender_recv_skew_us` (ADR-017 Decisions 3–4)~~ — **done (`ee8228e`)**, see gaps #3–#4 above.
+4. v1.1 validation: long-session slope quality note + paired DTLS/SRTP timeline e2e (still open, no new seam).

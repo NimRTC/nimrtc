@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Number | 017 |
-| Status | **Accepted (landed; audio clock rate pending, see Decision 6)** |
+| Status | **Accepted (landed)** |
 | Date | 2026-10-21 |
 | Phase | P2 (v1.0.0) |
 | Bound to | v1.0.0 |
@@ -101,28 +101,25 @@ counter).
 > v1.0.0" wording: the combination landed after review, in the shape
 > above.
 
-### Decision 3 — Deliberately linear, no EWMA/Kalman
+### Decision 3 — Fitted slope, landed (`ee8228e`)
 
-The estimator is a single-SR linear extrapolation:
+The tracker retains a bounded SR window per SSRC and fits the peer wall
+clock against its media clock by least squares, smoothed by EWMA
+(`SlopeFilterConfig`: `min_samples` / `max_samples` /
+`ewma_alpha_permille`). Fits deviating >5% from nominal are rejected;
+RTP wrap runs on cumulative position. `slope_fitted` reports whether the
+live estimate is fitted rather than nominal. Single-SR linear
+extrapolation remains the fallback when the window is too small.
 
-```
-capture_us = sr_ntp_us + (rtp_ts − sr_rtp_ts) × 1e6 / clock_rate_hz
-```
-
-This is correct to sub-millisecond for sessions of a few minutes and
-degrades gracefully after that. A slope *estimator* (fitting ≥ 2 SRs)
-and a smoother (EWMA / Kalman) are v1.1+ work. Making this trade-off
-explicit means callers who need long-session accuracy can measure the
-error against `local_recv_us_since_epoch` themselves.
-
-### Decision 4 — Skew reporting is a v1.1 API
+### Decision 4 — Skew reporting, landed (`ee8228e`)
 
 `capture_ts_us_for()`'s `sender_recv_skew_us` out-parameter is a
-`std::int64_t*` (pass `nullptr` to discard) and is **always 0** in
-v1.0.0. The parameter is reserved so the API shape survives into v1.x
-without a break; the value requires paired local-monotonic samples at
-both the SR instant and the RTP instant, which the engine does not yet
-thread through. Computing it out-of-band is the v1.0.0 contract.
+`std::int64_t*` (pass `nullptr` to discard) and now reports the
+inter-clock skew in the RFC 3550 §8.1 sense: the difference of the two
+clock offsets at packet vs SR time. The engine sets the monotonic
+origin at `open()` and threads `steady_us` + `&skew_us` through
+`observe_timeline()` (`src/engine/src/engine.cpp`). Without an origin
+the value stays 0; single samples carry jitter, the trend is the skew.
 
 > Signature note: this was a `std::int64_t&` in the first cut, which
 > forced every caller — including `std::ignore` — to supply storage.
@@ -151,7 +148,7 @@ and exposes the reconstruction through `last_capture_ts_us()`,
 | extmap negotiation + header-extension write, using `kAbsSendTimeUri` / `kAbsSendTimeDefaultLocalId` | **landed** — `create_offer()` / `process_remote_sdp()` negotiate the per-direction id; `PacketBuilder::set_abs_send_time(t, id)` emits under it |
 | SR send scheduling on `kSrPeriodMs` (declared, zero references) | **landed** — `EngineConfig::sr_period_ms` drives the send cadence |
 | Engine wiring: read `Profile::timeline_enabled`, feed parsed SRs into the tracker, expose capture timestamps | **landed** — `src/engine` |
-| `sender_recv_skew_us` real value | **v1.1** by decision |
+| `sender_recv_skew_us` real value | **landed (`ee8228e`)** — engine threads paired monotonic samples; see Decision 4 |
 
 ### Decision 6 — Engine-side per-SSRC clock rate: **landed**
 
@@ -178,9 +175,8 @@ signature change. The anchoring convention and the SR-authoritative /
 abs-send-time-refining split are decided, which is the part that is
 expensive to reverse.
 
-**Negative.** `sender_recv_skew_us` is reserved but always 0 (Decision 4),
-and the estimator extrapolates from a single SR against a *derived* slope
-rather than a fitted one (Decision 3) — both are v1.1 by decision. The
+**Negative.** Long sessions still depend on the fitted slope quality
+(Decision 3): sub-millisecond for minutes, degrading after that. The
 engine seam is covered by `tests/test_engine_timeline.cpp`, which drives
 real RTCP SRs and abs-send-time-bearing RTP packets through the production
 dispatch; there is still no test that runs a *paired* DTLS/SRTP session

@@ -328,6 +328,17 @@ def run_chrome_interop() -> bool:
 
         if not ok and rc_chrome == 0:
             print("[FAIL] chrome script exit=0 but result assertions FAILED")
+        # Machine-readable evidence (mirrors case_e_*_results.json): the
+        # Chrome results block plus the orchestrator verdict, so a later
+        # audit can check Case D without re-parsing the chrome log.
+        try:
+            evidence = dict(results_obj) if results_obj else {}
+            evidence["pass"] = bool(ok)
+            evidence["direction"] = "chrome-offer"
+            (E2E / "case_d_results.json").write_text(
+                json.dumps(evidence, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[warn] could not write case_d_results.json: {e}")
         rc_overall = rc_chrome
         return ok
 
@@ -435,6 +446,15 @@ def run_chrome_interop_reverse() -> bool:
 
         if not ok and rc_chrome == 0:
             print("[FAIL] chrome script exit=0 but result assertions FAILED")
+        # Machine-readable evidence (mirrors case_d_results.json).
+        try:
+            evidence = dict(results_obj) if results_obj else {}
+            evidence["pass"] = bool(ok)
+            evidence["direction"] = "nimrtc-offer"
+            (E2E / "case_d_rev_results.json").write_text(
+                json.dumps(evidence, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[warn] could not write case_d_rev_results.json: {e}")
         rc_overall = rc_chrome
         return ok
 

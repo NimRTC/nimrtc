@@ -120,10 +120,15 @@ See [`docs/adr/ADR-001-plugin-system.md`](docs/adr/ADR-001-plugin-system.md) for
 ## Layout invariants (must always hold)
 
 1. **`src/core/` is the only INTERFACE library** and exposes **only stable types**.
-   No `src/core/src/` files — when log sinks get implementations in P1, a new
-   `nimrtc_log` target is added; `src/core/` stays header-only and stable.
+   Documented exception (PAL Slice 2 / Windows DLL boundary fix, v0.11.0):
+   `src/core/src/plugin_registry.cpp` holds the `PluginRegistry::instance()`
+   singleton body in a STATIC `nimrtc_registry` lib (singleton unified across
+   consumers), and `src/core/src/pal_default_registrars.cpp` holds the
+   `kDefaultRegistrars[]` table in OBJECT `nimrtc_core_objects` (link-time
+   cycle avoidance). Both propagate INTERFACEly via `nimrtc::core`. See
+   `src/core/CMakeLists.txt` header comment.
 
-2. **`src/plugins/` is the only plugin interface layer** (header-only INTERFACE library `nimrtc_plugins`). It contains no implementations — only abstract classes and factory interfaces. All concrete implementations live in `src/modules/`.
+2. **`src/plugins/` is the only plugin interface layer** (INTERFACE library `nimrtc_plugins`). It contains only abstract classes and factory interfaces, plus one documented exception: `src/plugins/src/hw_video_backend.cpp`, the `HwVideoBackendRegistry` comparator/auto-load implementation (mutex-guarded, no global mutable state), compiled as STATIC and noted in `src/plugins/CMakeLists.txt`. All other concrete implementations live in `src/modules/`.
 
 3. **Every module is self-contained under `src/modules/<name>/`** with
    `CMakeLists.txt` + `include/` + `src/` + `tests/`. Modules may
@@ -134,8 +139,11 @@ See [`docs/adr/ADR-001-plugin-system.md`](docs/adr/ADR-001-plugin-system.md) for
    not individual modules. The engine's public header (`engine.hpp`)
    deliberately does **not** include any concrete module header — all
    concrete state lives in a PIMPL `Impl` defined inside `engine.cpp`.
-   Consumers who need concrete types (e.g. `nimrtc::dtls::DtlsSession`)
-   include those headers themselves; they aren't dragged in transitively.
+   `engine.cpp` itself includes concrete module headers (ice/rtp/dtls/srtp/…)
+   and links the module libs PRIVATE — that is the composition layer doing
+   its job, not a leak into consumers. Consumers who need concrete types
+   (e.g. `nimrtc::dtls::DtlsSession`) include those headers themselves;
+   they aren't dragged in transitively.
 
 5. **`src/third_party/` is the only place vendor code lives.** Nothing may
    link system-installed crypto / DTLS / SRTP libraries — `NIMRTC_VENDORED`

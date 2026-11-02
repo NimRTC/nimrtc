@@ -1336,16 +1336,19 @@ nimrtc::core::Result<void> DtlsSessionWolfSSL::open() noexcept {
     if (impl_->open_called) return nimrtc::core::Result<void>::make_ok();
     impl_->open_called = true;
 
-    static bool g_init = false;
-    if (!g_init) {
+    static std::once_flag wolfssl_init_once;
+    bool wolfssl_ok = true;
+    std::call_once(wolfssl_init_once, [&] {
         if (wolfSSL_Init() != WOLFSSL_SUCCESS) {
             nimrtc::core::log::Logger::instance().error("wolfSSL_Init failed");
-            ++impl_->stats_instance.errors;
-            return nimrtc::core::Result<void>::fail(
-                nimrtc::core::ErrorCode::InternalError,
-                "wolfSSL_Init failed");
+            wolfssl_ok = false;
         }
-        g_init = true;
+    });
+    if (!wolfssl_ok) {
+        ++impl_->stats_instance.errors;
+        return nimrtc::core::Result<void>::fail(
+            nimrtc::core::ErrorCode::InternalError,
+            "wolfSSL_Init failed");
     }
 
     if (!impl_->setup_context()) {

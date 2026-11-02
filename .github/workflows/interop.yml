@@ -100,8 +100,11 @@ jobs:
     name: windows / e2e acceptance
     runs-on: windows-2022
     timeout-minutes: 30
-    # Skip on draft PRs; full e2e is slow (~1min per case)
-    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    # Skip on draft PRs; full e2e is slow (~1min per case).
+    # NOTE: the pre-v1.0 condition `github.event_name == 'pull_request' && ...`
+    # evaluated to false on push events, silently skipping e2e on every main
+    # push (incl. the v1.0.0 tag cut). Run on push AND on non-draft PRs.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
         with:

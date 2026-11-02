@@ -57,6 +57,7 @@ concurrency:
 
 env:
   BUILD_TYPE: Release
+  PROJECT_VERSION: ${{ github.ref_name }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -67,35 +68,15 @@ jobs:
     name: release / preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      configured: ${{ steps.gpg-check.outputs.configured }}
-      release_tag: ${{ steps.resolve-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Resolve release tag (push vs workflow_dispatch)
-        id: resolve-tag
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${{ github.ref_name }}"
-          fi
-          if [[ -z "$tag" ]]; then
-            echo "::error::Could not resolve release tag (event=${{ github.event_name }}, ref=${{ github.ref }})."
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $tag"
 
       - name: Verify tag form
         shell: bash
         run: |
-          tag="${{ steps.resolve-tag.outputs.tag }}"
+          tag="${{ github.ref_name }}"
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
             echo "::error::Ref '$tag' does not match SemVer form vX.Y.Z[-prerelease]"
             exit 1
@@ -105,7 +86,7 @@ jobs:
       - name: Verify CMake project version matches tag
         shell: bash
         run: |
-          tag="${{ steps.resolve-tag.outputs.tag }}"
+          tag="${{ github.ref_name }}"
           tag_stripped="${tag#v}"
           # CMakeLists.txt uses a multi-line `project(...VERSION X.Y.Z...)`
           # block, so a single-line grep won't catch the VERSION.  Anchor on
@@ -157,13 +138,10 @@ jobs:
     needs: preflight
     runs-on: windows-2022
     timeout-minutes: 60
-    env:
-      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install Ninja
         shell: pwsh
@@ -253,7 +231,7 @@ jobs:
       - name: Install into staging dir
         shell: pwsh
         run: |
-          $version = "$env:RELEASE_TAG" -replace '^v',''
+          $version = "${{ github.ref_name }}" -replace '^v',''
           $staging = "build/_install/windows"
           cmake --install build --prefix $staging --config Release
 
@@ -307,13 +285,10 @@ jobs:
     needs: preflight
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    env:
-      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install ninja + cmake + xz
         shell: bash
@@ -372,7 +347,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${RELEASE_TAG#v}"
+          version="${GITHUB_REF_NAME#v}"
           staging="build/_install/linux-x86_64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" .
@@ -418,13 +393,10 @@ jobs:
     # Also see publish-release's `if:` which lets publish run
     # regardless of this job's result.
     continue-on-error: true
-    env:
-      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install ninja + cmake + xz
         shell: bash
@@ -490,7 +462,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${RELEASE_TAG#v}"
+          version="${GITHUB_REF_NAME#v}"
           staging="build/_install/linux-aarch64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" .
@@ -521,13 +493,10 @@ jobs:
     needs: preflight
     runs-on: macos-14
     timeout-minutes: 60
-    env:
-      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ needs.preflight.outputs.release_tag }}
 
       # macos-14 runners ship Python 3.12 + xz-utils pre-installed, but
       # the system Python 3 is "externally managed" (PEP 668) and
@@ -609,7 +578,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${RELEASE_TAG#v}"
+          version="${GITHUB_REF_NAME#v}"
           staging="build/_install/macos-arm64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
@@ -656,7 +625,6 @@ jobs:
     permissions:
       contents: write
     needs:
-      - preflight
       - build-windows
       - build-linux-gcc
       - build-macos-clang
@@ -676,13 +644,10 @@ jobs:
       # aarch64 bundle is non-fatal.
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Import GPG signing key
         if: needs.preflight.outputs.configured == 'true'
@@ -732,6 +697,41 @@ jobs:
               gpg --batch --yes \
                   --local-user "$GPG_FINGERPRINT" \
                   --armor --detach-sign --output "${tarball}.asc" "$tarball"
+            fi
+          done
+
+      # The detached `.asc` signatures are useless to a consumer who cannot
+      # obtain the public key: the v1.0.1 release shipped signed assets
+      # while the signing key stayed private, so `gpg --verify` failed for
+      # every downstream user. Export the public half of the signing key and
+      # publish it as a release asset next to the signatures, and push it to
+      # the public keyservers at the same time. Both are best-effort: the
+      # asset upload is the reliable channel, the keyserver push only
+      # succeeds for keys that have an email address on file.
+      - name: Export the signing public key
+        if: needs.preflight.outputs.configured == 'true'
+        shell: bash
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          gpg --armor --export "$GPG_FINGERPRINT" > dist/nimrtc-signing-key.asc
+          echo "[+] exported dist/nimrtc-signing-key.asc ($(wc -c < dist/nimrtc-signing-key.asc) bytes)"
+          gpg --fingerprint "$GPG_FINGERPRINT"
+
+      - name: Publish the signing key to the public keyservers
+        if: needs.preflight.outputs.configured == 'true'
+        shell: bash
+        continue-on-error: true
+        env:
+          GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          for keyserver in keyserver.ubuntu.com keys.openpgp.org; do
+            if gpg --keyserver "hkps://$keyserver" --send-keys "$GPG_FINGERPRINT"; then
+              echo "[+] sent the signing key to $keyserver"
+            else
+              echo "::warning::could not send the signing key to $keyserver"
             fi
           done
 
@@ -805,11 +805,11 @@ jobs:
           PYEOF
           echo "SBOM written: $(wc -c < dist/sbom.json) bytes"
 
-      - name: Extract CHANGELOG section for ${{ needs.preflight.outputs.release_tag }}
+      - name: Extract CHANGELOG section for ${{ github.ref_name }}
         id: changelog
         shell: bash
         run: |
-          version="${{ needs.preflight.outputs.release_tag }}"   # e.g. v1.0.0
+          version="${{ github.ref_name }}"   # e.g. v1.0.0
           stripped="${version#v}"            # 1.0.0
           export stripped
           # Match "## [X.Y.Z]" or "## [X.Y.Z-rc.N]" headings.
@@ -854,6 +854,25 @@ jobs:
               echo "> secrets are not configured in this repository."
               echo "> Verify integrity using the per-platform `.sha256` files only."
               echo "> Signed releases resume with v1.0.0 (see RELEASING.md §3.3)."
+            } >> dist/release_notes.md
+          else
+            {
+              echo
+              echo "---"
+              echo
+              echo "> **Verifying the signature**"
+              echo
+              echo "> The public half of the signing key ships with this"
+              echo "> release as \`nimrtc-signing-key.asc\`. To verify a bundle:"
+              echo
+              echo "> ```bash"
+              echo "> gpg --import nimrtc-signing-key.asc"
+              echo "> gpg --verify nimrtc-<platform>.tar.xz.asc nimrtc-<platform>.tar.xz"
+              echo "> ```"
+              echo
+              echo "> The signing key fingerprint is \`${{ vars.GPG_FINGERPRINT }}\`."
+              echo "> Check it against the fingerprint shown by \`gpg --fingerprint\`"
+              echo "> after importing — do not trust the key file blindly."
             } >> dist/release_notes.md
           fi
           echo "body_file=dist/release_notes.md" >> "$GITHUB_OUTPUT"
@@ -933,8 +952,8 @@ jobs:
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.preflight.outputs.release_tag }}
-          name: "NimRTC ${{ needs.preflight.outputs.release_tag }}"
+          tag_name: ${{ github.ref_name }}
+          name: "NimRTC ${{ github.ref_name }}"
           draft: true
           generate_release_notes: false
           body_path: dist/release_notes.md
@@ -942,6 +961,7 @@ jobs:
             dist/*.tar.xz
             dist/*.tar.xz.asc
             dist/*.tar.xz.sha256
+            dist/nimrtc-signing-key.asc
             dist/sbom.json
           fail_on_unmatched_files: false
 
@@ -984,7 +1004,7 @@ jobs:
             {
               echo "## Release attestation"
               echo
-              echo "- Tag: \`${{ needs.preflight.outputs.release_tag }}\`"
+              echo "- Tag: \`${{ github.ref_name }}\`"
               echo "- Signing key fingerprint: \`$GPG_FINGERPRINT\`"
               echo "- Artefact bundles:"
               for tarball in dist/*.tar.xz; do
@@ -999,7 +1019,7 @@ jobs:
             {
               echo "## Release summary (UNSIGNED — pre-1.0 Tech Preview)"
               echo
-              echo "- Tag: \`${{ needs.preflight.outputs.release_tag }}\`"
+              echo "- Tag: \`${{ github.ref_name }}\`"
               echo "- GPG signing: **not configured** (assets uploaded without detached signatures)"
               echo "- Artefact bundles:"
               for tarball in dist/*.tar.xz; do

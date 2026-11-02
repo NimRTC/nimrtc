@@ -1,13 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.0.1-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v1.0.0 (Stable) — first stable release. Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10000, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.0]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
+> **Current:** v1.0.1 (Stable) — first published stable release (`v1.0.0` tag retained as source milestone only; never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10001, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.1]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 

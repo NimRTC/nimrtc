@@ -1,14 +1,14 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.0.1-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#平台支持)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **当前版本**：v1.0.0 稳定版 —— 首个稳定版本。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10000，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC WebTransport / QUIC 上 DataChannel 双向互通（DC-1）**PASS E1–E6**。
-> 见 [当前进度](#当前进度v100-稳定版) 看今天能做什么；[路线图](#路线图p1p4-简化版) 看下一步。详见 `CHANGELOG.md` `## [1.0.0]` 与 `docs/plan/v1.0-plan.md` §3 + §12.3.6。
+> **当前版本**：v1.0.1 稳定版 —— 首个正式发布的稳定版本（`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10001，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC WebTransport / QUIC 上 DataChannel 双向互通（DC-1）**PASS E1–E6**。
+> 见 [当前进度](#当前进度v100-稳定版) 看今天能做什么；[路线图](#路线图p1p4-简化版) 看下一步。详见 `CHANGELOG.md` `## [1.0.1]` 与 `docs/plan/v1.0-plan.md` §3 + §12.3.6。
 >
 > 📖 **本文档为英文 README 的中文版本**。技术 canonical 文档以 [`docs/zh/architecture.md`](docs/zh/architecture.md) 为准（ADR-012）。中文 README 与英文 README 内容同步维护。
 

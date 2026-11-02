@@ -367,7 +367,8 @@ This section is appended at release time. Each entry cross-references the
 | `v0.9.0-rc1`   | 2026-09-06 | RC1 — see `CHANGELOG.md` `[0.9.0-rc1]`; Case D interop **known issue** | TBD |
 | `v0.9.0`       | TBD        | Final `0.9.x` line; only hot-fixes since `rc1`      | TBD            |
 | `v0.14.0`      | 2026-10-16 | WebTransport seam + DTLS Case D fragment reassembler (v1.0.0-alpha.2 alias). Tag was force-re-pointed twice on tag day to include the release.yml follow-ups (PR #20 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` for the four Configure steps, then `dc15ad8` `if: ${{ false }}` on the four `Prebuild WebRTC APM` steps). See `CHANGELOG.md` `[0.14.0]` for full notes; the `release.yml` artefact matrix is windows-msvc + linux-gcc + linux-aarch64 + macos-clang (linux-aarch64 / macos-clang depend on GHA runner capacity at push time). | https://github.com/NimRTC/nimrtc/releases/tag/v0.14.0 |
-| `v1.0.0`       | TBD        | First API-stable release; SemVer guarantees apply   | TBD            |
+| `v1.0.0`       | 2026-10-30 | Source milestone only (lightweight tag `f740f2e`); **never published** as a GitHub Release. Superseded by `v1.0.1`. | n/a — superseded |
+| `v1.0.1`       | 2026-11-02 | First **published** stable release; source milestone `v1.0.0` + Case D forward-DTLS fix + CI e2e-on-push. SemVer guarantees apply from this tag. See `CHANGELOG.md` `[1.0.1]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1 |
 
 ---
 

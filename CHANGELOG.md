@@ -7,8 +7,42 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Post-`v1.0.0` work accumulates here. The `## [1.0.0]` entry below
-> is the authoritative record of the first stable cut.
+> Post-`v1.0.1` work accumulates here. The `## [1.0.1]` entry below
+> is the authoritative record of the first published stable cut
+> (`v1.0.0` tag exists as a source milestone only and was never
+> published as a GitHub Release).
+
+## [1.0.1] - 2026-11-02
+
+### Status: Stable
+
+> **First published stable release.** `v1.0.0` (`f740f2e`, 2026-10-30)
+> is retained as a source-tree milestone tag only; it was never
+> published as a GitHub Release. `v1.0.1` is the first 1.0-line
+> release cut through `.github/workflows/release.yml` with
+> four-platform artefacts + SBOM (GPG signatures follow once
+> `GPG_PRIVATE_KEY` / `GPG_FINGERPRINT` are configured per
+> `RELEASING.md` §3.3).
+
+### Fixed
+
+- **Chrome forward DTLS handshake stall (Case D).** Tick-thread
+  WebTransport session creation with an empty peer host blocked ICE
+  drain, so ClientHello never reached `feed_inbound`. `create_data_channel`
+  now fails fast, and `--no-datachannel` clears both the datachannel name
+  and backend so tick keeps draining DTLS/SRTP/RTP. DTLS outbound re-pump
+  is gated on empty drain to stop ServerHello triple flight; single
+  keylog writer on handshake complete. (`5a582c5`)
+- **CI e2e acceptance on push.** `interop.yml` now runs the Case D
+  acceptance gate on push and emits `build/e2e/case_d_results.json`;
+  proxy/demo-p2p stderr and DTLS artefacts route under `build/e2e` for
+  upload; macOS arm64 `CadenceProducesApproxFps` bound relaxed 8→4 for
+  runner stutter. (`4e312e3`, `5a582c5`)
+
+### Notes
+
+- Public API is unchanged vs `v1.0.0`; `NIMRTC_API_VERSION` = 10001,
+  `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
 
 ## [1.0.0] - 2026-10-30
 

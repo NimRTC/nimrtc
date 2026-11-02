@@ -101,6 +101,21 @@ No single feature here is brand new — but the **combination** is rare in the o
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not P1).
 
+## Download prebuilt v1.0.1
+
+No build needed to evaluate. Each platform bundle contains headers, `NimRTCConfig.cmake`, and the static lib.
+
+- Release page: [v1.0.1](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1)
+- Assets: `nimrtc-1.0.1-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
+
+```bash
+tar -xJf nimrtc-1.0.1-linux-x86_64-gcc.tar.xz
+sha256sum -c nimrtc-1.0.1-linux-x86_64-gcc.tar.xz.sha256
+gpg --verify nimrtc-1.0.1-linux-x86_64-gcc.tar.xz.asc
+```
+
+Signing key fingerprint: `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`.
+
 ---
 
 ## Quick Start

@@ -404,16 +404,16 @@ The headline reason to choose NimRTC over libwebrtc is **size** — both binary 
 
 ### Transport-floor baselines (localhost UDP loopback, v1.1)
 
-Track A baselines are transport-floor numbers, not engine glass-to-glass claims. Measured on Windows 10 x86_64 (local `build/`):
+Track A baselines are transport-floor numbers, not engine glass-to-glass claims. Typical ranges on Windows 10 x86_64 (local `build/`; loopback numbers vary run to run):
 
-| Bench | Payload | Result |
+| Bench | Payload | Typical range |
 |---|---|---|
-| `bench_latency.json` (1000 × 172 B echo) | 172 B (~20 ms Opus mono + RTP header) | p50 **9.6 µs**, p99 **17.6 µs**, max 139.0 µs, mean jitter 0.1 µs |
-| `bench_dc.json` datagram plane (2000 msgs) | 256 B | **~78k pps / ~161 Mbps** |
-| `bench_dc.json` datagram plane (2000 msgs) | 1200 B | **~81k pps / ~775 Mbps** |
-| `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~74k pps / ~9700 Mbps** |
+| `bench_latency.json` (1000 × 172 B echo) | 172 B (~20 ms Opus mono + RTP header) | p50 **~10 µs**, p99 **~20–35 µs**, mean jitter **<1 µs** |
+| `bench_dc.json` datagram plane (2000 msgs) | 256 B | **~60–80k pps / ~120–165 Mbps** |
+| `bench_dc.json` datagram plane (2000 msgs) | 1200 B | **~60–80k pps / ~570–800 Mbps** |
+| `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~70k pps / ~9 Gbps** |
 
-> Reproduce with `python tools/benchmark_latency.py --count 1000` and `python tools/benchmark_dc.py`; artifacts land in `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json`. Engine glass-to-glass latency/jitter/MOS still depend on platform, codec, network, and target use case — profile-specific benchmarks land once P2 (PCM tap) and P3 (BWE + ref_frame) land.
+> Reproduce with `python tools/benchmark_latency.py --count 1000` and `python tools/benchmark_dc.py`; artifacts land in `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json`. Exact numbers are machine- and load-dependent — the checked-in JSON is one local sample, not a pass/fail threshold. Engine glass-to-glass latency/jitter/MOS still depend on platform, codec, network, and target use case — profile-specific benchmarks land once P2 (PCM tap) and P3 (BWE + ref_frame) land.
 
 See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), and [`tools/benchmark_dc.py`](tools/benchmark_dc.py) for the measurement tools.
 

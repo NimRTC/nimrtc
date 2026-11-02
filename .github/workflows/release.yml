@@ -57,7 +57,6 @@ concurrency:
 
 env:
   BUILD_TYPE: Release
-  PROJECT_VERSION: ${{ github.ref_name }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -158,10 +157,13 @@ jobs:
     needs: preflight
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install Ninja
         shell: pwsh
@@ -251,7 +253,7 @@ jobs:
       - name: Install into staging dir
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v',''
+          $version = "$env:RELEASE_TAG" -replace '^v',''
           $staging = "build/_install/windows"
           cmake --install build --prefix $staging --config Release
 
@@ -292,10 +294,13 @@ jobs:
     needs: preflight
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install ninja + cmake + xz
         shell: bash
@@ -354,7 +359,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           staging="build/_install/linux-x86_64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-x86_64-gcc.tar.xz" .
@@ -391,10 +396,13 @@ jobs:
     # Also see publish-release's `if:` which lets publish run
     # regardless of this job's result.
     continue-on-error: true
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Install ninja + cmake + xz
         shell: bash
@@ -460,7 +468,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           staging="build/_install/linux-aarch64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-linux-aarch64-gcc.tar.xz" .
@@ -482,10 +490,13 @@ jobs:
     needs: preflight
     runs-on: macos-14
     timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.preflight.outputs.release_tag }}
 
       # macos-14 runners ship Python 3.12 + xz-utils pre-installed, but
       # the system Python 3 is "externally managed" (PEP 668) and
@@ -567,7 +578,7 @@ jobs:
       - name: Install into staging dir + bundle
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           staging="build/_install/macos-arm64"
           cmake --install build --prefix "$staging"
           tar -C "$staging" -cJf "build/nimrtc-${version}-macos-arm64-clang.tar.xz" .
@@ -625,10 +636,13 @@ jobs:
       # aarch64 bundle is non-fatal.
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.preflight.outputs.release_tag }}
 
       - name: Import GPG signing key
         if: needs.preflight.outputs.configured == 'true'
@@ -751,11 +765,11 @@ jobs:
           PYEOF
           echo "SBOM written: $(wc -c < dist/sbom.json) bytes"
 
-      - name: Extract CHANGELOG section for ${{ github.ref_name }}
+      - name: Extract CHANGELOG section for ${{ needs.preflight.outputs.release_tag }}
         id: changelog
         shell: bash
         run: |
-          version="${{ github.ref_name }}"   # e.g. v1.0.0
+          version="${{ needs.preflight.outputs.release_tag }}"   # e.g. v1.0.0
           stripped="${version#v}"            # 1.0.0
           export stripped
           # Match "## [X.Y.Z]" or "## [X.Y.Z-rc.N]" headings.
@@ -879,8 +893,8 @@ jobs:
       - name: Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "NimRTC ${{ github.ref_name }}"
+          tag_name: ${{ needs.preflight.outputs.release_tag }}
+          name: "NimRTC ${{ needs.preflight.outputs.release_tag }}"
           draft: true
           generate_release_notes: false
           body_path: dist/release_notes.md
@@ -930,7 +944,7 @@ jobs:
             {
               echo "## Release attestation"
               echo
-              echo "- Tag: \`${{ github.ref_name }}\`"
+              echo "- Tag: \`${{ needs.preflight.outputs.release_tag }}\`"
               echo "- Signing key fingerprint: \`$GPG_FINGERPRINT\`"
               echo "- Artefact bundles:"
               for tarball in dist/*.tar.xz; do
@@ -945,7 +959,7 @@ jobs:
             {
               echo "## Release summary (UNSIGNED — pre-1.0 Tech Preview)"
               echo
-              echo "- Tag: \`${{ github.ref_name }}\`"
+              echo "- Tag: \`${{ needs.preflight.outputs.release_tag }}\`"
               echo "- GPG signing: **not configured** (assets uploaded without detached signatures)"
               echo "- Artefact bundles:"
               for tarball in dist/*.tar.xz; do

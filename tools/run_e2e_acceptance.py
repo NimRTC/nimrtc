@@ -267,6 +267,13 @@ def run_chrome_interop() -> bool:
         os.environ["NIMRTC_DTLS_SPKI_FILE"] = str(E2E / "nimrtc_chrome_spki.b64")
         if not (E2E / "nimrtc_chrome_spki.b64").exists():
             (E2E / "nimrtc_chrome_spki.b64").write_text("", encoding="utf-8")
+        # Route demo-p2p's stderr (engine[dtls]/engine[ice] logs) into
+        # build/e2e/ so the CI artifact upload picks it up.  Without this
+        # the proxy defaults to interop/signaling/_proxy_demo_stderr.log,
+        # which is outside build/e2e/ and never uploaded — leaving Case D
+        # failures (e.g. DTLS ClientHello never reaching feed_inbound)
+        # without engine-side evidence.
+        os.environ["NIMRTC_PROXY_STDERR"] = str(E2E / "case_d_demo_stderr.log")
 
         # 1) Signaling server
         _start(
@@ -399,6 +406,9 @@ def run_chrome_interop_reverse() -> bool:
         os.environ["NIMRTC_DTLS_SPKI_FILE"] = str(E2E / "nimrtc_chrome_rev_spki.b64")
         if not (E2E / "nimrtc_chrome_rev_spki.b64").exists():
             (E2E / "nimrtc_chrome_rev_spki.b64").write_text("", encoding="utf-8")
+        # Same engine-log routing as the forward direction (see above):
+        # keep demo-p2p stderr inside build/e2e/ for artifact upload.
+        os.environ["NIMRTC_PROXY_STDERR"] = str(E2E / "case_d_rev_demo_stderr.log")
 
         _start(
             "signaling_server",

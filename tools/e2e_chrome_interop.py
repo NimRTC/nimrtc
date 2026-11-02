@@ -58,8 +58,11 @@ WS_URL = "ws://localhost:8765/interop"
 # wolfSSL DTLS module).
 NIMRTC_SPKI_FILE = Path(
     os.environ.get(
-        "NIMRTC_SPKI_FILE",
-        str(E2E / "nimrtc_chrome_spki.b64"),
+        "NIMRTC_DTLS_SPKI_FILE",
+        os.environ.get(
+            "NIMRTC_SPKI_FILE",
+            str(E2E / "nimrtc_chrome_spki.b64"),
+        ),
     )
 )
 
@@ -72,14 +75,15 @@ def grep(path: Path, pattern: str) -> list[str]:
             if rx.search(ln)]
 
 
-def show_file_state() -> None:
+def show_file_state(rev: bool = False) -> None:
     print("\n=== Post-test file state ===")
+    suffix = "_rev" if rev else ""
     for p in [
-        E2E / "nimrtc_chrome.keylog",
-        E2E / "nimrtc_chrome.trace",
+        E2E / f"nimrtc_chrome{suffix}.keylog",
+        E2E / f"nimrtc_chrome{suffix}.trace",
         E2E / "nimrtc_proxy.err",
         E2E / "nimrtc_proxy.out",
-        E2E / "chrome_console.log",
+        E2E / f"chrome_console{suffix}.log",
     ]:
         if p.exists():
             print(f"  {p.name}: {p.stat().st_size} bytes")
@@ -277,7 +281,7 @@ def summarize(direction: str = "chrome-offer") -> None:
         chrome_keylog_name = ("chrome_chrome_rev.keylog" if rev
                               else "chrome_chrome.keylog")
         print(f"\n=== NimRTC <-> Chrome DTLS post-mortem ({direction}) ===")
-        show_file_state()
+        show_file_state(rev)
 
         # Show NimRTC trace tail (master_sec + verify_data lines).
         trace = E2E / trace_name

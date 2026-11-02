@@ -2007,6 +2007,19 @@ NimRTCEngine::create_data_channel(
     // the channel config, open() arms the stream/datagram path.
     if (resolved_dc_factory_id_ == "web_transport") {
         if (!impl_->wt_session) {
+            // Case D forward-stall guard: interop answerer has empty
+            // web_transport_peer_host (no QUIC peer configured). Creating a
+            // client QUIC session with an empty hostname would enter
+            // MsQuicConnectionStart on the tick thread and stall
+            // engine->tick() -> ice.recv() so rx_queue backs up (DTLS
+            // ClientHello never reaches feed_inbound). Fail fast instead;
+            // the tick loop keeps draining DTLS/SRTP/RTP.
+            if (config_.web_transport_peer_host.empty()) {
+                if (on_error_) on_error_(core::kEngineInternal,
+                    "create_data_channel(): web_transport_peer_host is empty "
+                    "(no QUIC peer; skipping session creation so tick keeps draining DTLS)");
+                return nullptr;
+            }
             const web_transport::IWebTransportSessionFactory* wtf =
                 pal::resolve_web_transport(config_.web_transport_name);
             if (!wtf) {

@@ -112,12 +112,15 @@ class NimRTCSubprocess:
         # the proxy's own log lines.
         self._stderr_path = Path(os.environ.get(
             "NIMRTC_PROXY_STDERR",
-            str(Path(__file__).parent / "_proxy_demo_stderr.log")))
+            str(Path(__file__).resolve().parent.parent.parent / "build" / "e2e" / "_proxy_demo_stderr.log")))
         try:
             self._stderr_file = open(self._stderr_path, "wb", buffering=0)
         except OSError as e:
             logger.warning("could not open stderr file: %s — falling back to merged stdout", e)
             self._stderr_file = subprocess.STDOUT  # merge into stdout so test sees it
+        # Fallbacks live under build/e2e/ (repo root) so standalone
+        # proxy runs keep artifacts inside the build tree.
+        _e2e_fallback = Path(__file__).resolve().parent.parent.parent / "build" / "e2e"
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -137,16 +140,22 @@ class NimRTCSubprocess:
             env={**os.environ,
                  "NIMRTC_DTLS_TRACE": os.environ.get(
                      "NIMRTC_DTLS_TRACE",
-                     str(Path(__file__).parent.parent / "build" / "nimrtc_dtls_trace.log")),
+                     str(_e2e_fallback / "nimrtc_dtls_trace.log")),
                  "NIMRTC_DTLS_KEYLOG": os.environ.get(
                      "NIMRTC_DTLS_KEYLOG",
-                     str(Path(__file__).parent.parent / "build" / "nimrtc_dtls_keylog.txt")),
+                     str(_e2e_fallback / "nimrtc_dtls_keylog.txt")),
                  "NIMRTC_DTLS_SPKI_FILE": os.environ.get(
                      "NIMRTC_DTLS_SPKI_FILE",
-                     str(Path(__file__).parent.parent / "build" / "nimrtc_spki.txt")),
+                     str(_e2e_fallback / "nimrtc_spki.txt")),
+                 "NIMRTC_DTLS_DUMP": os.environ.get(
+                     "NIMRTC_DTLS_DUMP", ""),
+                 "NIMRTC_DTLS_VERBOSE": os.environ.get(
+                     "NIMRTC_DTLS_VERBOSE", ""),
                  } if os.environ.get("NIMRTC_DTLS_TRACE") or
                     os.environ.get("NIMRTC_DTLS_KEYLOG") or
-                    os.environ.get("NIMRTC_DTLS_SPKI_FILE") else None,
+                    os.environ.get("NIMRTC_DTLS_SPKI_FILE") or
+                    os.environ.get("NIMRTC_DTLS_DUMP") or
+                    os.environ.get("NIMRTC_DTLS_VERBOSE") else None,
         )
         # Reader thread for stdout → asyncio queue.
         t = threading.Thread(target=self._read_stdout, daemon=True)

@@ -34,7 +34,7 @@
 | Field | Value | Expected |
 |-------|-------|---------|
 | fingerprint | `sha-256 AA:BB:...` | ✅ dtls::DtlsSession verifies peer fingerprint |
-| setup | `actpass` | ✅ NimRTC sets Client role |
+| setup | `actpass` | ✅ NimRTC as answerer takes Server role (passive; Chrome124+ BoringSSL rejects anonymous Client CertReq workaround) |
 | certificate | (self-signed, generated at runtime) | ✅ |
 
 ## Opus

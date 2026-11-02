@@ -1200,15 +1200,20 @@ int main(int argc, char** argv) {
 
     // DoD Gate #1: detect --no-datachannel BEFORE constructing the engine so
     // the DataChannel factory resolution (init_modules_once) reflects the
-    // correct cfg.datachannel_name.
+    // correct cfg.  v0.15.0: the default backend is "web_transport", so
+    // clearing only datachannel_name leaves the backend enabled and the
+    // tick thread still enters create_data_channel() (MsQuic session with
+    // empty peer host).  Clear BOTH to truly disable DataChannel.
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-datachannel") == 0) {
-            cfg.datachannel_name.clear();  // prevents m=application in SDP
+            cfg.datachannel_name.clear();     // prevents m=application in SDP (sctp path)
+            cfg.datachannel_backend.clear();  // prevents web_transport session creation
         }
     }
 
     nimrtc::engine::NimRTCEngine engine(cfg);
-    const bool dc_enable = !cfg.datachannel_name.empty();  // true unless --no-datachannel
+    const bool dc_enable =
+        !cfg.datachannel_name.empty() || !cfg.datachannel_backend.empty();
 
     // Only "offer" and "answer" are valid positional sub-commands.
     // Any other token after flags is an error (e.g. --codec opus <junk>).

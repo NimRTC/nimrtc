@@ -367,12 +367,15 @@ TEST(MemorySource, CadenceProducesApproxFps) {
     // Reset the counter and time a known production window. 50 fps ×
     // 500 ms = 25 frames nominal; allow a wide range so the test catches
     // a dead producer (n=0) and a runaway producer (n huge) without
-    // flaking on slow CI.
+    // flaking on slow CI. Lower bound 4 (was 8): macOS arm64 GHA
+    // runners stall the producer thread enough to deliver only 6 frames
+    // in 500 ms (ci 41377617286, video_source_tests, Expected n>=8 got 6).
+    // 4 still catches a dead producer while tolerating ~8 fps stutter.
     count.store(0, std::memory_order_release);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     src->stop();
     int n = count.load(std::memory_order_acquire);
-    EXPECT_GE(n, 8);
+    EXPECT_GE(n, 4);
     EXPECT_LE(n, 60);
 }
 

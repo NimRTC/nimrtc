@@ -207,27 +207,11 @@ static int dummy_verify_callback(int /*preverify*/, WOLFSSL_X509_STORE_CTX* /*st
 }
 
 #if defined(HAVE_SECRET_CALLBACK)
-// Native NSS keylog callback wired into wolfSSL via
-// wolfSSL_CTX_set_keylog_callback().  Called once per handshake with a
-// fully-formed NSS-format line ("CLIENT_RANDOM <hex> <hex>\n" — note
-// trailing newline).  We just append to the file path held by the
-// NIMRTC_DTLS_KEYLOG env var (looked up once at registration time
-// and cached).  The append is mutex-guarded so concurrent sessions in
-// the same process don't interleave bytes.
-static void keylog_to_file(const WOLFSSL* /*ssl*/, const char* line) {
-    static std::mutex mu;
-    static const char* path = []() -> const char* {
-        const char* p = std::getenv("NIMRTC_DTLS_KEYLOG");
-        return (p && *p) ? p : nullptr;
-    }();
-    if (!path || !line) return;
-    std::lock_guard<std::mutex> g(mu);
-    std::ofstream k(path, std::ios::app);
-    if (!k.is_open()) return;
-    k << line;
-    if (line[0] && line[std::strlen(line) - 1] != '\n') k << '\n';
-    k.flush();
-}
+// (Case D dedup) The native NSS keylog callback formerly lived here.
+// Removed: the sole keylog writer is now on_handshake_complete() ->
+// diag::write_keylog_line() reading ssl->arrays directly, because
+// wolfSSL 6.x never fires keyLogCb for server-side handshakes while
+// double-writing CLIENT_RANDOM on client handshakes.
 #endif
 
 static const char* srtp_profile_name(SrtpProfile p) {
@@ -670,22 +654,15 @@ struct DtlsSessionWolfSSL::Impl {
                                    WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT,
                                &dummy_verify_callback);
 
-        // Native NSS-format keylog callback (only available when
-        // wolfSSL was built with HAVE_SECRET_CALLBACK).  When the env
-        // var NIMRTC_DTLS_KEYLOG is set, wolfSSL itself writes lines
-        // like `CLIENT_RANDOM <hex> <hex>` to the file as soon as the
-        // master secret is derived — same format Wireshark expects,
-        // same format Chrome's BoringSSL emits via --ssl-key-log-file.
-        //
-        // This is the ONLY way to get master_secret without a private
-        // wolfSSL API (master_secret lives in ssl->arrays and there's
-        // no public getter).  Tying it to the env var means production
-        // builds (env var unset) pay zero overhead.
-#if defined(HAVE_SECRET_CALLBACK)
-        if (nimrtc::dtls::diag::keylog_path()) {
-            wolfSSL_CTX_set_keylog_callback(ctx, &keylog_to_file);
-        }
-#endif
+        // Native NSS-format keylog: single writer is
+        // on_handshake_complete() -> diag::write_keylog_line() reading
+        // ssl->arrays directly.  wolfSSL 6.x only fires keyLogCb from
+        // SendClientKeyExchange (client side), never from
+        // DoClientKeyExchange (server side), so keeping the CTX-level
+        // callback registered would double-write CLIENT_RANDOM on every
+        // client handshake (callback + arrays direct) while adding
+        // Registration removed (Case D dedup); see on_handshake_complete()
+        // for the sole writer.
         return true;
     }
 
@@ -1553,16 +1530,20 @@ DtlsSessionWolfSSL::take_outbound() noexcept {
     auto recs = std::move(impl_->outbound_);
     impl_->outbound_.clear();
 
-    // Re-pump the handshake: wolfSSL may have more bytes to send after
-    // we drained the previous batch.  We use `pump_handshake()` instead
-    // of `wolfSSL_dtls_got_timeout()` here because the I/O callbacks
-    // (`io_recv`/`io_send`) have a full picture only when paired with
-    // an explicit accept()/connect() call.
+    // Re-pump gate (Case D Chrome interop): only re-pump when the drain
+    // produced nothing.  drain_dtls() calls tick() first, which already
+    // flushes any wolfSSL retransmit bytes into outbound_; an
+    // unconditional pump here invokes wolfSSL_accept()/connect() a second
+    // time per drain, re-emitting the same ServerHello flight
+    // (seq=0..3, 4..7, 8..11 triple-emission) that Chrome treats as a
+    // protocol violation.  Gating on recs.empty() keeps the initial
+    // handshake pump (outbound starts empty) while suppressing the
+    // duplicate flight once bytes are already queued.
     //
     // Reentrancy: `pump_handshake()` may itself call `flush_send_buf()`
     // recursively, but the `Impl::pumping_` flag (set in `tick()` /
     // `pump_handshake()`) prevents unbounded recursion.
-    if (impl_->ssl &&
+    if (recs.empty() && impl_->ssl &&
         impl_->state != nimrtc::dtls::DtlsState::Connected &&
         impl_->state != nimrtc::dtls::DtlsState::Failed &&
         impl_->state != nimrtc::dtls::DtlsState::Closed) {

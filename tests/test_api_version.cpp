@@ -4,20 +4,20 @@
 
 /**
  * @file tests/test_api_version.cpp
- * @brief v1.0.1 Sec.3 DoD gate #4 -- API version smoke test.
+ * @brief v1.0.2 Sec.3 DoD gate #4 -- API version smoke test.
  *
- * ## [1.0.1] patch release smoke test.
+ * ## [1.0.2] patch release smoke test.
  *
  * ## What this test verifies
  *
  * 1. `version_macros_are_defined` -- canonical version triplet matches
- *    v1.0.1 (MAJOR=1, MINOR=0, PATCH=1, PRE_RELEASE="").
+ *    v1.0.2 (MAJOR=1, MINOR=0, PATCH=2, PRE_RELEASE="").
  *
- * 2. `encoded_version_is_correct` -- `NIMRTC_API_VERSION` equals 10001
- *    for v1.0.1 (MAJOR*10000 + MINOR*100 + PATCH).
+ * 2. `encoded_version_is_correct` -- `NIMRTC_API_VERSION` equals 10002
+ *    for v1.0.2 (MAJOR*10000 + MINOR*100 + PATCH).
  *
  * 3. `version_string_is_well_formed` -- `NIMRTC_API_VERSION_STRING`
- *    expands to "1.0.1".
+ *    expands to "1.0.2".
  *
  * 4. `api_version_namespace_constants_match_macros` -- the runtime
  *    `nimrtc::core::api_version::k*` constants are identical to the
@@ -26,7 +26,7 @@
  * 5. `stability_markers_expand_to_something` -- `NIMRTC_API_STABLE`
  *    and `NIMRTC_API_UNSTABLE` expand to valid C++ when applied to a
  *    function declaration (compile-time smoke; no runtime effect in
- *    v1.0.1 because both macros are empty).
+ *    v1.0.2 because both macros are empty).
  *
  * 6. `deprecated_expands_to_valid_attribute` -- `NIMRTC_API_DEPRECATED(msg)`
  *    is syntactically valid C++ when applied to a function declaration.
@@ -63,14 +63,14 @@ TEST(version_macros, are_defined) {
 }
 
 // -----------------------------------------------------------------------------
-// Test 1b -- encoded version integer is correct (v1.0.1 = 10001)
+// Test 1b -- encoded version integer is correct (v1.0.2 = 10002)
 // -----------------------------------------------------------------------------
 
 TEST(version_macros, encoded_version_is_correct) {
     // NIMRTC_API_VERSION encodes MAJOR*10000 + MINOR*100 + PATCH.
-    // v1.0.1 => 1*10000 + 0*100 + 1 = 10001.
-    static_assert(NIMRTC_API_VERSION == 10001, "NIMRTC_API_VERSION must be 10001 for v1.0.1");
-    EXPECT_EQ(NIMRTC_API_VERSION, 10001);
+    // v1.0.2 => 1*10000 + 0*100 + 2 = 10002.
+    static_assert(NIMRTC_API_VERSION == 10002, "NIMRTC_API_VERSION must be 10002 for v1.0.2");
+    EXPECT_EQ(NIMRTC_API_VERSION, 10002);
 }
 
 // -----------------------------------------------------------------------------
@@ -78,10 +78,10 @@ TEST(version_macros, encoded_version_is_correct) {
 // -----------------------------------------------------------------------------
 
 TEST(version_string, is_well_formed) {
-    // NIMRTC_API_VERSION_STRING must expand to "1.0.1".  Runtime
+    // NIMRTC_API_VERSION_STRING must expand to "1.0.2".  Runtime
     // EXPECT_STREQ (not static_assert + std::strcmp) for MSVC <cstring>
     // constexpr compatibility — see the comment in version_macros above.
-    EXPECT_STREQ(NIMRTC_API_VERSION_STRING, "1.0.1");
+    EXPECT_STREQ(NIMRTC_API_VERSION_STRING, "1.0.2");
 }
 
 // -----------------------------------------------------------------------------
@@ -169,14 +169,14 @@ TEST(deprecated, expands_to_valid_attribute) {
 // -----------------------------------------------------------------------------
 
 TEST(version_check, works_correctly) {
-    // v1.0.1 == 10001.  Verify NIMRTC_API_VERSION_CHECK works at compile time.
+    // v1.0.2 == 10002.  Verify NIMRTC_API_VERSION_CHECK works at compile time.
 
     // Current version exactly.
-    static_assert(NIMRTC_API_VERSION_CHECK(1, 0, 1), "v1.0.1 should match itself");
-    EXPECT_TRUE(NIMRTC_API_VERSION_CHECK(1, 0, 1));
+    static_assert(NIMRTC_API_VERSION_CHECK(1, 0, 2), "v1.0.2 should match itself");
+    EXPECT_TRUE(NIMRTC_API_VERSION_CHECK(1, 0, 2));
 
     // Earlier versions should also pass.
-    static_assert(NIMRTC_API_VERSION_CHECK(0, 99, 99), "v1.0.1 >= v0.99.99");
+    static_assert(NIMRTC_API_VERSION_CHECK(0, 99, 99), "v1.0.2 >= v0.99.99");
     EXPECT_TRUE(NIMRTC_API_VERSION_CHECK(0, 99, 99));
 
     // Later versions should fail (static_assert triggers, EXPECT_FALSE catches).
@@ -184,8 +184,8 @@ TEST(version_check, works_correctly) {
     // at compile time.  Use constexpr bool instead.
     constexpr bool v2_0_0_check = NIMRTC_API_VERSION_CHECK(2, 0, 0);
     constexpr bool v1_1_0_check = NIMRTC_API_VERSION_CHECK(1, 1, 0);
-    constexpr bool v1_0_2_check = NIMRTC_API_VERSION_CHECK(1, 0, 2);
-    EXPECT_FALSE(v2_0_0_check);  // v1.0.1 < v2.0.0
-    EXPECT_FALSE(v1_1_0_check); // v1.0.1 < v1.1.0
-    EXPECT_FALSE(v1_0_2_check);  // v1.0.1 < v1.0.2
+    constexpr bool v1_0_3_check = NIMRTC_API_VERSION_CHECK(1, 0, 3);
+    EXPECT_FALSE(v2_0_0_check);  // v1.0.2 < v2.0.0
+    EXPECT_FALSE(v1_1_0_check); // v1.0.2 < v1.1.0
+    EXPECT_FALSE(v1_0_3_check);  // v1.0.2 < v1.0.3
 }

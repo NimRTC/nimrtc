@@ -7,10 +7,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Post-`v1.0.1` work accumulates here. The `## [1.0.1]` entry below
-> is the authoritative record of the first published stable cut
-> (`v1.0.0` tag exists as a source milestone only and was never
-> published as a GitHub Release).
+> Post-`v1.0.2` work accumulates here (the v1.1 C-track items below).
+> The `## [1.0.2]` entry is the authoritative record of the current
+> published stable cut.
+
+## [1.0.2] - 2026-11-02
+
+### Status: Stable
+
+> **Patch release fixing two defects in `v1.0.1`.** `v1.0.1` remains
+> published and its tag is unchanged; per `RELEASING.md` §2.3 a
+> post-announcement fix becomes a new patch version. Public API is
+> unchanged (`NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE`
+> = `""`).
 
 ### Fixed
 
@@ -38,6 +47,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tree with members relative to the staging root — the same layout as
   the `tar -C ... .` of the Linux/macOS jobs — and all four jobs now
   refuse to publish a bundle larger than 64 MB.
+- **The signing public key is now shipped with the release.** `v1.0.1`
+  published detached `.asc` signatures while the signing key stayed
+  private, so `gpg --verify` failed for every downstream consumer.
+  The publish job now exports the public half of the signing key as
+  the `nimrtc-signing-key.asc` release asset, pushes it to
+  keyserver.ubuntu.com and keys.openpgp.org, and the release body
+  carries the verification recipe together with the fingerprint
+  (`114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`).
+
+### Known issues
+
+- **The `v1.0.1` Windows asset stays broken.** The published
+  `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is still the 822 MB
+  archive that contains the CI workspace rather than the install
+  tree; `v1.0.1` is immutable now, so the usable Windows artefact is
+  the one in this release.
+
+### Notes
+
+- Public API is unchanged vs `v1.0.1`; `NIMRTC_API_VERSION` = 10002,
+  `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
+- The `windows` bundle ships the stub 3A path (the WebRTC APM meson
+  prebuild is allowed to fail on the windows runners), same as in
+  `v1.0.1`.
+
+## [Unreleased — v1.1 C-track]
 
 ### Added
 
@@ -112,7 +147,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Windows bundle is 822 MB instead of ~3 MB.** The Windows job
   packed the whole CI workspace instead of the install staging tree
-  (see the "Fixed" entry in `[Unreleased]` for the root cause and the
+  (see the "Fixed" entry in `[1.0.2]` for the root cause and the
   fix). The published `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is
   therefore not a usable drop-in artefact: extract
   `build/_install/windows/` from it for the actual install tree.
@@ -121,7 +156,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account's GPG key list, keys.openpgp.org or keyserver.ubuntu.com,
   although `RELEASING.md` §3.3 requires `gpg --send-keys`. Consumers
   cannot verify the `.asc` signatures until the public key is
-  uploaded.
+  uploaded. Fixed in `v1.0.2`.
 
 ### Notes
 

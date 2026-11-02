@@ -12,6 +12,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > (`v1.0.0` tag exists as a source milestone only and was never
 > published as a GitHub Release).
 
+### Fixed
+
+- **WebTransport ALPN mismatch (NimRTC ↔ NimRTC handshakes were
+  rejected).** The listener advertised the HTTP/3 token `"h3"`
+  (RFC 9114 §3.1) while the session advertised the legacy draft
+  token `"sm"`, so every NimRTC-to-NimRTC WebTransport handshake was
+  refused during ALPN negotiation (Chrome interop was unaffected —
+  Chrome offers `"h3"`). Both sides now share one definition in
+  `src/web_transport/src/web_transport_msquic_alpn.hpp`
+  (`session_alpn()` / `listener_alpn()`), and
+  `src/web_transport/tests/test_web_transport_alpn.cpp` pins the
+  invariant so the two cannot drift apart again.
+- **Windows release bundle contained the whole CI workspace
+  (822 MB).** `release.yml` packed the Windows bundle with
+  `7z a -ttar -so "$staging" | 7z a -txz -si "$bundle"`. With `-so`,
+  7-Zip consumes the first positional argument as the archive name
+  (discarded, because the archive goes to stdout) and, with no file
+  list left, it packs the *current working directory* — so the
+  published v1.0.1 Windows asset shipped the sources, `.git` and the
+  complete MSVC build tree instead of the install staging tree
+  (822,079,464 bytes against 2.3-2.9 MB for the other three
+  platforms). The Windows job now uses
+  `tools/make_release_bundle.py`, which packs exactly the staging
+  tree with members relative to the staging root — the same layout as
+  the `tar -C ... .` of the Linux/macOS jobs — and all four jobs now
+  refuse to publish a bundle larger than 64 MB.
+
 ### Added
 
 - **Track A reproducible baselines (v1.1 A1/A2).** New
@@ -53,9 +80,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > is retained as a source-tree milestone tag only; it was never
 > published as a GitHub Release. `v1.0.1` is the first 1.0-line
 > release cut through `.github/workflows/release.yml` with
-> four-platform artefacts + SBOM (GPG signatures follow once
-> `GPG_PRIVATE_KEY` / `GPG_FINGERPRINT` are configured per
-> `RELEASING.md` §3.3).
+> four-platform artefacts + SBOM + detached GPG signatures.
+>
+> **Signing.** The tag-push run published the assets unsigned (no
+> `GPG_PRIVATE_KEY` configured at that point, so the publish job
+> skipped the signing steps). The release was then re-cut through the
+> `workflow_dispatch` path, which produced the signed assets that are
+> published today: every platform bundle ships with a `.sha256`
+> sidecar and a detached `.asc` signature made with key
+> `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`. The public part of
+> that key is **not** published on any keyserver yet, so
+> `gpg --verify` cannot succeed for downstream consumers until it is
+> uploaded (see "Known issues" below).
 
 ### Fixed
 
@@ -72,10 +108,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   upload; macOS arm64 `CadenceProducesApproxFps` bound relaxed 8→4 for
   runner stutter. (`4e312e3`, `5a582c5`)
 
+### Known issues
+
+- **Windows bundle is 822 MB instead of ~3 MB.** The Windows job
+  packed the whole CI workspace instead of the install staging tree
+  (see the "Fixed" entry in `[Unreleased]` for the root cause and the
+  fix). The published `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is
+  therefore not a usable drop-in artefact: extract
+  `build/_install/windows/` from it for the actual install tree.
+- **The signing key is not published.** The fingerprint
+  `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` is not on the GitHub
+  account's GPG key list, keys.openpgp.org or keyserver.ubuntu.com,
+  although `RELEASING.md` §3.3 requires `gpg --send-keys`. Consumers
+  cannot verify the `.asc` signatures until the public key is
+  uploaded.
+
 ### Notes
 
 - Public API is unchanged vs `v1.0.0`; `NIMRTC_API_VERSION` = 10001,
   `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
+- The `windows` bundle ships the stub 3A path: the WebRTC APM meson
+  prebuild is allowed to fail on the windows runners
+  (`continue-on-error: true`), and the Configure step recorded
+  `3a=OFF` for that platform. The CI job list shows the prebuild step
+  as `success` because `continue-on-error` turns a failure into a
+  successful *conclusion*; the real result is in
+  `steps.apm_prebuild.outcome`, which is what the release notes are
+  generated from.
 
 ## [1.0.0] - 2026-10-30
 

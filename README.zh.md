@@ -377,9 +377,21 @@ python tools/benchmark_size.py build --markdown   # 可直接粘贴 README 的�
 
 - libwebrtc 数字是**公开参考值**，随平台、branch、codec 集合浮动，发布营销文案前请重新验证。
 - NimRTC 数字取决于构建选项（`-DNIMRTC_PLUGINS_NVENC=ON` 等）。每次改选项都跑一遍 `benchmark_size.py`。
-- **吞吐量 / 延迟 / 抖动 / MOS 评分本节故意不放** —— 这些指标依赖平台、codec、网络、目标场景。等 P2（PCM tap）和 P3（BWE + ref_frame）落地后再发布 profile 专属 benchmark。
 
-详见 [`tools/benchmark_size.py`](tools/benchmark_size.py)。
+### 传输层基线（本机 UDP 回环，v1.1）
+
+Track A 基线是传输层下限数字，不是引擎端到端声明。实测环境 Windows 10 x86_64（本地 `build/`）：
+
+| 基准 | 载荷 | 结果 |
+|---|---|---|
+| `bench_latency.json`（1000 × 172 B 回显） | 172 B（约 20ms Opus 单声道 + RTP 头） | p50 **9.6 µs**，p99 **17.6 µs**，max 139.0 µs，平均抖动 0.1 µs |
+| `bench_dc.json` datagram 平面（2000 包） | 256 B | **~78k pps / ~161 Mbps** |
+| `bench_dc.json` datagram 平面（2000 包） | 1200 B | **~81k pps / ~775 Mbps** |
+| `bench_dc.json` bidi-stream-chunk 平面（2000 包） | 16384 B | **~74k pps / ~9700 Mbps** |
+
+> 用 `python tools/benchmark_latency.py --count 1000` 和 `python tools/benchmark_dc.py` 复现；产物落在 `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json`。引擎端到端延迟 / 抖动 / MOS 仍依赖平台、codec、网络与目标场景——等 P2（PCM tap）与 P3（BWE + ref_frame）落地后再发布 profile 专属 benchmark。
+
+详见 [`tools/benchmark_size.py`](tools/benchmark_size.py)、[`tools/benchmark_latency.py`](tools/benchmark_latency.py) 与 [`tools/benchmark_dc.py`](tools/benchmark_dc.py)。
 
 ---
 

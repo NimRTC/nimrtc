@@ -12,6 +12,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > (`v1.0.0` tag exists as a source milestone only and was never
 > published as a GitHub Release).
 
+### Added
+
+- **Track A reproducible baselines (v1.1 A1/A2).** New
+  `tools/benchmark_dc.py` bursts N UDP datagrams per payload size
+  over 127.0.0.1 (256/1200 B datagram plane, 16384 B bidi-stream-chunk
+  plane) and emits `build/e2e/bench_dc.json` with pps + Mbps per size.
+  README Benchmarks (EN + ZH) now cites measured transport-floor
+  numbers for `bench_latency.json` + `bench_dc.json` with reproduce
+  commands.
+
 ## [1.0.1] - 2026-11-02
 
 ### Status: Stable

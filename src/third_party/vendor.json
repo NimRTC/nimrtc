@@ -26,6 +26,7 @@
       "upstream_version": "master",
       "commit_sha": "d0569cfa50c1858ee279d77b3fc8870be6902441",
       "submodule_path": "src/third_party/webrtc_audio_processing/src",
+      "submodule": false,
       "license": "BSD-3-Clause",
       "build": "external (Meson) — see tools/build_webrtc_apm.{cmd,sh}; CMake only consumes pre-built artifacts under build_meson/",
       "notes": "WebRTC APM. Built out-of-tree via Meson (not CMake) because upstream is Meson-first. The source tree is NOT vendored into git: it is cloned at build time by tools/fetch_webrtc_apm.py and patched by tools/apply_webrtc_apm_patches.py. NimRTC's changes to the upstream tree live as versioned patches in src/third_party/webrtc_audio_processing/patches/ (currently 0001-cxx20.patch, which raises the Meson build to C++20 — required by agc2/*.cc). Because the tree is fetched rather than committed, this vendor has NO .gitmodules entry and NO gitlink in the index — 'submodule_path' here names the on-disk location that tools/check_vendor.py inspects, not a registered submodule. After clone, run tools/build_webrtc_apm.sh (Linux/macOS) or tools/build_webrtc_apm.cmd (Windows).",
@@ -39,7 +40,7 @@
       "submodule_path": "src/third_party/mbedtls/src",
       "license": "Apache-2.0",
       "build": "HISTORICAL ONLY — DTLS production path migrated to wolfSSL. CMake wrapper at src/third_party/mbedtls/CMakeLists.txt only exposes headers via INTERFACE.",
-      "notes": "No longer linked into nimrtc_dtls. Retained as archival source per CHANGELOG.md [0.9.0-rc1] Deferred-for-1.0 note; full removal is its own PR.",
+      "notes": "No longer linked into nimrtc_dtls. Retained as archival source per CHANGELOG.md [0.9.0-rc1] Deferred-for-1.0 note; full removal is its own PR. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending). The checked-in tree is NOT byte-identical to the pinned revision, because upstream keeps its test framework in a separate 'framework' submodule whose contents are inlined here (2039 tracked files versus 332 upstream entries). A conversion therefore has to decide how to carry the inlined framework tree.",
       "size_estimate": "37 MB / 2k files",
       "submodule_optional": true
     },
@@ -62,7 +63,7 @@
       "submodule_path": "src/third_party/libjuice/src",
       "license": "MIT",
       "build": "add_subdirectory(src) — see src/third_party/libjuice/CMakeLists.txt",
-      "notes": "ICE transport.",
+      "notes": "ICE transport. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending), so commit_sha pins the upstream revision the tree was taken from rather than the tree itself. The tree additionally carries one NimRTC-local patch on top of that revision: src/udp.c sets SO_REUSEADDR/SO_REUSEPORT on the agent socket so loopback agents can coexist when the OS recycles a port through TIME_WAIT (commit 450dde2). Converting it to a submodule requires that patch to be preserved (fork or versioned patch file) first.",
       "size_estimate": "0.5 MB / 78 files"
     },
     {
@@ -73,7 +74,7 @@
       "submodule_path": "src/third_party/libsrtp/src",
       "license": "BSD-3-Clause",
       "build": "add_subdirectory(src) — see src/third_party/libsrtp/CMakeLists.txt",
-      "notes": "SRTP crypto with CRYPTO_LIBRARY=internal.",
+      "notes": "SRTP crypto with CRYPTO_LIBRARY=internal. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending). The checked-in tree is byte-identical to the pinned revision, so it needs no NimRTC-local patch and is a direct Phase 3 candidate.",
       "size_estimate": "2.9 MB / 2.4k files"
     },
     {

@@ -12,6 +12,12 @@ Exits 1 on any of:
     gitlink file) -- i.e. it is a checked-in source tree, not a submodule
   - a submodule's HEAD does not match the pinned commit_sha
 
+A vendor is only reported as a verified submodule when the parent
+repository tracks its path as a gitlink (index mode 160000). Vendors
+whose sources are still checked into this repository are reported as
+"vendored-tree" (a warning, not a failure): the manifest SHA then pins
+the upstream revision the tree was taken from, not the tree itself.
+
 Usage:
   python tools/check_vendor.py                # human-readable output
   python tools/check_vendor.py --json         # machine-readable output
@@ -42,11 +48,17 @@ if hasattr(sys.stderr, "reconfigure"):
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "src" / "third_party" / "vendor.json"
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+GITLINK_MODE = "160000"
+
+# Statuses that describe a vendor that is not (yet) a registered
+# submodule. They are reported, but they do not fail the gate.
+WARNING_STATUSES = {"no-submodule", "vendored-tree", "unregistered", "not-a-submodule"}
 
 
 class VendorResult(NamedTuple):
     name: str
-    status: str  # "ok", "drift", "missing", "no-submodule", "no-git", "bad-sha", "placeholder"
+    status: str  # "ok", "drift", "missing", "no-submodule", "vendored-tree",
+                 # "unregistered", "no-git", "bad-sha", "placeholder"
     expected: str | None
     actual: str | None
     message: str | None = None
@@ -110,6 +122,32 @@ def is_submodule_initialised(submodule_path: Path) -> bool:
     return False
 
 
+def index_entries(submodule_path: Path) -> list[tuple[str, str]]:
+    """Return (mode, path) for every index entry under submodule_path.
+
+    A registered submodule shows up as a single entry with mode 160000
+    (a gitlink). A vendor whose sources are checked into this repository
+    shows up as one entry per file with mode 100644/100755.
+    """
+    rel = submodule_path.relative_to(REPO_ROOT).as_posix()
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-s", "--", rel],
+            text=True,
+            stderr=subprocess.PIPE,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+
+    entries: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        entries.append((parts[0], parts[3].strip()))
+    return entries
+
+
 def check_vendor(v: dict, strict: bool) -> VendorResult:
     name = v["name"]
     expected = v["commit_sha"]
@@ -120,6 +158,34 @@ def check_vendor(v: dict, strict: bool) -> VendorResult:
         status = "missing" if strict else "no-submodule"
         return VendorResult(name, status, expected, None, msg)
 
+    if not v.get("submodule", True):
+        # The manifest declares this vendor as not-a-submodule (for
+        # example a tree that is fetched at build time). There is no
+        # gitlink to verify; the pinned SHA documents the upstream
+        # revision the fetch is expected to produce.
+        head = read_submodule_head(sub_path)
+        msg = "declared in the manifest as a build-time fetch, not a submodule"
+        if head:
+            msg += f"; fetched tree HEAD {head[:12]}"
+        return VendorResult(name, "not-a-submodule", expected, head, msg)
+
+    entries = index_entries(sub_path)
+    has_gitlink = any(mode == GITLINK_MODE for mode, _ in entries)
+    tracked_files = [p for mode, p in entries if mode != GITLINK_MODE]
+
+    if not has_gitlink and tracked_files:
+        # Sources are committed into this repository instead of being a
+        # submodule. The manifest SHA pins the upstream revision the tree
+        # was vendored from -- it does not describe the tree itself.
+        head = read_submodule_head(sub_path)
+        msg = (
+            f"{len(tracked_files)} file(s) are checked into this repository, "
+            "not registered as a submodule (Phase 3 pending)"
+        )
+        if head:
+            msg += f"; nested clone HEAD {head[:12]} matches the pinned revision"
+        return VendorResult(name, "vendored-tree", expected, head, msg)
+
     if not is_submodule_initialised(sub_path):
         msg = "path exists but has no .git — appears to be a checked-in source tree"
         return VendorResult(name, "no-submodule", expected, None, msg)
@@ -127,6 +193,10 @@ def check_vendor(v: dict, strict: bool) -> VendorResult:
     actual = read_submodule_head(sub_path)
     if actual is None:
         return VendorResult(name, "no-git", expected, None, "git rev-parse HEAD failed")
+
+    if not has_gitlink:
+        msg = "working tree has a .git but the index has no gitlink — not a registered submodule"
+        return VendorResult(name, "unregistered", expected, actual, msg)
 
     if actual == expected:
         return VendorResult(name, "ok", expected, actual)
@@ -148,21 +218,31 @@ def render_human(results: list[VendorResult], manifest_errors: list[str]) -> int
         print()
         return 1
 
+    # Print in a stable order.
+    order = [
+        "ok",
+        "drift",
+        "vendored-tree",
+        "unregistered",
+        "not-a-submodule",
+        "no-submodule",
+        "no-git",
+        "missing",
+    ]
     by_status: dict[str, list[VendorResult]] = {}
     for r in results:
         by_status.setdefault(r.status, []).append(r)
 
-    # Print in a stable order.
-    order = ["ok", "drift", "no-submodule", "no-git", "missing"]
     for status in order:
         entries = by_status.get(status, [])
         if not entries:
             continue
+        marker = "✓" if status == "ok" else ("⚠" if status in WARNING_STATUSES else "✗")
         for r in entries:
             if status == "ok":
-                print(f"  ✓ {r.name}: {r.actual[:12]} matches manifest")
+                print(f"  {marker} {r.name}: {r.actual[:12]} matches manifest")
             else:
-                print(f"  ✗ {r.name}: {status} — {r.message or ''}")
+                print(f"  {marker} {r.name}: {status} — {r.message or ''}")
 
     extras = {k: v for k, v in by_status.items() if k not in order}
     for status, entries in extras.items():
@@ -172,9 +252,11 @@ def render_human(results: list[VendorResult], manifest_errors: list[str]) -> int
     # Non-ok statuses that are WARNINGS (do NOT fail the gate).
     # "no-submodule" is the default for missing paths and
     # "checked-in-tree" vendors (sources committed directly to the repo
-    # instead of being a git submodule).  Only --strict turns these
+    # instead of being a git submodule).  "vendored-tree" and
+    # "unregistered" are the same class of warning, reported with the
+    # index evidence that produced them.  Only --strict turns these
     # into failures.
-    warning_statuses = {"no-submodule"}
+    warning_statuses = WARNING_STATUSES
     failed = sum(
         len(v)
         for k, v in by_status.items()
@@ -200,6 +282,9 @@ def render_human(results: list[VendorResult], manifest_errors: list[str]) -> int
 
 
 def render_json(results: list[VendorResult], manifest_errors: list[str]) -> int:
+    failed = [
+        r for r in results if r.status != "ok" and r.status not in WARNING_STATUSES
+    ]
     payload = {
         "manifest_errors": manifest_errors,
         "vendors": [
@@ -212,7 +297,9 @@ def render_json(results: list[VendorResult], manifest_errors: list[str]) -> int:
             }
             for r in results
         ],
-        "ok": all(r.status == "ok" for r in results) and not manifest_errors,
+        "failed": [r.name for r in failed],
+        "warnings": [r.name for r in results if r.status in WARNING_STATUSES],
+        "ok": not failed and not manifest_errors,
     }
     print(json.dumps(payload, indent=2))
     return 0 if payload["ok"] else 1

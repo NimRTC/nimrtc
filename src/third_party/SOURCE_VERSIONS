@@ -3,24 +3,41 @@
 # Format: <name>   <release-or-tag>   <short-sha>   <full-sha>   <vendored-on>   <url>
 #
 # This file is the human-readable companion to src/third_party/vendor.json.
-# During the 1.0.0 vendor migration (docs/plan/vendor-migration.md) the
-# SHAs here are copied verbatim from `vendor.json` `commit_sha` fields,
-# which are the source of truth (and gated by tools/check_vendor.py in
-# CI). When the migration completes, this file is deleted (PR L in
-# docs/plan/vendor-migration.md §6).
+# The SHAs below are copied verbatim from the vendor.json `commit_sha`
+# fields, which are the source of truth (and are gated by
+# tools/check_vendor.py in CI).  tools/vendor_update.py and
+# scripts/vendor_update.py rewrite the matching row when a pin is bumped.
+#
+# The two files describe the same pins, but they do not describe the same
+# thing: vendor.json records where each vendor's upstream revision comes
+# from, while this file records how the revision is carried in this
+# repository:
+#
+#   - submodule       the sources live in a git submodule; the parent
+#                     repository stores a 40-byte gitlink.
+#   - checked-in tree the sources are still committed into this repository
+#                     (vendor-migration.md Phase 3 pending).  The SHA is
+#                     the upstream revision the tree was taken from, not a
+#                     description of the tree itself.
+#   - fetched         the tree is downloaded at build time and is never
+#                     committed (webrtc_audio_processing).
+#
+# The state of each vendor is spelled out in src/third_party/vendor.json
+# (`notes`) and in docs/plan/vendor-migration.md.
 
 libjuice                  master         77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
 libsrtp                   master         2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
 mbedtls                   4.2.0          023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
-libopus                   v1.6.1         7030c73   7030c73010a3c1372e92eb4cc2f0ced3080a9c07   2026-09-04   https://github.com/xiph/opus
-googletest                v1.12.1        58d77fa   58d77fa8070e8cec2dc1ed015d66b454c8d78850   2026-09-09   https://github.com/google/googletest
+libopus                   v1.6.1         22244de   22244de5a79bd1d6d623c32e72bf1954b56235be   2026-09-04   https://github.com/xiph/opus
+googletest                v1.12.0        15460959  15460959cbbfa20e66ef0b5ab497367e47fc0a04   2026-09-09   https://github.com/google/googletest
 nlohmann_json             v3.11.3        9cca280   9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03   2026-09-09   https://github.com/nlohmann/json
 wolfssl                   v5.9.2         ac01707   ac01707f552c611fbd135cc723b2682b3e7f80f2   2026-09-09   https://github.com/wolfSSL/wolfssl
 webrtc_audio_processing   master         d0569cf   d0569cfa50c1858ee279d77b3fc8870be6902441   2026-09-11   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing
+msquic                    master         a5ae3a0   a5ae3a06ed6e3c054c251892370801db98d85174   2026-10-19   https://github.com/NimRTC/msquic
 
 # Patches applied on top of the upstream tree
 #
-# webrtc_audio_processing is not vendored into git — it is cloned at build
+# webrtc_audio_processing is not vendored into git - it is cloned at build
 # time by tools/fetch_webrtc_apm.py.  NimRTC's changes to it therefore
 # travel as versioned patches in src/third_party/webrtc_audio_processing/
 # patches/, applied by tools/apply_webrtc_apm_patches.py:
@@ -29,3 +46,14 @@ webrtc_audio_processing   master         d0569cf   d0569cfa50c1858ee279d77b3fc88
 #
 # Upstream base commit for 0001-cxx20.patch:
 #   d0569cfa50c1858ee279d77b3fc8870be6902441
+#
+# libjuice is still a checked-in tree, and it carries one NimRTC-local
+# change on top of the pinned upstream revision:
+#
+#   src/third_party/libjuice/patches/0001-so-reuseaddr.patch
+#       set SO_REUSEADDR/SO_REUSEPORT on the agent socket so loopback
+#       agents can coexist when the OS recycles a port through TIME_WAIT
+#       (commit 450dde2).
+#
+# Upstream base commit for 0001-so-reuseaddr.patch:
+#   77daa8befd828046169adbb012d8de928bfdcdd4

@@ -11,6 +11,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The `## [1.0.2]` entry is the authoritative record of the current
 > published stable cut.
 
+### Fixed
+
+- **The vendored libjuice tree shipped leftover debug instrumentation.**
+  `src/agent.c` carried three `TEMP-DIAG` `JLOG_INFO` blocks (STUN
+  bookkeeping, per-entry state, retransmit tracing) and `src/udp.c`
+  carried three per-packet `JLOG_INFO` blocks (local address,
+  destination address, `sendto` return value). All six were compiled
+  into every NimRTC build — including the published release bundles —
+  and fired on every STUN keepalive and on every UDP datagram. They are
+  removed; what remains in `src/udp.c` against upstream `77daa8b` is
+  exactly the intentional `SO_REUSEADDR`/`SO_REUSEPORT` fix from
+  `450dde2`, now also preserved as
+  `src/third_party/libjuice/patches/0001-so-reuseaddr.patch`. The
+  em dash in that comment is replaced by a hyphen because MSVC
+  reported it as C4819 under codepage 936.
+
+### Changed
+
+- **The vendor manifest now tells the truth about what is a submodule.**
+  `tools/check_vendor.py` distinguishes a registered submodule (a
+  gitlink, index mode `160000`) from a vendor whose sources are still
+  checked into this repository; the latter is now reported as
+  `vendored-tree` instead of being counted as a verified submodule.
+  `.gitmodules` no longer lists `libjuice`, `libsrtp` and `mbedtls`,
+  which have no gitlink in the index (their intended settings are kept
+  as comments, with the blocker for each conversion spelled out).
+  `vendor.json` records the state and the local deltas per vendor, and
+  `src/third_party/SOURCE_VERSIONS` — which claimed to be copied
+  verbatim from `vendor.json` but was not — is corrected: libopus now
+  points at `22244de`, googletest at the `v1.12.0` revision upstream
+  actually tags, and `msquic` is listed at all.
+
 ### Added
 
 - **Track D packaging rules landed (behind `NIMRTC_INSTALL=OFF` by

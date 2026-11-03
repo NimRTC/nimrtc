@@ -1,15 +1,13 @@
 # Submodules for NimRTC's third-party dependencies.
 #
-# This file replaces the ~280 MB of vendored source trees that currently
-# live under src/third_party/<name>/src/.  When the migration completes
-# (see docs/plan/vendor-migration.md), the submodule paths below will
-# contain fresh git clones and the source trees will be git-tracked
-# only as submodule pointers (40 bytes per entry instead of 280 MB).
+# Every entry below is a REAL submodule: the parent repository tracks
+# the path as a gitlink (index mode 160000), so `git submodule update
+# --init` fetches it and the tree is stored as a 40-byte pointer
+# instead of a checked-in source tree.
 #
-# Until the migration lands, the source trees are still checked in
-# directly.  Adding a new entry here does NOT remove the existing
-# source — that requires running `git rm --cached <path>` and committing
-# the deletion in the same PR that adds the submodule.
+# The pinned commit for each submodule lives in
+# src/third_party/vendor.json and is enforced by tools/check_vendor.py
+# in CI.  Update both files together when bumping a pin.
 #
 # NOTE: webrtc_audio_processing is deliberately NOT listed here.  Its
 # source tree is fetched at build time by tools/fetch_webrtc_apm.py
@@ -19,6 +17,12 @@
 # would be misleading: there is no gitlink for it in the index, so
 # `git submodule update --init` would have nothing to fetch.  Its pinned
 # upstream SHA lives in src/third_party/vendor.json like the others.
+#
+# NOTE: libjuice, libsrtp and mbedtls are NOT listed here either.  Their
+# sources are still checked into this repository, so an entry would claim
+# a submodule that does not exist in the index.  Their conversion is
+# tracked as Phase 3 of docs/plan/vendor-migration.md; the URLs and
+# branches are kept at the bottom of this file for that work.
 
 [submodule "src/third_party/wolfssl/src"]
 	path = src/third_party/wolfssl/src
@@ -26,29 +30,11 @@
 	# Pinned: v5.9.2 — see src/third_party/vendor.json
 	branch = v5.9.2-stable
 
-[submodule "src/third_party/mbedtls/src"]
-	path = src/third_party/mbedtls/src
-	url = https://github.com/Mbed-TLS/mbedtls.git
-	# Pinned: 4.2.0 — historical only; DTLS production path is wolfSSL.
-	branch = mbedtls-4.2.0
-
 [submodule "src/third_party/libopus/src"]
 	path = src/third_party/libopus/src
 	url = https://github.com/xiph/opus.git
 	# Pinned: v1.6.1
 	branch = v1.6.1
-
-[submodule "src/third_party/libjuice/src"]
-	path = src/third_party/libjuice/src
-	url = https://github.com/paullouisageneau/libjuice.git
-	# Branch: master (last updated 2026-09-04 in SOURCE_VERSIONS)
-	branch = master
-
-[submodule "src/third_party/libsrtp/src"]
-	path = src/third_party/libsrtp/src
-	url = https://github.com/cisco/libsrtp.git
-	# Branch: master
-	branch = master
 
 [submodule "src/third_party/nlohmann_json"]
 	path = src/third_party/nlohmann_json
@@ -76,3 +62,31 @@
 	# than rewritten at configure time, so the submodule working tree
 	# stays vendor-clean and the pin is fetchable from a fresh clone.
 	branch = nimrtc-patches
+
+# ---------------------------------------------------------------------------
+# Pending submodule conversions (Phase 3 of docs/plan/vendor-migration.md).
+# These paths are tracked as regular files in this repository, so they are
+# deliberately left out of the submodule sections above.  The values below
+# are the intended settings for the conversion commits.
+#
+# libsrtp — the checked-in tree is byte-identical to the pinned revision
+#   (2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2), so it converts directly.
+#     path   = src/third_party/libsrtp/src
+#     url    = https://github.com/cisco/libsrtp.git
+#     branch = master
+#
+# libjuice — the checked-in tree carries one NimRTC-local patch on top of
+#   the pinned revision (77daa8befd828046169adbb012d8de928bfdcdd4): the
+#   SO_REUSEADDR/SO_REUSEPORT sets in src/udp.c.  The patch has to be
+#   preserved (fork or versioned patch file) before the conversion.
+#     path   = src/third_party/libjuice/src
+#     url    = https://github.com/paullouisageneau/libjuice.git
+#     branch = master
+#
+# mbedtls — archival only, but the checked-in tree inlines the contents of
+#   upstream's separate "framework" submodule, so it is not byte-identical
+#   to the pinned revision (023aca86208a4f1e602b4098fb46d936adb4657a).
+#     path   = src/third_party/mbedtls/src
+#     url    = https://github.com/Mbed-TLS/mbedtls.git
+#     branch = mbedtls-4.2.0
+# ---------------------------------------------------------------------------

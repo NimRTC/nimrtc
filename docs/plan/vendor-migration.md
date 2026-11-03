@@ -4,8 +4,13 @@
 |---|---|
 | Version | v1.0 (draft) |
 | Date | 2026-09-11 |
-| Status | **DRAFT — schema landed, SHA pinning pending** |
+| Status | **IN PROGRESS — 5 of 9 vendors are submodules; 3 are still checked-in trees; all pins SHA-locked** |
 | Goal | Replace ~280 MB of checked-in vendor source with git submodules + a SHA-pinned `vendor.json` manifest, without breaking offline builds. |
+
+Last verified 2026-11-03: every pin in `vendor.json` is a full 40-character
+SHA and matches the upstream revision actually in use; `tools/check_vendor.py`
+reports the five registered submodules as matching and the three checked-in
+trees as warnings.
 
 ## 1. Background
 
@@ -14,25 +19,31 @@ projects (libjuice, libsrtp, mbedtls, libopus, wolfssl,
 webrtc_audio_processing, googletest, nlohmann_json). Total: ~317 MB
 across ~11 600 files (measured 2026-09-11):
 
-| Vendor                        | Size       | Files | Pinned? |
-|-------------------------------|------------|-------|---------|
-| wolfssl                       | 123 MB     | 3 622 | partial (v5.9.2, SHA unknown) |
-| webrtc_audio_processing       | 121 MB     | 2 743 | partial (webrtc-m129, SHA unknown) |
-| mbedtls                       |  37 MB     | 2 056 | ✅ (4.2.0 / `023aca8…`) |
-| libopus                       |  29 MB     |   483 | ✅ (v1.6.1 / `7030c73…`) |
-| googletest                    |   3.4 MB   |   205 | partial (v1.12.1) |
-| libsrtp                       |   2.9 MB   | 2 398 | partial (master) |
-| nlohmann_json                 |   0.9 MB   |     3 | partial (v3.11.3) |
-| libjuice                      |   0.5 MB   |    78 | ✅ (master / `77daa8b…`) |
+| Vendor                        | Size       | Files | State in this repo | Pinned revision |
+|-------------------------------|------------|-------|--------------------|-----------------|
+| wolfssl                       | 123 MB     | 3 622 | submodule ✅ | `ac01707` (v5.9.2-stable) |
+| webrtc_audio_processing       | 121 MB     | 2 743 | fetched at build time ✅ | `d0569cf` (master) |
+| mbedtls                       |  37 MB     | 2 056 | checked-in tree ⏳ | `023aca8` (4.2.0) |
+| libopus                       |  29 MB     |   483 | submodule ✅ | `22244de` (v1.6.1) |
+| googletest                    |   3.4 MB   |   205 | submodule ✅ | `15460959` (v1.12.0) |
+| libsrtp                       |   2.9 MB   | 2 398 | checked-in tree ⏳ | `2f82ec0` (master) |
+| nlohmann_json                 |   0.9 MB   |     3 | submodule ✅ | `9cca280` (v3.11.3) |
+| libjuice                      |   0.5 MB   |    78 | checked-in tree ⏳ | `77daa8b` (master) |
+| msquic                        |  ~30 MB    |   500 | submodule ✅ (NimRTC fork) | `a5ae3a0` |
+
+⏳ = the sources are still committed into this repository; the SHA is the
+upstream revision the tree was taken from, not a description of the tree.
+See §3 Phase 3 for the per-vendor state and the blockers.
 
 Source: `src/third_party/SOURCE_VERSIONS` + PowerShell `Get-ChildItem -Recurse`.
 
 This was deliberately listed as a **1.0.0 blocker** in
 `CHANGELOG.md` `[0.9.0-rc1]` ("Vendor sources are checked into the
 tree… Migrating to submodules + a vendor.json manifest with SHA256-pinned
-tags is a blocker for the 1.0.0 tag."). As of this draft, the manifest
-schema and `.gitmodules` skeleton exist but no SHAs are pinned and no
-migration has executed.
+tags is a blocker for the 1.0.0 tag."). As of 2026-11-03 the manifest
+schema, the SHA pins and the CI gate are in place, five of the nine
+vendors have been switched to submodules, and three are still checked-in
+trees (see §3 Phase 3 for the per-vendor state).
 
 ## 2. Goal & non-goals
 
@@ -40,8 +51,9 @@ migration has executed.
 
 By 1.0.0:
 
-- All eight vendor trees replaced by git submodules pointing at pinned
-  commits in `vendor.json`.
+- All nine vendor trees replaced by git submodules pointing at pinned
+  commits in `vendor.json` (webrtc_audio_processing excepted — it is
+  fetched at build time, see D6).
 - `vendor.json` contains the canonical SHA for every submodule.
 - `tools/check_vendor.py` fails CI if any submodule SHA drifts from the
   manifest.
@@ -134,6 +146,24 @@ For each vendor in turn:
 (test-only) → libjuice → libopus → libsrtp → mbedtls (historical) →
 wolfssl (production DTLS — most cautious).
 
+#### Verified per-vendor state (2026-11-03)
+
+| Vendor | State | Blocker |
+|---|---|---|
+| nlohmann_json | submodule | — |
+| googletest | submodule | — |
+| libopus | submodule | — |
+| wolfssl | submodule | — |
+| msquic | submodule (NimRTC fork, one patch commit) | — |
+| libsrtp | checked-in tree | none: the tree is byte-identical to the pinned revision `2f82ec0`, so it converts directly |
+| libjuice | checked-in tree | the tree carries one NimRTC-local patch on top of `77daa8b` (SO_REUSEADDR/SO_REUSEPORT in `src/udp.c`); it is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` and has to be re-applied (or carried by a fork) after the conversion |
+| mbedtls | checked-in tree | the tree inlines the contents of upstream's separate `framework` submodule (2039 tracked files vs 332 upstream entries), so it is not byte-identical to `023aca8`; the conversion has to decide how to carry the inlined framework tree |
+
+`tools/check_vendor.py` distinguishes the two states from the index: a
+registered submodule is a gitlink (mode `160000`), a checked-in tree is
+one index entry per file. Checked-in trees are reported as warnings
+(`vendored-tree`), never as a verified submodule.
+
 webrtc_audio_processing is **not** in this list: its source tree is never
 committed to this repo (it is fetched at build time and patched from
 `src/third_party/webrtc_audio_processing/patches/`), so there is no
@@ -174,6 +204,15 @@ that preceded submodule migration. Its data now lives in `vendor.json`
 (SHA + upstream_version per vendor) and `.gitmodules` (URL + branch).
 The file can be deleted once `vendor.json` is the authoritative source.
 
+Status (2026-11-03): **deferred, not done.** The file was corrected
+instead — its SHAs now match `vendor.json` verbatim (they did not
+before: libopus pointed at `7030c73` instead of `22244de`, googletest at
+a `v1.12.1` revision that upstream never tagged, and msquic was missing
+entirely). It is kept for two reasons that `vendor.json` does not cover
+yet: it records when each tree was vendored, and it inventories the
+local deltas (the libjuice and WebRTC APM patch sets). Both can move
+into `vendor.json` once the last checked-in tree is converted.
+
 ## 4. Open decisions
 
 | # | Decision | Default | Notes |
@@ -184,6 +223,8 @@ The file can be deleted once `vendor.json` is the authoritative source.
 | D4 | Allow `branch = master` pins (no tagged release)? | **Yes**, with `commit_sha` as ground truth | libjuice and libsrtp don't tag frequently; pinning the HEAD SHA is sufficient. |
 | D5 | WebRTC APM — clone `master` or a stable commit? | **master** | PulseAudio fork moves slowly; no recent stable tag. |
 | D6 | Should WebRTC APM become a real submodule? | **No** | The tree is never committed to this repo, so a gitlink would have nothing to point at. NimRTC's changes to upstream travel as versioned patches applied by `tools/apply_webrtc_apm_patches.py`; the pinned upstream SHA stays in `vendor.json`. |
+| D7 | How is the NimRTC-local libjuice patch carried? | **Versioned patch file** | `src/udp.c` sets SO_REUSEADDR/SO_REUSEPORT (commit `450dde2`). The delta is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` against base `77daa8b`, mirroring the APM patch mechanism. The alternative — a NimRTC/libjuice fork like NimRTC/msquic — is still open; the patch file is the cheap first step and keeps the conversion reversible. |
+| D8 | How is upstream's mbedtls `framework` submodule carried? | **Open** | The checked-in tree inlines the framework sources (2039 tracked files vs 332 upstream entries). Converting mbedtls means either dropping the inlined framework tree (the tree is archival and not built) or keeping a second submodule for it. No decision taken yet. |
 
 ## 5. Risks
 
@@ -197,16 +238,25 @@ The file can be deleted once `vendor.json` is the authoritative source.
 
 ## 6. Commit / PR sequencing
 
-1. **PR A** — `chore(vendor): add vendor.json + .gitmodules schema` (this PR, schema only).
-2. **PR B** — `chore(vendor): fill missing SHAs in vendor.json` (fetch tags, no source changes).
-3. **PRs C–J** — One per vendor, in the order in §3 Phase 3.
-4. **PR K** — `ci: add tools/check_vendor.py gate`.
-5. **PR L** — `chore(vendor): delete src/third_party/SOURCE_VERSIONS`.
+1. **PR A** — `chore(vendor): add vendor.json + .gitmodules schema` (done).
+2. **PR B** — `chore(vendor): fill missing SHAs in vendor.json` (done — every
+   `commit_sha` is a full SHA and matches the revision in use).
+3. **PRs C–J** — One per vendor, in the order in §3 Phase 3. Done for
+   nlohmann_json, googletest, libopus, wolfssl and msquic; still open for
+   libsrtp (no blocker), libjuice (patch must be carried, D7) and mbedtls
+   (framework tree, D8).
+4. **PR K** — `ci: add tools/check_vendor.py gate` (done — six call sites in
+   `ci.yml` and `interop.yml`).
+5. **PR L** — `chore(vendor): delete src/third_party/SOURCE_VERSIONS`
+   (deferred until the last checked-in tree is converted; see Phase 5).
 
 Estimated total: 8–10 days of focused work across ~10 PRs.
 
 ## 7. Reference
 
-- `src/third_party/SOURCE_VERSIONS` — current authoritative version list (to be retired in PR L).
+- `src/third_party/SOURCE_VERSIONS` — human-readable version list, kept in
+  sync with `vendor.json` (to be retired in PR L).
+- `src/third_party/vendor.json` — the authoritative manifest (SHA + upstream
+  version + how each vendor is carried).
 - `src/third_party/CMakeLists.txt` — `_nimrtc_vendor_add_if_populated()` helper that already does the right thing whether the source is vendored or a submodule.
 - `docs/plan/linux-x86_64-support.md` §10 — prior decision D2 (CI not blocking until 5 consecutive greens) carries over to the vendor-check gate.

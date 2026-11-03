@@ -1007,6 +1007,42 @@ jobs:
             dist/sbom.json
           fail_on_unmatched_files: false
 
+      # The softprops action always CREATES a new draft, then discovers an
+      # existing draft for the same tag, keeps the OLDER one and deletes
+      # the new one ("Using release <id> ... instead of duplicate draft
+      # <id>").  The kept draft keeps its OLD body -- the body generated
+      # in this run is thrown away with the deleted draft.  Observed at
+      # the v1.0.2 cut: the body generator was fixed but the published
+      # draft still carried the previous run's body (stale "Partial
+      # release" banner, missing code fence, missing known issue).
+      # Refresh the body explicitly so a re-run is idempotent: the
+      # published draft always ends up with the body generated here.
+      - name: Refresh the draft release body
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\" and .draft == true) | .id" \
+            | head -n1)"
+          if [[ -z "${release_id}" ]]; then
+            echo "::error::no draft release found for ${RELEASE_TAG}"
+            exit 1
+          fi
+          payload="${RUNNER_TEMP}/release_body.json"
+          # `tag_name` must be sent explicitly: a PATCH that omits it
+          # clears the draft's tag and GitHub replaces it with an
+          # `untagged-<hash>` placeholder, so publishing the draft would
+          # create a bogus tag instead of v1.0.2.
+          jq -n --arg tag "${RELEASE_TAG}" --rawfile body dist/release_notes.md \
+            '{tag_name: $tag, body: $body}' > "${payload}"
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            --input "${payload}" --silent
+          echo "[+] refreshed the body of draft release ${release_id} (${RELEASE_TAG})"
+
       - name: Surface attestation in Step Summary
         if: always()
         shell: bash

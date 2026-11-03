@@ -626,7 +626,7 @@ TEST_F(EngineTimeline, NonStandardVideoClockRateFromRtpmapWins) {
     // 48000 ticks: 1 s at the peer-declared 48 kHz, ~533 ms at the
     // 90 kHz fallback.  ast24 = 0 disables the abs-send-time refinement
     // so the media clock alone decides (same as case 5).
-    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/48'000, /*ast24=*/0);
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/kRate, /*ast24=*/0);
     ASSERT_FALSE(pkt.empty());
     rx.feed_media_inbound(pkt.data(), pkt.size());
 

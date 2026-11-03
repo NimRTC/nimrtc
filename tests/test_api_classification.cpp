@@ -266,12 +266,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   SCTP DCEP codec (DATA_CHANNEL_OPEN/ACK encode/decode):
     //     - sctp/dcep.hpp
     //
+    // v1.2 M2 bump: +1 public header (102 -> 103) for the
+    //   StrategyValidator p99 budget enforcement helper:
+    //     - transport/strategy_validator.hpp
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 102;
+    constexpr std::size_t kBaselineHeaderCount = 103;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

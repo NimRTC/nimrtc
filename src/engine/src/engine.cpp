@@ -3390,7 +3390,8 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
 }
 
 const char* NimRTCEngine::ice_state_string() const noexcept {
-    if (!ice_t_) return "closed";    switch (ice_t_->state()) {
+    if (!ice_t_) return "closed";
+    switch (ice_t_->state()) {
         case plugins::IceState::Disconnected: return "disconnected";
         case plugins::IceState::Gathering:    return "gathering";
         case plugins::IceState::Connecting:   return "connecting";

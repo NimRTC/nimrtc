@@ -63,6 +63,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   archive that contains the CI workspace rather than the install
   tree; `v1.0.1` is immutable now, so the usable Windows artefact is
   the one in this release.
+- **The bundles do not contain NimRTC's own headers, static library,
+  or `NimRTCConfig.cmake`.** Each platform bundle currently ships
+  only the vendored third-party dependency stack (wolfSSL /
+  libsrtp3 / libjuice / msquic headers and libraries); no module in
+  `src/modules/` declares an `install()` rule, and no CMake package
+  config is generated, so `find_package(NimRTC)` does not resolve
+  against a downloaded bundle and linking NimRTC itself still requires
+  a source build. This predates `v1.0.1` (its Linux bundle has the
+  same shape). Adding per-module `install()` rules plus a generated
+  `NimRTCConfig.cmake` / `NimRTCConfigVersion.cmake` is tracked for
+  `v1.0.3`; `README.md` "Download prebuilt" has been corrected to
+  describe what the bundles actually contain.
 
 ### Notes
 

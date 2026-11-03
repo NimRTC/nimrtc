@@ -900,10 +900,15 @@ jobs:
               echo "> The public half of the signing key ships with this"
               echo "> release as \`nimrtc-signing-key.asc\`. To verify a bundle:"
               echo
-              echo "> ```bash"
-              echo "> gpg --import nimrtc-signing-key.asc"
-              echo "> gpg --verify nimrtc-<platform>.tar.xz.asc nimrtc-<platform>.tar.xz"
-              echo "> ```"
+              # NOTE: these lines are single-quoted on purpose.  Inside
+              # double quotes bash performs command substitution on
+              # backticks, so `echo "> ```bash"` swallowed the following
+              # lines into a command substitution and the rendered body
+              # lost the whole code block (observed on the v1.0.2 draft).
+              echo '> ```bash'
+              echo '> gpg --import nimrtc-signing-key.asc'
+              echo '> gpg --verify nimrtc-<version>-<platform>.tar.xz.asc nimrtc-<version>-<platform>.tar.xz'
+              echo '> ```'
               echo
               echo "> The signing key fingerprint is \`${{ vars.GPG_FINGERPRINT }}\`."
               echo "> Check it against the fingerprint shown by \`gpg --fingerprint\`"
@@ -916,26 +921,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Use a plain `test -f` per file rather than `compgen -G`:
-          # `compgen -G` is only a builtin when bash-completion is loaded,
-          # which is not guaranteed in fresh `ubuntu-latest` images and
-          # has been observed to silently return 0 against an empty
-          # pattern, defeating the missing-bundle detection (the v0.14.0
-          # release cut never reached this branch because aarch64 was
-          # the only one missing, but a future multi-missing scenario
-          # would have skipped the Partial release banner).
+          # The uploaded assets are VERSIONED: the build jobs pack
+          # `nimrtc-${version}-<platform>.tar.xz` (see the "Bundle name"
+          # comments in each build job).  The previous check looked for
+          # the UNVERSIONED `nimrtc-<platform>.tar.xz`, so every platform
+          # was reported MISSING even when it had been built and
+          # uploaded -- the v1.0.2 draft body therefore carried a false
+          # "Partial release" banner listing all four platforms while
+          # all four assets were present in the release.
+          version="${{ needs.preflight.outputs.release_tag }}"
+          version="${version#v}"
           missing=()
           for bundle in \
-            nimrtc-windows-x86_64-msvc \
-            nimrtc-linux-x86_64-gcc \
-            nimrtc-linux-aarch64-gcc \
-            nimrtc-macos-arm64-clang
+            windows-x86_64-msvc \
+            linux-x86_64-gcc \
+            linux-aarch64-gcc \
+            macos-arm64-clang
           do
-            if [[ -f "dist/${bundle}.tar.xz" ]]; then
-              echo "[+] ${bundle}.tar.xz present"
+            if [[ -f "dist/nimrtc-${version}-${bundle}.tar.xz" ]]; then
+              echo "[+] nimrtc-${version}-${bundle}.tar.xz present"
             else
-              echo "[!] ${bundle}.tar.xz MISSING"
-              missing+=("$bundle")
+              echo "[!] nimrtc-${version}-${bundle}.tar.xz MISSING"
+              missing+=("nimrtc-${version}-${bundle}.tar.xz")
             fi
           done
           if (( ${#missing[@]} > 0 )); then
@@ -949,10 +956,10 @@ jobs:
               for m in "${missing[@]}"; do
                 echo "> - \`${m}\`"
               done
-              echo "> Cause: GHA-hosted ARM64 runner capacity (14+ hour queue"
-              echo "> was observed at v0.14.0 cut) for the \`ubuntu-*-arm\` pool."
-              echo "> Follow-up release will ship the missing platform when"
-              echo "> runner capacity returns."
+              echo "> Cause: the corresponding build job did not produce an"
+              echo "> artefact in this run (see the workflow run log for the"
+              echo "> failing job). A follow-up release will ship the missing"
+              echo "> platform."
             } >> dist/release_notes.md
           fi
 
@@ -1013,16 +1020,20 @@ jobs:
           {
             echo "## Platform bundle coverage"
             echo
+            version="${{ needs.preflight.outputs.release_tag }}"
+            version="${version#v}"
             for bundle in \
-              nimrtc-windows-x86_64-msvc \
-              nimrtc-linux-x86_64-gcc \
-              nimrtc-linux-aarch64-gcc \
-              nimrtc-macos-arm64-clang
+              windows-x86_64-msvc \
+              linux-x86_64-gcc \
+              linux-aarch64-gcc \
+              macos-arm64-clang
             do
-              if [[ -f "dist/${bundle}.tar.xz" ]]; then
-                echo "- \`${bundle}\` — present"
+              # Versioned asset names -- see the note in the
+              # "Verify which platform bundles are present" step.
+              if [[ -f "dist/nimrtc-${version}-${bundle}.tar.xz" ]]; then
+                echo "- \`nimrtc-${version}-${bundle}.tar.xz\` — present"
               else
-                echo "- \`${bundle}\` — **MISSING** (aarch64 leg is best-effort; see RELEASING.md §3.1 step 4)"
+                echo "- \`nimrtc-${version}-${bundle}.tar.xz\` — **MISSING** (the corresponding build job did not produce an artefact; see the run log)"
               fi
             done
             echo

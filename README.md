@@ -1,13 +1,13 @@
 # NimRTC
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.0.2-green.svg)](CHANGELOG.md)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Platforms](https://img.shields.io/badge/platforms-Win%20%7C%20Linux%20%7C%20macOS%20%7C%20aarch64-lightgrey.svg)](#platform-support)
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Current:** v1.0.1 (Stable) — first published stable release (`v1.0.0` tag retained as source milestone only; never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10001, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.1]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
+> **Current:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > 🌐 **Other languages**: [Simplified Chinese](README.zh.md) · **Try the live demo**: [nimrtc.github.io/nimrtc/wasm](https://nimrtc.github.io/nimrtc/wasm/)
 
@@ -67,7 +67,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 
 | | | |
 |---|---|---|
-| 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **~5.6 MB static lib** (vs libwebrtc 150–250 MB) |
+| 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **<15 MB static lib** (vs libwebrtc 150–250 MB) |
 | 🧩 **Profiles for scenes, not forks** — `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **Swappable crypto** — OpenSSL ↔ mbedTLS ↔ GMSSL with no API change | 🛡️ **GM/T cryptography ready** — production-credible path for Xinchuang |
 | 📡 **Wire-level interop** — Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
 
@@ -100,6 +100,30 @@ No single feature here is brand new — but the **combination** is rare in the o
 | Standing up an **relay** without rewriting protocol code | Compile the `relay` profile (L0+L1+L3) — same engine, no L2 codec. |
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not P1).
+
+## Download prebuilt v1.0.2
+
+Each platform bundle ships the **vendored third-party dependency stack** for
+that platform — the wolfSSL / libsrtp3 / libjuice / msquic headers and
+libraries — so you can inspect and link the same crypto, SRTP, ICE and QUIC
+primitives the engine uses without building them yourself.
+
+> **The bundle does not yet contain NimRTC's own headers, static library, or
+> `NimRTCConfig.cmake`.** `find_package(NimRTC)` therefore does not work from a
+> downloaded bundle yet, and linking NimRTC itself still requires a source
+> build (see [Quick Start](#quick-start) below). Adding per-module `install()`
+> rules plus a generated CMake package config is tracked for v1.0.3.
+
+- Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
+- Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
+
+```bash
+tar -xJf nimrtc-1.0.2-linux-x86_64-gcc.tar.xz
+sha256sum -c nimrtc-1.0.2-linux-x86_64-gcc.tar.xz.sha256
+gpg --verify nimrtc-1.0.2-linux-x86_64-gcc.tar.xz.asc
+```
+
+Signing key fingerprint: `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`.
 
 ---
 
@@ -359,12 +383,12 @@ The headline reason to choose NimRTC over libwebrtc is **size** — both binary 
 
 | Artifact | NimRTC | libwebrtc (reference) |
 |---|---|---|
-| Static lib `nimrtc_engine` | **5.63 MB** | 150–250 MB |
-| Example `loopback-p2p` (full client) | **6.61 MB** | 50–80 MB (typical WebRTC sample) |
-| Example `demo-p2p` | **6.66 MB** | — |
-| **Estimated static-link footprint** | **~15.5 MB** | **~100 MB minimum** |
+| Static lib `nimrtc_engine` | **~12.5 MB (<15 MB)** | 150–250 MB |
+| Example `loopback-p2p` (full client) | **1.74 MB** | 50–80 MB (typical WebRTC sample) |
+| Example `demo-p2p` | **1.78 MB** | — |
+| **Estimated static-link footprint** | **~22.4 MB** | **~100 MB minimum** |
 
-> Measured on: Windows 10 x86_64, MSVC, Release. Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
+> Measured on: Windows 10 x86_64, MSVC, Release (local `build/`, `nimrtc_engine.lib` 12.46 MB). Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
 
 ### Source-tree complexity
 
@@ -386,9 +410,21 @@ The headline reason to choose NimRTC over libwebrtc is **size** — both binary 
 
 - libwebrtc numbers are **public reference values** that vary by platform, branch, and codec set. Re-validate before publishing marketing claims.
 - NimRTC numbers depend on which plugins / codecs you build (`-DNIMRTC_PLUGINS_NVENC=ON` etc.). Run `benchmark_size.py` after any option change.
-- **Throughput, latency, jitter, MOS scores are intentionally not in this section** — those depend heavily on platform, codec choice, network, and target use case. We will publish profile-specific benchmarks once P2 (PCM tap) and P3 (BWE + ref_frame) land.
 
-See [`tools/benchmark_size.py`](tools/benchmark_size.py) for the measurement tool.
+### Transport-floor baselines (localhost UDP loopback, v1.1)
+
+Track A baselines are transport-floor numbers, not engine glass-to-glass claims. Typical ranges on Windows 10 x86_64 (local `build/`; loopback numbers vary run to run):
+
+| Bench | Payload | Typical range |
+|---|---|---|
+| `bench_latency.json` (1000 × 172 B echo) | 172 B (~20 ms Opus mono + RTP header) | p50 **~10 µs**, p99 **~20–35 µs**, mean jitter **<1 µs** |
+| `bench_dc.json` datagram plane (2000 msgs) | 256 B | **~60–80k pps / ~120–165 Mbps** |
+| `bench_dc.json` datagram plane (2000 msgs) | 1200 B | **~60–80k pps / ~570–800 Mbps** |
+| `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~70k pps / ~9 Gbps** |
+
+> Reproduce with `python tools/benchmark_latency.py --count 1000` and `python tools/benchmark_dc.py`; artifacts land in `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json`. Exact numbers are machine- and load-dependent — the checked-in JSON is one local sample, not a pass/fail threshold. Engine glass-to-glass latency/jitter/MOS still depend on platform, codec, network, and target use case — profile-specific benchmarks land once P2 (PCM tap) and P3 (BWE + ref_frame) land.
+
+See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), and [`tools/benchmark_dc.py`](tools/benchmark_dc.py) for the measurement tools.
 
 ---
 
@@ -419,7 +455,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **Language** | C++20 | C++ (mixed C++03/17) | Go | C++ | Go |
 | **P2P client + relay from one codebase** | ✅ | ⚠️ libwebrtc + separate server | ❌ | ❌ SFU only | ❌ SFU only |
 | **Public plugin seam** | ✅ every layer | ❌ internal | ⚠️ partial | ⚠️ server-side | ⚠️ server-side |
-| **Static-link footprint** | **~5.6 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
+| **Static-link footprint** | **<15 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
 | **Embedded Linux aarch64** | ✅ CI green | ⚠️ unmaintained ports | ❌ | ❌ | ❌ |
 | **GM/T (GMSSL) crypto swap** | ✅ plugin swap, no fork | ❌ patch and rebuild | ❌ | ❌ | ❌ |
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |

@@ -140,6 +140,21 @@ jobs:
             build\examples\loopback-p2p\Debug\loopback-p2p.exe
           )
 
+      - name: Benchmark transport floor (Track A)
+        shell: pwsh
+        run: |
+          python tools/benchmark_latency.py --count 1000
+          python tools/benchmark_dc.py
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-windows-x86_64-${{ github.run_id }}
+          path: |
+            build/e2e/bench_latency.json
+            build/e2e/bench_dc.json
+          retention-days: 14
+
   # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04
   # ---------------------------------------------------------------------------
@@ -226,6 +241,20 @@ jobs:
 
       - name: Test
         run: ctest --preset tests --output-on-failure -j 2
+
+      - name: Benchmark transport floor (Track A)
+        run: |
+          python3 tools/benchmark_latency.py --count 1000
+          python3 tools/benchmark_dc.py
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-linux-x86_64-${{ github.run_id }}
+          path: |
+            build/e2e/bench_latency.json
+            build/e2e/bench_dc.json
+          retention-days: 14
 
       - name: Upload build directory on failure
         if: failure()

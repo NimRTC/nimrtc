@@ -1,0 +1,192 @@
+# NimRTCConfig.cmake.in — downstream package config (Track D, v1.1.0).
+#
+# Installed to <libdir>/cmake/NimRTC/NimRTCConfig.cmake. Hand-written
+# (not CMake-exported) on purpose:
+#
+#   - The build tree uses ALIAS targets (nimrtc::engine -> nimrtc_engine)
+#     and an OBJECT library (nimrtc_core_objects) that cannot be exported
+#     portably. A generated export set would additionally force every
+#     PRIVATE vendor target (nimrtc_vendor_*, msquic, wolfSSL, ...) into
+#     the export, coupling the install to submodule build details.
+#   - The installed bundle only promises: include/ + lib/ (static archives)
+#     + this config. Consumers link `nimrtc::engine`; the config chains
+#     every installed NimRTC archive into that target so inter-module
+#     symbols resolve without the consumer enumerating modules.
+#
+# L1–L4 note: this file ships install layout only; no new public headers,
+# no plugin implementations, no engine wiring changes.
+
+@PACKAGE_INIT@
+
+set(NIMRTC_VERSION "@PROJECT_VERSION@")
+
+if(TARGET nimrtc::engine)
+  return()
+endif()
+
+set_and_check(NimRTC_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(NimRTC_LIB_DIR "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+
+set(NIMRTC_INCLUDE_DIRS "${NimRTC_INCLUDE_DIR}")
+set(NIMRTC_LIBRARY_DIR "${NimRTC_LIB_DIR}")
+
+# Imported `nimrtc::core` carries the headers only (build-tree
+# nimrtc::core is INTERFACE; nimrtc_core_objects is an OBJECT lib whose
+# objects are already baked into the installed STATIC archives).
+add_library(nimrtc::core INTERFACE IMPORTED GLOBAL)
+set_target_properties(nimrtc::core PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}")
+
+# Per-module archives (without the `nimrtc_` prefix). `engine` is handled
+# separately below because it fans in every other archive.
+set(_nimrtc_module_shorts
+  log
+  registry
+  plugins
+  rtp
+  sdp
+  jb
+  bwe
+  sched
+  audio3a
+  ice
+  srtp
+  dtls
+  opus
+  session
+  assembly
+  datachannel
+  video_frame
+  video_payload
+  video_jb
+  h264
+  video_sdp_attributes
+  video_source
+  video_stats
+  video_rtcp_feedback
+  video_pipeline
+  video_sink
+  sctp
+  dtls_seam
+  raw_udp
+  transport
+  web_transport
+)
+
+set(_nimrtc_found_libs "")
+foreach(_short IN LISTS _nimrtc_module_shorts)
+  # NOTE: find_library caches by variable name. Unset the CACHE entry
+  # each iteration, otherwise only the first module is ever found and
+  # every later iteration silently reuses the cached path (observed:
+  # downstream link line carried only nimrtc_engine + nimrtc_log).
+  unset(_nimrtc_lib_path)
+  unset(_nimrtc_lib_path CACHE)
+  find_library(_nimrtc_lib_path
+    NAMES "nimrtc_${_short}"
+    PATHS "${NimRTC_LIB_DIR}"
+    NO_DEFAULT_PATH
+    NO_CMAKE_FIND_ROOT_PATH)
+  if(_nimrtc_lib_path)
+    list(APPEND _nimrtc_found_libs "${_nimrtc_lib_path}")
+    if(NOT TARGET "nimrtc::${_short}")
+      add_library("nimrtc::${_short}" UNKNOWN IMPORTED GLOBAL)
+      set_target_properties("nimrtc::${_short}" PROPERTIES
+        IMPORTED_LOCATION "${_nimrtc_lib_path}"
+        INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "nimrtc::core")
+    endif()
+  endif()
+  unset(_nimrtc_lib_path)
+  unset(_nimrtc_lib_path CACHE)
+endforeach()
+
+unset(_nimrtc_engine_path)
+unset(_nimrtc_engine_path CACHE)
+find_library(_nimrtc_engine_path
+  NAMES nimrtc_engine
+  PATHS "${NimRTC_LIB_DIR}"
+  NO_DEFAULT_PATH
+  NO_CMAKE_FIND_ROOT_PATH)
+
+if(_nimrtc_engine_path)
+  list(PREPEND _nimrtc_found_libs "${_nimrtc_engine_path}")
+endif()
+
+# Vendored third-party archives. NimRTC modules link these PRIVATE, so
+# static downstream consumers must carry them on the final link line
+# (observed: 82x LNK2001 juice_*/srtp_*/wolfSSL_*/opus_*/MsQuicOpenVersion
+# when only the nimrtc_* archives were chained). Most install via their
+# OWN upstream install() rules (srtp3/juice/wolfssl/msquic); `opus`
+# (EXCLUDE_FROM_ALL) and `nimrtc_vendor_usrsctp` (built directly) are
+# installed by cmake/NimRTCInstall.cmake §2b. Either way, chain whatever
+# is present — missing entries are simply skipped (module-OFF builds).
+set(_nimrtc_vendor_names
+  opus
+  srtp3
+  juice
+  wolfssl
+  msquic
+  msquic_platform
+  nimrtc_vendor_usrsctp
+  usrsctp
+)
+foreach(_vname IN LISTS _nimrtc_vendor_names)
+  unset(_nimrtc_vendor_path)
+  unset(_nimrtc_vendor_path CACHE)
+  find_library(_nimrtc_vendor_path
+    NAMES "${_vname}"
+    PATHS "${NimRTC_LIB_DIR}"
+    NO_DEFAULT_PATH
+    NO_CMAKE_FIND_ROOT_PATH)
+  if(_nimrtc_vendor_path)
+    list(APPEND _nimrtc_found_libs "${_nimrtc_vendor_path}")
+  endif()
+  unset(_nimrtc_vendor_path)
+  unset(_nimrtc_vendor_path CACHE)
+endforeach()
+unset(_vname)
+
+# System libs the vendored stacks need on the final link line. In the
+# build tree these propagate via the vendor targets' own
+# INTERFACE_LINK_LIBRARIES (juice PRIVATE ws2_32/bcrypt, usrsctp PUBLIC
+# ws2_32/iphlpapi); the installed archives lose those properties, so
+# re-attach the equivalent plain names here.
+if(WIN32)
+  list(APPEND _nimrtc_found_libs ws2_32 bcrypt iphlpapi winmm crypt32)
+elseif(UNIX)
+  list(APPEND _nimrtc_found_libs pthread dl m)
+endif()
+
+if(NOT _nimrtc_found_libs)
+  set(NimRTC_FOUND FALSE)
+  set(NimRTC_NOT_FOUND_MESSAGE
+    "NimRTCConfig: no installed nimrtc static archives under ${NimRTC_LIB_DIR}")
+  return()
+endif()
+
+if(NOT TARGET nimrtc::engine)
+  add_library(nimrtc::engine UNKNOWN IMPORTED GLOBAL)
+endif()
+if(_nimrtc_engine_path)
+  set_target_properties(nimrtc::engine PROPERTIES
+    IMPORTED_LOCATION "${_nimrtc_engine_path}"
+    INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES "${_nimrtc_found_libs}")
+else()
+  list(GET _nimrtc_found_libs 0 _nimrtc_first_lib)
+  set_target_properties(nimrtc::engine PROPERTIES
+    IMPORTED_LOCATION "${_nimrtc_first_lib}"
+    INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES "${_nimrtc_found_libs}")
+  unset(_nimrtc_first_lib)
+endif()
+
+set(NimRTC_FOUND TRUE)
+set(NIMRTC_FOUND TRUE)
+set(NIMRTC_INCLUDE_DIR "${NimRTC_INCLUDE_DIR}")
+set(NIMRTC_LIBRARIES "${_nimrtc_found_libs}")
+
+unset(_nimrtc_module_shorts)
+unset(_nimrtc_found_libs)
+unset(_nimrtc_engine_path)
+unset(_short)

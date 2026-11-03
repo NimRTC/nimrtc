@@ -13,6 +13,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Track D packaging rules landed (behind `NIMRTC_INSTALL=OFF` by
+  default).** `cmake/NimRTCInstall.cmake` (new) centralises the Track D
+  `install()` coverage from one place instead of touching every
+  per-module `CMakeLists.txt`: it installs every `src/*/include` +
+  `src/modules/*/include` tree to `<prefix>/include/`, every built
+  `nimrtc_*` STATIC archive (plus `opus` and `nimrtc_vendor_usrsctp`,
+  which have no upstream install coverage) to `<prefix>/lib/`, and a
+  hand-written `NimRTCConfig.cmake` + `SameMajorVersion` version file
+  to `<prefix>/lib/cmake/NimRTC/`. `release.yml` already passes
+  `-DNIMRTC_INSTALL=ON` on all five configure legs; the top-level
+  `CMakeLists.txt` only adds the `NIMRTC_INSTALL` option and
+  `include(NimRTCInstall)`. Windows downstream proof verified
+  2026-11-03: `cmake --install` staging holds `include/` + `lib/` +
+  `lib/cmake/NimRTC/`, and a minimal `find_package(NimRTC 1.0 REQUIRED)`
+  consumer linking `nimrtc::engine` configures, builds, and runs exit 0
+  (Linux proof still pending a CI leg; `## [1.1.0]` stays unwritten
+  until C-track closes).
 - **Track A bench CI artifacts (`b628fcb`).** `ci.yml` windows/msvc and
   linux-gcc legs now run `tools/benchmark_latency.py --count 1000` +
   `tools/benchmark_dc.py` and upload `build/e2e/bench_latency.json` +

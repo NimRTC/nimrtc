@@ -66,6 +66,12 @@ CMakeUserPresets.json
 .cursor/projects/
 
 # ─────────────────────────────────────────────
+# Local machine state (gh device ids, CLI caches)
+# Never commit — regenerated per host.
+# ─────────────────────────────────────────────
+.local/
+
+# ─────────────────────────────────────────────
 # Project root MUST stay clean (only allowed: CMake config, docs, .git metadata).
 # Block scratch logs / output captures / downloaded archives / etc. that
 # prior build/test sessions may dump at the repo root.

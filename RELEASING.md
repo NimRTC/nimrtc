@@ -313,14 +313,21 @@ Security fixes skip the normal cadence:
 
 ## 4. CMake / package manager integration
 
-> **Status (as of `v1.0.2`): not yet implemented.** The layout below is the
-> target contract, not the current one. No module under `src/modules/`
-> declares an `install()` rule and no CMake package config is generated, so
-> the published bundles ship only the vendored third-party dependency stack
-> (wolfSSL / libsrtp3 / libjuice / msquic) and `find_package(NimRTC)` does
-> not resolve against a downloaded bundle. Delivering this is tracked for
-> `v1.1.0` (Track D in `docs/plan/v1.1-plan.md`); no separate `v1.0.3` tag is
-> planned.
+> **Status (as of the Track D landing on `main`, post-`v1.0.2`):**
+> install rules are implemented behind `NIMRTC_INSTALL` (default OFF).
+> `cmake/NimRTCInstall.cmake` centralises the coverage — public headers
+> to `<prefix>/include/`, every built `nimrtc_*` STATIC archive (plus
+> `opus` and `nimrtc_vendor_usrsctp`, which have no upstream install
+> coverage) to `<prefix>/lib/`, and a hand-written `NimRTCConfig.cmake`
+> + `SameMajorVersion` version file to `<prefix>/lib/cmake/NimRTC/`.
+> `release.yml` already passes `-DNIMRTC_INSTALL=ON` on all five
+> configure legs. Windows downstream proof verified 2026-11-03
+> (staging holds `include/` + `lib/` + `lib/cmake/NimRTC/`; minimal
+> `find_package(NimRTC 1.0 REQUIRED)` consumer linking `nimrtc::engine`
+> builds and runs exit 0). Linux proof still pending a CI leg, so the
+> published `v1.0.2` bundles still ship only the vendored third-party
+> stack — the layout below remains the target contract for those
+> published assets until `v1.1.0` cuts.
 
 The target layout is: NimRTC installs CMake config files under
 `lib/cmake/NimRTC/NimRTCConfig.cmake` plus a version file

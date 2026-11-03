@@ -30,6 +30,7 @@ option(NIMRTC_VENDORED         "Use vendored third-party libraries" ON)
 option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
 option(NIMRTC_WARNINGS_AS_ERRORS "Treat warnings as errors"        ON)
+option(NIMRTC_INSTALL          "Enable install() rules (Track D packaging)" OFF)
 
 # -----------------------------------------------------------------------------
 # HW codec plugin switches (default OFF — opt-in per host platform)
@@ -291,6 +292,11 @@ if(NIMRTC_BUILD_DOCS)
         message(WARNING "Doxygen not found; skipping API docs")
     endif()
 endif()
+
+# Track D packaging (v1.1.0): install rules + package config.
+# Centralised in cmake/NimRTCInstall.cmake so per-module CMakeLists stay
+# untouched; guarded by NIMRTC_INSTALL (release.yml passes -DNIMRTC_INSTALL=ON).
+include(NimRTCInstall)
 
 # -----------------------------------------------------------------------------
 # Summary

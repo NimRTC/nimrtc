@@ -154,9 +154,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > published today: every platform bundle ships with a `.sha256`
 > sidecar and a detached `.asc` signature made with key
 > `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`. The public part of
-> that key is **not** published on any keyserver yet, so
-> `gpg --verify` cannot succeed for downstream consumers until it is
-> uploaded (see "Known issues" below).
+> that key was **not** published on any keyserver, so `gpg --verify`
+> could not succeed for downstream consumers (see "Known issues"
+> below; fixed in `v1.0.2`).
 
 ### Fixed
 
@@ -176,17 +176,15 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Known issues
 
 - **Windows bundle is 822 MB instead of ~3 MB.** The Windows job
-  packed the whole CI workspace instead of the install staging tree
-  (see the "Fixed" entry in `[1.0.2]` for the root cause and the
-  fix). The published `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is
-  therefore not a usable drop-in artefact: extract
-  `build/_install/windows/` from it for the actual install tree.
+  packed the whole CI workspace instead of the install staging tree.
+  The published `nimrtc-1.0.1-windows-x86_64-msvc.tar.xz` is therefore
+  not a usable drop-in artefact: extract `build/_install/windows/`
+  from it for the actual install tree. Fixed in `v1.0.2`.
 - **The signing key is not published.** The fingerprint
   `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` is not on the GitHub
   account's GPG key list, keys.openpgp.org or keyserver.ubuntu.com,
   although `RELEASING.md` §3.3 requires `gpg --send-keys`. Consumers
-  cannot verify the `.asc` signatures until the public key is
-  uploaded. Fixed in `v1.0.2`.
+  cannot verify the `.asc` signatures. Fixed in `v1.0.2`.
 
 ### Notes
 

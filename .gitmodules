@@ -10,18 +10,21 @@
 # directly.  Adding a new entry here does NOT remove the existing
 # source — that requires running `git rm --cached <path>` and committing
 # the deletion in the same PR that adds the submodule.
+#
+# NOTE: webrtc_audio_processing is deliberately NOT listed here.  Its
+# source tree is fetched at build time by tools/fetch_webrtc_apm.py
+# (it is gitignored and never committed), then patched by
+# tools/apply_webrtc_apm_patches.py from the versioned patches under
+# src/third_party/webrtc_audio_processing/patches/.  A submodule entry
+# would be misleading: there is no gitlink for it in the index, so
+# `git submodule update --init` would have nothing to fetch.  Its pinned
+# upstream SHA lives in src/third_party/vendor.json like the others.
 
 [submodule "src/third_party/wolfssl/src"]
 	path = src/third_party/wolfssl/src
 	url = https://github.com/wolfSSL/wolfssl.git
 	# Pinned: v5.9.2 — see src/third_party/vendor.json
 	branch = v5.9.2-stable
-
-[submodule "src/third_party/webrtc_audio_processing/src"]
-	path = src/third_party/webrtc_audio_processing/src
-	url = https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git
-	# WebRTC APM: built out-of-tree via Meson (see tools/build_webrtc_apm.sh).
-	branch = master
 
 [submodule "src/third_party/mbedtls/src"]
 	path = src/third_party/mbedtls/src

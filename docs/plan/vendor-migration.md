@@ -132,8 +132,12 @@ For each vendor in turn:
 
 **Order by risk**: nlohmann_json (header-only, 3 files) → googletest
 (test-only) → libjuice → libopus → libsrtp → mbedtls (historical) →
-wolfssl (production DTLS — most cautious) → webrtc_audio_processing
-(meson-built, most disruptive).
+wolfssl (production DTLS — most cautious).
+
+webrtc_audio_processing is **not** in this list: its source tree is never
+committed to this repo (it is fetched at build time and patched from
+`src/third_party/webrtc_audio_processing/patches/`), so there is no
+checked-in tree to convert into a submodule. See decision D6.
 
 Each PR must:
 
@@ -174,11 +178,12 @@ The file can be deleted once `vendor.json` is the authoritative source.
 
 | # | Decision | Default | Notes |
 |---|----------|---------|-------|
-| D1 | Where to put the WebRTC APM submodule? | `src/third_party/webrtc_audio_processing/src` | Matches current dir layout; CMake wrapper reads `build_meson/` (gitignored). |
+| D1 | Where to put the WebRTC APM source tree? | `src/third_party/webrtc_audio_processing/src` | Matches current dir layout; CMake wrapper reads `build_meson/` (gitignored). **Decided: NOT a submodule** — the tree is fetched at build time by `tools/fetch_webrtc_apm.py` and patched from `src/third_party/webrtc_audio_processing/patches/`, so it has no `.gitmodules` entry and no gitlink. See D6. |
 | D2 | Keep `nlohmann_json` vendored or as submodule? | **Submodule, optional** | Header-only, 0.9 MB — submodule is cheap and matches the others. |
 | D3 | What to do with the historical mbedtls tree? | **Archive, keep submodule** | Full removal is a separate PR per CHANGELOG `[0.9.0-rc1]`. |
 | D4 | Allow `branch = master` pins (no tagged release)? | **Yes**, with `commit_sha` as ground truth | libjuice and libsrtp don't tag frequently; pinning the HEAD SHA is sufficient. |
-| D5 | WebRTC APM submodule — clone `master` or a stable commit? | **master** | PulseAudio fork moves slowly; no recent stable tag. |
+| D5 | WebRTC APM — clone `master` or a stable commit? | **master** | PulseAudio fork moves slowly; no recent stable tag. |
+| D6 | Should WebRTC APM become a real submodule? | **No** | The tree is never committed to this repo, so a gitlink would have nothing to point at. NimRTC's changes to upstream travel as versioned patches applied by `tools/apply_webrtc_apm_patches.py`; the pinned upstream SHA stays in `vendor.json`. |
 
 ## 5. Risks
 

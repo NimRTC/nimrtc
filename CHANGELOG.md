@@ -11,6 +11,24 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The `## [1.0.2]` entry is the authoritative record of the current
 > published stable cut.
 
+### Added
+
+- **Track A bench CI artifacts (`b628fcb`).** `ci.yml` windows/msvc and
+  linux-gcc legs now run `tools/benchmark_latency.py --count 1000` +
+  `tools/benchmark_dc.py` and upload `build/e2e/bench_latency.json` +
+  `build/e2e/bench_dc.json` as `bench-<platform>-${{ github.run_id }}`
+  artifacts (14-day retention). Linux x86_64 reproducibility evidence
+  still pending the first green run after this commit; `## [1.1.0]` stays
+  unwritten until C-track (W3/W5) closes.
+
+### Known limitations (v1.1 C-track, still open)
+
+- W3 (APM prebuild `continue-on-error` ×4 + ON/OFF fallback) and W5
+  (`build-linux-aarch64` soft gate, excluded from `publish-release.needs`)
+  stay as-is until a four-platform release leg is observed green; flipping
+  them without that evidence would risk blocking the release.
+  `docs/plan/ci-workarounds.md` W3/W5 remain the source of truth.
+
 ## [1.0.2] - 2026-11-02
 
 ### Status: Stable

@@ -75,8 +75,14 @@ def run_throughput(count: int, size: int) -> dict:
     worker.start()
     time.sleep(0.05)  # let the receiver block in recvfrom first
     t0 = time.perf_counter_ns()
-    for _ in range(count):
+    # Large-payload bursts (16 KB x 2000 = ~32 MB back-to-back) overflow the
+    # loopback UDP buffers on shared CI runners, causing flaky drops. Pace
+    # bidi-stream-chunk sends so the receiver can drain.
+    pace = size > 1200
+    for i in range(count):
         tx.sendto(payload, ("127.0.0.1", port))
+        if pace and (i % 50 == 49):
+            time.sleep(0.002)
     worker.join()
     t1 = time.perf_counter_ns()
     stop.set()

@@ -194,6 +194,17 @@ public:
 
     void set_on_recv(plugins::OnSctpRecvCb cb) noexcept override;
 
+    // ---- ISctpSocket lifecycle (v1.2 T1, additive) -------------------------
+    //
+    // open(): no-op when the underlying usrsctp socket exists (is_ready()),
+    // kErrNotReady otherwise. Does NOT drive listen()/connect() — those stay
+    // explicit via the Stage-2 API below.
+    // close(): marks kClosed + wakes wait_for_established() observers; the
+    // underlying usrsctp socket is still released by ~UsrsctpSocket() so
+    // close() stays idempotent.
+    plugins::Status open() noexcept override;
+    void close() noexcept override;
+
     // ---- v0.14.x SCTP-over-DTLS surface (RFC 8831 §5 / RFC 8832) --------
     //
     // PPID-aware sends stamp the wire PPID (DCEP=50, string=51,

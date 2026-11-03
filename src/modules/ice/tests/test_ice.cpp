@@ -121,6 +121,28 @@ TEST(IceTransport, SelectedPairEmptyUntilConnected) {
 }
 
 // -----------------------------------------------------------------------------
+// v1.2 T2: last_recv_packet() pull-model accessor
+// -----------------------------------------------------------------------------
+//
+// The stack-internal demux path pops one queued inbound packet (FIFO)
+// without invoking on_recv. With no peer, the queue is empty and the
+// accessor must return nullopt (safe empty default, no crash).
+
+TEST(IceTransport, LastRecvPacketEmptyWhenNoPeer) {
+    IceConfig cfg;
+    cfg.bind_address = "127.0.0.1";
+    IceTransport t{cfg};
+    ASSERT_EQ(t.open(), 0u);
+
+    EXPECT_FALSE(t.last_recv_packet().has_value());
+
+    // recv() on an empty queue drains zero packets.
+    EXPECT_EQ(t.recv(), 0);
+
+    t.close();
+}
+
+// -----------------------------------------------------------------------------
 // Candidate SDP parsing round-trip
 // -----------------------------------------------------------------------------
 

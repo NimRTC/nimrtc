@@ -669,6 +669,14 @@ int IceTransport::recv() noexcept {
     return dispatched;
 }
 
+std::optional<std::vector<std::uint8_t>> IceTransport::last_recv_packet() noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (impl_->rx_queue.empty()) return std::nullopt;
+    auto pkt = std::move(impl_->rx_queue.front());
+    impl_->rx_queue.pop_front();
+    return pkt.data;
+}
+
 plugins::Addr IceTransport::local_addr() const noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->encode_addr(impl_->selected_local_str);

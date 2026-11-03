@@ -38,6 +38,8 @@ const ITransportStackFactory* default_stack_factory_singleton() noexcept;
 const ITransportStackFactory* webrtc_classic_stack_factory_singleton() noexcept;
 const ITransportStackFactory* raw_udp_arq_stack_factory_singleton() noexcept;
 
+}  // namespace detail
+
 // ---------------------------------------------------------------------------
 // make_transport_instance — Slice 7.6 PR3 (v0.12.0) implementation.
 //
@@ -151,6 +153,8 @@ nimrtc::TransportSession make_transport_instance(
 
     return session;
 }
+
+namespace detail {
 
 void do_register_default_selector() noexcept {
     // Process-static Selector instance — see Slice 7 header comment.

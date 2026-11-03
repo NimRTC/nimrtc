@@ -1408,4 +1408,26 @@ void UsrsctpSocket::set_on_recv(plugins::OnSctpRecvCb cb) noexcept {
     on_recv_ = std::move(cb);
 }
 
+// ---------------------------------------------------------------------------
+// ISctpSocket lifecycle (v1.2 T1) — open()/close() override.
+// ---------------------------------------------------------------------------
+
+plugins::Status UsrsctpSocket::open() noexcept {
+    if (sock_ == nullptr) {
+        return plugins::kErrNotReady;
+    }
+    return plugins::kOk;
+}
+
+void UsrsctpSocket::close() noexcept {
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (state_ == UsrsctpSocketState::kClosed) {
+            return;
+        }
+        state_ = UsrsctpSocketState::kClosed;
+        state_cv_.notify_all();
+    }
+}
+
 } // namespace nimrtc::sctp

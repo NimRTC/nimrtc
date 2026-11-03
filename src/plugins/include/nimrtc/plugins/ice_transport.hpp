@@ -60,6 +60,7 @@
 // a v0.13.x follow-up.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -192,6 +193,16 @@ public:
      *  Thread-safety: the caller guarantees no concurrent calls while
      *  the ICE transport is open. */
     virtual void set_scheduler(plugins::IScheduler* sched) noexcept = 0;
+
+    // ---- Stack demux accessor (v1.2 T2, additive) ---------------------------
+    //
+    // Non-pure-virtual with a safe empty default so existing backends keep
+    // compiling. Pops one queued inbound packet (FIFO) without invoking the
+    // recv callback, so WebRtcClassicStack can drive its own demux loop.
+    // Returns nullopt when the queue is empty.
+    virtual std::optional<std::vector<std::uint8_t>> last_recv_packet() noexcept {
+        return std::nullopt;
+    }
 };
 
 // ---------------------------------------------------------------------------

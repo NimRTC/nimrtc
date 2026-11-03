@@ -18,7 +18,13 @@
  *   - ICE:     open() + close() via IICETransport
  *   - DTLS:    start() + tick() via IDtlsSession  (pump drives retransmit timer)
  *   - RTP:     open() via IRTP  (stateless)
- *   - SCTP:    no lifecycle — ISctpSocket has no open/close; stub is no-op
+ *   - SCTP:    open()/close() via ISctpSocket (v1.2 T1; stub no-op)
+ *
+ * **Stack demux** (v1.2 T2): `IICETransport::last_recv_packet()` pops one
+ * queued inbound packet (FIFO) without invoking the recv callback, so the
+ * stack (or engine) can drive its own demux loop. The ICE error callback
+ * below keeps on_recv empty because the engine tick pulls via recv() /
+ * last_recv_packet() (pull model).
  *
  * **Component accessors** (ice() / dtls() / rtp() / sctp() / raw_control()):
  *   The engine continues to own the I/O loop and demux.  Accessors let the
@@ -33,8 +39,6 @@
  *
  * ## What is NOT in this file (deferred to future slices)
  *
- *   - SCTP lifecycle: `ISctpSocket` has no open/close; the stub is always
- *     ready. v0.11.0 lands `UsrsctpSocket` and extends the interface.
  *   - SRTP install / uninstall: owned by the engine; a future slice can
  *     pull it in by adding `install_srtp(SrtpKeyingMaterial)` to the stack.
  *   - Control stack (`raw_control()`): "webrtc-classic" returns nullptr.
@@ -122,8 +126,10 @@ public:
             (void)rtp_->open();
         }
 
-        // SCTP: ISctpSocket has no open/close on the seam.  The stub
-        // is ready from construction.  v0.11.0 will extend the interface.
+        // SCTP: v1.2 T1 lifecycle — stub no-op, usrsctp validates readiness.
+        if (sctp_) {
+            (void)sctp_->open();
+        }
 
         NIMRTC_LOG_INFO("transport: WebRtcClassicStack('"
                         << id() << "') started.");
@@ -133,8 +139,8 @@ public:
         NIMRTC_LOG_INFO("transport: WebRtcClassicStack('"
                         << id() << "') closing...");
 
-        // Tear down in reverse order: SCTP (no-op) → RTP → DTLS → ICE.
-        if (sctp_) { sctp_.reset(); }
+        // Tear down in reverse order: SCTP → RTP → DTLS → ICE.
+        if (sctp_) { sctp_->close(); sctp_.reset(); }
         if (rtp_)  { rtp_->close();  rtp_.reset();  }
         if (dtls_) { dtls_.reset(); }   // IDtlsSession has no close() on seam;
                                            // the engine calls dtls->close() directly
@@ -291,9 +297,8 @@ public:
         // Wire ICE error callback so transport errors surface in logs.
         if (stack->ice_ptr()) {
             stack->ice_ptr()->set_callbacks(
-                // on_recv: ICE recv is driven by the engine tick (pull model).
-                // Slice 7.5 follow-up: expose last_recv_packet() on IICETransport
-                // and wire demux here for push model.
+                // on_recv: ICE recv is driven by the engine tick (pull model
+                // via recv() / last_recv_packet() for stack demux).
                 [](plugins::BufferView /*bv*/) {},
                 [](plugins::Status err, std::string_view msg) {
                     NIMRTC_LOG_ERROR("transport[ice]: " << msg

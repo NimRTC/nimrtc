@@ -151,6 +151,14 @@ public:
         (void)cb;
     }
 
+    // ---- Lifecycle (v1.2 T1, additive) ------------------------------------
+    //
+    // Non-pure-virtual with safe no-op defaults so existing backends keep
+    // compiling. WebRtcClassicStack::start()/close() drives these; the stub
+    // stays no-op, UsrsctpSocket overrides to manage listen/connect state.
+    virtual plugins::Status open() noexcept { return plugins::kOk; }
+    virtual void close() noexcept {}
+
     // ---- Recv side ------------------------------------------------------
 
     /** Register the inbound message callback. Must be called before the first

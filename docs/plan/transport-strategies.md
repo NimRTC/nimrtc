@@ -8,6 +8,11 @@
 | Binds | v0.12.0 (T-PAL Slice 7 / 7.6 / 8 + Profile schema v1.1) |
 | Refs    | `docs/plan/transport-selection.md` §5.3 (CapabilitySelector rules); `docs/plan/v0.11-plan.md` §2.6 (Profile table); `profiles/schema/profile-v1.1.json` (additive `transport` section); ADR-010 (Profile JSON first-class) |
 
+> Tech-preview (v1.2 T4): `raw-udp-arq` media carries no congestion
+> control, no FEC, and no codec negotiation — same limitation as labeled
+> in `src/transport/include/nimrtc/transport/raw_udp_arq_stack.hpp`.
+> Production hardening (FEC/codec/reliable ARQ) is deferred to v1.3+.
+
 > This document names the **five canonical use-case strategies** that map
 > a Profile's declared intent to a concrete (media_stack, control_stack)
 > pair through `CapabilitySelector`. The Selector rule engine already

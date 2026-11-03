@@ -62,6 +62,7 @@
 // expressed inline in init_modules_once(); transport_plugin.hpp is NOT
 // included to avoid a PUBLIC link dependency on make_transport_instance().
 #include <nimrtc/transport/transport_stack.hpp>
+#include <nimrtc/transport/transport_plugin.hpp>
 #ifdef NIMRTC_HAS_H264
 #include <nimrtc/h264/codec_plugin.hpp>
 #endif
@@ -324,6 +325,15 @@ struct NimRTCEngine::Impl {
     bool            srtp_installed      = false;
     int             srtp_stats_drop     = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
+
+    // ---- ICE flap -> DTLS rehandshake (v1.2 D2, additive) ------------------
+    // Tracks ICE state across tick() to detect NAT rebinding:
+    // connected once -> disconnected (arm) -> connected again (trigger
+    // IDtlsSession::rehandshake()). plugins::IceState mirrors
+    // ice::IceState 1:1; no conversion needed.
+    plugins::IceState last_ice_state = plugins::IceState::Disconnected;
+    bool ice_connected_once = false;
+    bool ice_rehandshake_armed = false;
 
     // Local SDP (after create_offer / process_remote_sdp).
     std::optional<sdp::SessionDescription> local_sdp;
@@ -922,57 +932,23 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         // The sctp_id and rtp_id use the factory defaults; leave them
         // empty so the factory uses its own defaults.
 
-        impl_->session.media_stack_id   = impl_->resolved_media_factory_id;
-        impl_->session.control_stack_id = impl_->resolved_control_factory_id;
+        // v1.2 T3: canonical entry point — replaces the hand-rolled
+        // get_transport_stack + create two-step with a single call.
+        impl_->session = nimrtc::transport::make_transport_instance(
+            impl_->resolved_media_factory_id,
+            impl_->resolved_control_factory_id, scfg);
 
-        auto& reg = core::PluginRegistry::instance();
-
-        // Media stack ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ must succeed.
-        const ITransportStackFactory* media_f =
-            reg.get_transport_stack(impl_->resolved_media_factory_id);
-        if (!media_f) {
-            impl_->last_open_rc = core::kEngineInternal;
-            const std::string msg =
-                std::string{"engine: media stack factory '"} +
-                impl_->resolved_media_factory_id +
-                "' not registered (did "
-                "nimrtc::transport::register_default_plugins() run "
-                "before engine construction?).";
-            core::log::Logger::instance().error(msg);
-            if (on_error_) on_error_(core::kEngineInternal, msg);
-            return core::kEngineInternal;
-        }
-        impl_->session.media_stack = media_f->create(scfg);
         if (!impl_->session.media_stack) {
             impl_->last_open_rc = core::kEngineInternal;
             const std::string msg =
                 std::string{"engine: media stack factory '"} +
                 impl_->resolved_media_factory_id +
-                "' returned null ITransportStack.";
+                "' not registered or returned null (did "
+                "nimrtc::transport::register_default_plugins() run "
+                "before engine construction?).";
             core::log::Logger::instance().error(msg);
             if (on_error_) on_error_(core::kEngineInternal, msg);
             return core::kEngineInternal;
-        }
-
-        // Control stack ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ optional (null for strategies without
-        // high-freq control).
-        if (!impl_->resolved_control_factory_id.empty()) {
-            const ITransportStackFactory* ctrl_f =
-                reg.get_transport_stack(impl_->resolved_control_factory_id);
-            if (ctrl_f) {
-                impl_->session.control_stack = ctrl_f->create(scfg);
-                if (!impl_->session.control_stack) {
-                    core::log::Logger::instance().warn(
-                        std::string{"engine: control stack factory '"} +
-                        impl_->resolved_control_factory_id +
-                        "' returned null ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ control plane inactive for this strategy.");
-                }
-            } else {
-                core::log::Logger::instance().warn(
-                    std::string{"engine: control stack factory '"} +
-                    impl_->resolved_control_factory_id +
-                    "' not registered ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ control plane inactive for this strategy.");
-            }
         }
 
         // Extract handles into the owned session.
@@ -3264,6 +3240,9 @@ int NimRTCEngine::tick() noexcept {
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.
+    // v1.2 D2: poll ICE flap before draining so a NAT-rebinding
+    // disconnected->connected (2nd) transition triggers rehandshake().
+    poll_ice_flap_for_rehandshake();
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
@@ -3352,9 +3331,66 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     }
 }
 
+void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
+    // v1.2 D2: NAT-rebinding recovery. Engine thread only (called from
+    // tick()); impl_/ice_t_ lifetime is guaranteed by is_open() gate.
+    if (!ice_t_ || !impl_) return;
+    const plugins::IceState cur = ice_t_->state();
+    if (cur == impl_->last_ice_state) return;
+    const plugins::IceState prev = impl_->last_ice_state;
+    impl_->last_ice_state = cur;
+    const auto name = [](plugins::IceState s) {
+        switch (s) {
+            case plugins::IceState::Disconnected: return "disconnected";
+            case plugins::IceState::Gathering:    return "gathering";
+            case plugins::IceState::Connecting:   return "connecting";
+            case plugins::IceState::Connected:    return "connected";
+            case plugins::IceState::Completed:    return "completed";
+            case plugins::IceState::Failed:       return "failed";
+        }
+        return "unknown";
+    };
+    const bool cur_up = (cur == plugins::IceState::Connected ||
+                         cur == plugins::IceState::Completed);
+    const bool prev_up = (prev == plugins::IceState::Connected ||
+                          prev == plugins::IceState::Completed);
+    if (cur_up && !prev_up) {
+        if (!impl_->ice_connected_once) {
+            impl_->ice_connected_once = true;
+        } else if (impl_->ice_rehandshake_armed) {
+            impl_->ice_rehandshake_armed = false;
+            auto d = impl_->dtls.lock();
+            if (d && d->state() == dtls::DtlsState::Connected) {
+                core::log::Logger::instance().info(
+                    "engine[dtls]: ICE flap disconnected->connected, "
+                    "triggering DTLS rehandshake");
+                const auto rc = d->rehandshake();
+                if (rc == plugins::kOk) {
+                    impl_->srtp_installed = false;
+                } else {
+                    core::log::Logger::instance().warn(
+                        std::string("engine[dtls]: rehandshake rejected rc=") +
+                        std::to_string(static_cast<int>(rc)));
+                }
+            } else {
+                core::log::Logger::instance().info(
+                    std::string("engine[dtls]: ICE flap ") + name(prev) +
+                    "->" + name(cur) + ", no Connected DTLS session "
+                    "(rule-2/raw-udp-arq or pre-handshake); skip rehandshake");
+            }
+        }
+        return;
+    }
+    if (!cur_up && impl_->ice_connected_once) {
+        impl_->ice_rehandshake_armed = true;
+        core::log::Logger::instance().info(
+            std::string("engine[ice]: connected->") + name(cur) +
+            ", arming DTLS rehandshake on next reconnect");
+    }
+}
+
 const char* NimRTCEngine::ice_state_string() const noexcept {
-    if (!ice_t_) return "closed";
-    switch (ice_t_->state()) {
+    if (!ice_t_) return "closed";    switch (ice_t_->state()) {
         case plugins::IceState::Disconnected: return "disconnected";
         case plugins::IceState::Gathering:    return "gathering";
         case plugins::IceState::Connecting:   return "connecting";

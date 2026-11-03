@@ -409,6 +409,18 @@ set_tests_properties(test_dtls_retransmit_no_duplicate
     PROPERTIES TIMEOUT 30)
 
 # ----------------------------------------------------------------------------
+# v1.2 D3/D4: pump reentrancy + export/retransmit observability.
+# D3: consecutive pump/tick/drain + reentrant pump inside
+#     on_handshake_complete must not deadlock/crash (pumping_ guard).
+# D4: export pre-handshake kErrNotReady, post-handshake kOk + non-zero
+#     60B + client/server agree; retransmits monotonic observable.
+# ----------------------------------------------------------------------------
+add_dtls_handshake_test(test_dtls_pump_reentrancy
+                        test_dtls_pump_reentrancy.cpp)
+set_tests_properties(test_dtls_pump_reentrancy
+    PROPERTIES TIMEOUT 30)
+
+# ----------------------------------------------------------------------------
 # Slice 6 follow-up: ARQ-UDP transport e2e tests (A/B/C/D).
 #
 # These four tests form a progressive stack-validation sequence:

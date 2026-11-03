@@ -1190,6 +1190,7 @@ private:
     void handle_rtcp(plugins::BufferView view) noexcept;
     void observe_timeline(const rtp::PacketView& pv) noexcept;
     void maybe_send_sender_report() noexcept;
+    void poll_ice_flap_for_rehandshake() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
     void init_video_plugins() noexcept;

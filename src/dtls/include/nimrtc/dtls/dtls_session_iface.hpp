@@ -202,6 +202,21 @@ public:
     virtual void on_handshake_complete(OnCompleteCb cb) noexcept = 0;
 
     /**
+     * @brief Re-drive the handshake after NAT rebinding (v1.2 D2, additive).
+     *
+     * Non-pure-virtual with a safe default so existing backends keep
+     * compiling. The wolfSSL backend overrides this to reset the handshake
+     * state and re-emit the opening flight; the engine calls it on the
+     * second ICE disconnected→connected transition.
+     *
+     * @return kOk if a new handshake was started;
+     *         kErrUnsupported when the backend has no rehandshake path.
+     */
+    virtual plugins::Status rehandshake() noexcept {
+        return plugins::kErrUnsupported;
+    }
+
+    /**
      * @brief Export the 60-byte DTLS-SRTP keying material.
      *
      * RFC 5764 §4.2 layout:

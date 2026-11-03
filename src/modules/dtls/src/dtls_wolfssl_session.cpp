@@ -29,8 +29,13 @@
 #include <fstream>
 #include <mutex>
 #include <functional>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 
 // wolfSSL headers use anonymous structs (a GNU extension); suppress
@@ -378,7 +383,8 @@ struct DtlsSessionWolfSSL::Impl {
     // take_app_data() drains the queue (record boundaries preserved).
     std::vector<std::vector<std::uint8_t>> inbound_app_;
 
-    SOCKADDR_IN   peer_addr{};
+    sockaddr_storage peer_addr{};
+    unsigned int peer_addr_len = 0;
     bool          peer_set  = false;
     std::string   peer_host;
     std::uint16_t peer_port = 0;
@@ -796,12 +802,52 @@ struct DtlsSessionWolfSSL::Impl {
         peer_host = host;
         peer_port = port;
         peer_set  = true;
+        // v1.2 D1: resolve via getaddrinfo so literal IPv6 + hostnames work.
+        // IPv4 behaviour unchanged (first AF_INET result wins, same as the
+        // previous inet_pton(AF_INET) path).
         std::memset(&peer_addr, 0, sizeof(peer_addr));
-        peer_addr.sin_family = AF_INET;
-        peer_addr.sin_port   = htons(port);
-        inet_pton(AF_INET, host.c_str(), &peer_addr.sin_addr);
-        if (ssl) {
-            wolfSSL_dtls_set_peer(ssl, &peer_addr, sizeof(peer_addr));
+        peer_addr_len = 0;
+        struct addrinfo hints{};
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+        struct addrinfo* res = nullptr;
+        if (::getaddrinfo(host.c_str(), nullptr, &hints, &res) == 0 && res != nullptr) {
+            const struct addrinfo* pick_v4 = nullptr;
+            const struct addrinfo* pick_first = res;
+            for (const struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+                if (ai->ai_family == AF_INET && ai->ai_addrlen <= sizeof(peer_addr)) {
+                    pick_v4 = ai;
+                    break;
+                }
+            }
+            const struct addrinfo* pick = pick_v4 != nullptr ? pick_v4 : pick_first;
+            if (pick != nullptr && pick->ai_addrlen <= sizeof(peer_addr)) {
+                std::memcpy(&peer_addr, pick->ai_addr, pick->ai_addrlen);
+                peer_addr_len = static_cast<unsigned int>(pick->ai_addrlen);
+                if (peer_addr.ss_family == AF_INET) {
+                    reinterpret_cast<struct sockaddr_in*>(&peer_addr)->sin_port =
+                        htons(port);
+                } else if (peer_addr.ss_family == AF_INET6) {
+                    reinterpret_cast<struct sockaddr_in6*>(&peer_addr)->sin6_port =
+                        htons(port);
+                }
+            }
+            ::freeaddrinfo(res);
+        }
+        if (peer_addr_len == 0) {
+            // Fallback: preserve the legacy IPv4-only behaviour so existing
+            // IPv4 loopback tests never regress when DNS is unavailable.
+            auto* sin = reinterpret_cast<struct sockaddr_in*>(&peer_addr);
+            std::memset(sin, 0, sizeof(*sin));
+            sin->sin_family = AF_INET;
+            sin->sin_port   = htons(port);
+            ::inet_pton(AF_INET, host.c_str(), &sin->sin_addr);
+            peer_addr_len = static_cast<unsigned int>(sizeof(*sin));
+        }
+        if (ssl && peer_addr_len != 0) {
+            wolfSSL_dtls_set_peer(
+                ssl, reinterpret_cast<struct sockaddr*>(&peer_addr), peer_addr_len);
         }
     }
 
@@ -1832,6 +1878,62 @@ plugins::Status DtlsSessionWolfSSL::export_srtp_key_material(
     std::memcpy(out.data() + 16, km->server_master_key.data(),  16);
     std::memcpy(out.data() + 32, km->client_master_salt.data(), 14);
     std::memcpy(out.data() + 46, km->server_master_salt.data(), 14);
+    return plugins::kOk;
+}
+
+plugins::Status DtlsSessionWolfSSL::rehandshake() noexcept {
+    // v1.2 D2: NAT rebinding recovery. Only valid once Connected;
+    // otherwise the handshake pump owns the state machine.
+    if (!impl_->ssl ||
+        impl_->state != nimrtc::dtls::DtlsState::Connected) {
+        return plugins::kErrNotReady;
+    }
+#if defined(HAVE_SECURE_RENEGOTIATION) && !defined(NO_WOLFSSL_CLIENT) && !defined(NO_WOLFSSL_SERVER)
+    const int rc = wolfSSL_Rehandshake(impl_->ssl);
+    if (rc == WOLFSSL_SUCCESS) {
+        impl_->state = nimrtc::dtls::DtlsState::HelloSent;
+        impl_->srtp_keys_.reset();
+        impl_->handshake_start_ = std::chrono::steady_clock::now();
+        impl_->last_rtx_check_ = std::chrono::steady_clock::now();
+        nimrtc::core::log::Logger::instance().info(
+            "wolfSSL: Rehandshake started (NAT rebinding recovery)");
+        impl_->pump_handshake();
+        return plugins::kOk;
+    }
+    ++impl_->stats_instance.errors;
+    nimrtc::core::log::Logger::instance().warn(
+        std::string("wolfSSL: Rehandshake rejected, falling back to "
+                    "session restart rc=") + std::to_string(rc));
+#endif
+    // Fallback (vendored wolfSSL without HAVE_SECURE_RENEGOTIATION):
+    // full session restart — teardown SSL/CTX, rebuild, re-apply peer,
+    // and re-emit the opening flight. Preserves role/fingerprint/peer.
+    const std::string peer_host = impl_->peer_host;
+    const std::uint16_t peer_port = impl_->peer_port;
+    const bool had_peer = impl_->peer_set;
+    impl_->teardown();
+    impl_->recv_buf_.clear();
+    impl_->send_buf_.clear();
+    impl_->outbound_.clear();
+    impl_->inbound_app_.clear();
+    impl_->srtp_keys_.reset();
+    impl_->on_complete_cb_ = nullptr;
+    impl_->open_called = true;
+    if (!impl_->setup_context() || !impl_->create_ssl_object()) {
+        impl_->state = nimrtc::dtls::DtlsState::Failed;
+        ++impl_->stats_instance.errors;
+        return plugins::kErrInternal;
+    }
+    if (had_peer && !peer_host.empty() && peer_port != 0) {
+        impl_->peer_set = false;
+        impl_->set_peer(peer_host, peer_port);
+    }
+    impl_->state = nimrtc::dtls::DtlsState::Initial;
+    impl_->handshake_start_ = std::chrono::steady_clock::now();
+    impl_->last_rtx_check_ = std::chrono::steady_clock::now();
+    nimrtc::core::log::Logger::instance().info(
+        "wolfSSL: Rehandshake via session restart (NAT rebinding recovery)");
+    impl_->pump_handshake();
     return plugins::kOk;
 }
 

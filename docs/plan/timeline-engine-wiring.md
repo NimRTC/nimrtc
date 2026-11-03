@@ -80,10 +80,13 @@ Two details worth keeping:
   avoids. The set also keeps a second SSRC on the same payload type (RFC 5956
   simulcast) on its own entry.
 
-Known residual: the video rate is the literal 90000 rather than a parse of
-the SDP `a=rtpmap`. Every standardised video RTP payload (H.264/VP8/VP9/AV1)
-is 90 kHz, so this is not a live bug — but a codec that is not would need the
-rate to come off the wire instead.
+Known residual (v1.2 M1 — closed): the video rate now resolves from the
+peer's SDP `a=rtpmap` first (`remote_clock_rate_hz`, collected in
+`process_remote_sdp()`), and only falls back to the literal 90000 when the
+peer did not declare the payload type. `tests/test_engine_timeline.cpp`
+`NonStandardVideoClockRateFromRtpmapWins` pins this: a rewritten
+`H264/48000` offer reconstructs 48000 ticks as exactly 1 s (the 90 kHz
+fallback would give ~533 ms).
 
 ### 2. The reconstruction path itself is untested — **closed (landed)**
 

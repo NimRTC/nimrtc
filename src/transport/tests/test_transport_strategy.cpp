@@ -22,6 +22,8 @@
 
 #include <nimrtc/transport/transport_strategy.hpp>
 #include <nimrtc/transport/transport_selector.hpp>
+#include <nimrtc/transport/strategy_validator.hpp>
+#include <nimrtc/core/engine_errors.hpp>
 
 namespace nimrtc {
 namespace {
@@ -65,7 +67,7 @@ TEST(StrategyDefaults, CrossNetworkPeer) {
 }
 
 // ===========================================================================
-// strategy_by_name â€” name â†’ TransportRequirements lookup
+// strategy_by_name â€?name â†?TransportRequirements lookup
 // ===========================================================================
 TEST(StrategyByName, EmptyReturnsBrowserCallDefault) {
     const auto& req = strategy_by_name("");
@@ -143,11 +145,11 @@ TEST(StrategyCatalog, NamesMatchJsonSchemaEnum) {
 }
 
 // ===========================================================================
-// Selector Â§5.3 rule audit â€” each strategy hits exactly one rule
+// Selector Â§5.3 rule audit â€?each strategy hits exactly one rule
 // ===========================================================================
 TEST(StrategySelectorAudit, BrowserCallHitsRule1) {
     // Â§5.3 rule 1: needs_browser_interop == true, no high-freq control
-    //   â†’ media=webrtc-classic, control=null
+    //   â†?media=webrtc-classic, control=null
     const auto& req = kStrategyBrowserCall;
     EXPECT_TRUE(req.needs_browser_interop);
     EXPECT_FALSE(req.needs_high_freq_control);
@@ -155,7 +157,7 @@ TEST(StrategySelectorAudit, BrowserCallHitsRule1) {
 
 TEST(StrategySelectorAudit, AgentGatewayHitsRule1b) {
     // Â§5.3 rule 1b: browser interop + high-freq control
-    //   â†’ media=webrtc-classic, control=raw-udp-arq
+    //   â†?media=webrtc-classic, control=raw-udp-arq
     const auto& req = kStrategyAgentGateway;
     EXPECT_TRUE(req.needs_browser_interop);
     EXPECT_TRUE(req.needs_high_freq_control);
@@ -163,7 +165,7 @@ TEST(StrategySelectorAudit, AgentGatewayHitsRule1b) {
 
 TEST(StrategySelectorAudit, TeleopHitsRule2) {
     // Â§5.3 rule 2: no browser interop + high-freq control
-    //   â†’ media=raw-udp-arq, control=raw-udp-arq
+    //   â†?media=raw-udp-arq, control=raw-udp-arq
     const auto& req = kStrategyTeleopUltraLowLatency;
     EXPECT_FALSE(req.needs_browser_interop);
     EXPECT_TRUE(req.needs_high_freq_control);
@@ -171,7 +173,7 @@ TEST(StrategySelectorAudit, TeleopHitsRule2) {
 
 TEST(StrategySelectorAudit, SfuRelayAndCrossNetworkHitRule1) {
     // Â§5.3 rule 1: browser interop required, no high-freq control
-    //   â†’ media=webrtc-classic, control=null
+    //   â†?media=webrtc-classic, control=null
     EXPECT_TRUE(kStrategySfuRelay.needs_browser_interop);
     EXPECT_FALSE(kStrategySfuRelay.needs_high_freq_control);
     EXPECT_TRUE(kStrategyCrossNetworkPeer.needs_browser_interop);
@@ -179,7 +181,7 @@ TEST(StrategySelectorAudit, SfuRelayAndCrossNetworkHitRule1) {
 }
 
 // ===========================================================================
-// requirements_from_profile_input â€” bridge from Profile v1.1 to TransportReq
+// requirements_from_profile_input â€?bridge from Profile v1.1 to TransportReq
 // ===========================================================================
 //
 // The bridge is the runtime counterpart of the assembly layer's
@@ -251,7 +253,7 @@ TEST(ProfileInputBridge, MediaP99OverrideApplies) {
 }
 
 TEST(ProfileInputBridge, MediaP99OverrideCanLoosenBudget) {
-    // Symmetric to MediaP99OverrideApplies â€” verify the override can
+    // Symmetric to MediaP99OverrideApplies â€?verify the override can
     // also LOOSEN the budget (e.g. live-stream variant of `browser-call`
     // with 300 ms p99 instead of the default 200 ms). This is the
     // `kProfileLive` use case in the engine.
@@ -290,7 +292,7 @@ TEST(ProfileInputBridge, ControlFieldsAreIgnoredAtBridgeLevel) {
     // by the engine AFTER `CapabilitySelector::select()` returns (they
     // shape the resulting TransportSession, not the Selector's input).
     // The bridge intentionally does NOT fold them into the
-    // TransportRequirements booleans â€” that would be a Â§5.3 rule
+    // TransportRequirements booleans â€?that would be a Â§5.3 rule
     // audit violation. Verify the bridge leaves them out of the
     // result, even when set.
     ProfileTransportInput in;
@@ -313,7 +315,7 @@ TEST(ProfileInputBridge, ResultIsIndependentOfCanonical) {
     // Mutating the returned `TransportRequirements` must NOT leak into
     // the canonical `kStrategy*` constants. The bridge returns by
     // value (not by reference), so this is a structural guarantee
-    // â€” but we assert it explicitly so a future refactor that
+    // â€?but we assert it explicitly so a future refactor that
     // accidentally returns a reference is caught.
     {
         ProfileTransportInput in;
@@ -331,6 +333,38 @@ TEST(ProfileInputBridge, ResultIsIndependentOfCanonical) {
         auto req = requirements_from_profile_input(in);
         EXPECT_EQ(*req.max_p99_ms, *kStrategyAgentGateway.max_p99_ms);
     }
+}
+
+// ===========================================================================
+// v1.2 M2 StrategyValidator â€?opt-out record-only by default,
+// opt-in kEngineConfig on breach.
+// ===========================================================================
+TEST(StrategyValidator, NoBudgetAlwaysOk) {
+    transport::StrategyValidatorConfig cfg;
+    EXPECT_EQ(transport::validate_p99_budget(std::nullopt, 1000, cfg, "webrtc-classic"), 0u);
+    cfg.enforce = true;
+    EXPECT_EQ(transport::validate_p99_budget(std::nullopt, 1000, cfg, "webrtc-classic"), 0u);
+}
+
+TEST(StrategyValidator, WithinBudgetOk) {
+    transport::StrategyValidatorConfig cfg;
+    EXPECT_EQ(transport::validate_p99_budget(200, 150, cfg, "webrtc-classic"), 0u);
+    cfg.enforce = true;
+    EXPECT_EQ(transport::validate_p99_budget(200, 150, cfg, "webrtc-classic"), 0u);
+    EXPECT_EQ(transport::validate_p99_budget(200, 200, cfg, "webrtc-classic"), 0u);
+}
+
+TEST(StrategyValidator, BreachRecordOnlyByDefault) {
+    // Default (enforce=false): over-budget records WARN, returns 0 â€?    // existing open() behaviour is unchanged.
+    transport::StrategyValidatorConfig cfg;
+    EXPECT_EQ(transport::validate_p99_budget(200, 250, cfg, "webrtc-classic"), 0u);
+}
+
+TEST(StrategyValidator, BreachEnforcedReturnsEngineConfig) {
+    transport::StrategyValidatorConfig cfg;
+    cfg.enforce = true;
+    EXPECT_EQ(transport::validate_p99_budget(200, 250, cfg, "webrtc-classic"),
+              core::kEngineConfig);
 }
 
 }  // namespace

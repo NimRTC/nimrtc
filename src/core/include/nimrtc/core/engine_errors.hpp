@@ -60,6 +60,15 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineSdpCorrupt   = 0x1004;  
 inline constexpr NIMRTC_API_STABLE std::uint32_t kEngineInternal     = 0x1FFF;  // == plugins::kErrInternal
 
 // ---------------------------------------------------------------------------
+// Config validation (v1.2 M2, additive-only)
+// ---------------------------------------------------------------------------
+// v1.2 M2 StrategyValidator opt-in budget failure code. New symbol, so it
+// carries NIMRTC_API_UNSTABLE (empty expansion in default builds, see
+// api_version.hpp). Numeric value 0x1010 is unused by all existing
+// kEngine*/kDtls*/kAudio3A*/kVideo* codes.
+inline constexpr NIMRTC_API_UNSTABLE std::uint32_t kEngineConfig = 0x1010;
+
+// ---------------------------------------------------------------------------
 // Transport (ICE) — 0x1F00..0x1FFF
 // ---------------------------------------------------------------------------
 // 0x1FFF is the catch-all "internal" used by the plugin layer; transport-

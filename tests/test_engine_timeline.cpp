@@ -157,6 +157,34 @@ protected:
         if (offer.empty()) return false;
         return rx.process_remote_sdp(offer).has_value();
     }
+
+    /** Same as negotiate_with_peer(), but rewrites the video `a=rtpmap:`
+     *  clock rate in the peer's offer before handing it to `rx`.
+     *
+     *  Used by the M1 case: the stock offer declares `H264/90000`, and
+     *  rewriting it to e.g. `H264/48000` simulates a peer that sends
+     *  video on a non-standard media clock.  Returns false when the
+     *  stock offer has no such line (which also self-checks that the
+     *  video m-line was emitted at all). */
+    static bool negotiate_with_mangled_video_rate(NimRTCEngine& rx,
+                                                  const EngineConfig& cfg,
+                                                  std::string_view from,
+                                                  std::string_view to) {
+        NimRTCEngine tx(cfg);
+        if (tx.open() != 0) return false;
+        std::string offer = tx.create_offer();
+        if (offer.empty()) return false;
+        const std::string f(from), t(to);
+        bool replaced = false;
+        for (std::size_t pos = 0;
+             (pos = offer.find(f, pos)) != std::string::npos;) {
+            offer.replace(pos, f.size(), t);
+            pos += t.size();
+            replaced = true;
+        }
+        if (!replaced) return false;
+        return rx.process_remote_sdp(offer).has_value();
+    }
 };
 
 // =====================================================================
@@ -561,6 +589,56 @@ TEST_F(EngineTimeline, SkewIsPublishedPerSsrc) {
            "stream's skew";
     EXPECT_EQ(rx.last_sender_recv_skew_us(), skew_a)
         << "the convenience accessor mirrors the most recent stream";
+}
+
+// =====================================================================
+// 11. M1: a non-standard video clock rate from the peer's a=rtpmap
+//    wins over the 90 kHz default.
+//
+// The stock offer declares the video PT as H264/90000 (RFC 6184 §5.6).
+// Rewriting it to H264/48000 simulates a peer that sends video on a
+// non-standard media clock.  handle_rtp() must pin the remote rate
+// (48 kHz) on the tracker — not the 90 kHz video fallback — so 48000
+// ticks reconstruct as exactly 1 s.  At the 90 kHz fallback the same
+// ticks would reconstruct as ~533 ms and this assertion fails.
+// =====================================================================
+TEST_F(EngineTimeline, NonStandardVideoClockRateFromRtpmapWins) {
+    constexpr std::uint32_t kSsrc = 0x56565656u;
+    constexpr std::uint8_t  kPt   = 102;    // default video_receiver PT
+    constexpr std::uint32_t kRate = 48000;  // non-standard for video
+
+    EngineConfig cfg = make_test_config();
+    cfg.timeline_enabled = true;
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+    ASSERT_TRUE(negotiate_with_mangled_video_rate(rx, cfg, "H264/90000",
+                                                  "H264/48000"))
+        << "the peer's offer must carry a video rtpmap line to rewrite";
+    ASSERT_EQ(rx.remote_abs_send_time_ext_id(), kAbsSendTimeDefaultLocalId)
+        << "rewriting the rtpmap must not disturb the extmap negotiation";
+
+    const std::int64_t sr_us = whole_second_unix_us() - 5'000'000LL;
+    const auto sr = make_sr(kSsrc, /*rtp_ts=*/0, sr_us);
+    ASSERT_FALSE(sr.empty());
+    rx.feed_media_inbound(sr.data(), sr.size());
+
+    // 48000 ticks: 1 s at the peer-declared 48 kHz, ~533 ms at the
+    // 90 kHz fallback.  ast24 = 0 disables the abs-send-time refinement
+    // so the media clock alone decides (same as case 5).
+    const auto pkt = make_rtp(kSsrc, kPt, /*rtp_ts=*/48'000, /*ast24=*/0);
+    ASSERT_FALSE(pkt.empty());
+    rx.feed_media_inbound(pkt.data(), pkt.size());
+
+    const auto cap = rx.capture_ts_us_for_ssrc(kSsrc);
+    ASSERT_TRUE(cap.has_value())
+        << "the SR was ingested and the video PT was declared, so a "
+           "capture instant must exist";
+    EXPECT_EQ(*cap, sr_us + 1'000'000LL)
+        << "48000 ticks at the peer-declared 48 kHz is 1 s; got "
+        << (*cap - sr_us)
+        << " µs instead — handle_rtp() fell back to the 90 kHz video "
+           "default instead of the remote a=rtpmap rate";
 }
 
 } // anonymous namespace

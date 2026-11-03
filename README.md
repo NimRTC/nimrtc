@@ -112,7 +112,7 @@ primitives the engine uses without building them yourself.
 > `NimRTCConfig.cmake`.** `find_package(NimRTC)` therefore does not work from a
 > downloaded bundle yet, and linking NimRTC itself still requires a source
 > build (see [Quick Start](#quick-start) below). Adding per-module `install()`
-> rules plus a generated CMake package config is tracked for v1.0.3.
+> rules plus a generated CMake package config is tracked for v1.1.0.
 
 - Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
 - Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)

@@ -319,7 +319,8 @@ Security fixes skip the normal cadence:
 > the published bundles ship only the vendored third-party dependency stack
 > (wolfSSL / libsrtp3 / libjuice / msquic) and `find_package(NimRTC)` does
 > not resolve against a downloaded bundle. Delivering this is tracked for
-> `v1.0.3`.
+> `v1.1.0` (Track D in `docs/plan/v1.1-plan.md`); no separate `v1.0.3` tag is
+> planned.
 
 The target layout is: NimRTC installs CMake config files under
 `lib/cmake/NimRTC/NimRTCConfig.cmake` plus a version file
@@ -378,7 +379,7 @@ This section is appended at release time. Each entry cross-references the
 | `v0.14.0`      | 2026-10-16 | WebTransport seam + DTLS Case D fragment reassembler (v1.0.0-alpha.2 alias). Tag was force-re-pointed twice on tag day to include the release.yml follow-ups (PR #20 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` for the four Configure steps, then `dc15ad8` `if: ${{ false }}` on the four `Prebuild WebRTC APM` steps). See `CHANGELOG.md` `[0.14.0]` for full notes; the `release.yml` artefact matrix is windows-msvc + linux-gcc + linux-aarch64 + macos-clang (linux-aarch64 / macos-clang depend on GHA runner capacity at push time). | https://github.com/NimRTC/nimrtc/releases/tag/v0.14.0 |
 | `v1.0.0`       | 2026-10-30 | Source milestone only (lightweight tag `f740f2e`); **never published** as a GitHub Release. Superseded by `v1.0.1`. | n/a — superseded |
 | `v1.0.1`       | 2026-11-02 | First **published** stable release; source milestone `v1.0.0` + Case D forward-DTLS fix + CI e2e-on-push. SemVer guarantees apply from this tag. See `CHANGELOG.md` `[1.0.1]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1 |
-| `v1.0.2`       | 2026-11-02 | Patch release fixing the WebTransport ALPN mismatch, the oversized Windows bundle, and the missing signing public key. All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Known limitation: the bundles carry only the vendored third-party stack, not NimRTC's own headers/static lib/`NimRTCConfig.cmake` (§4) — tracked for `v1.0.3`. See `CHANGELOG.md` `[1.0.2]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2 |
+| `v1.0.2`       | 2026-11-02 | Patch release fixing the WebTransport ALPN mismatch, the oversized Windows bundle, and the missing signing public key. All four platform bundles ship with detached `.asc` signatures plus the `nimrtc-signing-key.asc` public key (fingerprint `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06`). Known limitation: the bundles carry only the vendored third-party stack, not NimRTC's own headers/static lib/`NimRTCConfig.cmake` (§4) — tracked for `v1.1.0` (Track D). See `CHANGELOG.md` `[1.0.2]`. | https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2 |
 
 ---
 

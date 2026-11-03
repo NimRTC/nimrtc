@@ -91,7 +91,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a source build. This predates `v1.0.1` (its Linux bundle has the
   same shape). Adding per-module `install()` rules plus a generated
   `NimRTCConfig.cmake` / `NimRTCConfigVersion.cmake` is tracked for
-  `v1.0.3`; `README.md` "Download prebuilt" has been corrected to
+  `v1.1.0` (Track D in `docs/plan/v1.1-plan.md`); `README.md` "Download prebuilt" has been corrected to
   describe what the bundles actually contain.
 
 ### Notes

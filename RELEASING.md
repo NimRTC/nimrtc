@@ -251,6 +251,20 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     git push origin vX.Y.Z
     ```
 
+    The tag must be signed with the project's release key, fingerprint
+    `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` (ed25519, uid
+    "NimRTC Release"). That is the same key whose public block ships as the
+    `nimrtc-signing-key.asc` asset of `v1.0.2` and is published on
+    `keyserver.ubuntu.com` and `keys.openpgp.org`, so consumers can verify the
+    tag against a key they already have. On a workstation that has the key in
+    its GnuPG keyring, `git tag -s -a` needs no further flags as long as
+    `gpg.format` is `openpgp` and `user.signingkey` is set to that
+    fingerprint; `git tag -v vX.Y.Z` must report "Good signature" before the
+    tag is pushed. The key must also be on the account's GitHub GPG key list
+    (`https://github.com/settings/keys`) for GitHub to render the "Verified"
+    badge; see `docs/plan/v1.1-plan.md` Track C6 for the current status of
+    that step.
+
 12. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
       containing headers, CMake config files, and the static `.lib`/`.a`).

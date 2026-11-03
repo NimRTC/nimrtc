@@ -69,12 +69,12 @@
     {
       "name": "libsrtp",
       "upstream_url": "https://github.com/cisco/libsrtp.git",
-      "upstream_version": "master",
+      "upstream_version": "main",
       "commit_sha": "2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2",
       "submodule_path": "src/third_party/libsrtp/src",
       "license": "BSD-3-Clause",
       "build": "add_subdirectory(src) — see src/third_party/libsrtp/CMakeLists.txt",
-      "notes": "SRTP crypto with CRYPTO_LIBRARY=internal. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending). The checked-in tree is byte-identical to the pinned revision, so it needs no NimRTC-local patch and is a direct Phase 3 candidate.",
+      "notes": "SRTP crypto with CRYPTO_LIBRARY=internal. Converted to a real submodule (vendor-migration.md Phase 3): the previously checked-in tree was byte-identical to the pinned revision, so no NimRTC-local patch had to be carried over. The index holds a gitlink at 160000; run `git submodule update --init src/third_party/libsrtp/src` to fetch.",
       "size_estimate": "2.9 MB / 2.4k files"
     },
     {

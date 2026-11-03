@@ -627,7 +627,7 @@ Pinned in [`src/third_party/vendor.json`](src/third_party/vendor.json) (SHA-veri
 | `wolfssl` | v5.9.2 | `src/third_party/wolfssl/src` |
 | `libopus` | v1.6.1 | `src/third_party/libopus/src` |
 | `libjuice` | master | `src/third_party/libjuice/src` |
-| `libsrtp` | master | `src/third_party/libsrtp/src` |
+| `libsrtp` | main | `src/third_party/libsrtp/src` |
 | `webrtc_audio_processing` | master | `src/third_party/webrtc_audio_processing/src` |
 | `googletest` | v1.12.1 | `src/third_party/googletest/src` |
 

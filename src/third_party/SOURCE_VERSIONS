@@ -26,7 +26,7 @@
 # (`notes`) and in docs/plan/vendor-migration.md.
 
 libjuice                  master         77daa8b   77daa8befd828046169adbb012d8de928bfdcdd4   2026-09-04   https://github.com/paullouisageneau/libjuice
-libsrtp                   master         2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
+libsrtp                   main           2f82ec0   2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2   2026-09-04   https://github.com/cisco/libsrtp
 mbedtls                   4.2.0          023aca8   023aca86208a4f1e602b4098fb46d936adb4657a   2026-09-04   https://github.com/Mbed-TLS/mbedtls
 libopus                   v1.6.1         22244de   22244de5a79bd1d6d623c32e72bf1954b56235be   2026-09-04   https://github.com/xiph/opus
 googletest                v1.12.0        15460959  15460959cbbfa20e66ef0b5ab497367e47fc0a04   2026-09-09   https://github.com/google/googletest

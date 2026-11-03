@@ -29,14 +29,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **libsrtp is now a real git submodule.** The vendored tree at
+  `src/third_party/libsrtp/src` was byte-identical to upstream
+  `2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2`, so it converted with no
+  NimRTC-local patch to carry over: the parent repository now tracks
+  the path as a gitlink (index mode `160000`) instead of ~2400 checked-in
+  files. `.gitmodules` gains the real entry
+  (`https://github.com/cisco/libsrtp.git`, branch `main`), the nested
+  clone's git dir was absorbed into `.git/modules/`, and `vendor.json`
+  records the conversion (`upstream_version` corrected from `master` to
+  `main`, notes rewritten). `tools/check_vendor.py` now reports
+  `libsrtp` as `ok` — a verified submodule — rather than
+  `vendored-tree`. `docs/plan/vendor-migration.md` §3 Phase 3 marks
+  libsrtp converted. Windows proof 2026-11-03: full Debug build
+  green, `ctest` 629/629 passed, `test_srtp_test` 8/8 passed.
 - **The vendor manifest now tells the truth about what is a submodule.**
   `tools/check_vendor.py` distinguishes a registered submodule (a
   gitlink, index mode `160000`) from a vendor whose sources are still
   checked into this repository; the latter is now reported as
   `vendored-tree` instead of being counted as a verified submodule.
-  `.gitmodules` no longer lists `libjuice`, `libsrtp` and `mbedtls`,
-  which have no gitlink in the index (their intended settings are kept
-  as comments, with the blocker for each conversion spelled out).
+  `.gitmodules` no longer lists `libjuice` and `mbedtls`, which have no
+  gitlink in the index (their intended settings are kept as comments,
+  with the blocker for each conversion spelled out).
   `vendor.json` records the state and the local deltas per vendor, and
   `src/third_party/SOURCE_VERSIONS` — which claimed to be copied
   verbatim from `vendor.json` but was not — is corrected: libopus now

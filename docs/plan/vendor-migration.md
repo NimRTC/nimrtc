@@ -155,7 +155,7 @@ wolfssl (production DTLS — most cautious).
 | libopus | submodule | — |
 | wolfssl | submodule | — |
 | msquic | submodule (NimRTC fork, one patch commit) | — |
-| libsrtp | checked-in tree | none: the tree is byte-identical to the pinned revision `2f82ec0`, so it converts directly |
+| libsrtp | submodule | — (converted 2026-11-03: the tree was byte-identical to the pinned revision `2f82ec0`, so it converted directly with no NimRTC-local patch) |
 | libjuice | checked-in tree | the tree carries one NimRTC-local patch on top of `77daa8b` (SO_REUSEADDR/SO_REUSEPORT in `src/udp.c`); it is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` and has to be re-applied (or carried by a fork) after the conversion |
 | mbedtls | checked-in tree | the tree inlines the contents of upstream's separate `framework` submodule (2039 tracked files vs 332 upstream entries), so it is not byte-identical to `023aca8`; the conversion has to decide how to carry the inlined framework tree |
 

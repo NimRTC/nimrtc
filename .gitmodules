@@ -18,9 +18,9 @@
 # `git submodule update --init` would have nothing to fetch.  Its pinned
 # upstream SHA lives in src/third_party/vendor.json like the others.
 #
-# NOTE: libjuice, libsrtp and mbedtls are NOT listed here either.  Their
-# sources are still checked into this repository, so an entry would claim
-# a submodule that does not exist in the index.  Their conversion is
+# NOTE: libjuice and mbedtls are NOT listed here either.  Their sources
+# are still checked into this repository, so an entry would claim a
+# submodule that does not exist in the index.  Their conversion is
 # tracked as Phase 3 of docs/plan/vendor-migration.md; the URLs and
 # branches are kept at the bottom of this file for that work.
 
@@ -63,17 +63,24 @@
 	# stays vendor-clean and the pin is fetchable from a fresh clone.
 	branch = nimrtc-patches
 
+[submodule "src/third_party/libsrtp/src"]
+	path = src/third_party/libsrtp/src
+	url = https://github.com/cisco/libsrtp.git
+	# Pinned: 2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2 (see src/third_party/vendor.json)
+	# The checked-in tree was byte-identical to this revision, so no
+	# NimRTC-local patch had to be carried over during the conversion.
+	branch = main
+
 # ---------------------------------------------------------------------------
 # Pending submodule conversions (Phase 3 of docs/plan/vendor-migration.md).
 # These paths are tracked as regular files in this repository, so they are
 # deliberately left out of the submodule sections above.  The values below
 # are the intended settings for the conversion commits.
 #
-# libsrtp — the checked-in tree is byte-identical to the pinned revision
-#   (2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2), so it converts directly.
-#     path   = src/third_party/libsrtp/src
-#     url    = https://github.com/cisco/libsrtp.git
-#     branch = master
+# libsrtp — converted in this repository; see the submodule section
+#   above.  The checked-in tree was byte-identical to the pinned revision
+#   (2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2), so it converted
+#   directly with no NimRTC-local patch.
 #
 # libjuice — the checked-in tree carries one NimRTC-local patch on top of
 #   the pinned revision (77daa8befd828046169adbb012d8de928bfdcdd4): the

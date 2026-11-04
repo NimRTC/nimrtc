@@ -646,9 +646,10 @@ third_party/
 
 **对应代码位置**：
 
-- `src/third_party/webrtc_audio_processing/CMakeLists.txt`：guard 实现（`_apm_lib` 找不到时的 ON→FATAL_ERROR / OFF→INTERFACE stub 分支）
+- `src/third_party/webrtc_audio_processing/CMakeLists.txt`：guard 实现（`_apm_lib` 找不到时的 ON→FATAL_ERROR / OFF→INTERFACE stub 分支）；链接顺序读 `build_meson/apm_link_order.txt`
 - `.github/workflows/ci.yml`：4 个 platform Configure 步骤的 `-DNIMRTC_VENDORED_WEBRTC_APM=OFF`
 - `tools/fetch_webrtc_apm.py` + `tools/build_webrtc_apm.{sh,cmd}`：prebuild 入口
+- `tools/apm_link_order.py`：从 meson 生成的 `build.ninja` 提取权威的归档链接顺序，写入 `build_meson/apm_link_order.txt`（静态链接器按左到右解析符号，顺序是契约的一部分）
 - 引入时间：v0.10.1（commit `8f7c756`）
 
 ---

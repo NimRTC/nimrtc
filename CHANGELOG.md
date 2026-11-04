@@ -76,6 +76,27 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consumer linking `nimrtc::engine` configures, builds, and runs exit 0
   (Linux proof still pending a CI leg; `## [1.1.0]` stays unwritten
   until C-track closes).
+- **The installed bundle now carries the WebRTC APM prebuilt.** The
+  APM is built out-of-tree with Meson and has no upstream `install()`
+  rules, so the bundle used to ship without
+  `libwebrtc-audio-processing-2.a` and the abseil archives it
+  references: a downstream consumer linking `nimrtc::engine` failed
+  with unresolved `webrtc::` / `absl::` symbols. The archive set and
+  their order now come from the Meson build's own link line, recorded
+  by the new `tools/apm_link_order.py` into
+  `build_meson/apm_link_order.txt` (a static linker resolves symbols
+  left-to-right, so the order is part of the contract). The build-tree
+  CMake wrapper reads that manifest instead of globbing abseil
+  archives in alphabetical order, `cmake/NimRTCInstall.cmake` ships
+  the archives to `<prefix>/lib/webrtc_apm/` together with the order
+  manifest, and the installed `NimRTCConfig.cmake` chains them in that
+  order. `tools/build_webrtc_apm.{cmd,sh}` run the helper as a final
+  step and fail with exit code 4 if the order cannot be recorded.
+  Windows downstream proof verified 2026-11-04: the staging tree
+  holds 13 archives under `lib/webrtc_apm/`, and a minimal
+  `find_package(NimRTC 1.0 REQUIRED)` consumer linking
+  `nimrtc::engine` links against the real APM and runs exit 0 with
+  "real WebRTC APM" initialised (AEC/ANS/AGC).
 - **Track A bench CI artifacts (`b628fcb`).** `ci.yml` windows/msvc and
   linux-gcc legs now run `tools/benchmark_latency.py --count 1000` +
   `tools/benchmark_dc.py` and upload `build/e2e/bench_latency.json` +

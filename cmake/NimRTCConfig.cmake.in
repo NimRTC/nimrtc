@@ -146,6 +146,39 @@ foreach(_vname IN LISTS _nimrtc_vendor_names)
 endforeach()
 unset(_vname)
 
+# WebRTC APM prebuilt archives.
+#
+# The bundle ships them in <libdir>/webrtc_apm/ together with the link-order
+# manifest.  A static linker resolves symbols left-to-right, so the abseil
+# archives must follow libwebrtc-audio-processing-2 in exactly the order the
+# Meson build used -- find_library() returns paths, not order, so the order
+# is read from the manifest rather than guessed.
+set(_nimrtc_apm_dir "${NimRTC_LIB_DIR}/webrtc_apm")
+set(_nimrtc_apm_manifest "${_nimrtc_apm_dir}/apm_link_order.txt")
+set(_nimrtc_apm_libs "")
+if(EXISTS "${_nimrtc_apm_manifest}")
+  file(STRINGS "${_nimrtc_apm_manifest}" _nimrtc_apm_names)
+  foreach(_apm_name IN LISTS _nimrtc_apm_names)
+    if(_apm_name STREQUAL "")
+      continue()
+    endif()
+    set(_apm_path "${_nimrtc_apm_dir}/${_apm_name}")
+    if(EXISTS "${_apm_path}")
+      list(APPEND _nimrtc_apm_libs "${_apm_path}")
+    else()
+      message(WARNING
+        "NimRTCConfig: APM archive '${_apm_name}' is listed in the link-order "
+        "manifest but missing from ${_nimrtc_apm_dir}")
+    endif()
+  endforeach()
+  list(APPEND _nimrtc_found_libs ${_nimrtc_apm_libs})
+endif()
+unset(_apm_name)
+unset(_apm_path)
+unset(_nimrtc_apm_names)
+unset(_nimrtc_apm_manifest)
+unset(_nimrtc_apm_dir)
+
 # System libs the vendored stacks need on the final link line. In the
 # build tree these propagate via the vendor targets' own
 # INTERFACE_LINK_LIBRARIES (juice PRIVATE ws2_32/bcrypt, usrsctp PUBLIC
@@ -180,6 +213,24 @@ else()
     INTERFACE_LINK_LIBRARIES "${_nimrtc_found_libs}")
   unset(_nimrtc_first_lib)
 endif()
+
+# The WebRTC APM prebuilt is compiled against the MSVC release CRT (/MD).
+# A consumer that links it has to use the same runtime, otherwise the
+# linker trips the CRT-mismatch errors (LNK2038 / LNK4098).  The build tree
+# gets this from the vendor target's INTERFACE options; the installed config
+# re-attaches the equivalent so that an installed bundle links exactly like
+# the build tree.
+if(MSVC AND _nimrtc_apm_libs)
+  foreach(_apm_target nimrtc::engine nimrtc::audio3a)
+    if(TARGET ${_apm_target})
+      set_target_properties(${_apm_target} PROPERTIES
+        INTERFACE_COMPILE_OPTIONS "/MD"
+        INTERFACE_LINK_OPTIONS "/NODEFAULTLIB:libcmt.lib")
+    endif()
+  endforeach()
+  unset(_apm_target)
+endif()
+unset(_nimrtc_apm_libs)
 
 set(NimRTC_FOUND TRUE)
 set(NIMRTC_FOUND TRUE)

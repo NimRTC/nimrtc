@@ -154,6 +154,51 @@ foreach(_vtgt opus nimrtc_vendor_usrsctp)
 endforeach()
 unset(_vtgt)
 
+# --- 2c. WebRTC APM prebuilt archives ----------------------------------------
+# The APM is prebuilt out-of-tree with Meson and has no upstream install()
+# rules, so without this section the installed bundle would ship without
+# libwebrtc-audio-processing-2 and the abseil archives it references: a
+# downstream consumer linking nimrtc::engine would fail with undefined
+# webrtc:: / absl:: symbols.
+#
+# The archive set AND their order come from the Meson build's own link line
+# (tools/apm_link_order.py writes build_meson/apm_link_order.txt), so the
+# installed tree reproduces the order Meson verified.  A static linker
+# resolves symbols left-to-right, so the order is part of the contract.
+#
+# They land in <libdir>/webrtc_apm/ (not directly in <libdir>/) because the
+# set is a dozen vendored archives no consumer should link by accident; the
+# installed NimRTCConfig.cmake picks them up through the order manifest.
+get_property(_apm_archives GLOBAL PROPERTY NIMRTC_APM_LINK_ARCHIVES)
+if(_apm_archives)
+  set(_apm_dest "${CMAKE_INSTALL_LIBDIR}/webrtc_apm")
+  set(_apm_names "")
+  foreach(_archive IN LISTS _apm_archives)
+    get_filename_component(_name "${_archive}" NAME)
+    list(FIND _apm_names "${_name}" _apm_dup_index)
+    if(NOT _apm_dup_index EQUAL -1)
+      message(FATAL_ERROR
+        "Duplicate WebRTC APM archive basename '${_name}' in the install set. "
+        "The bundle stores the archives by basename, so they must be unique: "
+        "${_apm_archives}")
+    endif()
+    list(APPEND _apm_names "${_name}")
+    install(FILES "${_archive}" DESTINATION "${_apm_dest}")
+  endforeach()
+
+  # The order manifest travels with the archives: find_library() returns
+  # paths, not order, so the consumer needs the order spelled out.
+  list(LENGTH _apm_names _apm_count)
+  string(REPLACE ";" "\n" _apm_manifest_text "${_apm_names}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/apm_link_order.txt"
+       "${_apm_manifest_text}\n")
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/apm_link_order.txt"
+          DESTINATION "${_apm_dest}")
+  message(STATUS
+    "Installing WebRTC APM archives (${_apm_count}) into ${_apm_dest}")
+endif()
+unset(_apm_archives)
+
 # --- 3. Package config + version file ----------------------------------------
 configure_package_config_file(
   "${CMAKE_SOURCE_DIR}/cmake/NimRTCConfig.cmake.in"

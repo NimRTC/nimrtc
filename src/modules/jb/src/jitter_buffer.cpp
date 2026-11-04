@@ -5,6 +5,8 @@
 
 #include <nimrtc/jb/jitter_buffer.hpp>
 
+#include <nimrtc/jb_strategy/adaptive_delay.hpp>
+
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
@@ -18,8 +20,10 @@ namespace nimrtc::jb {
 
 namespace {
 
-// (Default playout delays moved to JitterBuffer::Impl::base_delay_for_pt() —
-// per-payload-type heuristic that also accounts for narrowband vs wideband.)
+// Fixed component of the adaptive playout delay.  This is the "base + 4*J"
+// cushion of the classic playout-delay formula; the jitter part itself is
+// owned by nimrtc::jb_strategy (shared with the video front-end).
+constexpr std::int64_t kBaseDelayMs = 20;
 
 // Format-string attribute required by Clang/GCC to suppress
 // -Wformat-nonliteral on these variadic helpers (the format string
@@ -72,9 +76,31 @@ struct JitterBuffer::Impl {
         // current_delay == 0ms on construction, so leave it at 0 here and let
         // push() bootstrap it to config_.initial_delay on first packet.
         target_delay_ = core::Milliseconds{};
+        sync_tracker_policy();
     }
 
     Config config_;
+
+    // Shared RFC 3550 §6.4.1 jitter estimator + target-delay policy
+    // (v1.3 Q2: single implementation, audio/video dual front-ends).
+    // The estimator owns the smoothing state; this front-end owns the
+    // buffering structures and the playout bootstrap.
+    jb_strategy::AdaptiveDelayTracker tracker_;
+
+    /** Push the current Config into the shared tracker's DelayPolicy.
+     *  The fixed 20 ms base is the classic "base + 4*J" cushion; the
+     *  window [min_delay, max_delay] and the adaptive switch follow Config.
+     *  Fixed-mode playout still uses initial_delay (see pop()), so the
+     *  tracker base only matters in adaptive mode. */
+    void sync_tracker_policy() {
+        jb_strategy::DelayPolicy policy;
+        policy.base_delay = core::Milliseconds{kBaseDelayMs};
+        policy.min_delay = config_.min_delay;
+        policy.max_delay = config_.max_delay;
+        policy.jitter_multiplier = 4.0;
+        policy.adaptive = config_.adaptive;
+        tracker_.set_policy(policy);
+    }
 
     // Buffered frames keyed by RTP timestamp (one Frame may carry multiple
     // RTP packets sharing the same timestamp, e.g. redundant audio paths).
@@ -89,27 +115,18 @@ struct JitterBuffer::Impl {
     // caller as an output of pop() and is moved out of the buffer).
     std::map<std::uint32_t, core::TimePoint> frame_arrival_times_;
 
-    // Last received sequence number — used both for reorder-gap diagnostics
-    // and as the basis for RFC 3550 §6.4.1 transit-difference jitter math.
+    // Last received sequence number — reorder-gap diagnostics only.
+    // (The RFC 3550 §6.4.1 transit-difference state lives in tracker_.)
     std::optional<std::uint16_t> last_seq_;
-    // Last (transit-corrected) RTP clock value seen — needed for the
-    // transit-difference computation in update_jitter().
-    std::optional<std::uint64_t> last_rtp_clock_us_;
 
     std::uint64_t packets_received_ = 0;
     std::uint64_t packets_dropped_ = 0;
     std::uint64_t frames_emitted_ = 0;
 
-    // RFC 3550 §6.4.1 interarrival jitter estimate.  Updated on every
-    // push() using D(i,j) = (Rj - Ri) - (Sj - Si) and J(i) = J(i-1) +
-    // (|D(i-1,i)| - J(i-1)) / 16.  Reported in stats() as current_jitter;
-    // used by adaptive target_delay computation when config_.adaptive is
-    // true.
-    double jitter_estimate_ = 0.0;
-
-    // Current target delay — derived from config + adaptive jitter
-    // estimate.  Updated on each pop() so the value tracks the latest
-    // network conditions.
+    // Current target delay — bootstrapped on first push() (initial_delay or
+    // the per-payload-type heuristic), then tracked from tracker_ on each
+    // pop() when config_.adaptive is true.  Updated on each pop() so the
+    // value tracks the latest network conditions.
     core::Milliseconds target_delay_;
 
     // Statistics
@@ -136,9 +153,9 @@ struct JitterBuffer::Impl {
         // rate so we can subtract it from the arrival time.  For RFC 3550
         // arithmetic we use the SENDER's clock rate (typically 48 kHz for
         // Opus audio, 90 kHz for video).  When unknown, fall back to 90 kHz
-        // (the RFC default) so the math is still well-defined; the result
-        // will be off by a constant scale but the *sign* of D is preserved
-        // and |D| scaling only affects jitter growth rate (not correctness).
+        // (the RFC default) so the math is still well-defined.  The shared
+        // tracker owns the D(i-1,i)/J(i) smoothing; this front-end only
+        // feeds (arrival_us, media_clock_us) pairs.
         const std::uint32_t clock_rate_hz =
             config_.clock_rate_hz != 0 ? config_.clock_rate_hz : 90000;
         const std::uint64_t rtp_clock_us =
@@ -148,27 +165,8 @@ struct JitterBuffer::Impl {
             std::chrono::duration_cast<core::Microseconds>(
                 arrival.time_since_epoch())
                 .count();
-
-        if (last_rtp_clock_us_.has_value()) {
-            // D(i, j) = (Rj - Ri) - (Sj - Si).  Use signed arithmetic so
-            // reorder/loss can produce negative D — only |D| feeds into the
-            // smoothing equation.
-            const std::int64_t d_us =
-                (arrival_us
-                 - static_cast<std::int64_t>(*last_rtp_clock_us_))
-                - static_cast<std::int64_t>(
-                    static_cast<std::int64_t>(rtp_clock_us)
-                    - static_cast<std::int64_t>(*last_rtp_clock_us_));
-            // (Equivalent to:  (Rj - Ri) - (Sj - Si).)
-            // Update per RFC 3550 §A.8 with alpha = 1/16:
-            //   J(i) = J(i-1) + (|D(i-1,i)| - J(i-1)) / 16
-            const double abs_d = static_cast<double>(d_us < 0 ? -d_us : d_us);
-            // Math is in microseconds; convert to milliseconds for the
-            // stats surface.  Internal state stays in ms.
-            const double abs_d_ms = abs_d / 1000.0;
-            jitter_estimate_ += (abs_d_ms - jitter_estimate_) / 16.0;
-        }
-        last_rtp_clock_us_ = rtp_clock_us;
+        tracker_.observe(arrival_us,
+                         static_cast<std::int64_t>(rtp_clock_us));
 
         // ---- Initialise target_delay on first packet ---------------------
         if (target_delay_.count() == 0) {
@@ -225,23 +223,16 @@ struct JitterBuffer::Impl {
     /** Pull the next frame whose playout deadline is <= now. */
     std::optional<Frame> pop(core::TimePoint now) {
         // ---- Adaptive target_delay update ------------------------------
-        // Per WebRTC conventions and RFC 3550 §6.4.1, a reasonable
-        // adaptive playout delay tracks the observed jitter with a safety
-        // margin: target = clamp(min_delay, base + 4*J, max_delay).
-        // 4x jitter is the classic Cisco/SoC factor; it bounds the
-        // probability of under-run at ~3 sigma for typical lossless
-        // Gaussian jitter distributions.
-        if (config_.adaptive && jitter_estimate_ > 0.0) {
-            core::Milliseconds adaptive_target{
-                static_cast<std::int64_t>(jitter_estimate_ * 4.0 + 20.0)
-            };
-            if (adaptive_target < config_.min_delay) {
-                adaptive_target = config_.min_delay;
-            } else if (adaptive_target > config_.max_delay) {
-                adaptive_target = config_.max_delay;
+        // The shared tracker owns the "base + 4*J" policy (v1.3 Q2); this
+        // front-end only applies its output.  The bootstrap value set on
+        // first push() is kept until the estimator has seen jitter —
+        // otherwise the first frames would play out after 20 ms instead
+        // of the configured initial delay.
+        if (config_.adaptive) {
+            if (tracker_.jitter().count() > 0) {
+                target_delay_ = tracker_.target_delay();
             }
-            target_delay_ = adaptive_target;
-        } else if (!config_.adaptive) {
+        } else {
             // Fixed mode: target == initial_delay.
             target_delay_ = config_.initial_delay;
         }
@@ -303,11 +294,11 @@ struct JitterBuffer::Impl {
         frame_buffer_.clear();
         frame_arrival_times_.clear();
         last_seq_ = std::nullopt;
-        last_rtp_clock_us_ = std::nullopt;
         packets_received_ = 0;
         packets_dropped_ = 0;
         frames_emitted_ = 0;
-        jitter_estimate_ = 0.0;
+        tracker_.reset();
+        sync_tracker_policy();
         buffered_packets_ = 0;
         target_delay_ = {};
     }
@@ -318,14 +309,13 @@ struct JitterBuffer::Impl {
             .frames_emitted   = frames_emitted_,
             .packets_dropped  = packets_dropped_,
             .current_delay    = target_delay_,
-            .current_jitter   = core::Milliseconds{
-                static_cast<std::int64_t>(jitter_estimate_)
-            },
+            .current_jitter   = tracker_.jitter(),
         };
     }
 
     void update_config(Config config) {
         config_ = config;
+        sync_tracker_policy();
         if (!config_.adaptive) {
             target_delay_ = config_.initial_delay;
         }

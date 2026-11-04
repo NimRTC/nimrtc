@@ -28,7 +28,19 @@ if(NIMRTC_MODULE_SDP)
     add_subdirectory(sdp)
 endif()
 
+# Shared adaptive JB strategy (v1.3 Q2) — consumed by jb and video_jb.
+# NOTE: jb_strategy must come before jb: nimrtc_jb links
+# nimrtc::jb_strategy, so the target has to exist first.
+if(NIMRTC_MODULE_JB_STRATEGY)
+    add_subdirectory(jb_strategy)
+endif()
+
 if(NIMRTC_MODULE_JB)
+    if(NOT NIMRTC_MODULE_JB_STRATEGY)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_JB requires NIMRTC_MODULE_JB_STRATEGY "
+            "(shared RFC 3550 jitter estimator)")
+    endif()
     add_subdirectory(jb)
 endif()
 

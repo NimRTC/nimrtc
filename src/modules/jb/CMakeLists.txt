@@ -23,6 +23,12 @@ target_link_libraries(nimrtc_jb
         # PUBLIC: consumers can pass rtp::PacketView through their own
         # interfaces without re-declaring the type.
         nimrtc::rtp
+    PRIVATE
+        # Cross-module implementation dependency (documented in
+        # src/modules/CMakeLists.txt): the RFC 3550 §6.4.1 jitter
+        # estimator lives in jb_strategy; jb.hpp itself does not
+        # include it, so PRIVATE keeps the surface unchanged.
+        nimrtc::jb_strategy
     )
 
 target_include_directories(nimrtc_jb

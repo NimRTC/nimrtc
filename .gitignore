@@ -72,6 +72,12 @@ CMakeUserPresets.json
 .local/
 
 # ─────────────────────────────────────────────
+# zelto runtime state (may contain company-specific endpoints)
+# Never commit — regenerated per host.
+# ─────────────────────────────────────────────
+.zelto/
+
+# ─────────────────────────────────────────────
 # Project root MUST stay clean (only allowed: CMake config, docs, .git metadata).
 # Block scratch logs / output captures / downloaded archives / etc. that
 # prior build/test sessions may dump at the repo root.

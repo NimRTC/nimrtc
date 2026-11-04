@@ -44,6 +44,7 @@
 #include <memory>
 #include <string_view>
 
+#include <nimrtc/core/bytes.hpp>                 // core::MutableByteSpan
 #include <nimrtc/video_pipeline/video_pipeline.hpp>   // concrete VideoReceiver / VideoSender
 #include <nimrtc/plugins/video_pipeline.hpp>          // plugins::IVideoReceiver / IVideoSender
 
@@ -79,6 +80,13 @@ public:
     // ---- plugins::IVideoReceiver ------------------------------------------
     void              set_frame_callback(plugins::VideoReceiverFrameCallback cb) noexcept override;
     void              set_nack_callback (plugins::VideoReceiverNackCallback  cb) noexcept override;
+    void              set_feedback_callback(plugins::VideoReceiverFeedbackCallback cb) noexcept override;
+    std::size_t       feedback_rtcp_size(
+                          const plugins::VideoFeedbackReport& report) const noexcept override;
+    std::size_t       build_feedback_rtcp(const plugins::VideoFeedbackReport& report,
+                                          std::uint32_t sender_ssrc,
+                                          std::uint32_t media_ssrc,
+                                          nimrtc::core::MutableByteSpan out) const noexcept override;
     plugins::Status   push_rtp(const plugins::VideoRtpPacket& packet,
                                plugins::TimestampUs now_us) noexcept override;
     std::vector<std::uint16_t> pop_nack_entries() noexcept override;
@@ -88,9 +96,15 @@ public:
     plugins::VideoReceiverConfig config() const noexcept override;
 
 private:
+    /** Install the concrete feedback callback once; it fans out to both
+     *  the NACK callback and the feedback callback. */
+    void install_feedback_bridge() noexcept;
+
     std::unique_ptr<VideoReceiver>                       concrete_;
     plugins::VideoReceiverFrameCallback                  user_frame_cb_;
     plugins::VideoReceiverNackCallback                   user_nack_cb_;
+    plugins::VideoReceiverFeedbackCallback               user_feedback_cb_;
+    bool                                                feedback_bridge_installed_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +139,8 @@ public:
     plugins::Status   push_frame(const plugins::EncodedVideoFrame& frame,
                                  std::uint32_t rtp_timestamp) noexcept override;
     void              force_keyframe() noexcept override;
+    int               apply_feedback_rtcp(plugins::BufferView rtcp) noexcept override;
+    std::uint32_t     take_keyframe_requests() noexcept override;
     void              set_ref_frame(std::int64_t capture_ts_us,
                                     std::uint32_t frame_id,
                                     std::uint32_t rtp_timestamp) noexcept override;
@@ -135,6 +151,9 @@ public:
 private:
     std::unique_ptr<VideoSender>                       concrete_;
     plugins::VideoSenderPacketCallback                 user_pkt_cb_;
+    /** Key-frame requests seen since the last `take_keyframe_requests()`
+     *  (PLI / FIR arrivals). */
+    std::uint32_t                                      keyframe_requests_ = 0;
 };
 
 // ---------------------------------------------------------------------------

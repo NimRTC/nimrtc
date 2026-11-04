@@ -380,6 +380,63 @@ core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// NACK FCI packing helpers
+// ---------------------------------------------------------------------------
+
+std::vector<NackEntry> pack_nack_entries(
+    const std::vector<std::uint16_t>& seqs) noexcept {
+    std::vector<NackEntry> out;
+    if (seqs.empty()) return out;
+
+    // Anchor the wrap-aware arithmetic on the first element of the list.
+    const std::int32_t anchor = static_cast<std::int32_t>(seqs[0]);
+
+    std::vector<std::int32_t> deltas;
+    deltas.reserve(seqs.size());
+    for (std::uint16_t s : seqs) {
+        // Signed 16-bit difference (RFC 3550 §3.3.1 style): values beyond
+        // +32767 wrap around into the negative range, which keeps a loss
+        // set that straddles 65535 → 0 contiguous.
+        const std::int32_t raw = static_cast<std::int32_t>(s) - anchor;
+        const std::int32_t d = (raw > 32767) ? (raw - 65536) : raw;
+        deltas.push_back(d);
+    }
+    std::sort(deltas.begin(), deltas.end());
+    deltas.erase(std::unique(deltas.begin(), deltas.end()), deltas.end());
+
+    std::size_t i = 0;
+    while (i < deltas.size()) {
+        const std::int32_t pid_delta = deltas[i];
+        NackEntry e;
+        e.pid = static_cast<std::uint16_t>(
+            static_cast<std::uint32_t>((anchor + pid_delta) & 0xFFFF));
+        e.blp = 0;
+        ++i;
+        // The BLP bitmask covers PID+1 .. PID+16.
+        while (i < deltas.size()) {
+            const std::int32_t off = deltas[i] - pid_delta;
+            if (off < 1 || off > 16) break;
+            e.blp = static_cast<std::uint16_t>(e.blp | (1u << (off - 1)));
+            ++i;
+        }
+        out.push_back(e);
+    }
+    return out;
+}
+
+std::vector<std::uint16_t> unpack_nack_entries(const NackPacket& p) noexcept {
+    std::vector<std::uint16_t> out;
+    for (const auto& e : p.entries) {
+        out.push_back(e.pid);
+        for (int bit = 0; bit < 16; ++bit) {
+            if ((e.blp & (1u << bit)) == 0) continue;
+            out.push_back(static_cast<std::uint16_t>(e.pid + bit + 1));
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // FirCoalescer
 // ---------------------------------------------------------------------------
 

@@ -236,6 +236,54 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The RTCP feedback loop is closed (v1.3 Track Q3, "RTCP 反馈闭环打通").**
+  `nimrtc::video_rtcp_feedback` (NACK / FIR / PLI) is now wired to the
+  video pipeline, so a lost packet travels the whole path:
+  - the receiver detects the RTP sequence-number gap and reports it
+    through the new `VideoReceiver::set_feedback_callback()` (plain
+    data: the lost sequence numbers, plus a key-frame request when
+    picture data was lost) — `ReceiverStats::
+    keyframe_requests_emitted` counts the latter;
+  - `video_pipeline::build_feedback_rtcp()` encodes the report as RTCP
+    bytes (a NACK per RFC 4585 §6.2.1, a PLI per RFC 4585 §6.3.1);
+    `video_pipeline::feedback_rtcp_size()` sizes the destination, and a
+    report that does not fit is rejected as a whole (nothing is
+    written);
+  - the sender keeps the packets it sent in a bounded ring buffer
+    (`SenderConfig::retransmit_cache_packets`, default 256) and
+    `VideoSender::retransmit()` re-sends the exact packet that was
+    lost — same sequence number, timestamp and marker bit;
+  - `video_pipeline::apply_feedback_rtcp()` closes the loop on the
+    sender side: a NACK triggers the retransmissions, a PLI or FIR
+    arms the sender's key-frame marker (`VideoSender::
+    force_keyframe()` / `keyframe_pending()`), and a compound RTCP
+    packet is processed as a whole.
+  - the wire format gained the two helpers it was missing:
+    `video_rtcp_feedback::pack_nack_entries()` packs a list of lost
+    sequence numbers into PID + BLP FCI entries (wrap-aware: a loss set
+    straddling the 65535 → 0 rollover still fits in one entry), and
+    `unpack_nack_entries()` expands them back.
+  - the plugin seam follows: `ReceiverAdapter::set_nack_callback()`
+    now forwards the receiver's loss reports to the engine instead of
+    only storing the callback, and `plugins::VideoReceiverStats` /
+    `VideoSenderStats` expose the new counters
+    (`keyframe_requests_emitted`, `packets_retransmitted`,
+    `packets_retransmit_missed`).
+  - the engine owns the RTCP transport, so the two halves are wired
+    there: the receiver's report is queued by
+    `VideoReceiver::set_feedback_callback()` and put on the wire from
+    `NimRTCEngine::tick()` as SRTCP (RFC 3711 §3.4 — a different crypto
+    context from SRTP, so `protect_rtcp()` and not `protect_rtp()`);
+    inbound RTCP is handed to the sender through
+    `IVideoSender::apply_feedback_rtcp()`, and a key-frame request is
+    forwarded to the encoder (`force_keyframe()`), because the
+    packetizer alone cannot produce an IDR.  The feedback is sent from
+    `tick()` rather than from the receive callback so the transport's
+    `send()` is never re-entered from its `recv()`.
+  - The new `tests/test_video_feedback_loop.cpp` covers the closed loop
+    end to end (loss → NACK → retransmission → re-delivery, and PLI →
+    key frame).
+
 - **The video jitter buffer now shares the audio side's adaptive
   playout strategy (v1.3 Track Q2, "视频侧自适应 JB 统一").** The
   RFC 3550 §6.4.1 interarrival-jitter estimator and the

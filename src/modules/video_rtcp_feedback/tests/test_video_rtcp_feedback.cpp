@@ -487,3 +487,103 @@ TEST(VideoRtcpFeedback, BuildReturnsZeroOnUndersizedBuffer) {
         EXPECT_EQ(dst[11], 0xBBu);
     }
 }
+
+// ---------------------------------------------------------------------------
+// NACK FCI packing helpers (v1.3 Q3 feedback bridge)
+// ---------------------------------------------------------------------------
+
+TEST(VideoRtcpFeedback, PackNackEntriesEmpty) {
+    const auto entries =
+        nimrtc::video_rtcp_feedback::pack_nack_entries({});
+    EXPECT_TRUE(entries.empty());
+}
+
+TEST(VideoRtcpFeedback, PackNackEntriesSingleRun) {
+    // 100, 101, 102 -> one entry: PID=100, BLP bits 0 and 1 set.
+    const auto entries =
+        nimrtc::video_rtcp_feedback::pack_nack_entries({100, 101, 102});
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].pid, 100u);
+    EXPECT_EQ(entries[0].blp, 0x0003u);
+}
+
+TEST(VideoRtcpFeedback, PackNackEntriesSplitsOnGap) {
+    // 100, 101 and 200 are too far apart for one BLP window -> 2 entries.
+    const auto entries =
+        nimrtc::video_rtcp_feedback::pack_nack_entries({100, 101, 200});
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].pid, 100u);
+    EXPECT_EQ(entries[0].blp, 0x0001u);
+    EXPECT_EQ(entries[1].pid, 200u);
+    EXPECT_EQ(entries[1].blp, 0x0000u);
+}
+
+TEST(VideoRtcpFeedback, PackNackEntriesDeduplicates) {
+    const auto entries =
+        nimrtc::video_rtcp_feedback::pack_nack_entries({7, 7, 8, 7});
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].pid, 7u);
+    EXPECT_EQ(entries[0].blp, 0x0001u);
+}
+
+TEST(VideoRtcpFeedback, PackNackEntriesMaxWindow) {
+    // 17 consecutive sequence numbers fit in one entry (PID + 16 BLP bits).
+    std::vector<std::uint16_t> seqs;
+    for (std::uint16_t i = 0; i < 17; ++i) {
+        seqs.push_back(static_cast<std::uint16_t>(1000 + i));
+    }
+    const auto entries = nimrtc::video_rtcp_feedback::pack_nack_entries(seqs);
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].pid, 1000u);
+    EXPECT_EQ(entries[0].blp, 0xFFFFu);
+}
+
+TEST(VideoRtcpFeedback, PackNackEntriesWrapsAround) {
+    // 65534, 65535, 0, 1 -> one entry straddling the 16-bit rollover.
+    // PID = 65534, BLP covers 65535 (bit 0), 0 (bit 1) and 1 (bit 2).
+    const auto entries =
+        nimrtc::video_rtcp_feedback::pack_nack_entries({0, 1, 65534, 65535});
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].pid, 65534u);
+    EXPECT_EQ(entries[0].blp, 0x0007u);
+}
+
+TEST(VideoRtcpFeedback, UnpackNackEntriesReversesPacking) {
+    const std::vector<std::uint16_t> seqs{10, 11, 12, 40, 41};
+    const auto entries = nimrtc::video_rtcp_feedback::pack_nack_entries(seqs);
+
+    NackPacket p;
+    p.sender_ssrc = 1u;
+    p.media_ssrc  = 2u;
+    p.entries     = entries;
+
+    const auto back = nimrtc::video_rtcp_feedback::unpack_nack_entries(p);
+    ASSERT_EQ(back.size(), seqs.size());
+    for (std::size_t i = 0; i < back.size(); ++i) {
+        EXPECT_EQ(back[i], seqs[i]);
+    }
+}
+
+TEST(VideoRtcpFeedback, PackedEntriesSurviveWireRoundTrip) {
+    const std::vector<std::uint16_t> seqs{100, 101, 105, 200};
+    const auto entries = nimrtc::video_rtcp_feedback::pack_nack_entries(seqs);
+
+    NackPacket p;
+    p.sender_ssrc = 0x11223344u;
+    p.media_ssrc  = 0x55667788u;
+    p.entries     = entries;
+
+    std::vector<std::uint8_t> buf(kNackMinSize + entries.size() * kNackEntrySize);
+    const std::size_t n =
+        nimrtc::video_rtcp_feedback::build_nack(buf, p);
+    ASSERT_EQ(n, buf.size());
+
+    auto parsed = nimrtc::video_rtcp_feedback::parse_nack(buf);
+    ASSERT_TRUE(parsed.ok());
+    const auto back =
+        nimrtc::video_rtcp_feedback::unpack_nack_entries(parsed.value());
+    ASSERT_EQ(back.size(), seqs.size());
+    for (std::size_t i = 0; i < back.size(); ++i) {
+        EXPECT_EQ(back[i], seqs[i]);
+    }
+}

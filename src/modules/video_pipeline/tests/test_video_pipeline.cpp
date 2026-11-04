@@ -804,3 +804,151 @@ TEST(VideoPipeline, EndToEndFuA) {
     EXPECT_TRUE(recs[0].frame.is_keyframe);
     EXPECT_EQ(rx.stats().fua_fragments_seen, sent.size());
 }
+// ===========================================================================
+// 15. Receiver: feedback callback reports the lost sequence numbers.
+// ===========================================================================
+
+TEST(VideoPipeline, ReceiverFeedbackReportsMissingPackets) {
+    ReceiverConfig rc;
+    rc.codec        = video_frame::CodecKind::kH264;
+    rc.ssrc         = kSsrc;
+    rc.payload_type = kPt;
+
+    VideoReceiver rx(rc);
+
+    std::vector<vp::ReceiverFeedback> reports;
+    rx.set_feedback_callback([&reports](const vp::ReceiverFeedback& fb) {
+        reports.push_back(fb);
+    });
+
+    std::uint8_t n1[] = {0x65, 0xAA};
+    std::uint8_t n4[] = {0xCC, 0xDD};    // seq 101..103 missing
+
+    auto p1 = make_rtp(100, 5000, true, kPt, kSsrc, {n1, sizeof(n1)});
+    auto p4 = make_rtp(104, 5000, true, kPt, kSsrc, {n4, sizeof(n4)});
+
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(p1), 1000));
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(p4), 1200));
+
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_EQ(reports[0].missing_packets.size(), 3u);
+    EXPECT_EQ(reports[0].missing_packets[0], 101u);
+    EXPECT_EQ(reports[0].missing_packets[1], 102u);
+    EXPECT_EQ(reports[0].missing_packets[2], 103u);
+    EXPECT_FALSE(reports[0].keyframe_requested);
+}
+
+// ===========================================================================
+// 16. Receiver: an incomplete frame raises a key-frame request.
+// ===========================================================================
+
+TEST(VideoPipeline, ReceiverFeedbackRequestsKeyframe) {
+    ReceiverConfig rc;
+    rc.codec                           = video_frame::CodecKind::kH264;
+    rc.ssrc                            = kSsrc;
+    rc.payload_type                    = kPt;
+    rc.jitter_buffer_config.max_wait_ms = 50;
+
+    VideoReceiver rx(rc);
+
+    std::vector<vp::ReceiverFeedback> reports;
+    rx.set_feedback_callback([&reports](const vp::ReceiverFeedback& fb) {
+        reports.push_back(fb);
+    });
+
+    std::uint8_t n[] = {0x41, 0xAA};    // P-frame without marker
+    auto p = make_rtp(100, 6000, false, kPt, kSsrc, {n, sizeof(n)});
+    EXPECT_TRUE(rx.push_rtp(parse_rtp(p), 0));
+
+    rx.tick(/*now_us=*/60 * 1000);
+
+    bool saw_keyframe_request = false;
+    for (const auto& fb : reports) {
+        if (fb.keyframe_requested) saw_keyframe_request = true;
+    }
+    EXPECT_TRUE(saw_keyframe_request);
+    EXPECT_GE(rx.stats().keyframe_requests_emitted, 1u);
+}
+
+// ===========================================================================
+// 17. Sender: retransmission cache answers a NACK with the same packet.
+// ===========================================================================
+
+TEST(VideoPipeline, SenderRetransmitFromCache) {
+    SenderConfig sc;
+    sc.codec        = video_frame::CodecKind::kH264;
+    sc.ssrc         = kSsrc;
+    sc.payload_type = kPt;
+    sc.initial_seq  = 500;
+    sc.retransmit_cache_packets = 64;
+
+    VideoSender tx(sc);
+    PacketRecorder rec;
+    tx.set_packet_callback(rec.as_callback());
+
+    std::uint8_t nalu[] = {0x65, 0xAA, 0xBB};
+    std::vector<std::uint8_t> ann;
+    ann.insert(ann.end(), {0x00, 0x00, 0x00, 0x01});
+    ann.insert(ann.end(), nalu, nalu + sizeof(nalu));
+
+    video_frame::EncodedVideoFrame frame{};
+    frame.codec       = video_frame::CodecKind::kH264;
+    frame.nalu_format = video_frame::NaluFormat::kAnnexBStartCode;
+    frame.payload     = core::ByteSpan{ann.data(), ann.size()};
+
+    auto ok = tx.push_frame(frame, /*capture_ts_us=*/1000,
+                            /*rtp_timestamp=*/9000, /*frame_seq=*/1);
+    EXPECT_TRUE(ok.ok());
+
+    auto sent = rec.snapshot();
+    ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0].seq, 500u);
+    EXPECT_EQ(tx.cached_packet_count(), 1u);
+
+    // The NACK asks for seq 500 again -> the very same packet is re-sent.
+    EXPECT_TRUE(tx.retransmit(500u));
+    auto after = rec.snapshot();
+    ASSERT_EQ(after.size(), 2u);
+    EXPECT_EQ(after[1].seq, 500u);
+    EXPECT_EQ(after[1].rtp_ts, sent[0].rtp_ts);
+    EXPECT_EQ(after[1].marker, sent[0].marker);
+    EXPECT_EQ(after[1].payload, sent[0].payload);
+    EXPECT_EQ(tx.stats().packets_retransmitted, 1u);
+
+    // An unknown sequence number is a miss, not a crash.
+    EXPECT_FALSE(tx.retransmit(1234u));
+    EXPECT_EQ(tx.stats().packets_retransmit_missed, 1u);
+}
+
+// ===========================================================================
+// 18. Sender: force_keyframe() arms the one-shot key-frame marker.
+// ===========================================================================
+
+TEST(VideoPipeline, SenderKeyframePendingIsOneShot) {
+    SenderConfig sc;
+    sc.codec        = video_frame::CodecKind::kH264;
+    sc.ssrc         = kSsrc;
+    sc.payload_type = kPt;
+
+    VideoSender tx(sc);
+    EXPECT_FALSE(tx.keyframe_pending());
+
+    tx.force_keyframe();
+    EXPECT_TRUE(tx.keyframe_pending());
+    EXPECT_EQ(tx.stats().force_keyframe_calls, 1u);
+
+    std::uint8_t nalu[] = {0x65, 0xAA, 0xBB};
+    std::vector<std::uint8_t> ann;
+    ann.insert(ann.end(), {0x00, 0x00, 0x00, 0x01});
+    ann.insert(ann.end(), nalu, nalu + sizeof(nalu));
+
+    video_frame::EncodedVideoFrame frame{};
+    frame.codec       = video_frame::CodecKind::kH264;
+    frame.nalu_format = video_frame::NaluFormat::kAnnexBStartCode;
+    frame.payload     = core::ByteSpan{ann.data(), ann.size()};
+
+    auto ok = tx.push_frame(frame, 1000, 9000, 1);
+    EXPECT_TRUE(ok.ok());
+    EXPECT_FALSE(tx.keyframe_pending());
+    EXPECT_EQ(tx.stats().frames_marked_as_keyframe, 1u);
+}

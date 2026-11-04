@@ -220,6 +220,7 @@ to_plugin_receiver_stats(const ReceiverStats& s) noexcept {
     out.stap_a_packets_seen  = s.stap_a_packets_seen;
     out.nack_entries_emitted = s.nack_entries_emitted;
     out.sequence_gaps_seen   = s.sequence_gaps_seen;
+    out.keyframe_requests_emitted = s.keyframe_requests_emitted;
     return out;
 }
 
@@ -233,6 +234,8 @@ to_plugin_sender_stats(const SenderStats& s) noexcept {
     out.single_nal_frames_packetized = s.single_nal_frames_packetized;
     out.force_keyframe_calls         = s.force_keyframe_calls;
     out.frames_marked_as_keyframe    = s.frames_marked_as_keyframe;
+    out.packets_retransmitted        = s.packets_retransmitted;
+    out.packets_retransmit_missed    = s.packets_retransmit_missed;
     return out;
 }
 
@@ -277,10 +280,62 @@ void ReceiverAdapter::set_frame_callback(plugins::VideoReceiverFrameCallback cb)
 }
 
 void ReceiverAdapter::set_nack_callback(plugins::VideoReceiverNackCallback cb) noexcept {
-    // Concrete VideoReceiver exposes pull-style pop_nack_entries() only;
-    // a push callback isn't yet supported in the concrete API. Store it
-    // so future revisions can wire it up without an API break.
     user_nack_cb_ = std::move(cb);
+    install_feedback_bridge();
+}
+
+void ReceiverAdapter::set_feedback_callback(
+    plugins::VideoReceiverFeedbackCallback cb) noexcept {
+    user_feedback_cb_ = std::move(cb);
+    install_feedback_bridge();
+}
+
+void ReceiverAdapter::install_feedback_bridge() noexcept {
+    if (!concrete_ || feedback_bridge_installed_) return;
+    feedback_bridge_installed_ = true;
+
+    // v1.3 Q3: the concrete receiver pushes its loss reports, so the
+    // plugin seam can forward them straight to the engine.  One concrete
+    // callback serves both plugin-level callbacks — the concrete
+    // receiver holds a single feedback slot, so a second registration
+    // would silently replace the first.
+    concrete_->set_feedback_callback(
+        [this](const ReceiverFeedback& fb) {
+            if (fb.missing_packets.empty() && !fb.keyframe_requested) return;
+            if (user_nack_cb_ && !fb.missing_packets.empty()) {
+                user_nack_cb_(fb.missing_packets);
+            }
+            if (user_feedback_cb_) {
+                plugins::VideoFeedbackReport rep{};
+                rep.missing_seqs   = fb.missing_packets;
+                rep.want_keyframe  = fb.keyframe_requested;
+                user_feedback_cb_(rep);
+            }
+        });
+}
+
+std::size_t ReceiverAdapter::feedback_rtcp_size(
+    const plugins::VideoFeedbackReport& report) const noexcept {
+    if (!concrete_) return 0;
+    ReceiverFeedback fb{};
+    fb.missing_packets    = report.missing_seqs;
+    fb.keyframe_requested = report.want_keyframe;
+    // Qualified: the unqualified name resolves to this member function.
+    return ::nimrtc::video_pipeline::feedback_rtcp_size(fb);
+}
+
+std::size_t ReceiverAdapter::build_feedback_rtcp(
+    const plugins::VideoFeedbackReport& report,
+    std::uint32_t sender_ssrc,
+    std::uint32_t media_ssrc,
+    nimrtc::core::MutableByteSpan out) const noexcept {
+    if (!concrete_) return 0;
+    ReceiverFeedback fb{};
+    fb.missing_packets    = report.missing_seqs;
+    fb.keyframe_requested = report.want_keyframe;
+    // Qualified: the unqualified name resolves to this member function.
+    return ::nimrtc::video_pipeline::build_feedback_rtcp(
+        out, fb, sender_ssrc, media_ssrc);
 }
 
 plugins::Status ReceiverAdapter::push_rtp(const plugins::VideoRtpPacket& packet,
@@ -365,6 +420,32 @@ plugins::Status SenderAdapter::push_frame(const plugins::EncodedVideoFrame& fram
 
 void SenderAdapter::force_keyframe() noexcept {
     if (concrete_) concrete_->force_keyframe();
+}
+
+int SenderAdapter::apply_feedback_rtcp(plugins::BufferView rtcp) noexcept {
+    if (!concrete_) return 0;
+
+    // The concrete sender answers a NACK by re-emitting the cached packet
+    // through the packet callback and a PLI / FIR by arming its key-frame
+    // flag.  Both are counted in the sender stats, so the delta tells us
+    // how many key-frame requests arrived — the engine needs that number
+    // to force an IDR at the encoder.
+    const std::uint64_t before = concrete_->stats().force_keyframe_calls;
+
+    // Qualified: the unqualified name resolves to this member function.
+    auto r = ::nimrtc::video_pipeline::apply_feedback_rtcp(*concrete_, rtcp);
+
+    const std::uint64_t after = concrete_->stats().force_keyframe_calls;
+    if (after > before) {
+        keyframe_requests_ += static_cast<std::uint32_t>(after - before);
+    }
+    return r.ok() ? r.value() : 0;
+}
+
+std::uint32_t SenderAdapter::take_keyframe_requests() noexcept {
+    const std::uint32_t n = keyframe_requests_;
+    keyframe_requests_ = 0;
+    return n;
 }
 
 void SenderAdapter::set_ref_frame(std::int64_t /*capture_ts_us*/,

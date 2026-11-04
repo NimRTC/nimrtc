@@ -135,6 +135,11 @@ endif()
 
 if(NIMRTC_MODULE_VIDEO_PIPELINE
         AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/video_pipeline/CMakeLists.txt")
+    if(NOT NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_VIDEO_PIPELINE requires NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK "
+            "(the v1.3 Q3 feedback bridge encodes NACK/PLI for the video pipeline)")
+    endif()
     add_subdirectory(video_pipeline)
 endif()
 

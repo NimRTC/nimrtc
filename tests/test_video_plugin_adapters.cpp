@@ -365,4 +365,49 @@ TEST(VideoPluginAdaptersDirect, SenderAdapter_is_forwarder) {
     adapter.close();
 }
 
+// ---------------------------------------------------------------------------
+// v1.3 Q3: the adapter forwards the receiver's loss reports through the
+// plugin seam, so the engine can answer them with a NACK.
+// ---------------------------------------------------------------------------
+
+TEST(VideoPluginAdaptersDirect, ReceiverAdapter_forwards_nack_callback) {
+    nimrtc::video_pipeline::ReceiverConfig concrete_cfg{};
+    concrete_cfg.codec        = nimrtc::video_frame::CodecKind::kH264;
+    concrete_cfg.ssrc         = 0x12345678;
+    concrete_cfg.payload_type = 102;
+
+    auto concrete = std::make_unique<nimrtc::video_pipeline::VideoReceiver>(
+        concrete_cfg);
+
+    nimrtc::video_pipeline::ReceiverAdapter adapter(std::move(concrete));
+    ASSERT_EQ(adapter.open(), np::kOk);
+
+    std::vector<std::vector<std::uint16_t>> reports;
+    adapter.set_nack_callback(
+        [&reports](std::vector<std::uint16_t> missing) {
+            reports.push_back(std::move(missing));
+        });
+
+    static const std::uint8_t kPayload[] = {0x65, 0x88, 0x84};
+
+    np::VideoRtpPacket pkt{};
+    pkt.ssrc          = 0x12345678;
+    pkt.rtp_timestamp = 90000;
+    pkt.payload_type  = 102;
+    pkt.marker        = true;
+    pkt.payload       = nimrtc::core::ByteSpan{kPayload, sizeof(kPayload)};
+
+    pkt.seq = 10;
+    EXPECT_EQ(adapter.push_rtp(pkt, /*now_us=*/1000), np::kOk);
+    pkt.seq = 13;   // 11 and 12 are lost
+    EXPECT_EQ(adapter.push_rtp(pkt, /*now_us=*/3000), np::kOk);
+
+    ASSERT_EQ(reports.size(), 1u);
+    ASSERT_EQ(reports[0].size(), 2u);
+    EXPECT_EQ(reports[0][0], 11u);
+    EXPECT_EQ(reports[0][1], 12u);
+
+    adapter.close();
+}
+
 } // namespace

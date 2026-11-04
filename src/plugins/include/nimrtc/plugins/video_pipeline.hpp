@@ -154,6 +154,8 @@ struct NIMRTC_API_STABLE VideoReceiverStats {
     std::uint64_t stap_a_packets_seen  = 0;
     std::uint64_t nack_entries_emitted = 0;
     std::uint64_t sequence_gaps_seen   = 0;
+    /** Key-frame requests raised because picture data was lost (v1.3 Q3). */
+    std::uint64_t keyframe_requests_emitted = 0;
 };
 
 /** Frame callback: invoked on the receiver thread for every assembled frame.
@@ -190,6 +192,31 @@ using NIMRTC_API_STABLE VideoReceiverNackCallback =
     std::function<void(std::vector<std::uint16_t> missing_seqs)>;
 
 /**
+ * @brief Feedback report produced by a receiver (v1.3 Q3).
+ *
+ *  `missing_seqs` holds the RTP sequence numbers the receiver detected
+ *  as lost — the NACK candidates of RFC 4585 §6.2.1.  `want_keyframe`
+ *  asks the peer for a new key frame — RFC 4585 §6.3.1 (PLI) or
+ *  RFC 5104 §4.3.1 (FIR).
+ *
+ *  The report is plain data: the RTCP wire format is produced by the
+ *  receiver plugin itself (`build_feedback_rtcp()`), so the engine
+ *  never has to know how a NACK or a PLI is encoded.
+ */
+struct NIMRTC_API_STABLE VideoFeedbackReport {
+    /** Lost RTP sequence numbers (NACK candidates). */
+    std::vector<std::uint16_t> missing_seqs;
+
+    /** True when the receiver needs a new key frame (PLI / FIR). */
+    bool                       want_keyframe = false;
+};
+
+/** Push-style feedback callback (loss report and/or key-frame request).
+ *  Fired synchronously on the thread that fed the receiver. */
+using NIMRTC_API_STABLE VideoReceiverFeedbackCallback =
+    std::function<void(const VideoFeedbackReport& report)>;
+
+/**
  * @brief Receiver pipeline: RTP packets → assembled encoded frames.
  *
  * Pipeline per push:
@@ -212,6 +239,51 @@ public:
     /** Register an optional push-style NACK callback. Default = no-op. */
     virtual void set_nack_callback(VideoReceiverNackCallback cb) noexcept {
         (void)cb;   // default: implementations that don't push NACKs ignore this
+    }
+
+    // ---- Feedback bridge (v1.3 Q3) ---------------------------------------
+    //
+    // The receiver detects the loss and says *what* is wrong; the engine
+    // owns the RTCP transport and therefore needs the *bytes*.  These
+    // three methods close that gap without leaking the RTCP wire format
+    // into the engine (the engine only sees an opaque byte buffer).
+
+    /** Register the push-style feedback callback (loss + key-frame
+     *  request).  Default = no-op; receivers that cannot report feedback
+     *  leave this as the default.
+     *
+     *  A receiver may implement either this callback or the older
+     *  `set_nack_callback()` — the engine registers both, so an
+     *  implementation should support whichever it prefers. */
+    virtual void set_feedback_callback(VideoReceiverFeedbackCallback cb) noexcept {
+        (void)cb;
+    }
+
+    /** Number of bytes `build_feedback_rtcp()` needs for `report`.
+     *  0 when the report carries nothing to send (no loss, no key-frame
+     *  request). */
+    virtual std::size_t feedback_rtcp_size(
+        const VideoFeedbackReport& report) const noexcept {
+        (void)report;
+        return 0;
+    }
+
+    /** Encode `report` as RTCP feedback bytes (NACK and/or PLI).
+     *
+     *  @param report      The feedback to encode.
+     *  @param sender_ssrc SSRC of the feedback sender (this side).
+     *  @param media_ssrc  SSRC of the media source the feedback is about
+     *                     (the peer's stream).
+     *  @param out         Destination buffer, sized with
+     *                     `feedback_rtcp_size()`.
+     *  @return The number of bytes written; 0 when the report is empty or
+     *          `out` is too small. */
+    virtual std::size_t build_feedback_rtcp(const VideoFeedbackReport& report,
+                                            std::uint32_t sender_ssrc,
+                                            std::uint32_t media_ssrc,
+                                            core::MutableByteSpan out) const noexcept {
+        (void)report; (void)sender_ssrc; (void)media_ssrc; (void)out;
+        return 0;
     }
 
     /** Register the decoded-frame callback for zero-copy display path.
@@ -339,6 +411,11 @@ struct NIMRTC_API_STABLE VideoSenderStats {
     std::uint64_t single_nal_frames_packetized = 0;
     std::uint64_t force_keyframe_calls         = 0;
     std::uint64_t frames_marked_as_keyframe    = 0;
+    /** Packets re-sent in response to a NACK (v1.3 Q3). */
+    std::uint64_t packets_retransmitted        = 0;
+    /** NACKs that could not be answered (the packet had already left the
+     *  retransmission cache) (v1.3 Q3). */
+    std::uint64_t packets_retransmit_missed    = 0;
 };
 
 /** Per-packet callback: invoked for each emitted RTP packet payload.
@@ -390,6 +467,40 @@ public:
      *  is responsible for actually emitting a keyframe (i.e. for H.264 an
      *  IDR slice) at that point. */
     virtual void force_keyframe() noexcept = 0;
+
+    // ---- Feedback bridge (v1.3 Q3) ---------------------------------------
+    //
+    // The mirror image of the receiver side: the engine owns the RTCP
+    // transport and hands the received feedback bytes to the sender,
+    // which knows how to answer them.
+
+    /** Apply an inbound RTCP feedback packet (a single feedback packet
+     *  or a compound packet — every sub-packet is processed).
+     *
+     *  The sender answers:
+     *   - NACK (RFC 4585 §6.2.1) → the listed packets are retransmitted
+     *     through the packet callback (same sequence number, timestamp
+     *     and marker as the original).
+     *   - PLI  (RFC 4585 §6.3.1) → a key frame is requested.
+     *   - FIR  (RFC 5104 §4.3.1) → a key frame is requested.
+     *
+     *  @param rtcp  The received (plaintext) RTCP bytes.
+     *  @return The number of actions performed (retransmissions plus
+     *          key-frame requests).  Default = 0 (no feedback support). */
+    virtual int apply_feedback_rtcp(BufferView rtcp) noexcept {
+        (void)rtcp;
+        return 0;
+    }
+
+    /** Number of key-frame requests (PLI / FIR) recorded since the last
+     *  call; the counter is cleared by this call.
+     *
+     *  The engine polls it after `apply_feedback_rtcp()` so it can force
+     *  an IDR at the *encoder* — the packetizer alone cannot produce
+     *  one.  Default = 0. */
+    virtual std::uint32_t take_keyframe_requests() noexcept {
+        return 0;
+    }
 
     /** P3 — interface stable; implementation lands in 1.0.
      *  Sets the timeline reference frame metadata for the next encode call.

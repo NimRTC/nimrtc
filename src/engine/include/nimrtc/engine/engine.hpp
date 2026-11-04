@@ -1193,6 +1193,15 @@ private:
     void dispatch_media_inbound(plugins::BufferView view, bool tried_srtp) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
     void handle_rtcp(plugins::BufferView view) noexcept;
+    /** Merge a receiver feedback report into the pending one.  The
+     *  reports are put on the wire by `flush_video_feedback()` from
+     *  `tick()` — the receiver raises them from inside the ICE receive
+     *  path, and sending from there would re-enter the transport. */
+    void queue_video_feedback(const plugins::VideoFeedbackReport& report) noexcept;
+    /** Encode the pending receiver feedback as RTCP and put it on the wire
+     *  (v1.3 Q3).  The bytes are produced by the receiver plugin — the
+     *  engine only protects them (SRTCP) and sends them. */
+    void flush_video_feedback() noexcept;
     void observe_timeline(const rtp::PacketView& pv) noexcept;
     void maybe_send_sender_report() noexcept;
     void poll_ice_flap_for_rehandshake() noexcept;

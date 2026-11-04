@@ -743,6 +743,56 @@ endfunction()
 # R2-Batch2 validation: video plugin interfaces compile + register.
 nimrtc_add_plugin_test(test_video_plugin_interfaces test_video_plugin_interfaces.cpp)
 
+# ----------------------------------------------------------------------------
+# v1.3 Q3 — closed video feedback loop.
+#
+# Spans three modules:
+#   - nimrtc::video_pipeline       : receiver loss detection + sender cache
+#   - nimrtc::video_rtcp_feedback : NACK / PLI wire format
+#
+# The test drives: packet loss -> receiver feedback -> RTCP NACK ->
+# sender retransmission -> re-delivery, and the PLI -> key-frame path.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_video_feedback_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::video_pipeline
+        nimrtc::video_rtcp_feedback
+        nimrtc::video_frame
+        nimrtc::video_jb
+        nimrtc::rtp
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_rtcp_feedback/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_jb/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/rtp/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endfunction()
+
+if(NIMRTC_MODULE_VIDEO_PIPELINE AND NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK)
+nimrtc_add_video_feedback_test(test_video_feedback_loop
+                                test_video_feedback_loop.cpp)
+endif()
+
 # R2-Batch2 validation: video module plugin adapters wire concrete impls
 # through core::PluginRegistry (memory source / headless+pinned sinks /
 # reference receiver+sender).

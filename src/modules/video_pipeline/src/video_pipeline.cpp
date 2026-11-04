@@ -169,6 +169,7 @@ struct VideoReceiver::Impl {
     ReceiverConfig                 cfg{};
     ReceiverStats                  stats{};
     ReceiverFrameCallback          frame_cb;
+    ReceiverFeedbackCallback       feedback_cb;
 
     std::unique_ptr<video_jb::IVideoJitterBuffer> jb;
 
@@ -216,13 +217,40 @@ struct VideoReceiver::Impl {
             // gap of (d - 1) missing packets
             stats.sequence_gaps_seen += static_cast<std::uint64_t>(d - 1);
             std::uint16_t missing = expected_next;
+            std::vector<std::uint16_t> lost;
+            lost.reserve(static_cast<std::size_t>(d - 1));
             for (std::int32_t k = 0; k < d - 1; ++k) {
                 pending_nacks.push_back(missing);
+                lost.push_back(missing);
                 missing = static_cast<std::uint16_t>(missing + 1);
             }
+            // v1.3 Q3: hand the loss to the feedback callback so the owner
+            // of the RTCP transport can answer it with a NACK.
+            report_missing(std::move(lost));
         }
         highest_seq   = seq;
         expected_next = static_cast<std::uint16_t>(seq + 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // v1.3 Q3: report lost packets to the feedback callback.
+    // ---------------------------------------------------------------------
+    void report_missing(std::vector<std::uint16_t> lost) noexcept {
+        if (!feedback_cb || lost.empty()) return;
+        ReceiverFeedback fb;
+        fb.missing_packets = std::move(lost);
+        feedback_cb(fb);
+    }
+
+    // ---------------------------------------------------------------------
+    // v1.3 Q3: picture data was lost -> ask the sender for a key frame.
+    // ---------------------------------------------------------------------
+    void request_keyframe() noexcept {
+        stats.keyframe_requests_emitted++;
+        if (!feedback_cb) return;
+        ReceiverFeedback fb;
+        fb.keyframe_requested = true;
+        feedback_cb(fb);
     }
 
     // ---------------------------------------------------------------------
@@ -344,7 +372,6 @@ struct VideoReceiver::Impl {
     // Drain popped frames from the JB and invoke the user callback.
     // ---------------------------------------------------------------------
     void drain_frames(std::int64_t now_us) noexcept {
-        if (!frame_cb) return;
         for (;;) {
             // The time-aware pop lets the jitter buffer hold a frame until
             // its playout deadline (adaptive mode).  In fixed-window mode
@@ -352,7 +379,13 @@ struct VideoReceiver::Impl {
             auto f = jb->pop_frame(now_us);
             if (!f) break;
             stats.frames_emitted++;
-            if (!f->complete) stats.frames_incomplete++;
+            if (!f->complete) {
+                stats.frames_incomplete++;
+                // v1.3 Q3: picture data was lost — ask the sender for a
+                // fresh key frame so the decoder can resync (PLI / FIR).
+                request_keyframe();
+            }
+            if (!frame_cb) continue;
             video_frame::EncodedVideoFrame out{};
             out.codec        = f->codec;
             out.nalu_format  = video_frame::NaluFormat::kAnnexBStartCode;
@@ -379,6 +412,10 @@ VideoReceiver::~VideoReceiver() = default;
 
 void VideoReceiver::set_frame_callback(ReceiverFrameCallback cb) noexcept {
     impl_->frame_cb = std::move(cb);
+}
+
+void VideoReceiver::set_feedback_callback(ReceiverFeedbackCallback cb) noexcept {
+    impl_->feedback_cb = std::move(cb);
 }
 
 bool VideoReceiver::push_rtp(const rtp::PacketView& packet,
@@ -451,8 +488,24 @@ struct VideoSender::Impl {
     // Reusable scratch buffer for emitted packet payloads.
     std::vector<std::uint8_t> scratch;
 
+    // ---- Retransmission cache (v1.3 Q3) ---------------------------------
+    // A NACK asks the sender to repeat one packet; the sender can only
+    // do that if it still holds the packet.  We keep the most recently
+    // sent packets in a small ring buffer (bounded by
+    // `cfg.retransmit_cache_packets`) so a NACK can be answered without
+    // re-encoding the frame.
+    struct CachedPacket {
+        std::uint16_t           seq      = 0;
+        std::uint32_t           rtp_ts   = 0;
+        bool                    marker   = false;
+        std::vector<std::uint8_t> payload;
+    };
+    std::vector<CachedPacket>  rtx_cache;   // ring buffer, oldest first
+    std::size_t               rtx_head = 0; // next slot to overwrite
+
     explicit Impl(SenderConfig c) : cfg(std::move(c)) {
         next_seq = cfg.initial_seq;
+        rtx_cache.resize(cfg.retransmit_cache_packets);
     }
 
     void emit(core::ByteSpan payload,
@@ -462,10 +515,34 @@ struct VideoSender::Impl {
         std::uint16_t seq = next_seq;
         next_seq = static_cast<std::uint16_t>(next_seq + 1);
         stats.packets_emitted++;
+        cache_packet(seq, rtp_ts, marker, scratch);
         if (packet_cb) {
             packet_cb(core::ByteSpan{scratch.data(), scratch.size()},
                       rtp_ts, seq, marker);
         }
+    }
+
+    /** Store a sent packet in the retransmission ring buffer. */
+    void cache_packet(std::uint16_t           seq,
+                      std::uint32_t           rtp_ts,
+                      bool                    marker,
+                      const std::vector<std::uint8_t>& payload) noexcept {
+        if (cfg.retransmit_cache_packets == 0) return;
+        CachedPacket& slot = rtx_cache[rtx_head];
+        slot.seq    = seq;
+        slot.rtp_ts = rtp_ts;
+        slot.marker = marker;
+        slot.payload.assign(payload.begin(), payload.end());
+        rtx_head = (rtx_head + 1) % cfg.retransmit_cache_packets;
+    }
+
+    /** Look up a cached packet by sequence number. */
+    const CachedPacket* find_cached(std::uint16_t seq) const noexcept {
+        for (const auto& p : rtx_cache) {
+            if (p.payload.empty()) continue;   // never filled
+            if (p.seq == seq) return &p;
+        }
+        return nullptr;
     }
 
     /** H.264 packetization: emit one frame's worth of NALUs. */
@@ -693,12 +770,178 @@ void VideoSender::force_keyframe() noexcept {
     s.stats.force_keyframe_calls++;
 }
 
+bool VideoSender::keyframe_pending() const noexcept {
+    return impl_->keyframe_pending;
+}
+
+bool VideoSender::retransmit(std::uint16_t seq) noexcept {
+    auto& s = *impl_;
+    const Impl::CachedPacket* p = s.find_cached(seq);
+    if (!p) {
+        s.stats.packets_retransmit_missed++;
+        return false;
+    }
+    // Re-emit with the ORIGINAL sequence number / timestamp / marker so
+    // the receiver can splice the packet back into the frame it belongs to.
+    if (s.packet_cb) {
+        s.packet_cb(core::ByteSpan{p->payload.data(), p->payload.size()},
+                    p->rtp_ts, p->seq, p->marker);
+    }
+    s.stats.packets_retransmitted++;
+    return true;
+}
+
+std::size_t VideoSender::cached_packet_count() const noexcept {
+    const auto& s = *impl_;
+    std::size_t n = 0;
+    for (const auto& p : s.rtx_cache) {
+        if (!p.payload.empty()) ++n;
+    }
+    return n;
+}
+
 SenderStats VideoSender::stats() const noexcept {
     return impl_->stats;
 }
 
 std::uint16_t VideoSender::next_seq() const noexcept {
     return impl_->next_seq;
+}
+
+// ===========================================================================
+// Feedback bridge (v1.3 Q3)
+// ===========================================================================
+
+namespace fb = video_rtcp_feedback;
+
+std::size_t feedback_rtcp_size(const ReceiverFeedback& feedback) noexcept {
+    std::size_t n = 0;
+    if (!feedback.missing_packets.empty()) {
+        const auto entries = fb::pack_nack_entries(feedback.missing_packets);
+        n += fb::kNackMinSize + entries.size() * fb::kNackEntrySize;
+    }
+    if (feedback.keyframe_requested) {
+        n += fb::kPliPacketSize;
+    }
+    return n;
+}
+
+std::size_t build_feedback_rtcp(core::MutableByteSpan output,
+                                const ReceiverFeedback& feedback,
+                                std::uint32_t sender_ssrc,
+                                std::uint32_t media_ssrc) noexcept {
+    // Size the destination up-front: a report that does not fit is
+    // rejected as a whole (nothing is written), so the caller never sees
+    // a half-encoded feedback packet.
+    if (output.size() < feedback_rtcp_size(feedback)) return 0;
+
+    std::size_t written = 0;
+
+    if (!feedback.missing_packets.empty()) {
+        const auto entries = fb::pack_nack_entries(feedback.missing_packets);
+        if (!entries.empty()) {
+            fb::NackPacket nack;
+            nack.sender_ssrc = sender_ssrc;
+            nack.media_ssrc  = media_ssrc;
+            nack.entries     = entries;
+            const std::size_t n = fb::build_nack(
+                output.subspan(written), nack);
+            if (n == 0) return 0;      // destination too small
+            written += n;
+        }
+    }
+
+    if (feedback.keyframe_requested) {
+        fb::PliPacket pli;
+        pli.sender_ssrc = sender_ssrc;
+        pli.media_ssrc  = media_ssrc;
+        const std::size_t n = fb::build_pli(output.subspan(written), pli);
+        if (n == 0) return 0;          // destination too small
+        written += n;
+    }
+
+    return written;
+}
+
+core::Result<int> apply_feedback_rtcp(VideoSender& sender,
+                                      core::ByteSpan rtcp) noexcept {
+    int actions = 0;
+    std::size_t offset = 0;
+
+    while (offset < rtcp.size()) {
+        if (rtcp.size() - offset < fb::kRtcpHeaderSize) {
+            return core::Result<int>::fail(
+                core::ErrorCode::ProtocolError,
+                "video_pipeline: RTCP feedback truncated (header)");
+        }
+        const std::uint8_t b0 = rtcp[offset];
+        const std::uint8_t pt = rtcp[offset + 1];
+        const std::uint16_t length_words = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(rtcp[offset + 2]) << 8) |
+             static_cast<std::uint16_t>(rtcp[offset + 3]));
+        const std::size_t packet_size =
+            (static_cast<std::size_t>(length_words) + 1u) * 4u;
+        if (packet_size < fb::kRtcpHeaderSize ||
+            offset + packet_size > rtcp.size()) {
+            return core::Result<int>::fail(
+                core::ErrorCode::ProtocolError,
+                "video_pipeline: RTCP feedback length field invalid");
+        }
+        const core::ByteSpan packet = rtcp.subspan(offset, packet_size);
+        const std::uint8_t fmt = static_cast<std::uint8_t>(b0 & 0x1Fu);
+
+        if (pt == fb::kRtpfbPt && fmt == fb::kFmtNack) {
+            if (packet_size < fb::kNackMinSize) {
+                return core::Result<int>::fail(
+                    core::ErrorCode::ProtocolError,
+                    "video_pipeline: RTCP NACK too short");
+            }
+            auto parsed = fb::parse_nack(packet);
+            if (!parsed.ok()) {
+                return core::Result<int>::fail(parsed.error().code(),
+                                                parsed.error().message());
+            }
+            const auto seqs = fb::unpack_nack_entries(parsed.value());
+            for (std::uint16_t seq : seqs) {
+                if (sender.retransmit(seq)) ++actions;
+            }
+        } else if (pt == fb::kPsfbPt && fmt == fb::kFmtPli) {
+            if (packet_size < fb::kPliPacketSize) {
+                return core::Result<int>::fail(
+                    core::ErrorCode::ProtocolError,
+                    "video_pipeline: RTCP PLI too short");
+            }
+            auto parsed = fb::parse_pli(packet);
+            if (!parsed.ok()) {
+                return core::Result<int>::fail(parsed.error().code(),
+                                                parsed.error().message());
+            }
+            sender.force_keyframe();
+            ++actions;
+        } else if (pt == fb::kPsfbPt && fmt == fb::kFmtFir) {
+            if (packet_size < fb::kPliPacketSize) {
+                return core::Result<int>::fail(
+                    core::ErrorCode::ProtocolError,
+                    "video_pipeline: RTCP FIR too short");
+            }
+            auto parsed = fb::parse_fir(packet);
+            if (!parsed.ok()) {
+                return core::Result<int>::fail(parsed.error().code(),
+                                                parsed.error().message());
+            }
+            sender.force_keyframe();
+            ++actions;
+        }
+        // Other feedback kinds (REMB, transport-cc, …) are ignored on
+        // purpose — the video pipeline has no use for them.  The same
+        // holds for the non-feedback RTCP packets (SR / RR / SDES) that
+        // share a compound datagram with a NACK: they are skipped, not
+        // treated as a protocol error.
+
+        offset += packet_size;
+    }
+
+    return core::Result<int>::ok(actions);
 }
 
 } // namespace nimrtc::video_pipeline

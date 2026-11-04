@@ -356,6 +356,32 @@ struct NimRTCEngine::Impl {
     // packet callback to set kVideoKeyframe priority on the marker packet.
     std::atomic<bool> video_keyframe_pending_{false};
 
+    // ---- RTCP feedback state (v1.3 Q3) -------------------------------------
+    //
+    // The feedback loop has two halves:
+    //
+    //   outbound  receiver detects a loss -> the receiver plugin encodes a
+    //             NACK / PLI -> the engine protects it (SRTCP) and sends it.
+    //             The RTCP *sender* SSRC identifies us; the *media* SSRC is
+    //             the peer's video stream the feedback is about.
+    //
+    //   inbound   the peer sends a NACK / PLI -> the engine hands the bytes
+    //             to the sender plugin -> retransmission / forced IDR.
+    //
+    // `remote_video_ssrc_` is learned from the inbound RTP stream (the peer
+    // picks its own SSRC; our config only carries the *expected* one), so
+    // the NACK we send points at the right media source.
+    std::uint32_t remote_video_ssrc_    = 0;
+    /** Our own SSRC as the sender of the RTCP feedback (RFC 3550 §6.1). */
+    std::uint32_t video_feedback_ssrc_  = 0;
+    /** Feedback reports waiting to be put on the wire.  The receiver
+     *  raises them from inside the ICE receive path, so the engine queues
+     *  them and sends them from `tick()` — the same place the Sender
+     *  Report is sent from.  Re-entering the transport's send() from
+     *  inside its recv() would be a needless risk. */
+    plugins::VideoFeedbackReport pending_video_feedback_{};
+    bool                        has_pending_video_feedback_ = false;
+
     // ---- DTLS role negotiation ---------------------------------------------
     // Resolved in process_remote_sdp() from the peer's a=setup attribute.
     // Used to emit a matching a=setup on the answer SDP.  Empty until
@@ -1614,6 +1640,19 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // blocks).  Splitting the function into two phases ensures that by
     // the time any callback fires, every plugin slot is already filled.
 
+    // ---- Our RTCP feedback SSRC (v1.3 Q3) ---------------------------------
+    //
+    // RFC 3550 §6.1 identifies the sender of an RTCP packet by its SSRC.
+    // The feedback we emit (NACK / PLI) is sent by *us* as the receiver of
+    // the media, so it needs an SSRC of its own — distinct from the media
+    // SSRCs, which identify the streams rather than the reporter.
+    if (impl_->video_feedback_ssrc_ == 0) {
+        std::random_device rd;
+        std::mt19937_64 mt(rd());
+        impl_->video_feedback_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
+        if (impl_->video_feedback_ssrc_ == 0) impl_->video_feedback_ssrc_ = 1;
+    }
+
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
         // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
@@ -1808,6 +1847,19 @@ void NimRTCEngine::init_video_plugins() noexcept {
     //   3. Fire on_video_frame_ (NAL delivery, for existing users)
     // -------------------------------------------------------------------------
     if (video_receiver_) {
+        // ---- Receiver feedback bridge (v1.3 Q3) ---------------------------
+        //
+        // The receiver detects the loss and produces the RTCP bytes; the
+        // engine owns the transport, so it protects them (SRTCP) and puts
+        // them on the wire.  The receiver plugin is asked for the bytes
+        // rather than handing the engine an RTCP encoder — the engine
+        // must not know the RTCP wire format (L4: no concrete module
+        // headers in the engine).
+        video_receiver_->set_feedback_callback(
+            [this](const plugins::VideoFeedbackReport& report) {
+                queue_video_feedback(report);
+            });
+
         video_receiver_->set_frame_callback(
             [this](const plugins::EncodedVideoFrame& enc,
                    plugins::TimestampUs /*now_us*/) {
@@ -3289,6 +3341,10 @@ int NimRTCEngine::tick() noexcept {
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
+        // v1.3 Q3: put the pending video feedback (NACK / PLI) on the
+        // wire.  It is sent from here — not from the receiver callback —
+        // so the transport's send() is never re-entered from its recv().
+        flush_video_feedback();
     }
     return ice_t_->recv();
 }
@@ -3663,6 +3719,26 @@ void NimRTCEngine::feed_media_inbound(const std::uint8_t* pkt,
 }
 
 void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
+    // ---- Video feedback (NACK / PLI / FIR) --------------------------------
+    //
+    // This runs *before* the timeline gate: the feedback loop is a media
+    // quality feature, not a timeline feature, and it must work with
+    // `timeline_enabled = false` (which only disables the SR / abs-send-
+    // time seam).
+    //
+    // The sender plugin knows how to answer a NACK (retransmit) and how
+    // to answer a PLI / FIR (arm the key-frame marker).  The engine owns
+    // the encoder, so a key-frame request has to be forwarded there too:
+    // the packetizer cannot produce an IDR by itself.
+    if (video_sender_) {
+        (void)video_sender_->apply_feedback_rtcp(view);
+        const std::uint32_t keyframe_requests =
+            video_sender_->take_keyframe_requests();
+        if (keyframe_requests > 0 && video_codec_) {
+            (void)video_codec_->force_keyframe();
+        }
+    }
+
     if (!config_.timeline_enabled) {
         // The engine MUST NOT schedule SRs while the flag is false
         // (ADR-017 §"Decision 5"), and symmetrically there is no anchor to
@@ -3703,6 +3779,77 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
         (void)count;  // report-block count is parsed inside parse_sr()
 
         off += sub_len;
+    }
+}
+
+void NimRTCEngine::queue_video_feedback(
+    const plugins::VideoFeedbackReport& report) noexcept {
+    if (report.missing_seqs.empty() && !report.want_keyframe) return;
+
+    // Merge into the pending report: two gaps detected back to back must
+    // not cost two round trips, and a NACK list plus a key-frame request
+    // belong in the same feedback packet anyway.
+    if (!impl_->has_pending_video_feedback_) {
+        impl_->pending_video_feedback_ = report;
+        impl_->has_pending_video_feedback_ = true;
+        return;
+    }
+    impl_->pending_video_feedback_.missing_seqs.insert(
+        impl_->pending_video_feedback_.missing_seqs.end(),
+        report.missing_seqs.begin(), report.missing_seqs.end());
+    impl_->pending_video_feedback_.want_keyframe =
+        impl_->pending_video_feedback_.want_keyframe || report.want_keyframe;
+}
+
+void NimRTCEngine::flush_video_feedback() noexcept {
+    if (!impl_->has_pending_video_feedback_) return;
+    // Take the report out of the queue *before* sending: a send failure
+    // must not make the engine retry the same report forever.
+    const plugins::VideoFeedbackReport report =
+        impl_->pending_video_feedback_;
+    impl_->pending_video_feedback_ = plugins::VideoFeedbackReport{};
+    impl_->has_pending_video_feedback_ = false;
+
+    if (!video_receiver_) return;
+    if (!ice_t_ || !is_ice_connected()) return;
+
+    // The receiver plugin owns the RTCP wire format; the engine only
+    // carries the bytes.  (L4 — the engine must not include a concrete
+    // module header, so it cannot build a NACK itself.)
+    const std::size_t needed = video_receiver_->feedback_rtcp_size(report);
+    if (needed == 0) return;
+
+    std::vector<std::uint8_t> buf(needed);
+    const std::size_t written = video_receiver_->build_feedback_rtcp(
+        report,
+        impl_->video_feedback_ssrc_,   // we are the feedback sender
+        impl_->remote_video_ssrc_,     // the peer's video stream is the media source
+        core::MutableByteSpan{buf.data(), buf.size()});
+    if (written == 0 || written > buf.size()) return;
+
+    // RTCP leaves the engine as SRTCP (RFC 3711 §3.4) once SRTP is keyed
+    // — a different crypto context from SRTP, so protect_rtp would
+    // produce a packet the peer's unprotect_rtcp rejects.
+    core::ByteSpan out(buf.data(), written);
+    std::vector<std::uint8_t> enc;
+    if (impl_->srtp_installed && impl_->srtp) {
+        auto* sess = impl_->srtp->get_session(
+            config_.video_sender_tuning.ssrc, /*outgoing=*/true);
+        if (!sess) return;   // SRTP installed but no keying yet — skip.
+        auto r = sess->protect_rtcp(out);
+        if (!r) {
+            core::log::Logger::instance().warn(
+                "engine[feedback]: protect_rtcp failed; feedback dropped");
+            return;
+        }
+        enc.assign(r.value().data(), r.value().data() + r.value().size());
+        out = core::ByteSpan(enc.data(), enc.size());
+    }
+
+    plugins::BufferView bv{out.data(), out.size()};
+    if (ice_t_->send(bv, {}) != plugins::kOk) {
+        core::log::Logger::instance().warn(
+            "engine[feedback]: RTCP feedback send failed");
     }
 }
 
@@ -4027,6 +4174,11 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // pipeline; otherwise treat it as audio.
     if (video_receiver_ &&
         pv.payload_type == config_.video_receiver_tuning.payload_type) {
+        // Remember the peer's video SSRC: the NACK / PLI we send must
+        // name the media source it is about (RFC 4585 §6.2.1).  The peer
+        // picks its own SSRC, so it can only be learned from the wire.
+        impl_->remote_video_ssrc_ = pv.ssrc;
+
         plugins::VideoRtpPacket vp;
         vp.ssrc          = pv.ssrc;
         vp.seq           = pv.seq;

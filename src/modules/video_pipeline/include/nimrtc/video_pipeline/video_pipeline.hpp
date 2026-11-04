@@ -41,6 +41,21 @@
  *     machine (RFC 6184 §5.8).  When a complete NAL unit is produced,
  *     it is handed to the jitter buffer as a single-NAL packet.
  *
+ * ## Feedback loop (v1.3 Q3)
+ *
+ * The receiver tells the sender what it is missing: the sequence
+ * numbers of lost packets (RFC 4585 §6.2.1 NACK) and the request for a
+ * new key frame when picture data was lost (RFC 4585 §6.3.1 PLI /
+ * RFC 5104 §4.3.1 FIR).  The sender keeps the packets it sent in a
+ * bounded cache so a NACK can be answered with a retransmission of the
+ * exact packet that was lost.
+ *
+ * The wire format of the feedback itself is *not* built here — that is
+ * the job of the `nimrtc::video_rtcp_feedback` module (RTCP PSFB /
+ * RTPFB).  This module only produces and consumes the plain data
+ * (sequence numbers, key-frame requests) so that the two can be wired
+ * together by whatever owns the RTCP transport.
+ *
  * @note P1. Reference implementation; wired into the engine through
  * the `video_pipeline` plugin seam (`reference` factory).
  */
@@ -61,6 +76,7 @@
 #include <nimrtc/core/error.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 #include <nimrtc/video_jb/video_jitter_buffer.hpp>
+#include <nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp>
 #include <nimrtc/rtp/packet.hpp>
 
 namespace nimrtc::video_pipeline {
@@ -112,7 +128,34 @@ struct NIMRTC_API_STABLE ReceiverStats {
     std::uint64_t stap_a_packets_seen  = 0;
     std::uint64_t nack_entries_emitted = 0;
     std::uint64_t sequence_gaps_seen   = 0;
+    /** Number of key-frame requests the receiver raised because picture
+     *  data was lost (v1.3 Q3). */
+    std::uint64_t keyframe_requests_emitted = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Receiver feedback (v1.3 Q3)
+// ---------------------------------------------------------------------------
+
+/** Feedback the receiver wants to send back to the sender.
+ *
+ *  `missing_packets` holds the RTP sequence numbers the receiver
+ *  detected as lost — the NACK candidates of RFC 4585 §6.2.1.
+ *  `keyframe_requested` is set when the receiver lost picture data and
+ *  therefore needs a new key frame (RFC 4585 §6.3.1 PLI, or
+ *  RFC 5104 §4.3.1 FIR).
+ *
+ *  The RTCP wire format itself lives in `nimrtc::video_rtcp_feedback`;
+ *  this structure carries the plain data between the two ends. */
+struct NIMRTC_API_STABLE ReceiverFeedback {
+    std::vector<std::uint16_t> missing_packets;
+    bool                       keyframe_requested = false;
+};
+
+/** Called when the receiver has feedback for the sender.
+ *  Fired synchronously on the thread that called push_rtp() / tick(). */
+using NIMRTC_API_STABLE ReceiverFeedbackCallback =
+    std::function<void(const ReceiverFeedback& feedback)>;
 
 // ---------------------------------------------------------------------------
 // Receiver callback
@@ -159,6 +202,14 @@ public:
     /** Register the frame callback (must be set before push_rtp). */
     void set_frame_callback(ReceiverFrameCallback cb) noexcept;
 
+    /** Register the feedback callback (optional, v1.3 Q3).
+     *
+     *  The callback fires when the receiver detects a gap in the RTP
+     *  sequence numbers (the lost packets of a NACK) and when a frame
+     *  was force-emitted without all of its data (the key-frame request
+     *  of a PLI / FIR). */
+    void set_feedback_callback(ReceiverFeedbackCallback cb) noexcept;
+
     /** Feed a parsed RTP packet.  The receiver extracts seq, marker,
      *  ssrc, timestamp, and payload, then runs the receive pipeline.
      *  Any assembled frames fire the user callback synchronously.
@@ -201,6 +252,14 @@ struct NIMRTC_API_STABLE SenderConfig {
     /** Initial RTP sequence number (randomised by the caller in
      *  production; the pipeline just increments from this base). */
     std::uint16_t           initial_seq        = 0;
+
+    /** Number of sent packets kept for retransmission (v1.3 Q3).
+     *
+     *  A NACK asks the sender to repeat one packet; the sender can only
+     *  do that if it still holds the packet.  The cache is a ring buffer
+     *  of the most recently sent packets.  0 disables the cache (the
+     *  sender then answers every NACK with a miss). */
+    std::size_t             retransmit_cache_packets = 256;
 };
 
 // ---------------------------------------------------------------------------
@@ -215,6 +274,11 @@ struct NIMRTC_API_STABLE SenderStats {
     std::uint64_t single_nal_frames_packetized = 0;
     std::uint64_t force_keyframe_calls         = 0;
     std::uint64_t frames_marked_as_keyframe    = 0;
+    /** Packets re-sent in response to a NACK (v1.3 Q3). */
+    std::uint64_t packets_retransmitted        = 0;
+    /** NACKs that could not be answered because the packet had already
+     *  left the retransmission cache (v1.3 Q3). */
+    std::uint64_t packets_retransmit_missed    = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -288,6 +352,24 @@ public:
      *  IDR slice) at that point. */
     void force_keyframe() noexcept;
 
+    /** True when a key frame has been requested and the request has not
+     *  been consumed by a push_frame() yet (v1.3 Q3). */
+    bool keyframe_pending() const noexcept;
+
+    /** Re-emit a previously sent packet (RFC 4585 §6.2.1 NACK).
+     *
+     *  The packet is re-sent with its original sequence number, RTP
+     *  timestamp and marker bit, so the receiver can splice it back into
+     *  the frame it belongs to.
+     *
+     *  @param seq  The RTP sequence number to repeat.
+     *  @return false when the packet is no longer in the retransmission
+     *          cache (too old, or never sent by this sender). */
+    bool retransmit(std::uint16_t seq) noexcept;
+
+    /** Number of packets currently held in the retransmission cache. */
+    std::size_t cached_packet_count() const noexcept;
+
     /** Snapshot of sender counters. */
     SenderStats stats() const noexcept;
 
@@ -298,5 +380,61 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// ---------------------------------------------------------------------------
+// Feedback bridge (v1.3 Q3) — receiver feedback ↔ RTCP wire format
+// ---------------------------------------------------------------------------
+// The receiver produces plain data (`ReceiverFeedback`); the owner of the
+// RTCP transport needs bytes on the wire.  The two helpers below close that
+// gap and form the closed loop:
+//
+//   receiver --(ReceiverFeedback)--> build_feedback_rtcp --> RTCP bytes
+//   RTCP bytes --(apply_feedback_rtcp)--> retransmit / force key frame
+//
+// The wire format itself is owned by `nimrtc::video_rtcp_feedback`
+// (RFC 4585 §6.2.1 NACK, §6.3.1 PLI, RFC 5104 §4.3.1 FIR); this module
+// only wires it to the pipeline objects.
+
+/** Number of bytes `build_feedback_rtcp()` needs for a feedback report.
+ *  Zero when the report carries neither lost packets nor a key-frame
+ *  request. */
+NIMRTC_API_STABLE std::size_t feedback_rtcp_size(
+    const ReceiverFeedback& feedback) noexcept;
+
+/** Build the RTCP feedback bytes for a receiver feedback report.
+ *
+ *  A report with lost packets is encoded as a NACK (RFC 4585 §6.2.1);
+ *  a report that asks for a key frame is encoded as a PLI (RFC 4585 §6.3.1).
+ *  When both are present, the NACK is written first.
+ *
+ *  @param output      Destination buffer (size it with `feedback_rtcp_size()`).
+ *  @param feedback    The feedback report from the receiver.
+ *  @param sender_ssrc SSRC of the feedback sender (the receiver).
+ *  @param media_ssrc  SSRC of the media source (the sender's stream).
+ *  @return The number of bytes written; 0 when `output` is too small. */
+NIMRTC_API_STABLE std::size_t build_feedback_rtcp(
+    core::MutableByteSpan output,
+    const ReceiverFeedback& feedback,
+    std::uint32_t sender_ssrc,
+    std::uint32_t media_ssrc) noexcept;
+
+/** Apply an incoming RTCP feedback packet to a sender.
+ *
+ *  Handles the feedback kinds the video pipeline cares about:
+ *   - NACK (RFC 4585 §6.2.1) → the listed packets are retransmitted.
+ *   - PLI  (RFC 4585 §6.3.1) → the sender is asked for a key frame.
+ *   - FIR  (RFC 5104 §4.3.1) → the sender is asked for a key frame.
+ *
+ *  The input may be a single feedback packet or a compound RTCP packet;
+ *  every packet in the compound is processed.
+ *
+ *  @param sender The sender that answers the feedback.
+ *  @param rtcp   The received RTCP bytes.
+ *  @return The number of actions performed (packets retransmitted plus
+ *          key-frame requests honoured); a ProtocolError when the input
+ *          is not a well-formed RTCP packet. */
+NIMRTC_API_STABLE core::Result<int> apply_feedback_rtcp(
+    VideoSender& sender,
+    core::ByteSpan rtcp) noexcept;
 
 } // namespace nimrtc::video_pipeline

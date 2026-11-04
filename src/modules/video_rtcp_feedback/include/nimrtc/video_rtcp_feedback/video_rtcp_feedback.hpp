@@ -155,6 +155,32 @@ NIMRTC_API_STABLE core::Result<SliPacket>  parse_sli (core::ByteSpan input) noex
 NIMRTC_API_STABLE core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept;
 
 // ---------------------------------------------------------------------------
+// NACK FCI packing helpers (RFC 4585 §6.2.1)
+// ---------------------------------------------------------------------------
+// A single NACK FCI entry covers 17 sequence numbers: the PID itself plus
+// the 16 sequence numbers flagged in the BLP bitmask (bit i → PID + i + 1).
+// The two helpers below translate between the plain list of lost sequence
+// numbers (what a receiver detects) and the compact FCI form (what goes on
+// the wire).
+//
+// Sequence-number arithmetic is wrap-aware: the differences are computed as
+// signed 16-bit deltas relative to the first element of the input list, so
+// a loss set that straddles the 65535 → 0 rollover still packs into a
+// single entry.
+
+/** Pack a list of lost sequence numbers into NACK FCI entries.
+ *
+ *  @param seqs  The lost sequence numbers (duplicates are ignored).
+ *  @return The FCI entries, in ascending order.  Empty when `seqs` is empty. */
+NIMRTC_API_STABLE std::vector<NackEntry> pack_nack_entries(
+    const std::vector<std::uint16_t>& seqs) noexcept;
+
+/** Expand the FCI entries of a NACK back into the list of lost sequence
+ *  numbers (the inverse of `pack_nack_entries`). */
+NIMRTC_API_STABLE std::vector<std::uint16_t> unpack_nack_entries(
+    const NackPacket& p) noexcept;
+
+// ---------------------------------------------------------------------------
 // FIR coalescer — rate-limit FIR per media SSRC (RFC 5104 §4.3.1.1).
 // ---------------------------------------------------------------------------
 // The coalescer is thread-confined (NOT thread-safe). One coalescer per

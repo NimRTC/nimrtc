@@ -30,6 +30,9 @@ HTML_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""")
 # A fenced code block marker; links inside are not real links.
 FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 
+# An inline code span; `[this](...)` inside one is prose, not a link.
+INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
 
 def slugify(text: str) -> str:
     """Reproduce GitHub's heading slug rules closely enough for link checks."""
@@ -115,9 +118,13 @@ def check_file(path: str, root: str, verbose: bool) -> list[str]:
         return anchors_cache[target]
 
     for lineno, line in enumerate(lines, 1):
-        targets = [m.group(2) for m in LINK_RE.finditer(line)]
-        targets += [m.group(2) for m in IMAGE_RE.finditer(line)]
-        targets += [m.group(1) for m in HTML_HREF_RE.finditer(line)]
+        # Inline code spans are prose: `[this](...)` inside backticks is
+        # not a link.  Blank them out (keeping the column positions) so
+        # the link regex cannot pick them up.
+        masked = INLINE_CODE_RE.sub(lambda mo: " " * len(mo.group()), line)
+        targets = [m.group(2) for m in LINK_RE.finditer(masked)]
+        targets += [m.group(2) for m in IMAGE_RE.finditer(masked)]
+        targets += [m.group(1) for m in HTML_HREF_RE.finditer(masked)]
 
         for target in targets:
             if not target or target.startswith(("http://", "https://", "mailto:", "data:")):

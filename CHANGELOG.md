@@ -13,6 +13,15 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The installed bundle was missing the shared jitter-buffer strategy.**
+  `nimrtc::jb_strategy` (v1.3 Q2) is linked by both `nimrtc::jb` and
+  `nimrtc::video_jb`, but the install rules did not know about it:
+  `cmake/NimRTCInstall.cmake` shipped neither `libnimrtc_jb_strategy.a`
+  nor the module's headers, and `cmake/NimRTCConfig.cmake.in` never
+  created the `nimrtc::jb_strategy` imported target. A downstream
+  consumer that linked `nimrtc::jb` (or the engine, which fans in every
+  archive) therefore failed at link time with undefined symbols from
+  the shared strategy. Both files now carry the module.
 - **The video jitter buffer silently dropped complete frames.** In
   `video_jb`, `tick()` treated every frame older than `max_wait_ms` the
   same way: a frame that never completed was force-emitted (correctly

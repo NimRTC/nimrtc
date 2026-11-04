@@ -48,6 +48,7 @@ set(_nimrtc_module_shorts
   jb
   bwe
   sched
+  jb_strategy
   audio3a
   ice
   srtp

@@ -52,6 +52,7 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/modules/jb/include"
   "${CMAKE_SOURCE_DIR}/src/modules/bwe/include"
   "${CMAKE_SOURCE_DIR}/src/modules/sched/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/jb_strategy/include"
   "${CMAKE_SOURCE_DIR}/src/modules/audio3a/include"
   "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
   "${CMAKE_SOURCE_DIR}/src/modules/srtp/include"
@@ -94,6 +95,7 @@ set(_nimrtc_install_shorts
   jb
   bwe
   sched
+  jb_strategy
   audio3a
   ice
   srtp

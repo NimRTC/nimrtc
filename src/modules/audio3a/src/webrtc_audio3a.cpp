@@ -76,7 +76,14 @@ map_ans_level(std::uint8_t level) {
 // The APM float API is deinterleaved (one float* per channel) while
 // nimrtc::audio3a::Frame is interleaved.  These helpers convert between the
 // two layouts without allocating.
+//
+// They are only reachable from the real-APM code path, so they are compiled
+// exclusively when NIMRTC_USE_WEBRTC_APM is defined -- otherwise GCC's
+// -Werror=unused-function rejects the stub-only build of this translation
+// unit.
 // =============================================================================
+
+#if defined(NIMRTC_USE_WEBRTC_APM)
 
 // Interleaved → planar.  Copies `n` frames (per channel) from `src` into the
 // per-channel buffers pointed to by `dst`.
@@ -105,6 +112,8 @@ void copy_planar_to_interleaved(const PtrArray& src, std::size_t n, int channels
         }
     }
 }
+
+#endif  // NIMRTC_USE_WEBRTC_APM
 
 }  // anonymous namespace
 

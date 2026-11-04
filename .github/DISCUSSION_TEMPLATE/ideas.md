@@ -31,4 +31,4 @@ List any specific questions you want feedback on.
 ---
 
 **Note:** If this idea gains traction and requires an architecturally significant change,
-a maintainer may suggest opening a formal RFC. See [`docs/rfcs/`](docs/rfcs/) and [`.github/DISCUSSIONS.md`](.github/DISCUSSIONS.md).
+a maintainer may suggest opening a formal RFC. See [`docs/rfcs/`](../../docs/rfcs/) and [`.github/DISCUSSIONS.md`](../DISCUSSIONS.md).

@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **最新发布版**：v1.0.2 稳定版 —— 补丁版，修复 WebTransport ALPN 不匹配与 Windows bundle 体积异常，并随发布附带签名公钥（`v1.0.1` 保持已发布且不变；`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC WebTransport / QUIC 上 DataChannel 双向互通（DC-1）**PASS E1–E6**。
+> **最新发布版**：v1.0.2 稳定版 —— 补丁版，修复 WebTransport ALPN 不匹配与 Windows bundle 体积异常，并随发布附带签名公钥（`v1.0.1` 保持已发布且不变；`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC 数据交换（DC-1）：走 Chrome WebTransport JS API（`new WebTransport(url)`，不是 `RTCPeerConnection.createDataChannel()`；标准 WebRTC DataChannel 互通未声称，Firefox/Safari 对 WebTransport 支持不完整）（DC-1）**PASS E1–E6**。
 > 见 [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` 与 `docs/plan/v1.0-plan.md` §3 + §12.3.6。
 >
 > **当前 `main`（v1.0.2 之后，尚未发版）**：主干比已发布 tag 多出 **v1.1** 打包 + 基准轨、
@@ -47,11 +47,11 @@ WebRTC 在演进，但主流实现没跟上。
 
 - **libwebrtc** 是事实标准引擎，但构建产物多 GB、加密和编解码都是黑盒、代码库是 monolithic 的。
   把 libwebrtc 嵌到 aarch64 上，或者按 GM/T 合规要求去做审计，本身就是一场苦修。
-- **AI Agent / 遥操作 / 具身智能机器人**需要 libwebrtc 不暴露的能力 —— pre/post-3A PCM tap、严格优先级的控制面、采集-决策帧对齐 API。
+- **AI Agent / 遥操作 / 具身智能机器人**需要 libwebrtc 不暴露的能力 —— pre/post-3A PCM tap、调度器内严格优先排序（DC-2，见 `sched.hpp` Scope note；默认 `web_transport` 后端下不是跨连接线端保证）、采集-决策帧对齐 API。
 - **信创 / 合规**环境要的是"换路径"而不是"fork 主干"的国密落地方式。
 
 NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**（已在 Chrome 上验证，
-覆盖媒体与 DataChannel 两条路径），把不透明的单体替换成**编译期分层 + plugin 适配**的引擎，可读、可换、可上 aarch64。
+覆盖媒体（Case D）与数据（Case E，走 WebTransport JS API）两条路径），把不透明的单体替换成**编译期分层 + plugin 适配**的引擎，可读、可换、可上 aarch64。
 
 ---
 
@@ -110,7 +110,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | 用 C++ 写 P2P 语音/视频应用 | 用一个真正能 `grep`、能静态链接、几个 MB 就够的引擎替代 libwebrtc。 |
 | 政企信创 / 国密合规环境 | 不 fork 主干就把 DTLS 加密切换到 GMSSL（TLCP / SM2 / SM3 / SM4）。**范围说明**：国密路径覆盖 DTLS 握手 —— SRTP 仍使用国际 AES 套件（SM4-GCM SRTP 在后续版本）。 |
 | 在嵌入式 Linux aarch64 上跑 | Raspberry Pi、工业 SBC、机器人主控 —— 同一 codebase，桌面端能用的能力嵌入式也能用。 |
-| 搭 AI Agent / 遥操作 / 具身智能机器人 | 用 pre/post-3A 双 PCM tap、严格优先级 QoS、ref_frame 时间线 API。 |
+| 搭 AI Agent / 遥操作 / 具身智能机器人 | 用 pre/post-3A 双 PCM tap、调度器内严格优先排序（DC-2 范围声明适用）、ref_frame 时间线 API。 |
 | 自建 relay 但不想重写协议栈 | 编译 `relay` profile（L0+L1+L3），同一套引擎，跳过 L2 codec。 |
 
 > **不适用的场景**：今天就要一个开箱即用的浏览器级 SDK；只做移动端（iOS/Android 在路线图，不在当前轨道）。
@@ -750,7 +750,7 @@ choco install ninja
 跳过 3A：
 
 ```bash
-cmake --preset debug -DNIMRTC_VENDORED_WEBRTC_APM=OFF   # Windows 用 debug.msvc
+cmake --preset dev -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 ```
 
 或拉预编译产物：

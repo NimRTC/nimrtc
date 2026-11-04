@@ -4184,7 +4184,7 @@ and can be run manually; CI coverage for those platforms is a v1.0 milestone.
 
 - All four platforms (Windows ?Linux x86_64, macOS arm64, Linux
   aarch64) CI jobs are now green on HEAD. See the
-  [v0.9.0 Platform support matrix](#090---2026-09-xx) for per-platform status.
+  [Platform support matrix](#platform-support-matrix) for per-platform status.
   Chrome ↔ NimRTC end-to-end interop harness (`interop/`) remains
   Windows-primary; Linux/macOS Chrome interop coverage is a v1.0 milestone.
 

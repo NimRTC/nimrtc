@@ -1,6 +1,6 @@
 ## Checklist
 
-- [ ] I have read and understood [CONTRIBUTING.md](CONTRIBUTING.md)
+- [ ] I have read and understood [CONTRIBUTING.md](../CONTRIBUTING.md)
 - [ ] My commit messages follow the [Conventional Commits](https://www.conventionalcommits.org/) format
 - [ ] My commit includes a `-s` / `--signoff` line (DCO signing)
 - [ ] I have added or updated tests for any new public API

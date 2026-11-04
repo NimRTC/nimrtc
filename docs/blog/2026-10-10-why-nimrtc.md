@@ -8,10 +8,10 @@ status: opinion-piece
 
 # Why a from-scratch WebRTC engine in 2026?
 
-> Companion piece to the [v0.11.0 Beta 前哨 release notes](docs/releases/v0.11.0-beta.md).
+> Companion piece to the [v0.11.0 Beta 前哨 release notes](../releases/v0.11.0-beta.md).
 > This is the design-rationale long-form; the release notes are the
-> what's-new. If you only have 5 minutes, the [README](../README.md) and
-> the [Show HN draft](docs/marketing/show-hn-post.md) are tighter.
+> what's-new. If you only have 5 minutes, the [README](../../README.md) and
+> the [Show HN draft](../marketing/show-hn-post.md) are tighter.
 
 ---
 
@@ -243,5 +243,5 @@ what to update first.
 ---
 
 *Thanks for reading. If you got this far, you might enjoy the
-[Show HN draft](docs/marketing/show-hn-post.md) — it's the same
+[Show HN draft](../marketing/show-hn-post.md) — it's the same
 project, same author, different register.*

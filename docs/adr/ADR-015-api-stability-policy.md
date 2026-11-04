@@ -288,7 +288,7 @@ check is a Node scanner wired into all four platform jobs.
 
 ## References
 
-- [`docs/plan/v1.0-plan.md`](v1.0-plan.md) — parent plan; §2.1 P0
+- [`docs/plan/v1.0-plan.md`](../plan/v1.0-plan.md) — parent plan; §2.1 P0
   API-FREEZE item and §12.3.1 v1.0.0-alpha.1 DoD gates for this ADR.
 - [`docs/adr/ADR-001-plugin-system.md`](ADR-001-plugin-system.md) —
   parent architecture; `PluginRegistry` is the first public API to
@@ -296,7 +296,7 @@ check is a Node scanner wired into all four platform jobs.
 - [`docs/adr/ADR-008-pcm-tap.md`](ADR-008-pcm-tap.md) — the first
   `@deprecated` comment precedent in the codebase; `UsrsctpSocket*`
   marked deprecated in v0.11.0 for removal at v1.2.0.
-- [`src/core/include/nimrtc/core/api_version.hpp`](src/core/include/nimrtc/core/api_version.hpp) — the `NIMRTC_API_VERSION` macro
+- [`src/core/include/nimrtc/core/api_version.hpp`](../../src/core/include/nimrtc/core/api_version.hpp) — the `NIMRTC_API_VERSION` macro
   framework implemented by v1.0.0-alpha.1 PR #1.
 - [semver.org/spec/v2.0.0.html](https://semver.org/spec/v2.0.0.html) —
   Semantic Versioning 2.0.0 specification.

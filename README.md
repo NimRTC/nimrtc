@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
+> **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > **Current `main` (post-v1.0.2, unreleased):** the trunk is ahead of the published tag by the
 > **v1.1** packaging + benchmark track, the **v1.2** transport / media / DTLS hardening track, and
@@ -48,10 +48,10 @@ deployments without forking the trunk.
 WebRTC moved on, but the dominant implementation didn't.
 
 - **libwebrtc** is the de-facto engine, but its build is multi-GB, its crypto and codecs are black-box, and the codebase is monolithic. Embedding it on aarch64 or auditing it against GM/T regulations is an exercise in pain.
-- **AI Agents / teleop / embodied-AI robotics** need things libwebrtc doesn't expose cleanly — a pre/post-3A PCM tap, strict-priority control planes, and a capture-to-decision frame-time API.
+- **AI Agents / teleop / embodied-AI robotics** need things libwebrtc doesn't expose cleanly — a pre/post-3A PCM tap, intra-scheduler strict-priority ordering (DC-2, see `sched.hpp` Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend), and a capture-to-decision frame-time API.
 - **Xinchuang / regulated** environments need a swap-in path to GM/T cryptography, not a fork.
 
-NimRTC is a from-scratch C++20 implementation that keeps the **wire-level interop** you need (verified against Chrome, for both media and DataChannel) and replaces the opaque monolith with a **compile-time layered, plugin-adapted engine** you can read, swap, and ship on aarch64.
+NimRTC is a from-scratch C++20 implementation that keeps the **wire-level interop** you need (verified against Chrome: Case D media over DTLS-SRTP, Case E data over the Chrome WebTransport JS API) and replaces the opaque monolith with a **compile-time layered, plugin-adapted engine** you can read, swap, and ship on aarch64.
 
 ---
 
@@ -87,7 +87,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 |---|---|---|
 | 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **12.55 MB static lib** (vs libwebrtc 150–250 MB) |
 | 🧩 **Profiles for scenes, not forks** — `call` / `transport` / `relay` / `agent` / `agent-gateway` / `agent-low-latency` / `relay-agent` / `teleop` / `live` | 🔁 **Swappable DTLS backend** — wolfSSL (default) ↔ GMSSL (opt-in), public API unchanged | 🛡️ **GM/T crypto path** — DTLS/TLCP via GMSSL (SRTP still uses the international suites) |
-| 📡 **Wire-level interop** — Chrome (media + DataChannel over WebTransport) | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
+| 📡 **Wire-level interop** — Chrome (Case D media + Case E via WebTransport JS API) | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
 
 ---
 
@@ -114,7 +114,7 @@ No single feature here is brand new — but the **combination** is rare in the o
 | Building a **P2P voice/video app** in C++ | Replace libwebrtc with something you can actually inspect, link statically, and ship at a few MB instead of hundreds. |
 | Operating in a **Xinchuang / regulated** environment that mandates GM/T cryptography | Swap DTLS crypto to GMSSL (TLCP / SM2 / SM3 / SM4) without forking the engine. **Scope note:** the GM/T path covers the DTLS handshake — SRTP still uses the international AES suites (SM4-GCM SRTP is a later release). |
 | Running on **embedded Linux aarch64** (Raspberry Pi, industrial SBCs, robotics) | Get real RTC on a constrained board with the same codebase that powers your desktop client. |
-| Building **AI Agents / teleop / embodied-AI robotics** | Use the dual PCM tap (pre/post-3A), strict-priority QoS, and ref_frame timeline APIs. |
+| Building **AI Agents / teleop / embodied-AI robotics** | Use the dual PCM tap (pre/post-3A), intra-scheduler strict-priority ordering (DC-2 scope note applies), and ref_frame timeline APIs. |
 | Standing up an **relay** without rewriting protocol code | Compile the `relay` profile (L0+L1+L3) — same engine, no L2 codec. |
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not a current-track item).
@@ -347,7 +347,7 @@ flowchart TB
         P1["transport: P2P client"]
         P2["relay: forwarding only"]
         P3["agent-gateway: PCM dual-tap"]
-        P4["teleop: strict-priority control"]
+        P4["teleop: intra-scheduler priority (DC-2)"]
     end
 
     PROF --> L3
@@ -464,7 +464,7 @@ NimRTC exposes nearly every "swappable" capability through plugin interfaces def
 
 **Comparison baseline:** GStreamer / FFmpeg / OBS / PipeWire all use plugin architectures — but in the **WebRTC** ecosystem (libwebrtc / Pion / LiveKit / mediasoup / janus), only Pion and libwebrtc internally have similar abstractions. **NimRTC exposes them publicly and runs both P2P and `relay` on the same set of interfaces** (the `relay` profile skips L2 codecs; a from-scratch SFU module is *not* a deliverable — see `docs/plan/v1.0-plan.md` §7).
 
-Plugins are the evolution mechanism: P0–P1 use built-in implementations; P2–P3 differentiating features (dual 3A tap, strict-priority QoS, ref_frame timeline) also ship as plugins (`IJB::set_render_delivered`, `IRTP::set_ref_frame`).
+Plugins are the evolution mechanism: P0–P1 use built-in implementations; P2–P3 differentiating features (dual 3A tap, intra-scheduler strict-priority ordering, ref_frame timeline) also ship as plugins (`IJB::set_render_delivered`, `IRTP::set_ref_frame`).
 
 ---
 
@@ -482,7 +482,7 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **GM/T (GMSSL) crypto swap** | ✅ plugin swap, no fork (DTLS layer) | ❌ patch and rebuild | ❌ | ❌ | ❌ |
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |
 | **ref_frame / frame-aligned timeline** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
-| **Wire-level Chrome interop** | ✅ Case D green (media) + Case E green (DataChannel over WebTransport) | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
+| **Wire-level Chrome interop** | ✅ Case D green (media over DTLS-SRTP) + Case E green (data over Chrome WebTransport JS API) | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
 | **Production maturity (2026)** | Stable (v1.0.2 published) | Production-grade | Production-grade | Production-grade | Production-grade |
 
 **Where NimRTC wins outright:** aarch64 embedded, GM/T crypto path (DTLS layer), AI Agent hooks, single-trunk
@@ -505,7 +505,7 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 | `agent-gateway` | L0+L1+L2 (tap enabled) | AI Agent ingress — dual PCM tap + 3A bypass |
 | `agent-low-latency` | L0+L1+L2+L3 | Agent pipeline where latency dominates (20 ms JB, AGC off) |
 | `relay-agent` | L0+L1+L3 | Relay + AI Agent hybrid (N:1), timeline re-calibration |
-| `teleop` | L0+L1+L2+L3 | Robot / embodied-AI teleoperation — strict-priority control |
+| `teleop` | L0+L1+L2+L3 | Robot / embodied-AI teleoperation — intra-scheduler strict-priority ordering (DC-2 scope note applies) |
 | `live` | L0+L1+L2+L3 | One-way broadcast / live streaming |
 
 > Full matrix (9 shipped profiles, with per-field JB / 3A / BWE / DC settings) lives in
@@ -528,7 +528,7 @@ These are **P2 / P3 targets**, not P0 features — listed here so you can plan a
 | Need | NimRTC differentiation | Status in current OSS WebRTC |
 |---|---|---|
 | **3A bypass** — Agent feeds PCM to ASR | `pre-3a / post-3a` dual PCM tap | WebRTC APM is opaque; no PCM mid-pipeline hook |
-| **Control messages never starved by video** — teleop commands must not drop | Strict-priority scheduling contract | DTLS-SCTP / DataChannel is best-effort only |
+| **Control messages never starved by video** — teleop commands must not drop | Strict-priority scheduling contract (**intra-scheduler ordering only**; under the default `web_transport` backend media and DataChannel ride separate connections with independent congestion control — see `sched.hpp` § Scope note) | DTLS-SCTP / DataChannel is best-effort only |
 | **Capture-to-decision alignment** — Agent decisions tied to video frames | `ref_frame` timeline API | libwebrtc has no such abstraction; apps must build their own |
 
 ---
@@ -540,7 +540,7 @@ authoritative plan documents are `docs/plan/v1.*-plan.md`.
 
 | Version | Label | Scope | Status |
 |---|---|---|---|
-| **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), cross-plane scheduling (DC-2), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
+| **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
 | **v1.1** | Quality + Packaging | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs) | 🟡 in progress on `main` |
 | **v1.2** | Hardening | Transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard) | 🟡 landed on `main` |
 | **v1.3** | Quality line | Weak-network quality chain (Goog-CC BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 first item landed (`jb_strategy`); rest planned |
@@ -588,8 +588,8 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
 | ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
 | DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
-| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
-| DC-2 — L1 strict-priority send scheduling across RTP × DC plane | ✅ | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
+| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo (via `new WebTransport(url)`) PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
+| DC-2 — L1 strict-priority send scheduling within the `Scheduler` (RTP × DC ordering) | ✅ (intra-scheduler ordering only — see `sched.hpp` § Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend) | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
@@ -616,8 +616,8 @@ has not closed.
 
 > v1.0.2 is the **published Stable** release — public API frozen per ADR-015
 > (`NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);
-> WebTransport / msquic data plane (DC-1) + cross-plane scheduling (DC-2);
-> Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) **PASS E1–E6** —
+> WebTransport / msquic data plane (DC-1) + intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note);
+> Chrome e2e Case E (DataChannel over the WebTransport JS API — `new WebTransport(url)`, **not** `RTCPeerConnection.createDataChannel()`; standard WebRTC DataChannel interop is **not** claimed; Firefox/Safari WebTransport support is incomplete) **PASS E1–E6** —
 > datagram + bidi-stream echo against `examples/demo-wtserver` via
 > `tests/chrome_interop_harness/run_webtransport_harness.py`.
 > `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"`

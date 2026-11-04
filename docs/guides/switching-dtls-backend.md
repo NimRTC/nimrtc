@@ -312,7 +312,8 @@ to use GMSSL.
 
 - [ADR-013: GMSSL DTLS backend](../adr/ADR-013-gmssl-dtls-backend.md) —
   decision record, alternatives considered, scope of SM cipher work.
-- [engine_config.md](../api/engine_config.md) §2.2 — `dtls_name` field.
+- `src/engine/include/nimrtc/engine/engine.hpp` — `EngineConfig::dtls_name`
+  field (see the comment block above it for the accepted backend ids).
 - [plugin_author_guide.md](../plugin_author_guide.md) §6.1 — how to
   write a custom DTLS backend.
 - `src/dtls/include/nimrtc/dtls/dtls_session_iface.hpp` —

@@ -8,9 +8,9 @@ status: 观点文
 
 # 为什么 2026 年还要从零写一个 WebRTC 引擎？
 
-> 配套长文：[v0.11.0 Beta 前哨 Release Notes](docs/releases/v0.11.0-beta.md)。
+> 配套长文：[v0.11.0 Beta 前哨 Release Notes](../releases/v0.11.0-beta.md)。
 > 这篇讲"为什么"，release notes 讲"是什么"。如果只有 5 分钟，
-> [README](../README.md) 和 [Show HN 草稿](docs/marketing/show-hn-post.md) 更紧凑。
+> [README](../../README.md) 和 [Show HN 草稿](../marketing/show-hn-post.md) 更紧凑。
 
 ---
 

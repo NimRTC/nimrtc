@@ -156,6 +156,27 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # Docs: Markdown link / anchor integrity.
+  # Cheap, platform-independent, and catches the class of rot that a
+  # README rewrite introduces (relative paths written as if they were
+  # repo-root-relative, anchors that no longer match a heading).
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs / markdown links
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-docs
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check Markdown links and anchors
+        run: python tools/check_md_links.py
+
+  # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04
   # ---------------------------------------------------------------------------
   linux-gcc:

@@ -5,9 +5,9 @@
 > It hosts an embedded terminal recording of the in-process
 > `examples/loopback-p2p` example — not a runnable browser demo. The
 > **real** NimRTC-in-a-browser experience (Chrome ↔ NimRTC audio + video,
-> with the `transport` profile compiled to `wasm32-unknown-unknown`) is on
-> the **v0.12.0** milestone; see the v0.12.0 issue list for the current
-> tracking items.
+> with the `transport` profile compiled to `wasm32-unknown-unknown`) has
+> not landed yet and is a longer-term candidate — see "What the page will
+> look like when the wasm build lands" below.
 >
 > This page exists so the v0.11.0 Show HN / v0.12.0 announcement link does
 > not 404, and so visitors who do click through see a credible
@@ -37,16 +37,16 @@ that touches `examples/wasm-demo/www/**`.
 
 ### What the page shows
 
-- **Hero** — the headline numbers from `README.md` (~5.6 MB static lib,
-  4-platform CI, ~50k LOC, 5 profiles).
+- **Hero** — the headline numbers from `README.md` (12.55 MB static lib,
+  4-platform CI, ~30 K LOC, 9 profiles).
 - **Live demo** — an embedded terminal widget that plays back the
   `loopback-p2p` example's stderr. The recording is **synthesized** from
   the `fprintf` calls in `examples/loopback-p2p/loopback-p2p.cpp`, not a
   real terminal capture. The page says so explicitly.
 - **Quick start** — copy-paste build instructions matching the root
   `README.md`'s Quick Start.
-- **Status** — what's shipped in v0.11.0, what's deferred to v1.x, and
-  what's on the v0.12.0 roadmap.
+- **Status** — what's shipped in v1.0.2, what's deferred to v1.x, and
+  what's on the v1.1 / v1.2 / v1.3 tracks on `main`.
 - **Architecture in 30 seconds** — the L0–L3 + PAL diagram in plain text.
 - **Roadmap** — honest framing of why this page is a placeholder.
 
@@ -104,9 +104,10 @@ The Pages workflow re-deploys on the next push.
 
 ---
 
-## What the v0.12.0 page will look like
+## What the page will look like when the wasm build lands
 
-When the wasm build lands, this directory will grow:
+The wasm build has not landed yet — this directory is still just the static
+page. When it does, this directory will grow:
 
 ```
 examples/wasm-demo/
@@ -130,16 +131,18 @@ emmake make -C build/wasm nimrtc_wasm
 
 The browser side will use a real `RTCPeerConnection` on Chrome and a
 `NimRTC` instance on the other, with audio + video flowing both ways.
-The plugin seam (`IDtlsSession` for wolfSSL DTLS 1.3, `IICETransport` for
+The plugin seam (`IDtlsSession` for wolfSSL DTLS, `IICETransport` for
 libjuice, `IVideoSource` / `IVideoSink` adapter shims for
-`getUserMedia` / `MediaStream`) is the contract the v0.12.0 wasm adapter
-has to fit through. See [`docs/plugin_author_guide.md`](../../docs/plugin_author_guide.md)
+`getUserMedia` / `MediaStream`) is the contract the wasm adapter has to
+fit through. See [`docs/plugin_author_guide.md`](../../docs/plugin_author_guide.md)
 for the plugin contract.
 
-If you have prior wasm / emscripten experience and want to take this on,
-open a "claim" comment on a v0.12.0 milestone issue before sending a PR
-— coordinate the wasm DTLS / ICE backend selection early, since both
-have cross-platform CI implications.
+This is **not** on the v1.0–v1.3 roadmap — those tracks are quality,
+packaging, hardening, and the weak-network chain. A real in-browser
+build is a longer-term candidate. If you have prior wasm / emscripten
+experience and want to take it on, open an issue to discuss scope and
+coordinate the wasm DTLS / ICE backend selection early, since both have
+cross-platform CI implications.
 
 ---
 

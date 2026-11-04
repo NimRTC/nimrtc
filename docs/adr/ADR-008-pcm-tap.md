@@ -123,4 +123,5 @@ Rejected: requires recompilation to change tap behavior. Runtime `std::function`
 ## References
 
 - [ADR-001: Pluggable Module Architecture](ADR-001-plugin-system.md)
-- [NimRTC V2 Technical Doc §8.7: Pre/post 3A dual PCM tap](TBD)
+- [NimRTC V2 Technical Doc §8.7: Pre/post 3A dual PCM tap](../zh/architecture.md)
+  （原技术文档已于 v0.10 迁移，canonical 见 `docs/zh/architecture.md`）

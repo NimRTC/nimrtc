@@ -2,7 +2,7 @@
 
 > **Status: opening.** The spike is the source of truth for the
 > 5 evaluation criteria in
-> [`docs/adr/ADR-014-web-transport-vendor.md`](../docs/adr/ADR-014-web-transport-vendor.md)
+> [`docs/adr/ADR-014-web-transport-vendor.md`](../../docs/adr/ADR-014-web-transport-vendor.md)
 > §"The 5 evaluation criteria". `results.txt` is the gating
 > evidence; if any criterion fails, ADR-014 reopens and the
 > fallback path is **quiche** (BSD-2, C API, userspace only on
@@ -118,12 +118,12 @@ harness; the regression test is a separate PR).
 
 ## References
 
-- [`docs/adr/ADR-014-web-transport-vendor.md`](../docs/adr/ADR-014-web-transport-vendor.md) —
+- [`docs/adr/ADR-014-web-transport-vendor.md`](../../docs/adr/ADR-014-web-transport-vendor.md) —
   the parent ADR; this spike is the source of truth for
   ADR-014 §"The 5 evaluation criteria".
-- [`docs/plan/v1.0-plan.md`](../docs/plan/v1.0-plan.md) §10.2 —
+- [`docs/plan/v1.0-plan.md`](../../docs/plan/v1.0-plan.md) §10.2 —
   the 5 evaluation criteria (verbatim).
-- [`docs/plan/v0.14-plan.md`](../docs/plan/v0.14-plan.md) §9 —
+- [`docs/plan/v0.14-plan.md`](../../docs/plan/v0.14-plan.md) §9 —
   the spike framework; this directory is the implementation
   of §9.3.
 - [msquic on GitHub](https://github.com/microsoft/msquic) —

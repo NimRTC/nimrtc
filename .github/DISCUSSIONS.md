@@ -128,7 +128,7 @@ or close with explanation.
 
 For **architecturally significant** changes — new plugin interfaces, API surface changes,
 or cross-module design — the Ideas thread may be escalated to a **formal RFC**. See
-[`docs/rfcs/`](docs/rfcs/) for the existing RFCs and the RFC template. RFCs go through
+[`docs/rfcs/`](../docs/rfcs/) for the existing RFCs and the RFC template. RFCs go through
 **Draft → Review → Final** status stages and are merged into the documentation when Final.
 
 ---

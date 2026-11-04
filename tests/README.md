@@ -1,7 +1,7 @@
 # NimRTC Test Suite
 
 > Where the test files live, how to invoke them, and how to add your
-> own. For the framework conventions see [`src/third_party/googletest/`](../../src/third_party/googletest/).
+> own. For the framework conventions see [`src/third_party/googletest/`](../src/third_party/googletest/).
 >
 > **Pre-requisites**: `cmake --preset debug` already configured.
 

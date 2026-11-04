@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NimRTC — a from-scratch C++20 WebRTC engine</title>
-<meta name="description" content="NimRTC is a from-scratch C++20 WebRTC engine. <15 MB static lib, 4-platform CI, pluggable crypto, embeddable on aarch64. Wire-level Chrome / Firefox / libwebrtc interop.">
+<meta name="description" content="NimRTC is a from-scratch C++20 WebRTC engine. 12.55 MB static lib, 4-platform CI, pluggable crypto, embeddable on aarch64. Wire-level Chrome interop for media and WebTransport DataChannel.">
 <meta name="theme-color" content="#0d1117">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
@@ -33,29 +33,29 @@
 
 <section class="hero">
   <div class="container">
-    <p class="eyebrow">v1.0.1 Stable · 2026-11-02</p>
-    <h1>A from-scratch C++20 WebRTC engine.<br><span class="muted">&lt;15 MB. Four platforms. No fork.</span></h1>
+    <p class="eyebrow">v1.0.2 Stable · 2026-11-03</p>
+    <h1>A from-scratch C++20 WebRTC engine.<br><span class="muted">12.55 MB. Four platforms. No fork.</span></h1>
     <p class="lead">
       NimRTC is an embeddable media engine that keeps the wire-level WebRTC
-      interop you need (Chrome, Firefox, libwebrtc peers) and replaces the
-      150&ndash;250 MB monolith with a layered, plugin-adapted engine you can
-      <code>grep</code>, swap, and ship on aarch64. Same source tree ships a
-      P2P client <em>and</em> a <code>relay</code> gateway (relay profile
-      skips L2 codecs; a from-scratch SFU module is <em>not</em> a v1.0.0
-      deliverable per the §7 pre-1.0 decision window closure, BDFL
-      2026-10-19). DTLS, RTP, audio 3A, and codecs are all behind
-      header-only plugin interfaces.
+      interop you need (Chrome peers, for both media and DataChannel) and
+      replaces the 150&ndash;250 MB monolith with a layered, plugin-adapted
+      engine you can <code>grep</code>, swap, and ship on aarch64. Same
+      source tree ships a P2P client <em>and</em> a <code>relay</code>
+      gateway (relay profile skips L2 codecs; a from-scratch SFU module is
+      <em>not</em> a deliverable per the §7 pre-1.0 decision window
+      closure, BDFL 2026-10-19). DTLS, RTP, audio 3A, and codecs are all
+      behind header-only plugin interfaces.
     </p>
     <div class="hero-cta">
-      <a class="btn primary" href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">Download v1.0.1 →</a>
+      <a class="btn primary" href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2">Download v1.0.2 →</a>
       <a class="btn" href="https://github.com/NimRTC/nimrtc">★ on GitHub</a>
       <a class="btn ghost" href="#demo">see it run ↓</a>
     </div>
     <ul class="hero-numbers">
-      <li><b>&lt;15 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
+      <li><b>12.55 MB</b><span>static lib<br>(vs libwebrtc 150&ndash;250 MB)</span></li>
       <li><b>4 platforms</b><span>Windows · Linux x86_64 · macOS arm64 · Linux aarch64</span></li>
-      <li><b>~50k LOC</b><span>of C++20, end-to-end<br>(libwebrtc is ~5.5M)</span></li>
-      <li><b>5 profiles</b><span>transport · relay · agent · cloudgame · relay-agent</span></li>
+      <li><b>~30 K LOC</b><span>of C++20, end-to-end<br>(libwebrtc is ~5.5M)</span></li>
+      <li><b>9 profiles</b><span>call · transport · relay · agent · agent-gateway · agent-low-latency · relay-agent · teleop · live</span></li>
     </ul>
   </div>
 </section>
@@ -90,9 +90,13 @@
     <h2>Quick start</h2>
     <p class="section-lead">
       No build needed to evaluate: download the
-      <a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">v1.0.1 prebuilt bundle</a>
-      (headers + <code>NimRTCConfig.cmake</code> + static lib, with
-      <code>.sha256</code> + <code>.asc</code>). Or build the loopback
+      <a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2">v1.0.2 prebuilt bundle</a>
+      (vendored third-party stack — wolfSSL / libsrtp3 / libjuice / msquic —
+      with <code>.sha256</code> + <code>.asc</code> + <code>sbom.json</code>).
+      Linking NimRTC itself still needs a source build for now: the
+      <code>NIMRTC_INSTALL=ON</code> rules that produce NimRTC's own headers,
+      static lib and <code>NimRTCConfig.cmake</code> are landed on
+      <code>main</code> and ship in the next release. Or build the loopback
       example locally in <b>~3 minutes</b> on a 4-core x86_64. All
       third-party deps are git submodules, SHA-pinned in
       <code>src/third_party/vendor.json</code>.
@@ -127,29 +131,29 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
     <h2>What's working · what's not (be honest)</h2>
     <div class="grid two">
       <div>
-        <h3>Shipped in v1.0.1 (Stable)</h3>
+        <h3>Shipped in v1.0.2 (Stable)</h3>
         <ul class="check">
-          <li>First published stable release (<a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.1">v1.0.1, 2026-11-02</a>): 4-platform bundles + SBOM + detached GPG signatures.</li>
+          <li>Patch release (<a href="https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2">v1.0.2, 2026-11-03</a>): fixes the WebTransport ALPN mismatch and the oversized Windows bundle, and ships the signing public key with the release. 4-platform bundles + SBOM + detached GPG signatures.</li>
           <li>Chrome ↔ NimRTC DataChannel bidirectional interop (DC-1) over WebTransport / QUIC, PASS E1–E6.</li>
-          <li>5-variant profile library (<code>relay</code> / <code>transport</code> / <code>agent</code> / <code>cloudgame</code> / <code>relay-agent</code>) with strict JSON↔C++ round-trip tests.</li>
+          <li>9-profile library (<code>call</code> / <code>transport</code> / <code>relay</code> / <code>agent</code> / <code>agent-gateway</code> / <code>agent-low-latency</code> / <code>relay-agent</code> / <code>teleop</code> / <code>live</code>) with strict JSON↔C++ round-trip tests.</li>
           <li>Pre/post-3A PCM tap (race-free <code>set_pre_process_tap</code> / <code>set_post_process_tap</code>, int16 ASR variant).</li>
           <li>PAL Slice 1&ndash;8 — plugin-capability resolution, zero runtime overhead, public API unchanged.</li>
-          <li>Pluggable DTLS backend (<code>EngineConfig::dtls_name</code> resolves to OpenSSL / wolfSSL / mbedTLS at build time).</li>
-          <li>Vendored libs: wolfSSL · libsrtp · libopus · libjuice · WebRTC APM. SHA-pinned.</li>
+          <li>Pluggable DTLS backend (<code>EngineConfig::dtls_name</code> resolves to wolfSSL by default, GMSSL opt-in).</li>
+          <li>Vendored libs: wolfSSL · libsrtp · libopus · libjuice · msquic · WebRTC APM. SHA-pinned.</li>
         </ul>
       </div>
       <div>
         <h3>Deferred to v1.x (and why)</h3>
         <ul class="cross">
-          <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; v1.x re-platforms on <code>msquic</code>. The <code>usrsctp</code> socket class is <code>@deprecated</code> and still compiles for opt-in callers.</li>
-          <li><b>iOS / Android native.</b> Roadmap, not P1. No ETA yet.</li>
-          <li><b>Production-grade hardening.</b> API frozen at v1.0.0 per ADR-015; SemVer guarantees apply from v1.0.1 (first published stable).</li>
+          <li><b>DataChannel over SCTP-over-DTLS.</b> Chrome is moving DataChannel to WebTransport over QUIC; the <code>usrsctp</code> socket class is <code>@deprecated</code> and still compiles for opt-in callers, but is no longer auto-registered.</li>
+          <li><b>iOS / Android native.</b> Roadmap, not a current-track item. No ETA yet.</li>
+          <li><b>Production-grade hardening.</b> API frozen at v1.0.2 per ADR-015 (<code>NIMRTC_API_VERSION</code> = 10002); SemVer guarantees apply from v1.0.1 (first published stable).</li>
         </ul>
-        <h3>On the v0.12.0 roadmap</h3>
+        <h3>On the roadmap (<code>main</code>, ahead of v1.0.2)</h3>
         <ul class="bullet">
-          <li>Wasm browser demo (this page is the placeholder; see below).</li>
-          <li>Adaptive jitter buffer + Goog-CC-style BWE (P3).</li>
-          <li>GMSSL DTLS backend for Xinchuang / GM/T (P4).</li>
+          <li><b>v1.1 — Quality + packaging.</b> Reproducible transport-floor benchmarks with CI artifacts; <code>NIMRTC_INSTALL=ON</code> install rules so <code>find_package(NimRTC)</code> works from an installed tree; WebRTC APM prebuilt shipped alongside.</li>
+          <li><b>v1.2 — Hardening.</b> <code>ISctpSocket</code> lifecycle, ICE <code>last_recv_packet()</code> demux, p99 strategy validator, non-standard video clock-rate negotiation, DTLS IPv6 <code>set_peer()</code>, NAT-rebinding <code>rehandshake()</code>.</li>
+          <li><b>v1.3 — Quality line.</b> Goog-CC BWE, unified adaptive jitter buffer, RTCP feedback loop, engine-level video stats, GMSSL vendoring + SRTP backend seam.</li>
         </ul>
       </div>
     </div>
@@ -167,7 +171,8 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
     </p>
     <pre class="arch-diagram"><code>┌─────────────────────────────────────────────────────────────┐
 │  PROFILE  —  compile-time selection                          │
-│  transport │ relay │ agent-gateway │ cloudgame │ relay-agent    │
+│  call │ transport │ relay │ agent │ agent-gateway │          │
+│  agent-low-latency │ relay-agent │ teleop │ live             │
 └─────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┼─────────────────────┐
@@ -187,12 +192,11 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
                               │
                               ▼
         ITransport · IICETransport · IRTP · ISDP · IJB
-        IAudio3A · ICodec · IVideoSource/Sink · IDtlsSession</code></pre>
+        IAudio3A · ICodec · IVideoSource/Sink · IDataChannel</code></pre>
     <p class="arch-note">
-      Every capability swap (OpenSSL ↔ wolfSSL ↔ mbedTLS ↔ GMSSL;
-      in-tree 3A ↔ HW 3A; libjuice ↔ custom ICE) flows through one of
-      these header-only interfaces. The public <code>NimRTCEngine</code> API
-      does not change.
+      Every capability swap (wolfSSL ↔ GMSSL; in-tree 3A ↔ HW 3A;
+      libjuice ↔ custom ICE) flows through one of these header-only
+      interfaces. The public <code>NimRTCEngine</code> API does not change.
     </p>
   </div>
 </section>
@@ -206,9 +210,10 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
       demo. A real NimRTC-in-your-browser experience (Chrome ↔ NimRTC
       audio + video, with <code>getUserMedia</code> on the browser side
       and the <code>transport</code> profile compiled to
-      <code>wasm32-unknown-unknown</code>) is on the <b>v0.12.0</b>
-      milestone. The tracking issue lives under
-      <a href="https://github.com/NimRTC/nimrtc/issues?q=is%3Aopen+milestone%3A%22v0.12.0%22">milestone:v0.12.0</a>.
+      <code>wasm32-unknown-unknown</code>) has not landed yet and is a
+      longer-term candidate — it is not on the v1.0&ndash;v1.3 roadmap,
+      which covers quality, packaging, hardening, and the weak-network
+      chain.
     </p>
     <p>
       In the meantime, if you want to see NimRTC actually move audio and

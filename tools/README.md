@@ -6,6 +6,8 @@ Development and release utility scripts (not part of the NimRTC library itself).
 
 ```
 tools/
+├── *.py            # Utility scripts (lint, release, codegen, CI helpers)
+├── *.sh / *.cmd    # Thin wrappers for platform-specific commands
 ├── cmake/          # CMake helper scripts used at configure time
 ├── scripts/        # Shell / Python utilities (lint, release, codegen)
 └── ci/             # CI-specific scripts (packaging, signing)
@@ -35,6 +37,20 @@ Both scripts:
 .\scripts\build.bat --rebuild --release   # Windows: clean + Release
 bash scripts/build.sh --rebuild --preset=release  # Linux/macOS
 ```
+
+## Documentation
+
+| Script | Purpose |
+|--------|---------|
+| `check_md_links.py` | Verify relative Markdown links and `#anchor` targets in every non-vendored `.md` file. Wired into CI as the `docs / markdown links` job. |
+
+```
+python tools/check_md_links.py            # whole repo
+python tools/check_md_links.py README.md  # specific files
+```
+
+Exit code is non-zero when a link points at a missing file or an anchor
+that no heading produces.
 
 ## Scripts planned
 

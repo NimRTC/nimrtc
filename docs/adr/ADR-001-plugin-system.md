@@ -57,7 +57,7 @@ under `src/modules/`. The full surface as of the current phase:
 
 > **Note on `registry.hpp`**: ADR-001 originally listed `plugins/registry.hpp`
 > as a separate header. That header was merged into
-> [`src/core/include/nimrtc/core/registry.hpp`](src/core/include/nimrtc/core/registry.hpp)
+> [`src/core/include/nimrtc/core/registry.hpp`](../../src/core/include/nimrtc/core/registry.hpp)
 > because `PluginRegistry` is a global singleton and therefore must live in
 > `nimrtc::core::` (Layout Invariant 6). Consumers that still write
 > `#include <nimrtc/plugins/registry.hpp>` continue to work via a thin

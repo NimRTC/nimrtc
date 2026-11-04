@@ -453,13 +453,13 @@ option(NIMRTC_ENABLE_WEB_TRANSPORT_MSQUIC
 
 ## References
 
-- [`docs/plan/v1.0-plan.md`](v1.0-plan.md) — parent plan; §10
+- [`docs/plan/v1.0-plan.md`](../plan/v1.0-plan.md) — parent plan; §10
   (vendor spike framework), §12.3.2 (alpha.2 DoD Gate #1), §12.3.3
   (beta.1 DoD Gate #1).
-- [`docs/plan/v0.14-plan.md`](v0.14-plan.md) — v0.14.x = alpha.2 +
+- [`docs/plan/v0.14-plan.md`](../plan/v0.14-plan.md) — v0.14.x = alpha.2 +
   beta.1 milestone plan; §4 PR queue; §5 risk table; §9 ADR-014
   spike framework.
-- [`docs/plan/v0.11-plan.md`](v0.11-plan.md) — §2.2 (DC-1 / DC-2
+- [`docs/plan/v0.11-plan.md`](../plan/v0.11-plan.md) — §2.2 (DC-1 / DC-2
   / TPAL-5 deferred); §10 (WebTransport/QUIC forward direction).
 - [`docs/adr/ADR-001-plugin-system.md`](ADR-001-plugin-system.md) —
   parent architecture; `PluginRegistry` is the registry that

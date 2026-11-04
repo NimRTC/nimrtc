@@ -97,7 +97,7 @@ C++ `Builder` enforces schema + invariants at parse time.
 
 ## 3. The two-file pattern: JSON + C++ constant
 
-> Two-file because the [JSON ↔ C++ invariant](profiles.md) is
+> Two-file because the [JSON ↔ C++ invariant](../profiles.md) is
 > enforced by a unit test that fails the build if they drift.
 
 For each Profile, you ship **two** artefacts:

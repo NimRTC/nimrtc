@@ -97,8 +97,15 @@ where ninja >nul 2>&1 || (
     exit /b 1
 )
 
-echo [INFO] meson:  !meson --version!
-echo [INFO] ninja:  !ninja --version!
+REM `!meson --version!` would be read by cmd as a *delayed-expansion variable*
+REM named "meson --version" (which does not exist), so it expands to nothing.
+REM Run the tools once and keep their output in a variable instead.
+set "MESON_VERSION=unknown"
+set "NINJA_VERSION=unknown"
+for /f "tokens=*" %%v in ('meson --version 2^>nul') do set "MESON_VERSION=%%v"
+for /f "tokens=*" %%v in ('ninja --version 2^>nul') do set "NINJA_VERSION=%%v"
+echo [INFO] meson:  !MESON_VERSION!
+echo [INFO] ninja:  !NINJA_VERSION!
 
 REM ---------------------------------------------------------------------------
 REM Step 0: apply the NimRTC patch series (C++20 for agc2)
@@ -151,7 +158,7 @@ if not exist "%BUILD_DIR%\build.ninja" (
         exit /b 2
     )
 ) else (
-    echo [STEP 1] build.ninja already exists (run with --clean to reconfigure)
+    echo [STEP 1] build.ninja already exists - run with --clean to reconfigure
 )
 
 REM ---------------------------------------------------------------------------
@@ -169,25 +176,27 @@ REM ---------------------------------------------------------------------------
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 echo.
 echo [STEP 2] ninja build (logging to %LOG_DIR%\webrtc_apm_build.log)...
-powershell -NoProfile -Command ^
-  "$ErrorActionPreference = 'Stop';" ^
-  "ninja -C '%BUILD_DIR%' *>'%LOG_DIR%\webrtc_apm_build.log';" ^
-  "exit $LASTEXITCODE"
+REM Capture BOTH stdout and stderr in one log and keep ninja's real exit
+REM code.  This must NOT go through `powershell -Command`: PowerShell turns
+REM a native command's stderr into error records, and under
+REM `$ErrorActionPreference = 'Stop'` the very first progress line ninja
+REM writes to stderr ("ninja: Entering directory ...") aborts the
+REM PowerShell command with rc=1.  That reported a *successful* build as a
+REM failure, which is how the bundle silently degraded to the stub 3A path.
+REM cmd.exe's own redirection does neither: one combined log, exact exit code.
+REM `call` is required: a .cmd/.bat wrapper (a common way to put ninja on
+REM PATH) would otherwise take over control and never return, leaving the
+REM script to exit silently with no diagnostic at all.
+call ninja -C "%BUILD_DIR%" > "%LOG_DIR%\webrtc_apm_build.log" 2>&1
 set "NINJA_RC=%ERRORLEVEL%"
 
-if %NINJA_RC% neq 0 (
-    echo [ERROR] ninja build failed with rc=%NINJA_RC%
-    if exist "%LOG_DIR%\webrtc_apm_build.log" (
-        for %%F in ("%LOG_DIR%\webrtc_apm_build.log") do set "LOG_SIZE=%%~zF"
-        echo Full log: %LOG_DIR%\webrtc_apm_build.log  (!LOG_SIZE! bytes) - printing in full for triage
-        powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log'"
-        REM Also surface the first "error C\d+" / "fatal error" / "FAILED:" if any
-        powershell -NoProfile -Command "$lines = Get-Content '%LOG_DIR%\webrtc_apm_build.log' -ErrorAction SilentlyContinue; $lines | Select-String -Pattern 'error C\d+:|fatal error|FAILED: [a-zA-Z0-9=_. -]+' | Select-Object -First 20 | ForEach-Object { $_.Line }"
-    ) else (
-        echo [ERROR] Log file was not produced; ninja may have failed before opening it.
-    )
-    exit /b 3
-)
+REM The failure path below is reached with `goto` rather than an `if (...)`
+REM block.  cmd.exe parses a parenthesised block in full before it runs any
+REM of it, so a syntax error anywhere inside a *diagnostic* branch aborts
+REM the whole block even when the condition is false -- a broken triage
+REM path must never be able to break the success path.  `goto` keeps the
+REM branches independent of each other's syntax.
+if %NINJA_RC% neq 0 goto :ninja_failed
 
 REM ---------------------------------------------------------------------------
 REM Step 3: record the authoritative archive link order
@@ -216,6 +225,22 @@ for %%F in ("%BUILD_DIR%\webrtc\modules\audio_processing\libwebrtc-audio-process
     echo Size:   %%~zF bytes
 )
 exit /b 0
+
+:ninja_failed
+echo [ERROR] ninja build failed with rc=%NINJA_RC%
+if not exist "%LOG_DIR%\webrtc_apm_build.log" goto :ninja_failed_no_log
+for %%F in ("%LOG_DIR%\webrtc_apm_build.log") do set "LOG_SIZE=%%~zF"
+echo Full log: %LOG_DIR%\webrtc_apm_build.log - [!LOG_SIZE! bytes] - printing in full for triage
+powershell -NoProfile -Command "Get-Content '%LOG_DIR%\webrtc_apm_build.log'"
+REM Also surface the first "error C\d+" / "fatal error" / "FAILED:" if any
+powershell -NoProfile -Command "$lines = Get-Content '%LOG_DIR%\webrtc_apm_build.log' -ErrorAction SilentlyContinue; $lines | Select-String -Pattern 'error C\d+:|fatal error|FAILED: [a-zA-Z0-9=_. -]+' | Select-Object -First 20 | ForEach-Object { $_.Line }"
+goto :ninja_failed_end
+
+:ninja_failed_no_log
+echo [ERROR] Log file was not produced; ninja may have failed before opening it.
+
+:ninja_failed_end
+exit /b 3
 
 :print_usage
 echo Usage:

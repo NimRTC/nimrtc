@@ -13,6 +13,15 @@
 *.sh    text eol=lf
 *.py    text eol=lf
 
+# Windows batch scripts must be checked out with CRLF endings.  cmd.exe
+# mis-parses an LF-only batch file: it fails to resolve `goto` labels,
+# splits quoted paths at spaces, and can loop over the file forever.
+# With `* text=auto` alone the working-tree endings follow the local
+# core.autocrlf setting, so a clone with core.autocrlf=input produced a
+# broken script.
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
 # Documentation
 *.md    text eol=lf
 *.rst   text eol=lf

@@ -128,6 +128,55 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The `cloudgame` Profile was never shipped, and the docs said it was.**
+  `README.md`, `README.zh.md`, `docs/profiles.md`, `docs/zh/architecture.md`
+  and `docs/blog/2026-10-10-why-nimrtc.{md,zh.md}` all listed `cloudgame`
+  as an available Profile — but `profiles/cloudgame.json` does not exist and
+  `assembly` has no `kProfileCloudGame`; the registry ships 9 profiles.
+  BDFL decided on 2026-11-04 that `cloudgame` does **not** enter the official
+  Profile combination and is deferred to v1.4+, because its hardest
+  differentiator ("input aligned to the render frame") needs a **render
+  timestamp from the rendering host** (Unreal / Unity), which is outside the
+  engine's boundary — the engine does not bundle codecs, and GPU encode /
+  render-pipeline integration is out of scope. The remaining three
+  overrides are already covered by the `teleop` family plus the
+  command-to-frame API. The primary scenes are now **AI Agent** (`agent` /
+  `agent-gateway` / `agent-low-latency` / `relay-agent`) and **embodied-AI
+  teleoperation** (`teleop`, same family, no new Profile);
+  `takeover` (remote vehicle takeover) stays P4. All affected documents now
+  state `cloudgame` as a long-term candidate that is *not* in the shipped
+  Profile set. `docs/plan/v1.3-plan.md` §3 Track V item V2 is now a
+  documentation-alignment task rather than a Profile implementation.
+- **The GM/T coverage claim was overstated.** README (EN + ZH) and the
+  architecture doc described the project as "GM/T cryptography ready" /
+  "GM/T 国密就绪", which implies end-to-end GM/T media encryption. The
+  engine's GM/T path covers the **DTLS handshake** (TLCP / SM2 / SM3 / SM4
+  via the GMSSL backend); **SRTP still uses the international AES suites**
+  (SM4-GCM SRTP is a later release — a `libSRTP`-free implementation would
+  have to re-derive RFC 3711's KDF with SM3 as the PRF, and D1 forbids
+  self-implementing security-critical crypto). The claims are now scoped
+  explicitly, which matters because the previous wording was a compliance
+  misstatement towards regulated / Xinchuang customers. The compliance
+  layering is documented in `docs/plan/v1.3-plan.md` §3 Track X: signalling
+  TLCP is **above** the engine (§10 already says "上层"), DTLS GM/T is
+  **inside** the engine, SRTP GM/T is inside the engine but not yet
+  implemented.
+- **ADR-013's "do not vendor GMSSL" premise was stale.** Its decision
+  clause 6 justified the system-install-only strategy by "keeping
+  consistency with wolfSSL (which is also not vendored)" — but wolfSSL has
+  since become a real git submodule, as have msquic / libsrtp / libopus.
+  Requiring every downstream integrator to build and install GMSSL into
+  their own sysroot is exactly the integration burden ADR-013 set out to
+  remove (OHOS / aarch64 cross-compilation cannot reasonably assume a
+  system-installed GMSSL). The decision is therefore amended (2026-11-04):
+  GMSSL becomes a git submodule under `src/third_party/gmssl`, built via
+  `add_subdirectory` when `NIMRTC_ENABLE_DTLS_GMSSL=ON`, with the option
+  still defaulting to **OFF** so the default build's output size, build
+  time and artifact set are unchanged. Vendoring is gated on verifying the
+  pinned commit's LICENSE text and recording it in `vendor.json`; the
+  acceptance criteria now include a Windows/MSVC compile, since GMSSL v3 is
+  known to be rougher there and "works out of the box" does not hold on
+  Windows until that is proven.
 - **libsrtp is now a real git submodule.** The vendored tree at
   `src/third_party/libsrtp/src` was byte-identical to upstream
   `2f82ec0e6e55a18d9cfae2001a4b3fbbc0049da2`, so it converted with no

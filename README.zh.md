@@ -37,7 +37,7 @@ WebRTC 在演进，但主流实现没跟上。
 
 - **libwebrtc** 是事实标准引擎，但构建产物多 GB、加密和编解码都是黑盒、代码库是 monolithic 的。
   把 libwebrtc 嵌到 aarch64 上，或者按 GM/T 合规要求去做审计，本身就是一场苦修。
-- **AI Agent / 遥操作 / 云游戏**需要 libwebrtc 不暴露的能力 —— pre/post-3A PCM tap、严格优先级的控制面、采集-决策帧对齐 API。
+- **AI Agent / 遥操作 / 具身智能机器人**需要 libwebrtc 不暴露的能力 —— pre/post-3A PCM tap、严格优先级的控制面、采集-决策帧对齐 API。
 - **信创 / 合规**环境要的是"换路径"而不是"fork 主干"的国密落地方式。
 
 NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**（Chrome、Firefox、libwebrtc 节点），
@@ -58,7 +58,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | | | |
 |---|---|---|
 | 🎯 **编译期分层（L0–L3）** | 🔌 **公开 plugin 接口** | 🪶 **~5.6 MB 静态库**（libwebrtc 150–250 MB）|
-| 🧩 **面向场景的 Profile，不 fork 主干** —— `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **加密后端可替换** —— OpenSSL ↔ mbedTLS ↔ GMSSL，API 不变 | 🛡️ **GM/T 国密就绪** —— 信创合规场景有可信落地路径 |
+| 🧩 **面向场景的 Profile，不 fork 主干** —— `transport` / `relay` / `agent` / `agent-gateway` / `teleop` | 🔁 **加密后端可替换** —— mbedTLS ↔ wolfSSL ↔ GMSSL，API 不变 | 🛡️ **GM/T 国密路径** —— DTLS/TLCP 走 GMSSL（SRTP 仍为国际套件） |
 | 📡 **线缆级互通** —— Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **四平台 CI** —— Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **面向 AI Agent 的差异化** —— pre/post-3A PCM tap、ref_frame 时间线 |
 
 ---
@@ -72,7 +72,7 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | 1 | **分层 + Profile 组装（L0–L3）** | 编译期选层。同一份代码既能发 P2P 客户端，也能发 `relay` 网关（`relay` profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1）。**注意**：from-scratch 的 SFU 模块不是 v1.0.0 的交付内容（§7 pre-1.0 决策窗口在 2026-10-19 由 BDFL 关闭为 NO，SFU 不是项目核心目标；见 `docs/plan/v1.0-plan.md` §7 + §12.5）。LiveKit/mediasoup 只做服务端；libwebrtc 是 monolithic。 |
 | 2 | **多平台 CI 全部绿色** | Windows / Linux x86_64 / macOS arm64 / Linux aarch64 四平台均通过构建+单测。详见[平台支持](#平台支持)。 |
 | 3 | **PAL（Plugin Adaptation Layer）** | 所有能力切换走 `pal::*`，**零运行时开销**，公共 API 不变。详见 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)。 |
-| 4 | **加密后端可替换** | DTLS 后端可在同一 codebase 内替换为 OpenSSL / mbedTLS / 国密（GMSSL、WoTrCrypt）。多数开源 WebRTC 栈把加密焊死。 |
+| 4 | **加密后端可替换** | DTLS 后端可在同一 codebase 内替换为 mbedTLS / wolfSSL / 国密（GMSSL）。多数开源 WebRTC 栈把加密焊死。 |
 | 5 | **P2P 客户端和 relay 同一 codebase** | 同一套 plugin 接口同时支撑两条产品线。2026 年的开源 WebRTC 生态里几乎找不到第二家。（from-scratch 的 SFU 模块不是项目核心目标 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19。） |
 
 > **plugin 接口是这套架构的"接缝"**。上面五点要组合起来才出差异化，详见 [§ plugin 架构](#plugin-架构)。
@@ -84,9 +84,9 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 | 如果你是… | NimRTC 能帮你… |
 |---|---|
 | 用 C++ 写 P2P 语音/视频应用 | 用一个真正能 `grep`、能静态链接、几个 MB 就够的引擎替代 libwebrtc。 |
-| 政企信创 / 国密合规环境 | 不 fork 主干就把 DTLS 加密切换到 GMSSL。 |
+| 政企信创 / 国密合规环境 | 不 fork 主干就把 DTLS 加密切换到 GMSSL（TLCP / SM2 / SM3 / SM4）。**范围说明**：国密路径覆盖 DTLS 握手 —— SRTP 仍使用国际 AES 套件（SM4-GCM SRTP 在后续版本）。 |
 | 在嵌入式 Linux aarch64 上跑 | Raspberry Pi、工业 SBC、机器人主控 —— 同一 codebase，桌面端能用的能力嵌入式也能用。 |
-| 搭 AI Agent / 遥操作 / 云游戏 | 用 pre/post-3A 双 PCM tap、严格优先级 QoS、ref_frame 时间线 API。 |
+| 搭 AI Agent / 遥操作 / 具身智能机器人 | 用 pre/post-3A 双 PCM tap、严格优先级 QoS、ref_frame 时间线 API。 |
 | 自建 relay 但不想重写协议栈 | 编译 `relay` profile（L0+L1+L3），同一套引擎，跳过 L2 codec。 |
 
 > **不适用的场景**：今天就要一个开箱即用的浏览器级 SDK；只做移动端（iOS/Android 在路线图，不在 P1）。
@@ -238,7 +238,7 @@ profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1），原理就
 ```
             ┌──────────────────────────────────────────────────┐
             │  PROFILE  ——  编译期选择                          │
-            │  transport（P2P）│ relay │ agent-gateway │ cloudgame │
+            │  transport（P2P）│ relay │ agent │ agent-gateway │ teleop │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -289,7 +289,7 @@ flowchart TB
         P1["transport: P2P 客户端"]
         P2["relay: 纯转发"]
         P3["agent-gateway: PCM 双 tap"]
-        P4["cloudgame: 高码率 + 输入对齐"]
+        P4["teleop: 严格优先级控制面"]
     end
 
     PROF --> L3
@@ -424,13 +424,13 @@ Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2
 | **公开 plugin 接口** | ✅ 各层都有 | ❌ 内部封装 | ⚠️ 部分 | ⚠️ 服务端 | ⚠️ 服务端 |
 | **静态链接 footprint** | **~5.6 MB** | 150–250 MB | 不适用（Go） | 服务端 | 服务端 |
 | **嵌入式 Linux aarch64** | ✅ CI 绿色 | ⚠️ 久未维护的 port | ❌ | ❌ | ❌ |
-| **GM/T 国密（GMSSL）后端切换** | ✅ plugin 切换，不 fork | ❌ 需打补丁重建 | ❌ | ❌ | ❌ |
+| **GM/T 国密（GMSSL）后端切换** | ✅ plugin 切换，不 fork（DTLS 层） | ❌ 需打补丁重建 | ❌ | ❌ | ❌ |
 | **AI Agent / 3A 旁路 hook** | ✅ `pre/post-3a` PCM tap（P2） | ❌ APM 黑盒 | ❌ | ❌ | ❌ |
 | **ref_frame / 帧对齐时间线** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **线缆级 Chrome 互通** | ✅ Case D 绿色 | ✅ | ✅（仅 Go） | ✅ 通过浏览器 SDK | ✅ 通过浏览器 SDK |
 | **2026 生产成熟度** | Stable（v1.0.0） | Production-grade | Production-grade | Production-grade | Production-grade |
 
-**NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密、AI Agent hook、单主干 P2P+relay（`relay` 是单策略网关 profile，编译期跳过 L2 编解码；from-scratch 的 SFU 模块不是 v1.0.0 的交付内容 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19）。
+**NimRTC 全面领先的领域**：aarch64 嵌入式、GM/T 国密路径（DTLS 层）、AI Agent hook、单主干 P2P+relay（`relay` 是单策略网关 profile，编译期跳过 L2 编解码；from-scratch 的 SFU 模块不是 v1.0.0 的交付内容 —— 见 `docs/plan/v1.0-plan.md` §7，BDFL 2026-10-19）。
 **NimRTC 落后的领域**：生态广度、编解码覆盖、浏览器引擎对等、年限沉淀。**按需选择。**
 
 ---
@@ -443,8 +443,17 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 |---|---|---|
 | `transport` | L0+L1+L2+L3 | 完整 P2P 客户端（Chrome 互通） |
 | `relay` | L0+L1+L3（**跳过 L2**）| 服务器转发，不重编解码 |
+| `agent` | L0+L1+L2+L3 | AI Agent SDK（语音/文本 1:1）—— timeline + DC |
 | `agent-gateway` | L0+L1+L2（tap 打开）| AI Agent 接入，PCM 双 tap + 3A 旁路 |
-| `cloudgame` | L0+L1+L2+L3（高码率主线 + 输入渲染对齐）| 遥操作 / 云游戏（远期候选） |
+| `agent-low-latency` | L0+L1+L2+L3 | 延迟优先的 Agent 链路（20 ms JB、关闭 AGC） |
+| `relay-agent` | L0+L1+L3 | relay + AI Agent 混合（N:1），timeline 重新校准 |
+| `teleop` | L0+L1+L2+L3 | 机器人 / 具身智能遥操作 —— 严格优先级控制面 |
+| `live` | L0+L1+L2+L3 | 单向直播 / 广播 |
+
+> 完整矩阵（**已交付的 9 个 Profile**，含 JB / 3A / BWE / DC 逐字段取值）见
+> [`docs/profiles.md`](docs/profiles.md)。`cloudgame`（云渲染 / 云游戏串流）是
+> **长线候选，不在已交付 Profile 集合内** —— 见
+> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V。
 
 ---
 
@@ -466,6 +475,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
   - *注意*：aarch64 **编译可过 ≠ 互通可过**（见 architecture §13.1）。
 - **P2 场景差异化**：pre/post-3A 双 PCM tap；严格优先级调度；usrsctp DataChannel 互通；首批 Profile 库。
 - **P3 客户端质量 + ref_frame**：自适应 JB + Goog-CC 风格 BWE；ref_frame 时间线完整实现；首个付费标杆客户。
+  - *注*：`cloudgame`（云渲染 / 云游戏串流）**不在**已交付 Profile 集合内 —— 它是长线候选，顺延至 v1.4+（见 [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V）。
 - **P4 生产化 + 国密企版**：双链路 / 接管框架企版；国密后端落地；首份商业合同。
 
 详细路线图：见 [`docs/zh/architecture.md`](docs/zh/architecture.md) §13。

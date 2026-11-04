@@ -47,7 +47,9 @@ NimRTC v0.11.0 在阶段 1（PAL Slice 4 / TPAL-4）完成了 DTLS seam 接口�
    （SM2 算法 vs ECDSA P-256 不兼容），独立 SM2 证书 + 私钥。
    wolfSSL 与 Chrome / Firefox / Safari 互通路径不变（默认 backend）。
 
-6. **不向仓库 vendoring GMSSL 源码**：与 wolfSSL 保持一致的策略（wolfSSL 也未 vendoring）。`cmake/NimRTCVendored.cmake::nimrtc_link_gmssl()` 通过 `find_path` + `find_library` 在 `/usr/local`、`/usr`、`$ENV{GMSSL_ROOT}` 探测系统 GMSSL 安装，**不依赖 OpenSSL**（GMSSL 自带 SM2/SM3/SM4 crypto 原语）。
+6. **GMSSL 的依赖形态**：2026-09-21 原决策为"不向仓库 vendoring GMSSL 源码，通过 `find_path` + `find_library` 探测系统安装"。**2026-11-04 修正**（见 `docs/plan/v1.3-plan.md` §3 Track X 的 X1 决策记录）：改为 **GMSSL 以 git submodule 形式引入 `src/third_party/gmssl`**，`NIMRTC_ENABLE_DTLS_GMSSL=ON` 时走 `add_subdirectory`，不再要求用户自行编译安装到 sysroot。
+   - 修正理由：(a) OHOS / aarch64 交叉编译场景下"系统安装 GMSSL"实际不可行，而这正是本 ADR 的初衷；(b) 仓库已有 wolfSSL / msquic / libsrtp / libopus 的 submodule 先例，GMSSL 是唯一例外；(c) 本 ADR 原决策第 6 条称"与 wolfSSL 保持一致的策略（wolfSSL 也未 vendoring）"，该前提**已过时**——wolfSSL 实际已 vendored 成 submodule，故本次为**修正过时陈述**，而非推翻原决策。
+   - 约束：vendoring 前须核对 pinned commit 的 GmSSL LICENSE 原文并写入 `src/third_party/vendor.json`；`NIMRTC_ENABLE_DTLS_GMSSL` **默认保持 OFF**（默认构建产物 / 体积 / 耗时不变，非国密用户零成本）；CI 增一条 opt-in 腿实证，验收须含 Windows/MSVC 编译。
 
 ## Alternatives Considered
 

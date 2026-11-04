@@ -67,8 +67,9 @@ PAL 插件适配层                       ← 编译期解析
 
 每一层都是一个 CMake 的 INTERFACE / STATIC 库。**Profile** 也是编译
 期选择：`transport`（P2P 客户端）/ `relay`（仅转发，不含 L2）/
-`agent-gateway`（PCM 双 tap）/ `cloudgame`（高码率 + 对齐输入）/
-`relay-agent`（组合）。
+`agent`（Agent SDK）/ `agent-gateway`（PCM 双 tap）/
+`agent-low-latency` / `relay-agent`（组合）/ `teleop`（机器人遥操作）/
+`live`（直播）。
 
 这有趣的地方是：同一份源码树同时输出一个 P2P 客户端**和**一个 relay 网
 关。LiveKit 和 mediasoup 都是纯服务端；libwebrtc 是单体。OSS WebRTC

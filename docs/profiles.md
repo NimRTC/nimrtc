@@ -20,6 +20,11 @@ and diff-reviewed in pull requests.
 | `agent-gateway` | server-side Agent media gateway | adaptive / low_latency / 30 ms | webrtc_apm (tap surface) | opus | aimd (.5/5 Mbps) | yes | exposes pre/post-3A PCM tap for ASR / wake-word / VAD |
 | `agent-low-latency` | Agent SDK's lowest-latency variant | adaptive / low_latency / 20 ms | webrtc_apm (AGC off) | opus (FEC off) | aimd (.5/5 Mbps) | yes | `agent_low_latency` marker; AGC level estimator off; Opus FEC off |
 
+> **Not shipped: `cloudgame`** (cloud rendering / streaming). It is a long-term
+> candidate, not part of the official Profile set — `profiles/cloudgame.json`
+> does not exist and `assembly` has no `kProfileCloudGame`. Rationale and
+> follow-up: [`docs/plan/v1.3-plan.md`](plan/v1.3-plan.md) §3 Track V.
+
 ### When to pick each profile
 
 **`call`** — Default for any 1:1 voice call (VoIP, customer support, voice

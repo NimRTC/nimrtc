@@ -227,7 +227,7 @@ nimrtc/
 | **relay-agent** | AI Agent 实时交互（**relay 形态：Agent 作为 relay 参与者**，控制/事件 DC 选择性转发） | 无（转发跳过 L2） | 无 | 无（透传） | 转发公平 + **DC 转发策略（按消息流声明的转发标签转发）** | 帧级开 + **重新校准**（不让时间戳随 hop 漂移） | 国际 |
 | teleop | 机器人 / 无人设备遥操作 | Goog-CC 主线 | 低延迟通话档 | 关或第三方 | **严格优先级（指令插队）+ DC 不可靠无序 + TTL 丢旧保新** | **帧级 + 样本级** | 国际 / 国密可选 |
 | takeover | 自动驾驶远程接管 / 云控 | 同 teleop（多路视频） | 低延迟通话档 | 关或第三方 | 同 teleop + 高频心跳 / dead-man | 帧级 + 样本级 | **国密（SM）+ 双链路** |
-| cloudgame | 云游戏 / 云渲染串流（teleop 族） | **高码率主线**（视频即体验本体，降级坡度缓） | 低延迟档（下行为主） | 关（无采集端） | 同 teleop（输入严格优先级 / 丢旧保新）+ **上行高频状态流原语** | **帧级（输入↔渲染帧）** | 国际 |
+| cloudgame | 云游戏 / 云渲染串流（teleop 族，**长线候选，未进官方组合**） | **高码率主线**（视频即体验本体，降级坡度缓） | 低延迟档（下行为主） | 关（无采集端） | 同 teleop（输入严格优先级 / 丢旧保新）+ **上行高频状态流原语** | **帧级（输入↔渲染帧）** | 国际 |
 | relay | 服务端转发 | 无（转发跳过 L2） | 无 | 无 | 转发公平 | 关 | 国际 |
 | transport | 嵌入式 / 传输网关 | 无（`L0+L1`） | 无 | 无 | 极简 | 关 | 国际 / 国密可选 |
 
@@ -239,6 +239,8 @@ nimrtc/
   ② **timeline 语义偏移**——由「对所见帧做决策」变为「输入对齐其触发的**渲染帧**」（防输入-画面错位抖动）；
   ③ **上行是高频事件 / 状态流**（键鼠采样率远高于遥操作指令频率），引擎提供输入通道原语，采样 / 合并策略交上层自定；
   ④ **伴音单向**——游戏音效需与画面紧同步但无采集端，3A 依旧关闭。
+
+> **cloudgame 状态说明（2026-11-04 决策）**：本行是**设计预留的长线候选**，**尚未进入官方 Profile 组合**（`profiles/` 无 `cloudgame.json`，`assembly` 无 `kProfileCloudGame`）。不进官方组合的理由：覆盖项 ② 的"渲染帧时间戳"须由渲染端（Unreal / Unity 等）提供，**超出引擎能力边界**（引擎不捆绑编解码器，GPU 硬编与渲染管线接入不在本项目范围）；覆盖项 ①③④ 的实质已被 `teleop` 族 + 命令-画面关联 API 覆盖，边际增量低。**官方组合的推进顺序（v1.3 决策）**：AI Agent（`agent` / `agent-gateway` / `agent-low-latency` / `relay-agent`）与具身智能遥操作（`teleop` 同族复用）优先；`takeover` 归 P4（双链路 + dead-man）；`cloudgame` 顺延 v1.4+。详见 `docs/plan/v1.3-plan.md` §3 Track V 的 V2 决策记录。
 
 **（c）为何这是差异化（README 可用）**
 > libwebrtc 生态解决"多场景"的办法是 fork / 多 SDK 分支，各场景实现互相漂移；一体式轻量库只能调参、换不了实现。NimRTC 把"场景"做成 **Profile 层**：同一条接缝的不同实现（Goog-CC / 自自定义、通话 / 直播 / 对讲 JB、内置 / 第三方 / 关闭 3A、国际 / 国密 crypto）按场景组合——构建期裁剪、装配期绑定、会话级并存、运行期受限切换，**一套代码覆盖 通话 / 直播 / 对讲 / AI Agent / 遥操作 / 接管 / 云游戏 / SFU / 嵌入式**。
@@ -257,7 +259,7 @@ nimrtc/
 | D6 | 时钟全抽象：媒体时钟 / RTP 时间戳 / 系统时钟解耦 | 单测可模拟时间；嵌入式时钟漂移可控 | — |
 | D7 | SDP 独立模块，不绑定会话状态机 | 可单独复用（信令网关、录制分析） | — |
 | D8 | **数据面发送严格优先级调度**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽，绝不让媒体排挤控制 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
-| D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明） |
+| D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明；`takeover` / `cloudgame` 为设计预留，尚未进官方组合） |
 | D10 | **场景装配与切换纪律**：实现选择只发生在 构建期 / 装配期 / 会话边界 三处 + 运行期显式 `Reconfigure`；有内部状态的模块（JB / BWE / 3A）禁止静默热换（走 Pause→Drain→Rebind→Resume 或流重建）；Profile 官方组合每场景仅一条高质量主线 | "多场景 = 多实现"若无纪律会退化成组合爆炸，运行期乱换实现会静默丢状态 | 集中在 assembly 模块 + 显式 API；切换事件全部进统计（§9） |
 | D11 | **PAL Slice 1 — engine plugin resolver seam**：`engine.cpp` 通过 `pal::resolve_*` 内联 forwarder 走 `core::PluginRegistry`，公开 API 字节一致；Slice 2/3 进 v0.10.x 补丁轨道 | 详 [ADR-009](docs/adr/ADR-009-pal-slice-1.md) + [PAL 架构](docs/plan/pal-architecture.md) §4 | Slice 1 是 ~50 LOC 薄 alias，后续 API 演化成本随 transitive 依赖放大 → header-only + 字节级向后兼容 |
 | D12 | **JSON 作为声明式 Profile 一等公民**：与 C++ Builder 同等 first-class；现有 `profiles/*.json` 固定 schema v1.0；schema 变更遵循 SemVer（任何 break → 升 MINOR） | 详 [ADR-010](docs/adr/ADR-010-profile-json-format.md) + §2.6 Profile 表 | 双格式长期维护成本（CI 校验 json↔builder 一致） |
@@ -412,7 +414,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 - **命令-画面关联**：控制消息可携带 `ref_frame`（"我依据哪一帧决策 / 下达"），遥操作端与 AI Agent 都能实现对所见画面发指令（"所见即所控"）；
 - **E2E 时延分解**：导出 采集 → 入网 → 出网 → 渲染 各跳时延事件，供上层显示与校准；
 - **三种对齐粒度**：会话级（建立共享参考时钟，一次校准全程复用）／帧级（命令挂帧号，AI 场景主用）／样本级（控制-执行精确对准，机械臂 / 线控执行器）；
-- **按场景开启 / 关闭**：timeline 接口在架构中默认就位（D9），按 Profile 开启——`call` / `live` / `ptt` / `relay` / `transport` 默认关；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` 默认开。关闭路径仍可编译通过、零运行时开销（不解析 SR、不挂帧级事件）。
+- **按场景开启 / 关闭**：timeline 接口在架构中默认就位（D9），按 Profile 开启——`call` / `live` / `ptt` / `relay` / `transport` 默认关；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` 默认开（其中 `takeover` / `cloudgame` 为设计预留，尚未进官方组合）。关闭路径仍可编译通过、零运行时开销（不解析 SR、不挂帧级事件）。
 
 ### 8.5 遥操作可靠性与接管（引擎边界）
 
@@ -429,7 +431,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 ### 8.6 分期与架构落点
 
 - 落点：时间线原语 → L0 / timeline 模块；发送调度 → L1 / sched 模块；DC API → L3 session。
-- 分期：**P1** 发送调度契约（sched 接口）+ DataChannel API 入口（无 SCTP 实现，先定接口与 QoS 语义）；**P2** timeline 接口 + DataChannel 基础互通（usrsctp 接入）+ 调度实现 + assembly Profile 库 + 模型输入 PCM tap 原语（P2 首项 §8.7）；**P3** 部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API + cloudgame 官方 Profile 组合；**P4** 双链路 / 接管方案完整化交付。
+- 分期：**P1** 发送调度契约（sched 接口）+ DataChannel API 入口（无 SCTP 实现，先定接口与 QoS 语义）；**P2** timeline 接口 + DataChannel 基础互通（usrsctp 接入）+ 调度实现 + assembly Profile 库 + 模型输入 PCM tap 原语（P2 首项 §8.7）；**P3** 部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API（~~+ cloudgame 官方 Profile 组合~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**）；**P4** 双链路 / 接管方案完整化交付 + cloudgame 官方 Profile 组合（长线候选）。
 - 指标（§14 量化目标）：引擎单跳处理预算、控制不被挤占、时间线精度——全部【待实测】，禁止先写数字。
 
 ### 8.7 模型输入原语（P2 起，呼应 §2.6 `agent` / `agent-gateway` / `relay-agent` Profile）
@@ -736,8 +738,8 @@ third_party/
 | **P2 relay 转发 + 数据通道 + Agent 接入** | in-process `relay` 转发引擎（`relay-agent` / `agent-gateway` Profile 组合）；**DataChannel 基础互通（可靠 / 不可靠，usrsctp；v0.14.x 切到 WebTransport / QUIC） + L1 发送调度实现**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（relay / transport / agent / agent-gateway / relay-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通（`relay` Profile 形态）；**Chrome ↔ NimRTC DataChannel 双向互通**；控制消息在视频拥塞下不被挤占的本地演示；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
 
 > **P2 调整说明（2026-10-19）**：P2 行的"**sfu-relay 压测 (BENCH-1) + DC 转发策略 (DC-3, §7.1)**"已从 P2 范围移除——`v1.0-plan.md` §7 (SFU-1 / DC-3 / BENCH-1) 在 2026-10-19 由 BDFL 关闭为 NO；SFU 实现不是项目核心目标。P2 仍包含 `relay` Profile 的 in-process 转发引擎（与 SFU 区分：`relay` 是单策略转发，编译期 L2 跳过；SFU 是多策略复用 + 端到端转发控制）。如果 SFU 轨道在 v1.x 重新打开，新 plan 文档 `v1.1.0-plan.md` 决定 P 阶段归属，不回到 P2。
-| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；**cloudgame 进入官方 Profile 组合**（随 teleop 族：高码率主线 + 输入↔渲染帧对齐，见 §2.6(b)） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 跨平面调度（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
-| **P4 生产化 + 遥操作交付 + 国密** | 安全审计、QoE 数据、首个真实用户；**双链路 / 接管框架完整化**；国密后端 + 信创适配矩阵 | "可用于生产"不再心虚；完成首次外部安全审计；嵌入式 / 政企 / 关基行业场景下首个公开参考交付 | public（生产可用） |
+| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；~~**cloudgame 进入官方 Profile 组合**~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**（其最硬覆盖项"输入↔渲染帧对齐"依赖渲染端提供渲染帧时间戳，超出引擎能力边界；其余覆盖已被 teleop 族 + 命令-画面关联 API 覆盖。详见 `docs/plan/v1.3-plan.md` §V2 决策记录） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 跨平面调度（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
+| **P4 生产化 + 遥操作交付 + 国密** | 安全审计、QoE 数据、首个真实用户；**双链路 / 接管框架完整化**；国密后端 + 信创适配矩阵；**cloudgame 官方 Profile 组合（长线候选）**；**SRTP SM4-GCM 国密实现** | "可用于生产"不再心虚；完成首次外部安全审计；嵌入式 / 政企 / 关基行业场景下首个公开参考交付 | public（生产可用） |
 
 ### 13.1 aarch64 互通口径：编译可过 ≠ 互通可过
 
@@ -873,7 +875,9 @@ python3 apps/demo-p2p/signaling_demo.py
 # Connect → you should see 2-way audio/video loopback
 
 # See profiles/ for scene configurations:
-#   call · live · ptt · agent · teleop · takeover · cloudgame · relay · transport
+#   call · live · agent · agent-gateway · agent-low-latency · relay-agent
+#   · teleop · relay · transport
+#   (ptt · takeover · cloudgame — 设计预留，尚未进官方组合)
 ```
 
 > **Demo signaling**：minimal Python/Node script included; **not production-grade**.
@@ -917,7 +921,7 @@ backend at build or assembly time.
 | `relay-agent`   | AI agent as relay participant           | —    | —    | —   | fair + DC policy  | frame + recalib  |
 | `teleop`        | Robot/UAV teleoperation               | Goog | low  | off | strict priority   | frame+sample     |
 | `takeover`      | Autonomous vehicle remote takeover    | Goog | low  | off | strict + dual-link | frame+sample     |
-| `cloudgame`     | Cloud rendering/streaming             | high | low  | off | strict + input    | frame (input↔render) |
+| `cloudgame`     | Cloud rendering/streaming *(long-term candidate — not shipped)* | high | low  | off | strict + input    | frame (input↔render) |
 | `relay`         | Server forwarding                   | —    | —    | —   | fair              | off              |
 | `transport`     | Embedded gateway (L0+L1 only)         | —    | —    | —   | minimal           | off              |
 ```
@@ -932,8 +936,8 @@ backend at build or assembly time.
 | P0    | Org · CI · skeleton · hygiene docs                                           | 🔨 in progress |
 | P1    | ICE+DTLS+SRTP/RTP · 最小可用 JB/BWE/3A · Chrome P2P 通话体验可用 · Tier 0   | 📋 planned  |
 | P2    | `relay` Profile · DataChannel(usrsctp) · 调度实现 · timeline 接口 · aarch64 | ⚠️ **SFU-1 + DC-3 + BENCH-1 已关闭（2026-10-19）**：P2 = `relay` Profile 单策略转发，from-scratch SFU 模块不在 v1.0.x 关键路径 |
-| P3    | 自适应 JB / Goog-CC 完整 BWE / 完整 3A · TTL/部分可靠 · cloudgame profile    | 📋 planned  |
-| P4    | Production · security audit · dual-link / takeover                          | 📋 planned  |
+| P3    | 自适应 JB / Goog-CC 完整 BWE / 完整 3A · TTL/部分可靠                          | 📋 planned  |
+| P4    | Production · security audit · dual-link / takeover · cloudgame profile       | 📋 planned  |
 
 **Experimental — see [architecture docs](docs/zh/architecture.md) for full design.**
 

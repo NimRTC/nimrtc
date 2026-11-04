@@ -16,7 +16,7 @@
 **A native C++ WebRTC alternative — embeddable, scene-assembled, swappable backends.**
 
 One source tree ships a **P2P client**, a **`relay` gateway**, and runs on **embedded Linux aarch64**.
-DTLS / RTP / 3A codecs are all pluggable; the crypto path can swap to **GMSSL** for GM/T-regulated
+DTLS / RTP / 3A codecs are all pluggable; the DTLS crypto path can swap to **GMSSL** for GM/T-regulated
 deployments without forking the trunk.
 
 > **Note on terminology:** the gateway shipped by this source tree is the
@@ -37,7 +37,7 @@ deployments without forking the trunk.
 WebRTC moved on, but the dominant implementation didn't.
 
 - **libwebrtc** is the de-facto engine, but its build is multi-GB, its crypto and codecs are black-box, and the codebase is monolithic. Embedding it on aarch64 or auditing it against GM/T regulations is an exercise in pain.
-- **AI Agents / teleop / cloud gaming** need things libwebrtc doesn't expose cleanly — a pre/post-3A PCM tap, strict-priority control planes, and a capture-to-decision frame-time API.
+- **AI Agents / teleop / embodied-AI robotics** need things libwebrtc doesn't expose cleanly — a pre/post-3A PCM tap, strict-priority control planes, and a capture-to-decision frame-time API.
 - **Xinchuang / regulated** environments need a swap-in path to GM/T cryptography, not a fork.
 
 NimRTC is a from-scratch C++20 implementation that keeps the **wire-level interop** you need (Chrome, Firefox, libwebrtc peers) and replaces the opaque monolith with a **compile-time layered, plugin-adapted engine** you can read, swap, and ship on aarch64.
@@ -68,7 +68,7 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 | | | |
 |---|---|---|
 | 🎯 **Compile-time layered (L0–L3)** | 🔌 **Public plugin interfaces** | 🪶 **<15 MB static lib** (vs libwebrtc 150–250 MB) |
-| 🧩 **Profiles for scenes, not forks** — `transport` / `relay` / `agent-gateway` / `cloudgame` | 🔁 **Swappable crypto** — OpenSSL ↔ mbedTLS ↔ GMSSL with no API change | 🛡️ **GM/T cryptography ready** — production-credible path for Xinchuang |
+| 🧩 **Profiles for scenes, not forks** — `transport` / `relay` / `agent` / `agent-gateway` / `teleop` | 🔁 **Swappable crypto** — mbedTLS ↔ wolfSSL ↔ GMSSL with no API change | 🛡️ **GM/T crypto path** — DTLS/TLCP via GMSSL (SRTP still uses the international suites) |
 | 📡 **Wire-level interop** — Chrome ↔ Firefox ↔ libwebrtc | 🏗️ **4-platform CI** — Win / Linux x86_64 / macOS arm64 / Linux aarch64 | 🎛️ **Differentiated for AI Agent** — pre/post-3A PCM tap, ref_frame timeline |
 
 ---
@@ -82,7 +82,7 @@ No single feature here is brand new — but the **combination** is rare in the o
 | 1 | **Layered design + Profile composition (L0–L3)** | Compile-time layer selection. The same source tree ships a full P2P client *and* a `relay` gateway (`relay` profile skips L2 codecs; per `docs/zh/architecture.md` §7.1). **Note**: a from-scratch SFU module is *not* a v1.0.0 deliverable (the §7 pre-1.0 decision window for SFU-1 / DC-3 / BENCH-1 closed as NO, 2026-10-19 — SFU is not a project core goal; see `docs/plan/v1.0-plan.md` §7 + §12.5). LiveKit/mediasoup are server-only; libwebrtc is monolithic. |
 | 2 | **Multi-platform CI green** | Windows, Linux x86_64, macOS arm64, Linux aarch64 — all four pass build + unit tests. See [Platform support](#platform-support). |
 | 3 | **PAL (Plugin Adaptation Layer)** | All capability swapping flows through `pal::*` with **zero runtime overhead** and an unchanged public API. See [ADR-009](docs/adr/ADR-009-pal-slice-1.md). |
-| 4 | **Swappable crypto backends** | DTLS backend can be replaced in-tree with OpenSSL / mbedTLS / GMSSL (China's GM/T cryptography suite). Most OSS WebRTC stacks hard-wire their crypto. |
+| 4 | **Swappable crypto backends** | DTLS backend can be replaced in-tree with mbedTLS / wolfSSL / GMSSL (China's GM/T cryptography suite). Most OSS WebRTC stacks hard-wire their crypto. |
 | 5 | **P2P client and relay from the same codebase** | One set of plugin interfaces serves both. In 2026's OSS WebRTC ecosystem, this is rare. (A from-scratch SFU module is *not* a project core goal — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19.) |
 
 > **The plugin interfaces are the architectural seam.** They make the five points above work together. See [§ Plugin Architecture](#plugin-architecture) below.
@@ -94,9 +94,9 @@ No single feature here is brand new — but the **combination** is rare in the o
 | If you are… | NimRTC helps you… |
 |---|---|
 | Building a **P2P voice/video app** in C++ | Replace libwebrtc with something you can actually inspect, link statically, and ship at a few MB instead of hundreds. |
-| Operating in a **Xinchuang / regulated** environment that mandates GM/T cryptography | Swap DTLS crypto to GMSSL without forking the engine. |
+| Operating in a **Xinchuang / regulated** environment that mandates GM/T cryptography | Swap DTLS crypto to GMSSL (TLCP / SM2 / SM3 / SM4) without forking the engine. **Scope note:** the GM/T path covers the DTLS handshake — SRTP still uses the international AES suites (SM4-GCM SRTP is a later release). |
 | Running on **embedded Linux aarch64** (Raspberry Pi, industrial SBCs, robotics) | Get real RTC on a constrained board with the same codebase that powers your desktop client. |
-| Building **AI Agents / teleop / cloud gaming** | Use the dual PCM tap (pre/post-3A), strict-priority QoS, and ref_frame timeline APIs. |
+| Building **AI Agents / teleop / embodied-AI robotics** | Use the dual PCM tap (pre/post-3A), strict-priority QoS, and ref_frame timeline APIs. |
 | Standing up an **relay** without rewriting protocol code | Compile the `relay` profile (L0+L1+L3) — same engine, no L2 codec. |
 
 > **Not a fit if:** you need a turnkey browser-grade SDK today, or you only target mobile (iOS/Android are roadmap, not P1).
@@ -275,7 +275,7 @@ window closed as NO (BDFL, 2026-10-19; see `docs/plan/v1.0-plan.md` §7 + §12.5
 ```
             ┌──────────────────────────────────────────────────┐
             │  PROFILE  —  compile-time selection              │
-            │  transport (P2P) │ relay │ agent-gateway │ cloudgame │
+            │  transport (P2P) │ relay │ agent │ agent-gateway │ teleop │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -327,7 +327,7 @@ flowchart TB
         P1["transport: P2P client"]
         P2["relay: forwarding only"]
         P3["agent-gateway: PCM dual-tap"]
-        P4["cloudgame: high-bitrate + aligned input"]
+        P4["teleop: strict-priority control"]
     end
 
     PROF --> L3
@@ -457,13 +457,13 @@ A pragmatic matrix for evaluators — read across the rows that matter to you:
 | **Public plugin seam** | ✅ every layer | ❌ internal | ⚠️ partial | ⚠️ server-side | ⚠️ server-side |
 | **Static-link footprint** | **<15 MB** | 150–250 MB | n/a (Go) | server-side | server-side |
 | **Embedded Linux aarch64** | ✅ CI green | ⚠️ unmaintained ports | ❌ | ❌ | ❌ |
-| **GM/T (GMSSL) crypto swap** | ✅ plugin swap, no fork | ❌ patch and rebuild | ❌ | ❌ | ❌ |
+| **GM/T (GMSSL) crypto swap** | ✅ plugin swap, no fork (DTLS layer) | ❌ patch and rebuild | ❌ | ❌ | ❌ |
 | **AI Agent / 3A-bypass hooks** | ✅ `pre/post-3a` PCM tap (P2) | ❌ APM is opaque | ❌ | ❌ | ❌ |
 | **ref_frame / frame-aligned timeline** | 🚧 P3 | ❌ | ❌ | ❌ | ❌ |
 | **Wire-level Chrome interop** | ✅ Case D green | ✅ | ✅ (Go-only) | ✅ via browser SDK | ✅ via browser SDK |
 | **Production maturity (2026)** | Stable (v1.0.0) | Production-grade | Production-grade | Production-grade | Production-grade |
 
-**Where NimRTC wins outright:** aarch64 embedded, GM/T crypto, AI Agent hooks, single-trunk
+**Where NimRTC wins outright:** aarch64 embedded, GM/T crypto path (DTLS layer), AI Agent hooks, single-trunk
 P2P+relay (where `relay` is the single-strategy gateway profile that compiles out L2 codecs; a from-scratch SFU module is not a v1.0.0 deliverable — see `docs/plan/v1.0-plan.md` §7, BDFL 2026-10-19).
 **Where NimRTC loses:** ecosystem breadth, codec coverage, browser-engine parity, and
 years of hardening. Pick accordingly.
@@ -478,8 +478,17 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 |---|---|---|
 | `transport` | L0+L1+L2+L3 | Full P2P client (Chrome interop) |
 | `relay` | L0+L1+L3 (**skips L2**)| Server-side forwarding without re-encoding |
+| `agent` | L0+L1+L2+L3 | AI Agent SDK (voice/text, 1:1) — timeline + DC |
 | `agent-gateway` | L0+L1+L2 (tap enabled) | AI Agent ingress — dual PCM tap + 3A bypass |
-| `cloudgame` | L0+L1+L2+L3 (high-bitrate main + input/render alignment) | Teleop / cloud gaming (long-term candidate) |
+| `agent-low-latency` | L0+L1+L2+L3 | Agent pipeline where latency dominates (20 ms JB, AGC off) |
+| `relay-agent` | L0+L1+L3 | Relay + AI Agent hybrid (N:1), timeline re-calibration |
+| `teleop` | L0+L1+L2+L3 | Robot / embodied-AI teleoperation — strict-priority control |
+| `live` | L0+L1+L2+L3 | One-way broadcast / live streaming |
+
+> Full matrix (9 shipped profiles, with per-field JB / 3A / BWE / DC settings) lives in
+> [`docs/profiles.md`](docs/profiles.md). `cloudgame` (cloud rendering / streaming) is a
+> **long-term candidate and is not in the shipped Profile set** — see
+> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V.
 
 ---
 
@@ -501,6 +510,7 @@ These are **P2 / P3 targets**, not P0 features — listed here so you can plan a
   - *Note:* aarch64 *compiles* green ≠ *interops* green (see architecture doc §13.1).
 - **P2 — Scene differentiation:** dual pre/post-3A PCM tap; strict-priority QoS; usrsctp DataChannel interop; first Profile library.
 - **P3 — Client quality + ref_frame:** adaptive JB + Goog-CC-style BWE; complete ref_frame timeline; first paid reference customer.
+  - *Note:* `cloudgame` (cloud rendering / streaming) is **not** in the shipped Profile set — it is a long-term candidate deferred to v1.4+ (see [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V).
 - **P4 — Production + GMSSL enterprise:** dual-link / takeover framework (enterprise); GMSSL crypto backend live; first commercial contract.
 
 Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13.

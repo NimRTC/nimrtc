@@ -84,8 +84,9 @@ Plugin interfaces (header-only)           ← header in src/plugins/
 
 Each layer is a CMake INTERFACE / STATIC library. The **profile** is
 also a compile-time selection: `transport` (P2P client) / `relay`
-(forwarding only, no L2) / `agent-gateway` (PCM dual-tap) / `cloudgame`
-(high-bitrate + aligned input) / `relay-agent` (combo).
+(forwarding only, no L2) / `agent` (Agent SDK) / `agent-gateway`
+(PCM dual-tap) / `agent-low-latency` / `relay-agent` (combo) /
+`teleop` (robot teleoperation) / `live` (broadcast).
 
 The reason this is interesting: the same source tree ships both a P2P
 client *and* a relay gateway. LiveKit and mediasoup are server-only;

@@ -201,6 +201,17 @@ there is no "quiet default fill" beyond the dotted-line keys.
 
 ## 5. Worked example: adding a `cloudgame` profile
 
+> **Note (2026-11-04):** `cloudgame` is **not** a shipped Profile — it is a
+> long-term candidate deferred to v1.4+ (see
+> [`docs/plan/v1.3-plan.md`](../plan/v1.3-plan.md) §3 Track V). This section
+> is a **user-side illustration** of the authoring steps, not a shipped
+> profile's source of truth. Two caveats if you copy it verbatim:
+> (a) pick a name that does not collide with a reserved one — `cloudgame`,
+> `ptt` and `takeover` are reserved by the architecture design (§2.6(b));
+> (b) a *user* profile lives outside the engine's built-in registry — you
+> register it via `Builder` / `profile_from_json_file`, not by editing
+> `assembly.cpp`.
+
 A user wants a profile that targets cloud rendering:
 
 - aggressive low-latency (15 ms JB initial);

@@ -208,10 +208,7 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    platform before Configure and configures with
    `-DNIMRTC_VENDORED_WEBRTC_APM=ON`.
 
-   The prebuild is `continue-on-error: true` (W3): the meson build of
-   `webrtc_audio_processing` pulls in `abseil-cpp` as a subproject and is
-   known to fail on the `windows-2022` runner (it aborted the whole
-   `v0.14.0` release cut — see commit `dc15ad8`). A failed prebuild
+   The prebuild is `continue-on-error: true` (W3). A failed prebuild
    therefore **degrades the bundle to NimRTC's built-in stub 3A path
    instead of aborting the release**, and Configure picks the mode from
    the prebuild outcome (`ON` on success, `OFF` otherwise). Each build job
@@ -220,6 +217,27 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    body and the run's Step Summary, so a bundle carrying the stub 3A path
    is never published silently. See `docs/zh/architecture.md` §11.5.5 for
    the rationale.
+
+   **Why the `windows` leg used to fail — and why that is not a platform
+   limit.** The `v0.14.0` cut was aborted by a genuine meson/abseil
+   compile failure in `webrtc_audio_processing` (commit `dc15ad8`), but
+   the *persistent* Windows stub-3A outcome that shipped through
+   `v1.0.2` had a different cause: three defects in
+   `tools/build_webrtc_apm.cmd` — LF-only line endings that cmd.exe
+   mis-parses, a `powershell -Command` wrapper that turns ninja's stderr
+   progress line into a terminating error, and a ninja invocation
+   without `call`. All three are fixed in `9c3c522`, and
+   `.gitattributes` now pins `*.cmd` / `*.bat` to CRLF in the working
+   tree. The `windows` leg is therefore expected to prebuild the real
+   APM; a failure there is a defect to fix, not a platform limitation to
+   document. Do not copy the pre-`9c3c522` wording ("the meson prebuild
+   is known to fail on the windows-2022 runner") into new documents.
+
+   Note when reading a CI run: the `Prebuild WebRTC APM` step is
+   `continue-on-error: true`, so the job list shows it as `success`
+   even when it failed. The real result is `steps.apm_prebuild.outcome`,
+   which is what Configure reads and what the release notes are
+   generated from.
 
 ### 3.2 Stabilisation window (T-7 … T-1)
 
@@ -432,7 +450,9 @@ release pipeline **prefers** `=ON` after running `python tools/fetch_webrtc_apm.
 once per platform, but the prebuild is `continue-on-error: true` — a failed
 prebuild falls back to `=OFF` (the built-in stub 3A path) instead of aborting
 the cut, and the per-platform outcome is recorded in `build/3a-status-*.txt`
-and surfaced in the release body. See §3.1 step 4.
+and surfaced in the release body. The `windows` leg's prebuild failures
+through `v1.0.2` were caused by defects in `tools/build_webrtc_apm.cmd`,
+fixed in `9c3c522` — not by a platform limitation. See §3.1 step 4.
 
 ---
 

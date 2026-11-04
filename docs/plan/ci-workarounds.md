@@ -41,7 +41,7 @@ history. This register answers that in one table.
 |---|---|---|---|---|---|---|
 | **W1** | msquic forced onto the dummy raw datapath | `src/third_party/.gitmodules` (msquic URL → NimRTC/msquic, branch `nimrtc-patches`) + commit `a5ae3a06e` on the fork | The Windows XDP SDK (`xdp-for-windows`) is not present on the `windows-2022` runner image, so msquic's real datapath fails to compile with a missing `xdp/wincommon.h`. msquic is therefore pinned to a NimRTC fork (`https://github.com/NimRTC/msquic`), whose `nimrtc-patches` branch is upstream `microsoft/msquic` `42376ae` plus one NimRTC commit that flips the platform `CMakeLists.txt` condition to force `datapath_raw_dummy.c`. The patch is committed in the fork, not rewritten at configure time, so the submodule working tree stays vendor-clean. | Windows CI goes red at configure/compile. | Add the `xdp-for-windows` SDK to the runner image, then re-point the msquic submodule at `microsoft/msquic` and drop the fork branch — the dummy-datapath patch would no longer be needed. | No |
 | **W2** | `target_compile_options(core PRIVATE /wd28020)` | `src/third_party/CMakeLists.txt` | msquic's `core` target compiles `src/core/crypto_tls.c` under MSVC `/analyze /WX /sdl`, tripping a known false-positive `C28020` (SAL value-range) on a macro-driven `TlsRead`/`TlsWrite` switch. Scoped `PRIVATE` to the vendored `core` target so it does not leak into NimRTC's own `/W4 /WX` targets. | MSVC analysis fails the msquic build. | Upstream msquic suppresses or fixes C28020; or NimRTC stops building msquic with `/analyze`. | No |
-| **W3** | `Prebuild WebRTC APM` runs with `continue-on-error: true` + per-platform ON/OFF fallback (×4) | `.github/workflows/release.yml` (four `apm_prebuild` steps + four Configure blocks reading `steps.apm_prebuild.outcome`) | The meson prebuild of webrtc_audio_processing fails on windows-2022 (abseil subproject ninja failure at the v0.14.0 cut). The step runs but may fail; Configure picks `ON` on success and `OFF` on failure, recording the outcome in `build/3a-status-*.txt`, so the release is never aborted by the prebuild. `audio3a` already links `nimrtc_vendor_webrtc_apm` PUBLIC so abseil includes propagate when ON. | Forcing ON unconditionally would reintroduce the v0.14.0 windows abort. | Windows prebuild goes green reliably; then drop `continue-on-error` and pin Configure to `ON`. | **See §3 — per-platform 3A variance, recorded in release notes** |
+| **W3** | `Prebuild WebRTC APM` runs with `continue-on-error: true` + per-platform ON/OFF fallback (×4) | `.github/workflows/release.yml` (four `apm_prebuild` steps + four Configure blocks reading `steps.apm_prebuild.outcome`) | The meson prebuild of webrtc_audio_processing failed on windows-2022 at the v0.14.0 cut (abseil subproject ninja failure, `dc15ad8`), and the persistent Windows stub-3A outcome through `v1.0.2` additionally came from three defects in `tools/build_webrtc_apm.cmd` (LF-only line endings mis-parsed by cmd.exe, a `powershell -Command` wrapper turning ninja's stderr progress line into a terminating error, and a ninja call without `call`) — all three fixed in `9c3c522`. The step runs but may fail; Configure picks `ON` on success and `OFF` on failure, recording the outcome in `build/3a-status-*.txt`, so the release is never aborted by the prebuild. `audio3a` already links `nimrtc_vendor_webrtc_apm` PUBLIC so abseil includes propagate when ON. | Forcing ON unconditionally would let a genuine prebuild failure abort the release cut (the `v0.14.0` windows abort). | Windows prebuild goes green reliably; then drop `continue-on-error` and pin Configure to `ON`. | **See §3 — per-platform 3A variance, recorded in release notes** |
 | **W4** | Vendor manifest check is a hard gate (v1.0+) | `.github/workflows/ci.yml` (×4), `.github/workflows/interop.yml` (×2) | The drift gate (`tools/check_vendor.py`) only runs when `src/third_party/vendor.json` exists. v1.0+: drift = red CI = blocked merge (verified 9/9 match locally before the flip). | Unrelated PRs start failing on vendor drift. | **Removed 2026-10-30** — gate flipped hard for v1.0.0. | No |
 | **W5** | `build-linux-aarch64` is `continue-on-error: true` and excluded from `publish-release`'s `needs:` | `.github/workflows/release.yml` lines 341, 576 | **Original rationale was wrong.** The entry used to read "GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14)". The queue was not a capacity problem: the runner label was `ubuntu-22.04-arm64`, which is **not a GitHub-hosted label at all**, so the job could never be allocated a runner (see §4). With the label corrected to `ubuntu-24.04-arm` this leg runs like the other three. The soft gate is nevertheless retained for the v1.0.0 cut because the *release* leg's aarch64 build has never actually been observed to complete — the CI leg and the release leg are different jobs with different build settings. | A release cut that includes an aarch64 bundle would block on that bundle; if the aarch64 release build has a real defect, the release ships a known-bad artefact. | The `linux-aarch64` **release** job completes green at least once with the corrected label, then this row is removed and the job is added to `publish-release`'s `needs:`. Until then the `dist/` bundle scan prints a "Partial release" banner naming the missing bundle. | **See §4 — this is a support-matrix question** |
 
@@ -110,12 +110,24 @@ and Configure picks `ON`/`OFF` from `steps.apm_prebuild.outcome`:
 ```
 
 So a bundle may or may not carry the real WebRTC APM 3A depending on
-whether the meson/abseil prebuild succeeded on that runner
-(windows-2022 is the known-failing leg since the v0.14.0 cut). The
+whether the meson/abseil prebuild succeeded on that runner. The
 per-platform outcome is recorded in `build/3a-status-*.txt` and
 surfaced in the release notes. `CI` (always `OFF`) and `release`
 (best-effort `ON`) deliberately diverge here; the release is never
 aborted by a prebuild failure.
+
+**Correction (2026-11-04): the `windows-2022` leg is not a known-failing
+leg.** It was described as one because of the `v0.14.0` cut, where
+meson/abseil genuinely failed to compile
+`libwebrtc-audio-processing-2.a` (`dc15ad8`). But the *persistent*
+Windows stub-3A outcome through `v1.0.2` came from three defects in
+`tools/build_webrtc_apm.cmd` instead: LF-only line endings that cmd.exe
+mis-parses, a `powershell -Command` wrapper that turns ninja's stderr
+progress line into a terminating error, and a ninja invocation without
+`call`. All three are fixed in `9c3c522` (and `.gitattributes` now pins
+`*.cmd` / `*.bat` to CRLF), so the `windows` leg is expected to
+prebuild the real APM. A Windows prebuild failure is now a defect to
+fix, not a platform limitation to document.
 
 **Remaining work before the v1.0.0 tag:** update `RELEASING.md` §3.1
 to describe this degraded contract (instead of unconditional `ON`),

@@ -195,14 +195,25 @@ jobs:
           Write-Host "Adding to GITHUB_PATH: $userScripts"
           Add-Content -Path $env:GITHUB_PATH -Value $userScripts
 
-      # The meson prebuild of webrtc_audio_processing fails on the
-      # windows-2022 runner: meson pulls abseil-cpp in as a subproject
-      # and ninja then reports a subcommand failure while building
-      # `libwebrtc-audio-processing-2.a` (see commit dc15ad8 for the
-      # v0.14.0 release-cut failure, which aborted the whole release).
+      # The meson prebuild of webrtc_audio_processing DID fail on the
+      # windows-2022 runner at the v0.14.0 cut: meson pulls abseil-cpp
+      # in as a subproject and ninja then reported a subcommand failure
+      # while building `libwebrtc-audio-processing-2.a` (see commit
+      # dc15ad8, which aborted the whole release).
       #
-      # The step is therefore `continue-on-error: true` rather than
-      # skipped: when the prebuild succeeds the bundle ships the real
+      # That was NOT the only cause of the Windows stub-3A outcome that
+      # shipped through v1.0.2: `tools/build_webrtc_apm.cmd` also had
+      # three defects that made a *successful* build look like a
+      # failure (LF-only line endings that cmd.exe mis-parses, a
+      # `powershell -Command` wrapper that turned ninja's stderr
+      # progress line into a terminating error, and a ninja invocation
+      # without `call`). All three are fixed in 9c3c522, and
+      # `.gitattributes` now pins `*.cmd` / `*.bat` to CRLF.  The
+      # Windows leg is therefore expected to prebuild the real APM; a
+      # failure there is a defect to fix, not a platform limitation.
+      #
+      # The step stays `continue-on-error: true` rather than skipped:
+      # when the prebuild succeeds the bundle ships the real
       # WebRTC APM 3A (AEC/ANS/AGC); when it fails, Configure falls back
       # to `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` and the bundle ships the
       # built-in stub 3A path that ci.yml also uses.  Either way the

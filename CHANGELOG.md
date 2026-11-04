@@ -13,6 +13,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Windows WebRTC APM prebuild reported a successful build as a
+  failure.** `tools/build_webrtc_apm.cmd` carried three defects that
+  together made the `windows` release leg fall back to NimRTC's built-in
+  stub 3A instead of shipping the real AEC/ANS/AGC:
+  - the script was checked out with LF endings (the `* text=auto` rule
+    follows the local `core.autocrlf` setting) and cmd.exe mis-parses
+    an LF-only batch file — it split the quoted `vcvars64.bat` path at
+    spaces and never reached the ninja step;
+  - the ninja call was wrapped in `powershell -Command` with
+    `$ErrorActionPreference = 'Stop'`, and PowerShell turns a native
+    command's stderr into error records, so ninja's first progress line
+    (`ninja: Entering directory ...`) aborted the wrapper with rc=1;
+  - ninja was invoked without `call`, so a `.cmd`/`.bat` wrapper on
+    PATH took over control and the script exited silently with no
+    diagnostic at all.
+
+  `.gitattributes` now pins `*.cmd` / `*.bat` to CRLF in the working
+  tree, the ninja call uses cmd.exe's own redirection
+  (`call ninja -C ... > log 2>&1`) so the real exit code survives, and
+  the failure diagnostics moved from an `if (...)` block to a `goto`
+  label so a syntax error in the triage path can no longer break the
+  success path. The meson/ninja version echo now runs the tools instead
+  of expanding `!meson --version!` as a delayed-expansion variable
+  reference (which always printed nothing). Verified on Windows/MSVC:
+  the success path exits 0 and records the link order, the failure path
+  exits 3 and prints the full ninja log.
 - **The vendored libjuice tree shipped leftover debug instrumentation.**
   `src/agent.c` carried three `TEMP-DIAG` `JLOG_INFO` blocks (STUN
   bookkeeping, per-entry state, retransmit tracing) and `src/udp.c`
@@ -182,9 +208,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Public API is unchanged vs `v1.0.1`; `NIMRTC_API_VERSION` = 10002,
   `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
-- The `windows` bundle ships the stub 3A path (the WebRTC APM meson
-  prebuild is allowed to fail on the windows runners), same as in
-  `v1.0.1`.
+- The `windows` bundle ships the stub 3A path: the WebRTC APM prebuild
+  failed on the `windows-2022` runner, so the Configure step recorded
+  `3a=OFF` for that platform (same as in `v1.0.1`). The cause was a
+  defect in `tools/build_webrtc_apm.cmd` — LF-only line endings that
+  cmd.exe mis-parses, a `powershell -Command` wrapper that turned
+  ninja's stderr progress line into a terminating error, and a ninja
+  invocation without `call` — not a platform limitation. All three are
+  fixed in `9c3c522`, so the `windows` leg is expected to ship the real
+  APM from the next cut. The CI job list shows the prebuild step as
+  `success` because `continue-on-error` turns a failure into a
+  successful *conclusion*; the real result is in
+  `steps.apm_prebuild.outcome`, which is what the release notes are
+  generated from.
 
 ## [Unreleased — v1.1 C-track]
 
@@ -274,14 +310,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Public API is unchanged vs `v1.0.0`; `NIMRTC_API_VERSION` = 10001,
   `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
-- The `windows` bundle ships the stub 3A path: the WebRTC APM meson
-  prebuild is allowed to fail on the windows runners
-  (`continue-on-error: true`), and the Configure step recorded
-  `3a=OFF` for that platform. The CI job list shows the prebuild step
-  as `success` because `continue-on-error` turns a failure into a
-  successful *conclusion*; the real result is in
-  `steps.apm_prebuild.outcome`, which is what the release notes are
-  generated from.
+- The `windows` bundle ships the stub 3A path: the WebRTC APM prebuild
+  failed on the `windows-2022` runner (`continue-on-error: true`), and
+  the Configure step recorded `3a=OFF` for that platform. The cause was
+  a defect in `tools/build_webrtc_apm.cmd` (LF-only line endings that
+  cmd.exe mis-parses, a `powershell -Command` wrapper that turned
+  ninja's stderr progress line into a terminating error, and a ninja
+  invocation without `call`), fixed in `9c3c522` — not a platform
+  limitation. The CI job list shows the prebuild step as `success`
+  because `continue-on-error` turns a failure into a successful
+  *conclusion*; the real result is in `steps.apm_prebuild.outcome`,
+  which is what the release notes are generated from.
 
 ## [1.0.0] - 2026-10-30
 

@@ -27,6 +27,18 @@
  * - WebTransportDataChannel network I/O (→ integration tests)
  * - Real DC stream creation (→ DC-1 integration tests)
  *
+ * ## Scope note (DC-2 under the default `web_transport` backend)
+ *
+ *   This file proves **intra-scheduler ordering only**: L0 `drain()` and
+ *   L1 `select_next_packet()` each order their own queues correctly and
+ *   never leak packets into each other. It does NOT prove wire-level
+ *   "control not squeezed by video" under the default backend, because
+ *   there the media path (DTLS-SRTP over ICE/UDP, drained via `drain()`
+ *   in `NimRTCEngine::tick()`) and the data path (separate QUIC
+ *   connection via `WebTransportDataChannel`, which bypasses this
+ *   scheduler entirely) run independent congestion control. See
+ *   `sched.hpp` §"Scope note" for the full statement.
+ *
  * ## Test scenarios
  *
  * | # | Scenario                         | Key invariant verified                |

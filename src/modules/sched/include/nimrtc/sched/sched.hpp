@@ -16,6 +16,26 @@
  *     Normal — audio, video keyframes and regular frames
  *     Low    — padding, padding RTCP
  *
+ * ## Scope note (DC-2 under the default `web_transport` backend)
+ *
+ *   The DC-2 guarantee is **intra-scheduler ordering only**: it orders
+ *   packets that are both enqueued into this `Scheduler` instance
+ *   (L0 `enqueue_*()` vs L1 `enqueue_for_stream_*()`).
+ *
+ *   Under the default `EngineConfig::datachannel_backend = "web_transport"`,
+ *   media rides DTLS-SRTP over ICE/UDP while the DataChannel rides a
+ *   **separate QUIC connection** (`WebTransportDataChannel` sends straight
+ *   through `IWebTransportSession::send_datagram()` / stream `send()` and
+ *   never enqueues into this `Scheduler`; `NimRTCEngine::tick()` only
+ *   drains L0 via `drain_with()`). The two connections run independent
+ *   congestion control, so a video-heavy media path does not share a
+ *   scheduler queue with — and therefore cannot be pre-empted by — the
+ *   data path at the wire level. Cross-connection priority would require
+ *   joint pacing above both connections and is **not** what DC-2 provides.
+ *   The legacy `"sctp"` backend (SCTP-over-DTLS on the ICE 5-tuple) keeps
+ *   both planes on one connection, which is the only configuration where
+ *   an intra-scheduler ordering claim approaches wire-level relevance.
+ *
  * ## L0: Per-packet priority (pre-existing §8.3)
  *
  *   The original 5-level `plugins::Priority` (kControl … kBestEffort) is

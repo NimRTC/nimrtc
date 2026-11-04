@@ -206,6 +206,15 @@ TEST(Audio3AFrameAlignment, UnalignedPushDoesNotDropSamples) {
 // =============================================================================
 
 TEST(Audio3AConfig, VadDisabledNeverReportsSpeech) {
+    // These three tests drive the *real* APM: without it
+    // `WebRtcAudio3A::init()` refuses to start (the CI jobs configure
+    // with NIMRTC_VENDORED_WEBRTC_APM=OFF), so the assertions below
+    // would measure nothing.  The stub path has its own coverage in
+    // `Audio3AConfig.NullImplHonoursVadAndLevelFlags`.
+    if (!webrtc_apm_compiled_in()) {
+        GTEST_SKIP() << "real WebRTC APM not compiled in";
+    }
+
     Config cfg = default_config();
     cfg.enable_vad = false;
 
@@ -221,6 +230,10 @@ TEST(Audio3AConfig, VadDisabledNeverReportsSpeech) {
 }
 
 TEST(Audio3AConfig, ReportTxLevelOffKeepsLevelUntouched) {
+    if (!webrtc_apm_compiled_in()) {
+        GTEST_SKIP() << "real WebRTC APM not compiled in";
+    }
+
     Config cfg = default_config();
     cfg.report_tx_level = false;
 
@@ -235,6 +248,10 @@ TEST(Audio3AConfig, ReportTxLevelOffKeepsLevelUntouched) {
 }
 
 TEST(Audio3AConfig, ReportTxLevelOnPublishesLevel) {
+    if (!webrtc_apm_compiled_in()) {
+        GTEST_SKIP() << "real WebRTC APM not compiled in";
+    }
+
     Config cfg = default_config();
     cfg.report_tx_level = true;
 

@@ -466,7 +466,9 @@ private:
         // the in-flight cap from evicting a frame that is already
         // complete but still waiting for its playout deadline.
         b.marker_seen      = pkt.marker;
-        auto [ins_it, _] = buckets_.emplace(pkt.rtp_timestamp, std::move(b));
+        // The insert result is not needed: the bucket is looked up again
+        // below (the insert may have been a no-op for a duplicate frame).
+        buckets_.emplace(pkt.rtp_timestamp, std::move(b));
 
         // ---- Shared RFC 3550 §6.4.1 interarrival jitter observation ----
         // One observation per *frame* (not per packet): a video frame —

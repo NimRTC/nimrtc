@@ -55,6 +55,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
 
 #include <nimrtc/audio3a/audio3a.hpp>      // concrete audio3a::IAudio3A / NullAudio3A / Config
@@ -91,6 +92,21 @@ public:
     const char* name() const noexcept override;
     plugins::Status open() noexcept override;
     void          close() noexcept override;
+
+    // ---- Degradation reporting --------------------------------------------
+
+    /** Mark this instance as a degraded stand-in for the implementation it
+     *  was asked for (e.g. the WebRTC APM was requested but is not
+     *  available, so a NullAudio3A passthrough is used instead).
+     *
+     *  A degraded instance still works — it is a valid plugin — but the
+     *  caller is not getting the DSP they asked for.  name() reports the
+     *  degradation so the engine can surface it instead of silently
+     *  shipping a passthrough as "real 3A". */
+    void mark_degraded(std::string_view reason) noexcept;
+
+    /** True when this instance is a stand-in for an unavailable backend. */
+    bool degraded() const noexcept { return degraded_; }
 
     // ---- plugins::IAudio3A -------------------------------------------------
 
@@ -131,6 +147,16 @@ public:
 private:
     /** Concrete audio3a impl (audio3a::IAudio3A, NOT the plugin interface). */
     std::unique_ptr<audio3a::IAudio3A> concrete_;
+
+    /** Degradation state — set by the factory when the requested backend is
+     *  unavailable and a fallback is used instead. */
+    bool        degraded_ = false;
+    std::string degraded_reason_;
+
+    /** Cached plugin name returned by name().  Kept as a std::string so the
+     *  const char* returned to callers stays valid for the object's
+     *  lifetime. */
+    std::string name_cache_;
 
     /** Plugin-side callbacks. */
     plugins::VadCallback       on_vad_;

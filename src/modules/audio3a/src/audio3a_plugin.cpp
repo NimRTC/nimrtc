@@ -77,9 +77,23 @@ plugins::IAudio3A::Stats to_plugin_stats(const LevelStats& s) noexcept {
 
 PluginAdapter::PluginAdapter(audio3a::IAudio3A* impl)
     : concrete_(impl ? impl : new NullAudio3A())
+    , name_cache_("nimrtc::audio3a::PluginAdapter (concrete 3A via plugin interface)")
     , pre_tap_(nullptr)
     , post_tap_(nullptr)
     , post_tap_i16_(nullptr) {
+    // Default concrete configuration.
+    //
+    // The level meters are ON by default here: the plugin's stats() are the
+    // only way for the host to find out whether the microphone is picking
+    // anything up, and the concrete implementations gate the capture level
+    // on Config::report_tx_level.  Leaving it at the Config default (false)
+    // would make stats().last_capture_level_dbfs permanently -96 dBFS — a
+    // level meter that never moves.
+    concrete_config_.sample_rate_hz   = 48000;
+    concrete_config_.capture_channels = 1;
+    concrete_config_.render_channels  = 1;
+    concrete_config_.report_tx_level  = true;
+
     core::log::Logger::instance().debug(
         "audio3a::PluginAdapter created (concrete impl owned)");
 }
@@ -89,7 +103,19 @@ PluginAdapter::~PluginAdapter() {
 }
 
 const char* PluginAdapter::name() const noexcept {
-    return "nimrtc::audio3a::PluginAdapter (concrete 3A via plugin interface)";
+    return name_cache_.c_str();
+}
+
+void PluginAdapter::mark_degraded(std::string_view reason) noexcept {
+    degraded_ = true;
+    degraded_reason_.assign(reason);
+    // The degradation has to be visible from the outside: the engine
+    // reports the plugin's name to the host, and a silent passthrough
+    // presented as "real 3A" is exactly the failure mode we want to avoid.
+    name_cache_ = "nimrtc::audio3a::PluginAdapter (DEGRADED: " +
+                  degraded_reason_ + ")";
+    core::log::Logger::instance().error(
+        "audio3a::PluginAdapter: DEGRADED — " + degraded_reason_);
 }
 
 plugins::Status PluginAdapter::open() noexcept {
@@ -357,10 +383,20 @@ plugins::IAudio3A* WebRtcPluginFactory::create() const {
     // Check if WebRTC APM is actually available by trying to init
     audio3a::Config default_config{};
     if (!webrtc_impl->init(default_config)) {
-        // APM not available, use null impl
-        core::log::Logger::instance().warn(
-            "WebRtcPluginFactory: WebRTC APM not available, falling back to NullAudio3A");
-        return new PluginAdapter(new NullAudio3A());
+        // The APM is not available.  A passthrough is still a working
+        // plugin, but it is NOT the 3A the caller asked for, so the
+        // degradation is reported loudly and carried on the instance.
+        core::log::Logger::instance().error(
+            "WebRtcPluginFactory: WebRTC APM is NOT available — falling back to "
+            "NullAudio3A (passthrough). AEC/ANS/AGC will NOT run. Build with "
+            "-DNIMRTC_VENDORED_WEBRTC_APM=ON and a populated "
+            "src/third_party/webrtc_audio_processing tree, or run "
+            "tools/fetch_webrtc_apm.py + tools/build_webrtc_apm.cmd.");
+        auto* adapter = new PluginAdapter(new NullAudio3A());
+        adapter->mark_degraded(
+            "WebRTC APM unavailable — NullAudio3A passthrough substituted "
+            "(no AEC/ANS/AGC)");
+        return adapter;
     }
     return new PluginAdapter(webrtc_impl.release());
 }

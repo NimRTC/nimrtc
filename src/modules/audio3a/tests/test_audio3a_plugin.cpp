@@ -56,6 +56,20 @@ float make_sine_sample(float phase) {
     return 0.5f * std::sin(phase);
 }
 
+// RMS of a float buffer in dBFS.  -96 dBFS is the silence floor used
+// throughout the audio3a level contract.
+float rms_dbfs(const float* samples, std::size_t count) {
+    if (!samples || count == 0) return -96.0f;
+    double sumsq = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const double s = static_cast<double>(samples[i]);
+        sumsq += s * s;
+    }
+    const double rms = std::sqrt(sumsq / static_cast<double>(count));
+    if (rms < 1e-7) return -96.0f;
+    return static_cast<float>(20.0 * std::log10(rms));
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -327,6 +341,8 @@ TEST_F(Audio3APluginFixture, webrtc_apm_open_processes_real_audio) {
         return static_cast<float>(state) / static_cast<float>(UINT32_MAX) * 2.0f - 1.0f;
     };
     auto stats = plugin->stats();
+    float last_pre_capture_dbfs = -96.0f;
+    float last_pre_render_dbfs  = -96.0f;
     for (std::size_t f_idx = 0; f_idx < kNumFrames; ++f_idx) {
         for (std::size_t i = 0; i < kFrameSize; ++i) {
             rnd[i] = kNoiseAmp * lcg();
@@ -334,8 +350,13 @@ TEST_F(Audio3APluginFixture, webrtc_apm_open_processes_real_audio) {
             const float t = static_cast<float>(n) / 48000.0f;
             cap[i] = kSineAmp * std::sin(2.0f * 3.14159265f * 1000.0f * t) + rnd[i];
         }
+        // The level meters report the INPUT domain (the level of the signal
+        // as it arrives), so the expected value has to be computed from the
+        // buffer BEFORE the 3A stage mutates it in place.
+        last_pre_capture_dbfs = rms_dbfs(cap.data(), cap.size());
         ASSERT_EQ(plugin->process_capture(cap.data(), kFrameSize, 1),
                   nimrtc::plugins::kOk);
+        last_pre_render_dbfs = rms_dbfs(cap.data(), cap.size());
         ASSERT_EQ(plugin->process_render(cap.data(), kFrameSize, 1),
                   nimrtc::plugins::kOk);
         plugin->set_render_delivered(kFrameSize);
@@ -350,30 +371,23 @@ TEST_F(Audio3APluginFixture, webrtc_apm_open_processes_real_audio) {
     }
     EXPECT_EQ(bad, 0) << "WebRtcAudio3A produced NaN/Inf samples";
 
-    // Sanity: the APM reports RMS-based level stats; capture_level_dbfs must
-    // be populated (NullAudio3A also populates this, but the value is
-    // consistent with the post-DSP RMS of the buffer we fed in). For a real
-    // APM, the render_level_dbfs is also populated from the reverse path.
+    // The level stats must be populated and in range.
     EXPECT_LE(stats.last_capture_level_dbfs, 0.0f)
         << "last_capture_level_dbfs out of range";
     EXPECT_LE(stats.last_render_level_dbfs, 0.0f)
         << "last_render_level_dbfs out of range";
 
-    // If the real APM ran, the RMS of the post-DSP capture buffer must
-    // match what was reported (within a small db tolerance).
-    double sumsq = 0.0;
-    for (float s : cap) {
-        const double sd = static_cast<double>(s);
-        sumsq += sd * sd;
-    }
-    const double rms = std::sqrt(sumsq / static_cast<double>(cap.size()));
-    const float out_dbfs = (rms < 1e-7) ? -96.0f
-        : static_cast<float>(20.0 * std::log10(rms));
-    EXPECT_NEAR(out_dbfs, stats.last_capture_level_dbfs, 2.0f)
-        << "APM-reported level and post-DSP RMS disagree";
+    // The reported level is the level of the signal as it entered the 3A
+    // stage (input domain) — see the LevelStats contract in audio3a.hpp.
+    // Measuring the 3A output instead would report silence for any input
+    // the noise suppressor decided to suppress.
+    EXPECT_NEAR(last_pre_capture_dbfs, stats.last_capture_level_dbfs, 2.0f)
+        << "reported capture level and the input-domain RMS disagree";
+    EXPECT_NEAR(last_pre_render_dbfs, stats.last_render_level_dbfs, 2.0f)
+        << "reported render level and the input-domain RMS disagree";
 
     std::fprintf(stderr,
-        "INFO: webrtc_apm post-DSP tx_level=%.2f dBFS rx_level=%.2f dBFS\n",
+        "INFO: webrtc_apm capture_level=%.2f dBFS render_level=%.2f dBFS\n",
         static_cast<double>(stats.last_capture_level_dbfs),
         static_cast<double>(stats.last_render_level_dbfs));
 

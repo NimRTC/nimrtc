@@ -70,6 +70,42 @@ map_ans_level(std::uint8_t level) {
 
 #endif  // NIMRTC_USE_WEBRTC_APM
 
+// =============================================================================
+// Layout helpers
+//
+// The APM float API is deinterleaved (one float* per channel) while
+// nimrtc::audio3a::Frame is interleaved.  These helpers convert between the
+// two layouts without allocating.
+// =============================================================================
+
+// Interleaved → planar.  Copies `n` frames (per channel) from `src` into the
+// per-channel buffers pointed to by `dst`.
+void copy_interleaved_to_planar(const float* src, std::size_t n, int channels,
+                                float* const* dst) {
+    for (int ch = 0; ch < channels; ++ch) {
+        float* d = dst[ch];
+        for (std::size_t i = 0; i < n; ++i) {
+            d[i] = src[i * static_cast<std::size_t>(channels)
+                       + static_cast<std::size_t>(ch)];
+        }
+    }
+}
+
+// Planar → interleaved.  Writes `n` frames (per channel) from the per-channel
+// buffers pointed to by `src` into `dst`.  Templated on the pointer-array type
+// so both `float*[]` and `const float* const[]` can be passed.
+template <typename PtrArray>
+void copy_planar_to_interleaved(const PtrArray& src, std::size_t n, int channels,
+                                float* dst) {
+    for (int ch = 0; ch < channels; ++ch) {
+        const float* s = src[ch];
+        for (std::size_t i = 0; i < n; ++i) {
+            dst[i * static_cast<std::size_t>(channels)
+                + static_cast<std::size_t>(ch)] = s[i];
+        }
+    }
+}
+
 }  // anonymous namespace
 
 // =============================================================================
@@ -108,9 +144,25 @@ struct WebRtcAudio3A::Impl {
     LevelStats stats{};
 
     // Acoustic delay tracking — fed by on_render_delivered().
-    std::size_t render_delivered_samples = 0;
+    //
+    // `system_delay_ms` is the render→capture latency estimate reported to
+    // the APM via set_stream_delay_ms().  It comes from
+    // Config::aec_delay_headroom_ms — the caller's estimate of how long the
+    // loudspeaker signal takes to reach the microphone.  It is a *delay*, not
+    // a cumulative playback counter: the APM uses it to align the echo
+    // canceller's reference path with the capture path.
+    std::int32_t system_delay_ms = 50;
+    std::size_t render_delivered_samples = 0;  // cumulative, for diagnostics only
     std::int32_t last_set_delay_ms = 0;
     bool delay_ever_set = false;
+
+    // Number of samples whose 3A-processed output could not be handed back
+    // to the caller because they straddled a 10 ms APM frame boundary (the
+    // in-place API gives us nowhere to put them).  Non-zero means the caller
+    // is pushing frames whose length is not a multiple of the APM frame
+    // size — see the class-level docs in audio3a.hpp.
+    std::size_t unaligned_output_samples = 0;
+    bool warned_alignment = false;
 
     // Request flags.
     bool vad_requested = false;
@@ -132,6 +184,11 @@ bool WebRtcAudio3A::init(const Config& config) {
     impl_->sample_rate_hz   = static_cast<int>(config.sample_rate_hz);
     impl_->capture_channels = std::max<std::uint8_t>(1, config.capture_channels);
     impl_->render_channels  = std::max<std::uint8_t>(1, config.render_channels);
+
+    // The render→capture system delay the echo canceller is told about.
+    // The host measures the loudspeaker→microphone latency and passes it in;
+    // the APM needs it to align its reference path with the capture path.
+    impl_->system_delay_ms = config.aec_delay_headroom_ms;
 
     if (impl_->sample_rate_hz < 8000 || impl_->sample_rate_hz > 384000) {
         core::log::Logger::instance().error(
@@ -247,6 +304,19 @@ bool WebRtcAudio3A::init(const Config& config) {
     impl_->render_delivered_samples = 0;
     impl_->last_set_delay_ms = 0;
     impl_->delay_ever_set = false;
+    impl_->unaligned_output_samples = 0;
+    impl_->warned_alignment = false;
+
+    // Seed the echo canceller's delay estimate.  Without this the AEC has no
+    // idea how far the loudspeaker signal lags the microphone signal and
+    // cannot converge.
+    if (config.enable_aec) {
+        const std::int32_t clamped =
+            std::clamp<std::int32_t>(impl_->system_delay_ms, 0, 999);
+        impl_->apm->set_stream_delay_ms(clamped);
+        impl_->last_set_delay_ms = clamped;
+        impl_->delay_ever_set = true;
+    }
 
     reset();
 
@@ -286,6 +356,17 @@ static float rms_dbfs(const float* p, std::size_t n) {
     return static_cast<float>(20.0 * std::log10(rms));
 }
 
+/** RMS of an interleaved buffer, averaged over all channels.
+ *
+ *  The samples of all channels are pooled into one RMS — for a mono stream
+ *  that is the plain RMS of the channel, for multichannel it is the RMS over
+ *  the interleaved sample stream. */
+static float rms_dbfs_interleaved(const float* p, std::size_t frames, int channels) {
+    if (!p || frames == 0 || channels <= 0) return -96.0f;
+    const std::size_t total = frames * static_cast<std::size_t>(channels);
+    return rms_dbfs(p, total);
+}
+
 #endif  // NIMRTC_USE_WEBRTC_APM
 
 void WebRtcAudio3A::process_capture(Frame& frame) {
@@ -297,21 +378,64 @@ void WebRtcAudio3A::process_capture(Frame& frame) {
     const int frame_size = impl_->frame_size;
     std::size_t cursor = 0;  // samples consumed from input
 
-    // 1) Drain any leftover residual first (consumes residual_fill frames).
+    // Measure the capture level in the INPUT domain — the level of the
+    // signal as it arrives from the microphone, before any 3A processing.
+    //
+    // The 3A output is a processed signal: ANS legitimately silences a
+    // stationary tone, AEC silences the echo component, and AGC changes the
+    // level by design.  Measuring the output would report "the mic is dead"
+    // for a perfectly healthy input.  See the LevelStats contract in
+    // audio3a.hpp.
+    if (impl_->config.report_tx_level) {
+        impl_->stats.capture_level_dbfs = rms_dbfs_interleaved(
+            frame.samples, total_frames_in, channels);
+    }
+
+    // Pull the APM's VAD verdict (if enabled and requested) into stats.
+    auto refresh_vad = [&]() {
+        if (!impl_->config.enable_vad) {
+            impl_->stats.vad_active = false;
+            impl_->vad_requested = false;
+            return;
+        }
+        if (!impl_->vad_requested) return;
+        auto apm_stats = impl_->apm->GetStatistics();
+        if (apm_stats.voice_detected.has_value()) {
+            impl_->stats.vad_active = *apm_stats.voice_detected;
+        }
+        impl_->vad_requested = false;
+    };
+
+    // 1) Top up the leftover residual from the previous call.
+    //
+    // The APM only accepts whole 10 ms frames, so a call whose sample count
+    // is not a multiple of the frame size leaves a remainder behind.  The
+    // remainder is *carried over* to the next call (never discarded) and is
+    // combined with the next call's head to form a full frame.
+    //
+    // That combined frame straddles the call boundary, so only the part
+    // belonging to *this* call can be written back into the caller's
+    // in-place buffer; the part belonging to the previous call was already
+    // handed out unprocessed and there is nowhere to put its processed
+    // counterpart.  Those samples are counted in unaligned_output_samples.
     if (impl_->capture_residual_fill > 0) {
+        const std::size_t old_fill = impl_->capture_residual_fill;
         const std::size_t need =
-            static_cast<std::size_t>(frame_size) - impl_->capture_residual_fill;
+            static_cast<std::size_t>(frame_size) - old_fill;
         const std::size_t take = std::min(need, total_frames_in);
+
+        // Append this call's first `take` samples to the residual buffer.
         for (int ch = 0; ch < channels; ++ch) {
-            // Direct copy of every `channels`-th sample into residual channel.
+            float* r = impl_->capture_residual[static_cast<std::size_t>(ch)].data();
             for (std::size_t i = 0; i < take; ++i) {
-                impl_->capture_residual[static_cast<std::size_t>(ch)]
-                                       [impl_->capture_residual_fill + i] =
-                    frame.samples[(cursor + i) * static_cast<std::size_t>(channels) + ch];
+                r[old_fill + i] =
+                    frame.samples[i * static_cast<std::size_t>(channels)
+                                 + static_cast<std::size_t>(ch)];
             }
         }
-        cursor += take;
-        impl_->capture_residual_fill += take;
+        cursor = take;
+        impl_->capture_residual_fill = old_fill + take;
+
         if (impl_->capture_residual_fill == static_cast<std::size_t>(frame_size)) {
             // Build a per-channel pointer array for the APM float API.
             std::vector<float*> in_ptrs(static_cast<std::size_t>(channels));
@@ -328,27 +452,30 @@ void WebRtcAudio3A::process_capture(Frame& frame) {
                     "WebRtcAudio3A: ProcessStream returned code "
                     + std::to_string(rc));
             } else {
-                // Reflect processed output back into residual slot so the caller
-                // gets its in-place buffer mutated.
+                // Write back only the slice that belongs to this call
+                // (output samples [old_fill, old_fill + take)).
                 for (int ch = 0; ch < channels; ++ch) {
-                    std::memcpy(
-                        impl_->capture_residual[static_cast<std::size_t>(ch)].data(),
-                        impl_->capture_out_scratch[static_cast<std::size_t>(ch)].data(),
-                        static_cast<std::size_t>(frame_size) * sizeof(float));
-                }
-                impl_->stats.capture_level_dbfs = rms_dbfs(
-                    impl_->capture_residual[0].data(),
-                    static_cast<std::size_t>(frame_size));
-
-                // VAD / level reporting.
-                if (impl_->vad_requested) {
-                    auto stats = impl_->apm->GetStatistics();
-                    if (stats.voice_detected.has_value()) {
-                        impl_->stats.vad_active = *stats.voice_detected;
+                    const float* src =
+                        impl_->capture_out_scratch[static_cast<std::size_t>(ch)].data();
+                    for (std::size_t i = 0; i < take; ++i) {
+                        frame.samples[i * static_cast<std::size_t>(channels)
+                                     + static_cast<std::size_t>(ch)] =
+                            src[old_fill + i];
                     }
-                    impl_->vad_requested = false;
                 }
-                impl_->level_requested = false;
+                impl_->unaligned_output_samples += old_fill;
+                if (old_fill > 0 && !impl_->warned_alignment) {
+                    impl_->warned_alignment = true;
+                    core::log::Logger::instance().warn(
+                        "WebRtcAudio3A: capture frames are not aligned to the "
+                        "10 ms APM frame size; samples straddling a frame "
+                        "boundary are processed but their processed output "
+                        "cannot be returned in place. Push a multiple of "
+                        + std::to_string(frame_size) + " samples per channel "
+                        "for full 3A effect.");
+                }
+
+                refresh_vad();
             }
             impl_->capture_residual_fill = 0;
         }
@@ -356,21 +483,17 @@ void WebRtcAudio3A::process_capture(Frame& frame) {
 
     // 2) Process as many full 10 ms frames as possible from the remaining input.
     while (cursor + static_cast<std::size_t>(frame_size) <= total_frames_in) {
-        std::vector<float*> out_ptrs(static_cast<std::size_t>(channels));
         // Deinterleave `frame_size` frames into per-channel scratch.
-        for (int ch = 0; ch < channels; ++ch) {
-            float* dst = impl_->capture_scratch[static_cast<std::size_t>(ch)].data();
-            for (int i = 0; i < frame_size; ++i) {
-                dst[i] = frame.samples[(cursor + static_cast<std::size_t>(i))
-                                       * static_cast<std::size_t>(channels)
-                                       + static_cast<std::size_t>(ch)];
-            }
-        }
         std::vector<float*> in_ptrs(static_cast<std::size_t>(channels));
+        std::vector<float*> out_ptrs(static_cast<std::size_t>(channels));
         for (int ch = 0; ch < channels; ++ch) {
             in_ptrs[ch]  = impl_->capture_scratch[static_cast<std::size_t>(ch)].data();
             out_ptrs[ch] = impl_->capture_out_scratch[static_cast<std::size_t>(ch)].data();
         }
+        copy_interleaved_to_planar(
+            frame.samples + cursor * static_cast<std::size_t>(channels),
+            static_cast<std::size_t>(frame_size), channels, in_ptrs.data());
+
         int rc = impl_->apm->ProcessStream(
             in_ptrs.data(), impl_->capture_config, impl_->capture_out_config,
             out_ptrs.data());
@@ -380,49 +503,44 @@ void WebRtcAudio3A::process_capture(Frame& frame) {
                 + std::to_string(rc));
         } else {
             // Re-interleave processed output back into caller's buffer.
-            for (int ch = 0; ch < channels; ++ch) {
-                const float* src = impl_->capture_out_scratch[static_cast<std::size_t>(ch)].data();
-                for (int i = 0; i < frame_size; ++i) {
-                    frame.samples[(cursor + static_cast<std::size_t>(i))
-                                  * static_cast<std::size_t>(channels)
-                                  + static_cast<std::size_t>(ch)] = src[i];
-                }
-            }
-            impl_->stats.capture_level_dbfs = rms_dbfs(
-                impl_->capture_out_scratch[0].data(),
-                static_cast<std::size_t>(frame_size));
+            copy_planar_to_interleaved(
+                out_ptrs,
+                static_cast<std::size_t>(frame_size), channels,
+                frame.samples + cursor * static_cast<std::size_t>(channels));
 
-            if (impl_->vad_requested) {
-                auto stats = impl_->apm->GetStatistics();
-                if (stats.voice_detected.has_value()) {
-                    impl_->stats.vad_active = *stats.voice_detected;
-                }
-                impl_->vad_requested = false;
-            }
+            refresh_vad();
             impl_->level_requested = false;
         }
         cursor += static_cast<std::size_t>(frame_size);
     }
 
-    // 3) Stash leftover samples into residual for next call.
+    // 3) Stash leftover samples into the residual for the next call.
+    //
+    // The residual buffer is only ever written when it is empty (step 1
+    // either emptied it or consumed the whole input), so the carry-over
+    // accumulates instead of overwriting — no sample is ever dropped.
     if (cursor < total_frames_in) {
         const std::size_t leftover = total_frames_in - cursor;
-        impl_->capture_residual_fill = leftover;
         for (int ch = 0; ch < channels; ++ch) {
+            float* r = impl_->capture_residual[static_cast<std::size_t>(ch)].data();
             for (std::size_t i = 0; i < leftover; ++i) {
-                impl_->capture_residual[static_cast<std::size_t>(ch)][i] =
-                    frame.samples[(cursor + i) * static_cast<std::size_t>(channels)
-                                  + static_cast<std::size_t>(ch)];
+                r[i] = frame.samples[(cursor + i) * static_cast<std::size_t>(channels)
+                                     + static_cast<std::size_t>(ch)];
             }
         }
-        // Note: leftover samples haven't been processed yet — they live in the
-        // residual and will be processed at the start of the next call. We
-        // don't touch the input samples for these because the input/output
-        // buffers are required to be different by the APM API (and we can't
-        // guarantee the caller's buffer wasn't already mutated earlier).
-        // For simplicity we leave the leftover samples unchanged in the caller's
-        // buffer too (the APM contract says "may use the same memory" only if
-        // the caller doesn't need to inspect in-flight samples).
+        impl_->capture_residual_fill = leftover;
+
+        if (!impl_->warned_alignment) {
+            impl_->warned_alignment = true;
+            core::log::Logger::instance().warn(
+                "WebRtcAudio3A: capture frames are not aligned to the 10 ms "
+                "APM frame size (" + std::to_string(leftover)
+                + " sample(s) carried over). Samples that straddle a frame "
+                "boundary are processed, but their processed output cannot be "
+                "returned in place. Push a multiple of "
+                + std::to_string(frame_size)
+                + " samples per channel for full 3A effect.");
+        }
     }
 #else
     (void)frame;
@@ -437,6 +555,13 @@ void WebRtcAudio3A::process_render(const Frame& frame) {
     const int channels = impl_->render_channels;
     const int frame_size = impl_->frame_size;
     std::size_t cursor = 0;
+
+    // Render level is measured in the INPUT domain as well — the level of
+    // the loudspeaker reference signal as it arrives, not the level of the
+    // APM's reverse-stream output.  See the LevelStats contract in
+    // audio3a.hpp.
+    impl_->stats.render_level_dbfs = rms_dbfs_interleaved(
+        frame.samples, total_frames_in, channels);
 
     // 1) Drain any leftover residual.
     if (impl_->render_residual_fill > 0) {
@@ -468,9 +593,8 @@ void WebRtcAudio3A::process_render(const Frame& frame) {
                     "WebRtcAudio3A: ProcessReverseStream returned code "
                     + std::to_string(rc));
             } else {
-                impl_->stats.render_level_dbfs = rms_dbfs(
-                    impl_->render_out_scratch[0].data(),
-                    static_cast<std::size_t>(frame_size));
+                // The render level is measured on the input domain (see
+                // above); nothing to publish from the APM output.
             }
             impl_->render_residual_fill = 0;
         }
@@ -500,24 +624,26 @@ void WebRtcAudio3A::process_render(const Frame& frame) {
                 "WebRtcAudio3A: ProcessReverseStream returned code "
                 + std::to_string(rc));
         } else {
-            impl_->stats.render_level_dbfs = rms_dbfs(
-                impl_->render_out_scratch[0].data(),
-                static_cast<std::size_t>(frame_size));
+            // Render level measured on the input domain (see above).
         }
         cursor += static_cast<std::size_t>(frame_size);
     }
 
-    // 3) Residual.
+    // 3) Residual — carry the remainder over to the next call.
+    //
+    // The residual buffer is empty here (step 1 either emptied it or
+    // consumed the whole input), so this accumulates rather than overwrites:
+    // no reference sample is ever dropped.
     if (cursor < total_frames_in) {
         const std::size_t leftover = total_frames_in - cursor;
-        impl_->render_residual_fill = leftover;
         for (int ch = 0; ch < channels; ++ch) {
+            float* r = impl_->render_residual[static_cast<std::size_t>(ch)].data();
             for (std::size_t i = 0; i < leftover; ++i) {
-                impl_->render_residual[static_cast<std::size_t>(ch)][i] =
-                    frame.samples[(cursor + i) * static_cast<std::size_t>(channels)
-                                  + static_cast<std::size_t>(ch)];
+                r[i] = frame.samples[(cursor + i) * static_cast<std::size_t>(channels)
+                                     + static_cast<std::size_t>(ch)];
             }
         }
+        impl_->render_residual_fill += leftover;
     }
 #else
     (void)frame;
@@ -529,24 +655,17 @@ void WebRtcAudio3A::on_render_delivered(std::size_t num_samples) {
     if (!impl_->apm) return;
     impl_->render_delivered_samples += num_samples;
 
-    // Wrap-around so we don't crank the delay estimate past 999ms (APM
-    // rejects anything outside [0, 999] and returns kBadStreamParameterWarning
-    // otherwise). Once the playback pipeline reaches steady state the
-    // reported delay stabilises — we just need to keep feeding finite ms.
-    if (impl_->render_delivered_samples
-        >= static_cast<std::size_t>(impl_->sample_rate_hz)) {
-        impl_->render_delivered_samples %=
-            static_cast<std::size_t>(impl_->sample_rate_hz);
-    }
+    if (!impl_->config.enable_aec) return;
 
-    // Convert delivered-samples to a delay in ms (per render channel).
-    const std::int32_t delay_ms = static_cast<std::int32_t>(
-        (impl_->render_delivered_samples * 1000)
-        / (static_cast<std::size_t>(impl_->sample_rate_hz)
-           * static_cast<std::size_t>(impl_->render_channels)));
-
-    // Clamp to [0, 999] — valid APM range.
-    const std::int32_t clamped = std::clamp<std::int32_t>(delay_ms, 0, 999);
+    // The APM needs the *system* delay between the render reference (the
+    // loudspeaker signal) and the capture signal (the microphone) — not a
+    // cumulative playback counter.  The estimate comes from
+    // Config::aec_delay_headroom_ms, which the host sets from the measured
+    // loudspeaker→microphone latency.  Feeding a cumulative counter here
+    // made the reported delay grow without bound, which the echo canceller
+    // cannot use.
+    const std::int32_t clamped =
+        std::clamp<std::int32_t>(impl_->system_delay_ms, 0, 999);
 
     int rc = impl_->apm->set_stream_delay_ms(clamped);
     if (rc != webrtc::AudioProcessing::kNoError) {
@@ -600,6 +719,15 @@ void WebRtcAudio3A::reset() {
         pconfig.reverse_output_stream() =
             webrtc::StreamConfig(impl_->sample_rate_hz, impl_->render_channels);
         impl_->apm->Initialize(pconfig);
+        // Re-Initialize resets the echo canceller's internal state, so the
+        // system delay has to be handed over again.
+        if (impl_->config.enable_aec) {
+            const std::int32_t clamped =
+                std::clamp<std::int32_t>(impl_->system_delay_ms, 0, 999);
+            impl_->apm->set_stream_delay_ms(clamped);
+            impl_->last_set_delay_ms = clamped;
+            impl_->delay_ever_set = true;
+        }
     }
     impl_->stats = LevelStats{};
     impl_->capture_residual_fill = 0;
@@ -607,6 +735,8 @@ void WebRtcAudio3A::reset() {
     impl_->render_delivered_samples = 0;
     impl_->last_set_delay_ms = 0;
     impl_->delay_ever_set = false;
+    impl_->unaligned_output_samples = 0;
+    impl_->warned_alignment = false;
     impl_->vad_requested = false;
     impl_->level_requested = false;
     // Zero scratch buffers.
@@ -621,6 +751,14 @@ void WebRtcAudio3A::reset() {
 
 std::unique_ptr<IAudio3A> create_webrtc_audio3a() {
     return std::make_unique<WebRtcAudio3A>();
+}
+
+bool webrtc_apm_compiled_in() noexcept {
+#if defined(NIMRTC_USE_WEBRTC_APM)
+    return true;
+#else
+    return false;
+#endif
 }
 
 std::unique_ptr<IAudio3A> create_audio3a(std::string_view type) {

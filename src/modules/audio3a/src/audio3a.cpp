@@ -95,21 +95,34 @@ bool NullAudio3A::init(const Config& config) {
 }
 
 void NullAudio3A::process_capture(Frame& frame) {
-    // Calculate capture level
+    // Measure the capture level in the INPUT domain — the level of the
+    // signal as it arrives from the microphone, before any 3A processing.
+    //
+    // The 3A output is a processed signal: AGC changes the level by
+    // design, so measuring the output would report a level that is a
+    // function of the gain control rather than of the microphone.  See the
+    // LevelStats contract in audio3a.hpp.
     std::size_t total_samples = frame.num_samples * frame.num_channels;
-    float level = calculate_rms_dbfs(frame.samples, total_samples);
+    const float input_level = calculate_rms_dbfs(frame.samples, total_samples);
 
     // Apply gain if AGC enabled (simple implementation)
-    if (config_.enable_agc && level < static_cast<float>(config_.agc_target_dbfs)) {
-        float gain_db = static_cast<float>(config_.agc_target_dbfs) - level;
+    if (config_.enable_agc &&
+        input_level < static_cast<float>(config_.agc_target_dbfs)) {
+        const float gain_db =
+            static_cast<float>(config_.agc_target_dbfs) - input_level;
         apply_gain(frame.samples, total_samples, gain_db * 0.5f);  // conservative gain
-        level = calculate_rms_dbfs(frame.samples, total_samples);
     }
 
-    stats_.capture_level_dbfs = level;
+    if (config_.report_tx_level) {
+        stats_.capture_level_dbfs = input_level;
+    }
 
-    // VAD if requested
-    if (vad_requested_) {
+    // VAD if requested.  A disabled VAD never reports speech — same
+    // contract as the WebRTC APM path (see WebRtcAudio3A).
+    if (!config_.enable_vad) {
+        stats_.vad_active = false;
+        vad_requested_ = false;
+    } else if (vad_requested_) {
         stats_.vad_active = simple_vad(frame.samples, total_samples);
         vad_requested_ = false;
     }

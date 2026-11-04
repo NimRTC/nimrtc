@@ -64,3 +64,29 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# Real-APM behaviour tests: frame alignment, config wiring, AEC reference
+# path and degradation reporting.  Separate binary because they need the
+# vendored WebRTC APM headers (public include dirs of nimrtc_vendor_webrtc_apm
+# propagate through nimrtc::audio3a).
+# -----------------------------------------------------------------------------
+add_executable(test_webrtc_audio3a test_webrtc_audio3a.cpp)
+
+set_target_properties(test_webrtc_audio3a PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_webrtc_audio3a LENIENT)
+
+target_link_libraries(test_webrtc_audio3a PRIVATE
+    nimrtc::audio3a
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_webrtc_audio3a
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

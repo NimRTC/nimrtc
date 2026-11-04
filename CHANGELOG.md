@@ -52,6 +52,79 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `src/third_party/libjuice/patches/0001-so-reuseaddr.patch`. The
   em dash in that comment is replaced by a hyphen because MSVC
   reported it as C4819 under codepage 936.
+- **The 3A stage was not doing what its own contract said.** Six
+  separate defects in the `audio3a` module and the engine's use of it
+  made the real WebRTC APM either inert or actively wrong:
+  - **The level meters reported the 3A *output*, not the input.**
+    `capture_level_dbfs` was published from the APM's processed
+    output, so a healthy microphone could read as dead silence: the
+    noise suppressor legitimately silences a stationary tone (it looks
+    like noise to a spectral suppressor), the echo canceller
+    legitimately silences the echo component, and AGC changes the level
+    by design. A level meter whose reading is a function of the DSP's
+    decisions cannot answer the only question it exists for ("is the
+    microphone picking anything up?"). Both meters are now measured in
+    the **input domain** — mic level for capture, loudspeaker
+    reference level for render — and the convention is documented on
+    `LevelStats`.
+  - **`report_tx_level = false` still published a level**, and
+    `enable_vad = false` could still report speech. Both flags are
+    part of the public `Config`; the stub implementation honoured
+    neither, so a caller that turned VAD off could still be told the
+    user was speaking. `NullAudio3A` now honours both flags, with the
+    same semantics as the APM path.
+  - **The plugin adapter's level meter never moved.** `PluginAdapter`
+    left `Config::report_tx_level` at its default (`false`) while
+    handing the concrete implementation a default configuration, so
+    `stats().last_capture_level_dbfs` was permanently -96 dBFS. The
+    adapter now defaults the concrete configuration to 48 kHz / mono /
+    level-reporting on, because the plugin's `stats()` are the only
+    way for a host to find out whether the microphone is live.
+  - **A degraded backend was indistinguishable from a working one.**
+    When the APM was not part of the build, the factory substituted a
+    `NullAudio3A` passthrough and returned it as an ordinary plugin —
+    so AEC/ANS/AGC were silently inactive while the call looked
+    healthy. The fallback now marks the instance as degraded, reports
+    it in `name()`, and the engine logs it as an error at start-up.
+    The new `audio3a::webrtc_apm_compiled_in()` tells a caller whether
+    the build contains the real APM in the first place.
+  - **The echo canceller never got a reference signal.** The engine
+    fed the received audio to the host but never to the 3A plugin's
+    render path, so the APM had no reverse stream and the echo
+    canceller could not converge at all. The received frame is now
+    handed to `process_render()` before it reaches the host's playback
+    callback, and `set_render_delivered()` follows it so the plugin
+    can track the system delay.
+  - **The APM was told a growing playback counter instead of the
+    system delay.** `on_render_delivered()` converted the cumulative
+    count of delivered samples into a millisecond figure and fed that
+    to `set_stream_delay_ms()`. The value grew without bound and the
+    echo canceller cannot use it. The delay is now the measured
+    loudspeaker-to-microphone latency (`Config::aec_delay_headroom_ms`),
+    seeded at `init()` and re-seeded after every `reset()`.
+  - **Samples that straddled a 10 ms APM frame boundary lost their
+    processed output.** The APM only accepts whole frames, so a caller
+    pushing an arbitrary frame length left a remainder behind; the
+    carry-over was combined with the next call's head to form a full
+    frame, but the processed output of the *completing* call was
+    never written back into the caller's buffer. Unaligned pushers
+    therefore got raw audio back with no 3A applied, silently. The
+    carry-over now accumulates instead of overwriting (no sample is
+    ever dropped) and the completing call receives its processed
+    output. The condition is logged once, naming the expected frame
+    size.
+  - **The engine mutated the caller's `const` PCM buffer.**
+    `send_audio()` passed the caller's buffer to the 3A stage, which
+    processes in place, via a `const_cast` — undefined behaviour that
+    also silently changed the caller's data. The engine now copies
+    into a buffer it owns, mutates that copy, and encodes from it.
+
+  Verified locally on Windows/MSVC with the real APM compiled in: the
+  full suite is 642 tests, 0 failures. The nine `audio3a` tests that
+  need the real APM (`Audio3AFrameAlignment`, `Audio3AConfig`,
+  `Audio3AStartup`, `Audio3ARenderPath`, `Audio3ADegradation`) run
+  instead of skipping when `NIMRTC_VENDORED_WEBRTC_APM=ON`; they skip
+  when the build has no APM, which is the pre-existing contract.
 
 ### Changed
 

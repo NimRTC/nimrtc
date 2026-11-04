@@ -85,6 +85,27 @@ struct NIMRTC_API_STABLE Frame {
 };
 
 // Level metrics (dBFS: dB relative to full scale)
+//
+// ## Level semantics
+//
+// `capture_level_dbfs` and `render_level_dbfs` are measured in the **input
+// domain** — the signal level *entering* the 3A stage (mic level for
+// capture, loudspeaker reference level for render).  They are NOT measured
+// on the 3A output.
+//
+// The reason is that the 3A output is a *processed* signal, and its level
+// is a function of the DSP decisions, not of the signal:
+//
+//   - ANS legitimately silences a stationary tone (a steady sine looks like
+//     noise to a spectral noise suppressor), so the output of a loud input
+//     can be digital silence.
+//   - AEC legitimately silences the echo component of the capture signal.
+//   - AGC changes the level by design.
+//
+// A level meter that reports "the mic is dead" because the noise
+// suppressor decided the input was noise is useless for its actual purpose
+// (telling the host whether the microphone is picking anything up).  The
+// same convention is used by libwebrtc's `audio_source_level`.
 struct NIMRTC_API_STABLE LevelStats {
     float capture_level_dbfs = -96.0f;
     float render_level_dbfs = -96.0f;
@@ -175,5 +196,15 @@ private:
 NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_null_audio3a();
 NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_webrtc_audio3a();
 NIMRTC_API_STABLE std::unique_ptr<IAudio3A> create_audio3a(std::string_view type);
+
+/** True when this build contains the real WebRTC APM
+ *  (i.e. it was configured with NIMRTC_VENDORED_WEBRTC_APM=ON and the
+ *  vendored source tree was populated).
+ *
+ *  This is a *compile-time* fact.  Whether the APM can actually be
+ *  instantiated at runtime is probed separately by the plugin factory
+ *  ("webrtc_apm"), which reports a fallback to NullAudio3A through the
+ *  plugin instance's name() — the name then contains "DEGRADED". */
+NIMRTC_API_STABLE bool webrtc_apm_compiled_in() noexcept;
 
 } // namespace nimrtc::audio3a

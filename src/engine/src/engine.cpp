@@ -26,9 +26,11 @@
 
 #include <array>
 #include <atomic>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <optional>
@@ -399,6 +401,14 @@ struct NimRTCEngine::Impl {
     // future move to per-stream send queues stays trivial.
     std::vector<std::uint8_t> audio_codec_pkt;
     std::vector<std::uint8_t> audio_send_buf;
+
+    // Scratch buffer for the capture-side PCM.  The 3A stage processes audio
+    // in place, but send_audio() receives the caller's buffer as `const
+    // float*` — writing through a const_cast would be undefined behaviour and
+    // would silently mutate the caller's data.  The engine therefore owns a
+    // copy: the caller's buffer is read-only, the copy is what 3A mutates and
+    // what the encoder consumes.
+    std::vector<float> audio_pcm_buf;
 
     // ---- send_video scratch buffer (P0#4) ---------------------------------
     // Reusable buffer for the encoded H.264 frame.  Default reserve size
@@ -1033,6 +1043,21 @@ void NimRTCEngine::init_audio_modules() noexcept {
                     if (on_error_) on_error_(err, msg);
                 });
         });
+    // Report a degraded 3A backend explicitly.
+    //
+    // The audio3a plugin may have fallen back to a passthrough stub when the
+    // requested backend (e.g. the WebRTC APM) is not available in this
+    // build.  The instance carries that state in its name, so surface it
+    // here instead of letting a passthrough pass as "3A" unnoticed.
+    if (audio3a_plugin_) {
+        const char* pname = audio3a_plugin_->name();
+        if (pname != nullptr && std::strstr(pname, "DEGRADED") != nullptr) {
+            core::log::Logger::instance().error(
+                std::string("3A backend is DEGRADED: ") + pname +
+                " — the configured 3A implementation is not running; "
+                "AEC/ANS/AGC are inactive.");
+        }
+    }
     if (!audio3a_plugin_) {
         impl_->audio3a_concrete = std::make_unique<audio3a::NullAudio3A>();
         audio3a::Config a3a;
@@ -2977,16 +3002,31 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         return core::kEngineNotReady;
     }
 
+    // Copy the capture PCM into an engine-owned buffer.  The 3A stage
+    // processes audio in place, but the caller's buffer is declared const —
+    // writing through a const_cast would be undefined behaviour and would
+    // silently mutate the caller's data.  The copy is what 3A mutates below
+    // and what the encoder consumes.
+    const std::size_t total_floats =
+        num_samples * static_cast<std::size_t>(
+                          std::max<std::uint8_t>(1, config_.pcm_channels));
+    if (impl_->audio_pcm_buf.size() < total_floats) {
+        impl_->audio_pcm_buf.resize(total_floats);
+    }
+    std::memcpy(impl_->audio_pcm_buf.data(), pcm_samples,
+                total_floats * sizeof(float));
+    float* pcm = impl_->audio_pcm_buf.data();
+
     // 3A ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ prefer plugin adapter; fall back to concrete NullAudio3A.
     if (audio3a_plugin_) {
         // Plugin API takes raw (ptr, samples, channels) ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ same shape we have.
         audio3a_plugin_->process_capture(
-            const_cast<float*>(pcm_samples),
+            pcm,
             num_samples,
             config_.pcm_channels);
     } else if (impl_->audio3a_concrete) {
         audio3a::Frame frame;
-        frame.samples        = const_cast<float*>(pcm_samples);
+        frame.samples        = pcm;
         frame.num_samples    = num_samples;
         frame.num_channels   = config_.pcm_channels;
         frame.sample_rate_hz = config_.pcm_sample_rate_hz;
@@ -3001,12 +3041,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     }
     std::size_t codec_len = 0;
     if (codec_plugin_) {
-        codec_len = codec_plugin_->encode(pcm_samples, num_samples,
+        codec_len = codec_plugin_->encode(pcm, num_samples,
                                          impl_->audio_codec_pkt.data(),
                                          impl_->audio_codec_pkt.size());
 #ifdef NIMRTC_HAS_OPUS
     } else if (impl_->opus_encoder) {
-        codec_len = impl_->opus_encoder->encode(pcm_samples, num_samples,
+        codec_len = impl_->opus_encoder->encode(pcm, num_samples,
                                          impl_->audio_codec_pkt.data(),
                                          impl_->audio_codec_pkt.size());
 #endif
@@ -4012,11 +4052,40 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     }
     jb->push(pv, core::SteadyClock::now(), std::nullopt);
     if (auto frame = jb->pop(core::SteadyClock::now())) {
-        if (on_audio_frame_ && !frame->packets.empty()) {
+        if (!frame->packets.empty()) {
             const auto& p = frame->packets.front();
             if (p.payload.data() != nullptr && p.payload.size() > 0) {
-                on_audio_frame_(reinterpret_cast<const float*>(p.payload.data()),
-                                p.payload.size() / sizeof(float));
+                const float* pcm = reinterpret_cast<const float*>(p.payload.data());
+                const std::size_t total_floats = p.payload.size() / sizeof(float);
+                const std::size_t samples_per_ch =
+                    config_.pcm_channels
+                        ? total_floats / config_.pcm_channels
+                        : total_floats;
+
+                // AEC reference path.
+                //
+                // The remote audio we are about to hand to the host for
+                // loudspeaker playback is exactly the signal the echo
+                // canceller has to subtract from the microphone capture.
+                // Feeding it to the 3A plugin *before* the frame reaches the
+                // output keeps the capture and reference paths aligned.
+                // Without this the APM has no reverse stream and the echo
+                // canceller cannot converge at all.
+                if (audio3a_plugin_ && samples_per_ch > 0) {
+                    audio3a_plugin_->process_render(pcm, samples_per_ch,
+                                                   config_.pcm_channels);
+                }
+
+                if (on_audio_frame_) {
+                    on_audio_frame_(pcm, total_floats);
+                }
+
+                // The frame has been handed over for playback — tell the 3A
+                // plugin that the reference signal reached the speaker so it
+                // can track the system delay.
+                if (audio3a_plugin_ && samples_per_ch > 0) {
+                    audio3a_plugin_->set_render_delivered(samples_per_ch);
+                }
             }
         }
     }

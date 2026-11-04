@@ -116,7 +116,7 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 │ L3  会话层     轻量会话编排 · SDP(独立模块) · Track/Stream         │
 │                · BUNDLE / rtcp-mux · RTCP 扩展反馈 · DataChannel 入口│
 ├────────────────────────────────────────────────────────────────┤
-│ L2  媒体质量层 JitterBuffer(固定窗口默认,P3 自适应) · BWE(默认)    │
+│ L2  媒体质量层 JitterBuffer(共享自适应策略,视频 opt-in) · BWE(默认)  │
 │                · 3A(基础降噪/Passthrough) · Codec 注入/统一封装    │
 ├────────────────────────────────────────────────────────────────┤
 │ L1  传输层     ICE · DTLS · SRTP/SRTCP · RTP/RTCP                 │
@@ -308,7 +308,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 | 媒体-数据统一时间线 / 画面-控制对齐 | ✅ 做 | P2 接口 + P3 完整 | timeline 模块默认关闭（零开销），接口与基本能力 P2、命令-画面关联 API P3，见 §8.4 |
 | 双链路冗余 / 接管会话迁移 | ✅ 做 | P4 | 引擎提供原语，完整方案 P4 交付，见 §8.5 |
 | simulcast / SVC | ⏸ 后置 | Tier 1 | 接口预留 |
-| JitterBuffer / BWE / 3A | ✅ 做 | P1 最小 + P3 自适应/完整 | 固定窗口 JB + 简单 AIMD BWE + passthrough/基础降噪 P1 即通话体验可用；P3 替换为自适应 JB + Goog-CC 完整主线 + 完整 3A（弱网基线在 P3 验收） |
+| JitterBuffer / BWE / 3A | ✅ 做 | P1 最小 + P3 自适应/完整 | 固定窗口 JB + 简单 AIMD BWE + passthrough/基础降噪 P1 即通话体验可用；P3 替换为自适应 JB + Goog-CC 完整主线 + 完整 3A（弱网基线在 P3 验收）。**v1.3 Track Q2：自适应 JB 策略已收敛为 `nimrtc::jb_strategy` 单一实现**（音频 `nimrtc::jb` / 视频 `nimrtc::video_jb` 两个前端），视频侧默认仍为固定窗口，自适应播放延迟为 opt-in |
 | Codec 注入接口 / 统一封装（解码器由宿主提供） | ✅ 接口 P1 最小（互通需要）→ P3 完整 | — | 不捆绑解码器；payload 打包/解析归 rtp 模块（P1 含 Opus/H.264 支撑 Tier 0） |
 | 国密后端（SM2/SM4 密码栈） | ✅ 做 | P4（架构接缝 P1 就位） | 架构接缝 P1 就位；落地交付 P4，见 §10 |
 | 双链路调度完整策略 | ✅ 做 | P4 | §8.5 框架 + 完整调度 P4 |
@@ -324,7 +324,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 
 > P1 交付**最小可用版质量链路**（固定窗口 JitterBuffer + 简单 AIMD BWE + passthrough/基础降噪 3A），保证 Chrome ↔ NimRTC P2P 通话"体验可用"。**完整质量线（自适应 JB + Goog-CC 兼容主线 + 完整 3A + 弱网基线）放到 P3**。传输层与 SFU 转发均不依赖本节内容（P1 / P2 即可独立交付）。质量是 Google 烧了十几年钱的地方，本节是客户端体验层、也是区分度最大的环节。
 
-- **JitterBuffer**：音/视频策略抽象（低延迟通话 / 直播 / 对讲三档默认策略），P1 先交付**固定窗口实现**，P3 替换为**自适应 JB**；三档与各场景 Profile 的对应关系见 §2.6。
+- **JitterBuffer**：音/视频策略抽象（低延迟通话 / 直播 / 对讲三档默认策略），P1 先交付**固定窗口实现**，P3 替换为**自适应 JB**；三档与各场景 Profile 的对应关系见 §2.6。**v1.3 Track Q2 已把自适应策略收敛成一份实现**：`nimrtc::jb_strategy`（RFC 3550 §6.4.1 抖动估计 + "base + 4·J" 目标延迟）唯一存在，音频（`nimrtc::jb`）与视频（`nimrtc::video_jb`）是它的两个前端；视频侧默认仍是固定窗口（帧组装完成即交付），自适应播放延迟为 opt-in（`Config::adaptive` / `EngineConfig::video_receiver_tuning.adaptive_playout`）。
 - **BWE**：P1 交付**简单 AIMD 默认实现**，接口完整、可插拔；P3 替换为 **Goog-CC 兼容主线**作为对外承诺主线；**BBR 不写入对外文档**（RTC over UDP 用 BBR 仍属实验，写出去会被懂行的人抓），仅作内部实验项。
 - **3A**：接口支持 内置实现 / 第三方 AEC·ANS·AGC / 直接关闭（信创设备常自带算法）；P1 交付 passthrough + 基础降噪（开箱即用），P3 补完整 3A。
 - **Codec**：解码器接入抽象 + 统一封装；编 / 解码器一律由宿主或插件提供、core 不捆绑。payload 打包 / 解析归 rtp 模块（P1 即含 Opus / H.264，支撑 Tier 0 互通；见 §5）。PAL Slice 1 引入 `pal::resolve_codec()` / `pal::resolve_video_codec()` 走 `core::PluginRegistry`（详 [ADR-009](docs/adr/ADR-009-pal-slice-1.md)）。

@@ -31,6 +31,7 @@
 #   1  prerequisite missing
 #   2  meson setup failed
 #   3  ninja build failed
+#   4  archive link order could not be recorded
 #
 # This script is the canonical Linux/macOS build entry point; the legacy
 # copy at build/build_webrtc_apm.sh is gitignored and will be removed.
@@ -157,6 +158,26 @@ if ! ninja -C "${BUILD_DIR}" >"${LOG_DIR}/webrtc_apm_build.log" 2>&1; then
     echo "--- first error/failure markers found ---"
     grep -nE 'error C[0-9]+:|fatal error|FAILED:' "${LOG_DIR}/webrtc_apm_build.log" | head -20 || echo "(no error markers detected; build stopped on non-error condition)"
     exit 3
+fi
+
+# ----------------------------------------------------------------------------
+# Step 5: record the authoritative archive link order
+#
+# Meson merges the webrtc-internal archives into the APM archive and links
+# the abseil archives in a specific order.  A static linker resolves symbols
+# left-to-right, so that order is not something a consumer may guess.
+# tools/apm_link_order.py extracts the order from the Meson-generated
+# build.ninja (the very command line Meson verified to work) and writes
+# build_meson/apm_link_order.txt, which the NimRTC CMake wrapper consumes
+# for the build-tree link order and for the install rules.
+# ----------------------------------------------------------------------------
+echo
+echo "[STEP 5] Recording the APM archive link order..."
+if ! python3 "${PROJECT_ROOT}/tools/apm_link_order.py" --build-dir "${BUILD_DIR}"; then
+    echo "[ERROR] Could not determine the APM archive link order."
+    echo "        Without it, a consumer of the installed bundle cannot be"
+    echo "        linked reliably.  See tools/apm_link_order.py."
+    exit 4
 fi
 
 echo

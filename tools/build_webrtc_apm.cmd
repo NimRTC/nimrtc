@@ -16,6 +16,7 @@ REM   0  success
 REM   1  prerequisite missing (meson, ninja, MSVC)
 REM   2  meson setup failed
 REM   3  ninja build failed
+REM   4  archive link order could not be recorded
 REM
 REM This script is the canonical Windows build entry point; the legacy
 REM copy at build\build_webrtc_apm.cmd is gitignored and will be removed.
@@ -186,6 +187,26 @@ if %NINJA_RC% neq 0 (
         echo [ERROR] Log file was not produced; ninja may have failed before opening it.
     )
     exit /b 3
+)
+
+REM ---------------------------------------------------------------------------
+REM Step 3: record the authoritative archive link order
+REM
+REM Meson merges the webrtc-internal archives into the APM archive and links
+REM the abseil archives in a specific order.  A static linker resolves symbols
+REM left-to-right, so that order is not something a consumer may guess.
+REM tools\apm_link_order.py extracts the order from the Meson-generated
+REM build.ninja (the very command line Meson verified to work) and writes
+REM build_meson\apm_link_order.txt, which the NimRTC CMake wrapper consumes
+REM for the build-tree link order and for the install rules.
+REM ---------------------------------------------------------------------------
+echo.
+echo [STEP 3] Recording the APM archive link order...
+python "%PROJECT_ROOT%\tools\apm_link_order.py" --build-dir "%BUILD_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Could not determine the APM archive link order.
+    echo         Without it, a consumer of the installed bundle cannot be linked reliably.
+    exit /b 4
 )
 
 echo.

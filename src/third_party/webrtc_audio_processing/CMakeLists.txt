@@ -147,17 +147,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # -----------------------------------------------------------------------------
 # Discover all abseil-cpp static libraries (built as part of the meson build)
+# (resolution happens below, in the link-order block)
 # -----------------------------------------------------------------------------
+# Fallback set (only used when the link-order manifest is absent): glob
+# every abseil archive the Meson build produced.
+set(_absl_libs "")
 file(GLOB _absl_libs
     "${_abs_root}/libabsl_*.a"
     "${_abs_root}/libabsl_*/*.a"
 )
 foreach(_abs_candidate IN LISTS _abs_build_roots)
-    file(GLOB _absl_extra
+    file(GLOB _abs_extra
         "${_abs_candidate}/libabsl_*.a"
         "${_abs_candidate}/libabsl_*/*.a"
     )
-    list(APPEND _absl_libs ${_absl_extra})
+    list(APPEND _absl_libs ${_abs_extra})
 endforeach()
 
 if(NOT _absl_libs)
@@ -173,14 +177,60 @@ endif()
 add_library(nimrtc_vendor_webrtc_apm STATIC IMPORTED GLOBAL)
 add_library(nimrtc::vendor::webrtc_apm ALIAS nimrtc_vendor_webrtc_apm)
 
-# Locate the apm impl library (and its AVX2 privatearch sibling if present)
-set(_imported_libraries "${_apm_lib}")
-if(_apm_privatearch_lib)
-    list(APPEND _imported_libraries "${_apm_privatearch_lib}")
+# Resolve the archive set AND the link order.
+#
+# Meson merges the webrtc-internal archives (libbase, libapi, common_audio,
+# ...) into libwebrtc-audio-processing-2.a and links the abseil archives in
+# a specific order.  A static linker resolves symbols left-to-right, so that
+# order is part of the contract, not a detail.  tools/apm_link_order.py
+# extracts it from the Meson-generated build.ninja -- the very command line
+# Meson verified to work -- and writes build_meson/apm_link_order.txt.
+# Prefer that manifest; fall back to a glob only when the manifest is absent
+# (a manual build that skipped the helper), and say so loudly.
+set(_apm_manifest "${_vendor_root}/apm_link_order.txt")
+set(_imported_libraries "")
+set(_apm_manifest_used FALSE)
+
+if(EXISTS "${_apm_manifest}")
+    file(STRINGS "${_apm_manifest}" _apm_manifest_lines)
+    foreach(_apm_rel IN LISTS _apm_manifest_lines)
+        if(_apm_rel STREQUAL "")
+            continue()
+        endif()
+        set(_apm_abs "${_vendor_root}/${_apm_rel}")
+        if(EXISTS "${_apm_abs}")
+            list(APPEND _imported_libraries "${_apm_abs}")
+        else()
+            message(WARNING
+                "APM link-order manifest references a missing archive: ${_apm_abs}")
+        endif()
+    endforeach()
+    if(_imported_libraries)
+        set(_apm_manifest_used TRUE)
+    endif()
 endif()
 
-# Append all abseil static libraries so transitive linking works
-list(APPEND _imported_libraries ${_absl_libs})
+if(NOT _apm_manifest_used)
+    # The APM archive leads the list, which is what the linker needs; the
+    # abseil order is alphabetical rather than Meson's, which only works
+    # because abseil's cross-references happen to point at absl_base (which
+    # sorts first).
+    set(_imported_libraries "${_apm_lib}")
+    if(_apm_privatearch_lib)
+        list(APPEND _imported_libraries "${_apm_privatearch_lib}")
+    endif()
+    list(APPEND _imported_libraries ${_absl_libs})
+
+    message(WARNING
+        "APM link-order manifest not found at ${_apm_manifest}; falling back to a "
+        "globbed archive list.  Run `python tools/apm_link_order.py --build-dir "
+        "${_vendor_root}` (or tools/build_webrtc_apm.sh / .cmd) to record the "
+        "order Meson verified.")
+endif()
+
+# The install rules (cmake/NimRTCInstall.cmake) ship exactly this list, in
+# exactly this order, so that an installed bundle links like the build tree.
+set_property(GLOBAL PROPERTY NIMRTC_APM_LINK_ARCHIVES "${_imported_libraries}")
 
 set_target_properties(nimrtc_vendor_webrtc_apm PROPERTIES
     IMPORTED_LOCATION             "${_apm_lib}"

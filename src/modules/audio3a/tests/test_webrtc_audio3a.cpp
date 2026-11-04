@@ -61,10 +61,13 @@ constexpr std::size_t   kApmFrame = 480;  // 10 ms @ 48 kHz
 /** 1 kHz sine at -12 dBFS. */
 std::vector<float> make_tone(std::size_t n, float amp = 0.25f) {
     std::vector<float> out(n);
+    // The oscillator runs in double precision; the amplitude is widened
+    // explicitly so the build's -Wdouble-promotion stays happy.
+    const double amp_db = static_cast<double>(amp);
     for (std::size_t i = 0; i < n; ++i) {
         const double t = static_cast<double>(i) / kRate;
         out[i] = static_cast<float>(
-            amp * std::sin(2.0 * 3.14159265358979 * 1000.0 * t));
+            amp_db * std::sin(2.0 * 3.14159265358979 * 1000.0 * t));
     }
     return out;
 }

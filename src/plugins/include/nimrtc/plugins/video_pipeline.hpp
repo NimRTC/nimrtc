@@ -131,6 +131,15 @@ struct NIMRTC_API_STABLE VideoReceiverConfig {
     std::uint32_t  max_inflight_frames      = 8;
     bool           emit_nacks               = true;
 
+    /** Enable the adaptive playout delay of the video jitter buffer.
+     *
+     *  false (default) — a complete frame is delivered as soon as it is
+     *    assembled (no playout delay).
+     *  true — the frame is held until its playout deadline has passed;
+     *    the deadline follows the smoothed interarrival jitter estimate
+     *    (base delay + 4·J, clamped to [initial, max]). */
+    bool           adaptive_playout         = false;
+
     /** If true (recommended for H.264), the receiver runs FU-A reassembly
      *  itself. Otherwise the codec layer is expected to. */
     bool           expect_fu_a   = true;

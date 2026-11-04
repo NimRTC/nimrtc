@@ -36,7 +36,36 @@
  *   - Buffer overflow: oldest in-flight frame is dropped (audio JB does
  *     the same; we mirror the policy here for consistency).
  *
- * @note P1. Standalone module; not yet wired into the engine.
+ * ## Adaptive playout (v1.3 Q2)
+ *
+ * The playout-delay *policy* is shared with the audio jitter buffer and
+ * lives once in `nimrtc::jb_strategy` (RFC 3550 §6.4.1 interarrival
+ * jitter estimator + "base + 4·J" target delay).  This module is the
+ * video front-end of that strategy:
+ *
+ *   - one observation per *frame* (the media clock reading of the frame's
+ *     first packet), because a video frame — not an RTP packet — is the
+ *     unit the decoder plays out;
+ *   - a complete frame is held until its playout deadline
+ *     (first-packet arrival + target delay) has passed;
+ *   - the deadline is only enforced when `Config::adaptive` is true; the
+ *     default (false) keeps the fixed-window behaviour of emitting a
+ *     complete frame as soon as it is assembled.
+ *
+ * The target delay follows the shared policy
+ *
+ *     target = clamp(base_delay + jitter_multiplier * J, min_delay, max_delay)
+ *
+ * where J is the smoothed RFC 3550 §6.4.1 interarrival jitter.  The
+ * per-mode defaults (kLowLatency / kLive / kInteractive) live in the
+ * implementation; explicit `base_delay` / `min_delay` / `max_delay`
+ * values override them.
+ *
+ * Wiring (v1.3 Q2): opt-in through the receive path —
+ * `plugins::VideoReceiverConfig::adaptive_playout` /
+ * `EngineConfig::video_receiver_tuning.adaptive_playout` (default off,
+ * fixed-window behaviour preserved). `video_pipeline` forwards the
+ * switch and drains the buffer through `pop_frame(now_us)`.
  */
 
 #pragma once
@@ -54,6 +83,7 @@
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/error.hpp>
+#include <nimrtc/core/time.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
 namespace nimrtc::video_jb {
@@ -80,6 +110,26 @@ struct NIMRTC_API_STABLE Config {
 
     /** Whether to report lost packets via `pop_nack_entries()`. */
     bool emit_nacks = true;
+
+    // ---- Shared adaptive playout (v1.3 Q2, additive) --------------------
+    // Zero means "derive from mode" (see cpp for the per-mode defaults).
+    // Explicit non-zero values override the mode defaults.
+    core::Milliseconds base_delay{0};
+    core::Milliseconds min_delay{0};
+    core::Milliseconds max_delay{0};
+
+    /** Adaptive playout delay.
+     *
+     *  false (default) — fixed-window behaviour: a complete frame is
+     *    emitted as soon as it is assembled; the delay settings below are
+     *    ignored.
+     *  true — the frame is held until its playout deadline has passed
+     *    (first-packet arrival + target delay), where the target delay
+     *    tracks the smoothed RFC 3550 §6.4.1 jitter estimate. */
+    bool adaptive = false;
+
+    /** Safety factor applied to the jitter estimate (4 ≈ 4 sigma). */
+    double jitter_multiplier = 4.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -135,6 +185,10 @@ struct NIMRTC_API_STABLE Stats {
     std::uint64_t frames_emitted    = 0;
     std::uint64_t frames_incomplete = 0;
     std::uint64_t nacks_emitted     = 0;
+
+    // ---- Shared adaptive playout observability (v1.3 Q2, additive) --------
+    core::Milliseconds current_delay{};
+    core::Milliseconds current_jitter{};
 };
 
 // ---------------------------------------------------------------------------
@@ -150,8 +204,20 @@ public:
      *  frames after this call. */
     virtual bool insert(const InboundPacket& pkt) noexcept = 0;
 
-    /** Pop the next available completed frame. Returns nullptr if none. */
+    /** Pop the next available completed frame. Returns nullptr if none.
+     *
+     *  The no-argument form has no time reference, so it returns the next
+     *  complete frame regardless of the playout deadline.  Callers that
+     *  enable `Config::adaptive` should use `pop_frame(now_us)` instead. */
     virtual std::unique_ptr<AssembledFrame> pop_frame() noexcept = 0;
+
+    /** Pop the next completed frame whose playout time (first arrival +
+     *  shared target delay) is <= `now_us`. Returns nullptr if none is due
+     *  yet. Default implementation ignores the gate and delegates to
+     *  `pop_frame()` so existing callers keep the immediate-emit behavior. */
+    virtual std::unique_ptr<AssembledFrame> pop_frame(std::int64_t /*now_us*/) noexcept {
+        return pop_frame();
+    }
 
     /** Pop any pending NACK entries (lost packet seq numbers). */
     virtual std::vector<std::uint16_t> pop_nack_entries() noexcept = 0;

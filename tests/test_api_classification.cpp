@@ -270,12 +270,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   StrategyValidator p99 budget enforcement helper:
     //     - transport/strategy_validator.hpp
     //
+    // v1.3 Q2 bump: +1 public header (103 -> 104) for the shared
+    //   adaptive jitter-buffer strategy (audio + video front-ends):
+    //     - jb_strategy/adaptive_delay.hpp
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 103;
+    constexpr std::size_t kBaselineHeaderCount = 104;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

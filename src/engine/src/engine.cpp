@@ -1659,7 +1659,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
             config_.video_receiver_tuning.max_inflight_frames;
         cfg.max_jitter_buffer_ms =
             config_.video_receiver_tuning.max_jitter_buffer_ms;
+        cfg.initial_jitter_buffer_ms =
+            config_.video_receiver_tuning.initial_jitter_buffer_ms;
         cfg.emit_nacks  = config_.video_receiver_tuning.emit_nacks;
+        cfg.adaptive_playout = config_.video_receiver_tuning.adaptive_playout;
         (void)pal::make_plugin<&pal::resolve_video_receiver>(
             config_.video_receiver_name,
             video_receiver_,

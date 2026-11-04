@@ -18,9 +18,11 @@
  *
  * This module is a **reference implementation** sitting on top of the
  * existing `video_payload`, `video_jb`, `video_frame`, `rtp`, and `core`
- * modules.  It is **not yet wired into the engine**; the engine can later
- * adopt these classes (or replace them with an optimized version that
- * shares state with the engine's send/receive paths).
+ * modules.  The engine instantiates the reference receiver/sender
+ * through the `video_pipeline` plugin seam (`reference` factory) and
+ * forwards `EngineConfig::video_receiver_tuning` (including the opt-in
+ * `adaptive_playout` switch for the shared `nimrtc::jb_strategy`
+ * playout delay).
  *
  * ## Important contract notes
  *
@@ -39,7 +41,8 @@
  *     machine (RFC 6184 §5.8).  When a complete NAL unit is produced,
  *     it is handed to the jitter buffer as a single-NAL packet.
  *
- * @note P1. Standalone module; not yet wired into the engine.
+ * @note P1. Reference implementation; wired into the engine through
+ * the `video_pipeline` plugin seam (`reference` factory).
  */
 
 #pragma once

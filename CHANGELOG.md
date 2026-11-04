@@ -13,6 +13,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The video jitter buffer silently dropped complete frames.** In
+  `video_jb`, `tick()` treated every frame older than `max_wait_ms` the
+  same way: a frame that never completed was force-emitted (correctly
+  tagged `complete = false`), but a frame that *had* completed was
+  marked as emitted and counted in `frames_emitted` **without ever
+  being handed out** — the bitstream was dropped on the floor while
+  the statistics claimed the frame had been played. The trigger was
+  rare with the old fixed-window behaviour (the frame was normally
+  popped long before the timeout), but it becomes the normal case once
+  a frame waits for its playout deadline, which by design can exceed
+  `max_wait_ms`. The timeout now only applies to frames that never
+  completed; a complete frame stays buffered until it is popped.
+  Two related defects in the same path are fixed as well: the
+  in-flight cap evicted the *oldest* frame unconditionally (so a
+  complete frame that was only waiting for its deadline could be
+  evicted by the very delay it was waiting for — the cap now grows
+  with the adaptive delay window and prefers evicting a frame that
+  never completed), and a freshly created frame bucket was still
+  flagged "no marker seen" when the cap ran, so the cap could evict
+  the frame that had just been inserted.
 - **The Windows WebRTC APM prebuild reported a successful build as a
   failure.** `tools/build_webrtc_apm.cmd` carried three defects that
   together made the `windows` release leg fall back to NimRTC's built-in
@@ -207,6 +227,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The video jitter buffer now shares the audio side's adaptive
+  playout strategy (v1.3 Track Q2, "视频侧自适应 JB 统一").** The
+  RFC 3550 §6.4.1 interarrival-jitter estimator and the
+  "base + 4·J" target-delay policy live **once**, in the new
+  `nimrtc::jb_strategy` module; `nimrtc::jb` (audio) and
+  `nimrtc::video_jb` (video) are now two front-ends of that one
+  strategy. The video front-end:
+  - feeds the estimator **once per frame** (a video frame — not an RTP
+    packet — is what the decoder plays out, and the packets of one
+    frame share a media-clock reading, so per-packet observations
+    would feed the estimator the intra-frame burst spread and bias the
+    jitter estimate upwards);
+  - holds a complete frame until its playout deadline (first-packet
+    arrival + target delay) has passed, with the deadline derived from
+    the smoothed jitter estimate and clamped to
+    `[min_delay, max_delay]`; the delay and jitter estimates are
+    published through `video_jb::Stats`;
+  - is **opt-in** (`Config::adaptive`, default off): with the default
+    configuration a complete frame is still delivered the moment it is
+    assembled, so the receive path keeps its current latency. The
+    engine exposes the switch through
+    `EngineConfig::video_receiver_tuning.adaptive_playout` and
+    `plugins::VideoReceiverConfig::adaptive_playout`;
+  - gained a time-aware `pop_frame(now_us)` overload; the no-argument
+    `pop_frame()` keeps its "hand out the next complete frame"
+    behaviour, so existing callers are unaffected.
 - **Track D packaging rules landed (behind `NIMRTC_INSTALL=OFF` by
   default).** `cmake/NimRTCInstall.cmake` (new) centralises the Track D
   `install()` coverage from one place instead of touching every

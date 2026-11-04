@@ -96,6 +96,11 @@ if(NIMRTC_MODULE_VIDEO_PAYLOAD)
 endif()
 
 if(NIMRTC_MODULE_VIDEO_JB)
+    if(NOT NIMRTC_MODULE_JB_STRATEGY)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_VIDEO_JB requires NIMRTC_MODULE_JB_STRATEGY "
+            "(shared RFC 3550 jitter estimator)")
+    endif()
     add_subdirectory(video_jb)
 endif()
 

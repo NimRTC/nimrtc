@@ -10,6 +10,8 @@
  *   5. Timeout-driven emission of incomplete frames.
  *   6. Reset clears state.
  *   7. Multiple concurrent frames (different RTP timestamps).
+ *   8. Adaptive playout (shared nimrtc::jb_strategy): playout deadline,
+ *      jitter convergence, delay window bounds.
  */
 
 #include <gtest/gtest.h>
@@ -264,4 +266,231 @@ TEST(VideoJb, AssembledFrameCodecKindVP8) {
     ASSERT_NE(f, nullptr);
     EXPECT_EQ(f->codec, video_frame::CodecKind::kVP8);
     EXPECT_TRUE(f->is_keyframe);
+}
+
+// -----------------------------------------------------------------------------
+// Adaptive playout (v1.3 Q2 — shared nimrtc::jb_strategy, canonical suite:
+// VideoJbAdaptive below; plus timeout/ordering coverage here)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+/** Adaptive config with an explicit delay window so the expectations do
+ *  not depend on the per-mode defaults. */
+Config adaptive_cfg(std::uint32_t base_ms = 40,
+                    std::uint32_t min_ms = 20,
+                    std::uint32_t max_ms = 200) {
+    Config cfg;
+    cfg.adaptive   = true;
+    cfg.base_delay = core::Milliseconds{base_ms};
+    cfg.min_delay  = core::Milliseconds{min_ms};
+    cfg.max_delay  = core::Milliseconds{max_ms};
+    return cfg;
+}
+
+} // namespace
+
+TEST(VideoJbAdaptive, CompleteFrameSurvivesFrameTimeout) {
+    // max_wait_ms is shorter than the playout deadline: the frame must
+    // not be dropped by the timeout while it waits for its deadline.
+    Config cfg = adaptive_cfg(/*base_ms=*/400, /*min_ms=*/20, /*max_ms=*/400);
+    cfg.max_wait_ms = 50;
+    auto jb = create(cfg);
+
+    std::uint8_t nalu[] = {0x65, 0xAA};
+    jb->insert(make_packet(100, 1000, true, {nalu, sizeof(nalu)}, 0));
+
+    jb->tick(/*now_us=*/60 * 1000);
+
+    // Still buffered (not dropped) and emitted once it is due.
+    EXPECT_EQ(jb->pop_frame(/*now_us=*/60 * 1000), nullptr);
+    auto f = jb->pop_frame(/*now_us=*/400'000);
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->rtp_timestamp, 1000u);
+    EXPECT_EQ(jb->stats().frames_incomplete, 0u);
+    EXPECT_EQ(jb->stats().frames_emitted, 1u);
+}
+
+TEST(VideoJbAdaptive, EmitsFramesInOrder) {
+    auto jb = create(adaptive_cfg(/*base_ms=*/40));
+
+    std::uint8_t f1[] = {0x65, 0x11};        // IDR
+    std::uint8_t f2[] = {0x41, 0x22};        // P-slice
+    jb->insert(make_packet(100, 1000, true, {f1, sizeof(f1)}, 0));
+    jb->insert(make_packet(101, 4000, true, {f2, sizeof(f2)}, 33'333));
+
+    // Frame 1 is due 40 ms after its arrival, frame 2 40 ms after its own.
+    auto out1 = jb->pop_frame(/*now_us=*/40'000);
+    ASSERT_NE(out1, nullptr);
+    EXPECT_EQ(out1->rtp_timestamp, 1000u);
+
+    auto out2 = jb->pop_frame(/*now_us=*/73'333);
+    ASSERT_NE(out2, nullptr);
+    EXPECT_EQ(out2->rtp_timestamp, 4000u);
+}
+
+// -----------------------------------------------------------------------------
+// Shared adaptive playout (v1.3 Q2)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// One single-packet frame per call. RTP timestamps advance one 30 fps
+// frame (3000 ticks @ 90 kHz = 33.333 ms media time) per frame.
+void insert_frame(vjb::IVideoJitterBuffer& jb, int frame_index,
+                  std::int64_t arrival_us, std::uint16_t seq_base = 100) {
+    std::uint8_t nalu[] = {0x65, 0xAA};
+    const auto rtp_ts = static_cast<std::uint32_t>(frame_index * 3000);
+    const auto seq = static_cast<std::uint16_t>(seq_base + frame_index);
+    EXPECT_TRUE(jb.insert(make_packet(seq, rtp_ts, /*marker=*/true,
+                                       {nalu, sizeof(nalu)}, arrival_us)));
+}
+
+Config adaptive_config() {
+    return adaptive_cfg(/*base_ms=*/20, /*min_ms=*/20, /*max_ms=*/400);
+}
+
+}  // namespace
+
+TEST(VideoJbAdaptive, GateHoldsFrameUntilPlayoutDeadline) {
+    auto jb = create(adaptive_config());
+
+    std::uint8_t nalu[] = {0x65, 0xAA};
+    EXPECT_TRUE(jb->insert(make_packet(100, 0, /*marker=*/true,
+                                       {nalu, sizeof(nalu)},
+                                       /*arrival_us=*/0)));
+    // Target delay with no jitter yet = base 20 ms: not due at 19 ms.
+    EXPECT_EQ(jb->pop_frame(/*now_us=*/19 * 1000), nullptr);
+    // Due exactly at the 20 ms deadline.
+    auto f = jb->pop_frame(/*now_us=*/20 * 1000);
+    ASSERT_NE(f, nullptr);
+    EXPECT_TRUE(f->complete);
+}
+
+TEST(VideoJbAdaptive, FixedModeIgnoresGate) {
+    // Default config is fixed-window: the timed overload must behave
+    // like the immediate one (no deadline gate).
+    auto jb = create({});
+    std::uint8_t nalu[] = {0x65, 0xAA};
+    EXPECT_TRUE(jb->insert(make_packet(100, 0, /*marker=*/true,
+                                       {nalu, sizeof(nalu)},
+                                       /*arrival_us=*/0)));
+    auto f = jb->pop_frame(/*now_us=*/0);
+    ASSERT_NE(f, nullptr);
+    EXPECT_TRUE(f->complete);
+}
+
+TEST(VideoJbAdaptive, JitterEstimateConvergesAndDelayFollows) {
+    auto jb = create(adaptive_config());
+
+    // Media advances 33.333 ms/frame; arrival alternates +0 / +20 ms so
+    // the transit difference |D| is 20 ms every step.
+    constexpr std::int64_t kMediaStepUs = 33333;
+    for (int i = 0; i < 80; ++i) {
+        const std::int64_t media_us = static_cast<std::int64_t>(i) * kMediaStepUs;
+        const std::int64_t arrival_us =
+            media_us + ((i % 2 == 0) ? 0 : 20 * 1000);
+        insert_frame(*jb, i, arrival_us);
+        // Drain immediately so the buffer does not fill up; stats keep
+        // the shared estimator state.
+        auto f = jb->pop_frame();
+        ASSERT_NE(f, nullptr);
+    }
+
+    const auto stats = jb->stats();
+    // Smoothed |D| converges near 20 ms (truncated to whole ms).
+    EXPECT_GE(stats.current_jitter.count(), 15);
+    EXPECT_LE(stats.current_jitter.count(), 20);
+    // target = base (20) + 4 * J, inside the [20, 400] window.  The
+    // tracker derives the delay from the *unrounded* jitter estimate, so
+    // the two differ by at most one rounding step per 4·J term.
+    const auto expected = 20 + 4 * stats.current_jitter.count();
+    EXPECT_NEAR(static_cast<double>(stats.current_delay.count()),
+                static_cast<double>(expected), 4.0);
+    EXPECT_GT(stats.current_delay.count(), 20);
+}
+
+TEST(VideoJbAdaptive, MaxDelayUpperBoundHolds) {
+    Config cfg = adaptive_config();
+    cfg.max_delay = core::Milliseconds{30};
+    auto jb = create(cfg);
+
+    constexpr std::int64_t kMediaStepUs = 33333;
+    for (int i = 0; i < 80; ++i) {
+        const std::int64_t media_us = static_cast<std::int64_t>(i) * kMediaStepUs;
+        const std::int64_t arrival_us =
+            media_us + ((i % 2 == 0) ? 0 : 20 * 1000);
+        insert_frame(*jb, i, arrival_us);
+        auto f = jb->pop_frame();
+        ASSERT_NE(f, nullptr);
+    }
+
+    // ~100 ms of raw target delay must clamp to the 30 ms window top.
+    EXPECT_EQ(jb->stats().current_delay, core::Milliseconds{30});
+}
+
+TEST(VideoJbAdaptive, MinDelayLowerBoundHolds) {
+    Config cfg;
+    cfg.adaptive = true;
+    cfg.base_delay = core::Milliseconds{5};
+    cfg.min_delay = core::Milliseconds{50};
+    cfg.max_delay = core::Milliseconds{400};
+    auto jb = create(cfg);
+
+    // Steady arrivals: zero jitter, raw target = base 5 ms -> min 50 ms.
+    constexpr std::int64_t kMediaStepUs = 33333;
+    for (int i = 0; i < 10; ++i) {
+        insert_frame(*jb, i,
+                     static_cast<std::int64_t>(i) * kMediaStepUs);
+        auto f = jb->pop_frame();
+        ASSERT_NE(f, nullptr);
+    }
+    EXPECT_EQ(jb->stats().current_delay, core::Milliseconds{50});
+}
+
+// -----------------------------------------------------------------------------
+// Regression: the in-flight cap and late retransmissions
+// -----------------------------------------------------------------------------
+
+TEST(VideoJb, LateRetransmissionIsNotDeliveredTwice) {
+    // A frame that was already handed out must not be delivered again
+    // when a retransmission of one of its packets arrives: the late
+    // packet has to land in the (still buffered) bucket of that frame
+    // and be discarded there.
+    auto jb = create({});
+
+    std::uint8_t nalu[] = {0x65, 0xAA};
+    jb->insert(make_packet(100, 1000, true, {nalu, sizeof(nalu)}, 0));
+
+    auto first = jb->pop_frame();
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->rtp_timestamp, 1000u);
+
+    // NACK retransmission of the same packet (same seq, same RTP ts).
+    jb->insert(make_packet(100, 1000, true, {nalu, sizeof(nalu)}, 1000));
+
+    // The retransmission must not produce a second frame.
+    EXPECT_EQ(jb->pop_frame(), nullptr);
+    EXPECT_EQ(jb->stats().frames_emitted, 1u);
+}
+
+TEST(VideoJb, InflightCapDoesNotEvictTheNewlyInsertedFrame) {
+    // The in-flight cap must be enforced *before* the new frame is
+    // inserted — otherwise the frame that was just inserted is the one
+    // the cap evicts, and the frame is lost on arrival.
+    Config cfg;
+    cfg.max_inflight_frames = 2;
+    auto jb = create(cfg);
+
+    std::uint8_t nalu[] = {0x41, 0xAA};        // P-slice, no keyframe
+    // Two frames that never complete (no marker bit) fill the window.
+    jb->insert(make_packet(100, 1000, false, {nalu, sizeof(nalu)}, 0));
+    jb->insert(make_packet(101, 2000, false, {nalu, sizeof(nalu)}, 1000));
+    // The third frame is complete and must survive the cap.
+    jb->insert(make_packet(102, 3000, true, {nalu, sizeof(nalu)}, 2000));
+
+    auto f = jb->pop_frame();
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->rtp_timestamp, 3000u);
+    EXPECT_TRUE(f->complete);
 }

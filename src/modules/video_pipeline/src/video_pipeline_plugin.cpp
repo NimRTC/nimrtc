@@ -19,6 +19,7 @@
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/core/time.hpp>
 #include <nimrtc/rtp/packet.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
@@ -158,6 +159,14 @@ ReceiverConfig to_concrete_receiver_cfg(const plugins::VideoReceiverConfig& p) n
     jb.max_inflight_frames = p.max_inflight_frames;
     jb.max_wait_ms         = p.max_jitter_buffer_ms;
     jb.emit_nacks          = p.emit_nacks;
+    jb.adaptive            = p.adaptive_playout;
+    if (p.adaptive_playout) {
+        // The adaptive strategy needs a base delay (the fixed component of
+        // "base + 4·J") and an upper bound; the window lower bound stays
+        // at the mode default.
+        jb.base_delay = core::Milliseconds{p.initial_jitter_buffer_ms};
+        jb.max_delay  = core::Milliseconds{p.max_jitter_buffer_ms};
+    }
     c.jitter_buffer_config = jb;
     return c;
 }
@@ -172,6 +181,7 @@ to_plugin_receiver_cfg(const ReceiverConfig& c) noexcept {
     p.max_inflight_frames = c.jitter_buffer_config.max_inflight_frames;
     p.max_jitter_buffer_ms = c.jitter_buffer_config.max_wait_ms;
     p.emit_nacks          = c.jitter_buffer_config.emit_nacks;
+    p.adaptive_playout    = c.jitter_buffer_config.adaptive;
     return p;
 }
 

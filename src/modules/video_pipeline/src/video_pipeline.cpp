@@ -232,7 +232,8 @@ struct VideoReceiver::Impl {
     void flush_fua(std::uint8_t  nri,
                    std::uint8_t  nalu_type,
                    core::ByteSpan body,
-                   bool          marker) noexcept {
+                   bool          marker,
+                   std::int64_t  arrival_us) noexcept {
         if (body.empty()) {
             // Empty reassembly; nothing to emit.  This can happen if a
             // middle/end fragment arrived without a start — drop silently.
@@ -249,7 +250,7 @@ struct VideoReceiver::Impl {
         pkt.ssrc          = cfg.ssrc;
         pkt.seq           = fua_start_seq;   // representative seq
         pkt.rtp_timestamp = fua_rtp_ts;
-        pkt.arrival_us    = 0;               // filled by caller? (set later)
+        pkt.arrival_us    = arrival_us;
         pkt.marker        = marker;
         pkt.payload_type  = cfg.payload_type;
         pkt.codec         = video_frame::CodecKind::kH264;
@@ -295,7 +296,7 @@ struct VideoReceiver::Impl {
                     flush_fua(fua_nri, fua_nalu_type,
                               core::ByteSpan{fua_buf.data(),
                                              fua_buf.size()},
-                              marker);
+                              marker, arrival_us);
                     fua_in_progress = false;
                     fua_buf.clear();
                     fua_end_marker  = false;
@@ -345,7 +346,10 @@ struct VideoReceiver::Impl {
     void drain_frames(std::int64_t now_us) noexcept {
         if (!frame_cb) return;
         for (;;) {
-            auto f = jb->pop_frame();
+            // The time-aware pop lets the jitter buffer hold a frame until
+            // its playout deadline (adaptive mode).  In fixed-window mode
+            // it degrades to the immediate emit of the next complete frame.
+            auto f = jb->pop_frame(now_us);
             if (!f) break;
             stats.frames_emitted++;
             if (!f->complete) stats.frames_incomplete++;

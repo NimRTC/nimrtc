@@ -263,8 +263,13 @@ struct NIMRTC_API_STABLE EngineConfig {
         std::uint8_t  payload_type        = 102;
         std::uint32_t max_inflight_frames = 8;
         std::uint32_t max_jitter_buffer_ms = 200;
+        std::uint32_t initial_jitter_buffer_ms = 40;
         bool          emit_nacks          = true;
         bool          expect_fu_a         = true;
+        /** Enable the adaptive playout delay of the video jitter buffer
+         *  (the target delay then follows the interarrival jitter
+         *  estimate instead of being fixed). */
+        bool          adaptive_playout    = false;
     } video_receiver_tuning;
 
     /** Defaults forwarded to plugins::VideoSenderConfig when the engine

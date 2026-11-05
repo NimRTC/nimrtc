@@ -670,7 +670,7 @@ Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
 | `NIMRTC_WARNINGS_AS_ERRORS` | **ON** | Treat warnings as errors |
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | Use vendored WebRTC APM library |
 | `NIMRTC_INSTALL` | OFF | Enable `install()` rules — `include/` + `lib/` + `lib/cmake/NimRTC/` (Track D packaging) |
-| `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | Build the GMSSL-backed DTLS factory (id=`gmssl`); requires GMSSL v3.x on the system |
+| `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | Build the GMSSL-backed DTLS factory (id=`gmssl`); uses the vendored submodule at `src/third_party/gmssl/src` (pin v3.2.0), default OFF so non-GM builds pay zero cost |
 | `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC + NVDEC (Win/Linux) |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF (Windows) |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |

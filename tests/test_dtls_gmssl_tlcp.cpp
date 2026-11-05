@@ -19,6 +19,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <span>
 #include <thread>
 #include <vector>
@@ -72,26 +80,32 @@ bool generate_sm2_cert(const char* basename, const char* common_name,
     snprintf(cmd_keygen, sizeof(cmd_keygen),
              "gmssl sm2keygen -pass %s -out \"%s\" 2>&1", pass, key_file);
 
-    // gmssl certgen -key <key> -pass <pass> -sig_alg sm2sign-with-sm3
-    //       -sm2_id test -CN <name> -days 365 -out <cert>
+    // gmssl certgen — v3.2 has no -sig_alg flag; SM2 key input implies
+    // sm2sign-with-sm3.  -serial_len is mandatory.
     char cmd_certgen[4096] = {0};
     snprintf(cmd_certgen, sizeof(cmd_certgen),
              "gmssl certgen -key \"%s\" -pass %s "
-             "-sig_alg sm2sign-with-sm3 -sm2_id test "
-             "-CN \"%s\" -days 365 -out \"%s\" 2>&1",
+             "-sm2_id test "
+             "-CN \"%s\" -days 365 -serial_len 8 -out \"%s\" 2>&1",
              key_file, pass, common_name, cert_file);
 
     std::printf("[setup] generating SM2 key: %s\n", cmd_keygen);
+    std::fflush(stdout);
+    std::fprintf(stderr, "[trace] keygen start %s\n", basename);
     if (std::system(cmd_keygen) != 0) {
         std::fprintf(stderr, "[setup] FAIL: sm2keygen failed\n");
         return false;
     }
+    std::fprintf(stderr, "[trace] keygen done %s\n", basename);
 
     std::printf("[setup] generating SM2 cert: %s\n", cmd_certgen);
+    std::fflush(stdout);
+    std::fprintf(stderr, "[trace] certgen start %s\n", basename);
     if (std::system(cmd_certgen) != 0) {
         std::fprintf(stderr, "[setup] FAIL: certgen failed\n");
         return false;
     }
+    std::fprintf(stderr, "[trace] certgen done %s\n", basename);
 
     out_cert_path = cert_file;
     out_key_path  = key_file;
@@ -152,6 +166,8 @@ int main() {
         return 1;
     }
     std::printf("[setup] client cert: %s\n", client_cert.c_str());
+    std::fflush(stdout);
+    std::fprintf(stderr, "[trace] server certgen done\n");
 
     if (!generate_sm2_cert("gmssl-server", "GMSSL-Test-Server",
                            server_cert, server_key, server_pass)) {
@@ -159,6 +175,8 @@ int main() {
         return 1;
     }
     std::printf("[setup] server cert: %s\n", server_cert.c_str());
+    std::fflush(stdout);
+    std::fprintf(stderr, "[trace] building configs\n");
 
     // =========================================================================
     // Create sessions with socket addresses and SM2 cert paths

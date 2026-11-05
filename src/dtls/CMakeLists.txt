@@ -33,9 +33,14 @@
 #   - GMSSL v3.x native lib (opt-in via NIMRTC_ENABLE_DTLS_GMSSL)
 # ----------------------------------------------------------------------------
 
-# GMSSL backend (ADR-013) — opt-in, default OFF
+# GMSSL backend (ADR-013, v1.3 X1) — opt-in, default OFF
 option(NIMRTC_ENABLE_DTLS_GMSSL
-       "Build the GMSSL-backed DTLS factory (id=gmssl). Requires GMSSL v3.x installed on the system (or in $ENV{GMSSL_ROOT}). When OFF (default) only the wolfSSL backend is built."
+       "Build the GMSSL-backed DTLS factory (id=gmssl). Uses the vendored submodule at src/third_party/gmssl/src (pin v3.2.0); set NIMRTC_GMSSL_USE_SYSTEM=ON to use a system install ($ENV{GMSSL_ROOT}) instead. When OFF (default) only the wolfSSL backend is built."
+       OFF)
+# System fallback for environments that cannot vendor the source tree
+# (e.g. a distro package). Default OFF = vendored-first (v1.3 X1).
+option(NIMRTC_GMSSL_USE_SYSTEM
+       "Link GMSSL from the system install ($ENV{GMSSL_ROOT}) instead of the vendored submodule. Requires NIMRTC_ENABLE_DTLS_GMSSL=ON to take effect."
        OFF)
 
 set(_dtls_seam_srcs
@@ -75,10 +80,11 @@ target_compile_definitions(nimrtc_dtls_seam
     )
 
 if(NIMRTC_ENABLE_DTLS_GMSSL)
-    # ADR-013: link GMSSL v3.x native library (tls.h / TLS_* API).
-    # nimrtc_link_gmssl() resolves the library via find_path/find_library
-    # in /usr/local, /usr, $ENV{GMSSL_ROOT}, falling back gracefully
-    # so a missing GMSSL fails at build-time (not configure-time).
+    # ADR-013 (v1.3 X1): link the vendored GMSSL v3.x STATIC library.
+    # nimrtc_link_gmssl() prefers the submodule at
+    # src/third_party/gmssl/src via nimrtc_vendor_gmssl; the
+    # find_path/find_library system probe inside only runs when
+    # NIMRTC_GMSSL_USE_SYSTEM=ON is set explicitly.
     nimrtc_link_gmssl(nimrtc_dtls_seam)
     target_compile_definitions(nimrtc_dtls_seam
         PUBLIC

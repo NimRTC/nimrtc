@@ -158,6 +158,54 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # GMSSL vendored opt-in (v1.3 X1, ADR-013 correction).
+  # Windows/MSVC acceptance: submodule at src/third_party/gmssl/src
+  # (pin v3.2.0) builds STATIC EXCLUDE_FROM_ALL when
+  # NIMRTC_ENABLE_DTLS_GMSSL=ON, and test_dtls_gmssl_tlcp passes.
+  # Default builds stay OFF (zero cost for non-GM users).
+  # ---------------------------------------------------------------------------
+  gmssl-vendored:
+    name: gmssl-vendored / msvc
+    runs-on: windows-2022
+    timeout-minutes: 60
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-gmssl-vendored
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        run: python tools/check_vendor.py
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (GMSSL ON)
+        run: cmake --preset debug.msvc -DNIMRTC_ENABLE_DTLS_GMSSL=ON -DNIMRTC_BUILD_EXAMPLES=OFF
+
+      - name: Build GMSSL backend + TLCP test
+        run: cmake --build --preset debug.msvc --target nimrtc_dtls_seam nimrtc_gmssl_cli test_dtls_gmssl_tlcp -j 2
+
+      - name: Run TLCP test
+        # test_dtls_gmssl_tlcp shells out to `gmssl sm2keygen`/`gmssl certgen`
+        # for SM2 fixtures — put the vendored CLI on PATH first.
+        run: |
+          $gmsslBin = Get-ChildItem -Recurse -Filter gmssl.exe build | Select-Object -First 1 -ExpandProperty DirectoryName
+          if ($gmsslBin) { $env:PATH = "$gmsslBin;$env:PATH" }
+          ctest --preset tests.msvc -R test_dtls_gmssl_tlcp --output-on-failure
+
+  # ---------------------------------------------------------------------------
   # Docs: Markdown link / anchor integrity.
   # Cheap, platform-independent, and catches the class of rot that a
   # README rewrite introduces (relative paths written as if they were

@@ -662,7 +662,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `NIMRTC_WARNINGS_AS_ERRORS` | **ON** | 警告视为错误 |
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | 使用 vendored WebRTC APM |
 | `NIMRTC_INSTALL` | OFF | 启用 `install()` 规则 —— `include/` + `lib/` + `lib/cmake/NimRTC/`（Track D 打包） |
-| `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | 构建 GMSSL 后端的 DTLS 工厂（id=`gmssl`）；需要系统上装有 GMSSL v3.x |
+| `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | 构建 GMSSL 后端的 DTLS 工厂（id=`gmssl`）；使用 `src/third_party/gmssl/src` 的 vendored 子模块（pin v3.2.0），默认 OFF，非国密构建零成本 |
 | `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC + NVDEC（Win/Linux） |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF（Windows） |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |

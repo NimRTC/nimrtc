@@ -13,11 +13,15 @@
  *
  * ## I/O model
  *
- * GMSSL uses a file-descriptor (socket) as the transport.  Each
- * DtlsSessionGmSSL owns one non-blocking connected UDP socket.
- * The NimRTC test layer bridges two sessions via feed_inbound /
- * take_outbound: session A's take_outbound() → feed_inbound(B) and
- * vice-versa.  This mirrors real DTLS over UDP loopback.
+ * Vanilla GmSSL v3.2 exposes no custom-I/O callbacks: TLS_CONNECT has no
+ * io_ctx/io_send/io_recv members and tls_send/recv_record always go
+ * through conn->sock (stream semantics).  Each DtlsSessionGmSSL therefore
+ * owns one connected 127.0.0.1 TCP pair: gmssl_end_ is handed to GMSSL via
+ * tls_set_socket(), loop_end_ stays with Impl.  The NimRTC test layer
+ * bridges two sessions via feed_inbound / take_outbound: session A's
+ * take_outbound() → feed_inbound(B) and vice-versa.  TCP preserves the
+ * byte stream, so GMSSL's two-phase (header-then-body) record reads stay
+ * intact.  This mirrors real DTLS over loopback.
  *
  * ## Cipher suites
  *
@@ -57,6 +61,9 @@
 #include <nimrtc/core/log.hpp>
 
 #include <algorithm>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -68,6 +75,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
+#include <vector>
+// NOTE: no direct <winsock2.h>/<sys/socket.h> include here —
+// <gmssl/tls.h> -> <gmssl/socket.h> already pulls the platform socket
+// headers (and the WIN32 macro selecting the SOCKET branch comes from
+// the nimrtc_vendor_gmssl PUBLIC definitions).
 
 // GMSSL v3.x native headers
 extern "C" {
@@ -120,6 +134,13 @@ std::string cert_sha256_hex(const uint8_t* der, size_t der_len) {
         s.push_back(tab[hash[i] & 0xF]);
     }
     return s;
+}
+
+void close_tls_socket(tls_socket_t& sock) {
+    if (tls_socket_is_valid(sock)) {
+        tls_socket_close(sock);
+        sock = tls_socket_invalid();
+    }
 }
 
 std::string hex_colon(const uint8_t* data, size_t len) {
@@ -293,19 +314,22 @@ struct DtlsSessionGmSSL::Impl {
     TLS_CONNECT* conn_ = nullptr;
     bool         conn_inited_ = false;
 
-    // Loopback I/O bridges (NimRTC seam integration).
+    // TCP-loopback transport (vanilla-GMSSL seam integration).
     //
-    // Two deques carry raw DTLS record bytes between the engine and the
-    // outside world.  feed_inbound() pushes onto io_in_queue_; the GMSSL
-    // io_recv callback pops from the front.  The io_send callback pushes
-    // onto io_out_queue_; take_outbound() drains it and returns the
-    // DtlsRecord layer to the test.
-    //
-    // (We no longer touch `sock_fd_` for I/O.  The socket field exists
-    // only so the GMSSL struct initialiser is happy — we never call
-    // send()/recv() on it.  See "Custom I/O patch" in tls.c:2154.)
-    std::deque<std::vector<uint8_t>> io_in_queue_;
-    std::deque<std::vector<uint8_t>> io_out_queue_;
+    // Vanilla GmSSL v3.2 exposes no custom-I/O callbacks: TLS_CONNECT has
+    // no io_ctx/io_send/io_recv members, and tls_send_record /
+    // tls_recv_record always go through conn->sock (stream semantics).
+    // Each session therefore owns a connected 127.0.0.1 TCP pair:
+    // gmssl_end_ is handed to GMSSL via tls_set_socket(), loop_end_
+    // stays with Impl.  take_outbound() drains bytes GMSSL wrote;
+    // feed_inbound() writes peer bytes for GMSSL to read.  TCP preserves
+    // the byte stream, so GMSSL's two-phase (header-then-body) record
+    // reads stay intact.
+    tls_socket_t gmssl_end_ = tls_socket_invalid();
+    tls_socket_t loop_end_ = tls_socket_invalid();
+    // Bytes feed_inbound() could not push into loop_end_ (EAGAIN);
+    // retried on the next pump so no inbound byte is ever dropped.
+    std::deque<uint8_t> inbound_pending_;
 
     // Peer fingerprint pin
     Fingerprint               local_fp_;
@@ -408,6 +432,135 @@ struct DtlsSessionGmSSL::Impl {
         return true;
     }
 
+    bool open_socket_pair() {
+        // Connected 127.0.0.1 TCP pair: gmssl_end_ goes to GMSSL,
+        // loop_end_ stays with Impl. Both non-blocking.
+        // Windows requires WSAStartup before any socket call; the POSIX
+        // branch of tls_socket_lib_init() is a no-op so this is portable.
+        static std::once_flag socket_lib_once;
+        static bool socket_lib_ok = false;
+        std::call_once(socket_lib_once, [] {
+            socket_lib_ok = (tls_socket_lib_init() == 1);
+        });
+        if (!socket_lib_ok) return false;
+        tls_socket_t listener = tls_socket_invalid();
+        tls_socket_t connector = tls_socket_invalid();
+        tls_socket_t acceptor = tls_socket_invalid();
+        struct sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (tls_socket_create(&listener, AF_INET, SOCK_STREAM, 0) != 1) return false;
+        int one = 1;
+#ifdef _WIN32
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#endif
+        if (::bind(listener, reinterpret_cast<struct sockaddr*>(&addr),
+                   sizeof(addr)) != 0) {
+            close_tls_socket(listener);
+            return false;
+        }
+        if (::listen(listener, 1) != 0) {
+            close_tls_socket(listener);
+            return false;
+        }
+        tls_socklen_t len = sizeof(addr);
+        if (::getsockname(listener, reinterpret_cast<struct sockaddr*>(&addr),
+                          &len) != 0) {
+            close_tls_socket(listener);
+            return false;
+        }
+        if (tls_socket_create(&connector, AF_INET, SOCK_STREAM, 0) != 1) {
+            close_tls_socket(listener);
+            return false;
+        }
+        if (::connect(connector, reinterpret_cast<struct sockaddr*>(&addr),
+                      sizeof(addr)) != 0) {
+            close_tls_socket(connector);
+            close_tls_socket(listener);
+            return false;
+        }
+        acceptor = ::accept(listener, nullptr, nullptr);
+        if (!tls_socket_is_valid(acceptor)) {
+            close_tls_socket(connector);
+            close_tls_socket(listener);
+            return false;
+        }
+        close_tls_socket(listener);
+        tls_socket_set_nonblocking(connector, 1);
+        tls_socket_set_nonblocking(acceptor, 1);
+        gmssl_end_ = connector;
+        loop_end_ = acceptor;
+        return true;
+    }
+
+    // Push pending + new bytes into loop_end_ without blocking.
+    void push_inbound_bytes(const uint8_t* data, size_t size) {
+        if (!tls_socket_is_valid(loop_end_)) return;
+        if (!inbound_pending_.empty()) {
+            std::vector<uint8_t> merged;
+            merged.reserve(inbound_pending_.size() + size);
+            for (uint8_t b : inbound_pending_) merged.push_back(b);
+            merged.insert(merged.end(), data, data + size);
+            inbound_pending_.clear();
+            data = nullptr;
+            push_inbound_bytes(merged.data(), merged.size());
+            return;
+        }
+        size_t off = 0;
+        while (off < size) {
+            tls_ret_t n = tls_socket_send(
+                loop_end_, reinterpret_cast<const char*>(data + off),
+                size - off, 0);
+            if (n > 0) {
+                off += static_cast<size_t>(n);
+                continue;
+            }
+            if (n == 0) break;
+            int err = tls_socket_get_error();
+            tls_socket_err_t t = tls_socket_get_error_type(err, 0);
+            if (t == TLS_SOCKET_ERR_WANT_WRITE ||
+                t == TLS_SOCKET_ERR_INTERRUPTED) {
+                // Buffer what did not fit; retry on next pump.
+                for (size_t i = off; i < size; ++i)
+                    inbound_pending_.push_back(data[i]);
+                break;
+            }
+            for (size_t i = off; i < size; ++i)
+                inbound_pending_.push_back(data[i]);
+            break;
+        }
+    }
+
+    void flush_inbound_pending() {
+        if (inbound_pending_.empty() || !tls_socket_is_valid(loop_end_)) return;
+        std::vector<uint8_t> tmp(inbound_pending_.begin(), inbound_pending_.end());
+        inbound_pending_.clear();
+        push_inbound_bytes(tmp.data(), tmp.size());
+    }
+
+    // Drain everything GMSSL wrote (visible at loop_end_) into records.
+    void drain_outbound(std::vector<nimrtc::dtls::DtlsRecord>& recs) {
+        if (!tls_socket_is_valid(loop_end_)) return;
+        uint8_t buf[18437 + 64];
+        for (;;) {
+            tls_ret_t n = tls_socket_recv(loop_end_, reinterpret_cast<char*>(buf),
+                                          sizeof(buf), 0);
+            if (n > 0) {
+                nimrtc::dtls::DtlsRecord r;
+                r.bytes.assign(buf, buf + n);
+                ++stats_instance.records_out;
+                recs.push_back(std::move(r));
+                continue;
+            }
+            break;  // 0 or EAGAIN: nothing more right now
+        }
+    }
+
     bool create_tls_object(const char* cert_file,
                             [[maybe_unused]] const char* key_file,
                             [[maybe_unused]] const char* key_pass) {
@@ -444,13 +597,19 @@ struct DtlsSessionGmSSL::Impl {
             ctx_->certificate_request = 0;
         }
 
-        // Install NimRTC custom-I/O callbacks so tls_send_record /
-        // tls_recv_record route bytes through io_out_queue_ / io_in_queue_
-        // rather than the (unused) fd in conn_->sock.  See comment block
-        // on io_in_queue_ above for the rationale.
-        conn_->io_ctx   = this;
-        conn_->io_send  = &DtlsSessionGmSSL::Impl::gmssl_io_send;
-        conn_->io_recv  = &DtlsSessionGmSSL::Impl::gmssl_io_recv;
+        // Vanilla GmSSL has no custom-I/O callbacks: hand the connected
+        // gmssl_end_ to the library so tls_send/recv_record use a real
+        // (non-blocking, in-process TCP loopback) transport.
+        if (!open_socket_pair()) {
+            nimrtc::core::log::Logger::instance().error(
+                "gmssl: loopback socketpair failed: " + gmssl_err());
+            return false;
+        }
+        if (tls_set_socket(conn_, gmssl_end_) != 1) {
+            nimrtc::core::log::Logger::instance().error(
+                "gmssl: tls_set_socket failed: " + gmssl_err());
+            return false;
+        }
 
         // Compute and cache local fingerprint from the loaded cert
         compute_local_fingerprint(cert_file);
@@ -459,54 +618,6 @@ struct DtlsSessionGmSSL::Impl {
             std::string("DtlsSessionGmSSL: role=") +
             (config.role == DtlsRole::Server ? "Server" : "Client"));
         return true;
-    }
-
-    // ------------------------------------------------------------------
-    // Custom I/O callbacks (GMSSL NimRTC patch)
-    //
-    // These are invoked by tls_send_record / tls_recv_record with the
-    // NimRTC-patched libgmssl.so.3.3 (see tls.c:2154 for io_send and
-    // tls.c:2232 for io_recv).  They use `this` as the io_ctx.
-    //
-    // Return contract (mirrors the GMSSL "tls_socket_*" convention):
-    //   1     = full success, *sent / *rcvd bytes transferred.
-    //   < 0   = EAGAIN-style "would block"; tls_send/recv_record returns
-    //           TLS_ERROR_SEND_AGAIN / RECV_AGAIN so the caller drives
-    //           us again on the next tick.
-    //   other = error.
-    // ------------------------------------------------------------------
-
-    static int gmssl_io_send(void* ctx,
-                               const uint8_t* buf,
-                               size_t len,
-                               size_t* sent) {
-        auto* self = static_cast<DtlsSessionGmSSL::Impl*>(ctx);
-        self->io_out_queue_.emplace_back(buf, buf + len);
-        *sent = len;
-        return 1;
-    }
-
-    static int gmssl_io_recv(void* ctx,
-                               uint8_t* buf,
-                               size_t len,
-                               size_t* rcvd) {
-        auto* self = static_cast<DtlsSessionGmSSL::Impl*>(ctx);
-        if (self->io_in_queue_.empty()) {
-            *rcvd = 0;
-            return -1;  // EAGAIN — caller will retry on next tick
-        }
-        auto& front = self->io_in_queue_.front();
-        size_t take = std::min(len, front.size());
-        std::memcpy(buf, front.data(), take);
-        if (take == front.size()) {
-            self->io_in_queue_.pop_front();
-        } else {
-            front.erase(front.begin(),
-                        front.begin() + static_cast<std::ptrdiff_t>(take));
-        }
-        *rcvd = take;
-        ++self->stats_instance.records_in;
-        return 1;
     }
 
     void compute_local_fingerprint(const char* cert_file) {
@@ -582,9 +693,10 @@ struct DtlsSessionGmSSL::Impl {
 
         int ret = tls_do_handshake(conn_);
 
-        // Bytes GMSSL wrote during the handshake were already enqueued
-        // synchronously into io_out_queue_ by gmssl_io_send.  No socket
-        // drain needed.
+        // Bytes GMSSL wrote during the handshake sit in the TCP-loopback
+        // buffer until take_outbound() drains them via drain_outbound().
+        // No drain here: feed_inbound() must not consume outbound bytes
+        // that belong to the caller's next take_outbound() call.
 
         if (ret == 1) {
             // tls_do_handshake() returned 1: this side's outgoing flight is
@@ -761,8 +873,9 @@ struct DtlsSessionGmSSL::Impl {
         if (ctx_) {
             tls_ctx_cleanup(ctx_);
         }
-        io_in_queue_.clear();
-        io_out_queue_.clear();
+        close_tls_socket(gmssl_end_);
+        close_tls_socket(loop_end_);
+        inbound_pending_.clear();
         state = DtlsState::Closed;
     }
 };
@@ -840,9 +953,10 @@ core::Result<void> DtlsSessionGmSSL::open() noexcept {
             core::ErrorCode::InternalError, "GMSSL cert/key setup failed");
     }
 
-    // (No socket setup — we use the NimRTC io_send / io_recv callback
-    // patch in libgmssl.so.3.3 to drive GMSSL purely via in-memory
-    // queues.  See io_in_queue_ / io_out_queue_ for the data path.)
+    // (Socket setup happens in create_tls_object(): a connected
+    // 127.0.0.1 TCP pair is created and gmssl_end_ is handed to GMSSL
+    // via tls_set_socket().  feed_inbound() writes into loop_end_ and
+    // take_outbound() drains what GMSSL wrote.)
 
     if (!impl_->create_tls_object(cert_file, key_file, key_pass_local)) {
         ++impl_->stats_instance.errors;
@@ -866,9 +980,10 @@ std::size_t DtlsSessionGmSSL::feed_inbound(
     if (bytes.empty()) return 0;
     ++impl_->stats_instance.records_in;
 
-    // Enqueue onto the io_in_queue_ — gmssl_io_recv() pops from the front
-    // the next time GMSSL pulls bytes during a handshake pump.
-    impl_->io_in_queue_.emplace_back(bytes.begin(), bytes.end());
+    // Write peer bytes into loop_end_ so the next pump_handshake() can
+    // read them through gmssl_end_.  Short writes are buffered in
+    // inbound_pending_ and retried on the next pump.
+    impl_->push_inbound_bytes(bytes.data(), bytes.size());
 
     // Drive the handshake state machine until it blocks waiting for more
     // inbound data (RECV_AGAIN / SEND_AGAIN) or completes.  A single
@@ -878,16 +993,19 @@ std::size_t DtlsSessionGmSSL::feed_inbound(
     // before blocking again).  Looping here prevents the server from
     // getting stuck in HelloSent when the peer's data arrives.
     for (int pump_pass = 0; pump_pass < 16; ++pump_pass) {
+        impl_->flush_inbound_pending();
         if (impl_->pump_handshake()) break;
         // pump_handshake returned false: waiting for more data.
-        // If io_in_queue_ is empty, GMSSL has consumed everything and
-        // is genuinely blocked — stop pumping to avoid spinning.
+        // GMSSL has consumed everything available and is genuinely
+        // blocked — stop after a couple of settling passes to avoid
+        // spinning on RECV_AGAIN.
         if (!impl_->conn_inited_ ||
             impl_->state == DtlsState::Connected ||
             impl_->state == DtlsState::Failed ||
             impl_->state == DtlsState::Closed) {
             break;
         }
+        if (pump_pass >= 1 && impl_->inbound_pending_.empty()) break;
     }
 
     return bytes.size();
@@ -895,15 +1013,7 @@ std::size_t DtlsSessionGmSSL::feed_inbound(
 
 std::vector<DtlsRecord> DtlsSessionGmSSL::take_outbound() noexcept {
     std::vector<DtlsRecord> recs;
-    recs.reserve(impl_->io_out_queue_.size());
-
-    while (!impl_->io_out_queue_.empty()) {
-        DtlsRecord r;
-        r.bytes = std::move(impl_->io_out_queue_.front());
-        impl_->io_out_queue_.pop_front();
-        ++impl_->stats_instance.records_out;
-        recs.push_back(std::move(r));
-    }
+    impl_->drain_outbound(recs);
 
     // Keep pumping until the handshake stabilises (both sides done, or
     // no new outbound bytes and handshake state is final).  This is
@@ -911,19 +1021,14 @@ std::vector<DtlsRecord> DtlsSessionGmSSL::take_outbound() noexcept {
     // has received and processed all required messages yet.
     if (impl_->conn_inited_) {
         for (int pass = 0; pass < 8; ++pass) {
-            auto prev_out = impl_->io_out_queue_.size();
+            auto prev_out = recs.size();
+            impl_->flush_inbound_pending();
             impl_->pump_handshake();
-            while (!impl_->io_out_queue_.empty()) {
-                DtlsRecord r;
-                r.bytes = std::move(impl_->io_out_queue_.front());
-                impl_->io_out_queue_.pop_front();
-                ++impl_->stats_instance.records_out;
-                recs.push_back(std::move(r));
-            }
+            impl_->drain_outbound(recs);
             if ((impl_->state == DtlsState::Connected ||
                  impl_->state == DtlsState::Failed ||
                  impl_->state == DtlsState::Closed) &&
-                impl_->io_out_queue_.size() == prev_out) {
+                recs.size() == prev_out) {
                 break;
             }
         }
@@ -940,9 +1045,8 @@ void DtlsSessionGmSSL::tick() noexcept {
     // Note: we deliberately do NOT call pump_handshake() here.
     // The handshake is driven exclusively by feed_inbound() (when
     // inbound data arrives) and take_outbound() (which has its own
-    // 8-pass pump loop).  Calling pump here as well would cause the
-    // server to spin when io_in_queue_ is empty — GMSSL returns
-    // RECV_AGAIN and we would loop forever without advancing state.
+    // 8-pass pump loop).  Calling pump here as well would spin on
+    // RECV_AGAIN without advancing state.
 }
 
 DtlsState DtlsSessionGmSSL::state() const noexcept {

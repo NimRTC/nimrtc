@@ -97,3 +97,8 @@
 #     url    = https://github.com/Mbed-TLS/mbedtls.git
 #     branch = mbedtls-4.2.0
 # ---------------------------------------------------------------------------
+[submodule "src/third_party/gmssl/src"]
+	path = src/third_party/gmssl/src
+	url = https://github.com/guanzhi/GmSSL.git
+	# Pinned: v3.2.0 (7c9f02904ef33e59c87b4f16621cc8fd434e7579) — see src/third_party/vendor.json
+	# v1.3 X1 (ADR-013 correction): default OFF, opt-in via NIMRTC_ENABLE_DTLS_GMSSL=ON.

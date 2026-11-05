@@ -233,13 +233,22 @@ function(nimrtc_link_wolfssl target)
 endfunction()
 
 # ADR-013: link GMSSL v3.x native library.
-# GMSSL uses the same TLS API names as OpenSSL 1.1.1 (TLS_CONNECT,
-# TLS_CTX, tls_do_handshake, tls_send, tls_recv etc.) but lives
-# under <gmssl/tls.h> and links to libgmssl / gmssl.lib.
-# The function searches: $ENV{GMSSL_ROOT}/include, /usr/local/include,
-# /usr/include for <gmssl/tls.h>; and $ENV{GMSSL_ROOT}/lib, /usr/local/lib,
-# /usr/lib for libgmssl / gmssl.lib.
+# v1.3 X1: vendored-first.  When NIMRTC_ENABLE_DTLS_GMSSL=ON and the
+# submodule at src/third_party/gmssl/src is populated, the vendored
+# STATIC `gmssl` target (via nimrtc_vendor_gmssl) is used and no system
+# probing happens.  The find_path/find_library path below is retained
+# ONLY as a fallback for environments that set NIMRTC_GMSSL_USE_SYSTEM=ON
+# explicitly (e.g. a distro package that cannot vendor the source tree).
+# Default builds (OFF) never reach this function.
 function(nimrtc_link_gmssl target)
+    if(TARGET nimrtc_vendor_gmssl AND EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/gmssl/src/CMakeLists.txt" AND NOT NIMRTC_GMSSL_USE_SYSTEM)
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_gmssl)
+        target_compile_definitions(${target} PRIVATE
+            NIMRTC_USE_GMSSL=1
+            NIMRTC_HAS_DTLS_GMSSL=1)
+        message(STATUS "GMSSL DTLS backend: vendored submodule (v1.3 X1)")
+        return()
+    endif()
     # Propagate the GMSSL_ROOT hint from the caller (or the environment).
     set(_gmssl_roots
         "$ENV{GMSSL_ROOT}"

@@ -102,7 +102,7 @@ OpenSSL 1.1.1 本身有 DTLS 1.2 支持，且许多 Linux / Android 设备预装
 
 - **SM 与西方套件互不兼容（OH-RISK-6）**：SM2 证书与 ECDSA P-256 证书不互通。OHOS ↔ 桌面互通需要部署双栈（OHOS 端 GMSSL，桌面端 wolfSSL）。这是产品现实，已在 `docs/plan/openharmony-support.md` §7 OH-RISK-6 登记。
 - **没有 E2E 测试覆盖**（无 CI GMSSL 环境）：ADR Accepted 后的 OHOS SDK 验证阶段（OH-DOD-1 / OH-DOD-5）会交叉验证 GMSSL 后端。
-- **GMSSL 源码未 vendoring**：`nimrtc_link_gmssl()` 通过 `find_path` + `find_library` 在 `/usr/local`、`/usr`、`$ENV{GMSSL_ROOT}` 探测系统 GMSSL 安装；集成方需自行安装 GMSSL v3.x。Windows 环境无 GMSSL 预编译产物，验证需在 Linux x86_64 + OHOS-aarch64 上完成。
+- **GMSSL 源码未 vendoring（已过时，2026-11-05 被 X1 修正）**：X1 之前 `nimrtc_link_gmssl()` 通过 `find_path` + `find_library` 在 `/usr/local`、`/usr`、`$ENV{GMSSL_ROOT}` 探测系统 GMSSL 安装；X1 之后默认走 `src/third_party/gmssl/src` 的 vendored 子模块（pin v3.2.0，默认 OFF），系统探测仅在 `NIMRTC_GMSSL_USE_SYSTEM=ON` 时保留为 fallback。Windows 验收由 CI `gmssl-vendored` 腿覆盖（`test_dtls_gmssl_tlcp` PASS）。
 
 ## Verification
 
@@ -158,6 +158,6 @@ option(NIMRTC_ENABLE_DTLS_GMSSL
 ## Out of scope
 
 - SM2/SM3/SM4 cipher suite 与 RFC 5764 §5 Western 套件互通（OH-RISK-6；产品层面取舍，集成方按场景选择 backend）。
-- GMSSL 源码 vendoring（保持与 wolfSSL 一致的不 vendoring 策略）。
-- Windows MSVC 下 GMSSL 交叉编译（OHOS 目标以 Linux/ARM 为主；Windows 验证 OH-DOD-4 走 Linux x86_64）。
+- GMSSL 源码 vendoring（已过时，2026-11-05 被 X1 修正为 submodule，见决策 6）。
+- Windows MSVC 下 GMSSL 交叉编译（已过时，2026-11-05 被 X1 修正：CI `gmssl-vendored` 腿在 Windows/MSVC 上编译 vendored 子模块并跑 `test_dtls_gmssl_tlcp`）。
 - GMSSL DTLS 在 OHOS-aarch64 上的 ctest 自动覆盖（CI runner 现实约束；OH-DOD-5 允许 `continue-on-error`，但本地必须验证）。

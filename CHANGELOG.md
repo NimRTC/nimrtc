@@ -13,6 +13,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The offline release-signature verifier rejected valid signatures.**
+  `tools/verify_release_signature.py` re-implements Ed25519 in pure
+  Python so a release can be checked without GnuPG. Two defects made
+  it report every *valid* signature as invalid: the twisted-Edwards
+  curve check used `X^2 + Y^2 - Z^2 = d*X^2*Y^2` instead of the
+  RFC 8032 form `-X^2 + Y^2 - Z^2 - d*T^2 = 0`, and the §5.1.7
+  equation was checked as `R == [S]B + [k]A` instead of
+  `R + [k]A == [S]B`. Both are fixed, and `--self-test` now runs the
+  RFC 8032 §7.1 vectors plus a tampered-signature rejection case, so
+  the regression cannot come back silently; CI runs it on every push.
+  With the fix the published `v1.0.2` artefacts all verify (four
+  detached signatures, four SHA-256 sidecars) — and so does the
+  signing key's UID self-signature: GnuPG 2.4.8 reports "Good
+  signature" both for the key import and for every detached
+  signature, so the published `nimrtc-signing-key.asc` needs no
+  re-export.
 - **The release body's 3A status table did not match the published
   bundles.** The table was derived from `build/3a-status-<platform>.txt`,
   which records the *build-time* APM mode (whether the WebRTC APM

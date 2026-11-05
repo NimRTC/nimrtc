@@ -40,10 +40,19 @@ Usage
 -----
     python tools/verify_release_signature.py <dir> [...]
     python tools/verify_release_signature.py --key KEY.asc <dir>
+    python tools/verify_release_signature.py --self-test
 
 Each directory is scanned for `*.asc` detached signatures; the artefact
 is the same path with the `.asc` suffix removed.  Exit code is non-zero
 if anything fails to verify.
+
+`--self-test` runs the RFC 8032 §7.1 Ed25519 test vectors through the
+implementation in this file.  It needs no network and no artefacts, and
+it is the guard against the failure mode that actually bit this tool: a
+wrong sign in the twisted-Edwards curve equation, or an inverted
+verification equation (`[S]B = R + [k]A` checked as `R == [S]B + [k]A`),
+makes every *valid* signature look invalid -- and a verifier that
+rejects good signatures is worse than no verifier at all.
 
 No third-party modules are required: Ed25519 is implemented here.
 """
@@ -127,12 +136,15 @@ def _decode_point(data: bytes):
 
 
 def _is_on_curve(point: tuple) -> bool:
-    """Check the extended-coordinate point satisfies the curve equation."""
+    """Check the extended-coordinate point satisfies the curve equation.
+
+    RFC 8032 §5.1 writes the curve as `-x^2 + y^2 = 1 + d*x^2*y^2`.  In
+    extended coordinates (X:Y:Z:T) with `T = X*Y/Z` that becomes
+    `-X^2 + Y^2 - Z^2 - d*T^2 = 0`, which is the form the RFC's own
+    `isoncurve()` uses.
+    """
     x, y, z, t = point
-    # x^2 + y^2 = z^2 + d*x^2*y^2 (projective form, RFC 8032 §5.1).
-    lhs = (x * x + y * y - z * z) % _P
-    rhs = (_D * x * x % _P * y * y) % _P
-    return lhs == rhs
+    return (-x * x + y * y - z * z - _D * t * t) % _P == 0
 
 
 def _points_equal(p: tuple, q: tuple) -> bool:
@@ -148,7 +160,9 @@ def ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
     """Return True iff `signature` is a valid Ed25519 signature.
 
     Implements the RFC 8032 §5.1.7 verification equation
-    `[S]B = R + [k]A`, checked in projective coordinates.
+    `[S]B = R + [k]A`, checked in projective coordinates: the right-hand
+    side `R + [k]A` must equal `[S]B` (not the other way round -- adding
+    `[k]A` to `R` and comparing against `R` verifies nothing).
     """
     if len(public_key) != 32 or len(signature) != 64:
         return False
@@ -164,9 +178,9 @@ def ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
         return False
     h = int.from_bytes(
         hashlib.sha512(r_bytes + public_key + message).digest(), "little") % _Q
-    # [S]B + [h]A must equal R.
-    check = _ed_add(_ed_mul(s, _B), _ed_mul(h, a))
-    return _points_equal(check, r)
+    # R + [h]A must equal [S]B.
+    check = _ed_add(r, _ed_mul(h, a))
+    return _points_equal(check, _ed_mul(s, _B))
 
 
 # ---------------------------------------------------------------------------
@@ -428,16 +442,73 @@ def find_key(directory: Path, explicit):
     return None
 
 
+def _rfc8032_self_test() -> int:
+    """Run the RFC 8032 §7.1 Ed25519 test vectors through `ed25519_verify`."""
+    vectors = [
+        # (public key, message, signature)
+        (
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "",
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+            "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        ),
+        (
+            "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+            "72",
+            "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+            "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+        ),
+        (
+            "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+            "af82",
+            "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac"
+            "18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
+        ),
+    ]
+    failures = 0
+    for index, (public_key, message, signature) in enumerate(vectors, 1):
+        ok = ed25519_verify(
+            bytes.fromhex(public_key),
+            bytes.fromhex(message),
+            bytes.fromhex(signature),
+        )
+        print(f"[{'OK  ' if ok else 'FAIL'}] RFC 8032 §7.1 test vector {index}")
+        failures += 0 if ok else 1
+
+    # A tampered signature must NOT verify.
+    tampered = bytearray(bytes.fromhex(vectors[0][2]))
+    tampered[0] ^= 0x01
+    ok = not ed25519_verify(
+        bytes.fromhex(vectors[0][0]),
+        bytes.fromhex(vectors[0][1]),
+        bytes(tampered),
+    )
+    print(f"[{'OK  ' if ok else 'FAIL'}] tampered signature is rejected")
+    failures += 0 if ok else 1
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify NimRTC release artefacts (GPG detached signatures "
                     "+ SHA-256 sidecars) without requiring GnuPG.")
-    parser.add_argument("directories", nargs="+", type=Path,
+    parser.add_argument("directories", nargs="*", type=Path,
                         help="directories containing <artefact>[.asc|.sha256]")
     parser.add_argument("--key", type=Path, default=None,
                         help="public key block (default: nimrtc-signing-key.asc "
                              "in each scanned directory)")
+    parser.add_argument("--self-test", action="store_true",
+                        help="run the RFC 8032 Ed25519 test vectors and exit")
     args = parser.parse_args()
+
+    if args.self_test:
+        failures = _rfc8032_self_test()
+        print()
+        print(f"self-test: {failures} failure(s)")
+        return 0 if failures == 0 else 1
+
+    if not args.directories:
+        parser.error("at least one directory is required (or use --self-test)")
 
     failures = 0
     checked = 0

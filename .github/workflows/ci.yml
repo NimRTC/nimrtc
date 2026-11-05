@@ -176,6 +176,13 @@ jobs:
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
+      # The offline release-signature verifier carries its own Ed25519
+      # implementation.  A wrong curve equation or an inverted
+      # verification equation makes it reject *valid* release
+      # signatures, so the RFC 8032 §7.1 vectors run on every push.
+      - name: Self-test the offline release signature verifier
+        run: python tools/verify_release_signature.py --self-test
+
   # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04
   # ---------------------------------------------------------------------------

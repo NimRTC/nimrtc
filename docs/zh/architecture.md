@@ -985,7 +985,7 @@ backend at build or assembly time.
 - **GitHub Org**：`nimrtc-org`
 - **主域名**：`nimrtc.dev` · 备选 `nimrtc.com`
 - **域名策略**：注册后占位不启用，P1 公开前再接 GitHub Pages / 官网；WHOIS 隐私保护 + 域名锁立即开启
-- **仓库 Topics**：`webrtc-alternative` / `native-rtc` / `cpp20` / `realtime-communication` / `sfu` / `teleoperation` / `ai-agent` / `embedded`
+- **仓库 Topics**：`webrtc-alternative` / `native-rtc` / `cpp20` / `realtime-communication` / `rtc` / `audio-video` / `p2p` / `embedded` / `teleoperation` / `ai-agent` / `quic` / `gmssl` / `xinchuang`（不再挂 `sfu`：SFU 已于 2026-10-19 关闭为 NO，见 `docs/plan/v1.0-plan.md` §7）
 - **Logo / Social Preview**：P1 公开前必须就位，避免公开后改品牌引发的链接断链 / 历史问题
 - **关键 Badges**：CI 状态 / Codecov / License / Latest Release
 - **发布渠道**：GitHub Releases / 中文社区公众号（v1.0 起）

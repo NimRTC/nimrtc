@@ -405,7 +405,7 @@ flowchart TB
 > 实测环境：Windows 10 x86_64，MSVC，Release（本地 `build/`，`nimrtc_engine.lib` 13,164,084 字节 = 12.55 MB；示例二进制取自 `build/examples/Release/`）。改构建选项后跑 `python tools/benchmark_size.py build --markdown` 更新。
 >
 > **注**：单是静态库就有 12.55 MB；GitHub About 页和旧文档里写的 "~5.6 MB" 是更早那套模块集合的
-> 数字，对应的是旧构建。当前实测值是 12.55 MB。
+> 数字，对应的是旧构建。About 页现已改为 ~12.6 MB，与上面的实测值一致。
 
 本地复现：
 

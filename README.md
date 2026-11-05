@@ -417,7 +417,7 @@ The headline reason to choose NimRTC over libwebrtc is **size** — both binary 
 
 > Measured on: Windows 10 x86_64, MSVC, Release (local `build/`, `nimrtc_engine.lib` 13,164,084 bytes = 12.55 MB; example binaries from `build/examples/Release/`). Run `python tools/benchmark_size.py build --markdown` to re-measure after any build or option change.
 >
-> **Note:** the static archive alone is 12.55 MB; the numbers quoted on the GitHub About page and in older docs ("~5.6 MB") predate the current module set and refer to an older build. The 12.55 MB figure is the measured one.
+> **Note:** the static archive alone is 12.55 MB; the "~5.6 MB" figure quoted on the GitHub About page and in older docs predated the current module set and referred to an older build. The About page now quotes ~12.6 MB, matching the measured value above.
 
 ### Source-tree complexity
 

@@ -3,11 +3,10 @@
  * @brief Plugin adapter + PluginFactory for nimrtc::bwe.
  *
  * Wires the concrete `bwe::Bwe` (AIMD) implementation into the
- * `plugins::IBwe` seam and registers it under the id `"aimd"`.
- *
- * P3 will add a second factory for Goog-CC compatibility
- * (`"googcc"`); the registry's `get_bwe()` picks whichever id the
- * engine / scheduler asks for.
+ * `plugins::IBwe` seam and registers it under the id `"aimd"`,
+ * plus the opt-in `bwe::GoogCcBwe` (delay+loss hybrid) under the id
+ * `"goog-cc"` (v1.3 Q1). The registry's `get_bwe()` picks whichever id
+ * the engine / scheduler asks for; the engine default stays `"aimd"`.
  *
  * Per ADR-001 + the MSVC static-link workaround (see audio3a / ice):
  * explicit-registration entry point `register_default_plugins()` forces
@@ -36,6 +35,18 @@ public:
     }
 };
 
+/** Concrete factory producing opt-in `GoogCcBwe` instances. */
+class GoogCcPluginFactory final : public plugins::IBweFactory {
+public:
+    std::string_view id()          const noexcept override { return "goog-cc"; }
+    std::string_view display_name()const noexcept override {
+        return "Goog-CC hybrid bandwidth estimator (delay+loss, opt-in)";
+    }
+    plugins::IBwe* create(plugins::BweConfig config) const override {
+        return new GoogCcBwe(config);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Public registration entry point
 // ---------------------------------------------------------------------------
@@ -49,6 +60,10 @@ void do_register_default_plugins() noexcept {
             static AimdPluginFactory s_factory{};
             nimrtc::core::PluginRegistry::instance().register_bwe(
                 std::string_view{s_factory.id()}, &s_factory);
+            static GoogCcPluginFactory s_goog_cc_factory{};
+            nimrtc::core::PluginRegistry::instance().register_bwe(
+                std::string_view{s_goog_cc_factory.id()},
+                &s_goog_cc_factory);
         }
     } s_registrar;
     (void)s_registrar;

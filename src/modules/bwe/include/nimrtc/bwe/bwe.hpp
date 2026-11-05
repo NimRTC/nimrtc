@@ -96,4 +96,46 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// ---------------------------------------------------------------------------
+// GoogCcBwe — delay + loss hybrid, opt-in (v1.3 Q1)
+// ---------------------------------------------------------------------------
+
+/** Delay-based + loss-based bandwidth estimator, opt-in via `"goog-cc"`.
+ *
+ *  Simplified Goog-CC mainline: RTT-gradient (delay) signal drives a
+ *  multiplicative back-off when the RTT exceeds the observed minimum by
+ *  a threshold, loss events drive a multiplicative decrease, and clean
+ *  feedback drives a multiplicative probe capped by the additive
+ *  `increase_bps` floor. REMB override, [min, max] clamping and EMA
+ *  smoothing follow the AIMD front-end so scheduler behaviour stays
+ *  comparable. The engine default stays `"aimd"`; select this backend
+ *  explicitly via `EngineConfig::bwe_name = "goog-cc"`.
+ */
+class NIMRTC_API_UNSTABLE GoogCcBwe final : public plugins::IBwe {
+public:
+    explicit GoogCcBwe(plugins::BweConfig config = {});
+    ~GoogCcBwe() override;
+
+    GoogCcBwe(const GoogCcBwe&)            = delete;
+    GoogCcBwe& operator=(const GoogCcBwe&) = delete;
+    GoogCcBwe(GoogCcBwe&&)                 noexcept;
+    GoogCcBwe& operator=(GoogCcBwe&&)      noexcept;
+
+    // plugins::IPlugin ---------------------------------------------------
+    const char* name() const noexcept override;
+    plugins::Status open() noexcept override;
+    void close() noexcept override;
+
+    // plugins::IBwe -----------------------------------------------------
+    void on_feedback(plugins::BweFeedback feedback) noexcept override;
+    plugins::BweEstimate estimate() const noexcept override;
+    void update_config(plugins::BweConfig config) noexcept override;
+    plugins::BweConfig config() const noexcept override;
+    void reset() noexcept override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 } // namespace nimrtc::bwe

@@ -225,3 +225,104 @@ TEST(BweTest, ResetRestoresInitial) {
                 static_cast<double>(c.initial_bitrate_bps) * 0.05);
     EXPECT_EQ(e.reason, Estimate::Reason::Initial);
 }
+
+// -----------------------------------------------------------------------------
+// GoogCcBwe — delay + loss hybrid, opt-in (v1.3 Q1)
+// -----------------------------------------------------------------------------
+TEST(GoogCcBweTest, InitialEstimateMatchesConfig) {
+    Config c;
+    c.initial_bitrate_bps = 750'000;
+    GoogCcBwe bwe(c);
+
+    auto e = bwe.estimate();
+    EXPECT_NEAR(static_cast<double>(e.target_bitrate_bps),
+                static_cast<double>(c.initial_bitrate_bps),
+                static_cast<double>(c.initial_bitrate_bps) * 0.01);
+    EXPECT_EQ(e.reason, Estimate::Reason::Initial);
+}
+
+TEST(GoogCcBweTest, DelayOveruseCausesBackoff) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.smoothing_alpha = 1.0;  // immediate (no smoothing lag)
+    GoogCcBwe bwe(c);
+
+    auto t0 = core::SteadyClock::now();
+    // Seed the delay baseline with a low RTT.
+    bwe.on_feedback(no_loss(t0, 100, core::Milliseconds{50}));
+    // RTT well above baseline (+60 ms and > 1.2x) -> overuse back-off.
+    bwe.on_feedback(no_loss(t0 + std::chrono::milliseconds(300), 100,
+                            core::Milliseconds{110}));
+
+    auto e = bwe.estimate();
+    EXPECT_LT(e.target_bitrate_bps, 1'000'000u);
+    EXPECT_EQ(e.reason, Estimate::Reason::RttIncrease);
+}
+
+TEST(GoogCcBweTest, SmallRttJitterDoesNotBackoff) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.smoothing_alpha = 1.0;
+    c.change_interval = core::Milliseconds{10};
+    GoogCcBwe bwe(c);
+
+    auto t0 = core::SteadyClock::now();
+    bwe.on_feedback(no_loss(t0, 100, core::Milliseconds{50}));
+    // +10 ms jitter: below the 25 ms absolute gate -> no back-off.
+    bwe.on_feedback(no_loss(t0 + std::chrono::seconds(2), 100,
+                            core::Milliseconds{60}));
+
+    auto e = bwe.estimate();
+    EXPECT_GE(e.target_bitrate_bps, 1'000'000u);
+}
+
+TEST(GoogCcBweTest, LossCausesMultiplicativeDecrease) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.decrease_factor = 0.5;
+    c.smoothing_alpha = 1.0;
+    GoogCcBwe bwe(c);
+
+    auto t0 = core::SteadyClock::now();
+    bwe.on_feedback(with_loss(0.10, t0));
+
+    auto e = bwe.estimate();
+    EXPECT_LE(e.target_bitrate_bps, 500'000u);
+    EXPECT_EQ(e.reason, Estimate::Reason::AIMDDecrease);
+}
+
+TEST(GoogCcBweTest, CleanFeedbackProbesUpwards) {
+    Config c;
+    c.initial_bitrate_bps = 500'000;
+    c.increase_bps = 50'000;
+    c.change_interval = core::Milliseconds{10};
+    c.smoothing_alpha = 1.0;
+    GoogCcBwe bwe(c);
+
+    auto t0 = core::SteadyClock::now();
+    bwe.on_feedback(no_loss(t0));
+    bwe.on_feedback(no_loss(t0 + std::chrono::seconds(2)));
+
+    auto e = bwe.estimate();
+    EXPECT_GT(e.target_bitrate_bps, 500'000u);
+    EXPECT_EQ(e.reason, Estimate::Reason::AIMDIncrease);
+}
+
+TEST(GoogCcBweTest, ResetClearsDelayBaseline) {
+    Config c;
+    c.initial_bitrate_bps = 800'000;
+    c.smoothing_alpha = 1.0;
+    GoogCcBwe bwe(c);
+
+    auto t0 = core::SteadyClock::now();
+    bwe.on_feedback(no_loss(t0, 100, core::Milliseconds{50}));
+    bwe.on_feedback(no_loss(t0 + std::chrono::milliseconds(300), 100,
+                            core::Milliseconds{110}));
+    bwe.reset();
+
+    auto e = bwe.estimate();
+    EXPECT_NEAR(static_cast<double>(e.target_bitrate_bps),
+                static_cast<double>(c.initial_bitrate_bps),
+                static_cast<double>(c.initial_bitrate_bps) * 0.05);
+    EXPECT_EQ(e.reason, Estimate::Reason::Initial);
+}

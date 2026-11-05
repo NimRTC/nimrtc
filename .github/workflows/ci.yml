@@ -145,6 +145,7 @@ jobs:
         run: |
           python tools/benchmark_latency.py --count 1000
           python tools/benchmark_dc.py
+          python tools/benchmark_weaknet.py --count 200 --size 1200
 
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v4
@@ -153,6 +154,7 @@ jobs:
           path: |
             build/e2e/bench_latency.json
             build/e2e/bench_dc.json
+            build/e2e/bench_weaknet.json
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -182,6 +184,24 @@ jobs:
       # signatures, so the RFC 8032 §7.1 vectors run on every push.
       - name: Self-test the offline release signature verifier
         run: python tools/verify_release_signature.py --self-test
+
+      # Pre-tag guardrail (v1.1 plan Track C, item C3).  These are
+      # repo-level facts that no unit test sees and that rot quietly
+      # between releases: the SFU track must stay unwired, every public
+      # symbol must carry an ADR-015 stability marker, the API version
+      # must not carry a pre-release label, every submodule pin must be
+      # fetchable from a fresh clone, and the project root must stay
+      # free of scratch files.  The script was written for the tag cut
+      # but never wired into CI, so a violation could only surface when
+      # the release was already being cut.  Running it on every push
+      # moves the failure to the push that introduced it.
+      #
+      # `--final-tag` is deliberately NOT passed here: it requires an
+      # empty NIMRTC_API_VERSION_PRE_RELEASE, which is a property of a
+      # release tag rather than of ordinary trunk commits.  The release
+      # workflow passes it at cut time.
+      - name: Release freeze checklist
+        run: sh scripts/check-release-freeze.sh
 
   # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04
@@ -303,6 +323,7 @@ jobs:
         run: |
           python3 tools/benchmark_latency.py --count 1000
           python3 tools/benchmark_dc.py
+          python3 tools/benchmark_weaknet.py --count 200 --size 1200
 
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v4
@@ -311,6 +332,7 @@ jobs:
           path: |
             build/e2e/bench_latency.json
             build/e2e/bench_dc.json
+            build/e2e/bench_weaknet.json
           retention-days: 14
 
       - name: Upload build directory on failure

@@ -130,6 +130,21 @@ jobs:
           fi
           echo "CMake VERSION matches tag: $cmake_version"
 
+      # Pre-tag guardrail (v1.1 plan Track C, item C3).  This runs at
+      # cut time with --final-tag, so a release cannot be tagged while
+      # the SFU track has picked up engine wiring, while a public
+      # symbol is unclassified, while the API version still carries a
+      # pre-release label, while a submodule pin is unreachable from a
+      # fresh clone, or while the project root has accumulated scratch
+      # files.  CI runs the same checklist on every push (without
+      # --final-tag, since the pre-release label is a property of the
+      # tag rather than of trunk), so a violation here should already
+      # have been caught upstream; this step makes the cut itself
+      # self-guarding.
+      - name: Release freeze checklist (pre-tag guardrail)
+        shell: bash
+        run: sh scripts/check-release-freeze.sh --final-tag
+
       - name: Verify GPG signing prerequisites (optional pre-1.0)
         shell: bash
         id: gpg-check

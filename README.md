@@ -450,10 +450,13 @@ Track A baselines are transport-floor numbers, not engine glass-to-glass claims.
 | `bench_dc.json` datagram plane (2000 msgs) | 256 B | **~60–80k pps / ~120–165 Mbps** |
 | `bench_dc.json` datagram plane (2000 msgs) | 1200 B | **~60–80k pps / ~570–800 Mbps** |
 | `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~70k pps / ~9 Gbps** |
+| `bench_weaknet.json` loss-5pct tier (200 × 1200 B) | 1200 B, 5% loss + 5 ms base | delivery **~0.95**, p50 **~9–10 ms**, p99 **~16–17 ms** |
+| `bench_weaknet.json` jitter-100ms tier (200 × 1200 B) | 1200 B, 20 ms base + 0–100 ms jitter | delivery **1.0**, p50 **~75–80 ms**, p99 **~125–130 ms** |
+| `bench_weaknet.json` cap-1mbps tier (200 × 1200 B) | 1200 B, 1 Mbps pace + 5 ms base | delivery **1.0**, p50 **~10–16 ms**, p99 **~19–31 ms** |
 
-> Reproduce with `python tools/benchmark_latency.py --count 1000` and `python tools/benchmark_dc.py`; artifacts land in `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json`. Exact numbers are machine- and load-dependent — the checked-in JSON is one local sample, not a pass/fail threshold. Engine glass-to-glass latency/jitter/MOS still depend on platform, codec, network, and target use case — profile-specific benchmarks land once P2 (PCM tap) and P3 (BWE + ref_frame) land.
+> Reproduce with `python tools/benchmark_latency.py --count 1000`, `python tools/benchmark_dc.py`, and `python tools/benchmark_weaknet.py --count 200 --size 1200`; artifacts land in `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json` + `build/e2e/bench_weaknet.json`. Exact numbers are machine- and load-dependent — the checked-in JSON is one local sample, not a pass/fail threshold. The weak-network tiers run through an in-process userspace shaper over localhost UDP (deterministic seeded impairments), not `tc qdisc netem`, so they are reproducible without root. Engine glass-to-glass latency/jitter/MOS still depend on platform, codec, network, and target use case — profile-specific benchmarks land once P2 (PCM tap) and P3 (BWE + ref_frame) land.
 
-See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), and [`tools/benchmark_dc.py`](tools/benchmark_dc.py) for the measurement tools.
+See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), [`tools/benchmark_dc.py`](tools/benchmark_dc.py), and [`tools/benchmark_weaknet.py`](tools/benchmark_weaknet.py) for the measurement tools.
 
 ---
 

@@ -131,7 +131,7 @@ primitives the engine uses without building them yourself.
 > downloaded v1.0.2 bundle, and linking NimRTC itself still requires a source
 > build (see [Quick Start](#quick-start) below). This is fixed on `main`: the
 > `NIMRTC_INSTALL=ON` rules now produce `include/` + `lib/` + `lib/cmake/NimRTC/`
-> (verified downstream on Windows), and the next release will ship them.
+> (verified downstream on Windows; Linux downstream proof still pending a CI leg), and the next release will ship them.
 
 - Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
 - Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
@@ -528,7 +528,7 @@ These are **P2 / P3 targets**, not P0 features — listed here so you can plan a
 | Need | NimRTC differentiation | Status in current OSS WebRTC |
 |---|---|---|
 | **3A bypass** — Agent feeds PCM to ASR | `pre-3a / post-3a` dual PCM tap | WebRTC APM is opaque; no PCM mid-pipeline hook |
-| **Control messages never starved by video** — teleop commands must not drop | Strict-priority scheduling contract (**intra-scheduler ordering only**; under the default `web_transport` backend media and DataChannel ride separate connections with independent congestion control — see `sched.hpp` § Scope note) | DTLS-SCTP / DataChannel is best-effort only |
+| **Ordered control vs media inside one Scheduler** — same-queue ordering, not cross-connection pre-emption | DC-2 strict-priority ordering applies only to packets enqueued into the same `Scheduler` instance. Under the default `web_transport` backend, media (Case D, DTLS-SRTP over ICE/UDP) and data (Case E, WebTransport over QUIC) are **two independent connections with independent congestion control**, so a video-heavy media path cannot starve — and cannot be pre-empted by — the data path at the wire level. Only the legacy `"sctp"` backend keeps both planes on one connection, where intra-scheduler ordering approaches wire relevance. See `src/modules/sched/include/nimrtc/sched/sched.hpp` § Scope note | DTLS-SCTP / DataChannel is best-effort only |
 | **Capture-to-decision alignment** — Agent decisions tied to video frames | `ref_frame` timeline API | libwebrtc has no such abstraction; apps must build their own |
 
 ---
@@ -588,7 +588,7 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | TPAL-5 — SCTP usrsctp production backend (`UsrsctpSocketFactory` id=`"usrsctp"`) | ⏸️ **Deferred to v1.x** | The class is `@deprecated` and still compiles for opt-in callers; `sctp::register_default_plugins()` no longer auto-registers id="usrsctp". Forward direction: WebTransport over QUIC. See `docs/plan/v0.11-plan.md` §2.2 / §10. |
 | ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
 | DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
-| DC-1 — Chrome e2e Case E (DataChannel exchange over WebTransport / QUIC) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo (via `new WebTransport(url)`) PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
+| DC-1 — Chrome e2e Case E (data exchange via the WebTransport JS API, not `createDataChannel()`) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo (via `new WebTransport(url)`) PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
 | DC-2 — L1 strict-priority send scheduling within the `Scheduler` (RTP × DC ordering) | ✅ (intra-scheduler ordering only — see `sched.hpp` § Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend) | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
@@ -603,7 +603,7 @@ has not closed.
 
 | Capability | Status | Track |
 |---|---|---|
-| Packaging — `NIMRTC_INSTALL=ON` install rules (`cmake/NimRTCInstall.cmake`) producing `include/` + `lib/` + `lib/cmake/NimRTC/`; `find_package(NimRTC 1.0 REQUIRED)` consumer verified downstream on Windows | ✅ landed | v1.1 Track D |
+| Packaging — `NIMRTC_INSTALL=ON` install rules (`cmake/NimRTCInstall.cmake`) producing `include/` + `lib/` + `lib/cmake/NimRTC/`; `find_package(NimRTC 1.0 REQUIRED)` consumer verified downstream on Windows, **Linux proof still pending a CI leg** | ✅ landed | v1.1 Track D |
 | The installed bundle now carries the WebRTC APM prebuilt + its link-order manifest, so a downstream consumer links the real AEC/ANS/AGC | ✅ landed | v1.1 Track D |
 | Transport-floor benchmark artifacts in CI (`bench_latency.json`, `bench_dc.json` as 14-day artifacts) | ✅ landed | v1.1 Track A |
 | `ISctpSocket::open()/close()` lifecycle; `IICETransport::last_recv_packet()` + in-stack demux; unified `make_transport_instance()`; ARQ stack labelled tech-preview | ✅ landed | v1.2 Track T |

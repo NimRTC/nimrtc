@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#构建--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **最新发布版**：v1.0.2 稳定版 —— 补丁版，修复 WebTransport ALPN 不匹配与 Windows bundle 体积异常，并随发布附带签名公钥（`v1.0.1` 保持已发布且不变；`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC 数据交换（DC-1）：走 Chrome WebTransport JS API（`new WebTransport(url)`，不是 `RTCPeerConnection.createDataChannel()`；标准 WebRTC DataChannel 互通未声称，Firefox/Safari 对 WebTransport 支持不完整）（DC-1）**PASS E1–E6**。
+> **最新发布版**：v1.0.2 稳定版 —— 补丁版，修复 WebTransport ALPN 不匹配与 Windows bundle 体积异常，并随发布附带签名公钥（`v1.0.1` 保持已发布且不变；`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC 数据交换（DC-1）：走 Chrome WebTransport JS API（`new WebTransport(url)`，不是 `RTCPeerConnection.createDataChannel()`；标准 WebRTC DataChannel 互通未声称，Firefox/Safari 对 WebTransport 支持不完整）**PASS E1–E6**。
 > 见 [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` 与 `docs/plan/v1.0-plan.md` §3 + §12.3.6。
 >
 > **当前 `main`（v1.0.2 之后，尚未发版）**：主干比已发布 tag 多出 **v1.1** 打包 + 基准轨、
@@ -339,7 +339,7 @@ flowchart TB
         P1["call: P2P 客户端"]
         P2["relay: 纯转发"]
         P3["agent-gateway: PCM 双 tap"]
-        P4["teleop: 严格优先级控制面"]
+        P4["teleop: 调度器内优先排序 (DC-2)"]
     end
 
     PROF --> L3
@@ -462,7 +462,7 @@ NimRTC 几乎所有"可替换"的能力都通过 plugin 接口暴露（[`src/plu
 
 **对比基线**：GStreamer / FFmpeg / OBS / PipeWire 都用 plugin 架构，但那是多媒体生态；**WebRTC 生态**里（libwebrtc / Pion / LiveKit / mediasoup / janus）只有 Pion 和 libwebrtc 内部有类似抽象。**NimRTC 把 plugin 接口公开，且让 P2P 客户端和 `relay` 网关跑在同一套接口上**（`relay` profile 跳过 L2 编解码；from-scratch 的 SFU 模块不是交付内容 —— 见 `docs/plan/v1.0-plan.md` §7）——2026 年的开源 WebRTC 生态里几乎找不到第二家。
 
-Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2–P3 引入的差异化能力（双 3A tap、严格优先级、ref_frame）也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
+Plugin 是 NimRTC **可演进性**的核心机制：P0–P1 用内置实现，P2–P3 引入的差异化能力（双 3A tap、调度器内严格优先排序、ref_frame）也以 plugin 形式呈现（P2 `IJB::set_render_delivered`、P3 `IRTP::set_ref_frame`）。
 
 ---
 
@@ -501,7 +501,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `agent-gateway` | L0+L1+L2（tap 打开）| AI Agent 接入，PCM 双 tap + 3A 旁路 |
 | `agent-low-latency` | L0+L1+L2+L3 | 延迟优先的 Agent 链路（20 ms JB、关闭 AGC） |
 | `relay-agent` | L0+L1+L3 | relay + AI Agent 混合（N:1），timeline 重新校准 |
-| `teleop` | L0+L1+L2+L3 | 机器人 / 具身智能遥操作 —— 严格优先级控制面 |
+| `teleop` | L0+L1+L2+L3 | 机器人 / 具身智能遥操作 —— 调度器内严格优先排序 (DC-2 范围声明适用) |
 | `live` | L0+L1+L2+L3 | 单向直播 / 广播 |
 
 > 完整矩阵（**已交付的 9 个 Profile**，含 JB / 3A / BWE / DC 逐字段取值）见
@@ -523,7 +523,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 需求 | NimRTC 差异化 | 当前同类项目状态 |
 |---|---|---|
 | **3A 旁路**：Agent 需要把语音喂给 ASR | `pre-3a / post-3a` **双 PCM tap** 原语 | WebRTC APM 黑盒，PCM 中段无 hook |
-| **控制消息不被视频挤占**：遥操作指令不能丢 | 严格优先级调度契约 | DTLS-SCTP / DataChannel 仅尽力而为 |
+| **同一 Scheduler 内的控制与媒体排序**：同队列排序，不是跨连接抢占 | DC-2 严格优先排序仅适用于进入同一 `Scheduler` 实例的包。默认 `web_transport` 后端下，媒体（Case D，DTLS-SRTP over ICE/UDP）与数据（Case E，WebTransport over QUIC）是**两条独立连接、各自拥塞控制**，线端上不存在跨平面优先调度。只有 legacy `"sctp"` 后端把两个平面放在同一连接上，调度器内排序才接近线端意义。见 `src/modules/sched/include/nimrtc/sched/sched.hpp` § Scope note | DTLS-SCTP / DataChannel 仅尽力而为 |
 | **采集-决策对齐**：AI Agent 决策要与视频帧关联 | `ref_frame` 时间线 API | libwebrtc 无此抽象，application 层必须自建 |
 
 ---
@@ -534,7 +534,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 | 版本 | 定位 | 范围 | 状态 |
 |---|---|---|---|
-| **v1.0.x** | Stable | WebTransport / msquic 数据面（DC-1）、跨平面调度（DC-2）、Chrome e2e Case D + E | ✅ **v1.0.2 已发布** 2026-11-03 |
+| **v1.0.x** | Stable | WebTransport / msquic 数据面（DC-1）、调度器内排序（DC-2）、Chrome e2e Case D + E | ✅ **v1.0.2 已发布** 2026-11-03 |
 | **v1.1** | 质量 + 打包 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿） | 🟡 `main` 上推进中 |
 | **v1.2** | 加固 | 传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护） | 🟡 已落地在 `main` |
 | **v1.3** | 质量线 | 弱网质量链（Goog-CC BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | 🟡 第一项已落地（`jb_strategy`），其余规划中 |
@@ -581,8 +581,8 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | P1 UAF-DTLS 类型系统加固 + API 稳定性框架（ADR-015 冻结起点）+ PAL Slice 1.5 | ✅ | v1.0.0-alpha.1 |
 | WebTransport / QUIC 选型（ADR-014）+ `IWebTransportSession` seam + registry 槽位 | ✅ | v0.14.0 |
 | DC-1（WebTransport / msquic 数据面）—— msquic 集成、`WebTransportMsQuicSession`、`WebTransportDataChannel`、`test_web_transport_msquic` 12/12、`test_web_transport_data_channel` 17/17、`test_datachannel_engine` 5/5、`test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
-| Chrome e2e Case E（DataChannel over WebTransport / QUIC） | ✅ **PASS E1–E6**（datagram + bidi-stream 回显，经 `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html`，对端 `examples/demo-wtserver`） | v0.15.0（v1.0.0 冻结） |
-| 跨平面调度（DC-2）：`src/modules/sched/tests/test_sched_priority_dc.cpp` RTP × DC 交叉用例 | ✅ 17/17 | v1.0.0 |
+| Chrome e2e Case E（走 WebTransport JS API 的数据交换，不是 `createDataChannel()`） | ✅ **PASS E1–E6**（datagram + bidi-stream 回显，经 `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html`，对端 `examples/demo-wtserver`） | v0.15.0（v1.0.0 冻结） |
+| 调度器内排序（DC-2）：`src/modules/sched/tests/test_sched_priority_dc.cpp` RTP × DC 交叉用例 | ✅ 17/17 | v1.0.0 |
 | TPAL-5 —— SCTP usrsctp 生产后端（`UsrsctpSocketFactory` id=`"usrsctp"`） | ⏸️ **顺延到 v1.x** | 该类标了 `@deprecated` 且仍可编译供 opt-in 调用方使用；`sctp::register_default_plugins()` 已不再自动注册 id=`"usrsctp"`。前进方向：WebTransport over QUIC。见 `docs/plan/v0.11-plan.md` §2.2 / §10。 |
 | SFU-1 —— 进程内 SFU relay（`nimrtc_sfu` 模块，BUNDLE/rtcp-mux） | ❌ **已关闭 — NO** | 2026-10-19 关闭（BDFL：SFU 不是项目核心目标）；不在关键路径上。见 `docs/plan/v1.0-plan.md` §7 + §12.5。 |
 | DC-3 —— SFU relay 场景下的 DC 转发策略 | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
@@ -597,7 +597,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 | 能力 | 状态 | 轨道 |
 |---|---|---|
-| 打包 —— `NIMRTC_INSTALL=ON` 安装规则（`cmake/NimRTCInstall.cmake`），产出 `include/` + `lib/` + `lib/cmake/NimRTC/`；下游 Windows 已验证 `find_package(NimRTC 1.0 REQUIRED)` | ✅ 已落地 | v1.1 Track D |
+| 打包 —— `NIMRTC_INSTALL=ON` 安装规则（`cmake/NimRTCInstall.cmake`），产出 `include/` + `lib/` + `lib/cmake/NimRTC/`；下游 Windows 已验证 `find_package(NimRTC 1.0 REQUIRED)`，Linux 下游验证仍待 CI 路径跑通 | ✅ 已落地 | v1.1 Track D |
 | 安装后的 bundle 现在携带 WebRTC APM 预编译产物及其链接顺序清单，下游可链接真实 AEC/ANS/AGC | ✅ 已落地 | v1.1 Track D |
 | CI 里的传输层基准产物（`bench_latency.json`、`bench_dc.json`，保留 14 天） | ✅ 已落地 | v1.1 Track A |
 | `ISctpSocket::open()/close()` 生命周期；`IICETransport::last_recv_packet()` + 栈内分流；统一 `make_transport_instance()`；ARQ 栈标注为 tech-preview | ✅ 已落地 | v1.2 Track T |
@@ -610,7 +610,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 > v1.0.2 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
 > （`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）；
-> WebTransport / msquic 数据面（DC-1）+ 跨平面调度（DC-2）；
+> WebTransport / msquic 数据面（DC-1）+ 调度器内排序（DC-2）；
 > Chrome e2e Case E（DataChannel over WebTransport / QUIC）**PASS E1–E6** ——
 > 对 `examples/demo-wtserver` 的 datagram + bidi-stream 回显，经
 > `tests/chrome_interop_harness/run_webtransport_harness.py`。

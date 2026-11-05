@@ -122,7 +122,7 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 │ L1  传输层     ICE · DTLS · SRTP/SRTCP · RTP/RTCP                 │
 │                · **SCTP/DataChannel（含 QoS 语义：部分可靠TTL /   │
 │                  严格优先级调度 / ref_frame 关联）**               │
-│                · 发送调度(媒体×数据统一优先级)                     │
+│                · 发送调度(同一 Scheduler 实例内排序，DC-2)                     │
 ├────────────────────────────────────────────────────────────────┤
 │ L0  基础层     媒体 Buffer · 时钟/时间线抽象(AI/遥操依赖)          │
 │                · Executor · 统计事件端口                          │
@@ -152,7 +152,7 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 | dtls | nimrtc_dtls | DTLS 封装，**后端可插拔**（BoringSSL / mbedTLS / 国密） | ✅ P1 |
 | srtp | nimrtc_srtp | SRTP/SRTCP 封装，**后端可插拔**（libsrtp / 国密 SM4） | ✅ P1 |
 | rtp | nimrtc_rtp | RTP/RTCP 编解码、媒体 payload 打包/解析、标准反馈（transport-cc / NACK / REMB） | ✅ P1 |
-| sched | nimrtc_sched | L1 发送调度：RTP × DataChannel 统一严格优先级 + pacing | ⏸ 接口 P1 / 实现 P2 |
+| sched | nimrtc_sched | L1 发送调度：同一 Scheduler 实例内 RTP × 数据严格优先级 + pacing（DC-2） | ⏸ 接口 P1 / 实现 P2 |
 | sctp | nimrtc_sctp | DataChannel（usrsctp）：可靠 / 不可靠 / 有序 / 无序 + 部分可靠 | ✅ P2 |
 | timeline | nimrtc_timeline | 统一时间线：RTCP-SR NTP↔RTP ts 映射、帧 capture ts、渲染 age | ⏸ 接口 P2 / 完整 P3 |
 | codec | nimrtc_codec | 编解码**注入接口**（encoder/decoder 由宿主或插件提供）+ 统一封装；不捆绑解码器（payload 打包归 rtp 模块） | ✅ 接口 P1 最小 / 完整 P3 |
@@ -198,7 +198,7 @@ nimrtc/
 | Codec | 解码器接入 + payload 封装 | H.264/H.265/VP8/VP9/AV1/Opus（外部解码器） | 仅封装，不捆绑 |
 | Device（后期） | 采集 / 播放 | 四平台后端 | 插件化 |
 | DataChannel 语义 | 每消息流：可靠性 / 有序性 / 部分可靠 TTL / 优先级 | 浏览器互通子集（可靠·不可靠）／引擎扩展（部分可靠 + 严格优先级，§8.3） | 引擎扩展主线 |
-| 发送调度策略 | RTP × 数据统一发送队列 | 严格优先级默认（控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据）／自定义 | 严格优先级 |
+| 发送调度策略 | 同一 Scheduler 实例内 RTP × 数据排序（DC-2 范围声明适用） | 严格优先级默认（控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据）／自定义 | 严格优先级 |
 
 ### 2.6 场景装配与实现切换（Scene Assembly）
 
@@ -258,7 +258,7 @@ nimrtc/
 | D5 | 引用计数媒体 Buffer，转发路径零整帧拷贝 | 高码率、多路转发性能关键 | 生命期规则写进贡献者文档 |
 | D6 | 时钟全抽象：媒体时钟 / RTP 时间戳 / 系统时钟解耦 | 单测可模拟时间；嵌入式时钟漂移可控 | — |
 | D7 | SDP 独立模块，不绑定会话状态机 | 可单独复用（信令网关、录制分析） | — |
-| D8 | **数据面发送严格优先级调度**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽，绝不让媒体排挤控制 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
+| D8 | **数据面发送严格优先级调度（同一 Scheduler 实例内，DC-2）**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽（BWE 行为）；默认 web_transport 后端下不跨连接抢占 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
 | D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明；`takeover` / `cloudgame` 为设计预留，尚未进官方组合） |
 | D10 | **场景装配与切换纪律**：实现选择只发生在 构建期 / 装配期 / 会话边界 三处 + 运行期显式 `Reconfigure`；有内部状态的模块（JB / BWE / 3A）禁止静默热换（走 Pause→Drain→Rebind→Resume 或流重建）；Profile 官方组合每场景仅一条高质量主线 | "多场景 = 多实现"若无纪律会退化成组合爆炸，运行期乱换实现会静默丢状态 | 集中在 assembly 模块 + 显式 API；切换事件全部进统计（§9） |
 | D11 | **PAL Slice 1 — engine plugin resolver seam**：`engine.cpp` 通过 `pal::resolve_*` 内联 forwarder 走 `core::PluginRegistry`，公开 API 字节一致；Slice 2/3 进 v0.10.x 补丁轨道 | 详 [ADR-009](../adr/ADR-009-pal-slice-1.md) + [PAL 架构](../plan/pal-architecture.md) §4 | Slice 1 是 ~50 LOC 薄 alias，后续 API 演化成本随 transitive 依赖放大 → header-only + 字节级向后兼容 |
@@ -340,7 +340,10 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 - 转发路径走 D5 引用计数 Buffer + 零拷贝；提供 `sfu-relay` 压测工具，产出可复现的 pps / Mbps 基准（§14）。
 - RTCP 可扩展，允许注册自定义反馈类型（为私有 QoE 反馈、国密扩展留口）。
 
-### 7.1 DC / 控制消息 / 时间线在 relay 中的转发语义（P2 起，呼应 §2.6 `relay-agent` Profile）
+### 7.1 DC / 控制消息 / 时间线在 relay 中的转发语义
+
+> **發货状态**：本节的 DC 转发策略（DC-3）已于 2026-10-19 由 BDFL 关闭为 NO（SFU 不是项目核心目标，见 `docs/plan/v1.0-plan.md` §7），本节仅保留为设计文档，不代表已发货能力。`relay` Profile 本身只做单策略转发，多 party 转发需多个 relay 引擎 + 调用方自己的路由层。
+（P2 起，呼应 §2.6 `relay-agent` Profile）
 
 > **SFU 不只是 RTP 转发器**——AI Agent / 遥操场景里，SFU 形态也跑控制消息，行为必须可声明、可观测。下列语义与 §2.6 Profile 表对齐，引擎不替上层做"是否转发"的策略决策，只提供原语与默认值。
 
@@ -364,7 +367,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 
 ## 8. 低时延数据面与控制通道（DataChannel · 时间同步 · 遥操作 / AI Agent）
 
-> 前一版把 DataChannel 只当作"协议完整性"补项（§4.2 Tier 1）；**AI Agent 实时交互与机器人 / 车辆遥操作把它升级为一等需求**：除音视频外，还需要一条能**插队、区分可靠/实时语义、并与画面逐帧对齐**的数据通道。本章把「低时延控制通道 + 画面同步」从特性升级为架构决策（D8 / D9）。
+> 前一版把 DataChannel 只当作"协议完整性"补项（§4.2 Tier 1）；**AI Agent 实时交互与机器人 / 车辆遥操作把它升级为一等需求**：除音视频外，还需要一条能**在同一调度器内排序（DC-2；默认 web_transport 后端下不跨连接抢占）、区分可靠/实时语义、并与画面逐帧对齐**的数据通道。本章把「低时延控制通道 + 画面同步」从特性升级为架构决策（D8 / D9）。
 
 ### 8.1 目标场景与硬需求
 
@@ -378,7 +381,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 
 | 来源 | 关键数值（端到端 / 系统级） |
 |---|---|
-| DB31/T 1505—2024（自动驾驶集卡，上海市地方标准） | 远程驾驶时控制指令频率 **≥ 20 Hz**、交互时延 **< 30 ms**、视频传输时延宜 **< 250 ms**；通信链路宜设 **≥ 2 条独立且互不干扰** |
+| DB31/T 1505—2024（自动驾驶集卡，上海市地方标准） | 远程驾驶时控制指令频率 **≥ 20 Hz**、交互时延 **< 30 ms**、视频传输时延宜 **< 250 ms**；通信链路宜设 **≥ 2 条独立且互不干扰**（外部标准原文，不是 NimRTC DC-2 提供的跨连接保证） |
 | T/SSITS 2003—2023（低速无人设备远程驾驶系统规范） | 分车速档：控制端到端时延 **≤ 100 / 70 / 30 ms**，视频时延 **≤ 300 / 200 / 180 ms**，对应 RTT ≤ 100 / 70 / 30 ms、jitter95 ≤ 100 / 50 / 20 ms、丢包率 ≤ 30% / 20% / 10%；信道加密要求覆盖**控制指令、状态、音视频** |
 | 业界工程口径（云控 / 远控方案公开资料） | "控制通道的延迟与到达率优先于画面清晰度"；30% 丢包下画面卡顿可控；基站切换毫秒级预切 |
 
@@ -395,13 +398,13 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 | 尽力而为（高频遥测 / 占位） | 周期性状态、打点 | 不可靠流 |
 | 每流附加元数据 | 调度优先级、时延预算、sync-tag（关联媒体流） | 引擎 DC API 扩展 |
 
-> **差异化（表述要经得起审）**：浏览器 / 标准 DataChannel 也能表达部分可靠（建链参数 `maxPacketLifeTime` / `maxRetransmits`）与 priority（仅 hint），但都是**通道建链时一次性设定的静态语义**，priority 不保证调度。NimRTC 在 native 侧提供的是**每条消息流可动态声明的 QoS（含部分可靠 TTL）+ 与媒体同队列的严格优先级调度 + 消息时间戳 / ref_frame**——把"建完通道就不能改、调度无保证"变成"运行期可控、与画面可对齐"的动态语义，这才是 libwebrtc 生态给不了、遥操作又必须有的能力。
+> **差异化（表述要经得起审）**：浏览器 / 标准 DataChannel 也能表达部分可靠（建链参数 `maxPacketLifeTime` / `maxRetransmits`）与 priority（仅 hint），但都是**通道建链时一次性设定的静态语义**，priority 不保证调度。NimRTC 在 native 侧提供的是**每条消息流可动态声明的 QoS（含部分可靠 TTL）+ 同一 Scheduler 实例内的严格优先级排序（DC-2；默认 web_transport 后端下媒体与数据分属两条独立连接，见 sched.hpp Scope note）+ 消息时间戳 / ref_frame**——把"建完通道就不能改、调度无保证"变成"运行期可控、与画面可对齐"的动态语义，这才是 libwebrtc 生态给不了、遥操作又必须有的能力。
 
-### 8.3 发送调度：控制不排队，画面主动让路
+### 8.3 发送调度：同一 Scheduler 内排序，默认后端下不跨连接抢占
 
-- L1 统一发送调度器（`sched` 模块）：RTP（媒体）与 DataChannel（数据）进入**同一优先级队列**，默认策略：
+- L1 统一发送调度器（`sched` 模块）：RTP（媒体）与数据按**同一 `Scheduler` 实例内的严格优先级**排序（DC-2；默认 web_transport 后端下媒体与数据分属两条独立连接，见 sched.hpp Scope note），默认策略：
   **控制指令 > 音频 > 视频关键帧（I 帧）> 普通视频 > 尽力而为数据**；
-- 拥塞时**先由 BWE 压视频码率 / 帧率让出带宽**，不允许"视频把控制消息挤掉"或"控制等视频排完队"；
+- 拥塞时**先由 BWE 压视频码率 / 帧率让出带宽**，同一队列内不允许"视频把控制消息挤掉"或"控制等视频排完队"——这是队列内排序，不是跨连接线端保证；
 - 关键帧突发（PLI 响应 / 新端全帧）也要分级节流，避免洪泛压死控制面；
 - 调度策略可注入（接缝清单 §2.5），默认严格优先级主线开箱即用。
 
@@ -666,10 +669,10 @@ third_party/
 | **SDP parser / munger** | offer/answer 构造；Chrome 兼容字段顺序；BUNDLE；a=rtcp-fb 等 | 互通门槛 |
 | **ICE 状态机**（P3+ 自研路径） | candidate 收集、pair 排序、consent freshness、ICE restart | 可控性 + timeline 协同 |
 | **Jitter Buffer** | 固定窗口（P1）→ 自适应（P3）；**frame-level capture_ts 维护** | ref_frame 时间线 |
-| **BWE（带宽估计）** | AIMD（P1）→ Goog-CC（P3）；**媒体/控制优先级让路** | 严格优先级（§8.3） |
+| **BWE（带宽估计）** | AIMD（P1）→ Goog-CC（P3）；拥塞时降码率让路（BWE 行为，非跨连接抢占） | 调度器内排序（§8.3，DC-2 范围声明适用） |
 | **3A 接入层** | 包装 WebRTC APM；**pre-3a / post-3a 双 PCM tap**（§8.7） | PCM tap 差异化 |
 | **timeline 模块** | capture_ts 统一管理；ref_frame 关联；命令-画面绑定 API | §8.4 核心差异化 |
-| **调度（sched）** | 多路 RTP + DC 进入同一优先级队列；严格优先级分发 | §8.2 / §8.3 差异化 |
+| **调度（sched）** | 进入同一 Scheduler 实例的多路 RTP 按严格优先级分发（DC-2；默认 web_transport 后端下媒体与数据分属两条独立连接，见 sched.hpp Scope note） | §8.2 / §8.3 差异化 |
 | **会话编排 / assembly** | Builder + Profile 注册表 + 场景装配 | §2.6 差异化 |
 | **音频设备抽象** | CoreAudio / WASAPI / PulseAudio / ALSA 跨平台 wrapper | 跨平台 |
 | **配置 / Profile 加载** | nlohmann/json 之上封装 Profile schema | §2.6 配套 |
@@ -735,10 +738,10 @@ third_party/
 | **P1 传输 MVP** | ICE+DTLS+SRTP+RTP/RTCP+SDP+会话编排；**最小可用 JitterBuffer(固定窗口)+ 基础 3A(降噪/Passthrough) + BWE 默认(固定/AIMD)**；**L1 sched 接口（发送调度契约，无 SCTP 调度实现）** + DataChannel API 入口（仅接口与 QoS 语义，无 SCTP 实现）；内存帧源 + 宿主编解码注入接口（最小形态）；assembly 骨架（Builder + Profile 注册表）；echo-loopback；**aarch64 最小构建验证（编译验证，非互通验证，参见 §13.1）** | **Chrome ↔ NimRTC P2P 音/视频互通（Tier 0，x86_64 优先，aarch64 编译可过 ≠ 互通可过）+ 通话体验可用（无明显卡顿 / 噪声，量化口径见 §14）** + Quick Start 成立；README 6 段式首屏就位（§16.2）；Logo / Social Preview / Badges 就位（§16.4）；英文 README 落地、中文镜像 `README.zh-CN.md` 同步；**aarch64 编译产物 + Dockerfile 跨平台镜像**（呼应 §16.6） | **首次 public（Tech Preview）** |
 | **v0.13.0**（= v1.0.0-alpha.1 内部别名，见 `docs/plan/v0.13-plan.md` §1 + ADR-015）| **API 稳定性框架**：`NIMRTC_API_VERSION` 宏 + `NIMRTC_API_STABLE / UNSTABLE / DEPRECATED(msg)` 标注 + `nimrtc::core::api_version::*` 命名空间镜像；**89 个 public header 全部加稳定性分类标注**；**P1 UAF-DTLS `weak_ptr` 类型系统级加固**（`ITransportStack::dtls_weak()` + 14 处 engine `.lock()` + `v013_dtls_weak_expires_after_close` 回归测试）；**PAL Slice 1.5**（`pal::MakePluginOpts` 命名参数结构 + C++20 `auto Resolver` 模板 + 9 处 `engine.cpp` call site 迁移 + 6 个 `pal::resolve_*` forwarder） | windows-msvc + linux-gcc 本地 CI 双绿；macos-clang + linux-aarch64 跟随 `release.yml` 在 tag push 时验证；`tests/test_api_classification` 2/2 PASS（`headers=89 stable=107 unstable=6 deprecated=8 missing=0`）；`NIMRTC_API_VERSION_PRE_RELEASE = "alpha.1"`；**零**公共符号被标 DEPRECATED；**零**既有公共符号被修改或移除；公共 `NimRTCEngine` API 与 v0.12.0-post1 字节级一致 | 二次发布：Git tag `v0.13.0` 在 message body 标注 `v1.0.0-alpha.1` 别名；v0.x 线 "Tech Preview" banner 保持；首次以 `NIMRTC_API_*` 宏公开承诺 API 稳定性分类 |
 | **v0.14.0**（= v1.0.0-alpha.2 别名，见 `docs/plan/v0.14-plan.md` §2.1.1 + `docs/plan/v1.0-plan.md` §12.3.2 + ADR-014）| **WebTransport / QUIC 纯虚接口 seam**（`src/web_transport/include/nimrtc/web_transport/`：`IWebTransportSession` + `IBidirectionalStream` / `IUnidirectionalStream` + `DatagramFacade` + `IWebTransportSessionFactory`）；**PluginRegistry 新增 `web_transport_` 类型化 slot**（`register_web_transport` / `get_web_transport` / `list_web_transports` + `NIMRTC_REGISTER_WEB_TRANSPORT` 静态注册宏，与 DTLS / SCTP / raw_udp / transport-stack 4 个 factory slot 对称）；**NIMRTC_API_VERSION_PRE_RELEASE 由 `alpha.1` 升 `alpha.2`**；**DTLS Case D 片段重装器**（`DtlsHandshakeReassembler`，pure C++，无 wolfSSL 依赖；按 `msg_seq` 缓存入站 DTLS Handshake 记录；RFC 6347 §4.2.4 60 s 重传窗口内 5 s TTL GC；解决 Chrome `ClientHello` 跨多 record 拆分导致的 e2e 静默 drop）；**compile-only `test_web_transport_seam`** + `test_engine_plugin_loading` 加 2 个 alpha.2→beta.1 过渡护栏 | windows-msvc + linux-gcc 本地 CI 双绿（PR #19 retry 后均过，3m6s / 4m36s）；`test_web_transport_seam` 通过（接口良构 + v1.0-plan §10.4 默认值匹配 + enum round-trip）；`test_dtls_handshake_reassembler` 8/8 subtest + `test_dtls_replay_chrome_hello` 通过（1438 B `ClientHello` 端到端消费 + `HelloVerifyRequest` 发出 + 握手越过旧静默 drop 行为点）；`test_sctp_usrsctp` 4/4 Linux 平台 PASS（Windows / macOS 由 `__APPLE__` / `_WIN32` 平台守卫跳过，60 s 握手超时仅作 Linux 防御性上限，flake 已被 PR #19 retry 收口）；macos-clang / linux-aarch64 仍是 GHA runner capacity 跟随 `release.yml` 在 tag push 时验证（PR #19 4 平台 CI gate #6 实质满足，capacity 卡 8 h 已主动 cancel 释放 runner） | 三次发布：Git tag `v0.14.0` 在 message body 标注 `v1.0.0-alpha.2` 别名；v0.x 线 "Tech Preview" banner 保持；首次以 `IWebTransportSession` seam 公开承诺 v0.14.0-beta.1 落地路径；CHANGELOG `[0.14.0]` 段从 `Unreleased` 切到 `2026-10-16`，CMake `project(VERSION 0.14.0)`；无公共 API 移除 / 变更，仅新增 `web_transport_*` 命名空间与 `IWebTransportSession` 头文件 |
-| **P2 relay 转发 + 数据通道 + Agent 接入** | in-process `relay` 转发引擎（`relay-agent` / `agent-gateway` Profile 组合）；**DataChannel 基础互通（可靠 / 不可靠，usrsctp；v0.14.x 切到 WebTransport / QUIC） + L1 发送调度实现**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（relay / transport / agent / agent-gateway / relay-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通（`relay` Profile 形态）；**Chrome ↔ NimRTC DataChannel 双向互通**；控制消息在视频拥塞下不被挤占的本地演示；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
+| **P2 relay 转发 + 数据通道 + Agent 接入** | in-process `relay` 转发引擎（`relay-agent` / `agent-gateway` Profile 组合）；**DataChannel 基础互通（可靠 / 不可靠，usrsctp；v0.14.x 切到 WebTransport / QUIC） + L1 发送调度实现**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（relay / transport / agent / agent-gateway / relay-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通（`relay` Profile 形态）；**Chrome ↔ NimRTC 数据交换（当时为 SCTP 路径，现已切到 WebTransport JS API）**；同一 Scheduler 内排序的本地演示（非跨连接线端保证，见 sched.hpp Scope note）；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
 
 > **P2 调整说明（2026-10-19）**：P2 行的"**sfu-relay 压测 (BENCH-1) + DC 转发策略 (DC-3, §7.1)**"已从 P2 范围移除——`v1.0-plan.md` §7 (SFU-1 / DC-3 / BENCH-1) 在 2026-10-19 由 BDFL 关闭为 NO；SFU 实现不是项目核心目标。P2 仍包含 `relay` Profile 的 in-process 转发引擎（与 SFU 区分：`relay` 是单策略转发，编译期 L2 跳过；SFU 是多策略复用 + 端到端转发控制）。如果 SFU 轨道在 v1.x 重新打开，新 plan 文档 `v1.1.0-plan.md` 决定 P 阶段归属，不回到 P2。
-| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；~~**cloudgame 进入官方 Profile 组合**~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**（其最硬覆盖项"输入↔渲染帧对齐"依赖渲染端提供渲染帧时间戳，超出引擎能力边界；其余覆盖已被 teleop 族 + 命令-画面关联 API 覆盖。详见 `docs/plan/v1.3-plan.md` §V2 决策记录） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 跨平面调度（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
+| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；~~**cloudgame 进入官方 Profile 组合**~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**（其最硬覆盖项"输入↔渲染帧对齐"依赖渲染端提供渲染帧时间戳，超出引擎能力边界；其余覆盖已被 teleop 族 + 命令-画面关联 API 覆盖。详见 `docs/plan/v1.3-plan.md` §V2 决策记录） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 调度器内排序（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
 | **P4 生产化 + 遥操作交付 + 国密** | 安全审计、QoE 数据、首个真实用户；**双链路 / 接管框架完整化**；国密后端 + 信创适配矩阵；**cloudgame 官方 Profile 组合（长线候选）**；**SRTP SM4-GCM 国密实现** | "可用于生产"不再心虚；完成首次外部安全审计；嵌入式 / 政企 / 关基行业场景下首个公开参考交付 | public（生产可用） |
 
 ### 13.1 aarch64 互通口径：编译可过 ≠ 互通可过
@@ -765,7 +768,7 @@ third_party/
 | 单模块单测耗时 | < 2 min | 【待测】 |
 | 转发路径整帧拷贝次数 | 0（引用计数 + 切片） | 架构约束，代码走查验证 |
 | 引擎单跳控制消息处理预算（应用入队→封装→出网） | ≤ 数 ms 量级【目标待实测】；系统级端到端参考外部标准（§8.1：DB31/T < 30ms；T/SSITS ≤ 100 / 70 / 30ms） | 【待实测】 |
-| 视频拥塞下控制消息不被挤占（本地拥塞注入演示） | 视频降码率让路后，指令尾延迟增量低于阈值 | 【待实测】 |
+| 同一 Scheduler 内控制与媒体排序（本地拥塞注入演示；非跨连接线端保证） | 视频降码率让路后，指令尾延迟增量低于阈值 | 【待实测】 |
 | 媒体-数据时间线同步精度 | 本地 ±1ms 级；跨端随 RTT / 时钟漂移（基于 RTCP-SR） | 【待实测】 |
 | **P1 客户端基本质量（无损 / 10% 丢包，固定窗口 JB + AIMD BWE）** | 通话清晰、无明显卡顿 / 噪声（A/B 与 Chrome 对照；指标口径："控制-音频尾延迟 ≤ 200ms、音频丢帧率 ≤ 5%"） | 【待实测】 |
 

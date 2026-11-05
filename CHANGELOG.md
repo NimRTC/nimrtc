@@ -283,6 +283,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The new `tests/test_video_feedback_loop.cpp` covers the closed loop
     end to end (loss → NACK → retransmission → re-delivery, and PLI →
     key frame).
+  - The new `tests/test_engine_video_feedback.cpp` covers the *engine*
+    half of the loop, which the module-level tests cannot reach: the
+    engine is driven through a fake ICE transport (registered under the
+    id "fake-ice") that captures every outbound datagram and can inject
+    inbound ones, so the test asserts on the wire that a detected loss
+    really becomes an RTCP NACK (naming the peer's media SSRC and the
+    lost sequence number), that an inbound NACK really produces a
+    retransmission carrying the original sequence number, that an inbound
+    PLI really reaches the encoder's `force_keyframe()`, and that an
+    unrelated RTCP packet (a Receiver Report) is left alone.
 
 - **The video jitter buffer now shares the audio side's adaptive
   playout strategy (v1.3 Track Q2, "视频侧自适应 JB 统一").** The

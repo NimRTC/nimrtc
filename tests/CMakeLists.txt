@@ -889,6 +889,60 @@ nimrtc_add_engine_video_test(test_engine_video_plugins
                               test_engine_video_plugins.cpp)
 endif()
 
+# ----------------------------------------------------------------------------
+# v1.3 Q3 — engine-level RTCP feedback loop.
+#
+# The module-level loop lives in `test_video_feedback_loop.cpp` and the
+# plugin adapters in `test_video_plugin_adapters.cpp`.  This target covers
+# the *engine* half: the receiver's loss report -> engine -> RTCP bytes ->
+# ICE, and the peer's NACK / PLI -> engine -> sender / encoder.
+#
+# The engine is driven through a fake ICE transport registered under the id
+# "fake-ice" (see the test source), so no real networking is involved.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_engine_video_feedback_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::video_source
+        nimrtc::video_sink
+        nimrtc::video_pipeline
+        # PAL Slice 2 (v0.10.2): the unified registrar table references
+        # `nimrtc::datachannel::register_default_plugins`, so the symbol
+        # must resolve here too (same rationale as the function above).
+        nimrtc::datachannel
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endfunction()
+
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
+                                       test_engine_video_feedback.cpp)
+endif()
+
 # R3-Batch validation: video codec pipeline — encode/decode round-trip.
 function(nimrtc_add_engine_codec_test name source)
     add_executable(${name} ${source})

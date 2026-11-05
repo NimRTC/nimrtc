@@ -86,6 +86,147 @@ def _pct(sorted_us: list[float], q: float) -> float:
     return sorted_us[idx]
 
 
+def _pace_schedule(tier: dict, count: int, size: int) -> list[float]:
+    """Earliest send instant per packet, relative to the run start.
+
+    The capped tier is paced at exactly the cap rate so the queue in
+    front of the shaper stays empty: the reading then is the
+    configured delay, not the queue depth that a faster sender would
+    build up.  The uncapped tiers use a fixed 2 ms cadence (~500 pps)
+    for the same reason — without pacing, TX bursts all N packets at
+    once and the serial shaper / forwarder backlog (~50 us/packet of
+    Python + syscall) dominates the reading, so the 5 ms tier would
+    report ~25 ms of queue instead of the configured 5 ms delay.
+    """
+    pace_s = [0.0] * count
+    if tier["cap_mbps"] > 0:
+        per_pkt = (size * 8) / (tier["cap_mbps"] * 1e6)
+        for i in range(1, count):
+            pace_s[i] = pace_s[i - 1] + per_pkt
+    else:
+        for i in range(1, count):
+            pace_s[i] = pace_s[i - 1] + 0.002
+    return pace_s
+
+
+def run_netem_tier(tier: dict, count: int, size: int, host: str = "127.0.0.1") -> dict:
+    """Measure one tier whose impairments are applied by the kernel.
+
+    In this mode the tool drops nothing and delays nothing: the
+    `tc qdisc netem` qdisc that the caller attached to the interface
+    does both.  The tool only paces the sends (at the tier's rate, so
+    the netem rate limiter is a ceiling rather than a queue-builder)
+    and measures arrival-minus-send per sequence number.
+
+    Because the loss is applied by the kernel, the number of survivors
+    is not known in advance: the run ends when the link goes quiet for
+    a tail window instead of when a precomputed count is reached.
+    """
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for s in (rx, tx):
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 << 20)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        except OSError:
+            pass
+    rx.bind((host, 0))
+    tx.bind((host, 0))
+    rx_port = rx.getsockname()[1]
+    rx.settimeout(0.2)
+    payload = bytes((i % 251 for i in range(size)))
+    pace_s = _pace_schedule(tier, count, size)
+
+    send_ns: dict[int, int] = {}
+    arrival_ns: dict[int, int] = {}
+    arr_mu = threading.Lock()
+    stop = threading.Event()
+
+    def rx_drain() -> None:
+        last_arrival = time.monotonic()
+        try:
+            while not stop.is_set():
+                try:
+                    data, _ = rx.recvfrom(65535)
+                except socket.timeout:
+                    # A quiet tail means the kernel-side impairments have
+                    # finished delivering; the loopback is not going to
+                    # produce anything else.
+                    with arr_mu:
+                        got = len(arrival_ns)
+                    if got >= count or (time.monotonic() - last_arrival) > 2.0:
+                        return
+                    continue
+                if len(data) < 4:
+                    continue
+                seq = int.from_bytes(data[:4], "big")
+                last_arrival = time.monotonic()
+                with arr_mu:
+                    if seq not in arrival_ns:
+                        arrival_ns[seq] = time.perf_counter_ns()
+                    if len(arrival_ns) >= count:
+                        return
+        except OSError:
+            pass
+
+    t_drain = threading.Thread(target=rx_drain, daemon=True)
+    t_drain.start()
+    time.sleep(0.05)
+
+    t_start = time.perf_counter_ns()
+    for seq in range(count):
+        if pace_s[seq] > 0:
+            # The schedule is an absolute offset from the start of the
+            # run, not a delta: adding the accumulated offset to the
+            # *current* time would make each packet's target drift
+            # further out than the last, and the send rate would
+            # diverge instead of holding at the tier's rate.
+            target = t_start + int(pace_s[seq] * 1e9)
+            while time.perf_counter_ns() < target:
+                time.sleep(0.001)
+        send_ns[seq] = time.perf_counter_ns()
+        try:
+            tx.sendto(seq.to_bytes(4, "big") + payload, (host, rx_port))
+        except OSError:
+            break
+
+    # Let the tail drain: the last packet may still be sitting in the
+    # netem qdisc's delay queue.
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        with arr_mu:
+            got = len(arrival_ns)
+        if got >= count:
+            break
+        time.sleep(0.05)
+    stop.set()
+    t_drain.join(timeout=3.0)
+    rx.close()
+    tx.close()
+
+    lat_us = [
+        (arrival_ns[s] - send_ns[s]) / 1000.0 for s in arrival_ns if s in send_ns
+    ]
+    lat_us.sort()
+    received = len(arrival_ns)
+    # The kernel dropped whatever did not arrive, so the delivery ratio
+    # is the measurement and the expected count is the sent count.
+    return {
+        "tier": tier["id"],
+        "loss_config": tier["loss"],
+        "base_ms": tier["base_ms"],
+        "jitter_ms": tier["jitter_ms"],
+        "cap_mbps": tier["cap_mbps"],
+        "sent": count,
+        "received": received,
+        "expected": count,
+        "delivery_ratio": (received / count) if count else 0.0,
+        "p50_us": _pct(lat_us, 0.50),
+        "p99_us": _pct(lat_us, 0.99),
+        "max_us": lat_us[-1] if lat_us else 0.0,
+    }
+
+
 def run_tier(tier: dict, count: int, size: int, seed: int) -> dict:
     rng = random.Random(seed)
     # Pre-roll every packet decision so the run is deterministic and no
@@ -96,20 +237,7 @@ def run_tier(tier: dict, count: int, size: int, seed: int) -> dict:
         for _ in range(count)
     ]
     # Token pace for the capped tier: earliest send instant per packet.
-    pace_s = [0.0] * count
-    if tier["cap_mbps"] > 0:
-        per_pkt = (size * 8) / (tier["cap_mbps"] * 1e6)
-        for i in range(1, count):
-            pace_s[i] = pace_s[i - 1] + per_pkt
-    else:
-        # Fixed 2 ms cadence (~500 pps) for the uncapped tiers. Without
-        # pacing, TX bursts all N packets at once and the serial shaper /
-        # forwarder backlog (~50 us/packet of Python + syscall) dominates
-        # the reading — the 5 ms tier would report ~25 ms of queue, not
-        # the configured 5 ms delay. Paced sends keep the queue empty so
-        # arrival-minus-send measures the shaper delay itself.
-        for i in range(1, count):
-            pace_s[i] = pace_s[i - 1] + 0.002
+    pace_s = _pace_schedule(tier, count, size)
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sh = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -269,26 +397,69 @@ def main() -> int:
     ap.add_argument("--size", type=int, default=1200)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--mode",
+        choices=("shaper", "netem"),
+        default="shaper",
+        help=(
+            "shaper: impairments are applied by the in-process userspace "
+            "shaper (portable, no privileges).  netem: impairments are "
+            "applied by a 'tc qdisc netem' qdisc that the caller attached "
+            "to the interface; the tool only paces sends and measures."
+        ),
+    )
+    ap.add_argument(
+        "--tier",
+        action="append",
+        choices=[t["id"] for t in TIERS],
+        default=None,
+        help=(
+            "restrict the run to the given tier(s); repeatable.  Used by "
+            "tools/benchmark_weaknet_netem.sh, which has to attach one "
+            "qdisc per tier and therefore runs one tier per invocation."
+        ),
+    )
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="output JSON path (default build/e2e/bench_weaknet.json)",
+    )
     args = ap.parse_args()
+
+    tiers = TIERS
+    if args.tier:
+        wanted = set(args.tier)
+        tiers = tuple(t for t in TIERS if t["id"] in wanted)
 
     restore_timer = _high_res_timer()
 
     try:
-        results = [run_tier(t, args.count, args.size, args.seed) for t in TIERS]
+        if args.mode == "netem":
+            results = [run_netem_tier(t, args.count, args.size) for t in tiers]
+        else:
+            results = [run_tier(t, args.count, args.size, args.seed) for t in tiers]
     finally:
         restore_timer()
+    if args.mode == "netem":
+        note = ("kernel-side impairments via 'tc qdisc netem'; the tool paces "
+               "sends and measures arrival-minus-send; transport-floor "
+               "baseline, not engine glass-to-glass")
+    else:
+        note = ("in-process userspace shaper over localhost UDP; deterministic "
+                "seeded impairments; concurrent RX drain so latency is "
+                "arrival-minus-send per packet; transport-floor baseline, not "
+                "engine glass-to-glass; the Linux 'tc qdisc netem' equivalent "
+                "needs root and is driven by tools/benchmark_weaknet_netem.sh")
     result = {
+        "mode": args.mode,
         "count_per_tier": args.count,
         "payload_bytes": args.size,
         "seed": args.seed,
         "results": results,
-        "note": ("in-process userspace shaper over localhost UDP; deterministic "
-                 "seeded impairments; concurrent RX drain so latency is "
-                 "arrival-minus-send per packet; transport-floor baseline, not "
-                 "engine glass-to-glass; Linux netem equivalent would need root"),
+        "note": note,
     }
     E2E.mkdir(parents=True, exist_ok=True)
-    out = E2E / "bench_weaknet.json"
+    out = Path(args.out) if args.out else E2E / "bench_weaknet.json"
     out.write_text(json.dumps(result, indent=2), encoding="utf-8")
     if args.json:
         print(json.dumps(result, indent=2))
@@ -297,7 +468,19 @@ def main() -> int:
             print(f"[{r['tier']}] rx={r['received']}/{r['sent']} "
                   f"p50={r['p50_us']:.0f}us p99={r['p99_us']:.0f}us")
         print(f"wrote {out}")
-    ok = all(r["received"] == r["expected"] for r in results)
+    # In netem mode the kernel drops packets, so "received == sent" is
+    # the wrong gate: the delivery ratio is the measurement and a loss
+    # tier is *expected* to lose.  The gate there is that the link
+    # delivered something and that the tiers without loss delivered
+    # everything.
+    if args.mode == "netem":
+        ok = all(
+            r["received"] > 0
+            and (r["loss_config"] > 0 or r["received"] == r["sent"])
+            for r in results
+        )
+    else:
+        ok = all(r["received"] == r["expected"] for r in results)
     return 0 if ok else 2
 
 

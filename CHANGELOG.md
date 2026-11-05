@@ -393,6 +393,52 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - gained a time-aware `pop_frame(now_us)` overload; the no-argument
     `pop_frame()` keeps its "hand out the next complete frame"
     behaviour, so existing callers are unaffected.
+- **The Goog-CC bandwidth estimator landed alongside AIMD (v1.3 Track
+  Q1, "BWE 主线升级").** `src/modules/bwe/` gains `GoogCcBwe`, a
+  delay-plus-loss hybrid estimator registered under the factory id
+  `"goog-cc"`; AIMD stays the default backend, and
+  `EngineConfig::bwe_name` opts in explicitly, so existing sessions
+  keep their behaviour unless the caller asks for the new path. RTT /
+  loss / probe feedback reach the estimator through the existing BWE
+  input path, and `tests/test_bwe.cpp` covers bandwidth ramp-up,
+  loss-triggered downshift and probe feedback.
+- **The frame↔capture-timestamp map is now an engine API (v1.3 Tracks
+  T1/T2, "`ref_frame` 引擎级暴露 / 命令-画面关联").**
+  `NimRTCEngine` exposes the bidirectional mapping as additive
+  `NIMRTC_API_UNSTABLE` methods — `record_video_ref_frame()` mounts a
+  frame id, `ref_frame_to_capture_ts()` / `capture_ts_to_ref_frame()`
+  resolve it in either direction, and `data_message_frame_age_us()`
+  answers "which frame does this data message target, and how old is
+  it". The map is a bounded 1024-entry ring; `send_video()` and the
+  receive callback record automatically. `tests/test_engine_ref_frame.cpp`
+  covers mount / reverse lookup / miss / age / eviction.
+- **`NimRTCEngine::stats()` now aggregates the video counters (v1.3
+  Track V1, "`video_stats` 进 engine").** The eight module-level video
+  counters (bitrate / dropped frames / NACK classification) are summed
+  into the engine stats view additively — zero-valued when no video
+  flows, so existing consumers see no change.
+- **GMSSL is a real git submodule (v1.3 Track X1).** `src/third_party/gmssl`
+  pins GmSSL v3.2.0 (`.gitmodules` + `vendor.json` in sync; the pinned
+  LICENSE text verified Apache-2.0-compatible and recorded in
+  `vendor.json`). `NIMRTC_ENABLE_DTLS_GMSSL=ON` builds it via
+  `add_subdirectory` with no system-install probing; the default stays
+  OFF so the default build is unchanged. CI carries the opt-in
+  `gmssl-vendored` / `msvc` legs running `test_dtls_gmssl_tlcp`.
+- **The SRTP backend seam landed; SM4-GCM stays v1.4+ (v1.3 Track X2).**
+  `src/plugins/include/nimrtc/plugins/srtp_backend.hpp` declares the
+  additive `ISrtpSessionBackend` + factory seam, and
+  `src/modules/srtp/` routes the existing libsrtp path through a
+  `libsrtp_backend` adapter — behaviour unchanged. SM4-GCM SRTP is
+  explicitly out of scope for v1.3 (workload + D1 "no self-built
+  security-critical crypto"); the README national-crypto claim is
+  scoped to "DTLS/TLCP covered, SRTP still international suites".
+- **The engine translation unit is split five ways, behaviour unchanged
+  (v1.3 Track R1).** `src/engine/src/engine.cpp` (~4.5 kLOC) becomes
+  five responsibility-grouped TUs sharing the private
+  `src/engine/src/engine_impl.hpp` (core / transport / media /
+  signaling / timeline); the public `engine.hpp` is untouched (L4).
+  Verified 2026-11-05 on Windows/MSVC: full build exit 0, full
+  `ctest` 696/696, freeze scan headers 106 / symbols 707 / missing 0.
 - **Track D packaging rules landed (behind `NIMRTC_INSTALL=OFF` by
   default).** `cmake/NimRTCInstall.cmake` (new) centralises the Track D
   `install()` coverage from one place instead of touching every

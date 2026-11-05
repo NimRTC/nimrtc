@@ -74,7 +74,7 @@ flowchart LR
 | AI Agent 实时交互（语音 / 多模态） | 服务端形态：媒体网关 / transceiver，或 relay 中 Agent 作为参与者（Profile 见 §2.6 `agent-gateway` / `relay-agent`）；SDK 形态 Agent 终端（Profile `agent`） | 实时语音 Agent、智能客服、Agent 应用 | ✅ P2（DataChannel 互通 + 媒体网关）/ P3（时间线 + 模型输入原语完整） |
 | 机器人 / 无人设备遥操作 | 设备端 SDK + 远控端 SDK（共用共享核心，Profile `teleop`） | 巡检、物流、危险作业、远程维修 | ✅ P2 起（DC + 调度）/ P4 完整 |
 | 自动驾驶远程接管 / 云控 | 车端 SDK + 云控平台 | Robotaxi / 集卡 / 矿山港口（外部标准见 §8.1） | ✅ 架构支持，P4 交付 |
-| 云游戏 / 云渲染串流 | 渲染端 SDK（服务端形态）+ 玩家端 SDK（客户端形态） | 云游戏平台、3D 应用串流、XR 远端渲染 | ✅ P3（随 teleop 族进官方 Profile 组合，见 §2.6） |
+| 云游戏 / 云渲染串流 | 渲染端 SDK（服务端形态）+ 玩家端 SDK（客户端形态） | 云游戏平台、3D 应用串流、XR 远端渲染 | ⏸ 长线候选（2026-11-04 决策：不进官方组合，顺延 v1.4+，见 §2.6） |
 | 信创 / 国密 | 双栈加密（国际 + 国密后端） | 政企、关基行业 | ✅ 架构接缝 P1 就位，P4 启用 |
 
 > **场景 = 配置，不是新 SDK**：以上每一行场景都可以从**同一套共享核心**按需选择不同模块实现（BWE / JitterBuffer / 3A / 调度策略 / 时间线 / DataChannel 语义 / 密码后端……），预置为「场景 Profile」并随时覆盖。与 libwebrtc 生态"每场景一个 fork / SDK 分支"不同，NimRTC 一套代码多场景，机制见 **§2.6**。

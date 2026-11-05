@@ -31,7 +31,9 @@
 #               v0.14.0-rc.1 cycle briefly pinned src/third_party/msquic
 #               at a local-only commit (a88383e) and had to be reverted
 #               (ef6ff11); a pin that exists on one machine only breaks
-#               every other clone.
+#               every other clone. Reachability is probed by asking the
+#               upstream for the exact commit, which works on a shallow
+#               CI clone as well as on a full local one.
 #   root        No scratch scripts, captured logs, TLS keylogs or CTest
 #               output at the project root (project cleanliness rule;
 #               the pre-commit hook scripts/check-root-clean.sh enforces
@@ -293,11 +295,33 @@ if want submodules; then
                 *)
                     if [ "$NO_NETWORK" -eq 1 ]; then
                         printf 'NOTE %s: pinned %.12s (reachability not checked: --no-network)\n' "$path" "$sha"
-                    elif (cd "$path" 2>/dev/null && git branch -r --contains "$sha" 2>/dev/null) | grep -q .; then
-                        via=$(cd "$path" && git branch -r --contains "$sha" 2>/dev/null | head -1 | tr -d ' ')
-                        printf 'NOTE %s: pinned %.12s reachable via %s\n' "$path" "$sha" "$via"
                     else
-                        printf 'BAD  %s: pinned %.12s is not on any remote branch (unfetchable from a fresh clone)\n' "$path" "$sha"
+                        # Ask the upstream directly whether this exact commit
+                        # can be served, instead of asking the local clone
+                        # whether the commit sits on a remote-tracking branch.
+                        #
+                        # The local test (`git branch -r --contains`) is wrong
+                        # on a shallow clone: CI checks out submodules with
+                        # --depth=1, so the clone carries no remote-tracking
+                        # branches and the test reports every pin as
+                        # unreachable even though the pin is perfectly
+                        # fetchable. That false negative made the docs job
+                        # fail on every push.
+                        #
+                        # `git fetch --dry-run <url> <sha>` asks the server
+                        # for the object by name: the server refuses with
+                        # "not our ref" when the commit is gone, and accepts
+                        # when it is still servable. That is exactly the
+                        # property the check is about -- a pin that exists
+                        # only on one machine cannot survive this probe.
+                        url=$(git config --file .gitmodules --get "submodule.$path.url" 2>/dev/null)
+                        if [ -z "$url" ]; then
+                            printf 'BAD  %s: no url in .gitmodules for this pin\n' "$path"
+                        elif (cd "$path" 2>/dev/null && git fetch --no-tags --dry-run "$url" "$sha" >/dev/null 2>&1); then
+                            printf 'NOTE %s: pinned %.12s is fetchable from %s\n' "$path" "$sha" "$url"
+                        else
+                            printf 'BAD  %s: pinned %.12s is not fetchable from %s (unfetchable from a fresh clone)\n' "$path" "$sha" "$url"
+                        fi
                     fi
                     ;;
             esac

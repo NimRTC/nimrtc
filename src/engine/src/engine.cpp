@@ -27,10 +27,12 @@
 #include <array>
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -336,6 +338,15 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
+
+    // ---- Ref-frame timeline map (v1.3 T1/T2, UNSTABLE) -------------------
+    // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->
+    // capture_ts_us. Bounded ring (1024 entries); insertion-order deque
+    // drives eviction so the map cannot grow without bound. Single-threaded
+    // by engine contract (same as sr_tracker); no locking.
+    static constexpr std::size_t kRefFrameMapCap = 1024;
+    std::map<std::uint64_t, std::int64_t> ref_frame_to_ts;
+    std::deque<std::uint64_t>             ref_frame_order;
 
     // ---- ICE flap -> DTLS rehandshake (v1.2 D2, additive) ------------------
     // Tracks ICE state across tick() to detect NAT rebinding:
@@ -1878,6 +1889,11 @@ void NimRTCEngine::init_video_plugins() noexcept {
                    plugins::TimestampUs /*now_us*/) {
                 // v1.3 V1: one assembled receiver frame (pre-decode).
                 ++impl_->video_frames_received;
+                // v1.3 T1: record the inbound ref_frame mapping too, so a
+                // host holding a frame_seq from either direction resolves.
+                record_video_ref_frame(
+                    static_cast<std::uint64_t>(enc.info.frame_seq),
+                    static_cast<std::int64_t>(enc.info.capture_ts_us));
                 // Fire the NAL-level callback (existing behaviour).
                 if (on_video_frame_) {
                     on_video_frame_(enc.payload.data(),
@@ -3298,6 +3314,9 @@ plugins::Status NimRTCEngine::send_video(
     if (push_rc == plugins::kOk) {
         // v1.3 V1: one encoded frame accepted by the sender pipeline.
         ++impl_->video_frames_sent;
+        // v1.3 T1: record the outbound ref_frame mapping (id == frame_seq).
+        record_video_ref_frame(static_cast<std::uint64_t>(frame.frame_seq),
+                               static_cast<std::int64_t>(frame.capture_ts_us));
     }
     return push_rc;
 }
@@ -4333,6 +4352,58 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_feedback_applied  = impl_->video_feedback_applied;
     out.video_keyframes_applied = impl_->video_keyframes_applied;
     return out;
+}
+
+// -----------------------------------------------------------------------------
+// Ref-frame timeline map (v1.3 T1/T2, UNSTABLE)
+// -----------------------------------------------------------------------------
+//
+// Local frame-id <-> capture-ts registry. ref_frame id == frame_seq
+// (reusing the STABLE field avoids any ABI break on VideoSourceFrame).
+// Same benign single-threaded pattern as the ADR-017 accessors above.
+
+void NimRTCEngine::record_video_ref_frame(std::uint64_t ref_frame_id,
+                                          std::int64_t capture_ts_us) noexcept {
+    auto it = impl_->ref_frame_to_ts.find(ref_frame_id);
+    if (it != impl_->ref_frame_to_ts.end()) {
+        // Idempotent refresh: last-writer-wins, order unchanged.
+        it->second = capture_ts_us;
+        return;
+    }
+    impl_->ref_frame_to_ts.emplace(ref_frame_id, capture_ts_us);
+    impl_->ref_frame_order.push_back(ref_frame_id);
+    while (impl_->ref_frame_order.size() > Impl::kRefFrameMapCap) {
+        const std::uint64_t oldest = impl_->ref_frame_order.front();
+        impl_->ref_frame_order.pop_front();
+        impl_->ref_frame_to_ts.erase(oldest);
+    }
+}
+
+std::optional<std::int64_t> NimRTCEngine::ref_frame_to_capture_ts(
+    std::uint64_t ref_frame_id) const noexcept {
+    if (impl_ == nullptr) return std::nullopt;
+    const auto it = impl_->ref_frame_to_ts.find(ref_frame_id);
+    if (it == impl_->ref_frame_to_ts.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<std::uint64_t> NimRTCEngine::capture_ts_to_ref_frame(
+    std::int64_t capture_ts_us) const noexcept {
+    if (impl_ == nullptr) return std::nullopt;
+    for (const auto& [id, ts] : impl_->ref_frame_to_ts) {
+        if (ts == capture_ts_us) return id;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::int64_t> NimRTCEngine::data_message_frame_age_us(
+    std::uint64_t ref_frame_id) const noexcept {
+    const auto ts = ref_frame_to_capture_ts(ref_frame_id);
+    if (!ts.has_value()) return std::nullopt;
+    const std::int64_t now_us = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            core::SteadyClock::now().time_since_epoch()).count());
+    return now_us - *ts;
 }
 
 // -----------------------------------------------------------------------------

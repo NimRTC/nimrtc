@@ -748,6 +748,62 @@ public:
     NIMRTC_API_UNSTABLE
     plugins::Status send_video(const plugins::VideoSourceFrame& frame) noexcept;
 
+    // ---- Ref-frame timeline map (v1.3 T1/T2, UNSTABLE) -------------------
+    //
+    // Local frame-id <-> capture-timestamp registry. Unlike the ADR-017
+    // cross-end timeline (peer's clock reconstructed from Sender Reports),
+    // this map tracks OUR OWN frames: send_video() records
+    // (frame_seq -> capture_ts_us) automatically, and the inbound
+    // receiver callback records the peer's (frame_seq -> capture_ts_us)
+    // the same way. Hosts driving AI-agent / teleop loops use it to
+    // answer "which capture instant does control message X refer to?"
+    // without touching the SR tracker.
+    //
+    //   - ref_frame id == plugins::VideoSourceFrame::frame_seq
+    //     (per-SSRC, strictly increasing). Reusing frame_seq avoids any
+    //     ABI break on the STABLE VideoSourceFrame struct.
+    //   - record_video_ref_frame() is idempotent: re-recording an id
+    //     updates its timestamp (last-writer-wins).
+    //   - Bounded to the most recent 1024 entries (ring eviction); older
+    //     ids return nullopt from the lookups.
+    //   - data_message_frame_age_us() returns now_us - capture_ts for a
+    //     known id (T2 command-to-frame association), or nullopt when
+    //     the id is unknown.
+    //
+    // Example (T2 command-frame association):
+    // @code
+    //   // Sender: tag outgoing control messages with the frame_seq you
+    //   // just sent via send_video().
+    //   engine.send_video(frame);  // frame.frame_seq = 42
+    //   dc->send(control_bytes_for_frame_42);
+    //   // Receiver/host side: resolve the capture instant + age.
+    //   if (auto ts = engine.ref_frame_to_capture_ts(42)) {
+    //       auto age = engine.data_message_frame_age_us(42);
+    //   }
+    // @endcode
+    //
+    // UNSTABLE: registry capacity + eviction policy may be tuned.
+
+    /** Record (or refresh) one ref_frame mapping. Idempotent. */
+    NIMRTC_API_UNSTABLE
+    void record_video_ref_frame(std::uint64_t ref_frame_id,
+                                std::int64_t capture_ts_us) noexcept;
+
+    /** Capture timestamp for a known ref_frame id, or nullopt. */
+    NIMRTC_API_UNSTABLE
+    std::optional<std::int64_t> ref_frame_to_capture_ts(
+        std::uint64_t ref_frame_id) const noexcept;
+
+    /** Ref_frame id for a known capture timestamp, or nullopt. */
+    NIMRTC_API_UNSTABLE
+    std::optional<std::uint64_t> capture_ts_to_ref_frame(
+        std::int64_t capture_ts_us) const noexcept;
+
+    /** Age (now_us - capture_ts) for a known ref_frame id, or nullopt. */
+    NIMRTC_API_UNSTABLE
+    std::optional<std::int64_t> data_message_frame_age_us(
+        std::uint64_t ref_frame_id) const noexcept;
+
     // --- DTLS/SRTP internal pipeline -----------------------------------
     //
     // These two methods drive the DTLS and SRTP handshake steps inside

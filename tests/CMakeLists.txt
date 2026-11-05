@@ -1129,6 +1129,15 @@ set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.3 T1/T2 — engine-side ref_frame <-> capture-ts map.
+#
+# Covers OUR OWN frames (send_video auto-record + explicit
+# record_video_ref_frame), both lookup directions, the T2 age query, and
+# the 1024-entry ring eviction. Shell strategy, no ICE/DTLS handshake.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_ref_frame test_engine_ref_frame.cpp)
+
+# ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).
 #
 # This sub-project is gated by `NIMRTC_BUILD_BRIDGE_TESTS` (off by default)

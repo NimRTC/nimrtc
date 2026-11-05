@@ -261,9 +261,13 @@ public:
                       std::uint8_t* output,
                       std::size_t output_capacity,
                       np::EncodedVideoFrame& encoded_out) noexcept override {
-        if (!output || output_capacity < 1) return np::kErrBufferTooSmall;
-        output[0] = 0x65;
-        encoded_out.payload = nimrtc::core::ByteSpan{output, 1};
+        // Emit a minimal valid Annex-B frame (start code + one IDR NAL) so
+        // the reference sender's NALU parser accepts it.  A bare 0x65 byte
+        // has no start code and push_frame() would reject it.
+        static constexpr std::uint8_t kAnnexBIdr[] = {0x00, 0x00, 0x00, 0x01, 0x65};
+        if (!output || output_capacity < sizeof(kAnnexBIdr)) return np::kErrBufferTooSmall;
+        std::memcpy(output, kAnnexBIdr, sizeof(kAnnexBIdr));
+        encoded_out.payload = nimrtc::core::ByteSpan{output, sizeof(kAnnexBIdr)};
         encoded_out.codec = np::VideoCodecKind::kH264;
         encoded_out.is_keyframe = true;
         encoded_out.nalu_format = np::NaluFormat::kAnnexBStartCode;
@@ -520,6 +524,90 @@ TEST_F(EngineVideoFeedback, unrelated_rtcp_is_ignored) {
 
     EXPECT_EQ(engine.video_sender()->stats().force_keyframe_calls, 0u);
     EXPECT_EQ(codec->force_keyframe_calls(), before);
+
+    engine.close();
+}
+
+// ---------------------------------------------------------------------------
+// v1.3 V1: engine stats() counters track video traffic
+// ---------------------------------------------------------------------------
+
+TEST_F(EngineVideoFeedback, video_stats_counters_track_traffic) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    // All video counters start at zero on a fresh engine.
+    const auto s0 = engine.stats();
+    EXPECT_EQ(s0.video_frames_sent, 0u);
+    EXPECT_EQ(s0.video_packets_sent, 0u);
+    EXPECT_EQ(s0.video_bytes_sent, 0u);
+    EXPECT_EQ(s0.video_frames_received, 0u);
+    EXPECT_EQ(s0.video_nack_seqs_queued, 0u);
+    EXPECT_EQ(s0.video_keyframes_q, 0u);
+    EXPECT_EQ(s0.video_feedback_applied, 0u);
+    EXPECT_EQ(s0.video_keyframes_applied, 0u);
+
+    // ---- Outbound: send_video() drives frames/packets/bytes ---------------
+    // The counting codec ignores pixel input, so null planes are fine.
+    np::VideoSourceFrame vf{};
+    vf.width = 320;
+    vf.height = 240;
+    vf.format = np::VideoPixelFormat::kI420;
+    vf.capture_ts_us = 1000;
+    vf.frame_seq = 1;
+    vf.rtp_timestamp = 90000;
+    ASSERT_EQ(engine.send_video(vf), np::kOk);
+
+    const auto s1 = engine.stats();
+    EXPECT_EQ(s1.video_frames_sent, 1u)
+        << "send_video() must increment video_frames_sent";
+    EXPECT_GT(s1.video_packets_sent, 0u)
+        << "the sender packet callback must count emitted RTP packets";
+    EXPECT_GT(s1.video_bytes_sent, 0u)
+        << "the sender packet callback must count emitted RTP bytes";
+
+    // ---- Outbound feedback: inbound loss queues a NACK --------------------
+    const std::uint8_t rx_pt = cfg.video_receiver_tuning.payload_type;
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 100, 90000, rx_pt, {0x65, 0x88}));
+    ice->queue_inbound(make_rtp(kPeerVideoSsrc, 102, 93000, rx_pt, {0x41, 0x9A}));
+    engine.tick();
+    engine.tick();
+
+    const auto s2 = engine.stats();
+    EXPECT_GT(s2.video_nack_seqs_queued, s1.video_nack_seqs_queued)
+        << "queued NACK seqs must grow when the receiver reports a gap";
+    EXPECT_GE(s2.video_frames_received, s1.video_frames_received);
+
+    // ---- Inbound feedback: peer NACK applies + retransmits ----------------
+    // send_video() already cached an encoded frame in the sender, so ask
+    // the peer for one of the RTP packets it just emitted.
+    const std::uint8_t tx_pt = cfg.video_sender_tuning.payload_type;
+    const auto* original = find_sent(ice->sent(), [tx_pt](const std::vector<std::uint8_t>& p) {
+        return is_rtp_with_pt(p, tx_pt);
+    });
+    ASSERT_NE(original, nullptr) << "send_video() emitted no RTP packet";
+    const std::uint16_t seq = be16(original->data() + 2);
+    const auto nack = make_nack(/*sender_ssrc=*/0x0BADF00D,
+                                 /*media_ssrc=*/cfg.video_sender_tuning.ssrc,
+                                 /*pid=*/seq,
+                                 /*blp=*/0);
+    engine.feed_media_inbound(nack.data(), nack.size());
+    const auto s3 = engine.stats();
+    EXPECT_GT(s3.video_feedback_applied, s2.video_feedback_applied)
+        << "inbound NACK must increment video_feedback_applied";
+
+    // ---- Inbound feedback: peer PLI requests a keyframe -------------------
+    const auto pli = make_pli(/*sender_ssrc=*/0x0BADF00D,
+                              /*media_ssrc=*/cfg.video_sender_tuning.ssrc);
+    engine.feed_media_inbound(pli.data(), pli.size());
+    const auto s4 = engine.stats();
+    EXPECT_GT(s4.video_keyframes_applied, s3.video_keyframes_applied)
+        << "inbound PLI must increment video_keyframes_applied";
 
     engine.close();
 }

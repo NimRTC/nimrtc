@@ -326,6 +326,15 @@ struct NimRTCEngine::Impl {
     bool            dtls_active_inbound = false;
     bool            srtp_installed      = false;
     int             srtp_stats_drop     = 0;
+    // ---- Video counters (v1.3 V1, cumulative since open()) ------------------
+    std::uint64_t video_frames_sent       = 0;
+    std::uint64_t video_packets_sent      = 0;
+    std::uint64_t video_bytes_sent        = 0;
+    std::uint64_t video_frames_received   = 0;
+    std::uint64_t video_nack_seqs_queued  = 0;
+    std::uint64_t video_keyframes_q       = 0;
+    std::uint64_t video_feedback_applied  = 0;
+    std::uint64_t video_keyframes_applied = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // ---- ICE flap -> DTLS rehandshake (v1.2 D2, additive) ------------------
@@ -1828,6 +1837,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     impl_->video_keyframe_pending_.store(false, std::memory_order_release);
                 }
 
+                // v1.3 V1: count emitted RTP packets/bytes (post-protect size).
+                ++impl_->video_packets_sent;
+                impl_->video_bytes_sent += rtp_pkt.size();
+
                 if (scheduler_) {
                     scheduler_->enqueue_owned(prio,
                                               std::move(rtp_pkt),
@@ -1863,6 +1876,8 @@ void NimRTCEngine::init_video_plugins() noexcept {
         video_receiver_->set_frame_callback(
             [this](const plugins::EncodedVideoFrame& enc,
                    plugins::TimestampUs /*now_us*/) {
+                // v1.3 V1: one assembled receiver frame (pre-decode).
+                ++impl_->video_frames_received;
                 // Fire the NAL-level callback (existing behaviour).
                 if (on_video_frame_) {
                     on_video_frame_(enc.payload.data(),
@@ -3279,7 +3294,12 @@ plugins::Status NimRTCEngine::send_video(
 
     // Packetize (the sender's packet callback handles RTP header assembly
     // + SRTP protect + scheduler enqueue).
-    return video_sender_->push_frame(encoded, frame.rtp_timestamp);
+    const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
+    if (push_rc == plugins::kOk) {
+        // v1.3 V1: one encoded frame accepted by the sender pipeline.
+        ++impl_->video_frames_sent;
+    }
+    return push_rc;
 }
 
 int NimRTCEngine::tick() noexcept {
@@ -3731,11 +3751,18 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     // the encoder, so a key-frame request has to be forwarded there too:
     // the packetizer cannot produce an IDR by itself.
     if (video_sender_) {
-        (void)video_sender_->apply_feedback_rtcp(view);
+        const int actions = video_sender_->apply_feedback_rtcp(view);
+        // v1.3 V1: inbound feedback actions (retransmissions + keyframe reqs).
+        if (actions > 0) {
+            impl_->video_feedback_applied += static_cast<std::uint64_t>(actions);
+        }
         const std::uint32_t keyframe_requests =
             video_sender_->take_keyframe_requests();
-        if (keyframe_requests > 0 && video_codec_) {
-            (void)video_codec_->force_keyframe();
+        if (keyframe_requests > 0) {
+            impl_->video_keyframes_applied += keyframe_requests;
+            if (video_codec_) {
+                (void)video_codec_->force_keyframe();
+            }
         }
     }
 
@@ -3785,6 +3812,10 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
 void NimRTCEngine::queue_video_feedback(
     const plugins::VideoFeedbackReport& report) noexcept {
     if (report.missing_seqs.empty() && !report.want_keyframe) return;
+
+    // v1.3 V1: outbound feedback queued (NACK seqs + keyframe requests).
+    impl_->video_nack_seqs_queued += report.missing_seqs.size();
+    if (report.want_keyframe) ++impl_->video_keyframes_q;
 
     // Merge into the pending report: two gaps detected back to back must
     // not cost two round trips, and a NACK list plus a key-frame request
@@ -4290,7 +4321,18 @@ uint32_t NimRTCEngine::last_open_rc() const noexcept {
 }
 
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
-    return Stats{impl_->srtp_stats_drop};
+    Stats out;
+    out.srtp_drops = impl_->srtp_stats_drop;
+    // v1.3 V1: cumulative video counters (additive; zero when unused).
+    out.video_frames_sent       = impl_->video_frames_sent;
+    out.video_packets_sent      = impl_->video_packets_sent;
+    out.video_bytes_sent        = impl_->video_bytes_sent;
+    out.video_frames_received   = impl_->video_frames_received;
+    out.video_nack_seqs_queued  = impl_->video_nack_seqs_queued;
+    out.video_keyframes_q       = impl_->video_keyframes_q;
+    out.video_feedback_applied  = impl_->video_feedback_applied;
+    out.video_keyframes_applied = impl_->video_keyframes_applied;
+    return out;
 }
 
 // -----------------------------------------------------------------------------

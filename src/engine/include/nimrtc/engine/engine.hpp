@@ -1085,6 +1085,17 @@ public:
     // Engine stats for debugging
     struct NIMRTC_API_STABLE Stats {
         int srtp_drops = 0;
+        // ---- Video counters (v1.3 V1, additive) -------------------------
+        // All cumulative since open().  Wired to the already-existing
+        // video pipeline hooks; no new threads, no new I/O.
+        std::uint64_t video_frames_sent        = 0;  // send_video() frames
+        std::uint64_t video_packets_sent       = 0;  // RTP packets emitted
+        std::uint64_t video_bytes_sent         = 0;  // RTP bytes (hdr+payload)
+        std::uint64_t video_frames_received    = 0;  // receiver frames
+        std::uint64_t video_nack_seqs_queued   = 0;  // NACK seqs queued (out)
+        std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
+        std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
+        std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *

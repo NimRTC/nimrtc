@@ -325,6 +325,10 @@ jobs:
           python3 tools/benchmark_dc.py
           python3 tools/benchmark_weaknet.py --count 200 --size 1200
 
+      - name: Benchmark weak network with kernel netem (Linux only)
+        run: |
+          sudo --preserve-env=PATH bash tools/benchmark_weaknet_netem.sh --count 200 --size 1200
+
       - name: Upload bench artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -333,6 +337,7 @@ jobs:
             build/e2e/bench_latency.json
             build/e2e/bench_dc.json
             build/e2e/bench_weaknet.json
+            build/e2e/bench_weaknet_netem.json
           retention-days: 14
 
       - name: Upload build directory on failure

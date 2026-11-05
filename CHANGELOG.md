@@ -267,6 +267,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The weak-network baseline facility landed (v1.3 Track Q4, "弱网基线设施").**
+  Two reproducible paths measure the same three tiers — 5% loss,
+  20 ms base + 0–100 ms jitter, 1 Mbps cap — over a 1200 B payload:
+  - `tools/benchmark_weaknet.py` is the portable path: an in-process
+    userspace shaper between two loopback UDP sockets with seeded
+    (deterministic) impairments, so Windows/macOS/Linux all reproduce
+    the same numbers without root.
+  - `tools/benchmark_weaknet_netem.sh` is the Linux path: the same
+    tiers driven by a real `tc qdisc netem` qdisc attached to `lo`
+    inside a throwaway network namespace (so the host's loopback is
+    never reshaped). The tool's `--mode netem` then only paces the
+    sends and measures arrival-minus-send — the impairments are the
+    kernel's.
+  - Both account in **wire bytes** and keep the offered load at 90%
+    of the capacity. A rate-limited link delays a packet by its base
+    delay *plus* the time it needs to put the packet on the wire (the
+    serialization time), not by the delay alone; the old revision
+    paced at 100% of the cap and omitted the serialization term, so
+    the "1 Mbps" tier reported a queue the sender had built up itself
+    rather than the link's delay. The capped tier now reads
+    ~15 ms (5 ms base + ~9.6 ms serialization) with a flat
+    distribution (p99 − p50 < 2 ms) instead of ~16–31 ms with a
+    queue-dependent tail.
+  - The netem script pins the qdisc's cell size to 1 byte
+    (`rate 1mbit 0 1`): netem rounds the charged length up to the
+    cell size, and with the default cell the charge no longer matches
+    the length the sender paces against.
+  - Two Windows-only measurement defects were fixed. The shaper
+    scheduled its delivery deadlines on `time.monotonic()`, which on
+    Windows is `GetTickCount64` with a **15.6 ms** resolution, so
+    every packet's delay was quantized to a 15.6 ms step; it now uses
+    `time.perf_counter()` (`QueryPerformanceCounter`). And the
+    forwarder waited for its deadline with `Condition.wait(timeout=…)`,
+    whose timed wake-up has a ~10 ms granularity on Windows (a 10 ms
+    wait returns after ~20 ms), which added 5–15 ms of lateness to
+    every packet; it now polls in 0.5 ms slices outside the lock.
+  - CI runs the netem path on the Linux x86_64 leg (`sudo`, needs
+    `iproute2`); the JSON lands in `build/e2e/bench_weaknet_netem.json`
+    next to the portable `build/e2e/bench_weaknet.json`.
+  - README (EN + 中文) Benchmarks tables now quote the corrected
+    numbers for both paths.
+
 - **The RTCP feedback loop is closed (v1.3 Track Q3, "RTCP 反馈闭环打通").**
   `nimrtc::video_rtcp_feedback` (NACK / FIR / PLI) is now wired to the
   video pipeline, so a lost packet travels the whole path:

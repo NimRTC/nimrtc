@@ -129,6 +129,11 @@ msquic 的头文件与库——你可以直接检视并链接引擎所用的同�
 > `NIMRTC_INSTALL=ON` 现在会产出 `include/` + `lib/` + `lib/cmake/NimRTC/`
 > （Windows 下游已验证），下一个版本会带上。
 
+> **v1.0.2 的 bundle 里也没有 WebRTC APM 归档**：四个 tarball 里都不存在
+> `lib/webrtc_apm/` 目录，所以下载到的 bundle 完全不带音频 3A。发布说明里的
+> 逐平台 3A 状态因此写作"构建用的是真实 WebRTC APM，但该 bundle 不含 APM 归档"；
+> 这些归档由 `main` 的安装规则产出，会在下一个版本里出现。
+
 - Release 页面：[v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
 - 资产：`nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc`（含 `sbom.json`）
 

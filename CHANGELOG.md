@@ -13,6 +13,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The release body's 3A status table did not match the published
+  bundles.** The table was derived from `build/3a-status-<platform>.txt`,
+  which records the *build-time* APM mode (whether the WebRTC APM
+  prebuild succeeded), not what the tarball ships. The `v1.0.2` body
+  therefore claimed "WebRTC APM (real 3A) bundled" for the three
+  platforms whose prebuild had succeeded, while none of the four
+  published bundles contains `lib/webrtc_apm/` at all, and its
+  `windows` line blamed a failed prebuild although that step succeeded
+  in the final `v1.0.2` release run. `release.yml` now lists the
+  published tarball and reports the build mode and the shipped content
+  separately: "real 3A bundled" is only claimed when `lib/webrtc_apm/`
+  is actually inside the artefact, and a platform whose bundle is
+  missing or carries no APM archives says so. The published `v1.0.2`
+  body has been corrected accordingly.
+
 - **The installed bundle was missing the shared jitter-buffer strategy.**
   `nimrtc::jb_strategy` (v1.3 Q2) is linked by both `nimrtc::jb` and
   `nimrtc::video_jb`, but the install rules did not know about it:
@@ -440,24 +455,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `NimRTCConfig.cmake` / `NimRTCConfigVersion.cmake` is tracked for
   `v1.1.0` (Track D in `docs/plan/v1.1-plan.md`); `README.md` "Download prebuilt" has been corrected to
   describe what the bundles actually contain.
+- **The bundles carry no WebRTC APM archives, so no bundle provides a
+  usable 3A.** The four `v1.0.2` tarballs contain no
+  `lib/webrtc_apm/` directory at all (verified 2026-11-05 against the
+  published `nimrtc-1.0.2-{windows-x86_64-msvc,linux-x86_64-gcc}.tar.xz`
+  assets): they ship the vendored third-party stack only. The APM
+  archives are installed by `cmake/NimRTCInstall.cmake` (Track D), which
+  landed after the `v1.0.2` cut, so the `v1.0.2` bundles predate it.
 
 ### Notes
 
 - Public API is unchanged vs `v1.0.1`; `NIMRTC_API_VERSION` = 10002,
   `NIMRTC_API_VERSION_PRE_RELEASE` = `""`.
-- The `windows` bundle ships the stub 3A path: the WebRTC APM prebuild
-  failed on the `windows-2022` runner, so the Configure step recorded
-  `3a=OFF` for that platform (same as in `v1.0.1`). The cause was a
-  defect in `tools/build_webrtc_apm.cmd` — LF-only line endings that
-  cmd.exe mis-parses, a `powershell -Command` wrapper that turned
-  ninja's stderr progress line into a terminating error, and a ninja
-  invocation without `call` — not a platform limitation. All three are
-  fixed in `9c3c522`, so the `windows` leg is expected to ship the real
-  APM from the next cut. The CI job list shows the prebuild step as
-  `success` because `continue-on-error` turns a failure into a
-  successful *conclusion*; the real result is in
-  `steps.apm_prebuild.outcome`, which is what the release notes are
-  generated from.
+- **The 3A status table in this release's body was wrong, and so was
+  the reason it gave for the `windows` line.** The table is generated
+  from the per-platform *build-time* APM mode
+  (`build/3a-status-<platform>.txt`, which records whether the WebRTC
+  APM prebuild succeeded), not from what the published bundle carries.
+  The "WebRTC APM (real 3A) bundled" lines for linux/macOS therefore
+  described the build, not the artefact: none of the four bundles ships
+  the APM archives (see the known issue above). The `windows` line
+  blamed a failed prebuild, but the `Prebuild WebRTC APM` step
+  **succeeded** in the final `v1.0.2` release run (`release / build /
+  windows` → `Prebuild WebRTC APM` → `success`); the persistent Windows
+  stub-3A outcome through `v1.0.2` came from defects in
+  `tools/build_webrtc_apm.cmd` — LF-only line endings that cmd.exe
+  mis-parses, a `powershell -Command` wrapper that turned ninja's
+  stderr progress line into a terminating error, and a ninja invocation
+  without `call` — all fixed in `9c3c522`, i.e. before this cut. The
+  generator now lists the published tarball and reports the build mode
+  and the shipped content separately, so "real 3A bundled" is only
+  claimed when `lib/webrtc_apm/` is actually present in the artefact.
 
 ## [Unreleased — v1.1 C-track]
 

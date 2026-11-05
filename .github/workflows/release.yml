@@ -965,11 +965,21 @@ jobs:
             } >> dist/release_notes.md
           fi
 
-          # W3: per-platform 3A (AEC/ANS/AGC) status.  Each build job
-          # writes `3a-status-<platform>.txt` recording whether the
-          # WebRTC APM prebuild succeeded (real 3A) or fell back to the
-          # stub path.  Surface it so a consumer can tell at a glance
-          # which bundles carry the real audio-processing module.
+          # W3: per-platform 3A (AEC/ANS/AGC) status.  TWO DIFFERENT
+          # facts must be reported per platform, and conflating them is
+          # what made the v1.0.2 body wrong:
+          #   * the BUILD-TIME mode, from `3a-status-<platform>.txt`
+          #     (`ON` = the WebRTC APM prebuild succeeded);
+          #   * what the PUBLISHED BUNDLE actually carries, checked by
+          #     listing the tarball for `lib/webrtc_apm/`.
+          # The v1.0.2 body claimed "WebRTC APM (real 3A) bundled" for
+          # every platform whose prebuild succeeded, while NONE of the
+          # four published bundles contained the APM archives at all
+          # (they shipped only the vendored third-party stack), and the
+          # `windows` line blamed a failed prebuild although that step
+          # succeeded in the final release run.  The table now reports
+          # both facts, so every claim can be checked against the
+          # artefact the consumer actually downloads.
           {
             echo
             echo "---"
@@ -981,16 +991,39 @@ jobs:
               platform="$(basename "$status_file" .txt)"
               platform="${platform#3a-status-}"
               value="$(cut -d= -f2 "$status_file" | tr -d '\r')"
-              if [[ "$value" == "ON" ]]; then
+              bundle=""
+              for candidate in dist/nimrtc-*-"${platform}"-*.tar.xz; do
+                [[ -f "$candidate" ]] || continue
+                bundle="$candidate"
+                break
+              done
+              shipped="unknown"
+              if [[ -n "$bundle" ]]; then
+                if tar -tJf "$bundle" 2>/dev/null | grep -q "webrtc_apm/"; then
+                  shipped="yes"
+                else
+                  shipped="no"
+                fi
+              fi
+              if [[ "$shipped" == "yes" ]]; then
                 echo "> - \`${platform}\` — WebRTC APM (real 3A) bundled"
+              elif [[ "$shipped" == "unknown" ]]; then
+                echo "> - \`${platform}\` — no bundle for this platform in the release run (the build job produced no artefact), so its 3A content cannot be checked"
+              elif [[ "$value" == "ON" ]]; then
+                echo "> - \`${platform}\` — the build used the real WebRTC APM, but this bundle ships no APM archives (\`lib/webrtc_apm/\` is absent), so it provides no usable 3A"
+              elif [[ "$value" == "OFF" ]]; then
+                echo "> - \`${platform}\` — stub 3A path (the WebRTC APM prebuild did not succeed)"
               else
-                echo "> - \`${platform}\` — stub 3A path (WebRTC APM prebuild did not succeed)"
+                echo "> - \`${platform}\` — 3A status unknown (no \`3a-status\` record)"
               fi
             done
             echo
             echo "> The WebRTC APM is prebuilt out-of-tree with meson. Where"
-            echo "> that prebuild fails, the bundle falls back to NimRTC's"
+            echo "> that prebuild fails, the build falls back to NimRTC's"
             echo "> built-in stub 3A path instead of aborting the release."
+            echo "> The status above is checked against the published bundle:"
+            echo "> a platform counts as \"real 3A bundled\" only when"
+            echo "> \`lib/webrtc_apm/\` is actually present in the tarball."
           } >> dist/release_notes.md
 
       - name: Draft GitHub Release
@@ -1080,7 +1113,20 @@ jobs:
               platform="$(basename "$status_file" .txt)"
               platform="${platform#3a-status-}"
               value="$(cut -d= -f2 "$status_file" | tr -d '\r')"
-              echo "- \`${platform}\` — 3A: ${value}"
+              # Report the shipped content next to the build-time mode:
+              # the two are not the same fact (see the release-body
+              # generator for the v1.0.2 "real 3A bundled" mis-claim).
+              shipped="no APM archives in the bundle"
+              for candidate in dist/nimrtc-*-"${platform}"-*.tar.xz; do
+                [[ -f "$candidate" ]] || continue
+                if tar -tJf "$candidate" 2>/dev/null | grep -q "webrtc_apm/"; then
+                  shipped="APM archives present in the bundle"
+                else
+                  shipped="no APM archives in the bundle"
+                fi
+                break
+              done
+              echo "- \`${platform}\` — 3A build mode: ${value}; ${shipped}"
             done
             echo
           } >> "$GITHUB_STEP_SUMMARY"

@@ -133,6 +133,13 @@ primitives the engine uses without building them yourself.
 > `NIMRTC_INSTALL=ON` rules now produce `include/` + `lib/` + `lib/cmake/NimRTC/`
 > (verified downstream on Windows; Linux downstream proof runs in `ci.yml` on every push), and the next release will ship them.
 
+> **The v1.0.2 bundles also carry no WebRTC APM archives** — there is no
+> `lib/webrtc_apm/` directory in any of the four tarballs — so a downloaded
+> bundle provides no audio 3A at all. The release body states the per-platform
+> 3A status as "the build used the real WebRTC APM, but this bundle ships no APM
+> archives"; the archives are installed by the `main` install rules and will
+> appear in the next release.
+
 - Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
 - Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
 

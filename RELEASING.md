@@ -207,6 +207,21 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    is never published silently. See `docs/zh/architecture.md` §11.5.5 for
    the rationale.
 
+   **A green prebuild does not mean the bundle ships the APM.** The
+   `3a-status-<platform>.txt` record is a *build-time* fact: it says the
+   WebRTC APM was compiled into the NimRTC libraries of that build. What
+   the consumer downloads is a separate fact — the bundle only carries a
+   usable 3A when the install rules actually ship the APM archives under
+   `lib/webrtc_apm/` (`cmake/NimRTCInstall.cmake`; Track D). The release
+   body therefore checks the published tarball for `lib/webrtc_apm/` and
+   reports the build mode and the shipped content separately: a platform
+   is described as "real 3A bundled" only when the archives are actually
+   in the tarball. Before that check existed, the `v1.0.2` body claimed
+   "real 3A bundled" for the three platforms whose prebuild had succeeded
+   while none of the four bundles shipped the APM archives — and blamed a
+   failed prebuild for the `windows` line although that step succeeded in
+   the final release run.
+
    **Why the `windows` leg used to fail — and why that is not a platform
    limit.** The `v0.14.0` cut was aborted by a genuine meson/abseil
    compile failure in `webrtc_audio_processing` (commit `dc15ad8`), but
@@ -440,7 +455,11 @@ release pipeline **prefers** `=ON` after running `python tools/fetch_webrtc_apm.
 once per platform, but the prebuild is `continue-on-error: true` — a failed
 prebuild falls back to `=OFF` (the built-in stub 3A path) instead of aborting
 the cut, and the per-platform outcome is recorded in `build/3a-status-*.txt`
-and surfaced in the release body. The `windows` leg's prebuild failures
+and surfaced in the release body. That record is a *build-time* fact only:
+whether the published bundle carries a usable 3A depends on the install
+rules shipping the APM archives under `lib/webrtc_apm/`, so the release body
+lists the tarball and reports the two facts separately (§3.1 step 4). The
+`windows` leg's prebuild failures
 through `v1.0.2` were caused by defects in `tools/build_webrtc_apm.cmd`,
 fixed in `9c3c522` — not by a platform limitation. See §3.1 step 4.
 

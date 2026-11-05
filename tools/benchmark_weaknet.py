@@ -109,8 +109,8 @@ TIERS = (
 
 SEQ_BYTES = 4  # the per-packet sequence number the tool prepends
 NETEM_WIRE_OVERHEAD = 8 + 20 + 14  # UDP + IPv4 + loopback Ethernet
-NETEM_CELL_DEFAULT = 1  # netem's default cell: exact byte accounting
 UTIL_DEFAULT = 0.9  # offered load as a fraction of the capacity
+FORWARD_SLICE_S = 0.0005  # forwarder's delivery-deadline polling slice
 
 
 def _serialization_s(tier: dict, size: int) -> float:
@@ -129,7 +129,7 @@ def _netem_charged_bytes(size: int) -> int:
 
     netem charges the datagram's on-wire length (skb->len), rounded up
     to the qdisc's cell size.  The script pins the cell size to 1 byte
-    (exact accounting), so the charge is the on-wire length: our
+    ("rate 1mbit 0 1"), so the charge is the on-wire length: our
     sequence number plus the payload, plus the UDP, IPv4 and
     loopback-Ethernet headers the kernel adds on the way out.
     """
@@ -220,7 +220,7 @@ def run_netem_tier(
     stop = threading.Event()
 
     def rx_drain() -> None:
-        last_arrival = time.monotonic()
+        last_arrival = time.perf_counter()
         try:
             while not stop.is_set():
                 try:
@@ -231,13 +231,13 @@ def run_netem_tier(
                     # produce anything else.
                     with arr_mu:
                         got = len(arrival_ns)
-                    if got >= count or (time.monotonic() - last_arrival) > 2.0:
+                    if got >= count or (time.perf_counter() - last_arrival) > 2.0:
                         return
                     continue
                 if len(data) < 4:
                     continue
                 seq = int.from_bytes(data[:4], "big")
-                last_arrival = time.monotonic()
+                last_arrival = time.perf_counter()
                 with arr_mu:
                     if seq not in arrival_ns:
                         arrival_ns[seq] = time.perf_counter_ns()
@@ -376,7 +376,13 @@ def run_tier(
                 seq = int.from_bytes(data[:4], "big")
                 if 0 <= seq < count and not drop[seq]:
                     with heap_cv:
-                        heapq.heappush(heap, (time.monotonic() + delay_s[seq], data))
+                        # perf_counter, not monotonic: on Windows
+                        # time.monotonic() is GetTickCount64, whose
+                        # resolution is 15.6 ms, so scheduling on it
+                        # would quantize every packet's delay to a
+                        # 15.6 ms step.  perf_counter is
+                        # QueryPerformanceCounter (1e-7 s).
+                        heapq.heappush(heap, (time.perf_counter() + delay_s[seq], data))
                         heap_cv.notify()
         except OSError:
             pass
@@ -386,6 +392,17 @@ def run_tier(
     def forwarder() -> None:
         # Serve the heap in deliver_at order; one sleeper, no
         # head-of-line blocking, no per-packet thread.
+        #
+        # The wait for a packet's delivery time does *not* use
+        # Condition.wait(timeout=...): on Windows a timed Condition
+        # wait expires on a ~10 ms granularity (measured: a 10 ms wait
+        # returns after ~20 ms), which would add that much jitter to
+        # every reading.  Instead the forwarder sleeps in short
+        # slices outside the lock and re-checks the heap, so a packet
+        # that arrives with an earlier deliver_at (possible in the
+        # jitter tier, where the per-packet delay varies) is picked up
+        # within a slice, and the delivery deadline is met to within
+        # about a millisecond.
         try:
             while not stop.is_set():
                 with heap_cv:
@@ -396,10 +413,16 @@ def run_tier(
                     if not heap:
                         continue
                     deliver_at = heap[0][0]
-                    now = time.monotonic()
-                    wait = deliver_at - now
-                    if wait > 0:
-                        heap_cv.wait(timeout=wait)
+                now = time.perf_counter()
+                wait = deliver_at - now
+                if wait > 0:
+                    time.sleep(min(wait, FORWARD_SLICE_S))
+                    continue
+                with heap_cv:
+                    if not heap:
+                        continue
+                    deliver_at = heap[0][0]
+                    if deliver_at > time.perf_counter():
                         continue
                     _, data = heapq.heappop(heap)
                 try:

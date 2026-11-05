@@ -29,12 +29,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COUNT=200
 SIZE=1200
+UTIL=0.9
 OUT="$ROOT/build/e2e/bench_weaknet_netem.json"
 NS="nimrtcbench"
 
 usage() {
   cat <<'EOF'
-usage: tools/benchmark_weaknet_netem.sh [--count N] [--size BYTES] [--out PATH]
+usage: tools/benchmark_weaknet_netem.sh [--count N] [--size BYTES] [--util F] [--out PATH]
 
 Runs the three v1.3 Q4 weak-network tiers with 'tc qdisc netem'.
 Requires root (CAP_NET_ADMIN) and iproute2.
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --count) COUNT="$2"; shift 2 ;;
     --size) SIZE="$2"; shift 2 ;;
+    --util) UTIL="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -81,6 +83,13 @@ mkdir -p "$ROOT/build/e2e"
 #   jitter-100ms : 20 ms base + uniform 0..100 ms jitter
 #   cap-1mbps    : 1 Mbps token pace, 5 ms base delay
 #
+# A rate-limited link does not delay a packet by "the delay" alone: it
+# delays it by the time the link needs to put the packet on the wire
+# (its serialization time) plus whatever is already queued ahead of
+# it.  Both implementations therefore work in wire bytes and keep the
+# offered load below the capacity, so the reading is the link's delay
+# rather than a queue the sender built up itself.
+#
 # Two netem specifics are worth spelling out:
 #
 #   * netem's 'delay TIME JITTER' spreads the delay uniformly *around*
@@ -110,6 +119,7 @@ run_tier() {
   ip netns exec "$NS" tc qdisc replace dev lo root netem "$@"
   ip netns exec "$NS" python3 "$ROOT/tools/benchmark_weaknet.py" \
     --mode netem --tier "$tier_id" --count "$COUNT" --size "$SIZE" \
+    --util "$UTIL" \
     --out "$ROOT/build/e2e/bench_weaknet_netem_${tier_id}.json" --json
 }
 
@@ -119,10 +129,16 @@ run_tier "jitter-100ms" delay 70ms 50ms
 # the limiter then charges the exact on-wire length of each datagram.
 run_tier "cap-1mbps" delay 5ms rate 1mbit 0 1
 
-python3 - "$ROOT/build/e2e" "$OUT" "$COUNT" "$SIZE" <<'PY'
+python3 - "$ROOT/build/e2e" "$OUT" "$COUNT" "$SIZE" "$UTIL" <<'PY'
 import json, pathlib, sys
 
-e2e, out, count, size = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+e2e, out, count, size, util = (
+    pathlib.Path(sys.argv[1]),
+    pathlib.Path(sys.argv[2]),
+    int(sys.argv[3]),
+    int(sys.argv[4]),
+    float(sys.argv[5]),
+)
 tiers = ("loss-5pct", "jitter-100ms", "cap-1mbps")
 results = []
 for tier in tiers:
@@ -134,11 +150,13 @@ merged = {
     "count_per_tier": count,
     "payload_bytes": size,
     "seed": None,
+    "util": util,
     "results": results,
     "note": ("kernel-side impairments via 'tc qdisc netem' on 'lo' inside a "
              "throwaway network namespace; the tool paces sends and measures "
-             "arrival-minus-send; transport-floor baseline, not engine "
-             "glass-to-glass"),
+             "arrival-minus-send; the capped tier is paced at util x the cap "
+             "in on-wire bytes so the limiter's queue stays empty; "
+             "transport-floor baseline, not engine glass-to-glass"),
 }
 out.write_text(json.dumps(merged, indent=2), encoding="utf-8")
 for r in results:

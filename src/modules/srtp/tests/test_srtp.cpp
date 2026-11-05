@@ -20,18 +20,41 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <vector>
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/srtp/srtp.hpp>
+#include <nimrtc/srtp/libsrtp_backend.hpp>
 
 namespace {
 
 using namespace nimrtc;
 using namespace nimrtc::srtp;
 
-} // namespace
+constexpr std::uint32_t kTestSsrc = 0x12345678u;
+
+// Minimal 12-byte RTP header (V=2) + 32-byte payload.
+std::vector<std::uint8_t> make_min_rtp() {
+    std::vector<std::uint8_t> pkt(12 + 32, 0);
+    pkt[0] = 0x80;
+    pkt[1] = 111;
+    pkt[2] = 0xAB;
+    pkt[3] = 0xCD;
+    pkt[4] = 0xDE;
+    pkt[5] = 0xAD;
+    pkt[6] = 0xBE;
+    pkt[7] = 0xEF;
+    pkt[8] = 0x12;
+    pkt[9] = 0x34;
+    pkt[10] = 0x56;
+    pkt[11] = 0x78;
+    for (std::size_t i = 12; i < pkt.size(); ++i) pkt[i] = static_cast<std::uint8_t>(i);
+    return pkt;
+}
+
+}  // namespace
 
 // -----------------------------------------------------------------------------
 // CryptoSuite mapping
@@ -124,4 +147,53 @@ TEST(SrtpContextTest, TotalStatsStartAtZero) {
     EXPECT_EQ(stats.rtp_packets_encrypted, 0u);
     EXPECT_EQ(stats.rtp_packets_decrypted, 0u);
     EXPECT_EQ(stats.decryption_failures, 0u);
+}
+
+// -----------------------------------------------------------------------------
+// Backend seam (v1.3 X2): libsrtp routed via ISrtpSessionBackend.
+// Behaviour must match SrtpSession; SM4-GCM stays out of scope.
+// -----------------------------------------------------------------------------
+TEST(SrtpBackendSeamTest, FactoryIdIsLibsrtp) {
+    LibsrtpBackendFactory factory;
+    EXPECT_EQ(factory.id(), "libsrtp");
+    EXPECT_FALSE(factory.name().empty());
+    auto backend = factory.create();
+    ASSERT_NE(backend, nullptr);
+}
+
+TEST(SrtpBackendSeamTest, RoundTripThroughSeam) {
+    LibsrtpBackendFactory factory;
+    auto sender = factory.create();
+    auto receiver = factory.create();
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+
+    std::vector<std::uint8_t> key(16, 0xAA);
+    std::vector<std::uint8_t> salt(14, 0xBB);
+    const std::uint32_t suite = to_libsrtp_profile(CryptoSuite::Aes128CmSha1_80);
+    auto r1 = sender->init_outbound(key, salt, suite);
+    auto r2 = receiver->init_inbound(key, salt, suite);
+    ASSERT_TRUE(r1.ok());
+    ASSERT_TRUE(r2.ok());
+
+    auto pkt = make_min_rtp();
+    auto enc = sender->protect_rtp(core::ByteSpan(pkt.data(), pkt.size()));
+    ASSERT_TRUE(enc.ok());
+    std::vector<std::uint8_t> wire(enc.value().begin(), enc.value().end());
+    EXPECT_GT(wire.size(), pkt.size());
+
+    auto dec = receiver->unprotect_rtp(core::ByteSpan(wire.data(), wire.size()));
+    ASSERT_TRUE(dec.ok());
+    EXPECT_EQ(dec.value().size(), pkt.size());
+    EXPECT_EQ(0, std::memcmp(dec.value().data(), pkt.data(), pkt.size()));
+}
+
+TEST(SrtpBackendSeamTest, EmptyKeyFails) {
+    LibsrtpBackendFactory factory;
+    auto backend = factory.create();
+    ASSERT_NE(backend, nullptr);
+    std::vector<std::uint8_t> empty;
+    const std::uint32_t suite = to_libsrtp_profile(CryptoSuite::Aes128CmSha1_80);
+    EXPECT_FALSE(backend->init_outbound(empty, empty, suite).ok());
+    EXPECT_FALSE(backend->init_inbound(empty, empty, suite).ok());
 }

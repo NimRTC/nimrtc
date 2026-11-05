@@ -14,6 +14,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_srtp STATIC
     src/srtp.cpp
+    src/libsrtp_backend.cpp
     )
 
 nimrtc_apply_options(nimrtc_srtp)
@@ -23,6 +24,7 @@ if(TARGET nimrtc::vendor::libsrtp)
     target_link_libraries(nimrtc_srtp
         PUBLIC
             nimrtc::core
+            nimrtc::plugins
         PRIVATE
             nimrtc::vendor::libsrtp
         )

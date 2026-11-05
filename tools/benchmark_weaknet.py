@@ -104,7 +104,9 @@ TIERS = (
 #   * netem charges the *on-wire* length of the datagram (skb->len),
 #     which over an IPv4 loopback is the UDP payload plus the UDP,
 #     IP and loopback-Ethernet headers.  netem additionally rounds
-#     that length up to the qdisc's cell size (see --netem-cell).
+#     that length up to the qdisc's cell size, which
+#     tools/benchmark_weaknet_netem.sh pins to 1 byte so the charge
+#     is the exact byte count.
 # ---------------------------------------------------------------------------
 
 SEQ_BYTES = 4  # the per-packet sequence number the tool prepends

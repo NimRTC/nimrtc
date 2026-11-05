@@ -88,9 +88,16 @@ mkdir -p "$ROOT/build/e2e"
 #     spread is 20..120 ms, i.e. the same 20 ms base with 0..100 ms of
 #     jitter that the portable shaper applies.
 #   * netem's 'rate' limits by queueing, so the sender must not
-#     out-run it: the tool paces its sends at exactly the cap rate
-#     (the same pacing the portable shaper uses), which keeps the
-#     queue empty and makes the reading the configured delay.
+#     out-run it: the tool paces its sends at a fraction (--util, 0.9
+#     by default) of the cap rate, which keeps the queue empty and
+#     makes the reading the configured delay plus the link's
+#     serialization time.
+#   * netem's rate limiter charges the datagram's on-wire length
+#     (skb->len) rounded up to the qdisc's cell size.  The cell size
+#     is pinned to 1 byte ('rate 1mbit 0 1') so the charge is the
+#     exact byte count and the pacing matches the limiter's
+#     accounting; with the default cell size the kernel's rounding
+#     makes the charge larger than the length the tool reasons about.
 #   * the loss is spelled 'loss random PERCENT': the bare 'loss
 #     PERCENT' shorthand is rejected by some iproute2 builds, while
 #     'loss random' is accepted everywhere.
@@ -108,7 +115,9 @@ run_tier() {
 
 run_tier "loss-5pct" delay 5ms loss random 5%
 run_tier "jitter-100ms" delay 70ms 50ms
-run_tier "cap-1mbps" delay 5ms rate 1mbit
+# 'rate 1mbit 0 1' = 1 Mbps, no packet overhead, cell size 1 byte:
+# the limiter then charges the exact on-wire length of each datagram.
+run_tier "cap-1mbps" delay 5ms rate 1mbit 0 1
 
 python3 - "$ROOT/build/e2e" "$OUT" "$COUNT" "$SIZE" <<'PY'
 import json, pathlib, sys

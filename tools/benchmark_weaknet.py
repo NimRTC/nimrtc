@@ -13,6 +13,13 @@ v1.3-plan Q4 tiers deterministically (seeded RNG):
   - jitter-100ms : 20 ms base + uniform 0..100 ms jitter
   - cap-1mbps    : 1 Mbps token-pace, 5 ms base delay
 
+A rate-limited link delays a packet by its base delay *plus* the time
+the link needs to put the packet on the wire (its serialization time),
+and it only does so without building a queue if the sender stays below
+the capacity.  The capped tier therefore paces its sends at `--util`
+(default 0.9) of the cap and adds the serialization time to the
+packet's delay.
+
 Pipeline per tier (four threads, all localhost UDP):
 
   TX --(paced sends)--> shaper recv --(heap by deliver_at)--> forwarder
@@ -78,6 +85,56 @@ TIERS = (
     {"id": "cap-1mbps", "loss": 0.0, "base_ms": 5.0, "jitter_ms": 0.0, "cap_mbps": 1.0},
 )
 
+# ---------------------------------------------------------------------------
+# Wire accounting for the capped tier.
+#
+# A link at a fixed rate does not delay a packet by "the delay"; it
+# delays it by the time the link needs to put the packet on the wire
+# (its serialization time) plus whatever is already queued ahead of it.
+# Both implementations below therefore work in *wire* bytes, not
+# payload bytes, and both keep the offered load a little below the
+# capacity so the queue stays empty and the reading is the link's
+# delay rather than self-inflicted backlog.
+#
+# The two modes differ in what "wire bytes" means:
+#
+#   * The portable shaper charges the payload only: the sender paces
+#     the packets and the shaper adds the link's serialization time
+#     to each packet's delay.
+#   * netem charges the *on-wire* length of the datagram (skb->len),
+#     which over an IPv4 loopback is the UDP payload plus the UDP,
+#     IP and loopback-Ethernet headers.  netem additionally rounds
+#     that length up to the qdisc's cell size (see --netem-cell).
+# ---------------------------------------------------------------------------
+
+SEQ_BYTES = 4  # the per-packet sequence number the tool prepends
+NETEM_WIRE_OVERHEAD = 8 + 20 + 14  # UDP + IPv4 + loopback Ethernet
+NETEM_CELL_DEFAULT = 1  # netem's default cell: exact byte accounting
+UTIL_DEFAULT = 0.9  # offered load as a fraction of the capacity
+
+
+def _serialization_s(tier: dict, size: int) -> float:
+    """Seconds the link needs to put one packet of `size` payload on the wire.
+
+    Zero for the uncapped tiers: they have no rate limit, so there is
+    no serialization time to account for.
+    """
+    if tier["cap_mbps"] <= 0:
+        return 0.0
+    return (size * 8) / (tier["cap_mbps"] * 1e6)
+
+
+def _netem_charged_bytes(size: int) -> int:
+    """Bytes netem's rate limiter charges for one of our datagrams.
+
+    netem charges the datagram's on-wire length (skb->len), rounded up
+    to the qdisc's cell size.  The script pins the cell size to 1 byte
+    (exact accounting), so the charge is the on-wire length: our
+    sequence number plus the payload, plus the UDP, IPv4 and
+    loopback-Ethernet headers the kernel adds on the way out.
+    """
+    return size + SEQ_BYTES + NETEM_WIRE_OVERHEAD
+
 
 def _pct(sorted_us: list[float], q: float) -> float:
     if not sorted_us:
@@ -86,21 +143,34 @@ def _pct(sorted_us: list[float], q: float) -> float:
     return sorted_us[idx]
 
 
-def _pace_schedule(tier: dict, count: int, size: int) -> list[float]:
+def _pace_schedule(
+    tier: dict,
+    count: int,
+    size: int,
+    util: float = UTIL_DEFAULT,
+    charged_bytes: int | None = None,
+) -> list[float]:
     """Earliest send instant per packet, relative to the run start.
 
-    The capped tier is paced at exactly the cap rate so the queue in
-    front of the shaper stays empty: the reading then is the
-    configured delay, not the queue depth that a faster sender would
-    build up.  The uncapped tiers use a fixed 2 ms cadence (~500 pps)
-    for the same reason — without pacing, TX bursts all N packets at
-    once and the serial shaper / forwarder backlog (~50 us/packet of
-    Python + syscall) dominates the reading, so the 5 ms tier would
-    report ~25 ms of queue instead of the configured 5 ms delay.
+    The capped tier is paced at `util` times the link's capacity, in
+    the bytes the link actually charges, so the link's queue stays
+    empty: the reading is then the link's delay, not the queue depth a
+    faster sender would build up.  The uncapped tiers use a fixed 2 ms
+    cadence (~500 pps) for the same reason — without pacing, TX bursts
+    all N packets at once and the serial shaper / forwarder backlog
+    (~50 us/packet of Python + syscall) dominates the reading, so the
+    5 ms tier would report ~25 ms of queue instead of the configured
+    5 ms delay.
+
+    `charged_bytes` is the byte count the link charges per packet: the
+    payload for the portable shaper (which accounts in payload bytes),
+    the on-wire length for netem (which accounts in skb bytes).  When
+    it is None the payload size is used.
     """
     pace_s = [0.0] * count
     if tier["cap_mbps"] > 0:
-        per_pkt = (size * 8) / (tier["cap_mbps"] * 1e6)
+        bytes_per_pkt = charged_bytes if charged_bytes is not None else size
+        per_pkt = (bytes_per_pkt * 8) / (tier["cap_mbps"] * 1e6) / util
         for i in range(1, count):
             pace_s[i] = pace_s[i - 1] + per_pkt
     else:
@@ -109,7 +179,13 @@ def _pace_schedule(tier: dict, count: int, size: int) -> list[float]:
     return pace_s
 
 
-def run_netem_tier(tier: dict, count: int, size: int, host: str = "127.0.0.1") -> dict:
+def run_netem_tier(
+    tier: dict,
+    count: int,
+    size: int,
+    host: str = "127.0.0.1",
+    util: float = UTIL_DEFAULT,
+) -> dict:
     """Measure one tier whose impairments are applied by the kernel.
 
     In this mode the tool drops nothing and delays nothing: the
@@ -135,7 +211,8 @@ def run_netem_tier(tier: dict, count: int, size: int, host: str = "127.0.0.1") -
     rx_port = rx.getsockname()[1]
     rx.settimeout(0.2)
     payload = bytes((i % 251 for i in range(size)))
-    pace_s = _pace_schedule(tier, count, size)
+    charged = _netem_charged_bytes(size)
+    pace_s = _pace_schedule(tier, count, size, util, charged_bytes=charged)
 
     send_ns: dict[int, int] = {}
     arrival_ns: dict[int, int] = {}
@@ -220,6 +297,13 @@ def run_netem_tier(tier: dict, count: int, size: int, host: str = "127.0.0.1") -
         "sent": count,
         "received": received,
         "expected": count,
+        "util": util,
+        "charged_bytes": charged,
+        "serialization_us": (
+            (charged * 8) / (tier["cap_mbps"] * 1e6) * 1e6
+            if tier["cap_mbps"] > 0
+            else 0.0
+        ),
         "delivery_ratio": (received / count) if count else 0.0,
         "p50_us": _pct(lat_us, 0.50),
         "p99_us": _pct(lat_us, 0.99),
@@ -227,17 +311,29 @@ def run_netem_tier(tier: dict, count: int, size: int, host: str = "127.0.0.1") -
     }
 
 
-def run_tier(tier: dict, count: int, size: int, seed: int) -> dict:
+def run_tier(
+    tier: dict,
+    count: int,
+    size: int,
+    seed: int,
+    util: float = UTIL_DEFAULT,
+) -> dict:
     rng = random.Random(seed)
     # Pre-roll every packet decision so the run is deterministic and no
     # worker thread does RNG under load.
     drop = [rng.random() < tier["loss"] for _ in range(count)]
+    # A rate-limited link delays a packet by the time it needs to put
+    # the packet on the wire (its serialization time) plus the
+    # configured base delay, so the capped tier's delay carries that
+    # serialization term.  The uncapped tiers have no rate, so their
+    # serialization term is zero.
+    ser_s = _serialization_s(tier, size)
     delay_s = [
-        (tier["base_ms"] + rng.random() * tier["jitter_ms"]) / 1000.0
+        (tier["base_ms"] + rng.random() * tier["jitter_ms"]) / 1000.0 + ser_s
         for _ in range(count)
     ]
     # Token pace for the capped tier: earliest send instant per packet.
-    pace_s = _pace_schedule(tier, count, size)
+    pace_s = _pace_schedule(tier, count, size, util)
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sh = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -384,6 +480,9 @@ def run_tier(tier: dict, count: int, size: int, seed: int) -> dict:
         "sent": count,
         "received": len(arrival_ns),
         "expected": expected,
+        "util": util,
+        "charged_bytes": size,
+        "serialization_us": ser_s * 1e6,
         "delivery_ratio": (len(arrival_ns) / count) if count else 0.0,
         "p50_us": _pct(lat_us, 0.50),
         "p99_us": _pct(lat_us, 0.99),
@@ -420,6 +519,17 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--util",
+        type=float,
+        default=UTIL_DEFAULT,
+        help=(
+            "offered load of the capped tier as a fraction of the link's "
+            "capacity (default %(default)s).  Below 1.0 the sender never "
+            "out-runs the link, so the reading is the link's delay instead "
+            "of a queue the sender built up itself."
+        ),
+    )
+    ap.add_argument(
         "--out",
         default=None,
         help="output JSON path (default build/e2e/bench_weaknet.json)",
@@ -435,26 +545,39 @@ def main() -> int:
 
     try:
         if args.mode == "netem":
-            results = [run_netem_tier(t, args.count, args.size) for t in tiers]
+            results = [
+                run_netem_tier(t, args.count, args.size, util=args.util)
+                for t in tiers
+            ]
         else:
-            results = [run_tier(t, args.count, args.size, args.seed) for t in tiers]
+            results = [
+                run_tier(t, args.count, args.size, args.seed, util=args.util)
+                for t in tiers
+            ]
     finally:
         restore_timer()
     if args.mode == "netem":
         note = ("kernel-side impairments via 'tc qdisc netem'; the tool paces "
-               "sends and measures arrival-minus-send; transport-floor "
-               "baseline, not engine glass-to-glass")
+               "sends and measures arrival-minus-send; the capped tier is "
+               "paced at util x the cap in on-wire bytes (UDP+IPv4+Ethernet "
+               "headers included) so the limiter's queue stays empty; "
+               "transport-floor baseline, not engine glass-to-glass")
     else:
         note = ("in-process userspace shaper over localhost UDP; deterministic "
                 "seeded impairments; concurrent RX drain so latency is "
-                "arrival-minus-send per packet; transport-floor baseline, not "
-                "engine glass-to-glass; the Linux 'tc qdisc netem' equivalent "
-                "needs root and is driven by tools/benchmark_weaknet_netem.sh")
+                "arrival-minus-send per packet; the capped tier is paced at "
+                "util x the cap in payload bytes and its delay includes the "
+                "link's serialization time, so the reading is the link's "
+                "delay rather than a self-inflicted queue; transport-floor "
+                "baseline, not engine glass-to-glass; the Linux 'tc qdisc "
+                "netem' equivalent needs root and is driven by "
+                "tools/benchmark_weaknet_netem.sh")
     result = {
         "mode": args.mode,
         "count_per_tier": args.count,
         "payload_bytes": args.size,
         "seed": args.seed,
+        "util": args.util,
         "results": results,
         "note": note,
     }

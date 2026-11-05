@@ -10,8 +10,15 @@
 #   target_link_libraries(my_app PRIVATE nimrtc::engine)
 # =============================================================================
 
+# R1 (v1.3): engine.cpp was a single ~4.5 kLOC TU; it is now five
+# responsibility-grouped TUs sharing private engine_impl.hpp.
+# Public header untouched (L4); behaviour unchanged.
 add_library(nimrtc_engine STATIC
     src/engine.cpp
+    src/engine_transport.cpp
+    src/engine_media.cpp
+    src/engine_signaling.cpp
+    src/engine_timeline.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

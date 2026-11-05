@@ -274,12 +274,17 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   adaptive jitter-buffer strategy (audio + video front-ends):
     //     - jb_strategy/adaptive_delay.hpp
     //
+    // v1.3 X2 bump: +2 public headers (104 -> 106) for the SRTP
+    //   backend seam (seam only, SM4-GCM out of scope for v1.3):
+    //     - plugins/srtp_backend.hpp (ISrtpSessionBackend + factory)
+    //     - srtp/libsrtp_backend.hpp (libsrtp-backed seam adapter)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 104;
+    constexpr std::size_t kBaselineHeaderCount = 106;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

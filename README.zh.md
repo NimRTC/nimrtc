@@ -446,13 +446,16 @@ Track A 基线是传输层下限数字，不是引擎端到端声明。Windows 1
 | `bench_dc.json` datagram 平面（2000 包） | 256 B | **~60–80k pps / ~120–165 Mbps** |
 | `bench_dc.json` datagram 平面（2000 包） | 1200 B | **~60–80k pps / ~570–800 Mbps** |
 | `bench_dc.json` bidi-stream-chunk 平面（2000 包） | 16384 B | **~70k pps / ~9 Gbps** |
-| `bench_weaknet.json` loss-5pct 档（200 × 1200 B） | 1200 B，5% 丢包 + 5 ms 基准 | 送达率 **~0.95**，p50 **~9–10 ms**，p99 **~16–17 ms** |
-| `bench_weaknet.json` jitter-100ms 档（200 × 1200 B） | 1200 B，20 ms 基准 + 0–100 ms 抖动 | 送达率 **1.0**，p50 **~75–80 ms**，p99 **~125–130 ms** |
-| `bench_weaknet.json` cap-1mbps 档（200 × 1200 B） | 1200 B，1 Mbps 整形 + 5 ms 基准 | 送达率 **1.0**，p50 **~10–16 ms**，p99 **~19–31 ms** |
+| `bench_weaknet.json` loss-5pct 档（200 × 1200 B） | 1200 B，5% 丢包 + 5 ms 基准 | 送达率 **~0.95**，p50 **~5–7 ms**，p99 **~5–8 ms** |
+| `bench_weaknet.json` jitter-100ms 档（200 × 1200 B） | 1200 B，20 ms 基准 + 0–100 ms 抖动 | 送达率 **1.0**，p50 **~74–76 ms**，p99 **~118–121 ms** |
+| `bench_weaknet.json` cap-1mbps 档（200 × 1200 B） | 1200 B，1 Mbps 整形 + 5 ms 基准 | 送达率 **1.0**，p50 **~15–17 ms**，p99 **~19–31 ms** |
+| `bench_weaknet_netem.json` loss-5pct 档（200 × 1200 B，Linux） | 1200 B，5% 丢包 + 5 ms 基准 | 送达率 **~0.94–0.95**，p50 **~5.1 ms**，p99 **~5.2 ms** |
+| `bench_weaknet_netem.json` jitter-100ms 档（200 × 1200 B，Linux） | 1200 B，20 ms 基准 + 0–100 ms 抖动 | 送达率 **1.0**，p50 **~68 ms**，p99 **~118 ms** |
+| `bench_weaknet_netem.json` cap-1mbps 档（200 × 1200 B，Linux） | 1200 B，1 Mbps 整形 + 5 ms 基准 | 送达率 **1.0**，p50 **~15.1 ms**，p99 **~15.2 ms** |
 
-> 用 `python tools/benchmark_latency.py --count 1000`、`python tools/benchmark_dc.py` 与 `python tools/benchmark_weaknet.py --count 200 --size 1200` 复现；产物落在 `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json` + `build/e2e/bench_weaknet.json`。具体数字随机器与负载浮动——已落盘 JSON 只是一次本地采样，不是通过/失败阈值。弱网三档走本机 UDP 回环上的进程内整形器（确定性种子损伤），不是 `tc qdisc netem`，无需 root 即可复现。引擎端到端延迟 / 抖动 / MOS 仍依赖平台、codec、网络与目标场景——等 P2（PCM tap）与 P3（BWE + ref_frame）落地后再发布 profile 专属 benchmark。
+> 用 `python tools/benchmark_latency.py --count 1000`、`python tools/benchmark_dc.py` 与 `python tools/benchmark_weaknet.py --count 200 --size 1200` 复现；产物落在 `build/e2e/bench_latency.json` + `build/e2e/bench_dc.json` + `build/e2e/bench_weaknet.json`。具体数字随机器与负载浮动——已落盘 JSON 只是一次本地采样，不是通过/失败阈值。弱网三档走本机 UDP 回环上的进程内整形器（确定性种子损伤），无需 root 即可复现；Linux 上对应的 `tc qdisc netem` 版本是 [`tools/benchmark_weaknet_netem.sh`](tools/benchmark_weaknet_netem.sh)（需要 root + iproute2），产物落在 `build/e2e/bench_weaknet_netem.json`。限速档的发送速率被压到容量的 90%，且读数包含链路的序列化时间，所以上表是链路自身的延迟，而不是发送方自己堆出来的队列。引擎端到端延迟 / 抖动 / MOS 仍依赖平台、codec、网络与目标场景——等 P2（PCM tap）与 P3（BWE + ref_frame）落地后再发布 profile 专属 benchmark。
 
-详见 [`tools/benchmark_size.py`](tools/benchmark_size.py)、[`tools/benchmark_latency.py`](tools/benchmark_latency.py)、[`tools/benchmark_dc.py`](tools/benchmark_dc.py) 与 [`tools/benchmark_weaknet.py`](tools/benchmark_weaknet.py)。
+详见 [`tools/benchmark_size.py`](tools/benchmark_size.py)、[`tools/benchmark_latency.py`](tools/benchmark_latency.py)、[`tools/benchmark_dc.py`](tools/benchmark_dc.py)、[`tools/benchmark_weaknet.py`](tools/benchmark_weaknet.py) 与 [`tools/benchmark_weaknet_netem.sh`](tools/benchmark_weaknet_netem.sh)。
 
 ---
 

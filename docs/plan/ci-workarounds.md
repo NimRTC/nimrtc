@@ -43,7 +43,7 @@ history. This register answers that in one table.
 | **W2** | `target_compile_options(core PRIVATE /wd28020)` | `src/third_party/CMakeLists.txt` | msquic's `core` target compiles `src/core/crypto_tls.c` under MSVC `/analyze /WX /sdl`, tripping a known false-positive `C28020` (SAL value-range) on a macro-driven `TlsRead`/`TlsWrite` switch. Scoped `PRIVATE` to the vendored `core` target so it does not leak into NimRTC's own `/W4 /WX` targets. | MSVC analysis fails the msquic build. | Upstream msquic suppresses or fixes C28020; or NimRTC stops building msquic with `/analyze`. | No |
 | **W3** | `Prebuild WebRTC APM` runs with `continue-on-error: true` + per-platform ON/OFF fallback (×4) | `.github/workflows/release.yml` (four `apm_prebuild` steps + four Configure blocks reading `steps.apm_prebuild.outcome`) | The meson prebuild of webrtc_audio_processing failed on windows-2022 at the v0.14.0 cut (abseil subproject ninja failure, `dc15ad8`), and the persistent Windows stub-3A outcome through `v1.0.2` additionally came from three defects in `tools/build_webrtc_apm.cmd` (LF-only line endings mis-parsed by cmd.exe, a `powershell -Command` wrapper turning ninja's stderr progress line into a terminating error, and a ninja call without `call`) — all three fixed in `9c3c522`. The step runs but may fail; Configure picks `ON` on success and `OFF` on failure, recording the outcome in `build/3a-status-*.txt`, so the release is never aborted by the prebuild. `audio3a` already links `nimrtc_vendor_webrtc_apm` PUBLIC so abseil includes propagate when ON. | Forcing ON unconditionally would let a genuine prebuild failure abort the release cut (the `v0.14.0` windows abort). | Windows prebuild goes green reliably; then drop `continue-on-error` and pin Configure to `ON`. | **See §3 — per-platform 3A variance, recorded in release notes** |
 | **W4** | Vendor manifest check is a hard gate (v1.0+) | `.github/workflows/ci.yml` (×4), `.github/workflows/interop.yml` (×2) | The drift gate (`tools/check_vendor.py`) only runs when `src/third_party/vendor.json` exists. v1.0+: drift = red CI = blocked merge (verified 9/9 match locally before the flip). | Unrelated PRs start failing on vendor drift. | **Removed 2026-10-30** — gate flipped hard for v1.0.0. | No |
-| **W5** | `build-linux-aarch64` is `continue-on-error: true` and excluded from `publish-release`'s `needs:` | `.github/workflows/release.yml` lines 341, 576 | **Original rationale was wrong.** The entry used to read "GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14)". The queue was not a capacity problem: the runner label was `ubuntu-22.04-arm64`, which is **not a GitHub-hosted label at all**, so the job could never be allocated a runner (see §4). With the label corrected to `ubuntu-24.04-arm` this leg runs like the other three. The soft gate is nevertheless retained for the v1.0.0 cut because the *release* leg's aarch64 build has never actually been observed to complete — the CI leg and the release leg are different jobs with different build settings. | A release cut that includes an aarch64 bundle would block on that bundle; if the aarch64 release build has a real defect, the release ships a known-bad artefact. | The `linux-aarch64` **release** job completes green at least once with the corrected label, then this row is removed and the job is added to `publish-release`'s `needs:`. Until then the `dist/` bundle scan prints a "Partial release" banner naming the missing bundle. | **See §4 — this is a support-matrix question** |
+| **W5** | `build-linux-aarch64` hard gate in `publish-release`'s `needs:` | `.github/workflows/release.yml` | **Original rationale was wrong.** The entry used to read "GitHub-hosted ARM64 runner capacity is unreliable — a real observed failure mode was a 14+ hour queue (run #35049874137, 2026-09-16 → 2026-10-14)". The queue was not a capacity problem: the runner label was `ubuntu-22.04-arm64`, which is **not a GitHub-hosted label at all**, so the job could never be allocated a runner (see §4). With the label corrected to `ubuntu-24.04-arm` this leg runs like the other three. **Closed 2026-11-05 (review):** the `v1.0.2` release published the aarch64 bundle, which counts as the first observed green run of the *release* aarch64 leg — the `continue-on-error: true` is dropped and the job is back in `publish-release`'s `needs:`. | A release cut that includes an aarch64 bundle blocks on that bundle; if the aarch64 release build has a real defect, the release is held rather than shipping a known-bad or partial artefact. | **Closed 2026-11-05** — gate flipped hard per review; this row is retained as history. | **See §4 — this is a support-matrix question** |
 
 ---
 
@@ -194,14 +194,14 @@ repository-variable switch, then a support-matrix decision about
 whether to ship 3 platforms or 4 — all of which was treating a
 one-character typo in a label as an infrastructure capacity problem.
 
-### 4.2 Current factual state, as of 2026-10-28
+### 4.2 Current factual state, as of 2026-11-05 (W5 closure — see §4.3)
 
 | Leg | `ci.yml` (build + unit tests) | `release.yml` (shipped artefact) |
 |---|---|---|
 | windows-2022 / MSVC | active, hard gate | active, hard gate |
 | ubuntu-22.04 / GCC x86_64 | active, hard gate | active, hard gate |
 | macos-14 / Apple Clang arm64 | active, hard gate | active, hard gate |
-| ubuntu-24.04-arm / GCC | **active, hard gate** — no `if:`, no variable | `continue-on-error: true`, excluded from `publish-release`'s `needs:` |
+| ubuntu-24.04-arm / GCC | **active, hard gate** — no `if:`, no variable | **active, hard gate** — no `continue-on-error`, in `publish-release`'s `needs:` (W5 closed §4.3) |
 
 **What changed on 2026-10-28.** Three things:
 
@@ -230,43 +230,30 @@ variable gate makes "is the ARM64 leg actually running?" a question
 that must be answered out of band — which is the failure mode this
 register exists to prevent.
 
-### 4.3 What is still open
+### 4.3 Closed 2026-11-05: aarch64 is a hard gate again
 
 The **CI** leg and the **release** leg are different jobs with
 different build settings (`debug.aarch64` + `ctest` versus
-`release.aarch64` + packaging), and only the CI leg has been
-observed to run to completion. So `build-linux-aarch64` in
-`release.yml` keeps `continue-on-error: true` and stays out of
-`publish-release`'s `needs:` for now, on the honest ground that its
-first observed green run is still pending — **not** on the ground
-that the runner pool might be busy.
+`release.aarch64` + packaging). The CI leg has been observed green, and
+the `v1.0.2` release published the aarch64 bundle — which counts as the
+first observed green run of the *release* leg with the corrected label.
+So `build-linux-aarch64` in `release.yml` no longer carries
+`continue-on-error: true` and is back in `publish-release`'s `needs:` —
+on the review evidence (2026-11-05), **not** on the old ground that the
+runner pool might be busy.
 
-That leaves a documentation gap rather than a build gap. `README.md`
-§Platform support currently claims:
+That leaves no documentation gap on bundle coverage: `README.md`
+§Platform support says:
 
 > | Linux | aarch64 | ✅ Supported (compile-green; deployment validate on target hardware) |
 
-which is honest about compile-green vs. deployment, but does not say that
-an aarch64 release tarball may be absent from a given release. The
-`dist/` scan prints a "Partial release" banner when it is missing, so
-the information exists — it just is not in the README.
+which is honest about compile-green vs. deployment. The `dist/` bundle scan
+still prints a "Partial release" banner when any bundle is missing, so a
+regression there stays visible instead of silent.
 
-**Gate #8 needs one more observation, not a decision.** Once the
-`linux-aarch64` **release** job has completed green once with the
-corrected label, the release manager still has to pick:
-
-- **Ship aarch64 as a supported platform at v1.0.0** → make
-  `build-linux-aarch64` a hard gate (drop `continue-on-error`, add it to
-  `needs:`), and keep the README ✅.
-- **Ship v1.0.0 as 3-platform** → remove the `ubuntu-*-arm` runner from
-  the README support table and the 4-platform CI badge, and say so in
-  the release notes.
-
-The current state — README says 4 platforms, release ships 3-plus-one-
-maybe — is the one option that should not survive to the tag. But
-unlike before, the choice is no longer being forced by an
-infrastructure failure that the project could not fix; it is a
-shipping decision that can be made on evidence.
+**Gate #8 decision (closed 2026-11-05): ship aarch64 as a supported
+platform.** `build-linux-aarch64` is a hard gate again (no
+`continue-on-error`, back in `needs:`), and the README ✅ stays.
 
 ---
 

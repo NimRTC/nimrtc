@@ -421,14 +421,11 @@ jobs:
     # queue" reports actually were.  See docs/plan/ci-workarounds.md
     # §4.1.)
     #
-    # This leg still runs soft because the *release* aarch64 build has
-    # never been observed to complete — the CI leg and this leg are
-    # different jobs with different build settings.  Once this job has
-    # completed green once, drop `continue-on-error: true` and add
-    # `build-linux-aarch64` to publish-release's `needs:`.
-    # Also see publish-release's `if:` which lets publish run
-    # regardless of this job's result.
-    continue-on-error: true
+    # This leg runs hard: the v1.0.2 release published the aarch64 bundle,
+    # which is the first observed green run of the *release* aarch64 build
+    # with the corrected `ubuntu-24.04-arm` label (review 2026-11-05).
+    # W5 is therefore closed: a missing aarch64 bundle now blocks the
+    # release instead of publishing a partial set.
     env:
       RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
     steps:
@@ -670,21 +667,15 @@ jobs:
       - preflight
       - build-windows
       - build-linux-gcc
+      - build-linux-aarch64
       - build-macos-clang
-      # build-linux-aarch64 is intentionally NOT in `needs:` — see the
-      # `continue-on-error: true` note on that job. That leg's aarch64
-      # build has not yet been observed to complete, so publishing
-      # waits on a bundle that might not build; the other three
-      # artefacts ship regardless. (The historical reason given here
-      # was "ARM64 runner capacity is unreliable" — that was a
-      # misdiagnosis: the runner label was invalid, so the job could
-      # never be scheduled at all. See docs/plan/ci-workarounds.md §4.)
-      # The aarch64 artefact is filled in later as a follow-up release.
-      # The download step below still picks up `nimrtc-linux-aarch64-gcc`
-      # if it was uploaded (download-artifact with `merge-multiple: true`
-      # grabs every artefact in the run regardless of `needs:`), and the
-      # Draft step uses `fail_on_unmatched_files: false` so a missing
-      # aarch64 bundle is non-fatal.
+      # W5 closed (review 2026-11-05): the v1.0.2 release published the
+      # aarch64 bundle, which counts as the first observed green run of
+      # the release aarch64 leg. The leg is a hard gate again, so a
+      # missing aarch64 bundle blocks the release instead of publishing
+      # a partial set. (The historical "ARM64 runner capacity" story was
+      # a misdiagnosis: the runner label was invalid. See
+      # docs/plan/ci-workarounds.md §4.)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -1060,10 +1051,10 @@ jobs:
         env:
           GPG_FINGERPRINT: ${{ vars.GPG_FINGERPRINT }}
         run: |
-          # W5: the aarch64 leg is a soft dependency (GHA ARM64 runner
-          # capacity), so the missing/present bundle list and the 3A
-          # status are surfaced in the Step Summary as well as in the
-          # release body -- a partial release must never be silent.
+          # The present/missing bundle list and the 3A status are surfaced
+          # in the Step Summary as well as in the release body -- a partial
+          # release must never be silent. (W5 closed: aarch64 is a hard
+          # gate again, so a missing bundle now blocks the release.)
           {
             echo "## Platform bundle coverage"
             echo

@@ -255,13 +255,42 @@ jobs:
             -config build/wtserver_openssl.cnf
 
       - name: Configure
-        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
 
       - name: Build
         run: cmake --build --preset debug -j 2
 
       - name: Test
         run: ctest --preset tests --output-on-failure -j 2
+
+      # Track D downstream proof (Linux): install into a staging dir and
+      # build a minimal find_package(NimRTC) consumer against it, so the
+      # install rules stay verified on every push — not just on Windows.
+      - name: Install + downstream proof
+        run: |
+          cmake --install build --prefix build/_install/linux-x86_64
+          found="$(find build/_install/linux-x86_64 -name NimRTCConfig.cmake -print -quit)"
+          test -n "$found" && test -f "$found"
+          mkdir -p build/downstream-proof
+          cat > build/downstream-proof/main.cpp <<'EOF'
+          #include <nimrtc/core/api_version.hpp>
+          #include <cstdio>
+          int main() {
+            std::printf("nimrtc %s\n", NIMRTC_API_VERSION_STRING);
+            return 0;
+          }
+          EOF
+          cat > build/downstream-proof/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(nimrtc_downstream_proof LANGUAGES CXX)
+          find_package(NimRTC 1.0 REQUIRED)
+          add_executable(downstream_proof main.cpp)
+          target_link_libraries(downstream_proof PRIVATE nimrtc::engine)
+          EOF
+          cmake -S build/downstream-proof -B build/downstream-proof/build \
+            -DCMAKE_PREFIX_PATH="$PWD/build/_install/linux-x86_64"
+          cmake --build build/downstream-proof/build
+          ./build/downstream-proof/build/downstream_proof
 
       - name: Benchmark transport floor (Track A)
         run: |

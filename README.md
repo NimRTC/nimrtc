@@ -131,7 +131,7 @@ primitives the engine uses without building them yourself.
 > downloaded v1.0.2 bundle, and linking NimRTC itself still requires a source
 > build (see [Quick Start](#quick-start) below). This is fixed on `main`: the
 > `NIMRTC_INSTALL=ON` rules now produce `include/` + `lib/` + `lib/cmake/NimRTC/`
-> (verified downstream on Windows; Linux downstream proof still pending a CI leg), and the next release will ship them.
+> (verified downstream on Windows; Linux downstream proof runs in `ci.yml` on every push), and the next release will ship them.
 
 - Release page: [v1.0.2](https://github.com/NimRTC/nimrtc/releases/tag/v1.0.2)
 - Assets: `nimrtc-1.0.2-<platform>.tar.xz` + `.sha256` + `.asc` (`sbom.json` included)
@@ -603,7 +603,7 @@ has not closed.
 
 | Capability | Status | Track |
 |---|---|---|
-| Packaging — `NIMRTC_INSTALL=ON` install rules (`cmake/NimRTCInstall.cmake`) producing `include/` + `lib/` + `lib/cmake/NimRTC/`; `find_package(NimRTC 1.0 REQUIRED)` consumer verified downstream on Windows, **Linux proof still pending a CI leg** | ✅ landed | v1.1 Track D |
+| Packaging — `NIMRTC_INSTALL=ON` install rules (`cmake/NimRTCInstall.cmake`) producing `include/` + `lib/` + `lib/cmake/NimRTC/`; `find_package(NimRTC 1.0 REQUIRED)` consumer verified downstream on Windows and on Linux via the `ci.yml` install + downstream-proof leg | ✅ landed | v1.1 Track D |
 | The installed bundle now carries the WebRTC APM prebuilt + its link-order manifest, so a downstream consumer links the real AEC/ANS/AGC | ✅ landed | v1.1 Track D |
 | Transport-floor benchmark artifacts in CI (`bench_latency.json`, `bench_dc.json` as 14-day artifacts) | ✅ landed | v1.1 Track A |
 | `ISctpSocket::open()/close()` lifecycle; `IICETransport::last_recv_packet()` + in-stack demux; unified `make_transport_instance()`; ARQ stack labelled tech-preview | ✅ landed | v1.2 Track T |

@@ -597,7 +597,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 
 | 能力 | 状态 | 轨道 |
 |---|---|---|
-| 打包 —— `NIMRTC_INSTALL=ON` 安装规则（`cmake/NimRTCInstall.cmake`），产出 `include/` + `lib/` + `lib/cmake/NimRTC/`；下游 Windows 已验证 `find_package(NimRTC 1.0 REQUIRED)`，Linux 下游验证仍待 CI 路径跑通 | ✅ 已落地 | v1.1 Track D |
+| 打包 —— `NIMRTC_INSTALL=ON` 安装规则（`cmake/NimRTCInstall.cmake`），产出 `include/` + `lib/` + `lib/cmake/NimRTC/`；下游 Windows 已验证 `find_package(NimRTC 1.0 REQUIRED)`，Linux 下游验证随 `ci.yml` 每次推送跑通 | ✅ 已落地 | v1.1 Track D |
 | 安装后的 bundle 现在携带 WebRTC APM 预编译产物及其链接顺序清单，下游可链接真实 AEC/ANS/AGC | ✅ 已落地 | v1.1 Track D |
 | CI 里的传输层基准产物（`bench_latency.json`、`bench_dc.json`，保留 14 天） | ✅ 已落地 | v1.1 Track A |
 | `ISctpSocket::open()/close()` 生命周期；`IICETransport::last_recv_packet()` + 栈内分流；统一 `make_transport_instance()`；ARQ 栈标注为 tech-preview | ✅ 已落地 | v1.2 Track T |

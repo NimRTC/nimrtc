@@ -325,7 +325,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2026-11-03: `cmake --install` staging holds `include/` + `lib/` +
   `lib/cmake/NimRTC/`, and a minimal `find_package(NimRTC 1.0 REQUIRED)`
   consumer linking `nimrtc::engine` configures, builds, and runs exit 0
-  (Linux proof still pending a CI leg; `## [1.1.0]` stays unwritten
+  (Linux downstream proof runs in `ci.yml` on every push via the
+  install + downstream-proof leg; `## [1.1.0]` stays unwritten
   until C-track closes).
 - **The installed bundle now carries the WebRTC APM prebuilt.** The
   APM is built out-of-tree with Meson and has no upstream `install()`
@@ -358,10 +359,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Known limitations (v1.1 C-track, still open)
 
-- W3 (APM prebuild `continue-on-error` ×4 + ON/OFF fallback) and W5
-  (`build-linux-aarch64` soft gate, excluded from `publish-release.needs`)
-  stay as-is until a four-platform release leg is observed green; flipping
-  them without that evidence would risk blocking the release.
+- W3 (APM prebuild `continue-on-error` ×4 + ON/OFF fallback) stays as-is
+  until the Windows prebuild is observed reliably green; W5 is **closed
+  2026-11-05 (review)** — the `v1.0.2` release published the aarch64
+  bundle, so `build-linux-aarch64` is a hard gate again (no
+  `continue-on-error`, back in `publish-release.needs`).
   `docs/plan/ci-workarounds.md` W3/W5 remain the source of truth.
 
 ## [1.0.2] - 2026-11-02

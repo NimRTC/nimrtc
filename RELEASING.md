@@ -150,23 +150,15 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    CI runners (windows, linux-gcc, linux-aarch64, macos-clang). All four must
    be green before proceeding.
 
-   **aarch64 soft-dependency policy (W5).** The `linux-aarch64` leg of
-   `release.yml` is `continue-on-error: true` and is deliberately *not* listed
-   in `publish-release`'s `needs:`. This leg's aarch64 build has not yet been
-   observed to complete, so a hard gate would risk blocking publishing the
-   Windows / Linux x86_64 / macOS arm64 trio on a bundle that might not
-   build. Consequences, all of them explicit rather than silent:
-
-   - The aarch64 bundle is **best-effort**. When the leg does not run or
-     fails, the release is published with the other three bundles and a
-     "Partial release" banner in the release body; the missing bundle is
-     listed by name.
-   - `publish-release` writes the present / missing bundle list and the
-     per-platform 3A status into the run's Step Summary, so a partial
-     release cannot pass unnoticed.
-   - The aarch64 artefact is attached by a follow-up release.
-   - The **CI** leg in `ci.yml` (`linux-aarch64`) is a hard gate. Only
-     the *release* leg is soft.
+   **aarch64 hard-gate policy (W5 closed 2026-11-05).** The `linux-aarch64` leg of
+   `release.yml` is a hard gate: no `continue-on-error`, listed in
+   `publish-release`'s `needs:`. The `v1.0.2` release published the aarch64
+   bundle, which counts as the first observed green run of the *release*
+   aarch64 leg with the corrected `ubuntu-24.04-arm` label (review
+   2026-11-05). A missing aarch64 bundle now blocks the release instead of
+   publishing a partial set. The `dist/` bundle scan still prints a
+   "Partial release" banner naming any missing bundle, so a regression
+   stays visible.
 
    **The runner label is `ubuntu-24.04-arm`**, which is in GitHub's
    documented runner-label set. The older `ubuntu-22.04-arm64` label was
@@ -174,10 +166,7 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    that, not runner-pool capacity, is what the historical "ARM64 queued
    for hours" reports were. See `docs/plan/ci-workarounds.md` §4.1.
 
-   **Once the `linux-aarch64` release job has completed green once**
-   (it has not yet, as of 2026-10-28), drop `continue-on-error: true`
-   from that job, add `build-linux-aarch64` to `publish-release`'s
-   `needs:`, and delete row W5 from `docs/plan/ci-workarounds.md`.
+   W5 is retained in `docs/plan/ci-workarounds.md` as history only.
 
 5. Run the release freeze checklist:
 
@@ -356,7 +345,8 @@ Security fixes skip the normal cadence:
 > configure legs. Windows downstream proof verified 2026-11-03
 > (staging holds `include/` + `lib/` + `lib/cmake/NimRTC/`; minimal
 > `find_package(NimRTC 1.0 REQUIRED)` consumer linking `nimrtc::engine`
-> builds and runs exit 0). Linux proof still pending a CI leg, so the
+> builds and runs exit 0). Linux downstream proof runs in `ci.yml` on every
+> push via the install + downstream-proof leg, so the
 > published `v1.0.2` bundles still ship only the vendored third-party
 > stack — the layout below remains the target contract for those
 > published assets until `v1.1.0` cuts.

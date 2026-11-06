@@ -423,13 +423,22 @@ async def main() -> int:
     binary = Path(args.binary)
     if not binary.exists():
         # Try a few common locations.
+        #
+        # The executable suffix is host-dependent: MSVC appends `.exe`,
+        # the GCC/Clang toolchains do not.  The candidate list therefore
+        # covers both shapes rather than assuming Windows, so the proxy
+        # can find demo-p2p on the Linux half of the v1.1 soak gate
+        # (plan Track C, item C5).
+        _exe = ".exe" if os.name == "nt" else ""
         candidates = [
-            Path("build/examples/demo-p2p/demo-p2p.exe"),
+            Path("build/examples/demo-p2p/demo-p2p" + _exe),
             Path("build/examples/demo-p2p/demo-p2p"),
-            Path("../build/examples/demo-p2p/demo-p2p.exe"),
+            Path("build/examples/demo-p2p"),
+            Path("../build/examples/demo-p2p/demo-p2p" + _exe),
+            Path("../build/examples/demo-p2p/demo-p2p"),
         ]
         for c in candidates:
-            if c.exists():
+            if c.exists() and c.is_file():
                 binary = c.resolve()
                 break
         else:

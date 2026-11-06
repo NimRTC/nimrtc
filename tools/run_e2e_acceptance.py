@@ -68,10 +68,22 @@ def _resolve(cfg: str, sub: str) -> Path:
 BIN_TESTS    = _resolve("Debug", "tests")
 BIN_EXAMPLES = _resolve("Debug", "examples")
 
-EXE_GCM     = BIN_TESTS  / "test_dtls_gcm_aead.exe"
-EXE_INPROC  = BIN_TESTS  / "test_dtls_inproc.exe"
-EXE_LOOP    = BIN_EXAMPLES / "loopback-p2p.exe"
-EXE_DEMO    = BIN_EXAMPLES / "demo-p2p.exe"
+# Executable suffix depends on the host.  MSVC appends `.exe`; the
+# GCC/Clang toolchains do not, so a Linux build produces
+# `build/examples/demo-p2p` while the same build on Windows produces
+# `build/examples/Debug/demo-p2p.exe`.
+#
+# Hardcoding `.exe` here meant the runner could never find the binaries
+# on Linux, which matters for the v1.1 release gate: the 7-day soak
+# (plan Track C, item C5) requires green Case D / Case E runs on
+# Windows *and* Linux x86_64, and the Linux half of that gate could
+# never start if the runner could not locate its own executables.
+EXE_SUFFIX = ".exe" if os.name == "nt" else ""
+
+EXE_GCM     = BIN_TESTS  / ("test_dtls_gcm_aead" + EXE_SUFFIX)
+EXE_INPROC  = BIN_TESTS  / ("test_dtls_inproc" + EXE_SUFFIX)
+EXE_LOOP    = BIN_EXAMPLES / ("loopback-p2p" + EXE_SUFFIX)
+EXE_DEMO    = BIN_EXAMPLES / ("demo-p2p" + EXE_SUFFIX)
 
 SIGNALING_SERVER = ROOT / "interop" / "signaling" / "signaling_server.py"
 SIGNALING_PROXY  = ROOT / "interop" / "signaling" / "signaling_proxy.py"

@@ -23,8 +23,20 @@
 #               same scanner CI runs on all four platforms; this check
 #               invokes it so the tag cut cannot pass with an
 #               unclassified symbol that CI would only catch later.
-#               Requires node; reported as SKIP when node is absent so
-#               the POSIX-only path stays usable.
+#               Requires node.  A missing node is reported as SKIP, not
+#               PASS: a green "[PASS] api-symbols" line that silently
+#               means "the scan never ran" is how a tag cut convinces
+#               itself that the per-symbol gate was enforced when it
+#               was not.  Under --final-tag a missing node is a hard
+#               failure instead, because at tag-cut time there is no
+#               later CI run to catch it.
+#   vendor     Every vendored submodule SHA matches the pin recorded in
+#               src/third_party/vendor.json.  CI runs this per platform
+#               leg, but the tag cut itself did not: a tag could be cut
+#               against a working tree whose vendor sources had drifted
+#               from the manifest, and the drift would only surface on
+#               the next CI run.  Delegates to tools/check_vendor.py,
+#               the same gate CI runs.
 #   version     NIMRTC_API_VERSION_PRE_RELEASE must be "" for a final
 #               tag (ADR-015 Verification table).
 #   submodules  Every pin must be fetchable from a fresh clone. The
@@ -72,6 +84,7 @@ while [ $# -gt 0 ]; do
             echo "sfu"
             echo "api"
             echo "api-symbols"
+            echo "vendor"
             echo "version"
             echo "submodules"
             echo "root"
@@ -95,7 +108,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-ALL_CHECKS="sfu api api-symbols version submodules root"
+ALL_CHECKS="sfu api api-symbols vendor version submodules root"
 if [ -n "$ONLY" ]; then
     for c in $(echo "$ONLY" | tr ',' ' '); do
         case " $ALL_CHECKS " in
@@ -129,16 +142,20 @@ fi
 echo
 
 FAILED=""
+SKIPPED=""
 
 report() {
-    # report <PASS|FAIL> <check-id> <note>...
+    # report <PASS|FAIL|SKIP> <check-id> <note>...
     status="$1"; cid="$2"; shift 2
     echo "[$status] $cid"
     for note in "$@"; do
         echo "       $note"
     done
     echo
-    [ "$status" = "FAIL" ] && FAILED="$FAILED $cid"
+    case "$status" in
+        FAIL) FAILED="$FAILED $cid" ;;
+        SKIP) SKIPPED="$SKIPPED $cid" ;;
+    esac
     return 0
 }
 
@@ -215,9 +232,24 @@ fi
 # the CI accepts is a symbol the release accepts, and vice versa.
 if want api-symbols; then
     if ! command -v node >/dev/null 2>&1; then
-        report PASS api-symbols "skipped (node not on PATH)" \
-                        "the per-symbol scan is the same gate CI runs; \
-install node to run it locally"
+        # A missing node means the per-symbol scan never ran.  Reporting
+        # that as PASS would print a green line for a check that was
+        # skipped, and a tag-cut log full of green lines is exactly the
+        # artifact a release manager reads as "the gate held".  It did
+        # not hold -- it was not exercised.
+        #
+        # SKIP keeps the ordinary trunk run usable on a machine without
+        # node (the POSIX path stays portable), but SKIP is visibly
+        # different from PASS in the summary, and at tag-cut time
+        # (--final-tag) there is no later CI run to catch what the
+        # skipped scan would have found, so the skip becomes a failure.
+        if [ "$FINAL_TAG" -eq 1 ]; then
+            report FAIL api-symbols "node not found on PATH; the per-symbol scan cannot run" \
+                "a tag cut must not skip the API-freeze scan -- install node and re-run"
+        else
+            report SKIP api-symbols "node not on PATH; the per-symbol scan did not run" \
+                "the per-symbol scan is the same gate CI runs; install node to run it locally"
+        fi
     elif [ ! -f scripts/api_freeze_scan.js ]; then
         report FAIL api-symbols "scripts/api_freeze_scan.js not found"
     else
@@ -238,8 +270,62 @@ install node to run it locally"
 fi
 
 # ---------------------------------------------------------------------------
-# version — NIMRTC_API_VERSION_PRE_RELEASE tracks the release stage
+# vendor — the vendored sources match their manifest pins
 # ---------------------------------------------------------------------------
+# tools/check_vendor.py compares every submodule HEAD against the
+# commit_sha recorded in src/third_party/vendor.json.  CI runs that
+# gate on all four platform legs, but the tag cut did not: a release
+# could be cut from a working tree whose vendored sources had drifted
+# away from the manifest, and the artefact would then ship sources
+# that do not match the pins the manifest advertises.
+#
+# The interpreter name differs across the platforms this script runs
+# on: the GitHub runners expose `python3`, a stock Windows box exposes
+# `python`, and a minimal macOS install has neither in the same form.
+# Probe both rather than hardcoding one, and treat "no interpreter" as
+# SKIP (or FAIL at tag-cut time) for the same reason node is handled
+# that way above.
+if want vendor; then
+    py=""
+    # Probe each candidate by *running* it, not by asking the shell
+    # whether it is on PATH.  On a stock Windows box `python3` resolves
+    # to the Microsoft Store app-execution alias, which the shell
+    # reports as present but which prints nothing and exits non-zero --
+    # so a `command -v` probe selects an interpreter that cannot run
+    # the checker, and the vendor gate then fails for a reason that has
+    # nothing to do with vendor drift.  Running the candidate is the
+    # only probe that tells the truth.
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            if "$candidate" -c "import sys" >/dev/null 2>&1; then
+                py="$candidate"
+                break
+            fi
+        fi
+    done
+    if [ -z "$py" ]; then
+        if [ "$FINAL_TAG" -eq 1 ]; then
+            report FAIL vendor "no python interpreter found on PATH" \
+                "the vendor drift gate cannot run; a tag cut must not skip it -- install python and re-run"
+        else
+            report SKIP vendor "no python interpreter on PATH; the vendor drift gate did not run" \
+                "install python to run tools/check_vendor.py locally"
+        fi
+    elif [ ! -f tools/check_vendor.py ]; then
+        report FAIL vendor "tools/check_vendor.py not found"
+    else
+        mkdir -p build
+        vendor_out=$("$py" tools/check_vendor.py --strict 2>&1)
+        vendor_rc=$?
+        if [ "$vendor_rc" -eq 0 ]; then
+            report PASS vendor "$(echo "$vendor_out" | grep -iE 'ok|match|verified' | head -3 | tr '\n' ' ')"
+        else
+            report FAIL vendor "vendored submodule SHAs do not match src/third_party/vendor.json" \
+                          "$vendor_out"
+        fi
+    fi
+fi
+
 if want version; then
     hdr="src/core/include/nimrtc/core/api_version.hpp"
     if [ ! -f "$hdr" ]; then
@@ -370,7 +456,21 @@ fi
 # ---------------------------------------------------------------------------
 if [ -n "$FAILED" ]; then
     echo "FAILED:$FAILED"
+    if [ -n "$SKIPPED" ]; then
+        echo "SKIPPED:$SKIPPED"
+    fi
     exit 1
+fi
+
+# A skipped check is not a passed check.  The exit code stays 0 for an
+# ordinary trunk run (the check simply did not apply on this machine),
+# but the summary says so out loud: the difference between "the gate
+# held" and "the gate was not exercised" is the whole reason SKIP
+# exists as a separate status.
+if [ -n "$SKIPPED" ]; then
+    echo "OK: $(echo "$CHECKS" | tr ',' ' ' | wc -w | tr -d ' ') check(s) passed, $(echo "$SKIPPED" | wc -w | tr -d ' ') skipped"
+    echo "SKIPPED:$SKIPPED"
+    exit 0
 fi
 
 echo "OK: $(echo "$CHECKS" | tr ',' ' ' | wc -w | tr -d ' ') check(s) passed"

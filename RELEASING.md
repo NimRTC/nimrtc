@@ -273,19 +273,53 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     git push origin vX.Y.Z
     ```
 
-    The tag must be signed with the project's release key, fingerprint
+    **The signature path is SSH, not OpenPGP.** This repository signs
+    with `gpg.format = ssh` and
+    `user.signingkey = C:/Users/Administrator/.ssh/nimrtc_signing_ed25519.pub`
+    (ed25519, fingerprint `SHA256:3z9Lz53tKDBFwsXxiJMvFHhPm/jLdnJUrVaw/QVSxkA`,
+    principal `realdesktop@163.com`). That key is already registered on the
+    account's SSH key list, so GitHub renders an SSH-signed tag as
+    "Verified" exactly as it would a GPG-signed one. `git tag -s -a` needs no
+    extra flags under this configuration.
+
+    Verify before pushing:
+
+    ```bash
+    git tag -v vX.Y.Z                                   # git's own verdict
+    python tools/verify_tag_signature.py --tag vX.Y.Z   # the release tool
+    ```
+
+    `tools/verify_tag_signature.py` is the check of record. It confirms
+    that the tag is an *annotated* tag object, that it carries a signature
+    block, and that the signature verifies against
+    `~/.ssh/allowed_signers` under the principal `realdesktop@163.com`.
+    It exits non-zero on an unsigned tag, on a lightweight tag, and on a
+    signature that does not verify. Run `--self-test` to exercise all of
+    those cases.
+
+    An OpenPGP path remains available for anyone who prefers it: set
+    `gpg.format = openpgp` and `user.signingkey` to the release key
     `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` (ed25519, uid
-    "NimRTC Release <realdesktop@163.com>"). That is the same key whose public
-    block ships as the `nimrtc-signing-key.asc` asset of `v1.0.2` and is
-    published on `keyserver.ubuntu.com` and `keys.openpgp.org`, so consumers
-    can verify the tag against a key they already have. On a workstation that
-    has the key in its GnuPG keyring, `git tag -s -a` needs no further flags as
-    long as `gpg.format` is `openpgp` and `user.signingkey` is set to that
-    fingerprint; `git tag -v vX.Y.Z` must report "Good signature" before the
-    tag is pushed. The key must also be on the account's GitHub GPG key list
-    (`https://github.com/settings/keys`) for GitHub to render the "Verified"
-    badge; see `docs/plan/v1.1-plan.md` Track C6 for the current status of
-    that step.
+    "NimRTC Release <realdesktop@163.com>"), whose public block ships as
+    the `nimrtc-signing-key.asc` asset of `v1.0.2` and is published on
+    `keyserver.ubuntu.com` and `keys.openpgp.org`. Under that path
+    `git tag -v vX.Y.Z` must report "Good signature", and the key must
+    also be on the account's GitHub GPG key list
+    (`https://github.com/settings/keys`) for the badge to appear; see
+    `docs/plan/v1.1-plan.md` Track C6 for the current status of that step.
+    Note that the "Verified" badge does **not** depend on C6 when the SSH
+    path is used.
+
+    #### Historical tags carry no signature
+
+    Every tag released so far is unsigned. `v1.0.0` is a *lightweight*
+    tag (it points straight at a commit); `v1.0.1`, `v1.0.2` and every
+    `v0.x`/`v0.y` tag are *annotated* but were created with `git tag -a`
+    rather than `git tag -s -a`, so they carry no signature block at all.
+    `tools/verify_tag_signature.py` reports this state exactly rather
+    than passing them. Only tags cut after this procedure was adopted
+    are signed; the pre-`v1.1.0` tags cannot be signed retroactively
+    without rewriting published history.
 
 12. The push triggers `.github/workflows/release.yml` which:
     - Builds the four-platform release artefacts (`nimrtc-{windows,linux,linux-aarch64,macos}.tar.xz`
@@ -295,6 +329,22 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
     - Generates the SBOM (`reuse` + `scancode-toolkit` + `cyclonedx-bom`).
     - Drafts a GitHub Release with `CHANGELOG.md`'s `## [X.Y.Z]` block as the
       body.
+
+    #### Tag signing and artefact signing are two independent paths
+
+    The tag signature (step 11, SSH or OpenPGP, made on the release
+    manager's workstation) and the artefact signatures (the detached
+    `.asc` files produced by the release workflow from the
+    `GPG_PRIVATE_KEY` secret) are separate mechanisms that happen to use
+    the same word "signing". Switching the tag to the SSH path does not
+    weaken the artefacts: the artefacts keep their detached GPG
+    signatures, verified by `tools/verify_release_signature.py` and by
+    any consumer that has the public key. Conversely, the artefacts'
+    GPG signature says nothing about the tag, which is why the release
+    workflow runs `tools/verify_tag_signature.py --shape-only` as a
+    preflight step: the CI runner holds `GPG_PRIVATE_KEY` but not the
+    tag-signing key, so it cannot verify the tag cryptographically. It
+    can still refuse to release a tag that carries no signature block.
 
 #### GPG signing tier (pre-1.0 carve-out)
 

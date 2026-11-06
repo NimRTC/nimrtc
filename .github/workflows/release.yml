@@ -145,6 +145,48 @@ jobs:
         shell: bash
         run: sh scripts/check-release-freeze.sh --final-tag
 
+      # Tag-signature shape check (v1.1 plan Track C, item C4).
+      #
+      # This step deliberately performs a SHAPE check and not a
+      # cryptographic one.  The runner holds the artefact-signing key
+      # (the GPG_PRIVATE_KEY secret), not the tag-signing key: the tag
+      # is signed on the release manager's workstation, and that
+      # workstation's private key is deliberately not present in CI.
+      # The runner therefore cannot verify the tag's signature, and
+      # pretending otherwise would mean either shipping the private key
+      # to CI or reporting a pass that nobody actually checked.
+      #
+      # What the runner CAN do is refuse to release a tag that carries
+      # no signature block at all -- an unsigned tag, or a lightweight
+      # tag that points straight at a commit.  Those are the two ways
+      # the requirement in RELEASING.md §3.3 step 11 silently fails,
+      # and both are detectable from the tag object alone.  The
+      # cryptographic verification happens on the release manager's
+      # workstation, before the tag is pushed:
+      #
+      #     python tools/verify_tag_signature.py --tag vX.Y.Z
+      #
+      # --shape-only selects exactly that reduced check; the full
+      # verification would need the tag-signing key and an
+      # allowed_signers file, neither of which exists on the runner.
+      - name: Verify the release tag carries a signature
+        shell: bash
+        run: |
+          tag="${{ steps.resolve-tag.outputs.tag }}"
+          # The tag object has to be present in the working copy.
+          # `actions/checkout` uses a shallow fetch by default
+          # (fetch-depth: 1), and whether that brings the *annotated
+          # tag object* along rather than only the commit it points at
+          # depends on how the checkout was ref'd.  Fetch the one ref
+          # we need explicitly so the check cannot fail for a reason
+          # that has nothing to do with the signature.
+          if ! git cat-file -e "refs/tags/$tag" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/tags/$tag:refs/tags/$tag"
+          fi
+          python3 tools/verify_tag_signature.py --tag "$tag" --shape-only
+          echo "Tag '$tag' is an annotated tag carrying a signature block."
+
       - name: Verify GPG signing prerequisites (optional pre-1.0)
         shell: bash
         id: gpg-check

@@ -25,6 +25,7 @@ Run
 import asyncio
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -45,7 +46,51 @@ if sys.stdout is not None:
 ROOT = Path(__file__).resolve().parent.parent
 E2E  = ROOT / "build" / "e2e"
 CHROME_HTML = ROOT / "interop" / "chrome" / "test_chrome_opus.html"
-CHROME_EXE  = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+
+# Which browser to drive.
+#
+# The candidate list is per-platform because the previous value was a
+# hardcoded Windows path (`C:\Program Files\Google\Chrome\...`), which
+# cannot exist on Linux -- and the v1.1 soak gate (plan Track C, item
+# C5) requires the Chrome cases to go green on Linux x86_64 as well as
+# Windows.
+#
+# `NIMRTC_CHROME_PATH` still wins outright: a CI image or a developer
+# machine with Chrome in an unusual place can point at it directly.
+#
+# When no system Chrome is found, the path is left empty and Playwright
+# launches its own bundled Chromium.  That is the path CI takes
+# (`python -m playwright install chromium`), so the absence of a system
+# Chrome must NOT be an error -- passing a non-existent `executable_path`
+# to Playwright would be.
+CHROME_CANDIDATES = {
+    "Windows": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ],
+    "Linux": [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+    ],
+    "Darwin": [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ],
+}
+
+_override = os.environ.get("NIMRTC_CHROME_PATH")
+if _override:
+    CHROME_EXE = Path(_override)
+else:
+    CHROME_EXE = Path("")
+    for _candidate in CHROME_CANDIDATES.get(platform.system(), []):
+        _p = Path(_candidate)
+        if _p.exists():
+            CHROME_EXE = _p
+            break
 
 WS_URL = "ws://localhost:8765/interop"
 
@@ -144,9 +189,16 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
               "Chrome will reject NimRTC's self-signed cert (alert 46)")
 
     async with async_playwright() as p:
+        # `executable_path` is only passed when a system Chrome was
+        # actually found.  Passing an empty string (or a path that does
+        # not exist) makes Playwright fail outright, whereas omitting the
+        # argument lets it launch the Chromium build it downloaded via
+        # `playwright install chromium` -- which is exactly what CI
+        # relies on, on every platform.
+        _launch_kwargs = {"headless": True}
+        if str(CHROME_EXE):
+            _launch_kwargs["executable_path"] = str(CHROME_EXE)
         browser = await p.chromium.launch(
-            headless=True,
-            executable_path=CHROME_EXE,
             args=[
                 "--headless=new",
                 "--no-sandbox",
@@ -176,6 +228,7 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
                 *( ["--ignore-certificate-errors-spki-list=" + ",".join(nimrtc_spki)]
                    if nimrtc_spki else [] ),
             ],
+            **_launch_kwargs,
         )
         context = await browser.new_context()
         page = await context.new_page()

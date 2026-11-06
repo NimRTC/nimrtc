@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import socket
 import subprocess
 import sys
@@ -68,18 +69,58 @@ CHROME_HTML       = HARNESS_DIR / "chrome_dtls_only.html"
 # without Google Chrome (but with Playwright's bundled Chromium) can still
 # run Case E.  Example:
 #   NIMRTC_CHROME_PATH="C:\Users\me\AppData\Local\ms-playwright\chromium-1223\chrome-win64\chrome.exe"
-_CHROME_DEFAULT = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
-CHROME_EXE = Path(os.environ.get("NIMRTC_CHROME_PATH", str(_CHROME_DEFAULT)))
+#
+# The candidates are per-platform: the previous value was a hardcoded
+# Windows path, which cannot exist on Linux.  The v1.1 soak gate (plan
+# Track C, item C5) requires Case E to go green on Linux x86_64 as well
+# as Windows, so the harness has to be able to find a browser there --
+# or fall back to Playwright's bundled Chromium.
+CHROME_CANDIDATES = {
+    "Windows": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ],
+    "Linux": [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+    ],
+    "Darwin": [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ],
+}
+
+_override = os.environ.get("NIMRTC_CHROME_PATH")
+if _override:
+    CHROME_EXE = Path(_override)
+else:
+    CHROME_EXE = Path("")
+    for _candidate in CHROME_CANDIDATES.get(platform.system(), []):
+        _p = Path(_candidate)
+        if _p.exists():
+            CHROME_EXE = _p
+            break
 
 # demo-p2p binary — resolve using the same logic as run_e2e_acceptance.py.
+#
+# The executable suffix is host-dependent: MSVC appends `.exe`, the
+# GCC/Clang toolchains do not.  A Linux build therefore produces
+# `build/examples/demo-p2p` (no extension), and looking only for
+# `demo-p2p.exe` made the Case E harness unable to find its own
+# binary on Linux -- which is one of the two platforms the v1.1 soak
+# gate (plan Track C, item C5) requires to go green.
+_EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 _NIMRTC_BUILD_DIR = Path(os.environ.get("NIMRTC_BUILD_DIR", BUILD_DIR))
 for _sub, _cfg in [("examples", "Debug"), ("Debug", "examples"), ("examples", "")]:
-    _p = _NIMRTC_BUILD_DIR / _sub / _cfg / "demo-p2p.exe"
+    _p = _NIMRTC_BUILD_DIR / _sub / _cfg / ("demo-p2p" + _EXE_SUFFIX)
     if _p.exists():
         DEMO_P2P = _p
         break
 else:
-    DEMO_P2P = _NIMRTC_BUILD_DIR / "examples" / "Debug" / "demo-p2p.exe"
+    DEMO_P2P = _NIMRTC_BUILD_DIR / "examples" / "Debug" / ("demo-p2p" + _EXE_SUFFIX)
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 
@@ -197,9 +238,15 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
 
     try:
         # ── 0. Ensure Chrome and HTML exist ─────────────────────────────────
-        if not CHROME_EXE.exists():
-            results["errors"].append(f"Chrome not found at {CHROME_EXE}")
-            return results
+        # A missing system Chrome is not fatal: Playwright ships its own
+        # Chromium, and CI installs it via `playwright install chromium`.
+        # The check therefore only fires when NEITHER a system Chrome nor
+        # a bundled one is available -- which Playwright itself reports
+        # with a far better message than this script could.
+        if str(CHROME_EXE) and not CHROME_EXE.exists():
+            print(f"[warn] system Chrome not found at {CHROME_EXE}; "
+                  f"falling back to Playwright's bundled Chromium")
+            CHROME_EXE = Path("")
         if not CHROME_HTML.exists():
             results["errors"].append(f"HTML harness not found at {CHROME_HTML}")
             return results
@@ -325,10 +372,15 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
 
         try:
             with sync_playwright() as pw:
+                # `executable_path` is only passed when a system Chrome
+                # was found; an empty value would make Playwright fail
+                # instead of falling back to its bundled Chromium.
+                _launch_kwargs = {"headless": True}
+                if str(CHROME_EXE):
+                    _launch_kwargs["executable_path"] = str(CHROME_EXE)
                 browser = pw.chromium.launch(
-                    headless=True,
-                    executable_path=CHROME_EXE,
                     args=chrome_args,
+                    **_launch_kwargs,
                 )
                 context = browser.new_context()
                 page = context.new_page()

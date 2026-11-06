@@ -8,7 +8,7 @@ Chrome ↔ NimRTC DTLS-only interop harness (Case E).
 Architecture
 -----------
   ┌──────────────────────┐
-  │  signaling_server.py  │  ws://127.0.0.1:9000/dtls-e
+  │  signaling_server.py  │  ws://127.0.0.1:<port>/dtls-e
   └──────────┬───────────┘
              │ WebSocket
   ┌──────────┴───────────────────────┐
@@ -29,7 +29,7 @@ Evidence items (all three must pass for overall PASS):
 Usage
 -----
   python tests/chrome_interop_harness/run_harness.py
-      --signaling-port 9000   (default)
+      --signaling-port 0     (default: pick a free port automatically)
       --timeout 25            (default: seconds to wait for handshake)
 
 Exit codes: 0 = PASS, 1 = FAIL.
@@ -145,8 +145,72 @@ def wait_for_port(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
+def pick_free_port() -> int:
+    """Return a TCP port that is free on all local interfaces.
+
+    The historical fixed port (9000) is regularly occupied by unrelated
+    local services.  On Windows the collision is silent: the signaling
+    server binds 0.0.0.0:<port> successfully even when another process
+    already holds 127.0.0.1:<port>, and the incoming connections are then
+    delivered to the FOREIGN listener, which answers the WebSocket
+    upgrade with "404 Not Found".  Chrome then reports "WebSocket error"
+    and the harness fails for a reason that has nothing to do with the
+    engine.  Picking a free port removes the whole class of failure.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            pass
+        s.bind(("0.0.0.0", 0))
+        s.listen(1)
+        return int(s.getsockname()[1])
+
+
+def ws_upgrade_status(port: int, path: str = "/__healthcheck__",
+                      timeout_s: float = 5.0) -> str:
+    """Perform a real WebSocket handshake and return the HTTP status line.
+
+    "HTTP/1.1 101 ..." means the NimRTC signaling server owns the port.
+    Anything else means something else does -- which is the single most
+    useful diagnostic for a Case E failure that otherwise only says
+    "WebSocket error" on the Chrome side.  The probe uses its own room so
+    it does not take an "offerer" slot in the room the real peers use.
+    """
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: localhost:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout_s) as s:
+            s.settimeout(timeout_s)
+            s.sendall(request.encode())
+            data = s.recv(512)
+    except OSError as e:
+        return f"connection error: {e}"
+    if not data:
+        return "no response"
+    return data.split(b"\r\n", 1)[0].decode(errors="replace").strip()
+
+
 def kill_port(port: int) -> None:
-    """Best-effort: kill any process holding this port (Windows)."""
+    """Best-effort: kill any process holding this port."""
+    if os.name != "nt":
+        # POSIX: `fuser` is the portable "who holds this port" tool and
+        # is present on the Ubuntu runner images.  `netstat`/`taskkill`
+        # are Windows-only, so the old implementation was a no-op on
+        # Linux -- the scheduled soak workflow runs there.
+        for argv in (["fuser", "-k", f"{port}/tcp"], ["lsof", "-t", f"-i:{port}"]):
+            try:
+                subprocess.run(argv, capture_output=True, check=False)
+            except Exception:
+                continue
+        return
     try:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
@@ -173,7 +237,7 @@ def kill_port(port: int) -> None:
 # ─── Main test ────────────────────────────────────────────────────────────────
 
 
-def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
+def run(signaling_port: int = 0, timeout_s: int = 25) -> dict:
     """
     Run the Chrome ↔ NimRTC DTLS interop test.
 
@@ -197,6 +261,12 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
     }
 
     room          = "dtls-e"
+    # A port of 0 means "pick a free one" -- see pick_free_port().  The
+    # resolution happens HERE because the WebSocket URL the Chrome page
+    # uses is derived from the same number.
+    if signaling_port == 0:
+        signaling_port = pick_free_port()
+        logger.info("using auto-picked signaling port %d", signaling_port)
     ws_url        = f"ws://127.0.0.1:{signaling_port}/{room}"
     spki_file     = E2E_DIR / "case_e_nimrtc_spki.b64"
     nimrtc_trace  = E2E_DIR / "case_e_nimrtc.trace"
@@ -243,10 +313,18 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
         # The check therefore only fires when NEITHER a system Chrome nor
         # a bundled one is available -- which Playwright itself reports
         # with a far better message than this script could.
-        if str(CHROME_EXE) and not CHROME_EXE.exists():
-            print(f"[warn] system Chrome not found at {CHROME_EXE}; "
+        # NOTE: keep this in a LOCAL variable.  Assigning to the module
+        # level CHROME_EXE inside this function used to make Python treat
+        # the name as local for the whole function, so the read below
+        # raised `UnboundLocalError: local variable 'CHROME_EXE' referenced
+        # before assignment` -- the harness crashed on EVERY platform,
+        # and the stale results file left behind by an earlier successful
+        # run made the orchestrator report a PASS anyway.
+        chrome_exe = CHROME_EXE
+        if str(chrome_exe) and not chrome_exe.exists():
+            print(f"[warn] system Chrome not found at {chrome_exe}; "
                   f"falling back to Playwright's bundled Chromium")
-            CHROME_EXE = Path("")
+            chrome_exe = Path("")
         if not CHROME_HTML.exists():
             results["errors"].append(f"HTML harness not found at {CHROME_HTML}")
             return results
@@ -255,6 +333,8 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
             return results
 
         # ── 1. Free the signaling port ──────────────────────────────────────
+        # A no-op for an auto-picked (free) port; a real cleanup for an
+        # explicitly requested one.
         kill_port(signaling_port)
         time.sleep(0.3)
 
@@ -281,6 +361,18 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
                 f"signaling_server did not open :{signaling_port}")
             return results
         logger.info("signaling_server ready on :%d", signaling_port)
+
+        # Prove the listener really is the NimRTC signaling server: a
+        # foreign service on the port answers the upgrade with 404 (or
+        # nothing), which is the classic cause of an opaque Chrome-side
+        # "WebSocket error".
+        status = ws_upgrade_status(signaling_port)
+        logger.info("signaling health check: %s", status)
+        if not status.startswith("HTTP/1.1 101"):
+            results["errors"].append(
+                f":{signaling_port} is not answering WebSocket upgrades "
+                f"(got {status!r}); another service is listening there")
+            return results
 
         # ── 5. Start signaling_proxy → demo-p2p (NimRTC answerer) ──────────
         # demo-p2p runs as answerer because Chrome (BoringSSL) will be the
@@ -376,8 +468,8 @@ def run(signaling_port: int = 9000, timeout_s: int = 25) -> dict:
                 # was found; an empty value would make Playwright fail
                 # instead of falling back to its bundled Chromium.
                 _launch_kwargs = {"headless": True}
-                if str(CHROME_EXE):
-                    _launch_kwargs["executable_path"] = str(CHROME_EXE)
+                if str(chrome_exe):
+                    _launch_kwargs["executable_path"] = str(chrome_exe)
                 browser = pw.chromium.launch(
                     args=chrome_args,
                     **_launch_kwargs,
@@ -575,8 +667,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Chrome ↔ NimRTC DTLS interop harness (Case E)")
     parser.add_argument(
-        "--signaling-port", type=int, default=9000,
-        help="WebSocket signaling server port (default: 9000)")
+        "--signaling-port", type=int, default=0,
+        help="WebSocket signaling server port (default: 0 = pick a free one)")
     parser.add_argument(
         "--timeout", type=int, default=25,
         help="Max seconds to wait for DTLS handshake (default: 25)")

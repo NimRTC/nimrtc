@@ -92,7 +92,19 @@ else:
             CHROME_EXE = _p
             break
 
-WS_URL = "ws://localhost:8765/interop"
+# The signaling URL of the WebSocket server the page connects to.  The
+# acceptance runner owns the signaling server and may pick a free
+# ephemeral port (the fixed 8765 is regularly taken by unrelated local
+# services -- e.g. a uvicorn MCP server -- and on Windows the bind then
+# "succeeds" while the traffic is stolen by the other listener, which
+# made Case D fail with an opaque "WebSocket error").  The runner
+# therefore exports NIMRTC_CHROME_WS_URL; the port-only fallback keeps
+# the script usable standalone.
+_port_override = os.environ.get("NIMRTC_SIGNAL_PORT", "").strip()
+WS_URL = os.environ.get("NIMRTC_CHROME_WS_URL", "").strip() or (
+    f"ws://localhost:{_port_override}/interop" if _port_override
+    else "ws://localhost:8765/interop"
+)
 
 # Path to the file demo-p2p writes its local DTLS SPKI (base64 SHA-256 of
 # the server certificate's SubjectPublicKeyInfo) to once the engine is

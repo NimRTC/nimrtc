@@ -7,9 +7,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Post-`v1.0.2` work accumulates here (the v1.1 C-track items below).
-> The `## [1.0.2]` entry is the authoritative record of the current
-> published stable cut.
+> Work that lands after `v1.1.0`.
+
+## [1.1.0] - 2026-11-07
+
+### Status: Release candidate
+
+> **The source version is `1.1.0`** (`project(VERSION)` in `CMakeLists.txt`,
+> `NIMRTC_API_VERSION` = 10100, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`).
+> The `v1.1` / `v1.2` / `v1.3` plan drafts were consolidated into
+> `docs/plan/v1.1-plan.md` (BDFL, 2026-11-06); the version ladder it
+> records (§5.6) is: `v1.1.0` is the only feature-bearing release of the
+> `v1.1` line, `v1.1.x` carries fixes only, and new behaviour starts at
+> `v1.2.0`.
+>
+> The published stable cut is still `v1.0.2`; the `v1.1.0` tag is cut when
+> the remaining release-hardening gates close (see "Known limitations").
 
 ### Fixed
 
@@ -553,6 +566,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when the remaining C-track gates — the 7-day soak and the signed tag —
   clear (W3 and W5 are closed).
 
+- **Track A reproducible baselines (v1.1 A1/A2).** New
+  `tools/benchmark_dc.py` bursts N UDP datagrams per payload size
+  over 127.0.0.1 (256/1200 B datagram plane, 16384 B bidi-stream-chunk
+  plane) and emits `build/e2e/bench_dc.json` with pps + Mbps per size.
+  README Benchmarks (EN + ZH) now cites measured transport-floor
+  numbers for `bench_latency.json` + `bench_dc.json` with reproduce
+  commands. Re-verified 2026-11-02 on Windows 10 x86_64: latency
+  p50 ~9.7 µs / p99 ~17.2 µs / jitter ~0.2 µs (1000 × 172 B); DC
+  256 B ~74.8k pps / ~153 Mbps, 1200 B ~76.6k pps / ~735 Mbps,
+  16384 B bidi-stream-chunk ~67.1k pps / ~8.8 Gbps (2000 msgs each);
+  all inside the README cited ranges.
+- **Track B timeline收尾 B3 (docs only, no new seam).**
+  `docs/plan/timeline-engine-wiring.md` step 4 now records the
+  long-session slope quality note (sub-ms for minutes, degrades
+  after; single-SR fallback) plus the paired DTLS/SRTP timeline e2e
+  gap (`feed_srtp_inbound()` needs a completed handshake).
+  ADR-017 Consequences already carried the same two statements, so
+  B1/B2 have no stale "always 0" / "single-SR only" text left.
+- **Track A size bench A3.** `python tools/benchmark_size.py
+  --markdown` reports static lib `nimrtc_engine` 12.46 MB (<15 MB);
+  matches the README static-lib claim. Freeze script
+  `scripts/check-release-freeze.sh` passes 6/6 (additive-only API).
+
 ### Known limitations (v1.1 C-track, still open)
 
 - W3 is **closed 2026-11-06**: the `Prebuild WebRTC APM` step lost
@@ -569,6 +605,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Windows), the signed annotated tag, and the upload of the release key to
   the GitHub account GPG list (blocked on network access to
   `github.com`, not on tooling).
+
+- **The earlier C-track notes that kept W3 / W5 open are superseded.**
+  W3 (Windows APM prebuild `continue-on-error`) and W5
+  (`build-linux-aarch64` soft gate) were closed on 2026-11-06 and
+  2026-11-05 respectively; `docs/plan/ci-workarounds.md` W3/W5 remain the
+  source of truth.
+
 ## [1.0.2] - 2026-11-02
 
 ### Status: Stable
@@ -664,41 +707,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   generator now lists the published tarball and reports the build mode
   and the shipped content separately, so "real 3A bundled" is only
   claimed when `lib/webrtc_apm/` is actually present in the artefact.
-
-## [Unreleased — v1.1 C-track]
-
-### Added
-
-- **Track A reproducible baselines (v1.1 A1/A2).** New
-  `tools/benchmark_dc.py` bursts N UDP datagrams per payload size
-  over 127.0.0.1 (256/1200 B datagram plane, 16384 B bidi-stream-chunk
-  plane) and emits `build/e2e/bench_dc.json` with pps + Mbps per size.
-  README Benchmarks (EN + ZH) now cites measured transport-floor
-  numbers for `bench_latency.json` + `bench_dc.json` with reproduce
-  commands. Re-verified 2026-11-02 on Windows 10 x86_64: latency
-  p50 ~9.7 µs / p99 ~17.2 µs / jitter ~0.2 µs (1000 × 172 B); DC
-  256 B ~74.8k pps / ~153 Mbps, 1200 B ~76.6k pps / ~735 Mbps,
-  16384 B bidi-stream-chunk ~67.1k pps / ~8.8 Gbps (2000 msgs each);
-  all inside the README cited ranges.
-- **Track B timeline收尾 B3 (docs only, no new seam).**
-  `docs/plan/timeline-engine-wiring.md` step 4 now records the
-  long-session slope quality note (sub-ms for minutes, degrades
-  after; single-SR fallback) plus the paired DTLS/SRTP timeline e2e
-  gap (`feed_srtp_inbound()` needs a completed handshake).
-  ADR-017 Consequences already carried the same two statements, so
-  B1/B2 have no stale "always 0" / "single-SR only" text left.
-- **Track A size bench A3.** `python tools/benchmark_size.py
-  --markdown` reports static lib `nimrtc_engine` 12.46 MB (<15 MB);
-  matches the README static-lib claim. Freeze script
-  `scripts/check-release-freeze.sh` passes 6/6 (additive-only API).
-
-### Known limitations (v1.1 C-track, still open)
-
-- W3 (Windows APM prebuild `continue-on-error`) and W5
-  (`build-linux-aarch64` soft gate) stay as-is until a four-platform
-  release leg is observed green; flipping them without that evidence
-  would risk blocking the release. `docs/plan/ci-workarounds.md`
-  W3/W5 remain the source of truth.
 
 ## [1.0.1] - 2026-11-02
 

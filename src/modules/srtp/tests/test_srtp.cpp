@@ -150,7 +150,7 @@ TEST(SrtpContextTest, TotalStatsStartAtZero) {
 }
 
 // -----------------------------------------------------------------------------
-// Backend seam (v1.3 X2): libsrtp routed via ISrtpSessionBackend.
+// Backend seam (v1.1 X2): libsrtp routed via ISrtpSessionBackend.
 // Behaviour must match SrtpSession; SM4-GCM stays out of scope.
 // -----------------------------------------------------------------------------
 TEST(SrtpBackendSeamTest, FactoryIdIsLibsrtp) {

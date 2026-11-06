@@ -2,7 +2,7 @@
 # Copyright (c) 2026 NimRTC contributors.
 # SPDX-License-Identifier: MIT
 #
-# Linux weak-network baseline (v1.3 Q4) via 'tc qdisc netem'.
+# Linux weak-network baseline (v1.1 Q4) via 'tc qdisc netem'.
 #
 # The Linux counterpart of tools/benchmark_weaknet.py: the same three
 # tiers (5% loss / 100 ms jitter / 1 Mbps cap) measured with kernel-side
@@ -37,7 +37,7 @@ usage() {
   cat <<'EOF'
 usage: tools/benchmark_weaknet_netem.sh [--count N] [--size BYTES] [--util F] [--out PATH]
 
-Runs the three v1.3 Q4 weak-network tiers with 'tc qdisc netem'.
+Runs the three v1.1 Q4 weak-network tiers with 'tc qdisc netem'.
 Requires root (CAP_NET_ADMIN) and iproute2.
 EOF
 }

@@ -224,7 +224,7 @@ struct VideoReceiver::Impl {
                 lost.push_back(missing);
                 missing = static_cast<std::uint16_t>(missing + 1);
             }
-            // v1.3 Q3: hand the loss to the feedback callback so the owner
+            // v1.1 Q3: hand the loss to the feedback callback so the owner
             // of the RTCP transport can answer it with a NACK.
             report_missing(std::move(lost));
         }
@@ -233,7 +233,7 @@ struct VideoReceiver::Impl {
     }
 
     // ---------------------------------------------------------------------
-    // v1.3 Q3: report lost packets to the feedback callback.
+    // v1.1 Q3: report lost packets to the feedback callback.
     // ---------------------------------------------------------------------
     void report_missing(std::vector<std::uint16_t> lost) noexcept {
         if (!feedback_cb || lost.empty()) return;
@@ -243,7 +243,7 @@ struct VideoReceiver::Impl {
     }
 
     // ---------------------------------------------------------------------
-    // v1.3 Q3: picture data was lost -> ask the sender for a key frame.
+    // v1.1 Q3: picture data was lost -> ask the sender for a key frame.
     // ---------------------------------------------------------------------
     void request_keyframe() noexcept {
         stats.keyframe_requests_emitted++;
@@ -381,7 +381,7 @@ struct VideoReceiver::Impl {
             stats.frames_emitted++;
             if (!f->complete) {
                 stats.frames_incomplete++;
-                // v1.3 Q3: picture data was lost — ask the sender for a
+                // v1.1 Q3: picture data was lost — ask the sender for a
                 // fresh key frame so the decoder can resync (PLI / FIR).
                 request_keyframe();
             }
@@ -488,7 +488,7 @@ struct VideoSender::Impl {
     // Reusable scratch buffer for emitted packet payloads.
     std::vector<std::uint8_t> scratch;
 
-    // ---- Retransmission cache (v1.3 Q3) ---------------------------------
+    // ---- Retransmission cache (v1.1 Q3) ---------------------------------
     // A NACK asks the sender to repeat one packet; the sender can only
     // do that if it still holds the packet.  We keep the most recently
     // sent packets in a small ring buffer (bounded by
@@ -809,7 +809,7 @@ std::uint16_t VideoSender::next_seq() const noexcept {
 }
 
 // ===========================================================================
-// Feedback bridge (v1.3 Q3)
+// Feedback bridge (v1.1 Q3)
 // ===========================================================================
 
 namespace fb = video_rtcp_feedback;

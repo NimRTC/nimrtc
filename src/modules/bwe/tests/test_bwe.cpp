@@ -227,7 +227,7 @@ TEST(BweTest, ResetRestoresInitial) {
 }
 
 // -----------------------------------------------------------------------------
-// GoogCcBwe — delay + loss hybrid, opt-in (v1.3 Q1)
+// GoogCcBwe — delay + loss hybrid, opt-in (v1.1 Q1)
 // -----------------------------------------------------------------------------
 TEST(GoogCcBweTest, InitialEstimateMatchesConfig) {
     Config c;

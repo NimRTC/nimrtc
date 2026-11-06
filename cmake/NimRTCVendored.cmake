@@ -233,7 +233,7 @@ function(nimrtc_link_wolfssl target)
 endfunction()
 
 # ADR-013: link GMSSL v3.x native library.
-# v1.3 X1: vendored-first.  When NIMRTC_ENABLE_DTLS_GMSSL=ON and the
+# v1.1 X1: vendored-first.  When NIMRTC_ENABLE_DTLS_GMSSL=ON and the
 # submodule at src/third_party/gmssl/src is populated, the vendored
 # STATIC `gmssl` target (via nimrtc_vendor_gmssl) is used and no system
 # probing happens.  The find_path/find_library path below is retained
@@ -246,7 +246,7 @@ function(nimrtc_link_gmssl target)
         target_compile_definitions(${target} PRIVATE
             NIMRTC_USE_GMSSL=1
             NIMRTC_HAS_DTLS_GMSSL=1)
-        message(STATUS "GMSSL DTLS backend: vendored submodule (v1.3 X1)")
+        message(STATUS "GMSSL DTLS backend: vendored submodule (v1.1 X1)")
         return()
     endif()
     # Propagate the GMSSL_ROOT hint from the caller (or the environment).

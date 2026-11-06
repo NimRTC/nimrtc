@@ -41,7 +41,7 @@
  *     machine (RFC 6184 §5.8).  When a complete NAL unit is produced,
  *     it is handed to the jitter buffer as a single-NAL packet.
  *
- * ## Feedback loop (v1.3 Q3)
+ * ## Feedback loop (v1.1 Q3)
  *
  * The receiver tells the sender what it is missing: the sequence
  * numbers of lost packets (RFC 4585 §6.2.1 NACK) and the request for a
@@ -129,12 +129,12 @@ struct NIMRTC_API_STABLE ReceiverStats {
     std::uint64_t nack_entries_emitted = 0;
     std::uint64_t sequence_gaps_seen   = 0;
     /** Number of key-frame requests the receiver raised because picture
-     *  data was lost (v1.3 Q3). */
+     *  data was lost (v1.1 Q3). */
     std::uint64_t keyframe_requests_emitted = 0;
 };
 
 // ---------------------------------------------------------------------------
-// Receiver feedback (v1.3 Q3)
+// Receiver feedback (v1.1 Q3)
 // ---------------------------------------------------------------------------
 
 /** Feedback the receiver wants to send back to the sender.
@@ -202,7 +202,7 @@ public:
     /** Register the frame callback (must be set before push_rtp). */
     void set_frame_callback(ReceiverFrameCallback cb) noexcept;
 
-    /** Register the feedback callback (optional, v1.3 Q3).
+    /** Register the feedback callback (optional, v1.1 Q3).
      *
      *  The callback fires when the receiver detects a gap in the RTP
      *  sequence numbers (the lost packets of a NACK) and when a frame
@@ -253,7 +253,7 @@ struct NIMRTC_API_STABLE SenderConfig {
      *  production; the pipeline just increments from this base). */
     std::uint16_t           initial_seq        = 0;
 
-    /** Number of sent packets kept for retransmission (v1.3 Q3).
+    /** Number of sent packets kept for retransmission (v1.1 Q3).
      *
      *  A NACK asks the sender to repeat one packet; the sender can only
      *  do that if it still holds the packet.  The cache is a ring buffer
@@ -274,10 +274,10 @@ struct NIMRTC_API_STABLE SenderStats {
     std::uint64_t single_nal_frames_packetized = 0;
     std::uint64_t force_keyframe_calls         = 0;
     std::uint64_t frames_marked_as_keyframe    = 0;
-    /** Packets re-sent in response to a NACK (v1.3 Q3). */
+    /** Packets re-sent in response to a NACK (v1.1 Q3). */
     std::uint64_t packets_retransmitted        = 0;
     /** NACKs that could not be answered because the packet had already
-     *  left the retransmission cache (v1.3 Q3). */
+     *  left the retransmission cache (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
 };
 
@@ -353,7 +353,7 @@ public:
     void force_keyframe() noexcept;
 
     /** True when a key frame has been requested and the request has not
-     *  been consumed by a push_frame() yet (v1.3 Q3). */
+     *  been consumed by a push_frame() yet (v1.1 Q3). */
     bool keyframe_pending() const noexcept;
 
     /** Re-emit a previously sent packet (RFC 4585 §6.2.1 NACK).
@@ -382,7 +382,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Feedback bridge (v1.3 Q3) — receiver feedback ↔ RTCP wire format
+// Feedback bridge (v1.1 Q3) — receiver feedback ↔ RTCP wire format
 // ---------------------------------------------------------------------------
 // The receiver produces plain data (`ReceiverFeedback`); the owner of the
 // RTCP transport needs bytes on the wire.  The two helpers below close that

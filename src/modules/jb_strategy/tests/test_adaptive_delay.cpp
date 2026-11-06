@@ -2,7 +2,7 @@
 // =============================================================================
 // Shared adaptive jitter-buffer strategy — unit tests.
 //
-// Covers the acceptance criteria of v1.3 track Q2:
+// Covers the acceptance criteria of v1.1 track Q2:
 //   - the jitter estimate converges,
 //   - the target delay follows the jitter estimate,
 //   - the [min_delay, max_delay] window bounds hold.

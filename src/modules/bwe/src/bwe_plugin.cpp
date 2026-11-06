@@ -5,7 +5,7 @@
  * Wires the concrete `bwe::Bwe` (AIMD) implementation into the
  * `plugins::IBwe` seam and registers it under the id `"aimd"`,
  * plus the opt-in `bwe::GoogCcBwe` (delay+loss hybrid) under the id
- * `"goog-cc"` (v1.3 Q1). The registry's `get_bwe()` picks whichever id
+ * `"goog-cc"` (v1.1 Q1). The registry's `get_bwe()` picks whichever id
  * the engine / scheduler asks for; the engine default stays `"aimd"`.
  *
  * Per ADR-001 + the MSVC static-link workaround (see audio3a / ice):

@@ -1,6 +1,6 @@
 /**
  * @file src/engine/src/engine_impl.hpp
- * @brief PRIVATE engine internals (v1.3 R1).
+ * @brief PRIVATE engine internals (v1.1 R1).
  *
  * Includes, internal helpers (nimrtc::engine::detail) and the
  * NimRTCEngine::Impl definition shared by the five engine TUs.
@@ -329,7 +329,7 @@ struct NimRTCEngine::Impl {
     bool            dtls_active_inbound = false;
     bool            srtp_installed      = false;
     int             srtp_stats_drop     = 0;
-    // ---- Video counters (v1.3 V1, cumulative since open()) ------------------
+    // ---- Video counters (v1.1 V1, cumulative since open()) ------------------
     std::uint64_t video_frames_sent       = 0;
     std::uint64_t video_packets_sent      = 0;
     std::uint64_t video_bytes_sent        = 0;
@@ -340,7 +340,7 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_keyframes_applied = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
-    // ---- Ref-frame timeline map (v1.3 T1/T2, UNSTABLE) -------------------
+    // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->
     // capture_ts_us. Bounded ring (1024 entries); insertion-order deque
     // drives eviction so the map cannot grow without bound. Single-threaded
@@ -349,7 +349,7 @@ struct NimRTCEngine::Impl {
     std::map<std::uint64_t, std::int64_t> ref_frame_to_ts;
     std::deque<std::uint64_t>             ref_frame_order;
 
-    // ---- ICE flap -> DTLS rehandshake (v1.2 D2, additive) ------------------
+    // ---- ICE flap -> DTLS rehandshake (v1.1 Dtls2, additive) ------------------
     // Tracks ICE state across tick() to detect NAT rebinding:
     // connected once -> disconnected (arm) -> connected again (trigger
     // IDtlsSession::rehandshake()). plugins::IceState mirrors
@@ -377,7 +377,7 @@ struct NimRTCEngine::Impl {
     // packet callback to set kVideoKeyframe priority on the marker packet.
     std::atomic<bool> video_keyframe_pending_{false};
 
-    // ---- RTCP feedback state (v1.3 Q3) -------------------------------------
+    // ---- RTCP feedback state (v1.1 Q3) -------------------------------------
     //
     // The feedback loop has two halves:
     //

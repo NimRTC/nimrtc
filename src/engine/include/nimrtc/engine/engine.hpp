@@ -748,7 +748,7 @@ public:
     NIMRTC_API_UNSTABLE
     plugins::Status send_video(const plugins::VideoSourceFrame& frame) noexcept;
 
-    // ---- Ref-frame timeline map (v1.3 T1/T2, UNSTABLE) -------------------
+    // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     //
     // Local frame-id <-> capture-timestamp registry. Unlike the ADR-017
     // cross-end timeline (peer's clock reconstructed from Sender Reports),
@@ -1141,7 +1141,7 @@ public:
     // Engine stats for debugging
     struct NIMRTC_API_STABLE Stats {
         int srtp_drops = 0;
-        // ---- Video counters (v1.3 V1, additive) -------------------------
+        // ---- Video counters (v1.1 V1, additive) -------------------------
         // All cumulative since open().  Wired to the already-existing
         // video pipeline hooks; no new threads, no new I/O.
         std::uint64_t video_frames_sent        = 0;  // send_video() frames
@@ -1266,7 +1266,7 @@ private:
      *  path, and sending from there would re-enter the transport. */
     void queue_video_feedback(const plugins::VideoFeedbackReport& report) noexcept;
     /** Encode the pending receiver feedback as RTCP and put it on the wire
-     *  (v1.3 Q3).  The bytes are produced by the receiver plugin — the
+     *  (v1.1 Q3).  The bytes are produced by the receiver plugin — the
      *  engine only protects them (SRTCP) and sends them. */
     void flush_video_feedback() noexcept;
     void observe_timeline(const rtp::PacketView& pv) noexcept;

@@ -1,6 +1,6 @@
 # third_party/gmssl/CMakeLists.txt
 # =============================================================================
-# GmSSL v3.x — SM2/SM3/SM4 crypto + TLCP DTLS backend (v1.3 X1, ADR-013).
+# GmSSL v3.x — SM2/SM3/SM4 crypto + TLCP DTLS backend (v1.1 X1, ADR-013).
 #
 # Populated by: git submodule update --init src/third_party/gmssl/src
 # Upstream: https://github.com/guanzhi/GmSSL.git, pinned at v3.2.0
@@ -346,5 +346,5 @@ if(MSVC)
 endif()
 
 set(NIMRTC_GMSSL_VENDORED ON CACHE BOOL
-    "GmSSL vendored submodule build is active (v1.3 X1)" FORCE)
+    "GmSSL vendored submodule build is active (v1.1 X1)" FORCE)
 message(STATUS "GMSSL vendored backend: enabled (submodule v3.2.0, static)")

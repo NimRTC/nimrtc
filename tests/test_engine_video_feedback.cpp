@@ -1,6 +1,6 @@
 /**
  * @file tests/test_engine_video_feedback.cpp
- * @brief Engine-level test of the v1.3 Q3 RTCP feedback loop.
+ * @brief Engine-level test of the v1.1 Q3 RTCP feedback loop.
  *
  * The module-level loop is covered by `tests/test_video_feedback_loop.cpp`
  * and the plugin adapters by `tests/test_video_plugin_adapters.cpp`.  What
@@ -529,7 +529,7 @@ TEST_F(EngineVideoFeedback, unrelated_rtcp_is_ignored) {
 }
 
 // ---------------------------------------------------------------------------
-// v1.3 V1: engine stats() counters track video traffic
+// v1.1 V1: engine stats() counters track video traffic
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineVideoFeedback, video_stats_counters_track_traffic) {

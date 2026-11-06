@@ -8,7 +8,7 @@
 #   - video_payload : H.264/VP8/VP9 depacketizers + packetizers
 #   - video_jb      : IVideoJitterBuffer (frame-level reorder/timeout)
 #   - rtp           : PacketView (parsed RTP header)
-#   - video_rtcp_feedback : NACK/PLI/FIR wire format (v1.3 Q3 feedback bridge)
+#   - video_rtcp_feedback : NACK/PLI/FIR wire format (v1.1 Q3 feedback bridge)
 #
 # No vendor libraries; pure C++.
 # ----------------------------------------------------------------------------

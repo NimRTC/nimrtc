@@ -1,6 +1,6 @@
 /**
  * @file tests/test_dtls_pump_reentrancy.cpp
- * @brief v1.2 D3/D4 — DTLS pump reentrancy + export/retransmit observability.
+ * @brief v1.1 Dtls3/D4 — DTLS pump reentrancy + export/retransmit observability.
  *
  * D3: consecutive pump()/tick()/take_outbound() calls and a
  *     on_handshake_complete callback that re-enters pump() must not

@@ -2,7 +2,7 @@
 # ----------------------------------------------------------------------------
 # Shared adaptive jitter-buffer strategy.
 #
-# v1.3 track Q2 ("视频侧自适应 JB 统一"): the RFC 3550 §6.4.1 interarrival
+# v1.1 track Q2 ("视频侧自适应 JB 统一"): the RFC 3550 §6.4.1 interarrival
 # jitter estimator and the playout-delay derivation live here exactly once.
 # The audio front-end (modules/jb) and the video front-end (modules/video_jb)
 # both link this module and keep only their own buffering structures.

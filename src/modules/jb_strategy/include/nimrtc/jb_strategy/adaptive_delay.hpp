@@ -20,7 +20,7 @@
 // "how much delay should we play out with".  The audio side had an
 // RFC 3550 §6.4.1 interarrival-jitter estimator driving an adaptive target
 // delay; the video side had no jitter model at all and only a fixed frame
-// timeout.  v1.3 track Q2 ("视频侧自适应 JB 统一") collapses the two into
+// timeout.  v1.1 track Q2 ("视频侧自适应 JB 统一") collapses the two into
 // one implementation with two front-ends:
 //
 //   - `nimrtc::jb`         — audio front-end (packet-level, RTP timestamp keyed)

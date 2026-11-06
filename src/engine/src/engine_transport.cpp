@@ -1,8 +1,8 @@
 /**
  * @file src/engine/src/engine_transport.cpp
- * @brief Engine Transport plane (v1.3 R1). Strategy/session init, BWE + scheduler init, DataChannel registry, DTLS handshake, inbound dispatch, DTLS/SRTP install + drain, tick(), ICE-flap rehandshake poll..
+ * @brief Engine Transport plane (v1.1 R1). Strategy/session init, BWE + scheduler init, DataChannel registry, DTLS handshake, inbound dispatch, DTLS/SRTP install + drain, tick(), ICE-flap rehandshake poll..
  *
- * v1.3 R1 split of engine.cpp - mechanical move,
+ * v1.1 R1 split of engine.cpp - mechanical move,
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
@@ -239,7 +239,7 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         // The sctp_id and rtp_id use the factory defaults; leave them
         // empty so the factory uses its own defaults.
 
-        // v1.2 T3: canonical entry point — replaces the hand-rolled
+        // v1.1 Ts3: canonical entry point — replaces the hand-rolled
         // get_transport_stack + create two-step with a single call.
         impl_->session = nimrtc::transport::make_transport_instance(
             impl_->resolved_media_factory_id,
@@ -712,13 +712,13 @@ int NimRTCEngine::tick() noexcept {
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.
-    // v1.2 D2: poll ICE flap before draining so a NAT-rebinding
+    // v1.1 Dtls2: poll ICE flap before draining so a NAT-rebinding
     // disconnected->connected (2nd) transition triggers rehandshake().
     poll_ice_flap_for_rehandshake();
     if (is_ice_connected()) {
         drain_dtls();
         maybe_send_sender_report();
-        // v1.3 Q3: put the pending video feedback (NACK / PLI) on the
+        // v1.1 Q3: put the pending video feedback (NACK / PLI) on the
         // wire.  It is sent from here — not from the receiver callback —
         // so the transport's send() is never re-entered from its recv().
         flush_video_feedback();
@@ -728,7 +728,7 @@ int NimRTCEngine::tick() noexcept {
 
 
 void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
-    // v1.2 D2: NAT-rebinding recovery. Engine thread only (called from
+    // v1.1 Dtls2: NAT-rebinding recovery. Engine thread only (called from
     // tick()); impl_/ice_t_ lifetime is guaranteed by is_open() gate.
     if (!ice_t_ || !impl_) return;
     const plugins::IceState cur = ice_t_->state();

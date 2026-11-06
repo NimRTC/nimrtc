@@ -1,8 +1,8 @@
 /**
  * @file src/engine/src/engine_media.cpp
- * @brief Engine Media plane (v1.3 R1). Audio modules + send_audio, video plugins + send path, RTCP feedback queues, stats()..
+ * @brief Engine Media plane (v1.1 R1). Audio modules + send_audio, video plugins + send path, RTCP feedback queues, stats()..
  *
- * v1.3 R1 split of engine.cpp - mechanical move,
+ * v1.1 R1 split of engine.cpp - mechanical move,
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
@@ -148,7 +148,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // blocks).  Splitting the function into two phases ensures that by
     // the time any callback fires, every plugin slot is already filled.
 
-    // ---- Our RTCP feedback SSRC (v1.3 Q3) ---------------------------------
+    // ---- Our RTCP feedback SSRC (v1.1 Q3) ---------------------------------
     //
     // RFC 3550 §6.1 identifies the sender of an RTCP packet by its SSRC.
     // The feedback we emit (NACK / PLI) is sent by *us* as the receiver of
@@ -336,7 +336,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     impl_->video_keyframe_pending_.store(false, std::memory_order_release);
                 }
 
-                // v1.3 V1: count emitted RTP packets/bytes (post-protect size).
+                // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
                 ++impl_->video_packets_sent;
                 impl_->video_bytes_sent += rtp_pkt.size();
 
@@ -359,7 +359,7 @@ void NimRTCEngine::init_video_plugins() noexcept {
     //   3. Fire on_video_frame_ (NAL delivery, for existing users)
     // -------------------------------------------------------------------------
     if (video_receiver_) {
-        // ---- Receiver feedback bridge (v1.3 Q3) ---------------------------
+        // ---- Receiver feedback bridge (v1.1 Q3) ---------------------------
         //
         // The receiver detects the loss and produces the RTCP bytes; the
         // engine owns the transport, so it protects them (SRTCP) and puts
@@ -375,9 +375,9 @@ void NimRTCEngine::init_video_plugins() noexcept {
         video_receiver_->set_frame_callback(
             [this](const plugins::EncodedVideoFrame& enc,
                    plugins::TimestampUs /*now_us*/) {
-                // v1.3 V1: one assembled receiver frame (pre-decode).
+                // v1.1 V1: one assembled receiver frame (pre-decode).
                 ++impl_->video_frames_received;
-                // v1.3 T1: record the inbound ref_frame mapping too, so a
+                // v1.1 T1: record the inbound ref_frame mapping too, so a
                 // host holding a frame_seq from either direction resolves.
                 record_video_ref_frame(
                     static_cast<std::uint64_t>(enc.info.frame_seq),
@@ -706,9 +706,9 @@ plugins::Status NimRTCEngine::send_video(
     // + SRTP protect + scheduler enqueue).
     const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
     if (push_rc == plugins::kOk) {
-        // v1.3 V1: one encoded frame accepted by the sender pipeline.
+        // v1.1 V1: one encoded frame accepted by the sender pipeline.
         ++impl_->video_frames_sent;
-        // v1.3 T1: record the outbound ref_frame mapping (id == frame_seq).
+        // v1.1 T1: record the outbound ref_frame mapping (id == frame_seq).
         record_video_ref_frame(static_cast<std::uint64_t>(frame.frame_seq),
                                static_cast<std::int64_t>(frame.capture_ts_us));
     }
@@ -730,7 +730,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     // the packetizer cannot produce an IDR by itself.
     if (video_sender_) {
         const int actions = video_sender_->apply_feedback_rtcp(view);
-        // v1.3 V1: inbound feedback actions (retransmissions + keyframe reqs).
+        // v1.1 V1: inbound feedback actions (retransmissions + keyframe reqs).
         if (actions > 0) {
             impl_->video_feedback_applied += static_cast<std::uint64_t>(actions);
         }
@@ -792,7 +792,7 @@ void NimRTCEngine::queue_video_feedback(
     const plugins::VideoFeedbackReport& report) noexcept {
     if (report.missing_seqs.empty() && !report.want_keyframe) return;
 
-    // v1.3 V1: outbound feedback queued (NACK seqs + keyframe requests).
+    // v1.1 V1: outbound feedback queued (NACK seqs + keyframe requests).
     impl_->video_nack_seqs_queued += report.missing_seqs.size();
     if (report.want_keyframe) ++impl_->video_keyframes_q;
 
@@ -868,7 +868,7 @@ void NimRTCEngine::flush_video_feedback() noexcept {
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     Stats out;
     out.srtp_drops = impl_->srtp_stats_drop;
-    // v1.3 V1: cumulative video counters (additive; zero when unused).
+    // v1.1 V1: cumulative video counters (additive; zero when unused).
     out.video_frames_sent       = impl_->video_frames_sent;
     out.video_packets_sent      = impl_->video_packets_sent;
     out.video_bytes_sent        = impl_->video_bytes_sent;

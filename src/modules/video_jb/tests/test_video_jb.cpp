@@ -269,7 +269,7 @@ TEST(VideoJb, AssembledFrameCodecKindVP8) {
 }
 
 // -----------------------------------------------------------------------------
-// Adaptive playout (v1.3 Q2 — shared nimrtc::jb_strategy, canonical suite:
+// Adaptive playout (v1.1 Q2 — shared nimrtc::jb_strategy, canonical suite:
 // VideoJbAdaptive below; plus timeout/ordering coverage here)
 // -----------------------------------------------------------------------------
 
@@ -330,7 +330,7 @@ TEST(VideoJbAdaptive, EmitsFramesInOrder) {
 }
 
 // -----------------------------------------------------------------------------
-// Shared adaptive playout (v1.3 Q2)
+// Shared adaptive playout (v1.1 Q2)
 // -----------------------------------------------------------------------------
 
 namespace {

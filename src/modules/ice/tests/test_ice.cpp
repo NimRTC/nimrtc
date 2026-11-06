@@ -121,7 +121,7 @@ TEST(IceTransport, SelectedPairEmptyUntilConnected) {
 }
 
 // -----------------------------------------------------------------------------
-// v1.2 T2: last_recv_packet() pull-model accessor
+// v1.1 Ts2: last_recv_packet() pull-model accessor
 // -----------------------------------------------------------------------------
 //
 // The stack-internal demux path pops one queued inbound packet (FIFO)

@@ -23,7 +23,7 @@ target_link_libraries(nimrtc_video_jb
         nimrtc::video_frame
         nimrtc::video_payload       # for FU-A reassembly
     PRIVATE
-        # Shared RFC 3550 §6.4.1 strategy (v1.3 Q2); header surface unchanged.
+        # Shared RFC 3550 §6.4.1 strategy (v1.1 Q2); header surface unchanged.
         nimrtc::jb_strategy
     )
 

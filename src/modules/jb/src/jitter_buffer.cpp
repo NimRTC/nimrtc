@@ -82,7 +82,7 @@ struct JitterBuffer::Impl {
     Config config_;
 
     // Shared RFC 3550 §6.4.1 jitter estimator + target-delay policy
-    // (v1.3 Q2: single implementation, audio/video dual front-ends).
+    // (v1.1 Q2: single implementation, audio/video dual front-ends).
     // The estimator owns the smoothing state; this front-end owns the
     // buffering structures and the playout bootstrap.
     jb_strategy::AdaptiveDelayTracker tracker_;
@@ -223,7 +223,7 @@ struct JitterBuffer::Impl {
     /** Pull the next frame whose playout deadline is <= now. */
     std::optional<Frame> pop(core::TimePoint now) {
         // ---- Adaptive target_delay update ------------------------------
-        // The shared tracker owns the "base + 4*J" policy (v1.3 Q2); this
+        // The shared tracker owns the "base + 4*J" policy (v1.1 Q2); this
         // front-end only applies its output.  The bootstrap value set on
         // first push() is kept until the estimator has seen jitter —
         // otherwise the first frames would play out after 20 ms instead

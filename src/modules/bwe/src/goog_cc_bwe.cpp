@@ -1,6 +1,6 @@
 /**
  * @file src/modules/bwe/src/goog_cc_bwe.cpp
- * @brief GoogCcBwe — delay + loss hybrid bandwidth estimator, opt-in (v1.3 Q1).
+ * @brief GoogCcBwe — delay + loss hybrid bandwidth estimator, opt-in (v1.1 Q1).
  *
  * Simplified Goog-CC mainline (NOT a full port of the WebRTC
  * delay-based controller):

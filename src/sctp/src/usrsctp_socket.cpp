@@ -1409,7 +1409,7 @@ void UsrsctpSocket::set_on_recv(plugins::OnSctpRecvCb cb) noexcept {
 }
 
 // ---------------------------------------------------------------------------
-// ISctpSocket lifecycle (v1.2 T1) — open()/close() override.
+// ISctpSocket lifecycle (v1.1 Ts1) — open()/close() override.
 // ---------------------------------------------------------------------------
 
 plugins::Status UsrsctpSocket::open() noexcept {

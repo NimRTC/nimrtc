@@ -36,7 +36,7 @@
  *   - Buffer overflow: oldest in-flight frame is dropped (audio JB does
  *     the same; we mirror the policy here for consistency).
  *
- * ## Adaptive playout (v1.3 Q2)
+ * ## Adaptive playout (v1.1 Q2)
  *
  * The playout-delay *policy* is shared with the audio jitter buffer and
  * lives once in `nimrtc::jb_strategy` (RFC 3550 §6.4.1 interarrival
@@ -61,7 +61,7 @@
  * implementation; explicit `base_delay` / `min_delay` / `max_delay`
  * values override them.
  *
- * Wiring (v1.3 Q2): opt-in through the receive path —
+ * Wiring (v1.1 Q2): opt-in through the receive path —
  * `plugins::VideoReceiverConfig::adaptive_playout` /
  * `EngineConfig::video_receiver_tuning.adaptive_playout` (default off,
  * fixed-window behaviour preserved). `video_pipeline` forwards the
@@ -111,7 +111,7 @@ struct NIMRTC_API_STABLE Config {
     /** Whether to report lost packets via `pop_nack_entries()`. */
     bool emit_nacks = true;
 
-    // ---- Shared adaptive playout (v1.3 Q2, additive) --------------------
+    // ---- Shared adaptive playout (v1.1 Q2, additive) --------------------
     // Zero means "derive from mode" (see cpp for the per-mode defaults).
     // Explicit non-zero values override the mode defaults.
     core::Milliseconds base_delay{0};
@@ -186,7 +186,7 @@ struct NIMRTC_API_STABLE Stats {
     std::uint64_t frames_incomplete = 0;
     std::uint64_t nacks_emitted     = 0;
 
-    // ---- Shared adaptive playout observability (v1.3 Q2, additive) --------
+    // ---- Shared adaptive playout observability (v1.1 Q2, additive) --------
     core::Milliseconds current_delay{};
     core::Milliseconds current_jitter{};
 };

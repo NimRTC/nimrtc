@@ -194,7 +194,7 @@ public:
      *  the ICE transport is open. */
     virtual void set_scheduler(plugins::IScheduler* sched) noexcept = 0;
 
-    // ---- Stack demux accessor (v1.2 T2, additive) ---------------------------
+    // ---- Stack demux accessor (v1.1 Ts2, additive) ---------------------------
     //
     // Non-pure-virtual with a safe empty default so existing backends keep
     // compiling. Pops one queued inbound packet (FIFO) without invoking the

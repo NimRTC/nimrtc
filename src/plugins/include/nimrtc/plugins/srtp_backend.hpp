@@ -1,10 +1,10 @@
 /**
  * @file nimrtc/plugins/srtp_backend.hpp
- * @brief ISrtpSessionBackend — pluggable SRTP crypto backend seam (v1.3 X2).
+ * @brief ISrtpSessionBackend — pluggable SRTP crypto backend seam (v1.1 X2).
  *
  * The built-in backend is libsrtp (factory id "libsrtp",
  * `nimrtc::srtp::LibsrtpBackendFactory`). SM4-GCM is explicitly OUT OF
- * SCOPE for v1.3 — the seam exists so a v1.4+ backend can be added without
+ * SCOPE for v1.1 — the seam exists so a v1.2+ backend can be added without
  * touching callers. SRTP still uses the international AES suites; see the
  * README scope note ("DTLS/TLCP via GMSSL, SRTP still international").
  *

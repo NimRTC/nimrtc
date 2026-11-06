@@ -19,7 +19,7 @@
  *     insert it as a "synthesized single NAL packet" into the same
  *     per-frame bucket.
  *
- * Adaptive playout (v1.3 Q2):
+ * Adaptive playout (v1.1 Q2):
  *   - The jitter estimator and the target-delay policy live once in
  *     nimrtc::jb_strategy (shared with the audio front-end).  This file
  *     only feeds it (arrival time, media clock) once per frame and
@@ -60,7 +60,7 @@ constexpr std::uint32_t kRtpSeqMod = 65536u;
 #endif
 constexpr std::uint64_t kRtpTsMod  = 0x100000000ull;
 
-// Video RTP clock rate (Hz). v1.3 Q2 decision: fixed 90000 — the video
+// Video RTP clock rate (Hz). v1.1 Q2 decision: fixed 90000 — the video
 // convention (90 kHz for H.264/VP8/VP9). Used to convert RTP timestamps
 // to microseconds for the shared RFC 3550 §6.4.1 estimator.
 constexpr std::uint32_t kVideoClockRateHz = 90000;
@@ -478,7 +478,7 @@ private:
         // spread (media clock frozen, arrival clock advancing), which
         // biases the jitter estimate upwards.
         //
-        // Fixed 90 kHz video clock (v1.3 Q2 decision). RTP timestamps wrap
+        // Fixed 90 kHz video clock (v1.1 Q2 decision). RTP timestamps wrap
         // at 2^32, so unwrap against the previous observation to keep the
         // media clock monotonic for the tracker.
         observe_frame(pkt);
@@ -610,7 +610,7 @@ private:
     Stats                                  stats_{};
 
     // Shared RFC 3550 §6.4.1 jitter estimator + target-delay policy
-    // (v1.3 Q2: single implementation, audio/video dual front-ends).
+    // (v1.1 Q2: single implementation, audio/video dual front-ends).
     // Last RTP timestamp (raw 32-bit) for wrap-aware unwrapping.
     jb_strategy::AdaptiveDelayTracker tracker_;
     std::optional<std::uint32_t> last_rtp_ts_;

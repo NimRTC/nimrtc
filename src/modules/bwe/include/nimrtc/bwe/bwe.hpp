@@ -97,7 +97,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// GoogCcBwe — delay + loss hybrid, opt-in (v1.3 Q1)
+// GoogCcBwe — delay + loss hybrid, opt-in (v1.1 Q1)
 // ---------------------------------------------------------------------------
 
 /** Delay-based + loss-based bandwidth estimator, opt-in via `"goog-cc"`.

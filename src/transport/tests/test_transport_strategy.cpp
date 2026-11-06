@@ -336,7 +336,7 @@ TEST(ProfileInputBridge, ResultIsIndependentOfCanonical) {
 }
 
 // ===========================================================================
-// v1.2 M2 StrategyValidator — opt-out record-only by default,
+// v1.1 M2 StrategyValidator — opt-out record-only by default,
 // opt-in kEngineConfig on breach.
 // ===========================================================================
 TEST(StrategyValidator, NoBudgetAlwaysOk) {

@@ -1,6 +1,6 @@
 /**
  * @file tests/test_video_feedback_loop.cpp
- * @brief v1.3 Q3 — closed loop: packet loss -> NACK -> retransmission.
+ * @brief v1.1 Q3 — closed loop: packet loss -> NACK -> retransmission.
  *
  * The test drives the whole feedback path across three modules:
  *

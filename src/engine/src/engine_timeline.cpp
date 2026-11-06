@@ -1,8 +1,8 @@
 /**
  * @file src/engine/src/engine_timeline.cpp
- * @brief Engine Timeline plane (v1.3 R1). ADR-017 observe/handle path, Sender-Report emission, capture/skew accessors, ref_frame id <-> capture-ts map (T1/T2)..
+ * @brief Engine Timeline plane (v1.1 R1). ADR-017 observe/handle path, Sender-Report emission, capture/skew accessors, ref_frame id <-> capture-ts map (T1/T2)..
  *
- * v1.3 R1 split of engine.cpp - mechanical move,
+ * v1.1 R1 split of engine.cpp - mechanical move,
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"
@@ -299,7 +299,7 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 
 
 // -----------------------------------------------------------------------------
-// Ref-frame timeline map (v1.3 T1/T2, UNSTABLE)
+// Ref-frame timeline map (v1.1 T1/T2, UNSTABLE)
 // -----------------------------------------------------------------------------
 //
 // Local frame-id <-> capture-ts registry. ref_frame id == frame_seq

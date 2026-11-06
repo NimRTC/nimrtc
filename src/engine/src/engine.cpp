@@ -22,7 +22,7 @@
  * the user chose not to register an IICETransportFactory).
  */
 
-// R1 (v1.3): core TU of the five-way engine.cpp split.
+// R1 (v1.1): core TU of the five-way engine.cpp split.
 // Behaviour unchanged; see engine_impl.hpp.
 #include "engine_impl.hpp"
 

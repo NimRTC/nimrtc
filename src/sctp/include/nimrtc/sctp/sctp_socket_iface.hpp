@@ -151,7 +151,7 @@ public:
         (void)cb;
     }
 
-    // ---- Lifecycle (v1.2 T1, additive) ------------------------------------
+    // ---- Lifecycle (v1.1 Ts1, additive) ------------------------------------
     //
     // Non-pure-virtual with safe no-op defaults so existing backends keep
     // compiling. WebRtcClassicStack::start()/close() drives these; the stub

@@ -216,7 +216,7 @@ public:
     int recv() noexcept override;
 
     /** Pop one queued inbound packet (FIFO) without invoking on_recv.
-     *  v1.2 T2 override for stack-internal demux. */
+     *  v1.1 Ts2 override for stack-internal demux. */
     std::optional<std::vector<std::uint8_t>> last_recv_packet() noexcept override;
 
     plugins::Addr local_addr() const noexcept override;

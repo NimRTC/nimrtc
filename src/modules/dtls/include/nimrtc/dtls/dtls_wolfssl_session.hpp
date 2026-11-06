@@ -153,7 +153,7 @@ public:
     plugins::Status export_srtp_key_material(
         std::span<std::uint8_t, 60> out) noexcept override;
 
-    /** @override IDtlsSession — v1.2 D2 rehandshake (additive).
+    /** @override IDtlsSession — v1.1 Dtls2 rehandshake (additive).
      *  Re-drives the handshake after NAT rebinding via
      *  wolfSSL_Rehandshake(). Returns kErrNotReady when not Connected,
      *  kErrInternal when wolfSSL rejects the renegotiation. */

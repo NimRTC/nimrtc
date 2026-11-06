@@ -1,11 +1,11 @@
 /**
  * @file nimrtc/srtp/libsrtp_backend.hpp
- * @brief Libsrtp-backed ISrtpSessionBackend adapter (v1.3 X2).
+ * @brief Libsrtp-backed ISrtpSessionBackend adapter (v1.1 X2).
  *
  * Routes the existing libsrtp implementation (`SrtpSession`) through the
  * `plugins::ISrtpSessionBackend` seam. Default behaviour is unchanged:
  * the adapter owns one `SrtpSession` and delegates every call to it.
- * SM4-GCM is out of scope for v1.3; a v1.4+ backend implements the same
+ * SM4-GCM is out of scope for v1.1; a v1.2+ backend implements the same
  * seam without touching callers.
  */
 

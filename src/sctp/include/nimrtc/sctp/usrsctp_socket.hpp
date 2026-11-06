@@ -194,7 +194,7 @@ public:
 
     void set_on_recv(plugins::OnSctpRecvCb cb) noexcept override;
 
-    // ---- ISctpSocket lifecycle (v1.2 T1, additive) -------------------------
+    // ---- ISctpSocket lifecycle (v1.1 Ts1, additive) -------------------------
     //
     // open(): no-op when the underlying usrsctp socket exists (is_ready()),
     // kErrNotReady otherwise. Does NOT drive listen()/connect() — those stay

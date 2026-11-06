@@ -45,7 +45,7 @@ _nimrtc_vendor_add_if_populated(libopus)
 _nimrtc_vendor_add_if_populated(mbedtls)
 _nimrtc_vendor_add_if_populated(libjuice)
 _nimrtc_vendor_add_if_populated(wolfssl)
-# v1.3 X1 (ADR-013修正): GmSSL v3.x 国密 DTLS 后端,submodule 于
+# v1.1 X1 (ADR-013修正): GmSSL v3.x 国密 DTLS 后端,submodule 于
 # src/third_party/gmssl/src.外层 wrapper 见 gmssl/CMakeLists.txt:
 # 仅当 NIMRTC_ENABLE_DTLS_GMSSL=ON 时才构建上游静态库,OFF 时为空 stub.
 _nimrtc_vendor_add_if_populated(gmssl)

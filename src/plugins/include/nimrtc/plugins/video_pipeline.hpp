@@ -154,7 +154,7 @@ struct NIMRTC_API_STABLE VideoReceiverStats {
     std::uint64_t stap_a_packets_seen  = 0;
     std::uint64_t nack_entries_emitted = 0;
     std::uint64_t sequence_gaps_seen   = 0;
-    /** Key-frame requests raised because picture data was lost (v1.3 Q3). */
+    /** Key-frame requests raised because picture data was lost (v1.1 Q3). */
     std::uint64_t keyframe_requests_emitted = 0;
 };
 
@@ -192,7 +192,7 @@ using NIMRTC_API_STABLE VideoReceiverNackCallback =
     std::function<void(std::vector<std::uint16_t> missing_seqs)>;
 
 /**
- * @brief Feedback report produced by a receiver (v1.3 Q3).
+ * @brief Feedback report produced by a receiver (v1.1 Q3).
  *
  *  `missing_seqs` holds the RTP sequence numbers the receiver detected
  *  as lost — the NACK candidates of RFC 4585 §6.2.1.  `want_keyframe`
@@ -241,7 +241,7 @@ public:
         (void)cb;   // default: implementations that don't push NACKs ignore this
     }
 
-    // ---- Feedback bridge (v1.3 Q3) ---------------------------------------
+    // ---- Feedback bridge (v1.1 Q3) ---------------------------------------
     //
     // The receiver detects the loss and says *what* is wrong; the engine
     // owns the RTCP transport and therefore needs the *bytes*.  These
@@ -411,10 +411,10 @@ struct NIMRTC_API_STABLE VideoSenderStats {
     std::uint64_t single_nal_frames_packetized = 0;
     std::uint64_t force_keyframe_calls         = 0;
     std::uint64_t frames_marked_as_keyframe    = 0;
-    /** Packets re-sent in response to a NACK (v1.3 Q3). */
+    /** Packets re-sent in response to a NACK (v1.1 Q3). */
     std::uint64_t packets_retransmitted        = 0;
     /** NACKs that could not be answered (the packet had already left the
-     *  retransmission cache) (v1.3 Q3). */
+     *  retransmission cache) (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
 };
 
@@ -468,7 +468,7 @@ public:
      *  IDR slice) at that point. */
     virtual void force_keyframe() noexcept = 0;
 
-    // ---- Feedback bridge (v1.3 Q3) ---------------------------------------
+    // ---- Feedback bridge (v1.1 Q3) ---------------------------------------
     //
     // The mirror image of the receiver side: the engine owns the RTCP
     // transport and hands the received feedback bytes to the sender,

@@ -1,6 +1,6 @@
 /**
  * @file nimrtc/transport/strategy_validator.hpp
- * @brief v1.2 M2 — StrategyValidator (opt-in p99 budget enforcement).
+ * @brief v1.1 M2 — StrategyValidator (opt-in p99 budget enforcement).
  *
  * The CapabilitySelector records `TransportRequirements::max_p99_ms` but
  * never enforces it (transport-strategies.md section 6 item 4). This header
@@ -28,7 +28,7 @@
 
 namespace nimrtc::transport {
 
-/** v1.2 M2 validator configuration (additive, unstable). */
+/** v1.1 M2 validator configuration (additive, unstable). */
 struct NIMRTC_API_UNSTABLE StrategyValidatorConfig {
     /** False (default): record-only. True: over-budget fails open(). */
     bool enforce = false;

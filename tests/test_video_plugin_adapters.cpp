@@ -366,7 +366,7 @@ TEST(VideoPluginAdaptersDirect, SenderAdapter_is_forwarder) {
 }
 
 // ---------------------------------------------------------------------------
-// v1.3 Q3: the adapter forwards the receiver's loss reports through the
+// v1.1 Q3: the adapter forwards the receiver's loss reports through the
 // plugin seam, so the engine can answer them with a NACK.
 // ---------------------------------------------------------------------------
 

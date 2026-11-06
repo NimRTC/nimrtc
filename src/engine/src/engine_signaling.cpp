@@ -1,8 +1,8 @@
 /**
  * @file src/engine/src/engine_signaling.cpp
- * @brief Engine Signaling plane (v1.3 R1). create_offer / process_remote_sdp..
+ * @brief Engine Signaling plane (v1.1 R1). create_offer / process_remote_sdp..
  *
- * v1.3 R1 split of engine.cpp - mechanical move,
+ * v1.1 R1 split of engine.cpp - mechanical move,
  * behaviour unchanged. Shares engine_impl.hpp.
  */
 #include "engine_impl.hpp"

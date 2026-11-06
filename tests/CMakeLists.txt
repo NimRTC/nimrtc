@@ -409,7 +409,7 @@ set_tests_properties(test_dtls_retransmit_no_duplicate
     PROPERTIES TIMEOUT 30)
 
 # ----------------------------------------------------------------------------
-# v1.2 D3/D4: pump reentrancy + export/retransmit observability.
+# v1.1 Dtls3/D4: pump reentrancy + export/retransmit observability.
 # D3: consecutive pump/tick/drain + reentrant pump inside
 #     on_handshake_complete must not deadlock/crash (pumping_ guard).
 # D4: export pre-handshake kErrNotReady, post-handshake kOk + non-zero
@@ -744,7 +744,7 @@ endfunction()
 nimrtc_add_plugin_test(test_video_plugin_interfaces test_video_plugin_interfaces.cpp)
 
 # ----------------------------------------------------------------------------
-# v1.3 Q3 — closed video feedback loop.
+# v1.1 Q3 — closed video feedback loop.
 #
 # Spans three modules:
 #   - nimrtc::video_pipeline       : receiver loss detection + sender cache
@@ -890,7 +890,7 @@ nimrtc_add_engine_video_test(test_engine_video_plugins
 endif()
 
 # ----------------------------------------------------------------------------
-# v1.3 Q3 — engine-level RTCP feedback loop.
+# v1.1 Q3 — engine-level RTCP feedback loop.
 #
 # The module-level loop lives in `test_video_feedback_loop.cpp` and the
 # plugin adapters in `test_video_plugin_adapters.cpp`.  This target covers
@@ -1129,7 +1129,7 @@ set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 
 # ---------------------------------------------------------------------------
-# v1.3 T1/T2 — engine-side ref_frame <-> capture-ts map.
+# v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
 #
 # Covers OUR OWN frames (send_video auto-record + explicit
 # record_video_ref_frame), both lookup directions, the T2 age query, and

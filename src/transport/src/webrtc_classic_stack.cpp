@@ -18,9 +18,9 @@
  *   - ICE:     open() + close() via IICETransport
  *   - DTLS:    start() + tick() via IDtlsSession  (pump drives retransmit timer)
  *   - RTP:     open() via IRTP  (stateless)
- *   - SCTP:    open()/close() via ISctpSocket (v1.2 T1; stub no-op)
+ *   - SCTP:    open()/close() via ISctpSocket (v1.1 Ts1; stub no-op)
  *
- * **Stack demux** (v1.2 T2): `IICETransport::last_recv_packet()` pops one
+ * **Stack demux** (v1.1 Ts2): `IICETransport::last_recv_packet()` pops one
  * queued inbound packet (FIFO) without invoking the recv callback, so the
  * stack (or engine) can drive its own demux loop. The ICE error callback
  * below keeps on_recv empty because the engine tick pulls via recv() /
@@ -126,7 +126,7 @@ public:
             (void)rtp_->open();
         }
 
-        // SCTP: v1.2 T1 lifecycle — stub no-op, usrsctp validates readiness.
+        // SCTP: v1.1 Ts1 lifecycle — stub no-op, usrsctp validates readiness.
         if (sctp_) {
             (void)sctp_->open();
         }

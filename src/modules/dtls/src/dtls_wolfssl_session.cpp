@@ -802,7 +802,7 @@ struct DtlsSessionWolfSSL::Impl {
         peer_host = host;
         peer_port = port;
         peer_set  = true;
-        // v1.2 D1: resolve via getaddrinfo so literal IPv6 + hostnames work.
+        // v1.1 Dtls1: resolve via getaddrinfo so literal IPv6 + hostnames work.
         // IPv4 behaviour unchanged (first AF_INET result wins, same as the
         // previous inet_pton(AF_INET) path).
         std::memset(&peer_addr, 0, sizeof(peer_addr));
@@ -1882,7 +1882,7 @@ plugins::Status DtlsSessionWolfSSL::export_srtp_key_material(
 }
 
 plugins::Status DtlsSessionWolfSSL::rehandshake() noexcept {
-    // v1.2 D2: NAT rebinding recovery. Only valid once Connected;
+    // v1.1 Dtls2: NAT rebinding recovery. Only valid once Connected;
     // otherwise the handshake pump owns the state machine.
     if (!impl_->ssl ||
         impl_->state != nimrtc::dtls::DtlsState::Connected) {

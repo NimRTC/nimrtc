@@ -266,16 +266,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   SCTP DCEP codec (DATA_CHANNEL_OPEN/ACK encode/decode):
     //     - sctp/dcep.hpp
     //
-    // v1.2 M2 bump: +1 public header (102 -> 103) for the
+    // v1.1 M2 bump: +1 public header (102 -> 103) for the
     //   StrategyValidator p99 budget enforcement helper:
     //     - transport/strategy_validator.hpp
     //
-    // v1.3 Q2 bump: +1 public header (103 -> 104) for the shared
+    // v1.1 Q2 bump: +1 public header (103 -> 104) for the shared
     //   adaptive jitter-buffer strategy (audio + video front-ends):
     //     - jb_strategy/adaptive_delay.hpp
     //
-    // v1.3 X2 bump: +2 public headers (104 -> 106) for the SRTP
-    //   backend seam (seam only, SM4-GCM out of scope for v1.3):
+    // v1.1 X2 bump: +2 public headers (104 -> 106) for the SRTP
+    //   backend seam (seam only, SM4-GCM out of scope for v1.1):
     //     - plugins/srtp_backend.hpp (ISrtpSessionBackend + factory)
     //     - srtp/libsrtp_backend.hpp (libsrtp-backed seam adapter)
     //

@@ -1,6 +1,6 @@
 /**
  * @file tests/test_engine_ref_frame.cpp
- * @brief v1.3 T1/T2 — engine-side ref_frame <-> capture-ts map.
+ * @brief v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
  *
  * Covers the layer *below* the ADR-017 cross-end timeline: OUR OWN frames,
  * not the peer's clock. send_video() records (frame_seq -> capture_ts_us)

@@ -1,6 +1,6 @@
 /**
  * @file src/modules/srtp/src/libsrtp_backend.cpp
- * @brief Libsrtp-backed ISrtpSessionBackend adapter (v1.3 X2).
+ * @brief Libsrtp-backed ISrtpSessionBackend adapter (v1.1 X2).
  */
 
 #include <nimrtc/srtp/libsrtp_backend.hpp>

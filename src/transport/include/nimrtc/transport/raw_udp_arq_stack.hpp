@@ -13,9 +13,9 @@
  *
  * ## Stack shape
  *
- * Tech-preview (v1.2 T4): ARQ media carries no congestion control, no FEC,
+ * Tech-preview (v1.1 Ts4): ARQ media carries no congestion control, no FEC,
  * and no codec negotiation. Production hardening (FEC/codec/reliable ARQ)
- * is deferred to v1.3+; this release only labels the limitation.
+ * is deferred to v1.2+; this release only labels the limitation.
  *
  * The control stack deliberately does **not** own ICE / DTLS / RTP /
  * SCTP. The §5.3 Selector rules use `raw-udp-arq` only for the

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 NimRTC contributors.
 # SPDX-License-Identifier: MIT
-"""Portable weak-network baseline (v1.3 Q4).
+"""Portable weak-network baseline (v1.1 Q4).
 
 Why in-process instead of `tc qdisc netem`: netem is Linux-only and needs
 root + a real interface. CI runs on Windows/macOS/Linux and the bench must
 be reproducible on a laptop with no privileges. So this tool puts a small
 userspace shaper between two loopback UDP sockets and applies the three
-v1.3-plan Q4 tiers deterministically (seeded RNG):
+v1.1-plan Q4 tiers deterministically (seeded RNG):
 
   - loss-5pct    : 5% uniform drop, 5 ms base delay
   - jitter-100ms : 20 ms base + uniform 0..100 ms jitter
@@ -516,7 +516,7 @@ def run_tier(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Portable weak-net baseline (v1.3 Q4).")
+    ap = argparse.ArgumentParser(description="Portable weak-net baseline (v1.1 Q4).")
     ap.add_argument("--count", type=int, default=300)
     ap.add_argument("--size", type=int, default=1200)
     ap.add_argument("--seed", type=int, default=1234)

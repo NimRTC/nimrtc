@@ -294,7 +294,7 @@ void ReceiverAdapter::install_feedback_bridge() noexcept {
     if (!concrete_ || feedback_bridge_installed_) return;
     feedback_bridge_installed_ = true;
 
-    // v1.3 Q3: the concrete receiver pushes its loss reports, so the
+    // v1.1 Q3: the concrete receiver pushes its loss reports, so the
     // plugin seam can forward them straight to the engine.  One concrete
     // callback serves both plugin-level callbacks — the concrete
     // receiver holds a single feedback slot, so a second registration

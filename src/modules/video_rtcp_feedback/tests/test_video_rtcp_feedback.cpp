@@ -489,7 +489,7 @@ TEST(VideoRtcpFeedback, BuildReturnsZeroOnUndersizedBuffer) {
 }
 
 // ---------------------------------------------------------------------------
-// NACK FCI packing helpers (v1.3 Q3 feedback bridge)
+// NACK FCI packing helpers (v1.1 Q3 feedback bridge)
 // ---------------------------------------------------------------------------
 
 TEST(VideoRtcpFeedback, PackNackEntriesEmpty) {

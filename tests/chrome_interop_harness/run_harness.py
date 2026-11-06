@@ -133,8 +133,17 @@ logger = logging.getLogger("case_e_harness")
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def wait_for_port(port: int, timeout_s: float = 5.0) -> bool:
-    """Poll until something is listening on localhost:port."""
+def wait_for_port(port: int, timeout_s: float = 30.0) -> bool:
+    """Poll until something is listening on localhost:port.
+
+    The default is 30 seconds, not 5.  The signaling server is a
+    separate Python process, and on a machine that just woke up (the
+    soak's scheduled task runs at 3am) the interpreter start-up plus
+    `import websockets` come off a cold page cache.  5 seconds was not
+    enough for the server to reach its first log line, and the harness
+    reported that as "signaling_server did not open the port" -- a
+    tooling failure dressed up as a product failure.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
@@ -356,9 +365,19 @@ def run(signaling_port: int = 0, timeout_s: int = 25) -> dict:
              "--room", room],
             stdout=log_signal, stderr=subprocess.STDOUT,
         )
-        if not wait_for_port(signaling_port, timeout_s=5.0):
+        if not wait_for_port(signaling_port, timeout_s=30.0):
             results["errors"].append(
-                f"signaling_server did not open :{signaling_port}")
+                f"signaling_server did not open :{signaling_port} (waited 30s)")
+            # `log_signal` is an open file object, so read the path
+            # separately: the child's own output is what tells us
+            # whether the server died, hung, or was merely slow.
+            try:
+                signal_log_path = E2E_DIR / "case_e_signal_server.log"
+                for ln in signal_log_path.read_text(
+                        errors="replace").splitlines()[-12:]:
+                    results["errors"].append(f"signaling_server | {ln}")
+            except OSError:
+                pass
             return results
         logger.info("signaling_server ready on :%d", signaling_port)
 

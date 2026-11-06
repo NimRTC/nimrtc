@@ -16,7 +16,7 @@
 | | |
 |---|---|
 | Requirement | 7 consecutive calendar days, both platforms, cases `d` **and** `e` green |
-| What counts as a green day | Every required case has a `PASS` record for that platform on that calendar day |
+| What counts as a green day | Every required case has at least one `PASS` record for that platform on that calendar day, **and no required case has a `FAIL` record that day** |
 | What breaks the streak | A `FAIL`, an `INCONCLUSIVE`, **or a calendar day with no evidence at all** |
 | Where the evidence lives | `build/soak/<platform>-<YYYY-MM-DD>.jsonl` |
 | Where the summary comes from | `python tools/run_soak.py --summary` |
@@ -29,6 +29,30 @@ The streak counts *calendar*-consecutive days. Five green days spread
 across three weeks is a streak of one, not five — a gap day is a gap
 day, and the tool reports those gap dates explicitly so the short
 streak can be explained without diffing dates by hand.
+
+### 1.1 The intra-day rule
+
+A day can hold more than one record for the same case: the local
+scheduled task and the CI job both write the same platform/day, and a
+day may be re-run after a fix. The collector keeps **every** record,
+and a day is green only if all of the following hold:
+
+- every required case has at least one `PASS` record that day;
+- **no** required case has a `FAIL` record that day.
+
+The second bullet is the one that matters for honesty. A `FAIL` that a
+later `PASS` on the same day follows is **not** erased by that `PASS`:
+the failure is real evidence that something was broken, and hiding it
+behind the retry would let a broken build pass the gate. Such a day is
+reported as *not green*, and the failure is listed in `failures` and
+in `not_green_days`.
+
+An `INCONCLUSIVE` record is the opposite case: it means no evidence was
+produced, so it does not veto a day that later produced a `PASS`.
+Running twice is harmless.
+
+Every failing record is reported, not just the first one. A day that
+failed twice is a day that failed twice.
 
 ## 2. Prerequisites
 
@@ -219,7 +243,15 @@ that wants to assert on it rather than read it.
 - **inconclusive days** — days where the collector ran but the
   preconditions were not met. They are never green, and they break
   the streak.
-- **failures** — days where the acceptance runner exited non-zero.
+- **failures** — every failing record, with its day, case and reason. A
+  failure is never hidden by a later `PASS` on the same day (§1.1).
+- **days with evidence but not green** — days that carry evidence but
+  fail the green test, with the cases that lacked a `PASS` or carried a
+  `FAIL`. This is where a day that a retry "fixed" still shows up.
+- A tracked platform with **no evidence at all** is listed with a zero
+  streak rather than being omitted. A platform missing from the report
+  reads as "not tracked", which is exactly the misunderstanding the
+  release gate has to prevent.
 
 ## 6. When a day goes wrong
 
@@ -228,6 +260,7 @@ that wants to assert on it rather than read it.
 | `INCONCLUSIVE`, "required build artefacts are missing" | The build tree moved or was cleaned | Rebuild, or export `NIMRTC_BUILD_DIR` for the scheduled task |
 | `INCONCLUSIVE`, "the `playwright` package is not importable" | The Python environment for the scheduled task lacks Playwright | Install Playwright into **that** interpreter, not the one in your interactive shell |
 | `FAIL`, "the acceptance runner exited N" | A real acceptance failure | Read `build/e2e/case_d_chrome.log` / `case_e_harness.log` — this is a genuine regression, not a tooling problem |
+| `FAIL`, "signaling_server did not open :<port>" | The signaling server was still starting when the harness stopped waiting | Check `build/e2e/case_d_signal_server.log` — an empty log means the server never got far enough to print anything (a cold start), a log with an error means it crashed. The runner now waits 30 s and prints the log tail, so this is distinguishable from a real failure |
 | `FAIL`, "did not complete (timeout or launch error)" | The runner hung past 30 minutes or could not start | Check for a leftover Chrome or `demo-p2p` holding port 8765 or 9000 |
 | No record for a day at all | The scheduled task did not run | Check the task history; a machine that was asleep produces a gap, and a gap breaks the streak |
 
@@ -272,5 +305,14 @@ It asserts, among other things, that gapped green days do not form a
 long streak, that a failing or inconclusive day breaks the streak,
 that a day missing one required case is not green, that six green
 days report a streak of six and not seven, and that the two platforms
-are tracked independently. Run it after changing anything in
-`run_soak.py`.
+are tracked independently.
+
+It also pins the rules that keep the tool from overstating the
+evidence: a day whose `FAIL` is followed by a `PASS` is **not** green
+and the failure is still reported; an `INCONCLUSIVE` followed by a
+`PASS` **is** green; every failing record is reported, not just the
+first; a tracked platform with no evidence at all appears in the
+summary with a zero streak and fails the gate; and an exactly
+duplicated record is loaded once.
+
+Run it after changing anything in `run_soak.py`.

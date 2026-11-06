@@ -303,8 +303,16 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
 # ---------------------------------------------------------------------------
 
 def load_records(out_dir):
-    """Load every evidence record, newest last."""
+    """Load every evidence record, newest last.
+
+    Exact duplicates are dropped.  The merge procedure in the runbook
+    APPENDS the CI-produced records into `build/soak/`, so running it
+    twice puts the same record in the file twice.  A duplicate is not
+    new evidence -- it is the same evidence written twice -- and it
+    would otherwise inflate the failure count and skew the summary.
+    """
     records = []
+    seen = set()
     if not out_dir.is_dir():
         return records
     for path in sorted(out_dir.glob("*.jsonl")):
@@ -314,7 +322,7 @@ def load_records(out_dir):
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     # A truncated line means the writer died mid-record.
                     # Skip it rather than fail the whole summary: a
@@ -323,8 +331,42 @@ def load_records(out_dir):
                     sys.stderr.write(
                         "warning: skipping malformed record %s:%d\n"
                         % (path.name, line_number))
+                    continue
+                key = json.dumps(record, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(record)
     records.sort(key=lambda item: item.get("timestamp", ""))
     return records
+
+
+def _day_is_green(cases, required_cases):
+    """Decide whether one day of evidence counts as green.
+
+    `cases` maps a case name to the list of records for that case on
+    that day.  The rule is deliberately strict:
+
+    * every required case must have at least one PASS record;
+    * no required case may have a FAIL record -- *any* FAIL, even one
+      that a later PASS on the same day follows.  A day where the local
+      run failed and a later retry passed must not be reported as a
+      clean day: the failure is real evidence that something was
+      broken, and hiding it behind the retry would let a broken build
+      pass the gate;
+    * an INCONCLUSIVE record is harmless when the same case also has a
+      PASS (running twice is harmless), and otherwise the day simply
+      lacks a PASS for that case and is not green.
+
+    Returns True when the day counts towards the streak.
+    """
+    for case in required_cases:
+        records = cases.get(case, [])
+        if any(rec.get("status") == "FAIL" for rec in records):
+            return False
+        if not any(rec.get("status") == "PASS" for rec in records):
+            return False
+    return True
 
 
 def summarise(records, required_cases):
@@ -335,30 +377,35 @@ def summarise(records, required_cases):
 
     summary = {}
     for plat, items in per_platform.items():
-        # A day counts when every required case has a PASS record for
-        # it and no case has a FAIL.  INCONCLUSIVE leaves the day
-        # uncounted rather than counting it green.
+        # day -> case -> [records].
+        #
+        # A day can hold more than one record for the same case: the
+        # local Scheduled Task and the CI job both write the same
+        # platform/day, and a day may be re-run after a fix.  Every
+        # record is kept, because a summary that keeps only the last
+        # one cannot report a failure that a later PASS hid.
         days = {}
         for item in items:
             day = item.get("timestamp", "")[:10]
-            days.setdefault(day, {})[item.get("case")] = item
+            days.setdefault(day, {}).setdefault(item.get("case"), []).append(item)
 
-        # Classify every day with evidence into green / failing / other.
-        #
-        # "Other" is a day that has evidence but does not qualify as
-        # green and does not contain a failure: an INCONCLUSIVE day, or
-        # a day where one required case passed and another never ran.
-        # Such a day does not count towards the seven, and -- like a day
-        # with no evidence at all -- it breaks the streak.
+        # Classify every day with evidence into green / not-green.
         green_dates = []
-        breaks = []
+        not_green = []
         for day in sorted(days):
             cases = days[day]
-            statuses = {case: rec.get("status") for case, rec in cases.items()}
-            if all(statuses.get(case) == "PASS" for case in required_cases):
+            if _day_is_green(cases, required_cases):
                 green_dates.append(day)
             else:
-                breaks.append(day)
+                not_green.append({
+                    "day": day,
+                    "cases_without_pass": [
+                        case for case in required_cases
+                        if not any(rec.get("status") == "PASS"
+                                   for rec in cases.get(case, []))
+                        or any(rec.get("status") == "FAIL"
+                               for rec in cases.get(case, []))],
+                })
 
         # The streak is a run of *calendar*-consecutive green days.
         #
@@ -382,17 +429,24 @@ def summarise(records, required_cases):
             previous = day
 
         inconclusive = [
-            {"day": day, "cases": sorted(cases.keys()),
-             "reasons": sorted({rec.get("reason", "") for rec in cases.values()
-                                if rec.get("status") == "INCONCLUSIVE"})}
+            {"day": day,
+             "cases": sorted(case for case, recs in cases.items()
+                             if any(r.get("status") == "INCONCLUSIVE" for r in recs)),
+             "reasons": sorted({r.get("reason", "")
+                                for recs in cases.values()
+                                for r in recs
+                                if r.get("status") == "INCONCLUSIVE"})}
             for day, cases in sorted(days.items())
-            if any(rec.get("status") == "INCONCLUSIVE" for rec in cases.values())
+            if any(r.get("status") == "INCONCLUSIVE"
+                   for recs in cases.values() for r in recs)
         ]
 
         failures = [
-            {"day": day, "case": case, "reason": rec.get("reason", "")}
+            {"day": day, "case": case, "reason": rec.get("reason", ""),
+             "timestamp": rec.get("timestamp", "")}
             for day, cases in sorted(days.items())
-            for case, rec in sorted(cases.items())
+            for case, recs in sorted(cases.items())
+            for rec in recs
             if rec.get("status") == "FAIL"
         ]
 
@@ -421,7 +475,24 @@ def summarise(records, required_cases):
             "days_without_evidence": gaps,
             "inconclusive_days": inconclusive,
             "failures": failures,
+            "not_green_days": not_green,
         }
+
+    # Every tracked platform appears in the summary, even when it has
+    # no evidence at all.  A platform that is simply absent from the
+    # report reads as "not tracked", which is exactly the
+    # misunderstanding the release gate has to prevent.
+    for plat in PLATFORMS:
+        summary.setdefault(plat, {
+            "days_with_evidence": 0,
+            "consecutive_green_days": 0,
+            "best_streak": 0,
+            "green_days": [],
+            "days_without_evidence": [],
+            "inconclusive_days": [],
+            "failures": [],
+            "not_green_days": [],
+        })
     return summary
 
 
@@ -447,6 +518,12 @@ def print_summary(summary, required_cases):
             print("    failures              : %d" % len(info["failures"]))
             for entry in info["failures"]:
                 print("        %s  %s  %s" % (entry["day"], entry["case"], entry["reason"]))
+        if info.get("not_green_days"):
+            print("    days with evidence but not green: %d"
+                  % len(info["not_green_days"]))
+            for entry in info["not_green_days"]:
+                missing = ", ".join(entry["cases_without_pass"]) or "-"
+                print("        %s  no PASS for: %s" % (entry["day"], missing))
         print()
 
 
@@ -613,6 +690,77 @@ def _self_test():
         append_record(path, _record("2026-11-01", "e", "PASS"))
         check(len(load_records(tmp)) == 2,
               "both records land in the same day's evidence file")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # 10. A FAIL followed by a PASS on the same day is NOT green, and
+    #     the failure is still reported.  The local scheduled task and
+    #     the CI job both write the same platform/day, and a day may be
+    #     re-run after a fix; a later PASS must not erase the failure.
+    recs = [_record(day, case, "PASS") for day in seven[:3] for case in cases]
+    recs += [_record(seven[3], "d", "FAIL", reason="runner exited 1")]
+    recs += [_record(seven[3], "d", "PASS")]
+    recs += [_record(seven[3], "e", "PASS")]
+    recs += [_record(day, case, "PASS") for day in seven[4:] for case in cases]
+    info = summarise(recs, cases)["windows"]
+    check(info["consecutive_green_days"] == 3,
+          "a day with a FAIL followed by a PASS is not green "
+          "(streak %d, expected 3)" % info["consecutive_green_days"])
+    check(len(info["failures"]) == 1,
+          "the FAIL is still reported even though the day later passed")
+    check(info["not_green_days"] and info["not_green_days"][0]["day"] == seven[3],
+          "the day with a hidden failure is listed as not green")
+
+    # 11. An INCONCLUSIVE followed by a PASS for the same case IS green:
+    #     running twice is harmless, and the successful run is the
+    #     evidence that counts.
+    recs = [_record(day, case, "PASS") for day in seven for case in cases]
+    recs += [_record(seven[0], "d", "INCONCLUSIVE", reason="no build artefacts")]
+    info = summarise(recs, cases)["windows"]
+    check(info["consecutive_green_days"] == 7,
+          "an INCONCLUSIVE followed by a PASS is still green "
+          "(streak %d, expected 7)" % info["consecutive_green_days"])
+
+    # 12. Every failing record is reported, not just the first one.
+    recs = [_record(seven[0], "d", "FAIL", reason="runner exited 1")]
+    recs += [_record(seven[0], "e", "FAIL", reason="runner exited 2")]
+    recs += [_record(seven[1], "d", "FAIL", reason="runner exited 3")]
+    info = summarise(recs, cases)["windows"]
+    check(len(info["failures"]) == 3,
+          "every failing record is reported (got %d, expected 3)"
+          % len(info["failures"]))
+
+    # 13. A tracked platform with no evidence at all appears in the
+    #     summary with a zero streak, so it cannot be mistaken for a
+    #     platform that is simply not being tracked.
+    summary = summarise([], cases)
+    check("linux-x86_64" in summary,
+          "a tracked platform with no evidence still appears in the summary")
+    check(summary["linux-x86_64"]["consecutive_green_days"] == 0,
+          "a tracked platform with no evidence has a zero streak")
+    check(gate_unsatisfied(summary, 7) != [],
+          "a tracked platform with no evidence fails the gate")
+
+    # 14. An exactly duplicated record is loaded once.  The merge
+    #     procedure appends the CI records into build/soak/, so running
+    #     it twice writes the same record twice -- that is not new
+    #     evidence and must not inflate the failure count.
+    tmp = Path(tempfile.mkdtemp(prefix="nimrtc-soak-selftest-"))
+    try:
+        path = tmp / "windows-2026-11-01.jsonl"
+        record = _record("2026-11-01", "d", "FAIL", reason="runner exited 1")
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+            handle.write(json.dumps(record) + "\n")
+            handle.write(json.dumps(_record("2026-11-01", "e", "PASS")) + "\n")
+        loaded = load_records(tmp)
+        check(len(loaded) == 2,
+              "an exactly duplicated record is loaded once (got %d, expected 2)"
+              % len(loaded))
+        info = summarise(loaded, cases)["windows"]
+        check(len(info["failures"]) == 1,
+              "a duplicated failure is reported once (got %d, expected 1)"
+              % len(info["failures"]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

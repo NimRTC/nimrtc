@@ -1,0 +1,247 @@
+name: soak
+
+# The daily evidence collector for the v1.1 seven-day release gate
+# (v1.1 plan §2 Track C, item C5).  The gate needs SEVEN CONSECUTIVE
+# green days of Case D + Case E on Windows AND Linux x86_64; the
+# collector is `tools/run_soak.py` and its operating procedure is
+# `docs/plan/soak-runbook.md`.
+#
+# The Windows half of the window is produced by a local Scheduled Task
+# (the runbook §4.1).  This workflow produces the Linux half, which had
+# no machine at all -- without it the tag could not be cut, because a
+# green Windows streak and a green Linux streak are tracked separately
+# and neither substitutes for the other.
+#
+# Evidence accumulation: every run appends to
+# `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploads that file as a
+# workflow artifact, and commits it to a per-platform evidence branch
+# (`soak/evidence-<platform>`).  One branch per platform, so the two
+# jobs never race for the same ref.  The release process fetches those
+# branches and copies the records into `build/soak/` before running
+# `python tools/run_soak.py --summary --require`.
+#
+# A day with no record at all breaks the streak, so the schedule is
+# deliberately off the hour (GitHub's scheduled workflows are delayed
+# anyway, but a `:00` slot collides with every other `:00` job on the
+# platform).
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to collect evidence for'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - linux-x86_64
+          - windows
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-soak
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux x86_64 -- the half of the window that had no machine.
+  # ---------------------------------------------------------------------------
+  linux-x86_64:
+    name: soak / linux-x86_64
+    if: github.event_name == 'schedule' || inputs.platform == 'both' || inputs.platform == 'linux-x86_64'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    # A red acceptance run is EVIDENCE, not a build break: the collector
+    # records FAIL (or INCONCLUSIVE) for the day, which is exactly what
+    # breaks the seven-day streak.  Failing the job as well would add a
+    # red check on `main` that gates nothing and trains everyone to
+    # ignore it.  The evidence file and the Step Summary carry the
+    # verdict.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history, so the evidence branch can be fetched and pushed
+          # back without tripping GitHub's "shallow update not allowed".
+          fetch-depth: 0
+
+      - name: Install ninja + Python (CMake via pip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install the e2e dependencies (Playwright + Chromium)
+        # Case D and Case E both drive a REAL Chrome peer through
+        # Playwright, so the Chromium build and its system libraries have
+        # to be present -- `run_soak.py` records the day as INCONCLUSIVE
+        # (never PASS) when Playwright is missing.
+        run: |
+          python3 -m pip install --user websockets playwright
+          python3 -m playwright install --with-deps chromium
+
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py
+
+      # The WebTransport server seam needs a TLS certificate to complete
+      # the QUIC handshake; the harness looks for the pair in the build
+      # directory.
+      - name: Provision WebTransport TLS material
+        run: |
+          mkdir -p build
+          printf '%s\n' \
+            '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+            '[dn]' 'CN = localhost' \
+            '[v3]' 'subjectAltName = DNS:localhost,IP:127.0.0.1' \
+            > build/wtserver_openssl.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout build/wtserver_key.pem \
+            -out build/wtserver_cert.pem \
+            -config build/wtserver_openssl.cnf
+
+      - name: Configure
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+
+      - name: Build
+        run: cmake --build --preset debug -j 2
+
+      - name: Collect the soak evidence
+        id: collect
+        run: python3 tools/run_soak.py --platform linux-x86_64 --case d,e
+
+      - name: Upload the evidence record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-linux-x86_64-${{ github.run_id }}
+          path: build/soak/linux-x86_64-*.jsonl
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Accumulate the evidence on the evidence branch
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          day="$(date -u +%F)"
+          record="build/soak/linux-x86_64-${day}.jsonl"
+          if [ ! -f "$record" ]; then
+            echo "::warning::no evidence record at ${record}; the day is a gap"
+            exit 0
+          fi
+          branch="soak/evidence-linux-x86_64"
+          git fetch origin "$branch:refs/remotes/origin/$branch" || true
+          if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+            git checkout -B "$branch" "refs/remotes/origin/$branch"
+          else
+            git checkout --orphan "$branch"
+            git rm -r --cached . >/dev/null 2>&1 || true
+          fi
+          mkdir -p evidence/linux-x86_64
+          cp "$record" "evidence/linux-x86_64/linux-x86_64-${day}.jsonl"
+          git add "evidence/linux-x86_64/linux-x86_64-${day}.jsonl"
+          git -c user.name='NimRTC CI' -c user.email='ci@nimrtc.invalid' \
+              commit -m "soak: linux-x86_64 ${day}"
+          git push origin "HEAD:${branch}"
+
+      - name: Surface the soak summary
+        if: always()
+        run: python3 tools/run_soak.py --summary | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Windows -- the same evidence, produced on the platform the local
+  # Scheduled Task also covers.  Two independent sources for one gate is
+  # deliberate: a machine that is asleep on the wrong night must not be
+  # able to break the release window.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: soak / windows
+    if: github.event_name == 'schedule' || inputs.platform == 'both' || inputs.platform == 'windows'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    # Same reasoning as the Linux leg: the verdict lives in the evidence
+    # record, not in the job status.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install the e2e dependencies (Playwright + Chromium)
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install websockets playwright
+          python -m playwright install chromium
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --preset debug.msvc `
+            -DNIMRTC_BUILD_EXAMPLES=ON `
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Debug -j
+
+      - name: Collect the soak evidence
+        id: collect
+        shell: pwsh
+        run: python tools/run_soak.py --platform windows --case d,e
+
+      - name: Upload the evidence record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-windows-${{ github.run_id }}
+          path: build/soak/windows-*.jsonl
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Accumulate the evidence on the evidence branch
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $day = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          $record = "build/soak/windows-$day.jsonl"
+          if (-not (Test-Path $record)) {
+            Write-Host "::warning::no evidence record at $record; the day is a gap"
+            exit 0
+          }
+          $branch = 'soak/evidence-windows'
+          git fetch origin "$branch`:refs/remotes/origin/$branch" 2>$null
+          if (git rev-parse --verify --quiet "refs/remotes/origin/$branch") {
+            git checkout -B $branch "refs/remotes/origin/$branch"
+          } else {
+            git checkout --orphan $branch
+            git rm -r --cached . 2>$null
+          }
+          New-Item -ItemType Directory -Force -Path evidence/windows | Out-Null
+          Copy-Item $record "evidence/windows/windows-$day.jsonl"
+          git add "evidence/windows/windows-$day.jsonl"
+          git -c user.name='NimRTC CI' -c user.email='ci@nimrtc.invalid' `
+              commit -m "soak: windows $day"
+          git push origin "HEAD:$branch"
+
+      - name: Surface the soak summary
+        if: always()
+        shell: pwsh
+        run: |
+          python tools/run_soak.py --summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append

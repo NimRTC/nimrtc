@@ -129,6 +129,47 @@ A non-zero value means a FAIL, or that the precondition check tripped.
 The collector must be able to write to `build/soak/`, and the cron
 user needs a build tree it can read.
 
+### 4.3 GitHub Actions — the scheduled CI collector
+
+A cron entry needs a machine that is switched on at the right minute.
+The repository therefore also ships a scheduled workflow,
+`.github/workflows/soak.yml`, that runs the same collector on the
+GitHub-hosted runners:
+
+| | |
+|---|---|
+| Schedule | `cron: '23 3 * * *'` (daily; `workflow_dispatch` runs one platform on demand) |
+| Jobs | `linux-x86_64` (ubuntu-22.04) and `windows` (windows-2022) |
+| What it runs | `python tools/run_soak.py --platform <platform> --case d,e` on a fresh Debug build |
+| Where the record lands | `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploaded as the artifact `soak-<platform>-<run id>` (90-day retention) |
+| Where it accumulates | the per-platform branch `soak/evidence-<platform>`, one commit per day, so the two jobs never race for the same ref |
+
+Both jobs run with `continue-on-error: true`: a red acceptance run is
+**evidence** (the collector records `FAIL`, which breaks the streak),
+not a build break, so the window's verdict is read from the evidence
+file and the Step Summary rather than from a red check on `main`.
+
+Reading the CI-produced evidence on the release machine:
+
+```bash
+# Fetch both evidence branches and drop their records into build/soak/
+git fetch origin \
+  'refs/heads/soak/evidence-linux-x86_64:refs/remotes/origin/soak/evidence-linux-x86_64' \
+  'refs/heads/soak/evidence-windows:refs/remotes/origin/soak/evidence-windows'
+for branch in soak/evidence-linux-x86_64 soak/evidence-windows; do
+  git ls-tree -r --name-only "origin/$branch" | grep '\.jsonl$' | while read -r f; do
+    mkdir -p "build/soak/$(dirname "$f")"
+    git show "origin/$branch:$f" > "build/soak/$f"
+  done
+done
+python tools/run_soak.py --summary --require
+```
+
+The workflow is the only source of the Linux half of the window unless
+a real Linux machine is available; a green Windows streak and a green
+Linux streak are tracked separately and neither substitutes for the
+other.
+
 ## 5. Reading the window
 
 ```bash

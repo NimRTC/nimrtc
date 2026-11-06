@@ -31,7 +31,7 @@
 | Plan opened | 2026-11-06 |
 | Baseline | `main` @ post-v1.1 consolidation (`docs/plan/v1.1-plan.md`) |
 | Scope class | Audio pipeline — new plugin seams, wire-format completion, no transport rewrite |
-| Status | **Specification (owner review pending)** |
+| Status | **Specification — owner decisions confirmed 2026-11-06; the development plan and the version plan are written (`docs/plan/audio-pipeline-dev-plan.md`; the ladder amendment was fixed by the owner on 2026-11-06 — the audio P0+P1 body ships in `v1.2.0`)** |
 | Owner | BDFL |
 | Related | ADR-001 (plugin system), ADR-008 (PCM tap), ADR-015 (API stability), ADR-017 (cross-end timeline), `docs/plan/video-pipeline-v2-plan.md` (same shape, video side) |
 
@@ -57,6 +57,30 @@ recorded here):
 |---|---|---|
 | **DEC-5** | **Two new plugin seams: `plugins::IAudioDecoder` (codec) and `plugins::IAudioReceiver` (pipeline).** The receiver pipeline lives in a new self-contained module `src/modules/audio_rx/`, not in the engine. | L4 says `src/engine/` only orchestrates plugins and must not include concrete module headers. Today the engine already reaches into `nimrtc/jb/jitter_buffer.hpp` and `nimrtc/opus/opus.hpp` (see `src/engine/src/engine_impl.hpp:91,120`). Putting the new pipeline behind a seam removes the need to add another concrete include and gives the pipeline a unit-testable home. |
 | **DEC-6** | **Two new registry categories: `kAudioDecoder` and `kAudioReceiver`.** `EngineConfig` grows `audio_decoder_name` (default `"opus"`) and `audio_receiver_name` (default `"nimrtc_audio_rx"`). | The Opus plugin already registers under id `"opus"` in the `kCodec` category; ids are per-category, so the same id can serve the decoder slot without a second name. |
+
+### Owner answers of 2026-11-06
+
+The four design questions put to the owner on 2026-11-06 were answered as
+follows, and the answers are binding:
+
+| Question | Answer | Recorded as |
+|---|---|---|
+| 1. Codec seam: extend the published `plugins::ICodec`, or add a separate decoder interface? | **the latter** — a separate interface | **DEC-1** |
+| 2. Which PCM callback shape does the host program against? | **the new callback** — the one carrying rate / channels / timestamps / concealment flags | **DEC-2**, E-1, E-2, E-9 |
+| 3. What sample rate and channel count does the host receive? | **follow the new requirement** — the decoder's native rate, reported explicitly, no built-in resampler | **DEC-3**, A-2, A-5, X-1 |
+| 4. What does this round deliver? | **the detailed specification and design first, including the P1 public SDK** — complete, so nothing is lost; the development plan and the version plan are decided afterwards | **DEC-4** |
+
+Reading of answer 2: the new callback is the API the host is meant to use.
+The legacy `set_on_audio_frame()` is kept because it is a published STABLE
+symbol and cannot be removed without a MAJOR bump (ADR-015 §Decision 3),
+but it is documented as legacy and is not the recommended surface.
+
+Reading of answer 4: this document is the deliverable of this round. It
+specifies every work item down to the interface level, including the full
+P1 public SDK (Part E) and the verification for each item (Part V), so
+that the later development plan can be derived from it without re-deriving
+any design. It deliberately contains **no** schedule, no version numbers
+and no release gates; Part G is dependency order only.
 
 ---
 

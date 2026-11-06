@@ -470,6 +470,26 @@ def _record(day, case, status, plat="windows", reason=""):
     }
 
 
+def gate_unsatisfied(summary, required_days):
+    """Return the tracked platforms whose green streak is too short.
+
+    The gate iterates over `PLATFORMS` -- the platforms the window is
+    *tracked* for -- rather than over the platforms that happen to have
+    evidence.  A platform with no records at all scores zero and is
+    therefore unsatisfied, so a missing half of the window can never be
+    mistaken for a satisfied one.
+
+    Returns a list of "platform (streak/required)" strings, empty when
+    the window is satisfied.
+    """
+    unsatisfied = []
+    for plat in PLATFORMS:
+        streak = summary.get(plat, {}).get("consecutive_green_days", 0)
+        if streak < required_days:
+            unsatisfied.append("%s (%d/%d)" % (plat, streak, required_days))
+    return unsatisfied
+
+
 def _self_test():
     """Pin the streak semantics.
 
@@ -664,18 +684,14 @@ def main(argv=None) -> int:
         # that was never satisfied.
         if args.require:
             required_days = args.require_days
-            unsatisfied = []
-            for plat in sorted(summary):
-                streak = summary[plat]["consecutive_green_days"]
-                if streak < required_days:
-                    unsatisfied.append("%s (%d/%d)" % (plat, streak, required_days))
+            unsatisfied = gate_unsatisfied(summary, required_days)
             if unsatisfied:
                 sys.stderr.write(
                     "window NOT satisfied: %s\n"
                     % ", ".join(unsatisfied))
                 return 1
             print("window satisfied: %d consecutive green days on %s"
-                  % (required_days, ", ".join(sorted(summary))))
+                  % (required_days, ", ".join(PLATFORMS)))
         return 0
 
     plat = args.platform or local_platform()

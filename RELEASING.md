@@ -192,20 +192,19 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    **CI vs release build differ on WebRTC APM**: `.github/workflows/ci.yml`
    passes `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` to all four Configure steps so
    the runner doesn't need a `meson`+`abseil-cpp` prebuild. The actual release
-   artefact built by `.github/workflows/release.yml` **should** carry real 3A,
-   so the release pipeline runs `python tools/fetch_webrtc_apm.py` once per
+   artefact built by `.github/workflows/release.yml` **carries real 3A**, so
+   the release pipeline runs `python tools/fetch_webrtc_apm.py` once per
    platform before Configure and configures with
    `-DNIMRTC_VENDORED_WEBRTC_APM=ON`.
 
-   The prebuild is `continue-on-error: true` (W3). A failed prebuild
-   therefore **degrades the bundle to NimRTC's built-in stub 3A path
-   instead of aborting the release**, and Configure picks the mode from
-   the prebuild outcome (`ON` on success, `OFF` otherwise). Each build job
-   records its outcome in `build/3a-status-<platform>.txt`; `publish-release`
-   reads those files and writes the per-platform 3A status into the release
-   body and the run's Step Summary, so a bundle carrying the stub 3A path
-   is never published silently. See `docs/zh/architecture.md` §11.5.5 for
-   the rationale.
+   The prebuild is a **hard gate** (W3 was closed on 2026-11-06). A failed
+   prebuild therefore **aborts the release cut** — the degraded "ship the
+   built-in stub 3A path" fallback no longer exists — and Configure is
+   pinned to a literal `-DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON` on all four
+   legs. Each build job still records its mode in
+   `build/3a-status-<platform>.txt`; `publish-release` reads those files
+   and writes the per-platform 3A status into the release body and the run's
+   Step Summary. See `docs/zh/architecture.md` §11.5.5 for the rationale.
 
    **A green prebuild does not mean the bundle ships the APM.** The
    `3a-status-<platform>.txt` record is a *build-time* fact: it says the
@@ -232,16 +231,17 @@ sections 3.5 (security audit) and 3.6 (external comms window) are skipped.
    progress line into a terminating error, and a ninja invocation
    without `call`. All three are fixed in `9c3c522`, and
    `.gitattributes` now pins `*.cmd` / `*.bat` to CRLF in the working
-   tree. The `windows` leg is therefore expected to prebuild the real
-   APM; a failure there is a defect to fix, not a platform limitation to
-   document. Do not copy the pre-`9c3c522` wording ("the meson prebuild
-   is known to fail on the windows-2022 runner") into new documents.
+   tree. The final `v1.0.2` release run therefore had a **green**
+   `Prebuild WebRTC APM` step on all four legs — the Windows failures
+   were defects, and they were fixed before that cut. Do not copy the
+   pre-`9c3c522` wording ("the meson prebuild is known to fail on the
+   windows-2022 runner") into new documents.
 
-   Note when reading a CI run: the `Prebuild WebRTC APM` step is
-   `continue-on-error: true`, so the job list shows it as `success`
-   even when it failed. The real result is `steps.apm_prebuild.outcome`,
-   which is what Configure reads and what the release notes are
-   generated from.
+   Note when reading a CI run: since 2026-11-06 the `Prebuild WebRTC APM`
+   step is a hard gate, so a red `Prebuild WebRTC APM` step fails the
+   build job and no bundle is cut for that platform. There is no longer a
+   hidden outcome to read from `steps.apm_prebuild.outcome` — the step
+   either succeeds or the release stops there.
 
 ### 3.2 Stabilisation window (T-7 … T-1)
 
@@ -501,17 +501,19 @@ WebRTC APM is **not** part of the Phase 3 migration — it is already vendored
 in `src/third_party/webrtc_audio_processing/` and built by meson (not CMake).
 Its conditional prebuild guard (`NIMRTC_VENDORED_WEBRTC_APM`) is documented in
 `docs/zh/architecture.md` §11.5.5. The short version: CI uses `=OFF`; the
-release pipeline **prefers** `=ON` after running `python tools/fetch_webrtc_apm.py`
-once per platform, but the prebuild is `continue-on-error: true` — a failed
-prebuild falls back to `=OFF` (the built-in stub 3A path) instead of aborting
-the cut, and the per-platform outcome is recorded in `build/3a-status-*.txt`
-and surfaced in the release body. That record is a *build-time* fact only:
+release pipeline **always uses** `=ON` after running
+`python tools/fetch_webrtc_apm.py` once per platform, and the prebuild is a
+**hard gate** since 2026-11-06 (W3 closed) — a failed prebuild aborts the
+cut instead of falling back to `=OFF` (the built-in stub 3A path). The
+per-platform mode is still recorded in `build/3a-status-*.txt` and surfaced
+in the release body. That record is a *build-time* fact only:
 whether the published bundle carries a usable 3A depends on the install
 rules shipping the APM archives under `lib/webrtc_apm/`, so the release body
 lists the tarball and reports the two facts separately (§3.1 step 4). The
 `windows` leg's prebuild failures
 through `v1.0.2` were caused by defects in `tools/build_webrtc_apm.cmd`,
-fixed in `9c3c522` — not by a platform limitation. See §3.1 step 4.
+fixed in `9c3c522` — not by a platform limitation; the final `v1.0.2` run
+prebuilt the real APM on all four legs. See §3.1 step 4.
 
 ---
 

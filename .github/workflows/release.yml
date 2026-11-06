@@ -269,48 +269,38 @@ jobs:
       # Windows leg is therefore expected to prebuild the real APM; a
       # failure there is a defect to fix, not a platform limitation.
       #
-      # The step stays `continue-on-error: true` rather than skipped:
-      # when the prebuild succeeds the bundle ships the real
-      # WebRTC APM 3A (AEC/ANS/AGC); when it fails, Configure falls back
-      # to `-DNIMRTC_VENDORED_WEBRTC_APM=OFF` and the bundle ships the
-      # built-in stub 3A path that ci.yml also uses.  Either way the
-      # release is published -- the prebuild can no longer abort the cut.
-      # The per-platform outcome is recorded in `build/3a-status-*.txt`
-      # and surfaced in the release notes (publish-release reads them).
+      # The step is a HARD GATE: `continue-on-error` was dropped on
+      # 2026-11-06 (W3 flip) because the prebuild is green on every
+      # platform — the v1.0.2 release run's `Prebuild WebRTC APM` step
+      # SUCCEEDED on all four legs (the three earlier Windows failures
+      # were defects in tools/build_webrtc_apm.cmd, fixed in 9c3c522,
+      # i.e. before that cut).  Configure is therefore pinned to
+      # `-DNIMRTC_VENDORED_WEBRTC_APM=ON`, so the bundle always ships
+      # the real WebRTC APM 3A (AEC/ANS/AGC).  A prebuild failure now
+      # aborts the cut instead of silently shipping the stub 3A path.
       - name: Prebuild WebRTC APM
         id: apm_prebuild
-        continue-on-error: true
         shell: pwsh
         run: python tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: pwsh
         run: |
-          # W3: pick the APM mode from the prebuild outcome.  The prebuild
-          # is allowed to fail (see the comment above), so a failed
-          # prebuild degrades the bundle to the stub 3A path instead of
-          # aborting the release.
-          $apm = "OFF"
-          if ("${{ steps.apm_prebuild.outcome }}" -eq "success") { $apm = "ON" }
+          # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
+          # the mode is pinned to ON — there is no degraded fallback
+          # branch any more.
+          $apm = "ON"
           Write-Host "WebRTC APM (3A) bundled in this bundle: $apm"
           # NOTE: pass a literal ON/OFF (not -D...=$apm).  A variable-expanded
           # -D value that ever arrives as a non-empty unknown string (e.g. a
           # literal "$apm") is truthy in CMake's if(), so the APM wrapper
           # would take the FATAL_ERROR branch even though the log says OFF.
           # Literal branches make the configured value unambiguous.
-          if ($apm -eq "ON") {
-            cmake --preset release.msvc `
-              -DNIMRTC_BUILD_EXAMPLES=OFF `
-              -DNIMRTC_BUILD_TESTS=OFF `
-              -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON `
-              -DNIMRTC_INSTALL=ON
-          } else {
-            cmake --preset release.msvc `
-              -DNIMRTC_BUILD_EXAMPLES=OFF `
-              -DNIMRTC_BUILD_TESTS=OFF `
-              -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=OFF `
-              -DNIMRTC_INSTALL=ON
-          }
+          cmake --preset release.msvc `
+            -DNIMRTC_BUILD_EXAMPLES=OFF `
+            -DNIMRTC_BUILD_TESTS=OFF `
+            -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON `
+            -DNIMRTC_INSTALL=ON
           New-Item -ItemType Directory -Force -Path build | Out-Null
           "3a=$apm" | Set-Content -Path build/3a-status-windows.txt
 
@@ -404,32 +394,29 @@ jobs:
           python3 -m pip install --user --quiet "meson>=1.10"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # W3: the meson prebuild of webrtc_audio_processing is known-good
-      # on the linux runners (it succeeded in the v0.14.0 release-cut run
-      # -- see commit dc15ad8), so the real WebRTC APM 3A (AEC/ANS/AGC)
-      # is bundled here.  `continue-on-error: true` keeps a prebuild
-      # regression from aborting the release: Configure then falls back
-      # to the stub 3A path, and the per-platform outcome is recorded in
-      # `build/3a-status-*.txt` for the release notes.
+      # W3 (flipped 2026-11-06): the meson prebuild of
+      # webrtc_audio_processing is known-good on the linux runners (it
+      # succeeded on all four legs of the final `v1.0.2` release run),
+      # so the step is a HARD GATE here: the real WebRTC APM 3A
+      # (AEC/ANS/AGC) is always bundled, and a prebuild regression
+      # aborts the cut instead of silently shipping the stub 3A path.
       - name: Prebuild WebRTC APM
         id: apm_prebuild
-        continue-on-error: true
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
-          # W3: pick the APM mode from the prebuild outcome (a failed
-          # prebuild degrades the bundle to the stub 3A path instead of
-          # aborting the release).
-          apm="OFF"
-          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
+          # the mode is pinned to ON — there is no degraded fallback
+          # branch any more.
+          apm="ON"
           echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
+            -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON \
             -DNIMRTC_INSTALL=ON
           echo "3a=$apm" > build/3a-status-linux-x86_64.txt
 
@@ -519,32 +506,29 @@ jobs:
           python3 -m pip install --user --quiet "meson>=1.10"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # W3: the meson prebuild of webrtc_audio_processing is known-good
-      # on the linux runners (it succeeded in the v0.14.0 release-cut run
-      # -- see commit dc15ad8), so the real WebRTC APM 3A (AEC/ANS/AGC)
-      # is bundled here.  `continue-on-error: true` keeps a prebuild
-      # regression from aborting the release: Configure then falls back
-      # to the stub 3A path, and the per-platform outcome is recorded in
-      # `build/3a-status-*.txt` for the release notes.
+      # W3 (flipped 2026-11-06): the meson prebuild of
+      # webrtc_audio_processing is known-good on the linux runners (it
+      # succeeded on all four legs of the final `v1.0.2` release run),
+      # so the step is a HARD GATE here: the real WebRTC APM 3A
+      # (AEC/ANS/AGC) is always bundled, and a prebuild regression
+      # aborts the cut instead of silently shipping the stub 3A path.
       - name: Prebuild WebRTC APM
         id: apm_prebuild
-        continue-on-error: true
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
-          # W3: pick the APM mode from the prebuild outcome (a failed
-          # prebuild degrades the bundle to the stub 3A path instead of
-          # aborting the release).
-          apm="OFF"
-          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
+          # the mode is pinned to ON — there is no degraded fallback
+          # branch any more.
+          apm="ON"
           echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release.aarch64 \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
+            -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON \
             -DNIMRTC_INSTALL=ON
           echo "3a=$apm" > build/3a-status-linux-aarch64.txt
 
@@ -645,28 +629,28 @@ jobs:
           fi
           "$user_scripts/meson" --version
 
-      # W3: see the comment on the linux-gcc job above.  The macos
-      # prebuild uses the system `python3` (the meson install step above
-      # already put a managed 3.12 on PATH for later steps).
+      # W3 (flipped 2026-11-06): see the comment on the linux-gcc job
+      # above.  The step is a HARD GATE — the macos prebuild uses the
+      # system `python3` (the meson install step above already put a
+      # managed 3.12 on PATH for later steps), and a failure aborts the
+      # cut instead of shipping the stub 3A path.
       - name: Prebuild WebRTC APM
         id: apm_prebuild
-        continue-on-error: true
         shell: bash
         run: python3 tools/fetch_webrtc_apm.py
 
       - name: Configure
         shell: bash
         run: |
-          # W3: pick the APM mode from the prebuild outcome (a failed
-          # prebuild degrades the bundle to the stub 3A path instead of
-          # aborting the release).
-          apm="OFF"
-          if [[ "${{ steps.apm_prebuild.outcome }}" == "success" ]]; then apm="ON"; fi
+          # W3 (flipped 2026-11-06): the APM prebuild is a hard gate, so
+          # the mode is pinned to ON — there is no degraded fallback
+          # branch any more.
+          apm="ON"
           echo "WebRTC APM (3A) bundled in this bundle: $apm"
           cmake --preset release.macos \
             -DNIMRTC_BUILD_EXAMPLES=OFF \
             -DNIMRTC_BUILD_TESTS=OFF \
-            -DNIMRTC_VENDORED_WEBRTC_APM=$apm \
+            -DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON \
             -DNIMRTC_INSTALL=ON
           echo "3a=$apm" > build/3a-status-macos-arm64.txt
 

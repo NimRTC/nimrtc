@@ -521,8 +521,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `lib/cmake/NimRTC/`, and a minimal `find_package(NimRTC 1.0 REQUIRED)`
   consumer linking `nimrtc::engine` configures, builds, and runs exit 0
   (Linux downstream proof runs in `ci.yml` on every push via the
-  install + downstream-proof leg; `## [1.1.0]` stays unwritten
-  until C-track closes).
+  install + downstream-proof leg; `## [1.1.0]` is cut when the remaining
+  C-track gates — the 7-day soak and the signed tag — clear).
 - **The installed bundle now carries the WebRTC APM prebuilt.** The
   APM is built out-of-tree with Meson and has no upstream `install()`
   rules, so the bundle used to ship without
@@ -549,17 +549,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tools/benchmark_dc.py` and upload `build/e2e/bench_latency.json` +
   `build/e2e/bench_dc.json` as `bench-<platform>-${{ github.run_id }}`
   artifacts (14-day retention). Linux x86_64 reproducibility evidence
-  still pending the first green run after this commit; `## [1.1.0]` stays
-  unwritten until C-track (W3/W5) closes.
+  still pending the first green run after this commit; `## [1.1.0]` is cut
+  when the remaining C-track gates — the 7-day soak and the signed tag —
+  clear (W3 and W5 are closed).
 
 ### Known limitations (v1.1 C-track, still open)
 
-- W3 (APM prebuild `continue-on-error` ×4 + ON/OFF fallback) stays as-is
-  until the Windows prebuild is observed reliably green; W5 is **closed
-  2026-11-05 (review)** — the `v1.0.2` release published the aarch64
-  bundle, so `build-linux-aarch64` is a hard gate again (no
-  `continue-on-error`, back in `publish-release.needs`).
-  `docs/plan/ci-workarounds.md` W3/W5 remain the source of truth.
+- W3 is **closed 2026-11-06**: the `Prebuild WebRTC APM` step lost
+  `continue-on-error` on all four release legs and Configure is pinned to
+  a literal `-DNIMRTC_VENDORED_WEBRTC_APM:BOOL=ON`, so every bundle ships
+  the real WebRTC APM 3A and a prebuild regression aborts the cut instead
+  of degrading it to the built-in stub 3A path. W5 was closed 2026-11-05
+  (review) — the `v1.0.2` release published the aarch64 bundle, so
+  `build-linux-aarch64` is a hard gate again (no `continue-on-error`, back
+  in `publish-release.needs`). `docs/plan/ci-workarounds.md` W3/W5 remain
+  the source of truth.
+- Still open before the `v1.1.0` tag: the 7-day soak evidence for
+  §12.3.6 Gate 6 (the collector is in place and day 1 is green on
+  Windows), the signed annotated tag, and the upload of the release key to
+  the GitHub account GPG list (blocked on network access to
+  `github.com`, not on tooling).
 ## [1.0.2] - 2026-11-02
 
 ### Status: Stable

@@ -225,6 +225,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The source version is now `1.1.0`** (`project(VERSION)` in
+  `CMakeLists.txt`, `NIMRTC_API_VERSION_{MAJOR,MINOR,PATCH}` in
+  `src/core/include/nimrtc/core/api_version.hpp`, encoded `NIMRTC_API_VERSION`
+  `10002` → `10100`). The three former `v1.1` / `v1.2` / `v1.3` plan drafts
+  are consolidated into one `docs/plan/v1.1-plan.md` targeting `v1.1.0`
+  (BDFL, 2026-11-06): they all described a single unreleased body of work on
+  top of the published `v1.0.2`, and numbering them as three consecutive
+  versions implied three releases' worth of roadmap without three releases'
+  worth of delivered versions. The published stable cut is still `v1.0.2`;
+  `v1.1.0` is the version under preparation and its tag is cut only once the
+  release-hardening track (`docs/plan/v1.1-plan.md` Track C) closes.
 - **The `cloudgame` Profile was never shipped, and the docs said it was.**
   `README.md`, `README.zh.md`, `docs/profiles.md`, `docs/zh/architecture.md`
   and `docs/blog/2026-10-10-why-nimrtc.{md,zh.md}` all listed `cloudgame`

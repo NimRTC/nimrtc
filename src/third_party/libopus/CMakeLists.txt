@@ -55,17 +55,37 @@ if(EXISTS "${_src_dir}/CMakeLists.txt")
     #
     # The target property is named MSVC_RUNTIME_LIBRARY — CMAKE_... is only
     # the variable upstream reads, so setting it as a property was a no-op.
+    #
+    # The value must track whatever the *rest* of the tree uses, not a
+    # hard-coded /MD: with NIMRTC_TEST_RUNTIME_LIB=DEFAULT the top-level
+    # scope leaves CMAKE_MSVC_RUNTIME_LIBRARY unset and every NimRTC target
+    # falls back to CMake's per-config default (/MDd in Debug, /MD in
+    # Release).  Upstream's own default happens to be that same per-config
+    # expression, so reusing it in that mode keeps opus in step instead of
+    # re-introducing the mismatch in the opposite direction.
     if(MSVC)
+        if(CMAKE_MSVC_RUNTIME_LIBRARY)
+            set(_opus_runtime "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+            set(_opus_mt_debug "/MDd")
+            set(_opus_mt_release "/MD")
+        else()
+            set(_opus_runtime "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+            set(_opus_mt_debug "/MDd")
+            set(_opus_mt_release "/MD")
+        endif()
         set_target_properties(opus PROPERTIES
-            MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+            MSVC_RUNTIME_LIBRARY "${_opus_runtime}")
         # Also patch any compile flags that upstream set with the old runtime.
         get_target_property(_opus_flags opus COMPILE_FLAGS)
         if(_opus_flags)
-            string(REPLACE "/MTd" "/MD" _opus_flags "${_opus_flags}")
-            string(REPLACE "/MT"  "/MD" _opus_flags "${_opus_flags}")
+            string(REPLACE "/MTd" "${_opus_mt_debug}" _opus_flags "${_opus_flags}")
+            string(REPLACE "/MT"  "${_opus_mt_release}" _opus_flags "${_opus_flags}")
             set_target_properties(opus PROPERTIES COMPILE_FLAGS "${_opus_flags}")
         endif()
         unset(_opus_flags)
+        unset(_opus_runtime)
+        unset(_opus_mt_debug)
+        unset(_opus_mt_release)
     endif()
 
     # Alias the upstream `opus` target → NimRTC's standard name.

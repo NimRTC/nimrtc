@@ -80,7 +80,7 @@ Two details worth keeping:
   avoids. The set also keeps a second SSRC on the same payload type (RFC 5956
   simulcast) on its own entry.
 
-Known residual (v1.2 M1 — closed): the video rate now resolves from the
+Known residual (v1.1 M1 — closed): the video rate now resolves from the
 peer's SDP `a=rtpmap` first (`remote_clock_rate_hz`, collected in
 `process_remote_sdp()`), and only falls back to the literal 90000 when the
 peer did not declare the payload type. `tests/test_engine_timeline.cpp`

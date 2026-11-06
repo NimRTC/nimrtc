@@ -78,9 +78,27 @@ def run(cmd, cwd=None, check=True, timeout=300, project_root=None):
     """
     print(f"[CMD] {' '.join(cmd)}")
     try:
+        # Decode the child's output as UTF-8 with replacement, NOT with
+        # the locale's default codec.
+        #
+        # `text=True` alone makes Python pick `locale.getpreferredencoding()`,
+        # which is GBK on a zh-CN Windows host and UTF-8 on the GitHub
+        # runners.  The WebRTC APM build prints UTF-8 (ninja progress lines,
+        # MSVC's Chinese-locale link messages), so on a zh-CN host the
+        # decoder thread raised UnicodeDecodeError, `communicate()` then
+        # failed with a bare `IndexError: list index out of range`, and the
+        # wrapper reported the build as failed even though the build had
+        # succeeded.  In CI that meant the release silently degraded to the
+        # stub 3A path on exactly the platform where the prebuild was
+        # supposed to be green.
+        #
+        # `errors="replace"` keeps the diagnostic readable when the child
+        # emits a byte sequence that is not valid UTF-8 at all: a mangled
+        # character in a log line must never turn into a wrong verdict.
         result = subprocess.run(
             cmd, cwd=cwd, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, check=False, timeout=timeout,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", check=False, timeout=timeout,
         )
         ok = result.returncode == 0
         if ok:

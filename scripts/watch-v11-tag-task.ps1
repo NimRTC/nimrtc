@@ -26,6 +26,10 @@ param(
     [string] $RepoPath = '',
     [string] $Tag = 'v1.1.0',
     [string] $Principal = 'realdesktop@163.com',
+    # The repository to probe. Defaults to the repository this script lives in.
+    [string] $ProbeRepoPath = '',
+    # Where the state is written. Defaults to <probe repo>/build/v11-watch.
+    [string] $StateDir = '',
     # Seconds between probes.
     [int] $IntervalSeconds = 1800,
     # Stop after this many probes; 0 means run until a terminal state.
@@ -35,19 +39,25 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if (-not $RepoPath) {
-    $RepoPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+# The script's own directory is <repo>/scripts, so its parent is the repo
+# that holds the probe script -- independent of which repository is probed.
+$scriptRepo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+if (-not $ProbeRepoPath) {
+    $ProbeRepoPath = $scriptRepo
 }
 
-$probeScript = Join-Path $RepoPath 'scripts\watch-v11-tag.ps1'
+$probeScript = Join-Path $scriptRepo 'scripts\watch-v11-tag.ps1'
 if (-not (Test-Path -LiteralPath $probeScript)) {
     Write-Error "probe script not found: $probeScript"
     exit 3
 }
 
 # State lives under build/ so the project root stays clean.
-$stateDir = Join-Path $RepoPath 'build\v11-watch'
-New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+if (-not $StateDir) {
+    $StateDir = Join-Path $ProbeRepoPath 'build\v11-watch'
+}
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 $logFile = Join-Path $stateDir 'watch.log'
 $statusFile = Join-Path $stateDir 'status.json'
@@ -76,13 +86,13 @@ function Write-StatusFile {
 
 $script:probeCount = 0
 
-Write-WatchLog "watcher started: tag=$Tag interval=${IntervalSeconds}s repo=$RepoPath"
+Write-WatchLog "watcher started: tag=$Tag interval=${IntervalSeconds}s repo=$ProbeRepoPath"
 
 while ($true) {
     $script:probeCount++
 
     $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $probeScript `
-        -RepoPath $RepoPath -Tag $Tag -Principal $Principal 2>&1
+        -RepoPath $ProbeRepoPath -Tag $Tag -Principal $Principal 2>&1
     $code = $LASTEXITCODE
     $detail = ($output | Out-String).Trim()
 

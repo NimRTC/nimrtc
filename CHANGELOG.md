@@ -13,6 +13,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The vendored Opus library was built against a different C runtime than
+  the rest of the project, so Debug builds crashed on the audio path.**
+  `src/third_party/libopus/CMakeLists.txt` tried to pin the Opus target to
+  the project's `/MD` runtime by setting a target property named
+  `CMAKE_MSVC_RUNTIME_LIBRARY` — but that is the *variable* name upstream
+  reads, not the target property. The property is `MSVC_RUNTIME_LIBRARY`, so
+  the override was a silent no-op and upstream's own scope kept the Debug
+  runtime (`MultiThreadedDebugDLL` → `MSVCRTD`) for `opus.lib`, while every
+  other NimRTC target used `MultiThreadedDLL` → `MSVCRT`. Linking two CRT
+  heaps into one program means an allocation in one runtime and the matching
+  free in the other: the engine tests that touch the Opus path
+  (`test_engine_video_feedback` and its five cases) died with an access
+  violation before `main()` even printed a line, and the link emitted
+  `LNK4098`. The property name is fixed and the compile-flag rewrite now maps
+  `/MTd` and `/MT` to `/MD`; `opus.lib` and the rest of the tree agree on
+  `MSVCRT`, the `LNK4098` warning is gone, and the full suite is 696 tests,
+  0 failures.
 - **Commits and tags were signed with an email GitHub does not recognise, so
   every signature showed up as unverified.** The release key
   `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` carried the Gitee noreply

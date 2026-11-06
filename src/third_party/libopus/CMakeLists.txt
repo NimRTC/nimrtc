@@ -45,17 +45,24 @@ if(EXISTS "${_src_dir}/CMakeLists.txt")
 
     add_subdirectory(${_src_dir} _nimrtc_libopus_build EXCLUDE_FROM_ALL)
 
-    # Upstream defaults CMAKE_MSVC_RUNTIME_LIBRARY to MultiThreaded[/Debug]
-    # (static /MT /MTd) which conflicts with NimRTC's /MDd.  Override the
-    # runtime on the opus target so it matches the rest of the build.
+    # Upstream picks the runtime through the *variable*
+    # CMAKE_MSVC_RUNTIME_LIBRARY, set in its own directory scope, so it
+    # shadows NimRTC's project-wide /MD (MultiThreadedDLL).  In Debug that
+    # builds opus against MSVCRTD while every other NimRTC target uses
+    # MSVCRT: two CRT heaps in one process, plus an LNK4098 at link time.
+    # Mixed-CRT heap ownership is what used to crash the engine tests that
+    # touch the Opus encoder/decoder path.
+    #
+    # The target property is named MSVC_RUNTIME_LIBRARY — CMAKE_... is only
+    # the variable upstream reads, so setting it as a property was a no-op.
     if(MSVC)
         set_target_properties(opus PROPERTIES
-            CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+            MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
         # Also patch any compile flags that upstream set with the old runtime.
         get_target_property(_opus_flags opus COMPILE_FLAGS)
         if(_opus_flags)
-            string(REPLACE "/MTd" "/MDd" _opus_flags "${_opus_flags}")
-            string(REPLACE "/MT"  "/MD"  _opus_flags "${_opus_flags}")
+            string(REPLACE "/MTd" "/MD" _opus_flags "${_opus_flags}")
+            string(REPLACE "/MT"  "/MD" _opus_flags "${_opus_flags}")
             set_target_properties(opus PROPERTIES COMPILE_FLAGS "${_opus_flags}")
         endif()
         unset(_opus_flags)

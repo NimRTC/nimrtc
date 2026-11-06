@@ -23,7 +23,7 @@ and diff-reviewed in pull requests.
 > **Not shipped: `cloudgame`** (cloud rendering / streaming). It is a long-term
 > candidate, not part of the official Profile set — `profiles/cloudgame.json`
 > does not exist and `assembly` has no `kProfileCloudGame`. Rationale and
-> follow-up: [`docs/plan/v1.3-plan.md`](plan/v1.3-plan.md) §3 Track V.
+> follow-up: [`docs/plan/v1.1-plan.md`](plan/v1.1-plan.md) §2 Track V.
 
 ### When to pick each profile
 

@@ -46,7 +46,7 @@ that touches `examples/wasm-demo/www/**`.
 - **Quick start** — copy-paste build instructions matching the root
   `README.md`'s Quick Start.
 - **Status** — what's shipped in v1.0.2, what's deferred to v1.x, and
-  what's on the v1.1 / v1.2 / v1.3 tracks on `main`.
+  what's on the v1.1 track on `main`.
 - **Architecture in 30 seconds** — the L0–L3 + PAL diagram in plain text.
 - **Roadmap** — honest framing of why this page is a placeholder.
 
@@ -137,7 +137,7 @@ libjuice, `IVideoSource` / `IVideoSink` adapter shims for
 fit through. See [`docs/plugin_author_guide.md`](../../docs/plugin_author_guide.md)
 for the plugin contract.
 
-This is **not** on the v1.0–v1.3 roadmap — those tracks are quality,
+This is **not** on the v1.0–v1.1 roadmap — those tracks are quality,
 packaging, hardening, and the weak-network chain. A real in-browser
 build is a longer-term candidate. If you have prior wasm / emscripten
 experience and want to take it on, open an issue to discuss scope and

@@ -10,8 +10,11 @@
 > **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > **Current `main` (post-v1.0.2, unreleased):** the trunk is ahead of the published tag by the
-> **v1.1** packaging + benchmark track, the **v1.2** transport / media / DTLS hardening track, and
-> the first **v1.3** quality-track item (shared adaptive jitter strategy, `src/modules/jb_strategy`).
+> **v1.1** release, which consolidates the former v1.1 / v1.2 / v1.3 drafts into one
+> version target: the packaging + benchmark track, the transport / media / DTLS hardening
+> track, and the quality-line items (shared adaptive jitter strategy, `src/modules/jb_strategy`;
+> Goog-CC BWE; RTCP feedback loop; engine-level `ref_frame` and video stats; GMSSL vendoring
+> as a submodule + the SRTP backend seam; engine source split).
 > Local suite on Windows/MSVC Debug: **651/651 PASS** (measured 2026-11-04).
 > The packaging rules (`NIMRTC_INSTALL=ON` → `include/` + `lib/` + `lib/cmake/NimRTC/`) are landed
 > on `main` and will ship in the next release; the published v1.0.2 bundle does **not** contain
@@ -60,19 +63,20 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
 - **What:** An embeddable C++20 media engine for real-time communication — a from-scratch WebRTC alternative, **not a fork of libwebrtc**.
 - **Why it exists:** libwebrtc is large, hard to embed, and its crypto/codecs are opaque. NimRTC keeps the wire-level interop and replaces the monolith with a layered, plugin-adapted engine you can read, swap, and ship on aarch64.
 - **Current state:** **v1.0.2 is the latest published release** (Stable). The `main` trunk is
-  post-v1.0.2 and unreleased, carrying three in-flight tracks:
-  - **v1.1 — Quality + Packaging:** reproducible transport-floor benchmarks
+  post-v1.0.2 and unreleased, carrying one consolidated **v1.1** release:
+  - **v1.1 — Quality + Packaging + Hardening:** reproducible transport-floor benchmarks
     (`tools/benchmark_latency.py`, `tools/benchmark_dc.py`) with CI artifacts; install rules
     (`NIMRTC_INSTALL=ON`) that produce `include/` + `lib/` + `lib/cmake/NimRTC/` so
     `find_package(NimRTC)` works from an installed tree, and the WebRTC APM prebuilt shipped
-    alongside it.
-  - **v1.2 — Hardening:** `ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, p99 strategy
-    validator, non-standard video clock-rate negotiation, DTLS IPv6 `set_peer()`, and
-    NAT-rebinding `rehandshake()`.
-  - **v1.3 — Quality line (started):** the RFC 3550 jitter estimator and the
+    alongside it; the transport-stack residuals (`ISctpSocket` lifecycle, ICE
+    `last_recv_packet()` demux, unified `make_transport_instance()`, p99 strategy validator,
+    non-standard video clock-rate negotiation, DTLS IPv6 `set_peer()`, NAT-rebinding
+    `rehandshake()`); and the quality line — the RFC 3550 jitter estimator and the
     "base + 4·J" target-delay policy now live **once** in `src/modules/jb_strategy`, with the
-    audio (`jb`) and video (`video_jb`) front-ends sharing it. The video side's adaptive playout
-    is opt-in via `EngineConfig::video_receiver_tuning.adaptive_playout`.
+    audio (`jb`) and video (`video_jb`) front-ends sharing it (video-side adaptive playout is
+    opt-in via `EngineConfig::video_receiver_tuning.adaptive_playout`), plus Goog-CC BWE,
+    the RTCP feedback loop, engine-level `ref_frame` / video stats, GMSSL vendoring as a
+    submodule, the SRTP backend seam and the engine source split.
   Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10002); breaking changes require a
   MINOR/MAJOR bump. Local suite on Windows/MSVC Debug: **651/651 PASS**.
   **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
@@ -524,7 +528,7 @@ Profiles are **compile-time configurations**, not runtime dispatch. Format: see 
 > Full matrix (9 shipped profiles, with per-field JB / 3A / BWE / DC settings) lives in
 > [`docs/profiles.md`](docs/profiles.md). `cloudgame` (cloud rendering / streaming) is a
 > **long-term candidate and is not in the shipped Profile set** — see
-> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V.
+> [`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) §2 Track V.
 >
 > The `profiles/` directory also carries two **unregistered** JSON files, `sfu.json` and
 > `sfu-agent.json`. They carry the `sfu_enabled` marker and the `sfu-relay` transport
@@ -554,16 +558,12 @@ authoritative plan documents are `docs/plan/v1.*-plan.md`.
 | Version | Label | Scope | Status |
 |---|---|---|---|
 | **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
-| **v1.1** | Quality + Packaging | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs) | 🟡 in progress on `main` |
-| **v1.2** | Hardening | Transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard) | 🟡 landed on `main` |
-| **v1.3** | Quality line | Weak-network quality chain (Goog-CC BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 first item landed (`jb_strategy`); rest planned |
-| **v1.4+** | — | SM4-GCM SRTP implementation, `cloudgame` (long-term candidate), `takeover` (remote-vehicle takeover, P4) | ⏸️ planned |
+| **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (Goog-CC BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 landed on `main`, awaiting the release-hardening gates |
+| **v1.2+** | — | SM4-GCM SRTP implementation, `cloudgame` (long-term candidate), `takeover` (remote-vehicle takeover, P4) | ⏸️ planned |
 | — | Closed | In-process SFU module (`nimrtc_sfu`), DC forwarding policy (DC-3), `sfu-relay` benchmark (BENCH-1) | ❌ **NO** — closed 2026-10-19, BDFL: SFU is not a project core goal (`docs/plan/v1.0-plan.md` §7) |
 
 Full roadmap: [`docs/zh/architecture.md`](docs/zh/architecture.md) §13 ·
-[`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) ·
-[`docs/plan/v1.2-plan.md`](docs/plan/v1.2-plan.md) ·
-[`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md).
+[`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md).
 
 ---
 
@@ -619,13 +619,14 @@ has not closed.
 | Packaging — `NIMRTC_INSTALL=ON` install rules (`cmake/NimRTCInstall.cmake`) producing `include/` + `lib/` + `lib/cmake/NimRTC/`; `find_package(NimRTC 1.0 REQUIRED)` consumer verified downstream on Windows and on Linux via the `ci.yml` install + downstream-proof leg | ✅ landed | v1.1 Track D |
 | The installed bundle now carries the WebRTC APM prebuilt + its link-order manifest, so a downstream consumer links the real AEC/ANS/AGC | ✅ landed | v1.1 Track D |
 | Transport-floor benchmark artifacts in CI (`bench_latency.json`, `bench_dc.json` as 14-day artifacts) | ✅ landed | v1.1 Track A |
-| `ISctpSocket::open()/close()` lifecycle; `IICETransport::last_recv_packet()` + in-stack demux; unified `make_transport_instance()`; ARQ stack labelled tech-preview | ✅ landed | v1.2 Track T |
-| Non-standard video clock rate negotiated from SDP `a=rtpmap`; `max_p99_ms` strategy validator (opt-in enforcement) | ✅ landed | v1.2 Track M |
-| DTLS IPv6 `set_peer()` via `getaddrinfo`; NAT-rebinding `rehandshake()`; pump re-entrancy guard test | ✅ landed | v1.2 Track Dtls |
-| Shared adaptive jitter strategy (`src/modules/jb_strategy`): RFC 3550 jitter estimator + "base + 4·J" target delay, shared by the audio and video jitter buffers; video adaptive playout is opt-in | ✅ landed | v1.3 Track Q2 |
+| `ISctpSocket::open()/close()` lifecycle; `IICETransport::last_recv_packet()` + in-stack demux; unified `make_transport_instance()`; ARQ stack labelled tech-preview | ✅ landed | v1.1 Track Ts |
+| Non-standard video clock rate negotiated from SDP `a=rtpmap`; `max_p99_ms` strategy validator (opt-in enforcement) | ✅ landed | v1.1 Track M |
+| DTLS IPv6 `set_peer()` via `getaddrinfo`; NAT-rebinding `rehandshake()`; pump re-entrancy guard test | ✅ landed | v1.1 Track Dtls |
+| Shared adaptive jitter strategy (`src/modules/jb_strategy`): RFC 3550 jitter estimator + "base + 4·J" target delay, shared by the audio and video jitter buffers; video adaptive playout is opt-in | ✅ landed | v1.1 Track Q2 |
 | 3A stage brought in line with its own contract (input-domain level meters, honoured VAD / level flags, real APM reference signal, engine no longer mutates the caller's PCM) | ✅ landed | post-v1.0.2 fix |
 | libsrtp converted to a real git submodule; the vendor manifest now distinguishes verified submodules from checked-in trees | ✅ landed | post-v1.0.2 chore |
-| Goog-CC BWE, RTCP feedback loop, netem weak-network baselines, engine-level `ref_frame` / video stats, GMSSL vendoring + SRTP seam | ⏸️ planned | v1.3 Tracks Q1 / Q3 / Q4 / T / V / X |
+| Goog-CC BWE (opt-in, AIMD stays the default), RTCP feedback loop, netem weak-network baselines, engine-level `ref_frame` / video stats, GMSSL vendoring + SRTP seam, engine source split | ✅ landed | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| OHOS Stage 1 toolchain proof (`debug.ohos-arm64` zero errors, no unresolved symbols) | ⏸️ blocked — no OHOS SDK on this host | v1.1 Track O1 |
 
 > v1.0.2 is the **published Stable** release — public API frozen per ADR-015
 > (`NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`);

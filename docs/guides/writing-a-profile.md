@@ -202,8 +202,8 @@ there is no "quiet default fill" beyond the dotted-line keys.
 ## 5. Worked example: adding a `cloudgame` profile
 
 > **Note (2026-11-04):** `cloudgame` is **not** a shipped Profile — it is a
-> long-term candidate deferred to v1.4+ (see
-> [`docs/plan/v1.3-plan.md`](../plan/v1.3-plan.md) §3 Track V). This section
+> long-term candidate deferred to v1.2+ (see
+> [`docs/plan/v1.1-plan.md`](../plan/v1.1-plan.md) §2 Track V). This section
 > is a **user-side illustration** of the authoring steps, not a shipped
 > profile's source of truth. Two caveats if you copy it verbatim:
 > (a) pick a name that does not collide with a reserved one — `cloudgame`,

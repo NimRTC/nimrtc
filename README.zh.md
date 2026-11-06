@@ -10,9 +10,11 @@
 > **最新发布版**：v1.0.2 稳定版 —— 补丁版，修复 WebTransport ALPN 不匹配与 Windows bundle 体积异常，并随发布附带签名公钥（`v1.0.1` 保持已发布且不变；`v1.0.0` 标签仅保留为源码里程碑，从未作为 GitHub Release 发布）。公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）。Chrome ↔ NimRTC 数据交换（DC-1）：走 Chrome WebTransport JS API（`new WebTransport(url)`，不是 `RTCPeerConnection.createDataChannel()`；标准 WebRTC DataChannel 互通未声称，Firefox/Safari 对 WebTransport 支持不完整）**PASS E1–E6**。
 > 见 [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` 与 `docs/plan/v1.0-plan.md` §3 + §12.3.6。
 >
-> **当前 `main`（v1.0.2 之后，尚未发版）**：主干比已发布 tag 多出 **v1.1** 打包 + 基准轨、
-> **v1.2** 传输 / 媒体 / DTLS 加固轨，以及 **v1.3** 质量线的第一项（共享自适应抖动策略
-> `src/modules/jb_strategy`）。Windows/MSVC Debug 本地全套件 **651/651 PASS**（2026-11-04 实测）。
+> **当前 `main`（v1.0.2 之后，尚未发版）**：主干比已发布 tag 多出合并后的 **v1.1** 发布内容
+> （原 v1.1 / v1.2 / v1.3 三份草稿合并为一个版本目标）：打包 + 基准轨、传输 / 媒体 / DTLS
+> 加固轨，以及质量线的落地项（共享自适应抖动策略 `src/modules/jb_strategy`、Goog-CC BWE、
+> RTCP feedback 回环、引擎级 `ref_frame` / video stats、GMSSL 以 submodule 形式 vendor +
+> SRTP 后端 seam、引擎源码拆分）。Windows/MSVC Debug 本地全套件 **651/651 PASS**（2026-11-04 实测）。
 > 打包规则（`NIMRTC_INSTALL=ON` → `include/` + `lib/` + `lib/cmake/NimRTC/`）已在 `main` 落地，
 > 下一个版本会带上；**已发布的 v1.0.2 bundle 里还没有**。
 > 详见 [当前进度](#当前进度v102-已发布--main-领先) 与 [路线图](#路线图)。
@@ -60,16 +62,18 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
 - **是什么**：一个可嵌入的 C++20 媒体引擎，从零开始实现的 WebRTC 替代品，**不是** libwebrtc 的 fork。
 - **存在的原因**：libwebrtc 体积庞大、难以嵌入、加密和编解码不透明。NimRTC 保留同等级协议兼容性的同时，把 monolith 替换成分层 + plugin 适配的引擎，可被检查、可被定制、可被部署在 aarch64 上。
 - **当前状态**：**v1.0.2 是最新已发布版本**（稳定版）。`main` 主干在 v1.0.2 之后、尚未发版，
-  上面挂着三条在推进的轨道：
-  - **v1.1 —— 质量 + 打包**：可复现的传输层基线（`tools/benchmark_latency.py`、
+  上面挂着一条合并后的 **v1.1** 轨道（原 v1.1 / v1.2 / v1.3 三份草稿合并为一个版本目标）：
+  - **v1.1 —— 质量 + 打包 + 加固 + 质量线**：可复现的传输层基线（`tools/benchmark_latency.py`、
     `tools/benchmark_dc.py`）并产出 CI artifact；`NIMRTC_INSTALL=ON` 安装规则产出
     `include/` + `lib/` + `lib/cmake/NimRTC/`，装完即可 `find_package(NimRTC)`；WebRTC APM
-    预编译产物随包一起安装。
-  - **v1.2 —— 加固**：`ISctpSocket` 生命周期、ICE `last_recv_packet()` 收包分流、p99 策略校验器、
-    非标视频时钟率协商、DTLS IPv6 `set_peer()`、NAT rebinding `rehandshake()`。
-  - **v1.3 —— 质量线（已起步）**：RFC 3550 抖动估计与 "base + 4·J" 目标延迟策略现在**只实现一份**，
-    放在 `src/modules/jb_strategy`，音频（`jb`）与视频（`video_jb`）两个前端共用；视频侧自适应
-    播放通过 `EngineConfig::video_receiver_tuning.adaptive_playout` 开关启用。
+    预编译产物随包一起安装；传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()`
+    收包分流、统一 `make_transport_instance()`、p99 策略校验器、非标视频时钟率协商、
+    DTLS IPv6 `set_peer()`、NAT rebinding `rehandshake()`）；质量线（RFC 3550 抖动估计与
+    "base + 4·J" 目标延迟策略现在**只实现一份**，放在 `src/modules/jb_strategy`，音频（`jb`）
+    与视频（`video_jb`）两个前端共用，视频侧自适应播放通过
+    `EngineConfig::video_receiver_tuning.adaptive_playout` 开关启用；另有 Goog-CC BWE、
+    RTCP feedback 回环、引擎级 `ref_frame` / video stats、GMSSL 以 submodule 形式 vendor、
+    SRTP 后端 seam、引擎源码拆分）。
   公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002），破坏性变更需要 MINOR/MAJOR 版本号。
   Windows/MSVC Debug 本地全套件 **651/651 PASS**。
   **In-process SFU relay（`nimrtc_sfu`）、DC 转发策略（DC-3）、`sfu-relay` 基准（BENCH-1）
@@ -518,7 +522,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 > 完整矩阵（**已交付的 9 个 Profile**，含 JB / 3A / BWE / DC 逐字段取值）见
 > [`docs/profiles.md`](docs/profiles.md)。`cloudgame`（云渲染 / 云游戏串流）是
 > **长线候选，不在已交付 Profile 集合内** —— 见
-> [`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md) §3 Track V。
+> [`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) §2 Track V。
 >
 > `profiles/` 目录下另有两份**未注册**的 JSON：`sfu.json` 与 `sfu-agent.json`。
 > 它们带 `sfu_enabled` 标记与 `sfu-relay` 传输策略，但没有对应的 `kProfileSfu` 常量，
@@ -546,16 +550,12 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 版本 | 定位 | 范围 | 状态 |
 |---|---|---|---|
 | **v1.0.x** | Stable | WebTransport / msquic 数据面（DC-1）、调度器内排序（DC-2）、Chrome e2e Case D + E | ✅ **v1.0.2 已发布** 2026-11-03 |
-| **v1.1** | 质量 + 打包 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿） | 🟡 `main` 上推进中 |
-| **v1.2** | 加固 | 传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护） | 🟡 已落地在 `main` |
-| **v1.3** | 质量线 | 弱网质量链（Goog-CC BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | 🟡 第一项已落地（`jb_strategy`），其余规划中 |
-| **v1.4+** | — | SM4-GCM SRTP 实现、`cloudgame`（长线候选）、`takeover`（远程车辆接管，P4） | ⏸️ 规划中 |
+| **v1.1** | 质量 + 打包 + 加固 + 质量线 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿）；传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护）；弱网质量链（Goog-CC BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | 🟡 已落地在 `main`，等待发布加固门禁 |
+| **v1.2+** | — | SM4-GCM SRTP 实现、`cloudgame`（长线候选）、`takeover`（远程车辆接管，P4） | ⏸️ 规划中 |
 | — | 已关闭 | 进程内 SFU 模块（`nimrtc_sfu`）、DC 转发策略（DC-3）、`sfu-relay` 基准（BENCH-1） | ❌ **NO** —— 2026-10-19 关闭，BDFL：SFU 不是项目核心目标（`docs/plan/v1.0-plan.md` §7） |
 
 完整路线图：[`docs/zh/architecture.md`](docs/zh/architecture.md) §13 ·
-[`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md) ·
-[`docs/plan/v1.2-plan.md`](docs/plan/v1.2-plan.md) ·
-[`docs/plan/v1.3-plan.md`](docs/plan/v1.3-plan.md)。
+[`docs/plan/v1.1-plan.md`](docs/plan/v1.1-plan.md)。
 
 ---
 
@@ -611,13 +611,14 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 打包 —— `NIMRTC_INSTALL=ON` 安装规则（`cmake/NimRTCInstall.cmake`），产出 `include/` + `lib/` + `lib/cmake/NimRTC/`；下游 Windows 已验证 `find_package(NimRTC 1.0 REQUIRED)`，Linux 下游验证随 `ci.yml` 每次推送跑通 | ✅ 已落地 | v1.1 Track D |
 | 安装后的 bundle 现在携带 WebRTC APM 预编译产物及其链接顺序清单，下游可链接真实 AEC/ANS/AGC | ✅ 已落地 | v1.1 Track D |
 | CI 里的传输层基准产物（`bench_latency.json`、`bench_dc.json`，保留 14 天） | ✅ 已落地 | v1.1 Track A |
-| `ISctpSocket::open()/close()` 生命周期；`IICETransport::last_recv_packet()` + 栈内分流；统一 `make_transport_instance()`；ARQ 栈标注为 tech-preview | ✅ 已落地 | v1.2 Track T |
-| 从 SDP `a=rtpmap` 协商非标视频时钟率；`max_p99_ms` 策略校验器（opt-in 强制） | ✅ 已落地 | v1.2 Track M |
-| DTLS IPv6 `set_peer()` 走 `getaddrinfo`；NAT rebinding `rehandshake()`；pump 重入保护测试 | ✅ 已落地 | v1.2 Track Dtls |
-| 共享自适应抖动策略（`src/modules/jb_strategy`）：RFC 3550 抖动估计器 + "base + 4·J" 目标延迟，音频与视频抖动缓冲共用；视频侧自适应播放为 opt-in | ✅ 已落地 | v1.3 Track Q2 |
+| `ISctpSocket::open()/close()` 生命周期；`IICETransport::last_recv_packet()` + 栈内分流；统一 `make_transport_instance()`；ARQ 栈标注为 tech-preview | ✅ 已落地 | v1.1 Track Ts |
+| 从 SDP `a=rtpmap` 协商非标视频时钟率；`max_p99_ms` 策略校验器（opt-in 强制） | ✅ 已落地 | v1.1 Track M |
+| DTLS IPv6 `set_peer()` 走 `getaddrinfo`；NAT rebinding `rehandshake()`；pump 重入保护测试 | ✅ 已落地 | v1.1 Track Dtls |
+| 共享自适应抖动策略（`src/modules/jb_strategy`）：RFC 3550 抖动估计器 + "base + 4·J" 目标延迟，音频与视频抖动缓冲共用；视频侧自适应播放为 opt-in | ✅ 已落地 | v1.1 Track Q2 |
 | 3A 与自身契约对齐（输入域电平表、遵循 VAD / 电平开关、真实 APM 参考信号、引擎不再改动调用方的 PCM） | ✅ 已落地 | v1.0.2 之后的修复 |
 | libsrtp 转为真正的 git submodule；vendor 清单区分已验证 submodule 与签入树 | ✅ 已落地 | v1.0.2 之后的杂项 |
-| Goog-CC BWE、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam | ⏸️ 规划中 | v1.3 Tracks Q1 / Q3 / Q4 / T / V / X |
+| Goog-CC BWE（opt-in，默认仍走 AIMD）、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam、引擎源码拆分 | ✅ 已落地 | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| OHOS Stage 1 工具链实证（`debug.ohos-arm64` 零 error、无未解符号） | ⏸️ 阻塞 —— 本机无 OHOS SDK | v1.1 Track O1 |
 
 > v1.0.2 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
 > （`NIMRTC_API_VERSION` = 10002，`NIMRTC_API_VERSION_PRE_RELEASE` = `""`）；

@@ -65,7 +65,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   body has been corrected accordingly.
 
 - **The installed bundle was missing the shared jitter-buffer strategy.**
-  `nimrtc::jb_strategy` (v1.3 Q2) is linked by both `nimrtc::jb` and
+  `nimrtc::jb_strategy` (v1.1 Q2) is linked by both `nimrtc::jb` and
   `nimrtc::video_jb`, but the install rules did not know about it:
   `cmake/NimRTCInstall.cmake` shipped neither `libnimrtc_jb_strategy.a`
   nor the module's headers, and `cmake/NimRTCConfig.cmake.in` never
@@ -214,7 +214,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an available Profile — but `profiles/cloudgame.json` does not exist and
   `assembly` has no `kProfileCloudGame`; the registry ships 9 profiles.
   BDFL decided on 2026-11-04 that `cloudgame` does **not** enter the official
-  Profile combination and is deferred to v1.4+, because its hardest
+  Profile combination and is deferred to v1.2+, because its hardest
   differentiator ("input aligned to the render frame") needs a **render
   timestamp from the rendering host** (Unreal / Unity), which is outside the
   engine's boundary — the engine does not bundle codecs, and GPU encode /
@@ -225,7 +225,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   teleoperation** (`teleop`, same family, no new Profile);
   `takeover` (remote vehicle takeover) stays P4. All affected documents now
   state `cloudgame` as a long-term candidate that is *not* in the shipped
-  Profile set. `docs/plan/v1.3-plan.md` §3 Track V item V2 is now a
+  Profile set. `docs/plan/v1.1-plan.md` §2 Track V item V2 is now a
   documentation-alignment task rather than a Profile implementation.
 - **The GM/T coverage claim was overstated.** README (EN + ZH) and the
   architecture doc described the project as "GM/T cryptography ready" /
@@ -237,7 +237,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   self-implementing security-critical crypto). The claims are now scoped
   explicitly, which matters because the previous wording was a compliance
   misstatement towards regulated / Xinchuang customers. The compliance
-  layering is documented in `docs/plan/v1.3-plan.md` §3 Track X: signalling
+  layering is documented in `docs/plan/v1.1-plan.md` §2 Track X: signalling
   TLCP is **above** the engine (§10 already says "上层"), DTLS GM/T is
   **inside** the engine, SRTP GM/T is inside the engine but not yet
   implemented.
@@ -287,7 +287,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **The weak-network baseline facility landed (v1.3 Track Q4, "弱网基线设施").**
+- **The weak-network baseline facility landed (v1.1 Track Q4, "弱网基线设施").**
   Two reproducible paths measure the same three tiers — 5% loss,
   20 ms base + 0–100 ms jitter, 1 Mbps cap — over a 1200 B payload:
   - `tools/benchmark_weaknet.py` is the portable path: an in-process
@@ -329,7 +329,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - README (EN + 中文) Benchmarks tables now quote the corrected
     numbers for both paths.
 
-- **The RTCP feedback loop is closed (v1.3 Track Q3, "RTCP 反馈闭环打通").**
+- **The RTCP feedback loop is closed (v1.1 Track Q3, "RTCP 反馈闭环打通").**
   `nimrtc::video_rtcp_feedback` (NACK / FIR / PLI) is now wired to the
   video pipeline, so a lost packet travels the whole path:
   - the receiver detects the RTP sequence-number gap and reports it
@@ -388,7 +388,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     unrelated RTCP packet (a Receiver Report) is left alone.
 
 - **The video jitter buffer now shares the audio side's adaptive
-  playout strategy (v1.3 Track Q2, "视频侧自适应 JB 统一").** The
+  playout strategy (v1.1 Track Q2, "视频侧自适应 JB 统一").** The
   RFC 3550 §6.4.1 interarrival-jitter estimator and the
   "base + 4·J" target-delay policy live **once**, in the new
   `nimrtc::jb_strategy` module; `nimrtc::jb` (audio) and
@@ -413,7 +413,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - gained a time-aware `pop_frame(now_us)` overload; the no-argument
     `pop_frame()` keeps its "hand out the next complete frame"
     behaviour, so existing callers are unaffected.
-- **The Goog-CC bandwidth estimator landed alongside AIMD (v1.3 Track
+- **The Goog-CC bandwidth estimator landed alongside AIMD (v1.1 Track
   Q1, "BWE 主线升级").** `src/modules/bwe/` gains `GoogCcBwe`, a
   delay-plus-loss hybrid estimator registered under the factory id
   `"goog-cc"`; AIMD stays the default backend, and
@@ -422,7 +422,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loss / probe feedback reach the estimator through the existing BWE
   input path, and `tests/test_bwe.cpp` covers bandwidth ramp-up,
   loss-triggered downshift and probe feedback.
-- **The frame↔capture-timestamp map is now an engine API (v1.3 Tracks
+- **The frame↔capture-timestamp map is now an engine API (v1.1 Tracks
   T1/T2, "`ref_frame` 引擎级暴露 / 命令-画面关联").**
   `NimRTCEngine` exposes the bidirectional mapping as additive
   `NIMRTC_API_UNSTABLE` methods — `record_video_ref_frame()` mounts a
@@ -432,28 +432,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it". The map is a bounded 1024-entry ring; `send_video()` and the
   receive callback record automatically. `tests/test_engine_ref_frame.cpp`
   covers mount / reverse lookup / miss / age / eviction.
-- **`NimRTCEngine::stats()` now aggregates the video counters (v1.3
+- **`NimRTCEngine::stats()` now aggregates the video counters (v1.1
   Track V1, "`video_stats` 进 engine").** The eight module-level video
   counters (bitrate / dropped frames / NACK classification) are summed
   into the engine stats view additively — zero-valued when no video
   flows, so existing consumers see no change.
-- **GMSSL is a real git submodule (v1.3 Track X1).** `src/third_party/gmssl`
+- **GMSSL is a real git submodule (v1.1 Track X1).** `src/third_party/gmssl`
   pins GmSSL v3.2.0 (`.gitmodules` + `vendor.json` in sync; the pinned
   LICENSE text verified Apache-2.0-compatible and recorded in
   `vendor.json`). `NIMRTC_ENABLE_DTLS_GMSSL=ON` builds it via
   `add_subdirectory` with no system-install probing; the default stays
   OFF so the default build is unchanged. CI carries the opt-in
   `gmssl-vendored` / `msvc` legs running `test_dtls_gmssl_tlcp`.
-- **The SRTP backend seam landed; SM4-GCM stays v1.4+ (v1.3 Track X2).**
+- **The SRTP backend seam landed; SM4-GCM stays v1.2+ (v1.1 Track X2).**
   `src/plugins/include/nimrtc/plugins/srtp_backend.hpp` declares the
   additive `ISrtpSessionBackend` + factory seam, and
   `src/modules/srtp/` routes the existing libsrtp path through a
   `libsrtp_backend` adapter — behaviour unchanged. SM4-GCM SRTP is
-  explicitly out of scope for v1.3 (workload + D1 "no self-built
+  explicitly out of scope for v1.1 (workload + D1 "no self-built
   security-critical crypto"); the README national-crypto claim is
   scoped to "DTLS/TLCP covered, SRTP still international suites".
 - **The engine translation unit is split five ways, behaviour unchanged
-  (v1.3 Track R1).** `src/engine/src/engine.cpp` (~4.5 kLOC) becomes
+  (v1.1 Track R1).** `src/engine/src/engine.cpp` (~4.5 kLOC) becomes
   five responsibility-grouped TUs sharing the private
   `src/engine/src/engine_impl.hpp` (core / transport / media /
   signaling / timeline); the public `engine.hpp` is untouched (L4).
@@ -514,7 +514,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bundle, so `build-linux-aarch64` is a hard gate again (no
   `continue-on-error`, back in `publish-release.needs`).
   `docs/plan/ci-workarounds.md` W3/W5 remain the source of truth.
-
 ## [1.0.2] - 2026-11-02
 
 ### Status: Stable

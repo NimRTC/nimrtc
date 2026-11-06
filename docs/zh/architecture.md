@@ -74,7 +74,7 @@ flowchart LR
 | AI Agent 实时交互（语音 / 多模态） | 服务端形态：媒体网关 / transceiver，或 relay 中 Agent 作为参与者（Profile 见 §2.6 `agent-gateway` / `relay-agent`）；SDK 形态 Agent 终端（Profile `agent`） | 实时语音 Agent、智能客服、Agent 应用 | ✅ P2（DataChannel 互通 + 媒体网关）/ P3（时间线 + 模型输入原语完整） |
 | 机器人 / 无人设备遥操作 | 设备端 SDK + 远控端 SDK（共用共享核心，Profile `teleop`） | 巡检、物流、危险作业、远程维修 | ✅ P2 起（DC + 调度）/ P4 完整 |
 | 自动驾驶远程接管 / 云控 | 车端 SDK + 云控平台 | Robotaxi / 集卡 / 矿山港口（外部标准见 §8.1） | ✅ 架构支持，P4 交付 |
-| 云游戏 / 云渲染串流 | 渲染端 SDK（服务端形态）+ 玩家端 SDK（客户端形态） | 云游戏平台、3D 应用串流、XR 远端渲染 | ⏸ 长线候选（2026-11-04 决策：不进官方组合，顺延 v1.4+，见 §2.6） |
+| 云游戏 / 云渲染串流 | 渲染端 SDK（服务端形态）+ 玩家端 SDK（客户端形态） | 云游戏平台、3D 应用串流、XR 远端渲染 | ⏸ 长线候选（2026-11-04 决策：不进官方组合，顺延 v1.2+，见 §2.6） |
 | 信创 / 国密 | 双栈加密（国际 + 国密后端） | 政企、关基行业 | ✅ 架构接缝 P1 就位，P4 启用 |
 
 > **场景 = 配置，不是新 SDK**：以上每一行场景都可以从**同一套共享核心**按需选择不同模块实现（BWE / JitterBuffer / 3A / 调度策略 / 时间线 / DataChannel 语义 / 密码后端……），预置为「场景 Profile」并随时覆盖。与 libwebrtc 生态"每场景一个 fork / SDK 分支"不同，NimRTC 一套代码多场景，机制见 **§2.6**。
@@ -240,7 +240,7 @@ nimrtc/
   ③ **上行是高频事件 / 状态流**（键鼠采样率远高于遥操作指令频率），引擎提供输入通道原语，采样 / 合并策略交上层自定；
   ④ **伴音单向**——游戏音效需与画面紧同步但无采集端，3A 依旧关闭。
 
-> **cloudgame 状态说明（2026-11-04 决策）**：本行是**设计预留的长线候选**，**尚未进入官方 Profile 组合**（`profiles/` 无 `cloudgame.json`，`assembly` 无 `kProfileCloudGame`）。不进官方组合的理由：覆盖项 ② 的"渲染帧时间戳"须由渲染端（Unreal / Unity 等）提供，**超出引擎能力边界**（引擎不捆绑编解码器，GPU 硬编与渲染管线接入不在本项目范围）；覆盖项 ①③④ 的实质已被 `teleop` 族 + 命令-画面关联 API 覆盖，边际增量低。**官方组合的推进顺序（v1.3 决策）**：AI Agent（`agent` / `agent-gateway` / `agent-low-latency` / `relay-agent`）与具身智能遥操作（`teleop` 同族复用）优先；`takeover` 归 P4（双链路 + dead-man）；`cloudgame` 顺延 v1.4+。详见 `docs/plan/v1.3-plan.md` §3 Track V 的 V2 决策记录。
+> **cloudgame 状态说明（2026-11-04 决策）**：本行是**设计预留的长线候选**，**尚未进入官方 Profile 组合**（`profiles/` 无 `cloudgame.json`，`assembly` 无 `kProfileCloudGame`）。不进官方组合的理由：覆盖项 ② 的"渲染帧时间戳"须由渲染端（Unreal / Unity 等）提供，**超出引擎能力边界**（引擎不捆绑编解码器，GPU 硬编与渲染管线接入不在本项目范围）；覆盖项 ①③④ 的实质已被 `teleop` 族 + 命令-画面关联 API 覆盖，边际增量低。**官方组合的推进顺序（v1.1 决策）**：AI Agent（`agent` / `agent-gateway` / `agent-low-latency` / `relay-agent`）与具身智能遥操作（`teleop` 同族复用）优先；`takeover` 归 P4（双链路 + dead-man）；`cloudgame` 顺延 v1.2+。详见 `docs/plan/v1.1-plan.md` §2 Track V 的 V2 决策记录。
 
 **（c）为何这是差异化（README 可用）**
 > libwebrtc 生态解决"多场景"的办法是 fork / 多 SDK 分支，各场景实现互相漂移；一体式轻量库只能调参、换不了实现。NimRTC 把"场景"做成 **Profile 层**：同一条接缝的不同实现（Goog-CC / 自自定义、通话 / 直播 / 对讲 JB、内置 / 第三方 / 关闭 3A、国际 / 国密 crypto）按场景组合——构建期裁剪、装配期绑定、会话级并存、运行期受限切换，**一套代码覆盖 通话 / 直播 / 对讲 / AI Agent / 遥操作 / 接管 / 云游戏 / SFU / 嵌入式**。
@@ -308,7 +308,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 | 媒体-数据统一时间线 / 画面-控制对齐 | ✅ 做 | P2 接口 + P3 完整 | timeline 模块默认关闭（零开销），接口与基本能力 P2、命令-画面关联 API P3，见 §8.4 |
 | 双链路冗余 / 接管会话迁移 | ✅ 做 | P4 | 引擎提供原语，完整方案 P4 交付，见 §8.5 |
 | simulcast / SVC | ⏸ 后置 | Tier 1 | 接口预留 |
-| JitterBuffer / BWE / 3A | ✅ 做 | P1 最小 + P3 自适应/完整 | 固定窗口 JB + 简单 AIMD BWE + passthrough/基础降噪 P1 即通话体验可用；P3 替换为自适应 JB + Goog-CC 完整主线 + 完整 3A（弱网基线在 P3 验收）。**v1.3 Track Q2：自适应 JB 策略已收敛为 `nimrtc::jb_strategy` 单一实现**（音频 `nimrtc::jb` / 视频 `nimrtc::video_jb` 两个前端），视频侧默认仍为固定窗口，自适应播放延迟为 opt-in |
+| JitterBuffer / BWE / 3A | ✅ 做 | P1 最小 + P3 自适应/完整 | 固定窗口 JB + 简单 AIMD BWE + passthrough/基础降噪 P1 即通话体验可用；P3 替换为自适应 JB + Goog-CC 完整主线 + 完整 3A（弱网基线在 P3 验收）。**v1.1 Track Q2：自适应 JB 策略已收敛为 `nimrtc::jb_strategy` 单一实现**（音频 `nimrtc::jb` / 视频 `nimrtc::video_jb` 两个前端），视频侧默认仍为固定窗口，自适应播放延迟为 opt-in |
 | Codec 注入接口 / 统一封装（解码器由宿主提供） | ✅ 接口 P1 最小（互通需要）→ P3 完整 | — | 不捆绑解码器；payload 打包/解析归 rtp 模块（P1 含 Opus/H.264 支撑 Tier 0） |
 | 国密后端（SM2/SM4 密码栈） | ✅ 做 | P4（架构接缝 P1 就位） | 架构接缝 P1 就位；落地交付 P4，见 §10 |
 | 双链路调度完整策略 | ✅ 做 | P4 | §8.5 框架 + 完整调度 P4 |
@@ -324,7 +324,7 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 
 > P1 交付**最小可用版质量链路**（固定窗口 JitterBuffer + 简单 AIMD BWE + passthrough/基础降噪 3A），保证 Chrome ↔ NimRTC P2P 通话"体验可用"。**完整质量线（自适应 JB + Goog-CC 兼容主线 + 完整 3A + 弱网基线）放到 P3**。传输层与 SFU 转发均不依赖本节内容（P1 / P2 即可独立交付）。质量是 Google 烧了十几年钱的地方，本节是客户端体验层、也是区分度最大的环节。
 
-- **JitterBuffer**：音/视频策略抽象（低延迟通话 / 直播 / 对讲三档默认策略），P1 先交付**固定窗口实现**，P3 替换为**自适应 JB**；三档与各场景 Profile 的对应关系见 §2.6。**v1.3 Track Q2 已把自适应策略收敛成一份实现**：`nimrtc::jb_strategy`（RFC 3550 §6.4.1 抖动估计 + "base + 4·J" 目标延迟）唯一存在，音频（`nimrtc::jb`）与视频（`nimrtc::video_jb`）是它的两个前端；视频侧默认仍是固定窗口（帧组装完成即交付），自适应播放延迟为 opt-in（`Config::adaptive` / `EngineConfig::video_receiver_tuning.adaptive_playout`）。
+- **JitterBuffer**：音/视频策略抽象（低延迟通话 / 直播 / 对讲三档默认策略），P1 先交付**固定窗口实现**，P3 替换为**自适应 JB**；三档与各场景 Profile 的对应关系见 §2.6。**v1.1 Track Q2 已把自适应策略收敛成一份实现**：`nimrtc::jb_strategy`（RFC 3550 §6.4.1 抖动估计 + "base + 4·J" 目标延迟）唯一存在，音频（`nimrtc::jb`）与视频（`nimrtc::video_jb`）是它的两个前端；视频侧默认仍是固定窗口（帧组装完成即交付），自适应播放延迟为 opt-in（`Config::adaptive` / `EngineConfig::video_receiver_tuning.adaptive_playout`）。
 - **BWE**：P1 交付**简单 AIMD 默认实现**，接口完整、可插拔；P3 替换为 **Goog-CC 兼容主线**作为对外承诺主线；**BBR 不写入对外文档**（RTC over UDP 用 BBR 仍属实验，写出去会被懂行的人抓），仅作内部实验项。
 - **3A**：接口支持 内置实现 / 第三方 AEC·ANS·AGC / 直接关闭（信创设备常自带算法）；P1 交付 passthrough + 基础降噪（开箱即用），P3 补完整 3A。
 - **Codec**：解码器接入抽象 + 统一封装；编 / 解码器一律由宿主或插件提供、core 不捆绑。payload 打包 / 解析归 rtp 模块（P1 即含 Opus / H.264，支撑 Tier 0 互通；见 §5）。PAL Slice 1 引入 `pal::resolve_codec()` / `pal::resolve_video_codec()` 走 `core::PluginRegistry`（详 [ADR-009](../adr/ADR-009-pal-slice-1.md)）。
@@ -434,7 +434,7 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 ### 8.6 分期与架构落点
 
 - 落点：时间线原语 → L0 / timeline 模块；发送调度 → L1 / sched 模块；DC API → L3 session。
-- 分期：**P1** 发送调度契约（sched 接口）+ DataChannel API 入口（无 SCTP 实现，先定接口与 QoS 语义）；**P2** timeline 接口 + DataChannel 基础互通（usrsctp 接入）+ 调度实现 + assembly Profile 库 + 模型输入 PCM tap 原语（P2 首项 §8.7）；**P3** 部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API（~~+ cloudgame 官方 Profile 组合~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**）；**P4** 双链路 / 接管方案完整化交付 + cloudgame 官方 Profile 组合（长线候选）。
+- 分期：**P1** 发送调度契约（sched 接口）+ DataChannel API 入口（无 SCTP 实现，先定接口与 QoS 语义）；**P2** timeline 接口 + DataChannel 基础互通（usrsctp 接入）+ 调度实现 + assembly Profile 库 + 模型输入 PCM tap 原语（P2 首项 §8.7）；**P3** 部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API（~~+ cloudgame 官方 Profile 组合~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.2+**）；**P4** 双链路 / 接管方案完整化交付 + cloudgame 官方 Profile 组合（长线候选）。
 - 指标（§14 量化目标）：引擎单跳处理预算、控制不被挤占、时间线精度——全部【待实测】，禁止先写数字。
 
 ### 8.7 模型输入原语（P2 起，呼应 §2.6 `agent` / `agent-gateway` / `relay-agent` Profile）
@@ -741,7 +741,7 @@ third_party/
 | **P2 relay 转发 + 数据通道 + Agent 接入** | in-process `relay` 转发引擎（`relay-agent` / `agent-gateway` Profile 组合）；**DataChannel 基础互通（可靠 / 不可靠，usrsctp；v0.14.x 切到 WebTransport / QUIC） + L1 发送调度实现**；**timeline 接口（L0）+ 模型输入 PCM tap 原语（§8.7，pre-3a / post-3a 双 tap）**；assembly Profile 库（relay / transport / agent / agent-gateway / relay-agent 官方组合，§2.6） | 双客户端经 NimRTC 转发互通（`relay` Profile 形态）；**Chrome ↔ NimRTC 数据交换（当时为 SCTP 路径，现已切到 WebTransport JS API）**；同一 Scheduler 内排序的本地演示（非跨连接线端保证，见 sched.hpp Scope note）；**AI Agent 接入 demo（agent-gateway 形态：解码旁路 → PCM tap → 上层 ASR/LLM 接入示例）**；社区侧 GitHub Discussions 上线（不引入 Discord / 月度会议，§16.7）；发布首批 RFC（§16.7）；首轮外部贡献者 ≥ 3 | public（Beta 前哨） |
 
 > **P2 调整说明（2026-10-19）**：P2 行的"**sfu-relay 压测 (BENCH-1) + DC 转发策略 (DC-3, §7.1)**"已从 P2 范围移除——`v1.0-plan.md` §7 (SFU-1 / DC-3 / BENCH-1) 在 2026-10-19 由 BDFL 关闭为 NO；SFU 实现不是项目核心目标。P2 仍包含 `relay` Profile 的 in-process 转发引擎（与 SFU 区分：`relay` 是单策略转发，编译期 L2 跳过；SFU 是多策略复用 + 端到端转发控制）。如果 SFU 轨道在 v1.x 重新打开，新 plan 文档 `v1.1.0-plan.md` 决定 P 阶段归属，不回到 P2。
-| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；~~**cloudgame 进入官方 Profile 组合**~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.4+**（其最硬覆盖项"输入↔渲染帧对齐"依赖渲染端提供渲染帧时间戳，超出引擎能力边界；其余覆盖已被 teleop 族 + 命令-画面关联 API 覆盖。详见 `docs/plan/v1.3-plan.md` §V2 决策记录） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 调度器内排序（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
+| **P3 客户端质量成熟 + 控制面语义（v1.0.0 shipped：API 稳定 + DC-1/DC-2 已交付）** | **自适应 JitterBuffer + Goog-CC 完整主线 BWE + 完整 3A + 弱网基线**；**部分可靠（TTL）+ timeline 完整实现 + 命令-画面关联 API**；~~**cloudgame 进入官方 Profile 组合**~~ → **2026-11-04 决策：cloudgame 不进官方组合，顺延 P4 / v1.2+**（其最硬覆盖项"输入↔渲染帧对齐"依赖渲染端提供渲染帧时间戳，超出引擎能力边界；其余覆盖已被 teleop 族 + 命令-画面关联 API 覆盖。详见 `docs/plan/v1.1-plan.md` §5.2 决策记录） | v1.0.0 已交付：公共 API 冻结（ADR-015，102 头 / Missing 0）+ WebTransport DC-1（Case E PASS E1–E6）+ DC-2 调度器内排序（17/17）；API 已稳定；遥操作 demo：指令挂帧号与画面对齐；对外口径从 experimental 转 stable；GitHub 上 star ≥ 200 / 外部贡献者 ≥ 10（§14.1 社区指标）；开源核心 API 冻结承诺 | public（Stable, v1.0.0） |
 | **P4 生产化 + 遥操作交付 + 国密** | 安全审计、QoE 数据、首个真实用户；**双链路 / 接管框架完整化**；国密后端 + 信创适配矩阵；**cloudgame 官方 Profile 组合（长线候选）**；**SRTP SM4-GCM 国密实现** | "可用于生产"不再心虚；完成首次外部安全审计；嵌入式 / 政企 / 关基行业场景下首个公开参考交付 | public（生产可用） |
 
 ### 13.1 aarch64 互通口径：编译可过 ≠ 互通可过

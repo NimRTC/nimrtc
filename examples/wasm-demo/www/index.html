@@ -151,9 +151,7 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
         </ul>
         <h3>On the roadmap (<code>main</code>, ahead of v1.0.2)</h3>
         <ul class="bullet">
-          <li><b>v1.1 — Quality + packaging.</b> Reproducible transport-floor benchmarks with CI artifacts; <code>NIMRTC_INSTALL=ON</code> install rules so <code>find_package(NimRTC)</code> works from an installed tree; WebRTC APM prebuilt shipped alongside.</li>
-          <li><b>v1.2 — Hardening.</b> <code>ISctpSocket</code> lifecycle, ICE <code>last_recv_packet()</code> demux, p99 strategy validator, non-standard video clock-rate negotiation, DTLS IPv6 <code>set_peer()</code>, NAT-rebinding <code>rehandshake()</code>.</li>
-          <li><b>v1.3 — Quality line.</b> Goog-CC BWE, unified adaptive jitter buffer, RTCP feedback loop, engine-level video stats, GMSSL vendoring + SRTP backend seam.</li>
+          <li><b>v1.1 — Quality + packaging + hardening.</b> Reproducible transport-floor benchmarks with CI artifacts; <code>NIMRTC_INSTALL=ON</code> install rules so <code>find_package(NimRTC)</code> works from an installed tree; WebRTC APM prebuilt shipped alongside; <code>ISctpSocket</code> lifecycle, ICE <code>last_recv_packet()</code> demux, p99 strategy validator, non-standard video clock-rate negotiation, DTLS IPv6 <code>set_peer()</code>, NAT-rebinding <code>rehandshake()</code>; Goog-CC BWE, unified adaptive jitter buffer, RTCP feedback loop, engine-level video stats, GMSSL vendoring + SRTP backend seam.</li>
         </ul>
       </div>
     </div>
@@ -211,7 +209,7 @@ python tools/run_e2e_acceptance.py    # Chrome ↔ NimRTC Case D</code></pre>
       audio + video, with <code>getUserMedia</code> on the browser side
       and the <code>transport</code> profile compiled to
       <code>wasm32-unknown-unknown</code>) has not landed yet and is a
-      longer-term candidate — it is not on the v1.0&ndash;v1.3 roadmap,
+      longer-term candidate — it is not on the v1.0&ndash;v1.1 roadmap,
       which covers quality, packaging, hardening, and the weak-network
       chain.
     </p>

@@ -188,8 +188,18 @@ def run_local(exe: Path, log_name: str, timeout_s: int = 60) -> bool:
 # Case D — Chrome interop via signaling_server + signaling_proxy + Chrome
 # ---------------------------------------------------------------------------
 
-def wait_for_port(port: int, timeout_s: float = 5.0) -> bool:
-    """Poll until something is listening on localhost:port."""
+def wait_for_port(port: int, timeout_s: float = 30.0) -> bool:
+    """Poll until something is listening on localhost:port.
+
+    The default timeout is 30 seconds, not 5.  The signaling server is
+    a separate Python process: on a machine that just woke up (the
+    soak's scheduled task runs at 3am) the interpreter start-up and the
+    `import websockets` behind it are served from a cold page cache,
+    and 5 seconds was not enough for the server to reach its first
+    log line.  The failure looked like a product regression -- "the
+    signaling server did not open the port" -- when it was really the
+    harness giving up too early.
+    """
     import socket
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -199,6 +209,15 @@ def wait_for_port(port: int, timeout_s: float = 5.0) -> bool:
         except OSError:
             time.sleep(0.1)
     return False
+
+
+def _log_tail(path, lines: int = 12) -> str:
+    """Return the last few lines of a child process' log, or ''."""
+    try:
+        text = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(text[-lines:])
 
 
 def kill_port(port: int) -> None:
@@ -376,8 +395,14 @@ def run_chrome_interop() -> bool:
             [sys.executable, str(SIGNALING_SERVER), "--port", str(port)],
             stdout=log_signal, stderr=subprocess.STDOUT,
         )
-        if not wait_for_port(port, timeout_s=5.0):
-            print(f"[FAIL] signaling_server did not open :{port}")
+        if not wait_for_port(port, timeout_s=30.0):
+            print(f"[FAIL] signaling_server did not open :{port} "
+                  f"(waited 30s)")
+            tail = _log_tail(E2E / "case_d_signal_server.log")
+            if tail:
+                print("   | signaling_server log tail:")
+                for ln in tail.splitlines():
+                    print(f"   | {ln}")
             return False
         print(f"   signaling_server listening on :{port}")
 
@@ -533,8 +558,13 @@ def run_chrome_interop_reverse() -> bool:
             [sys.executable, str(SIGNALING_SERVER), "--port", str(port)],
             stdout=log_signal, stderr=subprocess.STDOUT,
         )
-        if not wait_for_port(port, timeout_s=5.0):
-            print(f"[FAIL] signaling_server did not open :{port}")
+        if not wait_for_port(port, timeout_s=30.0):
+            print(f"[FAIL] signaling_server did not open :{port} (waited 30s)")
+            tail = _log_tail(E2E / "case_d_rev_signal_server.log")
+            if tail:
+                print("   | signaling_server log tail:")
+                for ln in tail.splitlines():
+                    print(f"   | {ln}")
             return False
         print(f"   signaling_server listening on :{port}")
 

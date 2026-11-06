@@ -159,7 +159,11 @@ git fetch origin \
 for branch in soak/evidence-linux-x86_64 soak/evidence-windows; do
   git ls-tree -r --name-only "origin/$branch" | grep '\.jsonl$' | while read -r f; do
     mkdir -p "build/soak/$(dirname "$f")"
-    git show "origin/$branch:$f" > "build/soak/$f"
+    # APPEND, do not overwrite: the Windows Scheduled Task and the CI
+    # job both produce a record for the same platform and day, and the
+    # summary needs both (it reads a day as green only when every
+    # required case has a PASS record).
+    git show "origin/$branch:$f" >> "build/soak/$f"
   done
 done
 python tools/run_soak.py --summary --require

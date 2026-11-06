@@ -11,7 +11,7 @@
 #   - windows       : MSVC 19.43 on windows-2022         (static .lib + headers)
 #   - linux-gcc     : GCC 11 on ubuntu-22.04             (.a + headers, x86_64)
 #   - linux-aarch64 : GCC 11 on ubuntu-24.04-arm         (.a + headers, arm64)
-#   - macos-clang   : Apple Clang 15 on macos-14         (.a + headers, arm64)
+#   - macos-clang   : Apple Clang on macos-15           (.a + headers, arm64)
 #
 # Required secrets (v1.0.0+ only; pre-1.0 Tech Preview can run with these
 # empty — see RELEASING.md §3.3 step 10):
@@ -584,7 +584,10 @@ jobs:
   build-macos-clang:
     name: release / build / macos-clang
     needs: preflight
-    runs-on: macos-14
+    # macos-14 images were retired from GitHub Actions on 2026-11-02
+    # (actions/runner-images#15226); a job asking for that label never
+    # gets a runner.  macos-15 is the current arm64 image.
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
@@ -594,7 +597,7 @@ jobs:
           submodules: recursive
           ref: ${{ needs.preflight.outputs.release_tag }}
 
-      # macos-14 runners ship Python 3.12 + xz-utils pre-installed, but
+      # macos-15 runners ship Python 3.12 + xz-utils pre-installed, but
       # the system Python 3 is "externally managed" (PEP 668) and
       # `brew update && brew install python@3.12 xz` is slow enough
       # (10-25 min cold-tap refresh on first run) to push the whole
@@ -618,7 +621,7 @@ jobs:
       # is NOT "externally managed" (PEP 668), so a plain
       # `python3 -m pip install --user` works without
       # `--break-system-packages` and without going through Homebrew
-      # (which can take 5+ min on a cold tap refresh on macos-14
+      # (which can take 5+ min on a cold tap refresh on macos-15
       # runners). Mirror the linux-gcc / windows pattern.
       # NOTE: the user-site scripts dir (here
       # `/Users/runner/Library/Python/3.12/bin`) is NOT on PATH for

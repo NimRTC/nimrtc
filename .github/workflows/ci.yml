@@ -5,7 +5,7 @@
 #   - windows       : MSVC 19.43 on windows-2022        (primary dev env)
 #   - linux-gcc     : GCC 11 on ubuntu-22.04            (x86_64)
 #   - linux-aarch64 : GCC 11 on ubuntu-24.04-arm        (native arm64 runner)
-#   - macos-clang   : Apple Clang 15 on macos-14        (arm64; runs x86_64 binaries
+#   - macos-clang   : Apple Clang on macos-15           (arm64; runs x86_64 binaries
 #                                                          under Rosetta)
 #
 # Goals:
@@ -192,7 +192,13 @@ jobs:
           arch: x64
 
       - name: Configure (GMSSL ON)
-        run: cmake --preset debug.msvc -DNIMRTC_ENABLE_DTLS_GMSSL=ON -DNIMRTC_BUILD_EXAMPLES=OFF
+        # NIMRTC_VENDORED_WEBRTC_APM=OFF: this leg is about the GMSSL DTLS
+        # backend, not the 3A stack.  The WebRTC APM prebuilt archive is
+        # not present on a CI runner (it is produced by the release
+        # workflow's out-of-tree meson prebuild), and the default ON
+        # contract hard-fails at configure time when the archive is
+        # missing.  Every other CI leg passes the same flag.
+        run: cmake --preset debug.msvc -DNIMRTC_ENABLE_DTLS_GMSSL=ON -DNIMRTC_BUILD_EXAMPLES=OFF -DNIMRTC_VENDORED_WEBRTC_APM=OFF
 
       - name: Build GMSSL backend + TLCP test
         run: cmake --build --preset debug.msvc --target nimrtc_dtls_seam nimrtc_gmssl_cli test_dtls_gmssl_tlcp -j 2
@@ -536,11 +542,18 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # macOS: Apple Clang on macos-14 (arm64)
+  # macOS: Apple Clang on macos-15 (arm64)
+  #
+  # macos-14 images were retired from GitHub Actions on 2026-11-02
+  # (actions/runner-images#15226).  A job that asks for a retired label
+  # is never allocated a runner: it stays queued and is then cancelled,
+  # which is exactly what every macos-clang job did from 2026-11-06
+  # onwards.  macos-15 is the current arm64 image; it ships a newer
+  # CMake (3.31.x) and Xcode, so the Apple Clang leg is unaffected.
   # ---------------------------------------------------------------------------
   macos-clang:
     name: macos-clang / arm64
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-macos-clang
@@ -570,11 +583,16 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
 
-      # macos-14 ships CMake 3.27.x (≥ 3.25). Only Python is added here.
+      # macos-15 ships a modern CMake (3.31.x, ≥ 3.25) but its system
+      # Python is not guaranteed to be the version the tooling expects
+      # (and a Homebrew `brew update` can burn 10-25 min on a cold tap
+      # refresh).  Pin a managed interpreter with actions/setup-python,
+      # exactly as the release workflow's macos job does.
       - name: Install Python
-        run: |
-          brew update
-          brew install python@3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
 
       # Fail fast: detect missing tools before wasting minutes on configure.
       - name: Pre-flight tool check

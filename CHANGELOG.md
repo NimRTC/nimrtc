@@ -13,6 +13,26 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Commits and tags were signed with an email GitHub does not recognise, so
+  every signature showed up as unverified.** The release key
+  `114154CFEC3F5EE5A8D2D313BEACFBB55871CC06` carried the Gitee noreply
+  address `15608750+video-reflow@user.noreply.gitee.com` as its only user ID.
+  No GitHub account owns that address, so GitHub answered `no_user` for a
+  signed commit and never rendered a "Verified" badge. The key's user ID is
+  now `NimRTC Release <realdesktop@163.com>`, the account address of
+  `NimRTC`, and the key's public block was re-exported with a stock
+  `gpg --export` into `build/nimrtc-release-signing.pub.asc`. The fingerprint
+  is unchanged, so signatures made before the rename still verify and the
+  published `v1.0.2` assets keep verifying against the same key; the account's
+  GitHub GPG key list must be re-pointed at the new block before GitHub
+  accepts the key (see `docs/plan/v1.1-plan.md` Track C6).
+- **The exported public key was not a valid OpenPGP block.** The copy on disk
+  had been written by a PowerShell redirection, which encodes stdout as
+  UTF-16LE with a BOM; GnuPG rejects it with "partial length invalid for
+  packet type 63" and `gpg --import` fails with "Invalid keyring", so no
+  standard tool could read it. Writing the export through GnuPG's own
+  `--output` flag produces a plain ASCII armoured block that imports cleanly
+  and whose self-signature reports "Good signature".
 - **The offline release-signature verifier rejected valid signatures.**
   `tools/verify_release_signature.py` re-implements Ed25519 in pure
   Python so a release can be checked without GnuPG. Two defects made

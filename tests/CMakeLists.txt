@@ -145,6 +145,54 @@ endfunction()
 nimrtc_add_web_transport_dc_test(test_web_transport_data_channel
                                   test_web_transport_data_channel.cpp)
 
+# ----------------------------------------------------------------------------
+# v1.2.0 (audio pipeline, WP-1) -- the two new plugin seams.
+#
+# `tests/test_audio_seams.cpp` pins down the contract that WP-2 (the
+# Opus-side decoder) and WP-3 (the audio_rx module) build on:
+#
+#   - the seam headers compile standalone and expose the documented
+#     negotiation defaults,
+#   - the registry has a *distinct* category per seam, and plugin ids
+#     are per-category -- the Opus decoder may use the id "opus" even
+#     though the Opus codec plugin already uses "opus" in the codec
+#     category,
+#   - the static registration macros work,
+#   - the engine-side resolvers find what the registry holds and
+#     return nullptr for an unknown id (no silent fallback).
+#
+# The test is dependency-free by design: it uses fake implementations,
+# so it needs neither the Opus module nor the audio_rx module.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_audio_seam_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::core
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        # The engine-side resolvers live in the engine's include tree;
+        # the resolver header is header-only, so no engine link is needed.
+        "${CMAKE_SOURCE_DIR}/src/engine/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+endfunction()
+
+nimrtc_add_audio_seam_test(test_audio_seams test_audio_seams.cpp)
+
 # NOTE: A real-msquic loopback integration test (test_web_transport_msquic.cpp)
 # was drafted for v0.14.0-beta.1 (DC-1 land, Gate #2), but the bundled
 # msquic v2.x header surface (QUIC_API_TABLE) lacks the symbols the full

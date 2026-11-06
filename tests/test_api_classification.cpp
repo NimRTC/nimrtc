@@ -279,12 +279,19 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - plugins/srtp_backend.hpp (ISrtpSessionBackend + factory)
     //     - srtp/libsrtp_backend.hpp (libsrtp-backed seam adapter)
     //
+    // v1.2.0 bump: +3 public headers (106 -> 109) for the audio
+    //   pipeline's two plugin seams and the audio_rx module header
+    //   (spec E-8; audio-pipeline plan WP-1 / WP-3):
+    //     - plugins/audio_decoder.hpp (IAudioDecoder + factory)
+    //     - plugins/audio_receiver.hpp (IAudioReceiver + factory)
+    //     - audio_rx/audio_rx.hpp (the module's public header)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 106;
+    constexpr std::size_t kBaselineHeaderCount = 109;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -25,6 +25,8 @@
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
+#include <nimrtc/plugins/audio_decoder.hpp>
+#include <nimrtc/plugins/audio_receiver.hpp>
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
@@ -47,6 +49,22 @@ resolve_audio3a(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::ICodecFactory*
 resolve_codec(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_codec(id);
+}
+
+/** Resolve an `IAudioDecoderFactory` by plugin id. Returns nullptr if not
+ *  registered.  Used by the engine to satisfy `EngineConfig::audio_decoder_name`
+ *  (default "opus") -- the audio pipeline's codec-side seam. */
+[[nodiscard]] inline const plugins::IAudioDecoderFactory*
+resolve_audio_decoder(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_decoder(id);
+}
+
+/** Resolve an `IAudioReceiverFactory` by plugin id. Returns nullptr if not
+ *  registered.  Used by the engine to satisfy `EngineConfig::audio_receiver_name`
+ *  (default "nimrtc_audio_rx") -- the audio pipeline's pipeline-side seam. */
+[[nodiscard]] inline const plugins::IAudioReceiverFactory*
+resolve_audio_receiver(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_audio_receiver(id);
 }
 
 /** Resolve an `IBweFactory` by plugin id. Returns nullptr if not registered. */

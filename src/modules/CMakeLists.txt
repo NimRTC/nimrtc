@@ -72,6 +72,13 @@ if(NIMRTC_MODULE_OPUS)
     add_subdirectory(opus)
 endif()
 
+# v1.2.0 (audio pipeline): the audio receive pipeline. Self-contained
+# module -- it depends on nimrtc::core and nimrtc::plugins only; the
+# jitter buffer and the decoder are injected through the plugin seams.
+if(NIMRTC_MODULE_AUDIO_RX)
+    add_subdirectory(audio_rx)
+endif()
+
 if(NIMRTC_MODULE_SESSION)
     add_subdirectory(session)
 endif()

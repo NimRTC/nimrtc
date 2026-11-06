@@ -80,6 +80,13 @@ class NIMRTC_API_STABLE IVideoSenderFactory;
 class NIMRTC_API_STABLE IBweFactory;
 class NIMRTC_API_STABLE ISchedulerFactory;
 class NIMRTC_API_STABLE IDataChannelFactory;
+// v1.2.0 (audio pipeline): the two new audio seams -- the codec-side
+// decoder and the pipeline-side receiver. Forward-declared like the
+// other factory types so the registry's TypedRegistry<> fields can
+// reference them without pulling the seam headers into core
+// (Layout Invariant 1).
+class NIMRTC_API_STABLE IAudioDecoderFactory;
+class NIMRTC_API_STABLE IAudioReceiverFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -141,6 +148,19 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
 namespace datachannel      { void register_default_plugins() noexcept; }
+// v1.2.0 (audio pipeline): the audio receive-pipeline module. Its entry
+// point populates the audio-receiver registry slot
+// (register_audio_receiver) so `core::register_all_default_plugins()`
+// can wire the built-in receiver through the unified table.
+//
+// The declaration is unconditional -- like the ice / rtp / sdp / jb /
+// datachannel entries above -- so every consumer of
+// <nimrtc/core/registry.hpp> sees the same set of module entry points.
+// The *definition* lands with the module (WP-3), and the matching
+// kDefaultRegistrars[] entry lands with WP-7 -- which is also where the
+// engine starts linking nimrtc::audio_rx.  Until then nobody takes the
+// address of this symbol, so the declaration alone is harmless.
+namespace audio_rx { void register_default_plugins() noexcept; }
 // Transport PAL Slice 8 (v0.10.2): module-level entry points for the
 // DTLS / SCTP / raw_udp / transport-stack seams. Each one populates
 // its matching typed registry slot (register_dtls_session /
@@ -341,6 +361,33 @@ public:
     }
     [[nodiscard]] std::vector<std::string_view> list_codecs() const {
         return codec_.list_ids();
+    }
+
+    // -- Audio Decoder (v1.2.0, audio pipeline) ----------------------------
+    // The codec-side seam of the audio pipeline. Ids are per-category,
+    // so the Opus decoder registers under "opus" in this category even
+    // though the Opus *codec* plugin already uses that id in the codec
+    // category.
+    void register_audio_decoder(std::string_view id,
+                                const plugins::IAudioDecoderFactory* f);
+    [[nodiscard]] const plugins::IAudioDecoderFactory*
+    get_audio_decoder(std::string_view id) const {
+        return audio_decoder_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_audio_decoders() const {
+        return audio_decoder_.list_ids();
+    }
+
+    // -- Audio Receiver (v1.2.0, audio pipeline) ---------------------------
+    // The pipeline-side seam of the audio pipeline.
+    void register_audio_receiver(std::string_view id,
+                                 const plugins::IAudioReceiverFactory* f);
+    [[nodiscard]] const plugins::IAudioReceiverFactory*
+    get_audio_receiver(std::string_view id) const {
+        return audio_receiver_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_audio_receivers() const {
+        return audio_receiver_.list_ids();
     }
 
     // -- Video Codec --------------------------------------------------------
@@ -563,6 +610,8 @@ private:
     TypedRegistry<plugins::IJBFactory>           jb_;
     TypedRegistry<plugins::IAudio3AFactory>      audio3a_;
     TypedRegistry<plugins::ICodecFactory>        codec_;
+    TypedRegistry<plugins::IAudioDecoderFactory> audio_decoder_;
+    TypedRegistry<plugins::IAudioReceiverFactory> audio_receiver_;
     TypedRegistry<plugins::IVideoCodecFactory>   video_codec_;
     TypedRegistry<plugins::IVideoSourceFactory>  video_source_;
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
@@ -655,6 +704,38 @@ private:
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kCodec,          \
             #id, factory_ptr }
+
+/** Register an audio decoder plugin by ID and factory pointer.
+ *  v1.2.0 (audio pipeline) -- the codec-side seam.
+ *
+ *  @param id         A string literal, e.g. "opus". Unlike the legacy
+ *                    NIMRTC_REGISTER_* family (which stringifies a bare
+ *                    identifier token), the two audio-seam macros take the
+ *                    literal as-is -- the audio pipeline documents its
+ *                    plugin ids as string literals everywhere else.
+ *  @param factory_ptr A pointer to a static IAudioDecoderFactory.
+ *
+ *  Usage: NIMRTC_REGISTER_AUDIO_DECODER("opus", &g_opus_decoder_factory); */
+#define NIMRTC_REGISTER_AUDIO_DECODER(id, factory_ptr)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_decoder_){                          \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioDecoder,   \
+            id, factory_ptr }
+
+/** Register an audio receiver pipeline plugin by ID and factory pointer.
+ *  v1.2.0 (audio pipeline) -- the pipeline-side seam.
+ *
+ *  @param id         A string literal, e.g. "nimrtc_audio_rx".
+ *  @param factory_ptr A pointer to a static IAudioReceiverFactory.
+ *
+ *  Usage: NIMRTC_REGISTER_AUDIO_RECEIVER("nimrtc_audio_rx", &g_factory); */
+#define NIMRTC_REGISTER_AUDIO_RECEIVER(id, factory_ptr)                  \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_audio_receiver_){                        \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kAudioReceiver,  \
+            id, factory_ptr }
 
 /** Register a video codec plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_CODEC(id, factory_ptr)                     \
@@ -817,6 +898,9 @@ class Registrar {
 public:
     enum class Category {
         kTransport, kICETransport, kRTP, kSDP, kJB, kAudio3A, kCodec, kVideoCodec,
+        // v1.2.0 (audio pipeline): the two new audio seams -- the
+        // codec-side decoder and the pipeline-side receiver.
+        kAudioDecoder, kAudioReceiver,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
         kBwe, kScheduler,
         // P2: DataChannel typed factory slot ??see register_datachannel().
@@ -863,6 +947,14 @@ public:
             case Category::kCodec:
                 reg.register_codec(id,
                     static_cast<const plugins::ICodecFactory*>(factory));
+                break;
+            case Category::kAudioDecoder:
+                reg.register_audio_decoder(id,
+                    static_cast<const plugins::IAudioDecoderFactory*>(factory));
+                break;
+            case Category::kAudioReceiver:
+                reg.register_audio_receiver(id,
+                    static_cast<const plugins::IAudioReceiverFactory*>(factory));
                 break;
             case Category::kVideoCodec:
                 reg.register_video_codec(id,
@@ -974,6 +1066,14 @@ inline void register_all_default_plugins() noexcept {
 #include "nimrtc/plugins/video_pipeline.hpp"
 #include "nimrtc/plugins/bwe.hpp"
 #include "nimrtc/plugins/scheduler.hpp"
+
+// v1.2.0 (audio pipeline): the two new audio seams -- the codec-side
+// decoder and the pipeline-side receiver. Including them here is what
+// makes the back-compat shim work for code that only includes
+// <nimrtc/core/registry.hpp> and then references the new factory types
+// (spec B-15). Same pattern as the slots above.
+#include "nimrtc/plugins/audio_decoder.hpp"
+#include "nimrtc/plugins/audio_receiver.hpp"
 
 // Transport PAL Slice 8 (v0.10.2): seam headers for the typed factory
 // slots (DTLS / SCTP / raw_udp / transport-stack). Including them here

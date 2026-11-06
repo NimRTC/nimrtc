@@ -82,6 +82,46 @@ Two rules shape the split:
 > **The "Ships in" column is the ladder of §6.2, as the owner fixed it
 > on 2026-11-06.** See §6 before anyone schedules the work.
 
+### 2.1 Progress log
+
+**WP-0 (baseline) — recorded 2026-11-07, Windows 10 x86_64, MSVC 2022,
+Debug.** The five mechanical gates of spec V-5 on the untouched tree:
+
+| Gate | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 106 public headers, 707 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK — every marker-using header includes `api_version.hpp` |
+| `bash scripts/check-release-freeze.sh` | 7/7 PASS (sfu, api, api-symbols, vendor, version, submodules, root) |
+| `bash scripts/check-root-clean.sh` | PASS — no scratch / log / keylog artefacts at the root |
+| `pwsh scripts/check-markdown-utf8.ps1` | clean (checked with the Python equivalent on this machine — PowerShell 7 is not installed; the script's own recursion overflows under Windows PowerShell 5.1) |
+
+Acceptance evidence at the same point: `ctest --test-dir build -C Debug`
+→ **697 / 697 passed, 0 failed**; the acceptance runner's Case D (real
+Chrome interop over the full audio path) is exercised by
+`tools/run_e2e_acceptance.py --case d`.
+
+**After WP-1 (the two plugin seams) — 2026-11-07.** The scan reports
+**109 public headers** (106 + `plugins/audio_decoder.hpp` +
+`plugins/audio_receiver.hpp` + the module header `audio_rx/audio_rx.hpp`)
+and `Missing == 0`, which is exactly the E-8 prediction.  The symbol
+count moves 707 → 729.
+
+| Gate (after WP-1) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 729 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `bash scripts/check-release-freeze.sh` | 7/7 PASS |
+| `bash scripts/check-root-clean.sh` | PASS |
+| `ctest --test-dir build -C Debug` | **706 / 706 passed, 0 failed** (697 baseline + 9 entries: the 6 cases of `tests/test_audio_seams.cpp` plus its binary-level entry, and the `audio_rx` module's placeholder test plus its binary-level entry) |
+
+**One defect found and fixed inside WP-1.**  The two new registration
+macros initially stringified their id argument (`#id`), so a call of the
+form `NIMRTC_REGISTER_AUDIO_DECODER("opus", &factory)` stored the id
+`"opus"` *with* the quote characters — the lookup by `opus` then failed.
+The two audio-seam macros now take the id literal as-is; the legacy
+`NIMRTC_REGISTER_*` family (which stringifies a bare identifier token)
+is left untouched, and the difference is documented at each macro.
+
 ---
 
 ## 3. The work packages in detail

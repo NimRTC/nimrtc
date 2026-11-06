@@ -163,6 +163,11 @@ endif()
 if(NIMRTC_MODULE_H264)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_H264=1)
 endif()
+# v1.2.0 (audio pipeline): the audio receive-pipeline module's own
+# visibility macro is set by the module itself (src/modules/audio_rx/
+# CMakeLists.txt, PUBLIC).  Nothing needs to be mirrored here yet: the
+# kDefaultRegistrars[] entry for the module lands with WP-7, which is
+# also where the engine starts linking nimrtc::audio_rx.
 nimrtc_apply_options(nimrtc_core_objects)
 nimrtc_apply_options(nimrtc_registry)
 

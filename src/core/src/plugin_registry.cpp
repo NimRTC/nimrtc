@@ -119,6 +119,16 @@ void PluginRegistry::register_codec(std::string_view id,
     codec_.register_one(id, f);
 }
 
+void PluginRegistry::register_audio_decoder(std::string_view id,
+                                            const plugins::IAudioDecoderFactory* f) {
+    audio_decoder_.register_one(id, f);
+}
+
+void PluginRegistry::register_audio_receiver(std::string_view id,
+                                             const plugins::IAudioReceiverFactory* f) {
+    audio_receiver_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_codec(std::string_view id,
                                           const plugins::IVideoCodecFactory* f) {
     video_codec_.register_one(id, f);

@@ -109,4 +109,27 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 
+// ---------------------------------------------------------------------------
+// Audio pipeline — 0x1A40..0x1A4F (v1.2.0)
+// ---------------------------------------------------------------------------
+// The audio pipeline's own range, next to the audio3A block (0x1A00..0x1A1F)
+// and the video block (0x1A20..0x1A3F).  The values are stable per the
+// engine error-code compatibility rule.
+//
+// `kAudioCodecUnsupported` (negotiation-time: the peer offered a codec we
+// do not implement) and `kAudioPayloadTypeUnknown` (packet-time: this
+// packet's payload type is not in the negotiated routing table) are
+// deliberately different codes -- the first is a configuration condition
+// that disables the track, the second is a per-packet anomaly that is
+// counted and dropped.
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioCodecUnsupported   = 0x1A40;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioDecodeFailed       = 0x1A41;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioEncodeFailed       = 0x1A42;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioReceiverMissing    = 0x1A43;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioClockMismatch      = 0x1A44;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioChannelMismatch    = 0x1A45;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioDecoderMissing     = 0x1A46;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioDecoderUnsupported = 0x1A47;
+inline constexpr NIMRTC_API_STABLE std::uint32_t kAudioPayloadTypeUnknown = 0x1A48;
+
 } // namespace nimrtc::core

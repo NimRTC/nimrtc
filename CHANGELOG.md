@@ -13,6 +13,24 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The GMSSL TLCP backend corrupted the heap on every `open()` and crashed
+  the process.** `DtlsSessionGmSSL` allocated its `TLS_CTX` and
+  `TLS_CONNECT` objects in fixed-size byte buffers (128 KiB / 256 KiB) whose
+  sizes came from stale measurements of an older GmSSL. The real structs are
+  much larger — `sizeof(TLS_CTX)` is 201,128 bytes and `sizeof(TLS_CONNECT)`
+  is 189,280 bytes on the vendored v3.2.0 tree — and GmSSL's
+  `tls_ctx_init()` / `tls_init()` `memset` the whole struct. The 128 KiB
+  `TLS_CTX` buffer was therefore ~70 KiB too small: the `memset` ran past
+  the end of the allocation and smashed the heap, so
+  `test_dtls_gmssl_tlcp` died with a SEGV before the handshake even
+  started. The buffers are now sized from the real `sizeof()` plus a 64 KiB
+  margin, and a compile-time `#error` guard makes the build fail loudly if
+  the GmSSL feature macros (`ENABLE_SM9` / `ENABLE_SECP256R1` / `ENABLE_LMS`
+  / `ENABLE_XMSS` / `ENABLE_SPHINCS` / `ENABLE_KYBER`) ever stop reaching
+  this translation unit — those macros decide the size of the `X509_KEY`
+  union, so a mismatch would silently change the struct layout and turn
+  the same memset into heap corruption again. With the fix the TLCP
+  handshake completes and the whole suite is 697 tests, 0 failures.
 - **The vendored Opus library was built against a different C runtime than
   the rest of the project, so Debug builds crashed on the audio path.**
   `src/third_party/libopus/CMakeLists.txt` tried to pin the Opus target to

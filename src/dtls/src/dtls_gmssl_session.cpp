@@ -96,6 +96,21 @@ extern "C" {
 #include <gmssl/rand.h>
 }
 
+// ABI guard: GmSSL's `X509_KEY` is a union whose size is decided by the
+// ENABLE_* feature macros (SM9 / SECP256R1 / LMS / XMSS / SPHINCS /
+// KYBER).  The library is compiled with all of them ON; if this
+// translation unit is compiled without them, sizeof(X509_KEY) shrinks,
+// TLS_CTX / TLS_CONNECT get a different layout, and the library's
+// `memset(ctx, 0, sizeof(*ctx))` would scribble past the end of the
+// allocation — heap corruption, not a compile error.  The macros are
+// PUBLIC on nimrtc_vendor_gmssl (see src/third_party/gmssl/CMakeLists.txt),
+// so this guard only fires if that propagation is broken.
+#if !defined(ENABLE_SM9) || !defined(ENABLE_SECP256R1) || \
+    !defined(ENABLE_LMS) || !defined(ENABLE_XMSS) || \
+    !defined(ENABLE_SPHINCS) || !defined(ENABLE_KYBER)
+#error "GMSSL feature macros missing: this TU would not match the GmSSL library's struct layout (see src/third_party/gmssl/CMakeLists.txt)"
+#endif
+
 namespace {
 
 using nimrtc::dtls::Config;
@@ -291,23 +306,36 @@ struct DtlsSessionGmSSL::Impl {
     // heap allocations so the lib's internal `memset(ptr, 0, sizeof(*ptr))`
     // calls cannot bleed into adjacent Impl fields or std::string SSO data.
     //
-    // TLS_CTX is consistent: both lib and headers agree on 12,136 bytes.
-    // TLS_CONNECT is NOT consistent: the lib's tls_init does memset of
-    // 118,424 bytes while the header declares sizeof(TLS_CONNECT) = 117,512.
-    // This 912-byte overflow is a genuine lib/header mismatch in the
-    // current GmSSL 3.3 build.  Until upstream resolves it, we over-allocate
-    // TLS_CONNECT by ~35% (256 KiB) to absorb the surplus writes.
+    // Sizing: the library memsets `sizeof(*ctx)` / `sizeof(*conn)` — the
+    // size *as the library sees it*.  That size is only meaningful if this
+    // translation unit sees the SAME struct layout, and GMSSL's layout is
+    // macro-dependent: `X509_KEY` (embedded 8x inside TLS_CTX, 3x inside
+    // TLS_CONNECT) is a union whose size is decided by the ENABLE_*
+    // feature macros (SM9 / SECP256R1 / LMS / XMSS / SPHINCS / KYBER).
+    // The macros are PUBLIC on nimrtc_vendor_gmssl, so consumers inherit
+    // them and sizeof() agrees with the library — but only as long as that
+    // stays true, hence the #error guard below.
     //
-    // Sizes chosen with ~35% margin past the observed runtime memset
-    // boundaries (tls_ctx_init → 12,136 B; tls_init → 118,424 B).
-    // Bump them only if a future libgmssl drops in with larger structs.
+    // Measured on the vendored v3.2.0 tree (x64, MSVC):
+    //     sizeof(X509_KEY)    =  23,760 B
+    //     sizeof(TLS_CTX)     = 201,128 B
+    //     sizeof(TLS_CONNECT) = 189,280 B
+    // The earlier 128 KiB / 256 KiB fixed buffers were sized from stale
+    // numbers (12,136 / 117,512) and the 128 KiB TLS_CTX buffer was
+    // SMALLER than the real struct: tls_ctx_init()'s memset ran ~70 KiB
+    // past the end of the allocation and corrupted the heap (the TLCP
+    // test crashed with a SEGV before the handshake even started).
     //
-    // We keep TLS_CTX at 128 KiB (tight but safe) and TLS_CONNECT at
-    // 256 KiB.  Each Impl allocates exactly one of each, so the memory
-    // cost (~384 KiB/session) is acceptable for NimRTC's typical session
-    // count.
-    static constexpr std::size_t kRuntimeTLS_CTX     = 128 * 1024;  // 131,072 B — past 12,136
-    static constexpr std::size_t kRuntimeTLS_CONNECT = 256 * 1024;  // 262,144 B — past 118,424
+    // The buffers are therefore sized from the real sizeof() plus a
+    // margin, so a future library build that grows the struct cannot
+    // silently turn into heap corruption again.
+    static constexpr std::size_t kGmsslStructMargin = 64 * 1024;
+    static std::size_t runtime_ctx_size() noexcept {
+        return sizeof(TLS_CTX) + kGmsslStructMargin;
+    }
+    static std::size_t runtime_conn_size() noexcept {
+        return sizeof(TLS_CONNECT) + kGmsslStructMargin;
+    }
     std::unique_ptr<std::byte[]>  ctx_owner_;
     std::unique_ptr<std::byte[]>  conn_owner_;
     TLS_CTX*     ctx_  = nullptr;
@@ -356,11 +384,12 @@ struct DtlsSessionGmSSL::Impl {
 
     bool setup_context(bool prefer_tlcp) {
         // Lazy-allocate the GMSSL context the FIRST time we need it.
-        // See the comment on `kRuntimeTLS_CTX` above for why these structs
-        // are not in-class initializers and why we over-allocate.
+        // See the comment on `runtime_ctx_size()` above for why these
+        // structs are not in-class initializers and why the buffer is
+        // over-allocated.
         if (!ctx_owner_) {
-            ctx_owner_.reset(new std::byte[kRuntimeTLS_CTX]);
-            std::memset(ctx_owner_.get(), 0, kRuntimeTLS_CTX);
+            ctx_owner_.reset(new std::byte[runtime_ctx_size()]);
+            std::memset(ctx_owner_.get(), 0, runtime_ctx_size());
         }
         ctx_  = reinterpret_cast<TLS_CTX*>(ctx_owner_.get());
         conn_ = reinterpret_cast<TLS_CONNECT*>(conn_owner_.get());
@@ -565,11 +594,11 @@ struct DtlsSessionGmSSL::Impl {
                             [[maybe_unused]] const char* key_file,
                             [[maybe_unused]] const char* key_pass) {
         // Lazy-allocate TLS_CONNECT the FIRST time we need it.
-        // See the comment on `kRuntimeTLS_CONNECT` above for the
-        // runtime-size dance and why we over-allocate.
+        // See the comment on `runtime_conn_size()` above for the
+        // runtime-size dance and why the buffer is over-allocated.
         if (!conn_owner_) {
-            conn_owner_.reset(new std::byte[kRuntimeTLS_CONNECT]);
-            std::memset(conn_owner_.get(), 0, kRuntimeTLS_CONNECT);
+            conn_owner_.reset(new std::byte[runtime_conn_size()]);
+            std::memset(conn_owner_.get(), 0, runtime_conn_size());
         }
         ctx_  = reinterpret_cast<TLS_CTX*>(ctx_owner_.get());
         conn_ = reinterpret_cast<TLS_CONNECT*>(conn_owner_.get());

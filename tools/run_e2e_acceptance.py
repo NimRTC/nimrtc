@@ -88,8 +88,69 @@ EXE_DEMO    = BIN_EXAMPLES / ("demo-p2p" + EXE_SUFFIX)
 SIGNALING_SERVER = ROOT / "interop" / "signaling" / "signaling_server.py"
 SIGNALING_PROXY  = ROOT / "interop" / "signaling" / "signaling_proxy.py"
 
-SIGNAL_PORT      = 8765
+# The signaling WebSocket port.  8765 is the historical default, but on a
+# developer machine it is regularly occupied by an unrelated service (a
+# uvicorn/FastMCP HTTP server is a common offender).  On Windows the
+# collision is silent and destructive: `websockets.serve` binds 0.0.0.0:8765
+# successfully even when another process already holds 127.0.0.1:8765
+# (SO_REUSEADDR semantics), and the incoming connections are then delivered
+# to the FOREIGN listener.  That foreign server answers the WebSocket
+# upgrade with "HTTP/1.1 404 Not Found", so the Python proxy dies with
+# "timed out during opening handshake" and Chrome reports
+# "WebSocket error" -- a failure that looks like a Chrome bug but is not.
+#
+# Fix: pick a free port at run time (or honour NIMRTC_SIGNAL_PORT), and
+# verify the server really answers a WebSocket upgrade before starting the
+# browser.  0 means "choose one automatically".
+SIGNAL_PORT = int(os.environ.get("NIMRTC_SIGNAL_PORT", "0") or 0)
 PROXY_DURATION   = 30
+
+
+def pick_free_port() -> int:
+    """Return a TCP port that is currently free on all local interfaces.
+
+    The socket is bound to 0.0.0.0 (not 127.0.0.1) because the signaling
+    server binds 0.0.0.0 too: a port that is only free on loopback may
+    still be taken on a physical interface, and the bind would then fail
+    at server start-up instead of here.
+    """
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        s.bind(("0.0.0.0", 0))
+        s.listen(1)
+        return int(s.getsockname()[1])
+
+
+def ws_upgrade_status(port: int, path: str = "/__healthcheck__",
+                      timeout_s: float = 5.0) -> str:
+    """Perform a real WebSocket handshake against the signaling server.
+
+    Returns the HTTP status line of the answer ("HTTP/1.1 101 ..." for a
+    working signaling server, "HTTP/1.1 404 ..." when a foreign service
+    has stolen the port, ...).  The probe uses its own room so it does not
+    occupy an "offerer" slot in the room the real peers use.
+    """
+    import socket
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: localhost:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout_s) as s:
+            s.settimeout(timeout_s)
+            s.sendall(request.encode())
+            data = s.recv(512)
+    except OSError as e:
+        return f"connection error: {e}"
+    if not data:
+        return "no response"
+    return data.split(b"\r\n", 1)[0].decode(errors="replace").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +202,18 @@ def wait_for_port(port: int, timeout_s: float = 5.0) -> bool:
 
 
 def kill_port(port: int) -> None:
-    """Best-effort: kill any process holding this port (Windows)."""
+    """Best-effort: kill any process holding this port."""
+    if os.name != "nt":
+        # POSIX: `fuser` / `lsof` instead of netstat + taskkill, which
+        # are Windows-only.  The acceptance runner also runs on Linux
+        # (the scheduled soak workflow), where the old implementation
+        # silently did nothing.
+        for argv in (["fuser", "-k", f"{port}/tcp"], ["lsof", "-t", f"-i:{port}"]):
+            try:
+                subprocess.run(argv, capture_output=True, check=False)
+            except Exception:
+                continue
+        return
     try:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
@@ -252,17 +324,28 @@ def run_chrome_interop() -> bool:
         kw = dict(stdout=stdout or subprocess.DEVNULL,
                   stderr=stderr  or subprocess.DEVNULL)
         # Detach into its own process group on Windows so we can kill cleanly.
-        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # The flag is Windows-only -- subprocess.CREATE_NEW_PROCESS_GROUP
+        # does not exist on POSIX, and referencing it unconditionally made
+        # the whole acceptance runner crash with an AttributeError on
+        # Linux (which is where the scheduled soak workflow runs).
+        if sys.platform == "win32":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         p = subprocess.Popen(argv, **kw)
         procs.append((name, p))
         print(f"   started {name} (pid={p.pid})")
         return p
 
     rc_overall = 1
+    # Choose the signaling port for THIS run.  See the SIGNAL_PORT comment
+    # for why the historical fixed 8765 is not safe to assume.
+    port = SIGNAL_PORT or pick_free_port()
+    print(f"   signaling port: {port}")
     try:
-        # Free the port first.
-        kill_port(SIGNAL_PORT)
-        time.sleep(0.3)
+        # Free the port first (only meaningful when the port was pinned
+        # explicitly -- an auto-picked port is free by construction).
+        if SIGNAL_PORT:
+            kill_port(port)
+            time.sleep(0.3)
 
         # Set DTLS diagnostic env vars BEFORE spawning the proxy so the
         # demo-p2p child (which the proxy Popen()s without env= and
@@ -290,13 +373,27 @@ def run_chrome_interop() -> bool:
         # 1) Signaling server
         _start(
             "signaling_server",
-            [sys.executable, str(SIGNALING_SERVER), "--port", str(SIGNAL_PORT)],
+            [sys.executable, str(SIGNALING_SERVER), "--port", str(port)],
             stdout=log_signal, stderr=subprocess.STDOUT,
         )
-        if not wait_for_port(SIGNAL_PORT, timeout_s=5.0):
-            print(f"[FAIL] signaling_server did not open :{SIGNAL_PORT}")
+        if not wait_for_port(port, timeout_s=5.0):
+            print(f"[FAIL] signaling_server did not open :{port}")
             return False
-        print(f"   signaling_server listening on :{SIGNAL_PORT}")
+        print(f"   signaling_server listening on :{port}")
+
+        # Prove the listener really is the NimRTC signaling server before
+        # blaming Chrome for a later failure.  A foreign service holding
+        # the port answers the upgrade with 404 (or nothing at all), and
+        # that is exactly the state in which Case D used to fail with an
+        # opaque "WebSocket error" on the Chrome side.
+        status = ws_upgrade_status(port)
+        print(f"   signaling health check: {status}")
+        if not status.startswith("HTTP/1.1 101"):
+            print(f"[FAIL] :{port} is not answering WebSocket upgrades "
+                  f"(got {status!r}).  Another service is most likely "
+                  f"listening on that port -- pick another one with "
+                  f"NIMRTC_SIGNAL_PORT=<port>.")
+            return False
 
         # 2) signaling_proxy (manages demo-p2p as NimRTC side; ANSWERER,
         # because e2e_chrome_interop.py loads Chrome as offerer in room
@@ -311,7 +408,7 @@ def run_chrome_interop() -> bool:
             "signaling_proxy",
             [
                 sys.executable, str(SIGNALING_PROXY),
-                "--signaling", f"ws://127.0.0.1:{SIGNAL_PORT}/interop",
+                "--signaling", f"ws://127.0.0.1:{port}/interop",
                 "--binary", str(EXE_DEMO),
                 "--answerer",
                 "--bind", "0.0.0.0",
@@ -330,9 +427,13 @@ def run_chrome_interop() -> bool:
         # its full output appears in build/e2e/case_d_chrome.log.
         chrome_log = E2E / "case_d_chrome.log"
         cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
+        # Tell the browser script which signaling server to talk to.
+        chrome_env = dict(os.environ)
+        chrome_env["NIMRTC_CHROME_WS_URL"] = f"ws://localhost:{port}/interop"
         with open(chrome_log, "w", encoding="utf-8") as f:
             rc_chrome = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT,
-                                        timeout=PROXY_DURATION + 30)
+                                        timeout=PROXY_DURATION + 30,
+                                        env=chrome_env)
         # tail chrome log
         tail = chrome_log.read_text(errors="replace").splitlines()[-30:]
         for ln in tail:
@@ -376,7 +477,7 @@ def run_chrome_interop() -> bool:
                     p.kill()
             except Exception:
                 pass
-        kill_port(SIGNAL_PORT)
+        kill_port(port)
         log_signal.close()
         log_proxy.close()
         log_proxy_e.close()
@@ -401,16 +502,21 @@ def run_chrome_interop_reverse() -> bool:
     def _start(name: str, argv, stdout=None, stderr=None) -> subprocess.Popen:
         kw = dict(stdout=stdout or subprocess.DEVNULL,
                   stderr=stderr  or subprocess.DEVNULL)
-        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # Windows-only flag -- see run_chrome_interop() for the details.
+        if sys.platform == "win32":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         p = subprocess.Popen(argv, **kw)
         procs.append((name, p))
         print(f"   started {name} (pid={p.pid})")
         return p
 
     rc_overall = 1
+    port = SIGNAL_PORT or pick_free_port()
+    print(f"   signaling port: {port}")
     try:
-        kill_port(SIGNAL_PORT)
-        time.sleep(0.3)
+        if SIGNAL_PORT:
+            kill_port(port)
+            time.sleep(0.3)
 
         os.environ["NIMRTC_DTLS_KEYLOG"] = str(E2E / "nimrtc_chrome_rev.keylog")
         os.environ["NIMRTC_DTLS_TRACE"]  = str(E2E / "nimrtc_chrome_rev.trace")
@@ -424,13 +530,22 @@ def run_chrome_interop_reverse() -> bool:
 
         _start(
             "signaling_server",
-            [sys.executable, str(SIGNALING_SERVER), "--port", str(SIGNAL_PORT)],
+            [sys.executable, str(SIGNALING_SERVER), "--port", str(port)],
             stdout=log_signal, stderr=subprocess.STDOUT,
         )
-        if not wait_for_port(SIGNAL_PORT, timeout_s=5.0):
-            print(f"[FAIL] signaling_server did not open :{SIGNAL_PORT}")
+        if not wait_for_port(port, timeout_s=5.0):
+            print(f"[FAIL] signaling_server did not open :{port}")
             return False
-        print(f"   signaling_server listening on :{SIGNAL_PORT}")
+        print(f"   signaling_server listening on :{port}")
+
+        status = ws_upgrade_status(port)
+        print(f"   signaling health check: {status}")
+        if not status.startswith("HTTP/1.1 101"):
+            print(f"[FAIL] :{port} is not answering WebSocket upgrades "
+                  f"(got {status!r}).  Another service is most likely "
+                  f"listening on that port -- pick another one with "
+                  f"NIMRTC_SIGNAL_PORT=<port>.")
+            return False
 
         # NimRTC side is the OFFERER here (no --answerer): demo-p2p emits
         # its offer + candidates immediately on startup.
@@ -438,7 +553,7 @@ def run_chrome_interop_reverse() -> bool:
             "signaling_proxy",
             [
                 sys.executable, str(SIGNALING_PROXY),
-                "--signaling", f"ws://127.0.0.1:{SIGNAL_PORT}/interop",
+                "--signaling", f"ws://127.0.0.1:{port}/interop",
                 "--binary", str(EXE_DEMO),
                 "--bind", "0.0.0.0",
                 "--no-stun",
@@ -453,9 +568,12 @@ def run_chrome_interop_reverse() -> bool:
         chrome_log = E2E / "case_d_rev_chrome.log"
         cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py"),
                "--direction", "nimrtc-offer"]
+        chrome_env = dict(os.environ)
+        chrome_env["NIMRTC_CHROME_WS_URL"] = f"ws://localhost:{port}/interop"
         with open(chrome_log, "w", encoding="utf-8") as f:
             rc_chrome = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT,
-                                        timeout=PROXY_DURATION + 30)
+                                        timeout=PROXY_DURATION + 30,
+                                        env=chrome_env)
         tail = chrome_log.read_text(errors="replace").splitlines()[-30:]
         for ln in tail:
             print(f"   | {ln}")
@@ -494,7 +612,7 @@ def run_chrome_interop_reverse() -> bool:
                     p.kill()
             except Exception:
                 pass
-        kill_port(SIGNAL_PORT)
+        kill_port(port)
         log_signal.close()
         log_proxy.close()
         log_proxy_e.close()
@@ -524,11 +642,29 @@ def run_case_e_dtls() -> bool:
         return False
 
     log = E2E / "case_e_harness.log"
+    # Same reasoning as Case D: the historical fixed port 9000 can be
+    # occupied by an unrelated local service, and on Windows the bind then
+    # succeeds while the traffic is stolen by the foreign listener.
+    e_port = SIGNAL_PORT or pick_free_port()
+    print(f"   signaling port: {e_port}")
+    # A stale results file must never be able to decide this case.  The
+    # harness writes case_e_results.json at the END of a successful run,
+    # so a file left behind by an earlier run says nothing about THIS
+    # one -- and reading it made a crashed harness (the
+    # `CHROME_EXE` UnboundLocalError, for instance) report PASS.  Delete
+    # it before the launch so only a fresh file can be found below.
+    results_path = E2E / "case_e_results.json"
+    if results_path.exists():
+        try:
+            results_path.unlink()
+        except OSError as e:
+            print(f"[warn] could not remove the stale {results_path}: {e}")
+
     try:
         with open(log, "w", encoding="utf-8") as f:
             rc = subprocess.call(
                 [sys.executable, str(harness_py),
-                 "--signaling-port", "9000",
+                 "--signaling-port", str(e_port),
                  "--timeout", "25"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
@@ -544,8 +680,10 @@ def run_case_e_dtls() -> bool:
             print(f"   | {ln}")
     print(f"[rc]  run_harness.py exit={rc}")
 
-    # Read the machine-readable results from the harness.
-    results_path = E2E / "case_e_results.json"
+    # Read the machine-readable results from the harness.  The verdict
+    # needs BOTH a clean exit code and a fresh results file: the exit
+    # code says the harness ran to completion, the results file says the
+    # assertions inside it passed.
     if results_path.exists():
         try:
             obj = json.loads(results_path.read_text(errors="replace"))
@@ -556,10 +694,16 @@ def run_case_e_dtls() -> bool:
             nimrtc_line = obj.get("nimrtc_dtls_line", "")
             print(f"         Chrome dtlsState={dtls_state!r}")
             print(f"         NimRTC DTLS line: {nimrtc_line[:80] if nimrtc_line else '(not found)'}")
+            if rc != 0:
+                print(f"[FAIL] the harness exited {rc}; its results file is not a verdict")
+                return False
             return bool(pass_)
         except Exception as e:
             print(f"[warn] could not parse {results_path}: {e}")
 
+    if rc != 0:
+        print(f"[FAIL] run_harness.py exit={rc} and no results file was written")
+        return False
     return rc == 0
 
 

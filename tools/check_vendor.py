@@ -153,21 +153,33 @@ def check_vendor(v: dict, strict: bool) -> VendorResult:
     expected = v["commit_sha"]
     sub_path = REPO_ROOT / v["submodule_path"]
 
+    # The manifest's "submodule": false declaration has to be honoured
+    # BEFORE the path-existence check.  Such a vendor is a build-time
+    # fetch: its source tree is not tracked by this repository (it is
+    # gitignored) and is materialised by tools/fetch_webrtc_apm.py at
+    # build time, so its absence in a fresh checkout is the expected
+    # state, not vendor drift.  Checking the path first made every
+    # fresh clone -- i.e. every CI runner -- report "missing", which
+    # the strict vendor gate in scripts/check-release-freeze.sh then
+    # turned into a hard failure on every push.
+    if not v.get("submodule", True):
+        # There is no gitlink to verify; the pinned SHA documents the
+        # upstream revision the fetch is expected to produce.
+        head = read_submodule_head(sub_path) if sub_path.exists() else None
+        msg = "declared in the manifest as a build-time fetch, not a submodule"
+        if head:
+            msg += f"; fetched tree HEAD {head[:12]}"
+        else:
+            msg += (
+                "; the fetched tree is not present in this checkout "
+                "(it is materialised at build time)"
+            )
+        return VendorResult(name, "not-a-submodule", expected, head, msg)
+
     if not sub_path.exists():
         msg = "path does not exist on disk"
         status = "missing" if strict else "no-submodule"
         return VendorResult(name, status, expected, None, msg)
-
-    if not v.get("submodule", True):
-        # The manifest declares this vendor as not-a-submodule (for
-        # example a tree that is fetched at build time). There is no
-        # gitlink to verify; the pinned SHA documents the upstream
-        # revision the fetch is expected to produce.
-        head = read_submodule_head(sub_path)
-        msg = "declared in the manifest as a build-time fetch, not a submodule"
-        if head:
-            msg += f"; fetched tree HEAD {head[:12]}"
-        return VendorResult(name, "not-a-submodule", expected, head, msg)
 
     entries = index_entries(sub_path)
     has_gitlink = any(mode == GITLINK_MODE for mode, _ in entries)
@@ -305,6 +317,93 @@ def render_json(results: list[VendorResult], manifest_errors: list[str]) -> int:
     return 0 if payload["ok"] else 1
 
 
+def run_self_test() -> int:
+    """Pin the gate semantics that a fresh clone depends on.
+
+    The strict vendor gate runs on a CI runner, where the build-time
+    fetched sources have never been materialised.  A build-time fetch
+    vendor that is absent there must therefore NOT be reported as
+    "missing": the absence is the expected state of a fresh checkout,
+    and treating it as drift turned every CI push red.
+    """
+    failures: list[str] = []
+
+    def expect(label: str, actual: str, wanted: str) -> None:
+        if actual == wanted:
+            print(f"[PASS] {label}: {actual}")
+        else:
+            failures.append(f"{label}: got {actual!r}, wanted {wanted!r}")
+            print(f"[FAIL] {label}: got {actual!r}, wanted {wanted!r}")
+
+    absent_fetch = {
+        "name": "self-test-build-time-fetch",
+        "commit_sha": "0" * 40,
+        "submodule_path": "src/third_party/self-test-absent/src",
+        "submodule": False,
+    }
+    expect(
+        "an absent build-time fetch is not drift (strict)",
+        check_vendor(absent_fetch, strict=True).status,
+        "not-a-submodule",
+    )
+    expect(
+        "an absent build-time fetch is not drift (lenient)",
+        check_vendor(absent_fetch, strict=False).status,
+        "not-a-submodule",
+    )
+
+    absent_submodule = {
+        "name": "self-test-absent-submodule",
+        "commit_sha": "0" * 40,
+        "submodule_path": "src/third_party/self-test-absent",
+        "submodule": True,
+    }
+    expect(
+        "an absent real submodule is drift (strict)",
+        check_vendor(absent_submodule, strict=True).status,
+        "missing",
+    )
+    expect(
+        "an absent real submodule only warns (lenient)",
+        check_vendor(absent_submodule, strict=False).status,
+        "no-submodule",
+    )
+
+    expect(
+        "a placeholder SHA is rejected by the manifest validation",
+        "rejected"
+        if any(
+            "placeholder" in e
+            for e in validate_manifest(
+                {"vendors": [{"name": "x", "commit_sha": "REPLACE_WITH_FULL_SHA", "submodule_path": "p"}]}
+            )
+        )
+        else "accepted",
+        "rejected",
+    )
+    expect(
+        "a short SHA is rejected by the manifest validation",
+        "rejected"
+        if any(
+            "40 lowercase hex" in e
+            for e in validate_manifest(
+                {"vendors": [{"name": "x", "commit_sha": "abc", "submodule_path": "p"}]}
+            )
+        )
+        else "accepted",
+        "rejected",
+    )
+
+    print()
+    if failures:
+        print(f"FAILED: {len(failures)} self-test(s)")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    print("OK: all self-tests passed")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify every submodule SHA matches src/third_party/vendor.json."
@@ -315,7 +414,15 @@ def main() -> int:
         action="store_true",
         help="treat a missing submodule path as a failure (default: warn only)",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="exercise the gate semantics and exit (no manifest is read)",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        return run_self_test()
 
     if not MANIFEST_PATH.exists():
         print(f"vendor.json not found at {MANIFEST_PATH}", file=sys.stderr)

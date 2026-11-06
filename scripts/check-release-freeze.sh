@@ -315,13 +315,26 @@ if want vendor; then
         report FAIL vendor "tools/check_vendor.py not found"
     else
         mkdir -p build
-        vendor_out=$("$py" tools/check_vendor.py --strict 2>&1)
-        vendor_rc=$?
-        if [ "$vendor_rc" -eq 0 ]; then
-            report PASS vendor "$(echo "$vendor_out" | grep -iE 'ok|match|verified' | head -3 | tr '\n' ' ')"
+        # The self-test pins the gate's semantics before the gate is
+        # applied: a build-time fetched vendor is absent from a fresh
+        # clone, and that absence must not be reported as drift.  It
+        # regressed once already (the strict gate failed every CI push
+        # until e6e5943's vendor block was fixed), and the self-test is
+        # what stops the same class of bug from coming back silently.
+        selftest_out=$("$py" tools/check_vendor.py --self-test 2>&1)
+        selftest_rc=$?
+        if [ "$selftest_rc" -ne 0 ]; then
+            report FAIL vendor "the vendor gate's own self-test failed" \
+                          "$selftest_out"
         else
-            report FAIL vendor "vendored submodule SHAs do not match src/third_party/vendor.json" \
-                          "$vendor_out"
+            vendor_out=$("$py" tools/check_vendor.py --strict 2>&1)
+            vendor_rc=$?
+            if [ "$vendor_rc" -eq 0 ]; then
+                report PASS vendor "$(echo "$vendor_out" | grep -iE 'ok|match|verified' | head -3 | tr '\n' ' ')"
+            else
+                report FAIL vendor "vendored submodule SHAs do not match src/third_party/vendor.json" \
+                              "$vendor_out"
+            fi
         fi
     fi
 fi

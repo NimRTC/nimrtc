@@ -235,12 +235,20 @@ def git_provenance():
     to credit a day that was measured on something other than the
     candidate branch.
 
-    Returns a dict with `git_ref` and `git_commit`.  Both are `None`
-    when the tree cannot be identified (not a git checkout, no `git` on
-    PATH) -- the record is still written, and the summary then treats
-    the day as measured on an unknown tree, which is not green.
+    Returns a dict with `git_ref`, `git_commit` and `git_dirty`.  The
+    first two are `None` when the tree cannot be identified (not a git
+    checkout, no `git` on PATH) -- the record is still written, and the
+    summary then treats the day as measured on an unknown tree, which
+    is not green.
+
+    `git_dirty` says whether the tree carried uncommitted changes when
+    the measurement was taken.  A commit identifies a *tree*, but a
+    dirty tree is not that tree: the program that ran is whatever the
+    working directory happened to contain.  Recording the flag and
+    refusing to credit a dirty day keeps the window a statement about
+    the tree that gets tagged.
     """
-    provenance = {"git_ref": None, "git_commit": None}
+    provenance = {"git_ref": None, "git_commit": None, "git_dirty": None}
 
     # The branch the tree is on.  `symbolic-ref` answers the branch when
     # HEAD is attached to one, and fails when the checkout is detached
@@ -284,6 +292,22 @@ def git_provenance():
     except (OSError, subprocess.TimeoutExpired):
         pass
 
+    # Whether the working tree matched that commit.  `--porcelain`
+    # prints one line per difference and nothing at all when the tree
+    # is clean; ignored files are not reported, so the build tree
+    # under `build/` does not count as a difference.  A record written
+    # by a collector that could not answer the question carries `None`,
+    # which the summary treats as "not known to be clean" -- the same
+    # conservative reading as an unidentified tree.
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "status", "--porcelain"],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        if proc.returncode == 0:
+            provenance["git_dirty"] = bool(decode(proc.stdout).strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     return provenance
 
 
@@ -323,6 +347,7 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
             "stderr_excerpt": "",
             "git_ref": provenance["git_ref"],
             "git_commit": provenance["git_commit"],
+            "git_dirty": provenance["git_dirty"],
         }
         append_record(evidence_path(out_dir, plat, stamp), record)
         return record
@@ -373,6 +398,7 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
         "stderr_excerpt": stderr[:EXCERPT_BYTES],
         "git_ref": provenance["git_ref"],
         "git_commit": provenance["git_commit"],
+        "git_dirty": provenance["git_dirty"],
     }
     append_record(evidence_path(out_dir, plat, stamp), record)
     return record
@@ -480,6 +506,52 @@ def _day_is_on_ref(cases, expect_ref):
     return True
 
 
+def _day_is_clean(cases):
+    """Whether every record of a day was measured on a clean tree.
+
+    A commit identifies a tree, but a dirty working tree is not that
+    tree: the program that produced the evidence is whatever the
+    working directory happened to contain.  A record that does not say
+    whether the tree was clean (one written before the collector
+    tracked it) counts as NOT clean -- the same conservative reading as
+    an unidentified tree, because the gate cannot certify what it
+    cannot see.
+    """
+    for records in cases.values():
+        for rec in records:
+            if rec.get("git_dirty") is not False:
+                return False
+    return True
+
+
+def _day_cleanliness(cases):
+    """How well the day's records describe the tree they were measured on.
+
+    Returns "clean", "dirty" or "unknown":
+
+    * "dirty"   -- at least one record saw uncommitted changes;
+    * "unknown" -- no record saw a dirty tree, but at least one did not
+      say whether the tree was clean (a record written before the
+      collector tracked the flag);
+    * "clean"   -- every record saw a clean tree.
+    """
+    seen = set()
+    for records in cases.values():
+        for rec in records:
+            dirty = rec.get("git_dirty")
+            if dirty is True:
+                seen.add("dirty")
+            elif dirty is False:
+                seen.add("clean")
+            else:
+                seen.add("unknown")
+    if "dirty" in seen:
+        return "dirty"
+    if "unknown" in seen:
+        return "unknown"
+    return "clean"
+
+
 def summarise(records, required_cases, expect_ref=None):
     """Compute the per-platform streaks and the gaps.
 
@@ -509,12 +581,19 @@ def summarise(records, required_cases, expect_ref=None):
         green_dates = []
         not_green = []
         wrong_ref_days = []
+        dirty_days = []
+        unknown_days = []
         for day in sorted(days):
             cases = days[day]
             on_ref = _day_is_on_ref(cases, expect_ref)
             if not on_ref:
                 wrong_ref_days.append({"day": day, "refs": _day_refs(cases)})
-            if _day_is_green(cases, required_cases) and on_ref:
+            cleanliness = _day_cleanliness(cases)
+            if cleanliness == "dirty":
+                dirty_days.append({"day": day})
+            elif cleanliness == "unknown":
+                unknown_days.append({"day": day})
+            if _day_is_green(cases, required_cases) and on_ref and cleanliness == "clean":
                 green_dates.append(day)
             else:
                 entry = {
@@ -531,6 +610,8 @@ def summarise(records, required_cases, expect_ref=None):
                     # day is the tree it was measured on, and the report
                     # has to say so rather than imply a case failure.
                     entry["wrong_ref"] = _day_refs(cases)
+                if cleanliness != "clean":
+                    entry["tree_state"] = cleanliness
                 not_green.append(entry)
 
         # The streak is a run of *calendar*-consecutive green days.
@@ -606,6 +687,8 @@ def summarise(records, required_cases, expect_ref=None):
                                      for day_cases in days.values()
                                      for ref in _day_refs(day_cases)}),
             "wrong_ref_days": wrong_ref_days,
+            "dirty_tree_days": dirty_days,
+            "unknown_cleanliness_days": unknown_days,
         }
 
     # Every tracked platform appears in the summary, even when it has
@@ -648,6 +731,18 @@ def print_summary(summary, required_cases, expect_ref=None):
             for entry in info["wrong_ref_days"]:
                 print("        %s  measured on: %s"
                       % (entry["day"], ", ".join(entry["refs"])))
+        if info.get("dirty_tree_days"):
+            print("    days measured on an unclean tree: %d (these do not count "
+                  "as green)" % len(info["dirty_tree_days"]))
+            for entry in info["dirty_tree_days"]:
+                print("        %s  the working tree carried uncommitted changes"
+                      % entry["day"])
+        if info.get("unknown_cleanliness_days"):
+            print("    days whose tree state was not recorded: %d (these do not "
+                  "count as green)" % len(info["unknown_cleanliness_days"]))
+            for entry in info["unknown_cleanliness_days"]:
+                print("        %s  the collector did not record whether the "
+                      "working tree was clean" % entry["day"])
         if info["inconclusive_days"]:
             print("    inconclusive days     : %d (these do not count as green)"
                   % len(info["inconclusive_days"]))
@@ -669,6 +764,13 @@ def print_summary(summary, required_cases, expect_ref=None):
                     print("        %s  measured on another tree: %s"
                           % (entry["day"], ", ".join(entry["wrong_ref"])))
                     continue
+                if entry.get("tree_state") == "dirty":
+                    print("        %s  measured on an unclean tree" % entry["day"])
+                    continue
+                if entry.get("tree_state") == "unknown":
+                    print("        %s  the tree's cleanliness was not recorded"
+                          % entry["day"])
+                    continue
                 missing = ", ".join(entry["cases_without_pass"]) or "-"
                 print("        %s  no PASS for: %s" % (entry["day"], missing))
         print()
@@ -678,12 +780,17 @@ def print_summary(summary, required_cases, expect_ref=None):
 # Self-test
 # ---------------------------------------------------------------------------
 
-def _record(day, case, status, plat="windows", reason="", ref=None, commit=None):
+def _record(day, case, status, plat="windows", reason="", ref=None, commit=None,
+            dirty=False):
     """Build one synthetic evidence record.
 
     `ref` and `commit` stand in for the tree the collector recorded.
     `None` means "the tree could not be identified", which is what a
     record written before the collector tracked it looks like.
+
+    `dirty` stands in for "the working tree carried uncommitted
+    changes".  `None` means "the collector did not say", which the
+    summary reads as not known to be clean.
     """
     return {
         "timestamp": "%sT02:00:00+00:00" % day,
@@ -698,6 +805,7 @@ def _record(day, case, status, plat="windows", reason="", ref=None, commit=None)
         "stderr_excerpt": "",
         "git_ref": ref,
         "git_commit": commit,
+        "git_dirty": dirty,
     }
 
 
@@ -958,6 +1066,42 @@ def _self_test():
     check(info["consecutive_green_days"] == 7,
           "without an expected tree the tree does not affect the streak "
           "(got %d)" % info["consecutive_green_days"])
+
+    # 18. A day measured on a tree that carried uncommitted changes is
+    #     not green.  The commit identifies the tree, but a dirty
+    #     working tree is not that tree -- the program that ran is
+    #     whatever the working directory happened to contain, so the
+    #     day says nothing about the tree that gets tagged.
+    recs = [_record(day, case, "PASS", ref="release/1.1")
+            for day in seven for case in cases]
+    recs += [_record(seven[3], "d", "PASS", ref="release/1.1", dirty=True)]
+    info = summarise(recs, cases, expect_ref="release/1.1")["windows"]
+    check(info["consecutive_green_days"] == 3,
+          "a day measured on an unclean tree ends the streak "
+          "(streak %d, expected 3)" % info["consecutive_green_days"])
+    check(len(info["dirty_tree_days"]) == 1,
+          "the day measured on an unclean tree is listed as such "
+          "(got %d, expected 1)" % len(info["dirty_tree_days"]))
+    check(gate_unsatisfied(summarise(recs, cases, expect_ref="release/1.1"), 7) != [],
+          "a window containing an unclean-tree day fails the gate")
+
+    # 19. A record that does not say whether the tree was clean is read
+    #     as not known to be clean -- the gate cannot certify what it
+    #     cannot see.  This is what a record written before the
+    #     collector tracked the flag looks like.
+    recs = [_record(day, case, "PASS", ref="release/1.1")
+            for day in seven for case in cases]
+    for rec in recs:
+        rec["git_dirty"] = None
+    info = summarise(recs, cases, expect_ref="release/1.1")["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "a day whose cleanliness is unknown is not green "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+    check(len(info["unknown_cleanliness_days"]) == 7,
+          "a day whose cleanliness is unknown is reported as unknown, not as "
+          "dirty (got %d, expected 7)" % len(info["unknown_cleanliness_days"]))
+    check(not info["dirty_tree_days"],
+          "a day whose cleanliness is unknown is not reported as dirty")
 
     print()
     print("self-test: %d failure(s)" % failures)

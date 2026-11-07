@@ -585,6 +585,20 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The seven-day soak window now measures the release candidate's tree,
+  not `main`.** The `v1.1.0` tag is cut from `release/1.1`, and `main`
+  already carries the v1.2.0 audio body, so evidence collected from
+  `main` would have been evidence about a different program than the one
+  being released. `.github/workflows/soak.yml` gained a `SOAK_REF`
+  environment variable (`${{ inputs.ref || 'release/1.1' }}`) and a
+  matching `ref:` on both checkouts, so the scheduled run measures
+  `release/1.1` and a manual run can point it elsewhere through the new
+  `ref` dispatch input. The Windows half of the window has the same
+  requirement and is *not* automatic: the local Scheduled Task runs the
+  collector against the working tree of the checkout it was registered
+  against, so the release machine must stay on `release/1.1` for the
+  whole window. `docs/plan/soak-runbook.md` §4.3.1 records the rule and
+  the branch check to run before letting a day be recorded.
 - **The source version is now `1.1.0`** (`project(VERSION)` in
   `CMakeLists.txt`, `NIMRTC_API_VERSION_{MAJOR,MINOR,PATCH}` in
   `src/core/include/nimrtc/core/api_version.hpp`, encoded `NIMRTC_API_VERSION`
@@ -930,10 +944,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `publish-release.needs`). `docs/plan/ci-workarounds.md` W3/W5 remain
   the source of truth.
 - Still open before the `v1.1.0` tag: the 7-day soak evidence for
-  §12.3.6 Gate 6 (the collector is in place and day 1 is green on
-  Windows), the signed annotated tag, and the upload of the release key to
-  the GitHub account GPG list (blocked on network access to
-  `github.com`, not on tooling).
+  §12.3.6 Gate 6, the signed annotated tag, and the upload of the
+  release key to the GitHub account GPG list (blocked on network access
+  to `github.com`, not on tooling).
+  The soak window **restarts from zero** because it now measures the
+  candidate tree `release/1.1` rather than `main` (see the "Changed"
+  entry on `SOAK_REF` above): the 2026-11-06 / 2026-11-07 records were
+  taken from `main`, whose tree already carried the v1.2.0 audio body,
+  and the Linux half of that window was red anyway — the Linux port
+  picker crashed and the CI evidence was not merged into the
+  summary, and both fixes are on `release/1.1`. The window
+  therefore starts on the first day `release/1.1` is the measured tree
+  on **both** platforms, and needs seven consecutive green Case D +
+  Case E days on each.
 
 - **The earlier C-track notes that kept W3 / W5 open are superseded.**
   W3 (Windows APM prebuild `continue-on-error`) and W5

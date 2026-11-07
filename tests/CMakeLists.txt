@@ -1177,6 +1177,24 @@ set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (audio pipeline, WP-6) — negotiation, payload-type routing and
+# SDP completion.
+#
+# Covers the three things WP-6 changed in the engine:
+#   - the offer carries the completed audio m-line (a=ptime / a=maxptime,
+#     the Opus a=fmtp, the ssrc-audio-level a=extmap and the per-engine
+#     SSRC) — B-14;
+#   - a payload type the peer never declared is counted and dropped with
+#     kAudioPayloadTypeUnknown instead of being decoded — B-4 (defect F-8);
+#   - a peer that offers a codec we cannot decode produces
+#     kAudioCodecUnsupported exactly once and the audio m-line is rejected
+#     — A-9 / spec Part D.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_state test_engine_audio_state.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
 #
 # Covers OUR OWN frames (send_video auto-record + explicit

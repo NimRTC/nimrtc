@@ -587,11 +587,22 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         }
 
         // ---- RTP header (A-6: per-engine state) ----------------------
+        //
+        // The payload type is the *negotiated* one (B-4): RFC 3264 §6.1
+        // binds both ends of the session to the payload type the answer
+        // confirmed, so a peer that mapped Opus onto a different number
+        // must see that number on the wire.  Before a negotiation has
+        // happened the configured one is used.
+        const std::uint8_t outbound_pt =
+            impl_->negotiated_audio_pt != 0
+                ? impl_->negotiated_audio_pt
+                : config_.audio_codec.payload_type;
+
         rtp::PacketBuilder pb;
         pb.set_ssrc(impl_->audio_ssrc)
           .set_seq(impl_->audio_seq++)
           .set_timestamp(impl_->audio_ts)
-          .set_payload_type(config_.audio_codec.payload_type)
+          .set_payload_type(outbound_pt)
           .set_marker(false);
 
     // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ---------------

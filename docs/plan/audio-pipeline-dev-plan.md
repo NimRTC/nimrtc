@@ -176,6 +176,52 @@ is the same property WP-7 relies on from the other side.
 | `python scripts/check_api_marker_includes.py` | OK |
 | `ctest --test-dir build -C Debug` | **729 / 729 passed, 0 failed** (719 - the module's 2 placeholder entries + its 12 new entries) |
 
+**After WP-6 (negotiation, payload-type routing, SDP completion) —
+2026-11-07.**  The engine's demux rule changed from "anything that is
+not the video payload type is audio" to a **negotiated routing table**
+built from the peer's own `a=rtpmap:` lines.  The two tables (one per
+m-section — a payload type is only meaningful within the m-section that
+declared it, RFC 3550 §5.14) live in a private engine header,
+`src/engine/src/audio_routing.hpp`, so the **public header set does not
+change**: the scan still reports 109 headers and 730 symbols.
+
+A payload type in neither table is counted and dropped with
+`kAudioPayloadTypeUnknown` and is **never** decoded (defect F-8: the old
+rule handed telephone-event, RED and unsupported-codec packets to the
+audio decoder as if they were audio).  The report is throttled to the
+first occurrence and every 50th one, so a peer that keeps sending a
+stream we never negotiated cannot flood the host.
+
+The payload type we accept is the one we can actually decode — the
+lookup goes through the registry's audio-decoder slot, so the answer
+reflects the plugins the host really installed.  A peer that offers only
+codecs we cannot decode is a *configuration* condition, not a per-packet
+anomaly: `kAudioCodecUnsupported` is reported exactly once and the audio
+m-line is rejected in the answer (RFC 3264 §6.1).
+
+The offer now carries `a=ptime` / `a=maxptime`, the Opus `a=fmtp` that
+describes what NimRTC actually does (in-band FEC on, the stream's
+channel count) and the `ssrc-audio-level` `a=extmap` that Chrome needs
+before it reports `audioLevel` in `inbound-rtp` (F-22).  The per-engine
+SSRC in the description is the very value the packet path stamps, so the
+two cannot drift apart.  The answer carries exactly the negotiated
+payload type — its own `a=rtpmap:` and the *negotiated subset* of the
+peer's `a=fmtp:` parameters, not a blind echo.
+
+| Gate (after WP-6) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 730 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `ctest --test-dir build -C Debug` | **737 / 737 passed, 0 failed** (729 + the 7 cases of `tests/test_engine_audio_state.cpp` plus its binary-level entry) |
+| `python tools/run_e2e_acceptance.py --case d` | **PASS** — real Chrome interop over the full audio path: `sdpOfferSeen`, `audioReceived` and `rtpPackets>0` all OK |
+
+**The routing table is inert until a remote description arrives.**  While
+`pt_routing_active` is false the demux keeps its historical behaviour,
+so a host that drives the engine without an SDP exchange (the test
+seams, the loopback harness) is unaffected.  That is a deliberate
+choice, not an oversight: the routing table is only meaningful once the
+peer's description has told us what it will actually send.
+
 **WP-4 is half landed, and the plan says so.**  The clock-driven playout
 itself is in the module: `tick()` is the only thing that makes the
 pipeline produce output, a gap produces exactly the missing number of

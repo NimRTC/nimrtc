@@ -91,6 +91,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     downmix", plus the concealment cap (silence beyond the cap), the
     stream clock rate the jitter buffer is configured with, and the two
     null-product paths of B-16.
+- **Negotiated payload-type routing and a completed audio m-line (audio
+  pipeline WP-6, spec B-4 / B-14).** The engine used to demultiplex
+  inbound RTP with a single rule -- "if the payload type is the video one
+  it is video, otherwise it is audio" -- which handed telephone-event,
+  RED and unsupported-codec packets to the audio decoder as if they were
+  audio (defect F-8). The rule is now a *negotiated* routing table.
+  - The peer's own `a=rtpmap:` lines populate two tables, one per
+    m-section, because a payload type is only meaningful within the
+    m-section that declared it (RFC 3550 section 5.14). A payload type
+    that is in neither table is counted and dropped with
+    `kAudioPayloadTypeUnknown`; it is never decoded. The report is
+    throttled to the first occurrence and every 50th one, so a peer that
+    keeps sending a stream we never negotiated cannot flood the host.
+  - The payload type we accept is the one we can actually decode -- the
+    check goes through the registry's audio-decoder slot, so the answer
+    reflects the plugins the host really installed. A peer that offers
+    only codecs we cannot decode is a *configuration* condition:
+    `kAudioCodecUnsupported` is reported exactly once and the audio
+    m-line is rejected in the answer (RFC 3264 section 6.1).
+  - The offer now carries `a=ptime` / `a=maxptime`, the Opus `a=fmtp`
+    that describes what NimRTC actually does (in-band FEC on, the
+    stream's channel count), and the `ssrc-audio-level` `a=extmap` that
+    Chrome needs before it reports `audioLevel` in `inbound-rtp` (F-22).
+    The per-engine SSRC in the description is the very value the packet
+    path stamps, so the two cannot drift apart.
+  - The answer carries exactly the negotiated payload type -- its own
+    `a=rtpmap:` and the *negotiated subset* of the peer's `a=fmtp:`
+    parameters, not a blind echo.
+  - The routing table lives in a private engine header
+    (`src/engine/src/audio_routing.hpp`), so the public surface is
+    unchanged: the scan still reports 109 headers and 730 symbols.
 
 ### Changed
 

@@ -9,6 +9,26 @@
 
 namespace nimrtc::engine {
 
+namespace {
+
+/** Can we decode a stream whose RTP encoding name is @p encoding?
+ *
+ *  The audio pipeline's decoder seam is the registry's *audio-decoder*
+ *  slot (`plugins::IAudioDecoderFactory`), and the ids there are the
+ *  lower-cased RTP encoding names — the Opus decoder registers under
+ *  "opus" (B-15).  A host that implements its own codec registers it
+ *  under the encoding it implements, so the lookup answers the question
+ *  the negotiation actually asks: "do we have a decoder for this?".
+ *
+ *  @param encoding  The lower-cased RTP encoding name.
+ *  @return          true when a decoder plugin exists for it. */
+bool audio_encoding_decodable(const std::string& encoding) {
+    if (encoding.empty()) return false;
+    return core::PluginRegistry::instance().get_audio_decoder(encoding) != nullptr;
+}
+
+} // namespace
+
 
 std::string NimRTCEngine::create_offer() noexcept {
     if (ice_t_) ice_t_->wait_for_gathering(1500);
@@ -54,8 +74,25 @@ std::string NimRTCEngine::create_offer() noexcept {
     codec_map.clock_rate = config_.audio_codec.clock_rate;
     codec_map.channels   = config_.audio_codec.channels;
     audio.rtpmap[pt]     = codec_map;
-    if (!config_.audio_codec.fmtp.empty())
+
+    // a=fmtp:<pt> ... (B-14)
+    //
+    // The parameters must describe what NimRTC *actually does*, not
+    // what a peer might like: the decoder recovers a lost frame from
+    // the redundancy the sender embeds in the next packet (B-8), so
+    // in-band FEC has to be signalled or the peer will not send it.
+    //
+    // A host that configured an explicit `fmtp` string keeps it — the
+    // configuration is the more specific instruction.  Otherwise the
+    // Opus defaults are derived from what the engine really sends:
+    // the smallest Opus frame as `minptime`, in-band FEC on, and the
+    // channel count of the *stream* (`pcm_channels`), which is not the
+    // channel count of the encoding (Opus always supports two).
+    if (!config_.audio_codec.fmtp.empty()) {
         audio.fmtp[pt] = config_.audio_codec.fmtp;
+    } else if (detail::decoder_id_for_encoding(config_.audio_codec.encoding) == "opus") {
+        audio.fmtp[pt] = detail::build_local_opus_fmtp(config_.pcm_channels);
+    }
 
     // a=ssrc:<audio_ssrc> cname:nimrtc-audio (RFC 5576 section 4.1).
     // Chrome only populates `inbound-rtp` (and fires `ontrack` audio
@@ -108,6 +145,26 @@ std::string NimRTCEngine::create_offer() noexcept {
         ast.uri       = std::string(rtp::kAbsSendTimeUri);
         audio.extmap.push_back(ast);
         impl_->local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
+    }
+
+    // a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+    //
+    // RFC 6464 defines the extension; RFC 5285 §6 negotiates its id
+    // per direction.  Chrome reports `audioLevel` in `inbound-rtp`
+    // only when the description carries this extension (F-22), so the
+    // offer has to advertise it.
+    //
+    // Id 1 is the id Chrome has used for this extension for years, and
+    // it does not collide with the abs-send-time id (4) that shares
+    // the same m-line.  The id we advertise is also the id our own
+    // outbound packets will carry (see `local_audio_level_ext_id`).
+    {
+        sdp::MediaDescription::ExtMap al;
+        al.id        = detail::kAudioLevelDefaultLocalId;
+        al.direction = sdp::Direction::SendRecv;
+        al.uri       = std::string(detail::kAudioLevelExtUri);
+        audio.extmap.push_back(al);
+        impl_->local_audio_level_ext_id = detail::kAudioLevelDefaultLocalId;
     }
 
     // Helper: append ICE candidates stripped of any prefix the libjuice
@@ -417,6 +474,151 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
         core::log::Logger::instance().info(
             "engine[timeline]: remote payload-type clock rates: " + rates);
+    }
+
+    // ---- Negotiated payload-type routing (B-4) --------------------------
+    //
+    // The peer's own `a=rtpmap:` lines are the only authority on what
+    // the peer will put on the wire (RFC 3264 §6.1: the answer may only
+    // use payload types the offer contained).  The tables below become
+    // the demux's routing table: a payload type that is in neither of
+    // them is an anomaly, and an anomaly is counted and dropped — never
+    // decoded (defect F-8: the old rule was "anything that is not the
+    // video payload type is audio", which pushed telephone-event, RED
+    // and unsupported-codec packets into the audio pipeline).
+    //
+    // The two tables are kept apart because a payload type is only
+    // meaningful within the m-section that declared it (RFC 3550
+    // §5.14: the payload type is scoped to the RTP session, and an
+    // m-line that is rejected contributes no RTP session at all).
+    impl_->audio_pt_routes.clear();
+    impl_->video_pt_routes.clear();
+    impl_->negotiated_audio_pt = 0;
+    impl_->negotiated_opus_fmtp = detail::OpusFmtpParams{};
+    impl_->negotiated_opus_fmtp_text.clear();
+    impl_->audio_rx_disabled = false;
+    impl_->audio_codec_unsupported_reported = false;
+    impl_->pt_routing_active = true;
+
+    for (const auto& m : remote.media) {
+        if (m.type != sdp::MediaType::Audio &&
+            m.type != sdp::MediaType::Video) {
+            continue;
+        }
+        auto& table = (m.type == sdp::MediaType::Audio)
+                          ? impl_->audio_pt_routes
+                          : impl_->video_pt_routes;
+        for (const auto& fmt : m.formats) {
+            std::uint8_t pt = 0;
+            if (!detail::parse_payload_type(fmt, pt)) continue;
+
+            detail::AudioPayloadRoute route;
+            auto it = m.rtpmap.find(fmt);
+            if (it != m.rtpmap.end()) {
+                route.encoding   = detail::decoder_id_for_encoding(
+                    it->second.encoding);
+                route.clock_rate = it->second.clock_rate;
+                route.channels   = static_cast<std::uint8_t>(
+                    it->second.channels == 0 ? 1 : it->second.channels);
+            } else if (m.type == sdp::MediaType::Audio &&
+                       detail::static_audio_payload_type(pt, route)) {
+                // RFC 3551 §4.5 makes the `a=rtpmap:` line optional for
+                // the static payload types, so the table can fill those
+                // in on its own.  The dynamic range (96..127) always
+                // carries an rtpmap; a dynamic payload type without one
+                // is malformed and simply produces no route.
+            } else {
+                continue;
+            }
+            table[pt] = route;
+        }
+    }
+
+    // ---- Which audio payload type do we accept? (B-4) -------------------
+    //
+    // Two constraints meet here:
+    //
+    //   * RFC 3264 §6.1 — the answer may only use a payload type the
+    //     offer contained.
+    //   * A-9 — we may only accept a payload type whose encoding we can
+    //     actually decode.  A peer that offers a codec we do not
+    //     implement produces `kAudioCodecUnsupported` at negotiation
+    //     time, and the audio track is disabled.
+    //
+    // The selection prefers the payload type we advertise ourselves, so
+    // the answer and our own offer stay in sync; otherwise the first
+    // offered payload type we can decode wins (the table is ordered by
+    // payload type, so the choice is deterministic).
+    if (!impl_->audio_pt_routes.empty()) {
+        const std::uint8_t preferred = config_.audio_codec.payload_type;
+        std::uint8_t chosen = 0;
+        for (const auto& [pt, route] : impl_->audio_pt_routes) {
+            if (!audio_encoding_decodable(route.encoding)) continue;
+            if (chosen == 0) chosen = pt;
+            if (pt == preferred) { chosen = pt; break; }
+        }
+        impl_->negotiated_audio_pt = chosen;
+
+        if (chosen == 0) {
+            // The peer offered audio, but nothing in it is decodable
+            // here.  This is a configuration condition, not a per-packet
+            // anomaly, so it is reported once and disables the track.
+            impl_->audio_rx_disabled = true;
+            if (!impl_->audio_codec_unsupported_reported && on_error_) {
+                impl_->audio_codec_unsupported_reported = true;
+                on_error_(core::kAudioCodecUnsupported,
+                          "the peer offered an audio codec NimRTC cannot "
+                          "decode — the audio track is disabled");
+            }
+        } else {
+            core::log::Logger::instance().info(
+                "engine[audio]: negotiated inbound payload type " +
+                std::to_string(chosen) + " (encoding " +
+                impl_->audio_pt_routes[chosen].encoding + ")");
+        }
+
+        // The `a=fmtp:` parameters of the selected payload type are
+        // *parsed*, not echoed blindly (B-4).  Only the Opus parameters
+        // are meaningful to us; another encoding's parameters are
+        // ignored rather than rejected (RFC 3264 §6.1: a peer that
+        // sends a parameter we do not know must still be negotiable).
+        const std::string selected = std::to_string(impl_->negotiated_audio_pt);
+        for (const auto& m : remote.media) {
+            if (m.type != sdp::MediaType::Audio) continue;
+            auto fit = m.fmtp.find(selected);
+            if (fit == m.fmtp.end()) break;
+            if (impl_->audio_pt_routes[impl_->negotiated_audio_pt].encoding ==
+                "opus") {
+                impl_->negotiated_opus_fmtp = detail::parse_opus_fmtp(fit->second);
+                impl_->negotiated_opus_fmtp_text =
+                    detail::build_negotiated_opus_fmtp(impl_->negotiated_opus_fmtp);
+            }
+            break;
+        }
+    }
+
+    // ---- The audio-level extension id (B-14) ---------------------------
+    //
+    // RFC 5285 §6: the extension id is negotiated per direction.  The
+    // id the peer advertised is the id it will send under, so that is
+    // the id we parse their inbound packets with.  When we answer the
+    // peer's offer we echo that same id back — Chrome rejects an
+    // extension whose id changed between the offer and the answer.
+    for (const auto& m : remote.media) {
+        if (m.type != sdp::MediaType::Audio) continue;
+        for (const auto& em : m.extmap) {
+            if (em.uri != detail::kAudioLevelExtUri) continue;
+            if (em.direction == sdp::Direction::Inactive) continue;
+            if (em.id <= 0 || em.id > 255) continue;
+            impl_->remote_audio_level_ext_id = em.id;
+            if (!remote_is_answer) {
+                // We are the answerer: the answer echoes the offered id,
+                // and our own outbound packets use the same one.
+                impl_->local_audio_level_ext_id = em.id;
+            }
+            break;
+        }
+        break;
     }
 
     // Apply ICE credentials + candidates through the plugin seam.
@@ -745,8 +947,43 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // per-engine SSRC (A-6) — the same member the packet path
         // stamps, so the description and the wire cannot disagree.
         if (rm.type == sdp::MediaType::Audio) {
-            am.rtpmap = rm.rtpmap;
-            am.fmtp   = rm.fmtp;
+            // RFC 3264 §6.1: the answer's format list must be a subset
+            // of the offer's, and it names the payload type the peer
+            // will actually send on.  We answer with exactly the one we
+            // accept — a payload type we merely *could* accept but did
+            // not select would leave the peer free to send on a codec
+            // we never agreed to decode.
+            if (impl_->negotiated_audio_pt != 0) {
+                const std::string selected =
+                    std::to_string(impl_->negotiated_audio_pt);
+                am.formats = {selected};
+
+                // Only the selected payload type's own `a=rtpmap:` line
+                // survives into the answer.
+                auto rit = rm.rtpmap.find(selected);
+                if (rit != rm.rtpmap.end()) am.rtpmap[selected] = rit->second;
+
+                // The `a=fmtp:` line is the *negotiated* subset of what
+                // the peer sent (B-4), not a blind echo of it.  When the
+                // peer said nothing about the format parameters we
+                // advertise our own: in-band FEC has to be signalled or
+                // the peer will not embed the redundancy the decoder
+                // needs to recover a lost frame (B-8).
+                const std::string negotiated =
+                    impl_->negotiated_opus_fmtp_text.empty()
+                        ? detail::build_local_opus_fmtp(config_.pcm_channels)
+                        : impl_->negotiated_opus_fmtp_text;
+                if (!negotiated.empty()) am.fmtp[selected] = negotiated;
+            } else {
+                // Nothing the peer offered is decodable here, so the
+                // m-line is rejected (RFC 3264 §6.1: a rejected m-line
+                // carries port 0 and no format list).
+                am.port    = 0;
+                am.formats.clear();
+                am.rtpmap.clear();
+                am.fmtp.clear();
+            }
+
             char audio_ssrc_line[96];
             std::snprintf(audio_ssrc_line, sizeof(audio_ssrc_line),
                           "%u cname:nimrtc-audio",
@@ -756,6 +993,24 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                                          std::to_string(config_.audio_ptime_ms));
             am.extra_attrs.emplace_back("maxptime",
                                          std::to_string(config_.audio_ptime_ms));
+
+            // a=extmap:<id> urn:ietf:params:rtp-hdrext:ssrc-audio-level
+            //
+            // RFC 5285 §6: an answer that drops an extension the offer
+            // advertised is a rejection of that extension, and Chrome
+            // treats it as one.  The id must be the one the offer used —
+            // either the id the peer advertised (we are the answerer) or
+            // the one we advertised ourselves (we are the offerer).
+            {
+                sdp::MediaDescription::ExtMap al;
+                al.id = impl_->local_audio_level_ext_id != 0
+                            ? impl_->local_audio_level_ext_id
+                            : detail::kAudioLevelDefaultLocalId;
+                impl_->local_audio_level_ext_id = al.id;
+                al.direction = sdp::Direction::SendRecv;
+                al.uri       = std::string(detail::kAudioLevelExtUri);
+                am.extmap.push_back(al);
+            }
         }
 
         // For video: carry rtpmap/fmtp/rtcp-fb from offer verbatim.  The

@@ -34,6 +34,7 @@
  */
 
 #include "nimrtc/engine/engine.hpp"
+#include "audio_routing.hpp"
 
 #include <array>
 #include <atomic>
@@ -558,6 +559,72 @@ struct NimRTCEngine::Impl {
      *  belongs to, so a per-m-line table could not be consulted
      *  anyway. */
     std::unordered_map<std::uint8_t, std::uint32_t> remote_clock_rate_hz;
+
+    // ---- Negotiated payload-type routing (B-4) --------------------------
+    //
+    // The tables below are the *negotiated* routing: the payload types
+    // the peer declared on the matching m-line of its description, and
+    // which we therefore accept on the wire.  They replace the old rule
+    // "anything that is not the video payload type is audio" (defect
+    // F-8), which pushed telephone-event, RED and unsupported-codec
+    // packets into the audio pipeline.
+    //
+    // Both tables are empty until a remote description has been
+    // processed.  While they are empty the demux keeps its historical
+    // behaviour, so a host that drives the engine without an SDP
+    // exchange (the test seams, the loopback harness) is unaffected.
+    std::map<std::uint8_t, detail::AudioPayloadRoute> audio_pt_routes;
+    std::map<std::uint8_t, detail::AudioPayloadRoute> video_pt_routes;
+
+    /** The payload type the negotiation selected for the inbound audio
+     *  stream; 0 when nothing was selected. */
+    std::uint8_t negotiated_audio_pt = 0;
+
+    /** The Opus format parameters the peer sent for the selected
+     *  payload type, parsed (B-4).  WP-7 feeds them into the receive
+     *  pipeline's configuration. */
+    detail::OpusFmtpParams negotiated_opus_fmtp;
+
+    /** The format parameters the answer echoed back — the negotiated
+     *  subset of `negotiated_opus_fmtp` (B-4). */
+    std::string negotiated_opus_fmtp_text;
+
+    /** The negotiation concluded that we cannot decode the peer's audio.
+     *
+     *  Set when every payload type the peer offered names an encoding
+     *  that has no decoder plugin (A-9 / B-4).  The receive track is
+     *  then disabled: inbound audio packets are counted and dropped
+     *  instead of being handed to a decoder that does not exist. */
+    bool audio_rx_disabled = false;
+
+    /** The `kAudioCodecUnsupported` error was already reported for this
+     *  session.  The condition is reported exactly once (spec Part D). */
+    bool audio_codec_unsupported_reported = false;
+
+    /** Inbound audio packets dropped because their payload type is not
+     *  in the negotiated routing table (`kAudioPayloadTypeUnknown`). */
+    std::uint64_t audio_pt_unknown_count = 0;
+
+    /** The extmap id the peer advertised for the ssrc-audio-level
+     *  extension; 0 when the peer did not advertise it. */
+    int remote_audio_level_ext_id = 0;
+
+    /** The extmap id WE advertise for the ssrc-audio-level extension
+     *  (B-14).  It is also the id our outbound packets will carry.
+     *
+     *  RFC 5285 §6 negotiates the id per direction.  When we answer a
+     *  peer's offer we echo the id the peer advertised; when we are the
+     *  offerer we keep the id we advertised and read the peer's echo
+     *  back. */
+    int local_audio_level_ext_id = 0;
+
+    /** True once a remote description has been processed.
+     *
+     *  While this is false the demux keeps its historical behaviour
+     *  ("not the video payload type ⇒ audio"), so a host that drives
+     *  the engine without an SDP exchange — the test seams, the
+     *  loopback harness — is unaffected by the routing table. */
+    bool pt_routing_active = false;
 
     // ---- Outbound Sender Report state --------------------------------------
     // `sr_*` carry the values an SR body reports for the audio stream

@@ -217,14 +217,53 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         observe_timeline(pv);
     }
 
-    // ---- Demux by RTP payload type --------------------------------------
-    // The audio_codec PT is configured in EngineConfig; the video codec PT
-    // lives in the video_receiver/video_sender tuning. We first check
-    // whether this packet matches the video PT (and a video_receiver
-    // plugin is wired up) — if so, push it through the video receiver
-    // pipeline; otherwise treat it as audio.
-    if (video_receiver_ &&
-        pv.payload_type == config_.video_receiver_tuning.payload_type) {
+    // ---- Payload-type routing (B-4) --------------------------------------
+    //
+    // The routing table comes from the peer's SDP: only the payload
+    // types the peer declared on the matching m-line are ours.  A
+    // payload type in neither table is an anomaly — it is counted and
+    // dropped with `kAudioPayloadTypeUnknown`, never decoded.  The old
+    // rule ("anything that is not the video payload type is audio")
+    // pushed telephone-event, RED and unsupported-codec packets into
+    // the audio pipeline (defect F-8).
+    //
+    // Before a remote description has been processed the table is empty
+    // and the demux keeps its historical behaviour, so a host that
+    // drives the engine without an SDP exchange — the test seams, the
+    // loopback harness — is unaffected.
+    bool route_to_video = false;
+    bool route_to_audio = false;
+    if (impl_->pt_routing_active) {
+        route_to_audio = impl_->negotiated_audio_pt != 0 &&
+                         pv.payload_type == impl_->negotiated_audio_pt;
+        route_to_video = video_receiver_ &&
+                         impl_->video_pt_routes.count(pv.payload_type) > 0;
+        if (!route_to_audio && !route_to_video) {
+            ++impl_->audio_pt_unknown_count;
+            // Spec Part D: per-packet errors are counted but not
+            // reported individually — the first occurrence and every
+            // 50th one are.  Reporting each drop would flood the host
+            // when a peer keeps sending a stream we never negotiated.
+            if (impl_->audio_pt_unknown_count == 1 ||
+                impl_->audio_pt_unknown_count %
+                    detail::kAudioPayloadTypeReportInterval == 0) {
+                if (on_error_) {
+                    on_error_(core::kAudioPayloadTypeUnknown,
+                              "inbound RTP payload type " +
+                              std::to_string(pv.payload_type) +
+                              " is not in the negotiated routing table");
+                }
+            }
+            return;
+        }
+    } else {
+        route_to_video = video_receiver_ &&
+                         pv.payload_type ==
+                             config_.video_receiver_tuning.payload_type;
+        route_to_audio = !route_to_video;
+    }
+
+    if (route_to_video) {
         // Remember the peer's video SSRC: the NACK / PLI we send must
         // name the media source it is about (RFC 4585 §6.2.1).  The peer
         // picks its own SSRC, so it can only be learned from the wire.

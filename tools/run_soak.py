@@ -37,6 +37,12 @@ make a green result hard to fake:
   * The summary prints the streak it can actually prove, and separately
     prints the days without evidence and the inconclusive days, so a
     window with gaps cannot be mistaken for a clean one.
+  * Every record carries the tree it was measured on (`git_ref` and
+    `git_commit`), and a day only counts towards the window when it was
+    measured on the candidate branch.  The tag is cut from
+    `release/1.1`, so evidence taken from `main` -- which already
+    carries the v1.2.0 audio body -- is evidence about a different
+    program and must not be credited to the release.
 
 Usage
 -----
@@ -44,6 +50,7 @@ Usage
     python tools/run_soak.py --platform linux-x86_64 --case d,e
     python tools/run_soak.py --summary
     python tools/run_soak.py --summary --json
+    python tools/run_soak.py --summary --expect-ref release/1.1
 
 The default out-dir is `build/soak/`.  Evidence never goes to the
 project root: the root is kept free of scratch files by policy, and a
@@ -94,6 +101,12 @@ PYTHON_CANDIDATES = ("python3", "python")
 EXCERPT_BYTES = 8 * 1024
 
 PLATFORMS = ("windows", "linux-x86_64")
+
+# The tree the v1.1.0 window is a statement about.  The tag is cut from
+# `release/1.1`, so a day measured on `main` -- which already carries the
+# v1.2.0 audio body -- is evidence about a different program and is not
+# credited to the window.
+DEFAULT_EXPECT_REF = "release/1.1"
 
 
 class ToolError(Exception):
@@ -212,6 +225,68 @@ def shutil_which(name):
 # Evidence records
 # ---------------------------------------------------------------------------
 
+def git_provenance():
+    """Return the tree the evidence is being measured on.
+
+    The window is a statement about a *program*, and the program is the
+    tree the collector runs against.  Recording the branch and the
+    commit makes each day's evidence self-describing: a reader can see
+    exactly which tree produced a green day, and the summary can refuse
+    to credit a day that was measured on something other than the
+    candidate branch.
+
+    Returns a dict with `git_ref` and `git_commit`.  Both are `None`
+    when the tree cannot be identified (not a git checkout, no `git` on
+    PATH) -- the record is still written, and the summary then treats
+    the day as measured on an unknown tree, which is not green.
+    """
+    provenance = {"git_ref": None, "git_commit": None}
+
+    # The branch the tree is on.  `symbolic-ref` answers the branch when
+    # HEAD is attached to one, and fails when the checkout is detached
+    # -- which is what a CI runner's `actions/checkout` may leave
+    # behind.  In that case the branch that points at HEAD is looked up
+    # instead, so a CI-produced record names the same tree a local one
+    # does rather than reporting an unidentified tree.
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        if proc.returncode == 0:
+            value = decode(proc.stdout).strip()
+            if value:
+                provenance["git_ref"] = value
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    if provenance["git_ref"] is None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "for-each-ref",
+                 "--points-at=HEAD", "--format=%(refname:short)", "refs/heads/"],
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+            if proc.returncode == 0:
+                branches = [line.strip() for line in decode(proc.stdout).splitlines()
+                            if line.strip()]
+                if branches:
+                    provenance["git_ref"] = branches[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        if proc.returncode == 0:
+            value = decode(proc.stdout).strip()
+            if value:
+                provenance["git_commit"] = value
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return provenance
+
+
 def evidence_path(out_dir, plat, stamp):
     """Path of the JSONL file holding one day's records."""
     day = stamp.strftime("%Y-%m-%d")
@@ -232,6 +307,7 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
         raise ToolError("no usable python interpreter found")
 
     ready, reason = check_preconditions(case, plat, runner)
+    provenance = git_provenance()
 
     if not ready:
         record = {
@@ -245,6 +321,8 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
             "duration_seconds": 0.0,
             "stdout_excerpt": "",
             "stderr_excerpt": "",
+            "git_ref": provenance["git_ref"],
+            "git_commit": provenance["git_commit"],
         }
         append_record(evidence_path(out_dir, plat, stamp), record)
         return record
@@ -293,6 +371,8 @@ def run_once(runner, plat, case, out_dir, python_bin=None):
         "duration_seconds": duration,
         "stdout_excerpt": stdout[:EXCERPT_BYTES],
         "stderr_excerpt": stderr[:EXCERPT_BYTES],
+        "git_ref": provenance["git_ref"],
+        "git_commit": provenance["git_commit"],
     }
     append_record(evidence_path(out_dir, plat, stamp), record)
     return record
@@ -369,8 +449,44 @@ def _day_is_green(cases, required_cases):
     return True
 
 
-def summarise(records, required_cases):
-    """Compute the per-platform streaks and the gaps."""
+def _day_refs(cases):
+    """The distinct trees a day's records were measured on.
+
+    A record with no `git_ref` (written before the collector recorded
+    the tree, or produced from a checkout that could not be
+    identified) reports `None`, which is shown as `unknown`.
+    """
+    refs = set()
+    for records in cases.values():
+        for rec in records:
+            refs.add(rec.get("git_ref") or "unknown")
+    return sorted(refs)
+
+
+def _day_is_on_ref(cases, expect_ref):
+    """Whether every record of a day was measured on `expect_ref`.
+
+    A day measured on any other tree is not evidence about the
+    release candidate, so it cannot be green.  This is the rule that
+    stops a green day taken on `main` from being credited to a window
+    whose candidate lives on `release/1.1`.
+    """
+    if not expect_ref:
+        return True
+    for records in cases.values():
+        for rec in records:
+            if rec.get("git_ref") != expect_ref:
+                return False
+    return True
+
+
+def summarise(records, required_cases, expect_ref=None):
+    """Compute the per-platform streaks and the gaps.
+
+    `expect_ref` is the tree the window is a statement about.  When it
+    is given, a day only counts as green if every one of its records
+    was measured on that tree.
+    """
     per_platform = {}
     for record in records:
         per_platform.setdefault(record.get("platform", "?"), []).append(record)
@@ -392,12 +508,16 @@ def summarise(records, required_cases):
         # Classify every day with evidence into green / not-green.
         green_dates = []
         not_green = []
+        wrong_ref_days = []
         for day in sorted(days):
             cases = days[day]
-            if _day_is_green(cases, required_cases):
+            on_ref = _day_is_on_ref(cases, expect_ref)
+            if not on_ref:
+                wrong_ref_days.append({"day": day, "refs": _day_refs(cases)})
+            if _day_is_green(cases, required_cases) and on_ref:
                 green_dates.append(day)
             else:
-                not_green.append({
+                entry = {
                     "day": day,
                     "cases_without_pass": [
                         case for case in required_cases
@@ -405,7 +525,13 @@ def summarise(records, required_cases):
                                    for rec in cases.get(case, []))
                         or any(rec.get("status") == "FAIL"
                                for rec in cases.get(case, []))],
-                })
+                }
+                if not on_ref:
+                    # The cases may well have passed; what disqualifies the
+                    # day is the tree it was measured on, and the report
+                    # has to say so rather than imply a case failure.
+                    entry["wrong_ref"] = _day_refs(cases)
+                not_green.append(entry)
 
         # The streak is a run of *calendar*-consecutive green days.
         #
@@ -476,6 +602,10 @@ def summarise(records, required_cases):
             "inconclusive_days": inconclusive,
             "failures": failures,
             "not_green_days": not_green,
+            "measured_refs": sorted({ref
+                                     for day_cases in days.values()
+                                     for ref in _day_refs(day_cases)}),
+            "wrong_ref_days": wrong_ref_days,
         }
 
     # Every tracked platform appears in the summary, even when it has
@@ -492,12 +622,16 @@ def summarise(records, required_cases):
             "inconclusive_days": [],
             "failures": [],
             "not_green_days": [],
+            "measured_refs": [],
+            "wrong_ref_days": [],
         })
     return summary
 
 
-def print_summary(summary, required_cases):
+def print_summary(summary, required_cases, expect_ref=None):
     print("soak summary (cases: %s)" % ", ".join(required_cases))
+    if expect_ref:
+        print("window is measured on: %s" % expect_ref)
     print()
     for plat in sorted(summary):
         info = summary[plat]
@@ -505,6 +639,15 @@ def print_summary(summary, required_cases):
         print("    days with evidence    : %d" % info["days_with_evidence"])
         print("    consecutive green days: %d" % info["consecutive_green_days"])
         print("    best streak so far    : %d" % info["best_streak"])
+        if info.get("measured_refs"):
+            print("    trees measured        : %s"
+                  % ", ".join(info["measured_refs"]))
+        if info.get("wrong_ref_days"):
+            print("    days measured on another tree: %d (these do not count "
+                  "as green)" % len(info["wrong_ref_days"]))
+            for entry in info["wrong_ref_days"]:
+                print("        %s  measured on: %s"
+                      % (entry["day"], ", ".join(entry["refs"])))
         if info["inconclusive_days"]:
             print("    inconclusive days     : %d (these do not count as green)"
                   % len(info["inconclusive_days"]))
@@ -522,6 +665,10 @@ def print_summary(summary, required_cases):
             print("    days with evidence but not green: %d"
                   % len(info["not_green_days"]))
             for entry in info["not_green_days"]:
+                if entry.get("wrong_ref"):
+                    print("        %s  measured on another tree: %s"
+                          % (entry["day"], ", ".join(entry["wrong_ref"])))
+                    continue
                 missing = ", ".join(entry["cases_without_pass"]) or "-"
                 print("        %s  no PASS for: %s" % (entry["day"], missing))
         print()
@@ -531,8 +678,13 @@ def print_summary(summary, required_cases):
 # Self-test
 # ---------------------------------------------------------------------------
 
-def _record(day, case, status, plat="windows", reason=""):
-    """Build one synthetic evidence record."""
+def _record(day, case, status, plat="windows", reason="", ref=None, commit=None):
+    """Build one synthetic evidence record.
+
+    `ref` and `commit` stand in for the tree the collector recorded.
+    `None` means "the tree could not be identified", which is what a
+    record written before the collector tracked it looks like.
+    """
     return {
         "timestamp": "%sT02:00:00+00:00" % day,
         "platform": plat,
@@ -544,6 +696,8 @@ def _record(day, case, status, plat="windows", reason=""):
         "duration_seconds": 1.0,
         "stdout_excerpt": "",
         "stderr_excerpt": "",
+        "git_ref": ref,
+        "git_commit": commit,
     }
 
 
@@ -764,6 +918,47 @@ def _self_test():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # 15. A day measured on a tree other than the candidate is not
+    #     green.  The tag is cut from `release/1.1`, so a green day
+    #     taken on `main` is evidence about a different program and
+    #     must not be credited to the window.
+    recs = [_record(day, case, "PASS", ref="release/1.1")
+            for day in seven for case in cases]
+    info = summarise(recs, cases, expect_ref="release/1.1")["windows"]
+    check(info["consecutive_green_days"] == 7,
+          "seven days measured on the candidate branch give a streak of seven "
+          "(got %d)" % info["consecutive_green_days"])
+
+    recs = [_record(day, case, "PASS", ref="main")
+            for day in seven for case in cases]
+    info = summarise(recs, cases, expect_ref="release/1.1")["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "seven green days measured on another tree give a streak of zero "
+          "(got %d)" % info["consecutive_green_days"])
+    check(len(info["wrong_ref_days"]) == 7,
+          "every day measured on another tree is listed as such "
+          "(got %d, expected 7)" % len(info["wrong_ref_days"]))
+    check(gate_unsatisfied(summarise(recs, cases, expect_ref="release/1.1"), 7) != [],
+          "a window measured on the wrong tree fails the gate")
+
+    # 16. A day whose tree could not be identified is not green either:
+    #     "unknown" is not a statement about the candidate.
+    recs = [_record(day, case, "PASS") for day in seven for case in cases]
+    info = summarise(recs, cases, expect_ref="release/1.1")["windows"]
+    check(info["consecutive_green_days"] == 0,
+          "a day with an unidentified tree is not green "
+          "(streak %d, expected 0)" % info["consecutive_green_days"])
+
+    # 17. Without an expectation, the tree does not enter the verdict at
+    #     all -- the historical behaviour is preserved for anyone
+    #     summarising evidence for a different release.
+    recs = [_record(day, case, "PASS", ref="main")
+            for day in seven for case in cases]
+    info = summarise(recs, cases)["windows"]
+    check(info["consecutive_green_days"] == 7,
+          "without an expected tree the tree does not affect the streak "
+          "(got %d)" % info["consecutive_green_days"])
+
     print()
     print("self-test: %d failure(s)" % failures)
     return 0 if failures == 0 else 1
@@ -795,6 +990,11 @@ def main(argv=None) -> int:
     parser.add_argument("--require-days", type=int, default=7,
                         help="number of consecutive green days the gate demands "
                              "(default: 7, the v1.1 plan C5 requirement)")
+    parser.add_argument("--expect-ref", default=DEFAULT_EXPECT_REF,
+                        help="the tree the window is a statement about; a day "
+                             "measured on any other tree is not green "
+                             "(default: %s; pass an empty string to disable)"
+                             % DEFAULT_EXPECT_REF)
     parser.add_argument("--self-test", action="store_true",
                         help="run the built-in self-test and exit")
     args = parser.parse_args(argv)
@@ -808,16 +1008,17 @@ def main(argv=None) -> int:
 
     if args.summary:
         records = load_records(out_dir)
-        summary = summarise(records, required_cases)
+        summary = summarise(records, required_cases, expect_ref=args.expect_ref)
         if args.json:
             print(json.dumps({
                 "out_dir": str(out_dir),
                 "cases": required_cases,
+                "expect_ref": args.expect_ref,
                 "records": len(records),
                 "platforms": summary,
             }, indent=2, sort_keys=True))
         else:
-            print_summary(summary, required_cases)
+            print_summary(summary, required_cases, expect_ref=args.expect_ref)
             if not summary:
                 print("no evidence found under %s" % out_dir)
         # The summary is a report by default: it exits 0 even when the

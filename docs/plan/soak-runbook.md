@@ -188,18 +188,33 @@ manual run can point it elsewhere with `workflow_dispatch` → `ref`.
 **The Windows half of the window has the same requirement, and it is
 not automatic.** The local Scheduled Task (§4.1) runs the collector
 against *the working tree of the checkout it was registered against* —
-it does not check out a ref. The release machine's checkout must
-therefore stay on `release/1.1` for the whole window, and switching it
-to `main` (to work on the v1.2 body) silently starts measuring the
-wrong tree. Check the branch before letting a day be recorded:
+it does not check out a ref. If that checkout is on `main` (because
+the v1.2 body is being worked on), the day's records carry
+`git_ref = "main"` and the summary reports the day as *measured on
+another tree*: it does not count towards the window, and it is listed
+explicitly rather than silently dropped. Nothing is lying and nothing
+has to be deleted by hand.
+
+Two consequences follow:
+
+* The **pinned source** for both halves of the window is the GitHub
+  workflow, whose two jobs (`linux-x86_64` and `windows`) both check
+  out `SOAK_REF` and therefore always measure the candidate tree.
+* The local Scheduled Task is the **independent second source**. Its
+  days count when it happened to measure the candidate branch, and do
+  not count otherwise.
+
+To make the local task a full contributor, the release machine's
+checkout has to be on the candidate branch when it fires. Check it
+before letting a day be recorded:
 
 ```powershell
 git -C d:\MyOpen\NimRTC rev-parse --abbrev-ref HEAD
 ```
 
-If the branch is not the candidate branch, the day is not evidence for
-the window: delete `build/soak/windows-<day>.jsonl` after the run, fix
-the checkout, and re-run the collector.
+Nothing else has to be done when the branch is not the candidate one:
+the day is already excluded from the window by the `git_ref` rule, and
+the CI leg of the same platform covers the day regardless.
 
 Both jobs run with `continue-on-error: true`: a red acceptance run is
 **evidence** (the collector records `FAIL`, which breaks the streak),
@@ -232,6 +247,11 @@ for branch in soak/evidence-linux-x86_64 soak/evidence-windows; do
 done
 python tools/run_soak.py --summary --require
 ```
+
+The summary defaults to `--expect-ref release/1.1`, so a day measured
+on any other tree is excluded from the window and listed under "days
+measured on another tree". Pass `--expect-ref ""` to switch the check
+off (for example when summarising evidence for a different release).
 
 Run the merge **before** every `--summary --require`. The command
 appends, so running it twice puts the same records in twice; the

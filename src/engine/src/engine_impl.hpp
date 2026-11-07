@@ -573,6 +573,40 @@ struct NimRTCEngine::Impl {
     std::uint32_t video_packet_count    = 0;
     std::uint32_t video_octet_count     = 0;
 
+    // ---- Audio send state (A-6: per engine, never shared) -------------
+    //
+    // The SSRC, the RTP sequence number and the RTP timestamp used to
+    // live in function-local `static std::atomic` variables inside
+    // send_audio().  Two engines in one process therefore shared one
+    // sequence space and one SSRC (defect F-12), and the SDP generator
+    // had to hard-code the same value to stay in lockstep with the
+    // packet path.  They are per-engine members now, and the SDP
+    // generator reads `audio_ssrc` — the same member the packet path
+    // stamps — so the two cannot drift apart again.
+    std::uint16_t audio_seq = 0;
+    std::uint32_t audio_ts  = 0;
+
+    // ---- Frame accumulator (B-6) --------------------------------------
+    //
+    // send_audio() accepts any block size.  The processed PCM is
+    // appended here and only whole frames are encoded, so the wire
+    // format does not depend on how the host chunks its capture.
+    // The buffer holds interleaved samples; `audio_accum_frames` counts
+    // the per-channel samples already in it.
+    std::vector<float> audio_accum;
+    std::size_t audio_accum_frames = 0;
+
+    // ---- Audio send counters (A-8) -----------------------------------
+    //
+    // An encode failure must never disappear: it is counted here and
+    // reported through on_error (throttled to one report per second so
+    // a persistently broken stream cannot flood the host's callback).
+    std::uint64_t audio_frames_sent   = 0;
+    std::uint64_t audio_bytes_sent    = 0;
+    std::uint64_t audio_encode_errors = 0;
+    std::uint64_t audio_samples_in    = 0;
+    std::chrono::steady_clock::time_point audio_last_error_report{};
+
     /** Wall-clock instant (µs since the Unix epoch) of the **last outbound
      *  audio packet**, sampled at the very moment its abs-send-time
      *  element was stamped.

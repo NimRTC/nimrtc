@@ -930,58 +930,24 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
             std::fprintf(stderr, "[demo-p2p] answer SDP len=%zu:\n%s\n",
                          answer->size(), answer->c_str());
 
-            // Append a=ssrc:<SSRC> cname:<cname> to the last media section
-            // of the answer SDP if not already present.  This is required
-            // for Chrome interop (see notes in interop/signaling/signaling_proxy.py
-            // — Chrome refuses to count inbound RTP packets in
-            // `inbound-rtp` reports and treats the audio track as silent
-            // until the answer SDP carries at least one a=ssrc line that
-            // matches the RTP-header SSRC on the wire).
+            // The engine advertises the SSRC it actually uses in the answer
+            // (`a=ssrc:<ssrc> cname:nimrtc-audio`): the value is per engine
+            // (A-6) and is no longer a compile-time constant, so the demo
+            // must not append one of its own.  Chrome only counts our
+            // inbound RTP when the description names the SSRC that the
+            // RTP header carries; appending a stale constant would
+            // advertise an SSRC that never appears on the wire.
             //
-            // The SSRC must match what src/engine/src/engine.cpp::tick_audio
-            // stamps into the RTP header: static std::atomic<uint32_t>
-            // ssrc_val{0xDEADBEEF}.  If that value ever changes, this
-            // constant must be updated in lockstep.
-            static constexpr std::uint32_t kAudioSsrc = 0xDEADBEEFu;
+            // The check below is a diagnostic only: the engine emits the
+            // line for every audio answer, so a missing one means the
+            // description was produced by something else.
             {
                 std::string& s = *answer;
                 bool has_ssrc = s.find("a=ssrc:") != std::string::npos;
                 if (!has_ssrc) {
-                    char buf[96];
-                    std::snprintf(buf, sizeof(buf),
-                                  "a=ssrc:%u cname:nimrtc-audio\r\n",
-                                  static_cast<unsigned>(kAudioSsrc));
-                    // Append the ssrc line to the end of the SDP.
-                    //
-                    // BUGFIX: the previous implementation ran a `while` loop
-                    // that popped EVERY trailing '\r' / '\n' before appending
-                    // `buf`.  Because `buf` itself ends with "\r\n", the
-                    // pop-then-append sequence consumed the CRLF that
-                    // separated the munger's last emitted line from our new
-                    // `a=ssrc:` line, producing malformed SDP like:
-                    //
-                    //   ...a=candidate:4 1 UDP ... 172.25.80.1 55363 typ
-                    //   hosta=ssrc:3735928559 cname:nimrtc-audio
-                    //
-                    // Chrome rejects this with "Unsupported candidate type"
-                    // because it parses the whole blob as a single
-                    // `a=candidate:` line whose `typ` token is
-                    // "hosta=ssrc:3735928559" — which isn't a known ICE
-                    // candidate type.  setRemoteDescription then fails
-                    // BEFORE the DTLS handshake ever starts, so
-                    // `audioReceived=false`, `rtpPackets=0`,
-                    // `connectionState=failed` even though NimRTC's DTLS
-                    // stack and certificate are perfectly healthy.
-                    //
-                    // The munger already terminates every emitted line
-                    // (including the last one) with "\r\n" (see
-                    // `src/modules/sdp/src/munger.cpp`), so the cleanest
-                    // fix is to simply concatenate `buf` — its own trailing
-                    // "\r\n" becomes the separator between the two lines.
-                    s.append(buf);
                     std::fprintf(stderr,
-                                 "[demo-p2p] appended a=ssrc:%u to answer SDP\n",
-                                 static_cast<unsigned>(kAudioSsrc));
+                                 "[demo-p2p] answer SDP has no a=ssrc line -- "
+                                 "Chrome will not count our inbound RTP\n");
                 }
             }
 

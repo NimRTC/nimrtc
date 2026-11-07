@@ -223,6 +223,32 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::uint32_t pcm_sample_rate_hz = 48000;
     std::uint8_t  pcm_channels = 1;
 
+    /** Duration of one outbound audio RTP packet, in milliseconds.
+     *
+     *  One packet carries exactly one Opus frame of this duration
+     *  (RFC 7587 code 0 framing), so the value must be one of the Opus
+     *  frame sizes (RFC 6716 §4): 10, 20, 40 or 60 ms.  Default 20 ms
+     *  — the value every browser uses.
+     *
+     *  The RTP timestamp advances by this duration per packet, whether or
+     *  not the packet was actually emitted, so a dropped frame leaves a
+     *  gap in the sequence number but never a gap in the media clock.
+     */
+    std::uint16_t audio_ptime_ms = 20;
+
+    /** Explicit SSRC for the outbound audio stream.
+     *
+     *  0 (the default) means "choose one": the engine then draws a
+     *  per-engine SSRC from a per-process seed, so two engines in one
+     *  process never share an SSRC.  Set an explicit value to make the
+     *  stream reproducible (tests, or a host that manages SSRCs itself).
+     *
+     *  The value the engine uses is the one it advertises in the SDP
+     *  (`a=ssrc:`) and the one it stamps into every outbound RTP header
+     *  — the two cannot drift apart.
+     */
+    std::uint32_t audio_ssrc = 0;
+
     // ---- JitterBuffer config ----
 
     /** JitterBuffer fixed delay (ms). */
@@ -1152,6 +1178,17 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- Audio counters (WP-5, additive) -------------------------
+        // Cumulative since open().  `audio_encode_errors` is the
+        // "never silently dropped" counter: every PCM block that could
+        // not be encoded is counted here and reported through
+        // on_error, so a host that feeds the engine at the wrong rate
+        // sees an error instead of hearing silence.
+        std::uint64_t audio_frames_sent      = 0;  // RTP packets emitted
+        std::uint64_t audio_bytes_sent       = 0;  // RTP bytes (hdr+payload)
+        std::uint64_t audio_encode_errors    = 0;  // frames that failed to encode
+        std::uint64_t audio_samples_in       = 0;  // PCM samples handed to send_audio()
+        std::uint64_t audio_samples_pending  = 0;  // samples still in the accumulator
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *

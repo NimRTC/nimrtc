@@ -484,9 +484,9 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // writing through a const_cast would be undefined behaviour and would
     // silently mutate the caller's data.  The copy is what 3A mutates below
     // and what the encoder consumes.
-    const std::size_t total_floats =
-        num_samples * static_cast<std::size_t>(
-                          std::max<std::uint8_t>(1, config_.pcm_channels));
+    const std::size_t channels =
+        static_cast<std::size_t>(std::max<std::uint8_t>(1, config_.pcm_channels));
+    const std::size_t total_floats = num_samples * channels;
     if (impl_->audio_pcm_buf.size() < total_floats) {
         impl_->audio_pcm_buf.resize(total_floats);
     }
@@ -510,38 +510,89 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio3a_concrete->process_capture(frame);
     }
 
-    // Codec — prefer plugin adapter; fall back to concrete opus::Encoder.
-    // Reuse Impl::audio_codec_pkt (P0#4) — capacity grows monotonically.
-    const std::size_t needed = num_samples * sizeof(float) + 64;
-    if (impl_->audio_codec_pkt.size() < needed) {
-        impl_->audio_codec_pkt.resize(needed);
+    // One RTP packet carries one Opus frame of `audio_ptime_ms`
+    // milliseconds (RFC 7587 code 0 framing).  The frame length follows
+    // from the configuration, so the accumulator never has to guess.
+    //
+    // The check comes *before* the accumulator is touched: a zero frame
+    // size means the engine can never drain the accumulator, so taking
+    // the PCM in first would grow it without bound.
+    const std::size_t frame_samples =
+        (static_cast<std::size_t>(config_.pcm_sample_rate_hz) *
+         static_cast<std::uint16_t>(config_.audio_ptime_ms)) / 1000;
+    if (frame_samples == 0) {
+        impl_->audio_encode_errors++;
+        if (on_error_) {
+            on_error_(core::kAudioEncodeFailed,
+                      "send_audio: the configured audio frame size is zero");
+        }
+        return core::kEngineInvalidParam;
     }
-    std::size_t codec_len = 0;
-    if (codec_plugin_) {
-        codec_len = codec_plugin_->encode(pcm, num_samples,
-                                         impl_->audio_codec_pkt.data(),
-                                         impl_->audio_codec_pkt.size());
+
+    // ---- Accumulate the processed PCM (B-6) ----------------------------
+    //
+    // send_audio() accepts any block size.  The processed PCM is
+    // appended to a per-engine accumulator and only whole frames are
+    // encoded, so the wire format does not depend on how the host
+    // chunks its capture.  The residual stays in the accumulator across
+    // calls; a partial frame is never encoded.
+    impl_->audio_accum.insert(impl_->audio_accum.end(), pcm, pcm + total_floats);
+    impl_->audio_samples_in += num_samples;
+
+    // Errors are reported at a throttled rate: a host that feeds the
+    // engine PCM the encoder cannot take would otherwise get one
+    // callback per frame.
+    auto report_error = [&](std::uint32_t code, const char* msg) {
+        ++impl_->audio_encode_errors;
+        const auto now = std::chrono::steady_clock::now();
+        if (impl_->audio_last_error_report ==
+                std::chrono::steady_clock::time_point{} ||
+            now - impl_->audio_last_error_report >= std::chrono::seconds(1)) {
+            impl_->audio_last_error_report = now;
+            if (on_error_) on_error_(code, msg);
+        }
+    };
+
+    // ---- Emit one RTP packet per frame --------------------------------
+    auto emit_frame = [&](const float* frame_pcm) -> std::uint32_t {
+        // Codec — prefer plugin adapter; fall back to concrete
+        // opus::Encoder.  Reuse Impl::audio_codec_pkt (P0#4) — capacity
+        // grows monotonically.
+        const std::size_t needed = frame_samples * sizeof(float) + 64;
+        if (impl_->audio_codec_pkt.size() < needed) {
+            impl_->audio_codec_pkt.resize(needed);
+        }
+        std::size_t codec_len = 0;
+        if (codec_plugin_) {
+            codec_len = codec_plugin_->encode(frame_pcm, frame_samples,
+                                             impl_->audio_codec_pkt.data(),
+                                             impl_->audio_codec_pkt.size());
 #ifdef NIMRTC_HAS_OPUS
-    } else if (impl_->opus_encoder) {
-        codec_len = impl_->opus_encoder->encode(pcm, num_samples,
+        } else if (impl_->opus_encoder) {
+            codec_len = impl_->opus_encoder->encode(frame_pcm, frame_samples,
                                          impl_->audio_codec_pkt.data(),
                                          impl_->audio_codec_pkt.size());
 #endif
-    }
-    if (codec_len == 0) return 0;
+        }
+        if (codec_len == 0) {
+            // A-8: the frame is lost, but never silently.  The counter
+            // grows, the host is told (throttled), and the media clock
+            // keeps running — the peer must see a *loss* (a gap in the
+            // sequence number), not a hole in the timeline.
+            report_error(core::kAudioEncodeFailed,
+                         "send_audio: the audio encoder rejected a frame");
+            ++impl_->audio_seq;                       // gap in the sequence
+            impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
+            return 0;
+        }
 
-    static std::atomic<std::uint32_t> seq{0};
-    static std::atomic<std::uint32_t> ssrc_val{0xDEADBEEF};
-    static std::atomic<std::uint32_t> ts_val{0};
-    rtp::PacketBuilder pb;
-    std::uint32_t curr_ssrc = ssrc_val.load();
-    std::uint16_t seq_num = static_cast<std::uint16_t>(seq.fetch_add(1));
-    std::uint32_t cur_ts  = ts_val.fetch_add(static_cast<std::uint32_t>(num_samples));
-    pb.set_ssrc(curr_ssrc)
-      .set_seq(seq_num)
-      .set_timestamp(cur_ts)
-      .set_payload_type(config_.audio_codec.payload_type)
-      .set_marker(false);
+        // ---- RTP header (A-6: per-engine state) ----------------------
+        rtp::PacketBuilder pb;
+        pb.set_ssrc(impl_->audio_ssrc)
+          .set_seq(impl_->audio_seq++)
+          .set_timestamp(impl_->audio_ts)
+          .set_payload_type(config_.audio_codec.payload_type)
+          .set_marker(false);
 
     // ---- Cross-end timeline: stamp abs-send-time (ADR-017) ---------------
     // Only when the seam is on *and* the id was negotiated. The encoded
@@ -579,58 +630,99 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         }
     }
 
-    pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
-    auto pkt_buf = pb.build();
-    if (pkt_buf.empty()) return 0;
-
-    // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
-    // RTP timestamp is sampled *before* SRTP so the SR and the media packet
-    // it anchors describe the same media position; the octet count is the
-    // payload length, which is what the peer subtracts to check.
-    ++impl_->audio_packet_count;
-    impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
-    impl_->audio_rtp_timestamp = cur_ts;
-    // Record the SSRC so the Sender Report can name the media source it
-    // describes (RFC 3550 §6.4.1). The value comes from a function-local
-    // static, so tick() has no other way to learn it.
-    impl_->audio_ssrc = curr_ssrc;
-
-    // SRTP protect (or pass-through when not yet keyed).
-    // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
-    core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
-    if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(curr_ssrc, /*outgoing=*/true);
-        if (!sess) {
-            // SRTP installed but no session for this SSRC — drop.
+        pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
+        auto pkt_buf = pb.build();
+        if (pkt_buf.empty()) {
+            report_error(core::kAudioEncodeFailed,
+                         "send_audio: the RTP packet could not be built");
+            impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;
         }
-        auto enc = sess->protect_rtp(out_payload, curr_ssrc, cur_ts);
-        if (!enc) return 0;
-        impl_->audio_send_buf.assign(enc.value().data(),
-                                     enc.value().data() + enc.value().size());
-    } else {
-        impl_->audio_send_buf.assign(out_payload.data(),
-                                     out_payload.data() + out_payload.size());
+
+        // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
+        // RTP timestamp is sampled *before* SRTP so the SR and the media packet
+        // it anchors describe the same media position; the octet count is the
+        // payload length, which is what the peer subtracts to check.
+        const std::uint32_t cur_ts = impl_->audio_ts;
+        ++impl_->audio_packet_count;
+        impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
+        impl_->audio_rtp_timestamp = cur_ts;
+        ++impl_->audio_frames_sent;
+        impl_->audio_bytes_sent += pkt_buf.size();
+
+        // The media clock advances by the frame duration whether or not the
+        // packet reaches the wire (A-7): a dropped frame leaves a gap in
+        // the sequence number, never a gap in the timeline.
+        impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
+
+        // SRTP protect (or pass-through when not yet keyed).
+        // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
+        core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
+        if (impl_->srtp_installed && impl_->srtp) {
+            auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
+                                                   /*outgoing=*/true);
+            if (!sess) {
+                // SRTP installed but no session for this SSRC — drop.
+                return 0;
+            }
+            auto enc = sess->protect_rtp(out_payload, impl_->audio_ssrc, cur_ts);
+            if (!enc) return 0;
+            impl_->audio_send_buf.assign(enc.value().data(),
+                                         enc.value().data() + enc.value().size());
+        } else {
+            impl_->audio_send_buf.assign(out_payload.data(),
+                                         out_payload.data() + out_payload.size());
+        }
+
+        // ---- Scheduler: enqueue for priority-drain (move, P0#3) --------------
+        // The scheduler takes ownership of audio_send_buf via enqueue_owned.
+        // After this call, audio_send_buf is in MOVED-FROM state; we must not
+        // touch it.  The scheduler will release it on drain.
+        if (scheduler_) {
+            scheduler_->enqueue_owned(plugins::Priority::kAudio,
+                                      std::move(impl_->audio_send_buf),
+                                      plugins::Addr{});
+            return 0;
+        }
+
+        // Fallback: no scheduler — send directly through ICE (transport profile).
+        plugins::BufferView bv{impl_->audio_send_buf.data(),
+                               impl_->audio_send_buf.size()};
+        const auto send_rc = ice_t_->send(bv, {});
+        // Clear so the next call starts fresh.
+        impl_->audio_send_buf.clear();
+        impl_->audio_send_buf.shrink_to_fit();   // release backing if needed
+        return send_rc;
+    };
+
+    // ---- Drain the accumulator -----------------------------------------
+    //
+    // Every whole frame the accumulator holds becomes exactly one RTP
+    // packet.  A partial frame stays behind for the next call.
+    std::uint32_t rc = 0;
+    std::size_t emitted_frames = 0;
+    std::size_t available = impl_->audio_accum.size() / channels;
+    while (available >= frame_samples) {
+        const float* frame_pcm = impl_->audio_accum.data() +
+                                 emitted_frames * frame_samples * channels;
+        const std::uint32_t frame_rc = emit_frame(frame_pcm);
+        emitted_frames += frame_samples;
+        available -= frame_samples;
+        if (frame_rc != 0) {
+            // A transport failure stops the burst; the frames already
+            // emitted stay emitted.
+            rc = frame_rc;
+            break;
+        }
     }
 
-    // ---- Scheduler: enqueue for priority-drain (move, P0#3) --------------
-    // The scheduler takes ownership of audio_send_buf via enqueue_owned.
-    // After this call, audio_send_buf is in MOVED-FROM state; we must not
-    // touch it.  The scheduler will release it on drain.
-    if (scheduler_) {
-        scheduler_->enqueue_owned(plugins::Priority::kAudio,
-                                  std::move(impl_->audio_send_buf),
-                                  plugins::Addr{});
-        return 0;
+    if (emitted_frames > 0) {
+        impl_->audio_accum.erase(
+            impl_->audio_accum.begin(),
+            impl_->audio_accum.begin() +
+                static_cast<std::ptrdiff_t>(emitted_frames * channels));
     }
-
-    // Fallback: no scheduler — send directly through ICE (transport profile).
-    plugins::BufferView bv{impl_->audio_send_buf.data(),
-                           impl_->audio_send_buf.size()};
-    const auto rc = ice_t_->send(bv, {});
-    // Clear so the next call starts fresh.
-    impl_->audio_send_buf.clear();
-    impl_->audio_send_buf.shrink_to_fit();   // release backing if needed
+    impl_->audio_accum_frames = impl_->audio_accum.size() / channels;
     return rc;
 }
 
@@ -877,6 +969,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_keyframes_q;
     out.video_feedback_applied  = impl_->video_feedback_applied;
     out.video_keyframes_applied = impl_->video_keyframes_applied;
+    // WP-5: the audio send counters.  `audio_encode_errors` is the one
+    // that matters to a host: it counts the PCM that was accepted and
+    // then could not be encoded, which used to disappear silently.
+    out.audio_frames_sent     = impl_->audio_frames_sent;
+    out.audio_bytes_sent      = impl_->audio_bytes_sent;
+    out.audio_encode_errors   = impl_->audio_encode_errors;
+    out.audio_samples_in      = impl_->audio_samples_in;
+    out.audio_samples_pending = impl_->audio_accum_frames;
     return out;
 }
 

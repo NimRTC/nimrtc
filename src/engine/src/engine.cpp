@@ -26,7 +26,38 @@
 // Behaviour unchanged; see engine_impl.hpp.
 #include "engine_impl.hpp"
 
+#include <mutex>
+
 namespace nimrtc::engine {
+
+namespace {
+
+/** Draw the next outbound audio SSRC (A-6).
+ *
+ *  The SSRC used to be the constant 0xDEADBEEF, which meant two engines
+ *  in one process advertised and stamped the *same* SSRC — the peer could
+ *  not tell the two streams apart.  It is now drawn from a per-process
+ *  generator: the seed is taken once per process, and every engine draws
+ *  its own value from it, so two engines never collide.
+ *
+ *  The generator is seeded from std::random_device, so the value is not
+ *  predictable from the process start time alone. */
+std::uint32_t next_random_audio_ssrc() noexcept {
+    static std::mutex mtx;
+    static std::mt19937 rng = [] {
+        std::random_device rd;
+        std::seed_seq seq{rd(), rd(), rd(), rd(),
+                          static_cast<unsigned>(
+                              std::chrono::high_resolution_clock::now()
+                                  .time_since_epoch().count())};
+        return std::mt19937(seq);
+    }();
+    std::lock_guard<std::mutex> lock(mtx);
+    std::uniform_int_distribution<std::uint32_t> dist(1, 0xFFFFFFFFu);
+    return dist(rng);
+}
+
+}  // namespace
 
 
 // ---------------------------------------------------------------------------
@@ -34,7 +65,14 @@ namespace nimrtc::engine {
 // ---------------------------------------------------------------------------
 
 NimRTCEngine::NimRTCEngine(EngineConfig config)
-    : impl_(new Impl()), config_(std::move(config)) {}
+    : impl_(new Impl()), config_(std::move(config)) {
+    // A-6: the audio SSRC belongs to this engine.  An explicit value
+    // (a test that wants a reproducible stream) wins; otherwise one is
+    // drawn so that two engines in the same process never collide.
+    impl_->audio_ssrc = config_.audio_ssrc != 0
+                            ? config_.audio_ssrc
+                            : next_random_audio_ssrc();
+}
 
 
 NimRTCEngine::~NimRTCEngine() {
@@ -122,6 +160,39 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
 
 uint32_t NimRTCEngine::open() noexcept {
     if (state_ != State::kConstructed) return core::kEngineNotReady;
+
+    // ---- Audio clock check (A-7 / O-5) --------------------------------
+    //
+    // The RTP timestamp of an audio stream counts samples of the
+    // *codec's* clock — 48 kHz for Opus, 8 kHz for G.711.  If the PCM
+    // the host hands to send_audio() is sampled at a different rate,
+    // every timestamp would be off by that ratio and the peer's jitter
+    // buffer would play the stream at the wrong speed.
+    //
+    // There is no resampler in the stack, so the engine refuses to open
+    // instead of emitting a stream on the wrong clock: a host that
+    // configured the rate wrongly gets an explicit error rather than
+    // audio that drifts.
+    //
+    // The rule is "the PCM rate must equal the codec's clock rate", so
+    // Opus still requires 48 kHz (A-7) while G.711 still works at
+    // 8 kHz.  A rate of 0 means "no audio configured" (the SFU profile
+    // uses it) and is left alone.
+    if (config_.pcm_sample_rate_hz != 0 &&
+        config_.pcm_sample_rate_hz != config_.audio_codec.clock_rate) {
+        impl_->last_open_rc = core::kAudioClockMismatch;
+        core::log::Logger::instance().error(
+            std::string("open(): pcm_sample_rate_hz=") +
+            std::to_string(config_.pcm_sample_rate_hz) +
+            " does not match the audio codec clock rate " +
+            std::to_string(config_.audio_codec.clock_rate));
+        if (on_error_) {
+            on_error_(core::kAudioClockMismatch,
+                      "open(): pcm_sample_rate_hz must equal the audio "
+                      "codec clock rate");
+        }
+        return core::kAudioClockMismatch;
+    }
 
     // If pre_open() already created the modules, skip recreation and go straight
     // to opening the transport (which triggers gather_candidates with the

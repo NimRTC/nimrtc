@@ -61,16 +61,28 @@ std::string NimRTCEngine::create_offer() noexcept {
     // Chrome only populates `inbound-rtp` (and fires `ontrack` audio
     // playout stats) when the offer SDP carries an a=ssrc line whose
     // value matches the RTP-header SSRC on the wire.  The wire value is
-    // stamped in send_audio() (`ssrc_val{0xDEADBEEF}`); keep this line in
-    // lockstep with it.  Video already emits its own a=ssrc below; audio
-    // was missing it, which broke the NimRTC-offer -> Chrome-answer
-    // direction (Chrome never counted inbound RTP).
+    // `Impl::audio_ssrc` — the same per-engine member the packet path
+    // stamps — so the two cannot drift apart.  The value used to be the
+    // constant 0xDEADBEEF, which two engines in one process shared.
     {
         char ssrc_line[96];
         std::snprintf(ssrc_line, sizeof(ssrc_line),
                       "%u cname:nimrtc-audio",
-                      static_cast<unsigned>(0xDEADBEEFu));
+                      static_cast<unsigned>(impl_->audio_ssrc));
         audio.extra_attrs.emplace_back("ssrc", ssrc_line);
+    }
+
+    // a=ptime / a=maxptime (RFC 7587 §6.1, RFC 8866).
+    //
+    // The advertised ptime is the duration of one outbound audio packet
+    // — the frame size the encoder works with.  maxptime is the largest
+    // packet the peer may send us; the engine accepts up to one frame
+    // per packet, so it mirrors ptime here.
+    {
+        audio.extra_attrs.emplace_back("ptime",
+                                       std::to_string(config_.audio_ptime_ms));
+        audio.extra_attrs.emplace_back("maxptime",
+                                       std::to_string(config_.audio_ptime_ms));
     }
 
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
@@ -725,9 +737,25 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
 
         // For audio: carry rtpmap/fmtp from offer.
+        //
+        // The a=ssrc line is appended for the same reason the video
+        // block below does it: Chrome's inbound-rtp counter only
+        // advances when the description names the SSRC that the RTP
+        // header actually carries.  The value is the engine's own
+        // per-engine SSRC (A-6) — the same member the packet path
+        // stamps, so the description and the wire cannot disagree.
         if (rm.type == sdp::MediaType::Audio) {
             am.rtpmap = rm.rtpmap;
             am.fmtp   = rm.fmtp;
+            char audio_ssrc_line[96];
+            std::snprintf(audio_ssrc_line, sizeof(audio_ssrc_line),
+                          "%u cname:nimrtc-audio",
+                          static_cast<unsigned>(impl_->audio_ssrc));
+            am.extra_attrs.emplace_back("ssrc", audio_ssrc_line);
+            am.extra_attrs.emplace_back("ptime",
+                                         std::to_string(config_.audio_ptime_ms));
+            am.extra_attrs.emplace_back("maxptime",
+                                         std::to_string(config_.audio_ptime_ms));
         }
 
         // For video: carry rtpmap/fmtp/rtcp-fb from offer verbatim.  The

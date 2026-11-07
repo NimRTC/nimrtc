@@ -423,7 +423,98 @@ TEST_F(SctpUsrsctpTest, PartialReliableTtlDrop) {
 }
 
 // ---------------------------------------------------------------------------
-// (3) UsrsctpNotAutoRegistered — v0.11.0 contract: "usrsctp" slot is
+// (3) A late association-change notification must not close a socket
+//     that owns no association
+// ---------------------------------------------------------------------------
+//
+// usrsctp delivers an SCTP_ASSOC_CHANGE for an association that has
+// already been torn down to whichever socket matches the shared UDP
+// encapsulated port.  Every NimRTC usrsctp socket shares one
+// encapsulated UDP port, so the late notification of a *previous*
+// association can land on a socket that was created a moment ago and
+// has not called listen()/connect() yet.
+//
+// Such a notification is not about the fresh socket's association --
+// it has none.  Treating it as its own drove the fresh socket to
+// kClosed, and the listen() that followed was rejected with
+// kErrInvalidParam (0x1001).  Observed on the Linux CI leg on
+// 2026-11-07: SctpUsrsctpTest.PartialReliableTtlDrop failed at
+// `sock_b->listen(0)`.
+//
+// The invariant this test pins: a socket that owns no association is
+// never closed by an association-change notification, and it stays
+// usable -- listen() keeps working.
+TEST_F(SctpUsrsctpTest, LateAssociationChangeDoesNotCloseFreshSocket) {
+#if !defined(__linux__)
+    // The reproduction needs an SCTP handshake that actually
+    // completes, which only the Linux runner manages (usrsctp's
+    // connect() never completes on the macOS / Windows runners).
+    GTEST_SKIP() << "usrsctp_connect() does not complete on macOS or "
+                    "Windows CI runners";
+#endif
+    SctpConfig cfg_fresh{};
+    cfg_fresh.label = "fresh";
+    SctpConfig cfg_pair_a{};
+    cfg_pair_a.label = "pair-A";
+    SctpConfig cfg_pair_b{};
+    cfg_pair_b.label = "pair-B";
+
+    // The orphan notification is a race: it is generated when usrsctp
+    // cleans up an association whose socket is already gone, and it
+    // is delivered to whichever socket usrsctp finds first.  The
+    // window is repeated a few times so the test has a fair chance
+    // of covering it (the same race is what broke the Linux CI leg
+    // on 2026-11-07).
+    constexpr int kRounds = 3;
+    for (int round = 0; round < kRounds; ++round) {
+        // The fresh socket is created FIRST, so it is the socket
+        // usrsctp finds first when it looks for the owner of a late
+        // notification.
+        auto fresh_ptr = make_usrsctp_socket(cfg_fresh);
+        ASSERT_NE(fresh_ptr, nullptr);
+        UsrsctpSocket* fresh = static_cast<UsrsctpSocket*>(fresh_ptr.get());
+
+        // Establish an association with a second pair and tear it
+        // down: the teardown is what leaves a late association-change
+        // notification in flight.
+        {
+            auto a_ptr = make_usrsctp_socket(cfg_pair_a);
+            ASSERT_NE(a_ptr, nullptr);
+            UsrsctpSocket* a = static_cast<UsrsctpSocket*>(a_ptr.get());
+            auto* a_holder = a_ptr.release();
+
+            auto b_ptr = make_usrsctp_socket(cfg_pair_b);
+            ASSERT_NE(b_ptr, nullptr);
+            UsrsctpSocket* b = static_cast<UsrsctpSocket*>(b_ptr.get());
+            auto* b_holder = b_ptr.release();
+
+            ASSERT_EQ(b->listen(0), plugins::kOk);
+            ASSERT_EQ(a->connect("127.0.0.1", b->local_port()), plugins::kOk);
+            ASSERT_TRUE(a->wait_for_established(std::chrono::seconds(60)));
+            ASSERT_TRUE(b->wait_for_established(std::chrono::seconds(60)));
+
+            delete b_holder;
+            delete a_holder;
+        }
+
+        // Give the orphaned notification time to be delivered.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        EXPECT_EQ(fresh->state(), nimrtc::sctp::UsrsctpSocketState::kUnbound)
+            << "round " << round
+            << ": a late association-change notification closed a socket "
+               "that owns no association";
+
+        // ... and the socket is still usable.
+        EXPECT_EQ(fresh->listen(0), plugins::kOk)
+            << "round " << round
+            << ": a socket that owns no association was closed by a late "
+               "association-change notification and can no longer listen()";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (4) UsrsctpNotAutoRegistered — v0.11.0 contract: "usrsctp" slot is
 // NOT populated after register_default_plugins()
 // ---------------------------------------------------------------------------
 TEST_F(SctpUsrsctpTest, UsrsctpNotAutoRegistered) {

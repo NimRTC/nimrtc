@@ -160,6 +160,7 @@ extern "C" void  nimrtc_set_userspace_udp_socket(int fd);
 extern "C" int   nimrtc_get_userspace_udp_socket(void);
 extern "C" int   nimrtc_get_userspace_udp_port(void);
 extern "C" void  nimrtc_register_loopback_addresses(void);
+extern "C" int   nimrtc_pick_free_udp_port(void);
 
 #include <nimrtc/core/log.hpp>
 
@@ -206,7 +207,12 @@ namespace {
 std::mutex                              g_init_mu;
 std::atomic<bool>                       g_usrsctp_initialized{false};
 std::atomic<int>                        g_shared_udp_refcount{0};
-std::uint16_t                           g_shared_udp_port  = 0;     // host byte order
+// Host byte order.  Written once by s_acquire_global_init() (the
+// first UsrsctpSocket constructor in the process) and read by
+// s_shared_udp_port_network().  Atomic because the writer and the
+// reader can be on different threads (two sockets constructed
+// concurrently).
+std::atomic<std::uint16_t>              g_shared_udp_port{0};        // host byte order
 std::thread                             g_shared_udp_thread;
 std::atomic<bool>                       g_shared_udp_should_stop{false};
 
@@ -257,7 +263,7 @@ void open_shared_udp_socket() noexcept {
 
     core::log::Logger::instance().info(
         "nimrtc::sctp::UsrsctpSocket: shared UDP routing via usrsctp's "
-        "internal listener (port=9899)");
+        "internal listener");
 }
 
 void close_shared_udp_socket() noexcept {
@@ -266,7 +272,12 @@ void close_shared_udp_socket() noexcept {
     // never set (stays at kInvalidSocket) and g_shared_udp_thread
     // is never started.
     g_shared_udp_should_stop.store(true, std::memory_order_release);
-    g_shared_udp_port = 0;
+    // NOTE: g_shared_udp_port is deliberately NOT cleared here.  The
+    // port is the one usrsctp's internal listener is bound to, and
+    // that listener lives for the whole process lifetime (we never
+    // call usrsctp_finish()).  Clearing the port would make a later
+    // socket fall back to the hard-coded default and address packets
+    // to a port nothing is listening on.
 }
 
 } // namespace
@@ -286,19 +297,47 @@ void UsrsctpSocket::s_acquire_global_init() noexcept {
         // `sctp_udp_tunneling_port`). usrsctp uses this port to
         // open an internal UDP socket inside recv_thread_init()
         // and route AF_INET SCTP traffic through that socket for
-        // loopback / encapsulation scenarios. We pass a fixed
-        // non-zero port (9899) — chosen because usrsctp's own
-        // examples (programs/rtcweb.c, programs/tsctp.c) use
-        // 9899 for the same purpose. The actual per-peer UDP
-        // destination is configured via SCTP_REMOTE_UDP_ENCAPS_PORT
+        // loopback / encapsulation scenarios. The actual per-peer
+        // UDP destination is configured via SCTP_REMOTE_UDP_ENCAPS_PORT
         // in listen() / connect().
         //
         // IMPORTANT: This MUST be non-zero — passing 0 makes
         // sctp_output.c silently drop every outbound SCTP packet
         // with EHOSTUNREACH (see sctp_output.c ~line 4316:
         // `if (htons(SCTP_BASE_SYSCTL(sctp_udp_tunneling_port)) == 0)`).
+        //
+        // The port is NOT a fixed constant.  It used to be hard-coded
+        // to 9899 (the port usrsctp's own rtcweb.c / tsctp.c examples
+        // use), which made the seam unsafe whenever more than one
+        // NimRTC process existed on the host: recv_thread_init()
+        // binds `userspace_udpsctp` to exactly this port, so the
+        // second process's bind() failed, its socket stayed -1, and
+        // its SCTP packets were delivered to the *first* process's
+        // listener — which demultiplexed them onto the wrong socket,
+        // so the INIT/INIT-ACK handshake never completed.
+        //
+        // That is not a theoretical concern: CTest runs each
+        // gtest-discovered case as its own process under `-j 2`, so
+        // the usrsctp test binary really does run several instances
+        // concurrently (observed on the Linux CI legs of
+        // 2026-11-07: SctpUsrsctpTest.PartialReliableTtlDrop timed
+        // out after 60 s while a sibling case passed in 0.9 s).
+        //
+        // We therefore pick a free ephemeral UDP port per process.
+        // The helper probes for a free port and closes its probe
+        // socket, so the window before usrsctp_init() binds it is
+        // as small as the OS allows.
         std::lock_guard<std::mutex> lk(g_init_mu);
-        ::usrsctp_init(9899,
+        int udp_port = nimrtc_pick_free_udp_port();
+        if (udp_port <= 0 || udp_port > 65535) {
+            // Could not find a free UDP port.  Fall back to the
+            // historical constant so the seam still initialises;
+            // the resulting behaviour matches the pre-fix state.
+            udp_port = 9899;
+        }
+        g_shared_udp_port.store(static_cast<std::uint16_t>(udp_port),
+                                 std::memory_order_release);
+        ::usrsctp_init(static_cast<std::uint16_t>(udp_port),
                        &UsrsctpSocket::s_packet_output,
                        /*debug_printf=*/nullptr);
 
@@ -312,7 +351,10 @@ void UsrsctpSocket::s_acquire_global_init() noexcept {
 
         core::log::Logger::instance().info(
             "nimrtc::sctp::UsrsctpSocket: usrsctp_init() called once; "
-            "usrsctp stays initialized for process lifetime");
+            "usrsctp stays initialized for process lifetime (shared UDP "
+            "listener port=" +
+            std::to_string(g_shared_udp_port.load(std::memory_order_acquire)) +
+            ")");
     }
     // Else: already initialized, nothing to do.
 }
@@ -359,17 +401,19 @@ void UsrsctpSocket::s_release_shared_udp() noexcept {
 
 std::uint16_t UsrsctpSocket::s_shared_udp_port_network() noexcept {
     // Query usrsctp directly for the port that its internal UDP
-    // listener (userspace_udpsctp) is bound to. The port is
-    // determined by usrsctp_init(9899, ...) — which sets
-    // SCTP_BASE_SYSCTL(sctp_udp_tunneling_port) = 9899, then
-    // recv_thread_init() binds the UDP socket to that port — and
-    // stays constant for the lifetime of the process.
+    // listener (userspace_udpsctp) is bound to.  The port is
+    // determined by usrsctp_init(port, ...) — which sets
+    // SCTP_BASE_SYSCTL(sctp_udp_tunneling_port) = port, then
+    // recv_thread_init() binds the UDP socket to that same port — and
+    // stays constant for the lifetime of the process.  `port` is the
+    // free ephemeral port picked per process in s_acquire_global_init().
     //
     // We query the socket directly via getsockname() in the C helper
     // (nimrtc_get_userspace_udp_port), which reads the actual bound
     // port from usrsctp's internal socket. If the helper returns 0
     // (socket invalid or getsockname failed), we fall back to the
-    // documented sysctl value of 9899.
+    // port chosen at usrsctp_init() time, and finally to 9899 (the
+    // constant usrsctp's own examples use) if that is unknown too.
     const int port_host = nimrtc_get_userspace_udp_port();
     if (port_host > 0 && port_host <= 65535) {
         return htons(static_cast<std::uint16_t>(port_host));
@@ -378,7 +422,12 @@ std::uint16_t UsrsctpSocket::s_shared_udp_port_network() noexcept {
         "nimrtc::sctp::UsrsctpSocket::s_shared_udp_port_network: "
         "usrsctp UDP listener port unknown (helper returned " +
         std::to_string(port_host) + "); "
-        "falling back to hardcoded 9899");
+        "falling back to the port chosen at usrsctp_init() time");
+    const std::uint16_t chosen =
+        g_shared_udp_port.load(std::memory_order_acquire);
+    if (chosen != 0) {
+        return htons(chosen);
+    }
     return htons(9899);
 }
 

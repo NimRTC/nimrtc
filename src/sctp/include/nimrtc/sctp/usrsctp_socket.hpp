@@ -391,8 +391,9 @@ private:
 
     /** Return the shared UDP listener port (in network byte order, as
      *  needed by SCTP_REMOTE_UDP_ENCAPS_PORT). Queried from usrsctp's
-     *  internal socket via getsockname(). Falls back to 9899 (the
-     *  usrsctp_init() port) if the socket is not accessible. */
+     *  internal socket via getsockname(). Falls back to the port that
+     *  was chosen at usrsctp_init() time (a free ephemeral port picked
+     *  per process), and finally to 9899 if that is unknown too. */
     static std::uint16_t s_shared_udp_port_network() noexcept;
 
     /** Helper used by both listen() and connect() to bind the SCTP

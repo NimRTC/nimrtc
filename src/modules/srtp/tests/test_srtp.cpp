@@ -46,10 +46,10 @@ std::vector<std::uint8_t> make_min_rtp() {
     pkt[5] = 0xAD;
     pkt[6] = 0xBE;
     pkt[7] = 0xEF;
-    pkt[8] = 0x12;
-    pkt[9] = 0x34;
-    pkt[10] = 0x56;
-    pkt[11] = 0x78;
+    pkt[8] = static_cast<std::uint8_t>((kTestSsrc >> 24) & 0xFFu);
+    pkt[9] = static_cast<std::uint8_t>((kTestSsrc >> 16) & 0xFFu);
+    pkt[10] = static_cast<std::uint8_t>((kTestSsrc >> 8) & 0xFFu);
+    pkt[11] = static_cast<std::uint8_t>(kTestSsrc & 0xFFu);
     for (std::size_t i = 12; i < pkt.size(); ++i) pkt[i] = static_cast<std::uint8_t>(i);
     return pkt;
 }

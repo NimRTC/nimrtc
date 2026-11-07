@@ -54,6 +54,37 @@ Running twice is harmless.
 Every failing record is reported, not just the first one. A day that
 failed twice is a day that failed twice.
 
+### 1.2 The tree the day was measured on
+
+A green day is a statement about a *program*, and the program is the
+tree the collector ran against. Each record therefore carries the tree
+it was measured on:
+
+| Field | Meaning |
+|---|---|
+| `git_ref` | the branch the tree was on (`release/1.1` for the v1.1 window) |
+| `git_commit` | the commit the tree was at |
+| `git_dirty` | whether the working tree carried uncommitted changes |
+
+A day is green only when **every** record of that day was measured on
+the candidate branch *and* on a clean tree:
+
+* a day measured on another branch is evidence about a different
+  program, so it is listed under "days measured on another tree";
+* a day measured on a **dirty** tree is evidence about whatever the
+  working directory happened to contain, not about the tagged commit —
+  the commit identifies the tree, but a modified working tree is not
+  that tree. Such a day is listed under "days measured on an unclean
+  tree";
+* a record that does not say whether the tree was clean (one written
+  before the collector tracked the flag) is read as *not known to be
+  clean*. The gate cannot certify what it cannot see.
+
+The practical consequence for the release machine: **the checkout has
+to be clean when the task fires.** `git status --porcelain` must print
+nothing. The build tree under `build/` is ignored, so a built tree is
+not a dirty tree.
+
 ## 2. Prerequisites
 
 Per platform, the collector's precondition check runs before the
@@ -119,8 +150,37 @@ Run once a day, at a time when the machine is on and the build tree
 is intact. A scheduled task that runs while the machine is asleep
 produces no record, and a missing day breaks the streak.
 
+The task is registered by a script, so that registering it is a
+reviewable, repeatable act rather than a copy-paste:
+
 ```powershell
-# Register a daily task. Run once, from an elevated prompt.
+# Register the daily task (03:07 local by default).
+.\scripts\register-soak-task.ps1
+
+# ... or with a different time.
+.\scripts\register-soak-task.ps1 -Time 03:17
+
+# ... or remove it again.
+.\scripts\register-soak-task.ps1 -Remove
+```
+
+The registration wires `scripts/run-soak-daily.ps1` to the task. That
+wrapper runs the collector, tees its output into
+`build/soak/soak-task.log`, and returns the collector's exit code
+(0 = every case passed, 1 = a case failed, 2 = the collector could
+not run). It also picks the interpreter: the first candidate that can
+both execute code and import `playwright`, because Case D drives a
+real Chrome peer through Playwright and an interpreter without it
+cannot produce evidence at all.
+
+`StartWhenAvailable` is on, so a trigger missed while the machine was
+asleep fires as soon as the machine is back — a gap day breaks the
+streak, so a task that never runs at all is worse than one that runs
+late.
+
+The equivalent hand-rolled registration, for reference:
+
+```powershell
 $action  = New-ScheduledTaskAction `
     -Execute "python" `
     -Argument "d:\MyOpen\NimRTC\tools\run_soak.py --platform windows --case d,e" `
@@ -313,6 +373,10 @@ that wants to assert on it rather than read it.
 - **days with evidence but not green** — days that carry evidence but
   fail the green test, with the cases that lacked a `PASS` or carried a
   `FAIL`. This is where a day that a retry "fixed" still shows up.
+- **days measured on another tree** / **days measured on an unclean
+  tree** — the days whose records do not describe the candidate
+  commit. They are not green, and they are listed rather than dropped,
+  so a short streak can be explained without guessing (§1.2).
 - A tracked platform with **no evidence at all** is listed with a zero
   streak rather than being omitted. A platform missing from the report
   reads as "not tracked", which is exactly the misunderstanding the

@@ -151,8 +151,8 @@ static void hex(const char* tag, const uint8_t* data, size_t n) {
 int main() {
     // Simulate a Finished record (24 bytes plaintext) with both endpoints
     // using the same key/salt/nonce — this should be a perfect round-trip.
-    uint8_t key[16];
-    for (int i = 0; i < 16; ++i) key[i] = (uint8_t)(i + 1);
+    uint8_t key[kAesKeyLen];
+    for (std::size_t i = 0; i < kAesKeyLen; ++i) key[i] = (uint8_t)(i + 1);
     uint8_t salt[4]   = {0xAA, 0xBB, 0xCC, 0xDD};
     uint8_t nonce[8]  = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80};
     uint8_t aad[13];
@@ -160,11 +160,11 @@ int main() {
     uint8_t pt[24];
     for (int i = 0; i < 24; ++i) pt[i] = (uint8_t)(0x40 + i);
 
-    auto sealed = nimrtc::aes_gcm_seal(key, 16, salt, nonce, aad, 13, pt, 24);
+    auto sealed = nimrtc::aes_gcm_seal(key, kAesKeyLen, salt, nonce, aad, 13, pt, 24);
     std::printf("sealed size=%zu\n", sealed.size());
     hex("sealed:", sealed.data(), sealed.size());
 
-    auto opened = nimrtc::aes_gcm_open(key, 16, salt, nonce, aad, 13,
+    auto opened = nimrtc::aes_gcm_open(key, kAesKeyLen, salt, nonce, aad, 13,
                                           sealed.data(), sealed.size());
     std::printf("opened size=%zu\n", opened.size());
     hex("opened:", opened.data(), opened.size());

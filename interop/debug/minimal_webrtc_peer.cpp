@@ -39,7 +39,6 @@ static constexpr uint16_t STUN_BINDING_SUCCESS  = 0x0101;
 
 static constexpr uint16_t STUN_ATTR_USERNAME        = 0x0006;
 static constexpr uint16_t STUN_ATTR_PRIORITY        = 0x0024;
-static constexpr uint16_t STUN_ATTR_USE_CANDIDATE   = 0x0025;
 static constexpr uint16_t STUN_ATTR_ICE_CONTROLLED  = 0x8029;
 static constexpr uint16_t STUN_ATTR_XOR_MAPPED_ADDR = 0x0020;
 

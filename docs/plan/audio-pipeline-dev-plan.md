@@ -231,6 +231,51 @@ the V-2 loss-injection test ("constant cadence, concealed counter ==
 drop count"): that test drives two engines over the loopback transport,
 so it needs the engine wiring — it is part of WP-7, not of WP-4 alone.
 
+**After WP-7 (engine wiring and failure policy) — 2026-11-07.**  The
+engine stopped owning the receive path.  It held its own
+`jb::JitterBuffer`, fell back to a concrete `opus::Decoder`, and then
+reinterpreted the *compressed* RTP payload as float PCM — the host got
+noise and the 3A echo canceller got a bit-stream instead of a reference
+signal (defect F-1).
+
+The engine now resolves a **decoder** and a **receive pipeline** through
+the registry's typed slots (`EngineConfig::audio_decoder_name`, default
+`"opus"`; `EngineConfig::audio_receiver_name`, default
+`"nimrtc_audio_rx"`) and drives `plugins::IAudioReceiver` alone.  The
+plan's checkable condition holds: `src/engine/` contains **no** include
+of `nimrtc/jb/*` and **no** include of `nimrtc/opus/*` — only a comment
+that names them.  What replaced them is a *link* dependency on the
+`audio_rx` module (`src/engine/CMakeLists.txt`) and the matching entry
+in `kDefaultRegistrars[]` (`src/core/src/pal_default_registrars.cpp`),
+which is guarded by `NIMRTC_HAS_AUDIO_RX` so the entry exists only when
+the module is actually built.
+
+The failure policy is B-16 verbatim: a missing decoder or a missing
+pipeline is a hard error that fires `on_error` **exactly once** and
+disables the audio track; the inbound packets are counted and dropped,
+never decoded.  There is no fallback receiver and no fallback encoder —
+a missing codec plugin is reported (`kAudioEncodeFailed`, throttled)
+rather than silently putting a *different* codec's bit-stream on the
+wire.
+
+The 3A render reference is now the **decoded** frame — the frame that is
+about to be played out — so the echo canceller finally has a reverse
+stream (spec A-10).
+
+| Gate (after WP-7) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 730 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `ctest --test-dir build -C Debug` | **741 / 741 passed, 0 failed** (737 + the 4 new cases of `tests/test_engine_audio_state.cpp` plus its binary-level entry) |
+| `grep -r "nimrtc/\(jb\|opus\)/" src/engine/` | only a comment — no include remains |
+
+**What is still open after WP-7.**  The V-2 loss-injection test (the
+"constant cadence, concealed counter == drop count" row) is the last
+piece of WP-4 and it belongs to WP-11.  WP-8 (RTCP receiver reports and
+the statistics counters), WP-9 (the cross-end capture timestamp),
+WP-10 (the P1 public SDK) and WP-11 (verification and interop) are
+still ahead.
+
 ---
 
 ## 3. The work packages in detail

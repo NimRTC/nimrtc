@@ -122,6 +122,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The routing table lives in a private engine header
     (`src/engine/src/audio_routing.hpp`), so the public surface is
     unchanged: the scan still reports 109 headers and 730 symbols.
+- **The engine drives the audio receive pipeline as a plugin (audio
+  pipeline WP-7, spec A-9 / A-10 / B-11 / B-15 / B-16).** The receive
+  path was the last place where the engine still owned a concrete module:
+  it held its own `jb::JitterBuffer`, fell back to a concrete
+  `opus::Decoder`, and then handed the *compressed* RTP payload to the
+  host as if it were float PCM. The host received noise, and the 3A echo
+  canceller was fed a bit-stream instead of a reference signal.
+  - `src/engine/` now includes **no** concrete module header: neither
+    `nimrtc/jb/*` nor `nimrtc/opus/*`. The engine resolves a decoder and
+    a receive pipeline through the registry's typed slots
+    (`EngineConfig::audio_decoder_name`, default `"opus"`, and
+    `EngineConfig::audio_receiver_name`, default `"nimrtc_audio_rx"`) and
+    drives `plugins::IAudioReceiver` alone.
+  - The host now receives **decoded** PCM. The pipeline resolves its
+    jitter buffer and its decoder through the registry, walks the media
+    timeline on the RTP timestamps, conceals the slots that never
+    arrived, recovers a lost frame from the peer's in-band FEC and
+    downmixes to the configured output channel count.
+  - The playout is clock-driven: `tick()` is what makes the pipeline
+    produce output, and the output cadence follows the media time rather
+    than the packet arrival.
+  - The 3A render reference is now the **decoded** signal -- the frame
+    that is about to be played out -- instead of the inbound bit-stream.
+    Without a reverse stream the echo canceller could never converge.
+  - **There is deliberately no fallback receiver.** A missing decoder or
+    a missing pipeline is a hard error (`kAudioDecoderMissing` /
+    `kAudioReceiverMissing`) that fires `on_error` exactly once and
+    disables the audio track; the inbound packets are counted and dropped,
+    never decoded. A "built-in minimal receiver" would decode nothing and
+    hand the bit-stream over as if it were audio.
+  - The concrete `opus::Encoder` fallback is gone for the same reason: a
+    missing codec plugin is reported (`kAudioEncodeFailed`, throttled)
+    instead of silently putting a *different* codec's bit-stream on the
+    wire.
+  - `src/engine/CMakeLists.txt` gains a **link** dependency on the
+    `audio_rx` module (so the default receiver id resolves for consumers
+    that link only the engine) and `src/core/` gains the matching entry
+    in `kDefaultRegistrars[]`. Neither is an include: the public header
+    set is unchanged, and the scan still reports 109 headers and 730
+    symbols.
 
 ### Changed
 

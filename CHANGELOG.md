@@ -8,6 +8,181 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 > Work that lands after `v1.1.0`.
+>
+> The audio pipeline's development body lands here. Its work packages are
+> specified in `docs/plan/audio-pipeline-spec.md` and scheduled in
+> `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
+> 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
+> nothing here is a feature release of the `v1.1` line.
+
+### Added
+
+- **Two plugin seams for the audio pipeline (audio pipeline WP-1).** The
+  receive path needs a codec-side decoder (one RTP payload in, PCM frames
+  out) and a pipeline-side receiver (jitter buffer, concealment, FEC
+  recovery, downmix and playout clock behind one interface), so the engine
+  never has to include a concrete module header.
+  - `plugins::IAudioDecoder` with `AudioDecodeFormat`, `AudioDecodedFrame`
+    and its factory.
+  - `plugins::IAudioReceiver` with `AudioReceiverConfig`,
+    `AudioOutputFrame` and its factory.
+  - Two typed slots in `core::PluginRegistry` (the `kAudioDecoder` and
+    `kAudioReceiver` categories), their registration macros and the
+    back-compat includes. The two new macros take the id as a string
+    literal; the legacy `NIMRTC_REGISTER_*` family, which stringifies a
+    bare identifier token, is unchanged.
+  - `engine::pal::resolve_audio_decoder()` and `resolve_audio_receiver()`,
+    mirroring `resolve_codec` / `resolve_audio3a`.
+  - The audio error range `0x1A40`..`0x1A48` in `core/engine_errors.hpp`.
+  - `src/modules/audio_rx/` -- the self-contained module that will carry
+    the receive pipeline.
+- **The Opus side of the audio-decoder seam (audio pipeline WP-2).** The
+  Opus module now publishes a `plugins::IAudioDecoder` under the id
+  `"opus"` in the registry's audio-decoder category, next to the codec
+  plugin that uses the same id in the codec category (ids are per
+  category).
+  - The concrete decoder gains the entry points the pipeline needs:
+    `decode_with_fec()` reconstructs the *previous* frame from the
+    redundancy the peer embedded in the current packet, `last_payload()`
+    lets the caller re-submit a payload, `set_channels()` and
+    `reconfigure()` renegotiate the decoder (libopus cannot change
+    either in place, so the instance is re-created), and
+    `packet_loss_perc` drives the in-band FEC hint on both sides.
+  - The adapter header is private to the module: the engine reaches the
+    decoder through the registry's slot, so the public header count stays
+    where the API-freeze scan expects it.
+  - The tests reach the plugin through `core::PluginRegistry`, never
+    through a concrete class -- the property WP-7 depends on. They cover
+    the round-trip, the multi-frame payload, the malformed payload, the
+    concealment frame properties and the in-band FEC recovery of a lost
+    frame.
+- **The jitter-buffer seam can now be told which clock the stream runs
+  on.** `plugins::IJB` gains one virtual, `configure(const JBConfig&)`,
+  callable after `create()` and before the first `push()`. A jitter buffer
+  that was handed a 48 kHz audio stream used to measure the interarrival
+  jitter in the wrong unit and derive a playout delay off by the ratio
+  between the two rates (spec B-3 / F-6). The seam default of
+  `JBConfig::clock_rate_hz` moves from 90000 to 0, which means
+  "unspecified" instead of silently assuming video; the concrete module
+  keeps its historical 90 kHz reading for a `clock_rate_hz` of 0, so the
+  video path -- which never configures the buffer -- is unchanged.
+- **The audio receive pipeline module (audio pipeline WP-3).** The module
+  `src/modules/audio_rx/` implements the receive side of the pipeline: it
+  resolves its jitter buffer and its decoder through `core::PluginRegistry`
+  (the ids the engine puts into `AudioReceiverConfig`), walks the media
+  timeline on the RTP timestamps, conceals the slots that never arrived,
+  downmixes to the configured output channel count, and plays out **only**
+  when the host's `tick()` asks it to -- the playout is clock-driven, not
+  arrival-driven (spec A-1 / A-3 / A-4).
+  - The module depends on `nimrtc::core` and `nimrtc::plugins` only: it
+    links neither the Opus nor the JB module, because both are injected.
+  - It publishes a `plugins::IAudioReceiver` under the id
+    **`"nimrtc_audio_rx"`** in the registry's audio-receiver category.
+  - The factory returns a **null product** when the jitter buffer or the
+    decoder plugin is not registered: there is no fallback receiver
+    (spec B-16), so the caller turns the null into the hard error
+    `kAudioReceiverMissing`. The null product is also the only way to
+    report the condition, because the engine installs the callbacks
+    *after* `create()`.
+  - The module's tests use their own doubles for `plugins::IJB` and
+    `plugins::IAudioDecoder` rather than the Opus and JB modules, which is
+    what keeps the module independently buildable and testable. They cover
+    the V-1 rows "Receiver timeline", "Receiver cadence" and "Receiver
+    downmix", plus the concealment cap (silence beyond the cap), the
+    stream clock rate the jitter buffer is configured with, and the two
+    null-product paths of B-16.
+
+### Changed
+
+- **Every engine now owns its own audio send state (audio pipeline WP-5,
+  spec A-6 / A-7 / A-8).** The outbound audio path had three defects that
+  all came from the same root: the send state lived in function-local
+  statics instead of in the engine.
+  - The SSRC was the constant `0xDEADBEEF`, so two engines in one process
+    advertised and stamped the *same* SSRC and the peer could not tell the
+    two streams apart. It is now a per-engine member drawn from a
+    per-process generator (an explicit `EngineConfig::audio_ssrc` wins,
+    for a reproducible test stream), and the SDP generator reads the very
+    same member the packet path stamps -- the description and the wire can
+    no longer drift apart.
+  - The RTP sequence number and timestamp were function-local statics, so
+    two engines shared one sequence space. They are per-engine members
+    now.
+  - `send_audio()` used to encode whatever block the host happened to hand
+    it, so the packet size -- and therefore the media clock -- depended on
+    how the host chunked its capture. The processed PCM now goes through a
+    frame accumulator: one RTP packet carries exactly one frame of
+    `EngineConfig::audio_ptime_ms` milliseconds (RFC 7587 code 0 framing),
+    a partial frame stays behind for the next call, and the media clock
+    advances by the frame duration whether or not the packet reached the
+    wire. A dropped frame therefore leaves a gap in the sequence number,
+    never a hole in the timeline.
+  - An encode failure used to vanish. It is now counted
+    (`Stats::audio_encode_errors`), reported through `on_error` (throttled
+    to one report per second so a broken stream cannot flood the host) and
+    the timeline keeps advancing.
+  - The engine refused to open when `pcm_sample_rate_hz` did not match the
+    codec's clock rate, but only after the transport was already up. The
+    check now happens before `open()` creates anything: there is no
+    resampler in the stack, so a host that configured the rate wrongly gets
+    an explicit error rather than audio that drifts.
+  - On the SDP side, `a=ptime` / `a=maxptime` are advertised (RFC 7587
+    section 6.1, RFC 8866), and the answer carries the engine's own
+    `a=ssrc` line, which is what makes Chrome count our inbound RTP at
+    all. The demo no longer appends a stale constant SSRC of its own.
+
+### Fixed
+
+- **The soak evidence window erased the failures it was supposed to
+  record.** The summary kept only the *last* record per case per day, so a
+  FAIL that a later PASS on the same day followed was silently erased: the
+  day read as green while the failure sat in the file unmentioned. The
+  collector now keeps every record, and a day is green only when each
+  required case has a PASS and no required case has a FAIL. The failure is
+  still reported, and the day is listed as "evidence but not green".
+  The summary also dropped tracked platforms that had no records at all, so
+  a platform with no evidence read as "not tracked" instead of "zero green
+  days" -- the exact misunderstanding the release gate exists to prevent.
+  Every tracked platform is now listed with a zero streak, and a failing
+  gate names it. Exact duplicate records are dropped, because the runbook's
+  merge procedure appends the CI records into `build/soak/` and running it
+  twice inflated the failure count.
+- **A tooling failure was dressed up as a product regression.** The
+  signaling-server wait was 5 seconds, which is not enough for the server
+  to reach its first log line when the 3am scheduled task starts on a
+  machine waking from sleep. Both Case D and Case E then failed with
+  "signaling_server did not open :<port>" and an *empty* log. The wait is
+  now 30 seconds, and the runner prints the child's log tail on failure so
+  the two cases are distinguishable next time.
+- **The acceptance runner lost a port race.** The runner now waits for the
+  port instead of assuming it is free, so a slow start no longer turns
+  into a spurious failure.
+
+### Tooling
+
+- **A tag watcher for `v1.1.0`, with signature verification and a
+  release-gate status snapshot.** The watcher probes the repository it is
+  pointed at separately from the repository the scripts live in, so a
+  fork cannot be mistaken for the origin.
+- **A 7-day soak evidence collector** on the scheduled runners, with a
+  runbook that appends the CI records instead of overwriting them.
+- **An offline release signature verifier** that accepts valid signatures
+  produced by the release key.
+- **A release-gate status snapshot** (`tools/v11_status.py`) and the
+  `v1.1.0` release-candidate record.
+- **A MSVC developer-environment build wrapper** (`scripts/msvc_build.bat`)
+  that runs a command inside the VS 2022 x64 developer env, with a `raw`
+  mode for arbitrary commands. The `raw` mode never ran the command --
+  `shift` does not change `%*`, so the mode word stayed in front of the
+  command and cmd tried to execute a program called `raw`; the positional
+  expansion now drops the mode word explicitly. The wrapper's echo
+  messages also carried parenthesised text inside a parenthesised block,
+  which cmd.exe parses as one statement, so the closing parenthesis ended
+  the block early and aborted the script; the messages are free of
+  parentheses now, and the `%errorlevel%` reads became `!errorlevel!` so
+  the value is the one the command returned.
+- **The WebRTC APM prebuild is now a hard release gate** (the APM content
+  that actually ships is reported, not just the prebuild outcome).
 
 ## [1.1.0] - 2026-11-07
 

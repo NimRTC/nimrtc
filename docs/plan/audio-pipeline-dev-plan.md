@@ -145,6 +145,46 @@ in the newer packet and reported with `fec_recovered == true`
 one frame period (the "one-frame lookahead") and replace it with the
 FEC frame when one arrives; it needs no codec-specific code.
 
+**After WP-3 (the `audio_rx` module) — 2026-11-07.**  The module now
+implements the receive pipeline: it resolves its jitter buffer and its
+decoder through `core::PluginRegistry` (the ids the engine puts into
+`AudioReceiverConfig`), walks the media timeline on the RTP timestamps,
+conceals the slots that never arrived, downmixes to the configured output
+channel count, and plays out **only** when the host's `tick()` asks it
+to.  The module depends on `nimrtc::core` and `nimrtc::plugins` only —
+it links neither the Opus nor the JB module.
+
+The seam side landed with it: `src/modules/audio_rx/src/receiver_plugin.cpp`
+implements the `plugins::IAudioReceiver` adapter and its factory, and
+registers the pipeline under the id **`"nimrtc_audio_rx"`** in the
+registry's audio-receiver category.  The factory returns a **null
+product** when the jitter buffer or the decoder plugin is not registered:
+there is no fallback receiver (B-16), so the caller turns the null into
+the hard error `kAudioReceiverMissing`.  The null product is also the
+only way to report the condition, because the engine installs the
+callbacks *after* `create()` — the pipeline cannot report through its own
+error callback at that point.
+
+The module's tests use **their own doubles** for `plugins::IJB` and
+`plugins::IAudioDecoder` rather than the Opus and JB modules — that is
+what keeps the module independently buildable and testable (L3), and it
+is the same property WP-7 relies on from the other side.
+
+| Gate (after WP-3) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 730 symbols, `Missing == 0` (the module's public header gains one symbol: `register_default_plugins`) |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `ctest --test-dir build -C Debug` | **729 / 729 passed, 0 failed** (719 - the module's 2 placeholder entries + its 12 new entries) |
+
+**WP-4 is half landed, and the plan says so.**  The clock-driven playout
+itself is in the module: `tick()` is the only thing that makes the
+pipeline produce output, a gap produces exactly the missing number of
+concealed frames, and the output cadence follows the media time rather
+than the arrival (spec A-1 / A-3 / A-4).  What is **not** done yet is
+the V-2 loss-injection test ("constant cadence, concealed counter ==
+drop count"): that test drives two engines over the loopback transport,
+so it needs the engine wiring — it is part of WP-7, not of WP-4 alone.
+
 ---
 
 ## 3. The work packages in detail

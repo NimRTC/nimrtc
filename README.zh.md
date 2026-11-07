@@ -449,7 +449,7 @@ Track A 基线是传输层下限数字，不是引擎端到端声明。Windows 1
 | `bench_latency.json`（1000 × 172 B 回显） | 172 B（约 20ms Opus 单声道 + RTP 头） | p50 **~10 µs**，p99 **~20–35 µs**，平均抖动 **<1 µs** |
 | `bench_dc.json` datagram 平面（2000 包） | 256 B | **~60–80k pps / ~120–165 Mbps** |
 | `bench_dc.json` datagram 平面（2000 包） | 1200 B | **~60–80k pps / ~570–800 Mbps** |
-| `bench_dc.json` bidi-stream-chunk 平面（2000 包） | 16384 B | **~70k pps / ~9 Gbps** |
+| `bench_dc.json` bidi-stream-chunk 平面（2000 包） | 16384 B | **~60–70k pps / ~8–9 Gbps** |
 | `bench_weaknet.json` loss-5pct 档（200 × 1200 B） | 1200 B，5% 丢包 + 5 ms 基准 | 送达率 **~0.95**，p50 **~5–7 ms**，p99 **~5–8 ms** |
 | `bench_weaknet.json` jitter-100ms 档（200 × 1200 B） | 1200 B，20 ms 基准 + 0–100 ms 抖动 | 送达率 **1.0**，p50 **~74–76 ms**，p99 **~118–121 ms** |
 | `bench_weaknet.json` cap-1mbps 档（200 × 1200 B） | 1200 B，1 Mbps 整形 + 5 ms 基准 | 送达率 **1.0**，p50 **~15–17 ms**，p99 **~19–31 ms** |

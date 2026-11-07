@@ -453,7 +453,7 @@ Track A baselines are transport-floor numbers, not engine glass-to-glass claims.
 | `bench_latency.json` (1000 × 172 B echo) | 172 B (~20 ms Opus mono + RTP header) | p50 **~10 µs**, p99 **~20–35 µs**, mean jitter **<1 µs** |
 | `bench_dc.json` datagram plane (2000 msgs) | 256 B | **~60–80k pps / ~120–165 Mbps** |
 | `bench_dc.json` datagram plane (2000 msgs) | 1200 B | **~60–80k pps / ~570–800 Mbps** |
-| `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~70k pps / ~9 Gbps** |
+| `bench_dc.json` bidi-stream-chunk plane (2000 msgs) | 16384 B | **~60–70k pps / ~8–9 Gbps** |
 | `bench_weaknet.json` loss-5pct tier (200 × 1200 B) | 1200 B, 5% loss + 5 ms base | delivery **~0.95**, p50 **~5–7 ms**, p99 **~5–8 ms** |
 | `bench_weaknet.json` jitter-100ms tier (200 × 1200 B) | 1200 B, 20 ms base + 0–100 ms jitter | delivery **1.0**, p50 **~74–76 ms**, p99 **~118–121 ms** |
 | `bench_weaknet.json` cap-1mbps tier (200 × 1200 B) | 1200 B, 1 Mbps pace + 5 ms base | delivery **1.0**, p50 **~15–17 ms**, p99 **~19–31 ms** |

@@ -260,16 +260,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not `main`.** The `v1.1.0` tag is cut from `release/1.1`, and `main`
   already carries the v1.2.0 audio body, so evidence collected from
   `main` would have been evidence about a different program than the one
-  being released. `.github/workflows/soak.yml` gained a `SOAK_REF`
-  environment variable (`${{ inputs.ref || 'release/1.1' }}`) and a
-  matching `ref:` on both checkouts, so the scheduled run measures
-  `release/1.1` and a manual run can point it elsewhere through the new
-  `ref` dispatch input. The Windows half of the window has the same
-  requirement and is *not* automatic: the local Scheduled Task runs the
-  collector against the working tree of the checkout it was registered
-  against, so the release machine must stay on `release/1.1` for the
-  whole window. `docs/plan/soak-runbook.md` §4.3.1 records the rule and
-  the branch check to run before letting a day be recorded.
+  being released. Three changes close the gap:
+  - `.github/workflows/soak.yml` gained a `SOAK_REF` environment
+    variable (`${{ inputs.ref || 'release/1.1' }}`) and a matching `ref:`
+    on both checkouts, so the scheduled run measures `release/1.1` and a
+    manual run can point it elsewhere through the new `ref` dispatch
+    input. The workflow's two jobs are therefore the *pinned* source of
+    both halves of the window.
+  - `tools/run_soak.py` now records the tree each run was measured on
+    (`git_ref` and `git_commit`) in every evidence record, and its
+    summary only counts a day as green when that tree is the candidate
+    branch (`--expect-ref`, default `release/1.1`). A day measured on
+    `main` — which is what the local Scheduled Task produces whenever
+    the release machine's checkout is on `main` — is listed as "measured
+    on another tree" rather than silently credited to the window.
+    Evidence written before the collector tracked the tree has no
+    `git_ref` and is therefore not green either, so the window restarts
+    from zero.
+  - `tools/run_soak.py --self-test` now runs on every push
+    (`.github/workflows/ci.yml`), pinning the streak semantics and the
+    new tree rule together: a window measured on the wrong tree must
+    fail the gate.
+
+  `docs/plan/soak-runbook.md` §4.3.1 records which tree each half of
+  the window measures and how to check the local one.
 - **The source version is now `1.1.0`** (`project(VERSION)` in
   `CMakeLists.txt`, `NIMRTC_API_VERSION_{MAJOR,MINOR,PATCH}` in
   `src/core/include/nimrtc/core/api_version.hpp`, encoded `NIMRTC_API_VERSION`
@@ -615,9 +629,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `publish-release.needs`). `docs/plan/ci-workarounds.md` W3/W5 remain
   the source of truth.
 - Still open before the `v1.1.0` tag: the 7-day soak evidence for
-  §12.3.6 Gate 6, the signed annotated tag, and the upload of the
-  release key to the GitHub account GPG list (blocked on network access
-  to `github.com`, not on tooling).
+  §12.3.6 Gate 6, and the signed annotated tag itself. The **upload of
+  the release key to the GitHub account GPG list is no longer a
+  blocker**: the repository signs tags with `gpg.format = ssh` and the
+  account's already-registered SSH key, so GitHub renders the tag as
+  "Verified" without it (`RELEASING.md` §3.3 step 11; `docs/plan/
+  v1.1-plan.md` Track C6, 2026-11-06). The OpenPGP path remains
+  available and would need the key on the GPG list for its badge.
   The soak window **restarts from zero** because it now measures the
   candidate tree `release/1.1` rather than `main` (see the "Changed"
   entry on `SOAK_REF` above): the 2026-11-06 / 2026-11-07 records were

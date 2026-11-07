@@ -515,6 +515,14 @@ int UsrsctpSocket::s_instance_send_cb(struct socket* /*sock*/,
 // SCTP_PEER_ADDR_CHANGE was misread as sac_state=2 ==
 // SCTP_COMM_LOST, which drove the socket to kClosed immediately
 // after the legitimate SCTP_COMM_UP).
+//
+// NOTE: this runs inside usrsctp's receive callback, which holds the
+// inpcb read lock (see sctp_invoke_recv_callback() in upstream
+// sctputil.c).  No usrsctp call that takes the inpcb lock again
+// (usrsctp_getsockopt() and friends) may be issued from here -- a
+// recursive read lock can deadlock against a waiting writer.  The
+// association a notification belongs to is therefore decided from
+// the socket's own state, not from a query against usrsctp.
 // ---------------------------------------------------------------------------
 void UsrsctpSocket::handle_notification(const void* data,
                                         std::size_t datalen) noexcept {
@@ -535,27 +543,84 @@ void UsrsctpSocket::handle_notification(const void* data,
     }
     const auto* sac = static_cast<const struct sctp_assoc_change*>(data);
     const std::uint16_t sac_state = sac->sac_state;
-    switch (sac_state) {
-        case SCTP_COMM_UP:
-            // Transition to kEstablished regardless of whether we
-            // were kListening (inbound peer) or kConnecting (we
-            // initiated the handshake).
-            s_transition_to(UsrsctpSocketState::kEstablished);
-            break;
-        case SCTP_COMM_LOST:
-        case SCTP_CANT_STR_ASSOC:
-            s_transition_to(UsrsctpSocketState::kClosed);
-            break;
-        case SCTP_SHUTDOWN_COMP:
-            // Graceful shutdown — also kClosed for the seam.
-            s_transition_to(UsrsctpSocketState::kClosed);
-            break;
-        case SCTP_RESTART:
-            // SCTP restart (re-establishment) — keep the existing
-            // state. We don't surface a kRestarting state in v0.11.0.
-            break;
-        default:
-            break;
+
+    // A socket that owns no association cannot have its association
+    // change.  usrsctp delivers a *late* SCTP_ASSOC_CHANGE for an
+    // association that has already been torn down to whichever
+    // socket matches the shared UDP encapsulated port -- and because
+    // every NimRTC usrsctp socket shares one encapsulated UDP port,
+    // that late notification can land on a socket that was created
+    // a moment ago and has not called listen()/connect() yet.
+    //
+    // Acting on it drove the fresh socket straight to kClosed, and
+    // the listen() that followed was then rejected with
+    // kErrInvalidParam (observed on the Linux CI leg, 2026-11-07:
+    // SctpUsrsctpTest.PartialReliableTtlDrop failed at
+    // `sock_b->listen(0)` with 0x1001).
+    //
+    // Each notification is therefore only acted on when the socket is
+    // in a state where an association of its own can be affected:
+    //
+    //   kUnbound     -- the socket owns no association at all; every
+    //                   notification it receives is somebody else's.
+    //   kListening   -- a listener that has not accepted a peer yet;
+    //                   it has no association to lose.
+    //   kConnecting  -- a handshake in flight; only our own
+    //                   connect failure (SCTP_CANT_STR_ASSOC) is
+    //                   meaningful here.
+    //   kEstablished -- the association existed, so a loss is real.
+    //
+    // SCTP_COMM_UP is only acted on for a socket that is on its way
+    // to an association (it called listen() or connect() already);
+    // for a socket that owns none, the notification is somebody
+    // else's.
+    if (sac_state == SCTP_COMM_UP) {
+        if (state_ != UsrsctpSocketState::kConnecting &&
+            state_ != UsrsctpSocketState::kListening) {
+            core::log::Logger::instance().warn(
+                "nimrtc::sctp::UsrsctpSocket: ignoring SCTP_COMM_UP "
+                "addressed to a socket that owns no association");
+            return;
+        }
+        // Transition to kEstablished regardless of whether we
+        // were kListening (inbound peer) or kConnecting (we
+        // initiated the handshake).
+        s_transition_to(UsrsctpSocketState::kEstablished);
+        return;
+    }
+
+    if (sac_state == SCTP_CANT_STR_ASSOC) {
+        // "Cannot start association" is reported for the connect
+        // attempt this socket made; it is only meaningful while the
+        // handshake is in flight.
+        if (state_ != UsrsctpSocketState::kConnecting) {
+            core::log::Logger::instance().warn(
+                "nimrtc::sctp::UsrsctpSocket: ignoring SCTP_CANT_STR_ASSOC "
+                "for a socket that is not connecting");
+            return;
+        }
+        s_transition_to(UsrsctpSocketState::kClosed);
+        return;
+    }
+
+    if (sac_state == SCTP_COMM_LOST || sac_state == SCTP_SHUTDOWN_COMP) {
+        if (state_ != UsrsctpSocketState::kEstablished) {
+            core::log::Logger::instance().warn(
+                std::string("nimrtc::sctp::UsrsctpSocket: ignoring "
+                            "association-loss notification (state ") +
+                std::to_string((int)sac_state) +
+                ") for a socket that never established an association");
+            return;
+        }
+        // The association is gone: kEstablished -> kClosed.
+        s_transition_to(UsrsctpSocketState::kClosed);
+        return;
+    }
+
+    if (sac_state == SCTP_RESTART) {
+        // SCTP restart (re-establishment) — keep the existing
+        // state. We don't surface a kRestarting state in v0.11.0.
+        return;
     }
 }
 
@@ -1001,6 +1066,22 @@ plugins::Status UsrsctpSocket::connect(std::string_view remote_addr,
         }
     }
 
+    // Move to kConnecting *before* the handshake is initiated.
+    //
+    // The state has to be visible to the notification path before
+    // usrsctp_connect() can produce an SCTP_ASSOC_CHANGE: a connect
+    // that fails immediately (SCTP_CANT_STR_ASSOC) is reported
+    // asynchronously and may be delivered before usrsctp_connect()
+    // returns.  A socket still in kUnbound at that moment would
+    // treat the notification as belonging to somebody else and drop
+    // it (see handle_notification()), and the socket would then sit
+    // in kConnecting until wait_for_established() timed out instead
+    // of failing fast with kClosed.
+    {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        state_ = UsrsctpSocketState::kConnecting;
+    }
+
     // Initiate the SCTP handshake. usrsctp_connect returns 0 on
     // success (in non-blocking mode the handshake completes
     // asynchronously; SCTP_COMM_UP will fire the state machine
@@ -1022,14 +1103,18 @@ plugins::Status UsrsctpSocket::connect(std::string_view remote_addr,
             core::log::Logger::instance().warn(
                 "nimrtc::sctp::UsrsctpSocket: usrsctp_connect() failed; "
                 "errno=" + std::to_string(errno));
+            // The handshake never started and the socket is already
+            // bound, so it cannot be retried: mark it closed rather
+            // than leaving it dangling in kConnecting.
+            s_transition_to(UsrsctpSocketState::kClosed);
             return plugins::kErrInternal;
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        state_ = UsrsctpSocketState::kConnecting;
-    }
+    // The state was already moved to kConnecting before the handshake
+    // was initiated; do not overwrite it here -- a handshake that
+    // failed immediately has meanwhile driven the socket to kClosed,
+    // and that verdict must survive.
     core::log::Logger::instance().info(
         "nimrtc::sctp::UsrsctpSocket: connect() initiated to " +
         std::string(remote_addr) + ":" + std::to_string(remote_port) +

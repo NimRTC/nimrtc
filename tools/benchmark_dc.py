@@ -36,6 +36,20 @@ E2E = ROOT / "build" / "e2e"
 
 DEFAULT_SIZES = (256, 1200, 16384)
 
+# The credit window the large-payload plane sends behind.  It bounds how
+# far the sender may run ahead of the receiver, which is what keeps the
+# loopback UDP buffer from overflowing (and dropping datagrams) without
+# the fixed sleep that used to distort the measurement.
+CREDIT_WINDOW = 64
+
+# How long the sender waits between two credit checks.  This is a backoff
+# between progress probes, not the pacing interval itself.
+CREDIT_POLL_S = 0.0002
+
+# How long the sender waits for the last datagrams to be drained before it
+# stops the clock.
+DRAIN_TIMEOUT_S = 10.0
+
 
 def plane_for(size: int) -> str:
     if size <= 1200:
@@ -55,37 +69,68 @@ def run_throughput(count: int, size: int) -> dict:
             pass
     rx.bind(("127.0.0.1", 0))
     port = rx.getsockname()[1]
-    rx.settimeout(10.0)
+    # A short socket timeout, so the receiver can re-check the overall
+    # deadline instead of blocking in recvfrom until the very end.
+    rx.settimeout(0.25)
     payload = bytes((i % 251 for i in range(size)))
     received = 0
     total_bytes = 0
     stop = threading.Event()
+    # The overall budget for the whole exchange: the send burst plus the
+    # drain of whatever is still in flight.
+    deadline = time.monotonic() + DRAIN_TIMEOUT_S
 
     def recv_loop() -> None:
         nonlocal received, total_bytes
-        try:
-            while received < count and not stop.is_set():
+        while received < count and not stop.is_set():
+            try:
                 data, _ = rx.recvfrom(65535)
-                received += 1
-                total_bytes += len(data)
-        except socket.timeout:
-            pass
+            except socket.timeout:
+                # Keep waiting until the overall deadline passes; a timeout
+                # is only a chance to re-check it, not an end condition.
+                if time.monotonic() > deadline:
+                    break
+                continue
+            except OSError:
+                break
+            received += 1
+            total_bytes += len(data)
 
     worker = threading.Thread(target=recv_loop, daemon=True)
     worker.start()
     time.sleep(0.05)  # let the receiver block in recvfrom first
     t0 = time.perf_counter_ns()
     # Large-payload bursts (16 KB x 2000 = ~32 MB back-to-back) overflow the
-    # loopback UDP buffers on shared CI runners, causing flaky drops. Pace
-    # bidi-stream-chunk sends so the receiver can drain.
-    pace = size > 1200
+    # loopback UDP buffers on shared CI runners, causing flaky drops, so the
+    # sender has to stay behind the receiver.
+    #
+    # The pacing is a CREDIT WINDOW, not a fixed sleep: the sender waits
+    # until the receiver has drained back to within `window` datagrams of
+    # the send position.  A fixed sleep cannot do this job -- on Windows
+    # the default timer resolution is ~15.6 ms, so a `time.sleep(0.002)`
+    # costs ~15 ms of wall clock and the benchmark ends up measuring the
+    # SLEEPER instead of the transport (that is how the 16384 B row came
+    # to report ~3.1k pps / ~410 Mbps while the README claimed ~70k pps /
+    # ~9 Gbps).  The credit window adapts to the receiver's actual drain
+    # rate, so it neither drops datagrams nor caps the measurement.
+    window = CREDIT_WINDOW
     for i in range(count):
         tx.sendto(payload, ("127.0.0.1", port))
-        if pace and (i % 50 == 49):
-            time.sleep(0.002)
-    worker.join()
+        # Let the receiver catch up until it is at most `window`
+        # datagrams behind.  The sleep is a backoff between progress
+        # probes, not the pacing interval itself: the loop exits as soon
+        # as the receiver has drained.
+        while received < i - window and not stop.is_set():
+            time.sleep(CREDIT_POLL_S)
+    # Drain whatever is still in flight so the timing covers the whole
+    # batch rather than just the send loop.  The receiver keeps running
+    # during this wait -- stopping it here would discard the datagrams
+    # that are already in the socket buffer.
+    while received < count and time.monotonic() < deadline:
+        time.sleep(0.001)
     t1 = time.perf_counter_ns()
     stop.set()
+    worker.join(timeout=1.0)
     rx.close()
     tx.close()
 

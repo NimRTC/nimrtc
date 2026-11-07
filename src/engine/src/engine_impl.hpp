@@ -89,7 +89,6 @@
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/rtp/packet.hpp>
 #include <nimrtc/rtp/timeline.hpp>     // ADR-017 cross-end timeline seam
-#include <nimrtc/jb/jitter_buffer.hpp>
 #include <nimrtc/audio3a/audio3a.hpp>
 
 // Choose DTLS implementation via the PAL Slice 4 / Slice 8 seam.
@@ -117,9 +116,12 @@
 // include next to the seam header so reviewers see both in context.
 #include <nimrtc/dtls/dtls.hpp>
 #include <nimrtc/srtp/srtp.hpp>
-#ifdef NIMRTC_HAS_OPUS
-#include <nimrtc/opus/opus.hpp>
-#endif
+// NOTE (v1.2.0, audio pipeline WP-7): the engine no longer includes
+// `nimrtc/jb/jitter_buffer.hpp` nor `nimrtc/opus/opus.hpp`.  Both the
+// receive pipeline and the encoder are reached through the plugin
+// seams (`plugins::IAudioReceiver`, `plugins::ICodec`), which is
+// exactly what constraint L4 asks for: the engine orchestrates plugins
+// and never names a concrete module.
 
 namespace nimrtc::engine {
 
@@ -256,9 +258,6 @@ struct NimRTCEngine::Impl {
     std::unique_ptr<sdp::Parser>    sdp_parser = std::make_unique<sdp::Parser>();
     std::unique_ptr<sdp::Munger>    sdp_munger = std::make_unique<sdp::Munger>();
 
-    // Jitter buffers — keyed by SSRC.
-    std::map<std::uint32_t, std::unique_ptr<jb::JitterBuffer>> jitter_buffers;
-
     // Concrete fallback classes (when no plugin adapter is registered).
     std::unique_ptr<audio3a::IAudio3A> audio3a_concrete;
 
@@ -322,10 +321,6 @@ struct NimRTCEngine::Impl {
     //   - Audio pipeline falls back to null-encoder; ICE/DTLS work via
     //     the control stack's raw-UDP ARQ
     TransportSession session;
-#ifdef NIMRTC_HAS_OPUS
-    std::unique_ptr<opus::Encoder>     opus_encoder;
-    std::unique_ptr<opus::Decoder>     opus_decoder;
-#endif
 
     bool            dtls_active_inbound = false;
     bool            srtp_installed      = false;
@@ -597,6 +592,13 @@ struct NimRTCEngine::Impl {
      *  instead of being handed to a decoder that does not exist. */
     bool audio_rx_disabled = false;
 
+    /** Inbound audio packets dropped because the audio track is off.
+     *
+     *  The track is off when the host disabled it, when the negotiation
+     *  found nothing decodable, or when the receive pipeline could not
+     *  be created.  The packets are counted and never decoded. */
+    std::uint64_t audio_rx_dropped_packets = 0;
+
     /** The `kAudioCodecUnsupported` error was already reported for this
      *  session.  The condition is reported exactly once (spec Part D). */
     bool audio_codec_unsupported_reported = false;
@@ -673,6 +675,16 @@ struct NimRTCEngine::Impl {
     std::uint64_t audio_encode_errors = 0;
     std::uint64_t audio_samples_in    = 0;
     std::chrono::steady_clock::time_point audio_last_error_report{};
+
+    // ---- Audio receive counters (WP-7) ---------------------------------
+    //
+    // The pipeline owns the detailed statistics (packets, bytes, lost,
+    // jitter); these three count what the *engine* handed to the host,
+    // which is what the engine-level statistics report (spec B-13).
+    std::uint64_t audio_frames_received       = 0;
+    std::uint64_t audio_samples_received       = 0;
+    std::uint64_t audio_frames_concealed      = 0;
+    std::uint64_t audio_frames_fec_recovered  = 0;
 
     /** Wall-clock instant (µs since the Unix epoch) of the **last outbound
      *  audio packet**, sampled at the very moment its abs-send-time

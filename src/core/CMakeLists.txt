@@ -165,9 +165,14 @@ if(NIMRTC_MODULE_H264)
 endif()
 # v1.2.0 (audio pipeline): the audio receive-pipeline module's own
 # visibility macro is set by the module itself (src/modules/audio_rx/
-# CMakeLists.txt, PUBLIC).  Nothing needs to be mirrored here yet: the
-# kDefaultRegistrars[] entry for the module lands with WP-7, which is
-# also where the engine starts linking nimrtc::audio_rx.
+# CMakeLists.txt, PUBLIC).  It is mirrored here so the kDefaultRegistrars[]
+# entry for the module — added with WP-7 — materialises only when the
+# module is actually built.  When the module is OFF, the engine's audio
+# receive pipeline cannot be resolved, and the engine reports the hard
+# error `kAudioReceiverMissing` (spec B-16, no fallback receiver).
+if(NIMRTC_MODULE_AUDIO_RX)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_AUDIO_RX=1)
+endif()
 nimrtc_apply_options(nimrtc_core_objects)
 nimrtc_apply_options(nimrtc_registry)
 

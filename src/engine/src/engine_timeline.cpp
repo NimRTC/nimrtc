@@ -286,54 +286,41 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         return;
     }
 
-    // ---- Audio path (existing behaviour) --------------------------------
-    auto& jb = impl_->jitter_buffers[pv.ssrc];
-    if (!jb) {
-        jb::Config jc;
-        jc.initial_delay = core::Milliseconds{config_.jb_initial_delay_ms};
-        jc.min_delay     = core::Milliseconds{config_.jb_min_delay_ms};
-        jc.max_delay     = core::Milliseconds{config_.jb_max_delay_ms};
-        jb = std::make_unique<jb::JitterBuffer>(jc);
+    // ---- Audio path (v1.2.0, audio pipeline WP-7) -----------------------
+    //
+    // The engine owns neither a jitter buffer nor a decoder: the whole
+    // receive pipeline is a *plugin* (spec B-2 / B-11), so the inbound
+    // packet goes straight into it and the decoded frames come back
+    // through the frame callback.
+    //
+    // The old path pushed the packet into an engine-owned
+    // `jb::JitterBuffer` and then reinterpreted the RTP payload as raw
+    // float PCM — it never decoded anything (defect F-1: "the receive
+    // path has no decoding at all").  What the host receives now is the
+    // *decoded* signal, which is also what the 3A render reference must
+    // be (spec A-10).
+    if (!audio_receiver_ || impl_->audio_rx_disabled) {
+        // The audio track is off: either the host disabled it
+        // (`audio_receiver_name == ""`), the negotiation found nothing
+        // decodable, or the pipeline could not be created (a hard error
+        // that was already reported through `on_error_`).  The packets
+        // are counted and dropped — they are never decoded.
+        ++impl_->audio_rx_dropped_packets;
+        return;
     }
-    jb->push(pv, core::SteadyClock::now(), std::nullopt);
-    if (auto frame = jb->pop(core::SteadyClock::now())) {
-        if (!frame->packets.empty()) {
-            const auto& p = frame->packets.front();
-            if (p.payload.data() != nullptr && p.payload.size() > 0) {
-                const float* pcm = reinterpret_cast<const float*>(p.payload.data());
-                const std::size_t total_floats = p.payload.size() / sizeof(float);
-                const std::size_t samples_per_ch =
-                    config_.pcm_channels
-                        ? total_floats / config_.pcm_channels
-                        : total_floats;
 
-                // AEC reference path.
-                //
-                // The remote audio we are about to hand to the host for
-                // loudspeaker playback is exactly the signal the echo
-                // canceller has to subtract from the microphone capture.
-                // Feeding it to the 3A plugin *before* the frame reaches the
-                // output keeps the capture and reference paths aligned.
-                // Without this the APM has no reverse stream and the echo
-                // canceller cannot converge at all.
-                if (audio3a_plugin_ && samples_per_ch > 0) {
-                    audio3a_plugin_->process_render(pcm, samples_per_ch,
-                                                   config_.pcm_channels);
-                }
-
-                if (on_audio_frame_) {
-                    on_audio_frame_(pcm, total_floats);
-                }
-
-                // The frame has been handed over for playback — tell the 3A
-                // plugin that the reference signal reached the speaker so it
-                // can track the system delay.
-                if (audio3a_plugin_ && samples_per_ch > 0) {
-                    audio3a_plugin_->set_render_delivered(samples_per_ch);
-                }
-            }
-        }
-    }
+    const auto recv_ts_us = plugins::TimestampUs{
+        static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count())};
+    audio_receiver_->push(pv.payload.data(), pv.payload.size(),
+                          pv.timestamp, pv.seq, pv.ssrc, recv_ts_us);
+    // The pipeline is clock-driven (spec A-1): pushing the packet only
+    // fills the jitter buffer; the playout happens on `tick()`.  We tick
+    // here as well so a host that only receives packets (no tick loop)
+    // still gets audio, and so the pipeline's playout clock advances in
+    // step with the arrival of the media.
+    audio_receiver_->tick(recv_ts_us);
 }
 
 

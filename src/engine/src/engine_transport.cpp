@@ -709,6 +709,19 @@ int NimRTCEngine::tick() noexcept {
         });
     }
 
+    // ---- Drive the audio receive pipeline (v1.2.0, audio pipeline WP-7) --
+    //
+    // The pipeline is clock-driven (spec A-1): the host's tick() is what
+    // makes it play out.  Ticking it here — on the engine thread, next to
+    // the other periodic work — is what makes the output cadence follow
+    // the media time rather than the packet arrival (spec A-3 / A-4).
+    if (audio_receiver_) {
+        audio_receiver_->tick(plugins::TimestampUs{
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    core::SteadyClock::now().time_since_epoch()).count())});
+    }
+
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.

@@ -39,7 +39,10 @@ target_link_libraries(nimrtc_engine
     PRIVATE
         nimrtc::rtp            # RTP parser/builder (P1) — Impl in engine.cpp
         nimrtc::sdp            # SDP parser/munger (P1)
-        nimrtc::jb             # JitterBuffer (P1)
+        nimrtc::jb             # JitterBuffer (P1) — the *plugin* that the
+                               # audio receive pipeline injects through the
+                               # IJB seam (spec B-3); the engine itself no
+                               # longer owns a jitter buffer (WP-7).
         nimrtc::audio3a        # Audio 3A Null impl (P1)
         nimrtc::ice            # ICE transport (P1)
         nimrtc::dtls           # DTLS handshake (P1.1)
@@ -78,6 +81,27 @@ target_link_libraries(nimrtc_engine
 if(NIMRTC_MODULE_OPUS)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::opus)
     target_compile_definitions(nimrtc_engine PUBLIC NIMRTC_HAS_OPUS=1)
+endif()
+
+# v1.2.0 (audio pipeline, WP-7): the audio receive pipeline.
+#
+# The engine reaches the pipeline only through `plugins::IAudioReceiver`
+# — it never includes this module's header (Layout Invariant 4).  The
+# link dependency exists for two reasons:
+#
+#   1. the module's registrar entry point (in `kDefaultRegistrars[]`)
+#      must resolve at link time, so the pipeline is registered when
+#      `core::register_all_default_plugins()` runs;
+#   2. the pipeline's own registration lives in the module's static
+#      initialiser, which the MSVC linker would otherwise drop (the
+#      Layout Invariant 5 / MSVC-linker-quirk pattern used by the
+#      Slice 8 entries above).
+#
+# When the module is not built, the audio receive pipeline cannot be
+# resolved and the engine reports `kAudioReceiverMissing` — there is
+# deliberately no fallback receiver (spec B-16).
+if(NIMRTC_MODULE_AUDIO_RX)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_rx)
 endif()
 
 # Video plugin seam (R3-Batch): the engine resolves video_source / sink /

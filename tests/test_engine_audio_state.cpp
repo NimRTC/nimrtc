@@ -38,6 +38,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -46,6 +47,7 @@
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/rtp/packet.hpp>
 
 namespace {
@@ -116,7 +118,12 @@ protected:
     }
 
     /** Build a real RTP packet carrying @p payload_floats as its
-     *  payload, on payload type @p pt. */
+     *  payload, on payload type @p pt.
+     *
+     *  The payload is **not** a valid Opus frame — it is used by the
+     *  cases that only care about the demux (which payload type reaches
+     *  which path).  A case that needs the audio to be *decoded* uses
+     *  `make_opus_rtp()` instead. */
     static nimrtc::core::ByteBuffer make_rtp(std::uint32_t ssrc,
                                              std::uint8_t pt,
                                              std::uint32_t seq,
@@ -131,6 +138,55 @@ protected:
         pb.set_payload(nimrtc::core::ByteSpan(
             reinterpret_cast<const std::uint8_t*>(pcm.data()),
             pcm.size() * sizeof(float)));
+        return pb.build();
+    }
+
+    /** Encode one 20 ms frame with the registered Opus codec plugin and
+     *  wrap it into a real RTP packet.
+     *
+     *  Since WP-7 the receive path *decodes*: the RTP payload is an
+     *  Opus frame, not raw PCM.  A case that asserts "a frame came out"
+     *  therefore has to put a real Opus frame on the wire — a payload of
+     *  arbitrary bytes would be (correctly) rejected by the decoder.
+     *
+     *  Returns an empty buffer when the Opus plugin is not registered
+     *  (a build without the Opus module). */
+    static nimrtc::core::ByteBuffer make_opus_rtp(std::uint32_t ssrc,
+                                                  std::uint8_t pt,
+                                                  std::uint32_t seq,
+                                                  std::uint32_t rtp_ts,
+                                                  std::size_t samples_per_channel) {
+        const auto* factory =
+            nimrtc::core::PluginRegistry::instance().get_codec("opus");
+        if (!factory) return {};
+
+        nimrtc::plugins::CodecConfig cc{};
+        cc.sample_rate_hz = 48000;
+        cc.channels       = 1;
+        cc.bitrate_bps    = 64000;
+        cc.complexity     = 10;
+        cc.fec_enabled    = true;
+        cc.dtx_enabled    = false;
+        cc.vad_enabled    = false;
+        cc.payload_type   = pt;
+        cc.name           = "opus";
+
+        std::unique_ptr<nimrtc::plugins::ICodec> enc(factory->create(cc));
+        if (!enc) return {};
+        if (enc->open() != nimrtc::plugins::kOk) return {};
+
+        std::vector<float> pcm(samples_per_channel, 0.25f);
+        std::vector<std::uint8_t> bytes(4096);
+        const std::size_t n = enc->encode(pcm.data(), samples_per_channel,
+                                          bytes.data(), bytes.size());
+        if (n == 0) return {};
+
+        nimrtc::rtp::PacketBuilder pb;
+        pb.set_ssrc(ssrc)
+          .set_seq(static_cast<std::uint16_t>(seq))
+          .set_timestamp(rtp_ts)
+          .set_payload_type(pt);
+        pb.set_payload(nimrtc::core::ByteSpan(bytes.data(), n));
         return pb.build();
     }
 
@@ -257,24 +313,30 @@ TEST_F(EngineAudioState, NegotiatedPayloadTypeIsAccepted) {
         << "the SDP handshake a real session performs must succeed";
 
     // A packet on the negotiated payload type is the audio path: it
-    // reaches the jitter buffer and is played out.
+    // reaches the receive pipeline and is played out.
     int frames = 0;
     rx.set_on_audio_frame([&](const float*, std::size_t) { ++frames; });
 
     constexpr std::uint32_t kSsrc = 0x0B0B0B0Bu;
-    const auto first = make_rtp(kSsrc, kOpusPt, 1, 0, 960);
-    ASSERT_FALSE(first.empty());
+    // Since WP-7 the receive path decodes, so the payload has to be a
+    // real Opus frame — a payload of arbitrary bytes is rejected by the
+    // decoder (correctly) and no frame would come out.
+    const auto first = make_opus_rtp(kSsrc, kOpusPt, 1, 0, 960);
+    if (first.empty()) {
+        GTEST_SKIP() << "the Opus codec plugin is not registered in this build";
+    }
     rx.feed_media_inbound(first.data(), first.size());
 
     // The jitter buffer holds the packet for its initial delay; the
     // next packet after that delay pops it.
     std::this_thread::sleep_for(120ms);
-    const auto second = make_rtp(kSsrc, kOpusPt, 2, 960, 960);
+    const auto second = make_opus_rtp(kSsrc, kOpusPt, 2, 960, 960);
     ASSERT_FALSE(second.empty());
     rx.feed_media_inbound(second.data(), second.size());
 
     EXPECT_EQ(frames, 1)
-        << "the negotiated payload type must reach the audio pipeline";
+        << "the negotiated payload type must reach the audio pipeline and "
+           "be decoded into a frame";
     EXPECT_EQ(unknown_pt_errors, 0)
         << "the negotiated payload type is in the routing table and must "
            "not be reported as unknown";
@@ -416,6 +478,120 @@ TEST_F(EngineAudioState, UnsupportedRemoteCodecIsReportedOnceAndRejected) {
     EXPECT_EQ(frames, 0)
         << "no audio may be decoded when the negotiated codec is not "
            "supported";
+}
+
+// ============================================================================
+// 4. The plugin resolution and the failure policy (B-11 / B-15 / B-16)
+// ============================================================================
+//
+// The receive path is a plugin, not engine code: the engine resolves a
+// *decoder* and a *receiver* through the registry and drives the
+// receiver alone (spec B-11).  Two consequences are pinned down here:
+//
+//   * both slots must be populated by the built-in modules once
+//     `register_all_default_plugins()` has run (B-15) — otherwise the
+//     engine could never reach a pipeline at all;
+//
+//   * a missing plugin is a **hard error** that fires `on_error`
+//     exactly once and disables the audio track (B-16, O-7).  There is
+//     deliberately no fallback receiver: a "built-in minimal receiver"
+//     would decode nothing and hand the bit-stream over as if it were
+//     audio (defect F-2).
+
+TEST_F(EngineAudioState, RegistrySlotsResolveAfterDefaultRegistration) {
+    auto& reg = nimrtc::core::PluginRegistry::instance();
+
+    const auto* receiver = reg.get_audio_receiver("nimrtc_audio_rx");
+    ASSERT_NE(receiver, nullptr)
+        << "the audio_rx module must publish its pipeline in the "
+           "audio-receiver slot (B-15)";
+    EXPECT_EQ(receiver->id(), "nimrtc_audio_rx");
+
+    const auto* decoder = reg.get_audio_decoder("opus");
+    if (decoder == nullptr) {
+        GTEST_SKIP() << "this build has no Opus module, so no Opus decoder "
+                        "plugin is registered";
+    }
+    EXPECT_EQ(decoder->id(), "opus")
+        << "the Opus module must publish its decoder in the audio-decoder "
+           "slot (B-15)";
+}
+
+TEST_F(EngineAudioState, MissingReceiverIsAHardErrorAndDisablesTheTrack) {
+    EngineConfig cfg = make_test_config();
+    cfg.audio_receiver_name = "no_such_receiver";
+    NimRTCEngine engine(cfg);
+
+    std::vector<std::uint32_t> codes;
+    engine.set_on_error([&](std::uint32_t code, std::string_view) {
+        codes.push_back(code);
+    });
+
+    // The engine stays usable — the audio track is what is disabled, not
+    // the whole session.
+    ASSERT_EQ(engine.open(), 0u);
+
+    int missing = 0;
+    for (const std::uint32_t code : codes) {
+        if (code == nimrtc::core::kAudioReceiverMissing) ++missing;
+    }
+    EXPECT_EQ(missing, 1)
+        << "a missing receiver plugin is a hard error reported exactly once "
+           "(B-16 / O-7)";
+
+    // And the track is off: an inbound audio packet is counted and
+    // dropped, never decoded.
+    int frames = 0;
+    engine.set_on_audio_frame([&](const float*, std::size_t) { ++frames; });
+    const auto packet = make_rtp(0x0F0F0F0Fu, kOpusPt, 1, 0, 960);
+    ASSERT_FALSE(packet.empty());
+    engine.feed_media_inbound(packet.data(), packet.size());
+    EXPECT_EQ(frames, 0)
+        << "with no receiver there is nothing that could decode — the "
+           "packet must be dropped, never handed over as if it were audio";
+}
+
+TEST_F(EngineAudioState, MissingDecoderIsAHardErrorAndDisablesTheTrack) {
+    EngineConfig cfg = make_test_config();
+    cfg.audio_decoder_name = "no_such_decoder";
+    NimRTCEngine engine(cfg);
+
+    std::vector<std::uint32_t> codes;
+    engine.set_on_error([&](std::uint32_t code, std::string_view) {
+        codes.push_back(code);
+    });
+
+    ASSERT_EQ(engine.open(), 0u);
+
+    int missing = 0;
+    for (const std::uint32_t code : codes) {
+        if (code == nimrtc::core::kAudioDecoderMissing) ++missing;
+    }
+    EXPECT_EQ(missing, 1)
+        << "a missing decoder plugin is a hard error reported exactly once "
+           "(B-16 / O-7)";
+}
+
+TEST_F(EngineAudioState, EmptyReceiverNameDisablesTheTrackSilently) {
+    EngineConfig cfg = make_test_config();
+    cfg.audio_receiver_name = "";
+    NimRTCEngine engine(cfg);
+
+    std::vector<std::uint32_t> codes;
+    engine.set_on_error([&](std::uint32_t code, std::string_view) {
+        codes.push_back(code);
+    });
+
+    ASSERT_EQ(engine.open(), 0u);
+
+    for (const std::uint32_t code : codes) {
+        EXPECT_NE(code, nimrtc::core::kAudioReceiverMissing)
+            << "an explicitly disabled audio track is not an error — the "
+               "host asked for it";
+        EXPECT_NE(code, nimrtc::core::kAudioDecoderMissing)
+            << "an explicitly disabled audio track is not an error — the "
+               "host asked for it";
+    }
 }
 
 } // namespace

@@ -337,14 +337,17 @@ void NimRTCEngine::close() noexcept {
     impl_->session.close();
     ice_t_ = nullptr;
     // weak_ptr: no explicit reset needed — auto-expires when stack dies
-    impl_->jitter_buffers.clear();
+    // v1.2.0 (audio pipeline WP-7): the audio receive pipeline is a
+    // plugin; it is closed and released here.  The engine's own jitter
+    // buffer and the concrete opus encoder/decoder are gone — the
+    // pipeline and the codec seam own those roles now.
+    if (audio_receiver_) {
+        audio_receiver_->close();
+        audio_receiver_.reset();
+    }
     audio3a_plugin_.reset();
     impl_->audio3a_concrete.reset();
     codec_plugin_.reset();
-#ifdef NIMRTC_HAS_OPUS
-    impl_->opus_encoder.reset();
-    impl_->opus_decoder.reset();
-#endif
     impl_->srtp.reset();
     // ---- WebTransport session teardown (v0.14.0-rc.1 follow-up) ----
     // Channels hold a non-owning pointer into wt_session — close it here

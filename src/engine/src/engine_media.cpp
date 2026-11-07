@@ -93,18 +93,172 @@ void NimRTCEngine::init_audio_modules() noexcept {
             {.open_fail_mode = pal::PluginFailureMode::Silent,
              .missing_mode = pal::PluginFailureMode::Silent,
              .on_error = on_error_});
-        if (!codec_plugin_) {
-#ifdef NIMRTC_HAS_OPUS
-            opus::EncoderConfig ec;
-            ec.sample_rate_hz = config_.pcm_sample_rate_hz;
-            ec.channels       = config_.pcm_channels;
-            impl_->opus_encoder = std::make_unique<opus::Encoder>(ec);
-            opus::DecoderConfig dc;
-            dc.sample_rate_hz = config_.pcm_sample_rate_hz;
-            dc.channels       = config_.pcm_channels;
-            impl_->opus_decoder = std::make_unique<opus::Decoder>(dc);
-#endif
+        // WP-7: the concrete `opus::Encoder` fallback is gone.  The
+        // engine reaches the encoder through the codec seam only, so
+        // `src/engine/` names no concrete module (constraint L4).  When
+        // the configured codec plugin is missing, `send_audio()` reports
+        // the failure (throttled) instead of silently encoding with a
+        // different codec — a silent codec swap would put a bit-stream
+        // on the wire that the peer did not negotiate.
+    }
+
+    // ---- Audio receive pipeline (v1.2.0, audio pipeline WP-7) ---------
+    //
+    // The receive side of the audio path is a plugin, not engine code
+    // (spec B-11 / B-16): the engine resolves a *decoder* and a
+    // *receiver* through the registry and drives the receiver alone.
+    //
+    // Failure policy (B-16) — there is no fallback receiver:
+    //   - an empty `audio_decoder_name` / `audio_receiver_name` disables
+    //     the audio track explicitly and silently (the host asked for
+    //     it);
+    //   - a decoder that is not registered is a hard error
+    //     (`kAudioDecoderMissing`) that fires `on_error` exactly once;
+    //   - a receiver that cannot be created is a hard error
+    //     (`kAudioReceiverMissing`) that fires `on_error` exactly once.
+    // In both error cases the audio track stays off: inbound packets are
+    // counted and dropped, never decoded.
+    {
+        const bool want_decoder  = !config_.audio_decoder_name.empty();
+        const bool want_receiver = !config_.audio_receiver_name.empty();
+
+        if (!want_decoder || !want_receiver) {
+            // Explicitly disabled by the host — no error, no pipeline.
+            impl_->audio_rx_disabled = true;
+            core::log::Logger::instance().info(
+                "engine[audio]: the audio receive pipeline is disabled by "
+                "configuration (decoder=" +
+                std::string(config_.audio_decoder_name) +
+                ", receiver=" + std::string(config_.audio_receiver_name) + ")");
+            return;
         }
+
+        // ---- Step 1: the decoder -------------------------------------
+        //
+        // The receiver is useless without a decoder, so the decoder is
+        // resolved first.  The lookup goes through the registry's
+        // audio-decoder slot, so the answer reflects the plugins the
+        // host really installed.
+        auto& reg = core::PluginRegistry::instance();
+        if (reg.get_audio_decoder(config_.audio_decoder_name) == nullptr) {
+            impl_->audio_rx_disabled = true;
+            if (on_error_) {
+                on_error_(core::kAudioDecoderMissing,
+                          "the audio decoder plugin '" +
+                          std::string(config_.audio_decoder_name) +
+                          "' is not registered — the audio track is disabled");
+            }
+            return;
+        }
+
+        // ---- Step 2: the receiver -----------------------------------
+        plugins::AudioReceiverConfig rx_cfg{};
+        rx_cfg.jb_plugin_id           = std::string(config_.jb_name);
+        rx_cfg.decoder_plugin_id      = std::string(config_.audio_decoder_name);
+        rx_cfg.clock_rate_hz          = config_.audio_codec.clock_rate;
+        rx_cfg.decoder_sample_rate_hz = config_.pcm_sample_rate_hz;
+        rx_cfg.decoder_channels       = config_.audio_codec.channels;
+        rx_cfg.output_channels        = config_.pcm_channels;
+        rx_cfg.frame_duration_ms      = config_.audio_ptime_ms;
+        rx_cfg.target_delay_ms        = static_cast<std::uint16_t>(
+            config_.jb_initial_delay_ms < 0 ? 0 : config_.jb_initial_delay_ms);
+        rx_cfg.min_delay_ms           = static_cast<std::uint16_t>(
+            config_.jb_min_delay_ms < 0 ? 0 : config_.jb_min_delay_ms);
+        rx_cfg.max_delay_ms           = static_cast<std::uint16_t>(
+            config_.jb_max_delay_ms < 0 ? 0 : config_.jb_max_delay_ms);
+        // The engine advertises `useinbandfec=1` in its own SDP, so the
+        // decoder must be told to use in-band FEC as well (spec B-8).
+        rx_cfg.enable_fec_recovery    = true;
+        rx_cfg.enable_downmix         = true;
+
+        const bool created = pal::make_plugin<&pal::resolve_audio_receiver>(
+            config_.audio_receiver_name,
+            audio_receiver_,
+            std::move(rx_cfg),
+            {.err_open_failed = core::kAudioReceiverMissing,
+             .err_missing = core::kAudioReceiverMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_},
+            /*post_create=*/[this](plugins::IAudioReceiver& r) {
+                // The callbacks are installed *after* the factory has
+                // created the receiver (and opened it), so the receiver
+                // cannot report a missing plugin through them — that is
+                // why the factory returns a null product instead (B-16).
+                r.set_callbacks(
+                    [this](const plugins::AudioOutputFrame& frame) {
+                        on_audio_frame_decoded(frame);
+                    },
+                    [this](plugins::Status status, std::string_view msg) {
+                        if (on_error_) {
+                            on_error_(core::kAudioDecodeFailed, msg);
+                        }
+                        (void)status;
+                    });
+            });
+
+        if (!created || !audio_receiver_) {
+            // `make_plugin` already reported the hard error exactly
+            // once; the audio track stays off.
+            impl_->audio_rx_disabled = true;
+            audio_receiver_.reset();
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Audio receive callback (v1.2.0, audio pipeline WP-7)
+// ---------------------------------------------------------------------------
+//
+// The receive pipeline hands the *decoded* frame over.  The engine's job
+// here is small but not trivial:
+//
+//   * The 3A render reference must be the **decoded** signal, not the
+//     inbound bit-stream (spec A-10).  The echo canceller subtracts the
+//     loudspeaker signal from the microphone capture; feeding it the
+//     compressed payload would make it converge on noise — and the old
+//     code path did exactly that (it reinterpreted the RTP payload as
+//     float PCM, defect F-1).
+//   * The legacy PCM tap keeps its historical meaning: the `size_t`
+//     argument is the number of **interleaved** floats (spec O-2), i.e.
+//     `samples_per_channel * channels`.
+//
+// The frame's PCM belongs to the receiver and is only valid for the
+// duration of this call (the seam's contract).
+void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame) noexcept {
+    if (frame.pcm == nullptr || frame.samples_per_channel == 0) return;
+
+    const std::size_t samples_per_ch = frame.samples_per_channel;
+    const std::uint8_t channels = frame.channels != 0 ? frame.channels : 1;
+    const std::size_t total_floats = samples_per_ch * channels;
+
+    ++impl_->audio_frames_received;
+    impl_->audio_samples_received += samples_per_ch;
+    if (frame.concealed)     ++impl_->audio_frames_concealed;
+    if (frame.fec_recovered) ++impl_->audio_frames_fec_recovered;
+
+    // AEC reference path.
+    //
+    // The remote audio we are about to hand to the host for loudspeaker
+    // playback is exactly the signal the echo canceller has to subtract
+    // from the microphone capture.  Feeding it to the 3A plugin *before*
+    // the frame reaches the output keeps the capture and reference paths
+    // aligned.  Without this the APM has no reverse stream and the echo
+    // canceller cannot converge at all.
+    if (audio3a_plugin_) {
+        audio3a_plugin_->process_render(frame.pcm, samples_per_ch, channels);
+    }
+
+    if (on_audio_frame_) {
+        on_audio_frame_(frame.pcm, total_floats);
+    }
+
+    // The frame has been handed over for playback — tell the 3A plugin
+    // that the reference signal reached the speaker so it can track the
+    // system delay.
+    if (audio3a_plugin_) {
+        audio3a_plugin_->set_render_delivered(samples_per_ch);
     }
 }
 
@@ -555,9 +709,16 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
 
     // ---- Emit one RTP packet per frame --------------------------------
     auto emit_frame = [&](const float* frame_pcm) -> std::uint32_t {
-        // Codec — prefer plugin adapter; fall back to concrete
-        // opus::Encoder.  Reuse Impl::audio_codec_pkt (P0#4) — capacity
-        // grows monotonically.
+        // Codec — the plugin seam only (v1.2.0, audio pipeline WP-7).
+        //
+        // The concrete `opus::Encoder` fallback is gone: the engine
+        // orchestrates plugins and never names a concrete module
+        // (constraint L4).  When the configured codec plugin is missing
+        // the frame is reported as lost (throttled) instead of being
+        // encoded with a *different* codec — a silent codec swap would
+        // put a bit-stream on the wire that the peer never negotiated.
+        //
+        // Reuse Impl::audio_codec_pkt (P0#4) — capacity grows monotonically.
         const std::size_t needed = frame_samples * sizeof(float) + 64;
         if (impl_->audio_codec_pkt.size() < needed) {
             impl_->audio_codec_pkt.resize(needed);
@@ -567,20 +728,27 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
             codec_len = codec_plugin_->encode(frame_pcm, frame_samples,
                                              impl_->audio_codec_pkt.data(),
                                              impl_->audio_codec_pkt.size());
-#ifdef NIMRTC_HAS_OPUS
-        } else if (impl_->opus_encoder) {
-            codec_len = impl_->opus_encoder->encode(frame_pcm, frame_samples,
-                                         impl_->audio_codec_pkt.data(),
-                                         impl_->audio_codec_pkt.size());
-#endif
+            if (codec_len == 0) {
+                // A-8: the frame is lost, but never silently.  The counter
+                // grows, the host is told (throttled), and the media clock
+                // keeps running — the peer must see a *loss* (a gap in the
+                // sequence number), not a hole in the timeline.
+                report_error(core::kAudioEncodeFailed,
+                             "send_audio: the audio encoder rejected a frame");
+            }
+        } else {
+            // WP-7: there is no concrete fallback encoder any more — the
+            // engine reaches the encoder through the codec seam only
+            // (constraint L4).  A missing codec plugin means the engine
+            // cannot encode at all; that is reported (throttled) instead
+            // of silently producing nothing on the wire.
+            report_error(core::kAudioEncodeFailed,
+                         "send_audio: no audio codec plugin is available");
         }
         if (codec_len == 0) {
-            // A-8: the frame is lost, but never silently.  The counter
-            // grows, the host is told (throttled), and the media clock
-            // keeps running — the peer must see a *loss* (a gap in the
-            // sequence number), not a hole in the timeline.
-            report_error(core::kAudioEncodeFailed,
-                         "send_audio: the audio encoder rejected a frame");
+            // The frame is lost, but never silently: the sequence number
+            // leaves a gap and the media clock keeps running, so the peer
+            // sees a *loss* rather than a hole in the timeline (A-8).
             ++impl_->audio_seq;                       // gap in the sequence
             impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;

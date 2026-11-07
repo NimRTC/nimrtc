@@ -69,6 +69,19 @@ using RegistrarFn = void(*)() noexcept;
 // Alphabetical order by namespace is preferred for new additions.
 constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::audio3a::register_default_plugins,
+    // v1.2.0 (audio pipeline, WP-7): the audio receive-pipeline module.
+    // Its entry point populates the registry's audio-receiver slot
+    // (register_audio_receiver) under the id "nimrtc_audio_rx", so the
+    // engine can resolve the pipeline through the seam without naming
+    // a concrete module (Layout Invariant 4 / spec B-15).
+    //
+    // The declaration lives in <nimrtc/core/registry.hpp> (namespace
+    // nimrtc::audio_rx) so this table can take its address without
+    // including the module header — the same pattern the Slice 8
+    // transport entries below use.
+#ifdef NIMRTC_HAS_AUDIO_RX
+    &nimrtc::audio_rx::register_default_plugins,
+#endif
     &nimrtc::bwe::register_default_plugins,
     &nimrtc::datachannel::register_default_plugins,
 #ifdef NIMRTC_HAS_H264

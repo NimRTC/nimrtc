@@ -82,6 +82,8 @@
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/plugins/audio3a.hpp>
+#include <nimrtc/plugins/audio_decoder.hpp>
+#include <nimrtc/plugins/audio_receiver.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
@@ -541,6 +543,38 @@ struct NIMRTC_API_STABLE EngineConfig {
     // tests and integration shims can rely on it as the canonical way
     // to construct a network-free engine instance.
     std::string_view transport_strategy_name = "";
+
+    // ---- Audio pipeline plugin selection (v1.2.0, audio pipeline WP-7) ---
+    //
+    // The receive side of the audio path is a *plugin* (spec B-15 /
+    // B-16): the engine owns no jitter buffer and no decoder, it only
+    // drives `plugins::IAudioReceiver`.  The two ids below select the
+    // plugins, and they are resolved through the registry's typed slots
+    // (`core::PluginRegistry::get_audio_decoder()` /
+    // `get_audio_receiver()`).
+    //
+    // There is deliberately **no fallback**: a missing decoder or a
+    // missing receiver is a hard error (`kAudioDecoderMissing` /
+    // `kAudioReceiverMissing`) that fires `on_error` exactly once and
+    // disables the audio track.  A "built-in minimal receiver" would
+    // decode nothing and hand the bit-stream over as if it were audio
+    // (defect F-2).
+
+    /** Audio-decoder plugin id (the registry's audio-decoder slot).
+     *  Default = "opus" — the id the Opus module registers its decoder
+     *  under (`nimrtc::opus::register_default_plugins()`).
+     *
+     *  An empty string disables the audio track explicitly (no error is
+     *  reported: the host asked for it). */
+    std::string_view audio_decoder_name = "opus";
+
+    /** Audio receive-pipeline plugin id (the registry's audio-receiver
+     *  slot).  Default = "nimrtc_audio_rx" — the id the audio_rx module
+     *  registers its pipeline under.
+     *
+     *  An empty string disables the audio track explicitly (no error is
+     *  reported: the host asked for it). */
+    std::string_view audio_receiver_name = "nimrtc_audio_rx";
 };
 // ---------------------------------------------------------------------------
 // Public callbacks
@@ -1240,6 +1274,20 @@ private:
     std::unique_ptr<plugins::IAudio3A>          audio3a_plugin_;
     std::unique_ptr<plugins::ICodec>            codec_plugin_;
 
+    // ---- Audio receive pipeline (v1.2.0, audio pipeline WP-7) ----
+    //
+    // The engine drives the receive side of the audio path through this
+    // one seam (spec B-11 / B-16): the concrete pipeline lives in
+    // `src/modules/audio_rx/` and is reached through the registry's
+    // audio-receiver slot, so the engine includes no concrete module
+    // header (constraint L4).
+    //
+    // `nullptr` means "no audio receive pipeline" — either the host
+    // disabled the audio track (`audio_receiver_name == ""`) or the
+    // plugin could not be resolved (a hard error that was already
+    // reported through `on_error_`).
+    std::unique_ptr<plugins::IAudioReceiver>     audio_receiver_;
+
     // ---- Video plugins (resolved from core::PluginRegistry) ----
     std::unique_ptr<plugins::IVideoSource>      video_source_;
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
@@ -1296,6 +1344,10 @@ private:
      *  `tried_srtp` only controls the "probably STUN" debug line. */
     void dispatch_media_inbound(plugins::BufferView view, bool tried_srtp) noexcept;
     void handle_rtp(const rtp::PacketView& pv) noexcept;
+    /** The audio receive pipeline hands a decoded frame over (v1.2.0,
+     *  audio pipeline WP-7).  The engine applies 3A render to it and
+     *  forwards it to the legacy PCM tap. */
+    void on_audio_frame_decoded(const plugins::AudioOutputFrame& frame) noexcept;
     void handle_rtcp(plugins::BufferView view) noexcept;
     /** Merge a receiver feedback report into the pending one.  The
      *  reports are put on the wire by `flush_video_feedback()` from

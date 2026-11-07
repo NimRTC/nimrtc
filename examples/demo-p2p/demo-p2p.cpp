@@ -514,6 +514,12 @@ static void engine_tick_thread(ProxyState* st) {
     std::vector<float> pcm;
     bool rate_set = false;
     static thread_local int audio_packets_sent = 0;
+    // The inbound-audio report is emitted every 50 ticks (the tick
+    // thread sleeps 10 ms, so roughly every 500 ms).  It is printed
+    // from the tick thread on purpose: the receive pipeline is driven
+    // by `engine->tick()`, so the counters it updates live on this
+    // thread and reading them here is race-free.
+    int audio_rx_reports = 0;
 
     while (st->running.load() && std::chrono::steady_clock::now() < end) {
         st->engine->tick();
@@ -686,6 +692,32 @@ static void engine_tick_thread(ProxyState* st) {
                     static_cast<unsigned>(rc));
             }
 
+            // ---- Inbound audio (Chrome -> NimRTC) report -----------------
+            //
+            // The reverse direction of the audio path (spec V-3): Chrome
+            // sends Opus audio, NimRTC unwraps the SRTP, runs the jitter
+            // buffer, decodes the packet and plays the frame out.  The
+            // counters below come from the engine's own `Stats`, so this
+            // line is the end-to-end evidence that the whole receive
+            // chain ran -- a non-zero `frames` means the host was handed
+            // real PCM, not the compressed payload reinterpreted as
+            // floats (the old defect F-1).
+            if (++audio_rx_reports % 50 == 0) {
+                const auto s = st->engine->stats();
+                std::fprintf(stderr,
+                    "[demo-p2p] audio-rx frames=%llu samples=%llu "
+                    "concealed=%llu fec=%llu lost=%llu errors=%llu "
+                    "jitter_ms=%u playout_ms=%u\n",
+                    static_cast<unsigned long long>(s.audio_frames_received),
+                    static_cast<unsigned long long>(s.audio_samples_received),
+                    static_cast<unsigned long long>(s.audio_concealed_frames),
+                    static_cast<unsigned long long>(s.audio_fec_recovered_frames),
+                    static_cast<unsigned long long>(s.audio_packets_lost),
+                    static_cast<unsigned long long>(s.audio_decode_errors),
+                    static_cast<unsigned>(s.audio_jitter_ms),
+                    static_cast<unsigned>(s.audio_playout_delay_ms));
+            }
+
             // ---- Video drive loop ---------------------------------------
             // Pull a frame from the engine's video source at the
             // configured cadence; the source callback (wired in
@@ -723,6 +755,22 @@ static void engine_tick_thread(ProxyState* st) {
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // Final inbound-audio summary -- the machine-readable evidence for
+    // the Chrome -> NimRTC direction (spec V-3).  The acceptance runner
+    // parses this line, so its shape is part of the contract:
+    //   [demo-p2p] audio-rx summary frames=<n> ...
+    {
+        const auto s = st->engine->stats();
+        std::fprintf(stderr,
+            "[demo-p2p] audio-rx summary frames=%llu samples=%llu "
+            "concealed=%llu fec=%llu lost=%llu errors=%llu\n",
+            static_cast<unsigned long long>(s.audio_frames_received),
+            static_cast<unsigned long long>(s.audio_samples_received),
+            static_cast<unsigned long long>(s.audio_concealed_frames),
+            static_cast<unsigned long long>(s.audio_fec_recovered_frames),
+            static_cast<unsigned long long>(s.audio_packets_lost),
+            static_cast<unsigned long long>(s.audio_decode_errors));
     }
     st->running.store(false);
 }

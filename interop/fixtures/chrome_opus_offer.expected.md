@@ -20,6 +20,13 @@
 | rtcp-mux | `a=rtcp-mux` | ✅ single-port mode |
 | rtcp-rsize | `a=rtcp-rsize` | ✅ reduced-size RTCP |
 
+## Direction
+
+| Field | Value | Expected |
+|-------|-------|---------|
+| direction | `a=sendrecv` | ✅ the page captured the fake microphone (`sendAudio=1`), so Chrome sends Opus **and** receives it — this is the offer that exercises the Chrome → NimRTC direction (spec V-3) |
+| msid | `a=msid:chrome-audio audio-track` | ✅ the captured track's id, used to bind the inbound RTP stream to the media section |
+
 ## ICE
 
 | Field | Value | Expected |

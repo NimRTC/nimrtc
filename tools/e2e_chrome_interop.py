@@ -148,7 +148,8 @@ def show_file_state(rev: bool = False) -> None:
             print(f"  {p.name}: MISSING")
 
 
-async def run_e2e(direction: str = "chrome-offer") -> int:
+async def run_e2e(direction: str = "chrome-offer",
+                  send_audio: bool = False) -> int:
     if not CHROME_EXE.exists():
         sys.exit(f"Chrome not found at {CHROME_EXE}")
     if not CHROME_HTML.exists():
@@ -173,8 +174,14 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
     # Reverse: NimRTC (demo-p2p offerer) creates the offer; the page only
     # answers, so omit &offerer=1.
     offerer_qs = "&offerer=1" if not rev else ""
-    url = CHROME_HTML.as_uri() + "?ws=" + WS_URL + "&room=interop" + offerer_qs
-    print(f"[E2E] direction={direction} Loading: {url}")
+    # sendAudio=1 makes the page acquire the fake microphone and attach
+    # it as a track, which is what makes the Chrome -> NimRTC direction
+    # of the audio pipeline observable (spec V-3).  Without it Chrome's
+    # offer is recvonly and NimRTC never receives a packet.
+    send_qs = "&sendAudio=1" if send_audio else ""
+    url = (CHROME_HTML.as_uri() + "?ws=" + WS_URL + "&room=interop"
+           + offerer_qs + send_qs)
+    print(f"[E2E] direction={direction} send_audio={send_audio} Loading: {url}")
 
     # BoringSSL's DTLS path runs WebRTC's self-signed cert through the
     # same verifier as HTTPS; without an explicit allow-list Chrome
@@ -242,7 +249,15 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
             ],
             **_launch_kwargs,
         )
-        context = await browser.new_context()
+        # The microphone permission is what lets the page call
+        # getUserMedia() and attach a real (fake-device) track.  Chrome
+        # runs with --use-fake-device-for-media-stream, so the capture is
+        # a synthetic tone -- enough to make Chrome encode and send Opus
+        # packets towards NimRTC.
+        _context_kwargs = {}
+        if send_audio:
+            _context_kwargs["permissions"] = ["microphone"]
+        context = await browser.new_context(**_context_kwargs)
         page = await context.new_page()
 
         # Tee Chrome console to disk for later inspection.
@@ -278,6 +293,8 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
                     " ice: window._interopResults?.iceConnected,"
                     " audio: window._interopResults?.audioReceived,"
                     " rtp: window._interopResults?.rtpPackets,"
+                    " out: window._interopResults?.outboundPackets,"
+                    " sent: window._interopResults?.audioSent,"
                     " errs: (window._interopResults?.errors || []).length,"
                     " exitCode: window._interopResults?.exitCode,"
                     "})"
@@ -285,14 +302,19 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
                 last_results = snap
                 if snap.get("ice") and not saw_post_ice:
                     print(f"[E2E] ICE connected "
-                          f"(audio={snap.get('audio')}, rtp={snap.get('rtp')}); "
+                          f"(audio={snap.get('audio')}, rtp={snap.get('rtp')}, "
+                          f"out={snap.get('out')}); "
                           f"polling up to {POST_ICE_BUDGET_S}s for DTLS+audio")
                     saw_post_ice = True
+                # The reverse direction (Chrome -> NimRTC) is only
+                # required when the page was asked to send audio.
+                out_ok = (not send_audio) or (snap.get("out") or 0) > 0
                 # Once both audio and RTP are observed, settle one more
                 # tick so the JS-side stats catch up, then exit early.
                 if (saw_post_ice
                         and snap.get("audio")
-                        and snap.get("rtp")):
+                        and snap.get("rtp")
+                        and out_ok):
                     if post_audio_started_at is None:
                         post_audio_started_at = time.monotonic()
                         print("[E2E] audioReceived + rtpPackets observed — "
@@ -314,7 +336,9 @@ async def run_e2e(direction: str = "chrome-offer") -> int:
         # by sleeping briefly so the last page state has time to land in
         # the JS results object.
         if last_results.get("ice") and not (
-                last_results.get("audio") and last_results.get("rtp")):
+                last_results.get("audio") and last_results.get("rtp")
+                and (not send_audio
+                     or (last_results.get("out") or 0) > 0)):
             extra = max(0, POST_ICE_BUDGET_S - 10)
             if extra > 0:
                 print(f"[E2E] ICE up but audio/rtp missing — "
@@ -393,7 +417,11 @@ if __name__ == "__main__":
                     choices=["chrome-offer", "nimrtc-offer"],
                     help="chrome-offer: Chrome creates the offer (default); "
                          "nimrtc-offer: NimRTC creates the offer, Chrome answers")
+    _p.add_argument("--send-audio", action="store_true",
+                    help="make the page capture the fake microphone and send "
+                         "Opus audio to NimRTC (the Chrome -> NimRTC "
+                         "direction, spec V-3)")
     _ns = _p.parse_args()
-    rc = asyncio.run(run_e2e(_ns.direction))
+    rc = asyncio.run(run_e2e(_ns.direction, send_audio=_ns.send_audio))
     summarize(_ns.direction)
     sys.exit(rc)

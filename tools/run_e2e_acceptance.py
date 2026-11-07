@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -315,7 +316,45 @@ def _parse_chrome_results(chrome_log) -> dict:
     return results_obj
 
 
-def _check_audio_results(results_obj: dict, *, direction: str) -> bool:
+def _parse_demo_audio_rx(demo_log) -> dict:
+    """Read the inbound-audio counters out of demo-p2p's stderr.
+
+    demo-p2p prints one line per half second while ICE is up:
+
+        [demo-p2p] audio-rx frames=123 samples=59040 concealed=0 ...
+
+    and a final summary line when the tick loop ends normally:
+
+        [demo-p2p] audio-rx summary frames=123 ...
+
+    The counters come from the engine's own `Stats`, so a non-zero
+    `frames` is the NimRTC-side proof of the Chrome -> NimRTC direction
+    (spec V-3): the packet arrived, the SRTP unwrap worked, the jitter
+    buffer held it, the decoder produced PCM and the frame was played
+    out to the host.
+
+    The *last* matching line wins — the periodic line is printed during
+    the run, so the newest value is the freshest one.
+    """
+    out: dict = {}
+    if not demo_log or not Path(demo_log).exists():
+        return out
+    try:
+        text = Path(demo_log).read_text(errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if "audio-rx" not in line:
+            continue
+        for key in ("frames", "samples", "concealed", "fec", "lost", "errors"):
+            m = re.search(rf"\b{key}=(\d+)", line)
+            if m:
+                out[key] = int(m.group(1))
+    return out
+
+
+def _check_audio_results(results_obj: dict, *, direction: str,
+                         expect_reverse: bool = False) -> bool:
     """Shared audio-interop assertions (Case D forward + reverse).
 
     Evidence (audio-first release gate #1):
@@ -328,6 +367,11 @@ def _check_audio_results(results_obj: dict, *, direction: str) -> bool:
       errors        — must be empty
     We do NOT treat "ICE Connected but DTLS failed" as PASS — that was
     a bug in earlier revisions of this script.
+
+    With `expect_reverse` the Chrome -> NimRTC direction is required as
+    well: the page must have captured the fake microphone
+    (`micTrackAdded`) and its audio sender must have put packets on the
+    wire (`outboundPackets`).
     """
     if not results_obj:
         return False
@@ -339,6 +383,9 @@ def _check_audio_results(results_obj: dict, *, direction: str) -> bool:
         "rtpPackets>0":  (results_obj.get("rtpPackets") or 0) > 0,
         "errors==[]":    not results_obj.get("errors"),
     }
+    if expect_reverse:
+        checks["micTrackAdded"]   = results_obj.get("micTrackAdded") is True
+        checks["outboundPackets"] = (results_obj.get("outboundPackets") or 0) > 0
     print(f"   | direction={direction}")
     for name, passed in checks.items():
         print(f"   | check {name:18s}: {'OK' if passed else 'FAIL'}")
@@ -466,7 +513,11 @@ def run_chrome_interop() -> bool:
         # and pulling `window._interopResults`. We run it as a subprocess so
         # its full output appears in build/e2e/case_d_chrome.log.
         chrome_log = E2E / "case_d_chrome.log"
-        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py")]
+        cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py"),
+               # Capture the fake microphone and send audio to NimRTC, so
+               # the Chrome -> NimRTC direction of the audio pipeline is
+               # observable too (spec V-3).
+               "--send-audio"]
         # Tell the browser script which signaling server to talk to.
         chrome_env = dict(os.environ)
         chrome_env["NIMRTC_CHROME_WS_URL"] = f"ws://localhost:{port}/interop"
@@ -484,7 +535,23 @@ def run_chrome_interop() -> bool:
         ok = False
         results_obj = _parse_chrome_results(chrome_log)
         if results_obj:
-            ok = _check_audio_results(results_obj, direction="chrome-offer")
+            ok = _check_audio_results(results_obj, direction="chrome-offer",
+                                      expect_reverse=True)
+
+        # The NimRTC half of the reverse direction: the engine's own
+        # inbound-audio counters, read from demo-p2p's stderr.  The
+        # browser side (Chrome sent packets) and the engine side (NimRTC
+        # decoded them) are two facts about the same flow, and only
+        # together do they prove the receive path works end to end.
+        rx = _parse_demo_audio_rx(E2E / "case_d_demo_stderr.log")
+        rx_frames = int(rx.get("frames", 0) or 0)
+        rx_ok = rx_frames > 0
+        print(f"   | check nimrtc audio-rx frames: "
+              f"{'OK' if rx_ok else 'FAIL'} (frames={rx_frames}, "
+              f"samples={rx.get('samples', 0)}, "
+              f"concealed={rx.get('concealed', 0)}, "
+              f"lost={rx.get('lost', 0)})")
+        ok = ok and rx_ok
 
         if not ok and rc_chrome == 0:
             print("[FAIL] chrome script exit=0 but result assertions FAILED")
@@ -495,6 +562,9 @@ def run_chrome_interop() -> bool:
             evidence = dict(results_obj) if results_obj else {}
             evidence["pass"] = bool(ok)
             evidence["direction"] = "chrome-offer"
+            # The NimRTC-side inbound-audio counters (the reverse
+            # direction's engine half).
+            evidence["nimrtcAudioRx"] = rx
             (E2E / "case_d_results.json").write_text(
                 json.dumps(evidence, indent=2), encoding="utf-8")
         except Exception as e:
@@ -612,7 +682,11 @@ def run_chrome_interop_reverse() -> bool:
 
         chrome_log = E2E / "case_d_rev_chrome.log"
         cmd = [sys.executable, "-u", str(ROOT / "tools" / "e2e_chrome_interop.py"),
-               "--direction", "nimrtc-offer"]
+               "--direction", "nimrtc-offer",
+               # Same as the forward case: capture the fake microphone so
+               # the Chrome -> NimRTC direction is checked with the
+               # signaling roles flipped as well.
+               "--send-audio"]
         chrome_env = dict(os.environ)
         chrome_env["NIMRTC_CHROME_WS_URL"] = f"ws://localhost:{port}/interop"
         with open(chrome_log, "w", encoding="utf-8") as f:
@@ -627,7 +701,19 @@ def run_chrome_interop_reverse() -> bool:
         ok = False
         results_obj = _parse_chrome_results(chrome_log)
         if results_obj:
-            ok = _check_audio_results(results_obj, direction="nimrtc-offer")
+            ok = _check_audio_results(results_obj, direction="nimrtc-offer",
+                                      expect_reverse=True)
+
+        # The NimRTC half of the reverse direction (see Case D).
+        rx = _parse_demo_audio_rx(E2E / "case_d_rev_demo_stderr.log")
+        rx_frames = int(rx.get("frames", 0) or 0)
+        rx_ok = rx_frames > 0
+        print(f"   | check nimrtc audio-rx frames: "
+              f"{'OK' if rx_ok else 'FAIL'} (frames={rx_frames}, "
+              f"samples={rx.get('samples', 0)}, "
+              f"concealed={rx.get('concealed', 0)}, "
+              f"lost={rx.get('lost', 0)})")
+        ok = ok and rx_ok
 
         if not ok and rc_chrome == 0:
             print("[FAIL] chrome script exit=0 but result assertions FAILED")
@@ -636,6 +722,7 @@ def run_chrome_interop_reverse() -> bool:
             evidence = dict(results_obj) if results_obj else {}
             evidence["pass"] = bool(ok)
             evidence["direction"] = "nimrtc-offer"
+            evidence["nimrtcAudioRx"] = rx
             (E2E / "case_d_rev_results.json").write_text(
                 json.dumps(evidence, indent=2), encoding="utf-8")
         except Exception as e:

@@ -1122,6 +1122,14 @@ def generate_chrome_opus_offer() -> str:
     Generate a minimal Chrome-compatible Opus SDP offer (for fixture testing).
     This is NOT the output of NimRTC — it's a reference SDP from Chrome
     used to validate NimRTC's SDP parser.
+
+    The offer is the *sendrecv* one the Chrome page produces when it
+    captures the fake microphone (`test_chrome_opus.html?sendAudio=1`):
+    the direction attribute is `a=sendrecv` and the media section carries
+    the `a=msid:` line of the captured track.  It is the offer that
+    exercises the Chrome -> NimRTC direction of the audio pipeline
+    (spec V-3): NimRTC's answer is `sendrecv` too, so Chrome actually
+    sends Opus packets towards NimRTC.
     """
     return """\
 v=0
@@ -1141,7 +1149,8 @@ a=setup:actpass
 a=mid:0
 a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
 a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
-a=recvonly
+a=sendrecv
+a=msid:chrome-audio audio-track
 a=rtcp-mux
 a=rtcp-rsize
 a=rtpmap:111 opus/48000/2

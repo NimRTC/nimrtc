@@ -27,6 +27,10 @@
  *   room=<name>   Room name for signaling (default: interop)
  *   ws=<url>      WebSocket signaling server URL (default: ws://localhost:8765)
  *   offerer=1     Act as offerer instead of answerer (NimRTC answerer mode)
+ *   sendAudio=1   Send audio to NimRTC as well (acquires the fake mic,
+ *                  adds it as a track, and reports the outbound RTP
+ *                  counters).  This is what makes the Chrome -> NimRTC
+ *                  direction of the audio pipeline observable (spec V-3).
  *   timeout=<ms>  Wait time after ICE connected (default: 3000)
  */
 <script>
@@ -36,6 +40,7 @@ const PARAMS = new URLSearchParams(window.location.search);
 const ROOM    = PARAMS.get("room")    || "interop";
 const WS_URL  = PARAMS.get("ws")      || "ws://localhost:8765/" + ROOM;
 const OFFERER = PARAMS.get("offerer") === "1";
+const SEND_AUDIO = PARAMS.get("sendAudio") === "1";
 const TIMEOUT_MS = parseInt(PARAMS.get("timeout") || "10000", 10);
 
 // ---------- Results (written by page JS, read by Playwright) ----------
@@ -48,6 +53,14 @@ window._interopResults = {
     rtpPackets:    0,
     rtpPayloadType: null,
     lastSeqNum:    null,
+    // The reverse direction (spec V-3): what Chrome sent to NimRTC.
+    // `outboundPackets` is the number of RTP packets Chrome's audio
+    // sender put on the wire; `audioSent` says the sender existed and
+    // produced media at all.
+    outboundPackets: 0,
+    audioSent:     false,
+    micTrackAdded: false,
+    micError:      null,
     errors:        [],
     exitCode:      0,
 };
@@ -100,6 +113,7 @@ function makePc() {
             // Start the verifier right away so we don't miss early RTP.
             // The end-check (RESULT print) is scheduled independently.
             startPacketVerifier();
+            startOutboundVerifier();
             scheduleEndCheck();
         } else if (peer.iceConnectionState === "failed") {
             reportError(0x10, "ICE connection failed");
@@ -207,6 +221,7 @@ function connectWs() {
             }
 
             try {
+                await prepareLocalAudio();
                 await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
                 log("SDP", "setRemoteDescription(offer) OK");
                 const answer = await pc.createAnswer();
@@ -292,12 +307,49 @@ function connectWs() {
     };
 }
 
+// ----- Local audio (the Chrome -> NimRTC direction, spec V-3) -----
+
+// Acquire the local microphone and attach it to the peer connection.
+//
+// The headless browser runs with --use-fake-device-for-media-stream,
+// so getUserMedia resolves with a synthetic tone -- enough to make
+// Chrome encode and send real Opus packets.  Without a track Chrome's
+// offer is recvonly, nothing is ever sent to NimRTC, and the whole
+// reverse half of the audio pipeline stays unobservable.
+//
+// When the page is not asked to send audio we keep the historical
+// behaviour: a recvonly audio transceiver, so the SDP still has a media
+// section the NimRTC parser can read.
+async function prepareLocalAudio() {
+    if (!SEND_AUDIO) {
+        try { pc.addTransceiver("audio", { direction: "recvonly" }); } catch (_) {}
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const track = stream.getAudioTracks()[0];
+        if (!track) {
+            window._interopResults.micError = "getUserMedia returned no audio track";
+            reportError(0x23, window._interopResults.micError);
+            return;
+        }
+        audioTrack = track;
+        pc.addTrack(track, stream);
+        window._interopResults.micTrackAdded = true;
+        log("MIC", `fake mic track added (id=${track.id}, label="${track.label}")`);
+    } catch (e) {
+        window._interopResults.micError = String(e);
+        reportError(0x24, "getUserMedia failed: " + e);
+    }
+}
+
 async function createAndSendOffer() {
-    // Ensure the offer has a media section: Chrome's createOffer() with no
+    // The offer needs a media section: Chrome's createOffer() with no
     // transceivers/tracks returns a media-less SDP, which the NimRTC SDP
-    // parser can't extract ICE creds from.  Add a recvonly audio transceiver
-    // before createOffer().
-    try { pc.addTransceiver("audio", { direction: "recvonly" }); } catch (_) {}
+    // parser can't extract ICE creds from.  prepareLocalAudio() adds
+    // either the fake microphone track (sendAudio=1) or a recvonly
+    // audio transceiver.
+    await prepareLocalAudio();
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     log("SDP_OFFER_FULL", pc.localDescription.sdp);
@@ -422,6 +474,39 @@ function startPacketVerifier() {
 
 // ----- End verification -----
 
+// Poll the outbound (Chrome -> NimRTC) statistics.
+//
+// The inbound verifier above returns early when RTCRtpScriptTransformer
+// is available, so the outbound counters need a poller of their own.
+// The `outbound-rtp` report of the audio sender is the browser-side
+// proof that Chrome encoded and put Opus packets on the wire; the
+// NimRTC-side proof of the same fact is the engine's
+// `audio_frames_received` counter, which the acceptance runner reads
+// from demo-p2p's stderr.
+let outboundPollInterval = null;
+
+function startOutboundVerifier() {
+    if (!pc || !SEND_AUDIO) return;
+    outboundPollInterval = setInterval(async () => {
+        if (!pc) { clearInterval(outboundPollInterval); return; }
+        try {
+            const stats = await pc.getStats();
+            stats.forEach(report => {
+                if (report.type !== "outbound-rtp" || report.kind !== "audio") return;
+                const sent = report.packetsSent || 0;
+                if (sent > 0) {
+                    window._interopResults.outboundPackets = sent;
+                    window._interopResults.audioSent = true;
+                }
+                log("TX", `packetsSent=${sent} bytesSent=${report.bytesSent || 0} `
+                          + `payloadType=${report.payloadType}`);
+            });
+        } catch (e) {
+            log("TX", "getStats error: " + e);
+        }
+    }, 500);
+}
+
 function scheduleEndCheck() {
     setTimeout(() => {
         log("RESULT", "=== Interop Verification Results ===");
@@ -432,6 +517,10 @@ function scheduleEndCheck() {
         log("RESULT", `audioReceived:  ${window._interopResults.audioReceived}`);
         log("RESULT", `rtpPackets:     ${window._interopResults.rtpPackets}`);
         log("RESULT", `rtpPayloadType: ${window._interopResults.rtpPayloadType}`);
+        log("RESULT", `outboundPackets: ${window._interopResults.outboundPackets}`);
+        log("RESULT", `audioSent:      ${window._interopResults.audioSent}`);
+        log("RESULT", `micTrackAdded:  ${window._interopResults.micTrackAdded}`);
+        log("RESULT", `micError:       ${window._interopResults.micError}`);
         log("RESULT", `errors:         ${JSON.stringify(window._interopResults.errors)}`);
         log("RESULT", `exitCode:       ${window._interopResults.exitCode}`);
     }, TIMEOUT_MS);

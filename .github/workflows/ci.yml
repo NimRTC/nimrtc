@@ -595,6 +595,14 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
 
+      - name: Unused-const gate (Apple Clang)
+        # Clang's -Wunused-const-variable fires on a namespace-scope
+        # constant in a .cpp that nothing reads; GCC does not diagnose
+        # the same construct, so the defect is invisible on the Windows
+        # and Linux builds and only breaks this leg (which compiles with
+        # -Werror).  The scanner exits non-zero when it finds one.
+        run: python3 scripts/check_unused_const.py .
+
       # macos-15 ships a modern CMake (3.31.x, ≥ 3.25) but its system
       # Python is not guaranteed to be the version the tooling expects
       # (and a Homebrew `brew update` can burn 10-25 min on a cold tap

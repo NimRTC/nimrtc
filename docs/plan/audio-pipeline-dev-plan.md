@@ -122,6 +122,29 @@ The two audio-seam macros now take the id literal as-is; the legacy
 `NIMRTC_REGISTER_*` family (which stringifies a bare identifier token)
 is left untouched, and the difference is documented at each macro.
 
+**After WP-2 (the Opus-side decoder) — 2026-11-07.**  The Opus module
+now publishes a `plugins::IAudioDecoder` under the id `"opus"` in the
+registry's audio-decoder category, next to the codec plugin that uses
+the same id in the codec category (ids are per category, DEC-6).  The
+plugin lives in `src/modules/opus/src/`, so the **public header set does
+not change**: the scan still reports 109 headers and 729 symbols.
+
+| Gate (after WP-2) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 729 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `ctest --test-dir build -C Debug` | **719 / 719 passed, 0 failed** (706 + 13: the 12 cases of `src/modules/opus/tests/test_opus_audio_decoder.cpp` plus its binary-level entry) |
+
+**The gap detection lives in the decoder, not in the receiver.**  The
+Opus plugin tracks the RTP timestamp of the last decoded frame; when the
+next packet jumps forward it treats the jump as a loss, and — when the
+stream negotiated in-band FEC — decodes the packet in FEC mode first, so
+the *lost* frame is reconstructed from the redundancy the peer embedded
+in the newer packet and reported with `fec_recovered == true`
+(B-8).  The receiver therefore only has to hold the concealment slot for
+one frame period (the "one-frame lookahead") and replace it with the
+FEC frame when one arrives; it needs no codec-specific code.
+
 ---
 
 ## 3. The work packages in detail
@@ -220,6 +243,35 @@ must use the shared adaptive playout strategy that `v1.1.0` already
 introduced for the video jitter buffer (`src/modules/jb`, the shared
 strategy module) — it must not grow its own playout heuristic. This is
 the single most important "do not duplicate" rule of this plan (§6.3).
+
+**How the injection actually happens (decided 2026-11-07).** The seam
+`plugins::IAudioReceiverFactory::create(cfg)` takes only an
+`AudioReceiverConfig`, so the two injected plugins have to be *named*
+somewhere. The two fields appended to `AudioReceiverConfig` do that:
+
+| Field | Default | Filled by the engine from |
+|---|---|---|
+| `jb_plugin_id` | `"adaptive"` | `EngineConfig::jb_name` |
+| `decoder_plugin_id` | `"opus"` | `EngineConfig::audio_decoder_name` |
+
+The module's factory resolves both through `core::PluginRegistry` — the
+same ids the engine resolves for itself (DEC-6: ids are per category,
+so `"opus"` names both the Opus codec plugin and the Opus decoder
+plugin). The module therefore still depends on `nimrtc::core` and
+`nimrtc::plugins` only, and a missing plugin yields a `nullptr` factory
+product, which the engine turns into the B-16 hard error — there is no
+fallback receiver.
+
+**One seam change on the way: `IJB::configure()`.** B-3 requires the
+receiver to configure the jitter buffer with the *stream's* clock rate
+(48000 for Opus), because a `clock_rate_hz` of 0 must never silently
+mean 90 kHz for an audio stream (F-6). `plugins::IJB` had no way to do
+that (`IJBFactory::create()` takes no arguments), so the interface gains
+one virtual, `configure(const JBConfig&)`, which the `jb` module's
+adapter implements by translating into the concrete `jb::Config`. The
+seam default of `JBConfig::clock_rate_hz` moves from 90000 to 0
+("unspecified"), and the adapter keeps the historical 90 kHz only for
+the streams that are *not* configured (the video path).
 
 **Done when** `src/modules/audio_rx/tests/test_audio_rx.cpp` covers the
 V-1 rows "receiver timeline", "receiver cadence", "receiver downmix",

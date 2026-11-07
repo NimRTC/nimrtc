@@ -253,6 +253,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Audio3AStartup`, `Audio3ARenderPath`, `Audio3ADegradation`) run
   instead of skipping when `NIMRTC_VENDORED_WEBRTC_APM=ON`; they skip
   when the build has no APM, which is the pre-existing contract.
+- **The DTLS in-process AEAD test did not compile on MSVC.** The
+  previous commit replaced the hard-coded key length `16` with the
+  `kAesKeyLen` constant — but that constant lives inside
+  `namespace nimrtc`, and the test's `main()` sits at global scope
+  after that namespace closes, so the unqualified use did not resolve
+  and MSVC reported C2065 "undeclared identifier" (plus the
+  knock-on C3536/C2660). The file is `#ifdef _WIN32`-only, so the
+  Linux and macOS CI legs compiled it to an empty translation unit and
+  stayed green: only the Windows leg could see the break. The uses are
+  now qualified as `nimrtc::kAesKeyLen`.
+- **Two concurrent NimRTC processes on one host fought over usrsctp's
+  shared UDP port.** The SCTP seam called `usrsctp_init(9899, ...)`
+  with a fixed port, and usrsctp's `recv_thread_init()` binds its
+  internal `userspace_udpsctp` socket to exactly that port. When a
+  second process on the same host started, its `bind()` failed, its
+  socket stayed invalid, and its SCTP packets went to 127.0.0.1:9899 —
+  which belonged to the *first* process. usrsctp's listener
+  demultiplexed those datagrams onto the wrong socket, so the
+  INIT/INIT-ACK handshake never completed and the test timed out after
+  60 s. This is not theoretical: CTest runs each gtest-discovered case
+  as its own process under `-j 2`, and the Linux CI leg of 2026-11-07
+  showed `SctpUsrsctpTest.PartialReliableTtlDrop` timing out at 60 s
+  while a sibling case passed in 0.9 s. The seam now picks a free
+  ephemeral UDP port per process (`nimrtc_pick_free_udp_port()`) and
+  records it so the per-socket `SCTP_REMOTE_UDP_ENCAPS_PORT` matches
+  what usrsctp actually bound; the port is no longer cleared when the
+  last socket goes away, because the listener lives for the whole
+  process lifetime.
 
 ### Changed
 

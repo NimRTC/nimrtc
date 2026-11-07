@@ -46,6 +46,22 @@ namespace nimrtc::plugins {
 
 /** Per-stream configuration of the receive pipeline. */
 struct NIMRTC_API_STABLE AudioReceiverConfig {
+    /** Id of the jitter-buffer plugin to inject (v1.2.0, WP-3).
+     *
+     *  The receiver owns no concrete jitter buffer: it resolves this id
+     *  through `core::PluginRegistry` (the `kJb` category) and drives the
+     *  result through `plugins::IJB`.  The default is the id the engine
+     *  uses for its own jitter buffer (`EngineConfig::jb_name`), i.e.
+     *  "adaptive".
+     */
+    std::string jb_plugin_id = "adaptive";
+    /** Id of the audio-decoder plugin to inject (v1.2.0, WP-3).
+     *
+     *  Resolved through `core::PluginRegistry` (the `kAudioDecoder`
+     *  category).  The default is the id the Opus decoder plugin
+     *  registers under (`EngineConfig::audio_decoder_name`), i.e. "opus".
+     */
+    std::string decoder_plugin_id = "opus";
     /** RTP clock of the remote stream (48000 for Opus). */
     std::uint32_t clock_rate_hz = 48000;
     /** Sample rate the decoder produces. */

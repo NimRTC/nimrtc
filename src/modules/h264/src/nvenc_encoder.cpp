@@ -218,11 +218,15 @@ static D3D11DeviceHolder& d3d11() {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// NOTE: there are deliberately no bitrate / GOP defaults here.  The
+// encoder passes init.encodeConfig = nullptr (see open() below) because
+// the driver rejects hand-built NV_ENC_CONFIG objects on the pinned ABI,
+// so the bitrate and the keyframe interval are derived by the driver
+// from the preset (NV_ENC_PRESET_P4_GUID).  A constant here would never
+// be read.
 constexpr uint32_t kDefaultWidth     = 1280;
 constexpr uint32_t kDefaultHeight    = 720;
 constexpr uint32_t kDefaultFps        = 30;
-constexpr uint32_t kDefaultBitrate    = 2'000'000;
-constexpr uint32_t kDefaultGop        = 60;
 constexpr size_t   kBsBufBytes       = 2 * 1024 * 1024;  // 2 MiB
 
 inline bool is_annex_b(const uint8_t* p, size_t n) {

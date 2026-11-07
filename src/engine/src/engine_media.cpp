@@ -81,8 +81,12 @@ void NimRTCEngine::init_audio_modules() noexcept {
         codec_cfg.channels       = config_.pcm_channels;
         codec_cfg.bitrate_bps    = 64000;
         codec_cfg.complexity     = 10;
-        codec_cfg.fec_enabled    = true;
-        codec_cfg.dtx_enabled    = false;
+        codec_cfg.fec_enabled    = config_.audio_use_inband_fec;
+        // DTX is only honoured when the peer signals `usedtx=1`
+        // (spec E-3); the SDP side of that negotiation lives in
+        // `engine_signaling.cpp`.  The encoder is configured with the
+        // host's request, and the *offer* advertises it.
+        codec_cfg.dtx_enabled    = config_.audio_use_dtx;
         codec_cfg.vad_enabled    = false;
         codec_cfg.payload_type   = config_.audio_codec.payload_type;
         codec_cfg.name           = config_.codec_name;
@@ -160,16 +164,32 @@ void NimRTCEngine::init_audio_modules() noexcept {
         rx_cfg.decoder_channels       = config_.audio_codec.channels;
         rx_cfg.output_channels        = config_.pcm_channels;
         rx_cfg.frame_duration_ms      = config_.audio_ptime_ms;
+        // The audio stream's own target depth (spec E-3).  A host that
+        // left it at the default gets the module's own default; a host
+        // that configured it gets exactly that value.  The old
+        // `jb_initial_delay_ms` (the *video* jitter buffer's knob) is
+        // not the audio stream's knob — using it here made the audio
+        // depth depend on a video setting.
         rx_cfg.target_delay_ms        = static_cast<std::uint16_t>(
-            config_.jb_initial_delay_ms < 0 ? 0 : config_.jb_initial_delay_ms);
+            config_.audio_jitter_target_delay_ms < 0
+                ? 0 : config_.audio_jitter_target_delay_ms);
         rx_cfg.min_delay_ms           = static_cast<std::uint16_t>(
             config_.jb_min_delay_ms < 0 ? 0 : config_.jb_min_delay_ms);
         rx_cfg.max_delay_ms           = static_cast<std::uint16_t>(
             config_.jb_max_delay_ms < 0 ? 0 : config_.jb_max_delay_ms);
-        // The engine advertises `useinbandfec=1` in its own SDP, so the
-        // decoder must be told to use in-band FEC as well (spec B-8).
-        rx_cfg.enable_fec_recovery    = true;
-        rx_cfg.enable_downmix         = true;
+        rx_cfg.max_concealed_frames   = static_cast<std::uint16_t>(
+            config_.audio_max_concealed_frames < 0
+                ? 0 : config_.audio_max_concealed_frames);
+        // In-band FEC is what the SDP signals, so the decoder must be
+        // told to use it as well (spec B-8) — and the host must be able
+        // to turn it off (spec E-3).
+        rx_cfg.enable_fec_recovery    = config_.audio_use_inband_fec;
+        rx_cfg.enable_downmix         = config_.audio_downmix_to_pcm_channels;
+        if (!config_.audio_downmix_to_pcm_channels) {
+            // Without the downmix the pipeline keeps the decoder's own
+            // channel count (spec B-9).
+            rx_cfg.output_channels = config_.audio_codec.channels;
+        }
 
         const bool created = pal::make_plugin<&pal::resolve_audio_receiver>(
             config_.audio_receiver_name,
@@ -253,6 +273,12 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     if (on_audio_frame_) {
         on_audio_frame_(frame.pcm, total_floats);
     }
+
+    // The detailed callback fires *after* the legacy one (spec E-2):
+    // both receive the same buffer, and the detailed one adds the
+    // metadata (RTP timestamp, playout instant, capture instant, the
+    // concealment / FEC flags).
+    deliver_audio_frame_info(frame);
 
     // The frame has been handed over for playback — tell the 3A plugin
     // that the reference signal reached the speaker so it can track the
@@ -1015,12 +1041,13 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
         }
     }
 
-    if (!config_.timeline_enabled) {
-        // The engine MUST NOT schedule SRs while the flag is false
-        // (ADR-017 §"Decision 5"), and symmetrically there is no anchor to
-        // maintain — an inbound SR is of no use to a disabled seam.
-        return;
-    }
+    // The peer's Sender Report is parsed whether or not the cross-end
+    // timeline is enabled: the report's *LSR* field (the middle 32
+    // bits of the peer's NTP timestamp) is a fact about the wire that
+    // our receiver report has to carry (RFC 3550 §6.4.1), and the peer
+    // sends its Sender Reports whether we track the timeline or not.
+    // Only the *tracker* feed below is gated — with the timeline off
+    // the engine MUST NOT maintain an anchor (ADR-017 §"Decision 5").
 
     // Compound RTCP packets are a concatenation of sub-packets sharing one
     // header (RFC 3550 §6.1). Walk them so an SR that follows an RR in the
@@ -1042,6 +1069,24 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             rtp::Parser rp;
             auto sr = rp.parse_sr(view.subspan(off, sub_len));
             if (sr) {
+                // The peer's Sender Report is the anchor of the
+                // receiver report we send back: its middle 32 bits are
+                // the LSR field, and the instant we received it is the
+                // DLSR field (RFC 3550 §6.4.1).  This is recorded
+                // whether or not the cross-end timeline is enabled —
+                // the peer's report is a fact about the wire, not about
+                // our feature set.
+                if (sr.value().ssrc == impl_->audio_rx.ssrc) {
+                    impl_->audio_rx.last_sr_lsr =
+                        rtp::Ntp64{sr.value().ntp_timestamp}.mid_32();
+                    impl_->audio_rx.last_sr_recv_us = detail::steady_now_us();
+                }
+
+                if (!config_.timeline_enabled) {
+                    off += sub_len;
+                    continue;   // no anchor to maintain — nothing to feed
+                }
+
                 // The tracker wants our *monotonic* clock reading at
                 // receipt: it combines it with the monotonic origin to
                 // place our own clock on the peer's wall-clock timeline
@@ -1156,6 +1201,30 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.audio_encode_errors   = impl_->audio_encode_errors;
     out.audio_samples_in      = impl_->audio_samples_in;
     out.audio_samples_pending = impl_->audio_accum_frames;
+
+    // ---- Audio receive counters (v1.2.0, audio pipeline WP-8) ---------
+    //
+    // The split follows the ownership: the *engine* counts what it
+    // handed to the host (frames, samples, concealed frames, FEC
+    // recoveries), and the *receive pipeline* counts what happened on
+    // the wire (packets lost, decode errors, jitter, playout delay).
+    // The pipeline owns the detailed bookkeeping — it is the only
+    // party that knows which slots were concealed and how deep the
+    // jitter buffer was — so the numbers come from there and are not
+    // re-derived here (spec B-13).
+    out.audio_packets_sent         = impl_->audio_packet_count;
+    out.audio_frames_received      = impl_->audio_frames_received;
+    out.audio_samples_received     = impl_->audio_samples_received;
+    out.audio_concealed_frames     = impl_->audio_frames_concealed;
+    out.audio_fec_recovered_frames = impl_->audio_frames_fec_recovered;
+
+    if (audio_receiver_) {
+        const auto rx = audio_receiver_->stats();
+        out.audio_packets_lost     = rx.packets_lost;
+        out.audio_decode_errors    = rx.decode_errors;
+        out.audio_jitter_ms        = rx.jitter_ms;
+        out.audio_playout_delay_ms = rx.current_delay_ms;
+    }
     return out;
 }
 

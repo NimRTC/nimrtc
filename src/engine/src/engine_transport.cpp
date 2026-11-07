@@ -735,6 +735,12 @@ int NimRTCEngine::tick() noexcept {
         // wire.  It is sent from here — not from the receiver callback —
         // so the transport's send() is never re-entered from its recv().
         flush_video_feedback();
+        // v1.2.0 WP-8 (spec B-12): the RTCP receiver report for the
+        // inbound audio stream.  It goes out at least once per second
+        // while audio is inbound — the browser's `inbound-rtp` loss and
+        // jitter figures are derived from the reports it receives, so a
+        // stream that never reports shows no statistics at all.
+        maybe_send_receiver_report();
     }
     return ice_t_->recv();
 }

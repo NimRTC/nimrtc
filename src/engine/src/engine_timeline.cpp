@@ -313,6 +313,14 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         static_cast<std::int64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 core::SteadyClock::now().time_since_epoch()).count())};
+
+    // The RTCP receiver report needs the *sequence* bookkeeping of the
+    // inbound audio stream (RFC 3550 §6.4.2) — the extended highest
+    // sequence number, the cumulative loss and the interarrival
+    // jitter.  The pipeline counts packets but does not track the
+    // sequence numbers, so the engine does that here (spec B-12).
+    note_inbound_audio_packet(pv.ssrc, pv.seq, pv.timestamp, recv_ts_us);
+
     audio_receiver_->push(pv.payload.data(), pv.payload.size(),
                           pv.timestamp, pv.seq, pv.ssrc, recv_ts_us);
     // The pipeline is clock-driven (spec A-1): pushing the packet only

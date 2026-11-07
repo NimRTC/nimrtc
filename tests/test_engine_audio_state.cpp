@@ -594,4 +594,223 @@ TEST_F(EngineAudioState, EmptyReceiverNameDisablesTheTrackSilently) {
     }
 }
 
+// ============================================================================
+// 4. The P1 public SDK (spec E-1 / E-2 / E-4, V-1 rows)
+// ============================================================================
+//
+// The detailed callback is the *detailed* counterpart of the legacy PCM
+// tap: it carries the same buffer plus the metadata a host needs to
+// place the frame on a timeline.  Three things are pinned down here:
+//
+//   * the legacy callback's `num_samples` is the **total number of
+//     interleaved floats** (samples_per_channel * channels) — the one
+//     place where the legacy semantics were previously ambiguous
+//     (spec O-2, E-2);
+//   * the legacy callback fires *before* the detailed one, and both see
+//     the same buffer (spec E-2);
+//   * the negotiated-format accessor answers "what did we agree on?"
+//     once the remote description has been processed, and says "not yet"
+//     before that (spec E-4).
+
+TEST_F(EngineAudioState, LegacyCallbackSemanticsMatchTheDetailedFrame) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    std::size_t legacy_samples = 0;
+    std::size_t detailed_samples = 0;
+    std::uint8_t detailed_channels = 0;
+
+    rx.set_on_audio_frame([&](const float*, std::size_t n) {
+        legacy_samples = n;
+    });
+    rx.set_on_audio_frame_info(
+        [&](const nimrtc::engine::AudioFrameInfo& info) {
+            detailed_samples = info.num_samples_per_channel * info.channels;
+            detailed_channels = info.channels;
+        });
+
+    const auto first = make_opus_rtp(0x0E0E0E0Eu, kOpusPt, 1, 0, 960);
+    if (first.empty()) {
+        GTEST_SKIP() << "the Opus codec plugin is not registered in this build";
+    }
+    rx.feed_media_inbound(first.data(), first.size());
+
+    std::this_thread::sleep_for(120ms);
+    const auto second = make_opus_rtp(0x0E0E0E0Eu, kOpusPt, 2, 960, 960);
+    ASSERT_FALSE(second.empty());
+    rx.feed_media_inbound(second.data(), second.size());
+
+    for (int i = 0; i < 5; ++i) {
+        rx.tick();
+        std::this_thread::sleep_for(20ms);
+    }
+
+    EXPECT_GT(detailed_samples, 0u)
+        << "the detailed callback must deliver a frame";
+    EXPECT_EQ(legacy_samples, detailed_samples)
+        << "the legacy callback's `num_samples` is the total number of "
+           "interleaved floats (samples_per_channel * channels) — the "
+           "documented legacy semantics (spec O-2 / E-2)";
+    EXPECT_EQ(detailed_channels, static_cast<std::uint8_t>(cfg.pcm_channels))
+        << "the frame must be downmixed to the configured output channel "
+           "count";
+}
+
+TEST_F(EngineAudioState, TheLegacyCallbackFiresBeforeTheDetailedOne) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    std::vector<std::string> order;
+    rx.set_on_audio_frame([&](const float*, std::size_t) {
+        order.emplace_back("legacy");
+    });
+    rx.set_on_audio_frame_info(
+        [&](const nimrtc::engine::AudioFrameInfo&) {
+            order.emplace_back("detailed");
+        });
+
+    const auto first = make_opus_rtp(0x0D0D0D0Du, kOpusPt, 1, 0, 960);
+    if (first.empty()) {
+        GTEST_SKIP() << "the Opus codec plugin is not registered in this build";
+    }
+    rx.feed_media_inbound(first.data(), first.size());
+
+    std::this_thread::sleep_for(120ms);
+    const auto second = make_opus_rtp(0x0D0D0D0Du, kOpusPt, 2, 960, 960);
+    ASSERT_FALSE(second.empty());
+    rx.feed_media_inbound(second.data(), second.size());
+
+    for (int i = 0; i < 5; ++i) {
+        rx.tick();
+        std::this_thread::sleep_for(20ms);
+    }
+
+    ASSERT_GE(order.size(), 2u)
+        << "both callbacks must fire for a delivered frame";
+    EXPECT_EQ(order[0], "legacy")
+        << "the legacy callback fires first (spec E-2)";
+    EXPECT_EQ(order[1], "detailed")
+        << "the detailed callback fires second (spec E-2)";
+}
+
+TEST_F(EngineAudioState, AFrameThatArrivedNormallyIsNeitherConcealedNorFecRecovered) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    std::vector<nimrtc::engine::AudioFrameInfo> infos;
+    rx.set_on_audio_frame_info(
+        [&](const nimrtc::engine::AudioFrameInfo& info) {
+            infos.push_back(info);
+        });
+
+    // A gapless stream: every packet arrives, so nothing is concealed
+    // and nothing is reconstructed from FEC.
+    const auto first = make_opus_rtp(0x0C0C0C0Cu, kOpusPt, 1, 0, 960);
+    if (first.empty()) {
+        GTEST_SKIP() << "the Opus codec plugin is not registered in this build";
+    }
+    rx.feed_media_inbound(first.data(), first.size());
+
+    std::this_thread::sleep_for(120ms);
+    const auto second = make_opus_rtp(0x0C0C0C0Cu, kOpusPt, 2, 960, 960);
+    ASSERT_FALSE(second.empty());
+    rx.feed_media_inbound(second.data(), second.size());
+
+    for (int i = 0; i < 5; ++i) {
+        rx.tick();
+        std::this_thread::sleep_for(20ms);
+    }
+
+    ASSERT_FALSE(infos.empty())
+        << "the detailed callback must deliver a frame";
+    for (const auto& info : infos) {
+        EXPECT_FALSE(info.concealed)
+            << "a frame that arrived normally must never be flagged as "
+               "concealment (PLC) audio";
+        EXPECT_FALSE(info.fec_recovered)
+            << "a frame that arrived normally must never be flagged as "
+               "FEC-recovered audio";
+    }
+}
+
+TEST_F(EngineAudioState, AMissingPacketProducesAConcealedFrame) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    std::vector<nimrtc::engine::AudioFrameInfo> infos;
+    rx.set_on_audio_frame_info(
+        [&](const nimrtc::engine::AudioFrameInfo& info) {
+            infos.push_back(info);
+        });
+
+    // Sequence 1, then 3: the second packet's slot is missing, so the
+    // pipeline has to conceal it (spec B-7).
+    const auto first = make_opus_rtp(0x0B0B0B0Bu, kOpusPt, 1, 0, 960);
+    if (first.empty()) {
+        GTEST_SKIP() << "the Opus codec plugin is not registered in this build";
+    }
+    rx.feed_media_inbound(first.data(), first.size());
+
+    std::this_thread::sleep_for(120ms);
+    const auto third = make_opus_rtp(0x0B0B0B0Bu, kOpusPt, 3, 1920, 960);
+    ASSERT_FALSE(third.empty());
+    rx.feed_media_inbound(third.data(), third.size());
+
+    for (int i = 0; i < 10; ++i) {
+        rx.tick();
+        std::this_thread::sleep_for(20ms);
+    }
+
+    bool saw_concealed = false;
+    for (const auto& info : infos) {
+        if (info.concealed) saw_concealed = true;
+    }
+    EXPECT_TRUE(saw_concealed)
+        << "a missing packet must produce concealment audio, and the host "
+           "must be able to tell it apart from real audio (spec B-7 / E-1)";
+
+    const auto s = rx.stats();
+    EXPECT_GT(s.audio_concealed_frames, 0u)
+        << "the concealed frames must be counted in the statistics "
+           "(spec B-13)";
+}
+
+TEST_F(EngineAudioState, RemoteAudioFormatIsEmptyBeforeTheNegotiation) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    nimrtc::engine::AudioFormat fmt{};
+    EXPECT_FALSE(rx.remote_audio_format(&fmt))
+        << "before the remote description has been processed there is no "
+           "negotiated audio track — the accessor must say so instead of "
+           "guessing (spec E-4)";
+}
+
+TEST_F(EngineAudioState, RemoteAudioFormatCarriesTheNegotiatedValues) {
+    EngineConfig cfg = make_test_config();
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    ASSERT_TRUE(negotiate_with_peer(rx, cfg))
+        << "the SDP handshake a real session performs must succeed";
+
+    nimrtc::engine::AudioFormat fmt{};
+    ASSERT_TRUE(rx.remote_audio_format(&fmt))
+        << "after the negotiation the negotiated format must be available "
+           "(spec E-4)";
+    EXPECT_EQ(fmt.payload_type, kOpusPt)
+        << "the negotiated payload type is the one the peer will send on";
+    EXPECT_EQ(fmt.sample_rate_hz, 48000u)
+        << "Opus decodes at 48 kHz";
+    EXPECT_EQ(fmt.channels, static_cast<std::uint8_t>(cfg.pcm_channels))
+        << "the frame is downmixed to the configured output channel count";
+    EXPECT_EQ(fmt.frame_duration_ms, cfg.audio_ptime_ms)
+        << "the negotiated frame duration is the configured packet time";
+}
+
 } // namespace

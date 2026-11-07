@@ -555,6 +555,74 @@ struct NimRTCEngine::Impl {
      *  anyway. */
     std::unordered_map<std::uint8_t, std::uint32_t> remote_clock_rate_hz;
 
+    // ---- Inbound audio tracking (v1.2.0, audio pipeline WP-8) ---------
+    //
+    // The RTCP receiver report (RFC 3550 §6.4.2) needs the *sequence*
+    // bookkeeping of the inbound audio stream: the extended highest
+    // sequence number, the cumulative packet loss and the interarrival
+    // jitter.  The receive pipeline does not track those — it counts
+    // packets and plays out frames — so the engine keeps the numbers
+    // here, next to the statistics it publishes (spec B-12 / B-13).
+    //
+    // The state follows RFC 3550 Appendix A.1: a *source* (SSRC) has
+    // one sequence space, and a stream that restarts (a new SSRC, or a
+    // large backward jump) resets it.
+    struct AudioRxState {
+        /** The SSRC of the inbound audio stream; 0 = nothing seen yet. */
+        std::uint32_t ssrc = 0;
+
+        /** The first sequence number of the current sequence space
+         *  (RFC 3550's `base_seq`). */
+        std::uint16_t base_seq = 0;
+
+        /** The extended highest sequence number received
+         *  (RFC 3550's `max_seq`): cycles in the high 16 bits. */
+        std::uint32_t max_seq = 0;
+
+        /** Number of packets received in the current sequence space. */
+        std::uint64_t received = 0;
+
+        /** The `expected` / `received` counters as of the last report
+         *  (RFC 3550 A.3) — the fraction-lost computation is a
+         *  *difference* between two intervals, so the previous values
+         *  have to be remembered. */
+        std::uint64_t expected_prior = 0;
+        std::uint64_t received_prior = 0;
+
+        /** Interarrival jitter, in RTP timestamp units
+         *  (RFC 3550 §6.4.1). */
+        std::uint32_t jitter = 0;
+
+        /** The transit time (arrival − RTP timestamp) the last packet
+         *  produced.  The jitter estimate is the EWMA of the
+         *  *differences* of the transit times.
+         *
+         *  The value is a *signed* 32-bit number because the transit
+         *  time is modular over 2^32 (RFC 3550 A.1): the difference
+         *  between two transit times has to be taken modulo 2^32 as
+         *  well, or a wrap of the RTP timestamp would look like a
+         *  multi-second arrival gap. */
+        std::int32_t  last_transit = 0;
+        bool          have_transit = false;
+
+        /** The middle 32 bits of the NTP timestamp of the last Sender
+         *  Report received for this SSRC (the RR's LSR field), and
+         *  the instant we received it (the DLSR field). */
+        std::uint32_t last_sr_lsr = 0;
+        std::int64_t  last_sr_recv_us = 0;
+    } audio_rx;
+
+    /** Our own SSRC as the sender of the RTCP reports (RFC 3550 §6.1).
+     *
+     *  The receiver report is sent by *us* as the receiver of the
+     *  media, so it needs an SSRC of its own — distinct from the media
+     *  SSRCs, which identify the streams rather than the reporter.
+     *  0 until the first report is built. */
+    std::uint32_t rtcp_sender_ssrc_ = 0;
+
+    /** When the last receiver report went out (steady clock). */
+    std::chrono::steady_clock::time_point rr_last_sent{};
+
     // ---- Negotiated payload-type routing (B-4) --------------------------
     //
     // The tables below are the *negotiated* routing: the payload types
@@ -685,6 +753,14 @@ struct NimRTCEngine::Impl {
     std::uint64_t audio_samples_received       = 0;
     std::uint64_t audio_frames_concealed      = 0;
     std::uint64_t audio_frames_fec_recovered  = 0;
+
+    // ---- WP-8: the inbound-audio bookkeeping for the RTCP receiver
+    //      report (spec B-12). ----
+    // <<WP8_MEMBERS>>
+
+    // ---- WP-9: the cross-end capture timestamp of the inbound audio
+    //      frames (spec B-17). ----
+    // <<WP9_MEMBERS>>
 
     /** Wall-clock instant (µs since the Unix epoch) of the **last outbound
      *  audio packet**, sampled at the very moment its abs-send-time

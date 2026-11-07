@@ -19,6 +19,14 @@ add_library(nimrtc_engine STATIC
     src/engine_media.cpp
     src/engine_signaling.cpp
     src/engine_timeline.cpp
+    # v1.2.0 (audio pipeline): the RTCP receiver report for the inbound
+    # audio stream (WP-8, spec B-12) and the cross-end capture-timestamp
+    # lookup for the audio frames (WP-9, spec B-17).  Both are private
+    # engine TUs — they add no public symbol beyond what engine.hpp
+    # already declares.
+    src/engine_rtcp.cpp
+    src/engine_capture.cpp
+    src/engine_audio_frames.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

@@ -575,6 +575,49 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  An empty string disables the audio track explicitly (no error is
      *  reported: the host asked for it). */
     std::string_view audio_receiver_name = "nimrtc_audio_rx";
+
+    // ---- Audio pipeline behaviour (v1.2.0, audio pipeline WP-10) -------
+    //
+    // The five fields below are appended at the **end** of the struct, so
+    // an existing host that aggregate-initialises `EngineConfig` keeps
+    // compiling (spec E-6).
+
+    /** Enable Opus in-band FEC on the receive path.
+     *
+     *  Must match what the SDP signals: the offer carries
+     *  `useinbandfec=1` when this is true, so a host that turns it off
+     *  must not accept a peer that relies on it.  The decoder plugin
+     *  receives the flag through `AudioReceiverConfig::enable_fec_recovery`
+     *  (spec B-8).  Default true. */
+    bool audio_use_inband_fec = true;
+
+    /** Enable Opus DTX (discontinuous transmission).
+     *
+     *  Only honoured when the peer signals `usedtx=1` in its `a=fmtp:`
+     *  line — a DTX stream from a peer that did not negotiate it is not
+     *  something the engine may invent.  Default false. */
+    bool audio_use_dtx = false;
+
+    /** Target jitter-buffer depth for the inbound audio stream, in ms.
+     *
+     *  This is the *audio* target; the video path keeps its own tuning
+     *  (`video_receiver_tuning`).  It is handed to the receive pipeline
+     *  as `AudioReceiverConfig::target_delay_ms`.  Default 40. */
+    int audio_jitter_target_delay_ms = 40;
+
+    /** Maximum number of consecutive concealed frames the receive
+     *  pipeline may emit before it gives up on the stream.
+     *
+     *  Handed to the pipeline as `AudioReceiverConfig::max_concealed_frames`
+     *  (spec B-7).  Default 10. */
+    int audio_max_concealed_frames = 10;
+
+    /** Downmix the decoded inbound stream to `pcm_channels`.
+     *
+     *  When false, the pipeline keeps the decoder's own channel count
+     *  and the host receives a stereo stream on a mono configuration
+     *  (spec B-9).  Default true. */
+    bool audio_downmix_to_pcm_channels = true;
 };
 // ---------------------------------------------------------------------------
 // Public callbacks
@@ -584,6 +627,75 @@ using NIMRTC_API_STABLE AudioFrameCallback = std::function<void(const float* pcm
 using NIMRTC_API_STABLE VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
 using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
 using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* state)>;
+
+// ---------------------------------------------------------------------------
+// Audio frame details (v1.2.0, audio pipeline WP-10, spec E-1)
+// ---------------------------------------------------------------------------
+
+/** Everything the host needs to know about one delivered audio frame.
+ *
+ *  This is the *detailed* counterpart of the legacy
+ *  `AudioFrameCallback`: the legacy callback carries the PCM and
+ *  nothing else, this one carries the PCM together with the metadata a
+ *  host needs to place the frame on a timeline (spec E-1). */
+struct NIMRTC_API_STABLE AudioFrameInfo {
+    /** Interleaved PCM, float, [-1.0, 1.0].
+     *  Length = num_samples_per_channel * channels.
+     *  Valid only for the duration of the callback. */
+    const float*  pcm                 = nullptr;
+
+    /** Samples per channel in `pcm`. */
+    std::size_t   num_samples_per_channel = 0;
+
+    /** Sample rate of `pcm` — the decoder's native rate (48000 for Opus).
+     *  The host resamples if its device rate differs. */
+    std::uint32_t sample_rate_hz      = 48000;
+
+    /** Channel count of `pcm` — after downmix to the configured output
+     *  channel count. */
+    std::uint8_t  channels            = 1;
+
+    /** RTP timestamp of the first sample in this frame. */
+    std::uint32_t rtp_timestamp       = 0;
+
+    /** Engine-thread instant at which the frame was handed to the host.
+     *  On the engine's monotonic origin (same epoch as `tick()`'s `now_us`),
+     *  NOT the Unix wall clock. */
+    std::int64_t  playout_time_us     = 0;
+
+    /** Peer's capture instant of this frame, in Unix microseconds.
+     *  0 when the cross-end timeline seam has not yet reconstructed it
+     *  (no usable Sender Report / abs-send-time yet — ADR-017).
+     *  This is the audio side of the A/V-sync contract (C-4): the host
+     *  compares it against the video frame's `capture_ts_us`. */
+    std::int64_t  capture_time_us     = 0;
+
+    /** True when this frame is concealment (PLC) audio. */
+    bool          concealed           = false;
+
+    /** True when this frame was reconstructed from in-band FEC. */
+    bool          fec_recovered       = false;
+};
+
+/** The negotiated format of the inbound audio stream.
+ *  Filled in by `remote_audio_format()` once the remote SDP has been
+ *  processed. */
+struct NIMRTC_API_STABLE AudioFormat {
+    /** Decoder output rate — the codec's native rate (48000 for Opus). */
+    std::uint32_t sample_rate_hz      = 48000;
+
+    /** Channel count after the engine's downmix — what the host receives. */
+    std::uint8_t  channels            = 1;
+
+    /** The negotiated payload type (RFC 7587 Opus = 111). */
+    std::uint8_t  payload_type        = 111;
+
+    /** Negotiated frame duration in ms (10 / 20 / 40 / 60). */
+    std::uint16_t frame_duration_ms   = 20;
+};
+
+using NIMRTC_API_STABLE AudioFrameInfoCallback =
+    std::function<void(const AudioFrameInfo& info)>;
 
 // ---------------------------------------------------------------------------
 // NimRTCEngine
@@ -658,6 +770,20 @@ public:
     /** Install the audio-frame callback.  Fires on the engine thread at
      *  the configured PCM rate.  Pass an empty std::function to clear. */
     NIMRTC_API_STABLE void set_on_audio_frame(AudioFrameCallback cb) noexcept { on_audio_frame_ = std::move(cb); }
+
+    /** Install the detailed audio-frame callback.
+     *
+     *  Fires on the engine thread, after decoding, after downmix, and
+     *  after the 3A render stage.  When it is set, it fires *after* the
+     *  legacy callback; both receive the same buffer (spec E-2).
+     *
+     *  The legacy callback stays the recommended surface for a host that
+     *  only needs PCM — this one exists for the host that has to place
+     *  the frame on a timeline (A/V sync, capture-time bookkeeping).
+     *  Pass an empty std::function to clear. */
+    NIMRTC_API_STABLE void set_on_audio_frame_info(AudioFrameInfoCallback cb) noexcept {
+        on_audio_frame_info_ = std::move(cb);
+    }
 
     /** Install the video-frame callback.  Fires on the engine thread
      *  when the video pipeline decodes a complete frame (raw NAL).
@@ -1223,11 +1349,36 @@ public:
         std::uint64_t audio_encode_errors    = 0;  // frames that failed to encode
         std::uint64_t audio_samples_in       = 0;  // PCM samples handed to send_audio()
         std::uint64_t audio_samples_pending  = 0;  // samples still in the accumulator
+        // ---- Audio receive counters (WP-8, spec B-13, additive) -------
+        // All cumulative since open().  The send-side counters above
+        // count what the engine put on the wire; these count what came
+        // *in* and what the host was handed.  The values come from the
+        // receive pipeline's own statistics (the pipeline owns the
+        // detailed bookkeeping) plus the engine's inbound sequence
+        // tracking, so a host sees the same numbers Chrome reports in
+        // `inbound-rtp`.
+        std::uint64_t audio_packets_sent        = 0;  // RTP packets emitted
+        std::uint64_t audio_frames_received     = 0;  // decoded frames delivered
+        std::uint64_t audio_samples_received    = 0;  // samples per channel delivered
+        std::uint64_t audio_concealed_frames    = 0;  // PLC frames delivered
+        std::uint64_t audio_fec_recovered_frames= 0;  // frames rebuilt from in-band FEC
+        std::uint64_t audio_packets_lost        = 0;  // inbound packets inferred lost
+        std::uint64_t audio_decode_errors       = 0;  // decoder errors
+        std::uint32_t audio_jitter_ms           = 0;  // current interarrival jitter
+        std::uint32_t audio_playout_delay_ms    = 0;  // current playout delay
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
      *  UNSTABLE: the Stats struct fields may change before v1.0.0. */
     NIMRTC_API_UNSTABLE Stats stats() const noexcept;
+
+    /** The negotiated remote audio format, once the remote SDP has been
+     *  processed.
+     *
+     *  Returns false when no audio track is negotiated yet (or when the
+     *  peer's audio m-line was rejected), in which case `out` is left
+     *  untouched (spec E-4). */
+    NIMRTC_API_STABLE bool remote_audio_format(AudioFormat* out) const noexcept;
 
 private:
     // ---- Engine state ----
@@ -1305,6 +1456,7 @@ private:
 
     // ---- Public callbacks (no concrete deps) ----
     AudioFrameCallback  on_audio_frame_;
+    AudioFrameInfoCallback on_audio_frame_info_;
     VideoFrameCallback  on_video_frame_;
     EngineErrorCallback on_error_;
     EngineStateCallback on_state_change_;
@@ -1348,6 +1500,48 @@ private:
      *  audio pipeline WP-7).  The engine applies 3A render to it and
      *  forwards it to the legacy PCM tap. */
     void on_audio_frame_decoded(const plugins::AudioOutputFrame& frame) noexcept;
+    /** The peer's capture instant of an inbound audio frame, in Unix
+     *  microseconds (v1.2.0, audio pipeline WP-9, spec B-17).
+     *
+     *  Returns 0 when the cross-end timeline seam has not reconstructed
+     *  the instant yet — no usable Sender Report / abs-send-time for
+     *  this SSRC.  The value is **never** faked from the local playout
+     *  clock: that would silently mix two different clocks (spec O-9).
+     *
+     *  @param ssrc          The inbound audio source.
+     *  @param rtp_timestamp The RTP timestamp of the frame. */
+    std::int64_t audio_capture_time_us(std::uint32_t ssrc,
+                                       std::uint32_t rtp_timestamp) const noexcept;
+    /** An inbound audio RTP packet arrived (v1.2.0, audio pipeline WP-8,
+     *  spec B-12).
+     *
+     *  The RTCP receiver report needs the *sequence* bookkeeping — the
+     *  extended highest sequence number and the cumulative packet loss
+     *  (RFC 3550 §6.4.2) — and the receiver plugin does not track the
+     *  sequence numbers, only the packet count.
+     *
+     *  @param arrival_us  The arrival instant on the engine's monotonic
+     *                     clock; it feeds the interarrival-jitter
+     *                     estimate (RFC 3550 §6.4.1). */
+    void note_inbound_audio_packet(std::uint32_t ssrc,
+                                   std::uint16_t seq,
+                                   std::uint32_t rtp_timestamp,
+                                   std::int64_t arrival_us) noexcept;
+    /** Send the RTCP receiver report for the inbound audio stream
+     *  (v1.2.0, audio pipeline WP-8, spec B-12).
+     *
+     *  Driven from `tick()`: a report goes out at least once per second
+     *  while audio is inbound (RFC 3550 §6.4.2 recommends 5–10 s, but
+     *  WebRTC sends far more often because the browser's `inbound-rtp`
+     *  statistics depend on it). */
+    void maybe_send_receiver_report() noexcept;
+    /** Hand the decoded frame to the detailed callback (v1.2.0, audio
+     *  pipeline WP-10, spec E-2).
+     *
+     *  Called by `on_audio_frame_decoded()` *after* the legacy PCM tap
+     *  has fired, so a host that installed both callbacks sees the
+     *  legacy one first. */
+    void deliver_audio_frame_info(const plugins::AudioOutputFrame& frame) noexcept;
     void handle_rtcp(plugins::BufferView view) noexcept;
     /** Merge a receiver feedback report into the pending one.  The
      *  reports are put on the wire by `flush_video_feedback()` from

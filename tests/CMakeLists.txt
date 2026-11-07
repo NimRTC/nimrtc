@@ -1195,6 +1195,22 @@ nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 nimrtc_add_engine_test(test_engine_audio_state test_engine_audio_state.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 audio pipeline WP-8 — the RTCP receiver report for the inbound
+# audio stream and the audio statistics counters (spec B-12 / B-13).
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_stats test_engine_audio_stats.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 audio pipeline WP-9 — the cross-end capture timestamp of an
+# inbound audio frame (spec B-17).
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_capture_timestamp test_engine_capture_timestamp.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
 #
 # Covers OUR OWN frames (send_video auto-record + explicit

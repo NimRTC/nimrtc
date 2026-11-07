@@ -1211,6 +1211,43 @@ nimrtc_add_engine_test(test_engine_audio_stats test_engine_audio_stats.cpp)
 nimrtc_add_engine_test(test_engine_capture_timestamp test_engine_capture_timestamp.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 audio pipeline WP-11 -- the engine integration tests (spec V-2):
+# the media loopback.
+#
+#   - loss injection: every N-th packet is dropped; the output cadence
+#     stays constant and the concealed-frame counter matches the drop
+#     count (spec A-3 / A-4);
+#   - in-band FEC: the same drops are reconstructed instead of concealed
+#     (spec B-8);
+#   - tick-rate independence: 30 Hz and 200 Hz produce the same audio
+#     (spec A-1 / O-4);
+#   - the real loopback: two engines over 127.0.0.1, engine A sends PCM
+#     and engine B decodes it (the direction that used to hand the host
+#     the Opus bit-stream instead of PCM -- defect F-1).
+#
+# The loopback case needs a real UDP bind; when the host forbids it the
+# case skips instead of failing (a port restriction is not a media-path
+# defect).
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 audio pipeline WP-11 -- the send path's two promises (spec V-1):
+#
+#   - the framing is the engine's business: `send_audio()` accepts any
+#     block size and emits exactly one RTP packet per 20 ms frame with
+#     a continuous media timestamp (spec B-6, A-7);
+#   - no silent loss: an empty buffer, an invalid frame size or an
+#     encoder error increments the statistics counter and fires
+#     `on_error` (spec A-8).
+#
+# The engine is driven through a fake ICE transport and a fake DTLS
+# session (both registered as plugins), so the send path is reachable
+# without a peer.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
 #
 # Covers OUR OWN frames (send_video auto-record + explicit

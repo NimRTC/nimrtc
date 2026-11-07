@@ -13,13 +13,23 @@
 #include "audio_decoder_plugin.hpp"
 
 #include <atomic>
+#include <cstring>
 #include <utility>
+#include <vector>
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/plugin_id.hpp>
 #include <nimrtc/core/registry.hpp>
 
 namespace nimrtc::opus {
+
+namespace {
+
+/** Maximum number of Opus frames one RFC 7587 payload may carry
+ *  (RFC 6716 §3.2.5 [R5]: 120 ms at the shortest 2.5 ms frame). */
+constexpr std::size_t kMaxFramesPerPacket = 48;
+
+} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,6 +45,11 @@ CodecPluginAdapter::to_encoder_config(const ::nimrtc::plugins::CodecConfig& p) n
     c.fec_enabled    = p.fec_enabled;
     c.dtx_enabled    = p.dtx_enabled;
     c.vad_enabled    = p.vad_enabled;
+    // The in-band redundancy (spec B-8).  Without it the encoder never
+    // embeds the low-bitrate copy of the previous frame, and the
+    // receiver has nothing to reconstruct a lost frame from.
+    c.packet_loss_perc = p.packet_loss_perc < 0 ? 0
+                             : (p.packet_loss_perc > 100 ? 100 : p.packet_loss_perc);
     return c;
 }
 
@@ -100,7 +115,28 @@ std::size_t CodecPluginAdapter::encode(const float* pcm,
     if (!configured_) {
         if (ensure_configured() != plugins::kOk) return 0;
     }
-    return encoder_->encode(pcm, num_samples, output, output_capacity);
+
+    // ---- Step 1: encode into the module's own buffer ------------------
+    //
+    // The buffer has to hold the TOC byte libopus writes plus the
+    // frame's body, so it is one byte larger than the largest frame
+    // libopus can produce (1275 bytes, RFC 6716 §3.2.1).
+    enc_scratch_.resize(kMaxOpusFrameBytes + 1);
+    const std::size_t encoded = encoder_->encode(pcm, num_samples,
+                                                  enc_scratch_.data(),
+                                                  enc_scratch_.size());
+    if (encoded == 0) return 0;
+
+    // ---- Step 2: frame it as RFC 7587 ----------------------------------
+    //
+    // The engine must not have to know how Opus frames its output, and
+    // the wire format must be RFC 7587 by construction rather than by
+    // luck (spec B-5 / defect F-14).  `packetise()` reads the frame's
+    // own TOC — so the config field on the wire is the one the encoder
+    // actually used, never one the packetiser invented.
+    CodecFrame frame{enc_scratch_.data(), encoded};
+    return packetise(&frame, 1, enc_cfg_.sample_rate_hz, /*cbr=*/false,
+                     output, output_capacity);
 }
 
 std::size_t CodecPluginAdapter::decode(const std::uint8_t* encoded,
@@ -112,7 +148,36 @@ std::size_t CodecPluginAdapter::decode(const std::uint8_t* encoded,
     if (!configured_) {
         if (ensure_configured() != plugins::kOk) return 0;
     }
-    return decoder_->decode(encoded, encoded_len, output, output_capacity);
+
+    // The payload is in the RFC 7587 framing, so it is depacketised
+    // first; every frame is then decoded on its own.
+    PacketView views[kMaxFramesPerPacket];
+    std::size_t num_views = 0;
+    if (depacketise(encoded, encoded_len, views, kMaxFramesPerPacket,
+                    &num_views) == 0 || num_views == 0) {
+        return 0;
+    }
+
+    const std::size_t channels = dec_cfg_.channels ? dec_cfg_.channels : 1;
+    std::size_t written = 0;
+    for (std::size_t i = 0; i < num_views; ++i) {
+        if (written >= output_capacity) break;
+
+        // Rebuild the complete Opus packet: the depacketiser strips the
+        // TOC, libopus needs it (RFC 6716 §3.1).
+        dec_packet_scratch_.resize(views[i].size + 1);
+        dec_packet_scratch_[0] = make_toc_byte(views[i].config, views[i].s, 0);
+        if (views[i].size > 0) {
+            std::memcpy(dec_packet_scratch_.data() + 1, views[i].data, views[i].size);
+        }
+
+        const std::size_t n = decoder_->decode(
+            dec_packet_scratch_.data(), dec_packet_scratch_.size(),
+            output + written * channels, output_capacity - written);
+        if (n == 0) break;
+        written += n;
+    }
+    return written;
 }
 
 std::size_t CodecPluginAdapter::decode_plc(float*      output,

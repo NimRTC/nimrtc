@@ -702,31 +702,60 @@ std::size_t packetise(const CodecFrame* frames,
         if (frames[i].size > kMaxOpusFrameBytes) return 0;
     }
 
-    // Resolve per-frame TOC config + s field. All frames must agree on
-    // config (RFC 7587 §4.2 — Opus frames in a single packet share mode,
-    // bandwidth, frame size, and channel count).
-    std::uint8_t s_field = frames[0].is_stereo & 0x03;
+    // ------------------------------------------------------------------
+    // The frames' own TOC bytes are the authority (RFC 6716 §3.1).
+    //
+    // Every input frame is a *complete* Opus frame: the TOC byte libopus
+    // wrote, followed by the frame's body.  The TOC names the mode, the
+    // bandwidth and the duration the body was coded for — a packetiser
+    // that invented a config field of its own would put a TOC on the
+    // wire that contradicts the body, and the receiver would decode the
+    // frame with the wrong decoder mode.  That failure is audible as
+    // noise, not as an error, so it must not happen.
+    //
+    // All frames of one packet must agree on config and stereo bit
+    // (RFC 7587 §4.2), and each frame's TOC must be a single-frame TOC
+    // (code bits 1..0 == 0) — a multi-frame TOC describes a packet, not
+    // a frame.
+    // ------------------------------------------------------------------
     std::uint8_t resolved_config = 0;
+    std::uint8_t s_field = 0;
+    std::uint32_t total_ms = 0;
     for (std::size_t i = 0; i < num_frames; ++i) {
-        const auto cfg = toc_config_for_frame_size_ms(frames[i].frame_size_ms);
-        if (!cfg) return 0;
-        const std::uint8_t c = static_cast<std::uint8_t>(*cfg & 0x1F);
-        if (i == 0) resolved_config = c;
-        // Reject mixed configs / s fields across the packet (RFC 7587 §4.2).
-        if (i > 0 && c != resolved_config) return 0;
-        if ((frames[i].is_stereo & 0x03) != s_field) return 0;
+        const CodecFrame& f = frames[i];
+        // At least the TOC byte: a DTX frame carries no body at all
+        // (libopus returns a one-byte packet for a silent frame).
+        if (!f.data || f.size < 1) return 0;
+        const std::uint8_t toc = f.data[0];
+        if ((toc & 0x03u) != 0u) return 0;    // not a single-frame TOC
+        const std::uint8_t c = static_cast<std::uint8_t>((toc >> 3) & 0x1F);
+        const std::uint8_t s = static_cast<std::uint8_t>((toc >> 2) & 0x01);
+        if (i == 0) {
+            resolved_config = c;
+            s_field = s;
+        } else if (c != resolved_config || s != s_field) {
+            return 0;   // mixed configurations in one packet
+        }
+        // The frame's duration comes from its TOC; the packet must not
+        // carry more than 120 ms of audio (RFC 6716 [R5]).
+        total_ms += frame_size_ms_for_config(c);
+        if (total_ms > 120) return 0;
     }
+
+    // The bodies are what the payload carries — the frames' own TOC bytes
+    // are replaced by the packet's single TOC.
+    const std::size_t body_size = frames[0].size - 1;
 
     // ------------------------------------------------------------------
     // Code 0: one frame in the packet (RFC 6716 §3.2.2, Figure 2).
-    //   Layout: [TOC][N-1 bytes of frame data]
+    //   Layout: [TOC][frame body]
     // ------------------------------------------------------------------
     if (num_frames == 1) {
-        const std::size_t need = 1 + frames[0].size;
+        const std::size_t need = 1 + body_size;
         if (output_capacity < need) return 0;
         output[0] = make_toc_byte(resolved_config, s_field, kCode0_SingleFrame);
-        if (frames[0].size > 0) {
-            std::memcpy(output + 1, frames[0].data, frames[0].size);
+        if (body_size > 0) {
+            std::memcpy(output + 1, frames[0].data + 1, body_size);
         }
         return need;
     }
@@ -737,14 +766,14 @@ std::size_t packetise(const CodecFrame* frames,
     //   [R3]: N-1 must be even.
     // ------------------------------------------------------------------
     if (num_frames == 2 && frames[0].size == frames[1].size) {
-        const std::size_t per = frames[0].size;
+        const std::size_t per = body_size;
         const std::size_t need = 1 + 2 * per;
         // [R3]: N-1 (= 2*per) is always even — auto-satisfied.
         if (output_capacity < need) return 0;
         output[0] = make_toc_byte(resolved_config, s_field, kCode1_TwoEqualFrames);
         if (per > 0) {
-            std::memcpy(output + 1,          frames[0].data, per);
-            std::memcpy(output + 1 + per,    frames[1].data, per);
+            std::memcpy(output + 1,          frames[0].data + 1, per);
+            std::memcpy(output + 1 + per,    frames[1].data + 1, per);
         }
         return need;
     }
@@ -754,22 +783,24 @@ std::size_t packetise(const CodecFrame* frames,
     //   Layout: [TOC][N1 length 1-2 bytes][frame1 N1 bytes][frame2]
     // ------------------------------------------------------------------
     if (num_frames == 2) {
+        const std::size_t body0 = frames[0].size - 1;
+        const std::size_t body1 = frames[1].size - 1;
         std::uint8_t lenbuf[2];
         const std::size_t len_bytes = encode_frame_length(
-            static_cast<std::uint16_t>(frames[0].size), lenbuf);
+            static_cast<std::uint16_t>(body0), lenbuf);
         if (len_bytes == 0) return 0;
-        const std::size_t need = 1 + len_bytes + frames[0].size + frames[1].size;
+        const std::size_t need = 1 + len_bytes + body0 + body1;
         if (output_capacity < need) return 0;
         output[0] = make_toc_byte(resolved_config, s_field, kCode2_TwoUnequalFrames);
         std::memcpy(output + 1, lenbuf, len_bytes);
         std::size_t off = 1 + len_bytes;
-        if (frames[0].size > 0) {
-            std::memcpy(output + off, frames[0].data, frames[0].size);
-            off += frames[0].size;
+        if (body0 > 0) {
+            std::memcpy(output + off, frames[0].data + 1, body0);
+            off += body0;
         }
-        if (frames[1].size > 0) {
-            std::memcpy(output + off, frames[1].data, frames[1].size);
-            off += frames[1].size;
+        if (body1 > 0) {
+            std::memcpy(output + off, frames[1].data + 1, body1);
+            off += body1;
         }
         return off;
     }
@@ -781,16 +812,10 @@ std::size_t packetise(const CodecFrame* frames,
     //     [M-1 length entries (VBR only)][frame 1]...[frame M][padding]
     //
     //   M (in bits 7..2) must be non-zero, and the total audio duration
-    //   MUST NOT exceed 120 ms (RFC 6716 [R5]).
+    //   MUST NOT exceed 120 ms (RFC 6716 [R5]) — checked above, from the
+    //   frames' own TOC bytes.
     // ------------------------------------------------------------------
     const std::size_t m = num_frames;
-    // Compute total duration in ms (sum of per-frame frame_size_ms).
-    // We reject packets that exceed 120 ms — RFC 6716 [R5].
-    std::uint32_t total_ms = 0;
-    for (std::size_t i = 0; i < m; ++i) {
-        total_ms += frames[i].frame_size_ms;
-        if (total_ms > 120) return 0;
-    }
     if (m > kMaxFramesPerPacket) return 0;  // sanity re-check
 
     // Build the frame-count byte: bit 0 = v (VBR=1), bit 1 = p (padding), bits 7..2 = M.
@@ -817,7 +842,7 @@ std::size_t packetise(const CodecFrame* frames,
         std::uint8_t scratch[2];
         for (std::size_t i = 0; i + 1 < m; ++i) {
             const std::size_t n = encode_frame_length(
-                static_cast<std::uint16_t>(frames[i].size), scratch);
+                static_cast<std::uint16_t>(frames[i].size - 1), scratch);
             if (n == 0) return 0;
             len_table_bytes += n;
         }
@@ -825,7 +850,7 @@ std::size_t packetise(const CodecFrame* frames,
 
     const std::size_t need = 1 + 1 + len_table_bytes;
     std::size_t total_bytes = need;
-    for (std::size_t i = 0; i < m; ++i) total_bytes += frames[i].size;
+    for (std::size_t i = 0; i < m; ++i) total_bytes += frames[i].size - 1;
     if (output_capacity < total_bytes) return 0;
 
     output[0] = make_toc_byte(resolved_config, s_field, kCode3_NFrames);
@@ -836,7 +861,7 @@ std::size_t packetise(const CodecFrame* frames,
         std::uint8_t scratch[2];
         for (std::size_t i = 0; i + 1 < m; ++i) {
             const std::size_t n = encode_frame_length(
-                static_cast<std::uint16_t>(frames[i].size), scratch);
+                static_cast<std::uint16_t>(frames[i].size - 1), scratch);
             // encode_frame_length already validated above, n > 0 here.
             std::memcpy(output + off, scratch, n);
             off += n;
@@ -844,9 +869,10 @@ std::size_t packetise(const CodecFrame* frames,
     }
 
     for (std::size_t i = 0; i < m; ++i) {
-        if (frames[i].size > 0) {
-            std::memcpy(output + off, frames[i].data, frames[i].size);
-            off += frames[i].size;
+        const std::size_t body = frames[i].size - 1;
+        if (body > 0) {
+            std::memcpy(output + off, frames[i].data + 1, body);
+            off += body;
         }
     }
     return off;

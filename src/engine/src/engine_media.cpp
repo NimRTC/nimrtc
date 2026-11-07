@@ -82,6 +82,11 @@ void NimRTCEngine::init_audio_modules() noexcept {
         codec_cfg.bitrate_bps    = 64000;
         codec_cfg.complexity     = 10;
         codec_cfg.fec_enabled    = config_.audio_use_inband_fec;
+        // The in-band redundancy (spec B-8): the encoder embeds a
+        // low-bitrate copy of the previous frame in every frame, which
+        // is what lets the receiver reconstruct a lost frame instead of
+        // concealing it.
+        codec_cfg.packet_loss_perc = config_.audio_redundancy_percent;
         // DTX is only honoured when the peer signals `usedtx=1`
         // (spec E-3); the SDP side of that negotiation lives in
         // `engine_signaling.cpp`.  The encoder is configured with the
@@ -184,6 +189,11 @@ void NimRTCEngine::init_audio_modules() noexcept {
         // told to use it as well (spec B-8) — and the host must be able
         // to turn it off (spec E-3).
         rx_cfg.enable_fec_recovery    = config_.audio_use_inband_fec;
+        // The redundancy the peer is assumed to send — the decoder's
+        // own hint (spec B-8).  It is the same value the encoder was
+        // given, so the two ends agree on how much redundancy is in
+        // flight.
+        rx_cfg.packet_loss_perc       = config_.audio_redundancy_percent;
         rx_cfg.enable_downmix         = config_.audio_downmix_to_pcm_channels;
         if (!config_.audio_downmix_to_pcm_channels) {
             // Without the downmix the pipeline keeps the decoder's own
@@ -647,7 +657,34 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
 
 uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samples) noexcept {
     if (!is_open()) return core::kEngineNotReady;
-    if (!pcm_samples || num_samples == 0) return core::kEngineInvalidParam;
+
+    // The error reporter is defined up front because *every* rejection
+    // on this path has to be visible (spec A-8: "an invalid frame size,
+    // an encoder error, or an empty buffer never disappears.  Each
+    // occurrence increments a statistics counter and, at a throttled
+    // rate, fires `on_error`").  A host whose PCM never reaches the
+    // wire has to be able to see *why*.
+    auto report_error = [&](std::uint32_t code, const char* msg) {
+        ++impl_->audio_encode_errors;
+        const auto now = std::chrono::steady_clock::now();
+        if (impl_->audio_last_error_report ==
+                std::chrono::steady_clock::time_point{} ||
+            now - impl_->audio_last_error_report >= std::chrono::seconds(1)) {
+            impl_->audio_last_error_report = now;
+            if (on_error_) on_error_(code, msg);
+        }
+    };
+
+    if (!pcm_samples || num_samples == 0) {
+        // An empty buffer is a host-side mistake, and it used to be
+        // invisible: the call returned `kEngineInvalidParam` and the
+        // host heard silence with no explanation.  The counter grows
+        // and the callback fires, so the mistake is visible (A-8).
+        report_error(core::kAudioEncodeFailed,
+                     "send_audio: the PCM buffer is empty");
+        return core::kEngineInvalidParam;
+    }
+
     // Gate on DTLS being Connected — otherwise RTP packets would reach the
     // peer over plaintext UDP (no SRTP key), or get sent into a half-open
     // session that the peer has already torn down (e.g. after a fatal
@@ -701,11 +738,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         (static_cast<std::size_t>(config_.pcm_sample_rate_hz) *
          static_cast<std::uint16_t>(config_.audio_ptime_ms)) / 1000;
     if (frame_samples == 0) {
-        impl_->audio_encode_errors++;
-        if (on_error_) {
-            on_error_(core::kAudioEncodeFailed,
-                      "send_audio: the configured audio frame size is zero");
-        }
+        report_error(core::kAudioEncodeFailed,
+                     "send_audio: the configured audio frame size is zero");
         return core::kEngineInvalidParam;
     }
 
@@ -718,20 +752,6 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // calls; a partial frame is never encoded.
     impl_->audio_accum.insert(impl_->audio_accum.end(), pcm, pcm + total_floats);
     impl_->audio_samples_in += num_samples;
-
-    // Errors are reported at a throttled rate: a host that feeds the
-    // engine PCM the encoder cannot take would otherwise get one
-    // callback per frame.
-    auto report_error = [&](std::uint32_t code, const char* msg) {
-        ++impl_->audio_encode_errors;
-        const auto now = std::chrono::steady_clock::now();
-        if (impl_->audio_last_error_report ==
-                std::chrono::steady_clock::time_point{} ||
-            now - impl_->audio_last_error_report >= std::chrono::seconds(1)) {
-            impl_->audio_last_error_report = now;
-            if (on_error_) on_error_(code, msg);
-        }
-    };
 
     // ---- Emit one RTP packet per frame --------------------------------
     auto emit_frame = [&](const float* frame_pcm) -> std::uint32_t {

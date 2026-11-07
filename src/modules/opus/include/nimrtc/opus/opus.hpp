@@ -259,19 +259,31 @@ private:
 // -----------------------------------------------------------------------------
 
 /** Per-frame input to packetise(). The caller owns the storage; packetise()
- *  copies the bytes into the output payload. `frame_size_ms` must match the
- *  Opus frame size used to encode the frame (2.5 / 5 / 10 / 20 / 40 / 60 ms)
- *  and is what RFC 7587 / RFC 6716 §3.1 uses to choose the TOC config field.
+ *  copies the bytes into the output payload.
  *
- *  `is_stereo` is the TOC `s` bit (RFC 6716 §3.1) — 0 = mono, 1 = stereo
- *  (interleaved L/R). Higher values are clamped to 0 or 1 by the
- *  packetiser.
+ *  `data` / `size` describe one **complete Opus frame** — the TOC byte
+ *  libopus wrote, followed by the frame's body:
+ *
+ *      +--------+------------------------+
+ *      |  TOC   |        body            |
+ *      +--------+------------------------+
+ *
+ *  The TOC is the authority on the configuration (RFC 6716 §3.1): it
+ *  names the mode, the bandwidth and the duration the body was coded
+ *  for.  packetise() therefore *reads* the TOC and never invents a
+ *  config field of its own — a TOC that contradicts the body would make
+ *  the receiver decode the frame with the wrong decoder mode, which is
+ *  audible as noise rather than as an error.
+ *
+ *  `frame_size_ms` and `is_stereo` are kept for source compatibility
+ *  only; both are derived from the TOC, and the TOC wins.  Leave them
+ *  at their defaults.
  */
 struct NIMRTC_API_STABLE CodecFrame {
     const std::uint8_t* data     = nullptr;
     std::size_t         size     = 0;
-    std::uint16_t       frame_size_ms = 20;  // 2.5, 5, 10, 20, 40, 60
-    std::uint8_t        is_stereo    = 0;    // 0 = mono, 1 = stereo (LR)
+    std::uint16_t       frame_size_ms = 20;  // legacy; the TOC is authoritative
+    std::uint8_t        is_stereo    = 0;    // legacy; the TOC is authoritative
 };
 
 /** SDP-style codec configuration used by callers to choose packetisation
@@ -329,18 +341,18 @@ NIMRTC_API_STABLE inline std::uint8_t make_toc_byte(std::uint8_t config,
         ((config & 0x1F) << 3) | ((s & 0x01) << 2) | (code & 0x03));
 }
 
-/** Encode a list of Opus frames into a single RFC 7587 RTP payload.
+/** Encode a list of complete Opus frames into a single RFC 7587 RTP payload.
  *
- *  - 1 frame  → Code 0 (TOC + frame data)
- *  - 2 frames with equal size → Code 1 (TOC + 2×equal-size chunks)
- *  - 2 frames with different sizes → Code 2 (TOC + 1-2 byte len + frame1 + frame2)
- *  - M ≥ 3 frames (or M = 2 frames and caller forces VBR layout, etc.)
- *                → Code 3 (TOC + frame-count byte [+ padding len bytes]
- *                          + M-1 length entries + frame data)
+ *  - 1 frame  → Code 0 (TOC + frame body)
+ *  - 2 frames with equal body size → Code 1 (TOC + 2×equal-size chunks)
+ *  - 2 frames with different body sizes → Code 2 (TOC + 1-2 byte len + body1 + body2)
+ *  - M ≥ 3 frames → Code 3 (TOC + frame-count byte [+ padding len] [+ length table] + bodies)
  *
- *  The TOC config field is computed per-frame from `frame.frame_size_ms`
- *  using `toc_config_for_frame_size_ms()`.  All frames in a packet must
- *  share the same config — packetise() returns 0 if the inputs disagree.
+ *  Every input frame is a complete Opus frame (TOC + body — see
+ *  `CodecFrame`).  The packet's TOC config field and stereo bit are taken
+ *  from the frames' own TOC bytes; all frames must agree on them, and a
+ *  frame whose TOC carries a multi-frame code (bits 1..0 != 0) is
+ *  rejected.  The frames' bodies are what the payload carries.
  *
  *  @param frames        Array of `CodecFrame` describing the input frames.
  *  @param num_frames    Number of frames (must be ≥ 1 and ≤ 48).

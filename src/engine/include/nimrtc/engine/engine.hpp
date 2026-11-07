@@ -618,6 +618,20 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  and the host receives a stereo stream on a mono configuration
      *  (spec B-9).  Default true. */
     bool audio_downmix_to_pcm_channels = true;
+
+    /** In-band redundancy the audio encoder embeds, in percent (0..100).
+     *
+     *  The value is the "negotiated redundancy" of spec B-8: it is
+     *  handed to the encoder (`OPUS_SET_PACKET_LOSS_PERC`) so that every
+     *  frame carries a low-bitrate copy of the previous one, and to the
+     *  decoder, which uses it as its own redundancy hint.  A receiver
+     *  that lost a frame reconstructs it from the redundancy the *next*
+     *  packet carries.
+     *
+     *  0 disables the redundancy (the encoder then carries no copy at
+     *  all and the FEC recovery path cannot work).  Default 5 %, the
+     *  value the specification names. */
+    int audio_redundancy_percent = 5;
 };
 // ---------------------------------------------------------------------------
 // Public callbacks

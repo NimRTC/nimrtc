@@ -82,6 +82,12 @@ struct NIMRTC_API_STABLE AudioReceiverConfig {
     std::uint16_t max_concealed_frames = 10;
     /** Enable in-band FEC recovery. */
     bool          enable_fec_recovery = true;
+    /** In-band redundancy the peer is assumed to send, in percent (0..100).
+     *
+     *  Handed to the decoder as `AudioDecodeFormat::packet_loss_perc`:
+     *  it tells libopus how much redundancy to expect, which drives its
+     *  FEC / PLC decisions (spec B-8). */
+    int           packet_loss_perc = 5;
     /** Downmix to `output_channels`. */
     bool          enable_downmix = true;
 };

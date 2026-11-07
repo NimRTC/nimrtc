@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include <nimrtc/opus/opus.hpp>          // concrete opus::Encoder + Decoder
 #include <nimrtc/plugins/codec.hpp>      // plugins::ICodec / ICodecFactory / CodecConfig
@@ -100,6 +101,14 @@ private:
     /** Concrete encoder / decoder, constructed lazily on first encode/decode. */
     std::unique_ptr<Encoder> encoder_;
     std::unique_ptr<Decoder> decoder_;
+
+    /** Scratch buffer for the encoded frame (the encoder's own output,
+     *  TOC byte included) — `encode()` frames it before it hands it out. */
+    std::vector<std::uint8_t> enc_scratch_;
+
+    /** Scratch buffer for the rebuilt Opus packet `decode()` hands to
+     *  libopus (the depacketiser strips the TOC, libopus needs it). */
+    std::vector<std::uint8_t> dec_packet_scratch_;
 
     /** Whether open() has been called and encoder/decoder were constructed. */
     bool configured_ = false;

@@ -74,6 +74,18 @@ struct NIMRTC_API_STABLE CodecConfig {
     /** Whether forward error correction is enabled (Opus FEC / Silk). */
     bool          fec_enabled = false;
 
+    /** In-band redundancy, in percent (0..100).
+     *
+     *  Maps to libopus's `OPUS_SET_PACKET_LOSS_PERC` (spec B-8).  0 means
+     *  "no redundancy": the encoder then never carries a low-bitrate copy
+     *  of the previous frame, so a receiver cannot reconstruct a lost
+     *  frame from the next packet.  A non-zero value makes the encoder
+     *  embed the redundancy (SILK LBRR) — the in-band FEC recovery path
+     *  needs it.  0 is the default: redundancy costs bitrate, and a
+     *  caller that wants it says so.
+     */
+    int           packet_loss_perc = 0;
+
     /** Whether discontinuous transmission is enabled (DTX). */
     bool          dtx_enabled = false;
 
@@ -122,11 +134,17 @@ struct NIMRTC_API_STABLE CodecStats {
 class NIMRTC_API_STABLE ICodec : public IPlugin {
 public:
     /**
-     * @brief Encode one frame of PCM to the codec's compressed format.
+     * @brief Encode one frame of PCM to the codec's RTP payload format.
+     *
+     *  The bytes written to @p output are what goes into the RTP payload
+     *  of the media packet — the codec's own framing is included.  For
+     *  Opus that is the RFC 7587 framing (a TOC byte plus the frame's
+     *  body), so the caller never has to know how the codec frames its
+     *  output.
      *
      * @param pcm            Interleaved PCM samples (float, [-1.0, 1.0]).
      * @param num_samples    Samples per channel (NOT total samples).
-     * @param output         Caller-owned buffer for compressed output.
+     * @param output         Caller-owned buffer for the compressed payload.
      * @param output_capacity Capacity of @p output in bytes.
      * @return Number of bytes written to @p output; 0 on DTX or error.
      */
@@ -136,7 +154,12 @@ public:
                                std::size_t  output_capacity) noexcept = 0;
 
     /**
-     * @brief Decode one compressed frame to PCM.
+     * @brief Decode one RTP payload to PCM.
+     *
+     *  @p encoded is a payload in the format `encode()` produces — for
+     *  Opus the RFC 7587 framing, which may carry more than one frame.
+     *  The frames are decoded one after the other and written to
+     *  @p output back to back.
      *
      * @param encoded       Compressed payload.
      * @param encoded_len   Length of compressed payload in bytes.

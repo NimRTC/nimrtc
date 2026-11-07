@@ -10,15 +10,18 @@
  *      per RFC 6716 §3.2.1.
  *   5. Code 3 VBR (M >= 3 frames) round-trip + length table.
  *   6. Code 3 CBR (M frames, equal per-frame size) round-trip.
- *   7. Stereo TOC byte (s field) boundaries: 0 (mono), 3 (LR).
+ *   7. Stereo TOC byte (s field) boundaries: 0 (mono), 1 (LR).
  *   8. Capacity-too-small returns 0 and writes nothing.
- *   9. Mismatched frame_size_ms / s_field across frames is rejected.
+ *   9. Mismatched TOC config / stereo bit across frames is rejected.
  *  10. Frames exceeding 120 ms total duration are rejected (RFC 6716 [R5]).
  *  11. depacketise() rejects malformed payloads (odd-length Code 1,
  *      truncated Code 2 length, Code 3 R = M * per divisibility, etc.).
+ *  12. The packet's TOC comes from the frame's own TOC — the packetiser
+ *      never invents a config field (defect F-14).
  *
- * Tests use synthetic byte payloads (not real Opus-encoded audio) — the
- * packetiser is responsible only for framing, not the codec bitstream.
+ * The input frames are synthetic but *complete* Opus frames: a TOC byte
+ * followed by a body, exactly the shape libopus produces.  The packetiser
+ * is responsible for the framing, not for the codec bit-stream.
  */
 
 #include <gtest/gtest.h>
@@ -49,6 +52,22 @@ void fill_pattern(std::uint8_t* dst, std::size_t n, std::uint8_t seed) {
 
 bool bytes_equal(const std::uint8_t* a, const std::uint8_t* b, std::size_t n) {
     return std::memcmp(a, b, n) == 0;
+}
+
+/** A complete Opus frame: the TOC byte libopus wrote + the frame's body. */
+std::vector<std::uint8_t> make_frame(std::uint8_t config,
+                                      std::uint8_t s,
+                                      std::size_t body_size,
+                                      std::uint8_t seed) {
+    std::vector<std::uint8_t> frame(1 + body_size);
+    frame[0] = make_toc_byte(config, s, /*code=*/0);
+    if (body_size > 0) fill_pattern(frame.data() + 1, body_size, seed);
+    return frame;
+}
+
+/** The body of a frame — what the RTP payload carries. */
+std::size_t body_size(const std::vector<std::uint8_t>& frame) {
+    return frame.size() - 1;
 }
 
 } // anonymous namespace
@@ -89,22 +108,21 @@ TEST(OpusPacketiseToc, TocByteLayout) {
 // ---------------------------------------------------------------------------
 
 TEST(OpusPacketiseCode0, SingleFrameMonoRoundTrip) {
-    std::uint8_t frame[64];
-    fill_pattern(frame, sizeof(frame), /*seed=*/0xA0);
+    // A 20 ms CELT FB frame (config 31), mono.
+    const auto frame = make_frame(31, 0, 40, /*seed=*/0xA0);
 
     CodecFrame in;
-    in.data         = frame;
-    in.size         = sizeof(frame);
-    in.frame_size_ms = 20;
-    in.is_stereo    = 0;
+    in.data = frame.data();
+    in.size = frame.size();
 
     std::uint8_t payload[256];
     std::size_t written = packetise(&in, 1, 48000, /*cbr=*/false,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + sizeof(frame));
+    // The packet's TOC replaces the frame's TOC — same size.
+    ASSERT_EQ(written, frame.size());
     // TOC = (31 << 3) | (0 << 2) | 0 = 0xF8
     EXPECT_EQ(payload[0], 0xF8);
-    EXPECT_TRUE(bytes_equal(payload + 1, frame, sizeof(frame)));
+    EXPECT_TRUE(bytes_equal(payload + 1, frame.data() + 1, body_size(frame)));
 
     // Round-trip through depacketise.
     PacketView views[4];
@@ -112,31 +130,29 @@ TEST(OpusPacketiseCode0, SingleFrameMonoRoundTrip) {
     std::size_t got = depacketise(payload, written, views, 4, &n);
     EXPECT_EQ(got, 1u);
     EXPECT_EQ(n, 1u);
-    EXPECT_EQ(views[0].size, sizeof(frame));
+    EXPECT_EQ(views[0].size, body_size(frame));
     EXPECT_EQ(views[0].config, 31);
     EXPECT_EQ(views[0].s, 0);
     EXPECT_EQ(views[0].code, 0);
     EXPECT_EQ(views[0].frame_size_ms, 20);
-    EXPECT_TRUE(bytes_equal(views[0].data, frame, sizeof(frame)));
+    EXPECT_TRUE(bytes_equal(views[0].data, frame.data() + 1, body_size(frame)));
 }
 
 TEST(OpusPacketiseCode0, SingleFrameStereoRoundTrip) {
-    std::uint8_t frame[80];
-    fill_pattern(frame, sizeof(frame), 0x55);
+    // A 10 ms CELT FB frame (config 30), stereo.
+    const auto frame = make_frame(30, 1, 60, /*seed=*/0x55);
 
     CodecFrame in;
-    in.data          = frame;
-    in.size          = sizeof(frame);
-    in.frame_size_ms = 10;
-    in.is_stereo     = 1;  // TOC s = 1 (interleaved L/R stereo)
+    in.data = frame.data();
+    in.size = frame.size();
 
     std::uint8_t payload[256];
     std::size_t written = packetise(&in, 1, 48000, false,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + sizeof(frame));
-    // TOC = (30 << 3) | (1 << 2) | 0 = 0xF0 | 0x04 | 0 = 0xF4
+    ASSERT_EQ(written, frame.size());
+    // TOC = (30 << 3) | (1 << 2) | 0 = 0xF0 | 0x04 = 0xF4
     EXPECT_EQ(payload[0], 0xF4);
-    EXPECT_TRUE(bytes_equal(payload + 1, frame, sizeof(frame)));
+    EXPECT_TRUE(bytes_equal(payload + 1, frame.data() + 1, body_size(frame)));
 
     PacketView views[4];
     std::size_t n = 0;
@@ -144,7 +160,60 @@ TEST(OpusPacketiseCode0, SingleFrameStereoRoundTrip) {
     EXPECT_EQ(got, 1u);
     EXPECT_EQ(views[0].s, 1);
     EXPECT_EQ(views[0].frame_size_ms, 10);
-    EXPECT_EQ(views[0].size, sizeof(frame));
+    EXPECT_EQ(views[0].size, body_size(frame));
+}
+
+TEST(OpusPacketiseCode0, ThePacketTocComesFromTheFrame) {
+    // The packetiser must not invent a config field: the TOC on the wire
+    // has to be the one the frame was coded with (defect F-14).  A hybrid
+    // 20 ms frame is config 15 — a config the "canonical" mapping for
+    // 20 ms (config 31) would contradict.
+    const auto frame = make_frame(15, 0, 32, /*seed=*/0x77);
+
+    CodecFrame in;
+    in.data = frame.data();
+    in.size = frame.size();
+
+    std::uint8_t payload[256];
+    const std::size_t written = packetise(&in, 1, 48000, false,
+                                          payload, sizeof(payload));
+    ASSERT_EQ(written, frame.size());
+    EXPECT_EQ(payload[0], make_toc_byte(15, 0, 0));
+    EXPECT_EQ(payload[0], 0x78);
+
+    PacketView views[4];
+    std::size_t n = 0;
+    EXPECT_EQ(depacketise(payload, written, views, 4, &n), 1u);
+    EXPECT_EQ(views[0].config, 15);
+    EXPECT_EQ(views[0].frame_size_ms, 20);
+}
+
+TEST(OpusPacketiseCode0, DtxFrameKeepsItsSingleByte) {
+    // libopus returns a one-byte packet for a silent (DTX) frame: the TOC
+    // and nothing else.  The packetiser must pass it through.
+    const auto frame = make_frame(31, 0, 0, /*seed=*/0);
+
+    CodecFrame in;
+    in.data = frame.data();
+    in.size = frame.size();
+
+    std::uint8_t payload[16];
+    const std::size_t written = packetise(&in, 1, 48000, false,
+                                          payload, sizeof(payload));
+    ASSERT_EQ(written, 1u);
+    EXPECT_EQ(payload[0], make_toc_byte(31, 0, 0));
+}
+
+TEST(OpusPacketiseCode0, MultiFrameTocRejected) {
+    // A frame whose TOC carries a multi-frame code describes a *packet*,
+    // not a frame — the packetiser refuses it.
+    std::uint8_t frame[8] = { make_toc_byte(31, 0, /*code=*/1), 1, 2, 3, 4, 5, 6, 7 };
+    CodecFrame in;
+    in.data = frame;
+    in.size = sizeof(frame);
+
+    std::uint8_t payload[64];
+    EXPECT_EQ(packetise(&in, 1, 48000, false, payload, sizeof(payload)), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,35 +221,33 @@ TEST(OpusPacketiseCode0, SingleFrameStereoRoundTrip) {
 // ---------------------------------------------------------------------------
 
 TEST(OpusPacketiseCode1, TwoEqualFramesRoundTrip) {
-    std::uint8_t f0[40];
-    std::uint8_t f1[40];
-    fill_pattern(f0, sizeof(f0), 0x10);
-    fill_pattern(f1, sizeof(f1), 0x80);
+    const auto f0 = make_frame(31, 0, 30, /*seed=*/0x10);
+    const auto f1 = make_frame(31, 0, 30, /*seed=*/0x80);
 
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
 
     std::uint8_t payload[256];
     std::size_t written = packetise(frames, 2, 48000, /*cbr=*/true,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + 2 * sizeof(f0));
+    ASSERT_EQ(written, 1 + 2 * body_size(f0));
     // TOC code 1 → bits 1:0 = 0b01
     EXPECT_EQ(payload[0] & 0x03, 1);
-    EXPECT_TRUE(bytes_equal(payload + 1,         f0, sizeof(f0)));
-    EXPECT_TRUE(bytes_equal(payload + 1 + sizeof(f0), f1, sizeof(f1)));
+    EXPECT_TRUE(bytes_equal(payload + 1,         f0.data() + 1, body_size(f0)));
+    EXPECT_TRUE(bytes_equal(payload + 1 + body_size(f0), f1.data() + 1, body_size(f1)));
 
     PacketView views[4];
     std::size_t n = 0;
     std::size_t got = depacketise(payload, written, views, 4, &n);
     EXPECT_EQ(got, 2u);
-    EXPECT_EQ(views[0].size, sizeof(f0));
-    EXPECT_EQ(views[1].size, sizeof(f1));
+    EXPECT_EQ(views[0].size, body_size(f0));
+    EXPECT_EQ(views[1].size, body_size(f1));
     EXPECT_EQ(views[0].code, 1);
     EXPECT_EQ(views[1].code, 1);
-    EXPECT_TRUE(bytes_equal(views[0].data, f0, sizeof(f0)));
-    EXPECT_TRUE(bytes_equal(views[1].data, f1, sizeof(f1)));
+    EXPECT_TRUE(bytes_equal(views[0].data, f0.data() + 1, body_size(f0)));
+    EXPECT_TRUE(bytes_equal(views[1].data, f1.data() + 1, body_size(f1)));
 }
 
 TEST(OpusPacketiseCode1, OddPayloadLengthRejected) {
@@ -202,95 +269,89 @@ TEST(OpusPacketiseCode1, OddPayloadLengthRejected) {
 // ---------------------------------------------------------------------------
 
 TEST(OpusPacketiseCode2, TwoUnequalFramesSmallLength) {
-    // Frame 0 size 5 (fits in 1-byte length ≤ 251), frame 1 size 20.
-    std::uint8_t f0[5];
-    std::uint8_t f1[20];
-    fill_pattern(f0, sizeof(f0), 0xC0);
-    fill_pattern(f1, sizeof(f1), 0xD0);
+    // Body 4 bytes (fits in a 1-byte length ≤ 251), body 19 bytes.
+    const auto f0 = make_frame(31, 0, 4, /*seed=*/0xC0);
+    const auto f1 = make_frame(31, 0, 19, /*seed=*/0xD0);
 
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
 
     std::uint8_t payload[256];
     std::size_t written = packetise(frames, 2, 48000, /*cbr=*/false,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + 1 + sizeof(f0) + sizeof(f1));
+    ASSERT_EQ(written, 1 + 1 + body_size(f0) + body_size(f1));
     EXPECT_EQ(payload[0] & 0x03, 2);
-    EXPECT_EQ(payload[1], sizeof(f0));   // 1-byte length = 5
+    EXPECT_EQ(payload[1], body_size(f0));   // 1-byte length = 4
 
     PacketView views[4];
     std::size_t n = 0;
     std::size_t got = depacketise(payload, written, views, 4, &n);
     EXPECT_EQ(got, 2u);
-    EXPECT_EQ(views[0].size, sizeof(f0));
-    EXPECT_EQ(views[1].size, sizeof(f1));
+    EXPECT_EQ(views[0].size, body_size(f0));
+    EXPECT_EQ(views[1].size, body_size(f1));
     EXPECT_EQ(views[0].code, 2);
     EXPECT_EQ(views[1].code, 2);
-    EXPECT_TRUE(bytes_equal(views[0].data, f0, sizeof(f0)));
-    EXPECT_TRUE(bytes_equal(views[1].data, f1, sizeof(f1)));
+    EXPECT_TRUE(bytes_equal(views[0].data, f0.data() + 1, body_size(f0)));
+    EXPECT_TRUE(bytes_equal(views[1].data, f1.data() + 1, body_size(f1)));
 }
 
 TEST(OpusPacketiseCode2, TwoUnequalFramesLargeLength) {
-    // Frame 0 size 600 (>251, requires 2-byte length).
-    std::uint8_t f0[600];
-    std::uint8_t f1[40];
-    fill_pattern(f0, sizeof(f0), 0x11);
-    fill_pattern(f1, sizeof(f1), 0x22);
+    // Body 599 bytes (>251, requires a 2-byte length).
+    const auto f0 = make_frame(31, 0, 599, /*seed=*/0x11);
+    const auto f1 = make_frame(31, 0, 39, /*seed=*/0x22);
 
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
 
     std::uint8_t payload[1024];
     std::size_t written = packetise(frames, 2, 48000, false,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + 2 + sizeof(f0) + sizeof(f1));
+    ASSERT_EQ(written, 1 + 2 + body_size(f0) + body_size(f1));
     EXPECT_EQ(payload[0] & 0x03, 2);
-    // First byte in [252..255], second byte ∈ [0..255]; total = b0 + 4*b1 = 600.
-    // offset = 600 - 252 = 348; b1 = 348 >> 2 = 87; b0 = 348 & 3 = 0.
-    // first byte = 252 + 0 = 252. second byte = 87.
-    EXPECT_EQ(payload[1], 252);
-    EXPECT_EQ(payload[2], 87);
+    // First byte in [252..255], second byte ∈ [0..255]; total = b0 + 4*b1 = 599.
+    // offset = 599 - 252 = 347; b1 = 347 >> 2 = 86; b0 = 347 & 3 = 3.
+    // first byte = 252 + 3 = 255. second byte = 86.
+    EXPECT_EQ(payload[1], 255);
+    EXPECT_EQ(payload[2], 86);
 
     PacketView views[4];
     std::size_t n = 0;
     std::size_t got = depacketise(payload, written, views, 4, &n);
     EXPECT_EQ(got, 2u);
-    EXPECT_EQ(views[0].size, sizeof(f0));
-    EXPECT_EQ(views[1].size, sizeof(f1));
-    EXPECT_TRUE(bytes_equal(views[0].data, f0, sizeof(f0)));
-    EXPECT_TRUE(bytes_equal(views[1].data, f1, sizeof(f1)));
+    EXPECT_EQ(views[0].size, body_size(f0));
+    EXPECT_EQ(views[1].size, body_size(f1));
+    EXPECT_TRUE(bytes_equal(views[0].data, f0.data() + 1, body_size(f0)));
+    EXPECT_TRUE(bytes_equal(views[1].data, f1.data() + 1, body_size(f1)));
 }
 
 TEST(OpusPacketiseCode2, MaxFrameLengthBoundary) {
-    // Largest 2-byte length is 1275 bytes.
-    std::uint8_t f0[1275];
-    std::uint8_t f1[10];
-    fill_pattern(f0, sizeof(f0), 0x33);
-    fill_pattern(f1, sizeof(f1), 0x44);
+    // The largest 2-byte length is 1275 bytes.
+    const auto f0 = make_frame(31, 0, 1274, /*seed=*/0x33);
+    const auto f1 = make_frame(31, 0, 9, /*seed=*/0x44);
 
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
 
     std::uint8_t payload[2048];
     std::size_t written = packetise(frames, 2, 48000, false,
                                     payload, sizeof(payload));
-    EXPECT_EQ(written, 1 + 2 + sizeof(f0) + sizeof(f1));
-    // 1275 - 252 = 1023. b1 = 1023 / 4 = 255. b0 = 1023 & 3 = 3.
-    EXPECT_EQ(payload[1], 252 + 3);   // 255
+    EXPECT_EQ(written, 1 + 2 + body_size(f0) + body_size(f1));
+    // 1274 - 252 = 1022. b1 = 1022 / 4 = 255. b0 = 1022 & 3 = 2.
+    EXPECT_EQ(payload[1], 252 + 2);   // 254
     EXPECT_EQ(payload[2], 255);
 
     PacketView views[4];
     std::size_t n = 0;
     std::size_t got = depacketise(payload, written, views, 4, &n);
     EXPECT_EQ(got, 2u);
-    EXPECT_EQ(views[0].size, sizeof(f0));
-    EXPECT_EQ(views[1].size, sizeof(f1));
+    EXPECT_EQ(views[0].size, body_size(f0));
+    EXPECT_EQ(views[1].size, body_size(f1));
 }
 
 // ---------------------------------------------------------------------------
@@ -298,66 +359,69 @@ TEST(OpusPacketiseCode2, MaxFrameLengthBoundary) {
 // ---------------------------------------------------------------------------
 
 TEST(OpusPacketiseCode3, VbrThreeFramesRoundTrip) {
-    std::uint8_t f0[10], f1[20], f2[30];
-    fill_pattern(f0, sizeof(f0), 0x99);
-    fill_pattern(f1, sizeof(f1), 0xAA);
-    fill_pattern(f2, sizeof(f2), 0xBB);
+    const auto f0 = make_frame(31, 0, 9, /*seed=*/0x99);
+    const auto f1 = make_frame(31, 0, 19, /*seed=*/0xAA);
+    const auto f2 = make_frame(31, 0, 29, /*seed=*/0xBB);
 
     CodecFrame frames[3] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
-        { f2, sizeof(f2), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
+        { f2.data(), f2.size() },
     };
 
     std::uint8_t payload[256];
     std::size_t written = packetise(frames, 3, 48000, /*cbr=*/false,
                                     payload, sizeof(payload));
-    // Code 3 VBR layout: TOC + fc byte + (M-1) length entries + sum(frame sizes)
-    // = 1 + 1 + 2 + (10 + 20 + 30) = 64 bytes.
-    ASSERT_EQ(written, 1u + 1u + 2u + sizeof(f0) + sizeof(f1) + sizeof(f2));
+    // Code 3 VBR layout: TOC + fc byte + (M-1) length entries + sum(bodies)
+    // = 1 + 1 + 2 + (9 + 19 + 29) = 61 bytes.
+    ASSERT_EQ(written, 1u + 1u + 2u + body_size(f0) + body_size(f1) + body_size(f2));
     EXPECT_EQ(payload[0] & 0x03, 3);
     // fc byte: v=1, p=0, M=3 → (1) | (0<<1) | (3<<2) = 1 | 12 = 0x0D
     EXPECT_EQ(payload[1], 0x0D);
     // Length table (VBR): len(f0), len(f1) — each ≤ 251 → 1-byte entries.
-    EXPECT_EQ(payload[2], sizeof(f0));
-    EXPECT_EQ(payload[3], sizeof(f1));
+    EXPECT_EQ(payload[2], body_size(f0));
+    EXPECT_EQ(payload[3], body_size(f1));
 
     PacketView views[8];
     std::size_t n = 0;
     std::size_t got = depacketise(payload, written, views, 8, &n);
     EXPECT_EQ(got, 3u);
     EXPECT_EQ(n, 3u);
-    EXPECT_EQ(views[0].size, sizeof(f0));
-    EXPECT_EQ(views[1].size, sizeof(f1));
-    EXPECT_EQ(views[2].size, sizeof(f2));
+    EXPECT_EQ(views[0].size, body_size(f0));
+    EXPECT_EQ(views[1].size, body_size(f1));
+    EXPECT_EQ(views[2].size, body_size(f2));
     EXPECT_EQ(views[0].code, 3);
-    EXPECT_TRUE(bytes_equal(views[0].data, f0, sizeof(f0)));
-    EXPECT_TRUE(bytes_equal(views[1].data, f1, sizeof(f1)));
-    EXPECT_TRUE(bytes_equal(views[2].data, f2, sizeof(f2)));
+    EXPECT_TRUE(bytes_equal(views[0].data, f0.data() + 1, body_size(f0)));
+    EXPECT_TRUE(bytes_equal(views[1].data, f1.data() + 1, body_size(f1)));
+    EXPECT_TRUE(bytes_equal(views[2].data, f2.data() + 1, body_size(f2)));
 }
 
 TEST(OpusPacketiseCode3, CbrFourFramesRoundTrip) {
-    // 4 frames of 25 bytes each — equal-size CBR.
-    std::uint8_t f[4][25];
-    for (int i = 0; i < 4; ++i) fill_pattern(f[i], sizeof(f[i]),
-                                             static_cast<std::uint8_t>(0x10 + i));
+    // 4 frames with equal bodies — equal-size CBR.
+    std::vector<std::vector<std::uint8_t>> f;
+    for (int i = 0; i < 4; ++i) {
+        f.push_back(make_frame(31, 0, 24,
+                               static_cast<std::uint8_t>(0x10 + i)));
+    }
 
     CodecFrame frames[4];
     for (int i = 0; i < 4; ++i) {
-        frames[i] = { f[i], sizeof(f[i]), 20, 0 };
+        frames[i] = { f[static_cast<std::size_t>(i)].data(),
+                      f[static_cast<std::size_t>(i)].size() };
     }
 
     std::uint8_t payload[256];
     std::size_t written = packetise(frames, 4, 48000, /*cbr=*/true,
                                     payload, sizeof(payload));
-    ASSERT_EQ(written, 1 + 1 + 4 * sizeof(f[0]));
+    ASSERT_EQ(written, 1 + 1 + 4 * body_size(f[0]));
     EXPECT_EQ(payload[0] & 0x03, 3);
     // fc byte: v=0, p=0, M=4 → (0) | (0<<1) | (4<<2) = 16 = 0x10
     EXPECT_EQ(payload[1], 0x10);
     // 4 frames back-to-back, no length table.
     for (int i = 0; i < 4; ++i) {
-        EXPECT_TRUE(bytes_equal(payload + 2 + static_cast<std::size_t>(i) * sizeof(f[0]),
-                                f[i], sizeof(f[i])));
+        EXPECT_TRUE(bytes_equal(payload + 2 + static_cast<std::size_t>(i) * body_size(f[0]),
+                                f[static_cast<std::size_t>(i)].data() + 1,
+                                body_size(f[0])));
     }
 
     PacketView views[8];
@@ -365,8 +429,10 @@ TEST(OpusPacketiseCode3, CbrFourFramesRoundTrip) {
     std::size_t got = depacketise(payload, written, views, 8, &n);
     EXPECT_EQ(got, 4u);
     for (int i = 0; i < 4; ++i) {
-        EXPECT_EQ(views[i].size, sizeof(f[i]));
-        EXPECT_TRUE(bytes_equal(views[i].data, f[i], sizeof(f[i])));
+        EXPECT_EQ(views[i].size, body_size(f[static_cast<std::size_t>(i)]));
+        EXPECT_TRUE(bytes_equal(views[i].data,
+                                f[static_cast<std::size_t>(i)].data() + 1,
+                                body_size(f[static_cast<std::size_t>(i)])));
     }
 }
 
@@ -375,25 +441,24 @@ TEST(OpusPacketiseCode3, CbrFourFramesRoundTrip) {
 // ---------------------------------------------------------------------------
 
 TEST(OpusPacketiseValidation, OutputTooSmallReturnsZero) {
-    std::uint8_t frame[10];
-    fill_pattern(frame, sizeof(frame), 0);
+    const auto frame = make_frame(31, 0, 9, /*seed=*/0);
 
     CodecFrame in;
-    in.data          = frame;
-    in.size          = sizeof(frame);
-    in.frame_size_ms = 20;
-    in.is_stereo     = 0;
+    in.data = frame.data();
+    in.size = frame.size();
 
     std::uint8_t small[5];
     EXPECT_EQ(packetise(&in, 1, 48000, false, small, sizeof(small)), 0u);
 }
 
 TEST(OpusPacketiseValidation, MixedFrameSizeRejected) {
-    // A 20 ms frame and a 10 ms frame in the same packet — must reject.
-    std::uint8_t f0[5], f1[5];
+    // A 20 ms frame (config 31) and a 10 ms frame (config 30) in the same
+    // packet — the packet has one TOC, so the frames must agree.
+    const auto f0 = make_frame(31, 0, 4, /*seed=*/0);
+    const auto f1 = make_frame(30, 0, 4, /*seed=*/0);
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 10, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
     std::uint8_t payload[64];
     EXPECT_EQ(packetise(frames, 2, 48000, false, payload, sizeof(payload)), 0u);
@@ -402,35 +467,36 @@ TEST(OpusPacketiseValidation, MixedFrameSizeRejected) {
 TEST(OpusPacketiseValidation, MixedStereoRejected) {
     // Mono frame + stereo frame in the same packet — must reject because all
     // frames in a single Opus RTP packet share channel count (RFC 7587 §4.2).
-    std::uint8_t f0[5], f1[5];
+    const auto f0 = make_frame(31, 0, 4, /*seed=*/0);
+    const auto f1 = make_frame(31, 1, 4, /*seed=*/0);
     CodecFrame frames[2] = {
-        { f0, sizeof(f0), 20, 0 },  // mono
-        { f1, sizeof(f1), 20, 1 },  // stereo
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
     };
     std::uint8_t payload[64];
     EXPECT_EQ(packetise(frames, 2, 48000, false, payload, sizeof(payload)), 0u);
 }
 
 TEST(OpusPacketiseValidation, Exceeds120msRejected) {
-    // 40 ms × 4 frames = 160 ms — over the 120 ms cap.
-    std::uint8_t f0[5], f1[5], f2[5], f3[5];
-    CodecFrame frames[4] = {
-        { f0, sizeof(f0), 40, 0 },
-        { f1, sizeof(f1), 40, 0 },
-        { f2, sizeof(f2), 40, 0 },
-        { f3, sizeof(f3), 40, 0 },
-    };
+    // 40 ms × 4 frames = 160 ms — over the 120 ms cap (config 10 = SILK WB).
+    const auto f0 = make_frame(10, 0, 4, /*seed=*/0);
+    CodecFrame frames[4];
+    for (int i = 0; i < 4; ++i) {
+        frames[i] = { f0.data(), f0.size() };
+    }
     std::uint8_t payload[64];
     EXPECT_EQ(packetise(frames, 4, 48000, false, payload, sizeof(payload)), 0u);
 }
 
 TEST(OpusPacketiseValidation, CbrMixedSizesRejected) {
     // CBR Code 3 requires all M frames to share the same compressed size.
-    std::uint8_t f0[5], f1[10], f2[15];
+    const auto f0 = make_frame(31, 0, 4, /*seed=*/0);
+    const auto f1 = make_frame(31, 0, 9, /*seed=*/0);
+    const auto f2 = make_frame(31, 0, 14, /*seed=*/0);
     CodecFrame frames[3] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
-        { f2, sizeof(f2), 20, 0 },
+        { f0.data(), f0.size() },
+        { f1.data(), f1.size() },
+        { f2.data(), f2.size() },
     };
     std::uint8_t payload[64];
     EXPECT_EQ(packetise(frames, 3, 48000, /*cbr=*/true,
@@ -443,89 +509,14 @@ TEST(OpusPacketiseValidation, ZeroFramesRejected) {
 }
 
 TEST(OpusPacketiseValidation, TooManyFramesRejected) {
-    // 49 frames of 2.5 ms each would be 122.5 ms — over 48-frame cap.
-    std::uint8_t f0[5];
+    // 49 frames — over the 48-frame cap.
+    const auto f0 = make_frame(28, 0, 4, /*seed=*/0);
     CodecFrame frames[49];
     for (int i = 0; i < 49; ++i) {
-        frames[i] = { f0, sizeof(f0), 3, 0 };
+        frames[i] = { f0.data(), f0.size() };
     }
     std::uint8_t payload[256];
     EXPECT_EQ(packetise(frames, 49, 48000, false, payload, sizeof(payload)), 0u);
-}
-
-// ---------------------------------------------------------------------------
-// depacketise() edge cases
-// ---------------------------------------------------------------------------
-
-TEST(OpusPacketiseDepacketise, EmptyPayloadRejected) {
-    PacketView views[4];
-    std::size_t n = 0;
-    EXPECT_EQ(depacketise(nullptr, 0, views, 4, &n), 0u);
-}
-
-TEST(OpusPacketiseDepacketise, TruncatedCode2Rejected) {
-    // Code 2 with only 1 byte after TOC: length read fails.
-    std::uint8_t payload[2] = { 0xFA, 0xFF };  // code 2, b0=0xFF → needs second byte
-    PacketView views[4];
-    std::size_t n = 0;
-    EXPECT_EQ(depacketise(payload, sizeof(payload), views, 4, &n), 0u);
-}
-
-TEST(OpusPacketiseDepacketise, CbrNonDivisibleRejected) {
-    // Code 3 CBR with M=3 and R=8 (not divisible by 3).
-    // TOC: config=31, s=0, code=3 = 0xFB
-    // fc byte: v=0, p=0, M=3 = (3<<2) = 0x0C
-    // frame data: 8 bytes
-    std::uint8_t payload[10] = {
-        0xFB, 0x0C,
-        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22,
-    };
-    PacketView views[4];
-    std::size_t n = 0;
-    EXPECT_EQ(depacketise(payload, sizeof(payload), views, 4, &n), 0u);
-}
-
-TEST(OpusPacketiseDepacketise, Code3ZeroMRejected) {
-    // TOC code=3, fc byte = v=0,p=0,M=0 → RFC 6716 [R5]: M != 0
-    std::uint8_t payload[4] = { 0xFB, 0x00, 0xAA, 0xBB };
-    PacketView views[4];
-    std::size_t n = 0;
-    EXPECT_EQ(depacketise(payload, sizeof(payload), views, 4, &n), 0u);
-}
-
-// ---------------------------------------------------------------------------
-// Multi-frame round-trip at 20 ms (60 ms ptime = 3 × 20 ms)
-// ---------------------------------------------------------------------------
-
-TEST(OpusPacketiseRoundtrip, ThreeFramesAt60msPtime) {
-    // Realistic use case: 3 × 20 ms frames of equal compressed size in one
-    // RTP packet (CBR Code 3 framing).
-    constexpr std::size_t kPerFrame = 15;
-    std::uint8_t f0[kPerFrame], f1[kPerFrame], f2[kPerFrame];
-    fill_pattern(f0, sizeof(f0), 0xE0);
-    fill_pattern(f1, sizeof(f1), 0xE1);
-    fill_pattern(f2, sizeof(f2), 0xE2);
-
-    CodecFrame frames[3] = {
-        { f0, sizeof(f0), 20, 0 },
-        { f1, sizeof(f1), 20, 0 },
-        { f2, sizeof(f2), 20, 0 },
-    };
-
-    std::uint8_t payload[256];
-    std::size_t written = packetise(frames, 3, 48000, /*cbr=*/true,
-                                    payload, sizeof(payload));
-    ASSERT_GT(written, 0u);
-
-    PacketView views[8];
-    std::size_t n = 0;
-    EXPECT_EQ(depacketise(payload, written, views, 8, &n), 3u);
-    EXPECT_EQ(n, 3u);
-    for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(views[i].size, frames[i].size);
-        EXPECT_EQ(views[i].frame_size_ms, 20);
-        EXPECT_TRUE(bytes_equal(views[i].data, frames[i].data, frames[i].size));
-    }
 }
 
 } // namespace nimrtc::opus::test

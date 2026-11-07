@@ -160,6 +160,9 @@ bool Pipeline::open_stream(StreamState& st, std::uint32_t ssrc) noexcept {
     fmt.channels       = cfg_.decoder_channels;
     fmt.payload_type   = kOpusPayloadType;
     fmt.use_inband_fec  = cfg_.enable_fec_recovery;
+    fmt.packet_loss_perc = cfg_.packet_loss_perc < 0 ? 0
+                              : (cfg_.packet_loss_perc > 100 ? 100
+                                                           : cfg_.packet_loss_perc);
     st.decoder->update_format(fmt);
 
     return true;

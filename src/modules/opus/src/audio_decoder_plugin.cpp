@@ -60,6 +60,14 @@ struct AudioDecoderPlugin::Impl {
     /** Scratch buffer for one decoded frame. */
     std::vector<float> scratch;
 
+    /** Scratch buffer for the Opus packet handed to libopus.
+     *
+     *  libopus decodes *complete* Opus packets — a TOC byte followed by
+     *  the frame's body (RFC 6716 §3.1).  The depacketiser strips the
+     *  TOC, so the plugin puts it back before it calls the decoder; the
+     *  buffer holds the rebuilt packet. */
+    std::vector<std::uint8_t> packet_scratch;
+
     /** RTP timestamp the next frame is expected to carry. */
     std::uint32_t next_ts = 0;
     /** Whether next_ts is meaningful (a packet was decoded before). */
@@ -193,17 +201,48 @@ std::size_t AudioDecoderPlugin::decode_packet(const std::uint8_t* payload,
     // the next frame never arrived).
     bool gap = impl_->pending_fec;
     if (impl_->have_ts && rtp_timestamp > impl_->next_ts) gap = true;
+    if (gap) {
+        // Only the anomalies are logged: a per-packet trace would fire
+        // fifty times a second and drown the log.
+        NIMRTC_LOG_DEBUG("opus::AudioDecoderPlugin: gap before ts=" << rtp_timestamp
+                         << " (next_ts=" << impl_->next_ts
+                         << ", inband_fec=" << (impl_->fmt.use_inband_fec ? 1 : 0) << ")");
+    }
 
     std::uint32_t ts = rtp_timestamp;
     for (std::size_t i = 0; i < num_views; ++i) {
         const PacketView& v = views[i];
+
+        // ---- Rebuild the complete Opus packet -------------------------
+        //
+        // `depacketise()` strips the TOC byte, because the TOC describes
+        // the *packet*, not the frame.  libopus, however, decodes
+        // complete packets: it reads the TOC to learn the mode, the
+        // bandwidth and the duration of the frame it is about to decode.
+        // Handing it a body without its TOC is what made every inbound
+        // packet fail with "corrupted stream" (defect F-1): the decoder
+        // read the first body byte as a TOC and picked a configuration
+        // the frame was never coded for.
+        //
+        // The rebuilt packet is a code-0 packet — one frame, the frame's
+        // own config and stereo bit — which is exactly what the frame
+        // was coded as.
+        impl_->packet_scratch.resize(v.size + 1);
+        impl_->packet_scratch[0] = make_toc_byte(v.config, v.s, /*code=*/0);
+        if (v.size > 0) {
+            std::memcpy(impl_->packet_scratch.data() + 1, v.data, v.size);
+        }
+        const std::uint8_t* packet = impl_->packet_scratch.data();
+        const std::size_t packet_len = impl_->packet_scratch.size();
 
         // The first frame of the packet may reconstruct the frame that was
         // lost: the peer embeds a low-bitrate copy of the previous frame in
         // this packet (libopus's decode_fec = 1).
         if (i == 0 && gap && impl_->fmt.use_inband_fec) {
             const std::size_t n = impl_->decoder.decode_with_fec(
-                v.data, v.size, impl_->scratch.data(), impl_->scratch.size() / channels);
+                packet, packet_len, impl_->scratch.data(), impl_->scratch.size() / channels);
+            NIMRTC_LOG_DEBUG("opus::AudioDecoderPlugin: in-band FEC attempt on a "
+                             << packet_len << " byte packet returned " << n);
             if (n > 0) {
                 const std::uint32_t n32 = static_cast<std::uint32_t>(n);
                 const std::uint32_t recovered_ts = (ts >= n32) ? (ts - n32) : 0u;
@@ -218,7 +257,7 @@ std::size_t AudioDecoderPlugin::decode_packet(const std::uint8_t* payload,
         }
 
         const std::size_t n = impl_->decoder.decode(
-            v.data, v.size, impl_->scratch.data(), impl_->scratch.size() / channels);
+            packet, packet_len, impl_->scratch.data(), impl_->scratch.size() / channels);
         if (n == 0) {
             impl_->stats.decode_errors++;
             break;

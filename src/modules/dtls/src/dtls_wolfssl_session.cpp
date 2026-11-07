@@ -1787,9 +1787,65 @@ void DtlsSessionWolfSSL::set_role(nimrtc::dtls::DtlsRole r) noexcept {
             "DtlsSessionWolfSSL: role change after handshake ignored");
         return;
     }
+    const bool changed = (impl_->config.role != r);
     impl_->config.role = r;
     nimrtc::core::log::Logger::instance().info(
         std::string("DtlsSessionWolfSSL: role=") +
+        (r == DtlsRole::Server ? "Server" : "Client"));
+
+    if (!changed) return;
+
+    // ---- The role is baked into the wolfSSL context -------------------
+    //
+    // `setup_context()` creates the CTX with a *role-specific* method
+    // (`wolfDTLSv1_2_server_method()` / `wolfDTLSv1_2_client_method()`),
+    // because the version-flexible `wolfDTLS_*_method()` would negotiate
+    // DTLS 1.3 first — see the long comment in setup_context().  A CTX
+    // built for the server therefore cannot drive a client handshake:
+    // wolfSSL_connect() on it fails with -344 ("wrong client/server
+    // type") before a single byte leaves the host.
+    //
+    // The engine learns its role only when the *remote* description
+    // arrives (RFC 5763 §5: the answerer's `a=setup:` decides), and
+    // that happens *after* open() built the CTX with the default role
+    // (Server).  Without the rebuild below, the offerer of a
+    // NimRTC-to-NimRTC session would keep a server CTX and the handshake
+    // would fail with -344 — the symptom the audio loopback test
+    // reported.
+    //
+    // The rebuild is safe at this point: the handshake has not started
+    // (state is Closed/Initial), and the local fingerprint is recomputed
+    // from the *same* certificate file, so the value the SDP advertised
+    // and the value the peer pins stay identical.
+    if (!impl_->ctx && !impl_->ssl) {
+        // Not opened yet: setup_context() picks the new role up.
+        return;
+    }
+
+    impl_->teardown();
+    impl_->recv_buf_.clear();
+    impl_->send_buf_.clear();
+    impl_->outbound_.clear();
+    impl_->inbound_app_.clear();
+    // NOTE: `srtp_keys_` is an `std::optional`.  A bare `reset()` would
+    // leave it *empty*, and `export_srtp_keys()` bails out on an empty
+    // optional ("if (!ssl || !srtp_keys_) return;") — so the rebuilt
+    // session would finish its handshake and then report "Connected but
+    // no keying material", and the engine would never install the SRTP
+    // keys.  `emplace()` puts a fresh (zeroed) key set back.
+    impl_->srtp_keys_.emplace();
+    impl_->state = DtlsState::Initial;
+
+    if (!impl_->setup_context() || !impl_->create_ssl_object()) {
+        impl_->state = DtlsState::Failed;
+        ++impl_->stats_instance.errors;
+        nimrtc::core::log::Logger::instance().error(
+            "DtlsSessionWolfSSL: the context could not be rebuilt for the "
+            "new role");
+        return;
+    }
+    nimrtc::core::log::Logger::instance().info(
+        std::string("DtlsSessionWolfSSL: wolfSSL context rebuilt for role=") +
         (r == DtlsRole::Server ? "Server" : "Client"));
 }
 
@@ -1892,7 +1948,10 @@ plugins::Status DtlsSessionWolfSSL::rehandshake() noexcept {
     const int rc = wolfSSL_Rehandshake(impl_->ssl);
     if (rc == WOLFSSL_SUCCESS) {
         impl_->state = nimrtc::dtls::DtlsState::HelloSent;
-        impl_->srtp_keys_.reset();
+        // `emplace()` (not `reset()`): an empty optional would make
+        // `export_srtp_keys()` bail out after the renegotiation, so the
+        // session would end up Connected without keying material.
+        impl_->srtp_keys_.emplace();
         impl_->handshake_start_ = std::chrono::steady_clock::now();
         impl_->last_rtx_check_ = std::chrono::steady_clock::now();
         nimrtc::core::log::Logger::instance().info(
@@ -1916,7 +1975,9 @@ plugins::Status DtlsSessionWolfSSL::rehandshake() noexcept {
     impl_->send_buf_.clear();
     impl_->outbound_.clear();
     impl_->inbound_app_.clear();
-    impl_->srtp_keys_.reset();
+    // Same reason as in set_role(): an empty optional would make
+    // `export_srtp_keys()` return without exporting anything.
+    impl_->srtp_keys_.emplace();
     impl_->on_complete_cb_ = nullptr;
     impl_->open_called = true;
     if (!impl_->setup_context() || !impl_->create_ssl_object()) {

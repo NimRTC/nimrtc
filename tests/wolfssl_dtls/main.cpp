@@ -47,9 +47,6 @@
 // Configuration
 static const int SERVER_PORT = 9999;
 static const int BUFFER_SIZE = 4096;
-static const int TIMEOUT_MS = 5000;
-static const int SRTP_KEY_LEN = 16;
-static const int SRTP_SALT_LEN = 14;
 
 static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_handshake_complete{false};

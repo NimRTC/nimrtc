@@ -178,6 +178,27 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     tick-rate independence (30 Hz and 200 Hz produce the same audio) and
     the real two-engine loopback over 127.0.0.1, where engine A feeds
     PCM and engine B decodes it.
+- **The Chrome → NimRTC audio direction is now observed (audio pipeline
+  WP-11, spec V-3).**  The Chrome interop page used to add a *recvonly*
+  transceiver, so Chrome never sent a packet and NimRTC's receive path
+  was never exercised against a real browser — only the NimRTC → Chrome
+  direction was covered.
+  - The page captures the **fake microphone** when the harness asks for
+    it (`?sendAudio=1`): `getUserMedia()` attaches a track, the offer
+    becomes `a=sendrecv`, and Chrome really encodes and sends Opus.  The
+    Playwright harness grants the microphone permission.
+  - The direction is asserted from **both** ends, because they are two
+    facts about the same flow: Chrome reports `micTrackAdded` and
+    `outboundPackets > 0`, and NimRTC reports
+    `Stats::audio_frames_received > 0` — the engine's own counter, so a
+    non-zero value means the host was handed *decoded* PCM rather than
+    the compressed payload reinterpreted as floats.
+  - `tools/run_e2e_acceptance.py` reads the engine-side counter out of
+    demo-p2p's stderr, so the acceptance runner (and with it the daily
+    soak) now fails when the receive path breaks.
+  - The Chrome offer fixture (`interop/fixtures/chrome_opus_offer.sdp`)
+    and its expected-parsing document now describe the `sendrecv` offer
+    the page really sends.
 
 ### Changed
 

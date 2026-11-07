@@ -349,12 +349,50 @@ frame, the decoder uses it as its redundancy hint (spec B-8).
 | `python scripts/check_api_marker_includes.py` | OK |
 | `ctest --test-dir build -C Debug` | **769 / 770 passed, 1 failed** (763 + the 6 cases of `tests/test_engine_audio_send.cpp` plus its binary-level entry).  The one failure is `test_dtls_gmssl_tlcp`, and it is **environmental**: the test shells out to the `gmssl` tool to generate an SM2 key, and that tool is not installed on this machine ("'gmssl' is not recognized as an internal or external command").  No test of the audio pipeline fails. |
 
+**After WP-11, item 2 (the E-9 migration guide) — 2026-11-07.**  The
+P1 public SDK is documented: `docs/api/engine_api.md` gained the
+`on_audio_frame_info` callback row, an explicit statement of the legacy
+callback's `num_samples` semantics (the *total* number of interleaved
+float samples, not the samples per channel), a section 8 that describes
+the receive path (the decoded PCM, the buffer lifetime, the ≥ 100 Hz
+tick rate, the absence of a fallback receiver and the two new entry
+points) and a section 16 migration guide.  `docs/api/engine_config.md`
+documents the nine new `EngineConfig` fields, and `docs/zh/architecture.md`
+mirrors the three architectural decisions (ADR-012).
+
+**After WP-11, item 1 (the V-3 Chrome → NimRTC direction) — 2026-11-07.**
+Until now only the NimRTC → Chrome direction was observable: the Chrome
+page added a **recvonly** transceiver, so Chrome never sent a packet and
+NimRTC's receive path was never exercised against a real browser.
+
+The page now captures the **fake microphone** when the harness asks for
+it (`?sendAudio=1`): `getUserMedia()` attaches a track, the offer
+becomes `a=sendrecv`, and Chrome really encodes and sends Opus.  The
+harness grants the microphone permission, so the whole chain runs.
+
+The direction is asserted from **both ends**, because they are two facts
+about the same flow and only together do they prove the receive path:
+
+| End | Evidence | Where |
+|---|---|---|
+| Chrome | `micTrackAdded` (the track exists) and `outboundPackets > 0` (the sender put packets on the wire) | `window._interopResults`, read from `build/e2e/case_d_chrome.log` |
+| NimRTC | `Stats::audio_frames_received > 0` — the packet arrived, the SRTP unwrap worked, the jitter buffer held it, the decoder produced PCM and the frame was played out | demo-p2p's stderr, `[demo-p2p] audio-rx frames=…` |
+
+The NimRTC-side counter is the decisive one: it is the engine's own
+statistics, so a non-zero value means the host was handed **decoded
+PCM**, not the compressed payload reinterpreted as floats (the old
+defect F-1).
+
+| Gate (after the V-3 reverse direction) | Result |
+|---|---|
+| `python tools/run_e2e_acceptance.py --case d` | **PASS** — `micTrackAdded` OK, `outboundPackets` OK, `nimrtc audio-rx frames: OK (frames=138, samples=132480, concealed=0, lost=0)` |
+| `python tools/run_e2e_acceptance.py --case d_rev` | **PASS** — the same two assertions with the signaling roles flipped (NimRTC offers, Chrome answers) |
+
 **What is still open after WP-11.**  WP-12 (the P2 body: DTX/VAD
 coupling, the device-layer contract, A/V synchronisation, G.711) is the
-`v1.4.0` line.  The Chrome interop assertions of V-3 (the
-Chrome → NimRTC direction) and the API documentation of E-9 (the
-migration guide in `docs/api/engine_api.md`) are the two remaining
-WP-11 items.
+`v1.4.0` line.  With the E-9 migration guide and the V-3 reverse
+direction both closed, **WP-11 is complete** — the P0+P1 audio body is
+feature-complete and the whole `v1.2.0` audio scope has landed.
 
 ---
 

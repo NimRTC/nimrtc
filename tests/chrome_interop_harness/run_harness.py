@@ -167,10 +167,17 @@ def pick_free_port() -> int:
     engine.  Picking a free port removes the whole class of failure.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        except OSError:
-            pass
+        # `SO_EXCLUSIVEADDRUSE` is Windows-only and does not exist in
+        # the `socket` module on Linux -- referencing it unconditionally
+        # raised `AttributeError` and crashed the harness on every
+        # platform.  Look it up first and treat its absence as "not
+        # available here".
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            try:
+                s.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            except OSError:
+                pass
         s.bind(("0.0.0.0", 0))
         s.listen(1)
         return int(s.getsockname()[1])

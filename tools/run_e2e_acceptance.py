@@ -113,10 +113,25 @@ def pick_free_port() -> int:
     server binds 0.0.0.0 too: a port that is only free on loopback may
     still be taken on a physical interface, and the bind would then fail
     at server start-up instead of here.
+
+    `SO_EXCLUSIVEADDRUSE` is a WINDOWS-only socket option -- it does not
+    exist in the `socket` module on Linux at all, so referencing it
+    unconditionally raised `AttributeError: module 'socket' has no
+    attribute 'SO_EXCLUSIVEADDRUSE'` and crashed every acceptance case
+    on the Linux CI runner.  The option is also not needed there: on
+    POSIX the semantics that matter come from `SO_REUSEADDR`, which the
+    kernels apply differently but in a way that does not produce the
+    silent "someone else answers the upgrade" collision this function
+    exists to avoid.
     """
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            try:
+                s.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            except OSError:
+                pass
         s.bind(("0.0.0.0", 0))
         s.listen(1)
         return int(s.getsockname()[1])

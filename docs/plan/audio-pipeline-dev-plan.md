@@ -276,6 +276,86 @@ the statistics counters), WP-9 (the cross-end capture timestamp),
 WP-10 (the P1 public SDK) and WP-11 (verification and interop) are
 still ahead.
 
+**After WP-8 / WP-9 / WP-10 — 2026-11-07.**  Three packages landed in
+one merge, because the code half of WP-10 needs the counters of WP-8 and
+the timestamp of WP-9 to be meaningful:
+
+* **WP-8** — the engine keeps the RFC 3550 A.1 sequence bookkeeping for
+  the inbound audio stream (extended highest sequence number, cumulative
+  loss, interarrival jitter) and emits a receiver report once per second
+  through the same SRTCP path as every other RTCP packet.  A stream that
+  never reports shows no statistics at all in the browser's
+  `inbound-rtp`, so this is the piece that makes the audio visible to
+  Chrome.  The peer's Sender Report is now parsed even when the
+  cross-end timeline is off — its LSR field is a fact about the wire that
+  our report has to carry.
+* **WP-9** — `capture_time_us` comes from the ADR-017 seam
+  (`rtp::SenderReportTracker`) and is 0 when no usable Sender Report
+  exists.  It is never faked from the local playout clock (spec O-9).
+* **WP-10 (code half)** — `AudioFrameInfo` / `AudioFormat` and
+  `set_on_audio_frame_info()` / `remote_audio_format()`; the legacy
+  `set_on_audio_frame()` stays and fires first (spec E-2).  The new
+  `EngineConfig` fields are appended at the end of the struct, so a host
+  that aggregate-initialises it keeps compiling (spec E-6).
+
+**After WP-11 (verification) — 2026-11-07.**  Two new integration test
+binaries land with the defects they found:
+
+* `tests/test_engine_audio_send.cpp` — the send path's two promises.  The
+  framing is the engine's business: `send_audio()` accepts any block size
+  and puts exactly one RTP packet per 20 ms frame on the wire, with a
+  continuous media timestamp (spec B-6).  And no silent loss: an empty
+  buffer, a null buffer or an encoder error increments
+  `Stats::audio_encode_errors` and fires `on_error` (spec A-8).
+* `tests/test_engine_audio_loopback.cpp` — the media loopback (spec V-2):
+  loss injection (constant cadence, concealed counter == drop count), the
+  in-band FEC recovery, the tick-rate independence (30 Hz and 200 Hz
+  produce the same audio) and the real two-engine loopback over
+  127.0.0.1.
+
+**Three defects came out of the loopback test**, and all three were real
+media-path defects rather than test artefacts:
+
+1. **The DTLS session could not change its role.**  The wolfSSL context
+   is built with a *role-specific* method, so a context built for the
+   server cannot drive a client handshake (wolfSSL fails with -344
+   before a byte leaves the host).  The engine learns its role from the
+   remote description, which arrives *after* `open()` — so the session
+   now rebuilds its context when the role changes.
+2. **The rebuild lost the SRTP keying material.**  The rebuild reset the
+   `std::optional` that holds the keys, and `export_srtp_keys()` returns
+   early on an empty optional — the session came up "Connected" and the
+   engine reported "no keying material".  The same reset existed in the
+   re-handshake path.  Both now put a fresh key set back.
+3. **The inbound Opus payload was decoded without its TOC byte.**  The
+   depacketiser strips the TOC (it describes the *packet*), but libopus
+   decodes complete packets and reads the TOC to learn the mode, the
+   bandwidth and the duration of the frame.  The decoder now rebuilds the
+   code-0 packet before it hands it to libopus — this was the last
+   reason the receive path produced noise instead of PCM.
+
+The RFC 7587 framing moved into the codec plugin in the same merge: the
+plugin now frames the encoder's own output (the TOC byte libopus wrote
+plus the frame body) and the packetiser *reads* the TOC instead of
+inventing a config field, so the frame on the wire is the frame the
+encoder produced.  The in-band redundancy became configurable
+(`EngineConfig::audio_redundancy_percent`, default 5 %) and is handed to
+both ends — the encoder embeds the low-bitrate copy of the previous
+frame, the decoder uses it as its redundancy hint (spec B-8).
+
+| Gate (after WP-11) | Result |
+|---|---|
+| `node scripts/api_freeze_scan.js` | 109 headers, 733 symbols, `Missing == 0` |
+| `python scripts/check_api_marker_includes.py` | OK |
+| `ctest --test-dir build -C Debug` | **769 / 770 passed, 1 failed** (763 + the 6 cases of `tests/test_engine_audio_send.cpp` plus its binary-level entry).  The one failure is `test_dtls_gmssl_tlcp`, and it is **environmental**: the test shells out to the `gmssl` tool to generate an SM2 key, and that tool is not installed on this machine ("'gmssl' is not recognized as an internal or external command").  No test of the audio pipeline fails. |
+
+**What is still open after WP-11.**  WP-12 (the P2 body: DTX/VAD
+coupling, the device-layer contract, A/V synchronisation, G.711) is the
+`v1.4.0` line.  The Chrome interop assertions of V-3 (the
+Chrome → NimRTC direction) and the API documentation of E-9 (the
+migration guide in `docs/api/engine_api.md`) are the two remaining
+WP-11 items.
+
 ---
 
 ## 3. The work packages in detail

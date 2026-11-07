@@ -162,9 +162,42 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     in `kDefaultRegistrars[]`. Neither is an include: the public header
     set is unchanged, and the scan still reports 109 headers and 730
     symbols.
+- **The audio pipeline's engine integration tests (audio pipeline WP-11,
+  spec V-1 / V-2).**  Two new test binaries:
+  - `tests/test_engine_audio_send.cpp` — the send path's two promises.
+    The framing is the engine's business: `send_audio()` accepts any
+    block size and puts exactly one RTP packet per 20 ms frame on the
+    wire, with a continuous media timestamp and a continuous sequence
+    number (spec B-6).  And no silent loss: an empty buffer, a null
+    buffer or an encoder error increments the statistics counter and
+    fires `on_error` (spec A-8).  The engine is driven through a fake
+    ICE transport and a fake DTLS session, both registered as plugins.
+  - `tests/test_engine_audio_loopback.cpp` — the media loopback: loss
+    injection (the output cadence stays constant and the concealed-frame
+    counter matches the drop count), the in-band FEC recovery, the
+    tick-rate independence (30 Hz and 200 Hz produce the same audio) and
+    the real two-engine loopback over 127.0.0.1, where engine A feeds
+    PCM and engine B decodes it.
 
 ### Changed
 
+- **The Opus plugin frames its own output (audio pipeline WP-11, spec
+  B-5).**  The codec plugin used to hand the raw libopus frame to the
+  caller and let the engine work out the RTP payload — so the config
+  field on the wire was the one the *packetiser* invented, not the one
+  the encoder used.  A frame whose TOC contradicts its body made the
+  receiver decode it with the wrong decoder mode, which is audible as
+  noise rather than as an error.  The plugin now frames the encoder's
+  output itself (the TOC byte libopus wrote plus the frame body) and the
+  packetiser reads the TOC instead of deriving one.
+- **The in-band redundancy is configurable (audio pipeline WP-11, spec
+  B-8).**  `EngineConfig::audio_redundancy_percent` (default 5 %) is
+  handed to the encoder, so every frame carries a low-bitrate copy of
+  the previous one, and to the decoder, which uses it as its redundancy
+  hint.  `plugins::CodecConfig::packet_loss_perc` and
+  `plugins::AudioReceiverConfig::packet_loss_perc` carry the value
+  across the seams.  Without it the encoder embeds no copy at all and
+  the FEC recovery path cannot work.
 - **Every engine now owns its own audio send state (audio pipeline WP-5,
   spec A-6 / A-7 / A-8).** The outbound audio path had three defects that
   all came from the same root: the send state lived in function-local
@@ -204,6 +237,35 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The inbound Opus payload was decoded without its TOC byte (audio
+  pipeline WP-11, defect F-1).**  The depacketiser strips the TOC byte
+  (it describes the *packet*, not the frame), but libopus decodes
+  *complete* packets and reads the TOC to learn the mode, the bandwidth
+  and the duration of the frame it is about to decode.  Handing it a body
+  without its TOC made the decoder read the first body byte as a TOC and
+  pick a configuration the frame was never coded for — noise instead of
+  PCM.  The decoder now rebuilds the code-0 packet before it calls
+  libopus.
+- **A DTLS session could not change its role after it was opened.**  The
+  wolfSSL context is built with a *role-specific* method, so a context
+  built for the server cannot drive a client handshake — wolfSSL fails
+  with -344 ("wrong client/server type") before a byte leaves the host.
+  The engine learns its role from the remote description, which arrives
+  *after* `open()` built the context with the default role, so a
+  NimRTC-to-NimRTC session always failed.  The session now rebuilds its
+  context when the role changes.
+- **The rebuild of the DTLS context lost the SRTP keying material.**  The
+  rebuild reset the `std::optional` that holds the keys, and
+  `export_srtp_keys()` returns early on an empty optional — the session
+  came up "Connected" while the engine reported "no keying material",
+  and the SRTP context was never installed.  The same reset existed in
+  the re-handshake path.  Both put a fresh key set back now.
+- **An empty PCM buffer vanished silently (audio pipeline WP-11, spec
+  A-8).**  `send_audio()` returned `kEngineInvalidParam` and the host
+  heard silence with no explanation.  Every rejection on the send path
+  now increments `Stats::audio_encode_errors` and fires `on_error` at a
+  throttled rate, so a host whose PCM never reaches the wire can see
+  why.
 - **The soak evidence window erased the failures it was supposed to
   record.** The summary kept only the *last* record per case per day, so a
   FAIL that a later PASS on the same day followed was silently erased: the

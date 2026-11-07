@@ -10,6 +10,12 @@
 :: The CMake preset "debug.msvc" puts the compiler in PATH, but this script
 :: also works with a plain `cmake --build` invocation, which needs the
 :: vcvars environment that this script sets up.
+::
+:: NOTE: cmd.exe parses a parenthesised block as a whole statement, so an
+:: unescaped "(" or ")" inside the text of an echo within such a block ends
+:: the block early and aborts the script. Keep the messages below free of
+:: parentheses, and read %errorlevel% as !errorlevel! inside blocks so the
+:: value is taken after the command ran rather than when the block was read.
 setlocal EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
@@ -28,9 +34,12 @@ if errorlevel 1 (
 )
 
 if "%~1"=="raw" (
-    shift
-    %*
-    exit /b %errorlevel%
+    :: NOTE: `shift` does NOT change %*, so the arguments cannot be taken
+    :: from %* after a shift -- the mode word would still be in front of the
+    :: command and cmd would try to execute "raw" as the command.  The
+    :: positional expansion below drops the mode word explicitly.
+    call %2 %3 %4 %5 %6 %7 %8 %9
+    exit /b !errorlevel!
 )
 
 if "%~1"=="" set "MODE=build"
@@ -41,21 +50,18 @@ if "%~1"=="configure" set "MODE=configure"
 set "BUILD_TYPE=Debug"
 if "%~2"=="--release" set "BUILD_TYPE=Release"
 
-set "TARGET_ARG="
-if "%~2"=="--target" (
-    set "TARGET_ARG=--target"
-    set "TARGET_NAME=%~3"
-)
+set "TARGET_NAME="
+if "%~2"=="--target" set "TARGET_NAME=%~3"
 
 cd /d "%PROJECT_ROOT%"
 
 if "%MODE%"=="configure" (
-    echo [INFO] Configuring (debug.msvc, %BUILD_TYPE%)...
+    echo [INFO] Configuring preset debug.msvc, type %BUILD_TYPE% ...
     cmake --preset debug.msvc -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
-    exit /b %errorlevel%
+    exit /b !errorlevel!
 )
 
-echo [INFO] Building (%BUILD_TYPE%)...
+echo [INFO] Building %BUILD_TYPE% ...
 if "%TARGET_NAME%"=="" (
     cmake --build build --config %BUILD_TYPE% -j
 ) else (
@@ -67,9 +73,9 @@ if errorlevel 1 (
 )
 
 if "%MODE%"=="test" (
-    echo [INFO] Running ctest...
+    echo [INFO] Running ctest ...
     ctest --test-dir build -C %BUILD_TYPE% --output-on-failure
-    exit /b %errorlevel%
+    exit /b !errorlevel!
 )
 
 echo [OK] Build succeeded.

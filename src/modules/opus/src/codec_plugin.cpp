@@ -10,6 +10,8 @@
 
 #include <nimrtc/opus/codec_plugin.hpp>
 
+#include "audio_decoder_plugin.hpp"
+
 #include <atomic>
 #include <utility>
 
@@ -195,6 +197,10 @@ void do_register_default_plugins() noexcept {
         }
     } s_registrar;
     (void)s_registrar;
+
+    // The audio pipeline's decoder seam (v1.2.0, WP-2): the same "opus"
+    // id, but in the registry's audio-decoder category.
+    do_register_audio_decoder_plugin();
 }
 
 } // namespace detail

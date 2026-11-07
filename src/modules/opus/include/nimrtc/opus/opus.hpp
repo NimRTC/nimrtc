@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/opus/opus.hpp
  * @brief Opus audio codec interface (RFC 6716) + RFC 7587 RTP packetisation.
  *
@@ -61,6 +61,15 @@ struct NIMRTC_API_STABLE EncoderConfig {
     bool           fec_enabled    = true;    // forward error correction
     bool           dtx_enabled    = false;   // discontinuous transmission
 
+    /** In-band FEC redundancy hint, in percent (0..100).
+     *  Maps to libopus's OPUS_SET_PACKET_LOSS_PERC.  0 (the default) means
+     *  "no redundancy" -- the encoder then never carries a copy of the
+     *  previous frame, so a receiver cannot recover a lost frame from the
+     *  next packet.  A non-zero value makes the encoder emit the redundant
+     *  data (SILK LBRR) and is what the audio pipeline's FEC recovery
+     *  path (spec B-8) needs. */
+    int            packet_loss_perc = 0;
+
     /** Opus application mode.  Use the named constants exposed by
      *  nimrtc::opus (OPUS_APPLICATION_VOIP / OPUS_APPLICATION_AUDIO) rather
      *  than raw integers; those map to libopus's own OPUS_APPLICATION_*
@@ -73,6 +82,17 @@ struct NIMRTC_API_STABLE DecoderConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
     std::uint8_t  channels     = kDefaultChannels;
     int            complexity     = 10;
+
+    /** In-band FEC redundancy hint, in percent (0..100).
+     *  Maps to libopus's OPUS_SET_PACKET_LOSS_PERC.  It tells the decoder
+     *  how much redundancy the peer is expected to send, which drives
+     *  libopus's internal FEC / PLC decisions (spec B-10). */
+    int            packet_loss_perc = 5;
+
+    /** Whether the decoder accepts in-band FEC reconstruction.
+     *  When false, decode_with_fec() is refused and the receiver falls
+     *  back to plain concealment (spec B-10). */
+    bool           use_inband_fec  = true;
 };
 
 // -----------------------------------------------------------------------------
@@ -154,7 +174,66 @@ public:
                        float* output,
                        std::size_t output_capacity) noexcept;
 
-    /** Decode a PLC frame (packet loss). */
+    /** Decode an Opus packet in FEC mode (spec B-10).
+     *
+     *  libopus's `decode_fec = 1` reconstructs the **previous** frame from
+     *  the redundancy the peer embedded in *this* packet.  The call does not
+     *  advance the decoder to the current frame: the caller is expected to
+     *  decode the same packet again with decode() to obtain it.
+     *
+     *  @return Number of output PCM samples per channel of the reconstructed
+     *          (previous) frame, or 0 when the packet carries no usable
+     *          redundancy.
+     */
+    std::size_t decode_with_fec(const std::uint8_t* opus,
+                                std::size_t opus_len,
+                                float* output,
+                                std::size_t output_capacity) noexcept;
+
+    /** The last payload handed to decode() / decode_with_fec().
+     *
+     *  The decoder keeps a copy so a caller can re-submit it (for example
+     *  to retry a frame with FEC after a decode error).  The pointer stays
+     *  valid until the next decode call; the size is 0 when nothing has
+     *  been decoded yet (spec B-10). */
+    const std::uint8_t* last_payload() const noexcept;
+
+    /** Size of the payload last_payload() points at (0 when none). */
+    std::size_t last_payload_size() const noexcept;
+
+    /** Change the channel count (spec B-10).
+     *
+     *  libopus's decoder cannot change its channel count in place, so the
+     *  decoder is re-created; the decode history is lost.  @return false
+     *  when the new channel count is rejected (only 1 and 2 are valid) or
+     *  the decoder could not be re-created. */
+    bool set_channels(std::uint8_t channels) noexcept;
+
+    /** Apply a new configuration to the live decoder (spec B-10).
+     *
+     *  A change of the channel count or of the sample rate re-creates the
+     *  decoder (libopus cannot change either in place), which loses the
+     *  decode history; every other field is applied to the running
+     *  instance.
+     *
+     *  @return false when the configuration was rejected or the decoder
+     *          could not be re-created. */
+    bool reconfigure(const DecoderConfig& cfg) noexcept;
+
+    /** The channel count the decoder currently produces. */
+    std::uint8_t channels() const noexcept;
+
+    /** Decode a PLC frame (packet loss).
+     *
+     *  Produces concealment audio derived from the decoder's history.  The
+     *  generator works in 20 ms units (the native Opus frame); a shorter
+     *  requested duration is produced by truncating that unit, so the
+     *  decoder's internal timeline always advances in 20 ms steps.
+     *
+     *  @param output_capacity  Capacity of the output buffer (in float
+     *                          samples per channel); the call fills as much
+     *                          of it as the concealment generator can.
+     *  @return Number of PCM samples per channel written, or 0 on error. */
     std::size_t decode_plc(float* output,
                             std::size_t output_capacity) noexcept;
 

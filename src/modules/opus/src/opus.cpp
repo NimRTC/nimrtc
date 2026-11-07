@@ -42,8 +42,10 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 #include <opus.h>   // libopus vendored at src/third_party/libopus/src
 
@@ -139,6 +141,12 @@ struct Encoder::Impl {
         opus_encoder_ctl(enc, OPUS_SET_BITRATE(
             static_cast<int>(config.bitrate_bps)));
         opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(config.complexity));
+        // In-band FEC redundancy hint.  libopus only emits the redundant
+        // copy of the previous frame when the loss percentage is > 0, so
+        // the default of 0 keeps the packets small (spec B-10).
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(
+            config.packet_loss_perc < 0 ? 0
+                : (config.packet_loss_perc > 100 ? 100 : config.packet_loss_perc)));
         // libopus has no explicit VAD knob — VAD behaviour is governed by
         // DTX (when DTX=1 the encoder runs an internal VAD and produces
         // silence frames).  When DTX=0 we still want VBR for higher
@@ -163,6 +171,9 @@ struct Encoder::Impl {
         opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(c.complexity));
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(c.fec_enabled ? 1 : 0));
         opus_encoder_ctl(enc, OPUS_SET_DTX(c.dtx_enabled ? 1 : 0));
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(
+            c.packet_loss_perc < 0 ? 0
+                : (c.packet_loss_perc > 100 ? 100 : c.packet_loss_perc)));
     }
 };
 
@@ -258,6 +269,11 @@ struct Decoder::Impl {
     int                   error = OPUS_OK;
     opus_int32            last_frame_samples = kSamplesPerFrame;
 
+    /** Copy of the last payload handed to decode() / decode_with_fec()
+     *  (spec B-10: the receiver keeps the previous packet so it can be
+     *  re-submitted, e.g. for an FEC retry). */
+    std::vector<std::uint8_t> last_payload;
+
     explicit Impl(DecoderConfig c)
         : config(std::move(c))
         , dec(opus_decoder_create(
@@ -269,7 +285,7 @@ struct Decoder::Impl {
             throw std::runtime_error(std::string{"opus_decoder_create failed: "}
                                      + opus_strerror(error));
         }
-        opus_decoder_ctl(dec, OPUS_SET_COMPLEXITY(config.complexity));
+        apply_config();
         opus_debug("opus::Decoder created (rate=%u ch=%u)",
                    config.sample_rate_hz, config.channels);
     }
@@ -278,9 +294,41 @@ struct Decoder::Impl {
         if (dec) opus_decoder_destroy(dec);
     }
 
+    void apply_config() {
+        if (!dec) return;
+        opus_decoder_ctl(dec, OPUS_SET_COMPLEXITY(config.complexity));
+        // Redundancy hint: tells libopus how much FEC the peer sends, which
+        // drives its internal FEC / PLC decisions (spec B-10).
+        const int perc = config.packet_loss_perc < 0 ? 0
+            : (config.packet_loss_perc > 100 ? 100 : config.packet_loss_perc);
+        opus_decoder_ctl(dec, OPUS_SET_PACKET_LOSS_PERC(perc));
+    }
+
     void reconfigure(const DecoderConfig& c) {
         config = c;
-        if (dec) opus_decoder_ctl(dec, OPUS_SET_COMPLEXITY(c.complexity));
+        apply_config();
+    }
+
+    /** Re-create the libopus decoder with the current configuration.
+     *  Used by set_channels(): libopus cannot change the channel count of
+     *  a live decoder, so the instance is replaced (the decode history is
+     *  lost, which is the price of a stereo → mono renegotiation). */
+    bool recreate() {
+        int err = OPUS_OK;
+        OpusDecoder* fresh = opus_decoder_create(
+            static_cast<opus_int32>(config.sample_rate_hz),
+            static_cast<int>(config.channels),
+            &err);
+        if (err != OPUS_OK || fresh == nullptr) {
+            opus_debug("opus::Decoder::recreate failed: %s", opus_strerror(err));
+            return false;
+        }
+        if (dec) opus_decoder_destroy(dec);
+        dec = fresh;
+        error = err;
+        last_payload.clear();
+        apply_config();
+        return true;
     }
 };
 
@@ -295,7 +343,7 @@ std::size_t Decoder::decode(const std::uint8_t* encoded,
                              std::size_t encoded_len,
                              float* output,
                              std::size_t output_capacity) noexcept {
-    if (!output || output_capacity < kSamplesPerFrame) return 0;
+    if (!output || output_capacity == 0) return 0;
     if (!impl_ || !impl_->dec) return 0;
 
     const opus_int32 max_samples = static_cast<opus_int32>(output_capacity);
@@ -312,31 +360,164 @@ std::size_t Decoder::decode(const std::uint8_t* encoded,
     impl_->stats.frames_decoded++;
     impl_->stats.bytes_decoded += encoded_len;
     impl_->last_frame_samples = n;
+    if (encoded && encoded_len > 0) {
+        impl_->last_payload.assign(encoded, encoded + encoded_len);
+    }
     return static_cast<std::size_t>(n);
+}
+
+std::size_t Decoder::decode_with_fec(const std::uint8_t* encoded,
+                                      std::size_t encoded_len,
+                                      float* output,
+                                      std::size_t output_capacity) noexcept {
+    if (!impl_ || !impl_->dec) return 0;
+    if (!impl_->config.use_inband_fec) {
+        opus_debug("opus::Decoder::decode_with_fec refused: in-band FEC disabled");
+        return 0;
+    }
+    if (!encoded || encoded_len == 0) return 0;
+    if (!output || output_capacity == 0) return 0;
+
+    const opus_int32 n_bytes = static_cast<opus_int32>(encoded_len);
+
+    // Does the packet carry the in-band redundancy of the previous frame at
+    // all?  libopus exposes that as the SILK LBRR flag (opus_packet_has_lbrr).
+    // Without it the FEC decode would fall back to concealment and still
+    // report a frame, which would make the caller claim a recovery that
+    // never happened.
+    const int has_lbrr = opus_packet_has_lbrr(encoded, n_bytes);
+    if (has_lbrr <= 0) {
+        if (has_lbrr < 0) {
+            opus_debug("opus::Decoder::decode_with_fec: malformed packet: %s",
+                       opus_strerror(has_lbrr));
+            impl_->stats.errors++;
+        } else {
+            opus_debug("opus::Decoder::decode_with_fec: packet carries no "
+                       "in-band redundancy");
+        }
+        return 0;
+    }
+
+    // libopus's FEC path needs the requested frame size to be exactly the
+    // packet's own frame length:
+    //   - it must be a multiple of 2.5 ms, otherwise opus_decode_native()
+    //     rejects the call with OPUS_BAD_ARG;
+    //   - it must not be shorter than the packet's frame, otherwise the
+    //     decoder falls back to concealment.
+    // Both are guaranteed by deriving the size from the packet itself.
+    const opus_int32 frame_samples = opus_packet_get_samples_per_frame(
+        encoded, static_cast<opus_int32>(impl_->config.sample_rate_hz));
+    if (frame_samples <= 0) {
+        opus_debug("opus::Decoder::decode_with_fec: bad frame size");
+        impl_->stats.errors++;
+        return 0;
+    }
+    if (output_capacity < static_cast<std::size_t>(frame_samples)) {
+        opus_debug("opus::Decoder::decode_with_fec: output buffer too small "
+                   "(%zu < %d)", output_capacity, static_cast<int>(frame_samples));
+        return 0;
+    }
+
+    // decode_fec = 1 reconstructs the *previous* frame from the redundancy
+    // carried in this packet; the current frame is not decoded here.
+    const opus_int32 n = opus_decode_float(impl_->dec, encoded, n_bytes,
+                                            output, frame_samples, /*decode_fec*/ 1);
+    if (n < 0) {
+        opus_debug("opus::Decoder::decode_with_fec failed: %s", opus_strerror(n));
+        impl_->stats.errors++;
+        return 0;
+    }
+    impl_->stats.fec_frames++;
+    impl_->last_frame_samples = n;
+    impl_->last_payload.assign(encoded, encoded + encoded_len);
+    return static_cast<std::size_t>(n);
+}
+
+const std::uint8_t* Decoder::last_payload() const noexcept {
+    return impl_ && !impl_->last_payload.empty()
+        ? impl_->last_payload.data() : nullptr;
+}
+
+std::size_t Decoder::last_payload_size() const noexcept {
+    return impl_ ? impl_->last_payload.size() : 0;
+}
+
+bool Decoder::set_channels(std::uint8_t channels) noexcept {
+    if (!impl_) return false;
+    if (channels != 1 && channels != 2) return false;
+    if (channels == impl_->config.channels) return true;
+    impl_->config.channels = channels;
+    return impl_->recreate();
+}
+
+bool Decoder::reconfigure(const DecoderConfig& cfg) noexcept {
+    if (!impl_) return false;
+    if (cfg.channels != 1 && cfg.channels != 2) return false;
+    if (cfg.sample_rate_hz == 0 || cfg.sample_rate_hz > 48000) return false;
+    const bool ch_changed = cfg.channels != impl_->config.channels;
+    const bool rate_changed = cfg.sample_rate_hz != impl_->config.sample_rate_hz;
+    impl_->config = cfg;
+    if (ch_changed || rate_changed) return impl_->recreate();
+    impl_->apply_config();
+    return true;
+}
+
+std::uint8_t Decoder::channels() const noexcept {
+    return impl_ ? impl_->config.channels : kDefaultChannels;
 }
 
 std::size_t Decoder::decode_plc(float* output,
                                  std::size_t output_capacity) noexcept {
-    if (!output || output_capacity < kSamplesPerFrame) return 0;
+    if (!output || output_capacity == 0) return 0;
     if (!impl_ || !impl_->dec) return 0;
-    // libopus PLC = decode a NULL packet.  The decoder interpolates audio
-    // based on its internal history.
+
     const opus_int32 max_samples = static_cast<opus_int32>(output_capacity);
+
+    // First try to obtain exactly the requested number of samples.  libopus
+    // generates concealment in whole frames (20 ms at 48 kHz), so a shorter
+    // request is usually refused with OPUS_BUFFER_TOO_SMALL.
     const opus_int32 n = opus_decode_float(impl_->dec, nullptr, 0,
                                             output, max_samples, /*decode_fec*/ 0);
-    if (n < 0) {
+    if (n > 0) {
+        impl_->stats.plc_frames++;
+        impl_->last_frame_samples = n;
+        return static_cast<std::size_t>(n);
+    }
+    if (n != OPUS_BUFFER_TOO_SMALL) {
+        opus_debug("opus::Decoder::decode_plc failed: %s", opus_strerror(n));
         impl_->stats.errors++;
         return 0;
     }
+
+    // Fall back to the native concealment unit (20 ms) and truncate it to
+    // the requested length.  The decoder's internal timeline advances in
+    // 20 ms steps either way.
+    const std::size_t native = impl_->config.sample_rate_hz / 50;  // 20 ms
+    if (native == 0) return 0;
+    const std::size_t channels = impl_->config.channels ? impl_->config.channels : 1;
+    std::vector<float> scratch(native * channels);
+    const opus_int32 m = opus_decode_float(impl_->dec, nullptr, 0,
+                                            scratch.data(),
+                                            static_cast<opus_int32>(native),
+                                            /*decode_fec*/ 0);
+    if (m <= 0) {
+        opus_debug("opus::Decoder::decode_plc fallback failed: %s", opus_strerror(m));
+        impl_->stats.errors++;
+        return 0;
+    }
+    const std::size_t produced = std::min(output_capacity,
+                                           static_cast<std::size_t>(m));
+    std::memcpy(output, scratch.data(), produced * channels * sizeof(float));
     impl_->stats.plc_frames++;
-    impl_->last_frame_samples = n;
-    return static_cast<std::size_t>(n);
+    impl_->last_frame_samples = static_cast<opus_int32>(m);
+    return produced;
 }
 
 void Decoder::reset() noexcept {
     if (impl_ && impl_->dec) {
         opus_decoder_ctl(impl_->dec, OPUS_RESET_STATE);
         impl_->stats = Decoder::Stats{};
+        impl_->last_payload.clear();
     }
 }
 

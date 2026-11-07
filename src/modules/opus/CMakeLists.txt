@@ -14,6 +14,7 @@
 add_library(nimrtc_opus STATIC
     src/opus.cpp
     src/codec_plugin.cpp           # codec plugin adapter (R2-Batch1)
+    src/audio_decoder_plugin.cpp   # audio-decoder plugin adapter (v1.2.0, WP-2)
     )
 
 nimrtc_apply_options(nimrtc_opus)

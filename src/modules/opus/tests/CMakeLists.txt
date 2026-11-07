@@ -2,9 +2,11 @@
 # =============================================================================
 # Opus encoder/decoder unit tests (real libopus-backed).
 #
-# Two test binaries:
-#   - test_opus           : encoder/decoder roundtrip + stats + DTX + PLC
-#   - test_opus_packetise : RFC 7587 §4 RTP packetisation (TOC, Code 0/1/2/3)
+# Three test binaries:
+#   - test_opus               : encoder/decoder roundtrip + stats + DTX + PLC
+#   - test_opus_packetise     : RFC 7587 §4 RTP packetisation (TOC, Code 0/1/2/3)
+#   - test_opus_audio_decoder : the Opus implementation of the audio-decoder
+#                               plugin seam (audio pipeline WP-2)
 # =============================================================================
 
 find_package(GTest QUIET)
@@ -42,6 +44,12 @@ target_link_libraries(test_opus PRIVATE
 # standardised wrapper (auto test discovery, module include dir, etc.).
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_packetise.cpp
     DEPS nimrtc::opus nimrtc::core)
+
+# The audio pipeline (WP-2): the Opus implementation of plugins::IAudioDecoder.
+# The test reaches the plugin through the registry's audio-decoder slot,
+# exactly like the engine reaches it.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_audio_decoder.cpp
+    DEPS nimrtc::opus nimrtc::core nimrtc::plugins)
 
 # NOTE: No top-level add_test() — see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).  The legacy

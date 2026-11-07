@@ -41,7 +41,15 @@ namespace nimrtc::plugins {
 struct NIMRTC_API_STABLE JBConfig {
     std::string_view name;
     uint32_t ssrc = 0;
-    uint32_t clock_rate_hz = 90000;
+    /** RTP clock rate of the stream this buffer carries.
+    *
+    *  0 = "unspecified": the caller that knows the stream clock must set
+    *  it (spec B-3 / F-6).  A jitter buffer that silently assumed 90 kHz
+    *  would compute the interarrival jitter of a 48 kHz audio stream in the
+    *  wrong unit and derive a playout delay that is off by the ratio between
+    *  the two rates.
+    */
+    uint32_t clock_rate_hz = 0;
     int initial_depth_ms = 40;
     int max_depth_ms = 200;
     int min_depth_ms = 10;
@@ -63,6 +71,15 @@ class NIMRTC_API_STABLE IJB : public IPlugin {
 public:
     virtual void set_callbacks(FrameReadyCallback on_frame_ready,
                                FrameDropCallback  on_frame_drop) noexcept = 0;
+
+    /** Configure the buffer for the stream it is going to carry.
+    *
+    *  Must be callable after create() and before the first push().  The
+    *  audio receive pipeline uses it to set the *stream* clock rate (48000
+    *  for Opus) -- a jitter buffer that assumes 90 kHz would mis-measure
+    *  the jitter of an audio stream (spec B-3 / F-6).
+    */
+    virtual Status configure(const JBConfig& cfg) noexcept = 0;
 
     virtual Status
     push(const RtpPacket& pkt, TimestampUs recv_time_us) noexcept = 0;

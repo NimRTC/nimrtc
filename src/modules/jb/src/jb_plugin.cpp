@@ -49,6 +49,10 @@ Config to_concrete_config(const plugins::JBConfig& p) noexcept {
     c.min_delay     = core::Milliseconds{p.min_depth_ms};
     c.max_delay     = core::Milliseconds{p.max_depth_ms};
     c.max_packets   = 512;          // plugin interface doesn't expose this
+    // The concrete module reads clock_rate_hz == 0 as "90 kHz" (its
+    // historical default).  A stream that knows its own clock calls
+    // configure() and sets the real rate (spec B-3 / F-6).
+    c.clock_rate_hz = p.clock_rate_hz;
     c.adaptive      = true;
     return c;
 }
@@ -137,6 +141,16 @@ void PluginAdapter::set_callbacks(plugins::FrameReadyCallback on_frame_ready,
                                  plugins::FrameDropCallback  on_frame_drop) noexcept {
     on_frame_ready_ = std::move(on_frame_ready);
     on_frame_drop_  = std::move(on_frame_drop);
+}
+
+plugins::Status PluginAdapter::configure(const plugins::JBConfig& cfg) noexcept {
+    if (!concrete_) return plugins::kErrInternal;
+    plugin_config_    = cfg;
+    concrete_config_  = to_concrete_config(cfg);
+    // Live reconfigure: the concrete module keeps its buffering state and
+    // re-derives the adaptive target delay from the new policy.
+    concrete_->update_config(concrete_config_);
+    return plugins::kOk;
 }
 
 plugins::Status PluginAdapter::push(const plugins::RtpPacket& pkt,

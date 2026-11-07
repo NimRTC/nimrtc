@@ -72,6 +72,10 @@ public:
     void set_callbacks(plugins::FrameReadyCallback on_frame_ready,
                        plugins::FrameDropCallback  on_frame_drop) noexcept override;
 
+    // Configures the buffer for the stream it carries: the audio
+    // pipeline sets the negotiated clock rate here (spec B-3 / F-6).
+    plugins::Status configure(const plugins::JBConfig& cfg) noexcept override;
+
     plugins::Status push(const plugins::RtpPacket& pkt,
                           plugins::TimestampUs recv_time_us) noexcept override;
 

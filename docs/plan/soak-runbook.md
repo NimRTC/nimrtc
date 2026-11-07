@@ -182,16 +182,28 @@ git fetch origin \
   'refs/heads/soak/evidence-windows:refs/remotes/origin/soak/evidence-windows'
 for branch in soak/evidence-linux-x86_64 soak/evidence-windows; do
   git ls-tree -r --name-only "origin/$branch" | grep '\.jsonl$' | while read -r f; do
-    mkdir -p "build/soak/$(dirname "$f")"
+    # Take the BASE NAME, not the branch path.  The branch stores the
+    # file under evidence/<platform>/<platform>-<day>.jsonl, but the
+    # collector writes build/soak/<platform>-<day>.jsonl and the
+    # summary only reads the TOP LEVEL of build/soak/.  Copying the
+    # branch path verbatim puts the records in build/soak/evidence/...,
+    # where the summary never sees them -- the CI half of the window
+    # would silently count as zero.
+    name="$(basename "$f")"
     # APPEND, do not overwrite: the Windows Scheduled Task and the CI
     # job both produce a record for the same platform and day, and the
     # summary needs both (it reads a day as green only when every
-    # required case has a PASS record).
-    git show "origin/$branch:$f" >> "build/soak/$f"
+    # required case has a PASS record and no case has a FAIL).
+    git show "origin/$branch:$f" >> "build/soak/$name"
   done
 done
 python tools/run_soak.py --summary --require
 ```
+
+Run the merge **before** every `--summary --require`. The command
+appends, so running it twice puts the same records in twice; the
+collector drops exactly duplicated records, so that is harmless -- but
+it does mean the merge is idempotent only in effect, not in bytes.
 
 The workflow is the only source of the Linux half of the window unless
 a real Linux machine is available; a green Windows streak and a green

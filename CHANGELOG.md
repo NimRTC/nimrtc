@@ -284,6 +284,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   `docs/plan/soak-runbook.md` §4.3.1 records which tree each half of
   the window measures and how to check the local one.
+- **The soak window also refuses to credit a day that was measured on a
+  dirty working tree.** A commit identifies a tree, but a dirty tree is
+  not that tree: the program that produced the evidence is whatever the
+  working directory happened to contain, so such a day says nothing
+  about the commit that gets tagged. `tools/run_soak.py` now records
+  `git_dirty` in every evidence record, and a day whose records are not
+  all from a clean tree is not green — it is listed under "days
+  measured on an unclean tree". A record that does not say (one written
+  before the flag existed) is reported as "not recorded" rather than as
+  dirty, because the gate cannot certify what it cannot see.
+- **The daily Windows evidence run is now a script rather than a
+  hand-typed Scheduled Task action.** `scripts/run-soak-daily.ps1` runs
+  the collector, tees its output into `build/soak/soak-task.log` and
+  returns the collector's exit code; it picks the first interpreter that
+  can both execute code and import `playwright`, because Case D drives
+  a real Chrome peer through Playwright and an interpreter without it
+  produces no evidence at all. `scripts/register-soak-task.ps1`
+  registers (or removes) the task, warns when the checkout is not on
+  the candidate branch, and uses `StartWhenAvailable` so a trigger
+  missed while the machine was asleep fires on wake — a gap day breaks
+  the streak, so a task that never runs is worse than one that runs
+  late.
 - **The source version is now `1.1.0`** (`project(VERSION)` in
   `CMakeLists.txt`, `NIMRTC_API_VERSION_{MAJOR,MINOR,PATCH}` in
   `src/core/include/nimrtc/core/api_version.hpp`, encoded `NIMRTC_API_VERSION`
@@ -642,10 +664,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   taken from `main`, whose tree already carried the v1.2.0 audio body,
   and the Linux half of that window was red anyway — the Linux port
   picker crashed and the CI evidence was not merged into the
-  summary, and both fixes are on `release/1.1`. The window
-  therefore starts on the first day `release/1.1` is the measured tree
-  on **both** platforms, and needs seven consecutive green Case D +
-  Case E days on each.
+  summary, and both fixes are on `release/1.1`. **The first counted day
+  is 2026-11-08 (UTC)**, and the earliest possible close of the window
+  is 2026-11-14 — seven consecutive green Case D + Case E days on
+  **both** platforms, with every record taken on a clean checkout of
+  `release/1.1`.
 
 - **The earlier C-track notes that kept W3 / W5 open are superseded.**
   W3 (Windows APM prebuild `continue-on-error`) and W5

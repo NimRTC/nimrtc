@@ -165,8 +165,41 @@ GitHub-hosted runners:
 | Schedule | `cron: '23 3 * * *'` (daily; `workflow_dispatch` runs one platform on demand) |
 | Jobs | `linux-x86_64` (ubuntu-22.04) and `windows` (windows-2022) |
 | What it runs | `python tools/run_soak.py --platform <platform> --case d,e` on a fresh Debug build |
+| Which tree it measures | `SOAK_REF` — `release/1.1` by default, overridable with the `ref` dispatch input |
 | Where the record lands | `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploaded as the artifact `soak-<platform>-<run id>` (90-day retention) |
 | Where it accumulates | the per-platform branch `soak/evidence-<platform>`, one commit per day, so the two jobs never race for the same ref |
+
+### 4.3.1 Which tree the window measures
+
+The window must measure **the tree that gets tagged**, which for
+`v1.1.0` is `release/1.1` — *not* `main`. `main` already carries the
+v1.2.0 audio body, so evidence collected from `main` would be evidence
+about a different program than the release candidate. The workflow
+therefore checks out `SOAK_REF`, which defaults to `release/1.1`:
+
+```yaml
+env:
+  SOAK_REF: ${{ inputs.ref || 'release/1.1' }}
+```
+
+A scheduled run has no `inputs`, so it takes the same default; a
+manual run can point it elsewhere with `workflow_dispatch` → `ref`.
+
+**The Windows half of the window has the same requirement, and it is
+not automatic.** The local Scheduled Task (§4.1) runs the collector
+against *the working tree of the checkout it was registered against* —
+it does not check out a ref. The release machine's checkout must
+therefore stay on `release/1.1` for the whole window, and switching it
+to `main` (to work on the v1.2 body) silently starts measuring the
+wrong tree. Check the branch before letting a day be recorded:
+
+```powershell
+git -C d:\MyOpen\NimRTC rev-parse --abbrev-ref HEAD
+```
+
+If the branch is not the candidate branch, the day is not evidence for
+the window: delete `build/soak/windows-<day>.jsonl` after the run, fix
+the checkout, and re-run the collector.
 
 Both jobs run with `continue-on-error: true`: a red acceptance run is
 **evidence** (the collector records `FAIL`, which breaks the streak),

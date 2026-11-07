@@ -39,6 +39,20 @@ on:
           - both
           - linux-x86_64
           - windows
+      ref:
+        description: 'Tree to measure -- the v1.1.0 candidate lives on release/1.1'
+        required: false
+        default: 'release/1.1'
+        type: string
+
+# The tree the window measures.  It is NOT `main`: the v1.1.0 tag is cut
+# from `release/1.1`, and `main` already carries the v1.2.0 audio body.
+# Evidence collected from a different tree than the one that gets tagged
+# would not be evidence about the release candidate.  The scheduled run
+# has no `inputs`, so it falls back to the same default the dispatch
+# input carries.
+env:
+  SOAK_REF: ${{ inputs.ref || 'release/1.1' }}
 
 permissions:
   contents: write
@@ -67,6 +81,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # The tree the window measures.  Must be the candidate tree
+          # (release/1.1), not `main` -- see the `SOAK_REF` env block.
+          ref: ${{ env.SOAK_REF }}
           # Full history, so the evidence branch can be fetched and pushed
           # back without tripping GitHub's "shallow update not allowed".
           fetch-depth: 0
@@ -175,6 +192,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # The tree the window measures.  Must be the candidate tree
+          # (release/1.1), not `main` -- see the `SOAK_REF` env block.
+          ref: ${{ env.SOAK_REF }}
           fetch-depth: 0
 
       - name: Set up MSVC

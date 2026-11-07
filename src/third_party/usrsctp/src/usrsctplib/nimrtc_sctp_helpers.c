@@ -106,6 +106,70 @@ nimrtc_get_userspace_udp_port(void)
 	return port;
 }
 
+/*
+ * nimrtc_pick_free_udp_port -- find a UDP port that is currently free
+ * on the loopback interface, and return it in host byte order.
+ *
+ * Rationale (Linux CI, 2026-11-07): the seam used to call
+ * usrsctp_init(9899, ...) with a hard-coded port.  usrsctp's
+ * recv_thread_init() binds its internal `userspace_udpsctp` socket
+ * to exactly that port.  When two NimRTC test processes run
+ * concurrently (CTest runs each gtest-discovered case as its own
+ * process under `-j 2`), the second process's bind() failed, so
+ * `userspace_udpsctp` stayed -1 and the seam fell back to sending
+ * SCTP packets to 127.0.0.1:9899 -- which belonged to the *other*
+ * process.  usrsctp's listener then demultiplexed the datagram onto
+ * the wrong socket, the INIT/INIT-ACK handshake never completed,
+ * and the test timed out after 60 s.
+ *
+ * Picking an ephemeral port per process removes the collision: the
+ * port is chosen while it is free, and the probe socket is closed
+ * again immediately, so the window between "probe" and "usrsctp_init()
+ * binds it" is as small as the OS allows.
+ *
+ * Returns 0 if no free port could be found (the caller then has to
+ * deal with a failed usrsctp_init()).
+ */
+int
+nimrtc_pick_free_udp_port(void)
+{
+	struct sockaddr_in sin;
+	int port = 0;
+
+#if defined(_WIN32) && !defined(__MINGW32__)
+	/* A Windows SOCKET is a pointer-sized handle.  Keep it in a
+	 * SOCKET variable for the whole function and narrow to an int
+	 * only for the port, never for the handle. */
+	SOCKET fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd == INVALID_SOCKET) {
+		return 0;
+	}
+#else
+	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd < 0) {
+		return 0;
+	}
+#endif
+	memset(&sin, 0, sizeof(sin));
+	sin.sin_family = AF_INET;
+	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	sin.sin_port = 0; /* let the OS pick */
+
+	if (bind(fd, (struct sockaddr *)&sin, (socklen_t)sizeof(sin)) == 0) {
+		socklen_t namelen = (socklen_t)sizeof(sin);
+		if (getsockname(fd, (struct sockaddr *)&sin, &namelen) == 0) {
+			port = (int)ntohs(sin.sin_port);
+		}
+	}
+
+#if defined(_WIN32) && !defined(__MINGW32__)
+	closesocket(fd);
+#else
+	close(fd);
+#endif
+	return port;
+}
+
 void
 nimrtc_register_loopback_addresses(void)
 {

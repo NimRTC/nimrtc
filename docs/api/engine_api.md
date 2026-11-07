@@ -27,7 +27,8 @@ nimrtc::engine::NimRTCEngine
 │   └── is_open() → bool
 │
 ├── Callbacks (set once at construction)
-│   ├── set_on_audio_frame(cb)
+│   ├── set_on_audio_frame(cb)        -- legacy PCM tap
+│   ├── set_on_audio_frame_info(cb)   -- detailed PCM frame
 │   ├── set_on_video_frame(cb)
 │   ├── set_on_error(cb)
 │   ├── set_on_state_change(cb)
@@ -53,7 +54,8 @@ nimrtc::engine::NimRTCEngine
 │   └── maybe_install_srtp_keys()
 │
 ├── Audio I/O
-│   └── send_audio(const float* pcm, size_t n) → Status
+│   ├── send_audio(const float* pcm, size_t n) → Status
+│   └── remote_audio_format(AudioFormat* out) → bool
 │
 ├── Video I/O
 │   ├── start_video() / stop_video()
@@ -174,12 +176,28 @@ methods are written defensively.
 
 | Callback | Fires when | Signature |
 |---|---|---|
-| `on_audio_frame` | A decoded PCM frame is available (after SRTP decrypt + Opus decode + 3A post-process on the receive path) | `void(const float* pcm, size_t num_samples)` |
+| `on_audio_frame` | A decoded PCM frame is available (after SRTP decrypt + Opus decode + downmix + 3A post-process on the receive path) | `void(const float* pcm, size_t num_samples)` |
+| `on_audio_frame_info` | The same decoded PCM frame, with its metadata (rate, channels, RTP timestamp, concealment / FEC flags, capture instant) | `void(const engine::AudioFrameInfo& info)` |
 | `on_video_frame` | A decoded H.264 NAL is available on the receive path (pre-render) | `void(const uint8_t* nal, size_t len, bool keyframe)` |
 | `on_error` | Any subsystem error fires (transport, DTLS, audio3A, codec, scheduler) | `void(uint32_t err, std::string_view msg)` |
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
 | `on_data_message` | A DataChannel message arrives | `plugins::DataMessageCallback` |
 | `on_data_state` | A DataChannel state transition (open / closed / error) | `plugins::DataChannelStateCallback` |
+
+> **`on_audio_frame` is the legacy tap.**  Its `num_samples` argument is
+> the **total number of interleaved float samples** —
+> `num_samples_per_channel * channels` — and not the number of samples
+> per channel.  The two are equal only for a mono stream.
+>
+> **`on_audio_frame_info` is the recommended surface.**  It carries the
+> same PCM buffer plus the metadata a host needs to place the frame on
+> a timeline.  When both callbacks are installed, the **legacy one fires
+> first** and both receive the same buffer.  Installing one does not
+> uninstall the other, and both may be absent.
+>
+> The `pcm` pointer of either callback points into a decoder-owned
+> buffer that is reused for the next frame.  A host that needs to keep
+> the audio must copy it.
 
 > **Threading**: callbacks fire on the engine thread (the thread
 > that called `open()` and drives `tick()`). Plugins may also call
@@ -292,6 +310,8 @@ fingerprint in the WebRTC base64 form (matches Chrome's
 
 ## 8. Audio I/O
 
+### 8.1 `send_audio()`
+
 ```cpp
 uint32_t send_audio(const float* pcm_samples, size_t num_samples) noexcept;
 ```
@@ -300,6 +320,25 @@ Encode `pcm_samples` with the configured audio codec, RTP-packetise
 it, SRTP-encrypt it, and submit to the scheduler. The buffer must
 remain valid for the duration of the call (no copy made).
 
+**The framing is the engine's business.**  `send_audio()` accepts any
+block size: the PCM goes into a frame accumulator, and exactly one RTP
+packet carrying exactly one frame of `EngineConfig::audio_ptime_ms`
+milliseconds goes on the wire per frame.  A host that hands over one
+whole frame at a time and a host that hands over seven samples at a
+time put the *same* packets on the wire; only the moment of the call
+differs.  A partial frame stays in the accumulator until the next call
+completes it.
+
+The media timestamp advances by the frame duration whether or not the
+packet reached the wire, so a dropped frame leaves a gap in the
+sequence number — never a hole in the timeline.
+
+**Nothing fails silently.**  An empty buffer, a null buffer or an
+encoder failure increments `Stats::audio_encode_errors` and fires
+`on_error` (throttled to one report per second, so a broken stream
+cannot flood the host).  The counter grows with *every* occurrence,
+even the ones that are not reported.
+
 Call cadence: `num_samples / (sample_rate_hz * channels)` matches
 the frame duration in seconds; typical 10 ms / 20 ms Opus frames.
 The engine handles framing internally as long as you keep the
@@ -307,6 +346,75 @@ cadence consistent — opportunistic re-pacing happens in `tick()`.
 
 Returns `kOk` on success; non-zero on encode / encrypt failure
 (surfaces via `on_error_`).
+
+### 8.2 `set_on_audio_frame_info()`
+
+```cpp
+void set_on_audio_frame_info(AudioFrameInfoCallback cb) noexcept;
+```
+
+Installs the detailed audio-frame callback.  `AudioFrameInfo` carries
+the decoded PCM plus its metadata:
+
+| Field | Meaning |
+|---|---|
+| `pcm` | Interleaved PCM, float, `[-1.0, 1.0]`.  Valid only for the duration of the callback. |
+| `num_samples_per_channel` | Samples per channel in `pcm`. |
+| `sample_rate_hz` | The decoder's native rate (48000 for Opus).  Resample if the device rate differs. |
+| `channels` | Channel count of `pcm`, after the downmix to `EngineConfig::pcm_channels`. |
+| `rtp_timestamp` | RTP timestamp of the first sample in this frame. |
+| `playout_time_us` | The engine-thread instant at which the frame was handed over (same epoch as `tick()`'s clock, **not** the Unix wall clock). |
+| `capture_time_us` | The peer's capture instant, in Unix microseconds.  **0** when the cross-end timeline has not reconstructed it yet — the value is never faked from the local clock. |
+| `concealed` | True when the frame is concealment (PLC) audio, i.e. the original packet never arrived. |
+| `fec_recovered` | True when the frame was reconstructed from the peer's in-band FEC. |
+
+Pass an empty function to remove the callback.  The legacy
+`set_on_audio_frame()` stays, and when both are installed the legacy
+one fires **first**, with the same buffer.
+
+### 8.3 `remote_audio_format()`
+
+```cpp
+bool remote_audio_format(AudioFormat* out) const noexcept;
+```
+
+Reports the negotiated format of the inbound audio stream.  Returns
+`false` when no audio track has been negotiated yet, in which case
+`out` is left untouched.  `AudioFormat` carries
+`sample_rate_hz`, `channels`, `payload_type` and `frame_duration_ms`.
+
+A host that must know the rate before the first frame arrives — to
+pre-allocate a resampler, say — asks the engine:
+
+```cpp
+nimrtc::engine::AudioFormat fmt{};
+if (engine.remote_audio_format(&fmt)) {
+    // fmt.sample_rate_hz, fmt.channels, fmt.payload_type,
+    // fmt.frame_duration_ms are negotiated.
+}
+```
+
+### 8.4 The receive path and the tick rate
+
+The inbound audio is **decoded**: the host receives PCM, not the
+compressed bit-stream.  The pipeline resolves its jitter buffer and
+its decoder through the plugin registry, walks the media timeline on
+the RTP timestamps, conceals the slots that never arrived, recovers a
+lost frame from the peer's in-band FEC where possible, downmixes to the
+configured output channel count and plays out **only** when the host's
+`tick()` asks it to.
+
+**The host must call `tick()` at ≥ 100 Hz for audio playout to be
+smooth.**  A host that ticks at 30 Hz still gets continuous audio,
+with a coarser granularity — the output cadence follows the media
+time, not the arrival, so a slower tick delays the playout instead of
+dropping frames.
+
+There is **no fallback receiver**.  A missing decoder plugin or a
+missing receive pipeline is a hard error (`kAudioDecoderMissing` /
+`kAudioReceiverMissing`) that fires `on_error` exactly once and
+disables the audio track; the inbound packets are then counted and
+dropped, never decoded.
 
 ---
 
@@ -500,7 +608,79 @@ you want to know which subsystem failed:
 
 ---
 
-## 16. See also
+## 16. Migration guide — the audio pipeline (v1.2.0)
+
+The audio pipeline's public SDK is **additive**.  An existing host
+keeps compiling and keeps working; this section says what it *gains*
+and what it *should change*.
+
+### 16.1 Nothing must change
+
+A host that only uses `set_on_audio_frame()` and `send_audio()`
+continues to work unchanged.
+
+**One behavioural change is worth calling out.**  The legacy callback
+now receives genuinely **decoded** PCM.  Before v1.2.0 the receive
+path handed the host the compressed RTP payload reinterpreted as
+floating-point samples, so a host that appeared to "work" against the
+old build was in fact processing garbage.  After the change it
+processes real audio.  This is a **fix, not a regression** — but the
+bytes on the wire changed, and a host that had grown a workaround
+around the noise may need to drop it.
+
+### 16.2 Recommended migration
+
+Install the new callback, and keep the legacy one only if a legacy
+consumer still needs it:
+
+```cpp
+NimRTCEngine engine(cfg);
+
+engine.set_on_audio_frame([](const float* pcm, size_t n) {
+    // Legacy: n = total interleaved floats (samples_per_channel * channels).
+    legacy_sink(pcm, n);
+});
+
+engine.set_on_audio_frame_info([](const nimrtc::engine::AudioFrameInfo& f) {
+    // f.pcm is valid only for the duration of this call.
+    // f.sample_rate_hz / f.channels tell you what you actually got.
+    // f.concealed / f.fec_recovered let you distinguish synthetic audio.
+    modern_sink(f.pcm, f.num_samples_per_channel * f.channels,
+                f.sample_rate_hz, f.channels, f.rtp_timestamp);
+});
+```
+
+### 16.3 Buffer lifetime
+
+`f.pcm` points into a decoder-owned buffer that is reused for the next
+frame.  A host that needs to keep the audio must copy it.  This
+matches the existing contract of the legacy callback and is stated
+explicitly because it is the most common integration mistake.
+
+### 16.4 Tick rate
+
+The host must call `tick()` at **≥ 100 Hz** for audio playout to be
+smooth.  A host that calls it at 30 Hz still gets continuous audio,
+with coarser granularity — the playout follows the media time, not the
+arrival, so a slower tick delays the output instead of dropping it.
+
+### 16.5 Reading the negotiated format
+
+See §8.3 — `remote_audio_format()`.
+
+### 16.6 Backwards-compatibility rules
+
+- The legacy callback fires **before** the new one, with the same
+  buffer.
+- Installing the new callback does **not** uninstall the legacy one,
+  and vice versa.  Both may be absent.
+- When neither is installed, the receiver still runs — the decoding
+  happens regardless, because the statistics and the 3A render
+  reference depend on it.  The frames are simply dropped.
+
+---
+
+## 17. See also
 
 - `engine_config.md` — full field reference for `EngineConfig`.
 - `plugin_author_guide.md` — how to write your own plugin (DTLS,

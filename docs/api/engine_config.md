@@ -38,6 +38,17 @@ EngineConfig
 ├── Audio codec advertisement (SDP / send_audio)
 │   └── audio_codec: AudioCodecConfig
 │
+├── Audio pipeline (receive path)                    ← new in v1.2.0
+│   ├── audio_decoder_name              = "opus"
+│   ├── audio_receiver_name             = "nimrtc_audio_rx"
+│   ├── audio_ptime_ms                  = 20
+│   ├── audio_use_inband_fec            = true
+│   ├── audio_use_dtx                   = false
+│   ├── audio_jitter_target_delay_ms    = 40
+│   ├── audio_max_concealed_frames      = 10
+│   ├── audio_downmix_to_pcm_channels   = true
+│   └── audio_redundancy_percent        = 5
+│
 ├── Network
 │   ├── local_bind_address              = ""
 │   ├── stun_server_host / _port        = ""
@@ -110,6 +121,15 @@ for the full switching guide and constraints.
 | `audio3a_name` | `"webrtc_apm"` | `IAudio3A` plugin id. Set to `""` to disable 3A (raw passthrough). |
 | `codec_name` | `"opus"` | `ICodec` plugin id. Empty = first statically-linked codec. |
 | `audio_codec` | RFC 7587 Opus | Audio codec parameters advertised in SDP and used for `send_audio()`. See §3. |
+| `audio_decoder_name` | `"opus"` | `IAudioDecoder` plugin id — the decoder of the **receive** path. |
+| `audio_receiver_name` | `"nimrtc_audio_rx"` | `IAudioReceiver` plugin id — the receive pipeline itself. |
+| `audio_ptime_ms` | `20` | Audio frame duration in ms (10 / 20 / 40 / 60). Also the SDP `ptime`. |
+| `audio_use_inband_fec` | `true` | Opus in-band FEC. Must match the `a=fmtp` we send. |
+| `audio_use_dtx` | `false` | Opus DTX — only honoured when the peer signals `usedtx=1`. |
+| `audio_jitter_target_delay_ms` | `40` | Target jitter-buffer depth for the audio stream. |
+| `audio_max_concealed_frames` | `10` | Maximum number of consecutive concealed frames before the pipeline gives up on the gap. |
+| `audio_downmix_to_pcm_channels` | `true` | Downmix the decoded stream to `pcm_channels`. |
+| `audio_redundancy_percent` | `5` | In-band redundancy the encoder embeds, in percent (0..100). See below. |
 
 > The engine consumes `audio3a_name` first; when the prebuilt
 > WebRTC APM is missing (`NIMRTC_VENDORED_WEBRTC_APM=OFF` /
@@ -117,6 +137,23 @@ for the full switching guide and constraints.
 > `engine.audio3a()` may return `nullptr`. To force the fallback
 > explicitly, configure `audio3a_name = "webrtc"` (the built-in
 > null stub id).
+
+**The receive path has no fallback.**  `audio_decoder_name` and
+`audio_receiver_name` name real registry slots: a missing decoder
+plugin or a missing receive pipeline is a hard error
+(`kAudioDecoderMissing` / `kAudioReceiverMissing`) that fires
+`on_error` exactly once and disables the audio track.  The inbound
+packets are then counted and dropped — never decoded.  This is
+deliberate: a "built-in minimal receiver" would decode nothing and
+hand the bit-stream to the host as if it were audio.
+
+**`audio_redundancy_percent`** is the in-band redundancy (the SILK
+LBRR copy of the *previous* frame that the encoder embeds in every
+frame).  It is handed to the encoder, so every frame carries the copy,
+and to the decoder, which uses it as its own redundancy hint.  A
+receiver that lost a frame reconstructs it from the redundancy the
+*next* packet carries.  **0** disables the redundancy — the encoder
+then carries no copy at all and the FEC recovery path cannot work.
 
 ### 2.4 BWE / Scheduler
 

@@ -452,6 +452,14 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 
 > **呼应 §1.4 non-goal**：本节是"引擎原语"，**不做 Agent 网关产品**、**不做模型适配胶水**。上层应用基于此 tap 组合自己的 Agent / ASR / LLM 接入（与 §7.1 边界一致）。
 
+### 8.8 音频流水线（v1.2.0）：把接收路径做真
+
+> 落地形态见 [音频流水线规格](../plan/audio-pipeline-spec.md) 与 [开发 / 版本计划](../plan/audio-pipeline-dev-plan.md)。本节只记录**架构层面的三条决定**，接口细节在 `docs/api/engine_api.md`。
+
+- **接收路径与发送路径对称，编解码走同一条接缝。** 引擎不再自己持有具体的 Opus / 抖动缓冲实现：解码器（`plugins::IAudioDecoder`）与接收流水线（`plugins::IAudioReceiver`）都从 `core::PluginRegistry` 的类型化槽位解析，引擎里**不含任何具体模块头文件**（约束 L4）。没有兜底实现——插件缺失是**硬错误**（`kAudioDecoderMissing` / `kAudioReceiverMissing`），触发一次 `on_error` 并停掉音频轨，而不是"解码不出来也照样把码流当 PCM 交给宿主"。
+- **播放由时钟驱动，不由到达驱动。** 输出节奏跟随**媒体时间**而不是包到达时刻：丢掉的帧按时间轴补静音（PLC），可用时优先用对端的 in-band FEC 重建，最后按配置声道数下混。宿主必须以 **≥ 100 Hz** 调用 `tick()`；30 Hz 依然连续，只是粒度变粗。
+- **宿主拿到的是真 PCM。** 旧实现把 RTP 载荷 `reinterpret_cast` 成 `float*` 交给宿主（噪声）。现在宿主收到解码后的 PCM，并可通过新的 `set_on_audio_frame_info()` 拿到帧的元数据：采样率、声道、RTP 时间戳、**是否补静音**、**是否由 FEC 重建**、以及来自跨端时间线的 `capture_time_us`（拿不到时是 0，**绝不用本地时钟伪造**——这是 §8.4 帧级对齐的前提）。旧的 `set_on_audio_frame()` 保留且**先触发**，语义不变：它的 `num_samples` 是**交错后的浮点总样本数**。
+
 ---
 
 ## 9. 可观测性

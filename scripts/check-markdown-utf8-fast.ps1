@@ -302,21 +302,57 @@ $root = (Resolve-Path $Path).Path
 Write-Host "Scanning under: $root"
 Write-Host "Fix mode: $(if ($Fix) { 'ON' } else { 'OFF (read-only)' })"
 
-$files = @()
-foreach ($pat in $patterns) {
-    $files += @(Get-ChildItem -Path $root -Recurse -File -Filter $pat -ErrorAction SilentlyContinue)
-}
-$files = $files | Where-Object {
-    $rel = $_.FullName.Substring($root.Length).TrimStart('\','/')
-    if ($rel -match '(^|[\\/])node_modules([\\/]|$)') { return $false }
-    $excluded = $false
-    foreach ($ex in $excludeDirs) {
-        if ($rel -like "$ex\*" -or $rel -like "$ex/*" -or $rel -eq $ex) {
-            $excluded = $true; break
+function Find-CandidateFiles([string]$root, [string[]]$patterns, [string[]]$excludeDirs) {
+    # Compare with forward slashes on every platform.
+    $exNorm = @($excludeDirs | ForEach-Object { $_.Replace('\', '/') })
+
+    # Prune the excluded directories *while* descending.  Walking the
+    # whole tree first and filtering the result afterwards pulls in
+    # build/ and src/third_party/ -- ~90k files in this checkout -- and
+    # Get-ChildItem -Recurse overflows the stack long before that.
+    $found = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($root)
+
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        $rel = $dir.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
+
+        $skip = $false
+        foreach ($ex in $exNorm) {
+            if ($rel -eq $ex -or $rel -like "$ex/*") { $skip = $true; break }
+        }
+        if ($skip) { continue }
+
+        try {
+            foreach ($sub in [System.IO.Directory]::EnumerateDirectories($dir)) {
+                $subRel = $sub.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
+                # Any node_modules folder, anywhere.
+                if ($subRel -match '(^|/)node_modules(/|$)') { continue }
+                # A junction or a symlink can point back into the tree;
+                # following it can loop forever.
+                $attr = [System.IO.File]::GetAttributes($sub)
+                if ($attr -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+                $stack.Push($sub)
+            }
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir)) {
+                $name = [System.IO.Path]::GetFileName($file)
+                foreach ($pat in $patterns) {
+                    if ($name -like $pat) {
+                        $found.Add([System.IO.FileInfo]::new($file))
+                        break
+                    }
+                }
+            }
+        } catch {
+            # An unreadable directory must not abort the whole scan.
+            continue
         }
     }
-    -not $excluded
-} | Sort-Object -Property FullName -Unique
+    return ($found | Sort-Object -Property FullName -Unique)
+}
+
+$files = Find-CandidateFiles $root $patterns $excludeDirs
 
 Write-Host "Found $($files.Count) candidate file(s)."
 Write-Host ""

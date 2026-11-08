@@ -51,14 +51,32 @@ def remote_tag() -> str:
     """The sha of the release tag on origin, or "" when it is not there yet."""
     out = _git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}")
     for line in out.splitlines():
-        if f"refs/tags/{TAG}$" in line:
-            return line.split()[0]
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        # Compare the ref name exactly: `ls-remote --tags` prints the
+        # annotated tag and its peeled commit as two lines, and only the
+        # first one is the tag itself.
+        if fields[-1] == f"refs/tags/{TAG}":
+            return fields[0]
     return ""
 
 
 def local_tag() -> str:
-    out = _git("rev-list", "-n", "1", TAG)
+    """The sha of the local tag *object*.
+
+    This is the same kind of value remote_tag() returns — the annotated
+    tag object — so the two lines of the snapshot are comparable and a
+    mismatch means "not pushed yet" rather than "different objects".
+    The commit the tag peels to is reported separately by tag_commit().
+    """
+    out = _git("rev-parse", f"refs/tags/{TAG}")
     return out
+
+
+def tag_commit() -> str:
+    """The commit the local tag points at ("" when the tag is absent)."""
+    return _git("rev-list", "-n", "1", TAG)
 
 
 def soak() -> dict:
@@ -121,6 +139,7 @@ def collect() -> dict:
         "tag": TAG,
         "remote_tag_sha": remote_tag(),
         "local_tag_sha": local_tag(),
+        "tag_commit_sha": tag_commit(),
         "head": head_commit(),
         "changelog_1_1_0_written": changelog_section(),
         "soak": soak(),
@@ -143,6 +162,7 @@ def main() -> int:
     rt = data["remote_tag_sha"]
     print(f"  remote tag {TAG} : {rt if rt else 'NOT CUT'}")
     print(f"  local  tag {TAG} : {data['local_tag_sha'] or 'absent'}")
+    print(f"  tag commit       : {data['tag_commit_sha'] or '-'}")
     print(
         "  CHANGELOG [1.1.0] : "
         + ("written" if data["changelog_1_1_0_written"] else "NOT written")

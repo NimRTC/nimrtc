@@ -232,6 +232,37 @@ protected:
         return pb.build();
     }
 
+    /** Let the audio receive pipeline settle.
+     *
+     *  The jitter buffer plays a frame out `target_delay` after its
+     *  packet arrived (the engine's default is 40 ms), and the playout
+     *  only happens on a tick.  A frame that is already buffered is
+     *  therefore delivered *after* the last packet was fed — so the
+     *  counters keep moving for a while after the input went quiet.
+     *
+     *  A test that compares the counters before and after a quiet
+     *  period has to wait for that to happen, otherwise it measures the
+     *  playout delay instead of the counters.
+     *
+     *  @return The frame count once the pipeline stopped moving. */
+    static std::uint64_t settle_audio(NimRTCEngine& engine,
+                                      std::uint32_t quiet_rounds = 5) {
+        std::uint64_t last = engine.stats().audio_frames_received;
+        std::uint32_t quiet = 0;
+        for (std::uint32_t i = 0; i < 200 && quiet < quiet_rounds; ++i) {
+            engine.tick();
+            std::this_thread::sleep_for(20ms);
+            const std::uint64_t now = engine.stats().audio_frames_received;
+            if (now == last) {
+                ++quiet;
+            } else {
+                quiet  = 0;
+                last   = now;
+            }
+        }
+        return last;
+    }
+
     /** Build a Sender Report for @p ssrc.
      *
      *  The engine parses the peer's Sender Report both for the
@@ -359,11 +390,24 @@ TEST_F(EngineAudioStats, TheReceiveCountersAreMonotonic) {
     ASSERT_FALSE(second.empty());
     engine.feed_media_inbound(second.data(), second.size());
 
-    for (int i = 0; i < 3; ++i) {
-        engine.tick();
-        std::this_thread::sleep_for(20ms);
-    }
+    // The jitter buffer still holds the second frame: it is played out
+    // `target_delay` after it arrived.  Let the pipeline drain before
+    // the first snapshot — otherwise the second frame lands *between*
+    // the two snapshots and the "no new packet, no new frame"
+    // assertion measures the playout delay instead of the counter.
+    settle_audio(engine);
+
     const auto before = engine.stats();
+
+    // The two Opus packets carry two 20 ms frames, so the settled
+    // pipeline must have delivered both of them.  Without this the
+    // "the count must not grow" assertion below would also pass on an
+    // empty pipeline.
+    EXPECT_EQ(before.audio_frames_received, 2u)
+        << "both Opus frames must have been played out before the first "
+           "snapshot";
+    EXPECT_EQ(before.audio_samples_received, 1920u)
+        << "two 20 ms frames at 48 kHz carry 1920 samples per channel";
 
     for (int i = 0; i < 3; ++i) {
         engine.tick();
@@ -493,6 +537,14 @@ TEST_F(EngineAudioStats, ReceiverReportCarriesTheLastSenderReport) {
     const auto sr = make_sender_report(kPeerAudioSsrc, kNtp, 0);
     ASSERT_FALSE(sr.empty());
     engine.feed_media_inbound(sr.data(), sr.size());
+
+    // The DLSR field (the delay since the last Sender Report) counts in
+    // units of 1/65536 s — about 15.3 µs — and the engine truncates the
+    // elapsed time into that unit (RFC 3550 §6.4.1).  A delay shorter
+    // than one unit therefore *is* zero on the wire, so the receiver
+    // report has to be built at least one unit later for the field to
+    // be observable at all.
+    std::this_thread::sleep_for(1ms);
 
     engine.tick();
 

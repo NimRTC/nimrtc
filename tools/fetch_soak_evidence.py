@@ -64,7 +64,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from gh_api import _redirect_no_auth, resolve_token  # noqa: E402
+from gh_api import _redirect_no_auth, candidate_tokens  # noqa: E402
 
 API = "https://api.github.com"
 REPO = "NimRTC/nimrtc"
@@ -83,6 +83,66 @@ ARTIFACT_PREFIX = "soak-"
 
 class FetchError(Exception):
     """A recoverable problem while talking to GitHub."""
+
+
+def _probe_repo(token: str) -> bool:
+    """Can this token read the repository?
+
+    The probe has to be a repository endpoint and not `/user`: the
+    workflow's `GITHUB_TOKEN` is an *installation* token, and `/user`
+    only answers for user tokens, so a probe on `/user` rejects the
+    very token the CI is given.  The repository endpoint answers for
+    both kinds, and reading the repository is what the fetcher needs
+    anyway.
+    """
+    req = urllib.request.Request(
+        f"{API}/repos/{REPO}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "nimrtc-soak-evidence",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _candidate_tokens() -> list:
+    """Every token that might read the repository, best first.
+
+    `gh_api.candidate_tokens()` accepts the environment tokens whose
+    prefix looks like a GitHub token.  That prefix is a convention, not
+    a contract, so the environment's `GITHUB_TOKEN` is added here
+    unfiltered: a change in the prefix must not leave the CI without a
+    token, and a token that does not work is rejected by the probe
+    anyway.
+    """
+    tokens = list(candidate_tokens())
+    for var in ("GITHUB_TOKEN", "GH_TOKEN"):
+        value = os.environ.get(var)
+        if value and value not in tokens:
+            tokens.append(value)
+    return tokens
+
+
+def resolve_api_token(candidates=None, probe=None) -> str:
+    """A token that can read the repository's actions artifacts.
+
+    `candidates` and `probe` are injectable so that the self-test can
+    pin the behaviour without the network.
+    """
+    tokens = list(candidates) if candidates is not None else _candidate_tokens()
+    check = probe if probe is not None else _probe_repo
+    for token in tokens:
+        if check(token):
+            return token
+    raise FetchError(
+        f"no GitHub token that can read {REPO} was found in "
+        "~/.git-credentials or the environment (GITHUB_TOKEN / GH_TOKEN)"
+    )
 
 
 def api_get(path: str, token: str, raw: bool = False):
@@ -259,6 +319,44 @@ def _self_test() -> int:
         merged = merge_records(target, ['{"case": "d"}', '{"case": "f"}'])
         check(merged == 0, "the file is stable once every record is there")
 
+    # The token: the CI's GITHUB_TOKEN is an installation token, which
+    # a probe on the /user endpoint rejects -- so the fetcher probes the
+    # repository instead, and a token that only the repository answers
+    # for is still accepted.
+    def repo_only(token):
+        return token == "installation-token"
+
+    check(
+        resolve_api_token(candidates=["installation-token"], probe=repo_only)
+        == "installation-token",
+        "a token the repository endpoint accepts is used",
+    )
+
+    def nothing_works(token):
+        return False
+
+    try:
+        resolve_api_token(candidates=["broken"], probe=nothing_works)
+        check(False, "a token that cannot read the repository is refused")
+    except FetchError:
+        check(True, "a token that cannot read the repository is refused")
+
+    # The environment's GITHUB_TOKEN is taken unfiltered: its prefix is
+    # a convention, and a token whose prefix changes must not leave the
+    # CI without one.
+    saved = os.environ.get("GITHUB_TOKEN")
+    os.environ["GITHUB_TOKEN"] = "token-with-an-unknown-prefix"
+    try:
+        check(
+            "token-with-an-unknown-prefix" in _candidate_tokens(),
+            "the environment's GITHUB_TOKEN is a candidate whatever its prefix",
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("GITHUB_TOKEN", None)
+        else:
+            os.environ["GITHUB_TOKEN"] = saved
+
     print("self-test: %d failure(s)" % len(failures))
     for message in failures:
         print("  FAIL %s" % message)
@@ -318,8 +416,8 @@ def main() -> int:
         wanted = {item.strip() for item in args.platform.split(",") if item.strip()}
 
     try:
-        token = resolve_token()
-    except SystemExit as exc:
+        token = resolve_api_token()
+    except FetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

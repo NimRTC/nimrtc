@@ -11,11 +11,22 @@
 
 [CmdletBinding()]
 param(
-    [string]$Path = (Split-Path -Parent $PSScriptRoot),
+    # The default is resolved in the body, not here: on Windows PowerShell
+    # 5.1 a CmdletBinding script evaluates its parameter defaults before
+    # $PSScriptRoot is populated, so 'Split-Path -Parent $PSScriptRoot'
+    # fails with "cannot bind argument to parameter 'Path' because it is an
+    # empty string" when the script is started with '-File'.
+    [string]$Path = '',
     [switch]$Fix
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Path) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot }
+                 else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Path = Split-Path -Parent $scriptDir
+}
 
 $cs = @'
 using System;
@@ -298,7 +309,17 @@ $excludeDirs = @(
 )
 
 $patterns = @('*.md', '*.txt')
-$root = (Resolve-Path $Path).Path
+$resolved = (Resolve-Path $Path).Path
+
+# A single file is a legal target.  The walker only knows how to descend
+# into directories, so remember the file and scan the list directly.
+$root = $resolved
+$singleFile = $null
+if (Test-Path -PathType Leaf $root) {
+    $singleFile = $root
+    $root = Split-Path -Parent $root
+}
+
 Write-Host "Scanning under: $root"
 Write-Host "Fix mode: $(if ($Fix) { 'ON' } else { 'OFF (read-only)' })"
 
@@ -352,7 +373,17 @@ function Find-CandidateFiles([string]$root, [string[]]$patterns, [string[]]$excl
     return ($found | Sort-Object -Property FullName -Unique)
 }
 
-$files = Find-CandidateFiles $root $patterns $excludeDirs
+if ($singleFile) {
+    $name = [System.IO.Path]::GetFileName($singleFile)
+    $matched = $false
+    foreach ($pat in $patterns) {
+        if ($name -like $pat) { $matched = $true; break }
+    }
+    $files = @()
+    if ($matched) { $files = @([System.IO.FileInfo]::new($singleFile)) }
+} else {
+    $files = @(Find-CandidateFiles $root $patterns $excludeDirs)
+}
 
 Write-Host "Found $($files.Count) candidate file(s)."
 Write-Host ""

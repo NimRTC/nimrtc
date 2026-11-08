@@ -56,7 +56,12 @@
 
 [CmdletBinding()]
 param(
-    [string]$Path = (Split-Path -Parent $PSScriptRoot),
+    # The default is resolved in the body, not here: on Windows PowerShell
+    # 5.1 a CmdletBinding script evaluates its parameter defaults before
+    # $PSScriptRoot is populated, so 'Split-Path -Parent $PSScriptRoot'
+    # fails with "cannot bind argument to parameter 'Path' because it is an
+    # empty string" when the script is started with '-File'.
+    [string]$Path = '',
     [switch]$Fix,
     [switch]$Quiet,
     [string[]]$Pattern = @('*.md', '*.txt')
@@ -64,6 +69,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $Path) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot }
+                 else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Path = Split-Path -Parent $scriptDir
+}
 
 # --- Patterns --------------------------------------------------------------
 # Each entry: <search-bytes> -> <replace-bytes>
@@ -228,17 +239,39 @@ function Test-CleanUtf8([byte[]]$bytes) {
 
 # --- Main ------------------------------------------------------------------
 
-$root = (Resolve-Path $Path).Path
-if (-not (Test-Path $root)) {
-    Write-Error "Path not found: $root"
+$resolved = (Resolve-Path $Path).Path
+if (-not (Test-Path $resolved)) {
+    Write-Error "Path not found: $resolved"
     exit 2
+}
+
+# A single file is a legal target (see the .EXAMPLE block).  The walker
+# only knows how to descend into directories, so remember the file and
+# scan the list directly instead.
+$root = $resolved
+$singleFile = $null
+if (Test-Path -PathType Leaf $root) {
+    $singleFile = $root
+    $root = Split-Path -Parent $root
 }
 
 Write-Host "Scanning under: $root"
 Write-Host "Fix mode: $(if ($Fix) { 'ON' } else { 'OFF (read-only)' })"
 Write-Host ""
 
-$files = Find-CandidateFiles $root $Pattern
+if ($singleFile) {
+    $name = [System.IO.Path]::GetFileName($singleFile)
+    $matched = $false
+    foreach ($pat in $Pattern) {
+        if ($name -like $pat) { $matched = $true; break }
+    }
+    $files = @()
+    if ($matched) { $files = @([System.IO.FileInfo]::new($singleFile)) }
+} else {
+    # @() so an empty scan yields an array and .Count stays valid under
+    # Set-StrictMode.
+    $files = @(Find-CandidateFiles $root $Pattern)
+}
 Write-Host "Found $($files.Count) candidate file(s)."
 Write-Host ""
 
@@ -330,7 +363,7 @@ if ($Fix) {
 } else {
     Write-Host "  Files with known corruption:     $totalErrors  (run with -Fix to repair)"
 }
-if ($allStats.Count -gt 0) {
+if ($allStats.Keys.Count -gt 0) {
     Write-Host "  Bytes repaired by category:"
     foreach ($k in ($allStats.Keys | Sort-Object)) {
         if ($allStats[$k] -gt 0) {

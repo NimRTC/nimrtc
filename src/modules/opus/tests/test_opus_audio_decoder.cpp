@@ -171,7 +171,7 @@ TEST(OpusAudioDecoder, DecodesAMultiFramePayload) {
 
     std::vector<std::vector<std::uint8_t>> opus_frames;
     for (int i = 0; i < 3; ++i) {
-        const auto pcm = make_sine(kFrameSamples, 200.0f + 100.0f * i, kRate);
+        const auto pcm = make_sine(kFrameSamples, 200.0f + 100.0f * static_cast<float>(i), kRate);
         std::vector<std::uint8_t> bytes(512);
         const std::size_t n = enc.encode(pcm.data(), kFrameSamples,
                                           bytes.data(), bytes.size());
@@ -268,7 +268,7 @@ TEST(OpusAudioDecoder, RecoversTheLostFrameFromTheNextPacket) {
 
     std::vector<std::vector<std::uint8_t>> packets;
     for (int i = 0; i < 3; ++i) {
-        const auto pcm = make_sine(kFrameSamples, 180.0f + 20.0f * i, kRate);
+        const auto pcm = make_sine(kFrameSamples, 180.0f + 20.0f * static_cast<float>(i), kRate);
         std::vector<std::uint8_t> bytes(512);
         const std::size_t n = enc.encode(pcm.data(), kFrameSamples,
                                           bytes.data(), bytes.size());

@@ -373,9 +373,9 @@ TEST_F(AudioRxTest, TimelineGapProducesExactlyTheMissingConcealedFrames) {
     EXPECT_FALSE(frames_[3].concealed);
 
     // Exactly the missing number -- no more, no less.
-    const std::size_t concealed =
+    const std::size_t concealed = static_cast<std::size_t>(
         std::count_if(frames_.begin(), frames_.end(),
-                      [](const Emitted& e) { return e.concealed; });
+                      [](const Emitted& e) { return e.concealed; }));
     EXPECT_EQ(concealed, 2u);
 }
 
@@ -434,12 +434,12 @@ TEST_F(AudioRxTest, CadenceReceivedPlusConcealedEqualsTheTotalFrameCount) {
 
     ASSERT_EQ(frames_.size(), 4u);
 
-    const std::size_t received =
+    const std::size_t received = static_cast<std::size_t>(
         std::count_if(frames_.begin(), frames_.end(),
-                      [](const Emitted& e) { return !e.concealed; });
-    const std::size_t concealed =
+                      [](const Emitted& e) { return !e.concealed; }));
+    const std::size_t concealed = static_cast<std::size_t>(
         std::count_if(frames_.begin(), frames_.end(),
-                      [](const Emitted& e) { return e.concealed; });
+                      [](const Emitted& e) { return e.concealed; }));
     EXPECT_EQ(received + concealed, frames_.size());
     EXPECT_EQ(received, 2u);
     EXPECT_EQ(concealed, 2u);

@@ -331,7 +331,12 @@ Three properties of the fetch are worth knowing:
   not be mistaken for a short window.
 
 The token comes from the same places `tools/gh_api.py` looks: the git
-credential store first, then `GH_TOKEN` / `GITHUB_TOKEN`.
+credential store first, then `GH_TOKEN` / `GITHUB_TOKEN`. The fetcher
+probes a token against the **repository** endpoint rather than
+`/user`: the workflow's `GITHUB_TOKEN` is an installation token, and
+`/user` only answers for user tokens, so a probe on `/user` rejects
+the one token the CI is given. The repository endpoint answers for
+both kinds.
 
 Useful flags: `--platform windows` fetches one platform's half only,
 `--since 2026-11-01` sets the earliest run date by hand, and

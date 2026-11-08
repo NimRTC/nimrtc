@@ -27,8 +27,8 @@ CRED_FILE = os.path.join(os.path.expanduser("~"), ".git-credentials")
 API = "https://api.github.com"
 
 
-def resolve_token() -> str:
-    """Return a GitHub token from the git credential store, then the env.
+def candidate_tokens() -> list:
+    """Every token that might work, best first.
 
     The credential store is preferred: the GH_TOKEN in the environment is
     a fine-grained PAT that the API rejects with 401.
@@ -48,8 +48,12 @@ def resolve_token() -> str:
         value = os.environ.get(var)
         if value and value.startswith(("ghp_", "gho_", "ghu_", "ghs_", "github_pat_")):
             candidates.append(value)
+    return candidates
 
-    for token in candidates:
+
+def resolve_token() -> str:
+    """Return a GitHub token from the git credential store, then the env."""
+    for token in candidate_tokens():
         if _probe(token):
             return token
     raise SystemExit("no working GitHub token found in ~/.git-credentials or env")

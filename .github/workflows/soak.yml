@@ -12,13 +12,27 @@ name: soak
 # green Windows streak and a green Linux streak are tracked separately
 # and neither substitutes for the other.
 #
-# Evidence accumulation: every run appends to
-# `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploads that file as a
-# workflow artifact, and commits it to a per-platform evidence branch
-# (`soak/evidence-<platform>`).  One branch per platform, so the two
-# jobs never race for the same ref.  The release process fetches those
-# branches and copies the records into `build/soak/` before running
-# `python tools/run_soak.py --summary --require`.
+# Evidence accumulation: every run writes
+# `build/soak/<platform>-<YYYY-MM-DD>.jsonl` and uploads that file as a
+# workflow artifact (90-day retention).  The artifact IS the record:
+# the collector keeps every record it writes, so a run that is
+# repeated on the same day adds a second artifact rather than
+# replacing the first one, and no failing run can be erased by a
+# later pass.  `tools/fetch_soak_evidence.py` pulls the window back
+# into `build/soak/` -- the release machine runs it before
+# `python tools/run_soak.py --summary --require`, and this workflow
+# runs it before the summary so the Step Summary shows the whole
+# window instead of just the day it was measured.
+#
+# The records used to accumulate on a per-platform branch
+# (`soak/evidence-<platform>`).  That was a permanent ref that grew
+# without bound, and it was lossy: the workflow copied each day's
+# file onto the branch, so a second run of the same day REPLACED the
+# first run's records.  It was also what broke this workflow: the
+# step that pushed the branch replaced the working tree with the
+# branch's tree, which deleted `tools/run_soak.py` from the checkout,
+# so the summary step that followed it could not find its own tool --
+# and on Linux the missing `pipefail` hid that failure completely.
 #
 # A day with no record at all breaks the streak, so the schedule is
 # deliberately off the hour (GitHub's scheduled workflows are delayed
@@ -55,7 +69,12 @@ env:
   SOAK_REF: ${{ inputs.ref || 'release/1.1' }}
 
 permissions:
-  contents: write
+  # The workflow no longer pushes anything: the evidence leaves the job
+  # as an artifact.  `actions: read` is what lets the summary step
+  # download the window's earlier artifacts; `contents: read` is what
+  # the checkout needs.
+  contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-soak
@@ -84,8 +103,9 @@ jobs:
           # The tree the window measures.  Must be the candidate tree
           # (release/1.1), not `main` -- see the `SOAK_REF` env block.
           ref: ${{ env.SOAK_REF }}
-          # Full history, so the evidence branch can be fetched and pushed
-          # back without tripping GitHub's "shallow update not allowed".
+          # Full history: the record names the commit it measured, and
+          # a shallow clone makes that commit impossible to resolve in
+          # the repository's own history later.
           fetch-depth: 0
 
       - name: Install ninja + Python (CMake via pip)
@@ -143,36 +163,35 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Accumulate the evidence on the evidence branch
+      - name: Fold the window's artifacts into the evidence directory
+        # The Step Summary has to show the WINDOW, not just the day this
+        # run measured -- a summary that only ever sees one day reports
+        # a one-day streak no matter how long the window has been
+        # running.  The records of the earlier days live in the earlier
+        # runs' artifacts, so they are pulled back in here.
+        #
+        # `always()`: when this day's measurement failed there is no
+        # record of it, but the window up to yesterday is still worth
+        # showing -- and it is exactly the day a failure would break.
+        #
+        # The step fails when an artifact cannot be read: a window read
+        # from an incomplete set of artifacts is not the window, and a
+        # short read must not be mistaken for a short window.
         if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          day="$(date -u +%F)"
-          record="build/soak/linux-x86_64-${day}.jsonl"
-          if [ ! -f "$record" ]; then
-            echo "::warning::no evidence record at ${record}; the day is a gap"
-            exit 0
-          fi
-          branch="soak/evidence-linux-x86_64"
-          git fetch origin "$branch:refs/remotes/origin/$branch" || true
-          if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-            git checkout -B "$branch" "refs/remotes/origin/$branch"
-          else
-            git checkout --orphan "$branch"
-            git rm -r --cached . >/dev/null 2>&1 || true
-          fi
-          mkdir -p evidence/linux-x86_64
-          cp "$record" "evidence/linux-x86_64/linux-x86_64-${day}.jsonl"
-          git add "evidence/linux-x86_64/linux-x86_64-${day}.jsonl"
-          git -c user.name='NimRTC CI' -c user.email='ci@nimrtc.invalid' \
-              commit -m "soak: linux-x86_64 ${day}"
-          git push origin "HEAD:${branch}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/fetch_soak_evidence.py --days 21
 
       - name: Surface the soak summary
         if: always()
-        run: python3 tools/run_soak.py --summary | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
+        run: |
+          # `pipefail` is not optional here: without it the exit status
+          # of the pipeline is tee's, so a failing summary looks like a
+          # successful one and the Step Summary stays empty.
+          set -o pipefail
+          python3 tools/run_soak.py --summary --expect-ref "$SOAK_REF" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # Windows -- the same evidence, produced on the platform the local
@@ -234,34 +253,23 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Accumulate the evidence on the evidence branch
+      - name: Fold the window's artifacts into the evidence directory
+        # Same reasoning as the Linux leg: the Step Summary shows the
+        # whole window, so the earlier days' artifacts are pulled in.
         if: always()
-        continue-on-error: true
         shell: pwsh
-        run: |
-          $day = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
-          $record = "build/soak/windows-$day.jsonl"
-          if (-not (Test-Path $record)) {
-            Write-Host "::warning::no evidence record at $record; the day is a gap"
-            exit 0
-          }
-          $branch = 'soak/evidence-windows'
-          git fetch origin "$branch`:refs/remotes/origin/$branch" 2>$null
-          if (git rev-parse --verify --quiet "refs/remotes/origin/$branch") {
-            git checkout -B $branch "refs/remotes/origin/$branch"
-          } else {
-            git checkout --orphan $branch
-            git rm -r --cached . 2>$null
-          }
-          New-Item -ItemType Directory -Force -Path evidence/windows | Out-Null
-          Copy-Item $record "evidence/windows/windows-$day.jsonl"
-          git add "evidence/windows/windows-$day.jsonl"
-          git -c user.name='NimRTC CI' -c user.email='ci@nimrtc.invalid' `
-              commit -m "soak: windows $day"
-          git push origin "HEAD:$branch"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/fetch_soak_evidence.py --days 21
 
       - name: Surface the soak summary
         if: always()
         shell: pwsh
         run: |
-          python tools/run_soak.py --summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          # Tee-Object writes the summary to the Step Summary and leaves
+          # it on stdout, so the job log carries it too.
+          python tools/run_soak.py --summary --expect-ref $env:SOAK_REF |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          # The exit code of the collector is the verdict of this step;
+          # it must not be swallowed by the pipeline.
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

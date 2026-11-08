@@ -251,6 +251,14 @@ jobs:
       - name: Self-test the soak evidence collector
         run: python tools/run_soak.py --self-test
 
+      # The fetcher is how the CI half of the window is read back.  It
+      # must not lose a record (a day measured twice keeps both sets)
+      # and it must not grow the files it writes (a record that is
+      # already there is not written again), or the window it reports
+      # would not be the window that was measured.
+      - name: Self-test the soak evidence fetcher
+        run: python tools/fetch_soak_evidence.py --self-test
+
       # Pre-tag guardrail (v1.1 plan Track C, item C3).  These are
       # repo-level facts that no unit test sees and that rot quietly
       # between releases: the SFU track must stay unwired, every public

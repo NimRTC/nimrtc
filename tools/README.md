@@ -52,6 +52,22 @@ python tools/check_md_links.py README.md  # specific files
 Exit code is non-zero when a link points at a missing file or an anchor
 that no heading produces.
 
+## Release evidence (the seven-day soak)
+
+The v1.1 release gate needs one evidence record per platform per day.
+The operating procedure is `docs/plan/soak-runbook.md`.
+
+| Script | Purpose |
+|--------|---------|
+| `run_soak.py` | Runs the acceptance cases and records one machine-readable record per platform per day under `build/soak/`. `--summary` prints the streak it can prove, `--require` turns that summary into a gate (exit 1 unless every platform has 7 consecutive green days), `--self-test` pins the honesty rules. |
+| `fetch_soak_evidence.py` | Pulls the CI-produced records back out of the workflow artifacts into `build/soak/`. Idempotent, and fails when an artifact cannot be read. |
+
+```
+python tools/run_soak.py --summary --require      # read the window
+python tools/fetch_soak_evidence.py --days 21      # fold the CI half in
+python tools/fetch_soak_evidence.py --self-test
+```
+
 ## Scripts planned
 
 | Script | Phase | Purpose |

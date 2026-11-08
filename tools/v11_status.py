@@ -51,8 +51,14 @@ def remote_tag() -> str:
     """The sha of the release tag on origin, or "" when it is not there yet."""
     out = _git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}")
     for line in out.splitlines():
-        if f"refs/tags/{TAG}$" in line:
-            return line.split()[0]
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        # Compare the ref name exactly: `ls-remote --tags` prints the
+        # annotated tag and its peeled commit as two lines, and only the
+        # first one is the tag itself.
+        if fields[-1] == f"refs/tags/{TAG}":
+            return fields[0]
     return ""
 
 

@@ -21,8 +21,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `v1.1` line, `v1.1.x` carries fixes only, and new behaviour starts at
 > `v1.2.0`.
 >
-> The published stable cut is still `v1.0.2`; the `v1.1.0` tag is cut when
-> the remaining release-hardening gates close (see "Known limitations").
+> The `v1.1.0` tag is cut (2026-11-08) and the four platform bundles are
+> built; the GitHub Release stays a **draft** until the last remaining
+> release-hardening gate — the 7-day soak — closes (see "Known
+> limitations"). The published stable cut is still `v1.0.2`.
 
 ### Fixed
 
@@ -678,8 +680,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `build-linux-aarch64` is a hard gate again (no `continue-on-error`, back
   in `publish-release.needs`). `docs/plan/ci-workarounds.md` W3/W5 remain
   the source of truth.
-- Still open before the `v1.1.0` tag: the 7-day soak evidence for
-  §12.3.6 Gate 6, and the signed annotated tag itself. The **upload of
+- The `v1.1.0` tag is cut (2026-11-08): it is an annotated, SSH-signed tag
+  that GitHub reports as `verified: true`. **Still open before the release is
+  published**: the 7-day soak evidence for §12.3.6 Gate 6 — the window's
+  first counted day is 2026-11-08, so it cannot close before 2026-11-14 —
+  which is why the GitHub Release stays a **draft** until then. The **upload of
   the release key to the GitHub account GPG list is no longer a
   blocker**: the repository signs tags with `gpg.format = ssh` and the
   account's already-registered SSH key, so GitHub renders the tag as

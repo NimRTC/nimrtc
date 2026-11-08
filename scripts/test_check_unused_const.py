@@ -130,6 +130,60 @@ def main() -> int:
         found = run(case)
         assert found == [norm(case / "h.cpp", 4, "kLate")], found
 
+        # 10. An `extern const` declaration *before* the definition in
+        #     the same file gives the definition external linkage:
+        #     Clang stays quiet, so it is not a candidate.
+        case = tmp / "case10"
+        case.mkdir()
+        (case / "j.cpp").write_text(
+            "extern const int kBefore;\nconstexpr int kBefore = 9;\n"
+            "int j() { return 0; }\n",
+            encoding="utf-8",
+        )
+        found = run(case)
+        assert not any("kBefore" in f for f in found), found
+
+        # 11. An `extern const` declaration *after* the definition does
+        #     not reach it: the definition keeps internal linkage, so
+        #     Clang diagnoses it and the gate reports it.
+        case = tmp / "case11"
+        case.mkdir()
+        (case / "k.cpp").write_text(
+            "constexpr int kAfter = 10;\nextern const int kAfter;\n"
+            "int k() { return 0; }\n",
+            encoding="utf-8",
+        )
+        found = run(case)
+        assert found == [norm(case / "k.cpp", 1, "kAfter")], found
+
+        # 12. An `extern const` declaration in a *sibling* .cpp does not
+        #     reach the definition either: linkage is judged per
+        #     translation unit, so the constant stays internal and is
+        #     reported.
+        case = tmp / "case12"
+        case.mkdir()
+        (case / "l.cpp").write_text(
+            "extern const int kSibling;\nint l() { return 0; }\n", encoding="utf-8"
+        )
+        (case / "m.cpp").write_text(
+            "constexpr int kSibling = 11;\nint m() { return 0; }\n", encoding="utf-8"
+        )
+        found = run(case)
+        assert found == [norm(case / "m.cpp", 1, "kSibling")], found
+
+        # 13. A constant that is only referenced from another constant's
+        #     initializer is referenced, not unused -- Clang does not
+        #     diagnose it and the gate does not report it.
+        case = tmp / "case13"
+        case.mkdir()
+        (case / "n.cpp").write_text(
+            "constexpr int kRate = 48000;\nconstexpr int kFrame = kRate * 20 / 1000;\n"
+            "int n() { return kFrame; }\n",
+            encoding="utf-8",
+        )
+        found = run(case)
+        assert found == [], found
+
         print("all checks passed")
         return 0
     finally:

@@ -71,11 +71,15 @@ constexpr std::uint8_t kOpusPt = 111;
 /** The engine's default PCM rate (48 kHz) and frame duration (20 ms):
  *  one frame is 960 samples.
  *
- *  Written as a single literal on purpose: a `kSampleRate * kFrameMs / 1000`
- *  expression would leave both operands without an odr-use, and clang's
- *  `-Wunused-const-variable` (an error under `-Werror` on AppleClang) then
- *  rejects the file. */
-constexpr std::size_t kFrameSamples = 960;
+ *  The two operands are *referenced* by the initializer below, and that
+ *  is what keeps clang's `-Wunused-const-variable` (an error under
+ *  `-Werror` on AppleClang) quiet.  The warning fires on a constant
+ *  that nothing mentions again -- not on one that is merely not
+ *  odr-used: a constant read in a constant expression counts as a
+ *  reference. */
+constexpr std::size_t kSampleRate = 48000;
+constexpr std::size_t kFrameMs = 20;
+constexpr std::size_t kFrameSamples = kSampleRate * kFrameMs / 1000;
 
 // ---------------------------------------------------------------------------
 // Fake ICE transport

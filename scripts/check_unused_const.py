@@ -2,24 +2,33 @@
 """Report namespace-scope constants that nothing references.
 
 Clang's -Wunused-const-variable fires on an internal-linkage constant
-with no reader.  NimRTC compiles with -Werror, and GCC does not
-diagnose the same construct, so such a constant is invisible on the
-Windows and Linux builds and only breaks the Apple Clang leg.
+in a .cpp that nothing *references* -- the warning is about a name
+that is never mentioned again, not about a name that is merely not
+odr-used; a constant read in a constant expression counts as a
+reference.  NimRTC compiles with -Werror, and GCC does not diagnose
+the same construct, so such a constant is invisible on the Windows and
+Linux builds and only breaks the Apple Clang leg.
 
-A constant declared in a *header* is a different case: it has external
-linkage when declared `inline constexpr`, and Clang does not warn about
-it.  This script therefore only looks at .cpp files.
+Only a constant in a .cpp can be diagnosed at all: the warning applies
+to the *main file* of a compilation, so a constant declared in a header
+is out of scope however it is declared.  This script therefore only
+looks at .cpp files.
 
 ## Linkage decides the scope of the search
 
 A namespace-scope `const` / `constexpr` in a .cpp has *internal*
 linkage unless something gives it external linkage:
 
-  * a matching `extern const <type> <name>;` declaration in a header
-    (or in a sibling .cpp) makes the definition external, and Clang
-    does not warn about it;
+  * an `extern const <type> <name>;` declaration that is visible
+    *before* the definition in the same translation unit makes the
+    definition external, and Clang does not warn about it;
   * an `inline` variable has external linkage since C++17, and Clang
     does not warn about it either.
+
+The rule is per translation unit, which is why an `extern const`
+declaration in a *header* counts (the defining TU may include that
+header) while one in a *sibling* .cpp does not (the defining TU never
+sees it).
 
 Only an internal-linkage constant can be diagnosed at all, and an
 internal-linkage name is invisible outside its own translation unit.
@@ -30,13 +39,21 @@ file* -- a mention in a sibling .cpp cannot possibly be a use.
 
 A candidate is a `const` / `constexpr` declaration that
 
-  * starts in column 1 (namespace scope -- an indented declaration is a
-    class member or a function local, neither of which is diagnosed the
-    same way), and
+  * starts in column 1, and
   * carries no `[[maybe_unused]]` attribute, and
-  * has internal linkage (no `inline`, no `extern const` declaration
-    elsewhere), and
-  * is never mentioned again in its own file.
+  * has internal linkage (no `inline`, and no `extern const`
+    declaration visible before it in its own file or in a header), and
+  * is never read again in its own file (an `extern const` declaration
+    mentions the name without reading it).
+
+## Known blind spot: an indented namespace-scope constant
+
+Clang diagnoses a namespace-scope constant regardless of its
+indentation; the column-1 rule above is a heuristic that matches how
+NimRTC formats code (`.clang-format` sets `NamespaceIndentation:
+None`, so every namespace-scope constant in the tree is at column 1
+today).  A future declaration written inside an indented namespace
+block would slip past this gate and break the Apple Clang leg instead.
 
 ## `[[maybe_unused]]` and the preprocessor guard
 
@@ -68,9 +85,11 @@ from collections import Counter
 from pathlib import Path
 
 # A namespace-scope declaration that starts with `const` / `constexpr`.
-# The declaration must start in column 1: an indented declaration is
-# either a class member (external linkage rules differ) or a function
-# local (diagnosed as -Wunused-variable, not -Wunused-const-variable).
+# The declaration must start in column 1: that is a heuristic matching
+# how the project formats code, not a rule of the language.  An
+# indented declaration is usually a class member (where the external
+# linkage rules differ) or a function local (diagnosed as
+# -Wunused-variable, not -Wunused-const-variable).
 DECL_START = re.compile(
     r"^(?:(?:inline|static|constexpr|const|extern|thread_local)[ \t]+)*"
     r"\b(?:constexpr|const)\b",
@@ -144,6 +163,16 @@ def strip_noise(text: str) -> str:
     text = BLOCK_COMMENT.sub(_blank, text)
     text = LINE_COMMENT.sub(_blank, text)
     return STRING_LITERAL.sub('""', text)
+
+
+def strip_extern_decls(text: str) -> str:
+    """Blank out `extern const <type> <name>;` declarations.
+
+    Such a declaration *mentions* the name but does not read it: Clang
+    does not treat it as a use of the definition, so the reference
+    search must not either.
+    """
+    return EXTERN_DECL.sub(_blank, text)
 
 
 def has_maybe_unused(text: str, decl_start: int) -> bool:
@@ -302,8 +331,14 @@ def main(argv: list[str]) -> int:
     code = {p: strip_noise(t) for p, t in corpus.items()}
 
     # Names whose definition has external linkage, so Clang will not
-    # diagnose them and the reference search must span the whole tree.
-    external: set[str] = set()
+    # diagnose them.
+    #
+    # Clang judges linkage per translation unit: an `extern const`
+    # declaration only helps the definition it is visible to, and only
+    # when it comes *before* it.  A declaration in a header therefore
+    # counts (the defining TU may include that header), while one in a
+    # sibling .cpp does not (the defining TU never sees it).
+    header_extern: set[str] = set()
     headers = [
         p for p in sorted(root.rglob("*"))
         if p.is_file()
@@ -312,13 +347,20 @@ def main(argv: list[str]) -> int:
     ]
     for path in headers:
         text = strip_noise(path.read_text(encoding="utf-8", errors="replace"))
-        external.update(m.group("name") for m in EXTERN_DECL.finditer(text))
-    for text in code.values():
-        external.update(m.group("name") for m in EXTERN_DECL.finditer(text))
+        header_extern.update(m.group("name") for m in EXTERN_DECL.finditer(text))
+
+    # The file's own `extern const` declarations, with their position,
+    # so that only one that precedes the definition counts.
+    file_extern: dict[Path, list[tuple[int, str]]] = {
+        path: [(m.start(), m.group("name")) for m in EXTERN_DECL.finditer(text)]
+        for path, text in code.items()
+    }
 
     found = 0
     for path, text in code.items():
-        counts: Counter[str] = Counter(IDENT.findall(text))
+        # An `extern const` declaration mentions the name without
+        # reading it, so it does not count as a reference.
+        counts: Counter[str] = Counter(IDENT.findall(strip_extern_decls(text)))
         for match in DECL_START.finditer(text):
             parsed = parse_declaration(text, match.start())
             if parsed is None:
@@ -330,10 +372,15 @@ def main(argv: list[str]) -> int:
             # an `extern` definition is external by definition.
             if "inline" in quals or "extern" in quals:
                 continue
-            # An `extern const` declaration elsewhere gives the
-            # definition external linkage: Clang stays quiet and the
-            # use may live in any translation unit.
-            if name in external:
+            # An `extern const` declaration visible before the definition
+            # gives it external linkage: Clang stays quiet and the use may
+            # live in any translation unit.
+            if name in header_extern:
+                continue
+            if any(
+                pos < match.start() and ext_name == name
+                for pos, ext_name in file_extern.get(path, ())
+            ):
                 continue
             # Internal linkage: only this file can possibly read it.
             if counts[name] <= 1:

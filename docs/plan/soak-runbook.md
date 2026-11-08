@@ -227,7 +227,28 @@ GitHub-hosted runners:
 | What it runs | `python tools/run_soak.py --platform <platform> --case d,e` on a fresh Debug build |
 | Which tree it measures | `SOAK_REF` — `release/1.1` by default, overridable with the `ref` dispatch input |
 | Where the record lands | `build/soak/<platform>-<YYYY-MM-DD>.jsonl`, uploaded as the artifact `soak-<platform>-<run id>` (90-day retention) |
-| Where it accumulates | the per-platform branch `soak/evidence-<platform>`, one commit per day, so the two jobs never race for the same ref |
+| Where it accumulates | in the artifacts — one artifact per run, which is where the record of the window lives |
+| What the Step Summary shows | the whole window: the workflow pulls the earlier days' artifacts back into `build/soak/` before it summarises |
+
+**The artifact is the record.** Every run of the workflow uploads its
+own artifact, so a day that is measured twice produces two artifacts
+and **both** sets of records are kept. That matters: the collector
+never lets a failing run be hidden by a later pass on the same day,
+and a mechanism that kept only the last run's file would hide exactly
+that.
+
+The records used to accumulate on a per-platform branch
+(`soak/evidence-<platform>`) instead, one commit per day. That was a
+permanent ref that grew without bound and had to be kept alive, and it
+was lossy — the workflow *copied* each day's file onto the branch, so
+a second run of the same day replaced the first run's records. It was
+also what broke the workflow: the step that pushed the branch replaced
+the working tree with the branch's tree, which deleted
+`tools/run_soak.py` from the checkout, so the summary step that ran
+after it could not find its own tool. On Linux the failure was
+invisible on top of that, because the summary was piped into `tee`
+without `pipefail`, so the step reported success with an empty Step
+Summary. Those branches are gone; the artifacts replace them.
 
 ### 4.3.1 Which tree the window measures
 
@@ -283,40 +304,51 @@ file and the Step Summary rather than from a red check on `main`.
 
 Reading the CI-produced evidence on the release machine:
 
-```bash
-# Fetch both evidence branches and drop their records into build/soak/
-git fetch origin \
-  'refs/heads/soak/evidence-linux-x86_64:refs/remotes/origin/soak/evidence-linux-x86_64' \
-  'refs/heads/soak/evidence-windows:refs/remotes/origin/soak/evidence-windows'
-for branch in soak/evidence-linux-x86_64 soak/evidence-windows; do
-  git ls-tree -r --name-only "origin/$branch" | grep '\.jsonl$' | while read -r f; do
-    # Take the BASE NAME, not the branch path.  The branch stores the
-    # file under evidence/<platform>/<platform>-<day>.jsonl, but the
-    # collector writes build/soak/<platform>-<day>.jsonl and the
-    # summary only reads the TOP LEVEL of build/soak/.  Copying the
-    # branch path verbatim puts the records in build/soak/evidence/...,
-    # where the summary never sees them -- the CI half of the window
-    # would silently count as zero.
-    name="$(basename "$f")"
-    # APPEND, do not overwrite: the Windows Scheduled Task and the CI
-    # job both produce a record for the same platform and day, and the
-    # summary needs both (it reads a day as green only when every
-    # required case has a PASS record and no case has a FAIL).
-    git show "origin/$branch:$f" >> "build/soak/$name"
-  done
-done
+```powershell
+# Pull the window's CI half back into build/soak/, then read the window.
+python tools/fetch_soak_evidence.py --days 21
 python tools/run_soak.py --summary --require
 ```
+
+`tools/fetch_soak_evidence.py` reads the workflow's artifacts through
+the GitHub API and writes their records into `build/soak/`, under the
+same file names the collector uses (`<platform>-<day>.jsonl`). It runs
+on Windows and on Linux, so the release machine needs nothing else —
+the branch recipe this replaces was bash-only and could not run on the
+Windows host that owns the window.
+
+Three properties of the fetch are worth knowing:
+
+* It **appends**, never overwrites: the Windows Scheduled Task and the
+  CI job both produce a record for the same platform and day, and the
+  summary needs both (it reads a day as green only when every required
+  case has a PASS record and no case has a FAIL).
+* It is **idempotent**: a record that is already in the file is not
+  written again, so running it every night leaves the files
+  byte-identical instead of growing them.
+* It **fails** when an artifact cannot be read. A window read from an
+  incomplete set of artifacts is not the window, and a short read must
+  not be mistaken for a short window.
+
+The token comes from the same places `tools/gh_api.py` looks: the git
+credential store first, then `GH_TOKEN` / `GITHUB_TOKEN`.
+
+Useful flags: `--platform windows` fetches one platform's half only,
+`--since 2026-11-01` sets the earliest run date by hand, and
+`--dry-run` lists what would be fetched without writing anything.
 
 The summary defaults to `--expect-ref release/1.1`, so a day measured
 on any other tree is excluded from the window and listed under "days
 measured on another tree". Pass `--expect-ref ""` to switch the check
 off (for example when summarising evidence for a different release).
 
-Run the merge **before** every `--summary --require`. The command
-appends, so running it twice puts the same records in twice; the
-collector drops exactly duplicated records, so that is harmless -- but
-it does mean the merge is idempotent only in effect, not in bytes.
+Run the fetch **before** every `--summary --require`: the summary only
+sees what is in `build/soak/`.
+
+**The artifacts expire.** They are kept for 90 days, which is far more
+than a seven-day window needs — but the records of the window should be
+filed with the release evidence when the window closes (§7), because
+after that the artifacts are the only place they live.
 
 The workflow is the only source of the Linux half of the window unless
 a real Linux machine is available; a green Windows streak and a green
@@ -411,6 +443,11 @@ The window is satisfied when `python tools/run_soak.py --summary`
 shows **7 consecutive green days on both platforms**. Record the
 summary output alongside the release evidence, then update the C5 row
 in `docs/plan/v1.1-plan.md`.
+
+File the **records** as well as the summary output. The CI half of the
+window lives in the workflow artifacts, and the artifacts expire after
+90 days; the copy that is pulled into `build/soak/` when the window
+closes is the one that has to be kept.
 
 Two things the window does **not** establish:
 

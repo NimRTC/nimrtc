@@ -28,8 +28,15 @@ namespace h264 {
 namespace qsv_backend {
 namespace {
 
+// The Annex-B start codes: the 4-byte forms and the 3-byte short form.
+// Only the long form is emitted today; the others document the byte
+// sequences the encoder must recognise when it later parses a
+// bitstream.  Keep them available without tripping
+// -Werror=unused-const-variable on Clang.
+[[maybe_unused]]
 constexpr uint32_t START_CODE[] = {0x01000000, 0x00010000, 0x00000100};
 constexpr uint8_t  START_CODE_LONG[] = {0x00, 0x00, 0x00, 0x01};
+[[maybe_unused]]
 constexpr uint8_t  START_CODE_SHORT[] = {0x00, 0x00, 0x01};
 
 inline uint32_t get_le32(const uint8_t* data) {

@@ -69,9 +69,13 @@ using nimrtc::engine::NimRTCEngine;
 constexpr std::uint8_t kOpusPt = 111;
 
 /** The engine's default PCM rate (48 kHz) and frame duration (20 ms):
- *  one frame is 960 samples. */
-constexpr std::uint32_t kSampleRate = 48000;
-constexpr std::size_t   kFrameSamples = 960;
+ *  one frame is 960 samples.
+ *
+ *  Written as a single literal on purpose: a `kSampleRate * kFrameMs / 1000`
+ *  expression would leave both operands without an odr-use, and clang's
+ *  `-Wunused-const-variable` (an error under `-Werror` on AppleClang) then
+ *  rejects the file. */
+constexpr std::size_t kFrameSamples = 960;
 
 // ---------------------------------------------------------------------------
 // Fake ICE transport

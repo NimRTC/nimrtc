@@ -603,6 +603,12 @@ jobs:
         # C2079 ("uses undefined struct") instead of a clean error.
         run: python3 scripts/check_api_marker_includes.py
 
+      - name: Unused-const gate self-test
+        # The gate below only reports what its scanner recognizes.  The
+        # self-test pins that behavior: an unused internal-linkage
+        # constant must be reported, an external-linkage one must not.
+        run: python3 scripts/test_check_unused_const.py
+
       - name: Unused-const gate (Apple Clang)
         # Clang's -Wunused-const-variable fires on a namespace-scope
         # constant in a .cpp that nothing reads; GCC does not diagnose

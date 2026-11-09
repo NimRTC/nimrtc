@@ -601,6 +601,24 @@ NimRTCEngine::create_data_channel(
     cfg.max_packet_lifetime_ms = config_.datachannel_max_packet_lifetime_ms;
     ch->open(cfg);
 
+    // Arm the channel itself (the IPlugin lifecycle).  The
+    // IDataChannel::open(cfg) call above only stores the config; the
+    // IPlugin::open() call is what wires the backend (the SCTP recv
+    // callbacks for the "sctp" backend) and marks the channel usable.
+    //
+    // Without this call the returned channel is a shell: every
+    // send() fails with kErrNotReady and no inbound message ever
+    // reaches the application.  A non-kOk return means the channel is
+    // unusable — report it and hand back nullptr instead of a channel
+    // that silently fails.
+    const plugins::Status ch_rc = ch->open();
+    if (ch_rc != plugins::kOk) {
+        if (on_error_) on_error_(core::kEngineInternal,
+            "create_data_channel(): IDataChannel::open() failed for the "
+            "resolved backend '" + std::string{resolved_dc_factory_id_} + "'");
+        return nullptr;
+    }
+
     // NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport
     // / QUIC** re-design — see `docs/plan/v0.11-plan.md` §2.2 (DC-1 /
     // DC-2 / TPAL-5 deferred) and §10 (forward direction).  Stash the

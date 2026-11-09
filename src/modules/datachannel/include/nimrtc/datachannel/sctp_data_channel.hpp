@@ -237,10 +237,10 @@ public:
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
     /** Emit DATA_CHANNEL_OPEN (RFC 8832 §5.1, PPID=50) on stream 0.
-     *  v0.14.x SCTP-over-DTLS wiring: the engine (or peer-open path)
-     *  may call this once per channel after open(cfg); inbound DCEP ACK
-     *  completes the handshake via on_state_("open"). Best-effort:
-     *  returns void, failures surface as on_state_("error"). */
+     *  Idempotent — the DCEP OPEN is sent at most once per channel.
+     *  `open()` sends it automatically when a config is already known;
+     *  `open(cfg)` sends it when the config arrives later.  Best-effort:
+     *  failures surface as on_state("error"). */
     void send_dcep_open() noexcept;
 
     // ---- Test-only accessors --------------------------------------------
@@ -270,12 +270,27 @@ private:
     void on_sctp_recv_with_ppid(uint16_t stream, std::uint32_t ppid,
                                 core::ByteSpan data) noexcept;
 
+    /** Complete the DCEP handshake (RFC 8832 §6).
+     *
+     *  Called when the peer acknowledges our DATA_CHANNEL_OPEN, when the
+     *  peer opens a channel toward us, or when any user message arrives
+     *  on the channel.  It flips the channel out of the "handshake
+     *  pending" state (after which the channel's own ordering semantics
+     *  apply again) and reports "open" exactly once. */
+    void s_complete_handshake() noexcept;
+
     plugins::DataChannelConfig        cfg_{};
     plugins::DataMessageCallback      on_msg_;
     plugins::DataChannelStateCallback on_state_;
     std::unique_ptr<sctp::ISctpSocket> sock_;
     bool                              opened_ = false;
     bool                              dcep_open_sent_ = false;
+    /** True once `open(cfg)` gave us a config (so the DATA_CHANNEL_OPEN
+     *  can be emitted as soon as the socket is wired). */
+    bool                              cfg_set_ = false;
+    /** True while the DCEP handshake is outstanding.  RFC 8832 §6: until
+     *  the peer answers, every user message is sent ordered. */
+    bool                              handshake_pending_ = false;
 };
 
 #ifdef _MSC_VER

@@ -590,30 +590,48 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
 
     // Forward DATA payloads to the user callbacks under recv_mu so
     // set_on_recv / set_on_recv_with_ppid can swap the function
-    // pointers safely. BOTH callbacks fire when registered (fan-out,
-    // not either/or): the legacy callback keeps existing AF_INET
-    // loopback tests passing unchanged, while the PPID-aware callback
-    // feeds SctpDataChannel's DCEP demux. rcv_ppid arrives in network
-    // byte order — convert with ntohl() per the OnSctpRecvWithPpidCb
-    // host-byte-order contract.
+    // Forward DATA payloads to the user callbacks under recv_mu so
+    // set_on_recv / set_on_recv_with_ppid can swap the function
+    // pointers safely.
+    //
+    // The two callbacks are NOT a fan-out: exactly one of them fires
+    // per inbound chunk.  The PPID-aware callback wins when it is
+    // registered, because the payload protocol identifier is what the
+    // DCEP demux needs; the legacy callback is the fallback for
+    // callers that do not speak the PPID seam (the AF_INET loopback
+    // tests register only `set_on_recv`).  Firing both would deliver
+    // every user message twice.
+    //
+    // rcv_ppid arrives in network byte order -- convert with ntohl()
+    // per the OnSctpRecvWithPpidCb host-byte-order contract (this
+    // matches upstream usrsctp's own rtcweb.c, which does
+    // `ntohl(rcv.rcv_ppid)`).
     //
     // The payload view is only valid for the duration of the call: the
     // buffer belongs to usrsctp and is freed by `data_guard` when this
     // function returns.
     std::lock_guard<std::mutex> lk(slot->recv_mu);
-    if (slot->on_recv) {
-        slot->on_recv(static_cast<std::uint16_t>(rcvinfo.rcv_sid),
-                      plugins::BufferView{
-                          static_cast<const std::uint8_t*>(data),
-                          datalen});
-    }
     if (slot->on_recv_ppid) {
+        // PPID-aware delivery takes precedence.  The PPID callback
+        // carries the payload protocol identifier, which the DCEP
+        // demux needs; firing BOTH callbacks would deliver every
+        // inbound user message twice (once through the PPID demux,
+        // once through the legacy path) and would answer a single
+        // DATA_CHANNEL_OPEN with two DATA_CHANNEL_ACKs.
         slot->on_recv_ppid(
             static_cast<std::uint16_t>(rcvinfo.rcv_sid),
             ntohl(rcvinfo.rcv_ppid),
             plugins::BufferView{
                 static_cast<const std::uint8_t*>(data),
                 datalen});
+    } else if (slot->on_recv) {
+        // Legacy delivery -- for callers that do not speak the PPID
+        // seam (e.g. the AF_INET loopback tests, which register only
+        // `set_on_recv`).
+        slot->on_recv(static_cast<std::uint16_t>(rcvinfo.rcv_sid),
+                      plugins::BufferView{
+                          static_cast<const std::uint8_t*>(data),
+                          datalen});
     }
     return 0;   // returning 0 lets usrsctp keep processing
 }

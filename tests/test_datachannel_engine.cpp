@@ -96,6 +96,7 @@ public:
     }
     plugins::Status open() noexcept override {
         opened_count_.fetch_add(1, std::memory_order_relaxed);
+        plugin_open_count_.fetch_add(1, std::memory_order_relaxed);
         return plugins::kOk;
     }
     void close() noexcept override {
@@ -106,9 +107,10 @@ public:
     void open(const plugins::DataChannelConfig& cfg) override {
         last_cfg_ = cfg;
         opened_with_cfg_count_.fetch_add(1, std::memory_order_relaxed);
-        // Mirror IPlugin::open() — both are called by the engine path
-        // (the engine calls IDataChannel::open(cfg), not IPlugin::open()).
-        opened_count_.fetch_add(1, std::memory_order_relaxed);
+        // NOTE: `opened_count_` is NOT bumped here — the two overloads
+        // are counted separately (`plugin_open_count_` tracks the
+        // IPlugin lifecycle call) so a test can tell "the engine armed
+        // the plugin" from "the engine only stored the config".
     }
 
     void send(plugins::BufferView /*data*/) override {
@@ -147,6 +149,10 @@ public:
     std::atomic<int> opened_count_{0};
     std::atomic<int> closed_count_{0};
     std::atomic<int> opened_with_cfg_count_{0};
+    /** Number of IPlugin::open() calls (the lifecycle arming).  A
+     *  DataChannel is unusable without it — `send()` returns
+     *  kErrNotReady and no inbound message ever arrives. */
+    std::atomic<int> plugin_open_count_{0};
     std::atomic<int> on_message_set_count_{0};
     std::atomic<int> on_state_set_count_{0};
     std::atomic<int> on_message_ex_set_count_{0};
@@ -417,6 +423,11 @@ TEST_F(DataChannelEngine, EngineSurfacesDataChannelCallbacks) {
     EXPECT_GE(stub->opened_with_cfg_count_.load(), 1)
         << "StubDataChannel::open(cfg) should fire when "
            "engine.create_data_channel() runs";
+    EXPECT_EQ(stub->plugin_open_count_.load(), 1)
+        << "the engine must call IPlugin::open() on the channel: without "
+           "it the channel is a shell — every send() fails with "
+           "kErrNotReady and no inbound message ever reaches the "
+           "application";
     EXPECT_EQ(stub->on_message_set_count_.load(), 1)
         << "engine must call set_on_message exactly once before "
            "open(cfg) (per IDataChannel contract)";
@@ -657,6 +668,82 @@ TEST_F(DataChannelEngine, DefaultFramingIsRaw) {
     EXPECT_EQ(stub->last_cfg_.framing, plugins::DataChannelFraming::kRaw)
         << "the default must preserve the pre-v1.2.0 byte-stream "
            "behaviour (the framed mode is opt-in)";
+
+    engine.close();
+}
+
+// Test 6: the engine arms the channel with IPlugin::open() (DC-1).
+//
+// The `IDataChannel::open(cfg)` overload only caches the config —
+// without the `IPlugin::open()` call the returned channel is a shell:
+// every `send()` fails with kErrNotReady and no inbound message ever
+// reaches the application.
+//
+// Test 3 already asserts that `IPlugin::open()` was called (via the
+// stub's `plugin_open_count_`).  This test pins the *failure* half:
+// when the plugin refuses to open, the engine must report the error
+// and hand back nullptr instead of a channel that silently fails.
+// =====================================================================
+namespace {
+
+/** A DataChannel whose IPlugin::open() always fails. */
+class FailingOpenDataChannel final : public plugins::IDataChannel {
+public:
+    plugins::Status open() noexcept override {
+        return plugins::kErrNotReady;
+    }
+    const char* name() const noexcept override {
+        return "FailingOpenDataChannel";
+    }
+    void close() noexcept override {}
+    void open(const plugins::DataChannelConfig&) override {}
+    void send(plugins::BufferView) override {}
+    void set_on_message(plugins::DataMessageCallback) noexcept override {}
+    void set_on_state(plugins::DataChannelStateCallback) noexcept override {}
+};
+
+class FailingOpenFactory final : public plugins::IDataChannelFactory {
+public:
+    std::string_view id() const noexcept override {
+        return "failing_open_dc";
+    }
+    std::string_view display_name() const noexcept override {
+        return "Test DataChannel whose IPlugin::open() fails";
+    }
+    plugins::IDataChannel* create() const override {
+        return new FailingOpenDataChannel();
+    }
+};
+
+} // namespace
+
+TEST_F(DataChannelEngine, EngineReportsAFailedPluginOpen) {
+    static FailingOpenFactory factory;
+    PluginRegistry::instance().register_datachannel(factory.id(), &factory);
+
+    EngineConfig cfg = make_test_config();
+    cfg.datachannel_name = "failing_open_dc";
+
+    NimRTCEngine engine(cfg);
+
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool>          err_fired{false};
+    engine.set_on_error(
+        [&](std::uint32_t err, std::string_view /*msg*/) {
+            err_code  = err;
+            err_fired = true;
+        });
+
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto ch = engine.create_data_channel("test-channel");
+    EXPECT_EQ(ch, nullptr)
+        << "create_data_channel() must return nullptr when the plugin's "
+           "IPlugin::open() fails — a channel that can never send is "
+           "worse than no channel at all";
+    EXPECT_TRUE(err_fired.load())
+        << "the engine must surface the failed open through on_error_";
+    EXPECT_EQ(err_code.load(), nimrtc::core::kEngineInternal);
 
     engine.close();
 }

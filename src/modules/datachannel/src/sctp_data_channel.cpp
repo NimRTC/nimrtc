@@ -39,6 +39,23 @@
  * that acts as the PR-SCTP oracle for WP-D, and the approximation is
  * acceptable in that role only.
  *
+ * ## DCEP handshake (RFC 8832)
+ *
+ * `open()` announces `"connecting"` and — when a channel config is
+ * known — sends one `DATA_CHANNEL_OPEN` (PPID 50). The channel reports
+ * `"open"` only once the handshake completes, which happens when any
+ * of the following arrives on the channel:
+ *
+ *   - a `DATA_CHANNEL_ACK` (the peer confirmed our OPEN),
+ *   - a `DATA_CHANNEL_OPEN` (the peer opened a channel toward us; we
+ *     answer with an ACK),
+ *   - any user message (RFC 8832 §6: "the DATA_CHANNEL_ACK **or any
+ *     other message** has been received on a data channel").
+ *
+ * RFC 8832 §6 also requires that, until the handshake completes, every
+ * user message of the channel is sent **ordered** — whatever the
+ * channel's own ordering semantics are. `route_send()` enforces that.
+ *
  * ## Non-blocking I/O
  *
  * `send_*` calls on `ISctpSocket` are noexcept and non-blocking; they
@@ -192,6 +209,13 @@ Status SctpDataChannel::open() noexcept {
     // Wire the SCTP recv callbacks into our dispatchers. The PPID-aware
     // callback is preferred (DCEP demux); the legacy callback stays as
     // the fallback for backends/mocks that do not speak the PPID seam.
+    //
+    // The two callbacks are NOT a fan-out: `UsrsctpSocket` delivers a
+    // chunk to the PPID callback when one is registered and only falls
+    // back to the legacy callback otherwise.  Registering both is
+    // therefore safe — exactly one of them fires per inbound chunk,
+    // so a user message is delivered once, not twice.
+    //
     // Lifetime: `this` is captured raw; close() clears both callbacks
     // before the socket is dropped, so no use-after-free.
     sock_->set_on_recv_with_ppid(
@@ -203,13 +227,26 @@ Status SctpDataChannel::open() noexcept {
     });
     opened_ = true;
 
-    // Fire "connecting" then "open" state events so the engine knows
-    // the channel is up. The "open" event is informational only —
-    // real SCTP COMM_UP notifications are forwarded by the engine,
-    // not by this channel.
+    // The channel is "connecting" until the DCEP handshake completes
+    // (see the file header).  Reporting "open" here would be a lie:
+    // at this point there is neither an established association nor a
+    // DATA_CHANNEL_ACK from the peer.
     if (on_state_) {
         on_state_("connecting");
-        on_state_("open");
+    }
+
+    // The handshake is outstanding from now on: until the peer answers
+    // (or sends us anything on the channel), every user message of
+    // this channel MUST be sent ordered (RFC 8832 §6) — whatever the
+    // channel's own ordering semantics are.
+    handshake_pending_ = true;
+
+    // Send the DATA_CHANNEL_OPEN if the caller already gave us a
+    // config (the engine does: open(cfg) then open()).  When the
+    // config arrives later, `open(cfg)` sends it instead — the send
+    // is guarded by `dcep_open_sent_`, so it happens exactly once.
+    if (cfg_set_) {
+        send_dcep_open();
     }
     return kOk;
 }
@@ -221,6 +258,7 @@ void SctpDataChannel::close() noexcept {
     //   2. Drop the socket — usrsctp tears down its send buffer and
     //      the per-instance handle here.
     //   3. Mark the channel closed.
+    const bool was_open = opened_;
     if (sock_) {
         // set_on_recv with an empty std::function clears the
         // callback. Per `ISctpSocket` contract this is noexcept.
@@ -230,8 +268,11 @@ void SctpDataChannel::close() noexcept {
     sock_.reset();
     opened_ = false;
     dcep_open_sent_ = false;
+    handshake_pending_ = false;
 
-    if (on_state_) {
+    // "closed" is reported only for a channel that was actually open —
+    // closing a channel that never opened is not a state transition.
+    if (was_open && on_state_) {
         on_state_("closed");
         on_state_ = nullptr;
     }
@@ -248,6 +289,13 @@ void SctpDataChannel::open(const plugins::DataChannelConfig& cfg) {
     // engine (via ISctpSocket::listen / connect / wait_for_established)
     // before this method is called.
     cfg_ = cfg;
+    cfg_set_ = true;
+
+    // If the channel was already opened (the IPlugin overload ran
+    // first), the DATA_CHANNEL_OPEN still has to go out.
+    if (opened_ && !dcep_open_sent_) {
+        send_dcep_open();
+    }
 }
 
 void SctpDataChannel::send(plugins::BufferView data) {
@@ -289,9 +337,21 @@ Status SctpDataChannel::route_send(plugins::BufferView data) noexcept {
     // User payloads ride PPID string(51)/binary(53) per RFC 8831 §6.
     // The DCEP OPEN handshake uses PPID 50 (see send_dcep_open()).
     const std::uint32_t ppid = sctp::dcep_ppid_for_config(cfg_);
-    const bool unordered =
-        (cfg_.reliability == plugins::DataChannelReliability::kUnreliable) ||
-        !cfg_.ordered;
+    // The unordered flag mirrors the channel's own ordering semantics
+    // (RFC 8832 §8.2.2: the high bit of the Channel Type).  The
+    // kUnreliable mode below uses the datagram path, which is
+    // unordered by construction.
+    const bool unordered = !cfg_.ordered;
+
+    // RFC 8832 §6: "before the DATA_CHANNEL_ACK or any other message
+    // has been received on a data channel, all other messages
+    // containing user data and belonging to this data channel MUST be
+    // sent ordered, no matter whether the data channel is ordered or
+    // not."  Until the handshake completes, every channel — including
+    // an unreliable one — sends ordered.
+    if (handshake_pending_) {
+        return sock_->send_stream_with_ppid(stream, data, ppid);
+    }
 
     switch (cfg_.reliability) {
         case plugins::DataChannelReliability::kReliableOrdered:
@@ -323,28 +383,38 @@ void SctpDataChannel::send_dcep_open() noexcept {
     if (dcep_open_sent_) return;
     const std::vector<std::uint8_t> open = sctp::dcep_encode_open(cfg_);
     plugins::BufferView bv{open.data(), open.size()};
-    // DATA_CHANNEL_OPEN rides PPID 50 on the negotiated stream.
+    // DATA_CHANNEL_OPEN rides PPID 50 on the negotiated stream.  RFC
+    // 8832 §6: DCEP messages MUST be sent ordered and reliable — the
+    // `send_stream_with_ppid` path is exactly that.
     const plugins::Status s =
         sock_->send_stream_with_ppid(kSctpStreamId, bv, sctp::kPpidDcep);
     if (s == kOk) {
         dcep_open_sent_ = true;
-    } else if (on_state_) {
-        on_state_("error");
+        // The handshake is now outstanding: until the peer answers
+        // (or sends us anything on the channel), user data must be
+        // sent ordered (RFC 8832 §6).
+        handshake_pending_ = true;
+    } else {
+        core::log::Logger::instance().warn(
+            "SctpDataChannel: DATA_CHANNEL_OPEN could not be sent; "
+            "the channel stays unnegotiated");
+        if (on_state_) on_state_("error");
     }
 }
 
 void SctpDataChannel::on_sctp_recv_with_ppid(
-    uint16_t /*stream*/, std::uint32_t ppid, core::ByteSpan data) noexcept {
+    std::uint16_t stream, std::uint32_t ppid, core::ByteSpan data) noexcept {
     if (ppid == sctp::kPpidDcep) {
         if (data.empty()) return;
         if (data[0] == sctp::kDcepAck) {
-            // Peer acknowledged our OPEN — channel is usable.
-            if (on_state_) on_state_("open");
+            // Peer acknowledged our OPEN — the handshake is complete.
+            s_complete_handshake();
             return;
         }
         if (data[0] == sctp::kDcepOpen) {
             // Peer opened a channel toward us: adopt its label/QoS so
-            // send() routes correctly, reply ACK, and report open.
+            // send() routes correctly, reply ACK on the same stream
+            // (RFC 8832 §6), and report open.
             const auto* bytes = data.data();
             if (const auto params =
                     sctp::dcep_decode_open(bytes, data.size())) {
@@ -354,25 +424,48 @@ void SctpDataChannel::on_sctp_recv_with_ppid(
                 cfg_.max_retransmits = params->max_retransmits;
                 cfg_.max_packet_lifetime_ms =
                     params->max_packet_lifetime_ms;
+                // The priority is a u16 on the wire; DataChannelConfig
+                // carries it as a u8, so clamp.
+                cfg_.priority = static_cast<std::uint8_t>(
+                    params->priority > 255 ? 255 : params->priority);
             }
             const std::vector<std::uint8_t> ack = sctp::dcep_encode_ack();
             plugins::BufferView bv{ack.data(), ack.size()};
-            (void)sock_->send_stream_with_ppid(
-                kSctpStreamId, bv, sctp::kPpidDcep);
-            if (on_state_) on_state_("open");
+            // The ACK goes on the same stream the OPEN arrived on.
+            (void)sock_->send_stream_with_ppid(stream, bv, sctp::kPpidDcep);
+            s_complete_handshake();
             return;
         }
         return;  // unknown DCEP type — drop
     }
     if (ppid == sctp::kPpidString || ppid == sctp::kPpidBinary) {
-        on_sctp_recv(/*stream=*/0, data);
+        // A user message on the channel completes the handshake as
+        // well (RFC 8832 §6: "the DATA_CHANNEL_ACK or any other
+        // message has been received on a data channel").
+        s_complete_handshake();
+        on_sctp_recv(stream, data);
         return;
     }
     // Unknown PPID — drop per RFC 8831 §6 (no user callback).
 }
 
-void SctpDataChannel::on_sctp_recv(uint16_t /*stream*/,
+void SctpDataChannel::s_complete_handshake() noexcept {
+    if (!handshake_pending_) {
+        // Already complete — but the state event still has to fire
+        // exactly once, so track it with `handshake_pending_` only.
+        return;
+    }
+    handshake_pending_ = false;
+    if (on_state_) on_state_("open");
+}
+
+void SctpDataChannel::on_sctp_recv(std::uint16_t /*stream*/,
                                    core::ByteSpan data) noexcept {
+    // A message on the channel completes the handshake as well
+    // (RFC 8832 §6) — this is the path backends that do not speak the
+    // PPID seam take, so the handshake must be completed here too.
+    s_complete_handshake();
+
     // Forward to the user callback. The callback signature is
     // `void(BufferView)` and `BufferView = core::ByteSpan`, so the
     // conversion is a no-op.

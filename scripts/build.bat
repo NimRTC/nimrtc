@@ -63,6 +63,11 @@ if errorlevel 1 (
 :: ---------------------------------------------------------------------------
 echo [INFO] Detecting MSVC toolchain...
 
+:: A CL that carries a language-standard option breaks the vendored C11
+:: sources and poisons CMake's configure-time feature probes.  See
+:: scripts/msvc_env.bat for the details.
+call "%SCRIPT_DIR%msvc_env.bat"
+
 :: Check if cl.exe is in PATH (means we are in a VS dev prompt)
 where cl >nul 2>&1
 if errorlevel 1 (
@@ -137,6 +142,12 @@ if "%MODE%"=="configure" or "%MODE%"=="full" (
     echo ============================================================
     echo.
     cd /d "%PROJECT_ROOT%"
+    :: A cache that was configured with a polluted CL holds a failed
+    :: compiler probe, and CMake never recomputes a probe on its own.
+    :: The repair drops it so the configure below re-runs it.
+    if exist "%PROJECT_ROOT%\build\CMakeCache.txt" (
+        python "%SCRIPT_DIR%repair_msvc_cache.py" "%PROJECT_ROOT%\build"
+    )
     cmake --preset dev.msvc -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
     if errorlevel 1 (
         echo.

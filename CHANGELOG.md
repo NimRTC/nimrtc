@@ -337,6 +337,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the value is the one the command returned.
 - **The WebRTC APM prebuild is now a hard release gate** (the APM content
   that actually ships is reported, not just the prebuild outcome).
+- **An MSVC environment sanitizer** (`scripts/msvc_env.bat`) that clears
+  the `CL`, `_CL_` and `CLFLAGS` variables before a build. A `CL` that
+  carries a language-standard option is applied to C and to C++ sources
+  alike, so the vendored libopus (C11) and the C++ sources collide with
+  `cl : Command line error D8016: '/std:c++20' and '/std:c11' options are
+  incompatible`. Clearing the variables also un-poisons CMake's
+  configure-time feature probes, which inherit the same environment. The
+  cleared values are printed, and `NIMRTC_KEEP_CL=1` keeps them for the
+  rare build that genuinely needs one. Both `scripts/build.bat` and
+  `scripts/msvc_build.bat` call it.
+- **A CMake cache repair tool** (`scripts/repair_msvc_cache.py`) that
+  drops the probe results a polluted environment produced. CMake records
+  a failed probe as an *empty* cache value and never recomputes it, so a
+  tree that was once configured with a polluted `CL` stays broken even
+  after the environment is fixed: libopus then concludes that the
+  compiler supports no variable-length array, no `alloca` and no
+  pseudostack, and the build dies with `fatal error C1189: #error:
+  "Opus requires one of VAR_ARRAYS, USE_ALLOCA, or
+  NONTHREADSAFE_PSEUDOSTACK be defined"`. The tool drops only the probe
+  results whose cached value is empty -- a `FALSE` is an honest answer
+  (MSVC's C mode has no variable-length arrays) and is left alone -- and
+  both build scripts run it before the configure.
 
 ## [1.1.0] - 2026-11-07
 

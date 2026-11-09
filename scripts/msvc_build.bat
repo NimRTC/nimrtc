@@ -33,6 +33,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: A CL that carries a language-standard option breaks the vendored C11
+:: sources and poisons CMake's configure-time feature probes.  See
+:: scripts/msvc_env.bat for the details.
+call "%SCRIPT_DIR%msvc_env.bat"
+
 if "%~1"=="raw" (
     :: NOTE: `shift` does NOT change %*, so the arguments cannot be taken
     :: from %* after a shift -- the mode word would still be in front of the
@@ -54,6 +59,18 @@ set "TARGET_NAME="
 if "%~2"=="--target" set "TARGET_NAME=%~3"
 
 cd /d "%PROJECT_ROOT%"
+
+:: A cache that was configured with a polluted CL holds a failed
+:: compiler probe, and CMake never recomputes a probe on its own.  The
+:: repair drops it so the configure below re-runs it.  It exits 1 when it
+:: changed something, which is not an error here.
+if exist "%PROJECT_ROOT%\build\CMakeCache.txt" (
+    python "%SCRIPT_DIR%repair_msvc_cache.py" "%PROJECT_ROOT%\build"
+    if errorlevel 2 (
+        echo [ERROR] The CMake cache repair failed.
+        exit /b 1
+    )
+)
 
 if "%MODE%"=="configure" (
     echo [INFO] Configuring preset debug.msvc, type %BUILD_TYPE% ...

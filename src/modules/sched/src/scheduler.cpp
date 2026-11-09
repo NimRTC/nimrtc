@@ -11,9 +11,18 @@
  * - All public entry points acquire impl_->mu_ (std::mutex) for thread safety.
  *
  * - BWE congestion response (on_bwe_update):
- *     allowed_per_drain_ = target_bps / (avg_packet_size_bytes * 8)
- *     After setting the limit, drop packets from lowest priority upwards
- *     until total_estimated_size fits within the window.
+ *     The sender runs on a *time-based credit* (token bucket): every
+ *     drain() grants credit proportional to the wall-clock time that
+ *     elapsed since the previous drain, and every packet that leaves the
+ *     queue consumes its estimated size from that credit.  The effective
+ *     send rate is therefore independent of how often the host calls
+ *     drain() — a host ticking every 20 ms and a host ticking every
+ *     200 ms send at the same bitrate.
+ *
+ *     On top of the credit, a congestion *window* (one
+ *     SchedulerConfig::drain_interval_ms worth of bytes) bounds how much
+ *     data may stay queued: packets are trimmed from the lowest priority
+ *     upwards until the queue fits.
  *
  * - kControl is NEVER dropped by the scheduler — only discarded if the
  *   caller drops the entire stream (BWE target_bps == 0).
@@ -27,6 +36,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -89,15 +99,26 @@ inline void sched_debug(const char* fmt, ...) {
     }
 }
 
-/** Convert bits-per-second + avg packet size → packets-per-second budget.
- *  Returns 0 when target_bps == 0 (pause). */
-[[nodiscard]] constexpr std::uint32_t
-bits_to_packets_per_second(std::uint32_t target_bps,
-                           std::uint32_t avg_packet_size_bytes) noexcept {
-    if (target_bps == 0 || avg_packet_size_bytes == 0) return 0;
-    const std::uint64_t bits_per_packet = avg_packet_size_bytes * 8ULL;
-    const std::uint64_t pps = target_bps / bits_per_packet;
-    return static_cast<std::uint32_t>(std::min<std::uint64_t>(pps, 0xFFFFFFFFULL));
+/** Bytes the sender may emit during one congestion-window horizon.
+ *
+ *  `drain_interval_ms` is the scheduler's *horizon*: how much outbound
+ *  data may stay queued.  It is deliberately independent of the host's
+ *  tick rate — the tolerated backlog must not change when the host drains
+ *  more or less often.
+ *
+ *  The *send rate* is enforced separately, by the time-based credit in
+ *  drain_with(), which follows the measured wall-clock interval between
+ *  drains.
+ *
+ *  `drain_interval_ms == 0` is treated as 1 ms (i.e. one packet's worth
+ *  of budget at most) rather than as "unlimited", so a misconfigured
+ *  scheduler throttles instead of flooding the wire. */
+[[nodiscard]] constexpr std::uint64_t
+bytes_per_drain_interval(std::uint32_t target_bps,
+                          std::uint32_t drain_interval_ms) noexcept {
+    const std::uint64_t bytes_per_sec = static_cast<std::uint64_t>(target_bps) / 8;
+    const std::uint64_t interval = drain_interval_ms == 0 ? 1u : drain_interval_ms;
+    return (bytes_per_sec * interval) / 1000;
 }
 
 /** Estimate the byte size of one PacketRecord.
@@ -107,6 +128,16 @@ bits_to_packets_per_second(std::uint32_t target_bps,
 estimated_packet_bytes(const PacketRecord& r,
                        std::uint32_t avg_size) noexcept {
     return r.estimated_size_bytes != 0 ? r.estimated_size_bytes : avg_size;
+}
+
+/** Clamp a measured interval to a sane range.
+ *  1 ms avoids a zero-length budget (which would stall); 1000 ms stops a
+ *  long idle gap from turning into an unbounded burst. */
+[[nodiscard]] constexpr std::uint32_t
+clamp_interval_ms(std::int64_t ms) noexcept {
+    if (ms < 1) return 1u;
+    if (ms > 1000) return 1000u;
+    return static_cast<std::uint32_t>(ms);
 }
 
 }  // anonymous namespace
@@ -130,8 +161,43 @@ struct Scheduler::Impl {
 
     // ---- Bandwidth state ------------------------------------------------
     std::uint32_t target_bps_ = 0;          // from last on_bwe_update()
-    std::uint32_t allowed_per_drain_ = 0;   // max packets drain() may emit
+    // True once on_bwe_update() has been called at least once.  While
+    // false the scheduler applies NO per-drain limit (an unbounded
+    // queue drains as fast as the caller asks).  This flag exists
+    // because "no packets allowed" is a legitimate value after a
+    // BWE update (a budget too small for a single packet) and must not
+    // be confused with "no limit".
+    bool bwe_limit_active_ = false;
     std::uint32_t packets_sent_this_cycle_ = 0; // reset each drain() call
+
+    // ---- Send credit (token bucket) -------------------------------------
+    //
+    // The scheduler's time base.  Instead of assuming a drain cadence,
+    // the scheduler *measures* the interval between two consecutive
+    // drain() calls and grants send credit proportional to the elapsed
+    // time:
+    //
+    //     credit += (target_bps / 8) * elapsed_ms      [milli-bytes]
+    //
+    // Every packet that leaves the wire consumes its estimated size from
+    // the credit.  The credit is capped at one second's worth, so a long
+    // idle gap cannot turn into an unbounded burst.
+    //
+    // Because the credit is driven by *wall-clock* time and not by the
+    // number of drain() calls, the effective send rate is identical in a
+    // host that ticks every 20 ms and in a host that ticks every 200 ms.
+    //
+    // The credit is kept in milli-bytes so the fractional remainder of a
+    // packet's cost is not lost between drains.
+    std::uint64_t credit_milli_bytes_ = 0;
+
+    // ---- Measured drain cadence ----------------------------------------
+    core::TimePoint last_drain_time_{};
+    bool            has_last_drain_ = false;
+    std::uint32_t   measured_interval_ms_ = 0;  // 0 = not measured yet
+    // Bytes emitted by the last drain — used to report the observed
+    // egress rate in stats().
+    std::uint64_t   bytes_last_drain_ = 0;
 
     // ---- L1 stream-priority state (DC-2) -------------------------------
     // stream_id → StreamPriority.  Unseen streams default to Normal.
@@ -262,15 +328,64 @@ int Scheduler::drain_with(int max_packets,
 
     int sent = 0;
     impl_->packets_sent_this_cycle_ = 0;
+    bool vetoed = false;
+
+    // ---- Grant the send credit for the period this drain covers -------
+    //
+    // The credit is proportional to the *measured* wall-clock time since
+    // the previous drain, so the effective send rate is the same whether
+    // the host ticks every 20 ms or every 200 ms.  The very first drain
+    // has no predecessor to measure against and uses the configured
+    // SchedulerConfig::drain_interval_ms as the seed.
+    const auto now = core::SteadyClock::now();
+    std::uint64_t elapsed_us = 0;
+    if (impl_->has_last_drain_) {
+        elapsed_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                now - impl_->last_drain_time_).count());
+    } else {
+        elapsed_us = static_cast<std::uint64_t>(
+                         impl_->config_.drain_interval_ms) * 1000;
+    }
+    impl_->last_drain_time_ = now;
+    impl_->has_last_drain_ = true;
+    impl_->measured_interval_ms_ = static_cast<std::uint32_t>(
+        clamp_interval_ms(static_cast<std::int64_t>(elapsed_us / 1000)));
+    impl_->bytes_last_drain_ = 0;
+
+    if (impl_->bwe_limit_active_ && impl_->target_bps_ > 0) {
+        // Credit granted = bytes_per_sec * elapsed_us / 1000, expressed in
+        // milli-bytes so the fractional remainder of a packet's cost is
+        // not lost between drains.
+        const std::uint64_t bytes_per_sec =
+            static_cast<std::uint64_t>(impl_->target_bps_) / 8;
+        impl_->credit_milli_bytes_ += (bytes_per_sec * elapsed_us) / 1000;
+        // Cap the credit at one second's worth so a long idle gap cannot
+        // turn into an unbounded burst when the host resumes.
+        const std::uint64_t cap_milli = bytes_per_sec * 1000;
+        if (impl_->credit_milli_bytes_ > cap_milli) {
+            impl_->credit_milli_bytes_ = cap_milli;
+        }
+    }
 
     for (std::size_t idx = 0; idx < kPriorityCount && sent < max_packets; ++idx) {
         auto& q = impl_->queues_[idx];
 
         while (!q.empty() && sent < max_packets) {
-            // If a BWE limit is active, stop after allowed_per_drain_.
-            if (impl_->allowed_per_drain_ > 0 &&
-                impl_->packets_sent_this_cycle_ >= impl_->allowed_per_drain_) {
-                break;  // stop draining; remaining packets stay queued
+            // If a BWE limit is active, stop once the send credit is
+            // exhausted: the packet stays queued and goes out on a later
+            // drain, when enough time has passed to earn the credit.
+            // The credit is only consumed once the packet really left
+            // the queue — a vetoed packet keeps its credit.
+            std::uint32_t peek_bytes = 0;
+            if (impl_->bwe_limit_active_) {
+                peek_bytes = estimated_packet_bytes(
+                    q.front(), impl_->config_.avg_packet_size_bytes);
+                const std::uint64_t cost_milli =
+                    static_cast<std::uint64_t>(peek_bytes) * 1000;
+                if (impl_->credit_milli_bytes_ < cost_milli) {
+                    break;  // not enough credit yet — keep the packet queued
+                }
             }
 
             // Take ownership of the packet so we can update stats
@@ -283,26 +398,38 @@ int Scheduler::drain_with(int max_packets,
             if (cb) {
                 core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
                 if (!cb(rec.priority, span)) {
-                    // Caller vetoed — but we already removed the record.
-                    // (In practice callers will accept the dequeue; this
-                    // exists so they can early-exit on transport errors.)
+                    // Caller vetoed the packet.  Put it back at the FRONT of
+                    // its queue so the next drain() sees it again — the
+                    // previous behaviour silently discarded it, which lost
+                    // data and left the "dropped" statistic understating
+                    // the real loss.
+                    //
+                    // The record is put back as-is (not counted as sent),
+                    // so a vetoing transport does not lose the packet and
+                    // the statistics stay truthful.  Draining stops
+                    // entirely — a veto means "the transport is not
+                    // accepting traffic right now", so lower-priority
+                    // queues must not be attempted either.
+                    q.push_front(std::move(rec));
+                    vetoed = true;
                     break;
                 }
             }
 
             const std::uint32_t est_bytes = estimated_packet_bytes(
                 rec, impl_->config_.avg_packet_size_bytes);
+            if (impl_->bwe_limit_active_) {
+                impl_->credit_milli_bytes_ -=
+                    static_cast<std::uint64_t>(est_bytes) * 1000;
+            }
             ++sent;
             ++impl_->packets_sent_this_cycle_;
             ++impl_->sent_total_;
             impl_->sent_bytes_total_ += est_bytes;
+            impl_->bytes_last_drain_ += est_bytes;
         }
 
-        // If we hit the BWE limit while draining, stop scanning lower queues.
-        if (impl_->allowed_per_drain_ > 0 &&
-            impl_->packets_sent_this_cycle_ >= impl_->allowed_per_drain_) {
-            break;
-        }
+        if (vetoed) break;  // a veto stops the whole drain
     }
 
     return sent;
@@ -312,14 +439,14 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     impl_->target_bps_       = target_bps;
-    impl_->allowed_per_drain_ = bits_to_packets_per_second(
-        target_bps, impl_->config_.avg_packet_size_bytes);
-
-    sched_debug("Scheduler: BWE update target=%u bps, allowed_packets/drain=%u",
-                target_bps, impl_->allowed_per_drain_);
 
     if (target_bps == 0) {
         // Total sender pause: keep all kControl, drop everything else.
+        // The BWE limit is left inactive (not "0 credit") so the surviving
+        // kControl packets still drain — a pause is expressed by emptying
+        // the non-control queues, not by blocking the control plane.
+        impl_->credit_milli_bytes_ = 0;
+        impl_->bwe_limit_active_   = false;
         for (std::size_t idx = 1; idx < kPriorityCount; ++idx) {
             impl_->dropped_total_ +=
                 static_cast<std::uint32_t>(impl_->queues_[idx].size());
@@ -329,28 +456,52 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) noexcept {
         return;
     }
 
+    // The congestion-window horizon: how much backlog (in bytes) may
+    // stay queued before the scheduler starts trimming low-priority
+    // queues.  This is a *fixed* horizon (the configured
+    // SchedulerConfig::drain_interval_ms), deliberately independent of
+    // how fast the host ticks: the amount of data we tolerate in the
+    // send queue must not change with the host's tick rate.
+    //
+    // The *send rate* is enforced separately, by the time-based credit in
+    // drain_with(), which follows the measured wall-clock interval
+    // between drains.
+    const std::uint32_t horizon_ms =
+        impl_->config_.drain_interval_ms == 0 ? 1u
+                                              : impl_->config_.drain_interval_ms;
+
+    // Drain-window budget (used for the queue trim below):
+    //   bytes_per_drain   = (target_bps / 8) * horizon_ms / 1000
+    //
+    // NOTE: the previous implementation stored *packets per second* in
+    // allowed_per_drain_ and compared it against the per-drain counter,
+    // which over-allowed by a factor of (1000 / interval_ms) — a 125 ms
+    // drain period let through 8x the budgeted rate.  The send rate is
+    // now enforced by the time-based credit in drain_with(), which does
+    // not depend on the number of drain() calls.
+    const std::uint64_t budget_bytes =
+        bytes_per_drain_interval(target_bps, horizon_ms);
+    impl_->bwe_limit_active_  = true;
+
+    sched_debug("Scheduler: BWE update target=%u bps, horizon=%u ms, "
+                "window budget=%llu B",
+                target_bps, horizon_ms,
+                static_cast<unsigned long long>(budget_bytes));
+
     // Congestion signalled: trim the queue so its total byte cost fits
-    // within one drain cycle's budget.  Packets trimmed from the lowest
-    // priority queues are dropped (not "sent"); packets retained stay
-    // queued and will be sent by the next drain() call.
+    // within one drain interval's budget.  Packets trimmed from the
+    // lowest priority queues are dropped (not "sent"); packets retained
+    // stay queued and will be sent by the next drain() call.
     //
-    // Drain budget (bytes per drain call):
-    //   budget_bytes = target_bps / 8  → bytes per second
-    //                / kDrainsPerSecond  → bytes per drain call
-    //
-    // kDrainsPerSecond == 8 means drain is assumed to be called every
-    // 125 ms (the typical high-resolution engine tick). With this divisor:
+    // With the default 125 ms time base this yields:
     //   - 100 kbps → ~1562 bytes/drain → fits 1 packet of 1000 B; a 5-deep
     //     best-effort queue (5000 B) is dropped entirely.
     //   - 256 kbps → ~4000 bytes/drain → fits 4 packets of 1000 B; all
     //     4 moderate-congestion packets preserved.
     //   - 10 kbps → ~156 bytes/drain → fits 0 packets → all dropped.
     //   - 5 Mbps → ~78 KiB/drain → no drops.
-    constexpr std::uint32_t kDrainsPerSecond = 8;
-    const std::uint64_t bytes_per_sec =
-        static_cast<std::uint64_t>(target_bps) / 8;
-    const std::uint64_t budget_bytes =
-        bytes_per_sec / kDrainsPerSecond;
+    //   - 20 ms host tick → the same bitrate yields 1/6 of the above
+    //     budget per drain, i.e. the same rate per second.
 
     // Compute total queue bytes excluding kControl (which is never dropped).
     auto total_noncontrol_bytes = [&]() -> std::uint64_t {
@@ -406,8 +557,12 @@ void Scheduler::reset() noexcept {
         q.clear();
     }
     impl_->target_bps_          = 0;
-    impl_->allowed_per_drain_   = 0;
+    impl_->credit_milli_bytes_  = 0;
+    impl_->bwe_limit_active_    = false;
     impl_->packets_sent_this_cycle_ = 0;
+    impl_->has_last_drain_      = false;
+    impl_->measured_interval_ms_ = 0;
+    impl_->bytes_last_drain_     = 0;
     impl_->dropped_total_       = 0;
     impl_->sent_total_          = 0;
     impl_->sent_bytes_total_    = 0;
@@ -429,7 +584,15 @@ plugins::SchedulerStats Scheduler::stats() const noexcept {
     s.sent_packets      = impl_->sent_total_;
     s.sent_bytes        = impl_->sent_bytes_total_;
     s.target_bitrate_bps = impl_->target_bps_;
-    s.current_bitrate_bps = 0;  // computed externally if needed
+    // Observed egress rate of the last drain: bytes emitted during the
+    // measured drain interval, expressed in bits per second.  This is
+    // the *actual* rate, which — unlike the target — reflects what the
+    // host's tick cadence allowed.
+    s.current_bitrate_bps = 0;
+    if (impl_->has_last_drain_ && impl_->measured_interval_ms_ > 0) {
+        s.current_bitrate_bps = static_cast<std::uint32_t>(
+            (impl_->bytes_last_drain_ * 8 * 1000) / impl_->measured_interval_ms_);
+    }
     return s;
 }
 
@@ -546,7 +709,11 @@ void Scheduler::enqueue_for_stream(std::uint32_t stream_id,
 
 namespace {
 
-/** Helper: drain one stream bucket (called from select_next_packet). */
+/** Helper: drain one stream bucket (called from select_next_packet).
+ *
+ *  A veto from `inner_cb` stops the drain and puts the packet back at the
+ *  FRONT of the bucket — the previous behaviour dropped it silently, which
+ *  lost data and left the "dropped" statistic understating the real loss. */
 int drain_stream_bucket(std::deque<PacketRecord>& bucket,
                         std::uint32_t& sent_total,
                         std::uint64_t& sent_bytes_total,
@@ -554,7 +721,8 @@ int drain_stream_bucket(std::deque<PacketRecord>& bucket,
                         int max_packets,
                         plugins::DrainCallback inner_cb,
                         std::uint32_t stream_id,
-                        StreamPriority bucket_priority) noexcept {
+                        StreamPriority bucket_priority,
+                        bool& vetoed) noexcept {
     int sent = 0;
     while (!bucket.empty() && sent < max_packets) {
         PacketRecord rec = std::move(bucket.front());
@@ -563,7 +731,9 @@ int drain_stream_bucket(std::deque<PacketRecord>& bucket,
         if (inner_cb) {
             core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
             if (!inner_cb(rec.priority, span)) {
-                return sent;  // veto — stop
+                bucket.push_front(std::move(rec));  // veto — keep the packet
+                vetoed = true;
+                break;
             }
         }
 
@@ -611,13 +781,15 @@ int Scheduler::select_next_packet(int max_packets,
         // Peek at stream_id from the front of the bucket for the C ABI.
         std::uint32_t peek_stream_id = bucket.front().stream_id;
 
+        bool vetoed = false;
         int n = drain_stream_bucket(bucket, impl_->stream_sent_total_,
                                    impl_->sent_bytes_total_,
                                    impl_->config_.avg_packet_size_bytes,
                                    max_packets - sent, wrapped_cb,
-                                   peek_stream_id, bucket_prio);
+                                   peek_stream_id, bucket_prio, vetoed);
         sent += n;
-        if (n == 0) break;  // bucket became empty mid-drain via veto
+        if (vetoed) break;  // a veto stops the whole selection
+        if (n == 0) break;  // bucket became empty mid-drain
     }
 
     return sent;

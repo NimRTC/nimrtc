@@ -95,6 +95,27 @@ struct NIMRTC_API_STABLE SchedulerConfig {
      *  resolve or open a scheduler at open() and send_audio() sends
      *  directly through ICE.  Matches the docs in EngineConfig. */
     bool enabled = false;
+
+    /** The congestion-window horizon, in milliseconds.
+     *
+     *  This value has **two** roles:
+     *
+     *  1. It bounds how much outbound data may stay queued: when the BWE
+     *     estimate shrinks, packets are trimmed from the lowest priority
+     *     upwards until the queue fits into one horizon's worth of bytes
+     *     at the estimated rate.  A fixed horizon keeps the tolerated
+     *     backlog independent of the host's tick rate.
+     *
+     *  2. It seeds the *measured* drain interval.  After the first
+     *     `drain()` the scheduler measures the wall-clock time between
+     *     two drains and grants send credit proportional to that elapsed
+     *     time, so the effective send rate is the same whether the host
+     *     ticks every 20 ms or every 200 ms.  This value is only used
+     *     until the first measurement exists.
+     *
+     *  @note Appended at the end of the struct (v1.1.1) so that existing
+     *  aggregate initialisation of the preceding fields keeps compiling. */
+    std::uint32_t drain_interval_ms = 125;
 };
 
 // ---------------------------------------------------------------------------

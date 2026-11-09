@@ -19,6 +19,14 @@ namespace {
 constexpr int kDefaultAudioBitrateMonoBps   = 32000;
 constexpr int kDefaultAudioBitrateStereoBps = 64000;
 
+/** Size of the SRTP authentication tag (RFC 3711 §3.5 — the default
+ *  AES_CM_128_HMAC_SHA1_80 profile appends a 10-byte tag).
+ *
+ *  Used as the capacity hint when acquiring an outbound packet buffer from
+ *  the scheduler's pool, so the protected packet fits without a
+ *  reallocation. */
+constexpr std::size_t kSrtpAuthTagBytes = 10;
+
 } // anonymous namespace
 
 
@@ -519,7 +527,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
 
                 // ---- Assemble full RTP packet ----------------------------------
                 std::vector<std::uint8_t> rtp_pkt;
-                rtp_pkt.reserve(12 + payload.size());
+                if (scheduler_) {
+                    rtp_pkt = scheduler_->acquire_packet_buffer(
+                        12 + payload.size());
+                }
                 rtp_pkt.insert(rtp_pkt.end(), hdr, hdr + 12);
                 rtp_pkt.insert(rtp_pkt.end(),
                                payload.data(), payload.data() + payload.size());
@@ -529,6 +540,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     auto* sess = impl_->srtp->get_session(
                         config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                     if (!sess) {
+                // The buffer comes from the scheduler's packet pool (P1
+                // hardening, 2026-11-09): it is handed back to the pool
+                // once the packet has been drained and dispatched, so the
+                // steady-state send path performs no heap allocation.
                         // SRTP not ready — drop this packet silently.
                         return;
                     }
@@ -902,7 +917,19 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
 
         // SRTP protect (or pass-through when not yet keyed).
-        // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
+        //
+        // The outbound buffer is taken from the scheduler's packet pool
+        // (P1 hardening, 2026-11-09) and handed back to it with
+        // `enqueue_owned()`.  The previous code moved a MEMBER vector into
+        // the scheduler, which left the member in a moved-from state —
+        // so every single packet allocated a fresh buffer and the
+        // previous one was freed on drain.  With the pool the steady-state
+        // send path performs no heap allocation.
+        std::vector<std::uint8_t> send_buf;
+        if (scheduler_) {
+            send_buf = scheduler_->acquire_packet_buffer(
+                pkt_buf.size() + kSrtpAuthTagBytes);
+        }
         core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
         if (impl_->srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
@@ -913,32 +940,26 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
             }
             auto enc = sess->protect_rtp(out_payload, impl_->audio_ssrc, cur_ts);
             if (!enc) return 0;
-            impl_->audio_send_buf.assign(enc.value().data(),
-                                         enc.value().data() + enc.value().size());
+            send_buf.assign(enc.value().data(),
+                            enc.value().data() + enc.value().size());
         } else {
-            impl_->audio_send_buf.assign(out_payload.data(),
-                                         out_payload.data() + out_payload.size());
+            send_buf.assign(out_payload.data(),
+                            out_payload.data() + out_payload.size());
         }
 
         // ---- Scheduler: enqueue for priority-drain (move, P0#3) --------------
-        // The scheduler takes ownership of audio_send_buf via enqueue_owned.
-        // After this call, audio_send_buf is in MOVED-FROM state; we must not
-        // touch it.  The scheduler will release it on drain.
+        // The scheduler takes ownership of the buffer via enqueue_owned and
+        // returns it to its pool once the packet has been dispatched.
         if (scheduler_) {
             scheduler_->enqueue_owned(plugins::Priority::kAudio,
-                                      std::move(impl_->audio_send_buf),
+                                      std::move(send_buf),
                                       plugins::Addr{});
             return 0;
         }
 
         // Fallback: no scheduler — send directly through ICE (transport profile).
-        plugins::BufferView bv{impl_->audio_send_buf.data(),
-                               impl_->audio_send_buf.size()};
-        const auto send_rc = ice_t_->send(bv, {});
-        // Clear so the next call starts fresh.
-        impl_->audio_send_buf.clear();
-        impl_->audio_send_buf.shrink_to_fit();   // release backing if needed
-        return send_rc;
+        plugins::BufferView bv{send_buf.data(), send_buf.size()};
+        return ice_t_->send(bv, {});
     };
 
     // ---- Drain the accumulator -----------------------------------------

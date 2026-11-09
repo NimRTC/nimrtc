@@ -536,12 +536,12 @@ struct NimRTCEngine::Impl {
     // allocations that a fresh `std::vector` per call would incur.
     //
     // `audio_codec_pkt` holds the raw codec (Opus) output for the in-flight
-    // frame.  `audio_send_buf` is the SRTP-protected RTP packet that goes
-    // out the wire (or into the scheduler queue).  Both are members rather
-    // than `static thread_local` so the engine owns the lifetime and so a
-    // future move to per-stream send queues stays trivial.
+    // frame.  The outbound (SRTP-protected) packet is NOT kept here: it is
+    // taken from the scheduler's packet pool and handed back to the pool
+    // once the packet has been drained (P1 hardening, 2026-11-09).  Keeping
+    // it in a member and MOVING it into the scheduler would leave the
+    // member moved-from, so every packet would allocate a fresh buffer.
     std::vector<std::uint8_t> audio_codec_pkt;
-    std::vector<std::uint8_t> audio_send_buf;
 
     // Scratch buffer for the capture-side PCM.  The 3A stage processes audio
     // in place, but send_audio() receives the caller's buffer as `const

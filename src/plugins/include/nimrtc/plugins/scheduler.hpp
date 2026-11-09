@@ -228,6 +228,50 @@ public:
 
     /** Return the current configuration. */
     virtual SchedulerConfig config() const noexcept = 0;
+
+    // ---- Packet buffer pool (P1 hardening, 2026-11-09) ------------------
+    //
+    // The outbound hot path used to perform one heap allocation AND one
+    // free per packet: the engine built the packet in a member vector,
+    // moved it into the scheduler (leaving the member in a moved-from
+    // state, so the NEXT packet had to allocate again) and the scheduler
+    // freed the buffer when the packet was drained.  At 1000 packets per
+    // second that is 1000 malloc/free pairs per second on the send path.
+    //
+    // The pool closes that loop: the caller acquires a buffer, builds the
+    // packet in it, hands it over with `enqueue_owned()`, and the
+    // scheduler returns the buffer to the pool once the packet has been
+    // drained and dispatched.  In steady state the send path performs no
+    // heap allocation at all.
+    //
+    // The buffer is recycled AFTER the drain callback returned, so the
+    // callback may keep using the bytes for the duration of the call only.
+
+    /** Acquire a reusable packet buffer from the scheduler's pool.
+     *
+     *  `capacity_hint` is a hint in bytes.  The returned buffer may have
+     *  a different capacity; the caller resizes it before use.  The
+     *  default implementation returns an empty vector with `capacity_hint`
+     *  bytes of reserved capacity and no recycling.
+     *
+     *  Thread-safe. */
+    virtual std::vector<std::uint8_t> acquire_packet_buffer(
+        std::size_t capacity_hint) noexcept {
+        std::vector<std::uint8_t> buffer;
+        if (capacity_hint != 0) buffer.reserve(capacity_hint);
+        return buffer;
+    }
+
+    /** Return a buffer to the scheduler's pool for reuse.
+     *
+     *  Only buffers previously obtained from `acquire_packet_buffer()` of
+     *  the SAME scheduler instance should be released here.  The default
+     *  implementation simply destroys the buffer.
+     *
+     *  Thread-safe. */
+    virtual void release_packet_buffer(std::vector<std::uint8_t>&& buffer) noexcept {
+        (void)buffer;  // destroyed on return — no pool in the default impl
+    }
 };
 
 // ---------------------------------------------------------------------------

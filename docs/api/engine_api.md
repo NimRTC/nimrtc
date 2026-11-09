@@ -77,7 +77,7 @@ nimrtc::engine::NimRTCEngine
 └── Runtime swaps
     ├── set_video_sink(unique_ptr<IVideoSink>)
     ├── set_video_source(unique_ptr<IVideoSource>)
-    └── Stats::srtp_drops / stats()
+    └── Stats (video + audio counters) / stats()
 ```
 
 ---
@@ -532,6 +532,37 @@ uint32_t last_open_rc() const noexcept;
 
 struct Stats {
     int srtp_drops = 0;
+
+    // Video counters (v1.1 Track V) — cumulative since open().
+    uint64_t video_frames_sent = 0;
+    uint64_t video_packets_sent = 0;
+    uint64_t video_bytes_sent = 0;
+    uint64_t video_frames_received = 0;
+    uint64_t video_nack_seqs_queued = 0;
+    uint64_t video_keyframes_q = 0;
+    uint64_t video_feedback_applied = 0;
+    uint64_t video_keyframes_applied = 0;
+
+    // Audio send counters (audio pipeline WP-5) — cumulative since open().
+    uint64_t audio_frames_sent = 0;
+    uint64_t audio_bytes_sent = 0;
+    uint64_t audio_encode_errors = 0;
+    uint64_t audio_samples_in = 0;
+    uint64_t audio_samples_pending = 0;
+
+    // Audio receive counters (audio pipeline WP-8 / spec B-13).
+    uint64_t audio_packets_sent = 0;
+    uint64_t audio_frames_received = 0;
+    uint64_t audio_samples_received = 0;
+    uint64_t audio_concealed_frames = 0;
+    uint64_t audio_fec_recovered_frames = 0;
+    uint64_t audio_packets_lost = 0;
+    uint64_t audio_decode_errors = 0;
+    uint32_t audio_jitter_ms = 0;
+    uint32_t audio_playout_delay_ms = 0;
+
+    // Adaptive audio bitrate — instantaneous, not cumulative.
+    uint32_t audio_encoder_bitrate_bps = 0;
 };
 Stats stats() const noexcept;
 ```
@@ -550,6 +581,19 @@ you want to know which subsystem failed:
 | `0x1700` | JB |
 
 `Stats::srtp_drops` increments on every SRTP auth-tag mismatch.
+
+The remaining fields are **cumulative counters since `open()`**, except
+`audio_encoder_bitrate_bps`, which is the bitrate the outbound audio
+encoder is currently running at (it tracks the bandwidth estimate).
+
+**This is not a standard `RTCStatsReport`.** The struct is flat and
+engine-wide: there is no per-stream breakdown, no snapshot timestamp, and
+no ICE candidate-pair / RTT dimension. The `src/modules/video_stats/`
+module provides freeze counts, keyframe intervals, QP and drop-cause
+breakdown, but it is **not wired into the engine** yet, so those fields
+are not reachable through this accessor. For the full picture — the
+planned stream-level shape and the missing dimensions — see
+[../plan/stats-surface-plan.md](../plan/stats-surface-plan.md).
 
 ---
 

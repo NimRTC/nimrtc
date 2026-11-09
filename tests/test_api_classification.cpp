@@ -286,12 +286,22 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - plugins/audio_receiver.hpp (IAudioReceiver + factory)
     //     - audio_rx/audio_rx.hpp (the module's public header)
     //
+    // v1.2.0 M1 bump: +1 public header (109 -> 110) for the RTCP
+    //   compound-packet / REMB demux types:
+    //     - rtp/rtcp.hpp
+    //
+    // v1.2.0 M1 bump: +2 public headers (110 -> 112) for the
+    //   receiver-side network-feedback seam and its module header
+    //   (video-pipeline plan F2):
+    //     - plugins/net_feedback.hpp (INetFeedback + factory)
+    //     - net_feedback/net_feedback.hpp (the module's public header)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 109;
+    constexpr std::size_t kBaselineHeaderCount = 112;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

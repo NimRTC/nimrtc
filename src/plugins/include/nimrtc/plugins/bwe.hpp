@@ -45,8 +45,11 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include <nimrtc/core/time.hpp>   // core::TimePoint / core::Milliseconds
+
+#include "nimrtc/plugins/net_feedback.hpp"   // NetFeedbackSource (v1.2.0 M1, F3)
 
 namespace nimrtc::plugins {
 
@@ -109,6 +112,38 @@ struct NIMRTC_API_STABLE BweFeedback {
 
     /** Packets lost in this window. */
     std::uint32_t packets_lost = 0;
+
+    // ---------------------------------------------------------------------
+    // v1.2.0 M1 (F3) — additive fields.  Everything above keeps its
+    // meaning and its layout; an estimator that ignores these fields
+    // behaves exactly as before.
+    // ---------------------------------------------------------------------
+
+    /** Which receiver-side signal produced this sample.
+     *
+     *  Before v1.2.0 the feedback carried no discriminator, so an
+     *  estimator could not tell a loss-driven sample from a REMB-driven
+     *  one.  ADR-018 makes the driving signal explicit; the default is
+     *  `kLossRtt`, which is what the pre-v1.2.0 behaviour corresponded
+     *  to. */
+    NetFeedbackSource signal_source = NetFeedbackSource::kLossRtt;
+
+    /** The per-packet arrival deltas of a transport-cc feedback, in
+     *  milliseconds.  Empty when the sample does not come from
+     *  transport-cc. */
+    std::vector<double> arrival_deltas_ms;
+
+    /** The size of each acknowledged packet, in bytes, when the sender's
+     *  packet-size table is available.  Empty otherwise — the engine does
+     *  not keep a per-sequence-number size table yet, so this stays empty
+     *  until the pacing / send-side accounting lands (v1.2.0 M3 / M5). */
+    std::vector<std::uint32_t> packet_sizes_bytes;
+
+    /** The first sequence number the feedback acknowledges. */
+    std::uint16_t ack_base_seq = 0;
+
+    /** How many sequence numbers the feedback acknowledges. */
+    std::uint16_t ack_seq_span = 0;
 };
 
 // ---------------------------------------------------------------------------

@@ -173,6 +173,12 @@ endif()
 if(NIMRTC_MODULE_AUDIO_RX)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_AUDIO_RX=1)
 endif()
+# v1.2.0 M1 (F2): the network-feedback collector module.  Its registrar
+# entry materialises only when the module is built; the engine then
+# resolves it through the registry's net-feedback slot.
+if(NIMRTC_MODULE_NET_FEEDBACK)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_NET_FEEDBACK=1)
+endif()
 nimrtc_apply_options(nimrtc_core_objects)
 nimrtc_apply_options(nimrtc_registry)
 

@@ -88,6 +88,7 @@
 // any of these; consumers only need the plugin interfaces.
 #include <nimrtc/sdp/session_description.hpp>
 #include <nimrtc/rtp/packet.hpp>
+#include <nimrtc/rtp/rtcp.hpp>          // RTCP demux (v1.2.0 M1, F1)
 #include <nimrtc/rtp/timeline.hpp>     // ADR-017 cross-end timeline seam
 #include <nimrtc/audio3a/audio3a.hpp>
 
@@ -335,6 +336,23 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
+
+    // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------
+    //
+    // The loop is: inbound RTCP -> engine demux -> collector -> snapshot
+    // -> IBwe::on_feedback().  These two counters make the loop
+    // observable: `net_feedback_blocks` counts the RTCP blocks that were
+    // routed to the collector, `bwe_feedback_samples` counts the
+    // aggregated snapshots that were actually handed to the estimator.
+    //
+    // The last two fields are the de-duplication state: a snapshot is
+    // fed only when it carries new information (its timestamp moved),
+    // so the estimator sees one sample per feedback report rather than
+    // one per engine tick.
+    std::uint64_t net_feedback_blocks   = 0;
+    std::uint64_t bwe_feedback_samples  = 0;
+    core::TimePoint last_fed_feedback_ts{};
+    bool           has_fed_feedback     = false;
 
     // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->

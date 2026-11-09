@@ -269,6 +269,47 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     transport-cc arrival series, the acknowledged sequence range and the
     per-packet sizes.  Every field is additive — an estimator that
     ignores them behaves exactly as before.
+- **The bandwidth signal is now *selected*, not assumed (v1.2.0 M2, F5;
+  ADR-018).**  The collector had a fixed source precedence
+  (transport-cc → loss/RTT → REMB) that never consulted the
+  negotiation: a peer that did not advertise `transport-cc` still
+  produced a `kTransportCc` snapshot as soon as one transport-cc
+  feedback arrived, and a peer that advertised it but stopped sending
+  it starved the estimator.
+  - The peer's feedback capabilities are read from the remote
+    description's `a=rtcp-fb` lines (RFC 4585 section 4.1) and handed
+    to the collector, so the policy knows what the peer will actually
+    send.
+  - `plugins::NetFeedbackPolicy` (new) is the host's override:
+    `kAuto` (transport-cc when negotiated *and* fresh, loss/RTT
+    otherwise), `kLossRtt` (always the loss/RTT path; REMB stays an
+    upper-bound hint) and `kRequireTransportCc` (report the breakage
+    instead of falling back silently — there is deliberately no
+    "force transport-cc", because forcing a signal the peer never
+    sends produces a silent stall).
+  - `plugins::NetFeedbackConfig` (new) carries the policy and the
+    freshness window; `INetFeedback` gains `set_config()`,
+    `config()`, `set_peer_capabilities()`,
+    `peer_capabilities()`, `transport_cc_unavailable()` and
+    `evaluate(now)`.
+  - The freshness axis needs a clock and the collector has none of its
+    own, so the engine calls `evaluate()` from its tick — a transport-cc
+    path that went silent is detected even when no new feedback
+    arrives.  Re-evaluating never moves `NetFeedbackSnapshot::timestamp`,
+    so the estimator is still fed once per report.
+  - `EngineConfig::net_feedback_signal` selects the policy
+    (`"auto"` / `"loss_rtt"` / `"require_transport_cc"`; an unknown
+    value falls back to `"auto"` — the policy must never be the reason
+    a session fails) and
+    `EngineConfig::net_feedback_transport_cc_timeout_ms` sets the
+    freshness window (default 3000 ms).
+  - The engine advertises `a=rtcp-fb:<pt> transport-cc` in its offer
+    when it has a transport-cc-capable collector configured, and echoes
+    the offer's feedback types in its answer filtered to the supported
+    ones (RFC 3264 section 6.1).  Dropping the transport-cc entry
+    would silently disable the preferred signal.
+  - The collector is the only place with a policy branch — the engine
+    contains none (ADR-018 Decision 5).
 
 ### Changed
 

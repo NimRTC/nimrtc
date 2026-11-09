@@ -1,6 +1,6 @@
 /**
  * @file src/modules/net_feedback/src/collector.cpp
- * @brief The receiver-side network-feedback collector (v1.2.0 M1, F2).
+ * @brief The receiver-side network-feedback collector (v1.2.0 M1, F2 + M2, F5).
  *
  * The collector turns three kinds of inbound RTCP into one snapshot:
  *
@@ -16,6 +16,21 @@
  * `rtp::parse_remb`); this file only aggregates.  That split is what
  * keeps the collector small: a new feedback format is a change in the
  * `rtp` module, not here.
+ *
+ * The collector also owns the **signal-selection policy** (ADR-018
+ * Decision 5).  The engine hands it two facts it cannot know itself —
+ * what the peer advertised (`a=rtcp-fb`) and what the host wants
+ * (`NetFeedbackConfig::policy`) — and the collector resolves which
+ * signal drives:
+ *
+ * ```
+ *   peer advertised transport-cc?  no  ─────────────▶ loss/RTT
+ *                                 yes │ feedback fresh? no ─▶ loss/RTT
+ *                                     │                 yes ─▶ transport-cc
+ * ```
+ *
+ * The engine reads the answer out of the snapshot; it holds no policy
+ * branch of its own.
  */
 
 #include <nimrtc/net_feedback/net_feedback.hpp>
@@ -76,8 +91,11 @@ void Collector::reset() noexcept {
     local_sr_sent_at_ = core::TimePoint{};
     prev_cumulative_lost_ = 0;
     has_prev_cumulative_lost_ = false;
+    transport_cc_unavailable_ = false;
     // The clock rate is a property of the negotiated stream, not of the
-    // collector's state, so it survives a reset.
+    // collector's state, so it survives a reset.  So do the policy and
+    // the peer's capabilities: both describe the *session*, not the
+    // feedback stream, and a stream restart does not renegotiate them.
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +104,39 @@ void Collector::reset() noexcept {
 
 void Collector::set_stream_clock_rate(std::uint32_t hz) noexcept {
     clock_rate_hz_ = hz;
+}
+
+void Collector::set_config(const plugins::NetFeedbackConfig& config) noexcept {
+    config_ = config;
+    // Re-resolve against the most recent instant the collector knows,
+    // so a live policy change takes effect at once.  The engine calls
+    // `evaluate()` from its tick with the real clock, which keeps the
+    // freshness axis moving between ticks.
+    refresh_source(snap_.timestamp);
+}
+
+plugins::NetFeedbackConfig Collector::config() const noexcept {
+    return config_;
+}
+
+void Collector::set_peer_capabilities(const plugins::NetFeedbackCapabilities& caps) noexcept {
+    caps_ = caps;
+    refresh_source(snap_.timestamp);
+}
+
+plugins::NetFeedbackCapabilities Collector::peer_capabilities() const noexcept {
+    return caps_;
+}
+
+bool Collector::transport_cc_unavailable() const noexcept {
+    return transport_cc_unavailable_;
+}
+
+void Collector::evaluate(core::TimePoint now) noexcept {
+    // Only the *resolution* changes here: `snap_.timestamp` marks new
+    // data and must not move, or the engine would feed the estimator a
+    // duplicate sample on every tick.
+    refresh_source(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +192,7 @@ void Collector::handle_receiver_report(core::ByteSpan block,
     for (const rtp::ReportBlock& rb : rr.value().report_blocks) {
         snap_.has_loss_rtt = true;
         snap_.timestamp = now;
+        snap_.loss_rtt_timestamp = now;
 
         // The fraction lost is an 8-bit value scaled by 256 (RFC 3550
         // §6.4.1): 0 means no loss, 255 means "all or more than all".
@@ -192,7 +244,7 @@ void Collector::handle_receiver_report(core::ByteSpan block,
         }
     }
 
-    refresh_source();
+    refresh_source(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +264,8 @@ void Collector::handle_remb(core::ByteSpan block, core::TimePoint now) noexcept 
                          ? std::optional<std::uint32_t>{0xFFFFFFFFu}
                          : std::optional<std::uint32_t>{static_cast<std::uint32_t>(bps)};
     snap_.timestamp = now;
-    refresh_source();
+    snap_.remb_timestamp = now;
+    refresh_source(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +310,7 @@ void Collector::handle_transport_cc(core::ByteSpan block, core::TimePoint now) n
 
     snap_.has_transport_cc = true;
     snap_.timestamp = now;
+    snap_.transport_cc_timestamp = now;
     snap_.tc_packets_received = received;
     snap_.tc_packets_lost = lost;
     snap_.tc_base_seq = f.base_seq;
@@ -278,23 +332,72 @@ void Collector::handle_transport_cc(core::ByteSpan block, core::TimePoint now) n
     }
     snap_.tc_arrival_deltas_ms = std::move(deltas);
 
-    refresh_source();
+    refresh_source(now);
 }
 
 // ---------------------------------------------------------------------------
-// Source selection
+// Source selection — the policy (ADR-018 Decisions 2 and 5)
 // ---------------------------------------------------------------------------
 
-void Collector::refresh_source() noexcept {
-    // M1 keeps the precedence fixed and documented; the *configurable*
-    // policy (F5, ADR-018) lands with M2 and moves this decision into the
-    // engine, where the negotiated `a=rtcp-fb` set is known.
-    if (snap_.has_transport_cc) {
-        snap_.source = plugins::NetFeedbackSource::kTransportCc;
-    } else if (snap_.has_loss_rtt) {
-        snap_.source = plugins::NetFeedbackSource::kLossRtt;
-    } else if (snap_.remb_bps.has_value()) {
-        snap_.source = plugins::NetFeedbackSource::kRemb;
+bool Collector::transport_cc_stale(core::TimePoint now) const noexcept {
+    if (!snap_.has_transport_cc) {
+        return true;   // Nothing arrived yet: certainly not fresh.
+    }
+    if (config_.transport_cc_timeout.count() <= 0) {
+        return false;  // A non-positive timeout disables the freshness axis.
+    }
+    if (now < snap_.transport_cc_timestamp) {
+        return false;  // Clock went backwards: do not call it stale.
+    }
+    return (now - snap_.transport_cc_timestamp) > config_.transport_cc_timeout;
+}
+
+void Collector::refresh_source(core::TimePoint now) noexcept {
+    const bool have_rr   = snap_.has_loss_rtt;
+    const bool have_remb = snap_.remb_bps.has_value();
+
+    // The transport-cc path is usable only when the peer *negotiated* it
+    // (a peer that did not advertise it will never send it) and the last
+    // feedback is still fresh.
+    const bool tc_fresh   = snap_.has_transport_cc && !transport_cc_stale(now);
+    const bool tc_usable = caps_.transport_cc && tc_fresh;
+
+    // The loss/RTT path, and REMB as its last resort.
+    const plugins::NetFeedbackSource fallback =
+        have_rr ? plugins::NetFeedbackSource::kLossRtt
+                : (have_remb ? plugins::NetFeedbackSource::kRemb
+                             : plugins::NetFeedbackSource::kLossRtt);
+
+    switch (config_.policy) {
+        case plugins::NetFeedbackPolicy::kRequireTransportCc:
+            // "Fail loudly": the path is reported as unavailable instead
+            // of being papered over by the fallback.  The fallback still
+            // drives the estimate — starving the estimator would be a
+            // worse failure than a degraded one — but the host can see
+            // what happened through `transport_cc_unavailable()`.
+            if (tc_usable) {
+                snap_.source = plugins::NetFeedbackSource::kTransportCc;
+                transport_cc_unavailable_ = false;
+            } else {
+                snap_.source = fallback;
+                transport_cc_unavailable_ = true;
+            }
+            break;
+
+        case plugins::NetFeedbackPolicy::kLossRtt:
+            // The override: the loss/RTT path always drives.  REMB stays
+            // an upper-bound hint (ADR-018 Decision 3), never the driver.
+            snap_.source = fallback;
+            transport_cc_unavailable_ = false;
+            break;
+
+        case plugins::NetFeedbackPolicy::kAuto:
+        default:
+            // The automatic default (ADR-018 Decision 2's table).
+            snap_.source = tc_usable ? plugins::NetFeedbackSource::kTransportCc
+                                      : fallback;
+            transport_cc_unavailable_ = false;
+            break;
     }
 }
 

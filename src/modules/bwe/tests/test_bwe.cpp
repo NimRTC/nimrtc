@@ -167,6 +167,57 @@ TEST(BweTest, RembOverrideWhenHigherThanLocal) {
     EXPECT_EQ(e.reason, Estimate::Reason::REMBOverride);
 }
 
+// F7 / ADR-018 Decision 3: "REMB is an upper bound, not a target" —
+// it may raise the estimate, and it may never lower it.
+TEST(BweTest, RembNeverLowersTheEstimate) {
+    Config c;
+    c.initial_bitrate_bps = 2'000'000;
+    c.max_bitrate_bps = 5'000'000;
+    c.smoothing_alpha = 1.0;
+    Bwe bwe(c);
+
+    // A REMB well *below* the local estimate must not pull it down.
+    Feedback f = no_loss(core::SteadyClock::now());
+    f.remb_bps = 100'000;   // 80 kbps after the trust factor
+    bwe.on_feedback(f);
+
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 2'000'000u);
+}
+
+// The same rule for the transport-cc path: a REMB sample that arrives
+// alongside a transport-cc sample may raise the estimate but must not
+// undo the transport-cc-driven value.
+TEST(BweTest, RembMayRaiseButNeverUndoesATransportCcSample) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps = 5'000'000;
+    c.smoothing_alpha = 1.0;
+    c.decrease_factor = 0.5;
+    Bwe bwe(c);
+
+    // A transport-cc sample that reports a loss: the estimate halves.
+    Feedback tc = with_loss(0.20, core::SteadyClock::now());
+    tc.signal_source = plugins::NetFeedbackSource::kTransportCc;
+    bwe.on_feedback(tc);
+    const std::uint32_t after_loss = bwe.estimate().target_bitrate_bps;
+    EXPECT_EQ(after_loss, 500'000u);
+
+    // A REMB that is lower than the transport-cc-driven value must not
+    // lower it further; a REMB that is higher may raise it (ADR-018
+    // Decision 3: REMB is an upper bound, not a target).
+    Feedback remb = no_loss(core::SteadyClock::now() + std::chrono::milliseconds(10));
+    remb.remb_bps = 600'000;      // 480 kbps after the trust factor: below
+    remb.signal_source = plugins::NetFeedbackSource::kRemb;
+    bwe.on_feedback(remb);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    Feedback remb_high = no_loss(core::SteadyClock::now() + std::chrono::milliseconds(20));
+    remb_high.remb_bps = 2'000'000;   // 1.6 Mbps after the trust factor: above
+    remb_high.signal_source = plugins::NetFeedbackSource::kRemb;
+    bwe.on_feedback(remb_high);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'600'000u);
+}
+
 // -----------------------------------------------------------------------------
 // Smoothing
 // -----------------------------------------------------------------------------
@@ -325,4 +376,72 @@ TEST(GoogCcBweTest, ResetClearsDelayBaseline) {
                 static_cast<double>(c.initial_bitrate_bps),
                 static_cast<double>(c.initial_bitrate_bps) * 0.05);
     EXPECT_EQ(e.reason, Estimate::Reason::Initial);
+}
+
+// -----------------------------------------------------------------------------
+// REMB in the Goog-CC front-end (F7 / ADR-018 Decision 3)
+// -----------------------------------------------------------------------------
+
+TEST(GoogCcBweTest, RembOverrideWhenHigherThanLocal) {
+    Config c;
+    c.initial_bitrate_bps = 500'000;
+    c.max_bitrate_bps = 5'000'000;
+    c.smoothing_alpha = 1.0;
+    GoogCcBwe bwe(c);
+
+    Feedback f = no_loss(core::SteadyClock::now());
+    f.remb_bps = 3'000'000;
+    bwe.on_feedback(f);
+
+    auto e = bwe.estimate();
+    // Trust factor 0.8 -> 2.4 Mbps; with alpha=1.0 the smoothed value
+    // matches the current value immediately.
+    EXPECT_NEAR(static_cast<double>(e.target_bitrate_bps), 2'400'000.0, 1.0);
+    EXPECT_EQ(e.reason, Estimate::Reason::REMBOverride);
+}
+
+TEST(GoogCcBweTest, RembNeverLowersTheEstimate) {
+    Config c;
+    c.initial_bitrate_bps = 2'000'000;
+    c.max_bitrate_bps = 5'000'000;
+    c.smoothing_alpha = 1.0;
+    GoogCcBwe bwe(c);
+
+    // A REMB well *below* the local estimate must not pull it down.
+    Feedback f = no_loss(core::SteadyClock::now());
+    f.remb_bps = 100'000;   // 80 kbps after the trust factor
+    bwe.on_feedback(f);
+
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 2'000'000u);
+}
+
+// The same rule for the transport-cc path: a REMB sample may raise the
+// estimate, but it must never undo a transport-cc-driven decrease.
+TEST(GoogCcBweTest, RembMayRaiseButNeverUndoesATransportCcSample) {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps = 5'000'000;
+    c.smoothing_alpha = 1.0;
+    c.decrease_factor = 0.5;
+    GoogCcBwe bwe(c);
+
+    // A transport-cc sample that reports a loss: the estimate halves.
+    Feedback tc = with_loss(0.20, core::SteadyClock::now());
+    tc.signal_source = plugins::NetFeedbackSource::kTransportCc;
+    bwe.on_feedback(tc);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    // A REMB below the transport-cc-driven value must not lower it.
+    Feedback remb = no_loss(core::SteadyClock::now() + std::chrono::milliseconds(10));
+    remb.remb_bps = 600'000;      // 480 kbps after the trust factor: below
+    remb.signal_source = plugins::NetFeedbackSource::kRemb;
+    bwe.on_feedback(remb);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    // A REMB above it may raise it (REMB is an upper bound, not a target).
+    Feedback remb_high = no_loss(core::SteadyClock::now() + std::chrono::milliseconds(20));
+    remb_high.remb_bps = 2'000'000;   // 1.6 Mbps after the trust factor
+    remb_high.signal_source = plugins::NetFeedbackSource::kRemb;
+    bwe.on_feedback(remb_high);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'600'000u);
 }

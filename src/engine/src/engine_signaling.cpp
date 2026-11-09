@@ -30,6 +30,16 @@ bool audio_encoding_decodable(const std::string& encoding) {
 } // namespace
 
 
+bool NimRTCEngine::wants_transport_cc() const noexcept {
+    // A collector is what turns transport-cc feedback into an estimate,
+    // so without one there is nothing to negotiate for.  A host that
+    // pinned the policy to the loss/RTT path does not want the feedback
+    // either.
+    if (config_.net_feedback_name.empty()) return false;
+    return detail::parse_net_feedback_policy(config_.net_feedback_signal) !=
+           plugins::NetFeedbackPolicy::kLossRtt;
+}
+
 std::string NimRTCEngine::create_offer() noexcept {
     if (ice_t_) ice_t_->wait_for_gathering(1500);
 
@@ -120,6 +130,22 @@ std::string NimRTCEngine::create_offer() noexcept {
                                        std::to_string(config_.audio_ptime_ms));
         audio.extra_attrs.emplace_back("maxptime",
                                        std::to_string(config_.audio_ptime_ms));
+    }
+
+    // ---- a=rtcp-fb:<pt> transport-cc (RFC 4585 §4.1) --------------------
+    //
+    // transport-cc is the receiver-side congestion signal ADR-018
+    // prefers: per-packet arrival times, so it survives reordering and
+    // exposes queueing delay before loss does.  It has to be
+    // *negotiated* — a peer sends transport-cc feedback only when the
+    // negotiated description carries the attribute for that m-section —
+    // so not advertising it means never getting it.
+    //
+    // ADR-018 Decision 6: the offer carries it when the host has a
+    // transport-cc-capable collector configured.  A host that pinned
+    // the policy to the loss/RTT path does not advertise it at all.
+    if (wants_transport_cc()) {
+        audio.rtcp_fb.push_back(pt + " transport-cc");
     }
 
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
@@ -260,6 +286,15 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.rtcp_fb.push_back(vpt + " nack");
         video.rtcp_fb.push_back(vpt + " nack pli");
         video.rtcp_fb.push_back(vpt + " goog-remb");
+
+        // a=rtcp-fb:<vpt> transport-cc (RFC 4585 §4.1, ADR-018
+        // Decision 6).  The video stream is the bandwidth hog, so the
+        // transport-cc arrival series is the signal that matters most
+        // for it — but the attribute has to be negotiated, and the
+        // collector is what turns the feedback into an estimate.
+        if (wants_transport_cc()) {
+            video.rtcp_fb.push_back(vpt + " transport-cc");
+        }
 
         // a=ssrc:<video_ssrc> cname:nimrtc-video  (RFC 5576 §4.1)
         // WebRTC browsers count inbound-rtp only when the answer SDP
@@ -474,6 +509,39 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
         core::log::Logger::instance().info(
             "engine[timeline]: remote payload-type clock rates: " + rates);
+    }
+
+    // ---- Negotiated RTCP feedback capabilities (v1.2.0 M2, F5) ---------
+    //
+    // The `a=rtcp-fb` lines of the remote description are the only
+    // authority on which receiver-side feedback the peer will send
+    // (RFC 4585 §4.1).  The collector needs that fact to decide whether
+    // the transport-cc path may drive the estimate (ADR-018 Decision 2):
+    // a peer that did not advertise transport-cc will never send it, so
+    // driving the estimate from it would starve the estimator.
+    //
+    // The remote description is the peer's offer (we are the answerer)
+    // or the peer's answer (we are the offerer); either way it carries
+    // the negotiated set — RFC 3264 §6.1 restricts an answer's feedback
+    // types to the offer's, so the answer's set is a subset of what the
+    // offer could have agreed on.
+    if (net_feedback_) {
+        plugins::NetFeedbackCapabilities caps;
+        for (const auto& m : remote.media) {
+            for (const std::string& entry : m.rtcp_fb) {
+                if (detail::rtcp_fb_has_type(entry, "transport-cc")) {
+                    caps.transport_cc = true;
+                }
+                if (detail::rtcp_fb_has_type(entry, "goog-remb")) {
+                    caps.remb = true;
+                }
+            }
+        }
+        net_feedback_->set_peer_capabilities(caps);
+        core::log::Logger::instance().info(
+            std::string("engine[bwe]: peer feedback capabilities: transport-cc=") +
+            (caps.transport_cc ? "yes" : "no") + ", goog-remb=" +
+            (caps.remb ? "yes" : "no"));
     }
 
     // ---- Negotiated payload-type routing (B-4) --------------------------
@@ -994,6 +1062,28 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             am.extra_attrs.emplace_back("maxptime",
                                          std::to_string(config_.audio_ptime_ms));
 
+            // ---- a=rtcp-fb echo (RFC 3264 §6.1) --------------------------
+            //
+            // The answer carries the subset of the offer's feedback types
+            // that we support.  The transport-cc entry is the one that
+            // matters for the bandwidth loop (ADR-018): a peer only sends
+            // transport-cc feedback when the negotiated description
+            // carries the attribute for that m-section, so dropping it
+            // here would silently disable the preferred signal.
+            //
+            // The payload type is the *negotiated* one (the answer's
+            // format list), not the peer's: RFC 4585 §4.1 scopes the
+            // attribute to a payload type within its m-section.
+            if (impl_->negotiated_audio_pt != 0) {
+                for (const std::string& entry : rm.rtcp_fb) {
+                    if (!detail::rtcp_fb_entry_supported(entry)) continue;
+                    const std::string_view types = detail::rtcp_fb_types(entry);
+                    if (types.empty()) continue;
+                    am.rtcp_fb.push_back(std::to_string(impl_->negotiated_audio_pt) +
+                                         " " + std::string(types));
+                }
+            }
+
             // a=extmap:<id> urn:ietf:params:rtp-hdrext:ssrc-audio-level
             //
             // RFC 5285 §6: an answer that drops an extension the offer
@@ -1022,7 +1112,17 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         if (rm.type == sdp::MediaType::Video) {
             am.rtpmap   = rm.rtpmap;
             am.fmtp     = rm.fmtp;
-            am.rtcp_fb  = rm.rtcp_fb;
+            // The rtcp-fb set is the offer's, filtered to the feedback
+            // types we support (RFC 3264 §6.1).  The payload type is
+            // kept: the answer's video format list is the offer's, so
+            // the peer's payload type is the one in scope here.
+            // "transport-cc" is in the supported set — dropping it would
+            // silently disable the preferred bandwidth signal (ADR-018).
+            for (const std::string& entry : rm.rtcp_fb) {
+                if (detail::rtcp_fb_entry_supported(entry)) {
+                    am.rtcp_fb.push_back(entry);
+                }
+            }
             char ssrc_line[96];
             std::snprintf(ssrc_line, sizeof(ssrc_line),
                           "%u cname:nimrtc-video",

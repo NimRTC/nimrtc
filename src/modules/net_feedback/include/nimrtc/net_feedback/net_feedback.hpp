@@ -1,6 +1,6 @@
 /**
  * @file nimrtc/net_feedback/net_feedback.hpp
- * @brief The receiver-side network-feedback collector (v1.2.0 M1, F2).
+ * @brief The receiver-side network-feedback collector (v1.2.0 M1, F2 + M2, F5).
  *
  * The module implements `plugins::INetFeedback`: it consumes the
  * receiver-side network signals of an inbound RTCP compound datagram —
@@ -8,6 +8,12 @@
  * bandwidth opinion) and transport-cc (the per-packet arrival series) —
  * and aggregates them into one `plugins::NetFeedbackSnapshot` the engine
  * can hand to the bandwidth estimator.
+ *
+ * It also owns the **signal-selection policy** (ADR-018 Decision 5): the
+ * engine hands the collector the peer's negotiated capabilities and the
+ * host's policy, and the collector resolves which signal is driving —
+ * transport-cc when the peer negotiated it and its feedback is fresh,
+ * loss/RTT otherwise.
  *
  * It owns no transport, opens no socket and sends nothing.  The wire
  * formats belong to the `rtp` module; this module only aggregates.
@@ -39,8 +45,8 @@ namespace nimrtc::net_feedback {
  *
  *  The collector is a pure aggregator: it holds the last snapshot it
  *  produced, the description of our own last Sender Report (needed to
- *  turn an LSR / DLSR pair into an RTT) and the RTP clock rate of the
- *  stream the feedback describes (needed to turn the report's jitter
+ *  turn an LSR / DLSR pair into an RTT) and the RTP clock rate of
+ *  the stream the feedback describes (needed to turn the report's jitter
  *  into milliseconds). */
 class NIMRTC_API_STABLE Collector : public plugins::INetFeedback {
 public:
@@ -69,15 +75,40 @@ public:
 
     void reset() noexcept override;
 
+    // ---- The policy (ADR-018 Decision 5) -------------------------------
+
+    void set_config(const plugins::NetFeedbackConfig& config) noexcept override;
+    plugins::NetFeedbackConfig config() const noexcept override;
+
+    void set_peer_capabilities(const plugins::NetFeedbackCapabilities& caps) noexcept override;
+    plugins::NetFeedbackCapabilities peer_capabilities() const noexcept override;
+
+    bool transport_cc_unavailable() const noexcept override;
+
+    void evaluate(core::TimePoint now) noexcept override;
+
 private:
     void handle_receiver_report(core::ByteSpan block, core::TimePoint now) noexcept;
     void handle_remb(core::ByteSpan block, core::TimePoint now) noexcept;
     void handle_transport_cc(core::ByteSpan block, core::TimePoint now) noexcept;
 
     /** Recompute the snapshot's `source` from the signals seen so far. */
-    void refresh_source() noexcept;
+    void refresh_source(core::TimePoint now) noexcept;
+
+    /** True when the last transport-cc feedback is older than the
+     *  configured timeout (the freshness axis of the policy). */
+    bool transport_cc_stale(core::TimePoint now) const noexcept;
 
     plugins::NetFeedbackSnapshot snap_{};
+
+    /** The collector's configuration (policy + freshness timeout). */
+    plugins::NetFeedbackConfig config_{};
+
+    /** What the peer advertised (`a=rtcp-fb` of the remote description). */
+    plugins::NetFeedbackCapabilities caps_{};
+
+    /** True when the policy demands transport-cc but it is not usable. */
+    bool transport_cc_unavailable_ = false;
 
     /** The RTP clock rate of the stream the feedback describes (0 = unknown). */
     std::uint32_t clock_rate_hz_ = 0;

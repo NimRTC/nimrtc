@@ -346,6 +346,29 @@ struct NIMRTC_API_STABLE EngineConfig {
     // estimator is never fed).
     std::string net_feedback_name = "nimrtc_net_feedback";
 
+    // ---- Signal-selection policy (v1.2.0 M2, F5 / ADR-018 Decision 2) ---
+    //
+    // Which receiver-side signal drives the bandwidth estimate:
+    //
+    //   "auto"                (default) transport-cc when the peer
+    //                         negotiated it and its feedback is fresh,
+    //                         loss/RTT otherwise;
+    //   "loss_rtt"            always the loss/RTT path (REMB stays an
+    //                         upper-bound hint);
+    //   "require_transport_cc" transport-cc must drive; the engine
+    //                         reports the path as unavailable instead
+    //                         of falling back silently.
+    //
+    // An unknown value is treated as "auto" — the policy must never be
+    // the reason a session fails.
+    std::string net_feedback_signal = "auto";
+
+    // How long transport-cc feedback may stay silent before the policy
+    // treats it as stale and falls back to the loss/RTT path, in
+    // milliseconds.  Must be comfortably larger than the peer's
+    // feedback interval (Chrome: 50-100 ms).
+    std::uint32_t net_feedback_transport_cc_timeout_ms = 3000;
+
     // ---- Scheduler plugin selection (ADR-001: resolved via PluginRegistry) ----
     //
     // The scheduler prioritises outbound packets (audio / video / control).
@@ -1688,6 +1711,11 @@ private:
      *  estimator sees one sample per feedback report rather than one per
      *  engine tick. */
     void feed_bwe_from_net_feedback() noexcept;
+    /** True when the host configured a transport-cc-capable collector and
+     *  did not pin the signal policy to the loss/RTT path — i.e. when the
+     *  offer should advertise `a=rtcp-fb:<pt> transport-cc`
+     *  (ADR-018 Decision 6). */
+    bool wants_transport_cc() const noexcept;
     /** BWE-linked audio bitrate adaptation — see
      *  `Config::audio_bitrate_adaptive`.  Called from `tick()`. */
     void maybe_update_audio_bitrate() noexcept;

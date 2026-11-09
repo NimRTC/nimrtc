@@ -252,6 +252,81 @@ inline std::vector<std::uint8_t> hex_colon_decode(std::string_view sv) {
     return out;
 }
 
+/** Map the host's configuration string to a signal-selection policy
+ *  (ADR-018 Decision 2).
+ *
+ *  Unknown values fall back to the automatic default: the policy must
+ *  never be the reason a session fails. */
+inline plugins::NetFeedbackPolicy
+parse_net_feedback_policy(std::string_view name) noexcept {
+    if (name == "loss_rtt" || name == "loss-rtt" || name == "lossrtt") {
+        return plugins::NetFeedbackPolicy::kLossRtt;
+    }
+    if (name == "require_transport_cc" || name == "require-transport-cc") {
+        return plugins::NetFeedbackPolicy::kRequireTransportCc;
+    }
+    return plugins::NetFeedbackPolicy::kAuto;
+}
+
+/** True when an `a=rtcp-fb` entry mentions the given feedback type.
+ *
+ *  The entry is the SDP text that follows "rtcp-fb:", i.e.
+ *  "<pt> <type> [<type>…]" (RFC 4585 §4.1).  The payload type is
+ *  scoped to its m-section, and browsers disagree about what they put
+ *  there — Chrome uses the *media* payload type, not 205 — so the
+ *  feedback *type* token is what identifies the format. */
+inline bool rtcp_fb_has_type(std::string_view entry,
+                             std::string_view type) noexcept {
+    // Skip the payload-type token.
+    std::size_t i = 0;
+    while (i < entry.size() && entry[i] != ' ') ++i;
+    while (i < entry.size()) {
+        while (i < entry.size() && entry[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < entry.size() && entry[i] != ' ') ++i;
+        if (entry.compare(start, i - start, type) == 0) return true;
+    }
+    return false;
+}
+
+/** The feedback types of an `a=rtcp-fb` entry — everything after the
+ *  payload-type token. */
+inline std::string_view rtcp_fb_types(std::string_view entry) noexcept {
+    const std::size_t sp = entry.find(' ');
+    if (sp == std::string_view::npos) return {};
+    std::size_t i = sp + 1;
+    while (i < entry.size() && entry[i] == ' ') ++i;
+    return entry.substr(i);
+}
+
+/** True when every feedback type of an `a=rtcp-fb` entry is one the
+ *  engine supports.
+ *
+ *  RFC 3264 §6.1: an answer may only carry the feedback types the
+ *  answerer supports, so the answer echoes the offer's set intersected
+ *  with the supported one.  An entry that mixes a supported type with
+ *  an unsupported one ("111 nack trr-int") is dropped as a whole — the
+ *  engine cannot honour half of it. */
+inline bool rtcp_fb_entry_supported(std::string_view entry) noexcept {
+    std::size_t i = entry.find(' ');
+    if (i == std::string_view::npos) return false;
+    ++i;
+    bool any = false;
+    while (i < entry.size()) {
+        while (i < entry.size() && entry[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < entry.size() && entry[i] != ' ') ++i;
+        const std::string_view tok = entry.substr(start, i - start);
+        if (tok.empty()) continue;
+        if (tok != "nack" && tok != "pli" && tok != "ccm" && tok != "fir" &&
+            tok != "goog-remb" && tok != "transport-cc") {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
+
 }  // namespace detail
 
 struct NimRTCEngine::Impl {
@@ -353,6 +428,11 @@ struct NimRTCEngine::Impl {
     std::uint64_t bwe_feedback_samples  = 0;
     core::TimePoint last_fed_feedback_ts{};
     bool           has_fed_feedback     = false;
+
+    // True once the engine has reported that the transport-cc path was
+    // required but is unavailable (ADR-018 Decision 2's "fail loudly"
+    // mode).  The report is made once per session.
+    bool           transport_cc_unavailable_reported = false;
 
     // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->

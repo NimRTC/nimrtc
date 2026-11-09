@@ -1210,6 +1210,30 @@ nimrtc_add_engine_test(test_engine_net_feedback test_engine_net_feedback.cpp)
 #     the Opus a=fmtp, the ssrc-audio-level a=extmap and the per-engine
 #     SSRC) — B-14;
 #   - a payload type the peer never declared is counted and dropped with
+# Video pipeline v2 — C9 / C11: the video payload type is the *negotiated* one.
+#
+# Covers the two defects the negotiation work closes:
+#   - C9: the answer copied the offer's `a=rtpmap:` / `a=fmtp:` lines
+#     verbatim, which told the peer we would decode every codec it offered
+#     — including the ones NimRTC has no decoder for.  The answer now names
+#     exactly the negotiated payload type, and an undecodable codec rejects
+#     the media section (port 0) and reports kVideoCodecUnsupported once;
+#   - C11: the packet path demultiplexed inbound RTP by a *locally
+#     configured* payload type, so a payload type the peer offered but that
+#     was never negotiated still reached the video pipeline.  Only the
+#     negotiated payload type reaches the receiver now.
+#
+# The offer side is covered too: the offer names the SENDER's payload type,
+# because that is the number the outbound packet path stamps.
+#
+# Uses the "shell" transport strategy, like `test_engine_audio_state` above.
+# ---------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_PIPELINE AND NIMRTC_MODULE_VIDEO_SOURCE
+   AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_H264)
+    nimrtc_add_engine_test(test_video_negotiation test_video_negotiation.cpp)
+endif()
+
+# ---------------------------------------------------------------------------
 #     kAudioPayloadTypeUnknown instead of being decoded — B-4 (defect F-8);
 #   - a peer that offers a codec we cannot decode produces
 #     kAudioCodecUnsupported exactly once and the audio m-line is rejected

@@ -509,7 +509,18 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 // ---- Build 12-byte RTP header ---------------------------------
                 // byte 0: V=2 P=0 X=0 CC=0 → 0x80
                 // byte 1: M=X(1) PT(7)
-                std::uint8_t pt = config_.video_sender_tuning.payload_type;
+                //
+                // The payload type is the *negotiated* one (C9 / C11):
+                // it is the number the description exchange settled on,
+                // so the peer recognises the stream.  Before a
+                // negotiation happened the locally configured number is
+                // the fallback, which keeps a host that drives the
+                // engine without SDP working.
+                const std::uint8_t negotiated_pt =
+                    impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+                std::uint8_t pt = negotiated_pt != 0
+                                       ? negotiated_pt
+                                       : config_.video_sender_tuning.payload_type;
                 std::uint8_t hdr[12] = {
                     0x80,                             // version, no extensions
                     static_cast<std::uint8_t>((marker ? 0x80 : 0x00) | (pt & 0x7F)),
@@ -526,6 +537,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 };
 
                 // ---- Assemble full RTP packet ----------------------------------
+                // The buffer comes from the scheduler's packet pool (P1
+                // hardening, 2026-11-09): it is handed back to the pool
+                // once the packet has been drained and dispatched, so the
+                // steady-state send path performs no heap allocation.
                 std::vector<std::uint8_t> rtp_pkt;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
@@ -540,10 +555,6 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     auto* sess = impl_->srtp->get_session(
                         config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                     if (!sess) {
-                // The buffer comes from the scheduler's packet pool (P1
-                // hardening, 2026-11-09): it is handed back to the pool
-                // once the packet has been drained and dispatched, so the
-                // steady-state send path performs no heap allocation.
                         // SRTP not ready — drop this packet silently.
                         return;
                     }

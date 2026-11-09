@@ -35,6 +35,7 @@
 
 #include "nimrtc/engine/engine.hpp"
 #include "audio_routing.hpp"
+#include "video_negotiation.hpp"
 
 #include <array>
 #include <atomic>
@@ -736,6 +737,37 @@ struct NimRTCEngine::Impl {
     // exchange (the test seams, the loopback harness) is unaffected.
     std::map<std::uint8_t, detail::AudioPayloadRoute> audio_pt_routes;
     std::map<std::uint8_t, detail::AudioPayloadRoute> video_pt_routes;
+
+    /** The negotiated video codec and payload type (C9 / C11) — see
+     *  `src/engine/src/video_negotiation.hpp` for the shape and for what
+     *  "negotiated" means.  The video side is the counterpart of
+     *  `negotiated_audio_pt` below, but it carries the codec identity
+     *  and the fmtp as well, because the video fmtp is what the
+     *  receiver needs in order to interpret the bitstream. */
+    detail::VideoNegotiationResult negotiated_video;
+
+    /** The negotiated video payload type, mirrored into an atomic.
+     *
+     *  The negotiation runs on the signaling thread while the packet
+     *  path (the encoder callback that stamps the outbound RTP header)
+     *  runs on another, so the number the wire uses is published
+     *  through an atomic rather than read from the struct.  0 means
+     *  "nothing was negotiated" — the caller then falls back to its
+     *  locally configured payload type. */
+    std::atomic<std::uint8_t> negotiated_video_pt{0};
+
+    /** The negotiation concluded that we cannot decode the peer's video.
+     *
+     *  Set when every payload type the peer offered names an encoding
+     *  NimRTC has no decoder for (the video counterpart of A-9 / B-4).
+     *  The receive track is then disabled and the answer rejects the
+     *  video m-line (RFC 3264 §6.1: port 0, no format list). */
+    bool video_rx_disabled = false;
+
+    /** The "the peer offered a video codec we cannot decode" error has
+     *  already been reported to the host.  Reported once per
+     *  negotiation, not once per packet. */
+    bool video_codec_unsupported_reported = false;
 
     /** The payload type the negotiation selected for the inbound audio
      *  stream; 0 when nothing was selected. */

@@ -695,6 +695,16 @@ int NimRTCEngine::tick() noexcept {
         }
     }
 
+    // ---- BWE-linked audio bitrate adaptation ----------------------------
+    //
+    // The audio encoder is the one outbound stream that must survive a
+    // bandwidth collapse: when the estimate drops, the encoder's
+    // bitrate follows it down (never below the configured floor), and
+    // it climbs back towards the configured ceiling once the link
+    // recovers.  The controller is rate-limited, so this is a no-op
+    // between two steps (see maybe_update_audio_bitrate()).
+    maybe_update_audio_bitrate();
+
     // ---- Drain the scheduler (if enabled) ---------------------------------
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback

@@ -64,6 +64,7 @@
 #ifndef NIMRTC_ENGINE_ENGINE_HPP
 #define NIMRTC_ENGINE_ENGINE_HPP
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -632,6 +633,48 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  all and the FEC recovery path cannot work).  Default 5 %, the
      *  value the specification names. */
     int audio_redundancy_percent = 5;
+
+    // ---- Adaptive audio bitrate (BWE-linked) --------------------------
+
+    /** Target bitrate of the outbound audio encoder, in bits per second.
+     *
+     *  0 (the default) means "codec default": 32 kbps for a mono
+     *  configuration (`pcm_channels == 1`) and 64 kbps for a stereo one.
+     *  The value is also the *ceiling* of the adaptive bitrate — the
+     *  encoder never runs above it. */
+    int audio_bitrate_bps = 0;
+
+    /** Floor of the adaptive audio bitrate, in bits per second.
+     *
+     *  The engine never lowers the encoder below this value, so a
+     *  bandwidth collapse cannot starve the audio stream entirely.
+     *  Default 8 kbps (Opus stays intelligible down to ~6 kbps). */
+    int audio_min_bitrate_bps = 8000;
+
+    /** Enable the BWE-linked audio bitrate adaptation.
+     *
+     *  When true (the default) the engine lowers / raises the audio
+     *  encoder's bitrate from the bandwidth estimate, so a session on a
+     *  very narrow link degrades the audio instead of losing it.  Set
+     *  it to false to pin the encoder at `audio_bitrate_bps`.
+     *
+     *  The adaptation runs from `tick()` and reconfigures the codec
+     *  plugin, so `tick()` and `send_audio()` have to be called from the
+     *  same thread — the same rule the rest of the engine already
+     *  follows. */
+    bool audio_bitrate_adaptive = true;
+
+    /** Share of the bandwidth estimate the audio encoder may use.
+     *
+     *  The audio budget is `estimate.target_bitrate_bps * share`, so
+     *  the video stream keeps the rest.  Default 0.1 (10 %). */
+    double audio_bwe_share = 0.1;
+
+    /** Minimum interval between two bitrate adaptation steps, in ms.
+     *
+     *  The adaptation runs from `tick()`, so the effective granularity
+     *  is this value.  Default 1000 ms. */
+    int audio_bitrate_update_interval_ms = 1000;
 };
 // ---------------------------------------------------------------------------
 // Public callbacks
@@ -1380,6 +1423,11 @@ public:
         std::uint64_t audio_decode_errors       = 0;  // decoder errors
         std::uint32_t audio_jitter_ms           = 0;  // current interarrival jitter
         std::uint32_t audio_playout_delay_ms    = 0;  // current playout delay
+        // ---- Adaptive audio bitrate (additive) -----------------------
+        // The bitrate the outbound audio encoder currently runs at.
+        // It equals `Config::audio_bitrate_bps` until the BWE-linked
+        // adaptation lowers it (or raises it back towards that ceiling).
+        std::uint32_t audio_encoder_bitrate_bps  = 0;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -1464,6 +1512,23 @@ private:
     // Injected into ice_t_ via set_bwe() / set_scheduler().
     std::unique_ptr<plugins::IBwe>        bwe_;
     std::unique_ptr<plugins::IScheduler>  scheduler_;
+
+    // ---- Adaptive audio bitrate (BWE-linked) ---------------------------
+    //
+    // The engine lowers the audio encoder's bitrate when the bandwidth
+    // estimate collapses, and raises it back towards the configured
+    // ceiling once the link recovers.  These three fields carry the
+    // state of that controller:
+    //
+    //   - `audio_bitrate_current_bps_` — the bitrate the encoder runs
+    //     at right now (the value handed to the codec plugin).
+    //   - `audio_bitrate_ceiling_bps_` — the configured ceiling; the
+    //     adaptation never goes above it.
+    //   - `audio_bitrate_last_step_` — when the last adaptation step
+    //     ran, so the controller rate-limits itself.
+    int audio_bitrate_current_bps_ = 0;
+    int audio_bitrate_ceiling_bps_ = 0;
+    std::chrono::steady_clock::time_point audio_bitrate_last_step_{};
 
     // ---- Video codec plugin (ADR-001: resolved via PluginRegistry) ----
     std::unique_ptr<plugins::IVideoCodec> video_codec_;
@@ -1571,6 +1636,13 @@ private:
     void poll_ice_flap_for_rehandshake() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
+    /** BWE-linked audio bitrate adaptation — see
+     *  `Config::audio_bitrate_adaptive`.  Called from `tick()`. */
+    void maybe_update_audio_bitrate() noexcept;
+    /** The configured audio encoder ceiling, in bits per second:
+     *  `Config::audio_bitrate_bps` when set, otherwise the codec
+     *  default for the channel count (32 kbps mono / 64 kbps stereo). */
+    int resolve_audio_bitrate_ceiling() const noexcept;
     void init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 

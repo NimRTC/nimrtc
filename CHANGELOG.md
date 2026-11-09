@@ -199,9 +199,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The Chrome offer fixture (`interop/fixtures/chrome_opus_offer.sdp`)
     and its expected-parsing document now describe the `sendrecv` offer
     the page really sends.
+- **The audio encoder's bitrate follows the bandwidth estimate.**  The
+  engine used to hand the Opus encoder a fixed 64 kbps regardless of
+  the link, so a session on a narrow link lost its audio instead of
+  degrading it.  The engine now derives the audio bitrate from the BWE
+  estimate: the audio budget is `estimate.target_bitrate_bps *
+  audio_bwe_share` (10 % by default), clamped between
+  `audio_min_bitrate_bps` (8 kbps) and `audio_bitrate_bps` (the
+  ceiling).  A drop is applied immediately (at most -50 % per step), a
+  rise is at most +10 % per step, and a deviation below 10 % is ignored
+  — so the encoder never oscillates.  The new `EngineConfig` fields are
+  `audio_bitrate_bps`, `audio_min_bitrate_bps`, `audio_bitrate_adaptive`,
+  `audio_bwe_share` and `audio_bitrate_update_interval_ms`; the
+  effective value is observable through the new
+  `Stats::audio_encoder_bitrate_bps`.
+  - The bitrate reaches the encoder through `ICodec::update_config()`,
+    which now reconfigures the *running* encoder in place instead of
+    re-creating it — an adaptation step no longer resets the codec state
+    or its statistics.
+- **The mono default is 32 kbps.**  The engine hard-coded 64 kbps for
+  the audio encoder, which is the stereo number; a mono configuration
+  (`pcm_channels = 1`, the default) now gets 32 kbps.  An unset
+  `opus::EncoderConfig::bitrate_bps` (0) resolves to the channel-count
+  default — 32 kbps mono, 64 kbps stereo — through the new
+  `opus::default_bitrate_bps_for_channels()`.
 
 ### Changed
 
+- **`opus::EncoderConfig::bitrate_bps` now defaults to 0 (= codec
+  default) instead of 64000.**  0 resolves to 32 kbps for a mono encoder
+  and 64 kbps for a stereo one, so the default follows the channel
+  count instead of assuming stereo.  A caller that set the field
+  explicitly is unaffected.
 - **The Opus plugin frames its own output (audio pipeline WP-11, spec
   B-5).**  The codec plugin used to hand the raw libopus frame to the
   caller and let the engine work out the RTP payload — so the config

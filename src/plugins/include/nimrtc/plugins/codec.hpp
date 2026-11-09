@@ -65,7 +65,12 @@ struct NIMRTC_API_STABLE CodecConfig {
     /** Number of channels (1 = mono, 2 = stereo). */
     std::uint8_t  channels = 1;
 
-    /** Target bitrate in bits per second (0 = codec default). */
+    /** Target bitrate in bits per second (0 = codec default).
+     *
+     *  0 means "let the codec pick": the Opus adapter resolves it to
+     *  32 kbps for a mono stream and 64 kbps for a stereo one.  An
+     *  explicit value is forwarded to the encoder as-is (the codec
+     *  clamps it to what it supports). */
     int           bitrate_bps = 0;
 
     /** Codec complexity 0-10, 10 = highest quality (Opus convention). */
@@ -179,7 +184,19 @@ public:
     /** Get current configuration (for diagnostics / logs). */
     virtual CodecConfig config() const noexcept = 0;
 
-    /** Update configuration live (e.g. adaptive bitrate change). */
+    /** Update configuration live (e.g. adaptive bitrate change).
+     *
+     *  Implementations MUST reconfigure the running encoder / decoder
+     *  in place rather than re-create them: an adaptive-bitrate step
+     *  must not reset the codec state or its statistics.  A parameter
+     *  the codec cannot change in place (e.g. the channel count) may
+     *  force a re-creation of the affected instance.
+     *
+     *  Calling this before the codec was opened is legal — the new
+     *  configuration is then applied when the codec opens.
+     *
+     *  @return kOk on success, an error status when the configuration
+     *          was rejected. */
     virtual Status update_config(CodecConfig cfg) noexcept = 0;
 
     /** Snapshot of codec statistics. */

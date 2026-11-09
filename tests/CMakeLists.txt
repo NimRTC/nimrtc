@@ -1248,6 +1248,17 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 
 # ---------------------------------------------------------------------------
+# The BWE-linked audio bitrate adaptation.
+#
+# The engine lowers the audio encoder's bitrate when the bandwidth
+# estimate collapses (never below the configured floor) and raises it
+# back towards the configured ceiling once the link recovers.  The test
+# drives the engine through a fake BWE whose estimate it controls, plus
+# a fake codec that records every bitrate the engine pushes into it.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_bitrate test_engine_audio_bitrate.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.1 T1/T2 — engine-side ref_frame <-> capture-ts map.
 #
 # Covers OUR OWN frames (send_video auto-record + explicit

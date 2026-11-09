@@ -202,3 +202,73 @@ TEST(OpusEncoder, EncodeFrameForceDtxReturnsZero) {
     EXPECT_EQ(enc.encode_frame(pcm.data(), kFrameSamples, buf, sizeof(buf), /*force_dtx*/ true), 0u);
     EXPECT_EQ(enc.stats().dtx_frames, 1u);
 }
+
+// -----------------------------------------------------------------------------
+// Bitrate defaults + in-place reconfiguration
+// -----------------------------------------------------------------------------
+
+TEST(OpusEncoder, DefaultBitrateFollowsTheChannelCount) {
+    EXPECT_EQ(nimrtc::opus::default_bitrate_bps_for_channels(1), 32000);
+    EXPECT_EQ(nimrtc::opus::default_bitrate_bps_for_channels(2), 64000);
+
+    // An unset bitrate (0) resolves to the channel-count default.
+    nimrtc::opus::EncoderConfig mono;
+    mono.sample_rate_hz = kSampleRate;
+    mono.channels       = 1;
+    mono.bitrate_bps    = 0;
+    nimrtc::opus::Encoder enc_mono(mono);
+    EXPECT_EQ(enc_mono.bitrate_bps(), 32000);
+
+    nimrtc::opus::EncoderConfig stereo;
+    stereo.sample_rate_hz = kSampleRate;
+    stereo.channels       = 2;
+    stereo.bitrate_bps    = 0;
+    nimrtc::opus::Encoder enc_stereo(stereo);
+    EXPECT_EQ(enc_stereo.bitrate_bps(), 64000);
+}
+
+TEST(OpusEncoder, ReconfigureChangesTheBitrateInPlace) {
+    nimrtc::opus::EncoderConfig ec;
+    ec.sample_rate_hz = kSampleRate;
+    ec.channels       = kChannels;
+    ec.bitrate_bps    = 32000;
+    nimrtc::opus::Encoder enc(ec);
+    EXPECT_EQ(enc.bitrate_bps(), 32000);
+
+    // Encode a frame so the encoder has some state to preserve.
+    auto pcm = make_sine(kFrameSamples, 440.0f, kSampleRate);
+    std::uint8_t buf[4000];
+    ASSERT_GT(enc.encode(pcm.data(), kFrameSamples, buf, sizeof(buf)), 0u);
+    ASSERT_EQ(enc.stats().frames_encoded, 1u);
+
+    // A bitrate step reconfigures the running encoder: the statistics
+    // survive it (this is what the engine's BWE adaptation relies on).
+    ec.bitrate_bps = 16000;
+    EXPECT_TRUE(enc.reconfigure(ec));
+    EXPECT_EQ(enc.bitrate_bps(), 16000);
+    EXPECT_EQ(enc.stats().frames_encoded, 1u)
+        << "a bitrate step must not reset the encoder statistics";
+
+    // The encoder still works afterwards.
+    EXPECT_GT(enc.encode(pcm.data(), kFrameSamples, buf, sizeof(buf)), 0u);
+    EXPECT_EQ(enc.stats().frames_encoded, 2u);
+}
+
+TEST(OpusEncoder, ReconfigureKeepsTheStatisticsAcrossAChannelChange) {
+    nimrtc::opus::EncoderConfig ec;
+    ec.sample_rate_hz = kSampleRate;
+    ec.channels       = kChannels;
+    ec.bitrate_bps    = 32000;
+    nimrtc::opus::Encoder enc(ec);
+
+    auto pcm = make_sine(kFrameSamples, 440.0f, kSampleRate);
+    std::uint8_t buf[4000];
+    ASSERT_GT(enc.encode(pcm.data(), kFrameSamples, buf, sizeof(buf)), 0u);
+
+    // libopus cannot change the channel count in place, so the encoder
+    // is re-created — but the statistics are carried over.
+    ec.channels = 2;
+    EXPECT_TRUE(enc.reconfigure(ec));
+    EXPECT_EQ(enc.channels(), 2);
+    EXPECT_EQ(enc.stats().frames_encoded, 1u);
+}

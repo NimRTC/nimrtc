@@ -49,6 +49,13 @@ EngineConfig
 │   ├── audio_downmix_to_pcm_channels   = true
 │   └── audio_redundancy_percent        = 5
 │
+├── Adaptive audio bitrate (BWE-linked)
+│   ├── audio_bitrate_bps               = 0            ← 0 = codec default
+│   ├── audio_min_bitrate_bps           = 8000
+│   ├── audio_bitrate_adaptive          = true
+│   ├── audio_bwe_share                 = 0.1
+│   └── audio_bitrate_update_interval_ms = 1000
+│
 ├── Network
 │   ├── local_bind_address              = ""
 │   ├── stun_server_host / _port        = ""
@@ -154,6 +161,39 @@ and to the decoder, which uses it as its own redundancy hint.  A
 receiver that lost a frame reconstructs it from the redundancy the
 *next* packet carries.  **0** disables the redundancy — the encoder
 then carries no copy at all and the FEC recovery path cannot work.
+
+#### 2.3.1 Adaptive audio bitrate
+
+| Field | Default | Effect |
+|---|---|---|
+| `audio_bitrate_bps` | `0` | Target bitrate of the audio encoder. 0 = codec default: **32 kbps for mono** (the default `pcm_channels` is 1), 64 kbps for stereo. Also the ceiling of the adaptation. |
+| `audio_min_bitrate_bps` | `8000` | Floor of the adaptation — the encoder never goes below it. |
+| `audio_bitrate_adaptive` | `true` | Enable the BWE-linked adaptation. `false` pins the encoder at `audio_bitrate_bps`. |
+| `audio_bwe_share` | `0.1` | Share of the bandwidth estimate the audio encoder may use (the rest belongs to video). |
+| `audio_bitrate_update_interval_ms` | `1000` | Minimum interval between two adaptation steps. |
+
+The controller runs from `tick()` and reads the BWE estimate:
+
+```
+budget = estimate.target_bitrate_bps * audio_bwe_share
+target = clamp(budget, audio_min_bitrate_bps, audio_bitrate_bps)
+```
+
+The step towards the target is rate-limited, so the encoder never
+oscillates:
+
+- a **drop** is applied immediately — at most **-50 %** per step, so a
+  congestion collapse is answered within a couple of intervals;
+- a **rise** is at most **+10 %** per step, so a flickering estimate
+  cannot pump the encoder up and down;
+- a deviation of less than **10 %** is ignored altogether (hysteresis).
+
+The bitrate is pushed into the codec through `ICodec::update_config()`,
+which reconfigures the *running* encoder in place — the codec state and
+its statistics survive the step, so an adaptation never interrupts the
+stream.
+
+The effective bitrate is observable through `Stats::audio_encoder_bitrate_bps`.
 
 ### 2.4 BWE / Scheduler
 

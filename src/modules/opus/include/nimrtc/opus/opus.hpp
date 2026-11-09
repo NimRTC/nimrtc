@@ -40,6 +40,23 @@ NIMRTC_API_STABLE constexpr std::uint32_t kDefaultSampleRate = 48000;
 NIMRTC_API_STABLE constexpr std::uint8_t  kDefaultChannels   = 1;
 NIMRTC_API_STABLE constexpr std::uint8_t  kDefaultPayloadType = 111;  // RFC 7587
 
+/** Default encoder bitrate for a mono stream, in bits per second.
+ *
+ *  32 kbps is what every browser negotiates for a mono Opus stream and
+ *  it is what an AI-agent / embedded deployment (voice assistant, robot)
+ *  actually needs — the previous hard-coded 64 kbps was a stereo number
+ *  applied to a mono stream. */
+NIMRTC_API_STABLE constexpr int kDefaultBitrateMonoBps   = 32000;
+
+/** Default encoder bitrate for a stereo stream, in bits per second. */
+NIMRTC_API_STABLE constexpr int kDefaultBitrateStereoBps = 64000;
+
+/** Smallest bitrate libopus accepts (`OPUS_SET_BITRATE` rejects less). */
+NIMRTC_API_STABLE constexpr int kMinBitrateBps = 500;
+
+/** Largest bitrate libopus accepts. */
+NIMRTC_API_STABLE constexpr int kMaxBitrateBps = 512000;
+
 // ---------------------------------------------------------------------------
 // Opus application mode — mirrors libopus's OPUS_APPLICATION_* macros
 // (opus_defines.h: 2048 = VOIP, 2049 = AUDIO).  Exposed at the public
@@ -52,10 +69,25 @@ NIMRTC_API_STABLE inline constexpr int kOpusApplicationAudio = 2049;
 // Config
 // -----------------------------------------------------------------------------
 
+/** The default encoder bitrate for a given channel count, in bits per second.
+ *
+ *  Mono → `kDefaultBitrateMonoBps` (32 kbps), stereo (or more) →
+ *  `kDefaultBitrateStereoBps` (64 kbps).  This is what an unset
+ *  `EncoderConfig::bitrate_bps` (0) resolves to. */
+NIMRTC_API_STABLE int default_bitrate_bps_for_channels(std::uint8_t channels) noexcept;
+
 struct NIMRTC_API_STABLE EncoderConfig {
     std::uint32_t sample_rate_hz = kDefaultSampleRate;
     std::uint8_t  channels       = kDefaultChannels;
-    int            bitrate_bps    = 64000;
+
+    /** Target bitrate in bits per second.
+     *
+     *  0 (the default) means "codec default": the encoder then uses
+     *  `kDefaultBitrateMonoBps` for a mono stream and
+     *  `kDefaultBitrateStereoBps` for a stereo one — see
+     *  `default_bitrate_bps_for_channels()`.  An explicit value is
+     *  clamped to `[kMinBitrateBps, kMaxBitrateBps]`. */
+    int            bitrate_bps    = 0;
     int            complexity     = 10;     // 0-10, 10 = best quality
     bool           vad_enabled    = false;
     bool           fec_enabled    = true;    // forward error correction
@@ -133,6 +165,31 @@ public:
 
     /** Reset encoder state (on stream start / keyframe). */
     void reset() noexcept;
+
+    /** Apply a new configuration to the live encoder.
+     *
+     *  The bitrate, the complexity, the FEC / DTX flags and the
+     *  redundancy percentage are applied to the *running* libopus
+     *  instance, so the encoder state (and its statistics) survive the
+     *  change.  That is what the engine's BWE-driven bitrate adaptation
+     *  relies on: a bitrate step must not reset the encoder.
+     *
+     *  A change of the sample rate or of the channel count re-creates
+     *  the libopus encoder (libopus supports neither in place); the
+     *  statistics are carried over to the new instance.
+     *
+     *  @return false when the configuration was rejected (invalid rate
+     *          or channel count) or the encoder could not be
+     *          re-created. */
+    bool reconfigure(const EncoderConfig& cfg) noexcept;
+
+    /** The bitrate the encoder is currently configured with, in bits per
+     *  second.  Never 0 — an unset (0) configuration resolves to the
+     *  channel-count default. */
+    int bitrate_bps() const noexcept;
+
+    /** The channel count the encoder produces. */
+    std::uint8_t channels() const noexcept;
 
     /** Whether the encoder is currently in DTX (silence) mode. */
     bool is_dtx() const noexcept;

@@ -115,6 +115,14 @@ inline void opus_debug(const char* fmt, ...) noexcept {
 } // anonymous namespace
 
 // -----------------------------------------------------------------------------
+// Config helpers
+// -----------------------------------------------------------------------------
+
+int default_bitrate_bps_for_channels(std::uint8_t channels) noexcept {
+    return channels >= 2 ? kDefaultBitrateStereoBps : kDefaultBitrateMonoBps;
+}
+
+// -----------------------------------------------------------------------------
 // Encoder::Impl
 // -----------------------------------------------------------------------------
 
@@ -124,6 +132,15 @@ struct Encoder::Impl {
     OpusEncoder*          enc   = nullptr;
     int                   error = OPUS_OK;
     bool                  dtx_active = false;
+
+    /** Resolve an unset (≤ 0) bitrate to the channel-count default and
+     *  clamp the result into the range libopus accepts. */
+    static int resolve_bitrate(int configured, std::uint8_t channels) noexcept {
+        if (configured <= 0) configured = default_bitrate_bps_for_channels(channels);
+        if (configured < kMinBitrateBps) configured = kMinBitrateBps;
+        if (configured > kMaxBitrateBps) configured = kMaxBitrateBps;
+        return configured;
+    }
 
     explicit Impl(EncoderConfig c)
         : config(std::move(c))
@@ -137,7 +154,22 @@ struct Encoder::Impl {
             throw std::runtime_error(std::string{"opus_encoder_create failed: "}
                                      + opus_strerror(error));
         }
-        // Apply config knobs.
+        // An unset bitrate resolves to the channel-count default (32 kbps
+        // mono / 64 kbps stereo) before it reaches libopus.
+        config.bitrate_bps = resolve_bitrate(config.bitrate_bps, config.channels);
+        apply_config();
+
+        opus_debug("opus::Encoder created (rate=%u ch=%u bitrate=%d)",
+                   config.sample_rate_hz, config.channels, config.bitrate_bps);
+    }
+
+    ~Impl() {
+        if (enc) opus_encoder_destroy(enc);
+    }
+
+    /** Push the configuration knobs into the running libopus instance. */
+    void apply_config() {
+        if (!enc) return;
         opus_encoder_ctl(enc, OPUS_SET_BITRATE(
             static_cast<int>(config.bitrate_bps)));
         opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(config.complexity));
@@ -155,25 +187,39 @@ struct Encoder::Impl {
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(config.fec_enabled ? 1 : 0));
         opus_encoder_ctl(enc, OPUS_SET_DTX(config.dtx_enabled ? 1 : 0));
         // Note: OPUS_SET_VAD does not exist; VAD is implicit via DTX.
-
-        opus_debug("opus::Encoder created (rate=%u ch=%u bitrate=%d)",
-                   config.sample_rate_hz, config.channels, config.bitrate_bps);
     }
 
-    ~Impl() {
-        if (enc) opus_encoder_destroy(enc);
-    }
+    /** Apply a new configuration.
+     *
+     *  The common case (a bitrate step) is handled in place, so the
+     *  encoder state and its statistics survive the change.  A change of
+     *  the sample rate or of the channel count needs a fresh libopus
+     *  instance (libopus supports neither in place); the statistics are
+     *  carried over. */
+    bool reconfigure(const EncoderConfig& c) {
+        EncoderConfig next = c;
+        next.bitrate_bps = resolve_bitrate(next.bitrate_bps, next.channels);
 
-    void reconfigure(const EncoderConfig& c) {
-        config = c;
-        if (!enc) return;
-        opus_encoder_ctl(enc, OPUS_SET_BITRATE(static_cast<int>(c.bitrate_bps)));
-        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(c.complexity));
-        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(c.fec_enabled ? 1 : 0));
-        opus_encoder_ctl(enc, OPUS_SET_DTX(c.dtx_enabled ? 1 : 0));
-        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(
-            c.packet_loss_perc < 0 ? 0
-                : (c.packet_loss_perc > 100 ? 100 : c.packet_loss_perc)));
+        const bool recreate = next.sample_rate_hz != config.sample_rate_hz
+                            || next.channels != config.channels;
+        if (recreate) {
+            int err = OPUS_OK;
+            OpusEncoder* fresh = opus_encoder_create(
+                static_cast<opus_int32>(next.sample_rate_hz),
+                static_cast<int>(next.channels),
+                resolve_opus_application(next.application),
+                &err);
+            if (err != OPUS_OK || fresh == nullptr) {
+                opus_debug("opus::Encoder::reconfigure failed: %s", opus_strerror(err));
+                return false;
+            }
+            if (enc) opus_encoder_destroy(enc);
+            enc = fresh;
+            error = err;
+        }
+        config = next;
+        apply_config();
+        return true;
     }
 };
 
@@ -244,6 +290,19 @@ void Encoder::reset() noexcept {
         impl_->stats = Encoder::Stats{};
         impl_->dtx_active = false;
     }
+}
+
+bool Encoder::reconfigure(const EncoderConfig& cfg) noexcept {
+    if (!impl_) return false;
+    return impl_->reconfigure(cfg);
+}
+
+int Encoder::bitrate_bps() const noexcept {
+    return impl_ ? impl_->config.bitrate_bps : 0;
+}
+
+std::uint8_t Encoder::channels() const noexcept {
+    return impl_ ? impl_->config.channels : 0;
 }
 
 bool Encoder::is_dtx() const noexcept {

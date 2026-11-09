@@ -51,6 +51,12 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_packetise.cpp
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_audio_decoder.cpp
     DEPS nimrtc::opus nimrtc::core nimrtc::plugins)
 
+# The Opus implementation of the plugins::ICodec seam — the adapter the
+# engine reaches for the encoder, and the seam through which the
+# BWE-linked bitrate adaptation reconfigures the running encoder.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_opus_codec_plugin.cpp
+    DEPS nimrtc::opus nimrtc::core nimrtc::plugins)
+
 # NOTE: No top-level add_test() — see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).  The legacy
 # test_opus binary below is also picked up via gtest_discover_tests.

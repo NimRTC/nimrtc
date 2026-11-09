@@ -9,6 +9,18 @@
 
 namespace nimrtc::engine {
 
+namespace {
+
+/** Default audio encoder bitrate for a mono stream, in bits per second.
+ *
+ *  The engine is the policy layer for the audio path, so it owns the
+ *  default bitrate the codec plugin is configured with.  32 kbps is the
+ *  mono number every browser negotiates; 64 kbps is the stereo one. */
+constexpr int kDefaultAudioBitrateMonoBps   = 32000;
+constexpr int kDefaultAudioBitrateStereoBps = 64000;
+
+} // anonymous namespace
+
 
 // ---------------------------------------------------------------------------
 // Phase 4 — audio3a + codec plugin creation.
@@ -76,10 +88,15 @@ void NimRTCEngine::init_audio_modules() noexcept {
 
     // ---- Codec ---------------------------------------------------------
     {
+        const int bitrate_ceiling = resolve_audio_bitrate_ceiling();
         plugins::CodecConfig codec_cfg{};
         codec_cfg.sample_rate_hz = config_.pcm_sample_rate_hz;
         codec_cfg.channels       = config_.pcm_channels;
-        codec_cfg.bitrate_bps    = 64000;
+        // The audio encoder's target bitrate.  0 means "codec default":
+        // 32 kbps for mono (the default `pcm_channels` is 1), 64 kbps
+        // for stereo.  The resolved value is also the ceiling of the
+        // BWE-linked adaptation (see maybe_update_audio_bitrate()).
+        codec_cfg.bitrate_bps    = bitrate_ceiling;
         codec_cfg.complexity     = 10;
         codec_cfg.fec_enabled    = config_.audio_use_inband_fec;
         // The in-band redundancy (spec B-8): the encoder embeds a
@@ -102,6 +119,10 @@ void NimRTCEngine::init_audio_modules() noexcept {
             {.open_fail_mode = pal::PluginFailureMode::Silent,
              .missing_mode = pal::PluginFailureMode::Silent,
              .on_error = on_error_});
+        // The adaptation controller starts at the ceiling and only ever
+        // moves down from there (unless the host lowers the ceiling).
+        audio_bitrate_ceiling_bps_ = bitrate_ceiling;
+        audio_bitrate_current_bps_ = bitrate_ceiling;
         // WP-7: the concrete `opus::Encoder` fallback is gone.  The
         // engine reaches the encoder through the codec seam only, so
         // `src/engine/` names no concrete module (constraint L4).  When
@@ -1201,7 +1222,111 @@ void NimRTCEngine::flush_video_feedback() noexcept {
 }
 
 
+// ---------------------------------------------------------------------------
+// Adaptive audio bitrate (BWE-linked)
+// ---------------------------------------------------------------------------
+//
+// The engine keeps the audio encoder's bitrate inside the band the
+// bandwidth estimate allows:
+//
+//   budget = estimate.target_bitrate_bps * Config::audio_bwe_share
+//   target = clamp(budget, floor = audio_min_bitrate_bps,
+//                          ceiling = audio_bitrate_bps)
+//
+// The step towards the target is rate-limited so the encoder never
+// oscillates: a drop is applied immediately (at most -50 % per step,
+// so a congestion collapse is answered within a couple of intervals)
+// while a rise is at most +10 % per step (so a flickering estimate
+// cannot pump the encoder up and down).  A deviation of less than 10 %
+// is ignored altogether (hysteresis).
+//
+// The bitrate is pushed to the codec through `ICodec::update_config()`,
+// which reconfigures the running encoder in place — the codec state and
+// its statistics survive the step.
+
+int NimRTCEngine::resolve_audio_bitrate_ceiling() const noexcept {
+    if (config_.audio_bitrate_bps > 0) return config_.audio_bitrate_bps;
+    // The codec default: 32 kbps for mono, 64 kbps for stereo.
+    return config_.pcm_channels >= 2 ? kDefaultAudioBitrateStereoBps
+                                     : kDefaultAudioBitrateMonoBps;
+}
+
+void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
+    if (!config_.audio_bitrate_adaptive) return;
+    if (!codec_plugin_ || !bwe_) return;
+
+    const int current = audio_bitrate_current_bps_;
+    if (current <= 0) return;
+
+    // ---- Rate limit: one step per `audio_bitrate_update_interval_ms` ----
+    const auto now = std::chrono::steady_clock::now();
+    if (audio_bitrate_last_step_.time_since_epoch().count() != 0) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 now - audio_bitrate_last_step_).count();
+        const int interval = config_.audio_bitrate_update_interval_ms > 0
+                                 ? config_.audio_bitrate_update_interval_ms
+                                 : 1000;
+        if (elapsed < interval) return;
+    }
+
+    const std::uint32_t bwe_bps = bwe_->estimate().target_bitrate_bps;
+    if (bwe_bps == 0) {
+        // No estimate yet — keep the current bitrate rather than
+        // reading "0" as "no bandwidth at all".
+        return;
+    }
+    audio_bitrate_last_step_ = now;
+
+    // ---- Target = share of the estimate, clamped to [floor, ceiling] ----
+    double share = config_.audio_bwe_share;
+    if (share < 0.0) share = 0.0;
+    if (share > 1.0) share = 1.0;
+
+    const int ceiling = audio_bitrate_ceiling_bps_ > 0 ? audio_bitrate_ceiling_bps_
+                                                       : current;
+    int floor_bps = config_.audio_min_bitrate_bps > 0 ? config_.audio_min_bitrate_bps
+                                                      : 1000;
+    if (floor_bps > ceiling) floor_bps = ceiling;
+
+    int target = static_cast<int>(static_cast<double>(bwe_bps) * share);
+    if (target < floor_bps) target = floor_bps;
+    if (target > ceiling) target = ceiling;
+
+    if (target == current) return;
+
+    // ---- Hysteresis + ramp limits -------------------------------------
+    const int hysteresis = std::max(1, current / 10);   // 10 % of current
+    if (target > current) {
+        // Rise slowly: at most +10 % per step.
+        if (target < current + hysteresis) return;
+        target = current + hysteresis;
+    } else {
+        // Fall fast: at most -50 % per step.
+        if (target > current - hysteresis) return;
+        target = std::max(target, current / 2);
+    }
+    if (target < floor_bps) target = floor_bps;
+    if (target > ceiling) target = ceiling;
+    if (target == current) return;
+
+    // ---- Push to the codec (in-place reconfigure) ----------------------
+    plugins::CodecConfig cfg = codec_plugin_->config();
+    cfg.bitrate_bps = target;
+    if (codec_plugin_->update_config(cfg) != plugins::kOk) {
+        core::log::Logger::instance().warn(
+            "engine: audio bitrate update rejected by the codec plugin");
+        return;
+    }
+    audio_bitrate_current_bps_ = target;
+
+    core::log::Logger::instance().info(
+        "engine: audio encoder bitrate " + std::to_string(current) +
+        " -> " + std::to_string(target) + " bps (bwe=" +
+        std::to_string(bwe_bps) + ")");
+}
+
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
+
     Stats out;
     out.srtp_drops = impl_->srtp_stats_drop;
     // v1.1 V1: cumulative video counters (additive; zero when unused).
@@ -1245,6 +1370,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.audio_jitter_ms        = rx.jitter_ms;
         out.audio_playout_delay_ms = rx.current_delay_ms;
     }
+
+    // The bitrate the outbound audio encoder currently runs at — the
+    // value the BWE-linked adaptation last applied (it starts at the
+    // configured ceiling).
+    out.audio_encoder_bitrate_bps =
+        static_cast<std::uint32_t>(audio_bitrate_current_bps_ > 0
+                                       ? audio_bitrate_current_bps_
+                                       : 0);
     return out;
 }
 

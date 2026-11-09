@@ -40,7 +40,11 @@ CodecPluginAdapter::to_encoder_config(const ::nimrtc::plugins::CodecConfig& p) n
     EncoderConfig c;
     c.sample_rate_hz = p.sample_rate_hz;
     c.channels       = p.channels;
-    c.bitrate_bps    = p.bitrate_bps != 0 ? p.bitrate_bps : 64000;
+    // A bitrate of 0 means "codec default": the opus module resolves it
+    // to 32 kbps for mono and 64 kbps for stereo.  Resolving it here as
+    // well keeps the adapter's own view of the configuration truthful.
+    c.bitrate_bps    = p.bitrate_bps != 0 ? p.bitrate_bps
+                                           : default_bitrate_bps_for_channels(p.channels);
     c.complexity     = p.complexity;
     c.fec_enabled    = p.fec_enabled;
     c.dtx_enabled    = p.dtx_enabled;
@@ -195,9 +199,23 @@ plugins::Status CodecPluginAdapter::update_config(plugins::CodecConfig cfg) noex
     plugin_cfg_ = std::move(cfg);
     enc_cfg_ = to_encoder_config(plugin_cfg_);
     dec_cfg_ = to_decoder_config(plugin_cfg_);
-    // Reconstruct encoder/decoder with new config.
-    encoder_ = std::make_unique<Encoder>(enc_cfg_);
-    decoder_ = std::make_unique<Decoder>(dec_cfg_);
+
+    // The encoder / decoder are built lazily (on the first encode /
+    // decode), so before that point there is nothing to reconfigure —
+    // the new configuration is applied when they are constructed.  This
+    // matters for the engine's BWE-driven bitrate adaptation: it may
+    // push a new configuration before the first audio frame is sent.
+    if (!configured_) return plugins::kOk;
+
+    // Reconfigure in place.  Recreating the encoder would reset the
+    // codec state and its statistics on every bitrate step, which is
+    // exactly what an adaptive-bitrate step must not do.
+    if (encoder_ && !encoder_->reconfigure(enc_cfg_)) {
+        return plugins::kErrInvalidParam;
+    }
+    if (decoder_) {
+        (void)decoder_->reconfigure(dec_cfg_);
+    }
     return plugins::kOk;
 }
 

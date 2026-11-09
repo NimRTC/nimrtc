@@ -8,8 +8,18 @@
  * Entry points (wired into hw_backends.cpp):
  *   bool    nvenc_h264_available()  → runtime probe (see below)
  *   make_nvenc_h264_codec(cfg)    → real NvEncEncoder or nullptr
- *   bool    nvdec_h264_available()  → runtime probe (NVDEC shares DLL)
- *   make_nvdec_h264_codec(cfg)      → real NvDecDecoder or nullptr
+ *   bool    nvdec_h264_available()  → always false — the NVDEC decoder is
+ *                                     NOT implemented (see the definition)
+ *   make_nvdec_h264_codec(cfg)      → always nullptr (NVDEC not implemented)
+ *
+ * ## NVDEC status
+ *
+ * The NVDEC **decoder** is not implemented.  `make_nvdec_h264_codec()`
+ * returns nullptr and `nvdec_h264_available()` returns false, so the
+ * decoder selector never picks the "nvdec_h264" backend.  The NVENC
+ * **encoder** is fully implemented.  This asymmetry is deliberate: the
+ * encoder and the decoder are separate entry points, and only one of
+ * them exists today.
  *
  * ## Runtime availability probe
  *
@@ -704,15 +714,29 @@ make_nvenc_h264_codec(plugins::VideoCodecConfig cfg) {
 }
 
 bool nvdec_h264_available() noexcept {
-    // NVDEC shares nvEncodeAPI64.dll with NVENC; same availability.
-    return nvenc_h264_available();
+    // NVDEC decoding is NOT implemented: `make_nvdec_h264_codec()` below
+    // always returns nullptr.  Reporting "available" here would let the
+    // decoder selector hand a caller a backend descriptor whose `create()`
+    // cannot produce a codec — the caller would then have to discover the
+    // gap by getting a nullptr back and interpreting it.
+    //
+    // The probe therefore returns false unconditionally.  When the NVDEC
+    // decoder is implemented, this must become a real probe (it shares
+    // nvEncodeAPI64.dll with NVENC, so `nvenc_h264_available()` is the
+    // starting point) AND `make_nvdec_h264_codec()` must stop returning
+    // nullptr — the two must agree, or the selector picks an uncreatable
+    // backend.
+    return false;
 }
 
 std::unique_ptr<plugins::IVideoCodec>
 make_nvdec_h264_codec(plugins::VideoCodecConfig /*cfg*/) {
-    // NVDEC decoder implementation is TODO — return nullptr for now.
-    // When implemented, follow the same DLL-loading + NvDecOpenDecodeSessionEx
-    // pattern used by the encoder.
+    // NVDEC decoder is not implemented.  Follow the same
+    // DLL-loading + NvDecOpenDecodeSessionEx pattern used by the encoder
+    // when it lands.
+    //
+    // `nvdec_h264_available()` returns false to match, so the decoder
+    // selector never selects this backend.
     return nullptr;
 }
 

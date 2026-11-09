@@ -50,6 +50,20 @@ make_nvdec_h264_codec(plugins::VideoCodecConfig cfg);
 #define HAS_NVENC 0
 #endif
 
+// NVDEC can be requested on its own (NIMRTC_PLUGINS_NVDEC=ON) without
+// NVENC.  The NVDEC decoder is not implemented, so the entry is only
+// registered to keep the seam id stable — but it MUST be registered here,
+// otherwise a NVDEC-only build would silently drop the "nvdec_h264" id
+// from the registry while the CMake option claimed to enable it.
+#if defined(NIMRTC_PLUGINS_NVDEC_ON) || defined(NIMRTC_PLUGINS_NVENC_ON)
+extern bool nvdec_h264_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_nvdec_h264_codec(plugins::VideoCodecConfig cfg);
+#define HAS_NVDEC 1
+#else
+#define HAS_NVDEC 0
+#endif
+
 #if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
 extern bool amf_h264_available() noexcept;
 extern std::unique_ptr<plugins::IVideoCodec>
@@ -195,12 +209,20 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
 plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
     plugins::VideoDecoderBackend be;
     be.id             = "nvdec_h264";
-    be.description    = "NVIDIA NVDEC H.264 decoder";
+    // NOTE: the NVDEC decoder is NOT implemented — `create()` returns
+    // nullptr.  The entry is kept so the seam ids and the
+    // `HwBackend::Nvdec` kind stay stable, and `available()` is wired to
+    // `nvdec_h264_available()`, which returns false for exactly that
+    // reason.  The selector therefore never picks this backend.
+    be.description    = "NVIDIA NVDEC H.264 decoder (NOT IMPLEMENTED — create() returns nullptr)";
     be.backend        = plugins::HwBackend::Nvdec;
     be.priority       = 430;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    be.zero_copy_supported = true;
+    // No GPU output surface is produced, so the zero-copy path does not
+    // apply — claiming it would make the engine wire a pool that never
+    // receives a buffer.
+    be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return nvdec_h264_available();
     };
@@ -220,12 +242,16 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
 plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "videotoolbox_h264";
-    be.description    = "Apple VideoToolbox H.264 encoder";
+    // NOT IMPLEMENTED — the entry exists so the seam id and the
+    // `HwBackend::VideoToolbox` kind stay stable, but `available()`
+    // returns false and `create()` returns nullptr.
+    be.description    = "Apple VideoToolbox H.264 encoder (NOT IMPLEMENTED — create() returns nullptr)";
     be.backend        = plugins::HwBackend::VideoToolbox;
     be.priority       = 400;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    be.zero_copy_supported = true;
+    // No encoder exists, so no GPU output surface can be produced.
+    be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         // VTCompressionSessionCreate probe — TODO: implement when targeting macOS.
         return false;
@@ -272,12 +298,16 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
 plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "mediacodec_h264";
-    be.description    = "Android MediaCodec H.264 encoder";
+    // NOT IMPLEMENTED — the entry exists so the seam id and the
+    // `HwBackend::MediaCodec` kind stay stable, but `available()` returns
+    // false and `create()` returns nullptr.
+    be.description    = "Android MediaCodec H.264 encoder (NOT IMPLEMENTED — create() returns nullptr)";
     be.backend        = plugins::HwBackend::MediaCodec;
     be.priority       = 420;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    be.zero_copy_supported = true;
+    // No encoder exists, so no GPU output surface can be produced.
+    be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         // Android MediaCodec: check if MediaCodecList returns an H.264 encoder.
         // TODO: implement when targeting Android.
@@ -388,6 +418,9 @@ void register_default_video_backends() noexcept {
 
 #if HAS_NVENC
     reg.register_encoder(make_nvenc_encoder_backend());
+#endif
+
+#if HAS_NVDEC
     reg.register_decoder(make_nvdec_decoder_backend());
 #endif
 

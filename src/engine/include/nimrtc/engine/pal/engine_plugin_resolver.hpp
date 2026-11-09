@@ -36,7 +36,17 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
-#include <nimrtc/web_transport/web_transport_session_factory.hpp>   // IWebTransportSessionFactory (v0.14.0 alpha.2 seam)
+// v0.14.0 alpha.2 seam (WebTransport / QUIC session factory).
+//
+// P1 hardening (2026-11-09): this was an #include of
+// <nimrtc/web_transport/web_transport_session_factory.hpp>.  The
+// resolver only hands out a POINTER to the factory, so a forward
+// declaration is enough -- and it keeps the engine's PUBLIC header from
+// depending on an optional module's header (the web_transport include
+// path is not propagated to the engine's consumers).
+namespace nimrtc::web_transport {
+class NIMRTC_API_UNSTABLE IWebTransportSessionFactory;
+} // namespace nimrtc::web_transport
 
 namespace nimrtc::engine::pal {
 

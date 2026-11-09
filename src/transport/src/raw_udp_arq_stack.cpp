@@ -34,6 +34,7 @@
 #include <nimrtc/plugins/rtp.hpp>              // IRTP
 #include <nimrtc/raw_udp/arq_raw_udp.hpp>      // ArqRawUdp / ArqRawUdpFactory
 #include <nimrtc/raw_udp/raw_udp_datagram.hpp> // IRawUdpDatagram
+#include <nimrtc/raw_udp/raw_udp_factory_iface.hpp> // IRawUdpFactory (registry slot)
 #include <nimrtc/sctp/sctp_socket_iface.hpp>   // ISctpSocket
 #include <nimrtc/transport/raw_udp_arq_stack.hpp>
 #include <nimrtc/transport/transport_stack.hpp>

@@ -1097,59 +1097,30 @@ inline void register_all_default_plugins() noexcept {
 
 // ---------------------------------------------------------------------------
 // Backward-compatibility shim: expose the registry also in plugins namespace.
-// Existing code that includes plugins/registry.hpp gets this automatically.
-// New code should use nimrtc/core/registry.hpp directly.
+// Existing code that includes <nimrtc/plugins/registry.hpp> gets this
+// automatically.  New code should use nimrtc/core/registry.hpp directly.
+//
+// Layering (P1 hardening, 2026-11-09):
+//   This header previously included 18 seam headers (13 under
+//   nimrtc/plugins/ plus the DTLS / SCTP / raw_udp / transport-stack /
+//   WebTransport factory headers from five OPTIONAL modules).  That made
+//   every translation unit including <nimrtc/core/registry.hpp> pull in
+//   the whole optional-dependency surface, defeating the compile-time
+//   module trimming the CMake options provide, and made core depend on
+//   modules it must not know about (ARCHITECTURE.md Layout Invariant 1).
+//
+//   The seam headers now live behind explicit opt-in headers:
+//     - <nimrtc/plugins/registry.hpp>  -- the 13 nimrtc/plugins/ seams
+//     - <nimrtc/dtls/dtls_session_factory.hpp>, <nimrtc/sctp/...>,
+//       <nimrtc/raw_udp/...>, <nimrtc/transport/transport_stack.hpp>,
+//       <nimrtc/web_transport/...>  -- the optional-module seams,
+//       included directly by the code that needs them.
+//
+//   The registry API only needs POINTERS to the factory interfaces, so
+//   the forward declarations above are sufficient: a caller that
+//   registers a factory already has the complete type (it implements
+//   it), and a caller that only looks one up needs no definition.
 // ---------------------------------------------------------------------------
-#include "nimrtc/plugins/transport.hpp"
-#include "nimrtc/plugins/ice_transport.hpp"
-#include "nimrtc/plugins/rtp.hpp"
-#include "nimrtc/plugins/sdp.hpp"
-#include "nimrtc/plugins/jb.hpp"
-#include "nimrtc/plugins/audio3a.hpp"
-#include "nimrtc/plugins/codec.hpp"
-#include "nimrtc/plugins/video_codec.hpp"
-#include "nimrtc/plugins/video_source.hpp"
-#include "nimrtc/plugins/video_sink.hpp"
-#include "nimrtc/plugins/video_pipeline.hpp"
-#include "nimrtc/plugins/bwe.hpp"
-#include "nimrtc/plugins/scheduler.hpp"
-// v1.2.0 M1 (F2): the network-feedback collector seam.  Included here so
-// the back-compat shim works for code that only includes
-// <nimrtc/core/registry.hpp> and then references the new factory type.
-#include "nimrtc/plugins/net_feedback.hpp"
-
-// v1.2.0 (audio pipeline): the two new audio seams -- the codec-side
-// decoder and the pipeline-side receiver. Including them here is what
-// makes the back-compat shim work for code that only includes
-// <nimrtc/core/registry.hpp> and then references the new factory types
-// (spec B-15). Same pattern as the slots above.
-#include "nimrtc/plugins/audio_decoder.hpp"
-#include "nimrtc/plugins/audio_receiver.hpp"
-
-// Transport PAL Slice 8 (v0.10.2): seam headers for the typed factory
-// slots (DTLS / SCTP / raw_udp / transport-stack). Including them here
-// is what makes the back-compat shim work for old code that only
-// includes <nimrtc/core/registry.hpp> and then references the new
-// factory types ??the include propagates through the rest of the
-// project's translation units without forcing every TU to add the
-// include itself.
-#include "nimrtc/dtls/dtls_session_factory.hpp"
-#include "nimrtc/sctp/sctp_socket_factory.hpp"
-#include "nimrtc/raw_udp/raw_udp_factory_iface.hpp"
-#include "nimrtc/transport/transport_stack.hpp"
-
-// v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam factory
-// interface.  Including the factory header here is what makes the
-// back-compat shim work for old code that only includes
-// <nimrtc/core/registry.hpp> and then references the new factory
-// type — the include propagates through the rest of the project's
-// translation units without forcing every TU to add the include
-// itself.  The matching seam headers (`web_transport_session_iface.hpp`
-// etc.) are NOT included here; they are included by the
-// `web_transport_session_factory.hpp` header above, and consumers
-// that need the seam surface (e.g. the v0.14.0-beta.1 msquic
-// factory) include them directly.
-#include "nimrtc/web_transport/web_transport_session_factory.hpp"
 
 namespace nimrtc::plugins {
 

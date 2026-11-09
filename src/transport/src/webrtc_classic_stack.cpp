@@ -55,6 +55,7 @@
 #include <nimrtc/core/registry.hpp>         // typed registry slots
 #include <nimrtc/dtls/dtls.hpp>            // DtlsConfig, DtlsRole::Server, SrtpProfile (concrete)
 #include <nimrtc/dtls/dtls_session_iface.hpp> // IDtlsSession (seam)
+#include <nimrtc/dtls/dtls_session_factory.hpp> // IDtlsSessionFactory (registry slot)
 #include <nimrtc/plugins/base.hpp>          // BufferView, Status
 #include <nimrtc/plugins/ice_transport.hpp>  // IICETransport (full def)
 #include <nimrtc/plugins/rtp.hpp>          // IRTP (full def)

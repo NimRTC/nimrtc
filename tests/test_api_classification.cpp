@@ -296,12 +296,18 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - plugins/net_feedback.hpp (INetFeedback + factory)
     //     - net_feedback/net_feedback.hpp (the module's public header)
     //
+    // P1 hardening bump (2026-11-09): +1 public header (112 -> 113)
+    //   for the registry umbrella that replaces the seam includes
+    //   that used to live at the bottom of nimrtc/core/registry.hpp:
+    //     - plugins/registry.hpp (the registry + the 13 nimrtc/plugins/
+    //       seam interfaces; the optional-module seams stay out of it)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 112;
+    constexpr std::size_t kBaselineHeaderCount = 113;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

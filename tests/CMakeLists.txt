@@ -733,6 +733,14 @@ function(nimrtc_add_engine_test name source)
         # Slice 2 kDefaultRegistrars[] table, so the engine's
         # open() → register_all_default_plugins() chain resolves.
         nimrtc::net_feedback
+        # v0.14.0 alpha.2 (ADR-014): the WebTransport / QUIC seam. The
+        # engine test exercises the typed `register_web_transport()` /
+        # `get_web_transport()` registry slots and the auto-registered
+        # "msquic" factory, so it needs the seam's headers.  Linking it
+        # here propagates the module's PUBLIC include path -- the core
+        # layer no longer exports the optional-module include paths
+        # (P1 hardening, 2026-11-09).
+        nimrtc::web_transport
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"

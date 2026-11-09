@@ -109,6 +109,14 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 
+/** The peer offered a video codec NimRTC cannot decode (C9).
+ *
+ *  Reported once per negotiation, not once per packet — it is a
+ *  configuration condition, the video counterpart of
+ *  `kAudioCodecUnsupported`.  The video track is disabled and the
+ *  answer rejects the video m-line (RFC 3264 §6.1). */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecUnsupported = 0x1A32;
+
 // ---------------------------------------------------------------------------
 // Audio pipeline — 0x1A40..0x1A4F (v1.2.0)
 // ---------------------------------------------------------------------------

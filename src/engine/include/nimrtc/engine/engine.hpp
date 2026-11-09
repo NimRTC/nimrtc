@@ -262,11 +262,21 @@ struct NIMRTC_API_STABLE EngineConfig {
 
     // ---- Video plugin selection (R3-Batch: lookup by string ID) ----
     //
-    // Video integration is in P1.1/R3 scope; the engine currently does not
-    // pipe video RTP/RTCP, so these plugins are resolved but not yet
-    // threaded into the ICE/DTLS/SRTP pipeline. Callers can drive them
-    // manually via the `video_source() / video_sink() / video_receiver()
-    // / video_sender()` accessors.
+    // The engine DOES thread the video send and receive paths into the
+    // RTP/DTLS/SRTP pipeline:
+    //   send:    send_video() -> video_codec_ (encode) -> video_sender_
+    //             (FU-A packetize) -> RTP header -> SRTP protect ->
+    //             scheduler_ -> ICE.
+    //   receive: ICE recv -> handle_rtp (PT demux) -> video_receiver_->push_rtp()
+    //             (FU-A depacketize + jitter buffer) -> video_codec_ (decode)
+    //             -> video_sink_ (render).
+    //
+    // What is deliberately NOT auto-wired is the video SOURCE: the source
+    // runs its own cadence thread and IVideoCodec / IVideoSender are not
+    // thread-safe, so the engine starts/stops the source (start_video() /
+    // stop_video()) but the host is responsible for pulling frames and
+    // pushing them through send_video().  See the "Video plugin accessors"
+    // section further down for the full contract.
     //
     // Defaults match the IDs registered by `video_source::register_default_plugins()`,
     // `video_sink::register_default_plugins()`, and
@@ -996,12 +1006,14 @@ public:
     // ---- Video I/O --------------------------------------------------------
     //
     // Outbound: drive the full video pipeline:
-    //   video_source_ (frame capture) → video_codec_ (encode H.264)
+    //   send_video(frame) → video_codec_ (encode H.264)
     //   → video_sender_ (FU-A packetize) → RTP header → SRTP
     //   → scheduler_ (priority queue, tick drains to ICE).
     // The engine tick() must be called frequently (≥30 Hz) to drain the
     // scheduler and send packets.  start_video() / stop_video() control the
-    // source cadence.
+    // video SOURCE's cadence — but the source is NOT auto-wired into the
+    // encoder (IVideoCodec / IVideoSender are not thread-safe), so the host
+    // pulls frames from video_source() and pushes them via send_video().
     //
     // Inbound: ICE recv → on_transport_recv → handle_rtp (PT demux)
     //   → video_receiver_ (FU-A depacketize) → video_codec_ (decode)
@@ -1018,7 +1030,11 @@ public:
     // NACK path in `video_payload/` without bumping the MAJOR version.
 
     /** Start the video capture source (produces frames at the configured fps).
-     *  Idempotent if already running.  Returns kOk on success. */
+     *  Idempotent if already running.  Returns kOk on success.
+     *
+     *  Note: the source's frames are NOT auto-encoded or sent — the host
+     *  must pull them (via `video_source()`) and push them through
+     *  `send_video()`.  See the "Video I/O" note above. */
     NIMRTC_API_UNSTABLE plugins::Status start_video() noexcept;
 
     /** Stop the video capture source. Idempotent if already stopped. */
@@ -1364,13 +1380,24 @@ public:
     // themselves live for the engine's lifetime (or until replaced via
     // set_video_sink / set_video_source).
     //
-    // The engine does NOT thread these into the RTP/DTLS/SRTP pipeline
-    // yet (P1.1 future work). Callers can:
-    //   - drive video_source_->start() / produce_one() to feed a sender;
-    //   - push encoded frames via video_sender_->push_frame();
-    //   - receive encoded frames via video_receiver_->push_rtp() and
-    //     listen on set_frame_callback();
-    //   - render decoded frames via video_sink_->render().
+    // The engine DOES thread the send and receive video paths into the
+    // RTP/DTLS/SRTP pipeline:
+    //   send:    send_video() → video_codec_ (encode) → video_sender_
+    //             (FU-A packetize) → RTP header → SRTP protect →
+    //             scheduler_ → ICE.
+    //   receive: ICE recv → handle_rtp (PT demux) → video_receiver_->push_rtp()
+    //             (FU-A depacketize + jitter buffer) → video_codec_ (decode)
+    //             → video_sink_ (render).
+    // The set_frame_callback() on the receiver fires on the raw NAL level
+    // (before decode).
+    //
+    // The video SOURCE is deliberately NOT auto-wired into the encode path:
+    // IVideoCodec / IVideoSender are not thread-safe, and the source's
+    // cadence thread would race with any concurrent caller.  The engine
+    // therefore starts/stops the source (start_video() / stop_video()) but
+    // the host is responsible for pulling frames and pushing them through
+    // send_video().  A host that wants the source to drive the encoder must
+    // wire video_source()->set_callback() itself and serialise the calls.
     //
     // Returns nullptr if the configured plugin id was not found at open().
     //

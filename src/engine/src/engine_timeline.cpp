@@ -210,11 +210,19 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // entry, so each gets configured once.
         std::uint32_t clock_rate = 0;
         {
+            // The negotiated video payload type (C9 / C11) is the one
+            // the peer actually sends video on; the locally configured
+            // number is only the fallback for a host that never
+            // negotiated.
+            const std::uint8_t negotiated_vpt =
+                impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+            const std::uint8_t local_video_pt =
+                config_.video_receiver_tuning.payload_type;
             auto rit = impl_->remote_clock_rate_hz.find(pv.payload_type);
             if (rit != impl_->remote_clock_rate_hz.end()) {
                 clock_rate = rit->second;
-            } else if (pv.payload_type ==
-                       config_.video_receiver_tuning.payload_type) {
+            } else if (pv.payload_type == local_video_pt ||
+                       (negotiated_vpt != 0 && pv.payload_type == negotiated_vpt)) {
                 clock_rate = 90000;                    // RFC 6184 §5.6 H.264
             } else {
                 clock_rate = config_.audio_codec.clock_rate;  // 48 kHz for Opus
@@ -250,8 +258,19 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     if (impl_->pt_routing_active) {
         route_to_audio = impl_->negotiated_audio_pt != 0 &&
                          pv.payload_type == impl_->negotiated_audio_pt;
-        route_to_video = video_receiver_ &&
-                         impl_->video_pt_routes.count(pv.payload_type) > 0;
+        // Video: only the *negotiated* payload type may reach the video
+        // pipeline.  The old rule — "any payload type the peer declared
+        // on its video m-line" — let a peer send VP8 on a payload type
+        // we never agreed to have it decoded as H.264 (C11).  When no
+        // description exchange happened the historical rule still
+        // applies, so a host that drives the engine without SDP is
+        // unaffected.
+        const std::uint8_t negotiated_vpt =
+            impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+        route_to_video = video_receiver_ && !impl_->video_rx_disabled &&
+                         (negotiated_vpt != 0
+                              ? pv.payload_type == negotiated_vpt
+                              : impl_->video_pt_routes.count(pv.payload_type) > 0);
         if (!route_to_audio && !route_to_video) {
             ++impl_->audio_pt_unknown_count;
             // Spec Part D: per-packet errors are counted but not
@@ -271,9 +290,13 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             return;
         }
     } else {
+        const std::uint8_t negotiated_vpt =
+            impl_->negotiated_video_pt.load(std::memory_order_relaxed);
         route_to_video = video_receiver_ &&
-                         pv.payload_type ==
-                             config_.video_receiver_tuning.payload_type;
+                         (pv.payload_type ==
+                              config_.video_receiver_tuning.payload_type ||
+                          (negotiated_vpt != 0 &&
+                           pv.payload_type == negotiated_vpt));
         route_to_audio = !route_to_video;
     }
 

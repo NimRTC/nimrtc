@@ -227,8 +227,13 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.type     = sdp::MediaType::Video;
         video.port     = 9;
         video.protocol = "UDP/TLS/RTP/SAVPF";
+        // The payload type the offer names is the one our outbound
+        // packets carry (the sender's tuning), because a `sendrecv`
+        // m-section uses one payload type for both directions.  Using
+        // the receiver's tuning here would advertise a number the
+        // packet path never stamps (C9 / C11).
         const std::string vpt =
-            std::to_string(config_.video_receiver_tuning.payload_type);
+            std::to_string(config_.video_sender_tuning.payload_type);
         video.formats         = {vpt};
         video.direction       = sdp::Direction::SendRecv;
         video.mid             = "1";           // second BUNDLE mid
@@ -662,6 +667,114 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     detail::build_negotiated_opus_fmtp(impl_->negotiated_opus_fmtp);
             }
             break;
+        }
+    }
+
+    // ---- Which video payload type did we negotiate? (C9 / C11) ----------
+    //
+    // The video side mirrors the audio side above (B-4) and closes the
+    // defect C9 names: the engine used to answer a video m-line by
+    // copying the offer's `a=rtpmap:` / `a=fmtp:` lines verbatim while
+    // stamping its outbound RTP with a *locally configured* payload
+    // type.  The two could name different numbers — the peer then
+    // receives video on a payload type the negotiated description never
+    // mentions, and drops it.
+    //
+    // RFC 3264 §6.1 constrains the answer to the payload types the
+    // offer contained, so the negotiated video payload type is the one
+    // that appears in *both* descriptions.  Everything downstream — the
+    // answer's format list, the outbound RTP header, the inbound demux
+    // — then uses that one number.
+    impl_->negotiated_video = detail::VideoNegotiationResult{};
+    impl_->negotiated_video_pt.store(0, std::memory_order_relaxed);
+    impl_->video_rx_disabled = false;
+    impl_->video_codec_unsupported_reported = false;
+
+    // H.264 is the only video codec NimRTC implements today: the H.264
+    // module ships the packetizer, the depacketizer and the codec
+    // plug-in.  The list grows with the codec-breadth work of the video
+    // plan (C4 / C6 / C8: H.265, AV1, VP8, VP9); each new codec adds
+    // one line here and the negotiation picks it up automatically.
+    //
+    // The codec also has to be *present*: without a video codec plug-in
+    // the engine cannot decode a single frame, so an H.264 offer is no
+    // more decodable than a VP9 one.
+    const auto video_encoding_decodable = [this](const std::string& enc) {
+        if (enc == "h264") return video_codec_ != nullptr;
+        return false;
+    };
+
+    const sdp::MediaDescription* remote_video = nullptr;
+    for (const auto& m : remote.media) {
+        if (m.type != sdp::MediaType::Video) continue;
+        remote_video = &m;
+        break;
+    }
+
+    if (remote_video != nullptr && !remote_video->formats.empty()) {
+        // The payload type our own sender stamps into the outbound RTP
+        // header (`EngineConfig::video_sender_tuning.payload_type`).
+        //
+        // It plays two roles:
+        //   * when we are the OFFERER and receive an answer, the answer
+        //     may only name a payload type our offer contained
+        //     (RFC 3264 §6.1), so anything else is filtered out;
+        //   * when the peer offers several supported payload types, this
+        //     one wins, so the outbound path keeps a stable number.
+        const std::uint8_t our_video_pt =
+            config_.video_sender_tuning.payload_type;
+
+        std::uint8_t chosen = 0;
+        std::string  chosen_encoding;
+        std::uint32_t chosen_clock_rate = 0;
+
+        for (const auto& fmt : remote_video->formats) {
+            std::uint8_t pt = 0;
+            if (!detail::parse_payload_type(fmt, pt)) continue;
+            if (remote_is_answer && pt != our_video_pt) continue;
+            auto rit = remote_video->rtpmap.find(fmt);
+            if (rit == remote_video->rtpmap.end()) continue;
+            const std::string enc_lower =
+                detail::decoder_id_for_encoding(rit->second.encoding);
+            if (!video_encoding_decodable(enc_lower)) continue;
+            if (chosen == 0) {
+                chosen              = pt;
+                chosen_encoding     = rit->second.encoding;
+                chosen_clock_rate   = rit->second.clock_rate;
+            }
+            if (pt == our_video_pt) {
+                chosen              = pt;
+                chosen_encoding     = rit->second.encoding;
+                chosen_clock_rate   = rit->second.clock_rate;
+                break;
+            }
+        }
+
+        if (chosen != 0) {
+            impl_->negotiated_video.valid         = true;
+            impl_->negotiated_video.payload_type  = chosen;
+            impl_->negotiated_video.encoding       = chosen_encoding;
+            impl_->negotiated_video.clock_rate    = chosen_clock_rate;
+            auto fit = remote_video->fmtp.find(std::to_string(chosen));
+            if (fit != remote_video->fmtp.end()) {
+                impl_->negotiated_video.fmtp = fit->second;
+            }
+            impl_->negotiated_video_pt.store(chosen, std::memory_order_relaxed);
+            core::log::Logger::instance().info(
+                "engine[video]: negotiated payload type " +
+                std::to_string(chosen) + " (encoding " + chosen_encoding + ")");
+        } else {
+            // The peer offered video, but nothing in it is decodable
+            // here.  This is a configuration condition, not a per-packet
+            // anomaly, so it is reported once and disables the track.
+            impl_->negotiated_video.codec_unsupported = true;
+            impl_->video_rx_disabled = true;
+            if (!impl_->video_codec_unsupported_reported && on_error_) {
+                impl_->video_codec_unsupported_reported = true;
+                on_error_(core::kVideoCodecUnsupported,
+                          "the peer offered a video codec NimRTC cannot "
+                          "decode — the video track is disabled");
+            }
         }
     }
 
@@ -1103,25 +1216,53 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             }
         }
 
-        // For video: carry rtpmap/fmtp/rtcp-fb from offer verbatim.  The
-        // remote codec params (profile-level-id, packetization-mode, etc.)
-        // are what the remote decoder expects to see in our answer; the
-        // engine doesn't renegotiate them.  We also append the a=ssrc
-        // line so Chrome's inbound-rtp counter advances on the wire SSRC
-        // we emit.
+        // For video: name exactly the payload type that was negotiated.
+        //
+        // The old code copied the offer's `a=rtpmap:` / `a=fmtp:` /
+        // `a=rtcp-fb:` lines verbatim, which told the peer we would
+        // decode every codec it offered — including the ones NimRTC has
+        // no decoder for (C9).  RFC 3264 §6.1 wants the answer to carry
+        // the subset that was actually negotiated, which is what
+        // `negotiated_video` holds.
         if (rm.type == sdp::MediaType::Video) {
-            am.rtpmap   = rm.rtpmap;
-            am.fmtp     = rm.fmtp;
-            // The rtcp-fb set is the offer's, filtered to the feedback
-            // types we support (RFC 3264 §6.1).  The payload type is
-            // kept: the answer's video format list is the offer's, so
-            // the peer's payload type is the one in scope here.
-            // "transport-cc" is in the supported set — dropping it would
-            // silently disable the preferred bandwidth signal (ADR-018).
-            for (const std::string& entry : rm.rtcp_fb) {
-                if (detail::rtcp_fb_entry_supported(entry)) {
-                    am.rtcp_fb.push_back(entry);
+            if (impl_->negotiated_video.valid) {
+                const std::string selected =
+                    std::to_string(impl_->negotiated_video.payload_type);
+                am.formats = {selected};
+
+                // Only the negotiated payload type's own `a=rtpmap:`
+                // line survives into the answer.
+                auto rit = rm.rtpmap.find(selected);
+                if (rit != rm.rtpmap.end()) am.rtpmap[selected] = rit->second;
+
+                // The `a=fmtp:` line tells the receiver how to read the
+                // bitstream (RFC 6184 §5.6: profile-level-id and
+                // packetization-mode).  It is echoed as the peer sent
+                // it — the parameters describe the *peer's* encoder.
+                auto fit = rm.fmtp.find(selected);
+                if (fit != rm.fmtp.end()) am.fmtp[selected] = fit->second;
+
+                // The feedback set is the offer's, rewritten onto the
+                // negotiated payload type (RFC 4585 §4.1 scopes an
+                // `a=rtcp-fb:` entry to a payload type) and filtered to
+                // the types we support.  "transport-cc" is in the
+                // supported set — dropping it would silently disable
+                // the preferred bandwidth signal (ADR-018).
+                for (const std::string& entry : rm.rtcp_fb) {
+                    if (!detail::rtcp_fb_entry_supported(entry)) continue;
+                    const std::string_view types = detail::rtcp_fb_types(entry);
+                    if (types.empty()) continue;
+                    am.rtcp_fb.push_back(selected + " " + std::string(types));
                 }
+            } else {
+                // Nothing the peer offered is decodable here, so the
+                // m-line is rejected (RFC 3264 §6.1: a rejected m-line
+                // carries port 0 and no format list).
+                am.port    = 0;
+                am.formats.clear();
+                am.rtpmap.clear();
+                am.fmtp.clear();
+                am.rtcp_fb.clear();
             }
             char ssrc_line[96];
             std::snprintf(ssrc_line, sizeof(ssrc_line),

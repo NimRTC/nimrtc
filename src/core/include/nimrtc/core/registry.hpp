@@ -80,6 +80,11 @@ class NIMRTC_API_STABLE IVideoSenderFactory;
 class NIMRTC_API_STABLE IBweFactory;
 class NIMRTC_API_STABLE ISchedulerFactory;
 class NIMRTC_API_STABLE IDataChannelFactory;
+// v1.2.0 M1 (F2): the receiver-side network-feedback collector seam.
+// Forward-declared like the other factory types so the registry's
+// TypedRegistry<> field can reference it without pulling the seam header
+// into core (Layout Invariant 1).
+class NIMRTC_API_STABLE INetFeedbackFactory;
 // v1.2.0 (audio pipeline): the two new audio seams -- the codec-side
 // decoder and the pipeline-side receiver. Forward-declared like the
 // other factory types so the registry's TypedRegistry<> fields can
@@ -147,6 +152,11 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
+// v1.2.0 M1 (F2): the receiver-side network-feedback collector module.
+// Its entry point populates the registry's net-feedback slot
+// (register_net_feedback) so `core::register_all_default_plugins()` can
+// wire the built-in collector through the unified table.
+namespace net_feedback   { void register_default_plugins() noexcept; }
 namespace datachannel      { void register_default_plugins() noexcept; }
 // v1.2.0 (audio pipeline): the audio receive-pipeline module. Its entry
 // point populates the audio-receiver registry slot
@@ -467,6 +477,23 @@ public:
         return scheduler_.list_ids();
     }
 
+    // -- Net feedback (v1.2.0 M1, F2) -------------------------------------
+    //
+    // Typed slot for the receiver-side network-feedback collector seam
+    // (`plugins::INetFeedback`).  The collector sits between the wire and
+    // the bandwidth estimator: the engine routes inbound RTCP to it, it
+    // aggregates the signals, and the engine hands the result to
+    // `IBwe::on_feedback()`.
+    void register_net_feedback(std::string_view id,
+                               const plugins::INetFeedbackFactory* f);
+    [[nodiscard]] const plugins::INetFeedbackFactory*
+    get_net_feedback(std::string_view id) const {
+        return net_feedback_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_net_feedbacks() const {
+        return net_feedback_.list_ids();
+    }
+
     // -- DataChannel (P2: typed factory slot for IDataChannelFactory*) -----
     //
     // Mirrors the SCTP / DTLS / raw_udp / transport-stack slots above.
@@ -619,6 +646,10 @@ private:
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
     TypedRegistry<plugins::IBweFactory>           bwe_;
     TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
+    // v1.2.0 M1 (F2): typed factory slot for the network-feedback
+    // collector seam.  The built-in collector registers under
+    // "nimrtc_net_feedback".
+    TypedRegistry<plugins::INetFeedbackFactory>    net_feedback_;
     // DataChannel P2 typed slot — see register_datachannel() above for
     // the rationale.
     TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
@@ -793,6 +824,15 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kScheduler,     \
             #id, factory_ptr }
 
+/** Register a network-feedback collector plugin by ID and factory pointer.
+ *  v1.2.0 M1 (F2) — typed slot for `plugins::INetFeedbackFactory*`. */
+#define NIMRTC_REGISTER_NET_FEEDBACK(id, factory_ptr)                  \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_net_feedback_){                         \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kNetFeedback,  \
+            #id, factory_ptr }
+
 /** Register a DataChannel plugin by ID and factory pointer.
  *  P2 typed slot ??mirrors the SCTP / DTLS / raw_udp / transport-stack
  *  hooks above; see `register_datachannel()` for the canonical
@@ -903,6 +943,9 @@ public:
         kAudioDecoder, kAudioReceiver,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
         kBwe, kScheduler,
+        // v1.2.0 M1 (F2): the receiver-side network-feedback collector
+        // seam -- see register_net_feedback().
+        kNetFeedback,
         // P2: DataChannel typed factory slot ??see register_datachannel().
         kDataChannel,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
@@ -983,6 +1026,10 @@ public:
             case Category::kScheduler:
                 reg.register_scheduler(id,
                     static_cast<const plugins::ISchedulerFactory*>(factory));
+                break;
+            case Category::kNetFeedback:
+                reg.register_net_feedback(id,
+                    static_cast<const plugins::INetFeedbackFactory*>(factory));
                 break;
             case Category::kDataChannel:
                 reg.register_datachannel(id,
@@ -1066,6 +1113,10 @@ inline void register_all_default_plugins() noexcept {
 #include "nimrtc/plugins/video_pipeline.hpp"
 #include "nimrtc/plugins/bwe.hpp"
 #include "nimrtc/plugins/scheduler.hpp"
+// v1.2.0 M1 (F2): the network-feedback collector seam.  Included here so
+// the back-compat shim works for code that only includes
+// <nimrtc/core/registry.hpp> and then references the new factory type.
+#include "nimrtc/plugins/net_feedback.hpp"
 
 // v1.2.0 (audio pipeline): the two new audio seams -- the codec-side
 // decoder and the pipeline-side receiver. Including them here is what

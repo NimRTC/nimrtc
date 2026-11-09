@@ -223,6 +223,52 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `opus::EncoderConfig::bitrate_bps` (0) resolves to the channel-count
   default — 32 kbps mono, 64 kbps stereo — through the new
   `opus::default_bitrate_bps_for_channels()`.
+- **The receiver-side network-feedback collector (v1.2.0 M1, spec
+  F1 / F2 / F4 / F6).**  The bandwidth estimator was never fed: the
+  engine read `IBwe::estimate()` in its tick, but nothing ever called
+  `IBwe::on_feedback()` outside the unit tests, so the target stayed
+  pinned at the initial bitrate (1 Mbps) for the whole session and every
+  rate-control feature built on top of it was decorative.
+  - A new plugin seam `plugins::INetFeedback` — the *producer* side of
+    the loop.  It consumes demultiplexed RTCP sub-packets (the payload
+    type, the FMT and the raw bytes, so the interface layer never names
+    a wire-format type) and aggregates them into one
+    `plugins::NetFeedbackSnapshot`.
+  - A new module `src/modules/net_feedback/` implementing the seam.  It
+    reads three signals: the **Receiver Report** (fraction lost, jitter,
+    and the RTT derived from the LSR / DLSR pair against our own last
+    Sender Report), **REMB** (the peer's own bandwidth opinion) and
+    **transport-cc** (the per-packet arrival series, the received and
+    lost counters and the implied receive rate).  It registers under the
+    id `"nimrtc_net_feedback"` in the registry's new net-feedback
+    category.
+  - The engine now demultiplexes every inbound RTCP compound datagram
+    with `rtp::demux_rtcp()` (RFC 3550 section 6.1) instead of walking
+    it by hand: the Sender Report still feeds the cross-end timeline, the
+    video sender still gets the NACK / PLI / FIR, and the receiver-side
+    network feedback (RR / REMB / transport-cc) goes to the collector.
+    The demultiplexer is forgiving — a malformed tail ends the walk
+    instead of throwing away the well-formed head.
+  - The engine hands our own Sender Report to the collector, because the
+    LSR / DLSR pair in the peer's Receiver Report only becomes a round
+    trip time when the collector knows when that report left.
+  - The snapshot is fed to the estimator **once per feedback report**, not
+    once per engine tick: the collector's timestamp moves exactly when a
+    new report arrived, so the tick uses it as the de-duplication key.
+  - `EngineConfig::net_feedback_name` selects the collector (default
+    `"nimrtc_net_feedback"`; an empty string keeps the pre-v1.2.0
+    behaviour of never feeding the estimator).  The engine resolves it
+    through the registry and never includes the module's header
+    (Layout Invariant 4).
+  - `Stats` gains three counters that make the loop observable:
+    `net_feedback_blocks` (RTCP blocks routed to the collector),
+    `bwe_feedback_samples` (snapshots handed to the estimator) and
+    `bandwidth_estimate_bps` (the estimator's current target).
+  - `plugins::BweFeedback` gains the discriminating fields the policy
+    needs: `signal_source` (loss/RTT, transport-cc or REMB), the
+    transport-cc arrival series, the acknowledged sequence range and the
+    per-packet sizes.  Every field is additive — an estimator that
+    ignores them behaves exactly as before.
 
 ### Changed
 

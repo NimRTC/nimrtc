@@ -728,6 +728,11 @@ function(nimrtc_add_engine_test name source)
         # register `SctpDataChannelFactory`.  Linking here keeps the
         # Slice 2 table additive — no future PR is required for tests.
         nimrtc::datachannel
+        # v1.2.0 M1 (F2): the network-feedback collector module — its
+        # register_default_plugins() symbol is referenced by the PAL
+        # Slice 2 kDefaultRegistrars[] table, so the engine's
+        # open() → register_all_default_plugins() chain resolves.
+        nimrtc::net_feedback
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -1175,6 +1180,18 @@ set_tests_properties(test_datachannel_engine PROPERTIES TIMEOUT 120)
 # wiring as `test_datachannel_engine` above.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 M1 (F1 / F6) — the engine's side of the bandwidth loop.
+#
+# Covers the wiring between the RTCP demux, the net-feedback collector
+# and the bandwidth estimator: an inbound Receiver Report reaches the
+# collector, the aggregated snapshot reaches `IBwe::on_feedback()`, and
+# the bandwidth estimate *moves* under loss.  Before v1.2.0 nothing ever
+# fed the estimator, so the target stayed pinned at its initial value.
+# Uses the "shell" transport strategy, like `test_engine_timeline` above.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_net_feedback test_engine_net_feedback.cpp)
 
 # ---------------------------------------------------------------------------
 # v1.2.0 (audio pipeline, WP-6) — negotiation, payload-type routing and

@@ -89,6 +89,13 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #endif
     &nimrtc::ice::register_default_plugins,
     &nimrtc::jb::register_default_plugins,
+#ifdef NIMRTC_HAS_NET_FEEDBACK
+    // v1.2.0 M1 (F2): the receiver-side network-feedback collector.  Its
+    // entry point populates the registry's net-feedback slot under the id
+    // "nimrtc_net_feedback", so the engine can resolve the collector
+    // through the seam without naming a concrete module.
+    &nimrtc::net_feedback::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_OPUS
     &nimrtc::opus::register_default_plugins,
 #endif

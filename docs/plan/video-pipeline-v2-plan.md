@@ -409,16 +409,18 @@ OD-1 posture, ADR-019 covers OD-3's ladder modes and the profile table).
 |---|---|
 | 1. Cut the **v1.1.0** tag (OD-3(b) precondition) | **Done** — the tag exists; v1.2.0 work is unblocked. |
 | 2. Draft **ADR-018** (bandwidth signal policy, D1) | **Done** — `docs/adr/ADR-018-bandwidth-signal-policy.md`, status *Proposed* (acceptance waits on M1's aggregation and the policy's table-driven test). |
-| 3. Open **v1.2.0 M1** (F1, F2, F3, F4, F7) | **In progress.** The transport-cc **parsing** groundwork for F4 has landed: `rtp::Parser::parse_transport_cc` was corrected against the draft's real wire format (the chunk header contains the status symbols; the receive deltas are variable-width and follow all the chunks), the `PacketStatus` enum gained wire symbol 3, and the RTCP padding is honoured. Covered by 15 cases in `src/modules/rtp/tests/test_transport_cc.cpp`. F4 itself is still open — the parser has no production caller yet, and F1/F2/F3/F7 have not started. |
+| 3. Open **v1.2.0 M1** (F1, F2, F3, F4, F7) | **In progress.** The transport-cc **parsing** groundwork for F4 has landed: `rtp::Parser::parse_transport_cc` was corrected against the draft's real wire format (the chunk header contains the status symbols; the receive deltas are variable-width and follow all the chunks), the `PacketStatus` enum gained wire symbol 3, and the RTCP padding is honoured. Covered by 15 cases in `src/modules/rtp/tests/test_transport_cc.cpp`.
+| 3a. **F1 + F2 + F3 + F4 (producer side) + F6** | **Landed.** The inbound RTCP compound datagram is now demultiplexed on the receive path (`rtp::demux_rtcp()`, RFC 3550 §6.1), the receiver-side network signals (Receiver Report, REMB, transport-cc) reach a new collector module (`src/modules/net_feedback/`) through the `plugins::INetFeedback` seam, and the engine hands the aggregated snapshot to `IBwe::on_feedback()` once per feedback report. The transport-cc parser now has a production caller. `plugins::BweFeedback` grew the `signal_source` discriminator and the transport-cc fields. Covered by 10 cases in `src/modules/net_feedback/tests/test_net_feedback.cpp`. |
+| 3b. **F7** (the REMB trust policy) | **Open.** The collector's source precedence is fixed and documented (transport-cc → loss/RTT → REMB); the *configurable* policy (which signal the negotiated `a=rtcp-fb` set allows) still has to move into the engine. |
 
 **Next executable step** (no code change required):
 
-1. Continue **v1.2.0 M1**: F1 (RTCP demux on the receive path) and F2 (the
-   `net_feedback` module) — the engine must actually parse inbound RTCP and
-   aggregate it, or the corrected parser stays a library function with no
-   caller.
-2. F3 (`plugins::BweFeedback` grows a `signal_source` discriminator and the
-   transport-cc fields) and F7 (REMB trust policy), then wire the loop (F6).
+1. Continue **v1.2.0 M1** with F7 — the REMB trust policy becomes
+   configurable, driven by the negotiated `a=rtcp-fb` set, and the
+   collector's fixed precedence gives way to the negotiated one.
+2. F5 (the loop's *production* verification: a lossy channel must move
+   `target_bitrate_bps` over time) — the loop is closed in code, but the
+   end-to-end proof that the estimate actually moves is still missing.
 
 Everything else in this plan is downstream of M1.
 

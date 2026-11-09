@@ -624,4 +624,87 @@ TEST(Scheduler, CurrentBitrateReflectsObservedDrain) {
     EXPECT_LT(stats.current_bitrate_bps, 800'000u);
 }
 
+// ===========================================================================
+// Packet buffer pool (P1 hardening, 2026-11-09)
+// ===========================================================================
+//
+// The send path used to allocate and free one heap buffer per outbound
+// packet.  The pool recycles the drained buffers, so the steady state
+// performs no heap allocation.  These tests pin the contract:
+//
+//   1. acquire_packet_buffer() honours the capacity hint.
+//   2. release_packet_buffer() + acquire_packet_buffer() returns the SAME
+//      storage (no reallocation) — this is what makes the send path
+//      allocation-free.
+//   3. A drained packet's buffer goes back onto the free-list, so the
+//      storage used by an enqueued packet is the one a later acquire()
+//      hands out.
+//   4. The bytes handed to the drain callback are intact (the recycle
+//      happens AFTER the callback returned).
+// ===========================================================================
+
+/** The acquired buffer must be able to hold `capacity_hint` bytes. */
+TEST(SchedulerPool, AcquireHonoursCapacityHint) {
+    Scheduler sch{};
+    auto buffer = sch.acquire_packet_buffer(2048);
+    EXPECT_GE(buffer.capacity(), 2048u);
+}
+
+/** A released buffer comes back with the same storage — no reallocation. */
+TEST(SchedulerPool, ReleaseThenAcquireReusesTheSameStorage) {
+    Scheduler sch{};
+    auto buffer = sch.acquire_packet_buffer(1024);
+    buffer.assign(1024, 0xAB);
+    const std::uint8_t* const storage = buffer.data();
+
+    sch.release_packet_buffer(std::move(buffer));
+
+    auto again = sch.acquire_packet_buffer(1024);
+    EXPECT_EQ(again.data(), storage)
+        << "the released buffer must be handed back, not reallocated";
+    EXPECT_GE(again.capacity(), 1024u);
+}
+
+/** The buffer of a drained packet returns to the pool. */
+TEST(SchedulerPool, DrainedPacketBufferIsRecycled) {
+    Scheduler sch{};
+
+    // Enqueue through the owned path so we know exactly which storage the
+    // packet occupies.
+    std::vector<std::uint8_t> packet(512, 0x5A);
+    const std::uint8_t* const storage = packet.data();
+    sch.enqueue_owned(Priority::kAudio, std::move(packet), make_test_addr(0));
+
+    std::vector<std::uint8_t> seen;
+    const int drained = sch.drain_with(10, [&](Priority, nimrtc::core::ByteSpan data) {
+        seen.assign(data.data(), data.data() + data.size());
+        return true;
+    });
+    ASSERT_EQ(drained, 1);
+    ASSERT_EQ(seen.size(), 512u);
+    // The payload must be intact when the callback ran.
+    for (std::uint8_t byte : seen) EXPECT_EQ(byte, 0x5A);
+
+    // The drained buffer is back on the free-list.
+    auto recycled = sch.acquire_packet_buffer(512);
+    EXPECT_EQ(recycled.data(), storage)
+        << "the drained packet's buffer must be recycled, not freed";
+}
+
+/** The pool is bounded: releasing more buffers than the queue depth keeps
+ *  does not grow without limit (the excess is simply dropped). */
+TEST(SchedulerPool, PoolIsBoundedByQueueDepth) {
+    SchedulerConfig cfg;
+    cfg.max_queue_depth = 4;
+    Scheduler sch{cfg};
+
+    for (int i = 0; i < 64; ++i) {
+        auto buffer = sch.acquire_packet_buffer(128);
+        sch.release_packet_buffer(std::move(buffer));
+    }
+    // Nothing observable beyond "the scheduler still works".
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+    EXPECT_EQ(sch.drain(10), 1);
+}
+
 }  // namespace

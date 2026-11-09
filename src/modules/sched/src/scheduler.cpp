@@ -213,6 +213,42 @@ struct Scheduler::Impl {
     std::uint32_t sent_total_     = 0;
     std::uint64_t sent_bytes_total_ = 0;
 
+    // ---- Packet buffer pool (P1 hardening, 2026-11-09) ------------------
+    //
+    // Free-list of packet payload buffers.  A buffer that was drained and
+    // dispatched is pushed back here instead of being freed, and the next
+    // `acquire_packet_buffer()` pops it.  In steady state the send path
+    // therefore performs NO heap allocation per packet.
+    //
+    // The list is bounded by the queue depth: at most `max_queue_depth`
+    // buffers can be in flight, so the pool never holds more than that.
+    std::vector<std::vector<std::uint8_t>> buffer_pool_;
+
+    /** Maximum number of buffers the pool may hold.  Bounded by the
+     *  queue depth: at most `max_queue_depth` packets can be in flight,
+     *  so the pool never holds more than that. */
+    [[nodiscard]] std::size_t pool_limit() const noexcept {
+        return static_cast<std::size_t>(config_.max_queue_depth);
+    }
+
+    /** Put one buffer back onto the free-list.  The buffer keeps its
+     *  capacity (that is the whole point) but its contents are wiped so
+     *  the pool does not keep stale packet bytes alive. */
+    void recycle_buffer_locked(std::vector<std::uint8_t>&& buffer) noexcept {
+        if (buffer.capacity() == 0) return;
+        if (buffer_pool_.size() >= pool_limit()) return;  // pool is full
+        buffer.clear();
+        buffer_pool_.push_back(std::move(buffer));
+    }
+
+    /** Recycle every buffer still queued in `q` and empty the queue. */
+    void recycle_queue_locked(std::deque<PacketRecord>& q) noexcept {
+        while (!q.empty()) {
+            recycle_buffer_locked(std::move(q.front().owned_data));
+            q.pop_front();
+        }
+    }
+
     // ---- L1 stream statistics (DC-2) ------------------------------------
     std::uint32_t stream_dropped_total_ = 0;
     std::uint32_t stream_sent_total_   = 0;
@@ -251,9 +287,13 @@ void Scheduler::enqueue(plugins::Priority p, core::ByteSpan data,
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     // Copy path: hand off to the shared helper with an externally-owned
-    // vector.  The vector is freshly allocated (or reused from a
-    // thread_local pool in the caller); the helper consumes it via move.
+    // vector.  The buffer comes from the pool (P1 hardening, 2026-11-09),
+    // so the steady-state cost of this path is a memcpy, not a malloc.
     std::vector<std::uint8_t> buf;
+    if (!impl_->buffer_pool_.empty()) {
+        buf = std::move(impl_->buffer_pool_.back());
+        impl_->buffer_pool_.pop_back();
+    }
     buf.assign(data.data(), data.data() + data.size());
     enqueue_locked(p, std::move(buf), dst);
 }
@@ -288,6 +328,8 @@ void Scheduler::enqueue_locked(plugins::Priority p,
         for (std::size_t i = kPriorityCount; i-- > 0;) {
             auto& q = impl_->queues_[i];
             if (!q.empty()) {
+                // Recycle the dropped packet's buffer (P1 hardening).
+                impl_->recycle_buffer_locked(std::move(q.front().owned_data));
                 q.pop_front();
                 ++impl_->dropped_total_;
                 break;  // one drop per enqueue is sufficient
@@ -297,6 +339,8 @@ void Scheduler::enqueue_locked(plugins::Priority p,
         // silently discard the incoming packet rather than infinite-looping.
         if (total_queued() >= impl_->config_.max_queue_depth) {
             ++impl_->dropped_total_;
+            // The incoming packet is discarded — recycle its buffer too.
+            impl_->recycle_buffer_locked(std::move(owned_data));
             sched_debug("Scheduler: all queues full after overflow drop, "
                         "dropping incoming packet");
             return;
@@ -390,7 +434,7 @@ int Scheduler::drain_with(int max_packets,
 
             // Take ownership of the packet so we can update stats
             // even when no callback is registered.
-            const PacketRecord rec = std::move(q.front());
+            PacketRecord rec = std::move(q.front());
             q.pop_front();
 
             // If the caller wants per-packet observation, give them a chance
@@ -427,6 +471,13 @@ int Scheduler::drain_with(int max_packets,
             ++impl_->sent_total_;
             impl_->sent_bytes_total_ += est_bytes;
             impl_->bytes_last_drain_ += est_bytes;
+
+            // The packet has been dispatched: the drain callback is done
+            // with the bytes, so the buffer can go back onto the free-list
+            // instead of being freed (P1 hardening, 2026-11-09).  This is
+            // what removes the per-packet heap allocation from the send
+            // path.
+            impl_->recycle_buffer_locked(std::move(rec.owned_data));
         }
 
         if (vetoed) break;  // a veto stops the whole drain
@@ -450,7 +501,7 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) noexcept {
         for (std::size_t idx = 1; idx < kPriorityCount; ++idx) {
             impl_->dropped_total_ +=
                 static_cast<std::uint32_t>(impl_->queues_[idx].size());
-            impl_->queues_[idx].clear();
+            impl_->recycle_queue_locked(impl_->queues_[idx]);
         }
         sched_debug("Scheduler: sender pause — all non-control packets dropped");
         return;
@@ -541,7 +592,7 @@ void Scheduler::on_bwe_update(std::uint32_t target_bps) noexcept {
             // Even a single packet in this queue is too expensive to keep
             // given the remaining budget — drop the whole queue.
             impl_->dropped_total_ += static_cast<std::uint32_t>(q.size());
-            q.clear();
+            impl_->recycle_queue_locked(q);
             // remaining_budget unchanged: dropping frees no additional bytes
             // for higher-priority queues — they're still over budget.
             // Continue iterating so the loop reaches kAudio / kVideoKeyframe
@@ -554,7 +605,7 @@ void Scheduler::reset() noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
     for (auto& q : impl_->queues_) {
-        q.clear();
+        impl_->recycle_queue_locked(q);
     }
     impl_->target_bps_          = 0;
     impl_->credit_milli_bytes_  = 0;
@@ -567,7 +618,7 @@ void Scheduler::reset() noexcept {
     impl_->sent_total_          = 0;
     impl_->sent_bytes_total_    = 0;
     impl_->stream_priority_.clear();
-    for (auto& bucket : impl_->stream_buckets_) bucket.clear();
+    for (auto& bucket : impl_->stream_buckets_) impl_->recycle_queue_locked(bucket);
     impl_->stream_dropped_total_ = 0;
     impl_->stream_sent_total_   = 0;
     impl_->last_dst_addr_       = {};
@@ -599,6 +650,44 @@ plugins::SchedulerStats Scheduler::stats() const noexcept {
 plugins::SchedulerConfig Scheduler::config() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mu_);
     return impl_->config_;
+}
+
+// ---------------------------------------------------------------------------
+// Packet buffer pool (P1 hardening, 2026-11-09)
+// ---------------------------------------------------------------------------
+//
+// The send path used to allocate and free one heap buffer per outbound
+// packet.  With the pool the buffer is taken from a bounded free-list,
+// filled by the caller, handed to the scheduler with `enqueue_owned()`,
+// and returned to the list once the packet has been drained and
+// dispatched.  In steady state the send path performs no heap allocation.
+//
+// The pool is bounded by `max_queue_depth`: at most that many packets can
+// be in flight, so the pool never holds more memory than the queue could
+// anyway.
+
+std::vector<std::uint8_t>
+Scheduler::acquire_packet_buffer(std::size_t capacity_hint) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+
+    std::vector<std::uint8_t> buffer;
+    if (!impl_->buffer_pool_.empty()) {
+        buffer = std::move(impl_->buffer_pool_.back());
+        impl_->buffer_pool_.pop_back();
+    }
+    // The recycled buffer usually already has enough capacity (the packet
+    // sizes are stable).  Only when it is too small do we pay for a
+    // reallocation.
+    if (capacity_hint != 0 && buffer.capacity() < capacity_hint) {
+        buffer.reserve(capacity_hint);
+    }
+    return buffer;
+}
+
+void Scheduler::release_packet_buffer(
+    std::vector<std::uint8_t>&& buffer) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    impl_->recycle_buffer_locked(std::move(buffer));
 }
 
 // ===============================================================================
@@ -722,7 +811,9 @@ int drain_stream_bucket(std::deque<PacketRecord>& bucket,
                         plugins::DrainCallback inner_cb,
                         std::uint32_t stream_id,
                         StreamPriority bucket_priority,
-                        bool& vetoed) noexcept {
+                        bool& vetoed,
+                        std::vector<std::vector<std::uint8_t>>* buffer_pool,
+                        std::size_t pool_limit) noexcept {
     int sent = 0;
     while (!bucket.empty() && sent < max_packets) {
         PacketRecord rec = std::move(bucket.front());
@@ -742,6 +833,15 @@ int drain_stream_bucket(std::deque<PacketRecord>& bucket,
         const std::uint32_t est_bytes =
             rec.estimated_size_bytes != 0 ? rec.estimated_size_bytes : avg_packet_size;
         sent_bytes_total += est_bytes;
+        // The packet has been dispatched — recycle its buffer instead of
+        // freeing it (P1 hardening, 2026-11-09).  The pool is bounded by
+        // the queue depth; a full pool simply frees the buffer.
+        if (buffer_pool != nullptr) {
+            if (buffer_pool->size() < pool_limit) {
+                rec.owned_data.clear();
+                buffer_pool->push_back(std::move(rec.owned_data));
+            }
+        }
         (void)stream_id;
         (void)bucket_priority;
     }
@@ -786,7 +886,9 @@ int Scheduler::select_next_packet(int max_packets,
                                    impl_->sent_bytes_total_,
                                    impl_->config_.avg_packet_size_bytes,
                                    max_packets - sent, wrapped_cb,
-                                   peek_stream_id, bucket_prio, vetoed);
+                                   peek_stream_id, bucket_prio, vetoed,
+                                   &impl_->buffer_pool_,
+                                   impl_->pool_limit());
         sent += n;
         if (vetoed) break;  // a veto stops the whole selection
         if (n == 0) break;  // bucket became empty mid-drain

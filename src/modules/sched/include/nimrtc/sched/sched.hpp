@@ -160,6 +160,17 @@ public:
     plugins::SchedulerStats  stats()  const noexcept override;
     plugins::SchedulerConfig config() const noexcept override;
 
+    // ---- Packet buffer pool (P1 hardening, 2026-11-09) ----------------
+    //
+    // The built-in scheduler keeps a bounded free-list of packet buffers.
+    // A buffer that was drained and dispatched goes back onto the list, so
+    // the steady-state send path performs no heap allocation per packet.
+    // The pool is bounded by `max_queue_depth` so a burst cannot make the
+    // scheduler hoard memory.
+    std::vector<std::uint8_t> acquire_packet_buffer(
+        std::size_t capacity_hint) noexcept override;
+    void release_packet_buffer(std::vector<std::uint8_t>&& buffer) noexcept override;
+
     // =====================================================================
     // DC-2: L1 stream-priority API
     // =====================================================================

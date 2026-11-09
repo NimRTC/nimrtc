@@ -17,6 +17,7 @@
 add_library(nimrtc_rtp STATIC
     src/parser.cpp
     src/builder.cpp
+    src/rtcp.cpp             # v1.2.0 M1: RTCP compound demux (F1) + REMB (F7)
     src/timeline.cpp           # ADR-017: NTP↔RTP-TS + abs-send-time helpers
     src/rtp_plugin.cpp       # adapter wrapping concrete → plugins::IRTP
     )

@@ -401,6 +401,41 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     list; before, the padding bytes were parsed as a packet chunk.
   - Cross-checked against `draft-holmer-rmcat-transport-wide-cc-extensions-01`,
     libwebrtc and Pion; ADR-018 records the normative statement.
+- **The scheduler sent up to eight times the budgeted bitrate.**  The
+  per-drain allowance was computed as *packets per second* but compared
+  against a *per-drain* counter, so a host that drained every 125 ms
+  (the assumed cadence) let through eight times the budgeted rate.  A
+  host that drained more slowly than the assumption sent even less than
+  the estimate allowed, because the allowance never grew with the
+  interval.
+  - The send rate is now enforced by a **time-based credit**: every
+    drain grants credit proportional to the wall-clock time that elapsed
+    since the previous drain, and every packet that leaves the queue
+    consumes its estimated size from it.  The effective rate is
+    therefore the same whether the host ticks every 20 ms or every
+    200 ms.  The credit is capped at one second's worth, so a long idle
+    gap cannot turn into an unbounded burst.
+  - The *congestion window* — how much outbound data may stay queued —
+    is now bounded by `SchedulerConfig::drain_interval_ms` worth of
+    bytes at the estimated rate, deliberately independent of the host's
+    tick rate.  The old code used a hard-coded "8 drains per second"
+    divisor for the same number.
+  - `SchedulerConfig::drain_interval_ms` (new, default 125 ms) is the
+    window horizon and the seed for the first drain's interval.  It is
+    appended at the end of the struct, so existing aggregate
+    initialisation keeps compiling.
+  - `stats().current_bitrate_bps` now reports the *observed* egress
+    rate of the last drain instead of always 0.
+- **A packet the transport refused was silently thrown away.**  When
+  the drain callback vetoed a packet (the transport is not accepting
+  traffic right now), the scheduler had already popped it off the queue
+  and then dropped it — the packet was lost, and it was not even
+  counted as "dropped", so the statistics understated the real loss.
+  The vetoed packet now goes back to the front of its queue, is not
+  counted as sent, and the drain stops entirely (a veto means the
+  transport is not accepting traffic, so lower-priority queues must not
+  be attempted either).  The same fix applies to the per-stream
+  selection path.
 - **The inbound Opus payload was decoded without its TOC byte (audio
   pipeline WP-11, defect F-1).**  The depacketiser strips the TOC byte
   (it describes the *packet*, not the frame), but libopus decodes

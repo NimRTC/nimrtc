@@ -403,15 +403,24 @@ in this plan is blocked on a pending owner decision.** Any future change to
 OD-1 / OD-2 / OD-3 requires an ADR amendment (ADR-020 covers OD-2 and the
 OD-1 posture, ADR-019 covers OD-3's ladder modes and the profile table).
 
+### Progress
+
+| Step | State |
+|---|---|
+| 1. Cut the **v1.1.0** tag (OD-3(b) precondition) | **Done** — the tag exists; v1.2.0 work is unblocked. |
+| 2. Draft **ADR-018** (bandwidth signal policy, D1) | **Done** — `docs/adr/ADR-018-bandwidth-signal-policy.md`, status *Proposed* (acceptance waits on M1's aggregation and the policy's table-driven test). |
+| 3. Open **v1.2.0 M1** (F1, F2, F3, F4, F7) | **In progress.** The transport-cc **parsing** groundwork for F4 has landed: `rtp::Parser::parse_transport_cc` was corrected against the draft's real wire format (the chunk header contains the status symbols; the receive deltas are variable-width and follow all the chunks), the `PacketStatus` enum gained wire symbol 3, and the RTCP padding is honoured. Covered by 15 cases in `src/modules/rtp/tests/test_transport_cc.cpp`. F4 itself is still open — the parser has no production caller yet, and F1/F2/F3/F7 have not started. |
+
 **Next executable step** (no code change required):
 
-1. Close the v1.1.0 DoD checklist in `docs/plan/v1.1-plan.md` and cut the
-   **v1.1.0** tag (OD-3(b) — v1.2.0 work starts only after this).
-2. Draft **ADR-018** (bandwidth signal policy, D1) — it is the first thing
-   v1.2.0 M1 needs and it depends on nothing.
-3. Open **v1.2.0 M1** (F1, F2, F3, F4, F7) — the feedback ground.
+1. Continue **v1.2.0 M1**: F1 (RTCP demux on the receive path) and F2 (the
+   `net_feedback` module) — the engine must actually parse inbound RTCP and
+   aggregate it, or the corrected parser stays a library function with no
+   caller.
+2. F3 (`plugins::BweFeedback` grows a `signal_source` discriminator and the
+   transport-cc fields) and F7 (REMB trust policy), then wire the loop (F6).
 
-Everything else in this plan is downstream of step 3.
+Everything else in this plan is downstream of M1.
 
 ---
 

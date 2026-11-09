@@ -287,6 +287,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The transport-wide congestion-control feedback was parsed against the
+  wrong wire format (v1.2.0 M1, F4 groundwork).**  `rtp::Parser::parse_transport_cc`
+  did not implement the draft's encoding.  The status symbols live *inside*
+  the 16-bit chunk header (a run-length chunk is `0 | symbol | run length`;
+  a status-vector chunk is `1 | S | 14 symbol bits`, giving 14 one-bit or
+  7 two-bit symbols — there is no symbol-count field), and the receive
+  deltas are variable-width and follow *all* the chunks: 8-bit unsigned
+  for symbol 1, 16-bit signed for symbol 2, none for symbols 0 and 3.  The
+  old code read the symbols from the bytes after the chunk header and read
+  a fixed 14-bit delta per received packet — the RFC 8888 (CCFB) encoding,
+  a different feedback format — so every delta it produced was wrong.  A
+  run-length chunk of "received" packets also carries one delta per packet
+  in the run, which the old code did not read at all.
+  - The reference time is in multiples of 64 ms, not the 1 kHz its comment
+    claimed; the delta unit (250 µs) was already right.
+  - `PacketStatus` gains the wire symbol 3 ("received, without delta"),
+    which the draft uses in its own example 2.  The enumerator names
+    predate the format being implemented correctly and are
+    `NIMRTC_API_STABLE`, so they stay; the header now documents that
+    `ReceivedSmall` (2) is the *large* delta.
+  - `TransportCcFeedback` gains `reference_time_ms` and
+    `feedback_packet_count`.  The delta width is derivable from the status
+    symbol, so no separate field carries it.
+  - The RTCP padding is excluded from the chunk section and the delta
+    list; before, the padding bytes were parsed as a packet chunk.
+  - Cross-checked against `draft-holmer-rmcat-transport-wide-cc-extensions-01`,
+    libwebrtc and Pion; ADR-018 records the normative statement.
 - **The inbound Opus payload was decoded without its TOC byte (audio
   pipeline WP-11, defect F-1).**  The depacketiser strips the TOC byte
   (it describes the *packet*, not the frame), but libopus decodes

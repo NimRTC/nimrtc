@@ -276,4 +276,177 @@ TEST_F(EngineNetFeedback, ARembReachesTheCollector) {
     EXPECT_EQ(engine.stats().bwe_feedback_samples, 1u);
 }
 
+// ---------------------------------------------------------------------------
+// E6 - the transport-cc negotiation (ADR-018 Decisions 2 and 6)
+// ---------------------------------------------------------------------------
+
+/// Build a transport-cc feedback (RTPFB, FMT 15) with one run-length
+/// chunk of "received with a small delta" packets.
+ByteBuffer make_transport_cc(std::uint16_t base_seq, std::uint16_t count,
+                             const std::vector<std::uint8_t>& deltas) {
+    ByteBuffer body;
+    put_be16(body, static_cast<std::uint16_t>(
+                       (static_cast<std::uint16_t>(1u & 0x3u) << 13) | (count & 0x1FFFu)));
+    for (std::uint8_t d : deltas) {
+        put_u8(body, d);
+    }
+
+    const std::size_t total = 20u + body.size();
+    const std::size_t pad = (4u - (total % 4u)) % 4u;
+    const std::size_t padded = total + pad;
+
+    ByteBuffer out(padded, 0);
+    out[0] = static_cast<std::uint8_t>(0x80u | (pad ? 0x20u : 0x00u) | 15u);
+    out[1] = 205u;
+    const std::uint16_t length_words = static_cast<std::uint16_t>(padded / 4u - 1u);
+    out[2] = static_cast<std::uint8_t>(length_words >> 8);
+    out[3] = static_cast<std::uint8_t>(length_words & 0xFFu);
+    out[12] = static_cast<std::uint8_t>(base_seq >> 8);
+    out[13] = static_cast<std::uint8_t>(base_seq & 0xFFu);
+    out[14] = static_cast<std::uint8_t>(count >> 8);
+    out[15] = static_cast<std::uint8_t>(count & 0xFFu);
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        out[20u + i] = body[i];
+    }
+    if (pad) {
+        out[padded - 1u] = static_cast<std::uint8_t>(pad);
+    }
+    return out;
+}
+
+/// Drop every SDP line that mentions `token`.
+std::string strip_sdp_lines(const std::string& sdp, std::string_view token) {
+    std::string out;
+    std::size_t pos = 0;
+    while (pos <= sdp.size()) {
+        const std::size_t eol = sdp.find('\n', pos);
+        const std::size_t end = (eol == std::string::npos) ? sdp.size() : eol;
+        const std::string line = sdp.substr(pos, end - pos);
+        if (line.find(token) == std::string::npos) {
+            out += line;
+            out += "\r\n";
+        }
+        if (eol == std::string::npos) break;
+        pos = eol + 1;
+    }
+    return out;
+}
+
+TEST_F(EngineNetFeedback, TheOfferAdvertisesTransportCc) {
+    NimRTCEngine engine(make_test_config());
+    ASSERT_EQ(engine.open(), 0u);
+
+    const std::string offer = engine.create_offer();
+    ASSERT_FALSE(offer.empty());
+
+    EXPECT_NE(offer.find("transport-cc"), std::string::npos)
+        << "the offer MUST advertise a=rtcp-fb:<pt> transport-cc: a peer "
+           "sends transport-cc feedback only when the negotiated "
+           "description carries the attribute (ADR-018 Decision 6)";
+}
+
+TEST_F(EngineNetFeedback, TheLossRttPolicyDoesNotAdvertiseTransportCc) {
+    EngineConfig cfg = make_test_config();
+    cfg.net_feedback_signal = "loss_rtt";
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    const std::string offer = engine.create_offer();
+    ASSERT_FALSE(offer.empty());
+    EXPECT_EQ(offer.find("transport-cc"), std::string::npos)
+        << "a host that pinned the loss/RTT path must not negotiate a "
+           "signal it will not use";
+}
+
+TEST_F(EngineNetFeedback, TheAnswerEchoesTransportCcOnlyWhenThePeerOfferedIt) {
+    // The peer offers transport-cc: the answer has to echo it, or the
+    // peer will not send the feedback (RFC 3264 §6.1).
+    {
+        NimRTCEngine peer(make_test_config());
+        ASSERT_EQ(peer.open(), 0u);
+        const std::string peer_offer = peer.create_offer();
+        ASSERT_NE(peer_offer.find("transport-cc"), std::string::npos);
+
+        NimRTCEngine engine(make_test_config());
+        ASSERT_EQ(engine.open(), 0u);
+        const auto answer = engine.process_remote_sdp(peer_offer);
+        ASSERT_TRUE(answer.has_value());
+        ASSERT_FALSE(answer->empty());
+        EXPECT_NE(answer->find("transport-cc"), std::string::npos);
+    }
+
+    // The peer does not offer transport-cc: the answer must not invent
+    // it (the peer only sends what was negotiated).
+    {
+        NimRTCEngine peer(make_test_config());
+        ASSERT_EQ(peer.open(), 0u);
+        const std::string peer_offer =
+            strip_sdp_lines(peer.create_offer(), "transport-cc");
+        ASSERT_EQ(peer_offer.find("transport-cc"), std::string::npos);
+
+        NimRTCEngine engine(make_test_config());
+        ASSERT_EQ(engine.open(), 0u);
+        const auto answer = engine.process_remote_sdp(peer_offer);
+        ASSERT_TRUE(answer.has_value());
+        EXPECT_EQ(answer->find("transport-cc"), std::string::npos);
+    }
+}
+
+TEST_F(EngineNetFeedback, ThePeerCapabilityReachesTheCollector) {
+    NimRTCEngine peer(make_test_config());
+    ASSERT_EQ(peer.open(), 0u);
+    const std::string peer_offer = peer.create_offer();
+
+    NimRTCEngine engine(make_test_config());
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_NE(engine.net_feedback(), nullptr);
+
+    // Before the negotiation the collector assumes the peer advertised
+    // nothing, so the transport-cc path stays off.
+    EXPECT_FALSE(engine.net_feedback()->peer_capabilities().transport_cc);
+
+    ASSERT_TRUE(engine.process_remote_sdp(peer_offer).has_value());
+    EXPECT_TRUE(engine.net_feedback()->peer_capabilities().transport_cc)
+        << "the a=rtcp-fb facts of the remote description are the only "
+           "authority on whether the peer will send transport-cc";
+}
+
+TEST_F(EngineNetFeedback, ANegotiatedTransportCcPathDrivesTheEstimate) {
+    NimRTCEngine peer(make_test_config());
+    ASSERT_EQ(peer.open(), 0u);
+    const std::string peer_offer = peer.create_offer();
+
+    NimRTCEngine engine(make_test_config());
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_TRUE(engine.process_remote_sdp(peer_offer).has_value());
+
+    // The peer now sends transport-cc feedback.
+    ByteBuffer cc = make_transport_cc(1000, 3, {4, 8, 12});
+    engine.feed_media_inbound(cc.data(), cc.size());
+
+    const auto snap = engine.net_feedback()->snapshot();
+    EXPECT_TRUE(snap.has_transport_cc);
+    EXPECT_EQ(snap.source, NetFeedbackSource::kTransportCc)
+        << "with transport-cc negotiated and arriving, it drives the "
+           "estimate (ADR-018 Decision 2)";
+
+    engine.tick();
+    EXPECT_EQ(engine.stats().bwe_feedback_samples, 1u);
+}
+
+TEST_F(EngineNetFeedback, AnUnnegotiatedTransportCcPathDoesNotDrive) {
+    NimRTCEngine engine(make_test_config());
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_NE(engine.net_feedback(), nullptr);
+
+    // The peer never negotiated transport-cc, so a stray transport-cc
+    // feedback must not take over the estimate.
+    ByteBuffer cc = make_transport_cc(1000, 3, {4, 8, 12});
+    engine.feed_media_inbound(cc.data(), cc.size());
+
+    const auto snap = engine.net_feedback()->snapshot();
+    EXPECT_TRUE(snap.has_transport_cc);
+    EXPECT_EQ(snap.source, NetFeedbackSource::kLossRtt);
+}
+
 } // namespace

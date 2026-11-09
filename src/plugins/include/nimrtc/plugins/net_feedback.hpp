@@ -2,7 +2,7 @@
  * @file nimrtc/plugins/net_feedback.hpp
  * @brief INetFeedback — the pluggable *receiver-side network feedback* seam.
  *
- * v1.2.0 M1 (F2 / F4 / F7).
+ * v1.2.0 M1 (F2 / F4 / F7) + M2 (F5 — the signal-selection policy).
  *
  * ## What this seam is for
  *
@@ -38,13 +38,24 @@
  * (PT 201) → Receiver Report, (PT 206 / FMT 15) → REMB, (PT 205 / FMT 15)
  * → transport-cc, and ignores everything else.
  *
+ * ## The policy lives here, not in the engine (ADR-018 Decision 5)
+ *
+ * Which signal drives the estimate depends on two facts the *negotiation*
+ * knows and the engine does not: whether the peer advertised
+ * `transport-cc`, and whether that feedback is actually arriving.  The
+ * engine therefore hands the collector two things — the peer's
+ * capabilities (`set_peer_capabilities()`) and the host's policy
+ * (`set_config()`) — and the collector resolves the driving signal.
+ * The engine reads the answer out of the snapshot; it contains no policy
+ * branch of its own.
+ *
  * ## Not thread-safe
  *
  * The engine drives the collector from the engine thread, the same thread
  * that calls `snapshot()`.  Implementations do not need to be reentrant.
  *
  * @see docs/adr/ADR-018-bandwidth-signal-policy.md
- * @see docs/plan/video-pipeline-v2-plan.md (F2, F4, F7)
+ * @see docs/plan/video-pipeline-v2-plan.md (F2, F4, F5, F7)
  */
 
 // base.hpp must be before include guard — see transport.hpp for rationale.
@@ -85,6 +96,78 @@ enum class NIMRTC_API_STABLE NetFeedbackSource : std::uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// The signal-selection policy (ADR-018 Decision 2)
+// ---------------------------------------------------------------------------
+
+/** Which receiver-side signal drives the bandwidth estimate.
+ *
+ *  ADR-018 Decision 2 splits the choice in two axes:
+ *
+ *  * the **negotiation** axis — did the peer advertise `transport-cc`?
+ *    Only the SDP offer/answer knows this, so the engine tells the
+ *    collector what the peer advertised;
+ *  * the **freshness** axis — is transport-cc feedback *actually
+ *    arriving*?  A peer that advertised the capability and then never
+ *    sends it must not starve the estimator.
+ *
+ *  The policy below is the *override* on top of the automatic default
+ *  those two axes produce.  Note the direction of the override: there is
+ *  no "force transport-cc", because forcing a signal the peer never sends
+ *  produces a silent stall.  There is "require transport-cc", which
+ *  reports the breakage instead of hiding it. */
+enum class NIMRTC_API_STABLE NetFeedbackPolicy : std::uint8_t {
+    /** The automatic default: transport-cc when the peer negotiated it
+     *  and its feedback is fresh, loss/RTT otherwise. */
+    kAuto = 0,
+
+    /** Always drive the estimate from the loss/RTT path.  REMB stays an
+     *  upper-bound hint (ADR-018 Decision 3), never the driver.  This is
+     *  the override a host uses when the peer's transport-cc feedback is
+     *  unusable (a buggy peer, a middlebox, a version skew). */
+    kLossRtt = 1,
+
+    /** Require transport-cc.  When it is unavailable — the peer did not
+     *  negotiate it, or its feedback stopped arriving — the collector
+     *  reports the path as unavailable (see
+     *  `INetFeedback::transport_cc_unavailable()`) instead of falling
+     *  back silently.  A host that wants to *know* its transport-cc
+     *  path is broken uses this. */
+    kRequireTransportCc = 2,
+};
+
+/** What the peer advertised for the negotiated session.
+ *
+ *  The engine fills this in from the remote description's `a=rtcp-fb`
+ *  lines (RFC 4585 §4.1).  It is a *fact about the negotiation*, not a
+ *  guess: a peer that did not advertise `transport-cc` will not send
+ *  it. */
+struct NIMRTC_API_STABLE NetFeedbackCapabilities {
+    /** The peer advertised `transport-cc`. */
+    bool transport_cc = false;
+
+    /** The peer advertised `goog-remb`. */
+    bool remb = false;
+};
+
+/** The collector's configuration.
+ *
+ *  Set by the engine from the host's configuration; a host may also
+ *  change it live through `INetFeedback::set_config()`. */
+struct NIMRTC_API_STABLE NetFeedbackConfig {
+    /** The signal-selection policy. */
+    NetFeedbackPolicy policy = NetFeedbackPolicy::kAuto;
+
+    /** How long transport-cc feedback may stay silent before the policy
+     *  treats it as stale and falls back to the loss/RTT path.
+     *
+     *  This is the freshness axis of ADR-018 Decision 2.  It has to be
+     *  comfortably larger than the peer's feedback interval (Chrome
+     *  sends transport-cc roughly every 50-100 ms) and comfortably
+     *  smaller than the time a human notices a frozen picture. */
+    core::Milliseconds transport_cc_timeout = core::Milliseconds{3000};
+};
+
+// ---------------------------------------------------------------------------
 // The aggregated snapshot
 // ---------------------------------------------------------------------------
 
@@ -94,16 +177,29 @@ enum class NIMRTC_API_STABLE NetFeedbackSource : std::uint8_t {
  *  seen the corresponding feedback leaves it at its default; the `has_*`
  *  flags say which signals actually contributed. */
 struct NIMRTC_API_STABLE NetFeedbackSnapshot {
-    /** Which signal this snapshot is dominated by. */
+    /** Which signal this snapshot is dominated by.
+     *
+     *  This is the *resolved* source: the collector applies the policy
+     *  (negotiation state + freshness) to the signals it has seen, so
+     *  the value answers "which signal is driving now", not "which
+     *  signal arrived last". */
     NetFeedbackSource source = NetFeedbackSource::kLossRtt;
 
-    /** When the snapshot was produced (monotonic). */
+    /** When the snapshot was produced (monotonic).
+     *
+     *  The timestamp moves exactly when a *new* feedback report arrived,
+     *  which is what lets the engine feed the estimator once per report
+     *  rather than once per tick.  Re-evaluating the policy against a
+     *  later instant does **not** move it. */
     core::TimePoint timestamp{};
 
     // ---- Receiver Report (loss / RTT / jitter) --------------------------
 
     /** True once a Receiver Report has been seen. */
     bool has_loss_rtt = false;
+
+    /** When the last Receiver Report arrived. */
+    core::TimePoint loss_rtt_timestamp{};
 
     /** Fraction of packets lost in the last reporting window, [0.0, 1.0]. */
     double loss_rate = 0.0;
@@ -130,10 +226,16 @@ struct NIMRTC_API_STABLE NetFeedbackSnapshot {
     /** The receiver's own bandwidth estimate, when it sent one. */
     std::optional<std::uint32_t> remb_bps;
 
+    /** When the last REMB arrived. */
+    core::TimePoint remb_timestamp{};
+
     // ---- transport-cc ----------------------------------------------------
 
     /** True once a transport-cc feedback has been seen. */
     bool has_transport_cc = false;
+
+    /** When the last transport-cc feedback arrived. */
+    core::TimePoint transport_cc_timestamp{};
 
     /** Packets the peer reported as received. */
     std::uint32_t tc_packets_received = 0;
@@ -209,8 +311,55 @@ public:
      *  known.  0 means "unknown" and the jitter stays 0. */
     virtual void set_stream_clock_rate(std::uint32_t hz) noexcept = 0;
 
-    /** The aggregated snapshot. */
+    /** The aggregated snapshot.
+     *
+     *  `source` is the *resolved* driving signal: the policy has already
+     *  been applied to the signals the collector has seen. */
     virtual NetFeedbackSnapshot snapshot() const noexcept = 0;
+
+    // ---- The policy (ADR-018 Decision 5) -------------------------------
+
+    /** Apply the collector's configuration (policy + freshness timeout).
+     *
+     *  The engine calls this once at open() with the host's settings.
+     *  A live change re-resolves the driving signal immediately. */
+    virtual void set_config(const NetFeedbackConfig& config) noexcept = 0;
+
+    /** The configuration in force. */
+    virtual NetFeedbackConfig config() const noexcept = 0;
+
+    /** Tell the collector what the peer advertised.
+     *
+     *  The engine calls this after the SDP negotiation, with the
+     *  `a=rtcp-fb` facts of the remote description.  Until it is called
+     *  the collector assumes the peer advertised nothing, so the
+     *  transport-cc path stays off and the loss/RTT path drives. */
+    virtual void set_peer_capabilities(const NetFeedbackCapabilities& caps) noexcept = 0;
+
+    /** The capabilities in force. */
+    virtual NetFeedbackCapabilities peer_capabilities() const noexcept = 0;
+
+    /** True when the policy demands transport-cc but it is not available.
+     *
+     *  "Not available" means: the peer did not advertise it, no
+     *  transport-cc feedback ever arrived, or the last one is older than
+     *  `NetFeedbackConfig::transport_cc_timeout`.  Only meaningful under
+     *  `NetFeedbackPolicy::kRequireTransportCc`; it is the "fail loudly"
+     *  signal of ADR-018 Decision 2. */
+    virtual bool transport_cc_unavailable() const noexcept = 0;
+
+    /** Re-evaluate the policy against the current time.
+     *
+     *  The freshness axis of the policy can only be evaluated against a
+     *  clock, and the collector has none of its own (its inputs carry
+     *  their timestamps).  The engine calls this from its tick with its
+     *  monotonic clock, so a transport-cc path that went silent is
+     *  detected even when no new feedback arrives.
+     *
+     *  Re-evaluating never changes `NetFeedbackSnapshot::timestamp` —
+     *  that timestamp marks *new data*, and the engine uses it to feed
+     *  the estimator once per report. */
+    virtual void evaluate(core::TimePoint now) noexcept = 0;
 
     /** Reset the collector (e.g. on stream restart). */
     virtual void reset() noexcept = 0;

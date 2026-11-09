@@ -60,6 +60,16 @@ void NimRTCEngine::init_bwe_scheduler() noexcept {
         // the collector does not model separately).
         if (net_feedback_) {
             net_feedback_->set_stream_clock_rate(config_.audio_codec.clock_rate);
+
+            // The signal-selection policy (ADR-018 Decision 2).  The
+            // collector owns the decision; the engine only states the
+            // host's intent and the freshness window it wants.
+            plugins::NetFeedbackConfig nfc;
+            nfc.policy = detail::parse_net_feedback_policy(
+                config_.net_feedback_signal);
+            nfc.transport_cc_timeout =
+                core::Milliseconds{config_.net_feedback_transport_cc_timeout_ms};
+            net_feedback_->set_config(nfc);
         }
     }
 
@@ -113,6 +123,23 @@ void NimRTCEngine::init_bwe_scheduler() noexcept {
 // ---------------------------------------------------------------------------
 void NimRTCEngine::feed_bwe_from_net_feedback() noexcept {
     if (!net_feedback_ || !bwe_) return;
+
+    // ---- "Fail loudly" (ADR-018 Decision 2) -----------------------------
+    //
+    // Under the kRequireTransportCc policy the collector reports the
+    // transport-cc path as unavailable instead of falling back silently.
+    // The engine surfaces that once per session.  The estimator keeps
+    // running on the loss/RTT path — a starved estimator is a worse
+    // failure than a degraded one — but the host learns that its
+    // transport-cc path is broken.
+    if (net_feedback_->transport_cc_unavailable() &&
+        !impl_->transport_cc_unavailable_reported) {
+        impl_->transport_cc_unavailable_reported = true;
+        core::log::Logger::instance().warn(
+            "engine[bwe]: transport-cc was required but is unavailable "
+            "(the peer did not negotiate it, or its feedback stopped "
+            "arriving) — the estimate is driven by the loss/RTT path");
+    }
 
     const plugins::NetFeedbackSnapshot snap = net_feedback_->snapshot();
 
@@ -801,6 +828,16 @@ int NimRTCEngine::tick() noexcept {
                 if (on_data_state_) on_data_state_("closed");
             }
         }
+    }
+
+    // ---- Re-evaluate the signal policy (v1.2.0 M2, F5) -----------------
+    //
+    // The policy's freshness axis needs a clock, and the collector has
+    // none of its own (its inputs carry their timestamps).  The engine
+    // drives it from its tick, so a transport-cc path that went silent
+    // is detected even when no new feedback arrives at all.
+    if (net_feedback_) {
+        net_feedback_->evaluate(core::SteadyClock::now());
     }
 
     // ---- Feed the bandwidth estimator (v1.2.0 M1, F6) -------------------

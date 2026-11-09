@@ -11,9 +11,16 @@
  *   C6  - a REMB becomes the snapshot's REMB value
  *   C7  - a transport-cc feedback yields a non-empty arrival series (F4)
  *   C8  - the transport-cc receive/loss counts are aggregated
- *   C9  - the source discriminator follows the documented precedence
+ *   C9  - the source discriminator follows the negotiated policy
  *   C10 - an unknown payload type is ignored
  *   C11 - reset() clears the snapshot
+ *
+ *   P1  - the automatic default: transport-cc drives only when the peer
+ *         advertised it (ADR-018 Decision 2)
+ *   P2  - a stale transport-cc path falls back to the loss/RTT path
+ *   P3  - the loss/RTT override ignores transport-cc entirely
+ *   P4  - the "require transport-cc" policy fails loudly
+ *   P5  - the policy configuration round-trips
  *
  * The wire formats are the ones the `rtp` module owns: the Receiver
  * Report of RFC 3550 §6.4.2, the REMB of draft-alvestrand-rmcat-remb-03
@@ -319,7 +326,7 @@ TEST(NetFeedback, TransportCcAggregatesTheLostPackets) {
     EXPECT_EQ(snap.tc_packets_received, 0u);
 }
 
-TEST(NetFeedback, TransportCcWinsTheSourcePrecedence) {
+TEST(NetFeedback, TransportCcDrivesOnlyWhenThePeerNegotiatedIt) {
     nimrtc::net_feedback::Collector collector;
     collector.open();
 
@@ -327,9 +334,122 @@ TEST(NetFeedback, TransportCcWinsTheSourcePrecedence) {
     collector.on_rtcp_block(201, 1, ByteSpan{rr.data(), rr.size()}, at_ms(1000));
     EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kLossRtt);
 
+    // The peer sends transport-cc, but it never advertised the
+    // capability — so the feedback is not authoritative and the
+    // loss/RTT path keeps driving (ADR-018 Decision 2).
+    ByteBuffer cc = make_transport_cc(1, 1, {4});
+    collector.on_rtcp_block(205, 15, ByteSpan{cc.data(), cc.size()}, at_ms(1100));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kLossRtt);
+
+    // Once the negotiation says the peer supports transport-cc, the
+    // transport-cc path takes over.
+    collector.set_peer_capabilities({.transport_cc = true});
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kTransportCc);
+}
+
+// ---------------------------------------------------------------------------
+// The signal-selection policy (ADR-018 Decision 2)
+// ---------------------------------------------------------------------------
+
+TEST(NetFeedback, TheAutomaticDefaultFollowsTheNegotiation) {
+    nimrtc::net_feedback::Collector collector;
+    collector.open();
+
+    // The peer advertised transport-cc and sends it: transport-cc drives.
+    collector.set_peer_capabilities({.transport_cc = true});
+    ByteBuffer cc = make_transport_cc(1, 1, {4});
+    collector.on_rtcp_block(205, 15, ByteSpan{cc.data(), cc.size()}, at_ms(1000));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kTransportCc);
+}
+
+TEST(NetFeedback, AStaleTransportCcPathFallsBackToLossRtt) {
+    nimrtc::net_feedback::Collector collector;
+    collector.open();
+    collector.set_peer_capabilities({.transport_cc = true});
+
+    // The timeout is 1 s.
+    nimrtc::plugins::NetFeedbackConfig cfg;
+    cfg.policy = nimrtc::plugins::NetFeedbackPolicy::kAuto;
+    cfg.transport_cc_timeout = std::chrono::milliseconds{1000};
+    collector.set_config(cfg);
+
+    ByteBuffer cc = make_transport_cc(1, 1, {4});
+    collector.on_rtcp_block(205, 15, ByteSpan{cc.data(), cc.size()}, at_ms(1000));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kTransportCc);
+
+    // A Receiver Report arrives 200 ms later — the transport-cc path is
+    // still fresh, so it keeps driving.
+    ByteBuffer rr = make_rr({.fraction_lost = 4});
+    collector.on_rtcp_block(201, 1, ByteSpan{rr.data(), rr.size()}, at_ms(1200));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kTransportCc);
+
+    // Two seconds later the transport-cc feedback is stale: the policy
+    // falls back to the loss/RTT path.  `evaluate()` is what detects it
+    // — the collector has no clock of its own.
+    collector.evaluate(at_ms(3000));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kLossRtt);
+}
+
+TEST(NetFeedback, TheLossRttOverrideIgnoresTransportCc) {
+    nimrtc::net_feedback::Collector collector;
+    collector.open();
+    collector.set_peer_capabilities({.transport_cc = true});
+
+    nimrtc::plugins::NetFeedbackConfig cfg;
+    cfg.policy = nimrtc::plugins::NetFeedbackPolicy::kLossRtt;
+    collector.set_config(cfg);
+
+    ByteBuffer cc = make_transport_cc(1, 1, {4});
+    collector.on_rtcp_block(205, 15, ByteSpan{cc.data(), cc.size()}, at_ms(1000));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kLossRtt);
+    EXPECT_FALSE(collector.transport_cc_unavailable());
+}
+
+TEST(NetFeedback, TheRequiredTransportCcPolicyFailsLoudly) {
+    nimrtc::net_feedback::Collector collector;
+    collector.open();
+
+    nimrtc::plugins::NetFeedbackConfig cfg;
+    cfg.policy = nimrtc::plugins::NetFeedbackPolicy::kRequireTransportCc;
+    collector.set_config(cfg);
+
+    // The peer never advertised transport-cc: the path is reported as
+    // unavailable instead of being papered over.
+    EXPECT_TRUE(collector.transport_cc_unavailable());
+
+    // The loss/RTT path still drives — a starved estimator would be a
+    // worse failure than a degraded one.
+    ByteBuffer rr = make_rr({.fraction_lost = 4});
+    collector.on_rtcp_block(201, 1, ByteSpan{rr.data(), rr.size()}, at_ms(1000));
+    EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kLossRtt);
+    EXPECT_TRUE(collector.transport_cc_unavailable());
+
+    // With the capability negotiated and the feedback arriving, the
+    // path is available and drives the estimate.
+    collector.set_peer_capabilities({.transport_cc = true});
     ByteBuffer cc = make_transport_cc(1, 1, {4});
     collector.on_rtcp_block(205, 15, ByteSpan{cc.data(), cc.size()}, at_ms(1100));
     EXPECT_EQ(collector.snapshot().source, nimrtc::plugins::NetFeedbackSource::kTransportCc);
+    EXPECT_FALSE(collector.transport_cc_unavailable());
+}
+
+TEST(NetFeedback, ThePolicyConfigurationRoundTrips) {
+    nimrtc::net_feedback::Collector collector;
+    collector.open();
+
+    nimrtc::plugins::NetFeedbackConfig cfg;
+    cfg.policy = nimrtc::plugins::NetFeedbackPolicy::kRequireTransportCc;
+    cfg.transport_cc_timeout = std::chrono::milliseconds{1500};
+    collector.set_config(cfg);
+
+    EXPECT_EQ(collector.config().policy,
+              nimrtc::plugins::NetFeedbackPolicy::kRequireTransportCc);
+    EXPECT_EQ(collector.config().transport_cc_timeout.count(), 1500);
+
+    nimrtc::plugins::NetFeedbackCapabilities caps{.transport_cc = true};
+    collector.set_peer_capabilities(caps);
+    EXPECT_TRUE(collector.peer_capabilities().transport_cc);
+    EXPECT_FALSE(collector.peer_capabilities().remb);
 }
 
 // ---------------------------------------------------------------------------

@@ -563,6 +563,11 @@ struct Stats {
 
     // Adaptive audio bitrate — instantaneous, not cumulative.
     uint32_t audio_encoder_bitrate_bps = 0;
+
+    // Network feedback / BWE loop (v1.2.0 M1) — mixed semantics.
+    uint64_t net_feedback_blocks    = 0;  // RTCP blocks routed to the collector
+    uint64_t bwe_feedback_samples  = 0;  // samples handed to IBwe::on_feedback()
+    uint32_t bandwidth_estimate_bps = 0; // current BWE target, in bit/s
 };
 Stats stats() const noexcept;
 ```
@@ -583,8 +588,11 @@ you want to know which subsystem failed:
 `Stats::srtp_drops` increments on every SRTP auth-tag mismatch.
 
 The remaining fields are **cumulative counters since `open()`**, except
-`audio_encoder_bitrate_bps`, which is the bitrate the outbound audio
-encoder is currently running at (it tracks the bandwidth estimate).
+`audio_encoder_bitrate_bps` and `bandwidth_estimate_bps`, which are the
+**instantaneous** values (the outbound audio encoder's current bitrate and
+the bandwidth estimator's current target respectively). `audio_jitter_ms`
+and `audio_playout_delay_ms` are likewise instantaneous measurements
+rather than running totals.
 
 **This is not a standard `RTCStatsReport`.** The struct is flat and
 engine-wide: there is no per-stream breakdown, no snapshot timestamp, and

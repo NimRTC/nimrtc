@@ -971,6 +971,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tooling
 
+- **A CI leg that actually runs the sanitizers, and a gate that knows
+  whose bug it found.** The project had sanitizer *options*
+  (`NIMRTC_ASAN` / `NIMRTC_UBSAN`) but no CI leg ever turned them on, so
+  the ~274 `std::mutex` and ~222 `std::atomic` in the tree were never
+  checked for data races and the memory errors the options were meant to
+  catch were never caught. The new `linux-sanitizers` job runs two
+  configurations on `ubuntu-22.04`: `asan-ubsan` (memory errors and
+  undefined behaviour) and `tsan` (data races). ASan and TSan cannot
+  coexist in one build, so the presets set the other one OFF explicitly
+  and `cmake/NimRTCOptions.cmake` raises a `FATAL_ERROR` if both end up
+  ON. The sanitizer flags are applied globally (`add_compile_options` /
+  `add_link_options`) rather than per target: the sanitizer runtime has
+  to be linked into every final binary, and the vendored static libraries
+  are linked into the test executables, so instrumenting only the
+  `nimrtc_*` targets left the final link line without the runtime and
+  produced undefined references to it.
+  The leg's problem is the vendored stacks -- wolfSSL, usrsctp,
+  libjuice, msquic -- which are upstream code and trip the sanitizers on
+  their own. Suppressing their reports globally would hide real issues in
+  the code we call into, and failing on every upstream finding would
+  train everyone to ignore the gate. So `tools/sanitizer_gate.py`
+  classifies every report by the ownership of its root frame: a report
+  rooted in `src/` or `tests/` fails the job, a report rooted in
+  `src/third_party/` is printed and does not, and a report whose other
+  party to the fault is NimRTC code (the usual shape of a data race) is
+  printed as shared. A test failure that no upstream report explains is a
+  plain test failure and fails the job too. The gate's own classification
+  is pinned by a self-test that runs on every push.
 - **A tag watcher for `v1.1.0`, with signature verification and a
   release-gate status snapshot.** The watcher probes the repository it is
   pointed at separately from the repository the scripts live in, so a

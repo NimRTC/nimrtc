@@ -38,6 +38,9 @@
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/dtls/dtls_session_factory.hpp>   // IDtlsSessionFactory (registry slot)
+#include <nimrtc/sctp/sctp_socket_factory.hpp>     // ISctpSocketFactory (registry slot)
+#include <nimrtc/raw_udp/raw_udp_factory_iface.hpp> // IRawUdpFactory (registry slot)
 #include <nimrtc/transport/transport_stack.hpp>   // Slice 7.5: StackConfig, ITransportStack
 // v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam factory
 // interface — needed for the typed `register_web_transport()` slot

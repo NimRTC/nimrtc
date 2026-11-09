@@ -67,31 +67,30 @@ add_library(nimrtc_core_objects OBJECT
 target_include_directories(nimrtc_core_objects
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/plugins/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/video_frame/include>
         # Transport PAL Slice 8 (v0.10.2): the TypedRegistry<...> fields
         # in registry.hpp forward-declare the DTLS / SCTP / raw_udp /
         # transport-stack factory types but the static_cast calls in
         # `detail::Registrar::Registrar()` need the full type. The
-        # matching headers live in the seam modules' include dirs;
-        # exposing them here lets pal_default_registrars.cpp compile
-        # the static_cast without each TU needing to add the include
-        # explicitly.
+        # matching headers live in the seam modules' include dirs.
+        #
+        # These are PRIVATE since the P1 hardening (2026-11-09): the
+        # back-compat shim at the bottom of nimrtc/core/registry.hpp no
+        # longer includes the optional-module seam headers, so the core
+        # PUBLIC interface does not drag the optional modules in any
+        # more.  A consumer that needs a seam type includes that seam's
+        # header (and links that module) explicitly.
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
-        # v0.14.0 alpha.2 (ADR-014): the back-compat shim at the
-        # bottom of nimrtc/core/registry.hpp transitively includes
-        # `nimrtc/web_transport/web_transport_session_factory.hpp`
-        # (the typed factory interface for the WebTransport slot).
-        # The static_cast in `detail::Registrar::invoke()` for
-        # `Category::kWebTransport` needs the full factory type
-        # visible; adding this include path is the same pattern
-        # used for the Slice 8 DTLS / SCTP / raw_udp / transport
-        # slots above.
+        # v0.14.0 alpha.2 (ADR-014): the WebTransport factory type is
+        # needed by the static_cast in `detail::Registrar::invoke()` for
+        # `Category::kWebTransport`.
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>
-        $<INSTALL_INTERFACE:include>
 )
 
 # ---------------------------------------------------------------------------
@@ -112,6 +111,8 @@ target_compile_definitions(nimrtc_registry PRIVATE
 target_include_directories(nimrtc_registry
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/plugins/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/video_frame/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
@@ -125,8 +126,7 @@ target_include_directories(nimrtc_registry
         # site so the TypedRegistry<...> member template can
         # resolve.  Same pattern as the Slice 8 / PAL Slice 2
         # dtls/sctp/raw_udp/transport include paths above.
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>
-        $<INSTALL_INTERFACE:include>)
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>)
 target_link_libraries(nimrtc_registry
     PUBLIC
         # `PluginRegistry::instance()` and the register_* bodies only
@@ -215,13 +215,15 @@ target_link_libraries(nimrtc_core
         nimrtc_registry
         nimrtc_core_objects
         nimrtc::log
-        # The backward-compat shim at the bottom of nimrtc/core/registry.hpp
-        # transitively includes nimrtc/plugins/*.hpp so that old code which
-        # only included <nimrtc/core/registry.hpp> keeps working.  Declaring
-        # the dependency here (rather than reaching into plugins from a core
-        # source file) keeps the layering explicit and ensures downstream
-        # consumers (engine, examples, tests) get the plugins include path
-        # transitively via nimrtc::core.
+        # The registry's public header (<nimrtc/core/registry.hpp>) only
+        # forward-declares the factory interfaces, so it needs nothing
+        # from the plugins layer at compile time.  Linking nimrtc::plugins
+        # here still gives every consumer the plugins include path and
+        # the seam headers it needs when it wants them -- and it keeps the
+        # core header itself free of optional-module includes (P1
+        # hardening, 2026-11-09).  Code that wants the old one-header
+        # convenience includes <nimrtc/plugins/registry.hpp>, which pulls
+        # in the 13 nimrtc/plugins/ seam interfaces.
         nimrtc::plugins)
 
 # ---------------------------------------------------------------------------

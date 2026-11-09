@@ -20,7 +20,7 @@
 | First release | **v1.2.0** — development starts **after the v1.1.0 tag is cut** (OD-3(b)) |
 | Last release in this plan | **v1.4.0** (v1.5.0+ carries the explicitly deferred items) |
 | Owner | BDFL |
-| Related | `docs/zh/architecture.md` §6, ADR-001 (plugin system), ADR-015 (API stability), ADR-017 (cross-end timeline) |
+| Related | `docs/zh/architecture.md` §6, ADR-001 (plugin system), ADR-015 (API stability), ADR-017 (cross-end timeline), `docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项；C9/C11 已在本文落地）, `docs/plan/stats-surface-plan.md`（会话能力第 8 项）, `docs/plan/v1.1-plan.md` |
 
 ---
 
@@ -412,6 +412,7 @@ OD-1 posture, ADR-019 covers OD-3's ladder modes and the profile table).
 | 3. Open **v1.2.0 M1** (F1, F2, F3, F4, F7) | **In progress.** The transport-cc **parsing** groundwork for F4 has landed: `rtp::Parser::parse_transport_cc` was corrected against the draft's real wire format (the chunk header contains the status symbols; the receive deltas are variable-width and follow all the chunks), the `PacketStatus` enum gained wire symbol 3, and the RTCP padding is honoured. Covered by 15 cases in `src/modules/rtp/tests/test_transport_cc.cpp`.
 | 3a. **F1 + F2 + F3 + F4 (producer side) + F6** | **Landed.** The inbound RTCP compound datagram is now demultiplexed on the receive path (`rtp::demux_rtcp()`, RFC 3550 §6.1), the receiver-side network signals (Receiver Report, REMB, transport-cc) reach a new collector module (`src/modules/net_feedback/`) through the `plugins::INetFeedback` seam, and the engine hands the aggregated snapshot to `IBwe::on_feedback()` once per feedback report. The transport-cc parser now has a production caller. `plugins::BweFeedback` grew the `signal_source` discriminator and the transport-cc fields. Covered by 10 cases in `src/modules/net_feedback/tests/test_net_feedback.cpp`. |
 | 3b. **F7** (the REMB trust policy) | **Open.** The collector's source precedence is fixed and documented (transport-cc → loss/RTT → REMB); the *configurable* policy (which signal the negotiated `a=rtcp-fb` set allows) still has to move into the engine. |
+| 3c. **C9 + C11** (video SDP negotiation + PT demultiplexing) | **Landed.** The video payload type is now the *negotiated* one (RFC 3264 §6.1) in all three places that used to disagree: the answer names exactly the negotiated payload type (and only that codec's own `a=rtpmap:` / `a=fmtp:` lines), the outbound RTP header is stamped with the negotiated number, and the inbound demux accepts only that number. A peer that offers a codec NimRTC cannot decode gets the video m-line rejected (port 0, no format list) and one `kVideoCodecUnsupported` report. The negotiated state lives in `detail::VideoNegotiationResult` (`src/engine/src/video_negotiation.hpp`), shared by the SDP and the media layer. Covered by 5 cases in `tests/test_video_negotiation.cpp`. |
 
 **Next executable step** (no code change required):
 

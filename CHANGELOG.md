@@ -313,6 +313,82 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`<nimrtc/core/registry.hpp>` no longer drags the optional-module
+  seams into every translation unit (P1 hardening, 2026-11-09).**  The
+  header used to `#include` 18 seam headers in a "backward-compat shim"
+  block at the bottom — the 13 `nimrtc/plugins/` seam interfaces plus
+  the DTLS / SCTP / raw_udp / transport-stack / WebTransport factory
+  headers from five *optional* modules.  Any TU that included the
+  registry therefore compiled all of them, which defeated the
+  compile-time module trimming the CMake options provide and made
+  `core` depend on modules it must not know about (ARCHITECTURE.md
+  Layout Invariant 1).
+  - The 13 `nimrtc/plugins/` seam interfaces moved behind a new opt-in
+    umbrella header, `<nimrtc/plugins/registry.hpp>`.
+  - The optional-module seams are no longer reachable through the
+    registry header at all: a consumer includes the seam header it
+    needs (and links that module) explicitly.
+  - The registry API only needs *pointers* to the factory interfaces, so
+    the forward declarations it already carried are sufficient — the
+    `detail::Registrar` switch casts through the full type only in the
+    TU that registers the factory.
+  - The engine's PAL resolver forward-declares
+    `web_transport::IWebTransportSessionFactory` instead of including
+    the optional module's header, so the engine's public header does
+    not depend on an optional module either.
+  - The `nimrtc::core` target's optional-module include directories
+    became `PRIVATE`; only the `nimrtc/plugins` include path is still
+    exported.
+  - **Migration for consumers:** a translation unit that included only
+    `<nimrtc/core/registry.hpp>` and relied on the transitive seam
+    includes now includes `<nimrtc/plugins/registry.hpp>` (for the
+    `nimrtc/plugins/` seams) or the specific seam header (for the
+    optional modules).  `<nimrtc/core/registry.hpp>` alone keeps the
+    registry API and the registration macros working unchanged.
+- **The outbound send path no longer allocates a heap buffer per packet
+  (P1 hardening, 2026-11-09).**  The engine built each outbound RTP
+  packet in a *member* vector and then **moved** it into the scheduler,
+  which left the member in a moved-from state — so the next packet had
+  to allocate a fresh buffer, and the previous one was freed on drain.
+  At 1000 packets per second that is 1000 malloc/free pairs per second
+  on the send path, which is exactly the path whose jitter a real-time
+  caller sees.
+  - `plugins::IScheduler` gained two optional methods,
+    `acquire_packet_buffer()` and `release_packet_buffer()`.  The
+    default implementations preserve the old behaviour for a custom
+    scheduler (reserve, then destroy), so the seam stays source
+    compatible.
+  - The built-in scheduler keeps a bounded free-list of packet buffers.
+    A buffer is taken by the caller, filled with the packet, handed over
+    with `enqueue_owned()`, and returned to the free-list once the
+    packet has been drained and dispatched.  In steady state the send
+    path performs **no heap allocation at all**.
+  - The pool is bounded by `SchedulerConfig::max_queue_depth`, so a
+    burst cannot make the scheduler hoard memory, and a buffer that is
+    recycled is cleared so the pool does not keep stale packet bytes
+    alive.
+  - Covered by `src/modules/sched/tests/test_scheduler.cpp`.
+- **The README no longer overstates the hardware codec support.**  The
+  capability table claimed "H.264 hardware backends (NVENC / NVDEC /
+  AMF / QSV / DXVA / VA-API / OpenH264)" without distinguishing the
+  encoders that exist from the decoders that do not.
+  - NVENC **encoding** is implemented; **NVDEC decoding is not** —
+    `make_nvdec_h264_codec()` returns `nullptr`.  The decoder entry is
+    kept so the seam id stays stable, but its `available()` probe now
+    returns `false` to match, so the selector can never hand a caller
+    a backend whose `create()` cannot produce a codec.
+  - The same applies to the macOS VideoToolbox and the Android
+    MediaCodec entries: they exist as seam ids, report
+    `available() == false` and return `nullptr` from `create()`.
+  - The Windows **DXVA decoder is real** and is now named as the
+    supported hardware decode path; macOS and Android use the software
+    H.264 path.
+  - The "simplified Goog-CC" wording now says what it is everywhere it
+    appears (README, README.zh): a delay + loss hybrid estimator, not
+    a full trendline port, and AIMD remains the default.
+  - The CMake options were re-worded to match: `NIMRTC_PLUGINS_NVENC`
+    is the encoder, `NIMRTC_PLUGINS_NVDEC` registers a seam id only, and
+    `NIMRTC_PLUGINS_VAAPI` is the encoder.
 - **`opus::EncoderConfig::bitrate_bps` now defaults to 0 (= codec
   default) instead of 64000.**  0 resolves to 32 kbps for a mono encoder
   and 64 kbps for a stereo one, so the default follows the channel
@@ -374,6 +450,52 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The engine's public header still said the video pipeline was not
+  wired into the RTP / DTLS / SRTP path.**  `engine.hpp` carried a
+  "P1.1/R3 scope" note claiming that "the engine currently does not pipe
+  video RTP/RTCP" — while `engine_timeline.cpp` had been routing inbound
+  video RTP into `video_receiver_->push_rtp()` for several releases.  A
+  caller reading the header to decide what the engine can do was told
+  the opposite of the truth.
+  - The note now describes what is actually wired: the send path
+    (`send_video()` → codec → packetizer → RTP → SRTP → scheduler → ICE)
+    and the receive path (ICE → demux → depacketizer → jitter buffer →
+    decoder → sink).
+  - It also states what is *deliberately* not auto-wired: the video
+    **source**.  `IVideoCodec` / `IVideoSender` are not thread-safe and
+    the source runs its own cadence thread, so the host pulls frames and
+    pushes them through `send_video()` rather than the engine wiring the
+    source into the encoder.
+- **The video payload type was negotiated in three places that could
+  disagree (v1.2.0 video plan, C9 + C11).**  The engine had three
+  independent ideas of "the video payload type", and a mismatch between
+  them silently killed the video stream rather than raising an error.
+  - The **answer** copied the offer's `a=rtpmap:` / `a=fmtp:` lines
+    verbatim, so it told the peer "I will decode every codec you
+    offered" — including the ones NimRTC has no decoder for (C9).
+  - The **outbound RTP header** was stamped with a locally configured
+    payload type, which could differ from the number the negotiated
+    description named — the peer then received the stream on a payload
+    type the description never mentioned, and dropped it.
+  - The **inbound demultiplexer** routed any payload type the peer had
+    declared on its video m-line into the video pipeline, so a peer
+    sending VP8 on a payload type NimRTC never agreed to decode as H.264
+    still reached the H.264 pipeline (C11).
+  - All three now use the **negotiated** payload type — the one that
+    appears in *both* descriptions (RFC 3264 §6.1).  The answer names
+    exactly that payload type and only that codec's own `a=rtpmap:` /
+    `a=fmtp:` lines; the offer names the *sender's* payload type,
+    because that is the number the outbound packet path stamps; the
+    inbound demux accepts only the negotiated number.
+  - A peer that offers only a codec NimRTC cannot decode gets the video
+    m-line **rejected** (port 0, no format list, RFC 3264 §6.1) and one
+    `kVideoCodecUnsupported` report through `on_error` — instead of a
+    stream that never arrives.
+  - The negotiated state lives in one place,
+    `detail::VideoNegotiationResult`
+    (`src/engine/src/video_negotiation.hpp`), shared by the SDP layer and
+    the media layer so the producer and the consumer cannot drift apart.
+  - Covered by 5 cases in `tests/test_video_negotiation.cpp`.
 - **The transport-wide congestion-control feedback was parsed against the
   wrong wire format (v1.2.0 M1, F4 groundwork).**  `rtp::Parser::parse_transport_cc`
   did not implement the draft's encoding.  The status symbols live *inside*

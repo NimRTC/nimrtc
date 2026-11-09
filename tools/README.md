@@ -52,6 +52,33 @@ python tools/check_md_links.py README.md  # specific files
 Exit code is non-zero when a link points at a missing file or an anchor
 that no heading produces.
 
+## CI sanitizer gate
+
+`linux-sanitizers` in `.github/workflows/ci.yml` runs the test suite under
+AddressSanitizer / UndefinedBehaviorSanitizer / ThreadSanitizer. The
+vendored stacks trip the sanitizers on their own, so the job would either
+be red all the time or have to ignore everything. `sanitizer_gate.py`
+classifies each report by the ownership of its root frame and fails only
+on the ones that are ours.
+
+| Verdict | Meaning | Fails the job |
+|---------|---------|----------------|
+| `owned` | the root frame is in `src/` or `tests/` | yes |
+| `vendor` | the root frame is in `src/third_party/` | no |
+| `shared` | upstream root, NimRTC is the other party to the fault | only with `--fail-on-shared` |
+| `unknown` | no frame could be attributed | no |
+
+A test failure that no upstream report explains is a plain test failure
+and fails the job as well.
+
+```
+python tools/sanitizer_gate.py build/sanitizer-ctest.log
+python tools/sanitizer_gate.py --ctest-status build/ctest-exit.txt build/Testing/Temporary/LastTest.log
+python tools/sanitizer_gate.py --self-test
+```
+
+The self-test runs in the `docs / markdown links` job on every push.
+
 ## Release evidence (the seven-day soak)
 
 The v1.1 release gate needs one evidence record per platform per day.

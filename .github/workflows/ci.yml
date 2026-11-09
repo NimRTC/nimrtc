@@ -259,6 +259,17 @@ jobs:
       - name: Self-test the soak evidence fetcher
         run: python tools/fetch_soak_evidence.py --self-test
 
+      # The sanitizer gate decides whether the sanitizer CI leg fails, so
+      # a bug in the gate's own classification is a silent hole in the
+      # coverage: a NimRTC finding misfiled as vendored would stop the
+      # gate from ever firing.  The self-test pins the classification:
+      # an ASan report rooted in our own code is ours, a report rooted in
+      # src/third_party is upstream even when our code is on the stack,
+      # a data race whose other party is our code is shared, and a test
+      # failure that no upstream report explains is a plain failure.
+      - name: Self-test the sanitizer gate
+        run: python tools/sanitizer_gate.py --self-test
+
       # Pre-tag guardrail (v1.1 plan Track C, item C3).  These are
       # repo-level facts that no unit test sees and that rot quietly
       # between releases: the SFU track must stay unwired, every public
@@ -430,11 +441,9 @@ jobs:
   # ~274 std::mutex / ~222 std::atomic in the tree were never checked for
   # data races.  This job is the gate.
   #
-  # Three legs in one job (matrix over the preset):
+  # Two legs in one job (matrix over the preset):
   #   - asan-ubsan : memory errors + undefined behaviour
   #   - tsan       : data races
-  #   - asan       : memory errors, alone (keeps the two sanitisers that
-  #                  cannot coexist — TSan and ASan — from colliding)
   #
   # ASan and TSan are mutually exclusive, so they cannot live in the same
   # build; the presets set the others OFF explicitly and
@@ -447,26 +456,34 @@ jobs:
   # references to the runtime in the test executables.
   #
   # Vendor code noise: wolfSSL / usrsctp / libjuice / msquic are upstream
-  # code and may trip the sanitizers on their own.  We do NOT suppress
-  # their reports globally (that would hide real issues in the code we
-  # call into), but the job is marked continue-on-error so an upstream
-  # finding does not block every PR while the baseline is being
-  # triaged.  The NimRTC-owned failures still show up loudly in the log
-  # and in the uploaded artifact.
+  # code and may trip the sanitizers on their own.  Suppressing their
+  # reports globally would hide real issues in the code we call into, and
+  # failing on every upstream finding would train everyone to ignore the
+  # gate.  So tools/sanitizer_gate.py classifies every report by the
+  # ownership of its root frame:
+  #
+  #   owned  : the root frame is in src/ or tests/       -> the job FAILS
+  #   vendor : the root frame is in src/third_party/     -> reported only
+  #   shared : upstream root, NimRTC is the other party  -> reported only
+  #
+  # The ctest step is continue-on-error so that a sanitizer abort -- which
+  # kills the test binary -- cannot stop the job before the gate has read
+  # the log.  The gate step is what decides the outcome of the job: a
+  # NimRTC-owned finding fails it, an upstream finding does not.  A test
+  # failure that no upstream report explains is a plain test failure and
+  # fails the gate too -- the sanitizer build can expose timing bugs the
+  # plain build does not.
   # ---------------------------------------------------------------------------
   linux-sanitizers:
     name: linux-sanitizers / ${{ matrix.preset }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
           - preset: asan-ubsan
-            env: ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
           - preset: tsan
-            env: TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-sanitizers-${{ matrix.preset }}
       cancel-in-progress: true
@@ -497,11 +514,30 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }} -j 2
 
       - name: Test (${{ matrix.preset }})
+        # continue-on-error: a sanitizer abort kills the test binary, and
+        # the gate below still has to read what the sanitizer printed
+        # before the job is allowed to end.
+        continue-on-error: true
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-        run: ctest --preset tests.${{ matrix.preset }} -j 2
+        run: |
+          set +e
+          ctest --preset tests.${{ matrix.preset }} -j 2 --output-on-failure 2>&1 | tee build/sanitizer-ctest.log
+          echo "${PIPESTATUS[0]}" > build/ctest-exit.txt
+          exit 0
+
+      - name: Classify the sanitizer findings
+        # The gate is the point of this job.  LastTest.log is read as
+        # well: ctest only echoes the output of *failing* tests, so a
+        # leak report printed by a test that still passed would otherwise
+        # never be seen.
+        run: |
+          python3 tools/sanitizer_gate.py \
+            --ctest-status build/ctest-exit.txt \
+            build/sanitizer-ctest.log \
+            build/Testing/Temporary/LastTest.log
 
       - name: Upload sanitizer build directory on failure
         if: failure()

@@ -194,22 +194,86 @@ function(nimrtc_apply_options target)
     # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
-    # Sanitizers (debug builds)
+    # Sanitizers — NOT handled here.
+    #
+    # The sanitizer flags are applied globally at the top level via
+    # nimrtc_enable_sanitizer() (see the end of this file).  Rationale:
+    # a sanitizer runtime must be linked into EVERY final binary, including
+    # the ones that pull in vendored static libraries.  Applying the flags
+    # per-target here would leave the vendor objects uninstrumented and —
+    # worse — would miss the final link line of any executable that links
+    # only vendored code, producing undefined references to e.g.
+    # __asan_init.
     # -------------------------------------------------------------------------
-    if(NIMRTC_ASAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-        if(MSVC)
-            target_compile_options(${target} PRIVATE /fsanitize=address)
-        else()
-            target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
-            target_link_options(${target}      PRIVATE -fsanitize=address)
-        endif()
-    endif()
+endfunction()
 
-    if(NIMRTC_UBSAN AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-        if(NOT MSVC)
-            target_compile_options(${target} PRIVATE -fsanitize=undefined)
-            target_link_options(${target}      PRIVATE -fsanitize=undefined)
+# -----------------------------------------------------------------------------
+# Enable a sanitizer for the whole build.
+#
+# Usage:  nimrtc_enable_sanitizer(address|thread|undefined)
+#
+# Applies the flag to BOTH the compile and the link lines of every target
+# created afterwards, including the vendored third-party ones (their
+# add_subdirectory() calls happen after this function is invoked).  The
+# link flag is the important part: without it the final executable has
+# undefined references to the sanitizer runtime when it links a
+# sanitized static library.
+#
+# TSan and ASan are mutually exclusive — enabling both is a hard error
+# because their instrumentations conflict at runtime.
+# -----------------------------------------------------------------------------
+function(nimrtc_enable_sanitizer kind)
+    string(TOLOWER "${kind}" _kind)
+
+    if(_kind STREQUAL "address")
+        if(NIMRTC_TSAN)
+            message(FATAL_ERROR
+                "nimrtc_enable_sanitizer(address): NIMRTC_TSAN is also ON. "
+                "AddressSanitizer and ThreadSanitizer cannot be enabled "
+                "in the same build (their instrumentations conflict).")
         endif()
+        if(MSVC)
+            add_compile_options(/fsanitize=address)
+            add_link_options(/fsanitize=address)
+        else()
+            add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+            add_link_options(-fsanitize=address)
+        endif()
+        message(STATUS "  Sanitizer        : AddressSanitizer (global)")
+    elseif(_kind STREQUAL "thread")
+        if(NIMRTC_ASAN)
+            message(FATAL_ERROR
+                "nimrtc_enable_sanitizer(thread): NIMRTC_ASAN is also ON. "
+                "AddressSanitizer and ThreadSanitizer cannot be enabled "
+                "in the same build (their instrumentations conflict).")
+        endif()
+        if(MSVC)
+            message(WARNING
+                "nimrtc_enable_sanitizer(thread): ThreadSanitizer is not "
+                "supported by MSVC. Skipping.")
+            return()
+        endif()
+        # TSan needs its own shadow memory mapping; modern Linux distros
+        # default to PIE, which TSan supports, but the flag is kept
+        # explicit for portability with the CI image.
+        add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=thread)
+        message(STATUS "  Sanitizer        : ThreadSanitizer (global)")
+    elseif(_kind STREQUAL "undefined")
+        if(MSVC)
+            message(WARNING
+                "nimrtc_enable_sanitizer(undefined): UBSan is not supported "
+                "by MSVC. Skipping.")
+            return()
+        endif()
+        # -fno-sanitize-recover makes UB a hard failure instead of a
+        # "continue and print" diagnostic — a sanitizer gate is only
+        # useful if it actually fails the build.
+        add_compile_options(-fsanitize=undefined -fno-sanitize-recover=all -g)
+        add_link_options(-fsanitize=undefined -fno-sanitize-recover=all)
+        message(STATUS "  Sanitizer        : UndefinedBehaviorSanitizer (global)")
+    else()
+        message(FATAL_ERROR "nimrtc_enable_sanitizer: unknown kind '${kind}'")
     endif()
 endfunction()
 

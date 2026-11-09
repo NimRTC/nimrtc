@@ -423,6 +423,95 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # linux-sanitizers: ASan + UBSan + TSan on ubuntu-22.04
+  #
+  # P0 hardening (2026-11-09): the project had sanitizer *options*
+  # (NIMRTC_ASAN / NIMRTC_UBSAN) but no CI leg ever enabled them, so the
+  # ~274 std::mutex / ~222 std::atomic in the tree were never checked for
+  # data races.  This job is the gate.
+  #
+  # Three legs in one job (matrix over the preset):
+  #   - asan-ubsan : memory errors + undefined behaviour
+  #   - tsan       : data races
+  #   - asan       : memory errors, alone (keeps the two sanitisers that
+  #                  cannot coexist — TSan and ASan — from colliding)
+  #
+  # ASan and TSan are mutually exclusive, so they cannot live in the same
+  # build; the presets set the others OFF explicitly and
+  # cmake/NimRTCOptions.cmake raises a hard FATAL_ERROR if both end up ON.
+  #
+  # The sanitizer flags are applied GLOBALLY (add_compile_options /
+  # add_link_options) so the vendored third-party static libs are
+  # instrumented too and the sanitizer runtime is present in every final
+  # link line — a per-target application would produce undefined
+  # references to the runtime in the test executables.
+  #
+  # Vendor code noise: wolfSSL / usrsctp / libjuice / msquic are upstream
+  # code and may trip the sanitizers on their own.  We do NOT suppress
+  # their reports globally (that would hide real issues in the code we
+  # call into), but the job is marked continue-on-error so an upstream
+  # finding does not block every PR while the baseline is being
+  # triaged.  The NimRTC-owned failures still show up loudly in the log
+  # and in the uploaded artifact.
+  # ---------------------------------------------------------------------------
+  linux-sanitizers:
+    name: linux-sanitizers / ${{ matrix.preset }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: asan-ubsan
+            env: ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          - preset: tsan
+            env: TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-sanitizers-${{ matrix.preset }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja + Python (CMake via pip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py
+
+      - name: Configure (${{ matrix.preset }})
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_INSTALL=OFF
+
+      - name: Build (${{ matrix.preset }})
+        run: cmake --build --preset ${{ matrix.preset }} -j 2
+
+      - name: Test (${{ matrix.preset }})
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --preset tests.${{ matrix.preset }} -j 2
+
+      - name: Upload sanitizer build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.preset }}-${{ github.run_id }}
+          path: build/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Linux aarch64: GCC on a native arm64 runner
   #
   # ROOT CAUSE (corrected 2026-10-28): the "ARM64 runner pool is

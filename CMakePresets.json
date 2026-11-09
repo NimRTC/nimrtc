@@ -189,6 +189,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "ON",
+        "NIMRTC_TSAN": "OFF",
         "NIMRTC_UBSAN": "OFF",
         "NIMRTC_WARNINGS_AS_ERRORS": "ON"
       }
@@ -201,6 +202,33 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
+        "NIMRTC_TSAN": "OFF",
+        "NIMRTC_UBSAN": "ON",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer (GCC/Clang, Linux)",
+      "description": "Debug build with ThreadSanitizer enabled",
+      "inherits": ["dev.gcc"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_TSAN": "ON",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "AddressSanitizer + UndefinedBehaviourSanitizer (GCC/Clang, Linux)",
+      "description": "Debug build with both ASan and UBSan enabled (they compose; TSan does not)",
+      "inherits": ["dev.gcc"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "ON",
+        "NIMRTC_TSAN": "OFF",
         "NIMRTC_UBSAN": "ON",
         "NIMRTC_WARNINGS_AS_ERRORS": "ON"
       }
@@ -318,6 +346,16 @@
       "configurePreset": "ubsan"
     },
     {
+      "name": "tsan",
+      "displayName": "Build: TSan (Linux)",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Build: ASan + UBSan (Linux)",
+      "configurePreset": "asan-ubsan"
+    },
+    {
       "name": "coverage",
       "displayName": "Build: Coverage (Linux)",
       "configurePreset": "coverage"
@@ -339,6 +377,45 @@
       "displayName": "Run all tests (Debug/Linux)",
       "description": "Run all tests via ctest",
       "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.tsan",
+      "displayName": "Run all tests (TSan/Linux)",
+      "description": "Run all tests via ctest under ThreadSanitizer",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.asan",
+      "displayName": "Run all tests (ASan/Linux)",
+      "description": "Run all tests via ctest under AddressSanitizer",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.asan-ubsan",
+      "displayName": "Run all tests (ASan+UBSan/Linux)",
+      "description": "Run all tests via ctest under AddressSanitizer + UBSan",
+      "configurePreset": "asan-ubsan",
       "output": {
         "outputOnFailure": true
       },

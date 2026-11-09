@@ -29,6 +29,7 @@ option(NIMRTC_BUILD_BRIDGE_TESTS
 option(NIMRTC_VENDORED         "Use vendored third-party libraries" ON)
 option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
+option(NIMRTC_TSAN             "Enable ThreadSanitizer"            OFF)
 option(NIMRTC_WARNINGS_AS_ERRORS "Treat warnings as errors"        ON)
 option(NIMRTC_INSTALL          "Enable install() rules (Track D packaging)" OFF)
 
@@ -174,6 +175,29 @@ include(NimRTCOptions)        # sets C++ standard + warnings + visibility
 include(NimRTCVendored)       # declares vendor library targets (no-op if unused)
 include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
 
+# -----------------------------------------------------------------------------
+# Sanitizers — applied GLOBALLY, before any target is created.
+#
+# Rationale (P0 hardening): a sanitizer runtime has to be linked into every
+# final binary.  The vendored third-party static libraries (wolfSSL,
+# usrsctp, libjuice, msquic, opus, …) are linked into the test executables
+# and into the module libraries, so instrumenting only the nimrtc_* targets
+# would leave the final link line without -fsanitize=address and produce
+# undefined references to the runtime.
+#
+# This must run before the add_subdirectory() calls that create the
+# vendored targets, hence its position here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_ASAN)
+    nimrtc_enable_sanitizer(address)
+endif()
+if(NIMRTC_UBSAN)
+    nimrtc_enable_sanitizer(undefined)
+endif()
+if(NIMRTC_TSAN)
+    nimrtc_enable_sanitizer(thread)
+endif()
+
 # HW codec plugin SDK detection (NVENC/AMF/QSV/DXVA/VA-API/NVDEC).
 # Silent when the relevant NIMRTC_PLUGINS_<NAME>=OFF; otherwise probes
 # standard install paths and reports "not found" without failing the build.
@@ -313,6 +337,6 @@ message(STATUS "  Tests            : ${NIMRTC_BUILD_TESTS}")
 message(STATUS "  Examples         : ${NIMRTC_BUILD_EXAMPLES}")
 message(STATUS "  API docs         : ${NIMRTC_BUILD_DOCS}")
 message(STATUS "  Bridge tests     : ${NIMRTC_BUILD_BRIDGE_TESTS}")
-message(STATUS "  ASan / UBSan     : ${NIMRTC_ASAN} / ${NIMRTC_UBSAN}")
+message(STATUS "  ASan/TSan/UBSan  : ${NIMRTC_ASAN} / ${NIMRTC_TSAN} / ${NIMRTC_UBSAN}")
 message(STATUS "  Warnings→errors  : ${NIMRTC_WARNINGS_AS_ERRORS}")
 message(STATUS "==================================================")

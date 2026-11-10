@@ -226,6 +226,22 @@ tests/wolfssl_dtls/*.log
 tests/wolfssl_dtls/*.err
 tests/wolfssl_dtls/certs/
 
+# ─────────────────────────────────────────────
+# Fuzz corpus seeds: text only.
+#
+# The seed corpus lives in `tests/fuzz/corpus/` as `.hex` text (and the
+# `.sdp` seeds, which are text already).  The raw byte blobs that
+# libFuzzer wants are generated into the build tree by
+# `tests/fuzz/tools/make_corpus.py --materialize <dir>`.
+#
+# Binary files do not belong in this repository: they review badly,
+# they merge badly, and they are reproducible from the generator.
+# The rule below makes sure a generated corpus is never committed.
+# ─────────────────────────────────────────────
+tests/fuzz/corpus/**/*.bin
+tests/fuzz/corpus/**/*.dat
+tests/fuzz/corpus/**/*.seed
+
 # CTest scratch
 #
 # ctest writes Testing/ into its CWD. Under build/ that is expected, but a

@@ -1,0 +1,4 @@
+# nimrtc fuzz corpus seed.
+# One seed per file; hex bytes, whitespace separated.
+# Regenerate with: python3 tests/fuzz/tools/make_corpus.py
+10 00 9d 01 2a 00 00 00 00 00 00 00 00

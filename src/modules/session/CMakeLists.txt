@@ -20,6 +20,8 @@
 add_library(nimrtc_session STATIC
     src/track.cpp
     src/session.cpp
+    src/session_model.cpp
+    src/register.cpp
     )
 
 nimrtc_apply_options(nimrtc_session)

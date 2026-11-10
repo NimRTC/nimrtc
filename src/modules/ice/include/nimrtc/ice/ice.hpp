@@ -314,6 +314,29 @@ public:
      *  "candidate:" prefix is fine; "a=candidate:..." also accepted). */
     plugins::Status add_remote_candidate(std::string_view sdp) noexcept override;
 
+    // ---- ICE restart (RFC 8445 §9.1.1.1) -----------------------------------
+
+    /** Perform an ICE restart (RFC 8445 §9.1.1.1).
+     *
+     *  See `plugins::IICETransport::restart()` for the contract.  In short:
+     *  a fresh local credential pair is minted, the candidates are gathered
+     *  again, and the host has to publish a new offer afterwards.
+     *
+     *  @note The credentials the application pinned through
+     *        `IceConfig::local_ufrag` / `local_password` apply to the
+     *        *first* session only: a restart always mints new ones,
+     *        because the peer can only detect a restart by observing
+     *        changed credentials. */
+    plugins::Status restart() noexcept override;
+
+    /** Number of ICE restarts performed since open(). */
+    std::uint32_t restart_count() const noexcept override;
+
+    /** Install the callback fired when the *peer* restarts ICE.
+     *
+     *  @see plugins::IICETransport::set_on_ice_restart() */
+    void set_on_ice_restart(plugins::OnIceRestart cb) noexcept override;
+
     /** Override configuration before open() (EngineConfig → IceConfig bridge). */
     void set_config(const IceConfig& cfg) noexcept;
 

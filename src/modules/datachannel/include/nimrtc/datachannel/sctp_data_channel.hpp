@@ -43,11 +43,20 @@
  *   | kReliableOrdered      | send_stream()            |
  *   | kUnreliable           | send_datagram()          |
  *   | kPartialReliableTTL   | send_partial_reliable(ttl=cfg.max_packet_lifetime_ms) |
- *   | kPartialReliableCount | send_partial_reliable(ttl=max_retransmits * RTT_EST) |
+ *   | kPartialReliableCount | send_partial_reliable(ttl=max_retransmits * RTT_EST) — an approximation, not the count policy (WP-D3) |
  *
- * Stream id: the current revision hard-codes `stream = 0`. v0.12 will
- * derive a stream id from `cfg.priority` so high-priority control
- * traffic goes on a separate stream from bulk telemetry.
+ * Stream id: every channel writes to stream 0.  The id is NOT
+ * derived from `cfg.priority` — RFC 8832 §6 negotiates the stream id
+ * inside the DCEP `DATA_CHANNEL_OPEN`, so a channel must send its OPEN
+ * on the id it intends to use.  `cfg.priority` still travels to the
+ * peer inside the DCEP OPEN (RFC 8832 §5.1).
+ *
+ * @note v1.2.0 (WP-E1): the former `s_stream_from_priority()` stub
+ *       was deleted instead of being left as an unimplemented
+ *       promise.  The SCTP backend is a **test-only** backend
+ *       (WP-A / DEC-4 = A1) and serves as the PR-SCTP oracle for
+ *       WP-D; the priority that orders the production data plane is
+ *       the WebTransport backend's intra-plane ordering (WP-E2).
  *
  * ## Test injection
  *

@@ -57,6 +57,38 @@ if(COMMAND nimrtc_copy_msquic_dll)
     nimrtc_copy_msquic_dll(test_web_transport_alpn)
 endif()
 
+# -----------------------------------------------------------------------------
+# test_web_transport_dc_capability — the v1.2.0 data-channel capability
+# regression suite (WP-B framing / WP-C isolation / WP-D partial reliability
+# / WP-E priority).  The test drives WebTransportDataChannel against an
+# in-process mock session that implements the multicast inbound surface and
+# the outbound priority surface.
+#
+# The target is named `..._dc_capability` (not `..._data_channel`) because the
+# older DC-1 land test already owns the `test_web_transport_data_channel`
+# target in the top-level tests/ directory — two targets cannot share a name.
+# -----------------------------------------------------------------------------
+add_executable(test_web_transport_dc_capability test_web_transport_dc_capability.cpp)
+
+set_target_properties(test_web_transport_dc_capability PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_web_transport_dc_capability LENIENT)
+
+target_link_libraries(test_web_transport_dc_capability PRIVATE
+    nimrtc::web_transport
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+target_include_directories(test_web_transport_dc_capability PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+
+if(COMMAND nimrtc_copy_msquic_dll)
+    nimrtc_copy_msquic_dll(test_web_transport_dc_capability)
+endif()
+
 # NOTE: No top-level add_test() for the wrapper executable.  CMake 4.0's
 # multi-config generator wraps plain add_test() in a CTEST_CONFIGURATION_TYPE
 # conditional that marks the wrapper as NOT_AVAILABLE when ctest is invoked
@@ -64,6 +96,9 @@ endif()
 # per-case add_test() entries at build time that bypass the conditional.
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_web_transport_alpn
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+    gtest_discover_tests(test_web_transport_dc_capability
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()

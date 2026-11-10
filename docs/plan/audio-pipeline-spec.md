@@ -6,7 +6,7 @@
 > surface P1 adds, and how each item is verified.
 >
 > Scope of this document: **the specification and the design** (Parts A–G
-> plus the verification part V). **The development plan and the
+> plus Part L, and the verification part V). **The development plan and the
 > release/version plan are deliberately NOT in this document** — they are
 > decided separately, once this spec is approved. Part G therefore contains
 > dependency ordering only, not a schedule.
@@ -22,16 +22,17 @@
 > | `B-x` | P1 work item | Part B |
 > | `C-x` | P2 work item | Part C |
 > | `E-x` | Public SDK item | Part E |
+> | `L-x` | Logging / observability item | Part L |
 > | `V-x` | Verification item | Part V |
 > | `X-x` | Explicitly out of scope | §2.2 |
-> | `O-x` | Open item for the owner (has a default) | §11 |
+> | `O-x` | Open item for the owner (has a default) | §12 |
 
 | | |
 |---|---|
 | Plan opened | 2026-11-06 |
 | Baseline | `main` @ post-v1.1 consolidation (`docs/plan/v1.1-plan.md`) |
 | Scope class | Audio pipeline — new plugin seams, wire-format completion, no transport rewrite |
-| Status | **Specification — owner decisions confirmed 2026-11-06; the development plan and the version plan are written (`docs/plan/audio-pipeline-dev-plan.md`; the ladder amendment was fixed by the owner on 2026-11-06 — the audio P0+P1 body ships in `v1.2.0`)** |
+| Status | **Specification — owner decisions confirmed 2026-11-06; the development plan and the version plan are written (`docs/plan/audio-pipeline-dev-plan.md`; the ladder amendment was fixed by the owner on 2026-11-06 — the audio P0+P1 body ships in `v1.2.0`). Amended 2026-11-10 (owner): Part L (logging and observability) added, C-4 (engine-internal A/V synchronisation) and C-5 (G.711) moved into the `v1.2.0` body** |
 | Owner | BDFL |
 | Related | ADR-001 (plugin system), ADR-008 (PCM tap), ADR-015 (API stability), ADR-017 (cross-end timeline), `docs/plan/video-pipeline-v2-plan.md` (same shape, video side) |
 
@@ -164,8 +165,15 @@ not be carried into the plan:
 * P1 — the path becomes "like a real WebRTC stack": negotiated codec
   parameters, complete SDP, RTCP RR, audio statistics, and the public SDK
   described in Part E.
+* P1 — the path becomes *observable*: Part L defines the mandatory log
+  points of the audio path, their levels, their throttling and what must
+  never be written.
 * P2 — the quality and platform work (bitrate adaptation, DTX/VAD, device
-  layer, A/V sync) specified at the same level, scheduled later.
+  layer) specified at the same level, scheduled later.
+* P2, moved into the v1.2.0 body — **A/V synchronisation inside the
+  engine** (C-4) and the **G.711 module** (C-5). Both were P2 items in the
+  first draft of this specification; the owner moved them forward on
+  2026-11-10 (see §12, O-12 and O-13).
 
 ### 2.2 Out of scope for this specification
 
@@ -175,7 +183,7 @@ defect list (`F-x`, §1) or the verification list (`V-x`, Part V).
 | # | Excluded | Why |
 |---|---|---|
 | X-1 | A resampler module. | DEC-3: the host is told the true rate and resamples. |
-| X-2 | G.711 (PCMU/PCMA) implementation. | F-26 stays a known gap; the receive path must *reject* an unsupported PT with a clear error rather than decode noise. A codec module for G.711 is a separate plan item (C-5 specifies the shape). |
+| X-2 | G.711 codecs beyond PCMU / PCMA (G.722, G.726, …). | C-5 implements the two mandatory WebRTC codecs (PCMU = payload type 0, PCMA = payload type 8, RFC 3551) and nothing else. A third G.7xx codec is a separate plan item. |
 | X-3 | RED / ULPFEC. | Chrome does not use RED for audio in the profiles we interop with; Opus in-band FEC covers the first-order loss case. |
 | X-4 | Audio transport-wide congestion control (TWCC / REMB for audio). | The scheduler already carries audio packets; the transport-cc seam itself is a video-plan item. |
 | X-5 | Any change to the ICE / DTLS / SRTP layers. | — |
@@ -826,6 +834,12 @@ These items are specified at the same level so that nothing is lost, but
 they are not part of the P0/P1 critical path and their scheduling is
 entirely up to the later development plan.
 
+**Amendment of 2026-11-10 (owner decision).** Two of the five items left
+the P2 line: **C-4 (A/V synchronisation)** and **C-5 (G.711)** are now
+part of the v1.2.0 body, next to the P0/P1 work. C-4 is re-specified
+below as an *engine-internal*, switchable feature; C-5 is specified at
+the module level. C-1, C-2 and C-3 stay on the P2 line.
+
 ### C-1. Bitrate adaptation
 
 * The bandwidth estimate (existing `plugins::IBwe`) is written back to the
@@ -856,22 +870,100 @@ entirely up to the later development plan.
   capture ring buffer and the playback sink; the host can still feed PCM
   manually (the existing `send_audio()` path stays).
 
-### C-4. A/V synchronisation
+### C-4. A/V synchronisation — inside the engine, switchable
 
-* A media clock built on the existing `rtp::SenderReportTracker` and
-  abs-send-time (ADR-017) yields a capture instant for every audio and
-  video frame.
-* The new audio callback's `rtp_timestamp` (E-2) plus a `capture_time_us`
-  field is the audio side of that contract; the video side already carries
-  `capture_ts_us`.
-* The host aligns the two streams; NimRTC does not resample or re-time
-  video to match audio.
+> **Owner decision, 2026-11-10.** The alignment between the audio playout
+> clock and the video capture timeline is done by **the engine**, not by
+> the host, and it is a **configuration switch** — it can be turned on or
+> off.
 
-### C-5. G.711
+* **What the engine has.** Every inbound audio frame carries
+  `capture_time_us` (B-17) and every inbound video frame's capture
+  instant is reconstructible through the ADR-017 seam
+  (`NimRTCEngine::capture_ts_us_for_ssrc()`). Both are *peer's* capture
+  instants on the same Unix-microsecond axis, so the offset between the
+  two streams is directly measurable.
+* **What the engine computes.** The engine keeps a small ring of the most
+  recent video capture instants (per inbound video SSRC). For every
+  inbound audio frame with a reconstructible `capture_time_us` it picks
+  the video frame whose capture instant is *closest* to the audio frame's
+  (the two were captured together) and computes the skew
+  `skew_us = audio.capture_time_us − video.capture_ts_us`.
+  A skew of zero means "the audio frame and the video frame were captured
+  at the same instant"; a non-zero skew means the two streams have
+  drifted apart on the capture timeline.
+* **What the engine does with it.** The skew becomes a **playout offset**
+  for the audio receiver: the receiver delays (or, within its own bounds,
+  advances) the audio playout so that audio and video captured together
+  are presented together. The offset is smoothed (a simple IIR, α = 0.1)
+  so that a single outlier packet cannot jump the playout, and it is
+  clamped to ±`av_sync_max_skew_ms`.
+* **The engine does not resample and does not re-time video.** Video
+  timing stays where it is — the host renders the video frames it gets;
+  only the audio playout is aligned. That keeps the item bounded and
+  preserves DEC-3 (no built-in resampler) and X-7 (no change to the
+  video pipeline). The video side's own render clock remains the video
+  plan's item R3 (`v1.4.0`); it consumes the same skew later.
+* **The seam.** The engine drives the receiver through the plugin
+  interface and never through a concrete module header (L4), so the
+  receiver gains exactly one method:
 
-* A `src/modules/g711/` module (PCMU/PCMA) implementing the same
-  `plugins::IAudioDecoder` / `ICodec` seams, enabling the mandatory
-  WebRTC codecs and removing the stale fallback promise in F-26.
+  ```cpp
+  /** Adjust the playout target by `offset_ms` (positive = later).
+   *  The receiver clamps the value to its own min/max delay. */
+  virtual void set_playout_offset_ms(std::int32_t offset_ms) noexcept = 0;
+  ```
+
+  The receiver owns the playout clock; the engine owns the *decision* of
+  what the offset should be.
+* **The switch.** `EngineConfig::av_sync_enabled` (bool, default `true`)
+  and `EngineConfig::av_sync_max_skew_ms` (int, default `100`). With the
+  switch **off** the engine never touches the receiver's delay — the
+  behaviour is exactly the one of `v1.1.x`, and the host aligns the
+  streams itself with `capture_time_us` / `capture_ts_us`.
+* **Degradation is explicit and never faked.** If there is no video
+  track, if the capture instants are not yet reconstructible (0), or if
+  the skew exceeds `av_sync_max_skew_ms`, the engine keeps the receiver's
+  own delay, does **not** invent a capture instant, and reports the state
+  through the counters `Stats::av_sync_skew_us` and
+  `Stats::av_sync_frames_aligned` (B-13, E-8 amendment A-1).
+* **The default is `true`, but it is inert without a video track.** With
+  an audio-only session there is nothing to align against, so the switch
+  has no effect and an audio-only host keeps its behaviour unchanged. A
+  host that has both tracks and wants the old behaviour turns the switch
+  off — one field, no rebuild.
+
+### C-5. G.711 (PCMU / PCMA)
+
+* New module `src/modules/g711/` (L3: own `CMakeLists.txt`, `include/`,
+  `src/`, `tests/`) implementing `plugins::IAudioDecoder` (the receive
+  path) and `plugins::ICodec` (the send path), so that the mandatory
+  WebRTC codecs exist and F-26 is closed.
+* **Registry ids.** The module registers under the ids `pcmu` and `pcma`
+  in the `kAudioDecoder` and the `kCodec` category (ids are per category,
+  DEC-6). `detail::decoder_id_for_encoding()` already lower-cases the
+  `a=rtpmap:` encoding name, so the SDP name (`PCMU` / `PCMA`) maps onto
+  the plugin id (`pcmu` / `pcma`) with no new mapping table — exactly the
+  way `opus` already works.
+* **Wire format.** RFC 3551: PCMU is payload type 0, PCMA is payload type
+  8, both with a **8000 Hz** clock. One 20 ms frame is 160 samples. The
+  codec is a stateless companding law (µ-law for PCMU, A-law for PCMA) —
+  there is no encoder state, so the module needs no lookahead.
+* **The clock-rate rule changes.** `pcm_sample_rate_hz` must equal the
+  *negotiated codec's* clock rate: 48000 for Opus, 8000 for PCMU / PCMA.
+  `kAudioClockMismatch` (Part D) is therefore reported when the PCM rate
+  does not match the negotiated codec, not only when it differs from
+  48000. A host that wants to send G.711 sets `pcm_sample_rate_hz = 8000`
+  and `audio_codec.encoding = "PCMU"`.
+* **No resampler.** DEC-3 stands: NimRTC does not resample. A host that
+  captures at 48 kHz and wants to send G.711 must feed 8 kHz PCM.
+* **SDP.** No `a=fmtp:` line is sent for G.711 (RFC 3551 defines no
+  format parameters for PCMU / PCMA), and the Opus-only `a=fmtp` builder
+  (`detail::build_local_opus_fmtp()`) must only run for Opus.
+* **The stale promise goes away.** `AudioCodecConfig`'s doc comment
+  ("falls back to the first statically-linked codec plugin (e.g. PCMU)")
+  describes a fallback that never existed; with C-5 it is replaced by the
+  explicit selection of `audio_decoder_name` / the negotiated encoding.
 
 ---
 
@@ -883,7 +975,7 @@ entirely up to the later development plan.
 | `0x1A41` | `kAudioDecodeFailed` | The decoder failed on a payload (malformed or corrupt). |
 | `0x1A42` | `kAudioEncodeFailed` | The encoder rejected the PCM (invalid frame size, encoder error). |
 | `0x1A43` | `kAudioReceiverMissing` | The audio receiver plugin could not be resolved. |
-| `0x1A44` | `kAudioClockMismatch` | `pcm_sample_rate_hz` is not supported by the Opus RTP clock (must be 48000). |
+| `0x1A44` | `kAudioClockMismatch` | `pcm_sample_rate_hz` does not match the negotiated codec's RTP clock (Opus 48000, G.711 8000 — C-5). |
 | `0x1A45` | `kAudioChannelMismatch` | Negotiated channel count could not be honoured. |
 | `0x1A46` | `kAudioDecoderMissing` | The audio decoder plugin could not be resolved (B-16). |
 | `0x1A47` | `kAudioDecoderUnsupported` | No decoder is available at all — e.g. `NIMRTC_HAS_OPUS` is off (B-16). |
@@ -916,6 +1008,9 @@ Error-reporting policy:
   `kAudioReceiverMissing` are reported exactly once, at
   `open()`/`init_audio_modules()` time. They are not retried — the
   plugin set cannot change under a live engine.
+* Every code in this table is also **logged** at the matching level
+  (Part L, L-9): the host that installs no error callback still gets the
+  record.
 
 ---
 
@@ -1050,11 +1145,34 @@ struct NIMRTC_API_STABLE EngineConfig {
 
     /** Downmix the decoded stream to `pcm_channels`. */
     bool audio_downmix_to_pcm_channels = true;
+
+    /** Enable the engine-internal A/V synchronisation (C-4).
+     *
+     *  When true (the default) the engine measures the skew between the
+     *  audio capture timeline and the video capture timeline and adjusts
+     *  the audio playout so that media captured together is presented
+     *  together.  When false the engine never touches the receiver's
+     *  playout delay and the host aligns the streams itself, using
+     *  `capture_time_us` (audio) and `capture_ts_us` (video).
+     *
+     *  The switch is inert in an audio-only session: with no video track
+     *  there is nothing to align against. */
+    bool av_sync_enabled = true;
+
+    /** Maximum skew the engine corrects, in milliseconds (default 100).
+     *
+     *  A skew beyond this bound is not corrected — the receiver keeps its
+     *  own playout delay and the state is reported through the
+     *  `av_sync_*` counters.  The bound exists so that a peer whose
+     *  clocks are wrong cannot make the engine chase it. */
+    int av_sync_max_skew_ms = 100;
 };
 ```
 
 `pcm_sample_rate_hz` keeps its meaning (the rate of the PCM the host
-feeds *and* receives). For Opus it must be 48000 (F-15 / `kAudioClockMismatch`).
+feeds *and* receives). It must equal the **negotiated codec's** clock
+rate: 48000 for Opus, 8000 for PCMU / PCMA (F-15 / `kAudioClockMismatch`
+/ C-5).
 
 ### E-4. New engine accessors
 
@@ -1198,6 +1316,40 @@ scan's `Missing` count stays at 0. The scan is a *gate on missing markers*,
 not a gate on the header count, so no baseline file needs updating — but
 the number is recorded here so a reviewer can verify the delta.
 
+#### Amendment A-1 (2026-11-10) — the symbols added by C-4, C-5 and Part L
+
+The inventory above is the P1 body. The 2026-11-10 owner decision added
+three things to the v1.2.0 scope — the engine-internal A/V
+synchronisation (C-4), the G.711 module (C-5) and the logging contract
+(Part L) — and each of them touches the public surface. This amendment
+extends the inventory; it does not replace it. The rule "nothing may be
+added beyond this list without a spec amendment" still holds, and this is
+that amendment.
+
+| # | Symbol | Kind | Marker | Notes |
+|---|---|---|---|---|
+| 1 | `plugins::IAudioReceiver::set_playout_offset_ms()` | member fn | STABLE (parent) | C-4. One method on the published receiver seam; the receiver clamps the value to its own delay bounds. |
+| 2 | `EngineConfig::av_sync_enabled` | struct member | STABLE (parent) | C-4 / E-3. Appended at the end of the struct. |
+| 3 | `EngineConfig::av_sync_max_skew_ms` | struct member | STABLE (parent) | C-4 / E-3. Appended at the end of the struct. |
+| 4 | `Stats::av_sync_skew_us` | struct member | UNSTABLE (parent) | C-4. Appended at the end of the struct. |
+| 5 | `Stats::av_sync_frames_aligned` | struct member | UNSTABLE (parent) | C-4. Appended at the end of the struct. |
+
+Plus one **new public header**:
+
+| Header | Symbol | Kind | Marker | Notes |
+|---|---|---|---|---|
+| `src/modules/g711/include/nimrtc/g711/g711.hpp` | `register_default_plugins` | function | STABLE | C-5. Same shape as the `audio_rx` module's entry point. |
+
+**Part L adds no public symbol at all.** The logging contract is built on
+`core::log::Logger`, which is already published and already STABLE
+(`src/core/include/nimrtc/core/log.hpp`); Part L fixes *which* lines are
+written, at which level, with which fields — it does not add a knob.
+
+**Totals after amendment A-1: 27 new public symbols across 5 headers
+(3 of them new).** The public-header count goes **106 → 110**: the two
+plugin headers, the `audio_rx` module header and the new `g711` module
+header.
+
 ### E-9. Host migration guide
 
 The P1 SDK is additive; an existing host keeps compiling and keeps
@@ -1266,7 +1418,172 @@ continuous audio, with coarser granularity.
 
 ---
 
-## 9. Part V — verification
+## 9. Part L — logging and observability
+
+> **Why this part exists.** The audio pipeline fails silently by
+> nature: a frame that never arrived looks exactly like a frame that
+> arrived and was played out, and a peer that sends a codec we cannot
+> decode looks exactly like silence. The tree already has a logger
+> (`core::log::Logger` — the one global singleton L6 allows) and the
+> engine uses it in a handful of places, but nothing said *which* log
+> points the audio path owes the host, at which level, with which
+> fields, and what must never be written. This part turns the log into a
+> contract.
+
+### L-1. One logger, no second one
+
+Every log line in the audio path goes through `core::log::Logger`
+(`src/core/include/nimrtc/core/log.hpp`), through the `NIMRTC_LOG_*`
+macros or the free functions. No module writes to `stderr` / `stdout`
+directly, no module owns a second logger, and no module introduces a
+global of its own (L6). The logger is the *only* global mutable state
+the audio path may touch.
+
+### L-2. The mandatory log points
+
+The following log points are mandatory. "Mandatory" means: a reviewer
+may reject a change that removes one of them without an amendment, and a
+test asserts that it exists (L-11, V-1).
+
+| # | Where | Level | Message | Fields |
+|---|---|---|---|---|
+| L-2.1 | engine — module resolution | Info / Error | `audio: decoder plugin resolved` / `audio: decoder plugin unavailable` | plugin id, error code |
+| L-2.2 | engine — module resolution | Info / Error | `audio: receiver plugin resolved` / `audio: receiver plugin unavailable` | plugin id, error code |
+| L-2.3 | engine — negotiation | Info | `audio: negotiated codec` | encoding, payload type, clock rate, channels |
+| L-2.4 | engine — PT routing | Debug | `audio: payload-type routing table` | audio PT, video PT |
+| L-2.5 | engine — A/V sync | Debug | `audio: av-sync offset` | skew µs, offset ms, aligned frames |
+| L-2.6 | `audio_rx` — lifecycle | Info | `audio-rx: pipeline started` / `audio-rx: pipeline stopped` | ssrc, rate, channels, ptime |
+| L-2.7 | `audio_rx` — playout | Debug | `audio-rx: playout delay` | delay ms, jitter ms |
+| L-2.8 | `audio_rx` — concealment | Warn | `audio-rx: concealment` | consecutive frames, lost packets |
+| L-2.9 | `audio_rx` — FEC recovery | Debug | `audio-rx: fec recovered` | RTP timestamp |
+| L-2.10 | `audio_rx` — decode error | Warn | `audio-rx: decode failed` | error code, payload length (never the payload itself — L-6) |
+| L-2.11 | `opus` / `g711` module | Warn / Error | `opus: encode failed` / `g711: decode failed` | codec, error code |
+| L-2.12 | engine — send path | Warn | `audio: send dropped` | reason (encoder error / empty buffer) |
+
+### L-3. What belongs to which level
+
+| Level | Use |
+|---|---|
+| Trace | One line per frame or per packet. Never on by default (L-4). |
+| Debug | State transitions: delay changes, routing tables, recoveries. |
+| Info | Lifecycle: modules resolved, codec negotiated, pipeline started/stopped. |
+| Warn | A degradation the host should know about that does not stop the stream: concealment, a dropped send, a corrected skew. |
+| Error | A hard failure of a unit: no decoder, no receiver, an unrecoverable decode error. |
+| Critical | The engine itself cannot continue. |
+
+The level of a mandatory point is fixed by the table in L-2. A point may
+additionally be logged at a lower level, but never at a higher one: a
+concealment logged as `Error` would train the host to ignore `Error`.
+
+### L-4. Per-frame logging is opt-in
+
+At the default level (`Info`) the audio path writes **no per-frame and no
+per-packet line**. One `Trace` line per frame is the maximum a frame
+produces; a frame never produces two lines at the same level. This is
+what keeps the log usable: an audio stream produces 50 frames per second
+per direction, and a log that carries one line per frame is a log nobody
+reads.
+
+### L-5. Anomalies are throttled
+
+A recurring anomaly is reported **on the first occurrence and every 50th
+one** — the same rule the error-reporting policy of Part D uses for
+per-packet errors. The counter that drives the throttling is the same
+counter that feeds `Stats`, so the log and the statistics can never
+disagree about how often something happened.
+
+### L-6. Nothing sensitive, nothing bulky
+
+A log line carries **metadata only**:
+
+* never PCM samples, never a PCM buffer's content, never a payload dump;
+* never key material — no ICE ufrag/pwd, no DTLS or SRTP keys, no
+  certificate content;
+* never a whole SDP (the negotiated parameters are logged, the whole
+  description is not);
+* only counts, timestamps, SSRCs, payload types, codec names, delay and
+  skew values.
+
+### L-7. Logging must not change the behaviour of the media path
+
+* Every log call is `noexcept`; a sink that throws is swallowed.
+* The **string is only built when the level is enabled.** The
+  `NIMRTC_LOG_*` macros format unconditionally, so a call on a per-frame
+  path must be guarded:
+
+  ```cpp
+  if (core::log::Logger::instance().level() <= core::log::Level::Trace) {
+      NIMRTC_LOG_TRACE("frame ts=" << ts << " samples=" << n);
+  }
+  ```
+
+  A per-frame log call without the guard is a defect, not a style
+  question: the formatting cost is paid on every frame even when the
+  line is thrown away.
+* A disabled or failing sink cannot affect the media path. Logging is
+  never on the critical path of a deadline.
+
+### L-8. One prefix per component
+
+Every line starts with the prefix of the component that wrote it:
+
+| Prefix | Component |
+|---|---|
+| `audio:` | the engine (`src/engine/`) |
+| `audio-rx:` | the `audio_rx` module (`src/modules/audio_rx/`) |
+| `opus:` | the Opus module (`src/modules/opus/`) |
+| `g711:` | the G.711 module (`src/modules/g711/`) |
+
+A module never logs another module's business: the engine does not log
+"the decoder failed", it logs "the decoder plugin is unavailable" and
+leaves the decode failure to the decoder's own line. A host filters the
+log with one substring match.
+
+### L-9. The log is the human-readable face of the counters
+
+Two rules, both directions:
+
+* every anomaly that is counted in `Engine::Stats` produces a log line at
+  the matching level;
+* every `Warn` / `Error` line corresponds to a counter in `Engine::Stats`.
+
+A degradation that is invisible in the statistics and visible in the log
+is a defect, and so is the reverse. The host therefore has two views of
+the same fact — one for humans, one for machines.
+
+### L-10. What Part L does not add
+
+* No new public symbol (see E-8, amendment A-1).
+* No metrics exporter, no log-to-file contract, no per-host log format.
+  The sink is pluggable (`core::log::Sink`), which is where a host that
+  wants JSON or a file plugs in — that is the host's code, not ours.
+* No change to the `on_error` callback: the callback is the
+  *programmatic* contract, the log is the *diagnostic* one. Neither
+  replaces the other.
+
+### L-11. The verification of the log surface
+
+The log surface is verified by tests, not by review:
+
+* a test installs a capturing `core::log::Sink` and asserts that an
+  induced decode failure produces exactly one `Warn` line, that the line
+  carries the `audio-rx:` prefix, and that no PCM byte appears in it;
+* a test asserts that at the default level a running audio session
+  produces no per-frame line;
+* the guard of L-7 (a per-frame log call without the level check) is
+  reviewed in the same pass as the seam changes.
+
+### L-12. The documentation
+
+`docs/api/engine_api.md` gains a section describing the audio log
+surface — the prefixes, the levels, the mandatory points and the
+throttling rule; `docs/zh/architecture.md` mirrors the three
+architectural decisions (ADR-012). A host that reads only the API
+reference must be able to find out which lines it can expect.
+
+---
+
+## 10. Part V — verification
 
 ### V-1. Unit tests
 
@@ -1290,6 +1607,11 @@ continuous audio, with coarser granularity.
 | SDP contents | `tests/test_engine_audio_state.cpp` | the offer carries `a=ptime`, `a=maxptime`, the Opus `a=fmtp`, the audio-level `a=extmap`, and the per-engine SSRC (B-14) |
 | Encoder error reporting | `tests/test_engine_audio_state.cpp` | an invalid PCM block size increments `audio_encode_errors` and fires `on_error` — it is never silently dropped (A-8) |
 | Capture timestamp | `tests/test_engine_audio_state.cpp` | with no Sender Report received, `capture_time_us == 0`; it is never faked from the local playout clock (B-17) |
+| G.711 round-trip | `src/modules/g711/tests/test_g711.cpp` | the µ-law / A-law round-trip is sample-exact (both companding laws are lossless integer mappings), and a 20 ms frame yields exactly 160 samples at 8 kHz (RFC 3551, C-5) |
+| G.711 negotiation | `tests/test_engine_audio_state.cpp` | a peer that offers PCMU is answered with `a=rtpmap:0 PCMU/8000`; `pcm_sample_rate_hz == 8000` is accepted and `48000` is rejected with `kAudioClockMismatch` (C-5) |
+| A/V sync offset | `tests/test_engine_audio_state.cpp` | with a synthetic skew between the audio and the video capture timelines, the engine computes the skew, clamps it at `av_sync_max_skew_ms`, and hands the offset to the receiver through `set_playout_offset_ms()` (C-4) |
+| A/V sync switch | `tests/test_engine_audio_state.cpp` | with `av_sync_enabled == false` the receiver's playout delay is never touched; with no video track the switch has no effect (C-4) |
+| Log surface | `tests/test_engine_audio_log.cpp` | an induced decode failure produces exactly one `Warn` line carrying the `audio-rx:` prefix and no PCM byte; at the default level a running session produces no per-frame line (L-11, L-4) |
 
 ### V-2. Engine integration tests
 
@@ -1302,6 +1624,10 @@ continuous audio, with coarser granularity.
   matches the drop count.
 * Tick-rate independence — drive the engine at 30 Hz and at 200 Hz; both
   must produce continuous audio (30 Hz with the documented degradation).
+* A/V sync — two engines, one sending audio *and* video, with a
+  synthetic skew between their capture timelines; the receiving engine's
+  audio playout delay converges to the correction and
+  `Stats::av_sync_frames_aligned` counts the aligned frames (C-4).
 
 ### V-3. Interop (Chrome)
 
@@ -1334,6 +1660,16 @@ continuous audio, with coarser granularity.
    API-freeze scan reports 0 unclassified symbols (E-8).
 8. A host that only uses the legacy callback still compiles and still
    runs, unchanged (E-9).
+9. The audio path is diagnosable from the log alone: an induced decode
+   failure appears as exactly one throttled `Warn` line with the
+   `audio-rx:` prefix, and the same fact is visible in `Stats` (L-9,
+   L-11).
+10. A peer that offers PCMU is answered with `PCMU/8000`; the engine
+    accepts an 8000 Hz PCM rate for it and rejects 48000 Hz with
+    `kAudioClockMismatch` (C-5).
+11. With both tracks active the engine aligns the audio playout to the
+    video capture timeline; with `av_sync_enabled == false` it does not
+    (C-4).
 
 ### V-5. Static-analysis and CI gates
 
@@ -1351,7 +1687,7 @@ skipped.
 
 ---
 
-## 10. Part G — dependency order (not a schedule)
+## 11. Part G — dependency order (not a schedule)
 
 > This part lists **what must exist before what**. It is not a plan, not a
 > milestone list, and carries no version numbers — the development plan and
@@ -1374,6 +1710,13 @@ B-15 registry/build wiring ──► B-16 resolution policy ──► B-11 engin
                                                                    ▼
                                      B-13 statistics ──► B-14 SDP completion
                                      B-17 capture timestamp (needs ADR-017 SR/abstime)
+                                                          │
+                                                          ▼
+                                      C-4 A/V sync (needs B-17 + the video
+                                      capture instants of the same timeline)
+
+B-1  IAudioDecoder seam ──► C-5 G.711 module (same seam, a second
+                              implementation — no new seam)
 ```
 
 The critical path for "Chrome → NimRTC works" is:
@@ -1390,10 +1733,20 @@ Two ordering facts that are easy to get wrong:
   video path already uses. It is *not* on the critical path — the
   `capture_time_us` field can ship as 0 until the mapping exists — but
   the field must never be faked in the meantime (B-17).
+* **C-4 depends on B-17 and on the video capture instants.** The A/V
+  synchronisation is meaningless without both sides of the timeline; it
+  ships with the feature, not before it. The dependency is on the
+  *timeline*, not on the video pipeline's other work — the video side's
+  own render clock stays where the video plan puts it.
+* **C-5 depends on B-1 only.** The G.711 module is a second
+  implementation of the decoder seam that already exists; it introduces
+  no new interface.
+* **Part L has no ordering constraint of its own**, but every part above
+  owes it its mandatory log points (L-2).
 
 ---
 
-## 11. Open items for the owner
+## 12. Open items for the owner
 
 These are the points where this specification had to make a call that the
 owner may want to revisit. Each has a default so that implementation is
@@ -1405,7 +1758,7 @@ never blocked.
 | O-2 | The legacy callback's `size_t` argument — total interleaved floats, or samples per channel? | Total interleaved floats, because that is what the current code already passes; changing it would be a silent behavioural break for existing hosts. Documented explicitly (E-2). |
 | O-3 | FEC recovery costs one frame of latency on the recovered stream. Acceptable? | Yes, accepted, flagged per frame via `fec_recovered`. The alternative (no lookahead) makes in-band FEC useless. |
 | O-4 | Audio tick rate raised from ≥ 30 Hz to ≥ 100 Hz. Acceptable for existing hosts? | Yes — it is a documentation change; a slower tick degrades granularity but does not break the pipeline. |
-| O-5 | Should `pcm_sample_rate_hz != 48000` be a hard error (A-7) until a resampler exists? | Yes, hard error with `kAudioClockMismatch`. Silently resampling would contradict DEC-3. |
+| O-5 | Should `pcm_sample_rate_hz != 48000` be a hard error (A-7) until a resampler exists? | Yes, hard error with `kAudioClockMismatch`. Silently resampling would contradict DEC-3. **Generalised by C-5 (O-13)**: the hard error is now "the PCM rate does not match the *negotiated codec's* clock rate" — 48000 for Opus, 8000 for G.711 — so the rule survives the arrival of a second codec. |
 | O-6 | Is the `0x1A40..0x1A48` error-code range acceptable? | Yes — it extends the existing audio/video block without touching a published value. |
 | O-7 | Should a missing decoder or receiver plugin be a hard error, or should the engine fall back to a minimal built-in receiver? | Hard error, no fallback (B-16). A fallback receiver that decoded nothing would reproduce F-2 under a new name. The cost is that a consumer who deliberately excludes the Opus module now sees an explicit error instead of silence. |
 | O-8 | Should the receiver downmix to `pcm_channels` by default, or deliver the peer's native channel count and let the host mix? | Downmix by default, with `EngineConfig::audio_downmix_to_pcm_channels` to turn it off (E-3). NimRTC's own capture side is mono, so a mono-only host should not have to write the downmix itself. The reported `channels` is always the post-downmix count, so the host never has to guess. |
@@ -1413,9 +1766,18 @@ never blocked.
 | O-10 | Should the audio frame duration be configurable per engine, or fixed at 20 ms? | Configurable via `EngineConfig::audio_ptime_ms` (10/20/40/60), defaulting to 20 (E-3, B-5, B-6). The Opus frame sizes are fixed anyway; only the packetisation granularity varies. |
 | O-11 | Should `Engine::Stats` be promoted to STABLE while it is being extended? | No. It stays `NIMRTC_API_UNSTABLE` (E-4). Promotion is an unrelated policy decision. |
 
+### The four items of 2026-11-10
+
+| # | Question | Default taken here |
+|---|---|---|
+| O-12 | Should the A/V synchronisation live in the engine or in the host? | **In the engine, switchable** — `EngineConfig::av_sync_enabled` (default `true`). The owner decided this on 2026-11-10 ("the engine does it; whether synchronisation is on can be a configuration"). The engine only aligns the *audio playout*; it never resamples and never re-times video, and the host keeps the last word through the switch (C-4). |
+| O-13 | Should G.711 (PCMU / PCMA) ship in `v1.2.0` or stay on the P2 line? | **In `v1.2.0`** — owner decision of 2026-11-10. It closes F-26 and provides the two mandatory WebRTC codecs. The cost: `pcm_sample_rate_hz` must equal the *negotiated codec's* clock rate (8000 for G.711), which generalises the Opus-only rule that O-5 stated; and the module adds one public header (E-8, amendment A-1) (C-5). |
+| O-14 | Should the log surface be a binding contract (mandatory points, fixed levels) or left to the author's taste? | **A binding contract** (Part L). The audio path's failures are silent by nature, and a log that depends on the author's mood is not a diagnostic. The cost: every new log point needs a level and a prefix, and the review checks it. The counter-argument — "a contract on logs is a contract on prose" — is answered by keeping the mandatory list short (twelve points). |
+| O-15 | Should `av_sync_enabled` default to on or off? | **On** (default `true`), but inert in an audio-only session, so an audio-only host is unaffected. A host with both tracks that wants the pre-`v1.2.0` behaviour turns one field off. The alternative — default off — would ship a feature nobody benefits from while the behaviour change is invisible until it is switched on. |
+
 ---
 
-## 12. Appendix — traceability
+## 13. Appendix — traceability
 
 | Requirement / finding | Covered by |
 |---|---|
@@ -1431,6 +1793,8 @@ never blocked.
 | F-18 — channel contradiction | A-5, B-4, B-9 |
 | F-20, F-21, F-22 — no RR, no stats, incomplete SDP | B-12, B-13, B-14, E-4, E-8 |
 | F-23, F-24, F-25, F-26, F-27 — missing capability | C-2, C-3, C-4, C-5, V-1 … V-5 (verification) |
+| F-25 — no A/V synchronisation | C-4, V-1, V-2, V-4 |
+| F-26 — no PCMU / PCMA | C-5, X-2, V-1, V-4 |
 | DEC-1 — new codec seam | B-1, B-10, B-15 |
 | DEC-2 — legacy + new callback | E-1, E-2, E-9 |
 | DEC-3 — native rate, explicit rate/channel reporting, no resampler | A-2, A-5, E-1, X-1 (out of scope) |
@@ -1439,6 +1803,8 @@ never blocked.
 | DEC-6 — two new registry categories | B-15, B-16 |
 | A-1 … A-10 — P0 receive/send correctness | V-1, V-2, V-4 |
 | B-1 … B-17 — P1 interfaces and wiring | V-1, V-2, V-3, V-5 |
-| C-1 … C-5 — P2 quality and platform | specified here, scheduled later (DEC-4) |
+| C-1 … C-5 — quality and platform | C-4 and C-5 are part of the v1.2.0 body (O-12, O-13); C-1 … C-3 stay on the P2 line and are scheduled later (DEC-4) |
 | E-1 … E-9 — the public SDK | V-1, V-4, V-5 |
-| O-1 … O-11 — owner open items | each has a default; none blocks implementation |
+| Amendment A-1 — the public symbols added by C-4 / C-5 | E-8, V-5 |
+| L-1 … L-12 — the logging contract | Part L, V-1, V-4 |
+| O-1 … O-15 — owner open items | each has a default; none blocks implementation |

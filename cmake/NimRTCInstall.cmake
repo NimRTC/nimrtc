@@ -49,11 +49,14 @@ set(_nimrtc_install_headers
   "${CMAKE_SOURCE_DIR}/src/web_transport/include"
   "${CMAKE_SOURCE_DIR}/src/modules/rtp/include"
   "${CMAKE_SOURCE_DIR}/src/modules/sdp/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/net_feedback/include"
   "${CMAKE_SOURCE_DIR}/src/modules/jb/include"
   "${CMAKE_SOURCE_DIR}/src/modules/bwe/include"
   "${CMAKE_SOURCE_DIR}/src/modules/sched/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/pacing/include"
   "${CMAKE_SOURCE_DIR}/src/modules/jb_strategy/include"
   "${CMAKE_SOURCE_DIR}/src/modules/audio3a/include"
+  "${CMAKE_SOURCE_DIR}/src/modules/audio_rx/include"
   "${CMAKE_SOURCE_DIR}/src/modules/ice/include"
   "${CMAKE_SOURCE_DIR}/src/modules/srtp/include"
   "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
@@ -92,11 +95,14 @@ set(_nimrtc_install_shorts
   log
   rtp
   sdp
+  net_feedback
   jb
   bwe
   sched
+  pacing
   jb_strategy
   audio3a
+  audio_rx
   ice
   srtp
   dtls

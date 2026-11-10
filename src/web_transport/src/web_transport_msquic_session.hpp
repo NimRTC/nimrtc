@@ -187,6 +187,8 @@ public:
     plugins::Status send(std::span<const std::uint8_t> bytes) noexcept override;
     plugins::Status recv(std::span<std::uint8_t> out) noexcept override;
     void set_on_data(OnStreamDataCb cb) noexcept override;
+    StreamSubscriptionId subscribe_on_data(OnStreamDataCb cb) noexcept override;
+    void unsubscribe_on_data(StreamSubscriptionId id) noexcept override;
     void close() noexcept override;
     void reset() noexcept override;
 
@@ -223,6 +225,15 @@ private:
     bool recv_fin_seen_ = false;
 
     OnStreamDataCb on_data_cb_;
+    // Multicast inbound subscribers (v1.2.0, WP-C3): every subscriber
+    // of a stream sees every chunk, so several data channels can watch
+    // the same peer-initiated stream and pick the frames addressed to
+    // them.
+    struct DataSubscriber {
+        StreamSubscriptionId id = 0;
+        OnStreamDataCb cb;
+    };
+    std::vector<DataSubscriber> data_subs_;
     std::atomic<bool> closed_{false};
 };
 
@@ -337,6 +348,14 @@ public:
     plugins::Status send_datagram(std::span<const std::uint8_t> bytes) noexcept;
     void set_on_datagram(OnDatagramCb cb) noexcept { std::lock_guard<std::mutex> l{cb_mutex_}; on_datagram_cb_ = std::move(cb); }
     void set_on_peer_stream(OnPeerStreamCb cb) noexcept { std::lock_guard<std::mutex> l{cb_mutex_}; on_peer_stream_cb_ = std::move(cb); }
+    SubscriptionId subscribe_on_datagram(OnDatagramCb cb) noexcept;
+    void unsubscribe_on_datagram(SubscriptionId id) noexcept;
+    SubscriptionId subscribe_on_peer_stream(OnPeerStreamCb cb) noexcept;
+    void unsubscribe_on_peer_stream(SubscriptionId id) noexcept;
+    SubscriptionId register_priority_source(int priority,
+                                            PriorityFlush flush) noexcept;
+    void unregister_priority_source(SubscriptionId id) noexcept;
+    void flush_outbound() noexcept;
     void close() noexcept;
 
     /** Called by the QUIC connection callback. */
@@ -410,6 +429,39 @@ private:
     // Peer-initiated bidi stream callback (Case E routing). Empty = legacy echo.
     OnPeerStreamCb on_peer_stream_cb_;
     std::mutex cb_mutex_;
+
+    // ---- Multicast inbound routes (v1.2.0, WP-C2 / WP-C4) ---------------
+    //
+    // The single slots above are the legacy surface: the last channel
+    // to register replaced the previous one, and closing a channel
+    // deafened its siblings.  The subscriber lists below make the
+    // inbound surface a multicast — every channel registers its own
+    // route and removes only its own on close.
+    struct DatagramSubscriber {
+        SubscriptionId id = 0;
+        OnDatagramCb cb;
+    };
+    struct PeerStreamSubscriber {
+        SubscriptionId id = 0;
+        OnPeerStreamCb cb;
+    };
+    std::vector<DatagramSubscriber>  dgram_subs_;
+    std::vector<PeerStreamSubscriber> peer_subs_;
+    SubscriptionId next_sub_id_ = 1;
+
+    // ---- Outbound priority sources (v1.2.0, WP-E2) ----------------------
+    //
+    // The data plane rides its own connection, so the media scheduler
+    // cannot arbitrate between the media and the data plane.  What the
+    // session provides is the *intra*-data-plane ordering: the pending
+    // sends of the channels are offered to the transport in priority
+    // order (lower value first).
+    struct PrioritySource {
+        SubscriptionId id = 0;
+        int priority = 0;
+        PriorityFlush flush;
+    };
+    std::vector<PrioritySource> prio_sources_;
 
     // Datagram send state (set by DATAGRAM_STATE_CHANGED event).
     //
@@ -552,6 +604,14 @@ public:
         std::span<const std::uint8_t> bytes) noexcept override;
     void set_on_datagram(OnDatagramCb cb) noexcept override;
     void set_on_peer_stream(OnPeerStreamCb cb) noexcept override;
+    SubscriptionId subscribe_on_datagram(OnDatagramCb cb) noexcept override;
+    void unsubscribe_on_datagram(SubscriptionId id) noexcept override;
+    SubscriptionId subscribe_on_peer_stream(OnPeerStreamCb cb) noexcept override;
+    void unsubscribe_on_peer_stream(SubscriptionId id) noexcept override;
+    SubscriptionId register_priority_source(int priority,
+                                            PriorityFlush flush) noexcept override;
+    void unregister_priority_source(SubscriptionId id) noexcept override;
+    void flush_outbound() noexcept override;
     void close() noexcept override;
 
     /**

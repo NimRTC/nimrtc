@@ -10,11 +10,18 @@
  *      factories by id — same typed-registry contract used for DTLS /
  *      SCTP / raw_udp / transport-stack in Slice 8.
  *
- *   2. `EngineConfig::datachannel_name = "sctp"` (default) makes the
- *      engine log a "DataChannel plugin ready" line in
- *      `init_modules_once()` and `create_data_channel(label)` returns a
- *      non-null `IDataChannel*` after `open()`.  This proves the
- *      factory ↔ engine wiring is end-to-end functional.
+ *   2. `EngineConfig::datachannel_name = "stub_dc"` (a registered
+ *      factory id, dispatched through the legacy `datachannel_name`
+ *      selector) makes the engine log a "DataChannel plugin ready"
+ *      line in `init_modules_once()` and `create_data_channel(label)`
+ *      returns a non-null `IDataChannel*` after `open()`.  This proves
+ *      the factory ↔ engine wiring is end-to-end functional.
+ *
+ *      (v1.2.0: the default `datachannel_name` is now `""`, and the
+ *      "sctp" backend was retired from the public selectors — see
+ *      `docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1.
+ *      These tests drive the legacy `datachannel_name` selector with a
+ *      test-registered factory instead of the retired SCTP one.)
  *
  *   3. `EngineConfig::datachannel_name = "nope"` (an unregistered id)
  *      makes `create_data_channel()` return nullptr — the engine does
@@ -125,15 +132,28 @@ public:
         (void)was_empty;
     }
 
+    // v1.2.0, WP-C1: the additive identity-carrying callback.  The
+    // stub records it so the test can drive an inbound message and
+    // observe the identity the engine assigns.
+    void set_on_message_ex(
+        plugins::DataChannelMessageCallback cb) noexcept override {
+        const bool was_empty = !static_cast<bool>(on_message_ex_);
+        on_message_ex_ = std::move(cb);
+        on_message_ex_set_count_.fetch_add(1, std::memory_order_relaxed);
+        (void)was_empty;
+    }
+
     // ---- Test introspection ----
     std::atomic<int> opened_count_{0};
     std::atomic<int> closed_count_{0};
     std::atomic<int> opened_with_cfg_count_{0};
     std::atomic<int> on_message_set_count_{0};
     std::atomic<int> on_state_set_count_{0};
+    std::atomic<int> on_message_ex_set_count_{0};
     plugins::DataChannelConfig last_cfg_{};
     plugins::DataMessageCallback on_message_{};
     plugins::DataChannelStateCallback on_state_{};
+    plugins::DataChannelMessageCallback on_message_ex_{};
 };
 
 // =====================================================================
@@ -167,6 +187,9 @@ public:
         // factory's create() was actually invoked.
         auto* instance = new StubDataChannel();
         last_instance_.store(instance, std::memory_order_relaxed);
+        // v1.2.0, WP-C1: keep every instance so a test can address two
+        // distinct channels (the engine's per-channel identity).
+        created_.push_back(instance);
         return instance;
     }
 
@@ -174,11 +197,15 @@ public:
     // callback-counting fields without keeping a side-table.
     static std::atomic<StubDataChannel*> last_instance_;
 
+    // Every instance handed out, in creation order (v1.2.0, WP-C1).
+    static std::vector<StubDataChannel*> created_;
+
     mutable std::atomic<int> create_count_{0};
 };
 
-// Static member definition.
+// Static member definitions.
 std::atomic<StubDataChannel*> StubDataChannelFactory::last_instance_ = nullptr;
+std::vector<StubDataChannel*> StubDataChannelFactory::created_{};
 
 // =====================================================================
 // Helper: register the StubDataChannelFactory under id="stub_dc" and
@@ -193,9 +220,13 @@ static StubDataChannelFactory* register_stub_factory_once() {
         // multiple SetUp() calls.  s_factory is a Meyer's-singleton-like
         // pointer; the factory itself owns its atomic counters.
         s_factory = new StubDataChannelFactory();
-        PluginRegistry::instance().register_datachannel(
-            s_factory->id(), s_factory);
     }
+    // Always (re-)register: the registry slot is last-writer-wins, and
+    // the "ReRegisterSameIdIsLastWriterWins" test deliberately parks a
+    // *stack-local* factory under the same id — which would dangle
+    // once that test returns.  Re-registering the long-lived stub
+    // factory keeps every later test in the suite well-defined.
+    PluginRegistry::instance().register_datachannel(s_factory->id(), s_factory);
     return s_factory;
 }
 
@@ -210,6 +241,15 @@ protected:
         // Register our stub factory under a /mock/ id (production code
         // never registers such an id).  Done in SetUpTestSuite so every
         // test gets the same baseline.
+        register_stub_factory_once();
+    }
+
+    void SetUp() override {
+        // The registry slot is last-writer-wins and the
+        // "ReRegisterSameIdIsLastWriterWins" test parks a *stack-local*
+        // factory under the same id.  Re-register the long-lived stub
+        // factory before every test so no test observes a dangling
+        // factory pointer.
         register_stub_factory_once();
     }
 
@@ -424,13 +464,12 @@ TEST_F(DataChannelEngine, EngineSurfacesDataChannelCallbacks) {
 // other) factory is registered.  This is the explicit-disable path —
 // mirrors how `cfg.bwe_name = ""` disables BWE.
 //
-// v0.14.0-rc.1 contract (engine_config.md §2.6.3): setting
-// `datachannel_name = ""` disables DataChannel in **every** backend
-// family, including the `"sctp"` default where `datachannel_name`
-// stays the authoritative knob (see the `backend == "sctp"` branch
-// in `init_datachannel_registry()`, engine.cpp).  This is the v0.x
-// contract that `cfg.datachannel_name = ""` disables DataChannel and
-// is preserved for source compatibility.
+// v1.2.0 contract (engine_config.md §2.6.3): `datachannel_backend = ""`
+// disables the data plane.  The legacy `datachannel_name = ""` spelling
+// disables it too, but only when `datachannel_backend` is empty as well
+// — in the default `"web_transport"` family `datachannel_name` is
+// ignored (see the `backend == "web_transport"` branch in
+// `init_datachannel_registry()`, engine_transport.cpp).
 //
 // This test clears BOTH fields so the assertion holds regardless of
 // which one the backend dispatch consults; clearing `datachannel_name`
@@ -482,6 +521,144 @@ TEST_F(DataChannelEngine, ReRegisterSameIdIsLastWriterWins) {
     EXPECT_EQ(resolved, &second_factory)
         << "register_datachannel() must overwrite previous factory on "
            "the same id (last-writer-wins, matches Slice 8 contract)";
+}
+
+// =====================================================================
+// Test 6 (v1.2.0, WP-C1): the engine assigns a distinct channel
+// identity to every channel it creates.
+//
+// The plain `set_on_data_message()` callback carries no channel
+// identity — a host that opens two channels cannot tell which one a
+// message arrived on.  The additive `set_on_data_message_ex()`
+// callback carries the label and the engine-assigned `channel_id`.
+//
+// We create two channels ("a" and "b"), then drive an inbound
+// message on each stub channel and assert that the identity the
+// engine's callback receives names the right channel.
+// =====================================================================
+TEST_F(DataChannelEngine, ChannelIdentityIsReportedPerChannel) {
+    EngineConfig cfg = make_test_config();
+    cfg.datachannel_name = "stub_dc";
+
+    NimRTCEngine engine(cfg);
+
+    // The identities the engine reports, in arrival order.
+    std::vector<std::string> labels;
+    std::vector<std::uint32_t> ids;
+    engine.set_on_data_message_ex(
+        [&](const plugins::DataChannelMessage& msg) {
+            labels.emplace_back(msg.label);
+            ids.push_back(msg.channel_id);
+        });
+
+    ASSERT_EQ(engine.open(), 0u);
+
+    const std::size_t before = StubDataChannelFactory::created_.size();
+    auto ch_a = engine.create_data_channel("a");
+    auto ch_b = engine.create_data_channel("b");
+    ASSERT_NE(ch_a, nullptr);
+    ASSERT_NE(ch_b, nullptr);
+    ASSERT_EQ(StubDataChannelFactory::created_.size(), before + 2)
+        << "each create_data_channel() must produce its own channel "
+           "instance";
+
+    auto* stub_a = StubDataChannelFactory::created_[before];
+    auto* stub_b = StubDataChannelFactory::created_[before + 1];
+    ASSERT_NE(stub_a, nullptr);
+    ASSERT_NE(stub_b, nullptr);
+    ASSERT_EQ(stub_a->on_message_ex_set_count_.load(), 1)
+        << "the engine must install the identity-carrying callback on "
+           "every channel it creates";
+    ASSERT_EQ(stub_b->on_message_ex_set_count_.load(), 1);
+
+    // Drive an inbound message on channel "b" only.
+    const std::uint8_t payload[] = {0xAA};
+    plugins::DataChannelMessage inbound;
+    inbound.label = "b";
+    inbound.channel_id = 0;   // the backend does not know the id
+    inbound.data = plugins::BufferView{payload, sizeof(payload)};
+    stub_b->on_message_ex_(inbound);
+
+    ASSERT_EQ(labels.size(), 1u);
+    EXPECT_EQ(labels[0], "b")
+        << "the identity must name the channel the message arrived on";
+    EXPECT_NE(ids[0], 0u)
+        << "the engine must assign a non-zero channel id";
+
+    // Drive an inbound message on channel "a".
+    plugins::DataChannelMessage inbound_a;
+    inbound_a.label = "a";
+    inbound_a.channel_id = 0;
+    inbound_a.data = plugins::BufferView{payload, sizeof(payload)};
+    stub_a->on_message_ex_(inbound_a);
+
+    ASSERT_EQ(labels.size(), 2u);
+    EXPECT_EQ(labels[1], "a");
+    EXPECT_NE(ids[0], ids[1])
+        << "two channels must carry two distinct channel ids";
+
+    engine.close();
+}
+
+// =====================================================================
+// Test 7 (v1.2.0, WP-E1 / WP-B): `EngineConfig::datachannel_priority`
+// and `EngineConfig::datachannel_framing` reach the backend's
+// `DataChannelConfig`.
+//
+// Before v1.2.0 the engine hard-coded `priority = 128` and offered no
+// way to change it (the "priority field zero references" gap), and the
+// framing mode did not exist at all.
+// =====================================================================
+TEST_F(DataChannelEngine, PriorityAndFramingReachTheBackend) {
+    EngineConfig cfg = make_test_config();
+    cfg.datachannel_name  = "stub_dc";
+    cfg.datachannel_priority = 17;
+    cfg.datachannel_framing  = plugins::DataChannelFraming::kFramed;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    auto ch = engine.create_data_channel("ctl");
+    ASSERT_NE(ch, nullptr);
+
+    auto* stub = StubDataChannelFactory::last_instance_.load();
+    ASSERT_NE(stub, nullptr);
+    EXPECT_EQ(stub->last_cfg_.priority, 17)
+        << "the engine must forward the host's priority to the backend "
+           "(v1.2.0, WP-E1) — it used to hard-code 128";
+    EXPECT_EQ(stub->last_cfg_.framing, plugins::DataChannelFraming::kFramed)
+        << "the engine must forward the host's framing mode to the "
+           "backend (v1.2.0, WP-B)";
+
+    engine.close();
+}
+
+// =====================================================================
+// Test 8 (v1.2.0, WP-B): the default framing mode is `kRaw` — the
+// byte-stream behaviour every existing deployment relies on.  The
+// framed mode is opt-in.
+// =====================================================================
+TEST_F(DataChannelEngine, DefaultFramingIsRaw) {
+    EngineConfig cfg = make_test_config();
+    cfg.datachannel_name = "stub_dc";
+
+    // The engine-level default.
+    EXPECT_EQ(cfg.datachannel_framing, plugins::DataChannelFraming::kRaw);
+    EXPECT_EQ(plugins::DataChannelConfig{}.framing,
+              plugins::DataChannelFraming::kRaw);
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    auto ch = engine.create_data_channel("legacy");
+    ASSERT_NE(ch, nullptr);
+
+    auto* stub = StubDataChannelFactory::last_instance_.load();
+    ASSERT_NE(stub, nullptr);
+    EXPECT_EQ(stub->last_cfg_.framing, plugins::DataChannelFraming::kRaw)
+        << "the default must preserve the pre-v1.2.0 byte-stream "
+           "behaviour (the framed mode is opt-in)";
+
+    engine.close();
 }
 
 } // anonymous namespace

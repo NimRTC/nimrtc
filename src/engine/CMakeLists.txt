@@ -27,6 +27,11 @@ add_library(nimrtc_engine STATIC
     src/engine_rtcp.cpp
     src/engine_capture.cpp
     src/engine_audio_frames.cpp
+    # v1.2.0 (session capability plan N1–N5 / T1–T4): the session /
+    # track / transceiver surface.  The engine drives a pluggable
+    # `plugins::ISession` model through this TU and turns it into the
+    # SDP media list.
+    src/engine_session.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)
@@ -125,6 +130,37 @@ endif()
 # bandwidth estimate stays at its configured initial value.
 if(NIMRTC_MODULE_NET_FEEDBACK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::net_feedback)
+endif()
+
+# Session-model seam (v1.2.0, session capability plan N1 / T1): the
+# engine resolves the session model through the registry's session slot
+# (`EngineConfig::session_name`) and drives it through
+# `plugins::ISession` — it never includes this module's header
+# (Layout Invariant 4).  The link dependency exists so the module's
+# registrar entry point (in `kDefaultRegistrars[]`) resolves at link
+# time and its static initialiser is not stripped (same pattern as the
+# audio_rx / net_feedback entries above).
+#
+# When the module is not built the engine simply has no session model:
+# the offer keeps the pre-v1.2.0 fixed media list and the track API
+# reports "no session".
+if(NIMRTC_MODULE_SESSION)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::session)
+endif()
+
+# DTMF seam (v1.2.0, session capability plan D1 / D2): the engine
+# resolves the RFC 4733 codec through the registry's DTMF slot
+# (`EngineConfig::dtmf_codec_name`) and drives it through
+# `plugins::IDtmfCodec` — it never includes this module's header
+# (Layout Invariant 4).  The link dependency exists so the module's
+# registrar entry point (in `kDefaultRegistrars[]`) resolves at link
+# time (same pattern as the session / net_feedback entries above).
+#
+# When the module is not built the engine simply has no DTMF codec:
+# `dtmf_enabled` is then inert, and the pre-existing drop path for a
+# telephone-event payload stays in place (decision D4).
+if(NIMRTC_MODULE_DTMF)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::dtmf)
 endif()
 
 # Video plugin seam (R3-Batch): the engine resolves video_source / sink /

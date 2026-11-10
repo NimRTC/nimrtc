@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -104,6 +105,48 @@ juice_concurrency_mode_t map_mode(IceConfig::Mode m) noexcept {
     }
     return JUICE_CONCURRENCY_MODE_MUX;
 }
+
+namespace sdp_util {
+
+/** Extract the value of an SDP attribute, e.g. "ice-ufrag:" -> "abcd".
+ *
+ *  Accepts both the "a=<name>:" and the bare "<name>:" form and tolerates
+ *  CRLF line endings.  Returns an empty string when the attribute is absent.
+ *
+ *  Used to spot an ICE restart (RFC 8445 §9.1.1.1): the peer signals it by
+ *  publishing a different ice-ufrag / ice-pwd pair. */
+std::string extract_sdp_attr(const std::string& sdp, const std::string& name) {
+    const std::string prefixed = "a=" + name;
+
+    std::size_t pos = sdp.find(prefixed);
+    if (pos == std::string::npos) {
+        // Bare form, without the "a=" prefix.
+        pos = sdp.find(name);
+        if (pos == std::string::npos) return {};
+        // Guard against matching a longer attribute that ends with `name`
+        // (e.g. "x-ice-ufrag:").
+        if (pos > 0) {
+            const char prev = sdp[pos - 1];
+            if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '-') {
+                return {};
+            }
+        }
+    } else {
+        pos += 1;   // skip the "a="
+    }
+
+    pos += name.size();
+    const auto eol = sdp.find('\n', pos);
+    std::string value = sdp.substr(
+        pos, eol == std::string::npos ? std::string::npos : eol - pos);
+    while (!value.empty() &&
+           (value.back() == '\r' || value.back() == '\n')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+} // namespace sdp_util
 
 } // anonymous namespace
 
@@ -204,6 +247,48 @@ struct IceTransport::Impl {
     // before agent_gather_candidates() so libjuice knows the peer credentials
     // and sets the correct mode (CONTROLLED instead of CONTROLLING).
     std::string                          pending_remote_sdp_;
+
+    // ---- ICE restart state (RFC 8445 §9.1.1.1) ---------------------------
+    //
+    // A restart replaces the whole libjuice agent:
+    //
+    //   - juice_set_local_ice_attributes() fails with JUICE_ERR_FAILED once
+    //     gathering started, so the local credentials cannot be changed in
+    //     place;
+    //   - juice_set_remote_description() refuses a description whose ufrag
+    //     differs from the current one ("ICE restart is not supported").
+    //
+    // Rebuilding the agent is therefore the only way to obtain the fresh
+    // credential pair RFC 8445 §9.1.1.1 requires, and it additionally gives
+    // us a clean connectivity-check state (no half-finished transactions
+    // from the previous session).
+    //
+    // What survives a restart:
+    //   - the remote candidates (re-added to the new agent);
+    //   - the local candidate list is rebuilt from scratch, but the host
+    //     candidates are gathered synchronously inside juice_gather_candidates(),
+    //     so the list is already populated when restart() returns.
+    //
+    // The credentials the application pinned in IceConfig apply to the first
+    // session only: a restart always mints new ones, because the peer can
+    // only observe a restart by observing changed credentials.
+    std::string                          pinned_ufrag_;
+    std::string                          pinned_password_;
+    bool                                 pinned_creds_valid_ = false;
+
+    /** The remote description currently installed on the agent.  Kept so a
+     *  restart can re-apply it (and so a credential change can be detected). */
+    std::string                          applied_remote_sdp_;
+
+    /** Remote candidates added through add_remote_candidate().  Re-applied
+     *  after a restart. */
+    std::vector<std::string>             remote_candidates_;
+
+    std::uint32_t                        restart_count_ = 0;
+
+    /** Fired when the peer restarts ICE (the host must answer with the new
+     *  local credentials). */
+    plugins::OnIceRestart                on_ice_restart_;
 
     // ---- ICE consent freshness (RFC 7675 / RFC 8445 §10) ----------------
     //
@@ -349,10 +434,12 @@ struct IceTransport::Impl {
         if (!a) return false;
         agent = a;
 
-        if (!config.local_ufrag.empty() || !config.local_password.empty()) {
+        // Apply the pinned credentials, but only while they are still valid.
+        // An ICE restart clears them so libjuice mints a fresh pair.
+        if (pinned_creds_valid_ && !pinned_ufrag_.empty() && !pinned_password_.empty()) {
             juice_set_local_ice_attributes(agent,
-                                           config.local_ufrag.c_str(),
-                                           config.local_password.c_str());
+                                           pinned_ufrag_.c_str(),
+                                           pinned_password_.c_str());
         }
 
         // Apply any remote SDP set before the agent was created.  This is the
@@ -369,8 +456,88 @@ struct IceTransport::Impl {
     }
 
     // ---------------------------------------------------------------------
-    // ICE consent freshness tracker (RFC 7675 / RFC 8445 §10)
+    // ICE restart (RFC 8445 §9.1.1.1)
     // ---------------------------------------------------------------------
+
+    enum class RestartResult {
+        kOk,
+        kNotReady,
+        kFailed,
+    };
+
+    /** Rebuild the libjuice agent, i.e. perform an ICE restart.
+     *
+     *  @param apply_remote_sdp  When non-empty, this remote description is
+     *                           installed on the new agent.  Used by the
+     *                           remote-initiated path, where the peer already
+     *                           sent its new credentials.
+     *  @param keep_remote_sdp   When true, the remote description that was
+     *                           installed on the old agent is carried over.
+     *                           The local-initiated path passes false: the
+     *                           peer's old credentials are stale from the
+     *                           moment we change ours, so the new agent
+     *                           starts without a remote description and
+     *                           waits for the peer's answer.
+     */
+    RestartResult rebuild_agent(std::string_view apply_remote_sdp,
+                                bool keep_remote_sdp) {
+        if (!agent) return RestartResult::kNotReady;
+
+        // Work out which remote description the new agent starts with.
+        std::string remote_sdp;
+        if (!apply_remote_sdp.empty()) {
+            remote_sdp = std::string(apply_remote_sdp);
+        } else if (keep_remote_sdp) {
+            remote_sdp = applied_remote_sdp_;
+        }
+
+        // Tear the old agent down.  libjuice tears down its socket with it.
+        juice_destroy(agent);
+        agent = nullptr;
+
+        // Reset the observable state.  The candidate list is cleared as well:
+        // the addresses gathered before the restart may belong to a network
+        // interface that is gone.  The host candidates of the new session are
+        // gathered synchronously inside juice_gather_candidates(), so the
+        // list is repopulated before this function returns.
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            local_candidates.clear();
+            gathering_done = false;
+            state = plugins::IceState::Disconnected;
+            selected_local_str.clear();
+            selected_remote_str.clear();
+            rx_queue.clear();
+        }
+        cv_gather.notify_all();
+
+        // A restart always mints a new credential pair (RFC 8445 §9.1.1.1):
+        // the peer can only detect the restart by observing new credentials.
+        pinned_creds_valid_ = false;
+
+        // Install the remote description *before* gathering so libjuice picks
+        // the correct ICE role (CONTROLLED when the peer is the offerer).
+        pending_remote_sdp_ = remote_sdp;
+
+        if (!create_agent()) return RestartResult::kFailed;
+
+        // Re-add the remote candidates we already know about.
+        for (const auto& c : remote_candidates_) {
+            juice_add_remote_candidate(agent, c.c_str());
+        }
+
+        if (juice_gather_candidates(agent) != JUICE_ERR_SUCCESS) {
+            return RestartResult::kFailed;
+        }
+
+        // Re-prime the consent clock: the previous session's timestamps are
+        // meaningless for the new one, and a stale clock would fire
+        // on_consent_lost() the moment the new session reaches Connected.
+        record_binding_received();
+
+        ++restart_count_;
+        return RestartResult::kOk;
+    }
 
     /** Monotonic microseconds since the steady_clock epoch. */
     static std::int64_t now_us() noexcept {
@@ -516,12 +683,21 @@ struct IceTransport::Impl {
 IceTransport::IceTransport(IceConfig config)
     : impl_(std::make_unique<Impl>()) {
     impl_->config = std::move(config);
+    // The credentials the application pinned apply to the *first* session.
+    // An ICE restart clears them so a fresh pair is minted (RFC 8445
+    // §9.1.1.1: the peer detects a restart by observing new credentials).
+    impl_->pinned_ufrag_    = impl_->config.local_ufrag;
+    impl_->pinned_password_ = impl_->config.local_password;
+    impl_->pinned_creds_valid_ = true;
     hook_libjuice_logging_once();
 }
 
 void IceTransport::set_config(const IceConfig& cfg) noexcept {
     if (!impl_->agent) {
         impl_->config = cfg;
+        impl_->pinned_ufrag_    = cfg.local_ufrag;
+        impl_->pinned_password_ = cfg.local_password;
+        impl_->pinned_creds_valid_ = true;
     }
 }
 
@@ -577,6 +753,7 @@ plugins::Status IceTransport::open() noexcept {
     if (impl_->agent) {
         return plugins::kOk;   // already open
     }
+    impl_->restart_count_ = 0;
     if (!impl_->create_agent()) {
         return plugins::kErrInternal;
     }
@@ -608,6 +785,24 @@ void IceTransport::close() noexcept {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->rx_queue.clear();
     impl_->state = plugins::IceState::Disconnected;
+
+    // ---- Reset the ICE restart state ----------------------------------------
+    //
+    // A closed transport has no session: the remote description, the remote
+    // credentials and the remote candidates are gone, and the restart counter
+    // starts over.  The credentials the application pinned through
+    // IceConfig are restored so the *next* session starts with them again
+    // (they only ever apply to the first session of a transport — a restart
+    // always mints fresh ones, see rebuild_agent()).
+    impl_->applied_remote_sdp_.clear();
+    impl_->remote_candidates_.clear();
+    impl_->remote_ufrag_str.clear();
+    impl_->remote_pwd_str.clear();
+    impl_->pending_remote_sdp_.clear();
+    impl_->restart_count_ = 0;
+    impl_->pinned_ufrag_    = impl_->config.local_ufrag;
+    impl_->pinned_password_ = impl_->config.local_password;
+    impl_->pinned_creds_valid_ = true;
 }
 
 void IceTransport::set_callbacks(plugins::RecvCallback on_recv,
@@ -710,12 +905,60 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
     // juice_set_remote_description expects a NUL-terminated C string.
     std::string tmp{sdp};
 
+    // Pull the ICE credentials out of the description.  They are needed to
+    // detect an ICE restart (RFC 8445 §9.1.1.1): the peer signals a restart
+    // by publishing a different ice-ufrag / ice-pwd pair.
+    const std::string ufrag = sdp_util::extract_sdp_attr(tmp, "ice-ufrag:");
+    const std::string pwd   = sdp_util::extract_sdp_attr(tmp, "ice-pwd:");
+
     if (!impl_->agent) {
         // Agent not yet created — store for apply in create_agent() before
         // agent_gather_candidates().  This is the preferred path for loopback
         // tests: the answerer knows the offerer's ICE credentials before its
         // ICE transport opens, so libjuice sets the agent to CONTROLLED.
         impl_->pending_remote_sdp_ = tmp;
+        impl_->remote_ufrag_str = ufrag;
+        impl_->remote_pwd_str = pwd;
+        return plugins::kOk;
+    }
+
+    // ---- ICE restart detection (RFC 8445 §9.1.1.1) ------------------------
+    //
+    // The peer published different ICE credentials, i.e. it restarted ICE.
+    // libjuice refuses to replace a remote description whose ufrag differs
+    // from the current one ("ICE restart is not supported"), and RFC 8445
+    // requires *both* sides to change credentials for the restart to be
+    // complete.  We therefore rebuild the agent: fresh local credentials,
+    // fresh gathering, and the peer's new description installed on it.
+    //
+    // The distinction with the local-initiated restart matters: there we
+    // changed our own credentials and the peer is expected to answer with
+    // new ones; here the peer already changed theirs.
+    const bool peer_restarted =
+        !impl_->remote_ufrag_str.empty() && !ufrag.empty() &&
+        (impl_->remote_ufrag_str != ufrag || impl_->remote_pwd_str != pwd);
+
+    if (peer_restarted) {
+        core::log::Logger::instance().info(
+            "nimrtc::ice: peer restarted ICE (remote ufrag " +
+            impl_->remote_ufrag_str + " -> " + ufrag + "), rebuilding agent");
+
+        const auto rc = impl_->rebuild_agent(tmp, /*keep_remote_sdp=*/false);
+        if (rc != Impl::RestartResult::kOk) return plugins::kErrInternal;
+
+        impl_->applied_remote_sdp_ = tmp;
+        impl_->remote_ufrag_str = ufrag;
+        impl_->remote_pwd_str = pwd;
+
+        // The peer has to learn our new credentials, so the host must send a
+        // fresh answer.  Run the callback outside of any lock.
+        if (impl_->on_ice_restart_) {
+            try {
+                impl_->on_ice_restart_();
+            } catch (...) {
+                // A misbehaving consumer must not break the transport.
+            }
+        }
         return plugins::kOk;
     }
 
@@ -745,32 +988,9 @@ plugins::Status IceTransport::set_remote_description(std::string_view sdp) noexc
 
     // Cache the parsed credentials so callers can read them back via
     // remote_ufrag() / remote_password() without going through libjuice.
-    auto ufrag_pos = tmp.find("a=ice-ufrag:");
-    auto pwd_pos   = tmp.find("a=ice-pwd:");
-    if (ufrag_pos != std::string::npos) {
-        ufrag_pos += std::strlen("a=ice-ufrag:");
-        auto eol = tmp.find('\n', ufrag_pos);
-        impl_->remote_ufrag_str = tmp.substr(
-            ufrag_pos,
-            eol == std::string::npos ? std::string::npos : eol - ufrag_pos);
-        while (!impl_->remote_ufrag_str.empty() &&
-               (impl_->remote_ufrag_str.back() == '\r' ||
-                impl_->remote_ufrag_str.back() == '\n')) {
-            impl_->remote_ufrag_str.pop_back();
-        }
-    }
-    if (pwd_pos != std::string::npos) {
-        pwd_pos += std::strlen("a=ice-pwd:");
-        auto eol = tmp.find('\n', pwd_pos);
-        impl_->remote_pwd_str = tmp.substr(
-            pwd_pos,
-            eol == std::string::npos ? std::string::npos : eol - pwd_pos);
-        while (!impl_->remote_pwd_str.empty() &&
-               (impl_->remote_pwd_str.back() == '\r' ||
-                impl_->remote_pwd_str.back() == '\n')) {
-            impl_->remote_pwd_str.pop_back();
-        }
-    }
+    if (!ufrag.empty()) impl_->remote_ufrag_str = ufrag;
+    if (!pwd.empty())   impl_->remote_pwd_str = pwd;
+    impl_->applied_remote_sdp_ = tmp;
     return plugins::kOk;
 }
 
@@ -778,7 +998,40 @@ plugins::Status IceTransport::add_remote_candidate(std::string_view sdp) noexcep
     if (!impl_->agent) return plugins::kErrNotReady;
     std::string tmp{sdp};
     const int rc = juice_add_remote_candidate(impl_->agent, tmp.c_str());
-    return rc == JUICE_ERR_SUCCESS ? plugins::kOk : plugins::kErrInvalidParam;
+    if (rc != JUICE_ERR_SUCCESS) return plugins::kErrInvalidParam;
+    // Remember it so an ICE restart can re-apply it to the new agent.
+    impl_->remote_candidates_.push_back(tmp);
+    return plugins::kOk;
+}
+
+plugins::Status IceTransport::restart() noexcept {
+    if (!impl_->agent) return plugins::kErrNotReady;
+
+    core::log::Logger::instance().info(
+        "nimrtc::ice: ICE restart requested, rebuilding agent");
+
+    // The peer has not sent new credentials yet, so the new agent starts
+    // without a remote description and waits for the peer's answer.
+    const auto rc = impl_->rebuild_agent({}, /*keep_remote_sdp=*/false);
+    if (rc != Impl::RestartResult::kOk) return plugins::kErrInternal;
+
+    // The credentials changed, so the remote description we had is stale.
+    impl_->applied_remote_sdp_.clear();
+    impl_->remote_ufrag_str.clear();
+    impl_->remote_pwd_str.clear();
+
+    core::log::Logger::instance().info(
+        "nimrtc::ice: ICE restart done, new local ufrag=" +
+        local_ufrag());
+    return plugins::kOk;
+}
+
+std::uint32_t IceTransport::restart_count() const noexcept {
+    return impl_->restart_count_;
+}
+
+void IceTransport::set_on_ice_restart(plugins::OnIceRestart cb) noexcept {
+    impl_->on_ice_restart_ = std::move(cb);
 }
 
 std::string IceTransport::local_ufrag() const noexcept {

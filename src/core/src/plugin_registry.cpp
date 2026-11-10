@@ -129,6 +129,19 @@ void PluginRegistry::register_audio_receiver(std::string_view id,
     audio_receiver_.register_one(id, f);
 }
 
+void PluginRegistry::register_session(std::string_view id,
+                                     const plugins::ISessionFactory* f) {
+    session_.register_one(id, f);
+}
+
+// v1.2.0 (session capability plan D1 / D2): the RFC 4733
+// (telephone-event) slot.  The built-in codec registers under "dtmf";
+// the engine resolves it through `EngineConfig::dtmf_codec_name`.
+void PluginRegistry::register_dtmf(std::string_view id,
+                                   const plugins::IDtmfCodecFactory* f) {
+    dtmf_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_codec(std::string_view id,
                                           const plugins::IVideoCodecFactory* f) {
     video_codec_.register_one(id, f);

@@ -124,6 +124,35 @@ using NIMRTC_API_UNSTABLE OnDatagramCb =
 using NIMRTC_API_UNSTABLE OnPeerStreamCb =
     std::function<void(IBidirectionalStream* stream)>;
 
+/**
+ * @brief Token identifying one multicast subscription (v1.2.0, WP-C2).
+ *
+ * The session used to expose ONE inbound-datagram slot and ONE
+ * inbound-peer-stream slot; the last channel to register *replaced*
+ * the previous one, so the channels of one engine fought over the
+ * inbound routing and closing one of them disabled it for all of
+ * them.  The subscription tokens make the inbound surface a
+ * multicast: every channel registers its own route and removes only
+ * its own on close.
+ *
+ * Token 0 is never a valid subscription — it is what the default
+ * (no-op) implementations return.
+ */
+using NIMRTC_API_UNSTABLE SubscriptionId = std::uint64_t;
+
+/**
+ * @brief One outbound priority source (v1.2.0, WP-E2).
+ *
+ * The data plane rides its own connection, so the media scheduler
+ * cannot arbitrate between the media and the data planes.  What the
+ * data plane *can* do is order its own pending sends: a channel
+ * registers a flush callback together with its priority, and
+ * `IWebTransportSession::flush_outbound()` runs the callbacks in
+ * priority order — a lower priority value is offered to the transport
+ * first.
+ */
+using NIMRTC_API_UNSTABLE PriorityFlush = std::function<void()>;
+
 } // namespace nimrtc::web_transport
 
 namespace nimrtc::web_transport {
@@ -236,6 +265,87 @@ public:
      * changes. Pass an empty std::function to unregister.
      */
     virtual void set_on_peer_stream(OnPeerStreamCb cb) noexcept { (void)cb; }
+
+    // -------------------------------------------------------------------
+    // Multicast inbound routes (v1.2.0, WP-C2 / WP-C4)
+    // -------------------------------------------------------------------
+
+    /**
+     * @brief Subscribe to the inbound datagram stream (multicast).
+     *
+     * Every subscriber receives every inbound datagram; the subscriber
+     * decides whether the datagram belongs to it (in the framed mode
+     * it is the frame's channel label that decides, see
+     * `plugins::DataChannelFraming`).
+     *
+     * @return The subscription token, or 0 when the session does not
+     *         implement the multicast surface (the default).
+     */
+    virtual SubscriptionId subscribe_on_datagram(OnDatagramCb cb) noexcept {
+        (void)cb;
+        return 0;
+    }
+
+    /**
+     * @brief Remove one inbound-datagram subscription (WP-C4).
+     *
+     * Removing one subscription never affects the others — closing a
+     * channel must not deafen its siblings.
+     */
+    virtual void unsubscribe_on_datagram(SubscriptionId id) noexcept { (void)id; }
+
+    /**
+     * @brief Subscribe to the inbound peer-stream stream (multicast).
+     *
+     * @return The subscription token, or 0 when the session does not
+     *         implement the multicast surface.
+     */
+    virtual SubscriptionId subscribe_on_peer_stream(OnPeerStreamCb cb) noexcept {
+        (void)cb;
+        return 0;
+    }
+
+    /** Remove one inbound-peer-stream subscription (WP-C4). */
+    virtual void unsubscribe_on_peer_stream(SubscriptionId id) noexcept { (void)id; }
+
+    // -------------------------------------------------------------------
+    // Outbound priority (v1.2.0, WP-E2)
+    // -------------------------------------------------------------------
+
+    /**
+     * @brief Register an outbound priority source.
+     *
+     * The data plane runs on its own connection, so the media
+     * scheduler cannot order the data plane against the media plane.
+     * What this seam provides is the *intra*-data-plane ordering: the
+     * session runs the registered flush callbacks in priority order
+     * (lower value first) when `flush_outbound()` is called, so a
+     * high-priority control channel is not stuck behind a bulk
+     * transfer channel that is waiting for flow-control credit.
+     *
+     * @param priority  Lower value = higher priority.
+     * @param flush     The callback that drains the source's pending
+     *                  outbound data.
+     * @return The subscription token, or 0 when the session does not
+     *         implement the priority surface.
+     */
+    virtual SubscriptionId register_priority_source(int priority,
+                                                     PriorityFlush flush) noexcept {
+        (void)priority;
+        (void)flush;
+        return 0;
+    }
+
+    /** Remove one outbound priority source. */
+    virtual void unregister_priority_source(SubscriptionId id) noexcept { (void)id; }
+
+    /**
+     * @brief Drain the pending outbound data, highest priority first.
+     *
+     * Called by the engine's tick. A session that does not implement
+     * the priority surface does nothing.
+     */
+    virtual void flush_outbound() noexcept {}
 
     // -------------------------------------------------------------------
     // Lifecycle

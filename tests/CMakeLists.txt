@@ -746,6 +746,11 @@ function(nimrtc_add_engine_test name source)
         # layer no longer exports the optional-module include paths
         # (P1 hardening, 2026-11-09).
         nimrtc::web_transport
+        # v1.2.0 (session capability plan N1 / T1): the session-model
+        # module — its register_default_plugins() symbol populates the
+        # registry's session slot, so the engine's
+        # open() → register_all_default_plugins() chain resolves.
+        nimrtc::session
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
@@ -1320,6 +1325,46 @@ nimrtc_add_engine_test(test_engine_audio_bitrate test_engine_audio_bitrate.cpp)
 # the 1024-entry ring eviction. Shell strategy, no ICE/DTLS handshake.
 # ---------------------------------------------------------------------------
 nimrtc_add_engine_test(test_engine_ref_frame test_engine_ref_frame.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 (session capability plan) — the engine's renegotiation surface.
+#
+# N1 — the engine resolves a pluggable session model through the
+#      registry's session slot and drives it only through
+#      `plugins::ISession` (no concrete module include in `src/engine/`).
+# N2 — `needs_negotiation()` flips on a mutation and clears on the offer.
+# N3 — a host-added track grows the media list; an existing mid never moves.
+# N4 — a track's direction lands on the m-line.
+# N5 / OD-A — a removed track keeps its m-line, marked `inactive`.
+# T2 / T3 — a multi-m-line offer is answered one-to-one, per mid.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_session test_engine_session.cpp)
+
+# ---------------------------------------------------------------------------
+# Fuzz targets + corpus replay driver (P2 hardening, 2026-11-09).
+#
+# The three `run_*()` entry points (SDP / RTP / video payload) live in
+# `tests/fuzz/`.  They are driven two ways:
+#
+#   - `test_fuzz_replay` replays the committed seed corpus plus a
+#     deterministic mutation set.  It runs on every platform and on
+#     every commit, so it is the regression floor under the fuzzing
+#     effort: a bug libFuzzer finds becomes a seed, and the seed keeps
+#     being replayed.
+#   - `fuzz_sdp` / `fuzz_rtp` / `fuzz_video_payload` are libFuzzer
+#     harnesses, built only with `-DNIMRTC_FUZZING=ON` and a Clang
+#     toolchain (see tests/fuzz/CMakeLists.txt).
+#
+# The DTLS and STUN parsers are deliberately absent: they belong to
+# the vendored wolfSSL / libjuice, which carry their own upstream
+# fuzzing.  Re-fuzzing them from here would test the vendored code,
+# not ours.
+# ---------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/CMakeLists.txt")
+    add_subdirectory(fuzz)
+endif()
 
 # ---------------------------------------------------------------------------
 # Chrome↔NimRTC DTLS-SRTP interop bridge (tests/wolfssl_dtls/bridge/).

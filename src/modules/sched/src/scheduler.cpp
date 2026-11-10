@@ -50,6 +50,7 @@
 #include <vector>
 
 #include <nimrtc/core/log.hpp>  // core::log::Logger
+#include <nimrtc/pacing/pacing.hpp>  // pacing::TokenBucket (v1.2.0 M3, P1)
 
 namespace nimrtc::sched {
 
@@ -140,6 +141,28 @@ clamp_interval_ms(std::int64_t ms) noexcept {
     return static_cast<std::uint32_t>(ms);
 }
 
+/** The paced class of a per-packet priority.
+ *
+ *  Returns the index into the scheduler's per-class token buckets, or
+ *  -1 for `kControl` — the control plane **bypasses** the pacer: RTX,
+ *  NACK and RTCP feedback must not wait behind a saturated media
+ *  bucket. */
+[[nodiscard]] constexpr int
+paced_class_index(plugins::Priority p) noexcept {
+    switch (p) {
+        case plugins::Priority::kAudio:
+            return static_cast<int>(plugins::PacedClass::kAudio);
+        case plugins::Priority::kVideoKeyframe:
+        case plugins::Priority::kVideo:
+            return static_cast<int>(plugins::PacedClass::kVideo);
+        case plugins::Priority::kBestEffort:
+            return static_cast<int>(plugins::PacedClass::kData);
+        case plugins::Priority::kControl:
+            break;
+    }
+    return -1;  // the control plane bypasses the pacer
+}
+
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -199,10 +222,31 @@ struct Scheduler::Impl {
     // egress rate in stats().
     std::uint64_t   bytes_last_drain_ = 0;
 
-    // ---- L1 stream-priority state (DC-2) -------------------------------
+    // ---- Per-class pacing buckets (v1.2.0 M3, video plan P2) ----------
+    //
+    // The session credit above is the **aggregate** guard: the total
+    // number of bytes that may leave the machine is bounded by the BWE
+    // target.  The buckets below are the **distribution**: each traffic
+    // class (audio / video / data) has its own token bucket, so a
+    // saturated video stream cannot take the audio's share of the link.
+    //
+    // A class whose rate is 0 is not paced at all — the bucket is
+    // unlimited, and the class is bounded only by the session credit.
+    // That is the default, so a scheduler nobody configured behaves
+    // exactly as before.
+    std::array<pacing::TokenBucket, plugins::kPacedClassCount> class_buckets_{};
+    std::array<std::uint32_t, plugins::kPacedClassCount> class_rate_bps_{};
+
+    // Packets that were held back because their class had no credit.
+    // Telemetry for P4 (the pacing counters surfaced through the stats
+    // surface).
+    std::uint64_t paced_blocked_total_ = 0;
+
+    // ---- S-family (per-stream) priority state (DC-2) -------------------
     // stream_id → StreamPriority.  Unseen streams default to Normal.
     std::unordered_map<std::uint32_t, StreamPriority> stream_priority_{};
-    // Three L1 buckets, indexed by StreamPriority rank (High=0, Normal=1, Low=2).
+    // Three per-stream buckets, indexed by StreamPriority rank (High=0,
+    // Normal=1, Low=2).
     std::array<std::deque<PacketRecord>, kStreamPriorityCount> stream_buckets_{};
 
     // ---- Last destination address (for empty dst in enqueue) -----------
@@ -249,7 +293,7 @@ struct Scheduler::Impl {
         }
     }
 
-    // ---- L1 stream statistics (DC-2) ------------------------------------
+    // ---- S-family (per-stream) statistics (DC-2) ------------------------
     std::uint32_t stream_dropped_total_ = 0;
     std::uint32_t stream_sent_total_   = 0;
 
@@ -415,6 +459,18 @@ int Scheduler::drain_with(int max_packets,
     for (std::size_t idx = 0; idx < kPriorityCount && sent < max_packets; ++idx) {
         auto& q = impl_->queues_[idx];
 
+        // The control plane bypasses the pacer entirely (v1.2.0 M3, P2):
+        // RTX / NACK / RTCP feedback must never wait behind a saturated
+        // media bucket, and it is the *media* traffic that has to be
+        // shaped.  The control packets are small and rare, so letting
+        // them through does not measurably change the load on the link.
+        const bool is_control =
+            idx == plugins::priority_rank(plugins::Priority::kControl);
+
+        // The paced class of this queue (-1 for the control plane).
+        const int class_idx = is_control ? -1 : paced_class_index(
+            static_cast<plugins::Priority>(idx));
+
         while (!q.empty() && sent < max_packets) {
             // If a BWE limit is active, stop once the send credit is
             // exhausted: the packet stays queued and goes out on a later
@@ -422,13 +478,34 @@ int Scheduler::drain_with(int max_packets,
             // The credit is only consumed once the packet really left
             // the queue — a vetoed packet keeps its credit.
             std::uint32_t peek_bytes = 0;
-            if (impl_->bwe_limit_active_) {
+            if (!is_control && impl_->bwe_limit_active_) {
                 peek_bytes = estimated_packet_bytes(
                     q.front(), impl_->config_.avg_packet_size_bytes);
                 const std::uint64_t cost_milli =
                     static_cast<std::uint64_t>(peek_bytes) * 1000;
                 if (impl_->credit_milli_bytes_ < cost_milli) {
                     break;  // not enough credit yet — keep the packet queued
+                }
+            }
+
+            // The per-class pacer (v1.2.0 M3, P2).  A class whose rate is
+            // 0 is not paced; a class with a rate holds the packet back
+            // until its own bucket has earned the bytes.  The packet
+            // stays queued, so the class keeps its place in the queue.
+            const bool class_paced =
+                class_idx >= 0 &&
+                impl_->class_rate_bps_[static_cast<std::size_t>(class_idx)] > 0;
+            if (class_paced) {
+                peek_bytes = estimated_packet_bytes(
+                    q.front(), impl_->config_.avg_packet_size_bytes);
+                // `available()` refills the bucket as a side effect, so it
+                // is not a const member — the bucket must be reached
+                // through a mutable reference here.
+                auto& bucket =
+                    impl_->class_buckets_[static_cast<std::size_t>(class_idx)];
+                if (bucket.available(now) < peek_bytes) {
+                    ++impl_->paced_blocked_total_;
+                    break;  // this class is out of credit — keep the packet
                 }
             }
 
@@ -462,9 +539,16 @@ int Scheduler::drain_with(int max_packets,
 
             const std::uint32_t est_bytes = estimated_packet_bytes(
                 rec, impl_->config_.avg_packet_size_bytes);
-            if (impl_->bwe_limit_active_) {
+            if (!is_control && impl_->bwe_limit_active_) {
                 impl_->credit_milli_bytes_ -=
                     static_cast<std::uint64_t>(est_bytes) * 1000;
+            }
+            if (class_paced) {
+                // The bytes really left the machine: the class bucket
+                // spends its credit now (and not before, so a vetoed
+                // packet keeps the credit it never used).
+                impl_->class_buckets_[static_cast<std::size_t>(class_idx)]
+                    .try_consume(est_bytes, now);
             }
             ++sent;
             ++impl_->packets_sent_this_cycle_;
@@ -622,6 +706,51 @@ void Scheduler::reset() noexcept {
     impl_->stream_dropped_total_ = 0;
     impl_->stream_sent_total_   = 0;
     impl_->last_dst_addr_       = {};
+
+    // The pacing buckets start over as well: the credit they hold
+    // belonged to the session that just ended.
+    const auto now = core::SteadyClock::now();
+    for (auto& bucket : impl_->class_buckets_) {
+        bucket.reset(now);
+    }
+    impl_->paced_blocked_total_ = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Per-class pacing (v1.2.0 M3, video plan P2)
+// ---------------------------------------------------------------------------
+
+void Scheduler::set_pacing_rate(plugins::PacedClass cls,
+                                 std::uint32_t bps) noexcept {
+    const std::size_t idx = static_cast<std::size_t>(cls);
+    if (idx >= plugins::kPacedClassCount) return;
+
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+
+    // An unchanged rate must not disturb the bucket: re-applying the
+    // configuration on every engine tick would otherwise throw away the
+    // credit the bucket has earned.
+    if (impl_->class_rate_bps_[idx] == bps) return;
+
+    impl_->class_rate_bps_[idx] = bps;
+
+    pacing::PacerConfig cfg;
+    cfg.rate_bps = bps;
+    // The credit that was already earned is kept (and clamped to the new
+    // burst ceiling by set_config): lowering the rate does not throw away
+    // what was earned, raising it does not grant a free burst.
+    impl_->class_buckets_[idx].set_config(cfg);
+
+    sched_debug("Scheduler: pacing rate for class %zu set to %u bps",
+                idx, bps);
+}
+
+std::uint32_t Scheduler::pacing_rate(plugins::PacedClass cls) const noexcept {
+    const std::size_t idx = static_cast<std::size_t>(cls);
+    if (idx >= plugins::kPacedClassCount) return 0;
+
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    return impl_->class_rate_bps_[idx];
 }
 
 plugins::SchedulerStats Scheduler::stats() const noexcept {
@@ -644,6 +773,7 @@ plugins::SchedulerStats Scheduler::stats() const noexcept {
         s.current_bitrate_bps = static_cast<std::uint32_t>(
             (impl_->bytes_last_drain_ * 8 * 1000) / impl_->measured_interval_ms_);
     }
+    s.paced_blocked_packets = impl_->paced_blocked_total_;
     return s;
 }
 
@@ -691,7 +821,7 @@ void Scheduler::release_packet_buffer(
 }
 
 // ===============================================================================
-// DC-2: L1 stream-priority methods
+// DC-2: S-family (per-stream) priority methods
 // ===============================================================================
 
 void Scheduler::set_stream_priority(std::uint32_t stream_id,

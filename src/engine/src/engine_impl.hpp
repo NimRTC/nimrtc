@@ -35,6 +35,7 @@
 
 #include "nimrtc/engine/engine.hpp"
 #include "audio_routing.hpp"
+#include "bandwidth_allocation.hpp"
 #include "video_negotiation.hpp"
 
 #include <array>
@@ -253,6 +254,92 @@ inline std::vector<std::uint8_t> hex_colon_decode(std::string_view sv) {
     return out;
 }
 
+/** `plugins::Direction` → `sdp::Direction` (the two enums carry the same
+ *  four RFC 4566 states, one-to-one).
+ *
+ *  v1.2.0 (session capability plan, N4): the session model speaks
+ *  `plugins::Direction`, the SDP layer speaks `sdp::Direction`. */
+inline sdp::Direction to_sdp_direction(plugins::Direction dir) noexcept {
+    switch (dir) {
+        case plugins::Direction::kSendOnly: return sdp::Direction::SendOnly;
+        case plugins::Direction::kRecvOnly: return sdp::Direction::RecvOnly;
+        case plugins::Direction::kInactive:  return sdp::Direction::Inactive;
+        case plugins::Direction::kSendRecv:  break;
+    }
+    return sdp::Direction::SendRecv;
+}
+
+/** `sdp::Direction` → `plugins::Direction`. */
+inline plugins::Direction from_sdp_direction(sdp::Direction dir) noexcept {
+    switch (dir) {
+        case sdp::Direction::SendOnly: return plugins::Direction::kSendOnly;
+        case sdp::Direction::RecvOnly: return plugins::Direction::kRecvOnly;
+        case sdp::Direction::Inactive:  return plugins::Direction::kInactive;
+        case sdp::Direction::SendRecv:  break;
+    }
+    return plugins::Direction::kSendRecv;
+}
+
+/** The inverse of a media direction — what *we* can do when the peer
+ *  says what *it* can do (RFC 3264 §6.1).
+ *
+ *  `sendrecv` stays `sendrecv`, `sendonly` becomes `recvonly`,
+ *  `recvonly` becomes `sendonly`, `inactive` stays `inactive`. */
+inline sdp::Direction invert_sdp_direction(sdp::Direction dir) noexcept {
+    switch (dir) {
+        case sdp::Direction::SendOnly: return sdp::Direction::RecvOnly;
+        case sdp::Direction::RecvOnly: return sdp::Direction::SendOnly;
+        case sdp::Direction::Inactive:  return sdp::Direction::Inactive;
+        case sdp::Direction::SendRecv:  break;
+    }
+    return sdp::Direction::SendRecv;
+}
+
+/** Intersect two media directions (RFC 3264 §6.1: the answer's
+ *  direction is the offerer's capability intersected with the
+ *  answerer's).
+ *
+ *  The intersection is the *weaker* of the two in each direction:
+ *  `ours` says what we can do, `theirs` says what the peer can do,
+ *  and the negotiated direction says what both can do.
+ *
+ *  | ours     | theirs   | result    |
+ *  |----------|----------|-----------|
+ *  | sendrecv | sendrecv | sendrecv  |
+ *  | sendrecv | sendonly | sendonly  |
+ *  | sendrecv | recvonly | recvonly  |
+ *  | sendrecv | inactive | inactive  |
+ *  | sendonly | sendrecv | sendonly  |
+ *  | sendonly | sendonly | sendonly  |
+ *  | sendonly | recvonly | inactive  |
+ *  | sendonly | inactive | inactive  |
+ *  | recvonly | *        | recvonly  |
+ *  | inactive | *        | inactive  |
+ *
+ *  v1.2.0 (session capability plan, N4 / OD-A): the answer path uses
+ *  this to honour the session model's transceiver direction instead of
+ *  assuming a sendrecv answerer. */
+inline sdp::Direction intersect_direction(sdp::Direction ours,
+                                           sdp::Direction theirs) noexcept {
+    if (ours == sdp::Direction::Inactive || theirs == sdp::Direction::Inactive) {
+        return sdp::Direction::Inactive;
+    }
+    const bool we_send  = (ours == sdp::Direction::SendOnly ||
+                           ours == sdp::Direction::SendRecv);
+    const bool we_recv  = (ours == sdp::Direction::RecvOnly ||
+                           ours == sdp::Direction::SendRecv);
+    const bool they_send = (theirs == sdp::Direction::SendOnly ||
+                            theirs == sdp::Direction::SendRecv);
+    const bool they_recv = (theirs == sdp::Direction::RecvOnly ||
+                            theirs == sdp::Direction::SendRecv);
+    const bool send = we_send && they_recv;
+    const bool recv = we_recv && they_send;
+    if (send && recv) return sdp::Direction::SendRecv;
+    if (send)         return sdp::Direction::SendOnly;
+    if (recv)         return sdp::Direction::RecvOnly;
+    return sdp::Direction::Inactive;
+}
+
 /** Map the host's configuration string to a signal-selection policy
  *  (ADR-018 Decision 2).
  *
@@ -435,6 +522,13 @@ struct NimRTCEngine::Impl {
     // mode).  The report is made once per session.
     bool           transport_cc_unavailable_reported = false;
 
+    // ---- Pacing split (v1.2.0 M3, P2) ----------------------------------
+    //
+    // The demand list of the bandwidth split, kept as a member so that
+    // the per-tick split does not allocate a vector every time.  The
+    // contents are rewritten (never reallocated) on each tick.
+    std::vector<detail::BandwidthDemand> pacing_demands_;
+
     // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->
     // capture_ts_us. Bounded ring (1024 entries); insertion-order deque
@@ -455,6 +549,38 @@ struct NimRTCEngine::Impl {
 
     // Local SDP (after create_offer / process_remote_sdp).
     std::optional<sdp::SessionDescription> local_sdp;
+
+    // ---- Session model (v1.2.0, session capability plan N1 / T1) ---------
+    //
+    // The engine drives renegotiation through a pluggable session model
+    // (`plugins::ISession`), resolved from the registry's session slot
+    // with `EngineConfig::session_name`.  The engine never includes
+    // `src/modules/session/`'s headers (Layout Invariant 4) — it only
+    // talks to the interface declared in
+    // `<nimrtc/plugins/session.hpp>`.
+    //
+    // `session` is null when the session model is disabled
+    // (`session_name` empty) or when the resolution failed; in that
+    // case the engine keeps the pre-v1.2.0 fixed media list.
+    std::unique_ptr<plugins::ISession> session_model;
+
+    // True once the base session state (the audio / video / data
+    // transceiver and the tracks that ride on them) has been created.
+    // The seeding is idempotent: it runs from `create_offer()` and
+    // after `open()` resolved the video / datachannel plugins, and it
+    // only ever *adds* what is missing.
+    bool session_seeded = false;
+
+    // True when the session changed since the last offer / answer was
+    // produced — the host's cue to renegotiate (N2).
+    bool session_dirty = false;
+
+    // The mids the engine handed out for the base m-lines.  Empty means
+    // "not created yet"; the value is the mid that is actually in the
+    // SDP.
+    std::string base_audio_mid;
+    std::string base_video_mid;
+    std::string base_data_mid;
 
     // ---- Video receive pipeline decode buffers (ping-pong I420) ------------
     // Allocated lazily on first decoded frame; reused across frames.

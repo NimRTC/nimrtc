@@ -45,11 +45,13 @@ set(_nimrtc_module_shorts
   plugins
   rtp
   sdp
+  net_feedback
   jb
   bwe
   sched
   jb_strategy
   audio3a
+  audio_rx
   ice
   srtp
   dtls

@@ -1351,16 +1351,17 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
                               ? config_.audio_min_bitrate_bps
                               : 1000;
 
-    detail::BandwidthDemand audio_demand;
-    audio_demand.reserved = true;
-    audio_demand.share = config_.audio_bwe_share;
-    audio_demand.floor_bps = static_cast<std::uint32_t>(floor_bps);
-    audio_demand.ceiling_bps = static_cast<std::uint32_t>(ceiling);
+    detail::BandwidthDemand audio_demand = detail::reserved_audio_demand(
+        config_.audio_bwe_share,
+        static_cast<std::uint32_t>(floor_bps),
+        static_cast<std::uint32_t>(ceiling));
 
     const detail::BandwidthAllocation alloc =
         detail::allocate_bandwidth(bwe_bps, {audio_demand});
     if (alloc.targets.empty() || alloc.targets[0] == 0) return;
     int target = static_cast<int>(alloc.targets[0]);
+    if (target < floor_bps) target = floor_bps;
+    if (target > ceiling) target = ceiling;
 
     if (target == current) return;
 

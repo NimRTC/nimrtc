@@ -17,6 +17,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A telephone-event (RFC 4733) seam, so DTMF stops being an unknown
+  payload type (v1.2.0, session capability plan D1 / D2).**  Until now a
+  peer that negotiated `telephone-event` sent its digits into a payload
+  type the audio routing table had no route for: the packet was counted
+  as `kAudioPayloadTypeUnknown` and dropped, so a NimRTC peer could
+  neither send nor receive DTMF.
+  - `plugins::IDtmfCodec` — a seam of its own, because a four-byte
+    telephone-event header is **not** audio and must never reach an
+    `IAudioDecoder`.  It decodes one payload, encodes one event and
+    reports the payload type it uses.
+  - `src/modules/dtmf/` — the built-in implementation, registered under
+    the id `"dtmf"`.  The engine reaches it through the registry slot and
+    never includes the module's headers.
+  - The engine surface: `EngineConfig::dtmf_enabled` (**off** by
+    default — the offer carries no telephone-event declaration unless a
+    host asks for it), `dtmf_payload_type` (126, the value Chrome uses),
+    `dtmf_codec_name`, plus `send_dtmf()` and `set_on_dtmf()`.  An
+    inbound telephone-event payload is routed to the codec and reported
+    as a `DtmfEvent` with the accumulated duration, instead of being
+    dropped as unknown.
+
+- **A pluggable session model, so a host can renegotiate instead of
+  rebuilding the engine (v1.2.0, session capability plan N1 / T1).**  The
+  engine used to build a *fixed* SDP media list (one audio m-line, one
+  video m-line) and offered no way to add a track, remove one or change
+  a direction.
+  - `plugins::ISession` — the seam (tracks, transceivers, mid
+    allocation) with a typed slot in `core::PluginRegistry`; the
+    built-in implementation lives in `src/modules/session/` and
+    registers under the id `"session"`.
+  - The engine surface: `add_track()`, `remove_track()`,
+    `set_track_direction()`, `tracks()`, `add_transceiver()`,
+    `set_transceiver_direction()`, `stop_transceiver()`,
+    `restart_transceiver()`, `transceivers()` and `needs_negotiation()`.
+  - Removing a track does **not** remove its m-line: the transceiver
+    stays and is marked `inactive` (OD-A), and a mid is never reused.
+
+- **ICE restart (RFC 8445 §9.1.1.1), locally and on the peer's signal.**
+  A network change (WiFi -> 4G) or a stale path could not be recovered
+  without tearing the whole engine down.
+  - The ICE transport seam gains `restart()`, `restart_count()` and the
+    `OnIceRestart` callback, which fires when the *peer's* description
+    carries different ICE credentials — the answerer then answers with
+    a fresh credential pair, as RFC 8445 requires.
+  - The engine surface: `restart_ice()`, `ice_restart_count()` and
+    `set_on_ice_restart()`.  A local restart mints a new credential pair,
+    re-gathers the candidates and re-applies the known remote
+    candidates; the host then sends a fresh offer.
+
+- **A token-bucket pacer (v1.2.0 M3, video plan P1 / P2).**  The send
+  path had no rate-shaping primitive of its own: the scheduler's budget
+  was a per-drain allowance, and the bytes left the machine in bursts.
+  - `src/modules/pacing/` — a **token bucket** on a monotonic clock.
+    The bucket holds bytes, the rate is expressed in bits per second
+    (the unit every other knob in the project uses), and the bucket
+    never reads a clock itself: `refill()`, `available()` and
+    `try_consume()` take the current time point as an argument, which
+    makes the behaviour deterministic and testable without sleeps.
+  - The scheduler drives **per-class** buckets from the bandwidth
+    estimate, so a saturated video stream cannot eat the audio class'
+    share; the engine exposes `EngineConfig::media_pacing_enabled` and
+    `update_pacing_rates()`.
+
 - **The per-stream share rule of the session bandwidth budget (video plan
   F8).** `IBwe::estimate()` returns one number for the whole session, so
   the estimate has to be split before it reaches an encoder.  The rule:
@@ -367,6 +430,144 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The `"sctp"` data-channel backend was retired from the public selectors
+  (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP
+  backend was a **test-only** backend: `SctpDataChannel` opens an in-process
+  usrsctp socket bound to `127.0.0.1`, and the engine never wires the DTLS
+  transport's outbound/inbound datagram paths into that socket, so a channel
+  created on it could never reach a remote peer.  The public surface presented
+  it as a peer of the production WebTransport backend; that claim was wrong.
+  - `EngineConfig::datachannel_backend = "sctp"` now fails `open()` with
+    `kEngineInternal`; the error message names the backend as **test-only**
+    and points at `"web_transport"` (the default) and `""` (disable).
+  - The legacy v0.x spelling (`datachannel_backend` empty plus
+    `datachannel_name = "sctp"`) is rejected the same way.
+  - `EngineConfig::datachannel_name` now defaults to `""` instead of `"sctp"`,
+    so an unset field never selects the retired family and
+    `datachannel_backend = ""` alone is a clean "disable the data plane".
+  - The `SctpDataChannelFactory` **stays registered** in `core::PluginRegistry`
+    as the in-tree reference implementation for the DCEP codec and the PR-SCTP
+    semantics — the module tests drive it directly.  Only the public
+    *selector* was retired; no registry slot was withdrawn.
+  - No public symbol was added or removed.  The change is the *meaning* of two
+    existing config values, which is why it is called out here and in
+    `docs/api/engine_config.md` §2.6.
+
+- **The scheduler's two queue families no longer borrow the architecture's
+  layer names (2026-11-09).**  Inside `src/modules/sched/`, the per-packet
+  priority ladder and the per-stream priority buckets were labelled "L0" and
+  "L1" — the same tokens `docs/zh/architecture.md` uses for the L0–L3
+  *layering* (where L1 is the transport layer this module lives in).  Read
+  literally, "the scheduler's L1" meant two different things in the same
+  document set, and the plan docs compounded it by calling the per-stream
+  family "the scheduler's L1 API".
+  - The scheduler now names its two families **P-family** (per-packet,
+    `plugins::Priority`, five levels) and **S-family** (per-stream,
+    `sched::StreamPriority`, three buckets).  A new §"Terminology" section
+    in `src/modules/sched/include/nimrtc/sched/sched.hpp` states the
+    distinction and records that the two families are **separate queues
+    that are never compared with each other** — so the documented ladder
+    `kControl > kAudio > kVideoKeyframe > kVideo > kBestEffort` describes
+    the P-family only, and `kBestEffort` is a packet level, not a promise
+    that DataChannel traffic is scheduled at all.
+  - `docs/zh/architecture.md` §8.3 gained the matching terminology note, and
+    D8 / §2.3 / §2.5 now state the per-packet ladder and the per-stream
+    buckets as two ladders rather than one, and spell out that under the
+    default `web_transport` backend the data plane never enters the
+    scheduler.
+  - `plugins::IScheduler`'s header no longer claims that RTP and
+    DataChannel "share ONE priority queue" — a concrete scheduler may keep
+    them in separate families.
+  - The `sched.hpp` scope note no longer claims that the legacy `"sctp"`
+    backend puts the media and data planes on one connection: that backend
+    was retired in v1.2.0 (WP-A / DEC-4 = A1) and is now a test-only
+    in-process usrsctp loopback that never reaches a peer, so **no shipped
+    backend** provides wire-level cross-plane priority.  The note now states
+    the honest version — the scheduler arbitrates within a connection, and
+    the data plane does not use it at all (the per-stream API still has no
+    caller in the data path, per `datachannel-capability-plan.md` WP-E2).
+  - The DC-2 regression test was renamed accordingly
+    (`L0_L1_Isolation_*` → `P_S_Isolation_*`); the assertions are
+    unchanged.  **No behaviour change and no public API change** — the
+    `StreamPriority` enum, `set_stream_priority()`,
+    `enqueue_for_stream*()` and `select_next_packet()` keep their names and
+    semantics.
+- **`<nimrtc/core/registry.hpp>` no longer drags the optional-module
+  seams into every translation unit (P1 hardening, 2026-11-09).**  The
+  header used to `#include` 18 seam headers in a "backward-compat shim"
+  block at the bottom — the 13 `nimrtc/plugins/` seam interfaces plus
+  the DTLS / SCTP / raw_udp / transport-stack / WebTransport factory
+  headers from five *optional* modules.  Any TU that included the
+  registry therefore compiled all of them, which defeated the
+  compile-time module trimming the CMake options provide and made
+  `core` depend on modules it must not know about (ARCHITECTURE.md
+  Layout Invariant 1).
+  - The 13 `nimrtc/plugins/` seam interfaces moved behind a new opt-in
+    umbrella header, `<nimrtc/plugins/registry.hpp>`.
+  - The optional-module seams are no longer reachable through the
+    registry header at all: a consumer includes the seam header it
+    needs (and links that module) explicitly.
+  - The registry API only needs *pointers* to the factory interfaces, so
+    the forward declarations it already carried are sufficient — the
+    `detail::Registrar` switch casts through the full type only in the
+    TU that registers the factory.
+  - The engine's PAL resolver forward-declares
+    `web_transport::IWebTransportSessionFactory` instead of including
+    the optional module's header, so the engine's public header does
+    not depend on an optional module either.
+  - The `nimrtc::core` target's optional-module include directories
+    became `PRIVATE`; only the `nimrtc/plugins` include path is still
+    exported.
+  - **Migration for consumers:** a translation unit that included only
+    `<nimrtc/core/registry.hpp>` and relied on the transitive seam
+    includes now includes `<nimrtc/plugins/registry.hpp>` (for the
+    `nimrtc/plugins/` seams) or the specific seam header (for the
+    optional modules).  `<nimrtc/core/registry.hpp>` alone keeps the
+    registry API and the registration macros working unchanged.
+- **The outbound send path no longer allocates a heap buffer per packet
+  (P1 hardening, 2026-11-09).**  The engine built each outbound RTP
+  packet in a *member* vector and then **moved** it into the scheduler,
+  which left the member in a moved-from state — so the next packet had
+  to allocate a fresh buffer, and the previous one was freed on drain.
+  At 1000 packets per second that is 1000 malloc/free pairs per second
+  on the send path, which is exactly the path whose jitter a real-time
+  caller sees.
+  - `plugins::IScheduler` gained two optional methods,
+    `acquire_packet_buffer()` and `release_packet_buffer()`.  The
+    default implementations preserve the old behaviour for a custom
+    scheduler (reserve, then destroy), so the seam stays source
+    compatible.
+  - The built-in scheduler keeps a bounded free-list of packet buffers.
+    A buffer is taken by the caller, filled with the packet, handed over
+    with `enqueue_owned()`, and returned to the free-list once the
+    packet has been drained and dispatched.  In steady state the send
+    path performs **no heap allocation at all**.
+  - The pool is bounded by `SchedulerConfig::max_queue_depth`, so a
+    burst cannot make the scheduler hoard memory, and a buffer that is
+    recycled is cleared so the pool does not keep stale packet bytes
+    alive.
+  - Covered by `src/modules/sched/tests/test_scheduler.cpp`.
+- **The README no longer overstates the hardware codec support.**  The
+  capability table claimed "H.264 hardware backends (NVENC / NVDEC /
+  AMF / QSV / DXVA / VA-API / OpenH264)" without distinguishing the
+  encoders that exist from the decoders that do not.
+  - NVENC **encoding** is implemented; **NVDEC decoding is not** —
+    `make_nvdec_h264_codec()` returns `nullptr`.  The decoder entry is
+    kept so the seam id stays stable, but its `available()` probe now
+    returns `false` to match, so the selector can never hand a caller
+    a backend whose `create()` cannot produce a codec.
+  - The same applies to the macOS VideoToolbox and the Android
+    MediaCodec entries: they exist as seam ids, report
+    `available() == false` and return `nullptr` from `create()`.
+  - The Windows **DXVA decoder is real** and is now named as the
+    supported hardware decode path; macOS and Android use the software
+    H.264 path.
+  - The "simplified Goog-CC" wording now says what it is everywhere it
+    appears (README, README.zh): a delay + loss hybrid estimator, not
+    a full trendline port, and AIMD remains the default.
+  - The CMake options were re-worded to match: `NIMRTC_PLUGINS_NVENC`
+    is the encoder, `NIMRTC_PLUGINS_NVDEC` registers a seam id only, and
+    `NIMRTC_PLUGINS_VAAPI` is the encoder.
 - **`opus::EncoderConfig::bitrate_bps` now defaults to 0 (= codec
   default) instead of 64000.**  0 resolves to 32 kbps for a mono encoder
   and 64 kbps for a stereo one, so the default follows the channel
@@ -428,6 +629,90 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The WebTransport data channel mistook a Chrome stream header for
+  payload.**  A peer-initiated bidirectional stream starts with the
+  WebTransport stream-type signal `0x41` followed by the session-id
+  varint, and the data channel has to strip that header before it hands
+  the bytes to the application.  The header probe decoded the signal as
+  a QUIC varint, and the canonical varint encoding of `0x41` is the two
+  bytes `0x40 0x41` — so a stream that opened with the single byte
+  `0x41` (what the Chrome stack writes) decoded to `256`, was taken for
+  "not a WebTransport stream", and the header bytes were delivered to
+  the application as if they were payload.
+  - The probe now accepts both encodings: the single byte `0x41` and the
+    canonical `0x40 0x41` varint, and it waits for the whole header
+    when it is split across transport chunks (the probe re-runs on the
+    accumulated buffer, so no extra state is needed).
+  - A stream that carries no WebTransport header (a NimRTC peer in raw
+    mode, or a framed peer whose frame starts with the big-endian label
+    length) is still delivered verbatim.
+  - Covered by four cases in
+    `src/web_transport/tests/test_web_transport_dc_capability.cpp`
+    (single-byte signal, canonical varint signal, a header split byte by
+    byte, and a header-less stream).
+
+- **The installed bundle did not tell downstream consumers which C++
+  standard to compile with.**  The public headers need C++17 at the
+  minimum (nested namespace definitions such as
+  `namespace nimrtc::core::api_version`) and the shipped archives are
+  built as C++20, but the hand-written `cmake/NimRTCConfig.cmake.in`
+  declared neither.  A consumer whose `project()` did not pin a
+  standard inherited MSVC's default (C++14) and failed to compile the
+  installed headers with `error C2429: nested namespace definition
+  requires /std:c++17`, followed by a cascade of `std::string_view is
+  not a member of std`.
+  - `nimrtc::core` and `nimrtc::engine` now carry
+    `INTERFACE_COMPILE_FEATURES "cxx_std_20"`, so the consumer's
+    compiler receives `/std:c++20` (or `-std=c++20`) automatically.
+  - The Linux downstream proof in CI never caught this because GCC 11+
+    defaults to `gnu++17`, which is enough for the headers; only the
+    MSVC consumer broke.
+- **The engine's public header still said the video pipeline was not
+  wired into the RTP / DTLS / SRTP path.**  `engine.hpp` carried a
+  "P1.1/R3 scope" note claiming that "the engine currently does not pipe
+  video RTP/RTCP" — while `engine_timeline.cpp` had been routing inbound
+  video RTP into `video_receiver_->push_rtp()` for several releases.  A
+  caller reading the header to decide what the engine can do was told
+  the opposite of the truth.
+  - The note now describes what is actually wired: the send path
+    (`send_video()` → codec → packetizer → RTP → SRTP → scheduler → ICE)
+    and the receive path (ICE → demux → depacketizer → jitter buffer →
+    decoder → sink).
+  - It also states what is *deliberately* not auto-wired: the video
+    **source**.  `IVideoCodec` / `IVideoSender` are not thread-safe and
+    the source runs its own cadence thread, so the host pulls frames and
+    pushes them through `send_video()` rather than the engine wiring the
+    source into the encoder.
+- **The video payload type was negotiated in three places that could
+  disagree (v1.2.0 video plan, C9 + C11).**  The engine had three
+  independent ideas of "the video payload type", and a mismatch between
+  them silently killed the video stream rather than raising an error.
+  - The **answer** copied the offer's `a=rtpmap:` / `a=fmtp:` lines
+    verbatim, so it told the peer "I will decode every codec you
+    offered" — including the ones NimRTC has no decoder for (C9).
+  - The **outbound RTP header** was stamped with a locally configured
+    payload type, which could differ from the number the negotiated
+    description named — the peer then received the stream on a payload
+    type the description never mentioned, and dropped it.
+  - The **inbound demultiplexer** routed any payload type the peer had
+    declared on its video m-line into the video pipeline, so a peer
+    sending VP8 on a payload type NimRTC never agreed to decode as H.264
+    still reached the H.264 pipeline (C11).
+  - All three now use the **negotiated** payload type — the one that
+    appears in *both* descriptions (RFC 3264 §6.1).  The answer names
+    exactly that payload type and only that codec's own `a=rtpmap:` /
+    `a=fmtp:` lines; the offer names the *sender's* payload type,
+    because that is the number the outbound packet path stamps; the
+    inbound demux accepts only the negotiated number.
+  - A peer that offers only a codec NimRTC cannot decode gets the video
+    m-line **rejected** (port 0, no format list, RFC 3264 §6.1) and one
+    `kVideoCodecUnsupported` report through `on_error` — instead of a
+    stream that never arrives.
+  - The negotiated state lives in one place,
+    `detail::VideoNegotiationResult`
+    (`src/engine/src/video_negotiation.hpp`), shared by the SDP layer and
+    the media layer so the producer and the consumer cannot drift apart.
+  - Covered by 5 cases in `tests/test_video_negotiation.cpp`.
 - **The transport-wide congestion-control feedback was parsed against the
   wrong wire format (v1.2.0 M1, F4 groundwork).**  `rtp::Parser::parse_transport_cc`
   did not implement the draft's encoding.  The status symbols live *inside*

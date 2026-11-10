@@ -449,4 +449,64 @@ TEST_F(EngineNetFeedback, AnUnnegotiatedTransportCcPathDoesNotDrive) {
     EXPECT_EQ(snap.source, NetFeedbackSource::kLossRtt);
 }
 
+// ---------------------------------------------------------------------------
+// E7 - the transport-cc delay trend moves the estimate
+// ---------------------------------------------------------------------------
+//
+// ADR-018 Decision 4: the transport-cc path is preferred because it
+// carries the delay trend.  This is the end-to-end proof that the
+// preference is not decorative: a queue that builds up in front of the
+// bottleneck moves the estimate even though not a single packet was
+// lost -- which is exactly the congestion a fraction-lost counter cannot
+// see yet.
+
+namespace {
+
+/// A transport-cc run of `count` packets whose arrival deltas are
+/// `spacing_ticks` of 250 us apart.
+///
+/// The first delta of a feedback packet is measured from the previous
+/// feedback's reference time, so it straddles the gap between two
+/// feedbacks; it is given a deliberately huge value so that a series
+/// whose first delta is huge is visibly *not* a queue.
+std::vector<std::uint8_t> spacing_series(std::size_t count,
+                                         std::uint8_t spacing_ticks) {
+    std::vector<std::uint8_t> deltas;
+    deltas.reserve(count);
+    deltas.push_back(200);            // the inter-feedback gap: 50 ms
+    deltas.insert(deltas.end(), count - 1, spacing_ticks);
+    return deltas;
+}
+
+}  // namespace
+
+TEST_F(EngineNetFeedback, TheTransportCcDelayTrendMovesTheEstimate) {
+    NimRTCEngine peer(make_test_config());
+    ASSERT_EQ(peer.open(), 0u);
+    const std::string peer_offer = peer.create_offer();
+
+    NimRTCEngine engine(make_test_config());
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_TRUE(engine.process_remote_sdp(peer_offer).has_value());
+    ASSERT_NE(engine.bwe(), nullptr);
+
+    // A steady 4 ms spacing: the baseline, the operating point with no
+    // queue in front of the bottleneck.
+    ByteBuffer cc1 = make_transport_cc(1000, 10, spacing_series(10, 16));
+    engine.feed_media_inbound(cc1.data(), cc1.size());
+    engine.tick();
+    ASSERT_EQ(engine.bwe()->estimate().target_bitrate_bps, 1'000'000u);
+
+    // The spacing doubles: a queue is building up.  Nothing was lost, so
+    // only the delay trend can see this.
+    ByteBuffer cc2 = make_transport_cc(1010, 10, spacing_series(10, 32));
+    engine.feed_media_inbound(cc2.data(), cc2.size());
+    engine.tick();
+
+    EXPECT_EQ(engine.bwe()->estimate().target_bitrate_bps, 500'000u)
+        << "the transport-cc arrival series must be able to move the "
+           "estimate on its own (ADR-018 Decision 4)";
+    EXPECT_EQ(engine.stats().bwe_feedback_samples, 2u);
+}
+
 } // namespace

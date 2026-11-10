@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Number | 018 |
-| Status | **Proposed** |
+| Status | **Accepted (landed)** |
 | Date | 2026-11-09 |
 | Phase | v1.2.0 (M1 — the feedback ground) |
 | Bound to | v1.2.0 |
@@ -431,16 +431,36 @@ aggregation lives in `net_feedback`.
 
 ## Status
 
-**Proposed.** To be accepted when M1's parsing and aggregation land and the
-policy's table-driven test (peer supports transport-cc → `kTransportCc`; peer
-does not → `kLossRtt`; both paths feed the same `IBwe`) passes.
+**Accepted (landed).** M1's parsing and aggregation have landed, and so
+has the policy's table-driven test (peer supports transport-cc →
+`kTransportCc`; peer does not → `kLossRtt`; both paths feed the same
+`IBwe`).
 
-The transport-cc **parsing** half of M1 has landed with this ADR: the
-corrections above are implemented in `src/modules/rtp/src/parser.cpp` and
-covered by `src/modules/rtp/tests/test_transport_cc.cpp` (15 cases, one per
-wire-format shape the draft defines, plus the truncation and type-error
-paths). What is still missing for acceptance is the *aggregation* half
-(F2's `net_feedback` module) and the policy's table-driven test.
+What landed, in order:
 
-On acceptance this ADR's **Status** becomes **Accepted (landed)** and
+* The transport-cc **parsing** half of M1: the corrections above are
+  implemented in `src/modules/rtp/src/parser.cpp` and covered by
+  `src/modules/rtp/tests/test_transport_cc.cpp` (15 cases, one per
+  wire-format shape the draft defines, plus the truncation and type-error
+  paths).
+* The **aggregation** half (F2's `net_feedback` module): the inbound RTCP
+  compound datagram is demultiplexed, the receiver-side signals are
+  collected behind the `plugins::INetFeedback` seam, and the engine hands
+  the aggregated snapshot to `IBwe::on_feedback()` once per feedback
+  report — `src/modules/net_feedback/tests/test_net_feedback.cpp`.
+* The **policy** (F5/F7): `plugins::NetFeedbackPolicy`
+  (`kAuto` / `kLossRtt` / `kRequireTransportCc`) plus
+  `plugins::NetFeedbackConfig`, selected by
+  `EngineConfig::net_feedback_signal`, driven by the negotiated
+  `a=rtcp-fb` set. The table-driven test covers the negotiation
+  resolution, the stale-signal fallback and the explicit override.
+* Decision 4's **delay trend**: the transport-cc arrival series is turned
+  into an inter-arrival-spacing trend inside the estimator
+  (`src/modules/bwe/src/arrival_trend.hpp`), so a rising spacing —
+  congestion before it becomes loss — drives the same multiplicative
+  decrease a loss event does. Covered by
+  `src/modules/bwe/tests/test_bwe.cpp` and an end-to-end case in
+  `tests/test_engine_net_feedback.cpp`.
+
+This ADR's **Status** is therefore **Accepted (landed)**, and
 `docs/adr/README.md` lists it in the current-ADR table.

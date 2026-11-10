@@ -1,6 +1,6 @@
 ﻿/**
  * @file src/raw_udp/tests/test_raw_udp_arq.cpp
- * @brief Slice-6 ARQ skeleton loopback test 鈥?100 Hz sim + p50/p99/p999.
+ * @brief Slice-6 ARQ skeleton loopback test — 100 Hz sim + p50/p99/p999.
  *
  * This test exists to prove the ArqRawUdp skeleton is wired end-to-end.
  * It is NOT a benchmark:
@@ -16,7 +16,7 @@
  *
  * Coverage:
  *   - Open / close lifecycle
- *   - 100 Hz 脳 1000 packets simulated loopback, latency histogram
+ *   - 100 Hz × 1000 packets simulated loopback, latency histogram
  *   - Stats counters reflect the test workload
  *   - on_recv() callback fires for every injected packet
  *   - Send-before-open returns kErrNotReady
@@ -53,7 +53,7 @@ using nimrtc::plugins::BufferView;
 nimrtc::raw_udp::RawUdpConfig default_cfg();
 
 // ---------------------------------------------------------------------------
-// Bridge 鈥?nimrtc::raw_udp::ArqRawUdpFactory produces an nimrtc::raw_udp::IRawUdpDatagram. The test needs
+// Bridge — nimrtc::raw_udp::ArqRawUdpFactory produces an nimrtc::raw_udp::IRawUdpDatagram. The test needs
 // to reach the concrete ArqRawUdp for the test-only hooks. The hook
 // factory's id is "arq" and the skeleton produces ArqRawUdp; we rely
 // on that 1:1 mapping (asserted via dynamic_cast).
@@ -102,7 +102,7 @@ nimrtc::raw_udp::RawUdpConfig default_cfg() {
 }
 
 // =========================================================================
-// Test 1: lifecycle 鈥?open, double-open idempotent, close, re-open.
+// Test 1: lifecycle — open, double-open idempotent, close, re-open.
 // =========================================================================
 TEST(ArqRawUdpLifecycle, OpenCloseCycle) {
     auto h = ArqTestHandle::make();
@@ -155,7 +155,7 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
             auto payload = make_payload(i);
             ASSERT_EQ(datagram->send({}, payload), nimrtc::plugins::kOk);
 
-            // Simulate "loopback" 鈥?in skeleton-land this is what a real
+            // Simulate "loopback" — in skeleton-land this is what a real
             // UDP socket's recv path would do.
             auto recv_at = steady_clock::now();
             nimrtc::raw_udp::arq_test_inject_inbound(h.concrete, payload);

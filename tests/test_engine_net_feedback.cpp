@@ -1,6 +1,6 @@
 /**
  * @file tests/test_engine_net_feedback.cpp
- * @brief v1.2.0 M1 (F1 / F6) 鈥?the engine's side of the bandwidth loop.
+ * @brief v1.2.0 M1 (F1 / F6) — the engine's side of the bandwidth loop.
  *
  * The collector module has its own tests
  * (`src/modules/net_feedback/tests/test_net_feedback.cpp`), and the
@@ -14,10 +14,10 @@
  *
  * This suite therefore exercises the production path end to end:
  *
- *   inbound RTCP 鈫?engine demux 鈫?collector 鈫?snapshot 鈫?IBwe::on_feedback()
+ *   inbound RTCP → engine demux → collector → snapshot → IBwe::on_feedback()
  *
  * The packets are pushed through `feed_media_inbound()`, the same
- * RTCP-demux 鈫?dispatch tail `on_transport_recv()` uses, so a test
+ * RTCP-demux → dispatch tail `on_transport_recv()` uses, so a test
  * cannot pass against a parallel implementation that has drifted from
  * the production one.
  *
@@ -72,7 +72,7 @@ void put_be16(ByteBuffer& out, std::uint16_t v) {
 
 void put_u8(ByteBuffer& out, std::uint8_t v) { out.push_back(v); }
 
-/// One report block of a Receiver Report (RFC 3550 搂6.4.3).
+/// One report block of a Receiver Report (RFC 3550 §6.4.3).
 struct ReportBlockFields {
     std::uint32_t ssrc = 0;
     std::uint8_t  fraction_lost = 0;
@@ -129,7 +129,7 @@ ByteBuffer make_remb(std::uint64_t bitrate_bps) {
     return out;
 }
 
-/// Build a Sender Report (PT 200) 鈥?the timeline's anchor, *not* a
+/// Build a Sender Report (PT 200) — the timeline's anchor, *not* a
 /// receiver-side network signal.
 ByteBuffer make_sr(std::uint32_t ssrc, std::uint32_t ntp_mid32,
                    std::uint32_t rtp_ts) {
@@ -175,7 +175,7 @@ protected:
 };
 
 // ---------------------------------------------------------------------------
-// E1 鈥?the seam resolves
+// E1 — the seam resolves
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineNetFeedback, TheCollectorIsCreatedAtOpen) {
@@ -189,7 +189,7 @@ TEST_F(EngineNetFeedback, TheCollectorIsCreatedAtOpen) {
 }
 
 // ---------------------------------------------------------------------------
-// E2 鈥?the routing table reaches the collector
+// E2 — the routing table reaches the collector
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineNetFeedback, AnInboundReceiverReportReachesTheCollector) {
@@ -212,7 +212,7 @@ TEST_F(EngineNetFeedback, AnInboundReceiverReportReachesTheCollector) {
 }
 
 // ---------------------------------------------------------------------------
-// E3 鈥?the bandwidth estimate moves (F6)
+// E3 — the bandwidth estimate moves (F6)
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineNetFeedback, TheBandwidthEstimateMovesUnderLoss) {
@@ -239,7 +239,7 @@ TEST_F(EngineNetFeedback, TheBandwidthEstimateMovesUnderLoss) {
 }
 
 // ---------------------------------------------------------------------------
-// E4 鈥?the routing table: a Sender Report is not a network signal
+// E4 — the routing table: a Sender Report is not a network signal
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineNetFeedback, ASenderReportDoesNotReachTheCollector) {
@@ -258,7 +258,7 @@ TEST_F(EngineNetFeedback, ASenderReportDoesNotReachTheCollector) {
 }
 
 // ---------------------------------------------------------------------------
-// E5 鈥?REMB reaches the collector
+// E5 — REMB reaches the collector
 // ---------------------------------------------------------------------------
 
 TEST_F(EngineNetFeedback, ARembReachesTheCollector) {

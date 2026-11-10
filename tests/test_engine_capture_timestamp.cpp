@@ -1,10 +1,10 @@
 /**
  * @file tests/test_engine_capture_timestamp.cpp
- * @brief v1.2.0 (audio pipeline, WP-9) 鈥?the cross-end capture timestamp of
+ * @brief v1.2.0 (audio pipeline, WP-9) — the cross-end capture timestamp of
  *        an inbound audio frame (spec B-17).
  *
  * The capture timestamp answers the question "when did the *peer*
- * capture this frame?" 鈥?not "when did we play it out?".  It is the
+ * capture this frame?" — not "when did we play it out?".  It is the
  * audio half of the A/V-sync contract (C-4): a host that has to line a
  * voice frame up with a video frame needs both on the *peer's*
  * timeline, and the playout clock is not that timeline.
@@ -14,7 +14,7 @@
  *
  *   * **Never fake it.**  Without a usable Sender Report the value is
  *     0, and 0 means "not reconstructible".  It is never derived from
- *     the local playout clock 鈥?that would silently mix two different
+ *     the local playout clock — that would silently mix two different
  *     clocks (the peer's wall clock and ours) and produce a number that
  *     looks plausible and is wrong.
  *
@@ -131,7 +131,7 @@ protected:
 
     /** Build the peer's Sender Report: the anchor of the cross-end
      *  timeline (ADR-017) and the source of the receiver report's LSR
-     *  field (RFC 3550 搂6.4.1). */
+     *  field (RFC 3550 §6.4.1). */
     static nimrtc::core::ByteBuffer make_sender_report(std::uint32_t ssrc,
                                                        std::uint64_t ntp_timestamp,
                                                        std::uint32_t rtp_timestamp) {
@@ -194,7 +194,7 @@ TEST_F(EngineCaptureTimestamp, CaptureTimeIsZeroWithoutASenderReport) {
            "callback";
     EXPECT_EQ(last_capture_us, 0)
         << "without a Sender Report the capture instant is not "
-           "reconstructible, and 0 means exactly that 鈥?it must never be "
+           "reconstructible, and 0 means exactly that — it must never be "
            "faked from the local playout clock (spec O-9)";
 
     engine.close();

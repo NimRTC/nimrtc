@@ -66,6 +66,16 @@ constexpr std::uint8_t kMaxDtmfEventCode = 16;
  *  (`EngineConfig::dtmf_payload_type`). */
 constexpr std::uint8_t kDefaultDtmfPayloadType = 126;
 
+/** The size of the SRTP authentication tag (RFC 3711 §3.5 — the default
+ *  AES_CM_128_HMAC_SHA1_80 profile appends a 10-byte tag).
+ *
+ *  Used as the capacity hint when acquiring an outbound packet buffer
+ *  from the scheduler's pool, so the protected packet fits without a
+ *  reallocation.  It mirrors the same constant in `engine_media.cpp`:
+ *  the two paths protect different packets but with the same profile,
+ *  so the tag size is the same. */
+constexpr std::size_t kSrtpAuthTagBytes = 10;
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -243,14 +253,14 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
 // The receive path
 // ---------------------------------------------------------------------------
 
-void NimRTCEngine::handle_dtmf_payload(const rtp::PacketView& pv) noexcept {
+void NimRTCEngine::handle_dtmf_payload(std::uint32_t ssrc,
+                                       core::ByteSpan payload) noexcept {
     // --- Decode --------------------------------------------------------
     plugins::DtmfEvent event;
-    const std::string_view payload(
-        reinterpret_cast<const char*>(pv.payload.data()),
-        pv.payload.size());
+    const std::string_view payload_view(
+        reinterpret_cast<const char*>(payload.data()), payload.size());
 
-    if (!dtmf_codec_ || !dtmf_codec_->decode(payload, event)) {
+    if (!dtmf_codec_ || !dtmf_codec_->decode(payload_view, event)) {
         // A malformed telephone-event payload is a peer bug or an
         // attack.  It is counted and dropped — never guessed at.
         ++impl_->dtmf_packets_malformed;
@@ -268,7 +278,7 @@ void NimRTCEngine::handle_dtmf_payload(const rtp::PacketView& pv) noexcept {
     //
     // The accumulator is per-SSRC, so two telephone-event streams do
     // not mix their durations.
-    auto& acc = impl_->dtmf_rx_by_ssrc[pv.ssrc];
+    auto& acc = impl_->dtmf_rx_by_ssrc[ssrc];
 
     if (!acc.active) {
         // A new event begins here (RFC 4733 §2.2.2: the marker bit

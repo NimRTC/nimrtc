@@ -255,6 +255,33 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // loopback harness — is unaffected.
     bool route_to_video = false;
     bool route_to_audio = false;
+
+    // ---- The telephone-event branch (v1.2.0, D1 / D4) -----------------
+    //
+    // RFC 4733 payloads are *not* audio, so they must never reach the
+    // audio pipeline — and they must not be counted as an unknown
+    // payload type either, because the peer declared them in its
+    // description and we agreed to them.
+    //
+    // Decision D4 fixes the two counting cases:
+    //
+    //   - DTMF was negotiated (`negotiated_dtmf_pt_ != 0`): the packet
+    //     is decoded and reported to the host.  It is *not* an unknown
+    //     payload type.
+    //   - DTMF was not negotiated: the packet falls through to the
+    //     unknown-payload-type path below and is counted there, exactly
+    //     as it was before DTMF existed.
+    //
+    // The branch sits *before* the routing table check on purpose: the
+    // telephone-event payload type is deliberately not in the audio
+    // routing table (it is not an audio codec), so a table-driven check
+    // would drop it as unknown.
+    if (negotiated_dtmf_pt_ != 0 &&
+        pv.payload_type == negotiated_dtmf_pt_) {
+        handle_dtmf_payload(pv.ssrc, pv.payload);
+        return;
+    }
+
     if (impl_->pt_routing_active) {
         route_to_audio = impl_->negotiated_audio_pt != 0 &&
                          pv.payload_type == impl_->negotiated_audio_pt;

@@ -1047,6 +1047,37 @@ struct NimRTCEngine::Impl {
     /** The number of completed DTMF events reported to the host. */
     std::uint64_t dtmf_events_delivered = 0;
 
+    /** The number of outbound telephone-event packets the engine sent. */
+    std::uint64_t dtmf_packets_sent = 0;
+
+    // ---- DTMF transmit state (RFC 4733 §2.5) -------------------------
+    //
+    // RFC 4733 §2.5.1.2 describes the *sender*: while the key is held
+    // the event packet is repeated, each repeat carrying a larger
+    // duration, and the packet that closes the event carries the
+    // end-of-event bit.  A single packet would therefore tell the peer
+    // nothing about how long the key was held — and a peer that
+    // expects the repetition treats a lone packet as a truncated
+    // event.
+    //
+    // The engine therefore *queues* the event and lets the tick loop
+    // emit the repeats at the RFC's interval.  The queue is a deque
+    // because a host may press the next key before the previous event
+    // has finished, and the events must not overtake each other.
+    struct DtmfTxEvent {
+        /** The RFC 4733 event code of the key press. */
+        std::uint8_t  code = 0;
+        /** The total duration of the key press, in milliseconds. */
+        std::uint16_t duration_ms = 0;
+        /** How many packets of this event have been sent already. */
+        int            packets_sent = 0;
+        /** The instant the event was queued. */
+        core::SteadyClock::time_point start{};
+        /** The instant the next packet may be sent. */
+        core::SteadyClock::time_point next_send{};
+    };
+    std::deque<DtmfTxEvent> dtmf_tx_queue;
+
     // ---- WP-8: the inbound-audio bookkeeping for the RTCP receiver
     //      report (spec B-12). ----
     // <<WP8_MEMBERS>>

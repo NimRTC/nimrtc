@@ -1388,3 +1388,35 @@ if(NIMRTC_HW_HAVE_NVENC)
     nimrtc_apply_options(test_nvenc_abi_probe LENIENT)
     # Not registered with ctest — run manually as: cmake --build --target test_nvenc_abi_probe && build/tests/Debug/test_nvenc_abi_probe.exe
 endif()
+# ---------------------------------------------------------------------------
+# v1.2.0 (video plan F8) - the per-stream bandwidth share rule.
+#
+# The rule is an engine-private, header-only pure function
+# (`src/engine/src/bandwidth_allocation.hpp`).  It is unit tested
+# directly - no engine, no transport, no clock - because that is the
+# shape the rule has: a pure function of (estimate, demand list).
+#
+# The test therefore compiles the engine's *private* header directory
+# into its include path.  That directory is not installed and is not on
+# the public surface (constraint L4); adding it here does not make it
+# public, it only lets the unit test see the function.
+# ---------------------------------------------------------------------------
+add_executable(test_bandwidth_allocation test_bandwidth_allocation.cpp)
+target_link_libraries(test_bandwidth_allocation PRIVATE
+    nimrtc::core
+    GTest::gtest_main)
+target_include_directories(test_bandwidth_allocation PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_bandwidth_allocation PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_bandwidth_allocation LENIENT)
+add_test(NAME test_bandwidth_allocation
+    COMMAND $<TARGET_FILE:test_bandwidth_allocation>)
+set_tests_properties(test_bandwidth_allocation PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_bandwidth_allocation
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()

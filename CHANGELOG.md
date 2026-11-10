@@ -17,6 +17,20 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The per-stream share rule of the session bandwidth budget (video plan
+  F8).** `IBwe::estimate()` returns one number for the whole session, so
+  the estimate has to be split before it reaches an encoder.  The rule:
+  the *reserved* streams (the audio) take their clamped share of the
+  estimate first and keep a hard floor; the *elastic* streams (the video)
+  share what is left in proportion to their weight, split with the
+  largest-remainder (Hamilton) method so the pool is handed out exactly
+  and deterministically.  A reserved stream that claims more than the
+  estimate holds puts the session in *deficit*, which is reported rather
+  than hidden.  The rule is one engine-private, header-only pure function
+  (`src/engine/src/bandwidth_allocation.hpp`); the engine's audio bitrate
+  path now uses it instead of its own arithmetic — one rule, not two — and
+  the video's elastic share arrives with the rate controller (B2) on the
+  same terms.  Covered by 16 cases in `tests/test_bandwidth_allocation.cpp`.
 - **Two plugin seams for the audio pipeline (audio pipeline WP-1).** The
   receive path needs a codec-side decoder (one RTP payload in, PCM frames
   out) and a pipeline-side receiver (jitter buffer, concealment, FEC

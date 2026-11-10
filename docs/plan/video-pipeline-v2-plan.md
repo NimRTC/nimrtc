@@ -90,7 +90,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 | **F5** | **Signal-selection policy (D1)**: negotiate whether the peer supports `transport-cc` (via `a=rtcp-fb` in SDP) and select the driving signal — transport-cc when available, loss/RTT + REMB otherwise. Policy is a plug-in-configurable choice with an automatic default. | `P` + `M` | Table-driven test: peer supports transport-cc → policy reports `kTransportCc`; peer does not → `kLossRtt`; both paths feed the same `IBwe`. |
 | **F6** | Wire the loop: ICE/DTLS transport → RTCP demux → `net_feedback` → `bwe_->on_feedback()` → `scheduler_->on_bwe_update()`. | `E` | End-to-end loopback test: a lossy channel produces a `target_bitrate_bps` that **changes** over time (currently it stays at the initial value — that is the bug this track closes). |
 | **F7** | REMB parsing + trust policy: the existing REMB-override logic in `GoogCcBwe` (`kRembTrustFactor = 0.8`) is kept, but REMB becomes one *input* rather than the only receiver-side opinion. | `M` | Regression test keeps the current REMB-override semantics. |
-| **F8** | BWE re-targeting for a *single* video stream vs. the whole session: the current `IBwe` returns one estimate for the session. Define how per-stream shares are derived (see B2). | `P`/`M` | Documented rule; unit test on the share computation. |
+| **F8** | BWE re-targeting for a *single* video stream vs. the whole session: the current `IBwe` returns one estimate for the session. Define how per-stream shares are derived (see B2). | `E` (engine-private, header-only) | The rule is documented (`src/engine/src/bandwidth_allocation.hpp`) and unit tested — 16 cases in `tests/test_bandwidth_allocation.cpp`. The engine's audio path uses it, so there is one rule and not two. |
 
 ## Track P — Pacing, queueing and back-pressure
 
@@ -413,16 +413,21 @@ OD-1 posture, ADR-019 covers OD-3's ladder modes and the profile table).
 | 3a. **F1 + F2 + F3 + F4 (producer side) + F6** | **Landed.** The inbound RTCP compound datagram is now demultiplexed on the receive path (`rtp::demux_rtcp()`, RFC 3550 §6.1), the receiver-side network signals (Receiver Report, REMB, transport-cc) reach a new collector module (`src/modules/net_feedback/`) through the `plugins::INetFeedback` seam, and the engine hands the aggregated snapshot to `IBwe::on_feedback()` once per feedback report. The transport-cc parser now has a production caller. `plugins::BweFeedback` grew the `signal_source` discriminator and the transport-cc fields. Covered by 10 cases in `src/modules/net_feedback/tests/test_net_feedback.cpp`. |
 | 3b. **F7** (the REMB trust policy) | **Open.** The collector's source precedence is fixed and documented (transport-cc → loss/RTT → REMB); the *configurable* policy (which signal the negotiated `a=rtcp-fb` set allows) still has to move into the engine. |
 
-**Next executable step** (no code change required):
+| 3e. **F8** (the per-stream share rule) | **Landed.** The rule is now one documented, unit-tested function: `src/engine/src/bandwidth_allocation.hpp` (engine-private, header-only — it is a pure function of (estimate, demand list), so it needs no state, no clock and no translation unit). The session's estimate is split between the streams: the **reserved** ones first (the audio — a clamped share with a *hard* floor), the **elastic** ones share what is left (the video), split by weight with the largest-remainder (Hamilton) method so the pool is handed out exactly and deterministically. A reserved stream that claims more than the estimate holds puts the session in **deficit**, which is reported rather than hidden. The engine's audio path now uses this rule instead of its own arithmetic (one rule, not two), so the video's elastic share arrives with B2 on the same terms — the rate controller is handed a per-stream *budget*, not the raw estimate. Covered by 16 cases in `tests/test_bandwidth_allocation.cpp`. |
 
-1. Continue **v1.2.0 M1** with F7 — the REMB trust policy becomes
-   configurable, driven by the negotiated `a=rtcp-fb` set, and the
-   collector's fixed precedence gives way to the negotiated one.
-2. F5 (the loop's *production* verification: a lossy channel must move
+**Next executable step**:
+
+1. **Track P** (pacing) — the scheduler still has no time-based rate
+   shaping, so a correct estimate does not yet reach the wire as a
+   paced stream.  P1 (the token bucket) and P2 (the per-bucket
+   integration) are the next two items; B2 (the rate controller) is
+   downstream of P3, because the controller needs the pacer's rate view
+   to keep the two from drifting apart (B10).
+2. **F5** (the loop's *production* verification: a lossy channel must move
    `target_bitrate_bps` over time) — the loop is closed in code, but the
    end-to-end proof that the estimate actually moves is still missing.
 
-Everything else in this plan is downstream of M1.
+Everything else in this plan is downstream of M1/M2/M3.
 
 ---
 

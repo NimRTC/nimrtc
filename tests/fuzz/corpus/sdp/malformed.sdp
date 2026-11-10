@@ -1,0 +1,12 @@
+v=0
+o=-
+s=
+t=0 0
+a=this line has no field separator
+a=
+m=video
+c=IN IP4
+a=rtpmap:96 H264/90000
+a=rtpmap:97 VP8/90000
+a=rtpmap:98 VP9/90000
+a=rtpmap:99 bogus

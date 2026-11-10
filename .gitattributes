@@ -27,6 +27,17 @@
 *.rst   text eol=lf
 *.txt   text eol=lf
 
+# Fuzz corpus seeds
+#
+# The seeds are checked in as text (see the fuzz corpus section in
+# `.gitignore`): binary blobs never enter the repository.  `.hex` is the
+# hex-text seed format, `.sdp` the SDP seeds.  Both are LF-normalised
+# so the checked-in bytes are identical on every platform -- the
+# replay driver hashes nothing, but a CRLF round-trip would still make
+# the diff noisy.
+*.hex   text eol=lf
+*.sdp   text eol=lf
+
 # Configuration
 *.json  text eol=lf
 *.xml   text eol=lf

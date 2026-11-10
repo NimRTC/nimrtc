@@ -608,6 +608,113 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Linux fuzzing: libFuzzer over the untrusted-input parsers.
+  #
+  # Three things run here:
+  #
+  #   1. The corpus replay driver (`test_fuzz_replay`) — the same
+  #      driver that runs in the ordinary test suite.  It replays every
+  #      committed seed plus a deterministic mutation set.  This is
+  #      the regression floor: a crash libFuzzer finds is committed as
+  #      a seed, and the seed keeps being replayed.
+  #
+  #   2. A short libFuzzer run per target (60 s each, under
+  #      ASan+UBSan).  The runs are deliberately short: CI has to be
+  #      affordable, and a 60 s run over the committed corpus already
+  #      reaches the interesting states that a random byte flip never
+  #      would.
+  #
+  #   3. The crash artefacts are uploaded, so a finding can be
+  #      minimised and committed as a seed.
+  #
+  # Clang is required for `-fsanitize=fuzzer`; the leg installs it
+  # explicitly rather than relying on the runner image.
+  # ---------------------------------------------------------------------------
+  linux-fuzz:
+    name: linux-fuzz / clang
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-fuzz
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install clang + ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build python3
+          clang --version
+
+      - name: Install CMake
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (clang + fuzzing + sanitizers)
+        run: |
+          cmake -S . -B build/fuzz \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DNIMRTC_FUZZING=ON \
+            -DNIMRTC_ASAN=ON \
+            -DNIMRTC_UBSAN=ON \
+            -DNIMRTC_BUILD_TESTS=ON \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_INSTALL=OFF
+
+      - name: Build
+        run: cmake --build build/fuzz -j 2
+
+      - name: Materialise the fuzz corpus
+        # The seeds are checked in as *text* (`.hex`), never as binary
+        # blobs: binary files review badly, merge badly, and are
+        # reproducible from the generator script anyway.  libFuzzer
+        # needs raw bytes, so the hex seeds are decoded into a build
+        # directory here.
+        run: python3 tests/fuzz/tools/make_corpus.py --materialize build/fuzz-corpus
+
+      - name: Replay the committed corpus
+        # The replay driver must pass before the fuzzing runs: a seed
+        # that already crashes means the corpus was committed without
+        # fixing the bug it documents.
+        run: ctest --test-dir build/fuzz -R test_fuzz_replay --output-on-failure
+
+      - name: Run libFuzzer (60 s per target)
+        # `-runs=0` means "run until the time limit expires"; the
+        # time limit is what keeps CI affordable.  A crash makes
+        # libFuzzer exit non-zero, which fails the step.
+        run: |
+          set -e
+          mkdir -p build/fuzz-artifacts
+          for target in sdp rtp video_payload; do
+            echo "::group::fuzz_${target}"
+            ASAN_OPTIONS=abort_on_error=1 \
+            UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            ./build/fuzz/tests/fuzz/fuzz_${target} \
+              -max_total_time=60 \
+              -max_len=4096 \
+              -artifact_prefix=build/fuzz-artifacts/ \
+              "build/fuzz-corpus/${target}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload fuzzing artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: build/fuzz-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
   # Linux aarch64: GCC on a native arm64 runner
   #
   # ROOT CAUSE (corrected 2026-10-28): the "ARM64 runner pool is

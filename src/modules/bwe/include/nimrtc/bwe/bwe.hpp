@@ -16,6 +16,13 @@
  *   - REMB higher than local -> trust receiver (sanity-clamped).
  *   - EMA smoothing to avoid oscillation.
  *
+ * v1.2.0 M1/M2 (ADR-018): when the driving signal is transport-cc, the
+ * arrival series is turned into an inter-arrival-spacing trend, and a
+ * rising spacing triggers the same multiplicative decrease a loss event
+ * triggers.  That trend is the congestion signal loss-based feedback
+ * cannot produce, and without it the "prefer transport-cc" policy would
+ * be decorative.
+ *
  * P3: replaced by Goog-CC compatible mainline as the default (see §6 /
  * §13 P3 milestone). BBR stays internal experiment.
  *

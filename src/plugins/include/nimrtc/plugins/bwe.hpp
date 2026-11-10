@@ -130,7 +130,13 @@ struct NIMRTC_API_STABLE BweFeedback {
 
     /** The per-packet arrival deltas of a transport-cc feedback, in
      *  milliseconds.  Empty when the sample does not come from
-     *  transport-cc. */
+     *  transport-cc.
+     *
+     *  This is the **delay signal**: the growth of the inter-arrival
+     *  spacing says a queue is building up in front of the bottleneck,
+     *  which is congestion before it becomes loss (ADR-018 Decision 4).
+     *  An estimator that ignores this field treats transport-cc as a
+     *  loss counter and loses the reason the signal is preferred. */
     std::vector<double> arrival_deltas_ms;
 
     /** The size of each acknowledged packet, in bytes, when the sender's
@@ -169,6 +175,10 @@ struct NIMRTC_API_STABLE BweEstimate {
         AIMDDecrease, // multiplicative decrease on loss
         REMBOverride, // receiver estimate higher than ours
         RttIncrease,  // RTT spike suggests congestion
+        /** The transport-cc arrival series says the queue is growing
+         *  (ADR-018 Decision 4): the inter-arrival spacing rose beyond
+         *  its baseline, which is congestion before it becomes loss. */
+        TransportCcDelay,
     };
     Reason reason = Reason::Initial;
 };

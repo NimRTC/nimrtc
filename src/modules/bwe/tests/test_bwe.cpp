@@ -16,6 +16,8 @@
 
 #include <chrono>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <nimrtc/bwe/bwe.hpp>
 
@@ -60,6 +62,32 @@ Feedback with_loss(double rate,
     f.packets_received = packets_received;
     f.packets_lost = packets_lost;
     return f;
+}
+
+// Build a transport-cc feedback sample carrying an arrival series.
+Feedback transport_cc(core::TimePoint t, std::vector<double> deltas_ms) {
+    Feedback f = no_loss(t);
+    f.signal_source = plugins::NetFeedbackSource::kTransportCc;
+    f.arrival_deltas_ms = std::move(deltas_ms);
+    return f;
+}
+
+// A steady arrival series: `count` packets, `spacing_ms` apart.
+//
+// The first delta of a transport-cc feedback is measured from the
+// previous feedback's reference time, so it straddles the gap between
+// two feedback packets and is not a packet spacing.  The tests make that
+// visible by giving it a deliberately huge value: a series whose first
+// delta is huge must not look like a queue.
+std::vector<double> steady_series(std::size_t count, double spacing_ms,
+                                  double first_delta_ms = 100.0) {
+    std::vector<double> deltas;
+    deltas.reserve(count + 1);
+    deltas.push_back(first_delta_ms);
+    for (std::size_t i = 0; i < count; ++i) {
+        deltas.push_back(spacing_ms);
+    }
+    return deltas;
 }
 
 } // namespace
@@ -444,4 +472,150 @@ TEST(GoogCcBweTest, RembMayRaiseButNeverUndoesATransportCcSample) {
     remb_high.signal_source = plugins::NetFeedbackSource::kRemb;
     bwe.on_feedback(remb_high);
     EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'600'000u);
+}
+
+// -----------------------------------------------------------------------------
+// The transport-cc delay trend (ADR-018 Decision 4)
+// -----------------------------------------------------------------------------
+//
+// The transport-cc path is preferred over the loss/RTT path because it
+// carries the delay trend: the growth of the inter-arrival spacing says
+// a queue is building up in front of the bottleneck, which is congestion
+// *before* the packets start being dropped.  Without the trend, the
+// "transport-cc preferred" policy would buy nothing that a fraction-lost
+// counter does not already give.
+
+namespace {
+
+// A deterministic AIMD configuration: no smoothing lag, an exact halving.
+Config delay_trend_config() {
+    Config c;
+    c.initial_bitrate_bps = 1'000'000;
+    c.max_bitrate_bps     = 5'000'000;
+    c.decrease_factor     = 0.5;
+    c.smoothing_alpha     = 1.0;
+    c.change_interval     = core::Milliseconds{200};
+    return c;
+}
+
+}  // namespace
+
+TEST(BweTest, TheTransportCcDelayTrendBacksOffTheEstimate) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    // A steady 4 ms spacing: this is the baseline, the operating point
+    // with no queue in front of the bottleneck.
+    bwe.on_feedback(transport_cc(t0, steady_series(10, 4.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+
+    // The spacing doubles: a queue is building up.  No packet was lost,
+    // so the loss path has nothing to say about it — only the delay
+    // trend does.
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 8.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+    EXPECT_EQ(bwe.estimate().reason, Estimate::Reason::TransportCcDelay);
+}
+
+TEST(BweTest, TheDelayTrendIgnoresASlowDrift) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    bwe.on_feedback(transport_cc(t0, steady_series(10, 4.0)));
+
+    // 4.0 ms -> 4.4 ms: the spacing moves, but not enough to be a queue.
+    // A rate-control-driven drift looks exactly like this, and it must
+    // not be mistaken for congestion.
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 4.4)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+    EXPECT_EQ(bwe.estimate().reason, Estimate::Reason::Initial);
+}
+
+TEST(BweTest, TheDelayTrendNeedsAWindowOfPackets) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    // Three packets are not a window: ADR-018 Decision 4 forbids driving
+    // the estimate from a single transport-cc sample.
+    bwe.on_feedback(transport_cc(t0, steady_series(3, 4.0)));
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(3, 40.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+}
+
+TEST(BweTest, TheDelayTrendIgnoresTheInterFeedbackGap) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    // The first delta straddles the gap between two feedback packets; it
+    // is not a packet spacing and must not move the baseline.
+    bwe.on_feedback(transport_cc(t0, steady_series(10, 4.0, 250.0)));
+
+    // A series that is only slightly slower is still not a queue.
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 4.4, 250.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+}
+
+TEST(BweTest, AReorderedPacketIsNotAQueue) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    // A negative delta means the packet arrived *before* its predecessor:
+    // reordering, not congestion.  This is exactly what transport-cc
+    // survives and a fraction-lost counter does not.
+    std::vector<double> reordered = steady_series(10, 4.0);
+    reordered[5] = -2.0;
+    bwe.on_feedback(transport_cc(t0, std::move(reordered)));
+
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 8.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+    EXPECT_EQ(bwe.estimate().reason, Estimate::Reason::TransportCcDelay);
+}
+
+TEST(BweTest, OurOwnDecreaseDoesNotFeedTheDelayTrend) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    bwe.on_feedback(transport_cc(t0, steady_series(10, 4.0)));
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 8.0)));
+    ASSERT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+
+    // The sender now runs at half the rate, so *its* spacing doubled —
+    // that is our own doing, not congestion.  The estimate must not halve
+    // again (a decrease spiral).
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(100),
+                                 steady_series(10, 16.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 500'000u);
+}
+
+TEST(BweTest, TheLossRttPathDoesNotUseTheArrivalSeries) {
+    Bwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    // Only a transport-cc sample carries a delay signal; a loss/RTT
+    // sample with an arrival series attached must not move the estimate.
+    Feedback f = no_loss(t0);
+    f.arrival_deltas_ms = steady_series(10, 40.0);
+    bwe.on_feedback(f);
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+}
+
+TEST(GoogCcBweTest, TheTransportCcDelayTrendBacksOffTheGoogCcEstimate) {
+    GoogCcBwe bwe(delay_trend_config());
+    const auto t0 = core::SteadyClock::now();
+
+    bwe.on_feedback(transport_cc(t0, steady_series(10, 4.0)));
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 1'000'000u);
+
+    bwe.on_feedback(transport_cc(t0 + std::chrono::milliseconds(50),
+                                 steady_series(10, 8.0)));
+    // The Goog-CC front-end backs off by its delay factor (0.85), not by
+    // the loss factor.
+    EXPECT_EQ(bwe.estimate().target_bitrate_bps, 850'000u);
+    EXPECT_EQ(bwe.estimate().reason, Estimate::Reason::TransportCcDelay);
 }

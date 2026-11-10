@@ -16,6 +16,15 @@
  *   (after sanity check against min/max); ignored while a loss event is
  *   pending (receiver's estimate is stale during congestion).
  *
+ * - **transport-cc delay trend** (v1.2.0 M1, ADR-018 Decision 4): when
+ *   the driving signal is transport-cc, the arrival series is turned into
+ *   an inter-arrival-spacing trend (see `src/arrival_trend.hpp`).  A
+ *   growing spacing means a queue is building up in front of the
+ *   bottleneck — congestion *before* the packets start being dropped.
+ *   The trend triggers the same multiplicative decrease as a loss event.
+ *   It is the one signal that loss-based feedback cannot produce, and
+ *   without it the "transport-cc preferred" policy would be decorative.
+ *
  * - **Smoothing**: exponential moving average to avoid oscillation.
  *
  * @note P1 — simple AIMD. Goog-CC mainline lands in P3.
@@ -30,6 +39,8 @@
 #include <cstdio>
 
 #include <nimrtc/core/log.hpp>
+
+#include "arrival_trend.hpp"
 
 namespace nimrtc::bwe {
 
@@ -122,6 +133,31 @@ struct Bwe::Impl {
     // Time we entered decrease state
     std::optional<core::TimePoint> decrease_start_;
 
+    // The transport-cc delay trend (ADR-018 Decision 4).  Only the
+    // transport-cc path feeds it; the loss/RTT path has no arrival
+    // series to offer.
+    detail::ArrivalTrend arrival_trend_;
+
+    /// Apply a multiplicative decrease.
+    ///
+    /// The baseline of the arrival trend is dropped whenever the target
+    /// moves: the send spacing follows the target, so the baseline we
+    /// just compared against describes a different operating point now.
+    /// Keeping it would turn our own action into a congestion signal.
+    void decrease_to(std::uint32_t new_rate, core::TimePoint now,
+                     plugins::BweEstimate::Reason reason) {
+        new_rate = std::max(new_rate, config_.min_bitrate_bps);
+        new_rate = std::min(new_rate, config_.max_bitrate_bps);
+        if (new_rate == current_bps_) {
+            return;
+        }
+        current_bps_    = new_rate;
+        last_reason_    = reason;
+        decrease_start_ = now;
+        state_          = State::kDecrease;
+        arrival_trend_.invalidate();
+    }
+
     void on_feedback(plugins::BweFeedback feedback) {
         // ---- Loss event detection (P1#7 fix) --------------------------------
         // Edge-triggered: a "loss event" fires when the loss rate crosses the
@@ -139,11 +175,37 @@ struct Bwe::Impl {
             loss_event_pending_ = false;
         }
 
+        // ---- The transport-cc delay trend (ADR-018 Decision 4) --------------
+        //
+        // The arrival series is the one signal that loss-based feedback
+        // cannot produce: the growth of the inter-arrival spacing says a
+        // queue is building up in front of the bottleneck, which is
+        // congestion *before* the packets start being dropped.
+        //
+        // The trend is only read from a transport-cc sample: the loss/RTT
+        // path carries no arrival series, and a sample of another kind
+        // breaks the continuity of the observation, so the baseline is
+        // dropped (it describes an operating point we stopped watching).
+        bool delay_overuse = false;
+        if (feedback.signal_source == plugins::NetFeedbackSource::kTransportCc) {
+            const detail::ArrivalTrend::Sample sample =
+                arrival_trend_.update(feedback.arrival_deltas_ms);
+            delay_overuse = sample.overuse;
+            if (sample.overuse) {
+                bwe_debug("BWE: transport-cc delay trend: spacing %.2f ms "
+                         "vs baseline %.2f ms",
+                         sample.spacing_ms, sample.baseline_ms);
+            }
+        } else {
+            arrival_trend_.invalidate();
+        }
+
         // ---- REMB override (P1#7 fix: skip during loss events) ------------
         // REMB during an active loss event is suspect (the receiver's
         // estimate is also stale), so we ignore REMB while a decrease is
         // pending and let the loss-event path own the rate update.
-        if (feedback.remb_bps.has_value() && !loss_event_pending_) {
+        if (feedback.remb_bps.has_value() && !loss_event_pending_ &&
+            !delay_overuse) {
             std::uint32_t remb = *feedback.remb_bps;
             // Apply trust factor and clamp
             remb = static_cast<std::uint32_t>(remb * kRembTrustFactor);
@@ -154,6 +216,10 @@ struct Bwe::Impl {
             if (remb > smoothed_bps_) {
                 current_bps_  = remb;
                 last_reason_  = plugins::BweEstimate::Reason::REMBOverride;
+                // The target jumped: the send spacing follows it, so the
+                // arrival-trend baseline describes a different operating
+                // point now.
+                arrival_trend_.invalidate();
                 bwe_debug("BWE: REMB override: %u bps", remb);
             }
         }
@@ -161,16 +227,14 @@ struct Bwe::Impl {
         // ---- Apply multiplicative decrease on loss event -------------------
         if (loss_event_pending_) {
             // Compute new rate and clamp.
-            std::uint32_t new_rate = static_cast<std::uint32_t>(
+            const std::uint32_t new_rate = static_cast<std::uint32_t>(
                 current_bps_ * config_.decrease_factor);
-            new_rate = std::max(new_rate, config_.min_bitrate_bps);
-            new_rate = std::min(new_rate, config_.max_bitrate_bps);
+            const std::uint32_t before = current_bps_;
 
-            if (new_rate != current_bps_) {
-                current_bps_    = new_rate;
-                last_reason_    = plugins::BweEstimate::Reason::AIMDDecrease;
-                decrease_start_ = feedback.timestamp;
-                state_          = State::kDecrease;
+            decrease_to(new_rate, feedback.timestamp,
+                        plugins::BweEstimate::Reason::AIMDDecrease);
+
+            if (current_bps_ != before) {
                 bwe_debug("BWE: loss event (rate %.1f%%, was %.1f%%), "
                          "decreased to %u bps",
                          feedback.loss_rate * 100.0,
@@ -179,6 +243,25 @@ struct Bwe::Impl {
             // One decrease per loss event — clear the latch so a second
             // feedback at the same loss rate does not decrease again.
             loss_event_pending_ = false;
+        } else if (delay_overuse) {
+            // ---- The delay trend: congestion before loss ------------------
+            //
+            // The spacing grew: a queue is building up in front of the
+            // bottleneck.  This is congestion that has not become loss
+            // yet, so it gets the same multiplicative decrease — but it is
+            // reported separately, because a delay-driven back-off and a
+            // loss-driven one need different diagnoses.
+            const std::uint32_t new_rate = static_cast<std::uint32_t>(
+                current_bps_ * config_.decrease_factor);
+            const std::uint32_t before = current_bps_;
+
+            decrease_to(new_rate, feedback.timestamp,
+                        plugins::BweEstimate::Reason::TransportCcDelay);
+
+            if (current_bps_ != before) {
+                bwe_debug("BWE: transport-cc delay trend, decreased to %u bps",
+                         current_bps_);
+            }
         } else {
             // ---- No loss event: cooldown check + additive increase ---------
             if (state_ == State::kDecrease) {
@@ -274,6 +357,7 @@ struct Bwe::Impl {
         state_ = State::kIncrease;
         decrease_start_ = std::nullopt;
         last_reason_ = plugins::BweEstimate::Reason::Initial;
+        arrival_trend_.reset();
     }
 };
 

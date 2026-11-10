@@ -16,6 +16,11 @@
  *     max(additive `increase_bps` share, 5 % of current per second).
  *   - REMB override, [min, max] clamping and EMA smoothing follow the
  *     AIMD front-end so scheduler behaviour stays comparable.
+ *   - transport-cc delay signal: when transport-cc drives the estimate,
+ *     the arrival series replaces the RTT gate (ADR-018 Decision 4).  The
+ *     RTT of a Receiver Report is a windowed value that lags the
+ *     per-packet arrival series, and using both would count the same
+ *     congestion twice.
  *
  * The engine default stays `"aimd"`; select this backend explicitly via
  * `EngineConfig::bwe_name = "goog-cc"`.
@@ -27,6 +32,8 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+
+#include "arrival_trend.hpp"
 
 namespace nimrtc::bwe {
 
@@ -74,6 +81,9 @@ struct GoogCcBwe::Impl {
     bool loss_event_pending_ = false;
     static constexpr double kLossEventThreshold = 0.02;
 
+    // The transport-cc delay trend (ADR-018 Decision 4).
+    detail::ArrivalTrend arrival_trend_;
+
     bool in_cooldown(core::TimePoint now) const {
         return decrease_start_.has_value() &&
                (now - *decrease_start_ < kDecreaseCooldown);
@@ -102,6 +112,10 @@ struct GoogCcBwe::Impl {
             last_reason_ = reason;
             decrease_start_ = now;
             last_change_time_ = now;
+            // The send spacing follows the target, so the arrival-trend
+            // baseline we just compared against describes a different
+            // operating point now.
+            arrival_trend_.invalidate();
         }
     }
 
@@ -124,8 +138,36 @@ struct GoogCcBwe::Impl {
             loss_event_pending_ = false;
         }
 
-        // REMB override (ignored while a loss decrease is pending).
-        if (feedback.remb_bps.has_value() && !loss_event_pending_) {
+        // ---- The delay signal ---------------------------------------------
+        //
+        // Two paths, one signal.  The loss/RTT path uses the RTT gate
+        // (the RTT against the smallest RTT seen).  The transport-cc
+        // path uses the arrival-series trend instead: the RTT of a
+        // Receiver Report is a windowed value that lags the per-packet
+        // arrival series, and using both would count the same congestion
+        // twice.
+        bool overuse = false;
+        bool delay_overuse = false;
+        if (feedback.signal_source == plugins::NetFeedbackSource::kTransportCc) {
+            const detail::ArrivalTrend::Sample sample =
+                arrival_trend_.update(feedback.arrival_deltas_ms);
+            delay_overuse = sample.overuse;
+            // A series that carried too few packets says nothing about
+            // the delay; the RTT gate is the fallback for it.
+            overuse = sample.valid ? sample.overuse
+                                    : is_overuse(feedback.rtt);
+        } else {
+            // The arrival series is not continuous any more: the baseline
+            // describes an operating point we stopped watching.
+            arrival_trend_.invalidate();
+            overuse = is_overuse(feedback.rtt);
+        }
+
+        // REMB override (ignored while a loss decrease is pending, and
+        // while the delay trend says the path is congested: the
+        // receiver's opinion is stale in both cases).
+        if (feedback.remb_bps.has_value() && !loss_event_pending_ &&
+            !delay_overuse) {
             std::uint32_t remb = static_cast<std::uint32_t>(
                 static_cast<double>(*feedback.remb_bps) * kRembTrustFactor);
             remb = std::clamp(remb, config_.min_bitrate_bps,
@@ -134,10 +176,12 @@ struct GoogCcBwe::Impl {
                 current_bps_ = remb;
                 last_reason_ = plugins::BweEstimate::Reason::REMBOverride;
                 last_change_time_ = feedback.timestamp;
+                // The target jumped: the send spacing follows it, so the
+                // arrival-trend baseline describes a different operating
+                // point now.
+                arrival_trend_.invalidate();
             }
         }
-
-        const bool overuse = is_overuse(feedback.rtt);
 
         if (loss_event_pending_) {
             apply_decrease(
@@ -148,13 +192,14 @@ struct GoogCcBwe::Impl {
             loss_event_pending_ = false;
         } else if (overuse) {
             // Delay back-off fires even inside the post-loss cooldown:
-            // a rising RTT while we are already backing off is fresh
+            // a rising delay while we are already backing off is fresh
             // congestion information, not a duplicate of the loss event.
             apply_decrease(
                 static_cast<std::uint32_t>(static_cast<double>(current_bps_) *
                                            kDelayBackoffFactor),
                 feedback.timestamp,
-                plugins::BweEstimate::Reason::RttIncrease);
+                delay_overuse ? plugins::BweEstimate::Reason::TransportCcDelay
+                               : plugins::BweEstimate::Reason::RttIncrease);
         } else if (!is_lossy && !in_cooldown(feedback.timestamp)) {
             // Clean probe: multiplicative 5 %/s with the additive
             // `increase_bps` share as the floor.
@@ -231,6 +276,7 @@ struct GoogCcBwe::Impl {
         min_rtt_ = std::nullopt;
         last_loss_rate_ = 0.0;
         loss_event_pending_ = false;
+        arrival_trend_.reset();
     }
 };
 

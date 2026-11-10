@@ -69,6 +69,7 @@
 #include <functional>
 #include <memory>
 #include <nimrtc/core/api_version.hpp>
+#include <nimrtc/core/bytes.hpp>          // core::ByteSpan (the DTMF receive seam)
 #include <optional>
 #include <string>
 #include <string_view>
@@ -2287,9 +2288,11 @@ private:
      *  repeats RFC 4733 §2.5.1.2 describes, and reports the completed
      *  event through `on_dtmf_`.
      *
-     *  @param pv  The parsed RTP packet; its payload is the four-byte
-     *             telephone-event header. */
-    void handle_dtmf_payload(const rtp::PacketView& pv) noexcept;
+     *  @param ssrc     The SSRC of the stream the payload arrived on
+     *                  (the accumulator is per-SSRC).
+     *  @param payload  The four-byte telephone-event header. */
+    void handle_dtmf_payload(std::uint32_t ssrc,
+                             core::ByteSpan payload) noexcept;
 
     /** Phase 6 — create the SRTP context, open the DTLS session
      *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`

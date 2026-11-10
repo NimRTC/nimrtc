@@ -151,6 +151,10 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     if (const uint32_t rc = init_transport_session();    rc != 0) return rc;
     init_bwe_scheduler();
     init_audio_modules();
+    // v1.2.0 (session capability plan D1): the RFC 4733 codec.
+    // Resolution is not fatal — a missing codec only disables the DTMF
+    // path, so the rest of the session still works.
+    resolve_dtmf_codec();
     if (const uint32_t rc = init_datachannel_registry(); rc != 0) return rc;
     if (const uint32_t rc = init_dtls_handshake();       rc != 0) return rc;
 

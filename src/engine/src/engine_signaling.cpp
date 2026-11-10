@@ -133,6 +133,45 @@ std::string NimRTCEngine::create_offer() noexcept {
         audio.fmtp[pt] = detail::build_local_opus_fmtp(config_.pcm_channels);
     }
 
+    // ---- a=rtpmap:<dtmf_pt> telephone-event/8000 (v1.2.0, D3) ---------
+    //
+    // RFC 4733 §2.3.2 negotiates the telephone-event payload type out
+    // of band; §2.4 shows the two lines that declare it:
+    //
+    //     a=rtpmap:<pt> telephone-event/8000
+    //     a=fmtp:<pt> 0-16
+    //
+    // The `events` parameter lists the event codes the implementation
+    // supports (RFC 4733 §2.4).  NimRTC supports the DTMF digits 0..9,
+    // `*` (10), `#` (11), A..D (12..15) and the "flash" event (16) —
+    // the range RFC 4733 §2.1 defines — so the list is `0-16`.
+    //
+    // The declaration is only made when DTMF is enabled *and* the codec
+    // actually resolved.  Advertising a payload type the engine cannot
+    // encode would make the peer send telephone-event packets that
+    // this side then has to drop as unknown (D4) — a capability the
+    // description claims but the implementation does not have.
+    //
+    // The payload type is added to the m-line's format list: RFC 3550
+    // §5.14 scopes a payload type to the m-section that declared it, so
+    // a payload type that is not in the `m=` line is not part of the
+    // session.
+    if (config_.dtmf_enabled && dtmf_codec_) {
+        const std::string dpt = std::to_string(config_.dtmf_payload_type);
+        if (dpt != pt) {
+            audio.formats.push_back(dpt);
+
+            sdp::MediaDescription::RtpMap te_map;
+            te_map.encoding   = "telephone-event";
+            te_map.clock_rate = 8000;      // RFC 4733 §2.1 / §2.4
+            te_map.channels   = 1;
+            audio.rtpmap[dpt] = te_map;
+
+            // The supported event codes (RFC 4733 §2.4).
+            audio.fmtp[dpt] = "0-16";
+        }
+    }
+
     // a=ssrc:<audio_ssrc> cname:nimrtc-audio (RFC 5576 section 4.1).
     // Chrome only populates `inbound-rtp` (and fires `ontrack` audio
     // playout stats) when the offer SDP carries an a=ssrc line whose
@@ -683,6 +722,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     impl_->audio_rx_disabled = false;
     impl_->audio_codec_unsupported_reported = false;
     impl_->pt_routing_active = true;
+    // The DTMF negotiation restarts with every description: a peer
+    // that stops offering telephone-event in its next offer must stop
+    // being treated as a DTMF peer (decision D4).
+    negotiated_dtmf_pt_ = 0;
 
     for (const auto& m : remote.media) {
         if (m.type != sdp::MediaType::Audio &&
@@ -715,6 +758,60 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 continue;
             }
             table[pt] = route;
+        }
+    }
+
+    // ---- The telephone-event payload type (v1.2.0, D3 / D4) -----------
+    //
+    // A `telephone-event` payload type is **not** an audio codec: it
+    // carries a four-byte event header, not samples, and handing one to
+    // the audio decoder would push the header into an Opus decoder
+    // (the reason the DTMF path has a seam of its own).  So it is
+    // deliberately *not* put into the audio routing table — it is
+    // tracked separately, and the inbound demux gives it a branch of
+    // its own before the unknown-payload-type check runs.
+    //
+    // D4 fixes the counting semantics: a telephone-event payload counts
+    // as an unknown audio payload type when DTMF was **not** negotiated
+    // (the peer sent one we never agreed to), and does not count as one
+    // when DTMF **was** negotiated.  `negotiated_dtmf_pt_` is the
+    // single source of truth for that switch.
+    //
+    // The peer may offer telephone-event even when we did not ask for
+    // it; we accept it only when DTMF is enabled *and* the codec
+    // resolved, because a codec that is not there cannot decode the
+    // payload — and an undecodable payload is exactly the case D4 says
+    // must still count as unknown.
+    {
+        std::uint8_t peer_dtmf_pt = 0;
+        for (const auto& m : remote.media) {
+            if (m.type != sdp::MediaType::Audio) continue;
+            for (const auto& fmt : m.formats) {
+                std::uint8_t pt = 0;
+                if (!detail::parse_payload_type(fmt, pt)) continue;
+                auto rit = m.rtpmap.find(fmt);
+                if (rit == m.rtpmap.end()) continue;
+                if (detail::decoder_id_for_encoding(rit->second.encoding) !=
+                    "telephone-event") {
+                    continue;
+                }
+                peer_dtmf_pt = pt;
+                break;
+            }
+            if (peer_dtmf_pt != 0) break;
+        }
+
+        if (peer_dtmf_pt != 0 && config_.dtmf_enabled && dtmf_codec_) {
+            negotiated_dtmf_pt_ = peer_dtmf_pt;
+            core::log::Logger::instance().info(
+                "engine[dtmf]: the peer negotiated the telephone-event "
+                "payload type " + std::to_string(peer_dtmf_pt));
+        } else if (peer_dtmf_pt != 0) {
+            core::log::Logger::instance().info(
+                "engine[dtmf]: the peer offered the telephone-event "
+                "payload type " + std::to_string(peer_dtmf_pt) +
+                " but DTMF is disabled here — those packets count as an "
+                "unknown audio payload type (D4)");
         }
     }
 
@@ -1355,6 +1452,47 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                         ? detail::build_local_opus_fmtp(config_.pcm_channels)
                         : impl_->negotiated_opus_fmtp_text;
                 if (!negotiated.empty()) am.fmtp[selected] = negotiated;
+
+                // ---- a=rtpmap:<pt> telephone-event/8000 (v1.2.0, D3) ---
+                //
+                // RFC 3264 §6.1: the answer's format list must be a
+                // subset of the offer's.  When the peer offered a
+                // telephone-event payload type *and* DTMF is enabled
+                // here, the answer accepts it: the payload type joins
+                // the format list and its `a=rtpmap:` / `a=fmtp:`
+                // lines are echoed.
+                //
+                // The `a=fmtp:` line is the *intersection* of what the
+                // peer declared and what we support: the peer said
+                // "events 0-15" and we support 0-16, so the answer
+                // says "0-15" — echoing our own wider range would
+                // claim support for events the peer never offered.
+                // A peer that said nothing about the events gets our
+                // own list (RFC 4733 §2.5.1.1: "if no 'events'
+                // parameter is received, the sender SHOULD assume
+                // support for the DTMF events 0-15").
+                if (negotiated_dtmf_pt_ != 0) {
+                    const std::string dpt =
+                        std::to_string(negotiated_dtmf_pt_);
+                    am.formats.push_back(dpt);
+
+                    auto trit = rm.rtpmap.find(dpt);
+                    if (trit != rm.rtpmap.end()) {
+                        am.rtpmap[dpt] = trit->second;
+                    } else {
+                        sdp::MediaDescription::RtpMap te_map;
+                        te_map.encoding   = "telephone-event";
+                        te_map.clock_rate = 8000;
+                        te_map.channels   = 1;
+                        am.rtpmap[dpt] = te_map;
+                    }
+
+                    // The events the peer declared, intersected with
+                    // ours (0..16).  The intersection is computed on the
+                    // numeric ranges both sides declared.
+                    am.fmtp[dpt] = detail::negotiated_dtmf_events(
+                        rm.fmtp.count(dpt) ? rm.fmtp.at(dpt) : std::string());
+                }
             } else {
                 // Nothing the peer offered is decodable here, so the
                 // m-line is rejected (RFC 3264 §6.1: a rejected m-line

@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/badge/CI-4--platform%20matrix-brightgreen.svg)](#build--ci)
 [![DCO](https://img.shields.io/badge/contrib-DCO--required-blue.svg)](CONTRIBUTING.md)
 
-> **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"` keeps the legacy path. See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
+> **Latest release:** v1.0.2 (Stable) — patch release fixing the WebTransport ALPN mismatch and the oversized Windows bundle, and shipping the signing public key with the release (`v1.0.1` remains published and unchanged; the `v1.0.0` tag is retained as source milestone only and was never published as a GitHub Release). Public API frozen per [ADR-015](docs/adr/ADR-015-api-stability-policy.md); `NIMRTC_API_VERSION` = 10002, `NIMRTC_API_VERSION_PRE_RELEASE` = `""`. Chrome ↔ NimRTC data exchange (DC-1) via the Chrome WebTransport JS API (`new WebTransport(url)`, not `RTCPeerConnection.createDataChannel()`) over QUIC **PASS E1–E6** via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver` (datagram + bidi-stream echo). `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"` backend was retired from the public selectors in v1.2.0 (it was an in-process loopback socket that could never reach a peer). See [CHANGELOG.md](CHANGELOG.md) `## [1.0.2]` and [docs/plan/v1.0-plan.md](docs/plan/v1.0-plan.md) §3 + §12.3.6.
 >
 > **Current `main` (post-v1.0.2, unreleased):** the trunk is ahead of the published tag by the
 > **v1.1** release, which consolidates the former v1.1 / v1.2 / v1.3 drafts into one
@@ -547,7 +547,7 @@ These are **P2 / P3 targets**, not P0 features — listed here so you can plan a
 | Need | NimRTC differentiation | Status in current OSS WebRTC |
 |---|---|---|
 | **3A bypass** — Agent feeds PCM to ASR | `pre-3a / post-3a` dual PCM tap | WebRTC APM is opaque; no PCM mid-pipeline hook |
-| **Ordered control vs media inside one Scheduler** — same-queue ordering, not cross-connection pre-emption | DC-2 strict-priority ordering applies only to packets enqueued into the same `Scheduler` instance. Under the default `web_transport` backend, media (Case D, DTLS-SRTP over ICE/UDP) and data (Case E, WebTransport over QUIC) are **two independent connections with independent congestion control**, so a video-heavy media path cannot starve — and cannot be pre-empted by — the data path at the wire level. Only the legacy `"sctp"` backend keeps both planes on one connection, where intra-scheduler ordering approaches wire relevance. See `src/modules/sched/include/nimrtc/sched/sched.hpp` § Scope note | DTLS-SCTP / DataChannel is best-effort only |
+| **Ordered control vs media inside one Scheduler** — same-queue ordering, not cross-connection pre-emption | DC-2 strict-priority ordering applies only to packets enqueued into the same `Scheduler` instance. Under the default `web_transport` backend, media (Case D, DTLS-SRTP over ICE/UDP) and data (Case E, WebTransport over QUIC) are **two independent connections with independent congestion control**, so a video-heavy media path cannot starve — and cannot be pre-empted by — the data path at the wire level. The legacy `"sctp"` backend does not put the two planes on one connection either — it is an in-process loopback socket that never reaches a peer — so today no NimRTC backend gives the data plane wire-level priority against the media plane. See `src/modules/sched/include/nimrtc/sched/sched.hpp` § Scope note | DTLS-SCTP / DataChannel is best-effort only |
 | **Capture-to-decision alignment** — Agent decisions tied to video frames | `ref_frame` timeline API | libwebrtc has no such abstraction; apps must build their own |
 
 ---
@@ -604,7 +604,7 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | ADR-014 — WebTransport / QUIC vendor decision (msquic chosen) | ✅ | v0.14.0 |
 | DC-1 (WebTransport / msquic data plane) — msquic integration, `WebTransportMsQuicSession`, `WebTransportDataChannel`, `test_web_transport_msquic` 12/12, `test_web_transport_data_channel` 17/17, `test_datachannel_engine` 5/5, `test_sctp_usrsctp` 4/4 | ✅ | v0.14.0-beta.1 |
 | DC-1 — Chrome e2e Case E (data exchange via the WebTransport JS API, not `createDataChannel()`) | ✅ **PASS E1–E6** | Chrome ↔ NimRTC datagram + bidi-stream echo (via `new WebTransport(url)`) PASS via `tests/chrome_interop_harness/run_webtransport_harness.py` + `interop/chrome/test_chrome_webtransport.html` against `examples/demo-wtserver`. Landed in v0.15.0, frozen in v1.0.0. |
-| DC-2 — L1 strict-priority send scheduling within the `Scheduler` (RTP × DC ordering) | ✅ (intra-scheduler ordering only — see `sched.hpp` § Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend) | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
+| DC-2 — transport-layer (L1) strict-priority send scheduling within the `Scheduler` (RTP × DC ordering) | ✅ (intra-scheduler ordering only — see `sched.hpp` § Scope note; not a wire-level cross-connection guarantee under the default `web_transport` backend) | `src/modules/sched/tests/test_sched_priority_dc.cpp` 17/17; landed in v1.0.0. |
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
@@ -637,8 +637,9 @@ has not closed.
 > Chrome e2e Case E (DataChannel over the WebTransport JS API — `new WebTransport(url)`, **not** `RTCPeerConnection.createDataChannel()`; standard WebRTC DataChannel interop is **not** claimed; Firefox/Safari WebTransport support is incomplete) **PASS E1–E6** —
 > datagram + bidi-stream echo against `examples/demo-wtserver` via
 > `tests/chrome_interop_harness/run_webtransport_harness.py`.
-> `EngineConfig::datachannel_backend` defaults to `"web_transport"`; explicit `"sctp"`
-> keeps the legacy path.
+> `EngineConfig::datachannel_backend` defaults to `"web_transport"`; the `"sctp"`
+> backend was retired from the public selectors in v1.2.0 (it was an in-process
+> loopback socket that could never reach a peer).
 > `WebTransportDataChannel` (id `"web_transport"`) is the production backend per ADR-014.
 > **In-process SFU relay (`nimrtc_sfu`), DC forwarding policy (DC-3), and `sfu-relay`
 > benchmark (BENCH-1) were closed as NO on 2026-10-19** per `docs/plan/v1.0-plan.md` §7

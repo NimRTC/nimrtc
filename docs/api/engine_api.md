@@ -453,7 +453,9 @@ Allocates a new `IDataChannel` from the resolved factory; opens it
 with a default config (label, ordered, reliable, priority 128).
 Returns `nullptr` if:
 
-- `cfg.datachannel_name.empty()`;
+- the DataChannel backend is disabled (the resolved factory id is
+  empty — see `docs/api/engine_config.md` §2.6.1);
+- the engine is not `open()`ed yet;
 - the factory id was not registered (caller forgot
   `core::register_all_default_plugins()`);
 - the factory's `create()` returned null (catastrophic impl bug).
@@ -465,10 +467,12 @@ caller; pass it to a transport-stack or use it directly via the
 `set_on_data_message()` and `set_on_data_state()` install the
 matching callbacks on **every** new channel created after the call.
 
-> **Status**: v0.11.0 satisfies DC-1 Gate #1 via the §7 fallback
-> (in-process `test_datachannel_engine` 5/5 PASS).
-> Physical SCTP-over-DTLS plumbing is the v0.11.x follow-up;
-> §engine.hpp comment `v0.11.x follow-up` explains the caveat.
+> **Status**: the default backend is `"web_transport"` (WebTransport /
+> QUIC), which is the only backend with a wire path. The `"sctp"` backend
+> was **retired from the public selectors in v1.2.0** — it was an
+> in-process loopback socket that could never reach a peer. Physical
+> SCTP-over-DTLS plumbing was never landed and is not part of the
+> current architecture — see `docs/adr/ADR-014-web-transport-vendor.md`.
 
 ---
 

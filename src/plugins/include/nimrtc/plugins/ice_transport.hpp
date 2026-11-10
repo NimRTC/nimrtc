@@ -60,12 +60,32 @@
 // a v0.13.x follow-up.
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace nimrtc::plugins {
+
+// ---------------------------------------------------------------------------
+// OnIceRestart — fired when the ICE credentials changed underneath the
+// transport because the *peer* restarted ICE.
+// ---------------------------------------------------------------------------
+//
+// The distinction matters for the host:
+//
+//   - a *local* restart is initiated by the host (it calls restart() and
+//     then produces a new offer);
+//   - a *remote* restart is detected when the peer's description carries
+//     different ICE credentials.  RFC 8445 §9.1.1.1 requires the answerer
+//     to answer with a fresh credential pair as well, so the transport
+//     regenerates its own credentials and fires this callback: the host
+//     has to send the new answer (which carries the new local credentials)
+//     to the peer.
+//
+// The callback runs on the thread that called set_remote_description().
+using OnIceRestart = std::function<void()>;
 
 // ---------------------------------------------------------------------------
 // IceState — mirrors ice::IceState 1:1.
@@ -135,6 +155,50 @@ public:
     /** Add a single remote ICE candidate (accepts "a=candidate:..." or
      *  "candidate:..." prefixes). */
     virtual Status add_remote_candidate(std::string_view candidate_sdp) noexcept = 0;
+
+    // ---- ICE restart (RFC 8445 §9.1.1.1) -----------------------------------
+
+    /** Perform an ICE restart (RFC 8445 §9.1.1.1).
+     *
+     *  A restart re-runs the whole ICE session with a *fresh* credential
+     *  pair: the local ufrag / password are regenerated, the candidates are
+     *  gathered again (which is what picks up a changed network
+     *  interface, e.g. WiFi -> 4G), and the connectivity checks start over
+     *  with the new credentials.
+     *
+     *  The peer can only observe a restart through the new credentials, so
+     *  the host has to send a fresh offer afterwards:
+     *
+     *      ice->restart();
+     *      ice->wait_for_gathering(2000);
+     *      send_to_peer(create_offer());   // carries the new ice-ufrag/pwd
+     *
+     *  The previously known remote candidates are re-applied to the new
+     *  session; the peer's own credentials are re-sent in its answer.
+     *
+     *  @return kOk         the restart was performed;
+     *          kErrNotReady the transport is not open;
+     *          kErrInternal the restart failed (the transport stays down).
+     *
+     *  @note Thread-safety: not safe to call concurrently with open() /
+     *        close() or with the ICE callbacks.
+     */
+    virtual Status restart() noexcept { return kErrNotReady; }
+
+    /** Number of ICE restarts performed on this transport.
+     *
+     *  0 means the transport has never been restarted. */
+    virtual std::uint32_t restart_count() const noexcept { return 0; }
+
+    /** Install the callback fired when the *peer* restarts ICE.
+     *
+     *  The transport detects the restart (the peer's description carries
+     *  different ICE credentials), regenerates its own credentials as
+     *  RFC 8445 §9.1.1.1 requires, and then fires this callback so the
+     *  host can answer with the new credentials.
+     *
+     *  Pass a null callback to clear. */
+    virtual void set_on_ice_restart(OnIceRestart cb) noexcept { (void)cb; }
 
     // ---- Local config (must be called before open()) ----------------------
 

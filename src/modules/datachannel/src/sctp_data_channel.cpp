@@ -7,14 +7,23 @@
  * (`id="usrsctp"` in `core::PluginRegistry`) so the channel is ready
  * to dispatch as soon as `open()` is called.
  *
- * ## Stream-id mapping
+ * ## Stream id
  *
- * Per the P2 spec (`include/nimrtc/datachannel/sctp_data_channel.hpp`),
- * `cfg.priority` is currently NOT used — every channel writes to
- * `stream = 0`. v0.12 will derive a stream id from priority
- * (e.g. `stream = (priority / 32) & 0xFF`) so high-priority control
- * traffic gets its own stream. The mapping is centralised in
- * `s_stream_from_priority()` below so the upgrade is a one-liner.
+ * Every channel writes to SCTP stream 0.  The stream id is NOT derived
+ * from `cfg.priority`: RFC 8832 §6 negotiates the stream id inside
+ * the DCEP `DATA_CHANNEL_OPEN` message, so a channel must send its
+ * OPEN on the stream it intends to use — a priority-derived id would
+ * desynchronise the handshake.  `cfg.priority` is still carried in
+ * the DCEP OPEN (RFC 8832 §5.1), so it reaches the peer; it does not
+ * select a stream.
+ *
+ * v1.2.0 (WP-E1, `docs/plan/datachannel-capability-plan.md`): the
+ * former `s_stream_from_priority()` helper — which took a priority
+ * and ignored it — was deleted rather than left as a promise the
+ * code did not keep.  The SCTP backend is a **test-only** backend
+ * (WP-A / DEC-4 = A1) and serves as the PR-SCTP oracle for WP-D;
+ * the priority that orders the production data plane is the
+ * WebTransport backend's intra-plane ordering (WP-E2).
  *
  * ## Reliability → SCTP send method
  *
@@ -25,8 +34,10 @@
  *
  * The count-mode TTL is a conservative heuristic — usrsctp exposes TTL
  * not count, so we approximate "N retransmits" by "N * 100ms of TTL".
- * v0.12 will replace this with the count-policy PR-SCTP API once
- * usrsctp exposes it (see issue tracker).
+ * This is an approximation of the count policy, not the count policy
+ * itself (v1.2.0, WP-D3): the SCTP backend is a test-only backend
+ * that acts as the PR-SCTP oracle for WP-D, and the approximation is
+ * acceptable in that role only.
  *
  * ## Non-blocking I/O
  *
@@ -76,20 +87,27 @@ namespace {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Conservative SCTP stream-id mapping. v0.12 will widen this to use
- *  `cfg.priority` (e.g. one stream per 32-value priority bucket) so
- *  high-priority control traffic never shares a stream with bulk
- *  telemetry. For now, every channel writes to stream 0 — fine for
- *  tests, suboptimal in production. */
-constexpr std::uint16_t kDefaultStreamId = 0;
-
-inline std::uint16_t s_stream_from_priority(
-    std::uint8_t /*priority*/) noexcept {
-    return kDefaultStreamId;
-}
+/** The SCTP stream id every channel writes to.
+ *
+ *  RFC 8832 §6 negotiates the stream id inside the DCEP
+ *  `DATA_CHANNEL_OPEN`, so the id a channel sends its OPEN on is the
+ *  id it will use for its payload — it cannot be chosen locally from
+ *  the channel's priority (v1.2.0, WP-E1: the former
+ *  `s_stream_from_priority()` stub was deleted rather than kept as an
+ *  unimplemented promise).  `cfg.priority` still travels to the peer
+ *  inside the DCEP OPEN (RFC 8832 §5.1). */
+constexpr std::uint16_t kSctpStreamId = 0;
 
 /** Approximate retransmit count → TTL (usrsctp's PR-SCTP API exposes
- *  TTL, not count). 100 ms per retransmit is the WebRTC default. */
+ *  TTL, not count). 100 ms per retransmit is the WebRTC default.
+ *
+ *  v1.2.0 (WP-D3): this is an **approximation, not the count
+ *  policy** — usrsctp has no per-message retransmit budget.  It is
+ *  acceptable only because the SCTP backend is a test-only backend
+ *  (WP-A / DEC-4 = A1) that serves as the PR-SCTP *oracle* for WP-D:
+ *  the WebTransport implementation's per-message budget is tested
+ *  against the behaviours this approximation models (a message that
+ *  outlives its budget is dropped; the channel stays open). */
 inline std::chrono::milliseconds s_ttl_from_retransmits(
     std::uint16_t max_retransmits) noexcept {
     // Cap at 60s to avoid pathological values; usrsctp's max TTL is
@@ -258,7 +276,7 @@ Status SctpDataChannel::route_send(plugins::BufferView data) noexcept {
     if (!opened_) return kErrNotReady;
     if (!sock_)   return kErrNotReady;
 
-    const std::uint16_t stream = s_stream_from_priority(cfg_.priority);
+    const std::uint16_t stream = kSctpStreamId;
     // User payloads ride PPID string(51)/binary(53) per RFC 8831 §6.
     // The DCEP OPEN handshake uses PPID 50 (see send_dcep_open()).
     const std::uint32_t ppid = sctp::dcep_ppid_for_config(cfg_);
@@ -298,8 +316,7 @@ void SctpDataChannel::send_dcep_open() noexcept {
     plugins::BufferView bv{open.data(), open.size()};
     // DATA_CHANNEL_OPEN rides PPID 50 on the negotiated stream.
     const plugins::Status s =
-        sock_->send_stream_with_ppid(s_stream_from_priority(cfg_.priority),
-                                     bv, sctp::kPpidDcep);
+        sock_->send_stream_with_ppid(kSctpStreamId, bv, sctp::kPpidDcep);
     if (s == kOk) {
         dcep_open_sent_ = true;
     } else if (on_state_) {
@@ -332,7 +349,7 @@ void SctpDataChannel::on_sctp_recv_with_ppid(
             const std::vector<std::uint8_t> ack = sctp::dcep_encode_ack();
             plugins::BufferView bv{ack.data(), ack.size()};
             (void)sock_->send_stream_with_ppid(
-                s_stream_from_priority(cfg_.priority), bv, sctp::kPpidDcep);
+                kSctpStreamId, bv, sctp::kPpidDcep);
             if (on_state_) on_state_("open");
             return;
         }

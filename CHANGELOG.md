@@ -17,6 +17,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A telephone-event (RFC 4733) seam, so DTMF stops being an unknown
+  payload type (v1.2.0, session capability plan D1 / D2).**  Until now a
+  peer that negotiated `telephone-event` sent its digits into a payload
+  type the audio routing table had no route for: the packet was counted
+  as `kAudioPayloadTypeUnknown` and dropped, so a NimRTC peer could
+  neither send nor receive DTMF.
+  - `plugins::IDtmfCodec` — a seam of its own, because a four-byte
+    telephone-event header is **not** audio and must never reach an
+    `IAudioDecoder`.  It decodes one payload, encodes one event and
+    reports the payload type it uses.
+  - `src/modules/dtmf/` — the built-in implementation, registered under
+    the id `"dtmf"`.  The engine reaches it through the registry slot and
+    never includes the module's headers.
+  - The engine surface: `EngineConfig::dtmf_enabled` (**off** by
+    default — the offer carries no telephone-event declaration unless a
+    host asks for it), `dtmf_payload_type` (126, the value Chrome uses),
+    `dtmf_codec_name`, plus `send_dtmf()` and `set_on_dtmf()`.  An
+    inbound telephone-event payload is routed to the codec and reported
+    as a `DtmfEvent` with the accumulated duration, instead of being
+    dropped as unknown.
+
+- **A pluggable session model, so a host can renegotiate instead of
+  rebuilding the engine (v1.2.0, session capability plan N1 / T1).**  The
+  engine used to build a *fixed* SDP media list (one audio m-line, one
+  video m-line) and offered no way to add a track, remove one or change
+  a direction.
+  - `plugins::ISession` — the seam (tracks, transceivers, mid
+    allocation) with a typed slot in `core::PluginRegistry`; the
+    built-in implementation lives in `src/modules/session/` and
+    registers under the id `"session"`.
+  - The engine surface: `add_track()`, `remove_track()`,
+    `set_track_direction()`, `tracks()`, `add_transceiver()`,
+    `set_transceiver_direction()`, `stop_transceiver()`,
+    `restart_transceiver()`, `transceivers()` and `needs_negotiation()`.
+  - Removing a track does **not** remove its m-line: the transceiver
+    stays and is marked `inactive` (OD-A), and a mid is never reused.
+
+- **ICE restart (RFC 8445 §9.1.1.1), locally and on the peer's signal.**
+  A network change (WiFi -> 4G) or a stale path could not be recovered
+  without tearing the whole engine down.
+  - The ICE transport seam gains `restart()`, `restart_count()` and the
+    `OnIceRestart` callback, which fires when the *peer's* description
+    carries different ICE credentials — the answerer then answers with
+    a fresh credential pair, as RFC 8445 requires.
+  - The engine surface: `restart_ice()`, `ice_restart_count()` and
+    `set_on_ice_restart()`.  A local restart mints a new credential pair,
+    re-gathers the candidates and re-applies the known remote
+    candidates; the host then sends a fresh offer.
+
+- **A token-bucket pacer (v1.2.0 M3, video plan P1 / P2).**  The send
+  path had no rate-shaping primitive of its own: the scheduler's budget
+  was a per-drain allowance, and the bytes left the machine in bursts.
+  - `src/modules/pacing/` — a **token bucket** on a monotonic clock.
+    The bucket holds bytes, the rate is expressed in bits per second
+    (the unit every other knob in the project uses), and the bucket
+    never reads a clock itself: `refill()`, `available()` and
+    `try_consume()` take the current time point as an argument, which
+    makes the behaviour deterministic and testable without sleeps.
+  - The scheduler drives **per-class** buckets from the bandwidth
+    estimate, so a saturated video stream cannot eat the audio class'
+    share; the engine exposes `EngineConfig::media_pacing_enabled` and
+    `update_pacing_rates()`.
+
 - **The per-stream share rule of the session bandwidth budget (video plan
   F8).** `IBwe::estimate()` returns one number for the whole session, so
   the estimate has to be split before it reaches an encoder.  The rule:
@@ -367,6 +430,68 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The `"sctp"` data-channel backend was retired from the public selectors
+  (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP
+  backend was a **test-only** backend: `SctpDataChannel` opens an in-process
+  usrsctp socket bound to `127.0.0.1`, and the engine never wires the DTLS
+  transport's outbound/inbound datagram paths into that socket, so a channel
+  created on it could never reach a remote peer.  The public surface presented
+  it as a peer of the production WebTransport backend; that claim was wrong.
+  - `EngineConfig::datachannel_backend = "sctp"` now fails `open()` with
+    `kEngineInternal`; the error message names the backend as **test-only**
+    and points at `"web_transport"` (the default) and `""` (disable).
+  - The legacy v0.x spelling (`datachannel_backend` empty plus
+    `datachannel_name = "sctp"`) is rejected the same way.
+  - `EngineConfig::datachannel_name` now defaults to `""` instead of `"sctp"`,
+    so an unset field never selects the retired family and
+    `datachannel_backend = ""` alone is a clean "disable the data plane".
+  - The `SctpDataChannelFactory` **stays registered** in `core::PluginRegistry`
+    as the in-tree reference implementation for the DCEP codec and the PR-SCTP
+    semantics — the module tests drive it directly.  Only the public
+    *selector* was retired; no registry slot was withdrawn.
+  - No public symbol was added or removed.  The change is the *meaning* of two
+    existing config values, which is why it is called out here and in
+    `docs/api/engine_config.md` §2.6.
+
+- **The scheduler's two queue families no longer borrow the architecture's
+  layer names (2026-11-09).**  Inside `src/modules/sched/`, the per-packet
+  priority ladder and the per-stream priority buckets were labelled "L0" and
+  "L1" — the same tokens `docs/zh/architecture.md` uses for the L0–L3
+  *layering* (where L1 is the transport layer this module lives in).  Read
+  literally, "the scheduler's L1" meant two different things in the same
+  document set, and the plan docs compounded it by calling the per-stream
+  family "the scheduler's L1 API".
+  - The scheduler now names its two families **P-family** (per-packet,
+    `plugins::Priority`, five levels) and **S-family** (per-stream,
+    `sched::StreamPriority`, three buckets).  A new §"Terminology" section
+    in `src/modules/sched/include/nimrtc/sched/sched.hpp` states the
+    distinction and records that the two families are **separate queues
+    that are never compared with each other** — so the documented ladder
+    `kControl > kAudio > kVideoKeyframe > kVideo > kBestEffort` describes
+    the P-family only, and `kBestEffort` is a packet level, not a promise
+    that DataChannel traffic is scheduled at all.
+  - `docs/zh/architecture.md` §8.3 gained the matching terminology note, and
+    D8 / §2.3 / §2.5 now state the per-packet ladder and the per-stream
+    buckets as two ladders rather than one, and spell out that under the
+    default `web_transport` backend the data plane never enters the
+    scheduler.
+  - `plugins::IScheduler`'s header no longer claims that RTP and
+    DataChannel "share ONE priority queue" — a concrete scheduler may keep
+    them in separate families.
+  - The `sched.hpp` scope note no longer claims that the legacy `"sctp"`
+    backend puts the media and data planes on one connection: that backend
+    was retired in v1.2.0 (WP-A / DEC-4 = A1) and is now a test-only
+    in-process usrsctp loopback that never reaches a peer, so **no shipped
+    backend** provides wire-level cross-plane priority.  The note now states
+    the honest version — the scheduler arbitrates within a connection, and
+    the data plane does not use it at all (the per-stream API still has no
+    caller in the data path, per `datachannel-capability-plan.md` WP-E2).
+  - The DC-2 regression test was renamed accordingly
+    (`L0_L1_Isolation_*` → `P_S_Isolation_*`); the assertions are
+    unchanged.  **No behaviour change and no public API change** — the
+    `StreamPriority` enum, `set_stream_priority()`,
+    `enqueue_for_stream*()` and `select_next_packet()` keep their names and
+    semantics.
 - **`<nimrtc/core/registry.hpp>` no longer drags the optional-module
   seams into every translation unit (P1 hardening, 2026-11-09).**  The
   header used to `#include` 18 seam headers in a "backward-compat shim"
@@ -503,6 +628,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **The WebTransport data channel mistook a Chrome stream header for
+  payload.**  A peer-initiated bidirectional stream starts with the
+  WebTransport stream-type signal `0x41` followed by the session-id
+  varint, and the data channel has to strip that header before it hands
+  the bytes to the application.  The header probe decoded the signal as
+  a QUIC varint, and the canonical varint encoding of `0x41` is the two
+  bytes `0x40 0x41` — so a stream that opened with the single byte
+  `0x41` (what the Chrome stack writes) decoded to `256`, was taken for
+  "not a WebTransport stream", and the header bytes were delivered to
+  the application as if they were payload.
+  - The probe now accepts both encodings: the single byte `0x41` and the
+    canonical `0x40 0x41` varint, and it waits for the whole header
+    when it is split across transport chunks (the probe re-runs on the
+    accumulated buffer, so no extra state is needed).
+  - A stream that carries no WebTransport header (a NimRTC peer in raw
+    mode, or a framed peer whose frame starts with the big-endian label
+    length) is still delivered verbatim.
+  - Covered by four cases in
+    `src/web_transport/tests/test_web_transport_dc_capability.cpp`
+    (single-byte signal, canonical varint signal, a header split byte by
+    byte, and a header-less stream).
 
 - **The installed bundle did not tell downstream consumers which C++
   standard to compile with.**  The public headers need C++17 at the

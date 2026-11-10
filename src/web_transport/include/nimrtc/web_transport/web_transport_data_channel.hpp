@@ -8,22 +8,42 @@
  * backend for Chrome interop (Case E — RTCDataChannel exchange over
  * WebTransport / QUIC).
  *
+ * v1.2.0 (DataChannel capability plan, WP-B / WP-C / WP-D / WP-E):
+ * the channel gained the five capabilities the v1.1.0 gap table
+ * listed as missing:
+ *
+ *   - **WP-B — message boundary.**  In `kFramed` mode every payload
+ *     is wrapped in a length-prefixed frame, so one `send()` is one
+ *     inbound message.  `kRaw` keeps the byte-stream behaviour (what
+ *     Chrome's `RTCDataChannel`-over-WebTransport speaks).
+ *   - **WP-C — multi-channel isolation.**  The channel no longer
+ *     *replaces* the session's single inbound callback slot: it
+ *     subscribes to the session's multicast inbound routes and removes
+ *     only its own subscription on close.  In framed mode the frame's
+ *     channel label decides which channel a payload belongs to.
+ *   - **WP-D — partial reliability.**  The TTL and the retransmit
+ *     count are *per message*, not per channel.  An expired message is
+ *     dropped; the channel stays open.
+ *   - **WP-E — priority.**  The channel registers an outbound priority
+ *     source with the session, so the data plane orders its own
+ *     pending sends (lower `priority` value first).
+ *
  * ## DataChannel → WebTransport semantic mapping
  *
  * | DataChannelReliability      | WebTransport primitive            |
  * |----------------------------|-----------------------------------|
  * | kReliableOrdered           | `open_bidi_stream()` (reliable, ordered) |
  * | kUnreliable                | `send_datagram()` (unreliable, unordered) |
- * | kPartialReliableTTL        | bidi stream + app-level TTL reset  |
- * | kPartialReliableCount      | bidi stream + app-level count reset |
+ * | kPartialReliableTTL        | bidi stream + per-message TTL     |
+ * | kPartialReliableCount      | bidi stream + per-message retry budget |
  *
  * ## Thread model
  *
  * Same as `SctpDataChannel` / `plugins::IDataChannel`:
  *   - `set_on_message` / `set_on_state` are called from the engine
  *     thread before `open()`.
- *   - `send()` is thread-safe: queues into a lock-free outbound queue;
- *     the stream send callback drains it.
+ *   - `send()` is thread-safe: it appends to the outbound queue; the
+ *     queue is drained by the session's priority-ordered flush.
  *   - msquic callbacks fire on msquic's internal worker threads; we
  *     dispatch to the engine thread via the session's recv queue so
  *     no additional locking is needed at the IDataChannel surface level.
@@ -31,9 +51,10 @@
  * ## Lifecycle
  *
  * A channel is created by `WebTransportDataChannelFactory::create()`
- * and lives until `close()`.  The channel owns exactly one bidirectional
- * stream for the `kReliableOrdered` and partial-reliability modes; the
- * stream is opened lazily on first `send()` or explicitly on `open()`.
+ * and lives until `close()`.  The channel owns exactly one outbound
+ * bidirectional stream for the `kReliableOrdered` and partial-reliability
+ * modes; the stream is opened lazily on first `send()` or explicitly on
+ * `open()`.
  *
  * For `kUnreliable` (datagram), no stream is needed — `send_datagram()`
  * on the session is used directly.
@@ -61,14 +82,13 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/web_transport/bidi_stream_iface.hpp>
 #include <nimrtc/web_transport/web_transport_config.hpp>
 #include <nimrtc/web_transport/web_transport_session_iface.hpp>
-#include <nimrtc/web_transport/bidi_stream_iface.hpp>
 
 namespace nimrtc::web_transport {
 
@@ -96,7 +116,7 @@ using plugins::kErrInternal;
  * Wraps an `IWebTransportSession` and dispatches:
  *   - `send()` → `send_datagram()` (kUnreliable) or
  *     bidirectional stream send (kReliableOrdered / PR modes)
- *   - inbound stream data → `set_on_message` callback
+ *   - inbound stream data → `set_on_message` / `set_on_message_ex`
  *
  * The session is a non-owning pointer passed at construction time
  * (injected by `WebTransportDataChannelFactory`).
@@ -129,58 +149,93 @@ public:
      *  (by the engine's WebTransport session owner).  Returns kOk. */
     Status open() noexcept override;
 
-    /** Close the stream and clear all callbacks.  Idempotent. */
+    /** Close the stream, drop the queued messages and remove this
+     *  channel's session subscriptions.  Idempotent. */
     void close() noexcept override;
 
     // ---- IDataChannel ----------------------------------------------------
 
-    /** Cache the channel configuration.  For kUnreliable, store the
-     *  label (not yet used for WebTransport but reserved for future
-     *  ALPN / stream-type routing).  For reliable/partial modes,
-     *  the stream will be opened lazily on first `send()` or explicitly
-     *  when the session is in kConnected state. */
+    /** Cache the channel configuration (label, reliability, framing,
+     *  priority) and (re)wire the session routes for the configured
+     *  framing mode. */
     void open(const plugins::DataChannelConfig& cfg) override;
 
-    /** Send `data` over the appropriate WebTransport primitive based
-     *  on `cfg_.reliability`. */
+    /** Queue `data` for transmission.  The queue is drained by the
+     *  session's priority-ordered flush, so the send order across the
+     *  channels of one session follows their `priority`. */
     void send(plugins::BufferView data) override;
 
     /** Replace the message callback. */
     void set_on_message(plugins::DataMessageCallback cb) noexcept override;
 
+    /** Replace the identity-carrying message callback (v1.2.0, WP-C1). */
+    void set_on_message_ex(plugins::DataChannelMessageCallback cb) noexcept override;
+
     /** Replace the state callback. */
     void set_on_state(plugins::DataChannelStateCallback cb) noexcept override;
 
-    /** Subscribe this channel to the session's inbound datagrams and
-     *  peer-initiated streams (Case E product path). Safe to call after
-     *  both `open(cfg)` overloads; re-subscribing replaces the session
-     *  callbacks. `close()` unregisters them. */
+    /** Wire this channel's inbound routes on the session.  Safe to
+     *  call before `open(cfg)` — the wiring is (re)done by `open(cfg)`
+     *  once the framing mode is known.  `close()` removes it. */
     void attach_session_callbacks() noexcept;
 
     // ---- Test-only -------------------------------------------------------
 
     /** Returns true if the channel has an open stream or has ever sent
      *  a datagram. */
-    bool is_open() const noexcept { return opened_; }
+    bool is_open() const noexcept { return opened_.load(std::memory_order_acquire); }
 
     /** Returns the cached config (read-only). Useful in tests. */
     [[nodiscard]] const plugins::DataChannelConfig& config() const noexcept {
         return cfg_;
     }
 
+    /** Number of messages handed to the transport (v1.2.0). */
+    [[nodiscard]] std::uint64_t sent_messages() const noexcept;
+
+    /** Number of messages dropped by a partial-reliability policy
+     *  (v1.2.0, WP-D). */
+    [[nodiscard]] std::uint64_t dropped_messages() const noexcept;
+
+    /** Number of messages still waiting in the outbound queue. */
+    [[nodiscard]] std::size_t pending_sends() const noexcept;
+
 private:
-    // Forward declaration of the stream recv helper.
-    class StreamWrapper;
+    /** Opaque per-channel state (outbound queue, inbound frame readers).
+     *  Defined in the .cpp so the public header does not have to expose
+     *  the module-internal frame codec. */
+    struct State;
+
+    /** Which inbound surface the channel currently uses. */
+    enum class Routes : std::uint8_t {
+        kNone,    // not wired
+        kLegacy,  // raw mode: the session's single callback slots
+        kMulticast// framed mode: the session's multicast subscriptions
+    };
+
+    /** (Re)wire the session routes for the current configuration. */
+    void apply_session_routes() noexcept;
+
+    /** Remove this channel's session routes (WP-C4). */
+    void remove_session_routes() noexcept;
 
     /** Open a bidirectional stream (lazy, on first send for
      *  reliable/partial modes). */
     bool ensure_stream_open() noexcept;
 
-    /** Callback invoked by the bidirectional stream when data arrives. */
-    void on_stream_data(plugins::BufferView data) noexcept;
+    /** Offer one wire buffer to the transport.  Returns false when the
+     *  transport refused it (the message stays queued). */
+    bool offer_to_transport(const std::vector<std::uint8_t>& bytes) noexcept;
 
-    /** Callback invoked when the stream is closed or reset. */
-    void on_stream_closed() noexcept;
+    /** Drain the outbound queue (called by the session's priority
+     *  flush, and directly when the session has no priority surface). */
+    void flush_outbound() noexcept;
+
+    /** Inbound data path for the adopted peer stream: strips the
+     *  WebTransport stream-type header, then (framed mode) decodes the
+     *  frames and delivers the ones addressed to this channel. */
+    void on_peer_stream_data(IBidirectionalStream* stream,
+                             plugins::BufferView data) noexcept;
 
     /** Callback invoked for a peer-initiated bidi stream. */
     void on_peer_stream(IBidirectionalStream* stream) noexcept;
@@ -188,77 +243,43 @@ private:
     /** Callback invoked for an inbound session datagram. */
     void on_session_datagram(std::span<const std::uint8_t> bytes) noexcept;
 
-    /** Inbound data path for the adopted peer stream: strips the
-     *  WebTransport stream-type header, then delivers the payload
-     *  via `on_stream_data`. Tolerates a header split across
-     *  multiple `on_data` invocations. */
-    void on_peer_stream_data(plugins::BufferView data) noexcept;
+    /** Deliver one inbound payload to the user callbacks. */
+    void deliver(std::string_view label,
+                 std::span<const std::uint8_t> payload) noexcept;
 
-    /** Drop the adopted peer stream (if any) and reset the header
-     *  reassembly state. The stream itself stays owned by the
-     *  session; only our `on_data` subscription is removed. */
-    void detach_peer_stream() noexcept;
-
-    /** Map DataChannelReliability to a human-readable state string. */
-    static const char* state_from_reliability(plugins::DataChannelReliability r,
-                                               bool connected) noexcept;
+    /** Report a protocol error: the channel transitions to `error`. */
+    void fail_protocol(const char* reason) noexcept;
 
     IWebTransportSession*               session_;
     plugins::DataChannelConfig         cfg_;
     plugins::DataMessageCallback       on_msg_;
+    plugins::DataChannelMessageCallback on_msg_ex_;
     plugins::DataChannelStateCallback  on_state_;
-    // Non-owning raw pointer to the bidi stream — the session
+    // Non-owning raw pointer to the outbound bidi stream — the session
     // (or the test harness) owns the stream object.  The engine
     // owns the session, so lifetime is safe.
     IBidirectionalStream*              stream_raw_ = nullptr;
-    // Non-owning pointer to the adopted peer-initiated stream
-    // (Case E inbound path).  Owned by the session; we only hold
-    // it to deliver `on_stream_data` and to detach on close().
+    // Non-owning pointer to the peer-initiated stream adopted in raw
+    // mode (the legacy single-slot path).
     IBidirectionalStream*              peer_stream_raw_ = nullptr;
-    // WebTransport stream-type header reassembly for the adopted
-    // peer stream: signal varint (0x41) + session-id varint may be
-    // split across multiple on_data invocations.  Once `peer_header_done_`
-    // is true, bytes flow straight to `on_stream_data`.
-    bool                               peer_header_done_ = false;
-    std::vector<std::uint8_t>          peer_header_pending_;
+    // Multicast subscription tokens (v1.2.0, WP-C2).
+    SubscriptionId                     dgram_sub_ = 0;
+    SubscriptionId                     peer_sub_  = 0;
+    SubscriptionId                     prio_sub_  = 0;
+    Routes                             routes_    = Routes::kNone;
     std::atomic<bool>                  opened_{false};
+    // Latched by `close()`.  The inbound path is guarded by this flag
+    // (not by `opened_`) because the session routes are wired by
+    // `open(cfg)`, which the engine calls *before* `open()`: a peer
+    // stream or a datagram that arrives in that window must be
+    // adopted, not dropped.
+    std::atomic<bool>                  closed_{false};
     std::atomic<bool>                  stream_ready_{false};
-    std::chrono::steady_clock::time_point pr_ttl_deadline_{};
-    std::uint16_t                      pr_count_remaining_{0};
+    // Guards the outbound queue and the counters (send() is
+    // thread-safe, the flush runs on the engine thread).
+    mutable std::mutex                 tx_mutex_;
+    std::unique_ptr<State>             state_;
 };
-
-// ---------------------------------------------------------------------------
-// StreamWrapper — inline recv handler for the bidi stream.
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Inline stream recv handler.
- *
- * Lives inside the translation unit so it can capture the
- * `WebTransportDataChannel*` without exposing it in the header.
- * Registered as the stream's `set_on_data` callback on stream open.
- */
-class WebTransportDataChannel::StreamWrapper {
-public:
-    explicit StreamWrapper(WebTransportDataChannel* chan) noexcept
-        : chan_(chan) {}
-
-    void operator()(plugins::BufferView data) noexcept {
-        if (chan_) chan_->on_stream_data(data);
-    }
-
-    void on_closed() noexcept {
-        if (chan_) chan_->on_stream_closed();
-    }
-
-private:
-    WebTransportDataChannel* chan_;
-};
-
-#ifdef _MSC_VER
-#pragma pop_macro("open")
-#pragma pop_macro("close")
-#endif
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -326,5 +347,10 @@ public:
  */
 
 } // namespace nimrtc::web_transport
+
+#ifdef _MSC_VER
+#pragma pop_macro("open")
+#pragma pop_macro("close")
+#endif
 
 #endif // NIMRTC_WEB_TRANSPORT_WEB_TRANSPORT_DATA_CHANNEL_HPP

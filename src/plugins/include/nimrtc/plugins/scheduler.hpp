@@ -2,10 +2,16 @@
  * @file nimrtc/plugins/scheduler.hpp
  * @brief IScheduler — pluggable unified sending scheduler (NimRTC §2.5 / §8.3).
  *
- * RTP (media) and DataChannel (data) share ONE priority queue. The default
- * policy is strict descending priority:
+ * The default policy is strict descending priority over the **per-packet**
+ * levels:
  *
  *   kControl > kAudio > kVideoKeyframe > kVideo > kBestEffort
+ *
+ * A concrete scheduler may additionally provide a **per-stream** priority
+ * family (three buckets: High / Normal / Low) that orders whole streams
+ * against each other.  The two families live in separate queues and are
+ * never compared with each other, so the ladder above describes the
+ * per-packet family only.  See `nimrtc/sched/sched.hpp` §"Terminology".
  *
  * Implementations react to `on_bwe_update(target_bps)` to drop low-priority
  * traffic when the bandwidth budget shrinks — `kControl` is never dropped by
@@ -74,6 +80,39 @@ constexpr NIMRTC_API_STABLE std::size_t kPriorityCount = 5;
 }
 
 // ---------------------------------------------------------------------------
+// PacedClass — the traffic classes that are paced independently
+// ---------------------------------------------------------------------------
+
+/** The traffic classes the scheduler paces independently.
+ *
+ *  The mapping from the per-packet Priority ladder onto the classes is
+ *  fixed:
+ *
+ *    kControl                -> (no class)  — the pacer is bypassed
+ *    kAudio                  -> kAudio
+ *    kVideoKeyframe, kVideo  -> kVideo
+ *    kBestEffort             -> kData
+ *
+ *  `kControl` has **no** class on purpose.  RTX, NACK and RTCP feedback
+ *  must never be delayed by a saturated media bucket: they are small,
+ *  they are rare, and the far end is already blocked waiting for them.
+ *  Delaying feedback costs more than the bytes it occupies.
+ *
+ *  The classes exist so that the session's bandwidth budget can be
+ *  **split** instead of being taken by whichever stream happens to have
+ *  packets queued.  A video stream that saturates the link no longer
+ *  starves the audio, because each class has its own token bucket.
+ */
+enum class NIMRTC_API_STABLE PacedClass : std::uint8_t {
+    kAudio = 0,  /**< The audio stream (Priority::kAudio). */
+    kVideo = 1,  /**< The video stream (Priority::kVideoKeyframe + kVideo). */
+    kData  = 2,  /**< The best-effort / data lane (Priority::kBestEffort). */
+};
+
+/** The number of paced traffic classes. */
+constexpr NIMRTC_API_STABLE std::size_t kPacedClassCount = 3;
+
+// ---------------------------------------------------------------------------
 // SchedulerConfig
 // ---------------------------------------------------------------------------
 struct NIMRTC_API_STABLE SchedulerConfig {
@@ -139,6 +178,17 @@ struct NIMRTC_API_STABLE SchedulerStats {
 
     /** Approximate current egress rate (bps), updated at each drain call. */
     std::uint32_t current_bitrate_bps = 0;
+
+    /** The number of times a packet was held back because its traffic
+     *  class had no pacing credit (v1.2.0 M3, video plan P2).
+     *
+     *  A non-zero value means the pacer is doing its job: the packets
+     *  were not lost, they waited for the bucket to earn the bytes.  It
+     *  is the signal that a class is over its budget.
+     *
+     *  @note Appended at the end of the struct so that existing aggregate
+     *  initialisation of the preceding fields keeps compiling. */
+    std::uint64_t paced_blocked_packets = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +278,45 @@ public:
 
     /** Return the current configuration. */
     virtual SchedulerConfig config() const noexcept = 0;
+
+    // ---- Per-class pacing (v1.2.0 M3, video plan P2) -------------------
+    //
+    // The scheduler shapes the outbound traffic with one token bucket per
+    // traffic class (see PacedClass).  The *session* budget that
+    // `on_bwe_update()` reports is the aggregate guard — the total may
+    // not exceed it — and the class buckets are the *distribution*: they
+    // split that budget between the audio, the video and the data lane,
+    // so a saturated video stream cannot eat the audio's share.
+    //
+    // The default for every class is 0, which means "this class is not
+    // paced".  A scheduler that nobody configured therefore paces
+    // nothing, and the behaviour of an existing implementation is
+    // unchanged.
+
+    /** Set the pacing rate of one traffic class, in bits per second.
+     *
+     *  0 means the class is **not paced** — its packets leave as fast as
+     *  the session budget allows.  The rates of the classes are expected
+     *  to add up to at most the session target; the class buckets then
+     *  split the budget between the streams.
+     *
+     *  A rate change keeps the credit the class has already earned (the
+     *  credit is clamped to the new burst ceiling), so lowering the rate
+     *  does not throw away what was earned and raising it does not grant
+     *  a free burst.
+     *
+     *  Thread-safe. */
+    virtual void set_pacing_rate(PacedClass cls, std::uint32_t bps) noexcept {
+        (void)cls;
+        (void)bps;
+    }
+
+    /** The pacing rate of one traffic class, in bits per second.
+     *  0 = the class is not paced.  Thread-safe. */
+    virtual std::uint32_t pacing_rate(PacedClass cls) const noexcept {
+        (void)cls;
+        return 0;
+    }
 
     // ---- Packet buffer pool (P1 hardening, 2026-11-09) ------------------
     //

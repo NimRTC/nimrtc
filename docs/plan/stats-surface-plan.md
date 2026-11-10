@@ -6,7 +6,7 @@
 | Plan opened | 2026-11-09 |
 | Baseline | `main` @ post-v1.1 consolidation |
 | Scope class | 观测面（observability）— 纯增量统计字段与查询面，不改 wire format |
-| Related | `docs/plan/video-pipeline-v2-plan.md` 的 **O1**（逐流可观测面，落在 v1.2.0）、**R1**（`video_stats` 接入引擎，落在 v1.2.0）、`docs/plan/audio-pipeline-dev-plan.md` 的 **WP-8 / B-13**（音频统计计数器，v1.2.0）、`docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项） |
+| Related | `docs/plan/video-pipeline-v2-plan.md` 的 **O1**（逐流可观测面，落在 v1.2.0）、**R1**（`video_stats` 接入引擎，落在 v1.2.0）、`docs/plan/audio-pipeline-dev-plan.md` 的 **WP-8 / B-13**（音频统计计数器，v1.2.0）、`docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项，落位已定为 **v1.2.0**） |
 
 ---
 
@@ -126,7 +126,9 @@ Grep "video_stats|VideoStreamStats|IVideoStatsSink"  →  src/engine/  零命中
 | **v1.3.0** | S5, S7, S8 | 流级记录形状（S5）需要 S1/S2 的快照基础设施稳定后再做，否则要改两次；S7 / S8 是协议侧增量 |
 | **v1.4.0** | S6 | candidate-pair 统计涉及 ICE 模块接口扩展，跨版本改动成本更高 |
 
-**与 `session-capability-plan.md`（会话能力第 5/6/7/9 项）的依赖关系**：本计划与该计划**无双向依赖**。Renegotiation（第 5 项）会改变流的增删方式，届时 S5 的流级记录形状需要支持动态增删的流——因此**S5 排在 v1.3.0 而非 v1.2.0**，且实现时应预留流记录可增删的结构，而不是固定数组。DTMF（第 7 项）不产生统计面需求。Transceiver（第 6 项）会引入 transceiver 级方向概念，S5 的"方向"字段取值应与之对齐——但由于 S5 排在 v1.3.0、Transceiver 排期更晚，S5 实现时只需保证字段可扩展，不必现在等待。
+**与 `session-capability-plan.md`（会话能力第 5/6/7/9 项）的依赖关系**：本计划与该计划**无双向依赖**。Renegotiation（第 5 项）会改变流的增删方式，届时 S5 的流级记录形状需要支持动态增删的流——因此 **S5 必须排在 renegotiation 落地之后**，且实现时应预留流记录可增删的结构，而不是固定数组。**2026-11-10 更新**：renegotiation 与 transceiver 的排期已由 owner 压缩到 `v1.2.0`（见 `session-capability-plan.md` §4），而 S5 仍排在 `v1.3.0`——两者同属 v1.2.0，所以 S5 排在 renegotiation 之后这个约束仍然满足。另一侧，transceiver 现在比 S5 **更早**落地，因此 S5 实现时可以直接对齐 transceiver 的方向取值，不必像原草案那样只求"字段可扩展"。DTMF（第 7 项）不产生统计面需求。
+
+**排期状态说明**：`session-capability-plan.md` 的落位已定（v1.2.0），但**本计划自身的落位仍是待排期状态**——S5 / S7 / S8 是否也压进 v1.2.0 尚未由 owner 决定。上表中的 v1.3.0 / v1.4.0 仍是建议值。
 
 ---
 

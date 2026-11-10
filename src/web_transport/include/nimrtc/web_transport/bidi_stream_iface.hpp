@@ -77,6 +77,20 @@ namespace nimrtc::web_transport {
 using NIMRTC_API_UNSTABLE OnStreamDataCb =
     std::function<void(std::span<const std::uint8_t> bytes)>;
 
+/**
+ * @brief Token identifying one multicast data subscription
+ *        (v1.2.0, WP-C3).
+ *
+ * The stream used to expose a single inbound-data slot, so two
+ * channels that both wanted to watch the same peer-initiated stream
+ * overwrote each other's handler — the last writer won.  The token
+ * makes the inbound surface a multicast, which is what lets a peer
+ * stream be demultiplexed by the channel label carried in the frame.
+ *
+ * Token 0 is never a valid subscription.
+ */
+using NIMRTC_API_UNSTABLE StreamSubscriptionId = std::uint64_t;
+
 } // namespace nimrtc::web_transport
 
 namespace nimrtc::web_transport {
@@ -125,6 +139,33 @@ public:
      * call only from the engine thread.
      */
     virtual void set_on_data(OnStreamDataCb cb) noexcept = 0;
+
+    /**
+     * @brief Subscribe an additional inbound-data callback (v1.2.0,
+     *        WP-C3).
+     *
+     * Unlike `set_on_data()`, which owns the single "primary" slot,
+     * a subscription *adds* a handler: every subscriber of a stream
+     * sees every chunk.  This is what allows several data channels to
+     * watch the same peer-initiated stream and to decide — from the
+     * channel label carried in the frame — which one of them owns it.
+     *
+     * @return The subscription token, or 0 when the stream does not
+     *         implement the multicast surface (the default).
+     */
+    virtual StreamSubscriptionId subscribe_on_data(OnStreamDataCb cb) noexcept {
+        (void)cb;
+        return 0;
+    }
+
+    /**
+     * @brief Remove one multicast data subscription (v1.2.0, WP-C4).
+     *
+     * Removing one subscription never affects the others.
+     */
+    virtual void unsubscribe_on_data(StreamSubscriptionId id) noexcept {
+        (void)id;
+    }
 
     /**
      * @brief Half-close the stream (send FIN).

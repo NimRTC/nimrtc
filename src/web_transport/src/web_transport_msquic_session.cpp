@@ -301,6 +301,29 @@ void MsQuicBidiStream::set_on_data(OnStreamDataCb cb) noexcept {
     }
 }
 
+StreamSubscriptionId MsQuicBidiStream::subscribe_on_data(OnStreamDataCb cb) noexcept {
+    if (!cb) return 0;
+    std::lock_guard<std::mutex> l{recv_mutex_};
+    StreamSubscriptionId id = 0;
+    for (const auto& sub : data_subs_) {
+        if (sub.id > id) id = sub.id;
+    }
+    id = (id == 0) ? 1 : id + 1;
+    data_subs_.push_back(DataSubscriber{id, std::move(cb)});
+    return id;
+}
+
+void MsQuicBidiStream::unsubscribe_on_data(StreamSubscriptionId id) noexcept {
+    if (id == 0) return;
+    std::lock_guard<std::mutex> l{recv_mutex_};
+    for (auto it = data_subs_.begin(); it != data_subs_.end(); ++it) {
+        if (it->id == id) {
+            data_subs_.erase(it);
+            return;
+        }
+    }
+}
+
 void MsQuicBidiStream::close() noexcept {
     if (stream_ == nullptr) return;
     if (closed_.exchange(true)) return;  // idempotent
@@ -331,6 +354,7 @@ void MsQuicBidiStream::on_receive(
     // receives a non-owning span over that local buffer, which is
     // valid for the duration of the call.
     OnStreamDataCb cb_copy;
+    std::vector<MsQuicBidiStream::DataSubscriber> subs_copy;
     std::vector<std::uint8_t> data_copy;
     bool fin_seen = false;
     {
@@ -347,21 +371,29 @@ void MsQuicBidiStream::on_receive(
         // Take a snapshot of the callback.  set_on_data() takes the
         // same lock, so any later update will block until we release.
         cb_copy = on_data_cb_;
+        // The multicast subscribers see the same chunk (v1.2.0, WP-C3).
+        subs_copy = data_subs_;
         // Deliver the bytes that just arrived — not the queue front, which
         // may hold an older chunk when RECEIVE events coalesce.
-        if (cb_copy) {
+        if (cb_copy || !subs_copy.empty()) {
             try {
                 data_copy.assign(bytes.begin(), bytes.end());
             } catch (...) {
                 cb_copy = nullptr;
+                subs_copy.clear();
             }
         }
     }
 
-    // Fire the callback OUTSIDE the lock.
+    // Fire the callbacks OUTSIDE the lock.
     if (cb_copy) {
         cb_copy(std::span<const std::uint8_t>{data_copy.data(),
                                                 data_copy.size()});
+    }
+    for (const auto& sub : subs_copy) {
+        if (!sub.cb) continue;
+        sub.cb(std::span<const std::uint8_t>{data_copy.data(),
+                                             data_copy.size()});
     }
     (void)fin_seen;  // captured for future use (currently no-op)
 
@@ -1051,16 +1083,32 @@ void MsQuicSessionImpl::on_peer_stream_started(HQUIC stream,
     // WebTransportDataChannel), hand the accepted stream to it and skip the
     // legacy echo handler. The channel strips the WT header itself before
     // delivering payload bytes to the engine callback.
+    //
+    // v1.2.0 (WP-C2): the stream is handed to *every* subscriber — the
+    // multicast is what lets several channels demultiplex the frames by
+    // their channel label.  The legacy single-slot owner (if any) still
+    // gets the stream, so the raw-mode path is unchanged.
     {
         OnPeerStreamCb peer_cb;
+        std::vector<PeerStreamSubscriber> subs;
         {
             std::lock_guard<std::mutex> l{cb_mutex_};
             peer_cb = on_peer_stream_cb_;
+            subs = peer_subs_;
         }
-        if (peer_cb) {
-            try {
-                peer_cb(static_cast<IBidirectionalStream*>(raw));
-            } catch (...) {
+        if (peer_cb || !subs.empty()) {
+            if (peer_cb) {
+                try {
+                    peer_cb(static_cast<IBidirectionalStream*>(raw));
+                } catch (...) {
+                }
+            }
+            for (const auto& sub : subs) {
+                if (!sub.cb) continue;
+                try {
+                    sub.cb(static_cast<IBidirectionalStream*>(raw));
+                } catch (...) {
+                }
             }
             return;
         }
@@ -1112,12 +1160,105 @@ void MsQuicSessionImpl::on_datagram_received(const uint8_t* data,
                                   uint32_t len) noexcept {
     if (len == 0) return;
     OnDatagramCb cb;
+    std::vector<DatagramSubscriber> subs;
     {
         std::lock_guard<std::mutex> l{cb_mutex_};
         cb = on_datagram_cb_;
+        // The multicast subscribers (v1.2.0, WP-C2) see every datagram;
+        // each channel picks the ones addressed to it.
+        subs = dgram_subs_;
     }
     if (cb) {
         cb(std::span<const std::uint8_t>{data, len});
+    }
+    for (const auto& sub : subs) {
+        if (!sub.cb) continue;
+        sub.cb(std::span<const std::uint8_t>{data, len});
+    }
+}
+
+// ===========================================================================
+// Multicast inbound routes + outbound priority (v1.2.0, WP-C2 / WP-E2)
+// ===========================================================================
+
+SubscriptionId MsQuicSessionImpl::subscribe_on_datagram(OnDatagramCb cb) noexcept {
+    if (!cb) return 0;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    const SubscriptionId id = next_sub_id_++;
+    dgram_subs_.push_back(DatagramSubscriber{id, std::move(cb)});
+    return id;
+}
+
+void MsQuicSessionImpl::unsubscribe_on_datagram(SubscriptionId id) noexcept {
+    if (id == 0) return;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    for (auto it = dgram_subs_.begin(); it != dgram_subs_.end(); ++it) {
+        if (it->id == id) {
+            dgram_subs_.erase(it);
+            return;
+        }
+    }
+}
+
+SubscriptionId MsQuicSessionImpl::subscribe_on_peer_stream(OnPeerStreamCb cb) noexcept {
+    if (!cb) return 0;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    const SubscriptionId id = next_sub_id_++;
+    peer_subs_.push_back(PeerStreamSubscriber{id, std::move(cb)});
+    return id;
+}
+
+void MsQuicSessionImpl::unsubscribe_on_peer_stream(SubscriptionId id) noexcept {
+    if (id == 0) return;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    for (auto it = peer_subs_.begin(); it != peer_subs_.end(); ++it) {
+        if (it->id == id) {
+            peer_subs_.erase(it);
+            return;
+        }
+    }
+}
+
+SubscriptionId MsQuicSessionImpl::register_priority_source(int priority,
+                                            PriorityFlush flush) noexcept {
+    if (!flush) return 0;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    const SubscriptionId id = next_sub_id_++;
+    prio_sources_.push_back(PrioritySource{id, priority, std::move(flush)});
+    return id;
+}
+
+void MsQuicSessionImpl::unregister_priority_source(SubscriptionId id) noexcept {
+    if (id == 0) return;
+    std::lock_guard<std::mutex> l{cb_mutex_};
+    for (auto it = prio_sources_.begin(); it != prio_sources_.end(); ++it) {
+        if (it->id == id) {
+            prio_sources_.erase(it);
+            return;
+        }
+    }
+}
+
+void MsQuicSessionImpl::flush_outbound() noexcept {
+    // Copy the sources under the lock, then run them outside of it: a
+    // flush callback calls back into the session (the stream send), and
+    // the callback must not run with `cb_mutex_` held.
+    std::vector<PrioritySource> sources;
+    {
+        std::lock_guard<std::mutex> l{cb_mutex_};
+        sources = prio_sources_;
+    }
+    // Lower priority value = offered to the transport first.
+    std::stable_sort(sources.begin(), sources.end(),
+                     [](const PrioritySource& a, const PrioritySource& b) {
+                         return a.priority < b.priority;
+                     });
+    for (const auto& src : sources) {
+        if (!src.flush) continue;
+        try {
+            src.flush();
+        } catch (...) {
+        }
     }
 }
 
@@ -1306,6 +1447,35 @@ void WebTransportMsQuicSession::set_on_datagram(OnDatagramCb cb) noexcept {
 
 void WebTransportMsQuicSession::set_on_peer_stream(OnPeerStreamCb cb) noexcept {
     impl_->set_on_peer_stream(std::move(cb));
+}
+
+SubscriptionId WebTransportMsQuicSession::subscribe_on_datagram(OnDatagramCb cb) noexcept {
+    return impl_->subscribe_on_datagram(std::move(cb));
+}
+
+void WebTransportMsQuicSession::unsubscribe_on_datagram(SubscriptionId id) noexcept {
+    impl_->unsubscribe_on_datagram(id);
+}
+
+SubscriptionId WebTransportMsQuicSession::subscribe_on_peer_stream(OnPeerStreamCb cb) noexcept {
+    return impl_->subscribe_on_peer_stream(std::move(cb));
+}
+
+void WebTransportMsQuicSession::unsubscribe_on_peer_stream(SubscriptionId id) noexcept {
+    impl_->unsubscribe_on_peer_stream(id);
+}
+
+SubscriptionId WebTransportMsQuicSession::register_priority_source(int priority,
+                                            PriorityFlush flush) noexcept {
+    return impl_->register_priority_source(priority, std::move(flush));
+}
+
+void WebTransportMsQuicSession::unregister_priority_source(SubscriptionId id) noexcept {
+    impl_->unregister_priority_source(id);
+}
+
+void WebTransportMsQuicSession::flush_outbound() noexcept {
+    impl_->flush_outbound();
 }
 
 void WebTransportMsQuicSession::apply_datagram_state(

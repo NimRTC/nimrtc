@@ -414,6 +414,16 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         ice_t_      = &impl_->session.media_stack->ice();
         impl_->dtls = impl_->session.media_stack->dtls_weak();   // weak_ptr — auto-expires after close()
 
+        // ---- Forward the peer's ICE restart to the host ------------------
+        //
+        // The transport detects a peer-initiated restart (new ICE
+        // credentials in the remote description, RFC 8445 §9.1.1.1) and
+        // regenerates its own credentials.  The host has to answer with
+        // those, so we forward the event.
+        ice_t_->set_on_ice_restart([this] {
+            if (on_ice_restart_) on_ice_restart_();
+        });
+
         // Rule 2 warning: raw-udp-arq media has no DTLS.
         if (!impl_->dtls.lock()) {
             core::log::Logger::instance().warn(
@@ -471,15 +481,21 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 //
 // NOTE (v0.15.0): the WebTransport/QUIC data plane has landed.  The default
 // backend is now "web_transport" (msquic-backed); the session is created lazily
-// in create_data_channel() and shared by all channels of this engine.  The notes
-// below describe the legacy "sctp" backend, retained for backward compatibility.
+// in create_data_channel() and shared by all channels of this engine.
 //
-// (historical note: the v0.11 plan deferred the SCTP-over-DTLS wiring; the SCTP
-// backend below is the retained legacy path.)
+// NOTE (v1.2.0): the "sctp" backend was retired from the public backend
+// selector (`docs/plan/datachannel-capability-plan.md` WP-A, DEC-4 = A1).
+// The SCTP factory stays registered as an in-tree **test backend** — the
+// module tests drive it directly — but the engine refuses to select it,
+// because it opens an in-process usrsctp loopback socket that can never
+// reach a peer.  The historical SCTP-over-DTLS wiring sketch below is kept
+// for reference only; it was never implemented and is not planned (ADR-014).
+//
+// (historical note: the v0.11 plan deferred the SCTP-over-DTLS wiring.)
 //
 //
-// The full DataChannel lifecycle requires plumbing the DTLS
-// transport's outbound datagram path into the SCTP socket:
+// The (never-implemented) full DataChannel lifecycle would have required
+// plumbing the DTLS transport's outbound datagram path into the SCTP socket:
 //   1. Once DTLS reaches `Connected`, derive the SRTP / DTLS-SRTP
 //      keying material and feed it into the SCTP socket via the
 //      `ISctpSocket::set_dtls_keys()` hook.
@@ -489,13 +505,13 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
 //   3. Hook the DTLS transport's inbound (decrypted) datagrams
 //      into `ISctpSocket::feed_inbound_datagram()` so usrsctp
 //      can drain its receive queue.
-//   This skeleton only reserves the (void*) transport pointer
-// placeholder (`Impl::datachannel_transport_cookie`) -- the SCTP path reserves it;
-// the WebTransport path owns `Impl::wt_session` instead.
+//   Only the (void*) transport pointer placeholder
+// (`Impl::datachannel_transport_cookie`) was reserved; the WebTransport path
+// owns `Impl::wt_session` instead.
 // Returns `core::kEngineInternal` when `cfg.datachannel_backend` holds
-// an unrecognised value (no silent fallback to "sctp"); a missing
-// factory only logs a warning and `create_data_channel()` will return
-// `nullptr` on the caller side.
+// an unrecognised value or the retired "sctp" value (no silent fallback);
+// a missing factory only logs a warning and `create_data_channel()` will
+// return `nullptr` on the caller side.
 // ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     // ---- DataChannel factory dispatch (v0.14.0-rc.1) --------------------
@@ -506,8 +522,10 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     //      callers).  After this step the field is treated as the new
     //      `datachannel_backend` (might be "sctp", "web_transport", "...").
     //   2. Dispatch on the resolved backend id:
-    //        "sctp"          — pick factory id "sctp" (or `datachannel_name`
-    //                          override when non-empty).
+    //        "sctp"          — **retired** (v1.2.0, WP-A / DEC-4 = A1):
+    //                          a hard error, because the SCTP backend is a
+    //                          test-only in-process loopback socket that
+    //                          cannot reach a peer.
     //        "web_transport" — pick factory id "web_transport" (the
     //                          `datachannel_name` override is ignored in
     //                          this mode); also verify the
@@ -546,13 +564,15 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     if (backend.empty() && !config_.datachannel_name.empty()) {
         // Legacy v0.x call: `datachannel_name` is set, `datachannel_backend`
         // is not.  Map the legacy value to the new dispatch:
-        //   - "sctp" (the v0.x default) maps to "sctp" backend
-        //     (factory id stays "sctp")
+        //   - "sctp" (the v0.x default value) maps to the retired "sctp"
+        //     backend family, which the dispatcher rejects below (WP-A /
+        //     DEC-4 = A1).  `EngineConfig::datachannel_name` now defaults
+        //     to "" so an unset field never selects the retired family.
         //   - any other (non-empty) factory id is treated as a power-user
         //     factory override; the engine resolves it directly without
         //     dispatching through a backend family.
         if (config_.datachannel_name == "sctp") {
-            backend = "sctp";   // explicit even though "sctp" is also the default
+            backend = "sctp";   // explicit: the retired family, rejected below
         } else {
             // Power-user factory override.  Treat the value as a direct
             // factory id rather than a backend family — flagging it keeps
@@ -596,35 +616,33 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     }
 
     if (backend == "sctp") {
-        // Legacy SCTP-over-DTLS path.  `datachannel_name` stays the
-        // authoritative knob in this family: it is both the factory-id
-        // override and the explicit-disable signal (empty = disabled),
-        // which is the v0.x contract (`cfg.datachannel_name = ""` was how
-        // callers turned DataChannel off).  The `EngineConfig` default is
-        // already "sctp", so an empty value here is unambiguously an
-        // intentional disable rather than an unset field.
-        if (config_.datachannel_name.empty()) {
-            core::log::Logger::instance().debug(
-                "engine: DataChannel disabled (datachannel_name is empty)");
-            return 0;
-        }
-        resolved_dc_factory_id_ = config_.datachannel_name;
-
-        const plugins::IDataChannelFactory* dcf =
-            pal::resolve_datachannel(resolved_dc_factory_id_);
-        if (dcf) {
-            core::log::Logger::instance().info(
-                std::string("engine: DataChannel backend='sctp' ready "
-                            "(factory '")
-                    .append(dcf->id())
-                    .append("' resolved via core::PluginRegistry::get_datachannel)"));
-        } else {
-            core::log::Logger::instance().warn(
-                std::string("engine: DataChannel backend='sctp' but factory '")
-                    .append(resolved_dc_factory_id_)
-                    .append("' is not registered (create_data_channel() will return nullptr)"));
-        }
-        return 0;
+        // ---- Retired backend (v1.2.0, DataChannel capability plan
+        //      WP-A / DEC-4 decision A1) --------------------------
+        //
+        // The SCTP backend is a **test-only** backend: `SctpDataChannel`
+        // opens an in-process usrsctp socket bound to 127.0.0.1 and the
+        // engine never wires the DTLS transport's outbound/inbound
+        // datagram paths into that socket, so a channel created here can
+        // never reach a remote peer.  Silently resolving it would hand
+        // the caller a data plane that cannot work, so the selector is
+        // rejected outright.
+        //
+        // The in-tree factory stays registered (`SctpDataChannelFactory`,
+        // id "sctp") as the reference implementation for the DCEP codec
+        // and the PR-SCTP semantics — the module tests drive it directly.
+        // What is retired is the *public selector*, not the backend.
+        std::string msg =
+            std::string("engine: datachannel_backend='sctp' is a test-only "
+                        "backend (an in-process usrsctp loopback socket) and "
+                        "was retired from the public backend selector; it "
+                        "cannot reach a peer. Use \"web_transport\" (the "
+                        "default) for the WebTransport/QUIC data plane, or "
+                        "\"\" to disable the data plane.");
+        core::log::Logger::instance().error(msg);
+        impl_->last_open_rc = core::kEngineInternal;
+        if (on_error_) on_error_(core::kEngineInternal, msg);
+        resolved_dc_factory_id_.clear();   // force nullptr path in create_data_channel
+        return core::kEngineInternal;
     }
 
     if (backend == "web_transport") {
@@ -684,7 +702,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
     // fallback to "sctp" (a typo'd backend id would otherwise mask an
     // integrator error).
     std::string msg = std::string("engine: datachannel_backend='") + backend
-        + "' is not recognised (valid: \"sctp\", \"web_transport\", \"\"; "
+        + "' is not recognised (valid: \"web_transport\", \"\"; "
           "see docs/plan/v0.14-plan.md §2.1 / docs/plan/v1.0-plan.md §2.1.1)";
     core::log::Logger::instance().error(msg);
     impl_->last_open_rc = core::kEngineInternal;
@@ -828,6 +846,14 @@ int NimRTCEngine::tick() noexcept {
                 if (on_data_state_) on_data_state_("closed");
             }
         }
+
+        // Drain the data plane's outbound queue (v1.2.0, WP-E2).  The
+        // channels of this session register their pending sends as
+        // priority sources; the session offers them to the transport in
+        // priority order (lower priority value first).  A message that
+        // the transport refused is retried here, and a message whose
+        // per-message TTL expired is dropped (WP-D1).
+        impl_->wt_session->flush_outbound();
     }
 
     // ---- Re-evaluate the signal policy (v1.2.0 M2, F5) -----------------
@@ -861,6 +887,12 @@ int NimRTCEngine::tick() noexcept {
             scheduler_->on_bwe_update(target_bps);
         }
     }
+
+    // ---- Split the estimate between the traffic classes (v1.2.0 M3, P2) -
+    // The aggregate budget above is the *ceiling*; the per-class buckets
+    // are the *distribution*.  Without them a saturated video stream eats
+    // the whole budget and the audio is dropped with it.
+    update_pacing_rates();
 
     // ---- BWE-linked audio bitrate adaptation ----------------------------
     //
@@ -920,6 +952,82 @@ int NimRTCEngine::tick() noexcept {
         maybe_send_receiver_report();
     }
     return ice_t_->recv();
+}
+
+
+// ---------------------------------------------------------------------------
+// Pacing: split the estimate between the traffic classes (v1.2.0 M3, P2)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::update_pacing_rates() noexcept {
+    if (!config_.media_pacing_enabled) return;
+    if (!scheduler_ || !bwe_) return;
+
+    const std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
+    if (estimate == 0) {
+        // No estimate yet — the estimator has not heard from the network.
+        // Reading that as "no bandwidth at all" would freeze the stream,
+        // so the pacer keeps the rates it has.
+        return;
+    }
+
+    // ---- The demands ---------------------------------------------------
+    //
+    // The audio is the *reserved* stream (it takes its share first and
+    // keeps a hard floor); the video is the *elastic* one (it shares
+    // what the audio left).  The split rule itself lives in
+    // `bandwidth_allocation.hpp` (v1.2.0, video plan F8) and is the very
+    // same rule the audio bitrate adaptation uses — one rule, not two.
+    std::vector<detail::BandwidthDemand>& demands = impl_->pacing_demands_;
+    demands.clear();
+
+    const int audio_ceiling = resolve_audio_bitrate_ceiling();
+    const int audio_floor = config_.audio_min_bitrate_bps > 0
+                                ? config_.audio_min_bitrate_bps
+                                : 1000;
+    demands.push_back(detail::reserved_audio_demand(
+        config_.audio_bwe_share,
+        static_cast<std::uint32_t>(audio_floor),
+        static_cast<std::uint32_t>(audio_ceiling > 0 ? audio_ceiling : 0)));
+
+    // The video's ceiling is what its encoder is configured to produce:
+    // the video may not be paced faster than it encodes, and a video
+    // that cannot use its whole share does not hold it hostage.
+    std::uint32_t video_ceiling = 0;
+    if (video_codec_) video_ceiling = video_codec_->config().bitrate_bps;
+    detail::BandwidthDemand video_demand;
+    video_demand.reserved   = false;
+    video_demand.weight      = 1;
+    video_demand.ceiling_bps = video_ceiling;
+    demands.push_back(video_demand);
+
+    const detail::BandwidthAllocation alloc =
+        detail::allocate_bandwidth(estimate, demands);
+    if (alloc.targets.size() != 2) return;
+
+    // ---- The class rates ------------------------------------------------
+    //
+    // The audio class runs at the rate its encoder is really sending, or
+    // at its allocation if that is higher: the reserved floor is a
+    // *right*, not a cap.  Using the encoder's current rate (rather than
+    // the allocation) matters while the bitrate adaptation is still
+    // ramping down — pacing the audio below the rate its encoder is
+    // still producing would add latency to the call for no gain.
+    std::uint32_t audio_rate = alloc.targets[0];
+    if (audio_bitrate_current_bps_ > 0 &&
+        static_cast<std::uint32_t>(audio_bitrate_current_bps_) > audio_rate) {
+        audio_rate = static_cast<std::uint32_t>(audio_bitrate_current_bps_);
+    }
+
+    // The video class runs at its share of what the audio left, capped
+    // by what the encoder produces.
+    std::uint32_t video_rate = alloc.targets[1];
+    if (video_ceiling > 0 && video_rate > video_ceiling) video_rate = video_ceiling;
+
+    // The scheduler ignores an unchanged rate, so pushing the same
+    // numbers every tick costs a comparison, not a reconfiguration.
+    scheduler_->set_pacing_rate(plugins::PacedClass::kAudio, audio_rate);
+    scheduler_->set_pacing_rate(plugins::PacedClass::kVideo, video_rate);
 }
 
 

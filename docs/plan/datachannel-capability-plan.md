@@ -12,9 +12,9 @@
 > | Plan opened | 2026-11-09 |
 > | Baseline | `main` @ `v1.1.0` tag |
 > | Scope class | Data channel — wire-format semantics, channel routing, reliability correctness, priority plumbing |
-> | Status | **Gap analysis complete; work packages written; version placement partially owner-decided (§7), one item awaiting decision** |
+> | Status | **WP-A landed 2026-11-10 (DEC-4 = A1, DEC-1 = (a)); WP-B / WP-C / WP-D / WP-E written, version placement partially owner-decided (§7)** |
 > | Owner | BDFL |
-> | Related | `docs/plan/v1.1-plan.md` §5.6 (version ladder), `docs/plan/v0.11-plan.md` §2.2 / §10 (SCTP → WebTransport re-design), `docs/plan/v1.0-plan.md` §2.1.1 (DC-1 / DC-2), ADR-014 (WebTransport vendor), ADR-015 (API stability), `docs/plan/video-pipeline-v2-plan.md`, `docs/plan/audio-pipeline-dev-plan.md`, `docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项） |
+> | Related | `docs/plan/v1.1-plan.md` §5.6 (version ladder), `docs/plan/v0.11-plan.md` §2.2 / §10 (SCTP → WebTransport re-design), `docs/plan/v1.0-plan.md` §2.1.1 (DC-1 / DC-2), ADR-014 (WebTransport vendor), ADR-015 (API stability), `docs/plan/video-pipeline-v2-plan.md`, `docs/plan/audio-pipeline-dev-plan.md`, `docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项，落位已定为 **v1.2.0**） |
 
 ---
 
@@ -97,7 +97,7 @@ places: it is encoded into the DCEP `DATA_CHANNEL_OPEN` message
 `0` for every channel (`src/modules/datachannel/src/sctp_data_channel.cpp`).
 The engine hard-codes `cfg.priority = 128` at both creation sites and
 exposes no setter, so the value cannot even be set to anything else from
-the public API. The scheduler's L1 stream-priority API
+the public API. The scheduler's per-stream (S-family) priority API
 (`sched::Scheduler::set_stream_priority` / `enqueue_for_stream`,
 `src/modules/sched/include/nimrtc/sched/sched.hpp`) is **never called by
 any data-channel code path**; `tests/test_sched_priority_dc.cpp` exercises
@@ -155,7 +155,7 @@ has a defined "done".
 
 | WP | Closes | Depends on | Target line |
 |---|---|---|---|
-| WP-A | DC-A (dual-backend claim) | — | `v1.1.x` (doc + guardrail) |
+| WP-A | DC-A (dual-backend claim) | — | `v1.2.0` (**landed 2026-11-10**) |
 | WP-B | DC-B (message boundary) | — | `v1.2.0` |
 | WP-C | DC-C (multi-channel isolation) | WP-B | `v1.2.0` |
 | WP-D | DC-D (partial reliability) | — | `v1.1.x` (bug fix) |
@@ -168,37 +168,36 @@ public surface presents it as a peer of the production WebTransport
 backend, and `EngineConfig::datachannel_name = "sctp"` is documented as
 "the legacy SCTP-over-DTLS path".
 
-**Decision required (§7).** Two mutually exclusive directions:
+**Decision taken (§7 DEC-4 = A1, 2026-11-10): retire SCTP from the public
+backend selector.** The SCTP backend stays in-tree as a *test* backend (it
+carries the PR-SCTP TTL implementation and the DCEP codec, which the
+WebTransport path does not), but `"sctp"` was removed from the accepted
+values of `datachannel_backend` / `datachannel_name`, and
+`docs/api/engine_config.md` states plainly that the production data plane is
+WebTransport/QUIC only. The usrsctp removal scheduled for `v1.2.0`
+(`v0.11-plan.md` §2.2) becomes a clean removal of a test-only dependency,
+and the PR-SCTP reference implementation must first be salvaged as a test
+oracle for WP-D.
 
-* **A1 — Retire SCTP from the public backend selector.** Keep
-  `SctpDataChannel` as an in-tree *test* backend (it carries the PR-SCTP
-  TTL implementation and the DCEP codec, which the WebTransport path does
-  not), remove `"sctp"` from the documented values of
-  `datachannel_backend` / `datachannel_name`, and state plainly in
-  `docs/api/engine_config.md` that the production data plane is
-  WebTransport/QUIC only. Follow-on: the usrsctp removal scheduled for
-  `v1.2.0` (`v0.11-plan.md` §2.2) becomes a clean removal of a test-only
-  dependency, and the PR-SCTP reference implementation must first be
-  salvaged as a test oracle for WP-D.
-* **A2 — Build SCTP-over-DTLS.** Substantially larger: an
+* **A2 — Build SCTP-over-DTLS (not taken).** Substantially larger: an
   `AF_CONN` usrsctp backend, DTLS key export into usrsctp, the inbound
-  `usrsctp_conninput()` path, and a Chrome SCTP interop harness. This is
-  the path `v0.11-plan.md` §2.2 deliberately walked away from in favour of
+  `usrsctp_conninput()` path, and a Chrome SCTP interop harness. This is the
+  path `v0.11-plan.md` §2.2 deliberately walked away from in favour of
   WebTransport, and re-opening it would re-litigate a closed decision.
 
-**Recommendation: A1.** The default backend already works and has Chrome
-interop evidence (Case E); the SCTP path has been carried as a legacy
-shell for five minor versions with no wire-level use.
-
-**Acceptance.**
+**Acceptance (A1).**
 * `docs/api/engine_config.md` and the `EngineConfig` header comments state
-  which backends are production-capable and which are test-only.
-* A regression test asserts that the default
-  `datachannel_backend` resolves to a backend that has a *wire* path
-  (i.e. that the default is not the loopback SCTP socket).
-* If A1: `"sctp"` passed to `datachannel_backend` returns
-  `kEngineInternal` with a message that names the test-only status,
-  rather than silently resolving to a backend that cannot reach a peer.
+  which backends are production-capable and which are test-only. ✔
+* A regression test asserts that the default `datachannel_backend` resolves
+  to a backend that has a *wire* path (i.e. that the default is not the
+  loopback SCTP socket). ✔
+* `"sctp"` passed to `datachannel_backend` returns `kEngineInternal` with a
+  message that names the test-only status, rather than silently resolving to
+  a backend that cannot reach a peer. ✔
+  (The legacy v0.x spelling — `datachannel_backend` empty plus
+  `datachannel_name = "sctp"` — is rejected the same way, and
+  `EngineConfig::datachannel_name` now defaults to `""` so an unset field
+  never selects the retired family.)
 
 ### WP-B — Message boundary: frame the WebTransport payload
 
@@ -371,7 +370,7 @@ must be a fix for something that is *wrong* in `v1.1.0`") — see §7 DEC-1.
 ### WP-E — Priority reaching the data channel
 
 **Problem.** §1.1 DC-E: `priority` is DCEP-encoded and otherwise ignored;
-the scheduler's L1 API has no caller in the data plane.
+the scheduler's per-stream API has no caller in the data plane.
 
 **Fix — and the honest caveat.** Two distinct problems hide under this row,
 and only one of them is solvable:
@@ -386,7 +385,7 @@ and only one of them is solvable:
 * **E2 — the scheduler is not on the data path at all.** Under the default
   WebTransport backend, the media path (DTLS-SRTP over ICE/UDP) and the
   data path (a separate QUIC connection) run **independent congestion
-  control**. The scheduler's L1 buckets order packets *within one
+  control**. The scheduler's per-stream buckets order packets *within one
   connection*; they cannot order across two connections. This is stated
   in `src/modules/sched/include/nimrtc/sched/sched.hpp` §"Scope note" and
   it means the honest form of DC-E under the current architecture is:
@@ -398,7 +397,7 @@ and only one of them is solvable:
 
   The tractable version of E2: priority *within* the data plane. The
   WebTransport session's outbound datagram and stream sends can be
-  ordered by the scheduler's L1 buckets using the channel id as the
+  ordered by the scheduler's per-stream buckets using the channel id as the
   stream id, so that a high-priority control channel is not queued behind
   a bulk-transfer channel on the same QUIC connection. That is a real,
   useful, and honest capability.
@@ -477,10 +476,10 @@ than claiming a wire-level guarantee the architecture cannot provide.
 
 | ID | Question | Options | Recommendation | Status |
 |---|---|---|---|---|
-| **DEC-1** | Does the `v1.1.x` line carry the correctness fixes (WP-D) and the backend-honesty change (WP-A/A1)? | (a) yes — both are "fixes of something wrong in `v1.1.0`"; (b) no — push everything to `v1.2.0` | **(a)**, provided WP-A/A1 changes no public API and the `"sctp"` selector change is called out in the release notes | **awaiting decision** |
+| **DEC-1** | Does the `v1.1.x` line carry the correctness fixes (WP-D) and the backend-honesty change (WP-A/A1)? | (a) yes — both are "fixes of something wrong in `v1.1.0`"; (b) no — push everything to `v1.2.0` | **(a)**, provided WP-A/A1 changes no public API and the `"sctp"` selector change is called out in the release notes | **decided 2026-11-10: (a)** — WP-A/A1 adds and removes no public symbol (it changes the *meaning* of two existing config values, which `CHANGELOG.md` `## [Unreleased]` spells out). The trunk has since moved onto the `v1.2.0` line (the audio body and the session/data-channel/stats surfaces all land there), so the change ships in `v1.2.0`; a `v1.1.x` backport is optional and would need its own release-notes entry. |
 | **DEC-2** | How is the message boundary reconciled with Chrome's raw-byte WebTransport stream? | (a) negotiated framing (both peers agree); (b) NimRTC-only framing, Chrome path stays byte-stream; (c) no framing, document the loss | **(b)** — negotiation needs a wire format Chrome will not speak; (c) leaves DC-B open | **awaiting decision** |
 | **DEC-3** | How is per-message partial reliability implemented on a transport with no per-message retry hook? | (a) application-level sequence/ack protocol on top of the frame; (b) QUIC datagram + application retry window; (c) send-side-only policy (drop-old / drop-new), no delivery guarantee | **(a)** if the product needs a delivery guarantee; **(c)** otherwise | **awaiting decision** |
-| **DEC-4** | Which direction does WP-A take — retire SCTP from the public backend selector (A1), or build SCTP-over-DTLS (A2)? | A1 / A2 | **A1** — the default backend already has Chrome interop evidence; A2 re-opens a closed decision from `v0.11-plan.md` §2.2 | **awaiting decision** |
+| **DEC-4** | Which direction does WP-A take — retire SCTP from the public backend selector (A1), or build SCTP-over-DTLS (A2)? | A1 / A2 | **A1** — the default backend already has Chrome interop evidence; A2 re-opens a closed decision from `v0.11-plan.md` §2.2 | **decided 2026-11-10: A1** — implemented: `datachannel_backend = "sctp"` (and the legacy `datachannel_name = "sctp"` spelling) now fails `open()` with `kEngineInternal` and a message that names the backend as **test-only**; `EngineConfig::datachannel_name` now defaults to `""`. The `SctpDataChannelFactory` stays registered as the in-tree reference implementation (the PR-SCTP oracle WP-D needs); only the public *selector* was retired. |
 | **DEC-5** | Which release line carries WP-B, WP-C, WP-E? | (a) `v1.2.0` — alongside the video Part B and audio WP-0…WP-11 body; (b) `v1.3.0` — a dedicated data-channel release | **(a)** — `v1.2.0` is already the first feature release and these are the gaps most visible to integrators; but the line is already large | **awaiting decision** |
 
 ---
@@ -521,8 +520,8 @@ The data channel is considered to have closed the gap table when:
   wiring (WP-A)
 - `src/engine/src/engine_signaling.cpp` — `a=sctp-port`, `a=max-message-size`
   (WP-B4)
-- `src/modules/sched/include/nimrtc/sched/sched.hpp` — the L1 stream
-  priority API and its cross-plane scope note (WP-E2)
+- `src/modules/sched/include/nimrtc/sched/sched.hpp` — the per-stream
+  (S-family) priority API and its cross-plane scope note (WP-E2)
 - `src/modules/sched/tests/test_sched_priority_dc.cpp` — the DC-2 test that
   exercises the scheduler without the data plane (WP-E)
 - `docs/plan/v1.1-plan.md` §5.6 — the version ladder

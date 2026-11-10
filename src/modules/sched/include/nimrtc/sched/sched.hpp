@@ -1,8 +1,28 @@
 ﻿/**
  * @file nimrtc/sched/sched.hpp
- * @brief Unified sending scheduler — L1 packet prioritisation (§8.2 / §8.3).
+ * @brief Unified sending scheduler — send-priority scheduling (§8.2 / §8.3).
  *
- * ## L1: Per-stream strict-priority buckets (DC-2)
+ * ## Terminology: two independent queue families
+ *
+ * One `Scheduler` instance holds two *separate* queue families.  They are
+ * named below with scheduler-local labels that are deliberately **not** the
+ * architecture's L0–L3 layering: in `docs/zh/architecture.md` §2.1 "L1" means
+ * the *transport* layer, which is where this module lives.  So "L1" must
+ * never be used inside this module to mean the stream family.
+ *
+ *   - **P-family — per-packet priority**: `plugins::Priority`, 5 levels,
+ *     drained by `drain()` / `drain_with()`.
+ *   - **S-family — per-stream priority**: `sched::StreamPriority`, 3 buckets,
+ *     drained by `select_next_packet()`.
+ *
+ * The two families are **not** composed into a single total order:
+ * `drain()` / `drain_with()` only ever return P-family packets,
+ * `select_next_packet()` only ever returns S-family packets, and neither
+ * side compares a P-family level against an S-family bucket.  A ladder
+ * written as "control > audio > keyframe > video > best-effort" therefore
+ * describes **one** family only — see the P-family ladder below.
+ *
+ * ## S-family: per-stream strict-priority buckets (DC-2)
  *
  *   Streams are identified by a caller-supplied `stream_id` (uint32_t).
  *   Each stream carries a `StreamPriority` (High / Normal / Low).  The
@@ -20,27 +40,39 @@
  *
  *   The DC-2 guarantee is **intra-scheduler ordering only**: it orders
  *   packets that are both enqueued into this `Scheduler` instance
- *   (L0 `enqueue_*()` vs L1 `enqueue_for_stream_*()`).
+ *   (P-family `enqueue_*()` vs S-family `enqueue_for_stream_*()`).
  *
  *   Under the default `EngineConfig::datachannel_backend = "web_transport"`,
  *   media rides DTLS-SRTP over ICE/UDP while the DataChannel rides a
  *   **separate QUIC connection** (`WebTransportDataChannel` sends straight
  *   through `IWebTransportSession::send_datagram()` / stream `send()` and
  *   never enqueues into this `Scheduler`; `NimRTCEngine::tick()` only
- *   drains L0 via `drain_with()`). The two connections run independent
- *   congestion control, so a video-heavy media path does not share a
- *   scheduler queue with — and therefore cannot be pre-empted by — the
- *   data path at the wire level. Cross-connection priority would require
+ *   drains the P-family via `drain_with()`). The two connections run
+ *   independent congestion control, so a video-heavy media path does not
+ *   share a scheduler queue with — and therefore cannot be pre-empted by —
+ *   the data path at the wire level. Cross-connection priority would require
  *   joint pacing above both connections and is **not** what DC-2 provides.
- *   The legacy `"sctp"` backend (SCTP-over-DTLS on the ICE 5-tuple) keeps
- *   both planes on one connection, which is the only configuration where
- *   an intra-scheduler ordering claim approaches wire-level relevance.
  *
- * ## L0: Per-packet priority (pre-existing §8.3)
+ *   No shipped backend puts the two planes on one connection: the legacy
+ *   `"sctp"` backend was retired in v1.2.0 (WP-A / DEC-4 = A1) and is now a
+ *   test-only in-process usrsctp loopback socket that never reaches a peer,
+ *   so it cannot provide wire-level cross-plane priority either.  Today the
+ *   honest statement is: **the scheduler arbitrates within a connection, and
+ *   the data plane does not use it at all** — the per-stream API has no
+ *   caller in the data path (see `docs/plan/datachannel-capability-plan.md`
+ *   WP-E2).
  *
- *   The original 5-level `plugins::Priority` (kControl … kBestEffort) is
- *   preserved for callers that route packets without a stream abstraction.
- *   It is orthogonal to the stream-bucket layer above.
+ * ## P-family: per-packet priority (§8.3)
+ *
+ *   The original 5-level `plugins::Priority` ladder is preserved for callers
+ *   that route packets without a stream abstraction:
+ *
+ *     kControl > kAudio > kVideoKeyframe > kVideo > kBestEffort
+ *
+ *   It is orthogonal to the S-family buckets above.  Note that
+ *   `kBestEffort` is the lowest *packet* level, not a promise that
+ *   DataChannel traffic is scheduled here — whether data-plane packets
+ *   enter this family at all depends on the backend (see the scope note).
  *
  * Thread safety: the implementation guards internal state with a mutex;
  * callers must still provide their own memory barriers if the caller
@@ -93,10 +125,10 @@ namespace nimrtc::sched {
     }
 
     // =======================================================================
-    // DC-2: L1 stream-priority buckets
+    // DC-2: S-family (per-stream) priority buckets
     // =======================================================================
 
-    /** L1 stream priority — three buckets drive strict-priority scheduling.
+    /** Per-stream priority — three buckets drive strict-priority scheduling.
      *
      *  The engine maps stream types at registration time:
      *    High   — RTX, NACK, RTCP feedback
@@ -110,7 +142,7 @@ namespace nimrtc::sched {
         Low    = 2,  /**< Padding — sent only when High and Normal are empty. */
     };
 
-    /** Number of L1 priority buckets (High / Normal / Low). */
+    /** Number of per-stream priority buckets (High / Normal / Low). */
     NIMRTC_API_STABLE constexpr std::size_t kStreamPriorityCount = 3;
 
     /** Convert a StreamPriority to its integer rank (0 = High, 2 = Low). */
@@ -160,6 +192,17 @@ public:
     plugins::SchedulerStats  stats()  const noexcept override;
     plugins::SchedulerConfig config() const noexcept override;
 
+    // ---- Per-class pacing (v1.2.0 M3, video plan P2) -------------------
+    //
+    // One token bucket per traffic class (plugins::PacedClass): the
+    // session budget is the aggregate guard, the class buckets are the
+    // distribution.  The control plane (Priority::kControl) has no class
+    // and bypasses the pacer entirely, so RTX / NACK / RTCP feedback is
+    // never delayed by a saturated media bucket.
+    void              set_pacing_rate(plugins::PacedClass cls,
+                                       std::uint32_t bps) noexcept override;
+    std::uint32_t     pacing_rate(plugins::PacedClass cls) const noexcept override;
+
     // ---- Packet buffer pool (P1 hardening, 2026-11-09) ----------------
     //
     // The built-in scheduler keeps a bounded free-list of packet buffers.
@@ -172,18 +215,18 @@ public:
     void release_packet_buffer(std::vector<std::uint8_t>&& buffer) noexcept override;
 
     // =====================================================================
-    // DC-2: L1 stream-priority API
+    // DC-2: S-family (per-stream) priority API
     // =====================================================================
 
-    /** Set the L1 priority for a stream.  All subsequent packets enqueued
-     *  via `enqueue_for_stream()` for this `stream_id` will be placed in
-     *  the matching bucket.  Existing packets already in queues are not
-     *  moved.  Thread-safe. */
+    /** Set the per-stream priority for a stream.  All subsequent packets
+     *  enqueued via `enqueue_for_stream()` for this `stream_id` will be
+     *  placed in the matching bucket.  Existing packets already in queues
+     *  are not moved.  Thread-safe. */
     void              set_stream_priority(std::uint32_t stream_id,
                                           StreamPriority level) noexcept;
 
-    /** Return the current L1 priority of a stream.  Returns Normal if the
-     *  stream has not been assigned a priority yet.  Thread-safe. */
+    /** Return the current per-stream priority of a stream.  Returns Normal
+     *  if the stream has not been assigned a priority yet.  Thread-safe. */
     [[nodiscard]] StreamPriority
                     get_stream_priority(std::uint32_t stream_id) const noexcept;
 

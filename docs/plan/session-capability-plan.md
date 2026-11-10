@@ -16,9 +16,9 @@
 > | Plan opened | 2026-11-10 |
 > | Baseline | `main` @ post-v1.1 consolidation |
 > | Scope class | Session / signalling — session lifecycle, m-line semantics, RTP payload semantics, RTCP feedback surface. No transport rewrite. |
-> | Status | **Gap analysis complete; work items written; version placement partially owner-decided (§4)** |
+> | Status | **Gap analysis complete; work items written; version placement owner-decided (§4) — the whole plan lands in `v1.2.0`** |
 > | Owner | BDFL |
-> | Related | `docs/plan/video-pipeline-v2-plan.md`（**C9 / C11** 已落地，v1.2.0）、`docs/plan/stats-surface-plan.md`（会话能力第 8 项，O1 / M2）、`docs/plan/datachannel-capability-plan.md`、`docs/plan/v1.1-plan.md`、ADR-015 (API stability) |
+> | Related | `docs/plan/video-pipeline-v2-plan.md`（**C9 / C11** 已落地，v1.2.0）、`docs/plan/stats-surface-plan.md`（会话能力第 8 项，O1 / M2）、`docs/plan/datachannel-capability-plan.md`、`docs/plan/v1.1-plan.md` §5.6（版本阶梯）、ADR-015 (API stability) |
 
 ---
 
@@ -260,15 +260,19 @@ X1 (XR 解析) ── X2 (XR 构造)          X3 (TMMBR 往返) ── X4 (接�
 
 ---
 
-## 4. 里程碑建议与待决事项
+## 4. 里程碑与待决事项
+
+**版本落位（owner 决定，2026-11-10）：本计划的全部工作项落在 `v1.2.0`。**
 
 | 里程碑 | 工作项 | 理由 |
 |---|---|---|
-| **v1.3.0** | N1, N2, N3, N4, N5 | N 组是**接线**而非新建，风险低于 T 组，但需要 SDP 与引擎两条线同时动；排在 C9/C11 之后可以复用刚落地的协商结构（`VideoNegotiationResult` 那一层） |
-| **v1.4.0** | T1, T2, T3, T4 | Transceiver / Unified Plan 是一次 SDP 语义的改变，涉及与 Chrome 的互操作验证，需要独立的验证窗口 |
-| **v1.3.0** | D1, D2, D3, D4 | DTMF 是纯增量路径：不碰现有音频解码，只加一条出口；且 RFC 4733 的互操作面窄，验证成本低 |
-| **v1.4.0** | X1, X2, X3, X5 | XR / TMMBR 是协议侧增量，不影响现有路径 |
-| **v1.5.0** | X4 | TMMBR 接线依赖 B 轨的码率控制器稳定后再做，否则要返工 |
+| **v1.2.0** | N1, N2, N3, N4, N5 | N 组是**接线**而非新建：数据模型已就位（§1.2.1），接上刚落地的 C9/C11 协商结构（`VideoNegotiationResult`）即可，留在 v1.2.0 与视频 B 轨同批落地 |
+| **v1.2.0** | T1, T2, T3, T4 | Transceiver / Unified Plan 依赖 N1；两者同属 v1.2.0 时，T1 在 N1 落地后即可开工，不必跨版本等待 |
+| **v1.2.0** | D1, D2, D3, D4 | DTMF 是纯增量路径：不碰现有音频解码，只加一条出口；RFC 4733 互操作面窄，验证成本低 |
+| **v1.2.0** | X1, X2, X3, X4, X5 | XR / TMMBR 是协议侧增量。**X4 的前置（码率控制器）在同一版本内满足**——`video-pipeline-v2-plan.md` 的 B 轨（B5 统一编码参数计算）已排在 v1.2.0，因此 X4 不必再推一版 |
+| **v1.2.0** | X6 | 文档口径随代码同版本更新 |
+
+**这条压缩的代价，owner 需要知情：** v1.2.0 现在同时装着视频 B 轨（F / P / B）、音频 P0+P1（WP-0 … WP-11）、C9 / C11、usrsctp 移除、SM4-GCM SRTP，以及本计划的 N / T / D / X 四组。v1.2.0 的验收窗口会很紧；若中途发现 T 组（Unified Plan 的 Chrome 互操作验证）吃不下工作窗口，可执行项是把 **T 组**整体推到 v1.3.0——N / D / X 三组是独立轨道，砍掉 T 组不影响其余三组的落地。
 
 ### 待 owner 决策（规格里没写的行为，不自己选）
 
@@ -276,7 +280,31 @@ X1 (XR 解析) ── X2 (XR 构造)          X3 (TMMBR 往返) ── X4 (接�
 |---|---|---|---|
 | **OD-A** | **轨道被移除时，SDP 上怎么表现？** | (a) 整条 m-line 从 offer 中消失；(b) 保留 m-line 但标为 `inactive`；(c) 保留 m-line 但端口置 0 | 决定 N3/N5 与 T4 的实现形状。libwebrtc 在 Unified Plan 下倾向 (b)/(c)，但 NimRTC 是否要跟需要 owner 定 |
 | **OD-B** | **DTMF 是否随引擎默认开启？** | (a) 默认关闭，宿主显式开；(b) 默认开启 | 影响 SDP 默认形状与 §2 的默认流量 |
-| **OD-C** | **XR 要覆盖哪些块类型？** | (a) 只做 BT=1 + BT=6（N1 建议的最小集）；(b) 覆盖全部 RFC 3611 块类型 | 影响 X1/X2 的工作量与 X6 的支持矩阵 |
+| **OD-C** | **XR 要覆盖哪些块类型？** | (a) 只做 BT=1 + BT=6（X1 建议的最小集）；(b) 覆盖全部 RFC 3611 块类型 | 影响 X1/X2 的工作量与 X6 的支持矩阵 |
+
+### 已决策（owner，2026-11-10）
+
+三个决策点全部落定，实现按下列语义执行。
+
+| ID | **决定** | 落地含义 |
+|---|---|---|
+| **OD-A** | **(b) 保留 m-line 但标为 `inactive`** | 轨道被移除时，m-line 仍留在 offer / answer 中，方向属性写 `inactive`；mid **不回收**，BUNDLE 组保持合法（组内 mid 仍然存在）。N3 / N5 / T4 按此实现。**理由**：mid 稳定性是 Unified Plan 的核心不变式——回收 mid 会让对端把一条已建立的 m-line 误认为"新增的"，触发一次不必要的重协商；`inactive` 在语义上恰好表达"这条轨道本轮不收发"。 |
+| **OD-B** | **(a) 默认关闭，宿主显式开启** | `EngineConfig` 新增 `dtmf_enabled`（默认 `false`）。默认情况下 offer **不**携带 `a=rtpmap:<pt> telephone-event/8000`，telephone-event 负载类型仍走 §1.2.3 的既有丢弃路径（计入 `kAudioPayloadTypeUnknown`）。宿主显式开启后才声明、才解码。**理由**：DTMF 是可选能力，默认开启会让每一份 offer 都多出一条属性，而绝大多数会话用不到它。 |
+| **OD-C** | **(a) 只做 BT=1 + BT=6** | XR 实现只覆盖 Receiver Estimated Quality（BT=1）与 DLRR（BT=6）；其余 RFC 3611 块类型（Statistics Summary BT=4、Duplicate Arrival Notification BT=5 等）在解析时**安全跳过**而非报错。X6 的支持矩阵只列这两类。**理由**：这两类是 QoE 侧真正会收到的；其余块类型目前无人消费，做了也只是死代码。 |
+
+> **OD-A 的推论**：N5 的"停用轨道"与 N4 的"改方向"在 SDP 上**同形**——两者都表现为 m-line 的方向属性变为 `inactive`。区别在语义层：改方向是这条轨道下一轮可能恢复，停用是这条轨道已被移除。实现上由"轨道是否仍在 session 的轨道集合中"区分。
+
+### 决策带来的验收口径变化
+
+| 工作项 | 原验收 | 决策后的验收 |
+|---|---|---|
+| **N3** | 增删轨道后 mid 集合与既有 mid 无冲突 | **不变**，并追加：被移除轨道的 mid **仍在** mid 集合中（OD-A） |
+| **N5** | 行为在 `docs/api/engine_api.md` 中写明，且有一个测试固定该行为 | **具体化**：被移除轨道的 m-line 保留、方向为 `inactive`、mid 不回收；该行为在 `docs/api/engine_api.md` 写明并由测试固定 |
+| **T4** | 停用后 m-line 变为 `inactive`（或按 OD-A 消失） | **具体化**：停用后 m-line **保留**且方向为 `inactive`（OD-A 选定 (b)，"或消失"的分支不再适用） |
+| **D3** | offer 携带 telephone-event 声明 | **条件化**：仅当 `EngineConfig::dtmf_enabled == true` 时 offer 才携带（OD-B 选定默认关闭） |
+| **D4** | 两种协商状态下 unknown 计数行为不同 | **不变**，且默认态固定为"未协商 DTMF" |
+| **X1 / X2** | 覆盖 BT=1 与 BT=6 | **不变**（OD-C 确认最小集） |
+| **X6** | 支持矩阵与代码一致 | **具体化**：矩阵中 XR 一栏只列 BT=1 与 BT=6，其余块类型标注为"已识别但未解析" |
 
 ---
 

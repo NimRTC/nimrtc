@@ -32,6 +32,11 @@ add_library(nimrtc_engine STATIC
     # `plugins::ISession` model through this TU and turns it into the
     # SDP media list.
     src/engine_session.cpp
+    # v1.2.0 (session capability plan D1–D4): the RFC 4733 DTMF plane.
+    # The telephone-event codec is resolved through the registry's DTMF
+    # slot here, and the send / receive paths of the in-band event
+    # stream live in this TU.
+    src/engine_dtmf.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

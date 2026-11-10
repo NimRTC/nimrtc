@@ -33,6 +33,7 @@ nimrtc::engine::NimRTCEngine
 │   ├── set_on_error(cb)
 │   ├── set_on_state_change(cb)
 │   ├── set_on_data_message(cb)
+│   ├── set_on_data_message_ex(cb)    -- v1.2.0: adds the channel identity
 │   └── set_on_data_state(cb)
 │
 ├── SDP
@@ -466,6 +467,38 @@ caller; pass it to a transport-stack or use it directly via the
 
 `set_on_data_message()` and `set_on_data_state()` install the
 matching callbacks on **every** new channel created after the call.
+
+### 10.1 `set_on_data_message_ex()` — the channel identity
+
+```cpp
+void set_on_data_message_ex(
+    plugins::DataChannelMessageCallback cb) noexcept;
+```
+
+The classic `set_on_data_message()` callback carries the payload only,
+so a host that opens two channels cannot tell which one a message
+arrived on.  `set_on_data_message_ex()` is the **additive** counterpart
+(v1.2.0, the plan's WP-C1): the plain callback keeps its exact
+signature and behaviour — it is installed on every channel the engine
+creates, as a fan-out shorthand.
+
+```cpp
+struct plugins::DataChannelMessage {
+    std::string_view label;       // the channel's label
+    std::uint32_t    channel_id;  // engine-assigned id (1-based, per engine)
+    plugins::BufferView data;     // the payload (same bytes the plain callback gets)
+};
+```
+
+The engine assigns `channel_id` (monotonically increasing per engine,
+starting at 1) and fills `label` when the backend does not report one.
+
+With the framed mode (`EngineConfig::datachannel_framing =
+plugins::DataChannelFraming::kFramed`) the *peer's* label decides which
+channel a message belongs to.  With the raw mode there is no identity
+on the wire, so every channel of the connection sees the same bytes —
+use the framed mode (or one channel per connection) if you need
+isolation.  See [`docs/guides/datachannel.md`](../guides/datachannel.md).
 
 > **Status**: the default backend is `"web_transport"` (WebTransport /
 > QUIC), which is the only backend with a wire path. The `"sctp"` backend

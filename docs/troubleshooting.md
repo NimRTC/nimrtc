@@ -445,6 +445,8 @@ different `--target`). See
 - `docs/api/engine_config.md` — config field reference.
 - `docs/guides/switching-dtls-backend.md` — DTLS swap guide.
 - `docs/guides/building-on-openharmony.md` — OHOS build issues.
+- `docs/guides/datachannel.md` — what the data channel guarantees (message
+  boundary, channel identity, partial reliability, priority).
 - `docs/plugin_author_guide.md` — plugin authoring pitfalls.
 - `CONTRIBUTING.md` — DCO / PR process for fixes.
 - GitHub Discussions — community Q&A.

@@ -606,7 +606,8 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | SFU-1 — In-process SFU relay (`nimrtc_sfu` module, BUNDLE/rtcp-mux) | ❌ **Closed — NO** | Closed 2026-10-19 (BDFL: SFU is not a project core goal); off the critical path. See `docs/plan/v1.0-plan.md` §7 + §12.5. |
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
-| H.264 hardware backends (NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264) | ✅ | v0.9.2 |
+| H.264 hardware backends — NVENC encoder (Win/Linux), AMF encoder (Win), QSV encoder (Win/Linux), VA-API encoder (Linux), DXVA decoder (Win), OpenH264 software fallback | ✅ | v0.9.2 |
+| H.264 hardware **decoding** — NVDEC (Win/Linux), VideoToolbox (macOS), MediaCodec (Android) | ❌ **not implemented** — the backend entries exist so the seam stays stable, but `create()` returns `nullptr` and `available()` returns `false`. On Windows use the DXVA decoder; on macOS/Android use the software H.264 path. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | — |
 
 ### Landed on `main`, not yet published
 

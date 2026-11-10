@@ -1010,6 +1010,43 @@ struct NimRTCEngine::Impl {
     std::uint64_t audio_frames_concealed      = 0;
     std::uint64_t audio_frames_fec_recovered  = 0;
 
+    // ---- DTMF (v1.2.0, session capability plan D1 / D2) --------------
+    //
+    // The state of the telephone-event receive path.  RFC 4733 §2.5.1.2
+    // describes the *sender* as repeating the event packet while the key
+    // is held, each repeat carrying a larger duration; the receiver
+    // therefore accumulates the duration across the repeats and reports
+    // the event once, when the packet with the end bit arrives.
+    //
+    // The accumulator is per-SSRC: a peer may run more than one
+    // telephone-event stream, and mixing their durations would report
+    // key presses that never happened.
+    struct DtmfRxState {
+        /** The event code of the event in progress. */
+        std::uint8_t  code = 0;
+        /** The largest duration reported so far, in milliseconds. */
+        std::uint16_t duration_ms = 0;
+        /** True when an event is in progress (a packet was seen that did
+         *  not carry the end bit). */
+        bool          active = false;
+    };
+    std::map<std::uint32_t, DtmfRxState> dtmf_rx_by_ssrc;
+
+    /** The number of inbound telephone-event packets the engine decoded.
+     *
+     *  This is the D4 counter: a telephone-event payload counts as
+     *  "unknown audio payload type" only when DTMF was *not* negotiated
+     *  (decision D4 of the session capability plan). */
+    std::uint64_t dtmf_packets_received = 0;
+
+    /** The number of inbound telephone-event packets that were
+     *  malformed and therefore dropped (a wrong length, an event code
+     *  outside 0..16). */
+    std::uint64_t dtmf_packets_malformed = 0;
+
+    /** The number of completed DTMF events reported to the host. */
+    std::uint64_t dtmf_events_delivered = 0;
+
     // ---- WP-8: the inbound-audio bookkeeping for the RTCP receiver
     //      report (spec B-12). ----
     // <<WP8_MEMBERS>>

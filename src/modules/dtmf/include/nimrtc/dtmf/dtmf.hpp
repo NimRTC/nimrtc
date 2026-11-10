@@ -22,21 +22,28 @@
  * engine drives it next to the audio routing table rather than inside
  * it.
  *
- * ## The wire format (RFC 4733 §2.3.1)
+ * ## The wire format (RFC 4733 §2.3, Figure 1)
  *
  *     0                   1                   2                   3
  *     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  *    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *    |   event code  |E|   volume   |          duration           |
+ *    |     event     |E|R|   volume  |          duration             |
  *    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *
  *   - **event code** — 0..9 are the DTMF digits, 10 is `*`, 11 is `#`,
  *     12..15 are A..D, 16 is the "flash" event (RFC 4733 §2.1).
- *   - **E** — the end-of-event bit, in the least significant bit of
- *     byte 1 (RFC 4733 §2.5).
- *   - **volume** — the volume of the digit, 0..63 (RFC 4733 §2.3.1).
- *   - **duration** — how long the event has been active, in
- *     milliseconds, big endian.
+ *   - **E** — the end-of-event bit, the *most significant* bit of byte
+ *     1 (mask 0x80).  RFC 4733 §2.3.2.
+ *   - **R** — the reserved bit (mask 0x40).  The sender must set it to
+ *     zero; the receiver ignores it.  RFC 4733 §2.3.3.
+ *   - **volume** — the six low bits of byte 1 (mask 0x3F), the tone
+ *     power in dBm0 with the sign dropped (0..63).  RFC 4733 §2.3.4.
+ *   - **duration** — the 16-bit big-endian pair of bytes 2 and 3,
+ *     in **timestamp units** (RFC 4733 §2.3.5).  The telephone-event
+ *     clock rate is 8000 Hz (RFC 4733 §2.4), so one unit is 0.125 ms
+ *     — *not* one millisecond.  This codec converts at the boundary:
+ *     `decode()` reports milliseconds to the host and `encode()`
+ *     converts them back.
  *
  * ## The engine's side
  *

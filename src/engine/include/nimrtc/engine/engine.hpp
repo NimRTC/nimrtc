@@ -2245,6 +2245,31 @@ private:
      *  return, matching the other `init_*` failure paths. */
     uint32_t init_datachannel_registry() noexcept;
 
+    // ---- DTMF (v1.2.0, session capability plan D1–D4) ----------------
+    //
+    // The two private helpers of the DTMF plane.  They live in
+    // `src/engine/src/engine_dtmf.cpp`; they are declared here so the
+    // other engine TUs (the SDP builder and the inbound RTP demux)
+    // can reach them.
+
+    /** Resolve the RFC 4733 codec from the registry's DTMF slot.
+     *
+     *  A no-op when `config_.dtmf_enabled` is false (DTMF is off by
+     *  default, decision OD-B) or when the plugin is not registered —
+     *  a missing codec degrades the DTMF path, it does not fail the
+     *  engine. */
+    void resolve_dtmf_codec() noexcept;
+
+    /** Handle one inbound telephone-event payload.
+     *
+     *  Decodes the payload, accumulates the event duration across the
+     *  repeats RFC 4733 §2.5.1.2 describes, and reports the completed
+     *  event through `on_dtmf_`.
+     *
+     *  @param pv  The parsed RTP packet; its payload is the four-byte
+     *             telephone-event header. */
+    void handle_dtmf_payload(const rtp::PacketView& pv) noexcept;
+
     /** Phase 6 — create the SRTP context, open the DTLS session
      *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`
      *  is null by design), and wire the ICE recv / error callbacks.

@@ -325,6 +325,45 @@ of the recognised backend families.  For the v1.0.0 release, prefer
 using the new `datachannel_backend` switch with the built-in factory
 id `"web_transport"` (the production path).
 
+#### 2.6.5 Framing mode (`datachannel_framing`)
+
+A QUIC stream is a **byte** stream: `send()` boundaries are not
+preserved.  `datachannel_framing` decides whether the payload carries
+its own message boundary.
+
+| Mode | Behaviour |
+|---|---|
+| `plugins::DataChannelFraming::kRaw` (**default**) | The payload reaches the transport verbatim.  Two `send()` calls may surface as one callback, one `send()` may surface as several, and the bytes carry **no channel identity**.  This is the mode Chrome's `RTCDataChannel`-over-WebTransport speaks, so it is the default and existing deployments keep working unchanged. |
+| `plugins::DataChannelFraming::kFramed` | Every payload is wrapped in a length-prefixed frame that also carries the channel label.  One `send()` is one inbound message, and the label routes the message to the right channel. |
+
+**Both ends must agree.**  The framing is a NimRTC-internal convention
+(the plan's DEC-2 = (b)); there is no on-the-wire negotiation, because
+Chrome will not speak one.  A framed peer cannot read a raw stream and
+vice versa.
+
+The field applies to every channel the engine creates.  For the frame
+layout and the isolation rules see
+[`docs/guides/datachannel.md`](../guides/datachannel.md).
+
+#### 2.6.6 Channel priority (`datachannel_priority`)
+
+```cpp
+cfg.datachannel_priority = 16;   // lower value = higher priority
+```
+
+The value reaches the backend and orders the **data plane's own**
+outbound queue: a high-priority control channel is not stuck behind a
+bulk-transfer channel on the same QUIC connection.  The default is 128
+(the value the engine used to hard-code before v1.2.0 — there was no
+setter at all).
+
+**What it does not do.**  The media plane and the data plane run
+independent congestion control on two different connections, so the
+scheduler cannot arbitrate between them.  The honest statement is: *the
+data channel has its own connection and therefore its own priority; the
+scheduler does not arbitrate between media and data* (the plan's
+WP-E2).
+
 ### 2.7 Video codec
 
 ```cpp

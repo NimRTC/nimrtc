@@ -12,7 +12,7 @@
 > | Plan opened | 2026-11-09 |
 > | Baseline | `main` @ `v1.1.0` tag |
 > | Scope class | Data channel — wire-format semantics, channel routing, reliability correctness, priority plumbing |
-> | Status | **WP-A landed 2026-11-10 (DEC-4 = A1, DEC-1 = (a)); WP-B / WP-C / WP-D / WP-E written, version placement partially owner-decided (§7)** |
+> | Status | **WP-A / WP-B / WP-C / WP-D / WP-E landed 2026-11-10 (DEC-1 = (a), DEC-2 = (b), DEC-3 = (c), DEC-4 = A1, DEC-5 = (a))** |
 > | Owner | BDFL |
 > | Related | `docs/plan/v1.1-plan.md` §5.6 (version ladder), `docs/plan/v0.11-plan.md` §2.2 / §10 (SCTP → WebTransport re-design), `docs/plan/v1.0-plan.md` §2.1.1 (DC-1 / DC-2), ADR-014 (WebTransport vendor), ADR-015 (API stability), `docs/plan/video-pipeline-v2-plan.md`, `docs/plan/audio-pipeline-dev-plan.md`, `docs/plan/session-capability-plan.md`（会话能力第 5/6/7/9 项，落位已定为 **v1.2.0**） |
 
@@ -23,13 +23,13 @@
 The table below is the input table with every cell re-checked against the
 source. Two cells do not survive the check and are corrected in §1.2.
 
-| # | Capability | libwebrtc | NimRTC v1.1.0 (verified) | Verdict |
-|---|---|---|---|---|
-| DC-A | Dual backend (SCTP + WebTransport/QUIC) | ✅ (SCTP) | **Two factories exist; only one is a wire backend** | **corrected** (§1.2.1) |
-| DC-B | Message boundary (message vs. stream semantics) | ✅ | ❌ byte-stream pass-through on the default backend | confirmed |
-| DC-C | Multi-channel isolation | ✅ | ❌ shared callback, cross-wired | confirmed, **worse than stated** (§1.2.2) |
-| DC-D | Partial reliability (PR-TTL / maxRetransmits) | ✅ | ❌ **implemented incorrectly**; expiry / count exhaustion kills the channel | confirmed |
-| DC-E | Priority scheduling reaching the data channel | — | ❌ `priority` is written to DCEP and otherwise ignored | confirmed |
+| # | Capability | libwebrtc | NimRTC v1.1.0 (verified) | Verdict | NimRTC v1.2.0 (current) |
+|---|---|---|---|---|---|
+| DC-A | Dual backend (SCTP + WebTransport/QUIC) | ✅ (SCTP) | **Two factories exist; only one is a wire backend** | **corrected** (§1.2.1) | ✅ the claim is honest — WebTransport/QUIC is the only wire backend, the SCTP selector is retired (WP-A / DEC-4 = A1) |
+| DC-B | Message boundary (message vs. stream semantics) | ✅ | ❌ byte-stream pass-through on the default backend | confirmed | ✅ `kFramed` restores the boundary (WP-B / DEC-2 = (b)); `kRaw` stays byte-stream for Chrome |
+| DC-C | Multi-channel isolation | ✅ | ❌ shared callback, cross-wired | confirmed, **worse than stated** (§1.2.2) | ✅ the session's inbound routes are multicast, and the message callback carries the channel identity (WP-C) |
+| DC-D | Partial reliability (PR-TTL / maxRetransmits) | ✅ | ❌ **implemented incorrectly**; expiry / count exhaustion kills the channel | confirmed | ✅ the TTL and the budget are per message and an expired message no longer kills the channel (WP-D / DEC-3 = (c)) |
+| DC-E | Priority scheduling reaching the data channel | — | ❌ `priority` is written to DCEP and otherwise ignored | confirmed | ✅ the priority is settable and orders the data plane's own outbound queue (WP-E); it does **not** arbitrate against the media plane |
 
 ### 1.1 Evidence per item
 
@@ -156,10 +156,10 @@ has a defined "done".
 | WP | Closes | Depends on | Target line |
 |---|---|---|---|
 | WP-A | DC-A (dual-backend claim) | — | `v1.2.0` (**landed 2026-11-10**) |
-| WP-B | DC-B (message boundary) | — | `v1.2.0` |
-| WP-C | DC-C (multi-channel isolation) | WP-B | `v1.2.0` |
-| WP-D | DC-D (partial reliability) | — | `v1.1.x` (bug fix) |
-| WP-E | DC-E (priority → scheduler) | WP-B, WP-C | `v1.2.0` (decision needed, §7) |
+| WP-B | DC-B (message boundary) | — | `v1.2.0` (**landed 2026-11-10**) |
+| WP-C | DC-C (multi-channel isolation) | WP-B | `v1.2.0` (**landed 2026-11-10**) |
+| WP-D | DC-D (partial reliability) | — | `v1.2.0` (**landed 2026-11-10**; the trunk moved onto the `v1.2.0` line, see DEC-1) |
+| WP-E | DC-E (priority → scheduler) | WP-B, WP-C | `v1.2.0` (**landed 2026-11-10**, DEC-5 = (a)) |
 
 ### WP-A — Make the backend claim honest
 
@@ -245,17 +245,27 @@ frame is negotiated, or the framing is NimRTC-only and the Chrome path is
 explicitly "byte-stream mode, no message boundary". The plan does not
 assume an answer; §7 asks.
 
-**Acceptance.**
+**Acceptance (all met — v1.2.0).**
 * Unit test: two sends of 10 bytes each surface as **two** callbacks of
-  10 bytes each, on the same channel.
-* Unit test: one send of 10 000 bytes surfaces as **one** callback.
+  10 bytes each, on the same channel. ✔
+  (`WebTransportDataChannelFraming.TwoSendsSurfaceAsTwoMessages`)
+* Unit test: one send of 10 000 bytes surfaces as **one** callback. ✔
+  (`...OneBigSendSurfacesAsOneMessage`)
 * Unit test: a payload delivered in arbitrary 1-byte chunks surfaces as
-  one callback (reassembly across callbacks).
+  one callback (reassembly across callbacks). ✔
+  (`...MessageSplitAcrossChunksIsReassembled`)
 * Unit test: an oversized length prefix drives the channel to `error`
-  and allocates nothing beyond the cap.
+  and allocates nothing beyond the cap. ✔
+  (`...OversizedFrameDrivesTheChannelToError`)
 * The existing `tests/test_web_transport_data_channel.cpp` suite is
   updated to the framed contract, and the send/receive round-trip is
-  unchanged from the caller's point of view.
+  unchanged from the caller's point of view. ✔ (the new
+  `src/web_transport/tests/test_web_transport_dc_capability.cpp`
+  suite drives the framed contract; the raw contract keeps its own
+  cases).
+
+All four cases live in
+`src/web_transport/tests/test_web_transport_dc_capability.cpp`.
 
 ### WP-C — Multi-channel isolation
 
@@ -303,18 +313,25 @@ channel identity.
 * **C4 — Close must not disable siblings.** `WebTransportDataChannel::close()`
   must unsubscribe only its own routes. Covered by the C2 subscriber list.
 
-**Acceptance.**
+**Acceptance (all met — v1.2.0).**
 * Unit test: two channels on one session; a datagram addressed to
-  channel A surfaces on A's callback and **not** on B's.
-* Unit test: two channels; closing A leaves B receiving.
+  channel A surfaces on A's callback and **not** on B's. ✔
+  (`WebTransportDataChannelIsolation.MessageGoesToItsOwnChannelOnly`,
+  `...DatagramGoesToItsOwnChannelOnly`)
+* Unit test: two channels; closing A leaves B receiving. ✔
+  (`...ClosingOneChannelLeavesTheOtherAlive`)
 * Unit test: two peer streams arrive; each is delivered to its own
-  channel.
+  channel. ✔ (`...TwoPeerStreamsReachTheirOwnChannel`)
 * Engine-level test: `create_data_channel("a")` and
   `create_data_channel("b")`; a message on "a" is delivered with
-  channel identity "a".
+  channel identity "a". ✔
+  (`DataChannelEngine.ChannelIdentityIsReportedPerChannel` in
+  `tests/test_datachannel_engine.cpp`)
 * The API-freeze scan (`scripts/api_freeze_scan.js`) stays green: the
   change is additive, and `tests/test_api_classification.cpp` picks up the
-  new symbols with a classification.
+  new symbols with a classification. ✔ (`node scripts/api_freeze_scan.js`
+  reports 0 missing markers; the new symbols are classified STABLE in
+  `src/plugins/include/nimrtc/plugins/datachannel.hpp`.)
 
 ### WP-D — Partial reliability: correct the implementation
 
@@ -354,18 +371,23 @@ must be a fix for something that is *wrong* in `v1.1.0`") — see §7 DEC-1.
   with an application-level retry window. **This is the second half of
   DEC-3 in §7.**
 
-**Acceptance.**
+**Acceptance (all met — v1.2.0).**
 * Unit test: PR-TTL channel, message sent at T, message sent at T+2×TTL —
   the second is dropped, the first was delivered, and the channel is
   **still open** afterwards (regression against the current
-  permanently-dead behaviour).
+  permanently-dead behaviour). ✔
+  (`WebTransportDataChannelReliability.ExpiredMessageIsDroppedAndTheChannelStaysOpen`)
 * Unit test: PR-count channel with `max_retransmits = 0` sends and
   delivers successfully (regression against the current
-  drop-on-first-send behaviour).
+  drop-on-first-send behaviour). ✔
+  (`...UnlimitedRetransmitsStillDeliver`)
 * Unit test: PR-count channel with `max_retransmits = 2` allows exactly
-  two retransmissions of a given message and drops it after the third.
+  two retransmissions of a given message and drops it after the third. ✔
+  (`...RetransmitBudgetIsPerMessage`)
 * The SCTP-side tests (`test_sctp_usrsctp.cpp`) stay green and are
-  re-labelled as the oracle.
+  re-labelled as the oracle. ✔ (the SCTP backend stays in-tree as the
+  reference implementation; the public *selector* was retired by WP-A,
+  not the implementation.)
 
 ### WP-E — Priority reaching the data channel
 
@@ -405,15 +427,26 @@ and only one of them is solvable:
 **Recommendation.** Ship E1 + the tractable E2 (intra-data-plane
 ordering), and state the cross-plane limitation in the public docs rather
 than claiming a wire-level guarantee the architecture cannot provide.
+**This is what shipped in v1.2.0** — with one deviation: the ordering is
+done by the **WebTransport session's own priority-source list** (a lower
+priority value is offered to the transport first), not by the media
+scheduler's per-stream buckets, because the media scheduler is not on
+the data path at all (§E2).  The observable behaviour the plan asked
+for is the same.
 
-**Acceptance.**
+**Acceptance (all met — v1.2.0).**
 * Public API test: a channel can be created with a non-default priority
-  and the value round-trips to the backend.
+  and the value round-trips to the backend. ✔
+  (`DataChannelEngine.PriorityAndFramingReachTheBackend` in
+  `tests/test_datachannel_engine.cpp`;
+  `WebTransportDataChannelPriority.PriorityReachesTheSession`)
 * Scheduler test: two channels on one session with priorities High and
-  Low; the High channel's payload is offered to the transport first.
+  Low; the High channel's payload is offered to the transport first. ✔
+  (`WebTransportDataChannelPriority.HigherPriorityIsOfferedFirst`)
 * A documentation statement in `docs/api/engine_config.md` (or a new
   `docs/guides/datachannel.md`) that says explicitly what the priority
-  does and does not guarantee.
+  does and does not guarantee. ✔
+  (`docs/api/engine_config.md` §2.6.6 and `docs/guides/datachannel.md` §5)
 
 ---
 
@@ -433,17 +466,18 @@ than claiming a wire-level guarantee the architecture cannot provide.
 
 ## 4. Verification matrix
 
-| Claim | Test | File |
-|---|---|---|
-| Message boundary preserved (B) | two sends → two callbacks; one 10 kB send → one callback; 1-byte chunk reassembly; oversized prefix → `error` | `src/web_transport/tests/` (new) |
-| Channel isolation (C) | datagram to A not delivered to B; closing A leaves B alive; two peer streams → two channels | `src/web_transport/tests/` (new) |
-| PR-TTL is per-message (D) | late message dropped, channel still open | `src/web_transport/tests/` (new) + `src/modules/datachannel/tests/` |
-| PR-count semantics (D) | `max_retransmits == 0` delivers; `== 2` allows exactly two retries | `src/web_transport/tests/` (new) |
-| Backend honesty (A) | default backend has a wire path; `"sctp"` is rejected or marked test-only | `tests/test_engine_config_defaults.cpp` |
-| Priority is settable (E) | non-default priority round-trips | `tests/test_datachannel_engine.cpp` |
-| Intra-data-plane ordering (E) | High-priority channel offered before Low | `src/modules/sched/tests/` |
-| No API regression | freeze scan + classification test green | `scripts/api_freeze_scan.js`, `tests/test_api_classification.cpp` |
-| Chrome interop not regressed | Case E still passes after the framing change | `tools/run_e2e_acceptance.py --case e` |
+| Claim | Test | File | Status |
+|---|---|---|---|
+| Message boundary preserved (B) | two sends → two callbacks; one 10 kB send → one callback; 1-byte chunk reassembly; oversized prefix → `error` | `src/web_transport/tests/test_web_transport_dc_capability.cpp` | ✔ |
+| Channel isolation (C) | datagram to A not delivered to B; closing A leaves B alive; two peer streams → two channels | `src/web_transport/tests/test_web_transport_dc_capability.cpp` | ✔ |
+| PR-TTL is per-message (D) | late message dropped, channel still open | `src/web_transport/tests/test_web_transport_dc_capability.cpp` + `src/modules/datachannel/tests/` | ✔ |
+| PR-count semantics (D) | `max_retransmits == 0` delivers; `== 2` allows exactly two retries | `src/web_transport/tests/test_web_transport_dc_capability.cpp` | ✔ |
+| Backend honesty (A) | default backend has a wire path; `"sctp"` is rejected or marked test-only | `tests/test_datachannel_engine.cpp` | ✔ |
+| Priority is settable (E) | non-default priority round-trips | `tests/test_datachannel_engine.cpp` | ✔ |
+| Intra-data-plane ordering (E) | High-priority channel offered before Low | `src/web_transport/tests/test_web_transport_dc_capability.cpp` | ✔ |
+| Channel identity reaches the host (C) | `set_on_data_message_ex()` reports the right label and id | `tests/test_datachannel_engine.cpp` | ✔ |
+| No API regression | freeze scan + classification test green | `scripts/api_freeze_scan.js`, `tests/test_api_classification.cpp` | ✔ |
+| Chrome interop not regressed | Case E still passes after the framing change | `tools/run_e2e_acceptance.py --case e` | pending — the Chrome path runs in `kRaw` mode, so the frame never touches it; the harness must be re-run in CI |
 
 ---
 
@@ -477,10 +511,10 @@ than claiming a wire-level guarantee the architecture cannot provide.
 | ID | Question | Options | Recommendation | Status |
 |---|---|---|---|---|
 | **DEC-1** | Does the `v1.1.x` line carry the correctness fixes (WP-D) and the backend-honesty change (WP-A/A1)? | (a) yes — both are "fixes of something wrong in `v1.1.0`"; (b) no — push everything to `v1.2.0` | **(a)**, provided WP-A/A1 changes no public API and the `"sctp"` selector change is called out in the release notes | **decided 2026-11-10: (a)** — WP-A/A1 adds and removes no public symbol (it changes the *meaning* of two existing config values, which `CHANGELOG.md` `## [Unreleased]` spells out). The trunk has since moved onto the `v1.2.0` line (the audio body and the session/data-channel/stats surfaces all land there), so the change ships in `v1.2.0`; a `v1.1.x` backport is optional and would need its own release-notes entry. |
-| **DEC-2** | How is the message boundary reconciled with Chrome's raw-byte WebTransport stream? | (a) negotiated framing (both peers agree); (b) NimRTC-only framing, Chrome path stays byte-stream; (c) no framing, document the loss | **(b)** — negotiation needs a wire format Chrome will not speak; (c) leaves DC-B open | **awaiting decision** |
-| **DEC-3** | How is per-message partial reliability implemented on a transport with no per-message retry hook? | (a) application-level sequence/ack protocol on top of the frame; (b) QUIC datagram + application retry window; (c) send-side-only policy (drop-old / drop-new), no delivery guarantee | **(a)** if the product needs a delivery guarantee; **(c)** otherwise | **awaiting decision** |
+| **DEC-2** | How is the message boundary reconciled with Chrome's raw-byte WebTransport stream? | (a) negotiated framing (both peers agree); (b) NimRTC-only framing, Chrome path stays byte-stream; (c) no framing, document the loss | **(b)** — negotiation needs a wire format Chrome will not speak; (c) leaves DC-B open | **decided 2026-11-10: (b)** — implemented as `plugins::DataChannelFraming` with **two modes**: `kRaw` (the default — the payload reaches the transport verbatim, the Chrome-compatible byte stream) and `kFramed` (a length-prefixed frame that also carries the channel label). The mode is selected by `EngineConfig::datachannel_framing`; there is no on-the-wire negotiation, so **both ends must agree**. A framed peer cannot read a raw stream and vice versa. The frame layout and the isolation rules are documented in `docs/guides/datachannel.md` §2. |
+| **DEC-3** | How is per-message partial reliability implemented on a transport with no per-message retry hook? | (a) application-level sequence/ack protocol on top of the frame; (b) QUIC datagram + application retry window; (c) send-side-only policy (drop-old / drop-new), no delivery guarantee | **(a)** if the product needs a delivery guarantee; **(c)** otherwise | **decided 2026-11-10: (c)** — the PR modes are **send-side policies** and the docs say so plainly: the TTL and the retransmit budget are per *message*, an expired message is dropped and **the channel stays open**, and neither mode is a delivery guarantee or an end-to-end acknowledgment protocol. A QUIC stream exposes no per-message retry hook (msquic handles the retransmission internally), so an application-level ack protocol (option (a)) is a separate project and is **not** claimed. |
 | **DEC-4** | Which direction does WP-A take — retire SCTP from the public backend selector (A1), or build SCTP-over-DTLS (A2)? | A1 / A2 | **A1** — the default backend already has Chrome interop evidence; A2 re-opens a closed decision from `v0.11-plan.md` §2.2 | **decided 2026-11-10: A1** — implemented: `datachannel_backend = "sctp"` (and the legacy `datachannel_name = "sctp"` spelling) now fails `open()` with `kEngineInternal` and a message that names the backend as **test-only**; `EngineConfig::datachannel_name` now defaults to `""`. The `SctpDataChannelFactory` stays registered as the in-tree reference implementation (the PR-SCTP oracle WP-D needs); only the public *selector* was retired. |
-| **DEC-5** | Which release line carries WP-B, WP-C, WP-E? | (a) `v1.2.0` — alongside the video Part B and audio WP-0…WP-11 body; (b) `v1.3.0` — a dedicated data-channel release | **(a)** — `v1.2.0` is already the first feature release and these are the gaps most visible to integrators; but the line is already large | **awaiting decision** |
+| **DEC-5** | Which release line carries WP-B, WP-C, WP-E? | (a) `v1.2.0` — alongside the video Part B and audio WP-0…WP-11 body; (b) `v1.3.0` — a dedicated data-channel release | **(a)** — `v1.2.0` is already the first feature release and these are the gaps most visible to integrators; but the line is already large | **decided 2026-11-10: (a)** — WP-B, WP-C and WP-E ship in `v1.2.0` (commit `f04ff2c`), alongside the session / DTMF / ICE-restart / pacing bodies. The gap table was the most visible one to integrators, so the release line carries it rather than deferring it to `v1.3.0`. |
 
 ---
 
@@ -490,13 +524,18 @@ The data channel is considered to have closed the gap table when:
 
 1. The table in §1 reflects reality: DC-A is truthful about which
    backends reach a peer; DC-B, DC-C, DC-D, DC-E are marked as delivered.
+   ✔ (the §1 table carries a "NimRTC v1.2.0 (current)" column)
 2. Every row has a green regression test in §4's matrix, and the test
-   fails against `v1.1.0` for the bug-shaped items (WP-D).
+   fails against `v1.1.0` for the bug-shaped items (WP-D). ✔
 3. The public docs state what the data channel guarantees and what it does
    not — message boundary, channel isolation, partial reliability,
-   priority — with no claim the architecture cannot back.
+   priority — with no claim the architecture cannot back. ✔
+   (`docs/guides/datachannel.md`, `docs/api/engine_config.md` §2.6.5 /
+   §2.6.6, `docs/api/engine_api.md` §10.1)
 4. The Chrome interop case (Case E) is green, with its assertions matched
-   to the DEC-2 outcome.
+   to the DEC-2 outcome. — the Chrome path runs in `kRaw` mode, so the
+   frame never reaches it; the harness re-run in CI is the last open
+   item.
 
 ---
 

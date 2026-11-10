@@ -85,7 +85,11 @@ namespace nimrtc::plugins {
 //     to the peer.
 //
 // The callback runs on the thread that called set_remote_description().
-using OnIceRestart = std::function<void()>;
+//
+// STABLE (v1.2.0): the ICE-restart seam is part of the frozen
+// `IICETransport` contract (ADR-015); a host that observes a peer
+// restart depends on this exact callback type.
+using NIMRTC_API_STABLE OnIceRestart = std::function<void()>;
 
 // ---------------------------------------------------------------------------
 // IceState — mirrors ice::IceState 1:1.

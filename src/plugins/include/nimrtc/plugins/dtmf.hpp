@@ -104,9 +104,17 @@ class NIMRTC_API_STABLE IDtmfCodec : public IPlugin {
 public:
     /** Decode one telephone-event RTP payload.
      *
-     *  RFC 4733 §2.3.1: the payload is four bytes -- event code,
-     *  end-of-event bit (in the low bit of byte 1), volume (byte 2)
-     *  and duration in milliseconds (bytes 3 and 4, big endian).
+     *  RFC 4733 §2.3 (Figure 1): the payload is four bytes -- event
+     *  code, the end-of-event bit (the most significant bit of byte 1,
+     *  mask 0x80), the reserved bit (mask 0x40, ignored on receive),
+     *  the volume (the six low bits of byte 1) and the duration (the
+     *  16-bit big-endian pair of bytes 2 and 3).
+     *
+     *  The duration is carried in **timestamp units**, not
+     *  milliseconds: the telephone-event clock rate is 8000 Hz
+     *  (RFC 4733 §2.4), so one unit is 0.125 ms.  This interface
+     *  reports the duration in milliseconds, and the implementation
+     *  converts at the boundary.
      *
      *  @param payload The RTP payload (exactly the bytes after the RTP
      *                 header).

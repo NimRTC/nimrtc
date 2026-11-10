@@ -17,6 +17,72 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A data-channel message boundary, so `send()` is a message again
+  (v1.2.0, DataChannel capability plan WP-B / WP-C).**  The default
+  WebTransport backend rides a QUIC stream, which is a **byte** stream:
+  two `send()` calls of 10 bytes each could surface as one 20-byte
+  callback, and one `send()` of 10 bytes could surface as two 5-byte
+  callbacks.  The `IDataChannel` contract says "send a binary message",
+  so every message-oriented use of the data channel was unsafe.
+  - `plugins::DataChannelFraming` — the framing mode.  `kRaw` (the
+    default) keeps the byte-stream behaviour every existing deployment
+    relies on; `kFramed` wraps each payload in a length-prefixed frame
+    that also carries the channel label, so one `send()` is one inbound
+    message and the frame carries the channel identity.
+  - `EngineConfig::datachannel_framing` selects the mode for every
+    channel the engine creates.  **Both ends must agree**: the framing
+    is a NimRTC-internal convention (the plan's DEC-2 = (b)) with no
+    on-the-wire negotiation, because Chrome will not speak one.  A
+    framed peer cannot read a raw stream and vice versa.
+  - A frame whose length prefix exceeds the negotiated maximum is a
+    **protocol error**: the channel transitions to `error` rather than
+    allocating an unbounded buffer.
+  - The `kUnreliable` mode rides QUIC datagrams, which are
+    message-preserving by definition, and is exempt from the framing.
+  - Covered by 17 cases in
+    `src/web_transport/tests/test_web_transport_dc_capability.cpp`.
+
+- **A channel identity on the data-message callback (v1.2.0, DataChannel
+  capability plan WP-C).**  The classic `set_on_data_message()` callback
+  carries the payload only, so a host that opened two channels could
+  not tell which one a message arrived on.  The mechanism was worse
+  than a shared callback: the session had **one** inbound-datagram slot
+  and **one** inbound-peer-stream slot, so the last channel created
+  hijacked the inbound routing and closing *any* channel deafened *all*
+  of them.
+  - `plugins::DataChannelMessage { label, channel_id, data }` and
+    `plugins::DataChannelMessageCallback`, delivered through the
+    **additive** `IDataChannel::set_on_message_ex()`.  The four-member
+    `IDataChannel` contract keeps its exact signatures — the change is
+    additive, per ADR-015.
+  - `NimRTCEngine::set_on_data_message_ex()` — the engine-level
+    counterpart.  It assigns `channel_id` (1-based, monotonically
+    increasing per engine) and fills `label` when the backend does not
+    report one.  The plain `set_on_data_message()` keeps its exact
+    behaviour: a fan-out shorthand installed on every channel.
+  - The session's inbound slots became a **multicast**: the session
+    gains `subscribe_on_datagram()` / `subscribe_on_peer_stream()` and
+    the matching `unsubscribe_*()`.  A channel removes **only its own**
+    subscription on close, so closing one channel leaves its siblings
+    receiving.
+
+- **A settable data-channel priority (v1.2.0, DataChannel capability
+  plan WP-E1).**  `DataChannelConfig::priority` was read in exactly two
+  places — it was encoded into the DCEP `DATA_CHANNEL_OPEN` message and
+  otherwise ignored — and the engine hard-coded `128` at both creation
+  sites with **no setter at all**, so the value could not even be set
+  to anything else from the public API.
+  - `EngineConfig::datachannel_priority` (default 128) reaches the
+    backend and orders the data plane's own outbound queue.
+  - **What it does not do**: the media plane and the data plane run
+    independent congestion control on two different connections, so the
+    scheduler cannot arbitrate between them.  The honest statement is:
+    *the data channel has its own connection and therefore its own
+    priority; the scheduler does not arbitrate between media and data*.
+    The intra-data-plane ordering (a control channel is not stuck behind
+    a bulk transfer on the same QUIC connection) is the deliverable the
+    architecture can actually back.
+
 - **A telephone-event (RFC 4733) seam, so DTMF stops being an unknown
   payload type (v1.2.0, session capability plan D1 / D2).**  Until now a
   peer that negotiated `telephone-event` sent its digits into a payload

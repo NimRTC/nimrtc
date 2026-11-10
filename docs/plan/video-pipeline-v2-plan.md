@@ -90,7 +90,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 | **F5** | **Signal-selection policy (D1)**: negotiate whether the peer supports `transport-cc` (via `a=rtcp-fb` in SDP) and select the driving signal — transport-cc when available, loss/RTT + REMB otherwise. Policy is a plug-in-configurable choice with an automatic default. | `P` + `M` | Table-driven test: peer supports transport-cc → policy reports `kTransportCc`; peer does not → `kLossRtt`; both paths feed the same `IBwe`. |
 | **F6** | Wire the loop: ICE/DTLS transport → RTCP demux → `net_feedback` → `bwe_->on_feedback()` → `scheduler_->on_bwe_update()`. | `E` | End-to-end loopback test: a lossy channel produces a `target_bitrate_bps` that **changes** over time (currently it stays at the initial value — that is the bug this track closes). |
 | **F7** | REMB parsing + trust policy: the existing REMB-override logic in `GoogCcBwe` (`kRembTrustFactor = 0.8`) is kept, but REMB becomes one *input* rather than the only receiver-side opinion. | `M` | Regression test keeps the current REMB-override semantics. |
-| **F8** | BWE re-targeting for a *single* video stream vs. the whole session: the current `IBwe` returns one estimate for the session. Define how per-stream shares are derived (see B2). | `P`/`M` | Documented rule; unit test on the share computation. |
+| **F8** | BWE re-targeting for a *single* video stream vs. the whole session: the current `IBwe` returns one estimate for the session. Define how per-stream shares are derived (see B2). | `E` (engine-private, header-only) | The rule is documented (`src/engine/src/bandwidth_allocation.hpp`) and unit tested — 16 cases in `tests/test_bandwidth_allocation.cpp`. The engine's audio path uses it, so there is one rule and not two. |
 
 ## Track P — Pacing, queueing and back-pressure
 
@@ -415,20 +415,18 @@ OD-1 posture, ADR-019 covers OD-3's ladder modes and the profile table).
 | 3c. **F5 + F6** (the signal policy, and the loop's production verification) | **Landed.** The policy resolves the driving signal from the negotiation state and the freshness of the transport-cc feedback, and the engine feeds the estimator once per feedback report. Two gaps remained after the wiring landed, and both are now closed: the transport-cc path reached the estimator but nothing read the arrival series (the policy was decorative — the estimate saw a loss rate and an RTT, both of which the loss/RTT path already provides), and there was no end-to-end proof that the estimate moves. The arrival series is now turned into an inter-arrival-spacing trend inside the estimator (`src/modules/bwe/src/arrival_trend.hpp`): a rising spacing is congestion before it becomes loss, and it drives the same multiplicative decrease a loss event does (ADR-018 Decision 4). Covered by 8 cases in `src/modules/bwe/tests/test_bwe.cpp` and one end-to-end case in `tests/test_engine_net_feedback.cpp` (a queue that builds up moves the estimate although not a packet was lost). |
 | 3d. **C9 + C11** (video SDP negotiation + PT demultiplexing) | **Landed.** The video payload type is now the *negotiated* one (RFC 3264 §6.1) in all three places that used to disagree: the answer names exactly the negotiated payload type (and only that codec's own `a=rtpmap:` / `a=fmtp:` lines), the outbound RTP header is stamped with the negotiated number, and the inbound demux accepts only that number. A peer that offers a codec NimRTC cannot decode gets the video m-line rejected (port 0, no format list) and one `kVideoCodecUnsupported` report. The negotiated state lives in `detail::VideoNegotiationResult` (`src/engine/src/video_negotiation.hpp`), shared by the SDP and the media layer. Covered by 5 cases in `tests/test_video_negotiation.cpp`. |
 
+| 3e. **F8** (the per-stream share rule) | **Landed.** The rule is now one documented, unit-tested function: `src/engine/src/bandwidth_allocation.hpp` (engine-private, header-only — it is a pure function of (estimate, demand list), so it needs no state, no clock and no translation unit). The session's estimate is split between the streams: the **reserved** ones first (the audio — a clamped share with a *hard* floor), the **elastic** ones share what is left (the video), split by weight with the largest-remainder (Hamilton) method so the pool is handed out exactly and deterministically. A reserved stream that claims more than the estimate holds puts the session in **deficit**, which is reported rather than hidden. The engine's audio path now uses this rule instead of its own arithmetic (one rule, not two), so the video's elastic share arrives with B2 on the same terms — the rate controller is handed a per-stream *budget*, not the raw estimate. Covered by 16 cases in `tests/test_bandwidth_allocation.cpp`. |
+
 **Next executable step**:
 
-1. **F8** — the per-stream share rule: how a session-wide estimate is
-   divided among the streams (audio + video).  This is the last open
-   item of M2 and the precondition of B2's controller, which consumes
-   "the BWE estimate (per F8's share rule)".  The *rule* is an owner
-   decision (the reservation for audio, the split between several video
-   streams); the plan fixes only that it must be documented and unit
-   tested.
-2. **Track P** (pacing) — the scheduler still has no time-based rate
+1. **Track P** (pacing) — the scheduler still has no time-based rate
    shaping, so a correct estimate does not yet reach the wire as a
-   paced stream.
+   paced stream.  P1 (the token bucket) and P2 (the per-bucket
+   integration) are the next two items; B2 (the rate controller) is
+   downstream of P3, because the controller needs the pacer's rate view
+   to keep the two from drifting apart (B10).
 
-Everything else in this plan is downstream of M1/M2.
+Everything else in this plan is downstream of M1/M2/M3.
 
 ---
 

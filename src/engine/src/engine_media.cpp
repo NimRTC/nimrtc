@@ -7,6 +7,11 @@
  */
 #include "engine_impl.hpp"
 
+// v1.2.0 (video plan F8): the per-stream share rule of the session
+// bandwidth budget.  The audio path is the first consumer — the audio
+// is the session's *reserved* stream.
+#include "bandwidth_allocation.hpp"
+
 namespace nimrtc::engine {
 
 namespace {
@@ -1329,20 +1334,33 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
     }
     audio_bitrate_last_step_ = now;
 
-    // ---- Target = share of the estimate, clamped to [floor, ceiling] ----
-    double share = config_.audio_bwe_share;
-    if (share < 0.0) share = 0.0;
-    if (share > 1.0) share = 1.0;
-
+    // ---- Target = the reserved share of the estimate -------------------
+    //
+    // The split rule itself lives in `bandwidth_allocation.hpp` (v1.2.0,
+    // video plan F8): the session's estimate is divided between the
+    // streams, the *reserved* ones first.  The audio is the only
+    // reserved stream today; the video's elastic share of what is left
+    // arrives with the rate controller (B2), which is handed a per
+    // stream budget rather than the raw estimate.
+    //
+    // The rule clamps the floor to the ceiling (a ceiling configured
+    // below the floor wins), so the two are passed through unchanged.
     const int ceiling = audio_bitrate_ceiling_bps_ > 0 ? audio_bitrate_ceiling_bps_
                                                        : current;
-    int floor_bps = config_.audio_min_bitrate_bps > 0 ? config_.audio_min_bitrate_bps
-                                                      : 1000;
-    if (floor_bps > ceiling) floor_bps = ceiling;
+    const int floor_bps = config_.audio_min_bitrate_bps > 0
+                              ? config_.audio_min_bitrate_bps
+                              : 1000;
 
-    int target = static_cast<int>(static_cast<double>(bwe_bps) * share);
-    if (target < floor_bps) target = floor_bps;
-    if (target > ceiling) target = ceiling;
+    detail::BandwidthDemand audio_demand;
+    audio_demand.reserved = true;
+    audio_demand.share = config_.audio_bwe_share;
+    audio_demand.floor_bps = static_cast<std::uint32_t>(floor_bps);
+    audio_demand.ceiling_bps = static_cast<std::uint32_t>(ceiling);
+
+    const detail::BandwidthAllocation alloc =
+        detail::allocate_bandwidth(bwe_bps, {audio_demand});
+    if (alloc.targets.empty() || alloc.targets[0] == 0) return;
+    int target = static_cast<int>(alloc.targets[0]);
 
     if (target == current) return;
 

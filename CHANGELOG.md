@@ -490,6 +490,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The installed bundle did not tell downstream consumers which C++
+  standard to compile with.**  The public headers need C++17 at the
+  minimum (nested namespace definitions such as
+  `namespace nimrtc::core::api_version`) and the shipped archives are
+  built as C++20, but the hand-written `cmake/NimRTCConfig.cmake.in`
+  declared neither.  A consumer whose `project()` did not pin a
+  standard inherited MSVC's default (C++14) and failed to compile the
+  installed headers with `error C2429: nested namespace definition
+  requires /std:c++17`, followed by a cascade of `std::string_view is
+  not a member of std`.
+  - `nimrtc::core` and `nimrtc::engine` now carry
+    `INTERFACE_COMPILE_FEATURES "cxx_std_20"`, so the consumer's
+    compiler receives `/std:c++20` (or `-std=c++20`) automatically.
+  - The Linux downstream proof in CI never caught this because GCC 11+
+    defaults to `gnu++17`, which is enough for the headers; only the
+    MSVC consumer broke.
 - **The engine's public header still said the video pipeline was not
   wired into the RTP / DTLS / SRTP path.**  `engine.hpp` carried a
   "P1.1/R3 scope" note claiming that "the engine currently does not pipe

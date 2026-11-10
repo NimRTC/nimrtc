@@ -67,7 +67,6 @@ constexpr std::uint8_t kMaxDtmfEventCode = 16;
 [[maybe_unused]]
 constexpr std::uint8_t kDefaultDtmfPayloadType = 126;
 
-<<<<<<< HEAD
 /** The size of the SRTP authentication tag (RFC 3711 §3.5 — the default
  *  AES_CM_128_HMAC_SHA1_80 profile appends a 10-byte tag).
  *

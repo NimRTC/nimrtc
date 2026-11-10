@@ -33,9 +33,23 @@ set(NIMRTC_LIBRARY_DIR "${NimRTC_LIB_DIR}")
 # Imported `nimrtc::core` carries the headers only (build-tree
 # nimrtc::core is INTERFACE; nimrtc_core_objects is an OBJECT lib whose
 # objects are already baked into the installed STATIC archives).
+#
+# C++ standard propagation: the build tree sets CMAKE_CXX_STANDARD=20
+# globally (cmake/NimRTCOptions.cmake), and the public headers rely on
+# it -- e.g. nested namespace definitions such as
+# `namespace nimrtc::core::api_version` need C++17, and the C++20
+# baseline is what the shipped archives were compiled with.
+# A hand-written package config does NOT inherit those settings, so a
+# consumer whose project() did not pin a standard got MSVC's default
+# (C++14) and failed on the installed headers with
+# "error C2429: nested namespace definition requires /std:c++17"
+# plus a cascade of "std::string_view is not a member of std".
+# Declaring it as an INTERFACE usage requirement makes the consumer's
+# compiler receive /std:c++20 (or -std=c++20) automatically.
 add_library(nimrtc::core INTERFACE IMPORTED GLOBAL)
 set_target_properties(nimrtc::core PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}")
+  INTERFACE_INCLUDE_DIRECTORIES "${NimRTC_INCLUDE_DIR}"
+  INTERFACE_COMPILE_FEATURES "cxx_std_20")
 
 # Per-module archives (without the `nimrtc_` prefix). `engine` is handled
 # separately below because it fans in every other archive.
@@ -203,6 +217,11 @@ endif()
 if(NOT TARGET nimrtc::engine)
   add_library(nimrtc::engine UNKNOWN IMPORTED GLOBAL)
 endif()
+# The engine target links plain archive paths (not nimrtc::core), so it
+# does not inherit the C++ standard usage requirement declared on
+# nimrtc::core. Re-attach it here; consumers normally link nimrtc::engine.
+set_target_properties(nimrtc::engine PROPERTIES
+  INTERFACE_COMPILE_FEATURES "cxx_std_20")
 if(_nimrtc_engine_path)
   set_target_properties(nimrtc::engine PROPERTIES
     IMPORTED_LOCATION "${_nimrtc_engine_path}"

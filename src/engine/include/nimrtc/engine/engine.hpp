@@ -1338,6 +1338,20 @@ public:
     NIMRTC_API_STABLE bool send_dtmf(std::uint8_t event_code,
                                      std::uint16_t duration_ms) noexcept;
 
+    /** The negotiated telephone-event payload type (RFC 4733 §2.3.2).
+     *
+     *  Zero when no telephone-event payload type was negotiated -- which
+     *  is the case when DTMF is disabled, when the peer offered no
+     *  telephone-event payload type, or when the peer's answer dropped
+     *  the one the offer carried.  A host that wants to know whether a
+     *  key press can actually reach the peer asks here: `send_dtmf()`
+     *  fails in exactly that state.
+     *
+     *  The number is the *peer's* number: RFC 3264 §6.1 binds both ends
+     *  of the session to the payload type the negotiated description
+     *  names, and the answerer must use the offerer's number. */
+    NIMRTC_API_STABLE std::uint8_t negotiated_dtmf_payload_type() const noexcept;
+
     // ---- Audio I/O --------------------------------------------------------
     //
     // Opus encode + RTP packetise + SRTP encrypt + transport.send.
@@ -1895,6 +1909,19 @@ public:
         std::uint64_t net_feedback_blocks    = 0;  // RTCP blocks routed to the collector
         std::uint64_t bwe_feedback_samples  = 0;  // samples handed to IBwe::on_feedback()
         std::uint32_t bandwidth_estimate_bps = 0; // current BWE target, in bit/s
+        // ---- DTMF counters (v1.2.0 session plan D1–D4, additive) ------
+        // The telephone-event plane has its own counters because a
+        // telephone-event payload is *not* audio: it never reaches the
+        // audio pipeline, so the audio counters above say nothing about
+        // it.  `dtmf_payload_type` is the negotiated payload type (RFC
+        // 4733 §2.3.2); zero means the peer never negotiated one, which
+        // is also the state in which a received telephone-event payload
+        // counts as an unknown audio payload type (decision D4).
+        std::uint64_t dtmf_packets_sent      = 0;  // outbound event packets
+        std::uint64_t dtmf_packets_received  = 0;  // inbound event packets decoded
+        std::uint64_t dtmf_packets_malformed = 0;  // inbound packets that failed to decode
+        std::uint64_t dtmf_events_delivered  = 0;  // completed events reported to the host
+        std::uint8_t  dtmf_payload_type      = 0;  // the negotiated telephone-event PT
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -2037,6 +2064,11 @@ private:
      *  telephone-event payload must still count as an unknown audio
      *  payload type (decision D4). */
     std::uint8_t negotiated_dtmf_pt_ = 0;
+
+    /** The negotiated `a=fmtp:` event-code list of the telephone-event
+     *  payload type (RFC 4733 §2.3.2) — the codes both ends support.
+     *  Empty when no telephone-event payload type was negotiated. */
+    std::string negotiated_dtmf_fmtp_;
 
     // ---- DataChannel callbacks ---------------------------------------------
     //
@@ -2293,6 +2325,24 @@ private:
      *  @param payload  The four-byte telephone-event header. */
     void handle_dtmf_payload(std::uint32_t ssrc,
                              core::ByteSpan payload) noexcept;
+
+    /** Emit the queued DTMF events (RFC 4733 §2.5).
+     *
+     *  The tick loop calls this; it emits the repeats of the event in
+     *  progress and closes it with the end-of-event bit.  A no-op when
+     *  nothing is queued. */
+    void pump_dtmf_tx() noexcept;
+
+    /** Build, protect and enqueue one telephone-event RTP packet.
+     *
+     *  @param code        The RFC 4733 event code.
+     *  @param duration_ms  The duration the packet reports.
+     *  @param end          True for the packet that closes the event.
+     *  @param marker       True for the first packet of the event
+     *                      (RFC 4733 §2.2.2).
+     *  @return false when the packet could not be built or sent. */
+    bool emit_dtmf_packet(std::uint8_t code, std::uint16_t duration_ms,
+                          bool end, bool marker) noexcept;
 
     /** Phase 6 — create the SRTP context, open the DTLS session
      *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`

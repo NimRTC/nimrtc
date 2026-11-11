@@ -904,6 +904,18 @@ int NimRTCEngine::tick() noexcept {
     // between two steps (see maybe_update_audio_bitrate()).
     maybe_update_audio_bitrate();
 
+    // ---- Emit the pending DTMF events (v1.2.0, RFC 4733 §2.5) ---------
+    //
+    // RFC 4733 §2.5.1.2 describes the event as a *sequence*: the packet
+    // is repeated while the key is held, each repeat carrying a larger
+    // duration, and the last one carries the end-of-event bit.  The
+    // repeats are therefore paced by the clock, and the clock here is
+    // the engine's tick.
+    //
+    // This runs before the scheduler drain below, so the packet the
+    // tick produces goes out in the same tick.
+    pump_dtmf_tx();
+
     // ---- Drain the scheduler (if enabled) ---------------------------------
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback

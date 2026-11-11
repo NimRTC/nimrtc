@@ -223,6 +223,93 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `opus::EncoderConfig::bitrate_bps` (0) resolves to the channel-count
   default — 32 kbps mono, 64 kbps stereo — through the new
   `opus::default_bitrate_bps_for_channels()`.
+- **The receiver-side network-feedback collector (v1.2.0 M1, spec
+  F1 / F2 / F4 / F6).**  The bandwidth estimator was never fed: the
+  engine read `IBwe::estimate()` in its tick, but nothing ever called
+  `IBwe::on_feedback()` outside the unit tests, so the target stayed
+  pinned at the initial bitrate (1 Mbps) for the whole session and every
+  rate-control feature built on top of it was decorative.
+  - A new plugin seam `plugins::INetFeedback` — the *producer* side of
+    the loop.  It consumes demultiplexed RTCP sub-packets (the payload
+    type, the FMT and the raw bytes, so the interface layer never names
+    a wire-format type) and aggregates them into one
+    `plugins::NetFeedbackSnapshot`.
+  - A new module `src/modules/net_feedback/` implementing the seam.  It
+    reads three signals: the **Receiver Report** (fraction lost, jitter,
+    and the RTT derived from the LSR / DLSR pair against our own last
+    Sender Report), **REMB** (the peer's own bandwidth opinion) and
+    **transport-cc** (the per-packet arrival series, the received and
+    lost counters and the implied receive rate).  It registers under the
+    id `"nimrtc_net_feedback"` in the registry's new net-feedback
+    category.
+  - The engine now demultiplexes every inbound RTCP compound datagram
+    with `rtp::demux_rtcp()` (RFC 3550 section 6.1) instead of walking
+    it by hand: the Sender Report still feeds the cross-end timeline, the
+    video sender still gets the NACK / PLI / FIR, and the receiver-side
+    network feedback (RR / REMB / transport-cc) goes to the collector.
+    The demultiplexer is forgiving — a malformed tail ends the walk
+    instead of throwing away the well-formed head.
+  - The engine hands our own Sender Report to the collector, because the
+    LSR / DLSR pair in the peer's Receiver Report only becomes a round
+    trip time when the collector knows when that report left.
+  - The snapshot is fed to the estimator **once per feedback report**, not
+    once per engine tick: the collector's timestamp moves exactly when a
+    new report arrived, so the tick uses it as the de-duplication key.
+  - `EngineConfig::net_feedback_name` selects the collector (default
+    `"nimrtc_net_feedback"`; an empty string keeps the pre-v1.2.0
+    behaviour of never feeding the estimator).  The engine resolves it
+    through the registry and never includes the module's header
+    (Layout Invariant 4).
+  - `Stats` gains three counters that make the loop observable:
+    `net_feedback_blocks` (RTCP blocks routed to the collector),
+    `bwe_feedback_samples` (snapshots handed to the estimator) and
+    `bandwidth_estimate_bps` (the estimator's current target).
+  - `plugins::BweFeedback` gains the discriminating fields the policy
+    needs: `signal_source` (loss/RTT, transport-cc or REMB), the
+    transport-cc arrival series, the acknowledged sequence range and the
+    per-packet sizes.  Every field is additive — an estimator that
+    ignores them behaves exactly as before.
+- **The bandwidth signal is now *selected*, not assumed (v1.2.0 M2, F5;
+  ADR-018).**  The collector had a fixed source precedence
+  (transport-cc → loss/RTT → REMB) that never consulted the
+  negotiation: a peer that did not advertise `transport-cc` still
+  produced a `kTransportCc` snapshot as soon as one transport-cc
+  feedback arrived, and a peer that advertised it but stopped sending
+  it starved the estimator.
+  - The peer's feedback capabilities are read from the remote
+    description's `a=rtcp-fb` lines (RFC 4585 section 4.1) and handed
+    to the collector, so the policy knows what the peer will actually
+    send.
+  - `plugins::NetFeedbackPolicy` (new) is the host's override:
+    `kAuto` (transport-cc when negotiated *and* fresh, loss/RTT
+    otherwise), `kLossRtt` (always the loss/RTT path; REMB stays an
+    upper-bound hint) and `kRequireTransportCc` (report the breakage
+    instead of falling back silently — there is deliberately no
+    "force transport-cc", because forcing a signal the peer never
+    sends produces a silent stall).
+  - `plugins::NetFeedbackConfig` (new) carries the policy and the
+    freshness window; `INetFeedback` gains `set_config()`,
+    `config()`, `set_peer_capabilities()`,
+    `peer_capabilities()`, `transport_cc_unavailable()` and
+    `evaluate(now)`.
+  - The freshness axis needs a clock and the collector has none of its
+    own, so the engine calls `evaluate()` from its tick — a transport-cc
+    path that went silent is detected even when no new feedback
+    arrives.  Re-evaluating never moves `NetFeedbackSnapshot::timestamp`,
+    so the estimator is still fed once per report.
+  - `EngineConfig::net_feedback_signal` selects the policy
+    (`"auto"` / `"loss_rtt"` / `"require_transport_cc"`; an unknown
+    value falls back to `"auto"` — the policy must never be the reason
+    a session fails) and
+    `EngineConfig::net_feedback_transport_cc_timeout_ms` sets the
+    freshness window (default 3000 ms).
+  - The engine advertises `a=rtcp-fb:<pt> transport-cc` in its offer
+    when it has a transport-cc-capable collector configured, and echoes
+    the offer's feedback types in its answer filtered to the supported
+    ones (RFC 3264 section 6.1).  Dropping the transport-cc entry
+    would silently disable the preferred signal.
+  - The collector is the only place with a policy branch — the engine
+    contains none (ADR-018 Decision 5).
 
 ### Changed
 
@@ -287,6 +374,68 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The transport-wide congestion-control feedback was parsed against the
+  wrong wire format (v1.2.0 M1, F4 groundwork).**  `rtp::Parser::parse_transport_cc`
+  did not implement the draft's encoding.  The status symbols live *inside*
+  the 16-bit chunk header (a run-length chunk is `0 | symbol | run length`;
+  a status-vector chunk is `1 | S | 14 symbol bits`, giving 14 one-bit or
+  7 two-bit symbols — there is no symbol-count field), and the receive
+  deltas are variable-width and follow *all* the chunks: 8-bit unsigned
+  for symbol 1, 16-bit signed for symbol 2, none for symbols 0 and 3.  The
+  old code read the symbols from the bytes after the chunk header and read
+  a fixed 14-bit delta per received packet — the RFC 8888 (CCFB) encoding,
+  a different feedback format — so every delta it produced was wrong.  A
+  run-length chunk of "received" packets also carries one delta per packet
+  in the run, which the old code did not read at all.
+  - The reference time is in multiples of 64 ms, not the 1 kHz its comment
+    claimed; the delta unit (250 µs) was already right.
+  - `PacketStatus` gains the wire symbol 3 ("received, without delta"),
+    which the draft uses in its own example 2.  The enumerator names
+    predate the format being implemented correctly and are
+    `NIMRTC_API_STABLE`, so they stay; the header now documents that
+    `ReceivedSmall` (2) is the *large* delta.
+  - `TransportCcFeedback` gains `reference_time_ms` and
+    `feedback_packet_count`.  The delta width is derivable from the status
+    symbol, so no separate field carries it.
+  - The RTCP padding is excluded from the chunk section and the delta
+    list; before, the padding bytes were parsed as a packet chunk.
+  - Cross-checked against `draft-holmer-rmcat-transport-wide-cc-extensions-01`,
+    libwebrtc and Pion; ADR-018 records the normative statement.
+- **The scheduler sent up to eight times the budgeted bitrate.**  The
+  per-drain allowance was computed as *packets per second* but compared
+  against a *per-drain* counter, so a host that drained every 125 ms
+  (the assumed cadence) let through eight times the budgeted rate.  A
+  host that drained more slowly than the assumption sent even less than
+  the estimate allowed, because the allowance never grew with the
+  interval.
+  - The send rate is now enforced by a **time-based credit**: every
+    drain grants credit proportional to the wall-clock time that elapsed
+    since the previous drain, and every packet that leaves the queue
+    consumes its estimated size from it.  The effective rate is
+    therefore the same whether the host ticks every 20 ms or every
+    200 ms.  The credit is capped at one second's worth, so a long idle
+    gap cannot turn into an unbounded burst.
+  - The *congestion window* — how much outbound data may stay queued —
+    is now bounded by `SchedulerConfig::drain_interval_ms` worth of
+    bytes at the estimated rate, deliberately independent of the host's
+    tick rate.  The old code used a hard-coded "8 drains per second"
+    divisor for the same number.
+  - `SchedulerConfig::drain_interval_ms` (new, default 125 ms) is the
+    window horizon and the seed for the first drain's interval.  It is
+    appended at the end of the struct, so existing aggregate
+    initialisation keeps compiling.
+  - `stats().current_bitrate_bps` now reports the *observed* egress
+    rate of the last drain instead of always 0.
+- **A packet the transport refused was silently thrown away.**  When
+  the drain callback vetoed a packet (the transport is not accepting
+  traffic right now), the scheduler had already popped it off the queue
+  and then dropped it — the packet was lost, and it was not even
+  counted as "dropped", so the statistics understated the real loss.
+  The vetoed packet now goes back to the front of its queue, is not
+  counted as sent, and the drain stops entirely (a veto means the
+  transport is not accepting traffic, so lower-priority queues must not
+  be attempted either).  The same fix applies to the per-stream
+  selection path.
 - **The inbound Opus payload was decoded without its TOC byte (audio
   pipeline WP-11, defect F-1).**  The depacketiser strips the TOC byte
   (it describes the *packet*, not the frame), but libopus decodes

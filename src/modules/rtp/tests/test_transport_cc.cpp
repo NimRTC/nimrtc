@@ -1,19 +1,33 @@
 /**
  * @file tests/test_transport_cc.cpp
- * @brief Tests for WebRTC abs-send-time and RFC 8888 transport-wide CC feedback.
+ * @brief Tests for WebRTC abs-send-time and transport-wide CC feedback.
  *
  * Covers:
- *   T1 — abs-send-time round-trip (build → parse → equal)
- *   T2 — abs-send-time 24-bit wrap-around
- *   T3 — transport-cc parse: run length chunk
- *   T4 — transport-cc parse: status vector chunk (S_bit=0)
- *   T5 — transport-cc parse: status + delta chunk (S_bit=1) with deltas
- *   T6 — minimum valid feedback fixture (base_seq=0, 1 received packet)
+ *   T1  - abs-send-time round-trip (build -> parse -> equal)
+ *   T2  - abs-send-time 24-bit wrap-around
+ *   T3  - transport-cc parse: run length chunk, "not received"
+ *   T4  - transport-cc parse: run length chunk, "received" with small deltas
+ *   T5  - transport-cc parse: run length chunk, symbol 3 ("received, no delta")
+ *   T6  - transport-cc parse: one-bit status vector chunk
+ *   T7  - transport-cc parse: two-bit status vector chunk (draft example 2)
+ *   T8  - transport-cc parse: large / negative (16-bit signed) delta
+ *   T9  - transport-cc parse: several chunks, deltas follow all of them
+ *   T10 - transport-cc parse: header fields (reference time, fb pkt count)
+ *   T11 - transport-cc parse: the arrival-time series is reconstructible
+ *   T12 - transport-cc parse: rejects a wrong FMT
+ *   T13 - transport-cc parse: rejects truncated receive deltas
+ *   T14 - transport-cc parse: rejects truncated packet chunks
+ *   T15 - transport-cc parse: rejects an empty packet status
+ *
+ * Wire format: draft-holmer-rmcat-transport-wide-cc-extensions-01
+ * (NOT RFC 8888, which is the Common Control Feedback Format, FMT = 11).
+ * See ADR-018 for the normative statement of the time units.
  */
 
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <vector>
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/rtp/packet.hpp>
@@ -23,8 +37,9 @@ using nimrtc::core::ByteSpan;
 using namespace nimrtc::rtp;
 
 // ---------------------------------------------------------------------------
-// T1: abs-send-time round-trip — a fresh value emits RFC 5285 one-byte-form
-// extension (profile 0xBEDE, id=1, 3-byte timestamp) and parses back equal.
+// T1: abs-send-time round-trip -- a fresh value emits the RFC 5285 one-byte
+// form extension (profile 0xBEDE, id=1, 3-byte timestamp) and parses back
+// equal.
 // ---------------------------------------------------------------------------
 TEST(AbsSendTimeExtension, RoundTrip) {
     constexpr std::uint32_t kTimestamp24MHz = 0x00ABCDEFu;
@@ -40,8 +55,9 @@ TEST(AbsSendTimeExtension, RoundTrip) {
     auto buf = pb.build();
     ASSERT_GE(buf.size(), 12u + 4u /*ext header*/ + 4u /*ext data*/);
 
-    // Verify on-wire layout of the extension header:
-    //   byte 12 (after fixed header) = 0xBE, byte 13 = 0xDE, byte 14 = 0x00, byte 15 = 0x01
+    // Verify the on-wire layout of the extension header:
+    //   byte 12 (after the fixed header) = 0xBE, byte 13 = 0xDE,
+    //   byte 14 = 0x00, byte 15 = 0x01
     EXPECT_EQ(buf[12], 0xBE);
     EXPECT_EQ(buf[13], 0xDE);
     EXPECT_EQ(buf[14], 0x00);
@@ -60,8 +76,8 @@ TEST(AbsSendTimeExtension, RoundTrip) {
 }
 
 // ---------------------------------------------------------------------------
-// T2: 24-bit wrap — the field is masked to 24 bits at build time so
-// setting a 32-bit value > 0xFFFFFF must round-trip the low 24 bits.
+// T2: 24-bit wrap -- the field is masked to 24 bits at build time, so setting
+// a 32-bit value > 0xFFFFFF must round-trip the low 24 bits.
 // ---------------------------------------------------------------------------
 TEST(AbsSendTimeExtension, WrapsAt24Bits) {
     AbsSendTime t{0xFFEEDDCCu};                  // high byte set
@@ -80,34 +96,53 @@ TEST(AbsSendTimeExtension, WrapsAt24Bits) {
     EXPECT_EQ(parsed.send_time_24mhz, 0x00EEDDCCu);   // high byte masked out
 }
 
+// ===========================================================================
+// transport-wide CC feedback
+// ===========================================================================
+
+namespace {
+
 // ---------------------------------------------------------------------------
-// Helper — build a minimal but well-formed transport-cc feedback packet.
-// The transport-cc RTCP packet is laid out as:
-//   4 bytes  RTCP header (V=2, P=0, FMT=15, PT=205, length)
-//   4 bytes  sender SSRC
-//   4 bytes  media SSRC
-//   2 bytes  base seq
-//   2 bytes  packet status count
-//   3 bytes  reference time (24-bit)
-//   1 byte   fb_ect_0_etc = 0 reserved for now
-//   N bytes  packet chunks
-// -----------------------------------------------------------------
-static nimrtc::core::ByteBuffer make_transport_cc_packet(
-    std::uint32_t sender_ssrc,
-    std::uint32_t media_ssrc,
-    std::uint16_t base_seq,
-    std::uint16_t packet_status_count,
-    std::uint32_t reference_time_24mhz,
-    nimrtc::core::ByteSpan chunks) {
+// Helpers to build the wire format.
+//
+//   0                   1                   2                   3
+//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |V=2|P|  FMT=15 |    PT=205     |           length              |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                     SSRC of packet sender                     |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                      SSRC of media source                     |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |      base sequence number     |      packet status count      |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                 reference time                | fb pkt. count |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |          packet chunk         |         packet chunk          |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |          recv delta           |          recv delta           |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+// `body` holds the packet chunks followed by the whole receive-delta list.
+// ---------------------------------------------------------------------------
+ByteBuffer make_transport_cc_packet(std::uint32_t sender_ssrc,
+                                     std::uint32_t media_ssrc,
+                                     std::uint16_t base_seq,
+                                     std::uint16_t packet_status_count,
+                                     std::uint32_t reference_time,
+                                     std::uint8_t fb_pkt_count,
+                                     ByteSpan body) {
+    // 4 B RTCP header + 16 B feedback header + body, padded to a 32-bit word.
+    const std::size_t total = 20u + body.size();
+    const std::size_t pad = (4u - (total % 4u)) % 4u;
+    const std::size_t padded = total + pad;
 
-    // Header (4) + ssrc pair (8) + base seq (2) + status count (2)
-    //   + reference time (3) + 1 reserved = 20 bytes prefix
-    const std::size_t total = 20 + chunks.size();
-    nimrtc::core::ByteBuffer buf(total, 0);
+    ByteBuffer buf(padded, 0);
 
-    buf[0] = 0x80u | 15u;             // V=2 (bits 6-7), P=0, FMT=15
-    buf[1] = 205u;                    // PT = RTPFB
-    const std::uint16_t length_words = static_cast<std::uint16_t>((total / 4u) - 1u);
+    buf[0] = static_cast<std::uint8_t>(0x80u | (pad ? 0x20u : 0x00u) | 15u);
+    buf[1] = 205u;                                        // PT = RTPFB
+    const std::uint16_t length_words =
+        static_cast<std::uint16_t>((padded / 4u) - 1u);
     buf[2] = static_cast<std::uint8_t>((length_words >> 8) & 0xFFu);
     buf[3] = static_cast<std::uint8_t>( length_words       & 0xFFu);
 
@@ -119,38 +154,77 @@ static nimrtc::core::ByteBuffer make_transport_cc_packet(
     };
     auto w16 = [&](std::size_t off, std::uint16_t v) {
         buf[off    ] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
-        buf[off + 1] = static_cast<std::uint8_t>( v       & 0xFFu);
+        buf[off    + 1] = static_cast<std::uint8_t>(v & 0xFFu);
     };
 
     w32(4, sender_ssrc);
     w32(8, media_ssrc);
     w16(12, base_seq);
     w16(14, packet_status_count);
-    // Reference time (24-bit), big-endian, padded to 4 bytes (offset 16..19)
-    buf[16] = static_cast<std::uint8_t>((reference_time_24mhz >> 16) & 0xFFu);
-    buf[17] = static_cast<std::uint8_t>((reference_time_24mhz >>  8) & 0xFFu);
-    buf[18] = static_cast<std::uint8_t>( reference_time_24mhz        & 0xFFu);
-    buf[19] = 0;   // fb_ect_0 + reserved
+    buf[16] = static_cast<std::uint8_t>((reference_time >> 16) & 0xFFu);
+    buf[17] = static_cast<std::uint8_t>((reference_time >>  8) & 0xFFu);
+    buf[18] = static_cast<std::uint8_t>( reference_time        & 0xFFu);
+    buf[19] = fb_pkt_count;
 
-    std::memcpy(buf.data() + 20, chunks.data(), chunks.size());
+    if (!body.empty()) {
+        std::memcpy(buf.data() + 20u, body.data(), body.size());
+    }
+    if (pad) {
+        // The last padding octet carries the count of padding octets.
+        buf[padded - 1u] = static_cast<std::uint8_t>(pad);
+    }
     return buf;
 }
 
-// ---------------------------------------------------------------------------
-// T3: Run length chunk — T=0, status=NotReceived, run=5 → 5 NotReceived.
-// ---------------------------------------------------------------------------
-TEST(TransportCcFeedback, RunLengthChunk) {
-    // word: 0|00|run_length(13 bits) — status=00 (NotReceived), run=5
-    const std::uint16_t word = static_cast<std::uint16_t>(0x0005u);
-    const std::uint8_t bytes[2] = {
-        static_cast<std::uint8_t>((word >> 8) & 0xFFu),
-        static_cast<std::uint8_t>( word       & 0xFFu)};
+// Run length chunk: 0 | symbol (2 bit) | run length (13 bit).
+std::uint16_t run_length_chunk(std::uint8_t symbol, std::uint16_t run) {
+    return static_cast<std::uint16_t>(
+        ((static_cast<unsigned>(symbol) & 0x3u) << 13) |
+        (static_cast<unsigned>(run) & 0x1FFFu));
+}
 
-    auto pkt = make_transport_cc_packet(
-        /*sender*/ 0x10000001u, /*media*/ 0x20000002u,
-        /*base seq*/ 1000, /*count*/ 5, /*ref time*/ 0x00123456u,
-        nimrtc::core::ByteSpan{bytes, 2});
+// One-bit status vector chunk: 1 | 0 | 14 symbol bits (symbol 0 at bit 13).
+// `received[i]` is the status of the i-th packet: false = not received,
+// true = received with a small (8-bit) delta.
+std::uint16_t one_bit_chunk(const bool (&received)[14]) {
+    std::uint16_t w = 0x8000u;
+    for (unsigned i = 0; i < 14u; ++i) {
+        if (received[i]) {
+            w |= static_cast<std::uint16_t>(1u << (13u - i));
+        }
+    }
+    return w;
+}
 
+// Two-bit status vector chunk: 1 | 1 | 7 symbols of 2 bits (symbol 0 at
+// bits 13..12).
+std::uint16_t two_bit_chunk(const std::uint8_t (&symbols)[7]) {
+    std::uint16_t w = 0xC000u;
+    for (unsigned i = 0; i < 7u; ++i) {
+        w |= static_cast<std::uint16_t>(
+            (static_cast<unsigned>(symbols[i]) & 0x3u) << (12u - 2u * i));
+    }
+    return w;
+}
+
+void append_u16(ByteBuffer& v, std::uint16_t x) {
+    v.push_back(static_cast<std::uint8_t>((x >> 8) & 0xFFu));
+    v.push_back(static_cast<std::uint8_t>(x & 0xFFu));
+}
+
+void append_u8(ByteBuffer& v, std::uint8_t x) { v.push_back(x); }
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// T3: run length chunk -- T=0, symbol "not received", run of 5.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RunLengthChunkNotReceived) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 5));
+
+    auto pkt = make_transport_cc_packet(0x10000001u, 0x20000002u, 1000, 5,
+                                         0x00123456u, 0, ByteSpan{body});
     Parser parser;
     auto fb = parser.parse_transport_cc(pkt);
     ASSERT_TRUE(fb.ok()) << fb.error().message();
@@ -167,83 +241,168 @@ TEST(TransportCcFeedback, RunLengthChunk) {
 }
 
 // ---------------------------------------------------------------------------
-// T4: Status vector chunk (T=1, S=0) — 1-bit symbols.
+// T4: run length chunk of "received, small delta" -- every packet of the run
+// carries its own 8-bit receive delta, and the deltas follow the chunks.
 // ---------------------------------------------------------------------------
-TEST(TransportCcFeedback, StatusVectorChunk_1BitSymbols) {
-    // word: 1|0|symbol_count(14 bits) — S=0, count=4
-    const std::uint16_t word = static_cast<std::uint16_t>(0x8004u);
-    // Symbol bits (4 × 1 bit, packed MSB-first into 1 byte):
-    //   bit 0 = NotReceived, bit 0 = Received, bit 1 = NotReceived, bit 1 = Received
-    //   so: 0 1 0 1 -> 0101 0000 -> 0x50
-    const std::uint8_t symbol_byte = 0x50u;
-    const std::uint8_t bytes[3] = {
-        static_cast<std::uint8_t>((word >> 8) & 0xFFu),
-        static_cast<std::uint8_t>( word       & 0xFFu),
-        symbol_byte,
-    };
+TEST(TransportCcFeedback, RunLengthChunkReceivedWithSmallDeltas) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(1, 3));
+    append_u8(body, 0x10);   // 16 ticks
+    append_u8(body, 0x20);   // 32 ticks
+    append_u8(body, 0x30);   // 48 ticks
 
-    auto pkt = make_transport_cc_packet(
-        0x1u, 0x2u, 1, 4, 0u,
-        nimrtc::core::ByteSpan{bytes, 3});
+    auto pkt = make_transport_cc_packet(1, 2, 10, 3, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    ASSERT_TRUE(fb.ok()) << fb.error().message();
+    ASSERT_EQ(fb.value().packets.size(), 3u);
+    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[0].delta_250us, 0x10);
+    EXPECT_EQ(fb.value().packets[1].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[1].delta_250us, 0x20);
+    EXPECT_EQ(fb.value().packets[2].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[2].delta_250us, 0x30);
+}
 
+// ---------------------------------------------------------------------------
+// T5: run length chunk of symbol 3 -- "packet received, w/o recv delta".
+// The draft's own example 2 uses this symbol; no delta bytes follow.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RunLengthChunkReceivedWithoutDelta) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(3, 4));
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 4, 0, 0, ByteSpan{body});
     Parser parser;
     auto fb = parser.parse_transport_cc(pkt);
     ASSERT_TRUE(fb.ok()) << fb.error().message();
     ASSERT_EQ(fb.value().packets.size(), 4u);
-    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::NotReceived);
-    EXPECT_EQ(fb.value().packets[1].status, PacketStatus::Received);
-    EXPECT_EQ(fb.value().packets[2].status, PacketStatus::NotReceived);
-    EXPECT_EQ(fb.value().packets[3].status, PacketStatus::Received);
+    for (const auto& ps : fb.value().packets) {
+        EXPECT_EQ(ps.status, PacketStatus::ReceivedNoDelta);
+        EXPECT_EQ(ps.delta_250us, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// T5: Status + delta chunk (T=1, S=1) — 2-bit symbols + 14-bit delta per
-// "received" packet. RFC 8888 §7.1.1.
+// T6: one-bit status vector chunk -- the 14 symbol bits live inside the
+// 16-bit chunk header itself, and every "received" symbol is followed by an
+// 8-bit delta.
 // ---------------------------------------------------------------------------
-TEST(TransportCcFeedback, StatusDeltaChunk_2BitsAndDeltas) {
-    // word: 1|1|symbol_count=2 — S=1, count=2
-    const std::uint16_t word = static_cast<std::uint16_t>(0xC002u);
-    // Two 2-bit symbol values packed MSB-first into 1 byte:
-    //   symbol 0 = 01 (Received, large delta), symbol 1 = 10 (ReceivedSmall)
-    //   bits: 01 10 -> 0110 0000 -> 0x60
-    const std::uint8_t symbols_byte = 0x60u;
-    const std::uint8_t delta_bytes[4] = {0x3F, 0xFC, 0x01, 0x00};
-    const std::uint8_t bytes[7] = {
-        static_cast<std::uint8_t>((word >> 8) & 0xFFu),
-        static_cast<std::uint8_t>( word       & 0xFFu),
-        symbols_byte,
-        delta_bytes[0], delta_bytes[1], delta_bytes[2], delta_bytes[3],
-    };
+TEST(TransportCcFeedback, OneBitStatusVectorChunk) {
+    const bool received[14] = {false, true, true, false, false, false,
+                               false, false, false, false, false, false,
+                               false, false};
+    ByteBuffer body;
+    append_u16(body, one_bit_chunk(received));
+    append_u8(body, 0x07);   // 7 ticks
+    append_u8(body, 0x09);   // 9 ticks
 
-    auto pkt = make_transport_cc_packet(
-        0x1u, 0x2u, 0, 2, 0u,
-        nimrtc::core::ByteSpan{bytes, 7});
+    auto pkt = make_transport_cc_packet(1, 2, 1, 4, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    ASSERT_TRUE(fb.ok()) << fb.error().message();
+    // The chunk carries 14 symbols, but only 4 packets are reported.
+    ASSERT_EQ(fb.value().packets.size(), 4u);
+    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[1].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[1].delta_250us, 0x07);
+    EXPECT_EQ(fb.value().packets[2].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[2].delta_250us, 0x09);
+    EXPECT_EQ(fb.value().packets[3].status, PacketStatus::NotReceived);
+}
 
+// ---------------------------------------------------------------------------
+// T7: two-bit status vector chunk -- the draft's example 2 verbatim:
+//   1x "not received", 1x "received w/o delta", 3x "received", 2x "not received".
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, TwoBitStatusVectorChunk) {
+    const std::uint8_t symbols[7] = {0, 3, 1, 1, 1, 0, 0};
+    ByteBuffer body;
+    append_u16(body, two_bit_chunk(symbols));
+    append_u8(body, 0x05);   // 5 ticks
+    append_u8(body, 0x0A);   // 10 ticks
+    append_u8(body, 0x0F);   // 15 ticks
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 7, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    ASSERT_TRUE(fb.ok()) << fb.error().message();
+    ASSERT_EQ(fb.value().packets.size(), 7u);
+    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[1].status, PacketStatus::ReceivedNoDelta);
+    EXPECT_EQ(fb.value().packets[1].delta_250us, 0);
+    EXPECT_EQ(fb.value().packets[2].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[2].delta_250us, 0x05);
+    EXPECT_EQ(fb.value().packets[3].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[3].delta_250us, 0x0A);
+    EXPECT_EQ(fb.value().packets[4].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[4].delta_250us, 0x0F);
+    EXPECT_EQ(fb.value().packets[5].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[6].status, PacketStatus::NotReceived);
+}
+
+// ---------------------------------------------------------------------------
+// T8: large / negative delta -- symbol 2 ("received, large or negative
+// delta") is followed by a 16-bit *signed* value.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, LargeNegativeDelta) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(2, 2));
+    append_u16(body, 0xFF9Cu);   // -100 ticks
+    append_u16(body, 0x0100u);   // +256 ticks
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 2, 0, 0, ByteSpan{body});
     Parser parser;
     auto fb = parser.parse_transport_cc(pkt);
     ASSERT_TRUE(fb.ok()) << fb.error().message();
     ASSERT_EQ(fb.value().packets.size(), 2u);
-    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::Received);
-    EXPECT_EQ(fb.value().packets[0].delta_250us, 0x0FFF);
+    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::ReceivedSmall);
+    EXPECT_EQ(fb.value().packets[0].delta_250us, -100);
     EXPECT_EQ(fb.value().packets[1].status, PacketStatus::ReceivedSmall);
-    EXPECT_EQ(fb.value().packets[1].delta_250us, 0x0010);
+    EXPECT_EQ(fb.value().packets[1].delta_250us, 256);
 }
 
 // ---------------------------------------------------------------------------
-// T6: minimum valid feedback — base seq=42, 1 received packet via run length.
-// Exercises the full header parse + chunk loop body in one go.
+// T9: several chunks -- the receive deltas follow *all* the chunks, in
+// packet order, regardless of which chunk a packet's status came from.
 // ---------------------------------------------------------------------------
-TEST(TransportCcFeedback, MinimumValidFeedback) {
-    // Run length, status=Received (01), run=1
-    const std::uint16_t word = static_cast<std::uint16_t>(0x2001u);
-    const std::uint8_t bytes[2] = {
-        static_cast<std::uint8_t>((word >> 8) & 0xFFu),
-        static_cast<std::uint8_t>( word       & 0xFFu)};
+TEST(TransportCcFeedback, MultipleChunks) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 3));       // 3 x not received
+    const bool received[14] = {true, false, true, false, false, false,
+                               false, false, false, false, false, false,
+                               false, false};
+    append_u16(body, one_bit_chunk(received));       // 5 symbols used
+    append_u8(body, 0x11);                           // delta of packet 3
+    append_u8(body, 0x22);                           // delta of packet 5
 
-    auto pkt = make_transport_cc_packet(
-        0xCAFEBABEu, 0xFEEDFACEu, 42, 1, 0x00ABCDEFu,
-        nimrtc::core::ByteSpan{bytes, 2});
+    auto pkt = make_transport_cc_packet(1, 2, 0, 8, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    ASSERT_TRUE(fb.ok()) << fb.error().message();
+    ASSERT_EQ(fb.value().packets.size(), 8u);
+    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[1].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[2].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[3].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[3].delta_250us, 0x11);
+    EXPECT_EQ(fb.value().packets[4].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[5].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().packets[5].delta_250us, 0x22);
+    EXPECT_EQ(fb.value().packets[6].status, PacketStatus::NotReceived);
+    EXPECT_EQ(fb.value().packets[7].status, PacketStatus::NotReceived);
+}
 
+// ---------------------------------------------------------------------------
+// T10: header fields -- the reference time is in multiples of 64 ms, and the
+// feedback-packet counter is the byte that follows it.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, HeaderFields) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 1));
+
+    auto pkt = make_transport_cc_packet(0xCAFEBABEu, 0xFEEDFACEu, 42, 1,
+                                         0x00ABCDEFu, 0x5A, ByteSpan{body});
     Parser parser;
     auto fb = parser.parse_transport_cc(pkt);
     ASSERT_TRUE(fb.ok()) << fb.error().message();
@@ -251,6 +410,91 @@ TEST(TransportCcFeedback, MinimumValidFeedback) {
     EXPECT_EQ(fb.value().media_ssrc,  0xFEEDFACEu);
     EXPECT_EQ(fb.value().base_seq, 42);
     EXPECT_EQ(fb.value().reference_time_24mhz, 0x00ABCDEFu);
-    ASSERT_EQ(fb.value().packets.size(), 1u);
-    EXPECT_EQ(fb.value().packets[0].status, PacketStatus::Received);
+    EXPECT_EQ(fb.value().reference_time_ms, 0x00ABCDEFu * 64u);
+    EXPECT_EQ(fb.value().feedback_packet_count, 0x5A);
+}
+
+// ---------------------------------------------------------------------------
+// T11: the arrival-time series is reconstructible -- the reference time plus
+// the cumulative sum of the deltas is the arrival time of each packet, and
+// the series is monotonic.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, ArrivalSeriesIsReconstructible) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(1, 3));
+    append_u8(body, 0x10);   // 16 ticks
+    append_u8(body, 0x10);   // 16 ticks
+    append_u8(body, 0x10);   // 16 ticks
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 3, 100u, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    ASSERT_TRUE(fb.ok()) << fb.error().message();
+    ASSERT_EQ(fb.value().packets.size(), 3u);
+
+    // The reference time is in 64 ms units; the deltas in 250 us units.
+    std::uint64_t arrival_us = fb.value().reference_time_ms * 1000u;
+    std::uint64_t previous = 0;
+    for (const auto& ps : fb.value().packets) {
+        arrival_us += static_cast<std::uint64_t>(ps.delta_250us) * 250u;
+        EXPECT_GE(arrival_us, previous);
+        previous = arrival_us;
+    }
+    EXPECT_EQ(arrival_us, fb.value().reference_time_ms * 1000u + 3u * 16u * 250u);
+}
+
+// ---------------------------------------------------------------------------
+// T12: a wrong feedback message type is rejected.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RejectsWrongFmt) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 1));
+    auto pkt = make_transport_cc_packet(1, 2, 0, 1, 0, 0, ByteSpan{body});
+    pkt[0] = static_cast<std::uint8_t>(0x80u | 1u);   // FMT = 1, not 15
+
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    EXPECT_FALSE(fb.ok());
+}
+
+// ---------------------------------------------------------------------------
+// T13: truncated receive deltas are rejected -- a "received" symbol whose
+// delta bytes are missing is a malformed message, not a silent zero.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RejectsTruncatedDeltas) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(1, 2));   // 2 received packets
+    append_u8(body, 0x10);                      // only one delta present
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 2, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    EXPECT_FALSE(fb.ok());
+}
+
+// ---------------------------------------------------------------------------
+// T14: truncated packet chunks are rejected -- the chunk section ends before
+// the declared packet status count is covered.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RejectsTruncatedChunks) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 4));   // covers 4 packets only
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 8, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    EXPECT_FALSE(fb.ok());
+}
+
+// ---------------------------------------------------------------------------
+// T15: an empty packet status is rejected.
+// ---------------------------------------------------------------------------
+TEST(TransportCcFeedback, RejectsEmptyStatus) {
+    ByteBuffer body;
+    append_u16(body, run_length_chunk(0, 1));
+
+    auto pkt = make_transport_cc_packet(1, 2, 0, 0, 0, 0, ByteSpan{body});
+    Parser parser;
+    auto fb = parser.parse_transport_cc(pkt);
+    EXPECT_FALSE(fb.ok());
 }

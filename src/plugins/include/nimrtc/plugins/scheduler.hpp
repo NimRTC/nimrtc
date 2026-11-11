@@ -95,6 +95,27 @@ struct NIMRTC_API_STABLE SchedulerConfig {
      *  resolve or open a scheduler at open() and send_audio() sends
      *  directly through ICE.  Matches the docs in EngineConfig. */
     bool enabled = false;
+
+    /** The congestion-window horizon, in milliseconds.
+     *
+     *  This value has **two** roles:
+     *
+     *  1. It bounds how much outbound data may stay queued: when the BWE
+     *     estimate shrinks, packets are trimmed from the lowest priority
+     *     upwards until the queue fits into one horizon's worth of bytes
+     *     at the estimated rate.  A fixed horizon keeps the tolerated
+     *     backlog independent of the host's tick rate.
+     *
+     *  2. It seeds the *measured* drain interval.  After the first
+     *     `drain()` the scheduler measures the wall-clock time between
+     *     two drains and grants send credit proportional to that elapsed
+     *     time, so the effective send rate is the same whether the host
+     *     ticks every 20 ms or every 200 ms.  This value is only used
+     *     until the first measurement exists.
+     *
+     *  @note Appended at the end of the struct (v1.1.1) so that existing
+     *  aggregate initialisation of the preceding fields keeps compiling. */
+    std::uint32_t drain_interval_ms = 125;
 };
 
 // ---------------------------------------------------------------------------
@@ -207,6 +228,50 @@ public:
 
     /** Return the current configuration. */
     virtual SchedulerConfig config() const noexcept = 0;
+
+    // ---- Packet buffer pool (P1 hardening, 2026-11-09) ------------------
+    //
+    // The outbound hot path used to perform one heap allocation AND one
+    // free per packet: the engine built the packet in a member vector,
+    // moved it into the scheduler (leaving the member in a moved-from
+    // state, so the NEXT packet had to allocate again) and the scheduler
+    // freed the buffer when the packet was drained.  At 1000 packets per
+    // second that is 1000 malloc/free pairs per second on the send path.
+    //
+    // The pool closes that loop: the caller acquires a buffer, builds the
+    // packet in it, hands it over with `enqueue_owned()`, and the
+    // scheduler returns the buffer to the pool once the packet has been
+    // drained and dispatched.  In steady state the send path performs no
+    // heap allocation at all.
+    //
+    // The buffer is recycled AFTER the drain callback returned, so the
+    // callback may keep using the bytes for the duration of the call only.
+
+    /** Acquire a reusable packet buffer from the scheduler's pool.
+     *
+     *  `capacity_hint` is a hint in bytes.  The returned buffer may have
+     *  a different capacity; the caller resizes it before use.  The
+     *  default implementation returns an empty vector with `capacity_hint`
+     *  bytes of reserved capacity and no recycling.
+     *
+     *  Thread-safe. */
+    virtual std::vector<std::uint8_t> acquire_packet_buffer(
+        std::size_t capacity_hint) noexcept {
+        std::vector<std::uint8_t> buffer;
+        if (capacity_hint != 0) buffer.reserve(capacity_hint);
+        return buffer;
+    }
+
+    /** Return a buffer to the scheduler's pool for reuse.
+     *
+     *  Only buffers previously obtained from `acquire_packet_buffer()` of
+     *  the SAME scheduler instance should be released here.  The default
+     *  implementation simply destroys the buffer.
+     *
+     *  Thread-safe. */
+    virtual void release_packet_buffer(std::vector<std::uint8_t>&& buffer) noexcept {
+        (void)buffer;  // destroyed on return — no pool in the default impl
+    }
 };
 
 // ---------------------------------------------------------------------------

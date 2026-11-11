@@ -19,6 +19,14 @@ namespace {
 constexpr int kDefaultAudioBitrateMonoBps   = 32000;
 constexpr int kDefaultAudioBitrateStereoBps = 64000;
 
+/** Size of the SRTP authentication tag (RFC 3711 §3.5 — the default
+ *  AES_CM_128_HMAC_SHA1_80 profile appends a 10-byte tag).
+ *
+ *  Used as the capacity hint when acquiring an outbound packet buffer from
+ *  the scheduler's pool, so the protected packet fits without a
+ *  reallocation. */
+constexpr std::size_t kSrtpAuthTagBytes = 10;
+
 } // anonymous namespace
 
 
@@ -519,7 +527,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
 
                 // ---- Assemble full RTP packet ----------------------------------
                 std::vector<std::uint8_t> rtp_pkt;
-                rtp_pkt.reserve(12 + payload.size());
+                if (scheduler_) {
+                    rtp_pkt = scheduler_->acquire_packet_buffer(
+                        12 + payload.size());
+                }
                 rtp_pkt.insert(rtp_pkt.end(), hdr, hdr + 12);
                 rtp_pkt.insert(rtp_pkt.end(),
                                payload.data(), payload.data() + payload.size());
@@ -529,6 +540,10 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     auto* sess = impl_->srtp->get_session(
                         config_.video_sender_tuning.ssrc, /*outgoing=*/true);
                     if (!sess) {
+                // The buffer comes from the scheduler's packet pool (P1
+                // hardening, 2026-11-09): it is handed back to the pool
+                // once the packet has been drained and dispatched, so the
+                // steady-state send path performs no heap allocation.
                         // SRTP not ready — drop this packet silently.
                         return;
                     }
@@ -902,7 +917,19 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
 
         // SRTP protect (or pass-through when not yet keyed).
-        // Reuse Impl::audio_send_buf (P0#4) — one allocation ever, then in-place.
+        //
+        // The outbound buffer is taken from the scheduler's packet pool
+        // (P1 hardening, 2026-11-09) and handed back to it with
+        // `enqueue_owned()`.  The previous code moved a MEMBER vector into
+        // the scheduler, which left the member in a moved-from state —
+        // so every single packet allocated a fresh buffer and the
+        // previous one was freed on drain.  With the pool the steady-state
+        // send path performs no heap allocation.
+        std::vector<std::uint8_t> send_buf;
+        if (scheduler_) {
+            send_buf = scheduler_->acquire_packet_buffer(
+                pkt_buf.size() + kSrtpAuthTagBytes);
+        }
         core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
         if (impl_->srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
@@ -913,32 +940,26 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
             }
             auto enc = sess->protect_rtp(out_payload, impl_->audio_ssrc, cur_ts);
             if (!enc) return 0;
-            impl_->audio_send_buf.assign(enc.value().data(),
-                                         enc.value().data() + enc.value().size());
+            send_buf.assign(enc.value().data(),
+                            enc.value().data() + enc.value().size());
         } else {
-            impl_->audio_send_buf.assign(out_payload.data(),
-                                         out_payload.data() + out_payload.size());
+            send_buf.assign(out_payload.data(),
+                            out_payload.data() + out_payload.size());
         }
 
         // ---- Scheduler: enqueue for priority-drain (move, P0#3) --------------
-        // The scheduler takes ownership of audio_send_buf via enqueue_owned.
-        // After this call, audio_send_buf is in MOVED-FROM state; we must not
-        // touch it.  The scheduler will release it on drain.
+        // The scheduler takes ownership of the buffer via enqueue_owned and
+        // returns it to its pool once the packet has been dispatched.
         if (scheduler_) {
             scheduler_->enqueue_owned(plugins::Priority::kAudio,
-                                      std::move(impl_->audio_send_buf),
+                                      std::move(send_buf),
                                       plugins::Addr{});
             return 0;
         }
 
         // Fallback: no scheduler — send directly through ICE (transport profile).
-        plugins::BufferView bv{impl_->audio_send_buf.data(),
-                               impl_->audio_send_buf.size()};
-        const auto send_rc = ice_t_->send(bv, {});
-        // Clear so the next call starts fresh.
-        impl_->audio_send_buf.clear();
-        impl_->audio_send_buf.shrink_to_fit();   // release backing if needed
-        return send_rc;
+        plugins::BufferView bv{send_buf.data(), send_buf.size()};
+        return ice_t_->send(bv, {});
     };
 
     // ---- Drain the accumulator -----------------------------------------
@@ -1092,55 +1113,75 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
 
     // Compound RTCP packets are a concatenation of sub-packets sharing one
     // header (RFC 3550 §6.1). Walk them so an SR that follows an RR in the
-    // same compound datagram is not missed. A malformed length field ends
-    // the walk rather than throwing — the rest of the datagram is
-    // unparseable, but that is not an error worth failing the read path for.
-    std::size_t off = 0;
-    while (off + 4 <= view.size()) {
-        const std::uint8_t count = static_cast<std::uint8_t>(view[off] & 0x1F);
-        const std::uint32_t words = static_cast<std::uint32_t>(view[off + 2]) << 8 |
-                                    static_cast<std::uint32_t>(view[off + 3]);
-        const std::size_t sub_len = (static_cast<std::size_t>(words) + 1u) * 4u;
-        if (sub_len < 4u || off + sub_len > view.size()) {
-            break;
-        }
+    // same compound datagram is not missed, and so each sub-packet reaches
+    // *its* consumer: the Sender Report to the cross-end timeline, the
+    // receiver-side network feedback (RR / REMB / transport-cc) to the
+    // net-feedback collector.
+    //
+    // The walk itself lives in the `rtp` module (`rtp::demux_rtcp`), which
+    // is forgiving: a sub-packet whose length field does not fit ends the
+    // walk rather than throwing — the rest of the datagram is unparseable,
+    // but that is not an error worth failing the read path for, and the
+    // well-formed head of the datagram must not be thrown away.
+    const core::ByteSpan compound(view.data(), view.size());
+    const std::vector<rtp::RtcpBlock> blocks = rtp::demux_rtcp(compound);
+    const core::TimePoint now = core::SteadyClock::now();
 
-        const std::uint8_t ptype = view[off + 1];
-        if (ptype == 200) {  // SR
-            rtp::Parser rp;
-            auto sr = rp.parse_sr(view.subspan(off, sub_len));
-            if (sr) {
-                // The peer's Sender Report is the anchor of the
-                // receiver report we send back: its middle 32 bits are
-                // the LSR field, and the instant we received it is the
-                // DLSR field (RFC 3550 §6.4.1).  This is recorded
-                // whether or not the cross-end timeline is enabled —
-                // the peer's report is a fact about the wire, not about
-                // our feature set.
-                if (sr.value().ssrc == impl_->audio_rx.ssrc) {
-                    impl_->audio_rx.last_sr_lsr =
-                        rtp::Ntp64{sr.value().ntp_timestamp}.mid_32();
-                    impl_->audio_rx.last_sr_recv_us = detail::steady_now_us();
+    for (const rtp::RtcpBlock& blk : blocks) {
+        switch (blk.kind) {
+            case rtp::RtcpBlockKind::kSenderReport: {
+                rtp::Parser rp;
+                auto sr = rp.parse_sr(blk.packet);
+                if (sr) {
+                    // The peer's Sender Report is the anchor of the
+                    // receiver report we send back: its middle 32 bits are
+                    // the LSR field, and the instant we received it is the
+                    // DLSR field (RFC 3550 §6.4.1).  This is recorded
+                    // whether or not the cross-end timeline is enabled —
+                    // the peer's report is a fact about the wire, not about
+                    // our feature set.
+                    if (sr.value().ssrc == impl_->audio_rx.ssrc) {
+                        impl_->audio_rx.last_sr_lsr =
+                            rtp::Ntp64{sr.value().ntp_timestamp}.mid_32();
+                        impl_->audio_rx.last_sr_recv_us = detail::steady_now_us();
+                    }
+
+                    if (!config_.timeline_enabled) {
+                        break;  // no anchor to maintain — nothing to feed
+                    }
+
+                    // The tracker wants our *monotonic* clock reading at
+                    // receipt: it combines it with the monotonic origin to
+                    // place our own clock on the peer's wall-clock timeline
+                    // (ADR-017 §"Decision 4").  Passing a wall-clock reading
+                    // here would double-count the epoch and make the skew
+                    // meaningless.
+                    impl_->sr_tracker.on_sender_report(sr.value(),
+                                                      detail::steady_now_us());
                 }
-
-                if (!config_.timeline_enabled) {
-                    off += sub_len;
-                    continue;   // no anchor to maintain — nothing to feed
-                }
-
-                // The tracker wants our *monotonic* clock reading at
-                // receipt: it combines it with the monotonic origin to
-                // place our own clock on the peer's wall-clock timeline
-                // (ADR-017 §"Decision 4").  Passing a wall-clock reading
-                // here would double-count the epoch and make the skew
-                // meaningless.
-                impl_->sr_tracker.on_sender_report(sr.value(),
-                                                  detail::steady_now_us());
+                break;
             }
-        }
-        (void)count;  // report-block count is parsed inside parse_sr()
 
-        off += sub_len;
+            case rtp::RtcpBlockKind::kReceiverReport:
+            case rtp::RtcpBlockKind::kRtpFeedback:
+            case rtp::RtcpBlockKind::kPayloadSpecificFeedback:
+                // The receiver-side network feedback goes to the collector,
+                // which aggregates it into one snapshot (v1.2.0 M1, F1/F2).
+                // The collector decides what it understands — the payload
+                // type and the FMT are handed over so it can tell a REMB
+                // from a PLI and a transport-cc from a NACK.
+                if (net_feedback_) {
+                    net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
+                                                 blk.packet, now);
+                    ++impl_->net_feedback_blocks;
+                }
+                break;
+
+            default:
+                // SDES, BYE, APP, XR and anything this build does not know
+                // about: not ours.
+                break;
+        }
     }
 }
 
@@ -1338,6 +1379,14 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_keyframes_q;
     out.video_feedback_applied  = impl_->video_feedback_applied;
     out.video_keyframes_applied = impl_->video_keyframes_applied;
+    // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
+    // staying at zero means the loop is not closed — the estimator is
+    // never fed, so the bandwidth target never moves.
+    out.net_feedback_blocks   = impl_->net_feedback_blocks;
+    out.bwe_feedback_samples  = impl_->bwe_feedback_samples;
+    if (bwe_) {
+        out.bandwidth_estimate_bps = bwe_->estimate().target_bitrate_bps;
+    }
     // WP-5: the audio send counters.  `audio_encode_errors` is the one
     // that matters to a host: it counts the PCM that was accepted and
     // then could not be encoded, which used to disappear silently.

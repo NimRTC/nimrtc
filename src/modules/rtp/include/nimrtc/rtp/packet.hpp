@@ -94,26 +94,123 @@ struct NIMRTC_API_STABLE AbsSendTime {
 };
 
 // -----------------------------------------------------------------------------
-// transport-wide CC feedback packet (RFC 8888; PT = RTPFB, FMT = 15).
+// transport-wide CC feedback packet (PT = RTPFB, FMT = 15).
+//
+// Format: draft-holmer-rmcat-transport-wide-cc-extensions-01.  This is NOT
+// RFC 8888 -- RFC 8888 is the Common Control Feedback Format (CCFB, FMT = 11),
+// a different feedback format with a different reference-time encoding.
+//
+// Wire layout:
+//
+//   0                   1                   2                   3
+//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |V=2|P|  FMT=15 |    PT=205     |           length              |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                     SSRC of packet sender                     |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                      SSRC of media source                     |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |      base sequence number     |      packet status count      |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                 reference time                | fb pkt. count |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |          packet chunk         |         packet chunk          |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |          recv delta           |          recv delta           |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |          recv delta           |         zero padding          |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+// Time units (normative; see ADR-018):
+//   * the 24-bit reference time is in multiples of 64 ms;
+//   * each receive delta is in multiples of 250 us.
+//
+// The reference time is an arbitrary sender-chosen base: only *differences*
+// between reference times are meaningful, so the field is used to build a
+// per-packet arrival-time *series* (a trend), never an absolute wall clock.
+//
+// The packet chunks come first and are followed by the whole receive-delta
+// list; the deltas are ordered by the packets they belong to, and their
+// width is determined by the packet's status symbol (8-bit for a small
+// delta, 16-bit for a large/negative delta, absent for the two symbols that
+// carry no delta).
+//
 // `packets` has length = packet_status_count; one element per RTP packet,
 // in seq order starting at base_seq (modulo 2^16).
 // -----------------------------------------------------------------------------
+/// The status of one packet inside a transport-cc feedback message.
+///
+/// The value is the wire *symbol* of the packet's status
+/// (draft-holmer-rmcat-transport-wide-cc-extensions-01 §3.1.1) and it fully
+/// determines the width of the receive delta that follows:
+///
+///   * `NotReceived` (0) — the packet did not arrive; **no delta follows**.
+///     (It may not have been lost — it may simply not have arrived yet.)
+///   * `Received` (1) — the packet arrived; the receive delta is **8-bit
+///     unsigned**, i.e. 0 .. 255 ticks of 250 µs (0 .. 63.75 ms).  This is
+///     the wire's "received, small delta" symbol.
+///   * `ReceivedSmall` (2) — the packet arrived; the receive delta is
+///     **16-bit signed**, i.e. -32768 .. 32767 ticks of 250 µs
+///     (-8192.0 .. 8191.75 ms).  This is the wire's "received, large or
+///     negative delta" symbol.
+///   * `ReceivedNoDelta` (3) — the packet arrived, but no receive delta is
+///     reported for it.  **No delta follows.**
+///
+/// NOTE on the names: `ReceivedSmall` is the enumerator that carries the
+/// *large* delta — the names predate the wire format being implemented
+/// correctly and are kept as-is because this enum is NIMRTC_API_STABLE
+/// (ADR-015) and renaming them would be a breaking change.  The enumerator
+/// names are historical; the **numeric value** is the normative wire symbol,
+/// and the value alone tells you the delta width (1 -> 1 byte, 2 -> 2 bytes,
+/// 0 and 3 -> no delta).  A future MAJOR cycle may rename them.
 enum class NIMRTC_API_STABLE PacketStatus : std::uint8_t {
     NotReceived   = 0,
     Received      = 1,
     ReceivedSmall = 2,
+    ReceivedNoDelta = 3,
 };
 struct NIMRTC_API_STABLE TransportCcPacketStatus {
+    /// The packet's status symbol (see `PacketStatus`).
     PacketStatus status    = PacketStatus::NotReceived;
-    std::int16_t delta_250us = 0;  // recv-time delta in 250-µs ticks vs reference time
-                                   // (only meaningful when status != NotReceived)
+
+    /// The receive delta in 250 µs ticks.
+    ///
+    /// The delta is *relative to the previous received packet*; for the
+    /// first received packet in a feedback message it is relative to the
+    /// feedback message's reference time.  It is only meaningful when
+    /// `status` is `Received` (small) or `ReceivedSmall` (large/negative) —
+    /// both other symbols carry no delta, and the field is then 0.
+    std::int16_t delta_250us = 0;
 };
 struct NIMRTC_API_STABLE TransportCcFeedback {
     std::uint32_t sender_ssrc = 0;
     std::uint32_t media_ssrc  = 0;
     std::uint16_t base_seq    = 0;
     std::uint16_t packet_status_count = 0;
-    std::uint32_t reference_time_24mhz = 0;  // 24-bit wrap timestamp at 1 kHz / 24 kHz
+    /// The 24-bit reference time, in multiples of 64 ms.
+    ///
+    /// NOTE: the field *name* predates the unit being pinned down and says
+    /// "24mhz", which is wrong -- the unit is 64 ms, not 24 MHz.  The name is
+    /// kept because the field is NIMRTC_API_STABLE (ADR-015) and renaming it
+    /// would be a breaking change; the semantics are documented here and in
+    /// ADR-018.  A future MAJOR cycle may rename it to `reference_time_64ms`.
+    std::uint32_t reference_time_24mhz = 0;
+
+    /// `reference_time_24mhz` converted to milliseconds (64 ms per tick).
+    ///
+    /// Provided so callers do not each re-derive the unit.  The value is
+    /// only meaningful *relative* to another reference time: it is an
+    /// arbitrary sender-chosen base, not a wall clock.
+    std::uint64_t reference_time_ms = 0;
+
+    /// The 8-bit feedback-packet counter that follows the reference time on
+    /// the wire.  It is incremented by the sender for every feedback packet
+    /// and is used to detect feedback-packet loss.
+    std::uint8_t feedback_packet_count = 0;
+
+    /// One element per reported packet, in sequence order starting at
+    /// `base_seq` (modulo 2^16).
     std::vector<TransportCcPacketStatus> packets;
 };
 

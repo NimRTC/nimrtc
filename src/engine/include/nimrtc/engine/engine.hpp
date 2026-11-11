@@ -86,6 +86,7 @@
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
 #include <nimrtc/plugins/codec.hpp>
+#include <nimrtc/plugins/net_feedback.hpp>   // v1.2.0 M1 (F2) — feedback collector seam
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
@@ -324,6 +325,49 @@ struct NIMRTC_API_STABLE EngineConfig {
 
     /** Initial BWE parameters handed to `IBweFactory::create()`. */
     plugins::BweConfig bwe_config;
+
+    // ---- Net feedback plugin selection (v1.2.0 M1, F2) --------------------
+    //
+    // The receiver-side network-feedback collector sits *between* the
+    // wire and the bandwidth estimator: the engine demultiplexes the
+    // inbound RTCP compound datagram and routes the receiver-side
+    // network signals (Receiver Report, REMB, transport-cc) to the
+    // collector, the collector aggregates them into one snapshot, and
+    // the engine hands that snapshot to `IBwe::on_feedback()`.
+    //
+    // Without this plugin the estimator is never fed, so the bandwidth
+    // target stays pinned at `bwe_config.initial_bitrate_bps` forever
+    // and every rate-control feature built on top of it is decorative.
+    //
+    // The engine resolves the factory at open() via
+    // `core::PluginRegistry::instance().get_net_feedback(name)`.
+    // Default = "nimrtc_net_feedback" (the built-in collector).
+    // Empty string = no collector (the pre-v1.2.0 behaviour: the
+    // estimator is never fed).
+    std::string net_feedback_name = "nimrtc_net_feedback";
+
+    // ---- Signal-selection policy (v1.2.0 M2, F5 / ADR-018 Decision 2) ---
+    //
+    // Which receiver-side signal drives the bandwidth estimate:
+    //
+    //   "auto"                (default) transport-cc when the peer
+    //                         negotiated it and its feedback is fresh,
+    //                         loss/RTT otherwise;
+    //   "loss_rtt"            always the loss/RTT path (REMB stays an
+    //                         upper-bound hint);
+    //   "require_transport_cc" transport-cc must drive; the engine
+    //                         reports the path as unavailable instead
+    //                         of falling back silently.
+    //
+    // An unknown value is treated as "auto" — the policy must never be
+    // the reason a session fails.
+    std::string net_feedback_signal = "auto";
+
+    // How long transport-cc feedback may stay silent before the policy
+    // treats it as stale and falls back to the loss/RTT path, in
+    // milliseconds.  Must be comfortably larger than the peer's
+    // feedback interval (Chrome: 50-100 ms).
+    std::uint32_t net_feedback_transport_cc_timeout_ms = 3000;
 
     // ---- Scheduler plugin selection (ADR-001: resolved via PluginRegistry) ----
     //
@@ -1372,6 +1416,13 @@ public:
     NIMRTC_API_UNSTABLE plugins::IScheduler*  scheduler()  noexcept { return scheduler_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IScheduler* scheduler() const noexcept { return scheduler_.get(); }
 
+    // ---- Net feedback collector accessor (v1.2.0 M1, F2) -------------
+    /** The `INetFeedback` collector instance (or nullptr when the
+     *  collector was not created).  Call after open().  A host that
+     *  wants the raw aggregated signals can read `snapshot()` here. */
+    NIMRTC_API_UNSTABLE plugins::INetFeedback* net_feedback() noexcept { return net_feedback_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::INetFeedback* net_feedback() const noexcept { return net_feedback_.get(); }
+
     NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
@@ -1428,6 +1479,16 @@ public:
         // It equals `Config::audio_bitrate_bps` until the BWE-linked
         // adaptation lowers it (or raises it back towards that ceiling).
         std::uint32_t audio_encoder_bitrate_bps  = 0;
+        // ---- Network feedback / BWE loop (v1.2.0 M1, additive) ---------
+        // The counters that make the feedback loop observable: how many
+        // inbound RTCP blocks were routed to the collector, how many
+        // aggregated samples were handed to the bandwidth estimator, and
+        // what the estimator currently says.  A host (or a test) that
+        // sees `bwe_feedback_samples` stuck at zero knows the loop is
+        // not closed.
+        std::uint64_t net_feedback_blocks    = 0;  // RTCP blocks routed to the collector
+        std::uint64_t bwe_feedback_samples  = 0;  // samples handed to IBwe::on_feedback()
+        std::uint32_t bandwidth_estimate_bps = 0; // current BWE target, in bit/s
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -1512,6 +1573,14 @@ private:
     // Injected into ice_t_ via set_bwe() / set_scheduler().
     std::unique_ptr<plugins::IBwe>        bwe_;
     std::unique_ptr<plugins::IScheduler>  scheduler_;
+
+    // ---- Net feedback collector (v1.2.0 M1, F2) -------------------------
+    //
+    // Created in init_bwe_scheduler() (called from pre_open/open) from
+    // the registry's net-feedback slot.  It owns the aggregation of the
+    // receiver-side network signals; the engine owns the routing and
+    // the hand-off to the estimator.
+    std::unique_ptr<plugins::INetFeedback> net_feedback_;
 
     // ---- Adaptive audio bitrate (BWE-linked) ---------------------------
     //
@@ -1636,6 +1705,17 @@ private:
     void poll_ice_flap_for_rehandshake() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;
+    /** Hand the aggregated network-feedback snapshot to the bandwidth
+     *  estimator (v1.2.0 M1, F6).  Called from `tick()`; it feeds the
+     *  estimator only when the collector has a *new* snapshot, so the
+     *  estimator sees one sample per feedback report rather than one per
+     *  engine tick. */
+    void feed_bwe_from_net_feedback() noexcept;
+    /** True when the host configured a transport-cc-capable collector and
+     *  did not pin the signal policy to the loss/RTT path — i.e. when the
+     *  offer should advertise `a=rtcp-fb:<pt> transport-cc`
+     *  (ADR-018 Decision 6). */
+    bool wants_transport_cc() const noexcept;
     /** BWE-linked audio bitrate adaptation — see
      *  `Config::audio_bitrate_adaptive`.  Called from `tick()`. */
     void maybe_update_audio_bitrate() noexcept;

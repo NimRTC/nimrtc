@@ -745,11 +745,10 @@ core::Result<TransportCcFeedback> Parser::parse_transport_cc(core::ByteSpan raw)
             "RTCP RTPFB FMT != 15 (transport-cc): got " +
                 std::to_string(h.value().rc_or_fmt));
     }
-    if (raw.size() < kRtcpHeaderSize + 16) {
-        return core::Result<TransportCcFeedback>::fail(
-            core::ErrorCode::ProtocolError,
-            "RTCP transport-cc body truncated: " + std::to_string(raw.size()));
-    }
+
+    // The RTCP length field delimits the message; never read past it.
+    const std::size_t total = std::min(
+        raw.size(), static_cast<std::size_t>(h.value().length_words + 1u) * 4u);
 
     const std::uint8_t* p = raw.data();
     TransportCcFeedback f;
@@ -757,100 +756,144 @@ core::Result<TransportCcFeedback> Parser::parse_transport_cc(core::ByteSpan raw)
     f.media_ssrc          = read_be32_at(p + kRtcpHeaderSize + 4);
     f.base_seq            = read_be16_at(p + kRtcpHeaderSize + 8);
     f.packet_status_count = read_be16_at(p + kRtcpHeaderSize + 10);
-    // Reference time is a 24-bit field carrying the reference time at 1 kHz
-    // tick (RFC 8888 §7.1: lower 8 bits of NTP timestamp at 1ms resolution).
+    // Reference time is a 24-bit field in multiples of 64 ms
+    // (draft-holmer-rmcat-transport-wide-cc-extensions-01 §3.1; see
+    // ADR-018).  It is NOT an RFC 8888 field -- RFC 8888 is the Common
+    // Control Feedback Format (FMT = 11), a different feedback format.
+    //
+    // The value is an arbitrary sender-chosen base, so only *differences*
+    // between reference times carry meaning; it is used to build a
+    // per-packet arrival-time series, never as an absolute wall clock.
+    // The receive deltas below are in multiples of 250 us.
     f.reference_time_24mhz =
         (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 12]) << 16) |
         (static_cast<std::uint32_t>(p[kRtcpHeaderSize + 13]) <<  8) |
          static_cast<std::uint32_t>(p[kRtcpHeaderSize + 14]);
+    f.reference_time_ms =
+        static_cast<std::uint64_t>(f.reference_time_24mhz) * 64u;
+    // The 8-bit feedback-packet counter that follows the reference time.  The
+    // receiver side uses it to detect feedback-packet loss.
+    f.feedback_packet_count = p[kRtcpHeaderSize + 15];
 
-    // Walk packet-status chunks starting after the 16-byte feedback header.
+    if (f.packet_status_count == 0) {
+        return core::Result<TransportCcFeedback>::fail(
+            core::ErrorCode::ProtocolError,
+            "RTCP transport-cc carries no packet status");
+    }
+
+    // --- Phase 1: the packet chunks -----------------------------------------
+    // Every chunk is 16 bits and *contains* the status symbols:
+    //
+    //   T=0  run length chunk : 0 | symbol (2 bit) | run length (13 bit)
+    //   T=1  status vector    : 1 | S (1 bit) | symbol list (14 bit)
+    //        S=0 -> 14 one-bit symbols (0 = not received, 1 = received)
+    //        S=1 -> 7  two-bit symbols (0 / 1 / 2 / 3)
+    //
+    // The symbol count is implied by S -- there is no separate count field.
+    //
+    // The RTCP padding, if any, trails the message; the chunk section and
+    // the delta list both end before it.
+    std::size_t end = total;
+    if (h.value().padding != 0u) {
+        const std::size_t pad = p[total - 1];
+        if (pad == 0u || pad > total - (kRtcpHeaderSize + 16u)) {
+            return core::Result<TransportCcFeedback>::fail(
+                core::ErrorCode::ProtocolError,
+                "RTCP transport-cc has an invalid padding length: " +
+                    std::to_string(pad));
+        }
+        end = total - pad;
+    }
+
+    std::vector<PacketStatus> symbols;
+    symbols.reserve(f.packet_status_count);
     std::size_t off = kRtcpHeaderSize + 16;
-    f.packets.reserve(f.packet_status_count);
 
-    while (f.packets.size() < f.packet_status_count && off + 2 <= raw.size()) {
+    while (symbols.size() < f.packet_status_count) {
+        if (off + 2 > end) {
+            return core::Result<TransportCcFeedback>::fail(
+                core::ErrorCode::ProtocolError,
+                "RTCP transport-cc truncated inside the packet chunks (" +
+                    std::to_string(off) + " of " + std::to_string(end) +
+                    " B)");
+        }
         const std::uint16_t word = read_be16_at(p + off);
         off += 2;
 
-        const bool T = (word & 0x8000u) != 0;
-        if (!T) {
-            // Run length chunk: T=0 — 2-bit status + 14-bit run length.
+        const std::size_t remaining = f.packet_status_count - symbols.size();
+
+        if ((word & 0x8000u) == 0u) {
+            // Run length chunk: one symbol repeated `run` times.
             const auto s = static_cast<PacketStatus>((word >> 13) & 0x3u);
-            const std::size_t run = static_cast<std::size_t>(word & 0x1FFFu);
-            for (std::size_t i = 0; i < run &&
-                   f.packets.size() < f.packet_status_count; ++i) {
-                f.packets.push_back({s, 0});
+            const std::size_t run =
+                std::min<std::size_t>(word & 0x1FFFu, remaining);
+            symbols.insert(symbols.end(), run, s);
+            continue;
+        }
+
+        if ((word & 0x4000u) == 0u) {
+            // Status vector chunk, one-bit symbols: 14 symbols, symbol i sits
+            // at bit (13 - i).  0 = not received, 1 = received (small delta).
+            const std::size_t count = std::min<std::size_t>(14u, remaining);
+            for (std::size_t i = 0; i < count; ++i) {
+                const bool received = ((word >> (13u - i)) & 0x1u) != 0u;
+                symbols.push_back(received ? PacketStatus::Received
+                                           : PacketStatus::NotReceived);
             }
             continue;
         }
 
-        // T=1 chunk.
-        const bool S_bit = (word & 0x4000u) != 0;   // 0=1-bit sym; 1=2-bit sym
-        const std::size_t symbol_count = static_cast<std::size_t>(word & 0x3FFFu);
-        const std::size_t sym_bits = S_bit ? 2u : 1u;
-        const std::size_t total_status_bits = symbol_count * sym_bits;
-
-        // Read the packed status list byte-by-byte.
-        std::vector<PacketStatus> symbols;
-        symbols.reserve(symbol_count);
-        std::size_t bits_read = 0;
-        while (bits_read < total_status_bits) {
-            if (off >= raw.size()) break;
-            const std::uint8_t byte = p[off++];
-            for (std::uint8_t m = 0; m < 8 && bits_read < total_status_bits;
-                 m += static_cast<std::uint8_t>(sym_bits)) {
-                std::uint8_t bits;
-                if (sym_bits == 1) {
-                    bits = (byte >> (7 - m)) & 0x1u;
-                } else {
-                    bits = (byte >> (6 - m)) & 0x3u;
-                }
-                symbols.push_back(static_cast<PacketStatus>(bits));
-                bits_read += sym_bits;
-            }
+        // Status vector chunk, two-bit symbols: 7 symbols, symbol i sits at
+        // bits (12 - 2*i) .. (13 - 2*i).
+        const std::size_t count = std::min<std::size_t>(7u, remaining);
+        for (std::size_t i = 0; i < count; ++i) {
+            symbols.push_back(static_cast<PacketStatus>(
+                (word >> (12u - 2u * i)) & 0x3u));
         }
+    }
 
-        // Read deltas (only when S_bit=1): one 14-bit delta per "received"
-        // packet (status != NotReceived). NotReceived symbols carry delta=0.
-        std::vector<std::int16_t> deltas;
-        if (S_bit) {
-            deltas.reserve(symbol_count);
-            std::size_t bits_left = 0;
-            std::uint32_t acc = 0;
-            for (std::size_t i = 0; i < symbol_count; ++i) {
-                while (bits_left < 14) {
-                    if (off >= raw.size()) { off = raw.size(); break; }
-                    acc = (acc << 8) | p[off++];
-                    bits_left += 8;
-                }
-                if (bits_left < 14) {
-                    deltas.push_back(0);
-                    continue;
-                }
-                const std::uint32_t delta14 =
-                    (acc >> (bits_left - 14)) & 0x3FFFu;
-                bits_left -= 14;
-                acc &= (bits_left == 0) ? 0u
-                                        : ((1u << bits_left) - 1u);
-                if (symbols[i] == PacketStatus::NotReceived) {
-                    deltas.push_back(0);
-                } else {
-                    // Sign-extend 14-bit to 16-bit.
-                    const std::int32_t sign =
-                        (delta14 & 0x2000u)
-                            ? static_cast<std::int32_t>(delta14 | 0xFFFFC000u)
-                            : static_cast<std::int32_t>(delta14);
-                    deltas.push_back(static_cast<std::int16_t>(sign));
-                }
-            }
+    // --- Phase 2: the receive deltas ----------------------------------------
+    // The deltas follow *all* the chunks, ordered by packet.  One delta per
+    // received-with-delta packet; the symbol decides its width:
+    //   symbol 1 (small) -> 8-bit unsigned
+    //   symbol 2 (large) -> 16-bit signed
+    //   symbol 0 / 3     -> no delta at all
+    std::size_t delta_bytes = 0;
+    for (const PacketStatus s : symbols) {
+        if (s == PacketStatus::Received) {
+            delta_bytes += 1u;
+        } else if (s == PacketStatus::ReceivedSmall) {
+            delta_bytes += 2u;
         }
+    }
 
-        for (std::size_t i = 0; i < symbols.size() &&
-               f.packets.size() < f.packet_status_count; ++i) {
-            f.packets.push_back(
-                {symbols[i],
-                 S_bit ? deltas[i] : static_cast<std::int16_t>(0)});
+    // The RTCP padding, if any, was already excluded above: `end` is where
+    // the receive-delta list must fit.
+    if (end - off < delta_bytes) {
+        return core::Result<TransportCcFeedback>::fail(
+            core::ErrorCode::ProtocolError,
+            "RTCP transport-cc truncated in the receive deltas: need " +
+                std::to_string(delta_bytes) + " B, have " +
+                std::to_string(end - off) + " B");
+    }
+
+    f.packets.reserve(symbols.size());
+    for (const PacketStatus s : symbols) {
+        std::int16_t delta = 0;
+        if (s == PacketStatus::Received) {
+            // 8-bit unsigned small delta: 0 .. 255 ticks of 250 us.
+            delta = static_cast<std::int16_t>(p[off]);
+            off += 1;
+        } else if (s == PacketStatus::ReceivedSmall) {
+            // 16-bit signed large / negative delta.
+            const std::uint16_t raw16 = read_be16_at(p + off);
+            const std::int32_t signed16 =
+                (raw16 & 0x8000u) ? static_cast<std::int32_t>(raw16) - 0x10000
+                                  : static_cast<std::int32_t>(raw16);
+            delta = static_cast<std::int16_t>(signed16);
+            off += 2;
         }
+        f.packets.push_back({s, delta});
     }
 
     return core::Result<TransportCcFeedback>::ok(std::move(f));

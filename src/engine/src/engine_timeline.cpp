@@ -51,12 +51,12 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     // a zero packet count describes no media position).
     const std::int64_t send_unix_us = impl_->audio_last_send_unix_us;
     if (send_unix_us <= 0) return;
+    const rtp::Ntp64 sr_ntp = rtp::ntp64_from(
+        std::chrono::system_clock::time_point{
+            std::chrono::microseconds{send_unix_us}});
     rtp::SrBuilder sr;
     sr.set_ssrc(impl_->audio_ssrc)
-      .set_ntp_timestamp(rtp::ntp64_from(
-                             std::chrono::system_clock::time_point{
-                                 std::chrono::microseconds{send_unix_us}})
-                             .value)
+      .set_ntp_timestamp(sr_ntp.value)
       .set_rtp_timestamp(impl_->audio_rtp_timestamp)
       .set_sender_packet_count(impl_->audio_packet_count)
       .set_sender_octet_count(impl_->audio_octet_count);
@@ -88,6 +88,20 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     if (ice_t_->send(bv, {}) != 0) {
         core::log::Logger::instance().warn(
             "engine[timeline]: Sender Report send failed");
+        return;
+    }
+
+    // ---- Tell the feedback collector about our own Sender Report ---------
+    //
+    // The Receiver Report the peer sends back describes *our* stream, and
+    // its LSR / DLSR pair only becomes a round-trip time when the
+    // collector knows when that report left (RFC 3550 §6.4.1).  The
+    // middle 32 bits of the NTP timestamp we put on the wire are what
+    // the peer will echo back as its LSR, so the collector matches the
+    // two.
+    if (net_feedback_) {
+        net_feedback_->on_local_sender_report(sr_ntp.mid_32(),
+                                              core::SteadyClock::now());
     }
 }
 

@@ -52,6 +52,13 @@ if(NIMRTC_MODULE_SCHED)
     add_subdirectory(sched)
 endif()
 
+# v1.2.0 M1 (F2): the receiver-side network-feedback collector.  It links
+# nimrtc::rtp for the RTCP wire formats — the documented cross-module
+# dependency pattern (same shape as modules/jb using modules/rtp).
+if(NIMRTC_MODULE_NET_FEEDBACK)
+    add_subdirectory(net_feedback)
+endif()
+
 if(NIMRTC_MODULE_AUDIO3A)
     add_subdirectory(audio3a)
 endif()

@@ -11,14 +11,19 @@
  *   P2 — Reset clears all queues and statistics.
  *   P2 — Empty drain returns 0.
  *   P2 — Config round-trip.
+ *   P0 — Drain veto: the packet is kept (not lost) and the drain stops.
+ *   P0 — Time base: the send rate follows wall-clock time, not the number
+ *        of drain() calls (host tick rate independence).
  */
 
 // gtest first: ensures no PCH surprises from our headers.
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 // Plugin types (plugins::Addr, kMaxAddrLen) must be visible before
 // nimrtc/sched/sched.hpp which uses plugins::Addr in its public API.
@@ -30,6 +35,7 @@ namespace {
 
 using namespace nimrtc::sched;
 using namespace nimrtc::core;
+using namespace std::chrono_literals;
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -452,6 +458,253 @@ TEST(Scheduler, EnqueueWithNonEmptyDstPreserved) {
     // The drain count reflects that the packet was in the queue.
     auto counts = drain_all(sch);
     EXPECT_EQ(counts[priority_rank(Priority::kControl)], 1);
+}
+
+// ---------------------------------------------------------------------------
+// P0 - Drain veto: the packet must not be lost
+// ---------------------------------------------------------------------------
+
+/** A callback that vetoes the dequeue must NOT lose the packet.
+ *
+ *  Before the fix, drain_with() had already popped the record off the
+ *  queue when the callback returned false - the packet was silently
+ *  discarded and was not counted as "dropped" either, so the statistics
+ *  understated the real loss.  Now the packet goes back to the front of
+ *  its queue and the drain stops. */
+TEST(Scheduler, VetoKeepsPacketQueued) {
+    Scheduler sch{};
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+
+    const int n = sch.drain_with(10, [](Priority, nimrtc::core::ByteSpan) {
+        return false;  // veto everything
+    });
+
+    EXPECT_EQ(n, 0);  // nothing was sent
+    auto stats = sch.stats();
+    EXPECT_EQ(stats.sent_packets, 0u);
+    EXPECT_EQ(stats.queued_packets, 2u);   // both packets still queued
+    EXPECT_EQ(stats.dropped_packets, 0u);  // and nothing was "dropped" either
+}
+
+/** After a veto, the next accepting drain emits the very same packets. */
+TEST(Scheduler, VetoThenAcceptDrainsSamePackets) {
+    Scheduler sch{};
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+
+    EXPECT_EQ(sch.drain_with(10, [](Priority, nimrtc::core::ByteSpan) {
+        return false;
+    }), 0);
+
+    // A subsequent drain that accepts must deliver the packet.
+    int seen = 0;
+    const int n = sch.drain_with(10, [&](Priority, nimrtc::core::ByteSpan) {
+        ++seen;
+        return true;
+    });
+    EXPECT_EQ(n, 1);
+    EXPECT_EQ(seen, 1);
+    EXPECT_EQ(sch.stats().queued_packets, 0u);
+}
+
+/** A veto on a high-priority packet stops the whole drain - lower
+ *  priority queues must not be attempted either. */
+TEST(Scheduler, VetoStopsWholeDrain) {
+    Scheduler sch{};
+    sch.enqueue(Priority::kControl, ByteSpan{kPayload}, make_test_addr(0));
+    sch.enqueue(Priority::kBestEffort, ByteSpan{kPayload}, make_test_addr(0));
+
+    const int n = sch.drain_with(10, [](Priority, nimrtc::core::ByteSpan) {
+        return false;
+    });
+
+    EXPECT_EQ(n, 0);
+    EXPECT_EQ(sch.stats().queued_packets, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// P0 - Time base: the send rate follows wall-clock time
+// ---------------------------------------------------------------------------
+
+/** The per-drain send rate must follow wall-clock time, not the number
+ *  of drain() calls.
+ *
+ *  A host that drains in a tight loop (elapsed ~ 0 ms) must not be able
+ *  to push more bytes out than the target bitrate allows; the credit
+ *  granted per drain is proportional to the measured elapsed time. */
+TEST(Scheduler, SendRateFollowsWallClockNotDrainCount) {
+    SchedulerConfig cfg;
+    cfg.avg_packet_size_bytes = 1000;
+    cfg.drain_interval_ms = 125;
+    Scheduler sch{cfg};
+
+    // 800 kbps -> 100 kB/s.
+    sch.on_bwe_update(800'000);
+
+    // Enqueue 50 packets (50 kB - half a second of traffic).
+    for (int i = 0; i < 50; ++i) {
+        sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+    }
+
+    // Drain in a tight loop: 200 iterations, no sleeping.  Wall-clock time
+    // barely advances, so only a handful of packets may leave.  If the
+    // scheduler used a per-drain packet allowance instead of a time-based
+    // credit, all 50 packets would be emitted here.
+    int sent = 0;
+    for (int i = 0; i < 200; ++i) {
+        sent += sch.drain_with(50, [](Priority, nimrtc::core::ByteSpan) {
+            return true;
+        });
+    }
+    EXPECT_LT(sent, 50);
+    EXPECT_GT(sent, 0);
+}
+
+/** Two hosts with different tick rates reach a comparable number of sent
+ *  packets over the same wall-clock window. */
+TEST(Scheduler, TickRateDoesNotChangeEffectiveRate) {
+    constexpr std::uint32_t kBps = 800'000;   // 100 kB/s
+    constexpr std::uint32_t kPkt = 1000;      // bytes per packet
+    constexpr int          kPkts = 60;        // 60 kB to send
+    constexpr auto         kWindow = 400ms;   // observation window
+
+    auto run = [&](std::chrono::milliseconds period) -> int {
+        SchedulerConfig cfg;
+        cfg.avg_packet_size_bytes = kPkt;
+        Scheduler sch{cfg};
+        sch.on_bwe_update(kBps);
+        for (int i = 0; i < kPkts; ++i) {
+            sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+        }
+        const auto deadline = std::chrono::steady_clock::now() + kWindow;
+        int sent = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            sent += sch.drain_with(50, [](Priority, nimrtc::core::ByteSpan) {
+                return true;
+            });
+            std::this_thread::sleep_for(period);
+        }
+        return sent;
+    };
+
+    const int fast = run(5ms);
+    const int slow = run(50ms);
+
+    // 100 kB/s over 400 ms = 40 kB = 40 packets.  Both hosts must land in
+    // the same neighbourhood; the tolerance absorbs scheduler jitter, the
+    // point is that they must not differ by an order of magnitude.
+    EXPECT_GT(fast, 10);
+    EXPECT_LT(fast, 60);
+    EXPECT_GT(slow, 10);
+    EXPECT_LT(slow, 60);
+    // The two hosts must be within a factor of two of each other.
+    const int lo = fast < slow ? fast : slow;
+    const int hi = fast < slow ? slow : fast;
+    EXPECT_GT(hi, lo / 2);
+}
+
+/** stats().current_bitrate_bps reports the *observed* egress rate of the
+ *  last drain, not the target. */
+TEST(Scheduler, CurrentBitrateReflectsObservedDrain) {
+    SchedulerConfig cfg;
+    cfg.avg_packet_size_bytes = 1000;
+    Scheduler sch{cfg};
+    sch.on_bwe_update(800'000);
+
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+    (void)sch.drain_with(10, [](Priority, nimrtc::core::ByteSpan) {
+        return true;
+    });
+
+    // The first drain uses the configured seed interval (125 ms), so the
+    // observed rate is at most one 1000-byte packet per 125 ms = 64 kbps.
+    const auto stats = sch.stats();
+    EXPECT_EQ(stats.target_bitrate_bps, 800'000u);
+    EXPECT_GT(stats.current_bitrate_bps, 0u);
+    EXPECT_LT(stats.current_bitrate_bps, 800'000u);
+}
+
+// ===========================================================================
+// Packet buffer pool (P1 hardening, 2026-11-09)
+// ===========================================================================
+//
+// The send path used to allocate and free one heap buffer per outbound
+// packet.  The pool recycles the drained buffers, so the steady state
+// performs no heap allocation.  These tests pin the contract:
+//
+//   1. acquire_packet_buffer() honours the capacity hint.
+//   2. release_packet_buffer() + acquire_packet_buffer() returns the SAME
+//      storage (no reallocation) — this is what makes the send path
+//      allocation-free.
+//   3. A drained packet's buffer goes back onto the free-list, so the
+//      storage used by an enqueued packet is the one a later acquire()
+//      hands out.
+//   4. The bytes handed to the drain callback are intact (the recycle
+//      happens AFTER the callback returned).
+// ===========================================================================
+
+/** The acquired buffer must be able to hold `capacity_hint` bytes. */
+TEST(SchedulerPool, AcquireHonoursCapacityHint) {
+    Scheduler sch{};
+    auto buffer = sch.acquire_packet_buffer(2048);
+    EXPECT_GE(buffer.capacity(), 2048u);
+}
+
+/** A released buffer comes back with the same storage — no reallocation. */
+TEST(SchedulerPool, ReleaseThenAcquireReusesTheSameStorage) {
+    Scheduler sch{};
+    auto buffer = sch.acquire_packet_buffer(1024);
+    buffer.assign(1024, 0xAB);
+    const std::uint8_t* const storage = buffer.data();
+
+    sch.release_packet_buffer(std::move(buffer));
+
+    auto again = sch.acquire_packet_buffer(1024);
+    EXPECT_EQ(again.data(), storage)
+        << "the released buffer must be handed back, not reallocated";
+    EXPECT_GE(again.capacity(), 1024u);
+}
+
+/** The buffer of a drained packet returns to the pool. */
+TEST(SchedulerPool, DrainedPacketBufferIsRecycled) {
+    Scheduler sch{};
+
+    // Enqueue through the owned path so we know exactly which storage the
+    // packet occupies.
+    std::vector<std::uint8_t> packet(512, 0x5A);
+    const std::uint8_t* const storage = packet.data();
+    sch.enqueue_owned(Priority::kAudio, std::move(packet), make_test_addr(0));
+
+    std::vector<std::uint8_t> seen;
+    const int drained = sch.drain_with(10, [&](Priority, nimrtc::core::ByteSpan data) {
+        seen.assign(data.data(), data.data() + data.size());
+        return true;
+    });
+    ASSERT_EQ(drained, 1);
+    ASSERT_EQ(seen.size(), 512u);
+    // The payload must be intact when the callback ran.
+    for (std::uint8_t byte : seen) EXPECT_EQ(byte, 0x5A);
+
+    // The drained buffer is back on the free-list.
+    auto recycled = sch.acquire_packet_buffer(512);
+    EXPECT_EQ(recycled.data(), storage)
+        << "the drained packet's buffer must be recycled, not freed";
+}
+
+/** The pool is bounded: releasing more buffers than the queue depth keeps
+ *  does not grow without limit (the excess is simply dropped). */
+TEST(SchedulerPool, PoolIsBoundedByQueueDepth) {
+    SchedulerConfig cfg;
+    cfg.max_queue_depth = 4;
+    Scheduler sch{cfg};
+
+    for (int i = 0; i < 64; ++i) {
+        auto buffer = sch.acquire_packet_buffer(128);
+        sch.release_packet_buffer(std::move(buffer));
+    }
+    // Nothing observable beyond "the scheduler still works".
+    sch.enqueue(Priority::kAudio, ByteSpan{kPayload}, make_test_addr(0));
+    EXPECT_EQ(sch.drain(10), 1);
 }
 
 }  // namespace

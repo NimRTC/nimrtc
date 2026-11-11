@@ -30,12 +30,23 @@
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/plugins/net_feedback.hpp>
 #include <nimrtc/plugins/scheduler.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
-#include <nimrtc/web_transport/web_transport_session_factory.hpp>   // IWebTransportSessionFactory (v0.14.0 alpha.2 seam)
+// v0.14.0 alpha.2 seam (WebTransport / QUIC session factory).
+//
+// P1 hardening (2026-11-09): this was an #include of
+// <nimrtc/web_transport/web_transport_session_factory.hpp>.  The
+// resolver only hands out a POINTER to the factory, so a forward
+// declaration is enough -- and it keeps the engine's PUBLIC header from
+// depending on an optional module's header (the web_transport include
+// path is not propagated to the engine's consumers).
+namespace nimrtc::web_transport {
+class NIMRTC_API_UNSTABLE IWebTransportSessionFactory;
+} // namespace nimrtc::web_transport
 
 namespace nimrtc::engine::pal {
 
@@ -77,6 +88,16 @@ resolve_bwe(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::ISchedulerFactory*
 resolve_scheduler(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_scheduler(id);
+}
+
+/** Resolve an `INetFeedbackFactory` by plugin id. Returns nullptr if not
+ *  registered.  Used by the engine to satisfy `EngineConfig::net_feedback_name`
+ *  (default "nimrtc_net_feedback") -- the receiver-side network-feedback
+ *  collector that sits between the wire and the bandwidth estimator
+ *  (v1.2.0 M1, F2). */
+[[nodiscard]] inline const plugins::INetFeedbackFactory*
+resolve_net_feedback(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_net_feedback(id);
 }
 
 /** Resolve an `IVideoCodecFactory` by plugin id. Returns nullptr if not registered. */

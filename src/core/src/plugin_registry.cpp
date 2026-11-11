@@ -164,6 +164,15 @@ void PluginRegistry::register_scheduler(std::string_view id,
     scheduler_.register_one(id, f);
 }
 
+// v1.2.0 M1 (F2): the receiver-side network-feedback collector slot.
+// The built-in collector registers under "nimrtc_net_feedback"; the
+// engine resolves it by `EngineConfig::net_feedback_name`.
+void PluginRegistry::register_net_feedback(
+    std::string_view id,
+    const plugins::INetFeedbackFactory* f) {
+    net_feedback_.register_one(id, f);
+}
+
 void PluginRegistry::register_datachannel(std::string_view id,
                                           const plugins::IDataChannelFactory* f) {
     datachannel_.register_one(id, f);

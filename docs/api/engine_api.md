@@ -77,7 +77,7 @@ nimrtc::engine::NimRTCEngine
 └── Runtime swaps
     ├── set_video_sink(unique_ptr<IVideoSink>)
     ├── set_video_source(unique_ptr<IVideoSource>)
-    └── Stats::srtp_drops / stats()
+    └── Stats (video + audio counters) / stats()
 ```
 
 ---
@@ -532,6 +532,42 @@ uint32_t last_open_rc() const noexcept;
 
 struct Stats {
     int srtp_drops = 0;
+
+    // Video counters (v1.1 Track V) — cumulative since open().
+    uint64_t video_frames_sent = 0;
+    uint64_t video_packets_sent = 0;
+    uint64_t video_bytes_sent = 0;
+    uint64_t video_frames_received = 0;
+    uint64_t video_nack_seqs_queued = 0;
+    uint64_t video_keyframes_q = 0;
+    uint64_t video_feedback_applied = 0;
+    uint64_t video_keyframes_applied = 0;
+
+    // Audio send counters (audio pipeline WP-5) — cumulative since open().
+    uint64_t audio_frames_sent = 0;
+    uint64_t audio_bytes_sent = 0;
+    uint64_t audio_encode_errors = 0;
+    uint64_t audio_samples_in = 0;
+    uint64_t audio_samples_pending = 0;
+
+    // Audio receive counters (audio pipeline WP-8 / spec B-13).
+    uint64_t audio_packets_sent = 0;
+    uint64_t audio_frames_received = 0;
+    uint64_t audio_samples_received = 0;
+    uint64_t audio_concealed_frames = 0;
+    uint64_t audio_fec_recovered_frames = 0;
+    uint64_t audio_packets_lost = 0;
+    uint64_t audio_decode_errors = 0;
+    uint32_t audio_jitter_ms = 0;
+    uint32_t audio_playout_delay_ms = 0;
+
+    // Adaptive audio bitrate — instantaneous, not cumulative.
+    uint32_t audio_encoder_bitrate_bps = 0;
+
+    // Network feedback / BWE loop (v1.2.0 M1) — mixed semantics.
+    uint64_t net_feedback_blocks    = 0;  // RTCP blocks routed to the collector
+    uint64_t bwe_feedback_samples  = 0;  // samples handed to IBwe::on_feedback()
+    uint32_t bandwidth_estimate_bps = 0; // current BWE target, in bit/s
 };
 Stats stats() const noexcept;
 ```
@@ -550,6 +586,23 @@ you want to know which subsystem failed:
 | `0x1700` | JB |
 
 `Stats::srtp_drops` increments on every SRTP auth-tag mismatch.
+
+The remaining fields are **cumulative counters since `open()`**, except
+`audio_encoder_bitrate_bps` and `bandwidth_estimate_bps`, which are the
+**instantaneous** values (the outbound audio encoder's current bitrate and
+the bandwidth estimator's current target respectively). `audio_jitter_ms`
+and `audio_playout_delay_ms` are likewise instantaneous measurements
+rather than running totals.
+
+**This is not a standard `RTCStatsReport`.** The struct is flat and
+engine-wide: there is no per-stream breakdown, no snapshot timestamp, and
+no ICE candidate-pair / RTT dimension. The `src/modules/video_stats/`
+module provides freeze counts, keyframe intervals, QP and drop-cause
+breakdown, but it is **not wired into the engine** yet, so those fields
+are not reachable through this accessor. For the full picture — the
+planned stream-level shape and the missing dimensions — see
+`docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack,
+so referenced here by path, not by link).
 
 ---
 

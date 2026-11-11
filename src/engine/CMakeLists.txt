@@ -112,6 +112,21 @@ if(NIMRTC_MODULE_AUDIO_RX)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::audio_rx)
 endif()
 
+# Network-feedback collector seam (v1.2.0 M1, F2): the engine routes the
+# receiver-side RTCP (RR / REMB / transport-cc) into the collector and
+# hands the aggregated snapshot to the bandwidth estimator.  The engine
+# reaches the collector only through `plugins::INetFeedback` — it never
+# includes this module's header (Layout Invariant 4).  The link dependency
+# exists so the module's registrar entry point (in `kDefaultRegistrars[]`)
+# resolves at link time and its static initialiser is not stripped
+# (same pattern as the audio_rx entry above).
+#
+# When the module is not built the engine simply has no collector: the
+# bandwidth estimate stays at its configured initial value.
+if(NIMRTC_MODULE_NET_FEEDBACK)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::net_feedback)
+endif()
+
 # Video plugin seam (R3-Batch): the engine resolves video_source / sink /
 # receiver / sender from core::PluginRegistry, but does not link any
 # concrete video_* module header. Consumers that want engine integration

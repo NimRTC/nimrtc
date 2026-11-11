@@ -29,6 +29,50 @@ void NimRTCEngine::init_bwe_scheduler() noexcept {
              .on_error = on_error_});
     }
 
+    // ---- Net feedback collector (v1.2.0 M1, F2) --------------------------
+    //
+    // The collector is the *producer* side of the bandwidth loop: the
+    // engine routes the receiver-side network signals of every inbound
+    // RTCP compound datagram to it, and the engine hands its aggregated
+    // snapshot to the estimator.  Without it the estimator is never fed
+    // and the bandwidth target stays pinned at its initial value.
+    //
+    // Failure policy: Warn, like BWE and the scheduler — a missing
+    // collector degrades to "no adaptive bandwidth" with a diagnostic,
+    // not to a failed session.
+    if (!config_.net_feedback_name.empty() && !net_feedback_) {
+        (void)pal::make_plugin<&pal::resolve_net_feedback>(
+            config_.net_feedback_name,
+            net_feedback_,
+            nullptr,   // the collector's factory takes no config
+            {.err_open_failed = core::kEngineInternal,  // unused (Warn)
+             .err_missing = core::kEngineInternal,      // unused (Warn)
+             .open_fail_mode = pal::PluginFailureMode::Warn,
+             .missing_mode = pal::PluginFailureMode::Warn,
+             .on_error = on_error_});
+
+        // The jitter in a Receiver Report is expressed in RTP timestamp
+        // units of the stream the report describes, so the collector
+        // needs that stream's clock rate to convert it to milliseconds.
+        // The peer reports on *our* outbound stream, whose clock rate is
+        // the audio codec's (the outbound media the engine sends is
+        // audio; the video stream shares the 90 kHz video clock, which
+        // the collector does not model separately).
+        if (net_feedback_) {
+            net_feedback_->set_stream_clock_rate(config_.audio_codec.clock_rate);
+
+            // The signal-selection policy (ADR-018 Decision 2).  The
+            // collector owns the decision; the engine only states the
+            // host's intent and the freshness window it wants.
+            plugins::NetFeedbackConfig nfc;
+            nfc.policy = detail::parse_net_feedback_policy(
+                config_.net_feedback_signal);
+            nfc.transport_cc_timeout =
+                core::Milliseconds{config_.net_feedback_transport_cc_timeout_ms};
+            net_feedback_->set_config(nfc);
+        }
+    }
+
     // ---- Scheduler plugin ------------------------------------------------
     // Created and opened here; injected into ice_t_ via set_scheduler().
     // If scheduler_config.enabled is false, scheduler is skipped (direct ICE send).
@@ -54,12 +98,116 @@ void NimRTCEngine::init_bwe_scheduler() noexcept {
 }
 
 
+// ---------------------------------------------------------------------------
+// feed_bwe_from_net_feedback() — the missing producer (v1.2.0 M1, F6).
+//
+// This is the step that closes the bandwidth loop.  Before v1.2.0 the
+// engine read `bwe_->estimate()` in its tick but nothing ever called
+// `IBwe::on_feedback()`, so the target stayed pinned at the initial
+// bitrate forever.
+//
+// The conversion from the collector's snapshot to the estimator's
+// sample is the one place where the two shapes meet, so it lives here
+// and nowhere else:
+//
+//   - The loss rate, the RTT and the REMB figure come straight from the
+//     Receiver Report / REMB path.
+//   - Under transport-cc the loss rate is derived from the peer's own
+//     received / lost counters (the transport-cc feedback does not
+//     carry a fraction-lost field), and the arrival series rides along
+//     so an estimator that understands it can use it.
+//
+// The snapshot is fed only when it changed: the collector's timestamp
+// moves exactly when a new report arrived, so this yields one sample
+// per report rather than one per engine tick.
+// ---------------------------------------------------------------------------
+void NimRTCEngine::feed_bwe_from_net_feedback() noexcept {
+    if (!net_feedback_ || !bwe_) return;
+
+    // ---- "Fail loudly" (ADR-018 Decision 2) -----------------------------
+    //
+    // Under the kRequireTransportCc policy the collector reports the
+    // transport-cc path as unavailable instead of falling back silently.
+    // The engine surfaces that once per session.  The estimator keeps
+    // running on the loss/RTT path — a starved estimator is a worse
+    // failure than a degraded one — but the host learns that its
+    // transport-cc path is broken.
+    if (net_feedback_->transport_cc_unavailable() &&
+        !impl_->transport_cc_unavailable_reported) {
+        impl_->transport_cc_unavailable_reported = true;
+        core::log::Logger::instance().warn(
+            "engine[bwe]: transport-cc was required but is unavailable "
+            "(the peer did not negotiate it, or its feedback stopped "
+            "arriving) — the estimate is driven by the loss/RTT path");
+    }
+
+    const plugins::NetFeedbackSnapshot snap = net_feedback_->snapshot();
+
+    // Nothing new since the last feed.
+    if (impl_->has_fed_feedback &&
+        snap.timestamp == impl_->last_fed_feedback_ts) {
+        return;
+    }
+    impl_->last_fed_feedback_ts = snap.timestamp;
+    impl_->has_fed_feedback = true;
+
+    // The collector has not seen any signal yet — nothing to report.
+    if (!snap.has_loss_rtt && !snap.has_transport_cc &&
+        !snap.remb_bps.has_value()) {
+        return;
+    }
+
+    plugins::BweFeedback fb{};
+    fb.timestamp      = snap.timestamp;
+    fb.signal_source  = snap.source;
+    fb.rtt            = snap.rtt;
+    fb.remb_bps       = snap.remb_bps;
+
+    switch (snap.source) {
+        case plugins::NetFeedbackSource::kTransportCc:
+            fb.packets_received = snap.tc_packets_received;
+            fb.packets_lost     = snap.tc_packets_lost;
+            fb.arrival_deltas_ms = snap.tc_arrival_deltas_ms;
+            fb.ack_base_seq     = snap.tc_base_seq;
+            fb.ack_seq_span     = snap.tc_packet_count;
+            {
+                const std::uint32_t total =
+                    snap.tc_packets_received + snap.tc_packets_lost;
+                fb.loss_rate = total > 0
+                    ? static_cast<double>(snap.tc_packets_lost) /
+                      static_cast<double>(total)
+                    : 0.0;
+            }
+            break;
+
+        case plugins::NetFeedbackSource::kLossRtt:
+            fb.loss_rate        = snap.loss_rate;
+            fb.packets_received = snap.packets_received;
+            fb.packets_lost     = snap.packets_lost;
+            break;
+
+        case plugins::NetFeedbackSource::kRemb:
+            // REMB alone carries no loss information; the estimator
+            // treats a REMB-only sample as "clean" and applies its
+            // trust factor.
+            fb.loss_rate        = 0.0;
+            fb.packets_received = snap.packets_received;
+            fb.packets_lost     = snap.packets_lost;
+            break;
+    }
+
+    bwe_->on_feedback(fb);
+    ++impl_->bwe_feedback_samples;
+}
+
+
 void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     auto close_plugin = [](auto& p) {
         if (p) p->close();
         p.reset();
     };
     close_plugin(bwe_);
+    close_plugin(net_feedback_);
     close_plugin(scheduler_);
     if (ice_t_) {
         ice_t_->set_bwe(nullptr);
@@ -681,6 +829,25 @@ int NimRTCEngine::tick() noexcept {
             }
         }
     }
+
+    // ---- Re-evaluate the signal policy (v1.2.0 M2, F5) -----------------
+    //
+    // The policy's freshness axis needs a clock, and the collector has
+    // none of its own (its inputs carry their timestamps).  The engine
+    // drives it from its tick, so a transport-cc path that went silent
+    // is detected even when no new feedback arrives at all.
+    if (net_feedback_) {
+        net_feedback_->evaluate(core::SteadyClock::now());
+    }
+
+    // ---- Feed the bandwidth estimator (v1.2.0 M1, F6) -------------------
+    //
+    // The producer side of the loop: the collector has aggregated the
+    // receiver-side network signals of every inbound RTCP compound
+    // datagram, and the estimator needs them.  This runs *before* the
+    // estimate is read below, so the scheduler budget reflects the
+    // feedback that arrived since the last tick.
+    feed_bwe_from_net_feedback();
 
     // ---- Push BWE estimate into the scheduler (P2/P3 wiring) -------------
     // estimate() is cheap (reads an atomic snapshot in the AIMD impl) and

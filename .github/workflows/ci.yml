@@ -277,6 +277,22 @@ jobs:
       - name: Release freeze checklist
         run: sh scripts/check-release-freeze.sh
 
+      # The version lives in three places: the public API header, the
+      # CMake project() call, and the pinned expectation the version
+      # smoke test compares against.  Editing them by hand is how the
+      # post-v1.1.0 bump (059cc29) shipped a tree where the header said
+      # 1.1.1-dev and the test still said 1.1.0 -- a mismatch that CI
+      # could only report as a static_assert failure inside four
+      # platform builds, which says nothing about the real cause.
+      #
+      # tools/bump_version.py is the only supported way to change the
+      # version, and it rewrites all three sites together.  This gate
+      # checks that they still agree.  It runs here, in the fastest
+      # job, so a drift is reported in seconds instead of after four
+      # platform builds; --check needs no build and no network.
+      - name: Version consistency
+        run: python tools/bump_version.py --check
+
   # ---------------------------------------------------------------------------
   # Linux x86_64: GCC on ubuntu-22.04
   # ---------------------------------------------------------------------------

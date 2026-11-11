@@ -17,10 +17,9 @@
  * ## Why not in plugins/
  *
  * The DTLS seam is intentionally module-local (it lives next to the
- * concrete dtls module).  Promoting the registration to
- * `core::register_all_default_plugins()` is a Slice 7 / Slice 8
- * concern — for Slice 4 we only stand up the seam and its default
- * factory, and document the integration point.
+ * concrete dtls module).  `core::register_all_default_plugins()`
+ * already calls `nimrtc::dtls::register_default_plugins()`, which
+ * publishes the factory into `PluginRegistry::register_dtls_session`.
  *
  * ## Static-link workaround
  *
@@ -64,8 +63,8 @@ void do_register_default_plugins() noexcept;
  * Idempotent: the first call constructs and publishes a single
  * `WolfsslDtlsFactory` instance; subsequent calls hit the static
  * latch and return immediately.  MUST be called once at program
- * startup before any transport-stack construction (Slice 7) or
- * engine integration (Slice 8) looks up the "wolfssl" factory.
+ * startup before any transport-stack / engine lookup of the
+ * "wolfssl" factory.
  *
  * @note Not `inline` — see the file header for the static-link
  *       rationale that matches `nimrtc::ice::register_default_plugins()`
@@ -80,9 +79,10 @@ void register_default_plugins() noexcept;
 // while still letting tests resolve the factory pointer without going
 // through a registry.
 //
-// Slice 7 will route the canonical lookup through
-// `core::PluginRegistry::register_dtls(...)` / `get_dtls(id)`; for
-// Slice 4 the test path is the seam-local accessor.
+// Canonical lookup is `PluginRegistry::get_dtls_session(id)`.  The
+// seam-local accessor below is the Slice 4 test path and is still
+// wired by `register_default_plugins()` for tests that skip the
+// registry.
 // ---------------------------------------------------------------------------
 namespace test_only {
 

@@ -17,6 +17,7 @@
 #include "thread.h"
 #include "timestamp.h"
 #include "turn.h"
+#include "turn_tcp.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -100,6 +101,25 @@ typedef struct agent_turn_state {
 	turn_map_t map;
 	stun_credentials_t credentials;
 	const char *password;
+
+	// Stream transport (TURN over TCP, RFC 8656 section 12).
+	//
+	// The control connection to the TURN server is a TCP stream.  The
+	// relayed transport address allocated by the server remains a UDP
+	// transport towards the peer.
+	juice_turn_transport_t transport;
+	turn_tcp_stream_t *stream;
+
+	// Reader thread for the TURN-over-TCP control connection.  The
+	// Allocate response and the relayed data both arrive on the stream,
+	// so the stream has to be pumped independently of the UDP socket.
+	thread_t reader_thread;
+	bool reader_thread_started;
+	atomic(bool) reader_stopped;
+
+	// Time at which the TCP connection attempt started, used to bound
+	// the connect timeout.
+	timestamp_t stream_timestamp;
 } agent_turn_state_t;
 
 typedef struct agent_stun_entry {
@@ -121,6 +141,18 @@ typedef struct agent_stun_entry {
 	struct agent_stun_entry *relay_entry;
 
 } agent_stun_entry_t;
+
+// The reader thread needs both the agent and the entry it serves.
+//
+// NOTE: `agent_stun_entry` is defined *below* this struct, so the type
+// has to be forward-declared here — a `typedef struct ...` used before
+// its own definition is a compile error in C.
+struct agent_stun_entry;
+
+typedef struct agent_turn_entry_arg {
+	juice_agent_t *agent;
+	struct agent_stun_entry *entry;
+} agent_turn_entry_arg_t;
 
 struct juice_agent {
 	juice_config_t config;

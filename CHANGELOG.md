@@ -66,6 +66,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     subscription on close, so closing one channel leaves its siblings
     receiving.
 
+- **An application-level retransmission protocol, so the
+  partial-reliability modes actually deliver (v1.2.0, DataChannel
+  capability plan WP-D4 — the plan's DEC-3 = (a)).**  A QUIC stream
+  gives the application **no per-message retry hook**: msquic
+  retransmits the stream's bytes internally and never tells the
+  application that a *message* was lost.  The partial-reliability
+  budgets therefore had nothing to act on, and the modes degraded to
+  send-side policies.
+  - The frame header gained a **kind** and a **sequence number**
+    (`src/web_transport/src/web_transport_frame.hpp`): a DATA frame
+    with `seq == 0` is a plain message, a DATA frame with `seq != 0` is
+    an ARQ message the peer must acknowledge and de-duplicate, and an
+    ACK frame carries the acknowledged sequence number.
+  - The ARQ runs under `kFramed` in the two partial-reliability modes
+    (`kPartialReliableTTL`, `kPartialReliableCount`).  The reliable
+    mode rides QUIC's own retransmission and the unreliable mode rides
+    datagrams, so neither uses it.
+  - The receiver de-duplicates: a retransmitted message is delivered
+    **once**, and the acknowledgement is sent even for a duplicate
+    (the lost ACK is the usual reason a message is retransmitted).
+  - The budgets are **per message** and are enforced by the ARQ: an
+    expired TTL or an exhausted retransmit budget drops the message and
+    **the channel stays open**.
+  - `EngineConfig::datachannel_max_retransmits` (0 = unlimited) and
+    `EngineConfig::datachannel_max_packet_lifetime_ms` (0 = unlimited)
+    carry the budgets to the backend.
+  - The de-duplication window is bounded (4096 sequence numbers); a
+    retransmission that arrives later than the window is delivered
+    again.
+  - Covered by 6 cases in
+    `src/web_transport/tests/test_web_transport_dc_capability.cpp`.
+
 - **A settable data-channel priority (v1.2.0, DataChannel capability
   plan WP-E1).**  `DataChannelConfig::priority` was read in exactly two
   places — it was encoded into the DCEP `DATA_CHANNEL_OPEN` message and

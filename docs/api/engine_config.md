@@ -236,9 +236,11 @@ std::string datachannel_name    = "";    // legacy factory slot; empty = no Data
 std::string web_transport_name  = "msquic"; // WebTransport session factory id
 std::uint16_t sctp_port        = 5000;
 
-// v1.2.0 (DataChannel capability plan WP-B / WP-E1):
+// v1.2.0 (DataChannel capability plan WP-B / WP-E1 / WP-D4):
 plugins::DataChannelFraming datachannel_framing = plugins::DataChannelFraming::kRaw;
 std::uint8_t datachannel_priority = 128;
+std::uint16_t datachannel_max_retransmits = 0;          // 0 = unlimited
+std::uint16_t datachannel_max_packet_lifetime_ms = 0;   // 0 = unlimited
 ```
 
 **v0.14.0-rc.1** added the `datachannel_backend` + `web_transport_name`
@@ -363,6 +365,28 @@ scheduler cannot arbitrate between them.  The honest statement is: *the
 data channel has its own connection and therefore its own priority; the
 scheduler does not arbitrate between media and data* (the plan's
 WP-E2).
+
+#### 2.6.7 Partial-reliability budgets (`datachannel_max_retransmits` /
+`datachannel_max_packet_lifetime_ms`)
+
+```cpp
+cfg.datachannel_framing = plugins::DataChannelFraming::kFramed;
+cfg.datachannel_max_retransmits = 2;           // PR-count budget
+cfg.datachannel_max_packet_lifetime_ms = 500;  // PR-TTL lifetime
+```
+
+Both fields reach every channel the engine creates and bound the
+**application-level ARQ** that the partial-reliability modes run under
+`kFramed` (plan WP-D4 / DEC-3 = (a)):
+
+| Field | Meaning |
+|---|---|
+| `datachannel_max_retransmits` | Per-message retransmission budget. `0` = unlimited (the documented meaning in `plugins::DataChannelConfig`). |
+| `datachannel_max_packet_lifetime_ms` | Per-message lifetime in milliseconds. `0` = unlimited. |
+
+An expired or exhausted message is dropped and **the channel stays
+open**. The ARQ is inactive in `kRaw` and in the reliable / unreliable
+modes. See [`docs/guides/datachannel.md` §4](../guides/datachannel.md).
 
 ### 2.7 Video codec
 

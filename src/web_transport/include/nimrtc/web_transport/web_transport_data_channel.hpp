@@ -200,6 +200,14 @@ public:
     /** Number of messages still waiting in the outbound queue. */
     [[nodiscard]] std::size_t pending_sends() const noexcept;
 
+    /** Number of messages that are on the wire but not acknowledged
+     *  yet (v1.2.0, WP-D4 — the ARQ in-flight window).  Zero for the
+     *  modes that do not use the application-level ARQ. */
+    [[nodiscard]] std::size_t in_flight_messages() const noexcept;
+
+    /** Number of retransmissions the ARQ performed (v1.2.0, WP-D4). */
+    [[nodiscard]] std::uint64_t retransmitted_messages() const noexcept;
+
 private:
     /** Opaque per-channel state (outbound queue, inbound frame readers).
      *  Defined in the .cpp so the public header does not have to expose
@@ -228,8 +236,41 @@ private:
     bool offer_to_transport(const std::vector<std::uint8_t>& bytes) noexcept;
 
     /** Drain the outbound queue (called by the session's priority
-     *  flush, and directly when the session has no priority surface). */
+     *  flush, and directly when the session has no priority surface).
+     *
+     *  The same flush also runs the ARQ sweep (WP-D4): the messages
+     *  that are on the wire but not acknowledged yet are retransmitted
+     *  when their retransmission timer expires, and dropped when their
+     *  budget (or their TTL) is exhausted. */
     void flush_outbound() noexcept;
+
+    // ---- Application-level ARQ (v1.2.0, WP-D4) -------------------------
+
+    /** True when this channel runs the application-level
+     *  retransmission protocol: the framed mode plus one of the two
+     *  partial-reliability modes.  The reliable mode rides QUIC's own
+     *  retransmission and the unreliable mode rides datagrams, so
+     *  neither needs the ARQ. */
+    [[nodiscard]] bool arq_enabled() const noexcept;
+
+    /** Handle one inbound DATA frame that carries an ARQ sequence
+     *  number: de-duplicate it, deliver it once and acknowledge it. */
+    void handle_arq_data(std::uint32_t seq,
+                         std::string_view label,
+                         std::span<const std::uint8_t> payload) noexcept;
+
+    /** Handle one inbound ACK frame: the message it names is
+     *  delivered, so it leaves the in-flight window. */
+    void handle_arq_ack(std::uint32_t seq) noexcept;
+
+    /** Send the acknowledgement of one sequence number.  The ACK
+     *  travels on the channel's own outbound stream — the same stream
+     *  the acknowledged message came in on, seen from the other side. */
+    void send_ack(std::uint32_t seq, std::string_view label) noexcept;
+
+    /** The ARQ sweep: retransmit the messages whose timer expired,
+     *  drop the ones whose budget or TTL is exhausted. */
+    void arq_sweep() noexcept;
 
     /** Inbound data path for the adopted peer stream: strips the
      *  WebTransport stream-type header, then (framed mode) decodes the

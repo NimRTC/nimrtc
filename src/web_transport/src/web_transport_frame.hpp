@@ -1,7 +1,7 @@
 /**
  * @file src/web_transport/src/web_transport_frame.hpp
  * @brief NimRTC data-channel frame codec (v1.2.0, DataChannel capability
- *        plan WP-B / WP-C3).
+ *        plan WP-B / WP-C3 / WP-D4).
  *
  * NOT part of the public API — an internal header of the
  * `web_transport` module.  Consumers include
@@ -15,11 +15,14 @@
  * The WebTransport data plane therefore carries an explicit frame:
  *
  * ```text
- *   0            4            8                        8+label_len
- *   +------------+------------+------------------------+-------------+
- *   | u32 BE     | u32 BE     | label bytes (UTF-8)    | payload     |
- *   | label_len  | payload_len|                        | bytes       |
- *   +------------+------------+------------------------+-------------+
+ *   0     1     2         4                 8                 12
+ *   +-----+-----+---------+-----------------+-----------------+--------+
+ *   |kind |flags| reserved| seq (u32 BE)    | label_len (u32) | payload|
+ *   | 1B  | 1B  |   2B    |                 |                 |_len    |
+ *   +-----+-----+---------+-----------------+-----------------+--------+
+ *   | label bytes (UTF-8)                                  | payload |
+ *   |                                                       | bytes   |
+ *   +-------------------------------------------------------+--------+
  * ```
  *
  * The length prefixes make the message boundary explicit (one frame
@@ -27,6 +30,23 @@
  * identity that makes several channels on one connection isolable
  * (WP-C3).  The label matches the DCEP `DATA_CHANNEL_OPEN` semantics
  * in RFC 8832: the receiver routes an incoming channel by its label.
+ *
+ * ## The kind and the sequence number (WP-D4)
+ *
+ * A QUIC stream gives the application no per-message retry hook:
+ * msquic retransmits the stream's bytes internally and never tells
+ * the application that a *message* was lost.  Partial reliability
+ * therefore needs an application-level retransmission protocol, and
+ * that protocol needs two things the first frame version did not
+ * carry:
+ *
+ *  - `kind` — a DATA frame carries a user message, an ACK frame
+ *    carries the acknowledgement of one sequence number;
+ *  - `seq` — the per-channel message sequence number.  A DATA frame
+ *    with `seq == 0` is a plain message (no ARQ); a DATA frame with
+ *    `seq != 0` is an ARQ message the receiver must acknowledge and
+ *    de-duplicate; an ACK frame carries the acknowledged sequence
+ *    number in the same field.
  *
  * The framing is a **NimRTC-internal convention** (DEC-2 = (b)): a
  * peer that speaks raw bytes (Chrome's `RTCDataChannel`-over-
@@ -46,8 +66,24 @@
 
 namespace nimrtc::web_transport::detail {
 
-/** Size of the fixed frame header (label_len + payload_len). */
-inline constexpr std::size_t kFrameHeaderSize = 8;
+/**
+ * @brief The kind of a data-channel frame (v1.2.0, WP-D4).
+ *
+ * The kind is the first byte of the frame header; it tells the
+ * reader whether the frame carries a user message or an ARQ
+ * acknowledgement.
+ */
+enum class FrameKind : std::uint8_t {
+    /** A user message.  `seq == 0` means "no ARQ" (a plain message). */
+    kData = 1,
+    /** An acknowledgement of the DATA frame whose sequence number is
+     *  carried in the frame's `seq` field. */
+    kAck = 2,
+};
+
+/** Size of the fixed frame header (kind, flags, reserved, seq,
+ *  label_len, payload_len). */
+inline constexpr std::size_t kFrameHeaderSize = 16;
 
 /** Maximum label length a frame may carry (bytes). */
 inline constexpr std::uint32_t kMaxFrameLabelLength = 255;
@@ -69,11 +105,17 @@ inline constexpr std::uint32_t kDefaultMaxFramePayload = 65536;
  * @param label    Channel label (the identity).  Must not exceed
  *                 `kMaxFrameLabelLength`; longer labels are truncated
  *                 by the caller, not here.
- * @param payload  The message payload.
+ * @param payload  The message payload (empty for an ACK frame).
+ * @param kind     The frame kind (WP-D4).
+ * @param seq      The per-channel sequence number (WP-D4).  `0` means
+ *                 "no ARQ" for a DATA frame; for an ACK frame it is
+ *                 the acknowledged sequence number.
  * @return The framed bytes, ready to be handed to the transport.
  */
 std::vector<std::uint8_t> encode_frame(std::string_view label,
-                                        std::span<const std::uint8_t> payload);
+                                        std::span<const std::uint8_t> payload,
+                                        FrameKind kind = FrameKind::kData,
+                                        std::uint32_t seq = 0);
 
 /**
  * @brief Reassembles a byte stream into frames.
@@ -104,6 +146,12 @@ public:
     /** True when a complete frame is available. */
     [[nodiscard]] bool has_frame() const noexcept { return has_frame_; }
 
+    /** The current frame's kind (valid while `has_frame()`). */
+    [[nodiscard]] FrameKind kind() const noexcept { return kind_; }
+
+    /** The current frame's sequence number (valid while `has_frame()`). */
+    [[nodiscard]] std::uint32_t seq() const noexcept { return seq_; }
+
     /** The current frame's channel label (valid while `has_frame()`). */
     [[nodiscard]] std::string_view label() const noexcept { return label_; }
 
@@ -128,6 +176,8 @@ private:
     std::string                 label_;
     std::vector<std::uint8_t>   payload_;
     std::uint32_t               max_payload_;
+    FrameKind                   kind_     = FrameKind::kData;
+    std::uint32_t               seq_      = 0;
     bool                        has_frame_ = false;
     bool                        failed_    = false;
     const char*                 error_     = "";

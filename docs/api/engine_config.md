@@ -555,7 +555,7 @@ config struct, because TURN servers are typically per-session
 An overload takes an explicit `plugins::TurnTransport`
 (`Udp` / `Tcp` / `Tls`) so the control connection can be forced over
 TCP or TLS when UDP is blocked by the network. See
-[engine_api.md](engine_api.md#64-add_turn_server).
+[engine_api.md](engine_api.md) §6.4.
 
 ---
 

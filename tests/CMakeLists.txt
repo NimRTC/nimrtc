@@ -1207,6 +1207,60 @@ nimrtc_add_engine_test(test_engine_timeline test_engine_timeline.cpp)
 nimrtc_add_engine_test(test_engine_net_feedback test_engine_net_feedback.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (session capability plan X1) — the engine's side of the RTCP
+# Extended Report path.
+#
+# Covers the wiring between the RTCP demux and the XR consumer seam: an
+# inbound XR packet (PT 207) reaches the consumer, the decoded RFC 3611
+# report blocks are readable by the host, and a non-XR RTCP packet never
+# reaches it.  Before v1.2.0 the XR sub-packet was recognised by the
+# demultiplexer and dropped.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_xr_report test_engine_xr_report.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 (session capability plan X2 / X4 / X5) — the engine's side of the
+# RTCP XR / TMMBR plane.
+#
+# Covers the wiring the wire-format tests cannot:
+#   - the offer advertises `a=rtcp-fb:<pt> ccm tmmbr` and
+#     `a=rtcp-xr:rcvr-rtt=all stat-summary=loss` (and does not, when the
+#     features are off);
+#   - the answer echoes the negotiated subset of both (RFC 3264 §6.1,
+#     RFC 3611 §5.2, RFC 5104 §7.2);
+#   - an inbound TMMBR clamps the peer's limit, the tightest limit wins,
+#     and a tuple about a foreign media source is ignored;
+#   - a malformed TMMBR is dropped, not fatal.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_tmmbr test_engine_tmmbr.cpp)
+
+# ---------------------------------------------------------------------------
+# v1.2.0 (session capability plan X2 / X4 / X5) — the *outbound* RTCP XR /
+# TMMBR plane.
+#
+# Covers the part the wire-format tests cannot: that the engine actually
+# puts the packets on the wire and that they carry the right numbers —
+#   - the XR report (PT 207) carries the Receiver Reference Time block
+#     (BT = 4) and the DLRR block (BT = 5) that answers the peer's own
+#     report, and only when the peer named the format (RFC 3611 §5.1);
+#   - the Statistics Summary block (BT = 6) reports the inbound audio
+#     stream and only the field indicators the peer asked for;
+#   - the TMMBR (RTPFB, FMT = 3) carries the live bandwidth estimate and
+#     is silent unless "ccm tmmbr" was negotiated (RFC 5104 §7.2);
+#   - `disable_tmmbr` vetoes the outbound TMMBR;
+#   - an inbound TMMBR is answered with exactly one TMMBN (RTPFB, FMT = 4)
+#     whose FCI entry names the owner of the bounding tuple.
+#
+# Driven through a fake ICE transport (the "fake-ice" pattern), so the
+# engine's periodic work runs and the outbound datagrams are observable.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_xr_tmmbr test_engine_xr_tmmbr.cpp)
+
+# ---------------------------------------------------------------------------
 # v1.2.0 (audio pipeline, WP-6) — negotiation, payload-type routing and
 # SDP completion.
 #

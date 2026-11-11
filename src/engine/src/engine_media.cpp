@@ -1179,7 +1179,39 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             }
 
             case rtp::RtcpBlockKind::kReceiverReport:
+                // The receiver-side network feedback goes to the collector,
+                // which aggregates it into one snapshot (v1.2.0 M1, F1/F2).
+                // The collector decides what it understands — the payload
+                // type and the FMT are handed over so it can tell a REMB
+                // from a PLI and a transport-cc from a NACK.
+                if (net_feedback_) {
+                    net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
+                                                 blk.packet, now);
+                    ++impl_->net_feedback_blocks;
+                }
+                break;
+
             case rtp::RtcpBlockKind::kRtpFeedback:
+                // The RTPFB packet type carries several feedback
+                // messages, told apart by the FMT (RFC 4585 §6.4):
+                // NACK (1), TMMBR (3), TMMBN (4), transport-cc (15).
+                //
+                // A TMMBR is *not* receiver-side network feedback: it
+                // is the peer telling us how much we may send, so it
+                // goes to the TMMBR path (v1.2.0, session plan X5)
+                // rather than to the bandwidth collector.  Everything
+                // else (NACK, transport-cc) is the collector's business.
+                if (blk.fmt == 3) {   // TMMBR — RFC 5104 §4.2.1
+                    handle_inbound_tmmbr(blk.packet);
+                    break;
+                }
+                if (net_feedback_) {
+                    net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
+                                                 blk.packet, now);
+                    ++impl_->net_feedback_blocks;
+                }
+                break;
+
             case rtp::RtcpBlockKind::kPayloadSpecificFeedback:
                 // The receiver-side network feedback goes to the collector,
                 // which aggregates it into one snapshot (v1.2.0 M1, F1/F2).
@@ -1193,8 +1225,26 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 }
                 break;
 
+            case rtp::RtcpBlockKind::kExtendedReport:
+                // The RFC 3611 extended report goes to the XR consumer,
+                // which decodes the report blocks for the host (v1.2.0,
+                // session capability plan X1).  The consumer decides
+                // what it understands — a PT that is not 207 is never
+                // its business.
+                if (xr_report_) {
+                    xr_report_->on_rtcp_block(blk.payload_type, blk.packet, now);
+                    ++impl_->xr_report_blocks;
+                }
+                // The Receiver Reference Time block (BT = 4) is the
+                // one block that needs the *engine's* attention: our
+                // next DLRR answers it (RFC 3611 §4.5).  The consumer
+                // decodes it for the host; the engine remembers it so
+                // the DLRR can carry the right LRR / DLRR pair.
+                note_peer_reference_time(blk.packet);
+                break;
+
             default:
-                // SDES, BYE, APP, XR and anything this build does not know
+                // SDES, BYE, APP and anything this build does not know
                 // about: not ours.
                 break;
         }
@@ -1412,6 +1462,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // never fed, so the bandwidth target never moves.
     out.net_feedback_blocks   = impl_->net_feedback_blocks;
     out.bwe_feedback_samples  = impl_->bwe_feedback_samples;
+    // v1.2.0 (session plan X1): the XR routing counter.
+    out.xr_report_blocks      = impl_->xr_report_blocks;
     if (bwe_) {
         out.bandwidth_estimate_bps = bwe_->estimate().target_bitrate_bps;
     }

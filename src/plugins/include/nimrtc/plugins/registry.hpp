@@ -85,6 +85,8 @@
 #include <nimrtc/plugins/scheduler.hpp>
 // v1.2.0 M1 (F2): the network-feedback collector seam.
 #include <nimrtc/plugins/net_feedback.hpp>
+// v1.2.0 (session capability plan X1): the RTCP Extended Report seam.
+#include <nimrtc/plugins/xr_report.hpp>
 // v1.2.0 (audio pipeline): the codec-side decoder and the pipeline-side
 // receiver seams.
 #include <nimrtc/plugins/audio_decoder.hpp>

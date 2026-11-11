@@ -160,7 +160,6 @@ TEST(DtmfCodec, TheDurationIsDecodedIntoMilliseconds) {
     TelephoneEventCodec codec;
 
     // 800 timestamp units at 8000 Hz = 100 ms.
-    DtmfEvent ev;
     std::string raw;
     raw.push_back(static_cast<char>(9));       // event code
     raw.push_back(static_cast<char>(0x80));    // E bit

@@ -49,6 +49,7 @@
  */
 #include "fuzz_targets.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -156,9 +157,13 @@ void mutate_bit_flip(std::vector<std::uint8_t>& buf, Rng& rng) {
 void mutate_header_version(std::vector<std::uint8_t>& buf, Rng& rng) {
     // Corrupt the version field of a length-prefixed header.  A
     // parser that reads the version but not the length would sail
-    // past this one.
+    // past this one.  The version lives in the top two bits, so the
+    // mutation rewrites them with a value the PRNG picks (V = 0..3).
     if (buf.empty()) return;
-    buf[0] = static_cast<std::uint8_t>(buf[0] & 0x3Fu); // V = 0..3
+    const auto version  = static_cast<unsigned>(rng.below(4));
+    const auto masked   = static_cast<unsigned>(buf[0]) & 0x3Fu;
+    const auto shifted  = version << 6;
+    buf[0] = static_cast<std::uint8_t>(masked | shifted);
 }
 
 void mutate_zero_fill(std::vector<std::uint8_t>& buf, Rng& rng) {
@@ -201,8 +206,8 @@ enum class Target { kSdp, kRtp, kVideoPayload };
 
 const char* target_name(Target t) noexcept {
     switch (t) {
-        case Target::kSdp:         return "sdp";
-        case Target::kRtp:         return "rtp";
+        case Target::kSdp:          return "sdp";
+        case Target::kRtp:          return "rtp";
         case Target::kVideoPayload: return "video_payload";
     }
     return "?";
@@ -321,6 +326,10 @@ namespace {
 std::size_t g_seed_count    = 0;
 std::size_t g_case_count    = 0;
 
+/** Per-target seed counts, so a corpus that silently stops being
+ *  replayed for one target is visible in the output. */
+std::size_t g_seeds_by_target[3] = {0, 0, 0};
+
 void replay_directory(const std::filesystem::path& dir, nimrtc::fuzz::Target target) {
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) return;
@@ -340,6 +349,7 @@ void replay_directory(const std::filesystem::path& dir, nimrtc::fuzz::Target tar
         std::vector<std::uint8_t> seed;
         if (!nimrtc::fuzz::read_seed(f, seed)) continue;
         ++g_seed_count;
+        ++g_seeds_by_target[static_cast<std::size_t>(target)];
         nimrtc::fuzz::replay_seed(target, seed);
         g_case_count += 1 + nimrtc::fuzz::kMutationsPerSeed;
     }
@@ -368,6 +378,11 @@ int main() {
     run_video_payload(&zero, 1);
     g_case_count += 6;
 
+    for (std::size_t i = 0; i < 3; ++i) {
+        std::printf("fuzz replay: %-14s %zu seeds\n",
+                    nimrtc::fuzz::target_name(static_cast<Target>(i)),
+                    g_seeds_by_target[i]);
+    }
     std::printf("fuzz replay: %zu seeds, %zu cases, no crash\n",
                 g_seed_count, g_case_count);
     return 0;

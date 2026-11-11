@@ -7,10 +7,11 @@
  *
  * The seam lets a host application replace wolfSSL with another DTLS
  * backend (OpenSSL, BoringSSL, mbedTLS, custom) without touching the
- * engine.  Slice 8 (engine integration) will route `engine.cpp` through
- * the factory rather than constructing `DtlsSessionWolfSSL` directly;
- * for Slice 4 we only introduce the seam, register a default factory
- * (id = "wolfssl"), and keep the existing engine.cpp untouched.
+ * engine.  The engine / `WebRtcClassicStackFactory` resolve the
+ * backend through `core::PluginRegistry::get_dtls_session(id)` and
+ * call `IDtlsSessionFactory::create()`; they never construct
+ * `DtlsSessionWolfSSL` (or `DtlsSessionGmSSL`) directly.  The built-in
+ * factory id is `"wolfssl"`; `"gmssl"` is the optional second backend.
  *
  * ## Thread model
  *
@@ -103,13 +104,10 @@
 
 namespace nimrtc::dtls {
 
-// Forward declarations — the concrete `Config` type lives in
-// `nimrtc/dtls/dtls.hpp` (the existing module header).  Including that
-// here would force every consumer of the seam to also pull in the
-// concrete dtls config; the forward declaration keeps the seam header
-// minimal.
-struct NIMRTC_API_STABLE Config;
-using NIMRTC_API_STABLE DtlsConfig = Config;   // alias requested by the Slice 4 DoD
+// `Config` is defined in `dtls_types.hpp` (included above).  The
+// Slice 4 DoD asked for the alias `DtlsConfig`; keep it here so the
+// factory / engine call sites can spell either name.
+using NIMRTC_API_STABLE DtlsConfig = Config;
 
 /**
  * @brief DTLS role — Server (answerer) or Client (offerer).

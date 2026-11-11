@@ -96,7 +96,7 @@ private:
 // later.
 //
 // Production callers should NOT use this — they go through
-// `register_default_plugins()` and (in Slice 7) core::PluginRegistry.
+// `register_default_plugins()` and `PluginRegistry::get_dtls_session`.
 // This accessor exists so the Registrar in dtls_plugin.cpp can publish
 // the factory pointer through the test-only slot without exposing
 // `WolfsslDtlsFactory`'s definition across translation units.
@@ -114,9 +114,8 @@ const IDtlsSessionFactory* wolfssl_factory_singleton() noexcept {
 // while still letting tests resolve the factory pointer without going
 // through a registry.
 //
-// Slice 7 will route the canonical lookup through
-// `core::PluginRegistry::register_dtls(...)` / `get_dtls(id)`; for
-// Slice 4 the test path is the seam-local accessor.
+// Canonical lookup is `PluginRegistry::get_dtls_session(id)`; the
+// test path here is the seam-local accessor.
 // ===========================================================================
 
 namespace test_only {

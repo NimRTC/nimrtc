@@ -29,12 +29,13 @@
  * ----------------------------------------------------------------------------
  * Slice-7 DELIVERABLE
  * ----------------------------------------------------------------------------
- * The Selector implementation is shipped with **TODO bodies** that
- * construct empty `TransportSession` values and log "stack factories
- * pending Slice 7.5" — because the default Stack factories depend on
- * Slice 4/5/6 default impls being merged first. The PRIORITY LOGIC is
- * fully enumerated in code comments so reviewers can verify the rule
- * set is complete without running anything.
+ * The Selector implementation resolves each stack factory by id and
+ * constructs the stack through the injected lookup / create hooks.  The
+ * PRIORITY LOGIC is fully enumerated in code comments so reviewers can
+ * verify the rule set is complete without running anything.
+ *
+ * Only the `webrtc-quic` branch (rule 3) is still a stub — it needs the
+ * msquic / ngtcp2 backends.
  *
  * Integration tests use **mock factories** that bypass the
  * PluginRegistry lookups, so the selector's rule engine is testable

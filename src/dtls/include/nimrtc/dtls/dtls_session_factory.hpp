@@ -24,11 +24,9 @@
  * A host application that wants a different DTLS backend
  * (OpenSSL, BoringSSL, mbedTLS, …) implements `IDtlsSession` for
  * that backend, registers an `IDtlsSessionFactory` via
- * `core::PluginRegistry::register_dtls(...)` (Slice 4 does not
- * introduce the registry slot — it stays at the seam level only;
- * Slice 8 / Slice 7 will add a registry slot when transport selection
- * goes through core::PluginRegistry), and selects the new factory by
- * id when building a TransportStack.
+ * `core::PluginRegistry::register_dtls_session(id, factory)`, and
+ * selects the new factory by id when building a TransportStack
+ * (`EngineConfig::dtls_name` / `StackConfig::dtls_id`).
  *
  * @note P1 — interface added as part of PAL Slice 4 (v0.11.0).
  */

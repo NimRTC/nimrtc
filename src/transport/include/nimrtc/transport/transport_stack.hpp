@@ -25,9 +25,9 @@
  * ----------------------------------------------------------------------------
  *
  * Slice 7 ships the interface only — it does NOT instantiate default
- * Stack factories (that is Slice 7.5 work, gated on Slice 4/5/6 default
- * impls being merged). The Selector therefore constructs an empty
- * `TransportSession` and tags it as "stack factories pending Slice 7.5".
+ * Stack factories.  The Selector therefore looks the factory up by id
+ * and constructs an empty `TransportSession` when no factory is
+ * registered (the "stack factories pending" case).
  */
 #pragma once
 
@@ -46,9 +46,11 @@ namespace nimrtc {
 // ---------------------------------------------------------------------------
 // Slice 4/5/6 interface FORWARD DECLARATIONS.
 //
-// These are forward-declared in this header so Slice 7 can compile and
-// install without Slice 4/5/6 being merged yet. After Slice 4/5/6 land,
-// switch these to `#include <nimrtc/dtls/dtls_session_iface.hpp>` etc.
+// These are forward-declared in this header so the transport module can
+// compile without pulling in the DTLS / SCTP / raw_udp module headers.
+// The concrete types all exist now (DTLS seam = Slice 4, SCTP seam =
+// Slice 5, raw UDP = Slice 6); the forward declarations here keep the
+// header dependency-free.
 // ---------------------------------------------------------------------------
 namespace plugins {
 class NIMRTC_API_STABLE IICETransport;   // named "plugins::IICETransport" — Slice 4
@@ -58,20 +60,17 @@ class NIMRTC_API_STABLE IRTP;
 } // namespace plugins
 
 namespace dtls {
-class NIMRTC_API_STABLE IDtlsSession;     // Slice 4 (does NOT exist yet — forward-declared only)
+class NIMRTC_API_STABLE IDtlsSession;
 class NIMRTC_API_STABLE IDtlsSessionFactory;
 } // namespace dtls
 
 namespace sctp {
-class NIMRTC_API_STABLE ISctpSocket;      // Slice 5 (does NOT exist yet — forward-declared only)
+class NIMRTC_API_STABLE ISctpSocket;
 class NIMRTC_API_STABLE ISctpSocketFactory;
 } // namespace sctp
 
 namespace raw_udp {
-class NIMRTC_API_STABLE IRawUdpDatagram;  // Slice 6 (DOES exist — forward-declared for parallel
-                        // build isolation; the real include is added when
-                        // Slice 6 lands as a sibling target. See
-                        // transport_selector.cpp TODO.)
+class NIMRTC_API_STABLE IRawUdpDatagram;
 class NIMRTC_API_STABLE IRawUdpFactory;
 } // namespace raw_udp
 

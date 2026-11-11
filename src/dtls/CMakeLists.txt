@@ -18,11 +18,12 @@
 #
 # Architectural role (per docs/plan/transport-selection.md §5.2 / §6.1):
 #   The seam is the first slice of transport-layer plugin-replaceability
-#   for NimRTC.  Slice 5 (SCTP), Slice 6 (raw UDP bypass), Slice 7 (Stack
-#   + Selector), and Slice 8 (engine integration) build on top of this
-#   DTLS seam.  Slice 4 itself does not change core::PluginRegistry or
-#   engine.cpp — registration is seam-local until Slice 7 introduces the
-#   registry slot.
+#   for NimRTC.  Slice 5 (SCTP), Slice 6 (raw UDP), Slice 7 (Stack +
+#   Selector), and Slice 8 (engine integration) sit on top of it.
+#   Registration is now the Slice 8 typed slot
+#   `PluginRegistry::register_dtls_session` / `get_dtls_session`;
+#   `register_default_plugins()` still also fills the Slice 4
+#   test-only accessor.
 #
 # Dependencies:
 #   - core (always)

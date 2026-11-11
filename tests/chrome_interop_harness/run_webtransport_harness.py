@@ -256,10 +256,18 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
         # ── 0. Verify prerequisites ──────────────────────────────────────────
         # A missing system Chrome is not fatal: Playwright ships its own
         # Chromium, and CI installs it via `playwright install chromium`.
-        if str(CHROME_EXE) and not CHROME_EXE.exists():
-            print(f"[warn] system Chrome not found at {CHROME_EXE}; "
+        # NOTE: keep this in a LOCAL variable.  Assigning to the module
+        # level CHROME_EXE inside this function makes Python treat the
+        # name as local for the whole function, so the read raises
+        # `UnboundLocalError: local variable 'CHROME_EXE' referenced
+        # before assignment` -- the harness crashes on EVERY platform,
+        # before it ever launches Chrome.  run_harness.py carries the
+        # same fix and the same note.
+        chrome_exe = CHROME_EXE
+        if str(chrome_exe) and not chrome_exe.exists():
+            print(f"[warn] system Chrome not found at {chrome_exe}; "
                   f"falling back to Playwright's bundled Chromium")
-            CHROME_EXE = Path("")
+            chrome_exe = Path("")
         if not WT_HTML.exists():
             results["errors"].append(f"WebTransport HTML not found at {WT_HTML}")
             return results
@@ -348,8 +356,8 @@ def run(wt_port: int = 9443, timeout_s: int = 20) -> dict:
                 # was found; an empty value would make Playwright fail
                 # instead of falling back to its bundled Chromium.
                 _launch_kwargs = {"headless": True}
-                if str(CHROME_EXE):
-                    _launch_kwargs["executable_path"] = str(CHROME_EXE)
+                if str(chrome_exe):
+                    _launch_kwargs["executable_path"] = str(chrome_exe)
                 browser = pw.chromium.launch(
                     args=chrome_args,
                     **_launch_kwargs,

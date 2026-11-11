@@ -99,9 +99,11 @@ struct NIMRTC_API_STABLE MediaDescription {
     // *media-level* attribute whose value is the list of XR
     // parameters the endpoint supports:
     //
-    //   - "rcvr-rtt=all"     — the Receiver Reference Time block
-    //                          (BT = 4) and its DLRR answer (BT = 5);
-    //   - "stat-summary=loss" — the Statistics Summary block (BT = 6).
+    //   - "rcvr-rtt=all"          — the Receiver Reference Time block
+    //                              (BT = 4) and its DLRR answer (BT = 5);
+    //   - "stat-summary=loss,jitt" — the Statistics Summary block
+    //                              (BT = 6), with the field indicators
+    //                              the peer asked for.
     //
     // RFC 3611 §5.1: "When the 'rtcp-xr' attribute is present,
     // participants SHOULD NOT send XR blocks other than the ones

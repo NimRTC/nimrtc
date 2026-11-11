@@ -58,6 +58,11 @@ nimrtc::engine::NimRTCEngine
 │   ├── send_audio(const float* pcm, size_t n) → Status
 │   └── remote_audio_format(AudioFormat* out) → bool
 │
+├── DTMF (RFC 4733, optional — off by default)
+│   ├── send_dtmf(event_code, duration_ms) → bool
+│   ├── set_on_dtmf(cb)
+│   └── negotiated_dtmf_payload_type() → uint8_t
+│
 ├── Video I/O
 │   ├── start_video() / stop_video()
 │   └── send_video(const VideoSourceFrame&) → Status
@@ -184,6 +189,7 @@ methods are written defensively.
 | `on_state_change` | Engine state transitions (e.g. ICE → connected) | `void(const char* state)` |
 | `on_data_message` | A DataChannel message arrives | `plugins::DataMessageCallback` |
 | `on_data_state` | A DataChannel state transition (open / closed / error) | `plugins::DataChannelStateCallback` |
+| `on_dtmf` | A completed DTMF key press arrives (RFC 4733; only when `EngineConfig::dtmf_enabled` is true) | `void(const plugins::DtmfEvent& event)` |
 
 > **`on_audio_frame` is the legacy tap.**  Its `num_samples` argument is
 > the **total number of interleaved float samples** —
@@ -416,6 +422,78 @@ missing receive pipeline is a hard error (`kAudioDecoderMissing` /
 `kAudioReceiverMissing`) that fires `on_error` exactly once and
 disables the audio track; the inbound packets are then counted and
 dropped, never decoded.
+
+### 8.5 DTMF (RFC 4733)
+
+DTMF is an **optional, in-band** capability: the digits travel as
+`telephone-event` payloads on the audio m-line, not as a separate
+stream and not out of band.
+
+```cpp
+bool send_dtmf(std::uint8_t event_code,
+               std::uint16_t duration_ms) noexcept;
+void set_on_dtmf(DtmfEventCallback cb) noexcept;
+std::uint8_t negotiated_dtmf_payload_type() const noexcept;
+```
+
+**DTMF is off by default.**  `EngineConfig::dtmf_enabled` has to be
+`true` before the engine offers a `telephone-event` payload type at
+all; a default engine's offer carries no RFC 4733 line, and a peer
+that sends one anyway is treated as an unknown payload type (see the
+counting rules below).  `EngineConfig::dtmf_codec_name` selects the
+codec plugin (default `"dtmf"`); an empty string disables the path
+even when `dtmf_enabled` is true.
+
+**The negotiation.**  The payload type is negotiated in the SDP
+(RFC 4733 §2.3.2), never assumed:
+
+* the offer carries `a=rtpmap:<pt> telephone-event/8000` and
+  `a=fmtp:<pt> 0-16`, and the payload type joins the m-line's format
+  list (RFC 3550 §5.14 scopes a payload type to its m-section);
+* the answer carries the *negotiated* event codes — the peer's list
+  narrowed to the codes this side implements — not a blind echo of the
+  offer;
+* `negotiated_dtmf_payload_type()` reports the number both ends use,
+  or `0` when nothing was negotiated.  `send_dtmf()` fails in exactly
+  that state, so a host can ask before it presses a key.
+
+**Sending.**  `send_dtmf(event_code, duration_ms)` encodes one key
+press.  RFC 4733 §2.5.1.2 describes the event as a *sequence*: the
+packet is repeated while the key is held, each repeat carrying a
+larger duration, and the packet that closes the event carries the
+end-of-event bit.  The first packet goes out immediately; the repeats
+are paced by `tick()`, so **the host must keep ticking for the event
+to finish**.  The event packets share the audio stream's sequence
+number space and timestamp base (RFC 4733 §2.1) and carry the marker
+bit on the first packet only (RFC 4733 §2.2.2).
+
+`duration_ms` is the length of the key press; `0` is rejected (RFC
+4733 §2.3.5 makes a zero duration a *state*, not a key press), and
+event codes above `16` are rejected (RFC 4733 §2.1 defines 0..16).
+
+**Receiving.**  `set_on_dtmf()` installs the callback that receives the
+completed events — `(event_code, duration_ms, end)`.  The engine
+accumulates the duration across the repeats and reports the event
+**once**, when the packet with the end bit arrives.
+
+**The counting rules** (the boundary with the payload-type routing
+fix): a `telephone-event` payload is *not* audio — it is a four-byte
+event header, and handing it to the audio decoder would push the
+header into an Opus decoder.  So:
+
+| state                            | a received telephone-event packet |
+|----------------------------------|------------------------------------|
+| DTMF off, nothing negotiated     | counted as an unknown audio payload type and dropped |
+| DTMF on, nothing negotiated      | counted as an unknown audio payload type and dropped |
+| DTMF on, payload type negotiated | decoded and reported to the host |
+
+In other words: a negotiated payload type is never an anomaly, and an
+un-negotiated one always is.  The telephone-event plane has counters
+of its own in `Stats` — `dtmf_packets_sent`,
+`dtmf_packets_received`, `dtmf_packets_malformed`,
+`dtmf_events_delivered` and `dtmf_payload_type` — because the audio
+counters say nothing about it (the payload never reaches the audio
+pipeline).
 
 ---
 

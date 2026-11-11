@@ -42,23 +42,28 @@ option(NIMRTC_INSTALL          "Enable install() rules (Track D packaging)" OFF)
 # the stub codec.
 #
 # Per-platform availability (compile-time):
-#   - NVENC        : Windows + Linux (NVIDIA drivers)
+#   - NVENC        : Windows + Linux (NVIDIA drivers) — encoder only
 #   - AMF          : Windows (AMD drivers)
 #   - QSV/libvpl   : Windows + Linux (Intel GPU + driver)
 #   - DXVA         : Windows only
 #   - VA-API       : Linux only
-#   - NVDEC        : Windows + Linux (decoupled from NVENC — driver-only)
+#   - NVDEC        : seam id only — the decoder is NOT implemented, so the
+#                    "nvdec_h264" backend is registered but its
+#                    `available()` returns false and `create()` returns
+#                    nullptr.  See src/modules/h264/src/nvenc_encoder.cpp.
+#   - VideoToolbox : macOS only — NOT implemented (same shape as NVDEC)
+#   - MediaCodec   : Android only — NOT implemented (same shape as NVDEC)
 #
 # Each switch is a *runtime* decision (you can flip it on/off without
 # touching CMake) — see HW codec plugin docs.  The CMake flag controls
 # whether the SDK is even *attempted* to be located on the build host.
 # -----------------------------------------------------------------------------
-option(NIMRTC_PLUGINS_NVENC  "Build NVIDIA NVENC H.264 encoder + NVDEC decoder"        OFF)
+option(NIMRTC_PLUGINS_NVENC  "Build NVIDIA NVENC H.264 encoder (the NVDEC decoder is NOT implemented)" OFF)
 option(NIMRTC_PLUGINS_AMF    "Build AMD AMF H.264 encoder"                             OFF)
 option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 encoder"  OFF)
 option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                      OFF)
-option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder + decoder (Linux Intel/AMD)"  OFF)
-option(NIMRTC_PLUGINS_NVDEC  "Build NVIDIA NVDEC H.264 decoder (without NVENC)"        OFF)
+option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder (Linux Intel/AMD)"             OFF)
+option(NIMRTC_PLUGINS_NVDEC  "Register the NVIDIA NVDEC H.264 decoder seam id (the decoder itself is NOT implemented)" OFF)
 option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                 OFF)
 
 # Helper that prints a one-liner summary at the end of CMake configure.

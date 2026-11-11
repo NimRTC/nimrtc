@@ -1215,6 +1215,30 @@ nimrtc_add_engine_test(test_engine_net_feedback test_engine_net_feedback.cpp)
 #     the Opus a=fmtp, the ssrc-audio-level a=extmap and the per-engine
 #     SSRC) — B-14;
 #   - a payload type the peer never declared is counted and dropped with
+# Video pipeline v2 — C9 / C11: the video payload type is the *negotiated* one.
+#
+# Covers the two defects the negotiation work closes:
+#   - C9: the answer copied the offer's `a=rtpmap:` / `a=fmtp:` lines
+#     verbatim, which told the peer we would decode every codec it offered
+#     — including the ones NimRTC has no decoder for.  The answer now names
+#     exactly the negotiated payload type, and an undecodable codec rejects
+#     the media section (port 0) and reports kVideoCodecUnsupported once;
+#   - C11: the packet path demultiplexed inbound RTP by a *locally
+#     configured* payload type, so a payload type the peer offered but that
+#     was never negotiated still reached the video pipeline.  Only the
+#     negotiated payload type reaches the receiver now.
+#
+# The offer side is covered too: the offer names the SENDER's payload type,
+# because that is the number the outbound packet path stamps.
+#
+# Uses the "shell" transport strategy, like `test_engine_audio_state` above.
+# ---------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_PIPELINE AND NIMRTC_MODULE_VIDEO_SOURCE
+   AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_H264)
+    nimrtc_add_engine_test(test_video_negotiation test_video_negotiation.cpp)
+endif()
+
+# ---------------------------------------------------------------------------
 #     kAudioPayloadTypeUnknown instead of being decoded — B-4 (defect F-8);
 #   - a peer that offers a codec we cannot decode produces
 #     kAudioCodecUnsupported exactly once and the audio m-line is rejected
@@ -1363,4 +1387,36 @@ if(NIMRTC_HW_HAVE_NVENC)
         "${NVENC_INCLUDE_DIR}")
     nimrtc_apply_options(test_nvenc_abi_probe LENIENT)
     # Not registered with ctest — run manually as: cmake --build --target test_nvenc_abi_probe && build/tests/Debug/test_nvenc_abi_probe.exe
+endif()
+# ---------------------------------------------------------------------------
+# v1.2.0 (video plan F8) - the per-stream bandwidth share rule.
+#
+# The rule is an engine-private, header-only pure function
+# (`src/engine/src/bandwidth_allocation.hpp`).  It is unit tested
+# directly - no engine, no transport, no clock - because that is the
+# shape the rule has: a pure function of (estimate, demand list).
+#
+# The test therefore compiles the engine's *private* header directory
+# into its include path.  That directory is not installed and is not on
+# the public surface (constraint L4); adding it here does not make it
+# public, it only lets the unit test see the function.
+# ---------------------------------------------------------------------------
+add_executable(test_bandwidth_allocation test_bandwidth_allocation.cpp)
+target_link_libraries(test_bandwidth_allocation PRIVATE
+    nimrtc::core
+    GTest::gtest_main)
+target_include_directories(test_bandwidth_allocation PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_bandwidth_allocation PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_bandwidth_allocation LENIENT)
+add_test(NAME test_bandwidth_allocation
+    COMMAND $<TARGET_FILE:test_bandwidth_allocation>)
+set_tests_properties(test_bandwidth_allocation PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_bandwidth_allocation
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
 endif()

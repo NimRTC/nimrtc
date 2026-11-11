@@ -17,6 +17,20 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The per-stream share rule of the session bandwidth budget (video plan
+  F8).** `IBwe::estimate()` returns one number for the whole session, so
+  the estimate has to be split before it reaches an encoder.  The rule:
+  the *reserved* streams (the audio) take their clamped share of the
+  estimate first and keep a hard floor; the *elastic* streams (the video)
+  share what is left in proportion to their weight, split with the
+  largest-remainder (Hamilton) method so the pool is handed out exactly
+  and deterministically.  A reserved stream that claims more than the
+  estimate holds puts the session in *deficit*, which is reported rather
+  than hidden.  The rule is one engine-private, header-only pure function
+  (`src/engine/src/bandwidth_allocation.hpp`); the engine's audio bitrate
+  path now uses it instead of its own arithmetic — one rule, not two — and
+  the video's elastic share arrives with the rate controller (B2) on the
+  same terms.  Covered by 16 cases in `tests/test_bandwidth_allocation.cpp`.
 - **Two plugin seams for the audio pipeline (audio pipeline WP-1).** The
   receive path needs a codec-side decoder (one RTP payload in, PCM frames
   out) and a pipeline-side receiver (jitter buffer, concealment, FEC
@@ -310,6 +324,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     would silently disable the preferred signal.
   - The collector is the only place with a policy branch — the engine
     contains none (ADR-018 Decision 5).
+- **The transport-cc signal now actually drives the estimate (v1.2.0 M2,
+  F5/F6; ADR-018 Decision 4).**  The arrival series reached the
+  estimator, and nothing read it: under the `kTransportCc` policy the
+  estimate saw a loss rate and an RTT, both of which the loss/RTT path
+  already provides.  The "prefer transport-cc" preference therefore
+  bought nothing, and the delay trend — the one congestion signal
+  transport-cc offers that loss-based feedback cannot produce — was
+  computed nowhere.
+  - The arrival series is turned into an **inter-arrival-spacing trend**:
+    the spacing of the received media packets against the smallest
+    spacing seen recently.  A rise means a queue is building up in front
+    of the bottleneck, which is congestion *before* the packets start
+    being dropped.  The helper is module-internal
+    (`src/modules/bwe/src/arrival_trend.hpp`): the receive rate and the
+    loss stay with the collector, the trend belongs to the estimator's
+    algorithm.
+  - The AIMD front-end (the engine default) backs off on the trend with
+    the same multiplicative decrease a loss event uses; the Goog-CC
+    front-end uses the trend *instead of* its RTT gate while transport-cc
+    drives, because a Receiver Report's RTT is a windowed value that
+    lags the per-packet arrival series.
+  - The trend ignores the first delta of a feedback packet (it straddles
+    the gap between two feedbacks, so it is not a packet spacing) and
+    every non-positive delta (a reordered packet is not a queue) — which
+    is what transport-cc's reorder-robustness is for.
+  - The estimator invalidates the baseline whenever it moves its own
+    target bitrate: the send spacing follows the target, so the old
+    baseline describes a different operating point, and keeping it would
+    turn the estimator's own action into a congestion signal (a decrease
+    spiral).  A rate change driven by anything else — the future rate
+    controller, the pacer — is not visible to the estimator; the
+    send-side accounting of v1.2.0 M3/M5 is what closes that gap.
+  - `plugins::BweEstimate::Reason` gains `TransportCcDelay`, so the
+    telemetry says *why* the estimate moved.  Adding an enumerator is
+    additive and does not change the enum's size (the same rule
+    ADR-018 records for `PacketStatus::ReceivedNoDelta`).
+  - Covered by 8 cases in `src/modules/bwe/tests/test_bwe.cpp` and one
+    end-to-end case in `tests/test_engine_net_feedback.cpp`: a queue that
+    builds up moves the estimate even though not a single packet was
+    lost.
 
 ### Changed
 

@@ -77,11 +77,28 @@ typedef struct juice_mux_binding_request {
 
 typedef void (*juice_cb_mux_incoming_t)(const juice_mux_binding_request_t *info, void *user_ptr);
 
+// The transport a TURN server is reached over.
+//
+// RFC 8656 section 3 allows the TURN messages between the client and the
+// server to be carried over UDP, TCP, TLS over TCP, or DTLS over UDP.
+//
+// Note that "TURN over TCP" here means the *control connection* to the
+// TURN server is a TCP stream, while the relayed transport address
+// allocated by the server remains a UDP transport towards the peer
+// (RFC 8656 section 2).  This is different from RFC 6062, which
+// describes TCP *allocations*.
+typedef enum juice_turn_transport {
+	JUICE_TURN_TRANSPORT_UDP = 0, // plain TURN over UDP (RFC 5766)
+	JUICE_TURN_TRANSPORT_TCP,     // TURN over TCP (RFC 8656 section 12)
+	JUICE_TURN_TRANSPORT_TLS      // TURN over TLS (RFC 8656 section 12)
+} juice_turn_transport_t;
+
 typedef struct juice_turn_server {
 	const char *host;
 	const char *username;
 	const char *password;
 	uint16_t port;
+	juice_turn_transport_t transport;
 } juice_turn_server_t;
 
 typedef enum juice_concurrency_mode {
@@ -153,6 +170,12 @@ typedef struct juice_server_config {
 	const char *bind_address;
 	const char *external_address;
 	uint16_t port;
+
+	// Port for the TURN-over-TCP listener (RFC 8656 section 12).
+	//
+	// Zero means "no TCP listener".  When set, the server additionally
+	// accepts TURN control connections over TCP on that port.
+	uint16_t tcp_port;
 
 	uint16_t relay_port_range_begin;
 	uint16_t relay_port_range_end;

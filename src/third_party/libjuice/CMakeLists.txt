@@ -19,7 +19,12 @@ set(_upstream_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # libjuice symbols are pulled into nimrtc_ice (and ultimately into consumers)
 # without producing a DLL we would then need to ship.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(NO_SERVER   ON  CACHE BOOL "" FORCE)   # we only need the client agent
+# The TURN *server* half of libjuice is kept enabled on purpose: it is what
+# lets the ICE module's regression test stand up a real TURN server in-tree
+# and assert that a relay candidate is actually gathered.  libjuice's
+# server is a separate translation unit, so a consumer that never calls
+# juice_server_create() never pulls it into the link.
+set(NO_SERVER   OFF CACHE BOOL "" FORCE)
 set(NO_TESTS    ON  CACHE BOOL "" FORCE)   # upstream test programs not built
 set(FUZZER      OFF CACHE BOOL "" FORCE)
 set(CLANG_TIDY  OFF CACHE BOOL "" FORCE)

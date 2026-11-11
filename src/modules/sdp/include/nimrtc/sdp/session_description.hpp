@@ -182,6 +182,23 @@ struct NIMRTC_API_STABLE SessionDescription {
     std::string dtls_fingerprint_value;
     std::string dtls_setup;
 
+    // a=rtcp-xr:<parameter> [<parameter>...]  (RFC 3611 §5.1)
+    //
+    // The RTCP Extended Report negotiation attribute at *session* level.
+    // RFC 3611 §5.1: "It is both a session and a media level
+    // attribute.  When specified at session level, it applies to all
+    // media level blocks in the session.  Any media level specification
+    // MUST replace a session level specification, if one is present,
+    // for that media block."
+    //
+    // So the session-level value is the *default* for every media
+    // section, and a media section that carries its own `a=rtcp-xr`
+    // overrides it.  The same empty-vs-absent distinction as the
+    // media-level field applies: an empty value with the present flag
+    // set means "I understand the attribute but send no XR blocks".
+    std::string rtcp_xr;
+    bool rtcp_xr_present = false;
+
     // Session-level attributes not captured above.
     std::vector<std::pair<std::string, std::string>> extra_attrs;
 

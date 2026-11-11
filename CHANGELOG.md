@@ -232,12 +232,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     next RTCP interval; an unchanged one is refreshed every five
     intervals, because the peer may have missed the previous message.
   - **An inbound TMMBR is obeyed**: the tightest limit the peers ask
-    for clamps the scheduler's session budget *and* the per-class
-    pacing rates, and every TMMBR is answered with exactly one TMMBN
-    (RFC 5104 §4.2.2.2) -- even when the tuple was not accepted, which
-    is what lets a participant that missed the last TMMBR recover the
-    state.  A tuple naming a media source the engine does not send is
-    recorded but not applied: it is somebody else's constraint.
+    for clamps the scheduler's session budget, the per-class pacing
+    rates **and the audio encoder**, and every TMMBR is answered with
+    exactly one TMMBN (RFC 5104 §4.2.2.2) -- even when the tuple was
+    not accepted, which is what lets a participant that missed the last
+    TMMBR recover the state.  A tuple naming a media source the engine
+    does not send is recorded but not applied: it is somebody else's
+    constraint.
+  - **The peer's limit outranks the local audio floor.**  The
+    acknowledgement (the TMMBN) is a promise, so the limit the peer
+    asked for overrides `EngineConfig::audio_min_bitrate_bps`: the
+    encoder is allowed to drop *below* the local floor when the peer
+    asks for less.  The two constraints are not of the same kind -- the
+    local floor protects the audio against a congestion collapse,
+    while the peer's limit is a commitment the engine made on the wire.
+    The limit is honoured even when `audio_bitrate_adaptive` is
+    `false`: that switch says "do not move the encoder because of the
+    *estimate*", not "break the promises the engine already made".
+  - **TMMBR is opt-in.**  `EngineConfig::tmmbr_enabled` defaults to
+    `false` -- the engine sends no TMMBR unless the host asks for it.
+    `EngineConfig::disable_tmmbr` vetoes the feature in both
+    directions and overrides `tmmbr_enabled`.  The *inbound* side
+    needs no switch: a TMMBR the peer sends is always honoured.
   - **Both features are negotiated, not assumed.**  The offer carries
     `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 §7.2) and
     `a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt` (RFC 3611 §5.1); the
@@ -271,7 +287,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `tests/test_engine_xr_tmmbr.cpp` (11 cases that assert on the
     **wire bytes**: the XR report's RRTR / DLRR / Statistics Summary
     blocks, the TMMBR's live bit rate, the `disable_tmmbr` veto and the
-    TMMBN's owner SSRC) and
+    TMMBN's owner SSRC),
+    `tests/test_engine_audio_bitrate.cpp` (the encoder side of the
+    inbound TMMBR: the cap, the floor override, the pinned encoder and
+    the tightest-limit rule) and
     `src/modules/rtp/tests/test_rtcp_xr.cpp` (the wire format).
 
 - **A pluggable session model, so a host can renegotiate instead of

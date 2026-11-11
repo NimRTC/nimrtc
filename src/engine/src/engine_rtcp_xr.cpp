@@ -252,6 +252,19 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
         // interval).  The engine reports the whole space it has seen
         // so far; the sequence numbers are 16-bit and wrap, which is
         // exactly what the field is defined as (RFC 3550 A.1).
+        //
+        // RFC 3611 §4.1 defines the two fields as:
+        //
+        //     begin_seq: "The first sequence number that this block
+        //                  reports on."
+        //     end_seq:   "The last sequence number that this block
+        //                  reports on *plus one*."
+        //
+        // So `end_seq` is the *exclusive* upper bound of the interval,
+        // not the last sequence number itself.  The number of packets
+        // the interval covers is therefore `end_seq − begin_seq`, which
+        // is exactly the `expected` computed below — the two agree only
+        // if `end_seq` carries the +1.
         const std::uint64_t expected =
             static_cast<std::uint64_t>(rx.max_seq - rx.base_seq) + 1u;
         const std::int64_t lost =
@@ -271,7 +284,12 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
         rtp::XrStatisticsSummary summary;
         summary.ssrc           = rx.ssrc;
         summary.begin_seq      = static_cast<std::uint16_t>(rx.base_seq);
-        summary.end_seq        = static_cast<std::uint16_t>(rx.max_seq);
+        // RFC 3611 §4.1: "end_seq: The last sequence number that this
+        // block reports on plus one."  The field is the *exclusive* end
+        // of the interval, so it is the highest sequence number seen
+        // plus one.  The addition wraps with the 16-bit sequence space,
+        // which is the RFC's own arithmetic (RFC 3550 A.1).
+        summary.end_seq        = static_cast<std::uint16_t>(rx.max_seq + 1u);
         summary.has_loss       = want_loss;
         // The cumulative loss is a signed quantity (a duplicate or a
         // reordered packet makes it negative); the wire field is
@@ -398,6 +416,17 @@ void NimRTCEngine::flush_tmmbn() noexcept {
     if (!impl_->pending_tmmbn) return;
     if (!ice_t_ || !is_ice_connected()) return;
 
+    // RFC 5104 §4.2.2.3: "The TMMBN acknowledgement SHOULD be sent as
+    // soon as allowed by the applied timing rules for the session.
+    // Immediate or early feedback mode SHOULD be used for these
+    // messages."
+    //
+    // So there is deliberately *no* time gate here — unlike the XR
+    // report and the outbound TMMBR, which ride the receiver-report
+    // cadence.  The acknowledgement goes out on the very next tick, so
+    // a peer that asked us to throttle learns that we are honouring the
+    // limit without waiting for the next RTCP slot.
+    //
     // Only one TMMBN is sent even if several TMMBRs arrived in
     // between (RFC 5104 §4.2.2.2) — so the pending flag is cleared
     // *before* the send, and a send failure does not leave a stale

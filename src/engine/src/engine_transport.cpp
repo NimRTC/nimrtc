@@ -1000,10 +1000,18 @@ int NimRTCEngine::tick() noexcept {
         // v1.2.0 (session plan X2 / X4 / X5): the RTCP XR report, the
         // outbound TMMBR, and the TMMBN that answers an inbound TMMBR.
         //
-        // All three ride the receiver-report cadence (RFC 3611 §5.2,
-        // RFC 5104 §4.2.1.3) and all three are sent from here — not
-        // from the receive path — so the transport's send() is never
-        // re-entered from its recv().
+        // The XR report and the TMMBR ride the receiver-report cadence
+        // (RFC 3611 §5.2, RFC 5104 §4.2.1.3).
+        //
+        // The TMMBN does *not*: RFC 5104 §4.2.2.3 says "The TMMBN
+        // acknowledgement SHOULD be sent as soon as allowed by the
+        // applied timing rules for the session.  Immediate or early
+        // feedback mode SHOULD be used for these messages."  So it is
+        // immediate feedback — `flush_tmmbn()` has no time gate and
+        // puts the acknowledgement on the wire on the very next tick.
+        //
+        // All three are sent from here — not from the receive path — so
+        // the transport's send() is never re-entered from its recv().
         maybe_send_extended_report();
         maybe_send_tmmbr();
         flush_tmmbn();
@@ -1047,13 +1055,28 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     demands.clear();
 
     const int audio_ceiling = resolve_audio_bitrate_ceiling();
-    const int audio_floor = config_.audio_min_bitrate_bps > 0
-                                ? config_.audio_min_bitrate_bps
-                                : 1000;
+    int audio_floor = config_.audio_min_bitrate_bps > 0
+                          ? config_.audio_min_bitrate_bps
+                          : 1000;
+    // The peer's TMMBR limit wins over the local floor here too — the
+    // same "peer-wins" rule the audio encoder adaptation uses (OD-E
+    // decision 3).  Without it the reserved demand would claim more
+    // than the (peer-limited) estimate, the session would report a
+    // deficit, and the elastic video stream would be starved by a
+    // promise the engine is about to break anyway.
+    int audio_cap = audio_ceiling;
+    if (peer_limit > 0) {
+        if (audio_floor > static_cast<int>(peer_limit)) {
+            audio_floor = static_cast<int>(peer_limit);
+        }
+        if (audio_cap <= 0 || audio_cap > static_cast<int>(peer_limit)) {
+            audio_cap = static_cast<int>(peer_limit);
+        }
+    }
     demands.push_back(detail::reserved_audio_demand(
         config_.audio_bwe_share,
         static_cast<std::uint32_t>(audio_floor),
-        static_cast<std::uint32_t>(audio_ceiling > 0 ? audio_ceiling : 0)));
+        static_cast<std::uint32_t>(audio_cap > 0 ? audio_cap : 0)));
 
     // The video's ceiling is what its encoder is configured to produce:
     // the video may not be paced faster than it encodes, and a video
@@ -1082,6 +1105,16 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     if (audio_bitrate_current_bps_ > 0 &&
         static_cast<std::uint32_t>(audio_bitrate_current_bps_) > audio_rate) {
         audio_rate = static_cast<std::uint32_t>(audio_bitrate_current_bps_);
+    }
+
+    // ...but never above the peer's TMMBR limit.  The encoder may still
+    // be ramping down towards the limit (the adaptation step is
+    // rate-limited), and the pacer must not let the *old* rate through
+    // in the meantime: the TMMBN is a promise that the limit is in
+    // force, and the pacer is the last thing between the encoder and the
+    // wire.  The tighter of the two wins (v1.2.0, session plan X5).
+    if (peer_limit > 0 && audio_rate > peer_limit) {
+        audio_rate = peer_limit;
     }
 
     // The video class runs at its share of what the audio left, capped

@@ -14,7 +14,7 @@
  *   T-E1 - the offer advertises `a=rtcp-fb:<pt> ccm tmmbr` when TMMBR
  *          is enabled, and does not when it is disabled
  *   T-E2 - the offer advertises `a=rtcp-xr:rcvr-rtt=all
- *          stat-summary=loss` when XR is enabled
+ *          stat-summary=loss,jitt` when XR is enabled
  *   T-E3 - the answer echoes the negotiated subset of both attributes
  *          (RFC 3264 §6.1 / RFC 3611 §5.2 / RFC 5104 §7.2)
  *   T-E4 - an inbound TMMBR clamps the peer's limit (RFC 5104
@@ -203,10 +203,11 @@ TEST_F(EngineTmmbr, TheOfferAdvertisesRtcpXrWhenEnabled) {
     const std::string offer = engine.create_offer();
     ASSERT_FALSE(offer.empty());
 
-    EXPECT_NE(offer.find("a=rtcp-xr:rcvr-rtt=all stat-summary=loss"),
+    EXPECT_NE(offer.find("a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt"),
               std::string::npos)
         << "RFC 3611 §5.1: the rtcp-xr attribute names the report blocks "
-           "the peer may expect — BT=4 (rcvr-rtt) and BT=6 (stat-summary)";
+           "the peer may expect — BT=4 (rcvr-rtt) and BT=6 (stat-summary), "
+           "with the two field indicators the engine measures";
 }
 
 TEST_F(EngineTmmbr, TheOfferDoesNotAdvertiseRtcpXrWhenDisabled) {

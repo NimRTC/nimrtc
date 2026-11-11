@@ -171,9 +171,10 @@ recognition is the *whole* of the implementation:
 
 - There is **no XR block parser and no XR builder** in `src/modules/rtp/`.
   The RTPFB parser handles NACK and transport-cc; the PSFB parser handles
-  PLI / FIR / SLI / REMB. The XR-specific block types — Receiver Estimated
-  Quality, DLRR, Duplicate Arrival Notification, Statistics Summary,
-  Virtual Time, IDMS — have no representation at all.
+  PLI / FIR / SLI / REMB. The XR-specific block types — Receiver Reference
+  Time, DLRR, Statistics Summary — have no representation at all, and
+  neither have the rest of RFC 3611 section 6.2's registry (Loss RLE,
+  Duplicate RLE, Packet Receipt Times, VoIP Metrics).
 - The generic `demux_rtcp()` walk returns the XR sub-packet as an opaque
   `RtcpBlock` with `kind == kExtendedReport` and the raw bytes in
   `packet`. Nothing downstream consumes it.

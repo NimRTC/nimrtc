@@ -17,7 +17,11 @@
 # can walk the source tree at runtime (see test_api_classification.cpp).
 # ----------------------------------------------------------------------------
 function(nimrtc_add_core_api_test name source)
-    add_executable(${name} ${source})
+    # Extra sources (headers) may be listed after the translation unit.
+    # Listing the generated expectation header here keeps it visible in
+    # IDEs and makes the build depend on it, so that regenerating it
+    # actually rebuilds the test.
+    add_executable(${name} ${source} ${ARGN})
     if(WIN32)
         target_link_libraries(${name} PRIVATE ws2_32)
     endif()
@@ -41,7 +45,8 @@ function(nimrtc_add_core_api_test name source)
     endif()
 endfunction()
 
-nimrtc_add_core_api_test(test_api_version        test_api_version.cpp)
+nimrtc_add_core_api_test(test_api_version        test_api_version.cpp
+                                                  api_version_expectations.hpp)
 nimrtc_add_core_api_test(test_api_classification test_api_classification.cpp)
 
 # ----------------------------------------------------------------------------

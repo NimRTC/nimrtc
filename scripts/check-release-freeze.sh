@@ -38,7 +38,10 @@
 #               the next CI run.  Delegates to tools/check_vendor.py,
 #               the same gate CI runs.
 #   version     NIMRTC_API_VERSION_PRE_RELEASE must be "" for a final
-#               tag (ADR-015 Verification table).
+#               tag (ADR-015 Verification table).  Outside a final tag
+#               the ordinary stage labels are accepted, including the
+#               "dev" label that trunk carries between two releases
+#               (RELEASING.md S3.4 step 14).
 #   submodules  Every pin must be fetchable from a fresh clone. The
 #               v0.14.0-rc.1 cycle briefly pinned src/third_party/msquic
 #               at a local-only commit (a88383e) and had to be reverted
@@ -351,14 +354,22 @@ if want version; then
             report FAIL version "NIMRTC_API_VERSION_PRE_RELEASE = \"$value\"" \
                               "must be \"\" for a final tag (ADR-015 Verification table)"
         elif [ "$FINAL_TAG" -eq 0 ]; then
+            # "dev" is the ordinary trunk state between two releases
+            # (RELEASING.md S3.4 step 14: the post-release bump moves the
+            # tree to X.Y.(Z+1)-dev so find_package(NimRTC) cannot pick up
+            # an in-progress build as the released version).  The label
+            # cycle documented in api_version.hpp is
+            #   "dev" -> "alpha.N" -> "beta.N" -> "rc.N" -> "",
+            # so "dev" has to be accepted here or every post-release
+            # branch fails this check until the next tag is cut.
             case "$value" in
-                ""|alpha*|beta*|rc*)
+                ""|dev|alpha*|beta*|rc*)
                     report PASS version "NIMRTC_API_VERSION_PRE_RELEASE = \"$value\"" \
                                       "valid stage label (final-tag emptiness needs --final-tag)"
                     ;;
                 *)
                     report FAIL version "NIMRTC_API_VERSION_PRE_RELEASE = \"$value\"" \
-                                      'expected "", "alpha.N", "beta.N" or "rc.N"'
+                                      'expected "", "dev", "alpha.N", "beta.N" or "rc.N"'
                     ;;
             esac
         else

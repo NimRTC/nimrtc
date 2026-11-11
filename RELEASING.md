@@ -99,6 +99,13 @@ in two cases:
    where `<word>` ∈ {`alpha`, `beta`}. These are not advertised externally and
    must not be installed by `cmake --build` consumers via `find_package`.
 
+Separately, `NIMRTC_API_VERSION_PRE_RELEASE` carries a `dev` label on
+trunk between two releases. It is a **source-tree** label, never a tag:
+the cycle is `"dev"` → `"alpha.N"` → `"beta.N"` → `"rc.N"` → `""`, and the
+label returns to `""` when the tag is cut. `scripts/check-release-freeze.sh`
+accepts `dev` outside a final tag and still requires the label to be empty
+under `--final-tag`.
+
 Pre-release tags **must**:
 
 - Carry an annotated tag object (`git tag -a v0.9.0-rc1 -m "..."`), not a
@@ -375,9 +382,25 @@ gpg --send-keys "$GPG_FPR"
 13. Merge `release/X.Y` back into `main` (fast-forward) so the version bump
     is visible on `main` too. This merge commit is **not** a new release.
 14. Open a PR titled `chore: post-release version bump` that advances
-    `CMakeLists.txt` and `version.hpp` to `X.Y.(Z+1)-dev` on `main` so
+    the project version to `X.Y.(Z+1)-dev` on `main` so
     `find_package(NimRTC)` cannot accidentally pick up an in-progress build
-    as `X.Y.Z`.
+    as `X.Y.Z`. Make the change with
+
+    ```sh
+    python tools/bump_version.py --bump patch --pre-release dev
+    ```
+
+    The script rewrites the three sites that carry the version together:
+    `src/core/include/nimrtc/core/api_version.hpp` (the public API
+    contract, and the source of truth), the `project(nimrtc VERSION ...)`
+    call in `CMakeLists.txt`, and the pinned expectation in
+    `tests/api_version_expectations.hpp` that the version smoke test
+    compares against. **Do not edit those sites by hand.** The
+    `v1.1.0` → `v1.1.1` bump (`059cc29`) did, and the resulting drift
+    only surfaced as a `static_assert` failure inside four platform
+    builds — a report that says nothing about the real cause.
+    `python tools/bump_version.py --check` runs on every push and names
+    any site that drifted.
 15. Mark the milestone as `100% complete` on GitHub.
 16. Announce:
     - GitHub Release (auto-created in step 12) — pinned to the repo front page.

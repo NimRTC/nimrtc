@@ -95,6 +95,7 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/plugins/xr_report.hpp>        // v1.2.0 (session plan X1) — RTCP XR seam
 
 // Forward declarations of concrete module types — full definitions live
 // in module headers (e.g. <nimrtc/dtls/dtls.hpp>) and are pulled in by
@@ -381,6 +382,21 @@ struct NIMRTC_API_STABLE EngineConfig {
     // milliseconds.  Must be comfortably larger than the peer's
     // feedback interval (Chrome: 50-100 ms).
     std::uint32_t net_feedback_transport_cc_timeout_ms = 3000;
+
+    // ---- RTCP Extended Report consumer (v1.2.0, session plan X1) -------
+    //
+    // The engine demultiplexes every inbound RTCP compound datagram
+    // and routes the XR sub-packets (payload type 207) to this
+    // consumer, which decodes the RFC 3611 report blocks (the Receiver
+    // Reference Time, the DLRR and the Statistics Summary reports) so
+    // the host can read the peer's QoE / network statistics.
+    //
+    // The engine resolves the factory at open() via
+    // `core::PluginRegistry::instance().get_xr_report(name)`.
+    // Default = "nimrtc_xr" (the built-in consumer).
+    // Empty string = no consumer (the pre-v1.2.0 behaviour: the XR
+    // sub-packet is recognised and dropped).
+    std::string xr_report_name = "nimrtc_xr";
 
     // ---- Scheduler plugin selection (ADR-001: resolved via PluginRegistry) ----
     //
@@ -859,12 +875,31 @@ struct NIMRTC_API_STABLE EngineConfig {
 
     // ---- RTCP XR / TMMBR (v1.2.0, session capability plan X2-X5) ------
     //
-    /** Send RFC 3611 Receiver Estimated Quality (BT=1) and DLRR
-     *  (BT=6) reports.
+    /** Send RFC 3611 Extended Reports.
      *
-     *  Default = false: an XR report is a QoE report, and a host that
-     *  does not consume QoE metrics should not pay for the packets. */
+     *  The reports carry the blocks NimRTC implements (RFC 3611 §4.4 /
+     *  §4.5 / §4.6): the **Receiver Reference Time** report (BT = 4),
+     *  the **DLRR** report (BT = 5) and the **Statistics Summary**
+     *  report (BT = 6).  The SDP carries the matching `a=rtcp-xr:`
+     *  attribute (RFC 3611 §5.1).
+     *
+     *  Default = false: an XR report is a QoE / network-statistics
+     *  report, and a host that does not consume those metrics should
+     *  not pay for the packets. */
     bool rtcp_xr_enabled = false;
+
+    /** Send TMMBR feedback (RFC 5104 §4.2.1).
+     *
+     *  A TMMBR tells the peer "you may not send me more than this".
+     *  The engine reports the bit rate its own bandwidth estimator is
+     *  currently *using*, so the peer and the engine agree on the
+     *  number: a TMMBR that reports a limit the sender does not obey
+     *  is worse than no TMMBR at all.
+     *
+     *  Default = false: the feature is opt-in, because a TMMBR changes
+     *  how the peer sends, and a host that never asked for that should
+     *  not get it. */
+    bool tmmbr_enabled = false;
 
     /** Do not send TMMBR feedback (RFC 5104).
      *
@@ -873,7 +908,10 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  engine-side switch -- when it is set, the engine sends no
      *  TMMBR, and the SDP carries no `a=rtcp-fb` entry for it either.
      *
-     *  Default = false (TMMBR is sent). */
+     *  It overrides `tmmbr_enabled`: a host that sets both gets no
+     *  TMMBR.
+     *
+     *  Default = false (TMMBR is governed by `tmmbr_enabled`). */
     bool disable_tmmbr = false;
 
     // ---- Media pacing (v1.2.0 M3, video plan P2) ----------------------
@@ -1843,6 +1881,50 @@ public:
     NIMRTC_API_UNSTABLE plugins::INetFeedback* net_feedback() noexcept { return net_feedback_.get(); }
     NIMRTC_API_UNSTABLE const plugins::INetFeedback* net_feedback() const noexcept { return net_feedback_.get(); }
 
+    // ---- XR report consumer accessor (v1.2.0, session plan X1) ---------
+    /** The `IXrReport` consumer instance (or nullptr when the consumer
+     *  was not created).  Call after open().  A host that wants the
+     *  decoded RFC 3611 report blocks reads `snapshot()` here. */
+    NIMRTC_API_UNSTABLE plugins::IXrReport* xr_report() noexcept { return xr_report_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IXrReport* xr_report() const noexcept { return xr_report_.get(); }
+
+    // ---- RTCP XR / TMMBR observability (v1.2.0, session plan X2–X5) --
+    //
+    // The four accessors below are the public face of the outbound XR
+    // and TMMBR planes.  They are counters and a limit, not a
+    // configuration surface: the host switches the features on and off
+    // through `EngineConfig`, and reads back what happened through
+    // these.
+
+    /** The tightest bit-rate limit any peer's TMMBR has asked the
+     *  engine to honour, in bits per second.
+     *
+     *  RFC 5104 §4.2.1.2: a TMMBR is a receiver's statement of the
+     *  maximum rate it supports, and the sender must obey it.  The
+     *  engine clamps its scheduler budget and its pacing rates to this
+     *  value, so the number here *is* the effective egress ceiling.
+     *
+     *  0 = no limit received (the peer's estimate governs). */
+    NIMRTC_API_UNSTABLE std::uint32_t peer_tmmbr_limit_bps() const noexcept;
+
+    /** The bit rate the last outbound TMMBR reported, in bits per
+     *  second.
+     *
+     *  This is the bandwidth estimate the engine was *using* when it
+     *  built the message (X4: the TMMBR must reflect the live BWE
+     *  target, not a stale number).  0 = no TMMBR was sent yet. */
+    NIMRTC_API_UNSTABLE std::uint32_t last_tmmbr_bps() const noexcept;
+
+    /** The number of outbound TMMBR / TMMBN messages the engine sent. */
+    NIMRTC_API_UNSTABLE std::uint64_t tmmbr_sent_count() const noexcept;
+
+    /** The number of inbound TMMBR messages the engine honoured. */
+    NIMRTC_API_UNSTABLE std::uint64_t tmmbr_received_count() const noexcept;
+
+    /** The number of outbound RFC 3611 extended reports the engine
+     *  sent (one per report, whatever the block count). */
+    NIMRTC_API_UNSTABLE std::uint64_t xr_reports_sent_count() const noexcept;
+
     NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
@@ -1922,6 +2004,12 @@ public:
         std::uint64_t dtmf_packets_malformed = 0;  // inbound packets that failed to decode
         std::uint64_t dtmf_events_delivered  = 0;  // completed events reported to the host
         std::uint8_t  dtmf_payload_type      = 0;  // the negotiated telephone-event PT
+        // ---- RTCP XR counters (v1.2.0 session plan X1, additive) --------
+        // The number of inbound RTCP XR sub-packets (payload type 207)
+        // that were routed to the XR consumer.  A peer that sends
+        // extended reports and a counter stuck at zero means the routing
+        // is not wired.
+        std::uint64_t xr_report_blocks      = 0;  // XR blocks routed to the consumer
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -2014,6 +2102,14 @@ private:
     // receiver-side network signals; the engine owns the routing and
     // the hand-off to the estimator.
     std::unique_ptr<plugins::INetFeedback> net_feedback_;
+
+    // ---- XR report consumer (v1.2.0, session plan X1) ------------------
+    //
+    // Created in init_bwe_scheduler() (called from pre_open/open) from
+    // the registry's XR slot.  It owns the decoding of the peer's
+    // RFC 3611 extended reports; the engine owns the routing of the
+    // inbound RTCP XR sub-packets into it.
+    std::unique_ptr<plugins::IXrReport> xr_report_;
 
     // ---- Adaptive audio bitrate (BWE-linked) ---------------------------
     //
@@ -2169,6 +2265,66 @@ private:
     void flush_video_feedback() noexcept;
     void observe_timeline(const rtp::PacketView& pv) noexcept;
     void maybe_send_sender_report() noexcept;
+    // ---- RTCP XR / TMMBR (v1.2.0, session capability plan X2–X5) ------
+    //
+    // The declarations use *primitive* types only (no `rtp::` structs):
+    // `engine.hpp` must not include a concrete module header (Layout
+    // Invariant 4).  The definitions live in `engine_rtcp_xr.cpp`, which
+    // is the one engine TU that links the RFC 3611 / RFC 5104 parsers.
+    /** Send the RFC 3611 extended report — the Receiver Reference Time
+     *  block (BT = 4) plus, when the peer's own reference time report
+     *  has been received, the DLRR block (BT = 5) that answers it.
+     *
+     *  Driven from `tick()`; the report rides the receiver-report
+     *  cadence (RFC 3611 §5.2). */
+    void maybe_send_extended_report() noexcept;
+    /** Send the RFC 5104 TMMBR — the "you may not send me more than
+     *  this" request, carrying the live bandwidth estimate.
+     *
+     *  Gated by `EngineConfig::tmmbr_enabled` and vetoed by
+     *  `EngineConfig::disable_tmmbr`. */
+    void maybe_send_tmmbr() noexcept;
+    /** Send the RFC 5104 TMMBN — the answer to an inbound TMMBR.
+     *
+     *  Exactly one TMMBN is sent per batch of inbound TMMBRs
+     *  (RFC 5104 §4.2.2.2), and it is sent even when the peer's
+     *  tuple was *not* accepted into the bounding set — that is what
+     *  lets a participant that missed the last TMMBN recover. */
+    void flush_tmmbn() noexcept;
+    /** Handle an inbound TMMBR (RFC 5104 §4.2.1.2): clamp the outbound
+     *  rate to the peer's limit and queue the TMMBN answer. */
+    void on_tmmbr_received(std::uint32_t sender_ssrc,
+                           std::uint32_t media_ssrc,
+                           std::uint32_t bitrate_bps) noexcept;
+    /** Parse an inbound TMMBR sub-packet and hand its entries to
+     *  `on_tmmbr_received()`.  A malformed packet is counted and
+     *  dropped — never an error on the read path. */
+    void handle_inbound_tmmbr(core::ByteSpan packet) noexcept;
+    /** Remember the peer's Receiver Reference Time report (RFC 3611
+     *  §4.4) so the engine's next DLRR can answer it (§4.5). */
+    void note_peer_reference_time(core::ByteSpan packet) noexcept;
+    /** Put one RTCP packet on the wire.
+     *
+     *  RTCP leaves the engine as SRTCP (RFC 3711 §3.4) once SRTP is
+     *  keyed — a *different* crypto context from SRTP, so
+     *  `protect_rtp()` would produce a packet the peer's
+     *  `unprotect_rtcp()` rejects.
+     *
+     *  @param ssrc  The SSRC the packet is sent under: the engine's own
+     *               RTCP SSRC for the reports it makes (RFC 3550
+     *               §6.1), the SSRC of the feedback sender for a
+     *               feedback message (RFC 4585 §6.1).
+     *  @param bytes The cleartext RTCP packet. */
+    bool send_rtcp_packet(std::uint32_t ssrc,
+                          const core::ByteBuffer& bytes) noexcept;
+    /** The SSRC the engine's RTCP reports are sent under.
+     *
+     *  RFC 3550 §6.1: the reports identify their *originator*, which is
+     *  the party making the statement — not the media SSRC of the
+     *  stream the report is about.  The value is drawn once and then
+     *  reused, so the receiver report, the extended report and the
+     *  feedback messages all come from the same reporter. */
+    std::uint32_t rtcp_reporter_ssrc() noexcept;
     void poll_ice_flap_for_rehandshake() noexcept;
     void init_bwe_scheduler() noexcept;
     void shutdown_bwe_scheduler() noexcept;

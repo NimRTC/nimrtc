@@ -73,6 +73,28 @@ void NimRTCEngine::init_bwe_scheduler() noexcept {
         }
     }
 
+    // ---- XR report consumer (v1.2.0, session plan X1) -------------------
+    //
+    // The consumer decodes the peer's RFC 3611 extended reports.  The
+    // engine's RTCP demux routes the XR sub-packets (payload type 207)
+    // into it; without a consumer the XR sub-packet is recognised and
+    // dropped, which is the pre-v1.2.0 behaviour.
+    //
+    // Failure policy: Warn, like BWE and the net-feedback collector — a
+    // missing consumer degrades to "no XR statistics" with a diagnostic,
+    // not to a failed session.
+    if (!config_.xr_report_name.empty() && !xr_report_) {
+        (void)pal::make_plugin<&pal::resolve_xr_report>(
+            config_.xr_report_name,
+            xr_report_,
+            nullptr,   // the consumer's factory takes no config
+            {.err_open_failed = core::kEngineInternal,  // unused (Warn)
+             .err_missing = core::kEngineInternal,      // unused (Warn)
+             .open_fail_mode = pal::PluginFailureMode::Warn,
+             .missing_mode = pal::PluginFailureMode::Warn,
+             .on_error = on_error_});
+    }
+
     // ---- Scheduler plugin ------------------------------------------------
     // Created and opened here; injected into ice_t_ via set_scheduler().
     // If scheduler_config.enabled is false, scheduler is skipped (direct ICE send).
@@ -208,6 +230,8 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
     };
     close_plugin(bwe_);
     close_plugin(net_feedback_);
+    // v1.2.0 (session plan X1): the XR report consumer.
+    close_plugin(xr_report_);
     close_plugin(scheduler_);
     if (ice_t_) {
         ice_t_->set_bwe(nullptr);
@@ -881,8 +905,19 @@ int NimRTCEngine::tick() noexcept {
     // when target_bps == 0 so the scheduler keeps its previous budget
     // rather than reading "0 = total sender pause" on a transient BWE
     // startup glitch.  Both pointers may be null in the "transport" profile.
+    //
+    // v1.2.0 (session plan X5): the budget is *also* clamped by the
+    // peer's TMMBR limit.  A peer that told us "you may not send me
+    // more than this" (RFC 5104 §4.2.1.2) is a constraint the engine
+    // has to honour — the TMMBN it answers with is a promise that the
+    // limit is in force, so the scheduler must not be allowed to spend
+    // more than the peer allows.  The tightest of the two wins.
     if (bwe_ && scheduler_) {
-        const std::uint32_t target_bps = bwe_->estimate().target_bitrate_bps;
+        std::uint32_t target_bps = bwe_->estimate().target_bitrate_bps;
+        const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+        if (peer_limit > 0 && (target_bps == 0 || target_bps > peer_limit)) {
+            target_bps = peer_limit;
+        }
         if (target_bps > 0) {
             scheduler_->on_bwe_update(target_bps);
         }
@@ -962,6 +997,16 @@ int NimRTCEngine::tick() noexcept {
         // jitter figures are derived from the reports it receives, so a
         // stream that never reports shows no statistics at all.
         maybe_send_receiver_report();
+        // v1.2.0 (session plan X2 / X4 / X5): the RTCP XR report, the
+        // outbound TMMBR, and the TMMBN that answers an inbound TMMBR.
+        //
+        // All three ride the receiver-report cadence (RFC 3611 §5.2,
+        // RFC 5104 §4.2.1.3) and all three are sent from here — not
+        // from the receive path — so the transport's send() is never
+        // re-entered from its recv().
+        maybe_send_extended_report();
+        maybe_send_tmmbr();
+        flush_tmmbn();
     }
     return ice_t_->recv();
 }
@@ -975,7 +1020,15 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     if (!config_.media_pacing_enabled) return;
     if (!scheduler_ || !bwe_) return;
 
-    const std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
+    // The session budget is the BWE estimate, clamped by the peer's
+    // TMMBR limit (v1.2.0, session plan X5) — the peer is the one who
+    // knows what it can receive, and the TMMBN we send is a promise
+    // that the limit is in force.
+    std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
+    const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+    if (peer_limit > 0 && (estimate == 0 || estimate > peer_limit)) {
+        estimate = peer_limit;
+    }
     if (estimate == 0) {
         // No estimate yet — the estimator has not heard from the network.
         // Reading that as "no bandwidth at all" would freeze the stream,

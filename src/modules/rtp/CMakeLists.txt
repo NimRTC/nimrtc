@@ -18,8 +18,11 @@ add_library(nimrtc_rtp STATIC
     src/parser.cpp
     src/builder.cpp
     src/rtcp.cpp             # v1.2.0 M1: RTCP compound demux (F1) + REMB (F7)
+    src/rtcp_xr.cpp          # v1.2.0 X1/X2: RFC 3611 XR blocks
+    src/rtcp_tmmbr.cpp       # v1.2.0 X3/X4: RFC 5104 TMMBR / TMMBN
     src/timeline.cpp           # ADR-017: NTP↔RTP-TS + abs-send-time helpers
     src/rtp_plugin.cpp       # adapter wrapping concrete → plugins::IRTP
+    src/xr_report_plugin.cpp # v1.2.0 X1: adapter → plugins::IXrReport
     )
 
 nimrtc_apply_options(nimrtc_rtp)

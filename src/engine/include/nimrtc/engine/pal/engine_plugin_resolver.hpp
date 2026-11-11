@@ -37,6 +37,8 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_source.hpp>
+// v1.2.0 (session capability plan X1): the RTCP Extended Report seam.
+#include <nimrtc/plugins/xr_report.hpp>
 // v0.14.0 alpha.2 seam (WebTransport / QUIC session factory).
 //
 // P1 hardening (2026-11-09): this was an #include of
@@ -108,6 +110,16 @@ resolve_scheduler(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::INetFeedbackFactory*
 resolve_net_feedback(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_net_feedback(id);
+}
+
+/** Resolve an `IXrReportFactory` by plugin id. Returns nullptr if not
+ *  registered.  Used by the engine to satisfy
+ *  `EngineConfig::xr_report_name` (default "nimrtc_xr") -- the RTCP
+ *  Extended Report consumer that decodes RFC 3611 report blocks
+ *  (v1.2.0, session capability plan X1). */
+[[nodiscard]] inline const plugins::IXrReportFactory*
+resolve_xr_report(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_xr_report(id);
 }
 
 /** Resolve an `IVideoCodecFactory` by plugin id. Returns nullptr if not registered. */

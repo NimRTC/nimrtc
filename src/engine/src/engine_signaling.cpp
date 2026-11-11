@@ -357,6 +357,61 @@ std::string NimRTCEngine::create_offer() noexcept {
         audio.rtcp_fb.push_back(pt + " transport-cc");
     }
 
+    // ---- a=rtcp-fb:<pt> ccm tmmbr (RFC 5104 §7.2) ---------------------
+    //
+    // The TMMBR codec-control message is negotiated exactly like any
+    // other feedback type: RFC 5104 §7.2 gives it the generic "ccm"
+    // form with the "tmmbr" parameter —
+    //
+    //     a=rtcp-fb:<pt> ccm tmmbr
+    //
+    // — and says that "only the joint subset of CCM parameters from
+    // the offer and answer may be used".  So the attribute is put in
+    // the offer only when the host actually wants TMMBR: an offer that
+    // declares it and an answer that does not would bind us out of
+    // sending one (RFC 5104 §7.2), and an offer that does not
+    // declare it makes the engine's own TMMBR un-negotiable.
+    //
+    // The payload type is the audio one: the engine's TMMBR names the
+    // peer's audio stream (RFC 5104 §4.2.1.2 — the tuple is about the
+    // media source it applies to).
+    if (config_.tmmbr_enabled && !config_.disable_tmmbr) {
+        audio.rtcp_fb.push_back(pt + " ccm tmmbr");
+    }
+
+    // ---- a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt (RFC 3611 §5.1) -
+    //
+    // The XR negotiation attribute names the report blocks the peer
+    // may expect:
+    //
+    //   - "rcvr-rtt=all"       — the Receiver Reference Time block
+    //                            (BT = 4) and the DLRR block (BT = 5)
+    //                            that answers the peer's own report;
+    //   - "stat-summary=loss,jitt" — the Statistics Summary block
+    //                            (BT = 6), with the two fields the
+    //                            engine actually measures.
+    //
+    // RFC 3611 §5.1: "When the 'rtcp-xr' attribute is present,
+    // participants SHOULD NOT send XR blocks other than the ones
+    // indicated by the parameters" — so the attribute is emitted
+    // exactly when the engine will send those blocks, and not at all
+    // when XR is off (the host pays for the packets, so the default
+    // is silence).
+    //
+    // The attribute is media-level; it is carried by the audio
+    // m-section because the engine's Statistics Summary block
+    // describes the *inbound audio* stream (the engine reports the
+    // sequence space, loss and jitter of the audio source).
+    if (config_.rtcp_xr_enabled) {
+        audio.rtcp_xr          = "rcvr-rtt=all stat-summary=loss,jitt";
+        audio.rtcp_xr_present  = true;
+        // "rcvr-rtt" is collaborative (RFC 3611 §5.1): our offer
+        // declares that we are prepared to receive a Receiver Reference
+        // Time Report and to answer it with a DLRR.  The flag authorises
+        // the DLRR half of the exchange.
+        impl_->local_xr_rcvr_rtt = true;
+    }
+
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
     //
     // a=extmap:4 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
@@ -838,6 +893,69 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             std::string("engine[bwe]: peer feedback capabilities: transport-cc=") +
             (caps.transport_cc ? "yes" : "no") + ", goog-remb=" +
             (caps.remb ? "yes" : "no"));
+    }
+
+    // ---- The negotiated RTCP XR / TMMBR capabilities (v1.2.0, X2–X5) --
+    //
+    // Both protocols make the *negotiated* description the authority on
+    // what may be sent, so the engine reads the peer's description here
+    // and the send paths consult the flags afterwards:
+    //
+    //   * RFC 3611 §5.1: "When the 'rtcp-xr' attribute is present,
+    //     participants SHOULD NOT send XR blocks other than the ones
+    //     indicated by the parameters."  So the XR path is silent unless
+    //     the peer named the format we want to send.
+    //   * RFC 5104 §7.2: "both offerer and answerer MUST NOT use any
+    //     feedback messages other than what both sides have explicitly
+    //     indicated as being supported.  In other words, only the joint
+    //     subset of CCM parameters from the offer and answer may be
+    //     used."  So the TMMBR path is silent unless the peer named
+    //     "ccm tmmbr" *and* the engine's own configuration keeps TMMBR
+    //     enabled.
+    //
+    // The rule is symmetric in both directions: the peer's description
+    // is its offer when we are the answerer and its answer when we are
+    // the offerer, and in either case its "stat-summary" asks *us* for
+    // the blocks (RFC 3611 §5.2 — whoever writes the parameter is
+    // asking the other party to send them).
+    {
+        impl_->peer_xr_rcvr_rtt = false;
+        impl_->peer_xr_stat_summary = false;
+        impl_->peer_xr_stat_summary_flags.clear();
+        impl_->peer_tmmbr_negotiated = false;
+
+        const bool want_tmmbr =
+            config_.tmmbr_enabled && !config_.disable_tmmbr;
+
+        for (const auto& m : remote.media) {
+            if (m.type != sdp::MediaType::Audio) continue;
+
+            if (m.rtcp_xr_present) {
+                impl_->peer_xr_rcvr_rtt =
+                    detail::rtcp_xr_has_format(m.rtcp_xr, "rcvr-rtt");
+                impl_->peer_xr_stat_summary =
+                    detail::rtcp_xr_has_format(m.rtcp_xr, "stat-summary");
+                // The field indicators the peer asked for, narrowed to the
+                // ones the engine produces (RFC 3611 §5.1 — the list says
+                // which fields SHOULD be included in the blocks we send).
+                impl_->peer_xr_stat_summary_flags =
+                    detail::rtcp_xr_stat_summary_supported(m.rtcp_xr);
+            }
+
+            for (const std::string& entry : m.rtcp_fb) {
+                if (detail::rtcp_fb_has_ccm_param(entry, "tmmbr")) {
+                    impl_->peer_tmmbr_negotiated = want_tmmbr;
+                }
+            }
+        }
+
+        core::log::Logger::instance().info(
+            std::string("engine[xr]: negotiated — rcvr-rtt=") +
+            (impl_->peer_xr_rcvr_rtt ? "yes" : "no") +
+            ", stat-summary=" +
+            (impl_->peer_xr_stat_summary ? "yes" : "no") +
+            ", tmmbr=" +
+            (impl_->peer_tmmbr_negotiated ? "yes" : "no"));
     }
 
     // ---- Negotiated payload-type routing (B-4) --------------------------
@@ -1652,14 +1770,71 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // The payload type is the *negotiated* one (the answer's
             // format list), not the peer's: RFC 4585 §4.1 scopes the
             // attribute to a payload type within its m-section.
+            //
+            // The filter is the CCM-aware one (v1.2.0, session plan X5):
+            // RFC 5104 §7.2 removes the *CCM parameters* the answerer
+            // does not support — not the whole entry — so an offer's
+            // "111 ccm fir tmmbr" becomes "111 ccm fir" when the TMMBR
+            // is switched off, and the "tmmbr" parameter disappears
+            // from the negotiated set (which is what binds the engine
+            // out of sending one).
             if (impl_->negotiated_audio_pt != 0) {
+                const bool want_tmmbr =
+                    config_.tmmbr_enabled && !config_.disable_tmmbr;
                 for (const std::string& entry : rm.rtcp_fb) {
-                    if (!detail::rtcp_fb_entry_supported(entry)) continue;
-                    const std::string_view types = detail::rtcp_fb_types(entry);
+                    const std::string types =
+                        detail::filter_rtcp_fb_types(entry, want_tmmbr);
                     if (types.empty()) continue;
                     am.rtcp_fb.push_back(std::to_string(impl_->negotiated_audio_pt) +
-                                         " " + std::string(types));
+                                         " " + types);
                 }
+            }
+
+            // ---- a=rtcp-xr echo (RFC 3611 §5.1 / §5.2) ------------------
+            //
+            // The answer carries the XR formats the engine both
+            // understands and produces, intersected with the offer's
+            // set (RFC 3264 §6.1).  RFC 3611 §5.2 is explicit about the
+            // two halves:
+            //
+            //   * "rcvr-rtt" is *collaborative* — the answerer's copy
+            //     declares "I can receive the initiator and send the
+            //     response", so we echo it when the offer named it;
+            //   * "stat-summary" is *unilateral* — the peer's copy asks
+            //     us for the blocks, so the answer's copy asks the peer
+            //     for them; we echo the indicators we produce (loss and
+            //     jitter), narrowed to what the offer asked for.
+            //
+            // An offer with no "rtcp-xr" at all gets no answer copy:
+            // RFC 3611 §5.1 says the attribute is not to be supplied when
+            // XR is not used from the start of the session.
+            if (rm.rtcp_xr_present) {
+                am.rtcp_xr_present = true;
+                if (config_.rtcp_xr_enabled) {
+                    std::string xr;
+                    if (detail::rtcp_xr_has_format(rm.rtcp_xr, "rcvr-rtt")) {
+                        xr = "rcvr-rtt=all";
+                        // Our answer echoes the collaborative parameter,
+                        // so we are prepared to receive the peer's Receiver
+                        // Reference Time Report and to answer it with a
+                        // DLRR (RFC 3611 §5.2).  The flag authorises the
+                        // DLRR half of the exchange.
+                        impl_->local_xr_rcvr_rtt = true;
+                    }
+                    const std::string stat =
+                        detail::rtcp_xr_stat_summary_supported(rm.rtcp_xr);
+                    if (!stat.empty()) {
+                        if (!xr.empty()) xr += ' ';
+                        xr += "stat-summary=" + stat;
+                    }
+                    am.rtcp_xr = xr;
+                }
+                // Otherwise the attribute is present but empty: RFC 3611
+                // §5.2 — "If a participant receives an SDP offer and
+                // understands the 'rtcp-xr' attribute but does not wish
+                // to implement XR functionality offered, its answer
+                // SHOULD include an 'rtcp-xr' attribute without
+                // parameters."
             }
 
             // a=extmap:<id> urn:ietf:params:rtp-hdrext:ssrc-audio-level

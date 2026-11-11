@@ -37,6 +37,12 @@ add_library(nimrtc_engine STATIC
     # slot here, and the send / receive paths of the in-band event
     # stream live in this TU.
     src/engine_dtmf.cpp
+    # v1.2.0 (session capability plan X2–X5): the RFC 3611 RTCP XR
+    # report and the RFC 5104 TMMBR / TMMBN plane.  This is the one
+    # engine TU that links the XR / TMMBR parsers and builders (the
+    # public header stays free of concrete module includes —
+    # Layout Invariant 4).
+    src/engine_rtcp_xr.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

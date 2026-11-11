@@ -725,6 +725,19 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
     return 0;
 }
 
+int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
+                                  std::string_view username,
+                                  std::string_view password,
+                                  plugins::TurnTransport transport) noexcept {
+    if (!ice_t_) {
+        core::log::Logger::instance().error(
+            "add_turn_server: ICE transport not yet created — call pre_open() first");
+        return -1;
+    }
+    ice_t_->add_turn_server(host, port, username, password, transport);
+    return 0;
+}
+
 
 // ---------------------------------------------------------------------------
 // ICE restart (RFC 8445 §9.1.1.1)

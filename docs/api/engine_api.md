@@ -284,11 +284,35 @@ connectivity.
 int add_turn_server(std::string_view host, std::uint16_t port,
                     std::string_view username,
                     std::string_view password) noexcept;
+
+int add_turn_server(std::string_view host, std::uint16_t port,
+                    std::string_view username,
+                    std::string_view password,
+                    plugins::TurnTransport transport) noexcept;
 ```
 
 Adds a TURN relay for candidate gathering. Requires `pre_open()`
 first. Returns 0 on success; non-zero if the ICE transport is not
 yet created.
+
+The first overload reaches the server over plain TURN/UDP. The second
+one selects the control-connection transport explicitly:
+
+| `plugins::TurnTransport` | Meaning |
+| --- | --- |
+| `Udp` | TURN over UDP (default, RFC 5766) |
+| `Tcp` | TURN over TCP, RFC 8656 §12 self-delimiting framing |
+| `Tls` | TURN over TLS, same framing over a TLS stream |
+
+`Tcp` is what enterprise networks need when UDP is blocked. `Tls`
+adds transport security on top of the TURN channel; when the
+underlying vendor build cannot negotiate TLS it falls back to plain
+TCP.
+
+The plugin-level seam exposes the same choice via
+`plugins::IICETransport::add_turn_server(...)` plus
+`turn_transport_supported(TurnTransport)`, so a host application can
+query whether a transport is usable before committing to it.
 
 ---
 

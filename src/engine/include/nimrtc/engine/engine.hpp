@@ -1574,6 +1574,29 @@ public:
                         std::string_view username,
                         std::string_view password) noexcept;
 
+    /** Add a TURN server with an explicit transport.
+     *
+     *  The overload above reaches the server over plain TURN/UDP.  This one
+     *  lets the host pick TURN over TCP (RFC 8656 § 12), which is what
+     *  traverses an enterprise firewall that only lets TCP through: the
+     *  *control connection* to the TURN server is a TCP stream, while the
+     *  relayed transport address allocated by the server stays a UDP
+     *  transport towards the peer.
+     *
+     *  Same precondition as the UDP overload: call before open().
+     *
+     *  @note TURN over TLS (RFC 6062) is accepted and reported, but the
+     *        underlying vendor build does not negotiate it yet; it falls
+     *        back to plain TCP.
+     *
+     *  @return  0 on success; non-zero if the ICE transport is not yet
+     *           created (call pre_open() first).
+     */
+    NIMRTC_API_STABLE int add_turn_server(std::string_view host, std::uint16_t port,
+                        std::string_view username,
+                        std::string_view password,
+                        plugins::TurnTransport transport) noexcept;
+
     // --- ICE restart (RFC 8445 §9.1.1.1) ---------------------------------
     //
     // A restart re-runs the whole ICE session with a fresh credential pair

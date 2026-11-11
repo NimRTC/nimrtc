@@ -420,6 +420,17 @@ public:
      *        `turn_transport_supported()`. */
     void add_turn_server(const TurnServer& server) noexcept;
 
+    /** @override plugins::IICETransport
+     *
+     *  Selects the transport the TURN server is reached over. */
+    void add_turn_server(std::string_view host, std::uint16_t port,
+                         std::string_view username,
+                         std::string_view password,
+                         plugins::TurnTransport transport) noexcept override;
+
+    /** @override plugins::IICETransport */
+    bool turn_transport_supported(plugins::TurnTransport transport) const noexcept override;
+
     /** True when the vendored libjuice build can actually speak the
      *  given TURN transport.  `Tls` is false today: the vendored
      *  libjuice build has no TLS code path for TURN (RFC 6062). */

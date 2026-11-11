@@ -44,8 +44,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -179,6 +182,77 @@ IceConfig make_agent_config() {
     cfg.local_port_range_begin = kAgentPortBegin;
     cfg.local_port_range_end   = kAgentPortEnd;
     return cfg;
+}
+
+// -----------------------------------------------------------------------------
+// A receive-side collector.
+//
+// libjuice dispatches inbound packets on its own thread; the NimRTC wrapper
+// queues them and hands them to the application from `recv()`.  The
+// collector therefore has to be fed by the test's own pump loop.
+// -----------------------------------------------------------------------------
+class RxCollector {
+public:
+    void on_recv(nimrtc::plugins::BufferView v) {
+        std::lock_guard<std::mutex> lk(mu_);
+        rx_.emplace_back(v.data(), v.data() + v.size());
+        cv_.notify_all();
+    }
+
+    bool wait_one(std::vector<std::uint8_t>& out,
+                  std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mu_);
+        if (!cv_.wait_for(lk, timeout, [this] { return !rx_.empty(); })) {
+            return false;
+        }
+        out = std::move(rx_.front());
+        rx_.pop_front();
+        return true;
+    }
+
+private:
+    std::mutex              mu_;
+    std::condition_variable cv_;
+    std::deque<std::vector<std::uint8_t>> rx_;
+};
+
+// Build the list of relayed candidate lines of the peer.
+//
+// Why the filtering matters:
+//
+// On the loopback interface a host↔host pair is perfectly reachable, so an
+// unrestricted offer/answer would pair the two agents directly over UDP and
+// the TURN allocation would never carry a single byte.  The only way to
+// force the traffic through the relay is to advertise *only* the relayed
+// candidates to the peer, which leaves the relayed↔relayed pair as the sole
+// candidate pair in the checklist.
+//
+// The credentials are taken from the pinned ones (IceConfig::local_ufrag /
+// local_password), so both agents agree on them without depending on the
+// order in which the relay candidates arrive.
+std::vector<std::string> relay_candidate_lines(const IceTransport& peer) {
+    std::vector<std::string> out;
+    for (const auto& line : peer.gathered_local_candidates()) {
+        auto c = nimrtc::ice::parse_candidate(line);
+        if (c && c->type == CandidateType::Relay) {
+            out.push_back(line);
+        }
+    }
+    return out;
+}
+
+// The host address a transport actually bound to.
+//
+// libjuice binds the UDP socket to IceConfig::bind_address and reports that
+// very address as the host candidate.  A mismatch therefore means the bind
+// did not happen and the transport fell back to "any address" — which the
+// end-to-end relay test must not silently accept.
+std::string host_address_of(const IceTransport& t) {
+    for (const auto& line : t.gathered_local_candidates()) {
+        auto c = nimrtc::ice::parse_candidate(line);
+        if (c && c->type == CandidateType::Host) return c->host;
+    }
+    return {};
 }
 
 } // namespace
@@ -316,6 +390,48 @@ TEST(TurnRelay, TransportSurfaceReportsSupportedTransports) {
     EXPECT_FALSE(IceTransport::turn_transport_supported(TurnTransport::Tls));
 }
 
+// The plugin seam (plugins::IICETransport) and the engine-facing API must
+// be able to select TURN over TCP too — otherwise the capability is only
+// reachable by an application that instantiates the concrete ICE transport
+// directly, and the engine (which only ever sees the interface) could
+// never use it.
+TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
+    // The module-level and the plugin-level enums must stay in lockstep,
+    // because the implementation casts between them.
+    static_assert(static_cast<int>(TurnTransport::Udp) ==
+                      static_cast<int>(nimrtc::plugins::TurnTransport::Udp),
+                  "TurnTransport::Udp must match");
+    static_assert(static_cast<int>(TurnTransport::Tcp) ==
+                      static_cast<int>(nimrtc::plugins::TurnTransport::Tcp),
+                  "TurnTransport::Tcp must match");
+    static_assert(static_cast<int>(TurnTransport::Tls) ==
+                      static_cast<int>(nimrtc::plugins::TurnTransport::Tls),
+                  "TurnTransport::Tls must match");
+
+    // The concrete transport must answer through the plugin seam too.
+    IceTransport t{make_agent_config()};
+    EXPECT_TRUE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tcp));
+    EXPECT_FALSE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tls));
+
+    // And the plugin-seam overload must actually reach the TURN server
+    // over TCP: the relay candidate it produces is the observable proof.
+    TurnServerFixture server(kTurnTcpPort);
+    ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
+
+    nimrtc::plugins::IICETransport* plugin = &t;
+    plugin->add_turn_server("127.0.0.1", kTurnTcpPort, kTurnUser, kTurnPass,
+                            nimrtc::plugins::TurnTransport::Tcp);
+
+    ASSERT_EQ(t.open(), 0u) << "open() failed";
+
+    const auto relays = wait_for_relay_candidate(t, 15s);
+    ASSERT_FALSE(relays.empty())
+        << "the plugin seam could not select TURN over TCP; the relay "
+           "candidate was not gathered";
+
+    t.close();
+}
+
 // -----------------------------------------------------------------------------
 // TURN over TCP (RFC 8656 section 12)
 // -----------------------------------------------------------------------------
@@ -384,4 +500,255 @@ TEST(TurnTcp, UnreachableTcpTurnServerProducesNoRelayCandidate) {
     EXPECT_TRUE(relay_candidates(t).empty());
 
     t.close();
+}
+
+// -----------------------------------------------------------------------------
+// End-to-end data relay over the TURN-over-TCP control connection
+// -----------------------------------------------------------------------------
+//
+// This is the test that turns "TURN over TCP is configurable" into "TURN over
+// TCP actually carries the media".  It exercises the whole chain:
+//
+//   NimRTC IceTransport
+//     -> libjuice agent (relayed local candidate)
+//       -> TURN/TCP control connection (RFC 8656 §12.4 framing)
+//         -> in-tree TURN server (RFC 8656 §12.4/§12.5 framing)
+//           -> relayed transport address (UDP)
+//             -> peer agent
+//
+// Both agents are configured with the *same* TURN server, so each of them
+// holds its own allocation; the traffic between them therefore has to be
+// relayed by the server (relayed↔relayed candidate pair).
+//
+// The test asserts three things:
+//
+//   1. Both agents gather a relayed candidate over the TCP control
+//      connection.
+//   2. The selected candidate pair is the relayed one on *both* sides, i.e.
+//      the connection really is relayed and not a direct host↔host pair.
+//   3. Application data flows in both directions through the relay.
+//
+// The last point is the one that matters for the capability claim: the
+// relayed data is carried as ChannelData messages over the TCP control
+// connection, so a bug in the RFC 8656 §12.5 padding (the payload must be
+// padded to a 4-byte boundary, and the padding must *not* be reflected in the
+// Length field) shows up here as a corrupted or missing payload.
+
+TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
+    if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
+
+    // The server listens on both UDP and TCP; the clients use the TCP
+    // control connection.
+    TurnServerFixture server(kTurnTcpPort);
+    ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
+
+    // Pinned credentials: the two agents need to agree on them before the
+    // candidates are exchanged, and pinning them lets the test build the
+    // remote descriptions deterministically.
+    IceConfig cfg_a = make_agent_config();
+    cfg_a.local_ufrag    = "ufragTurnTcpA0000000";
+    cfg_a.local_password = "pwdTurnTcpA00000000000000000";
+
+    IceConfig cfg_b = make_agent_config();
+    cfg_b.role          = Role::Controlled;
+    cfg_b.local_ufrag    = "ufragTurnTcpB0000000";
+    cfg_b.local_password = "pwdTurnTcpB00000000000000000";
+
+    // The two agents must live on *different* loopback addresses.
+    //
+    // The reason is a TURN subtlety (RFC 5766 §8): a permission is granted
+    // per IP address, not per address *and* port.  If both agents share
+    // 127.0.0.1, the permission the peer installs for the relayed address
+    // (127.0.0.1) also covers our own host socket, so the TURN server
+    // forwards the *direct* host↔host traffic into the peer's allocation.
+    // The direct pair then succeeds and — being the higher-priority pair —
+    // wins over the relayed one, so the relay never carries the data and
+    // the test would verify the wrong path.
+    //
+    // With 127.0.0.2 and 127.0.0.3 the host sockets are no longer covered
+    // by the peer's permission, so the direct pair cannot succeed and the
+    // relayed↔relayed pair is the only viable one.
+    cfg_a.bind_address = "127.0.0.2";
+    cfg_b.bind_address = "127.0.0.3";
+
+    // Disjoint local port ranges, so the two agents do not share a socket.
+    cfg_a.local_port_range_begin = 64200;
+    cfg_a.local_port_range_end   = 64249;
+    cfg_b.local_port_range_begin = 64250;
+    cfg_b.local_port_range_end   = 64299;
+
+    IceTransport a{cfg_a};
+    IceTransport b{cfg_b};
+
+    RxCollector rx_a, rx_b;
+    a.set_callbacks(
+        [&](nimrtc::plugins::BufferView v) { rx_a.on_recv(v); },
+        [](nimrtc::plugins::Status, std::string_view) {});
+    b.set_callbacks(
+        [&](nimrtc::plugins::BufferView v) { rx_b.on_recv(v); },
+        [](nimrtc::plugins::Status, std::string_view) {});
+
+    for (const auto& t : {TurnTransport::Tcp}) {
+        TurnServer ts;
+        ts.host = "127.0.0.1";
+        ts.port = kTurnTcpPort;
+        ts.username = kTurnUser;
+        ts.password = kTurnPass;
+        ts.transport = t;
+        a.add_turn_server(ts);
+        b.add_turn_server(ts);
+    }
+
+    // ---- Gather the relay candidates --------------------------------------
+    //
+    // The remote descriptions are installed *before* open() so that libjuice
+    // picks the ICE roles correctly (the answerer must be CONTROLLED), but
+    // they only carry the credentials at this point: the relayed candidates
+    // do not exist yet.
+    const std::string creds_a = "a=ice-ufrag:" + cfg_a.local_ufrag + "\r\n" +
+                                "a=ice-pwd:" + cfg_a.local_password + "\r\n";
+    const std::string creds_b = "a=ice-ufrag:" + cfg_b.local_ufrag + "\r\n" +
+                                "a=ice-pwd:" + cfg_b.local_password + "\r\n";
+
+    ASSERT_EQ(b.set_remote_description(creds_a), nimrtc::plugins::kOk);
+    ASSERT_EQ(a.set_remote_description(creds_b), nimrtc::plugins::kOk);
+
+    ASSERT_EQ(a.open(), 0u) << "A.open() failed";
+    ASSERT_EQ(b.open(), 0u) << "B.open() failed";
+
+    const auto relays_a = wait_for_relay_candidate(a, 15s);
+    const auto relays_b = wait_for_relay_candidate(b, 15s);
+
+    ASSERT_FALSE(relays_a.empty())
+        << "A gathered no relay candidate over the TURN-over-TCP connection";
+    ASSERT_FALSE(relays_b.empty())
+        << "B gathered no relay candidate over the TURN-over-TCP connection";
+
+    // The agents really have to sit on their own loopback addresses;
+    // otherwise the direct host↔host pair would shadow the relayed one and
+    // the test would silently verify the wrong path.
+    EXPECT_EQ(host_address_of(a), cfg_a.bind_address)
+        << "A did not bind to its own loopback address";
+    EXPECT_EQ(host_address_of(b), cfg_b.bind_address)
+        << "B did not bind to its own loopback address";
+
+    // The two allocations must have distinct relayed addresses, otherwise
+    // the relay could not tell the two peers apart.
+    EXPECT_NE(relays_a.front().port, relays_b.front().port)
+        << "both agents got the same relayed address";
+
+    // ---- Exchange the relayed candidates -----------------------------------
+    //
+    // Only the relayed candidates are offered, so the checklist contains the
+    // relayed↔relayed pair and nothing else.  A direct host↔host pair would
+    // otherwise win on the loopback interface and the relay would stay idle.
+    //
+    // The candidates are added one by one rather than through a second
+    // set_remote_description(): libjuice ignores a remote description whose
+    // credentials are unchanged ("Remote description is already set"), so
+    // the second call would silently drop the candidates.
+    for (const auto& line : relay_candidate_lines(b)) {
+        ASSERT_EQ(a.add_remote_candidate(line), nimrtc::plugins::kOk)
+            << "A rejected B's relayed candidate: " << line;
+    }
+    for (const auto& line : relay_candidate_lines(a)) {
+        ASSERT_EQ(b.add_remote_candidate(line), nimrtc::plugins::kOk)
+            << "B rejected A's relayed candidate: " << line;
+    }
+
+    // ---- Wait for the relayed pair to be selected --------------------------
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    bool connected = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        a.recv();
+        b.recv();
+        const auto sa = a.state();
+        const auto sb = b.state();
+        if ((sa == nimrtc::ice::IceState::Connected || sa == nimrtc::ice::IceState::Completed) &&
+            (sb == nimrtc::ice::IceState::Connected || sb == nimrtc::ice::IceState::Completed)) {
+            connected = true;
+            break;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+
+    if (!connected) {
+        std::fprintf(stderr, "[turn-tcp] A state=%d B state=%d\n",
+                     static_cast<int>(a.state()), static_cast<int>(b.state()));
+    }
+    ASSERT_TRUE(connected)
+        << "the relayed candidate pair was never selected; the TURN-over-TCP "
+           "data path did not come up";
+
+    // The selected pair must be the relayed one on both sides — otherwise
+    // the test would have passed over a direct path.
+    const auto sel_a_local  = a.selected_local();
+    const auto sel_a_remote = a.selected_remote();
+    const auto sel_b_local  = b.selected_local();
+    const auto sel_b_remote = b.selected_remote();
+
+    ASSERT_TRUE(sel_a_local.has_value());
+    ASSERT_TRUE(sel_a_remote.has_value());
+    ASSERT_TRUE(sel_b_local.has_value());
+    ASSERT_TRUE(sel_b_remote.has_value());
+
+    EXPECT_EQ(sel_a_local->type, CandidateType::Relay)
+        << "A's selected local candidate is not the relayed one";
+    EXPECT_EQ(sel_a_remote->type, CandidateType::Relay)
+        << "A's selected remote candidate is not the relayed one";
+    EXPECT_EQ(sel_b_local->type, CandidateType::Relay)
+        << "B's selected local candidate is not the relayed one";
+    EXPECT_EQ(sel_b_remote->type, CandidateType::Relay)
+        << "B's selected remote candidate is not the relayed one";
+
+    // ---- A → B -------------------------------------------------------------
+    const std::string payload = "ping-over-turn-tcp";
+    const auto bytes = reinterpret_cast<const std::uint8_t*>(payload.data());
+    nimrtc::plugins::BufferView view{bytes, payload.size()};
+    ASSERT_EQ(a.send(view), 0u) << "A.send() failed over the TURN/TCP relay";
+
+    std::vector<std::uint8_t> got;
+    for (int i = 0; i < 60 && got.empty(); ++i) {
+        a.recv();
+        b.recv();
+        std::this_thread::sleep_for(50ms);
+        std::vector<std::uint8_t> tmp;
+        if (rx_b.wait_one(tmp, 1ms)) {
+            got = std::move(tmp);
+            break;
+        }
+    }
+    ASSERT_FALSE(got.empty())
+        << "B did not receive the packet relayed over the TURN/TCP control "
+           "connection";
+    EXPECT_EQ(std::string(got.begin(), got.end()), payload);
+
+    // ---- B → A -------------------------------------------------------------
+    // The payload length is deliberately not a multiple of four: over TCP the
+    // ChannelData payload has to be padded to a 4-byte boundary (RFC 8656
+    // §12.5), and the receiver must strip that padding again.  A payload
+    // that is already 4-byte aligned would not exercise the padding path.
+    const std::string payload2 = "pong-over-turn-tcp-12345";
+    const auto bytes2 = reinterpret_cast<const std::uint8_t*>(payload2.data());
+    nimrtc::plugins::BufferView view2{bytes2, payload2.size()};
+    ASSERT_EQ(b.send(view2), 0u) << "B.send() failed over the TURN/TCP relay";
+
+    std::vector<std::uint8_t> got2;
+    for (int i = 0; i < 60 && got2.empty(); ++i) {
+        a.recv();
+        b.recv();
+        std::this_thread::sleep_for(50ms);
+        std::vector<std::uint8_t> tmp;
+        if (rx_a.wait_one(tmp, 1ms)) {
+            got2 = std::move(tmp);
+            break;
+        }
+    }
+    ASSERT_FALSE(got2.empty())
+        << "A did not receive the packet relayed over the TURN/TCP control "
+           "connection";
+    EXPECT_EQ(std::string(got2.begin(), got2.end()), payload2);
+
+    a.close();
+    b.close();
 }

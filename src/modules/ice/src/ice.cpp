@@ -905,6 +905,30 @@ bool IceTransport::turn_transport_supported(TurnTransport transport) noexcept {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Plugin seam (plugins::IICETransport)
+// ---------------------------------------------------------------------------
+
+void IceTransport::add_turn_server(std::string_view host,
+                                   std::uint16_t port,
+                                   std::string_view username,
+                                   std::string_view password,
+                                   plugins::TurnTransport transport) noexcept {
+    // The plugin-layer enum mirrors the module-layer one value for value,
+    // so the cast is a plain reinterpretation of the same three cases.
+    TurnServer ts;
+    ts.host = std::string(host);
+    ts.port = port;
+    ts.username = std::string(username);
+    ts.password = std::string(password);
+    ts.transport = static_cast<TurnTransport>(transport);
+    add_turn_server(ts);
+}
+
+bool IceTransport::turn_transport_supported(plugins::TurnTransport transport) const noexcept {
+    return turn_transport_supported(static_cast<TurnTransport>(transport));
+}
+
 IceConfig::Mode IceTransport::resolved_mode() const noexcept {
     return resolve_mode(impl_->config);
 }

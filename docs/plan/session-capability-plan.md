@@ -247,7 +247,7 @@ Landing-site markers follow `video-pipeline-v2-plan.md`: `P` = `src/plugins/`,
 | **X2** | **XR 块构造**：引擎能生成 Receiver Reference Time、DLRR 与 Statistics Summary 报告并发出。 | `M` + `E` | 引擎能发出可被对端解析的 XR 报告；DLRR 的子报告时间戳正确 |
 | **X3** | **TMMBR 构造与解析**：实现 RTPFB FMT=3（TMMBR）与 FMT=4（TMMBN）的载荷，处理 RFC 5104 §4 的 ssrc / bitrate 对列表。 | `M` | 一个带多个 (ssrc, bitrate) 对的 TMMBR 能被往返构造与解析，结果一致 |
 | **X4** | **TMMBR 与码率控制器的接线**：引擎发出的 TMMBR 必须反映**当前实际生效的码率**，与 BWE 的估计一致——否则对端会按一个我们并未遵守的码率调整。 | `E` | 引擎发出的 TMMBR 携带的码率与 BWE 当前的 `target_bitrate_bps` 一致；带宽下降后发出的 TMMBR 随之下降 |
-| **X5** | **`disable_tmmbr` 开关接通**：把 `plugins::SdpCodecConfig::disable_tmmbr`（目前是死字段）接到引擎的 munging / 发送路径上，使宿主能真正关闭 TMMBR。 | `E` + `M` | 设置该开关后引擎不再发出 TMMBR；未设置时行为不变 |
+| **X5** | **`disable_tmmbr` 开关接通**：把 `plugins::SdpCodecConfig::disable_tmmbr`（目前是死字段）接到引擎的 munging / 发送路径上，使宿主能真正关闭 TMMBR。同时新增 `EngineConfig::tmmbr_enabled`（默认 `false`）——**TMMBR 是显式 opt-in**：`tmmbr_enabled=false` 时引擎一条 TMMBR 都不发，`disable_tmmbr` 覆盖 `tmmbr_enabled`（两者同设为真 → 完全关闭）。入站方向**完整执行**：解析对端 TMMBR → 回 TMMBN + 把本端发送码率上限压到对端给的值（**编码器、pacing、调度器预算三处都压**，见 OD-E 决定 3）。 | `E` + `M` | 设置 `disable_tmmbr` 后引擎不再发出 TMMBR；未开启 `tmmbr_enabled` 时行为不变（一条都不发）；入站 TMMBR 会收紧 `peer_tmmbr_limit_bps()` 并触发 TMMBN；入站 TMMBR 会把**编码器**码率压到限额以下（**包括压到 `audio_min_bitrate_bps` 以下**） |
 | **X6** | **文档口径**：`docs/api/engine_api.md` 中对 RTCP 反馈面的描述要写明支持哪些 PT 与哪些块类型，避免宿主误以为 XR 已被完整支持。 | `D` | 文档中的 RTCP 支持矩阵与代码一致 |
 
 > **X1 已落地（v1.2.0，2026-11-11）。** 验证矩阵：
@@ -269,13 +269,29 @@ Landing-site markers follow `video-pipeline-v2-plan.md`: `P` = `src/plugins/`,
 > | **X2** | XR 块的构造（`rtp::build_xr` / `build_xr_receiver_reference_time` / `build_xr_dlrr` / `build_xr_statistics_summary`）；引擎的 `maybe_send_extended_report()` 按 RTCP 间隔发出 BT=4 / BT=5 / BT=6 | `src/modules/rtp/tests/test_rtcp_xr.cpp`（线格式）+ `tests/test_engine_xr_report.cpp`（引擎面）+ `tests/test_engine_xr_tmmbr.cpp`（**线上字节**：RRTR 存在、DLRR 的 LRR / DLRR 正确、Statistics Summary 只带对端点名的字段） |
 > | **X3** | TMMBR / TMMBN 的构造与解析（RTPFB FMT=3 / FMT=4，RFC 5104 §4.2）；FCI 条目的 (ssrc, bitrate) 列表 | `src/modules/rtp/tests/test_rtcp_xr.cpp` |
 > | **X4** | 引擎的 TMMBR 携带 `bwe_->estimate().target_bitrate_bps`——即**当前实际生效**的码率，与 BWE 一致；码率变化时在下一个 RTCP 槽位重发，未变化时每 5 个间隔刷新一次 | `tests/test_engine_tmmbr.cpp` + `tests/test_engine_xr_tmmbr.cpp`（线上 TMMBR 的 FCI 码率 == BWE 目标码率） |
-> | **X5** | `plugins::SdpCodecConfig::disable_tmmbr` 的死字段被引擎侧 `EngineConfig::disable_tmmbr` 接管；入站 TMMBR → `peer_tmmbr_limit_bps()` 收紧调度器预算与 pacing 速率，并回 TMMBN 确认 bounding set（RFC 5104 §4.2.2.2） | `tests/test_engine_tmmbr.cpp` + `tests/test_engine_xr_tmmbr.cpp`（TMMBN 的 owner SSRC 与"一批 TMMBR 只回一条 TMMBN"） |
+> | **X5** | `plugins::SdpCodecConfig::disable_tmmbr` 的死字段被引擎侧 `EngineConfig::disable_tmmbr` 接管；入站 TMMBR → `peer_tmmbr_limit_bps()` 收紧调度器预算、pacing 速率**与音频编码器**，并回 TMMBN 确认 bounding set（RFC 5104 §4.2.2.2）；对端限额**覆盖** `audio_min_bitrate_bps` 本地下限（OD-E 决定 3，peer-wins），且即使 `audio_bitrate_adaptive = false` 也生效 | `tests/test_engine_tmmbr.cpp` + `tests/test_engine_xr_tmmbr.cpp`（TMMBN 的 owner SSRC 与"一批 TMMBR 只回一条 TMMBN"）+ `tests/test_engine_audio_bitrate.cpp`（**编码器被压到限额以下 / 压到本地下限以下 / 钉死编码器时仍然生效 / 最紧限额胜出**） |
 > | **X5b** | SDP 接线：offer 携带 `a=rtcp-fb:<pt> ccm tmmbr`（RFC 5104 §7.2）与 `a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt`（RFC 3611 §5.1）；answer 回带协商后的子集；`sdp::MediaDescription` 新增 `rtcp_xr` / `rtcp_xr_present` 字段与解析器 / munger 支持 | `tests/test_engine_tmmbr.cpp` + `src/modules/sdp/tests/test_sdp.cpp` |
 > | **X6** | 文档口径：`docs/api/engine_api.md` §8.6 / §8.7 / §8.8（XR 块矩阵、TMMBR 语义、完整 RTCP PT 支持矩阵）+ `docs/api/engine_config.md` §2.4a / §2.4b | 文档与代码逐条对照 |
 >
 > 公开面（新增 / 落地）：`EngineConfig::rtcp_xr_enabled`、`EngineConfig::tmmbr_enabled`、`EngineConfig::disable_tmmbr`、`NimRTCEngine::xr_reports_sent_count()`、`peer_tmmbr_limit_bps()`、`last_tmmbr_bps()`、`tmmbr_sent_count()`、`tmmbr_received_count()`。
 >
 > **协商的对称性**：XR 与 TMMBR 的发送都以**对端的描述**为准（RFC 3611 §5.1「participants SHOULD NOT send XR blocks other than the ones indicated by the parameters」；RFC 5104 §7.2「only the joint subset of CCM parameters from the offer and answer may be used」）。规则在 offer 与 answer 两个方向上对称：对端描述里的 `stat-summary` 永远是**对我们要发的块**的请求，`ccm tmmbr` 永远是**我们要发的消息**的授权。
+>
+> **OD-E 的三个决定（owner 已决，2026-11-11）**：
+>
+> 1. **默认发送还是默认不发 → 默认不发（opt-in）。** 新增 `EngineConfig::tmmbr_enabled`（默认 `false`），宿主不显式开启时引擎一条 TMMBR 都不发。这条决定推翻了本计划初稿 X5 验收栏的「未设置时行为不变」——那句话原本指的是「`disable_tmmbr` 未设置时」的行为，而 TMMBR 本身的默认发送策略在本轮才定下来。`disable_tmmbr` 仍然保留，且**覆盖** `tmmbr_enabled`：两者同时为真 → TMMBR 完全关闭（连 SDP 的 `a=rtcp-fb:<pt> ccm tmmbr` 也不带）。
+> 2. **收到对端 TMMBR 时要不要真的执行 → 完整执行。** 引擎完整实现入向路径：解析对端 TMMBR（RFC 5104 §4.2.1.1）→ 按 §4.2.2.2 批量回一条 TMMBN → 把本端的发送预算与 pacing 速率压到 `peer_tmmbr_limit_bps()`（调度器侧与 pacing 侧都取「BWE 估计」与「对端限额」的较小值）。入向路径**不需要**配置开关：对端发来的 TMMBR 总是被遵守——发 TMMBN 就是一份承诺，承诺了就要兑现。
+> 3. **对端限额与本地下限冲突时谁赢 → 对端赢（peer-wins）。** `EngineConfig::audio_min_bitrate_bps`（默认 8000）存在的目的是让**拥塞塌陷**不至于饿死音频流，它保护的是本端流。而对端的 TMMBR 限额是另一类约束：引擎回 TMMBN（RFC 5104 §4.2.2.2）等于确认了这个 bounding set，**回一条 TMMBN 就是一份承诺**。一份「少发」的承诺不是发送方可以悄悄突破的，所以对端限额**覆盖**本地下限——当对端要的比本地下限还低时，编码器允许降到本地下限**以下**。
+>
+>    该决定的落地范围是**三处**（缺一则承诺不成立）：
+>
+>    | 位置 | 落地内容 |
+>    |---|---|
+>    | `maybe_update_audio_bitrate()` | 编码器上限 = `min(audio_bitrate_ceiling_bps_, peer_limit)`；下限 = `min(audio_min_bitrate_bps, peer_limit)`；**有效估计** = `min(BWE 估计, peer_limit)` |
+>    | `update_pacing_rates()` | pacing 的音频 class 速率同样被 `peer_limit` 夹住（编码器降速是限速的，pacer 不能在过渡期放行旧速率） |
+>    | `audio_bitrate_adaptive = false` | 该开关只表示「不因**估计**移动编码器」，**不豁免**线上已经许下的承诺——限额依然生效 |
+>
+>    另有一条实现细节：一旦编码器当前速率已经**超过**对端限额（即承诺已被破坏），降速**不再走**「每步至多 -50 %」的限速，而是**一步到位**降到限额——限速降速会让承诺在接下来的若干秒里持续被违反。
 
 ---
 

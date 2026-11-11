@@ -651,10 +651,24 @@ must respect, and the engine does:
 * the scheduler's session budget is clamped to
   `peer_tmmbr_limit_bps()`;
 * the per-class pacing rates are clamped the same way;
+* the **audio encoder** is clamped the same way — the encoder is what
+  decides how many bits go on the wire, so a limit that stopped at the
+  pacer would only *lose* frames rather than keep the promise;
+* the limit **overrides `EngineConfig::audio_min_bitrate_bps`**: the
+  local floor protects the audio against a congestion collapse, while
+  the peer's limit is a commitment the engine made on the wire (the
+  TMMBN is the acknowledgement of it), so the two are not of the same
+  kind — the peer's limit wins, and the encoder may go *below* the
+  local floor;
 * the tightest limit wins — a looser TMMBR never raises a ceiling a
   tighter one has set (RFC 5104 section 3.5.4.2);
 * a tuple naming a media source the engine does not send is recorded
   but **not** applied: it is somebody else's constraint.
+
+The peer's limit is honoured even when
+`EngineConfig::audio_bitrate_adaptive` is `false` — that switch says
+"do not move the encoder because of the *estimate*", not "break the
+promises the engine already made on the wire".
 
 Every inbound TMMBR is answered with exactly one TMMBN (RFC 5104
 section 4.2.2.2), even when the tuple was not accepted — that is what

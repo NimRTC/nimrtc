@@ -164,9 +164,17 @@ struct NIMRTC_API_STABLE XrStatisticsSummary {
     std::uint32_t ssrc = 0;
 
     /// The first sequence number of the reported interval.
+    ///
+    /// RFC 3611 §4.1: "The first sequence number that this block
+    /// reports on."
     std::uint16_t begin_seq = 0;
 
-    /// The last sequence number of the reported interval.
+    /// The *exclusive* end of the reported interval.
+    ///
+    /// RFC 3611 §4.1: "The last sequence number that this block
+    /// reports on **plus one**."  So the field is one past the last
+    /// sequence number the block covers, and the interval therefore
+    /// holds `end_seq - begin_seq` sequence numbers.
     std::uint16_t end_seq = 0;
 
     /// True when `lost_packets` carries a report.

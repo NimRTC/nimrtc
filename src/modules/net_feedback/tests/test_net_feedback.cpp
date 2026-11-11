@@ -112,7 +112,7 @@ ByteBuffer make_remb(std::uint64_t bitrate_bps) {
     put_be32(body, 0);             // media SSRC
     put_be32(body, 0x52454D42u);   // 'R' 'E' 'M' 'B'
     put_u8(body, 0);              // no SSRC list
-    put_u8(body, static_cast<std::uint8_t>((exponent << 2) | (mantissa >> 16)));
+    put_u8(body, static_cast<std::uint8_t>((static_cast<std::uint64_t>(exponent) << 2) | (mantissa >> 16)));
     put_be16(body, static_cast<std::uint16_t>(mantissa & 0xFFFF));
 
     ByteBuffer out;

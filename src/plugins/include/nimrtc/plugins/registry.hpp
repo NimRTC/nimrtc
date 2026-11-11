@@ -57,6 +57,9 @@
 #ifndef NIMRTC_PLUGINS_REGISTRY_HPP
 #define NIMRTC_PLUGINS_REGISTRY_HPP
 
+// Stability marker used in the @note below.
+#include <nimrtc/core/api_version.hpp>
+
 // The registry itself (core layer).  The factory interfaces below are
 // forward-declared there; including the real headers here makes them
 // complete for callers that need them.

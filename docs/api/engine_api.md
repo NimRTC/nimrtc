@@ -601,7 +601,8 @@ module provides freeze counts, keyframe intervals, QP and drop-cause
 breakdown, but it is **not wired into the engine** yet, so those fields
 are not reachable through this accessor. For the full picture — the
 planned stream-level shape and the missing dimensions — see
-[../plan/stats-surface-plan.md](../plan/stats-surface-plan.md).
+`docs/plan/stats-surface-plan.md` (landed later in the v1.2 stack,
+so referenced here by path, not by link).
 
 ---
 

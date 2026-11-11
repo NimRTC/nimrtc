@@ -64,9 +64,6 @@ using nimrtc::engine::NimRTCEngine;
  *  Chrome uses, and the engine's default). */
 constexpr std::uint8_t kDtmfPt = 126;
 
-/** The engine's default audio payload type (Opus). */
-constexpr std::uint8_t kOpusPt = 111;
-
 /** A peer offer that declares a telephone-event payload type.
  *
  *  The peer is a bare SDP string rather than a second engine, so the

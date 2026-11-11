@@ -1226,7 +1226,7 @@ nimrtc_add_engine_test(test_engine_xr_report test_engine_xr_report.cpp)
 #
 # Covers the wiring the wire-format tests cannot:
 #   - the offer advertises `a=rtcp-fb:<pt> ccm tmmbr` and
-#     `a=rtcp-xr:rcvr-rtt=all stat-summary=loss` (and does not, when the
+#     `a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt` (and does not, when the
 #     features are off);
 #   - the answer echoes the negotiated subset of both (RFC 3264 §6.1,
 #     RFC 3611 §5.2, RFC 5104 §7.2);

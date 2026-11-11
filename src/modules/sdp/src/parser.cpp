@@ -438,7 +438,7 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
             } else if (av.starts_with("rtcp-xr:")) {
                 // RFC 3611 §5.1 — the RTCP Extended Report negotiation
                 // attribute.  The value is the list of XR parameters
-                // ("rcvr-rtt=all stat-summary=loss"), stored verbatim.
+                // ("rcvr-rtt=all stat-summary=loss,jitt"), stored verbatim.
                 //
                 // A bare "a=rtcp-xr" (no colon) means "I understand the
                 // attribute but send no XR blocks"; the parser cannot

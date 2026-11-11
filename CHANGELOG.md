@@ -136,6 +136,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     as a `DtmfEvent` with the accumulated duration, instead of being
     dropped as unknown.
 
+- **A negotiated telephone-event payload type, so the DTMF path is
+  actually reachable (v1.2.0, session capability plan D3 / D4).**  The
+  RFC 4733 codec and the send path existed, but the *payload type* was
+  never negotiated: the offer declared nothing, the answer echoed
+  nothing, and the codec sat idle.  A key press therefore had nowhere
+  to go, and a telephone-event payload arriving from the peer landed on
+  a payload type the engine did not recognise.
+  - The offer now carries `a=rtpmap:<pt> telephone-event/8000` and
+    `a=fmtp:<pt> 0-16` (RFC 4733 §2.3.2), and the payload type joins
+    the m-line's format list — RFC 3550 §5.14 scopes a payload type
+    to its m-section, so a payload type that is not in the `m=` line
+    is not part of the session.  The declaration is conditional:
+    `EngineConfig::dtmf_enabled` is **off** by default (OD-B), so a
+    default engine offers no telephone-event line at all.
+  - The answer carries the **negotiated** event codes — the peer's
+    list narrowed to the codes this side implements — rather than a
+    blind echo of the offer.  An answer that names a code the offerer
+    never offered describes something the peer will not accept.
+  - `NimRTCEngine::negotiated_dtmf_payload_type()` reports the number
+    both ends use, or `0` when nothing was negotiated.  `send_dtmf()`
+    fails in exactly that state, so a host can ask before it presses a
+    key rather than sending a packet on a payload type the peer never
+    agreed to (RFC 3264 §6.1).
+  - The counting boundary is now explicit (D4): a **negotiated**
+    telephone-event payload is decoded and reported to the host and is
+    **not** counted as an unknown audio payload type; an
+    **un-negotiated** one still is (the peer sent something we never
+    agreed to).  A malformed payload is counted separately, so it never
+    masquerades as a delivered event.
+  - The telephone-event plane has counters of its own in `Stats` —
+    `dtmf_packets_sent`, `dtmf_packets_received`,
+    `dtmf_packets_malformed`, `dtmf_events_delivered` and
+    `dtmf_payload_type` — because the audio counters say nothing about
+    it: the payload never reaches the audio pipeline.
+  - Covered by 13 cases in `tests/test_engine_dtmf.cpp`: eleven on the
+    SDP declaration and the counting rules, and two on the wire -- a
+    key press has to leave the engine as an RFC 4733 *event sequence*
+    (the repeats, the marker bit on the first packet, and the
+    end-of-event packet that closes it), not as a single packet.  The
+    codec's own wire format is covered by
+    `src/modules/dtmf/tests/test_dtmf_codec.cpp`.
+
 - **A pluggable session model, so a host can renegotiate instead of
   rebuilding the engine (v1.2.0, session capability plan N1 / T1).**  The
   engine used to build a *fixed* SDP media list (one audio m-line, one

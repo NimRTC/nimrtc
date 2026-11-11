@@ -16,7 +16,7 @@
 > | Plan opened | 2026-11-10 |
 > | Baseline | `main` @ post-v1.1 consolidation |
 > | Scope class | Session / signalling — session lifecycle, m-line semantics, RTP payload semantics, RTCP feedback surface. No transport rewrite. |
-> | Status | **Gap analysis complete; work items written; version placement owner-decided (§4) — the whole plan lands in `v1.2.0`** |
+> | Status | **Gap analysis complete; work items written; version placement owner-decided (§4) — the whole plan lands in `v1.2.0`. Tracks N, T and D have landed; Track X (RTCP XR / TMMBR) is still open.** |
 > | Owner | BDFL |
 > | Related | `docs/plan/video-pipeline-v2-plan.md`（**C9 / C11** 已落地，v1.2.0）、`docs/plan/stats-surface-plan.md`（会话能力第 8 项，O1 / M2）、`docs/plan/datachannel-capability-plan.md`、`docs/plan/v1.1-plan.md` §5.6（版本阶梯）、ADR-015 (API stability) |
 
@@ -226,6 +226,17 @@ Landing-site markers follow `video-pipeline-v2-plan.md`: `P` = `src/plugins/`,
 | **D2** | **RFC 4733 发送**：宿主能把 DTMF 事件编码成 telephone-event 载荷发出，含 RFC 4733 要求的重复包与结束包时序。 | `P` + `M` + `E` | 发出一个按键后，对端能收到该事件码与时长；结束包按 RFC 4733 §2.5 的时序出现 |
 | **D3** | **SDP 声明**：offer / answer 中出现 `a=rtpmap:<pt> telephone-event/8000` 与 `a=fmtp:<pt> 0-16`（RFC 4733 §2.3.2），且该负载类型**不进入**普通音频解码路径（与 §1.2.3 现有的丢弃路径一致，不产生回归）。 | `E` | offer 携带 telephone-event 声明；对端发来的 telephone-event 包**不**被当作音频解码，计数口径与 F-8 修复后一致 |
 | **D4** | **与 F-8 修复的边界**：`kAudioPayloadTypeUnknown` 的计数口径必须明确——telephone-event 在**未协商 DTMF** 时仍计为 unknown，在**已协商 DTMF** 时不再计入 unknown。 | `E` + `D` | 两种协商状态下，unknown 计数的行为不同且各有测试固定 |
+
+> **D1 / D2 / D3 / D4 已落地（v1.2.0，2026-11-11）。** 验证矩阵：
+>
+> | 工作项 | 落地内容 | 验证 |
+> |---|---|---|
+> | **D1** | `plugins::IDtmfCodec` 接缝 + `src/modules/dtmf/` 实现（RFC 4733 编解码） | `src/modules/dtmf/tests/test_dtmf_codec.cpp` |
+> | **D2** | 发送路径：事件重复包与结束包由 `tick()` 按 RFC 4733 §2.5.1.2 的节奏发出 | `src/modules/dtmf/tests/test_dtmf_codec.cpp`（线格式）+ `tests/test_engine_dtmf.cpp`（引擎面） |
+> | **D3** | SDP 声明：offer / answer 携带 `a=rtpmap:<pt> telephone-event/8000` 与 `a=fmtp:<pt> 0-16`，payload type 进入 m-line 的格式表；answer 回带**协商后**的事件码（对端声明 ∩ 本端实现），不是盲回显 | `tests/test_engine_dtmf.cpp`（`ADefaultEngineOffersNoTelephoneEvent`、`...DeclaresTheTelephoneEventExactlyOnce`、`TheAnswerEchoesTheTelephoneEventDeclaration`、`TheAnswerCarriesTheNegotiatedEventCodes`） |
+> | **D4** | 计数口径：已协商的 telephone-event 不计入 `kAudioPayloadTypeUnknown`，未协商的仍计入；malformed 单独计数 | `tests/test_engine_dtmf.cpp`（`ANegotiatedTelephoneEventIsNotCountedAsUnknownAudio`、`AnUnnegotiatedTelephoneEventIsCountedAsUnknownAudio`、`AMalformedTelephoneEventIsCountedSeparately`） |
+>
+> 公开面：`NimRTCEngine::negotiated_dtmf_payload_type()` 与 `Stats` 的 `dtmf_packets_sent` / `dtmf_packets_received` / `dtmf_packets_malformed` / `dtmf_events_delivered` / `dtmf_payload_type`。文档见 `docs/api/engine_api.md` §8.5。
 
 ### Track X — RTCP XR / TMMBR (item 9)
 

@@ -64,6 +64,7 @@ constexpr std::uint8_t kMaxDtmfEventCode = 16;
  *  RFC 4733 §2.3.2 negotiates the payload type out of band; 126 is
  *  the value Chrome uses and the engine's default
  *  (`EngineConfig::dtmf_payload_type`). */
+[[maybe_unused]]
 constexpr std::uint8_t kDefaultDtmfPayloadType = 126;
 
 /** The SRTP authentication tag size, in bytes.

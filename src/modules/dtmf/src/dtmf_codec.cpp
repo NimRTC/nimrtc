@@ -51,6 +51,7 @@ constexpr std::uint8_t kEndBit = 0x80;
 
 /** The reserved bit of byte 1 (RFC 4733 §2.3.3).  The sender must
  *  set it to zero; the receiver ignores it. */
+[[maybe_unused]]
 constexpr std::uint8_t kReservedBit = 0x40;
 
 /** The volume field: the six low bits of byte 1 (RFC 4733 §2.3.4). */

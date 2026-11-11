@@ -388,8 +388,8 @@ jobs:
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
       - name: Install ninja + Python (CMake via pip)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -554,8 +554,8 @@ jobs:
 
       - name: Install ninja + Python (CMake via pip)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -644,8 +644,8 @@ jobs:
 
       - name: Install clang + ninja
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang ninja-build python3
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y clang ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
           clang --version
 
       - name: Install CMake
@@ -798,8 +798,8 @@ jobs:
         # not have.  `g++` (not `g++-aarch64-linux-gnu`) is the native
         # arm64 package on this image.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3 g++
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 g++ && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

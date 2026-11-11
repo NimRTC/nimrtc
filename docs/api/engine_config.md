@@ -206,6 +206,73 @@ Empty + `bwe_config.enabled == false` (or
 `scheduler_config.enabled == false`) opts the engine out of BWE /
 scheduling (used by the `transport` profile for pure passthrough).
 
+### 2.4a RTCP Extended Report consumer
+
+```cpp
+std::string xr_report_name = "nimrtc_xr";   // IXrReport plugin
+```
+
+Selects the consumer that decodes the peer's RFC 3611 extended
+reports (RTCP payload type 207).  The engine demultiplexes every
+inbound RTCP compound datagram and routes the XR sub-packets into it;
+the host reads the decoded blocks out of `engine.xr_report()->snapshot()`.
+
+An **empty string disables the consumer** — the XR sub-packet is then
+recognised by the demultiplexer and dropped, which is the pre-v1.2.0
+behaviour.
+
+The blocks NimRTC parses are **BT=4** (Receiver Reference Time),
+**BT=5** (DLRR) and **BT=6** (Statistics Summary); the other block
+types RFC 3611 registers are recognised but not parsed (they are
+skipped by their length, never an error).  See
+[`engine_api.md` §8.6](./engine_api.md) for the full matrix and for
+the note on the draft-vs-RFC block numbering.
+
+### 2.4b RTCP XR / TMMBR sending
+
+```cpp
+bool rtcp_xr_enabled = false;   // send RFC 3611 extended reports
+bool tmmbr_enabled   = false;   // send RFC 5104 TMMBR feedback
+bool disable_tmmbr   = false;   // suppress TMMBR entirely (overrides the above)
+```
+
+These select the **outbound** half of the RTCP feedback surface.  All
+three default to `false`: an XR report is a QoE / network-statistics
+report and a TMMBR changes how the peer sends, so a host that never
+asked for either should not get it.  `disable_tmmbr` overrides
+`tmmbr_enabled` — a host that sets both gets no TMMBR.
+
+**`rtcp_xr_enabled`.**  The engine emits one RFC 3611 extended report
+per RTCP interval, carrying the Receiver Reference Time block (BT=4),
+the DLRR block (BT=5) that answers the peer's own reference-time
+report, and the Statistics Summary block (BT=6).  The report is
+**negotiated**: the offer carries `a=rtcp-xr:rcvr-rtt=all
+stat-summary=loss,jitt` and the engine sends nothing until the peer's
+description named the format (RFC 3611 section 5.1).
+
+The `stat-summary` field list is the *peer's*: RFC 3611 section 5.1
+says it "contains a list indicating which fields SHOULD be included in
+the Statistics Summary report blocks that are sent", so the block's L
+and J flag bits follow whatever the peer asked for.  A peer that asked
+for `loss` alone gets no jitter flag.
+
+**`tmmbr_enabled`.**  The engine emits a TMMBR carrying the bit rate
+its bandwidth estimator is *currently using* — the number the peer
+should throttle to.  It is negotiated through
+`a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 section 7.2), so the engine
+sends no TMMBR unless the peer's description carried the parameter
+too.
+
+**`disable_tmmbr`.**  Vetoes the feature in both directions: no TMMBR
+is sent, and the SDP carries no `tmmbr` parameter.  It overrides
+`tmmbr_enabled`.
+
+The *inbound* side needs no configuration: a TMMBR the peer sends is
+always honoured — the engine clamps its scheduler budget and its
+pacing rates to `peer_tmmbr_limit_bps()` and answers with a TMMBN
+(RFC 5104 section 4.2.2.2).  See
+[`engine_api.md` §8.7](./engine_api.md) for the details.
+
 ### 2.5 Video plugins
 
 The video plugins are resolved but **not yet threaded into the

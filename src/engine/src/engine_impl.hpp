@@ -394,7 +394,13 @@ inline std::string_view rtcp_fb_types(std::string_view entry) noexcept {
  *  answerer supports, so the answer echoes the offer's set intersected
  *  with the supported one.  An entry that mixes a supported type with
  *  an unsupported one ("111 nack trr-int") is dropped as a whole — the
- *  engine cannot honour half of it. */
+ *  engine cannot honour half of it.
+ *
+ *  "tmmbr" is in the supported set (v1.2.0, session plan X5): the
+ *  RFC 5104 §7.2 codec-control-message form is
+ *  `a=rtcp-fb:<pt> ccm tmmbr`, i.e. the generic "ccm" type with the
+ *  "tmmbr" parameter — both tokens are part of one entry and both are
+ *  understood by the engine. */
 inline bool rtcp_fb_entry_supported(std::string_view entry) noexcept {
     std::size_t i = entry.find(' ');
     if (i == std::string_view::npos) return false;
@@ -407,12 +413,191 @@ inline bool rtcp_fb_entry_supported(std::string_view entry) noexcept {
         const std::string_view tok = entry.substr(start, i - start);
         if (tok.empty()) continue;
         if (tok != "nack" && tok != "pli" && tok != "ccm" && tok != "fir" &&
-            tok != "goog-remb" && tok != "transport-cc") {
+            tok != "goog-remb" && tok != "transport-cc" && tok != "tmmbr") {
             return false;
         }
         any = true;
     }
     return any;
+}
+
+/** The whitespace-separated feedback-type tokens of an `a=rtcp-fb`
+ *  entry — everything after the payload-type token.
+ *
+ *  RFC 4585 §4.1: the entry is "<pt> <type> [<type>…]"; RFC 5104 §7.1
+ *  extends the type list with the codec-control-message family, whose
+ *  *parameters* ("fir", "tmmbr", …) follow the "ccm" type token. */
+inline std::vector<std::string_view> rtcp_fb_type_tokens(std::string_view entry) noexcept {
+    std::vector<std::string_view> out;
+    const std::size_t sp = entry.find(' ');
+    if (sp == std::string_view::npos) return out;
+    std::size_t i = sp + 1;
+    while (i < entry.size()) {
+        while (i < entry.size() && entry[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < entry.size() && entry[i] != ' ') ++i;
+        if (i > start) out.push_back(entry.substr(start, i - start));
+    }
+    return out;
+}
+
+/** True when an `a=rtcp-fb` entry carries the given codec-control-message
+ *  parameter (RFC 5104 §7.1).
+ *
+ *  The parameter must follow the "ccm" type token — a bare "tmmbr"
+ *  without "ccm" is not the codec-control form. */
+inline bool rtcp_fb_has_ccm_param(std::string_view entry,
+                                   std::string_view param) noexcept {
+    const auto tokens = rtcp_fb_type_tokens(entry);
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] != "ccm") continue;
+        // The parameters follow "ccm".  RFC 5104 §7.1 allows a
+        // sub-parameter ("smaxpr=…") to follow the parameter it belongs
+        // to, so the scan continues until the next non-sub-parameter.
+        for (std::size_t k = i + 1; k < tokens.size(); ++k) {
+            if (tokens[k] == param) return true;
+            if (tokens[k].find('=') == std::string_view::npos) break;
+        }
+        return false;
+    }
+    return false;
+}
+
+/** Filter one `a=rtcp-fb` entry down to the feedback types the engine
+ *  supports and return them as an SDP-ready type list.
+ *
+ *  RFC 3264 §6.1: an answer carries the subset of the offer's feedback
+ *  types that the answerer supports.  RFC 5104 §7.2 makes the removal
+ *  granularity explicit for the codec-control-message (CCM) family: the
+ *  answerer removes the *CCM parameters* it does not support — not the
+ *  whole entry — so "111 ccm fir tmmbr" becomes "111 ccm fir" when the
+ *  TMMBR is off.  An entry whose every parameter was removed is dropped
+ *  as a whole.
+ *
+ *  The other feedback families keep the pre-v1.2.0 rule: an entry that
+ *  mixes a supported type with an unsupported one is dropped whole,
+ *  because the engine cannot honour half of it.
+ *
+ *  @param entry        The offer's entry ("<pt> <type>…").
+ *  @param want_tmmbr   True when the engine supports TMMBR (RFC 5104).
+ *  @return The filtered type list; empty when nothing survived. */
+inline std::string filter_rtcp_fb_types(std::string_view entry,
+                                        bool want_tmmbr) {
+    const auto tokens = rtcp_fb_type_tokens(entry);
+
+    // ---- The CCM family (RFC 5104 §7.1) --------------------------------
+    if (!tokens.empty() && tokens[0] == "ccm") {
+        std::string out = "ccm";
+        bool have_tmmbr = false;
+        for (std::size_t i = 1; i < tokens.size(); ++i) {
+            const std::string_view tok = tokens[i];
+            if (tok == "fir") {
+                out += " fir";
+            } else if (tok == "tmmbr") {
+                if (!want_tmmbr) continue;
+                out += " tmmbr";
+                have_tmmbr = true;
+            } else if (tok.starts_with("smaxpr=")) {
+                // The optional sub-parameter of "tmmbr" (RFC 5104
+                // §7.1).  It only makes sense together with it.
+                if (!have_tmmbr) continue;
+                out += ' ';
+                out += tok;
+            }
+            // "tstr", "vbcm" and anything unknown are removed — the
+            // engine implements neither.
+        }
+        if (out == "ccm") return {};   // no parameter survived
+        return out;
+    }
+
+    // ---- The other families (RFC 4585 §4.1) ----------------------------
+    if (!rtcp_fb_entry_supported(entry)) return {};
+    const std::string_view types = rtcp_fb_types(entry);
+    if (types.empty()) return {};
+    return std::string(types);
+}
+
+/** True when the `a=rtcp-xr` parameter list names the given XR format.
+ *
+ *  RFC 3611 §5.1: the attribute's value is a space-separated list of XR
+ *  formats — "rcvr-rtt=all stat-summary=loss,jitt".  A format is named
+ *  by its leading token, optionally followed by "=" and the format's own
+ *  parameters, so a format is present when one of the tokens starts with
+ *  "<name>=" or *is* "<name>". */
+inline bool rtcp_xr_has_format(std::string_view params,
+                                std::string_view name) noexcept {
+    std::size_t i = 0;
+    while (i < params.size()) {
+        while (i < params.size() && params[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < params.size() && params[i] != ' ') ++i;
+        const std::string_view tok = params.substr(start, i - start);
+        if (tok.size() < name.size()) continue;
+        if (tok.compare(0, name.size(), name) != 0) continue;
+        if (tok.size() == name.size()) return true;      // bare format
+        if (tok[name.size()] == '=') return true;        // format with params
+    }
+    return false;
+}
+
+/** The `stat-summary` field indicators of an `a=rtcp-xr` parameter list.
+ *
+ *  RFC 3611 §5.1: "stat-summary" carries a comma-separated list of field
+ *  indicators — "loss", "dup", "jitt", "TTL", "HL".  Returns the raw
+ *  list; empty when the format is absent. */
+inline std::string rtcp_xr_stat_summary_flags(std::string_view params) {
+    const std::string_view kName = "stat-summary";
+    std::size_t i = 0;
+    while (i < params.size()) {
+        while (i < params.size() && params[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < params.size() && params[i] != ' ') ++i;
+        const std::string_view tok = params.substr(start, i - start);
+        if (tok.size() <= kName.size()) continue;
+        if (tok.compare(0, kName.size(), kName) != 0) continue;
+        if (tok[kName.size()] != '=') continue;
+        return std::string(tok.substr(kName.size() + 1));
+    }
+    return {};
+}
+
+/** The `stat-summary` indicators the engine both understands and
+ *  produces — "loss" and "jitt".
+ *
+ *  RFC 3611 §4.6: the duplicate and TTL / Hop-Limit groups are optional
+ *  (they are behind their own flag bits), and NimRTC does not measure
+ *  them, so the negotiated set is the intersection of the peer's list and
+ *  the engine's.
+ *
+ *  RFC 3611 §5.1 makes the field list *optional* ("stat-summary"
+ *  ["=" stat-flag *("," stat-flag)]), so a bare "stat-summary" asks for
+ *  the summary as a whole — the engine then reports every field it
+ *  produces.  An empty result means "the peer asked for something the
+ *  engine does not produce", and the format is then not echoed at all. */
+inline std::string rtcp_xr_stat_summary_supported(std::string_view params) {
+    if (!rtcp_xr_has_format(params, "stat-summary")) return {};
+    const std::string flags = rtcp_xr_stat_summary_flags(params);
+    // The format is named but no field was requested — report the
+    // engine's whole set.
+    if (flags.empty()) return "loss,jitt";
+    std::string out;
+    // NOTE: the view is taken over the *named* string.  `std::string::substr`
+    // returns a temporary, and a `string_view` bound to it would dangle as
+    // soon as the full expression ended — the token would then read as
+    // garbage (an empty one, in practice) and every field would be dropped.
+    const std::string_view fv(flags);
+    std::size_t i = 0;
+    while (i < fv.size()) {
+        while (i < fv.size() && fv[i] == ',') ++i;
+        const std::size_t start = i;
+        while (i < fv.size() && fv[i] != ',') ++i;
+        const std::string_view tok = fv.substr(start, i - start);
+        if (tok != "loss" && tok != "jitt") continue;
+        if (!out.empty()) out += ',';
+        out += std::string(tok);
+    }
+    return out;
 }
 
 }  // namespace detail
@@ -521,6 +706,14 @@ struct NimRTCEngine::Impl {
     // required but is unavailable (ADR-018 Decision 2's "fail loudly"
     // mode).  The report is made once per session.
     bool           transport_cc_unavailable_reported = false;
+
+    // ---- RTCP Extended Reports (v1.2.0, session plan X1) ---------------
+    //
+    // The number of inbound RTCP XR sub-packets that were routed to the
+    // XR consumer.  It is the observable that proves the wiring is
+    // closed: a peer that sends extended reports and a counter that
+    // stays at zero mean the routing is broken.
+    std::uint64_t xr_report_blocks = 0;
 
     // ---- Pacing split (v1.2.0 M3, P2) ----------------------------------
     //
@@ -847,6 +1040,137 @@ struct NimRTCEngine::Impl {
 
     /** When the last receiver report went out (steady clock). */
     std::chrono::steady_clock::time_point rr_last_sent{};
+
+    // ---- RTCP Extended Report / TMMBR (v1.2.0, session plan X2–X5) ---
+    //
+    // The *outbound* XR state: the peer's Receiver Reference Time
+    // report that our next DLRR answers (RFC 3611 §4.5), and the
+    // instant we received it (the DLRR's delay field).
+    //
+    // `peer_rr_ssrc` is the SSRC of the *peer* that sent the Receiver
+    // Reference Time Report; `peer_rr_mid_32` is the middle 32 bits of
+    // that report's NTP timestamp.  The DLRR sub-block echoes both
+    // (RFC 3611 §4.5).
+    std::uint32_t peer_rr_ssrc    = 0;
+    std::uint32_t peer_rr_mid_32  = 0;
+    std::int64_t  peer_rr_recv_us = 0;
+
+    /** When the last XR report went out (steady clock).  The XR report
+     *  rides on the receiver-report cadence (RFC 3611 §5.2: an XR
+     *  packet is sent no more often than the RTCP interval). */
+    std::chrono::steady_clock::time_point xr_last_sent{};
+
+    /** The number of outbound XR reports the engine sent. */
+    std::uint64_t xr_reports_sent = 0;
+
+    // ---- The negotiated RTCP XR / TMMBR capabilities -------------------
+    //
+    // RFC 3611 §5.1 and RFC 5104 §7.2 both make the *negotiated*
+    // description the authority on what may be sent:
+    //
+    //   * "When the 'rtcp-xr' attribute is present, participants SHOULD
+    //      NOT send XR blocks other than the ones indicated by the
+    //      parameters" (§5.1) — so an XR block is only sent when the
+    //      peer asked for that format;
+    //   * "both offerer and answerer MUST NOT use any feedback messages
+    //      other than what both sides have explicitly indicated as being
+    //      supported" (RFC 5104 §7.2) — so a TMMBR is only sent when
+    //      the peer advertised the "ccm tmmbr" parameter.
+    //
+    // The flags below are read from the *remote* description (offer or
+    // answer — the rule is symmetric, see the note on each flag).
+    //
+    // `peer_xr_rcvr_rtt` — the peer's description named the
+    // "rcvr-rtt" format.  The peer then declared that it is prepared to
+    // receive a Receiver Reference Time Report and to answer it with a
+    // DLRR, so we may send the initiator (RFC 3611 §5.2).
+    bool peer_xr_rcvr_rtt = false;
+
+    /** `local_xr_rcvr_rtt` — *our* description named the "rcvr-rtt"
+     *  format.
+     *
+     *  "rcvr-rtt" is a *collaborative* parameter (RFC 3611 §5.1): it
+     *  declares that the writer is prepared to receive a Receiver
+     *  Reference Time Report and to answer it with a DLRR.  So the DLRR
+     *  we send is authorised by *our* declaration — the peer's
+     *  declaration authorises the RRTR we send.
+     *
+     *  RFC 3611 §5.2: "By including a collaborative parameter in its
+     *  answer, the answerer declares its ability to receive initiators
+     *  and to send responses."  So the flag is set when the engine
+     *  emits "rcvr-rtt" — in its offer or in its answer. */
+    bool local_xr_rcvr_rtt = false;
+
+    /** `peer_xr_stat_summary` — the peer's description named the
+     *  "stat-summary" format.
+     *
+     *  Whoever writes the parameter is asking the *other* party to send
+     *  the corresponding blocks (RFC 3611 §5.2), so the rule is the same
+     *  in both offer and answer direction: the peer's "stat-summary"
+     *  asks *us* for the blocks. */
+    bool peer_xr_stat_summary = false;
+
+    /** The `stat-summary` field indicators the peer asked for, already
+     *  narrowed to the ones the engine produces ("loss" and "jitt").
+     *
+     *  RFC 3611 §5.1: "The 'stat-summary' parameter contains a list
+     *  indicating which fields SHOULD be included in the Statistics
+     *  Summary report blocks that are sent."  So the L / J flag bits of
+     *  the block we send follow the peer's list: a peer that asked for
+     *  "loss" gets a block with the loss flag set and the jitter flag
+     *  clear. */
+    std::string peer_xr_stat_summary_flags;
+
+    /** `peer_tmmbr_negotiated` — the peer's description carried the
+     *  "ccm tmmbr" parameter and the engine supports TMMBR, so the
+     *  joint subset of RFC 5104 §7.2 includes it. */
+    bool peer_tmmbr_negotiated = false;
+
+    // ---- The inbound TMMBR limit (v1.2.0, session plan X5) -------------
+    //
+    // A peer that sends us a TMMBR is telling us "you may not send me
+    // more than this".  The engine honours the limit: the scheduler's
+    // budget is clamped to it, so the engine obeys the very limit it
+    // acknowledges with a TMMBN.
+    //
+    // 0 = no limit received.  The value is the *lowest* limit any
+    // peer's TMMBR has asked for: the tightest constraint wins
+    // (RFC 5104 §4.2.1.2 — the receiver reports the highest bit rate
+    // it *currently* supports).
+    std::uint32_t peer_tmmbr_limit_bps = 0;
+
+    /** The SSRC of the peer that sent the last TMMBR.
+     *
+     *  It is the *owner* of the bounding tuple the TMMBN reports
+     *  (RFC 5104 §4.2.2.1): in the unicast case the receiver that
+     *  issued the TMMBR becomes the owner of the tuple as soon as the
+     *  sender acknowledges it (§4.2.2.2). */
+    std::uint32_t tmmbr_peer_ssrc = 0;
+
+    /** The number of inbound TMMBR messages the engine honoured. */
+    std::uint64_t tmmbr_received = 0;
+
+    /** The number of outbound TMMBR messages. */
+    std::uint64_t tmmbr_sent = 0;
+
+    /** The number of outbound TMMBN messages. */
+    std::uint64_t tmmbn_sent = 0;
+
+    /** A TMMBN is pending: the peer asked us to confirm the bounding
+     *  set (RFC 5104 §4.2.2.2).  Only one TMMBN is sent even if
+     *  several TMMBRs arrive in between (RFC 5104 §4.2.2.2). */
+    bool pending_tmmbn = false;
+
+    /** The bit rate the last outbound TMMBR reported, in bits per
+     *  second.  It is the observable that proves the TMMBR follows the
+     *  bandwidth estimate rather than a stale number. */
+    std::uint32_t last_tmmbr_bps = 0;
+
+    /** When the last TMMBR went out (steady clock).  RFC 5104
+     *  §4.2.1.3: a repeated request uses the regular RTCP timing, so
+     *  the engine repeats it on the receiver-report cadence rather
+     *  than on every estimate change. */
+    std::chrono::steady_clock::time_point tmmbr_last_sent{};
 
     // ---- Negotiated payload-type routing (B-4) --------------------------
     //

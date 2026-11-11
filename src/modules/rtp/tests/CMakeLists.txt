@@ -12,5 +12,12 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_transport_cc.cpp
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_rtcp.cpp
     DEPS nimrtc::rtp)
 
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_rtcp_xr.cpp
+    DEPS nimrtc::rtp)
+
+# v1.2.0 (session plan X1): the RTCP XR seam adapter.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_xr_report_plugin.cpp
+    DEPS nimrtc::rtp)
+
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_timeline.cpp
     DEPS nimrtc::rtp)

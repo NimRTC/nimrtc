@@ -93,6 +93,32 @@ struct NIMRTC_API_STABLE MediaDescription {
     // stored verbatim to preserve ordering and exact formatting
     std::vector<std::string> rtcp_fb;
 
+    // a=rtcp-xr:<parameter> [<parameter>...]  (RFC 3611 §5.1)
+    //
+    // The RTCP Extended Report negotiation attribute.  It is a
+    // *media-level* attribute whose value is the list of XR
+    // parameters the endpoint supports:
+    //
+    //   - "rcvr-rtt=all"     — the Receiver Reference Time block
+    //                          (BT = 4) and its DLRR answer (BT = 5);
+    //   - "stat-summary=loss" — the Statistics Summary block (BT = 6).
+    //
+    // RFC 3611 §5.1: "When the 'rtcp-xr' attribute is present,
+    // participants SHOULD NOT send XR blocks other than the ones
+    // indicated by the parameters."  So an empty value means "I
+    // understand the attribute but send no XR blocks at all" — the
+    // value is stored verbatim to keep that distinction.
+    std::string rtcp_xr;
+
+    /** True when the description carried an `a=rtcp-xr` attribute at
+     *  all — with or without a parameter list.
+     *
+     *  RFC 3611 §5.1 gives the bare attribute (no parameters) a
+     *  meaning of its own: "I understand the attribute, but send me
+     *  no XR blocks."  Without this flag an empty `rtcp_xr` would be
+     *  indistinguishable from "no attribute at all". */
+    bool rtcp_xr_present = false;
+
     // a=extmap:<id>[/<direction>] <URI> [<params>]
     struct ExtMap {
         int id = 0;

@@ -322,6 +322,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   pacer (video-pipeline plan P1):
     //     - pacing/pacing.hpp (the token bucket on a monotonic clock)
     //
+    // v1.2.0 (session capability plan X1 / X3) bump: +4 public headers
+    //   (118 -> 122) for the RTCP Extended Report seam and the TMMBR
+    //   messages:
+    //     - plugins/xr_report.hpp (IXrReport + factory -- the RFC 3611
+    //       seam the engine routes the inbound XR sub-packets into)
+    //     - rtp/rtcp_xr.hpp (the RFC 3611 XR block parser / builder)
+    //     - rtp/rtcp_tmmbr.hpp (the RFC 5104 TMMBR / TMMBN messages)
+    //     - rtp/xr_report_plugin.hpp (the module-side adapter that puts
+    //       the XR parser behind the seam)
+    //
     // `session/track.hpp` already existed at v1.1.0 and is part of the
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
@@ -331,7 +341,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 118;
+    constexpr std::size_t kBaselineHeaderCount = 122;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

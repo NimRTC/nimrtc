@@ -169,6 +169,21 @@ void emit_media_attrs(std::string& out, const MediaDescription& m) {
         out += "\r\n";
     }
 
+    // rtcp-xr (RFC 3611 §5.1) — the XR parameter list, if any.
+    //
+    // The attribute is emitted only when it is *present*; a bare
+    // "a=rtcp-xr" (no colon) is the RFC's way of saying "I understand
+    // the attribute but send no XR blocks", and it is a different
+    // statement from silence.
+    if (m.rtcp_xr_present) {
+        out += "a=rtcp-xr";
+        if (!m.rtcp_xr.empty()) {
+            out += ':';
+            out += m.rtcp_xr;
+        }
+        out += "\r\n";
+    }
+
     // extmap (ascending id)
     auto sorted_ext = m.extmap;
     std::sort(sorted_ext.begin(), sorted_ext.end(),

@@ -119,7 +119,6 @@ void NimRTCEngine::resolve_dtmf_codec() noexcept {
     // capability, and a host that enabled it without building the
     // module should get "DTMF does not work here" rather than a
     // startup failure of the whole engine.
-    auto& reg = core::PluginRegistry::instance();
     const plugins::IDtmfCodecFactory* factory =
         pal::resolve_dtmf(config_.dtmf_codec_name);
     if (factory == nullptr) {

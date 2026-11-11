@@ -30,6 +30,7 @@
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/plugins/dtmf.hpp>
 #include <nimrtc/plugins/net_feedback.hpp>
 #include <nimrtc/plugins/scheduler.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
@@ -76,6 +77,15 @@ resolve_audio_decoder(std::string_view id) noexcept {
 [[nodiscard]] inline const plugins::IAudioReceiverFactory*
 resolve_audio_receiver(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_audio_receiver(id);
+}
+
+/** Resolve an `IDtmfCodecFactory` by plugin id. Returns nullptr if not
+ *  registered.  Used by the engine to satisfy `EngineConfig::dtmf_codec_name`
+ *  (default "dtmf") -- the RFC 4733 telephone-event seam (v1.2.0,
+ *  session capability plan D1 / D2). */
+[[nodiscard]] inline const plugins::IDtmfCodecFactory*
+resolve_dtmf(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_dtmf(id);
 }
 
 /** Resolve an `IBweFactory` by plugin id. Returns nullptr if not registered. */

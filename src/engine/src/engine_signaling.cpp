@@ -59,15 +59,44 @@ std::string NimRTCEngine::create_offer() noexcept {
     // and keep its default DTLS role.
     impl_->local_session_id = sdp.origin_session_id;
 
-    sdp::MediaDescription audio;
+    // Helper: append ICE candidates stripped of any prefix the libjuice
+    // collector added (the munger re-emits "a=candidate:" itself).
+    auto push_candidates_into = [&](sdp::MediaDescription& m) {
+        if (!ice_t_) return;
+        auto gathered = ice_t_->gathered_local_candidates();
+        constexpr std::string_view kFullPrefix = "a=candidate:";
+        constexpr std::string_view kHalfPrefix = "candidate:";
+        for (auto& c : gathered) {
+            if (c.size() >= kFullPrefix.size() &&
+                c.substr(0, kFullPrefix.size()) == kFullPrefix) {
+                m.candidates.push_back(std::string(c.substr(kFullPrefix.size())));
+            } else if (c.size() >= kHalfPrefix.size() &&
+                       c.substr(0, kHalfPrefix.size()) == kHalfPrefix) {
+                m.candidates.push_back(std::string(c.substr(kHalfPrefix.size())));
+            } else {
+                m.candidates.push_back(c);
+            }
+        }
+    };
+
+    // ---- Audio m-line builder (RFC 8829 §5, Opus via RFC 7587) ---------
+    //
+    // The audio m-line is built by a lambda so the media plan can emit
+    // one m-line per audio transceiver, each with its own mid and
+    // direction (N3 / T2).  The *content* of the m-line is the same for
+    // every audio transceiver — the payload type, the codec parameters
+    // and the ICE / DTLS credentials are per-session, not per-m-line.
+    auto build_audio_media = [&](const std::string& mid,
+                                 sdp::Direction dir) -> sdp::MediaDescription {
+            sdp::MediaDescription audio;
     audio.type            = sdp::MediaType::Audio;
     audio.port            = 9;
     audio.protocol        = "UDP/TLS/RTP/SAVPF";
     // Build the format string key from the configurable payload type.
     const std::string pt = std::to_string(config_.audio_codec.payload_type);
     audio.formats         = {pt};
-    audio.direction       = sdp::Direction::SendRecv;
-    audio.mid             = "0";
+    audio.direction       = dir;
+    audio.mid             = mid;
     audio.rtcp_mux_value  = "rtcp-mux";
     audio.ice_ufrag       = ice_t_ ? ice_t_->local_ufrag() : "";
     audio.ice_pwd         = ice_t_ ? ice_t_->local_password() : "";
@@ -193,28 +222,10 @@ std::string NimRTCEngine::create_offer() noexcept {
         impl_->local_audio_level_ext_id = detail::kAudioLevelDefaultLocalId;
     }
 
-    // Helper: append ICE candidates stripped of any prefix the libjuice
-    // collector added (the munger re-emits "a=candidate:" itself).
-    auto push_candidates_into = [&](sdp::MediaDescription& m) {
-        if (!ice_t_) return;
-        auto gathered = ice_t_->gathered_local_candidates();
-        constexpr std::string_view kFullPrefix = "a=candidate:";
-        constexpr std::string_view kHalfPrefix = "candidate:";
-        for (auto& c : gathered) {
-            if (c.size() >= kFullPrefix.size() &&
-                c.substr(0, kFullPrefix.size()) == kFullPrefix) {
-                m.candidates.push_back(std::string(c.substr(kFullPrefix.size())));
-            } else if (c.size() >= kHalfPrefix.size() &&
-                       c.substr(0, kHalfPrefix.size()) == kHalfPrefix) {
-                m.candidates.push_back(std::string(c.substr(kHalfPrefix.size())));
-            } else {
-                m.candidates.push_back(c);
-            }
-        }
-    };
     push_candidates_into(audio);
 
-    sdp.media.push_back(std::move(audio));
+    return audio;
+    };
 
     // ---- Video m-line (RFC 8829 §5, H.264 via RFC 6184) -----------------
     // Emit a video m-line only when at least one video plugin was resolved
@@ -222,7 +233,11 @@ std::string NimRTCEngine::create_offer() noexcept {
     // codec plugin is decoder-only — for encode we'd need a real codec
     // plugin — but the SDP/SDP-answer plumbing is correct regardless so
     // that browsers see the negotiation succeed even on a one-way demo.
-    if (video_receiver_ || video_sender_) {
+    //
+    // The builder is a lambda so the media plan can emit one m-line per
+    // video transceiver, each with its own mid and direction (N3 / T2).
+    auto build_video_media = [&](const std::string& mid,
+                                 sdp::Direction dir) -> sdp::MediaDescription {
         sdp::MediaDescription video;
         video.type     = sdp::MediaType::Video;
         video.port     = 9;
@@ -235,8 +250,8 @@ std::string NimRTCEngine::create_offer() noexcept {
         const std::string vpt =
             std::to_string(config_.video_sender_tuning.payload_type);
         video.formats         = {vpt};
-        video.direction       = sdp::Direction::SendRecv;
-        video.mid             = "1";           // second BUNDLE mid
+        video.direction       = dir;
+        video.mid             = mid;
         video.rtcp_mux_value  = "rtcp-mux";
         video.ice_ufrag       = ice_t_ ? ice_t_->local_ufrag() : "";
         video.ice_pwd         = ice_t_ ? ice_t_->local_password() : "";
@@ -312,10 +327,8 @@ std::string NimRTCEngine::create_offer() noexcept {
         video.extra_attrs.emplace_back("ssrc", ssrc_line);
 
         push_candidates_into(video);
-        sdp.media.push_back(std::move(video));
-        // Make sure both mids are in the BUNDLE group.
-        sdp.bundle_mids = {"0", "1"};
-    }
+        return video;
+    };
 
     // ---- DataChannel m=application line (RFC 8831 / RFC 8260) ----------
     //
@@ -349,7 +362,12 @@ std::string NimRTCEngine::create_offer() noexcept {
         (!resolved_dc_factory_id_.empty()
              ? (resolved_dc_factory_id_ == "web_transport")
              : (config_.datachannel_backend == "web_transport"));
-    if (!wt_backend && !config_.datachannel_name.empty()) {
+
+    // The application m-line is built by a lambda for the same reason as
+    // the other two: the media plan drives it, one m-line per data
+    // transceiver (N3 / T2).
+    auto build_app_media = [&](const std::string& mid,
+                               sdp::Direction dir) -> sdp::MediaDescription {
         sdp::MediaDescription app;
         app.type     = sdp::MediaType::Application;
         app.port     = 9;
@@ -364,10 +382,10 @@ std::string NimRTCEngine::create_offer() noexcept {
         // list rather than a placeholder — the munger emits
         // `m=application 9 UDP/DTLS/SCTP` with no trailing formats.
         app.formats.clear();
-        app.direction       = sdp::Direction::SendRecv;
-        // Third BUNDLE mid — keep mids 0=audio, 1=video, 2=application
-        // to match the wire order.
-        app.mid             = "2";
+        app.direction       = dir;
+        // The application mid is allocated by the session model, so it
+        // is whatever mid the data transceiver owns (normally "2").
+        app.mid             = mid;
         app.rtcp_mux_value  = "";    // rtcp-mux is RTP-specific; not valid for SCTP.
         app.ice_ufrag       = ice_t_ ? ice_t_->local_ufrag() : "";
         app.ice_pwd         = ice_t_ ? ice_t_->local_password() : "";
@@ -392,17 +410,110 @@ std::string NimRTCEngine::create_offer() noexcept {
         app.extra_attrs.emplace_back("max-message-size", "6556");
 
         push_candidates_into(app);
-        sdp.media.push_back(std::move(app));
-        // Update BUNDLE mids — the application mid always appends.
-        // We rebuild from sdp.media to keep the order in sync (audio=0,
-        // video=1, application=2).  When video is disabled, the audio mid
-        // is still 0 and the application mid slides to 1 to keep the
-        // BUNDLE group contiguous.
-        sdp.bundle_mids.clear();
-        for (const auto& m : sdp.media) {
-            if (!m.mid.empty()) sdp.bundle_mids.push_back(m.mid);
+        return app;
+    };
+
+    // ---- The media plan (v1.2.0, session capability plan N3 / T2) ----
+    //
+    // The media list is not a fixed two-m-line affair any more: it is
+    // the session model's transceiver list.  A track the host added
+    // shows up as a new m-line, a removed track keeps its m-line and
+    // turns it `inactive` (OD-A), and a mid never moves (T3).
+    ensure_base_session_state();
+
+    const bool want_data   = (!wt_backend && !config_.datachannel_name.empty());
+    const bool want_video  = (video_receiver_ || video_sender_);
+
+    struct MediaPlanEntry {
+        std::string    mid;
+        sdp::MediaType type = sdp::MediaType::Audio;
+        sdp::Direction dir  = sdp::Direction::SendRecv;
+    };
+    std::vector<MediaPlanEntry> media_plan;
+
+    if (impl_->session_model) {
+        for (const auto& t : impl_->session_model->transceivers()) {
+            sdp::MediaType type = sdp::MediaType::Audio;
+            if (t.kind == plugins::MediaKind::kVideo) {
+                type = sdp::MediaType::Video;
+            } else if (t.kind == plugins::MediaKind::kData) {
+                type = sdp::MediaType::Application;
+            }
+            // Audio is the default: the transceiver's kind decides the
+            // media type, and `kAudio` keeps the type above.
+            // A media section we cannot serve is not advertised: no
+            // video pipeline means no m=video, no SCTP backend means
+            // no m=application.
+            if (type == sdp::MediaType::Video && !want_video) continue;
+            if (type == sdp::MediaType::Application && !want_data) continue;
+            media_plan.push_back(
+                {t.mid, type, detail::to_sdp_direction(t.direction)});
+        }
+    } else {
+        // No session model (the host disabled it, or the module is not
+        // built): the pre-v1.2.0 fixed media list.
+        media_plan.push_back({"0", sdp::MediaType::Audio, sdp::Direction::SendRecv});
+        if (want_video) {
+            media_plan.push_back({"1", sdp::MediaType::Video, sdp::Direction::SendRecv});
+        }
+        if (want_data) {
+            media_plan.push_back({"2", sdp::MediaType::Application, sdp::Direction::SendRecv});
         }
     }
+
+    // A session model that produced no transceiver at all would leave
+    // the offer without a single m-line, and no peer can negotiate an
+    // offer that carries no media.  The audio m-line is the engine's
+    // baseline, so it is always present.
+    if (media_plan.empty()) {
+        media_plan.push_back({"0", sdp::MediaType::Audio, sdp::Direction::SendRecv});
+    }
+
+    // Stable order: the mids sort numerically ("0" audio, "1" video,
+    // "2" data, then whatever the host added), so the media list keeps
+    // the shape it always had.
+    const auto mid_sort_key = [](const std::string& mid) {
+        std::uint64_t numeric = 0;
+        bool numeric_mid = !mid.empty();
+        for (char c : mid) {
+            if (c < '0' || c > '9') { numeric_mid = false; break; }
+            numeric = numeric * 10 + static_cast<std::uint64_t>(c - '0');
+        }
+        return std::pair<std::uint64_t, std::string>{
+            numeric_mid ? numeric : ~std::uint64_t{0}, mid};
+    };
+    std::stable_sort(media_plan.begin(), media_plan.end(),
+                     [&mid_sort_key](const MediaPlanEntry& a,
+                                    const MediaPlanEntry& b) {
+                         return mid_sort_key(a.mid) < mid_sort_key(b.mid);
+                     });
+
+    for (const auto& entry : media_plan) {
+        switch (entry.type) {
+            case sdp::MediaType::Audio:
+                sdp.media.push_back(build_audio_media(entry.mid, entry.dir));
+                break;
+            case sdp::MediaType::Video:
+                sdp.media.push_back(build_video_media(entry.mid, entry.dir));
+                break;
+            case sdp::MediaType::Application:
+                sdp.media.push_back(build_app_media(entry.mid, entry.dir));
+                break;
+            default:
+                break;
+        }
+    }
+
+    // The BUNDLE group lists every mid we emitted (RFC 8829 §5.2.1).
+    sdp.bundle_mids.clear();
+    for (const auto& m : sdp.media) {
+        if (!m.mid.empty()) sdp.bundle_mids.push_back(m.mid);
+    }
+
+    // The session changed → the offer we just produced is the new
+    // baseline, so the "needs renegotiation" flag goes back to false
+    // (N2).
+    impl_->session_dirty = false;
 
     auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
     if (!sdp_str) {
@@ -1029,7 +1140,71 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             "process_remote_sdp: answer applied — no answer generated "
             "(dtls role=" +
             std::string(impl_->dtls_is_client ? "Client" : "Server") + ")");
+        // The peer's answer closes the current negotiation round, so the
+        // session is no longer "dirty" (N2).
+        impl_->session_dirty = false;
         return std::string{};
+    }
+
+    // ---- Adopt the peer's m-lines as transceivers (T2 / T3) -----------
+    //
+    // The peer's offer carries one m-line per media section, each with
+    // its own mid.  Each of them becomes a transceiver in our session
+    // model, so:
+    //
+    //   - the mid the peer chose is the mid we answer with (RFC 3264
+    //     §6.1: the answer mirrors the offer's m-sections one-to-one),
+    //   - a transceiver the peer offered but we never created (the peer
+    //     has more media than we do) is visible to the host through
+    //     `transceivers()` — it can attach a track to it or stop it.
+    //
+    // A transceiver that already exists (our base audio / video / data
+    // ones) keeps its identity; only its direction is refreshed, and
+    // only from what the peer *offered* — our own capability is
+    // intersected with it when the answer is built.
+    if (impl_->session_model) {
+        for (const auto& rm : remote.media) {
+            if (rm.type != sdp::MediaType::Audio &&
+                rm.type != sdp::MediaType::Video &&
+                rm.type != sdp::MediaType::Application) {
+                continue;
+            }
+            const plugins::MediaKind kind =
+                (rm.type == sdp::MediaType::Video)
+                    ? plugins::MediaKind::kVideo
+                    : (rm.type == sdp::MediaType::Application)
+                          ? plugins::MediaKind::kData
+                          : plugins::MediaKind::kAudio;
+
+            const std::string mid = rm.mid.empty()
+                ? std::to_string(remote.media.size())
+                : rm.mid;
+
+            // Does a transceiver already own that mid?
+            bool found = false;
+            for (const auto& t : impl_->session_model->transceivers()) {
+                if (t.mid == mid) { found = true; break; }
+            }
+            if (!found) {
+                // A transceiver we had no counterpart for.  Its initial
+                // direction is the *inverse* of what the peer offered:
+                // a peer that offers `sendonly` sends, so we receive.
+                const plugins::Direction peer_can =
+                    detail::from_sdp_direction(rm.direction);
+                const plugins::Direction ours =
+                    (peer_can == plugins::Direction::kSendOnly)
+                        ? plugins::Direction::kRecvOnly
+                    : (peer_can == plugins::Direction::kRecvOnly)
+                        ? plugins::Direction::kSendOnly
+                        : peer_can;
+                const std::string created =
+                    impl_->session_model->add_transceiver_at(mid, kind, ours);
+                if (created.empty()) continue;
+            }
+            // An existing transceiver keeps *our* direction — the peer's
+            // capability is intersected with it when the answer is built,
+            // and overwriting it here would throw our side away.
+        }
     }
 
     sdp::SessionDescription ans;
@@ -1100,6 +1275,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // Preserve the remote mid when present (BUNDLE); fall back to a
         // positional assignment by index for the legacy single-m-line case.
         am.mid      = rm.mid.empty() ? std::to_string(remote.media.size()) : rm.mid;
+
+        // ---- Session model overrides the direction (N4 / OD-A) ----------
+        //
+        // The direction computed above is "what the *peer* offered,
+        // inverted" — the answerer's capability is assumed to be
+        // sendrecv.  When the session model knows the transceiver that
+        // owns this mid, the *session* is the authority on what we can
+        // actually do: a transceiver the host stopped, or one whose
+        // track was removed, must be answered `inactive` (OD-A), and a
+        // sendonly transceiver must not answer `recvonly`.
+        //
+        // The mid is matched against the transceiver list, so a
+        // transceiver the peer did not offer is simply not found and
+        // the historical behaviour stands.
+        if (impl_->session_model && !am.mid.empty()) {
+            for (const auto& t : impl_->session_model->transceivers()) {
+                if (t.mid != am.mid) continue;
+                // Our own capability, intersected with the peer's.
+                const plugins::Direction ours = t.direction;
+                const sdp::Direction peer = rm.direction;
+                am.direction = detail::intersect_direction(
+                    detail::to_sdp_direction(ours), peer);
+                break;
+            }
+        }
         // rtcp-mux is RTP-specific — invalid on an SCTP m-line.  The
         // munger emits `a=rtcp-mux` whenever the field is non-empty;
         // we set it only for audio/video to avoid spurious lines

@@ -167,7 +167,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 |---|---|---|---|
 | **R1** | **`video_stats` wired into the engine** (the module exists and says so itself in its own header). Provides measured outbound bitrate, frame counts, dropped frames, keyframe requests, inbound freeze detection. This is the feedback the controller needs (B2) and the ground truth for O2. | `E` | The engine exposes a per-stream stats snapshot; values change during a live session. |
 | **R2** | **Decoder-side resolution switch**: the receiver must handle a parameter-set change (H.264/H.265 SPS·PPS·VPS, AV1 sequence header) mid-stream without a full restart. | `M` | A synthetic mid-stream resolution change is decoded without an error. |
-| **R3** | **Render clock + A/V sync**: turn the existing skew observation (`SenderReportTracker`, ADR-017) into action — a render clock, and align / drop / reorder decisions driven by the measured skew. | `M` (new `video_sync`) + `E` | A/V skew that exceeds the configured tolerance produces a documented drop or delay correction, asserted in a test with a synthetic skew. |
+| **R3** | **Render clock + A/V sync**: turn the existing skew observation (`SenderReportTracker`, ADR-017) into action — a render clock, and align / drop / reorder decisions driven by the measured skew. | `M` (new `video_sync`) + `E` | A/V skew that exceeds the configured tolerance produces a documented drop or delay correction, asserted in a test with a synthetic skew. **Scope note (2026-11-10):** the *engine* now corrects the **audio** playout against the same capture timeline in `v1.2.0` (audio plan WP-14, spec C-4, switchable). R3 keeps the **video** half — the render clock and the video-side drop / delay decisions — and consumes the same skew. The two must not grow a second skew model: both read the ADR-017 mapping. |
 | **R4** | **Receiver-side decode degradation**: when the receiver cannot keep up, drop frames rather than let the buffer grow unboundedly (bounded-memory guarantee). | `M` | Memory stays bounded under a sustained decode overrun; the drop count is reported. |
 
 ## Track T — Transport robustness
@@ -221,7 +221,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 
 | Release | Theme | Tracks | Headline claim |
 |---|---|---|---|
-| **v1.2.0** | **Adaptive quality closed loop** | F (all), P (P1–P3), B (all), R1, O1, O2, O5, G1, G2, G7, G8 | "Bandwidth-adaptive video: the target bitrate tracks the network, the ladder degrades predictably, and the encoder is told what to do." |
+| **v1.2.0** | **Adaptive quality closed loop** | F (all), P (P1–P3), B (all), R1, O1, O2, O5, G1, G2, G7, G8 | "Bandwidth-adaptive video: the target bitrate tracks the network, the ladder degrades predictably, and the encoder is told what to do." (The same release also carries the audio side's engine-internal A/V correction — audio plan WP-14 — which aligns the *audio playout* to this timeline; R3, the video render clock, stays on `v1.4.0`.) |
 | **v1.3.0** | **Codec breadth and hardware-first** | C (all), R2, O3, G3, G4, G5, G6 | "H.264 / H.265 / AV1 / VP8 / VP9 negotiate properly, and hardware codecs are used automatically when the machine has them." |
 | **v1.4.0** | **Device layer and receive experience** | C1 (device breadth), R3, R4, T1, T2, O4 | "A real camera in, a real renderer out, with A/V synchronisation and RTX-based recovery." |
 | **v1.5.0+** | Deferred items | O-2, O-5, O-1 | FEC, simulcast/SVC, SFU video. |

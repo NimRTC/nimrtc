@@ -1103,13 +1103,14 @@ TEST_F(EnginePluginLoading,
 // WebTransport) lands in a follow-up PR.
 //
 // Subtests:
-//   1. dc0141_backend_default_sctp_resolves_sctp_factory
-//   2. dc0141_backend_web_transport_resolves_msquic_session_factory
-//   3. dc0141_backend_web_transport_without_msquic_soft_warns
-//   4. dc0141_backend_unknown_value_hard_fails_open
-//   5. dc0141_backend_empty_disables_datachannel
-//   6. dc0141_legacy_datachannel_name_only_sctp_still_works
-//   7. dc0141_legacy_datachannel_name_nondefault_uses_as_factory_id
+//   1. dc0141_backend_default_resolves_wire_capable_factory
+//   2. dc0141_backend_sctp_is_rejected_as_test_only   (v1.2.0, WP-A)
+//   3. dc0141_backend_web_transport_resolves_msquic_session_factory
+//   4. dc0141_backend_web_transport_without_msquic_soft_warns
+//   5. dc0141_backend_unknown_value_hard_fails_open
+//   6. dc0141_backend_empty_disables_datachannel
+//   7. dc0141_legacy_datachannel_name_sctp_is_rejected   (v1.2.0, WP-A)
+//   8. dc0141_legacy_datachannel_name_nondefault_uses_as_factory_id
 // ===========================================================================
 
 // File-scope stub factory for the legacy-v0.x backward-compat test
@@ -1136,32 +1137,38 @@ static const StubFactory k_stub_factory;
 
 } // namespace dc0141_legacy_stub_namespace
 
-TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
+TEST_F(EnginePluginLoading, dc0141_backend_default_resolves_wire_capable_factory) {
     // v0.14.0-rc.1 contract (updated v0.15.0): the default
     // `datachannel_backend = "web_transport"` (product route) resolves
     // the `WebTransportDataChannelFactory` (id="web_transport").
-    // Explicit `datachannel_backend = "sctp"` keeps resolving the
-    // `SctpDataChannelFactory` (id="sctp") — verified below.
+    //
+    // v1.2.0 (WP-A / DEC-4 = A1): the default must resolve to a backend
+    // that has a **wire path**.  The retired "sctp" backend was an
+    // in-process usrsctp loopback socket and could never reach a peer,
+    // so it must not be the default (and must not be selectable — see
+    // dc0141_backend_sctp_is_rejected_as_test_only below).
     EngineConfig cfg;
     EXPECT_EQ(cfg.datachannel_backend, "web_transport")
         << "v0.15.0: default datachannel_backend must be \"web_transport\" "
            "(product route: every caller that did not set the field lands "
            "on the WebTransport family)";
+    EXPECT_NE(cfg.datachannel_backend, "sctp")
+        << "v1.2.0: the default backend must have a wire path; the retired "
+           "\"sctp\" backend is an in-process loopback socket";
     EXPECT_EQ(cfg.web_transport_name, "msquic")
         << "v0.14.0-rc.1: default web_transport_name must be \"msquic\" "
            "(matches list_web_transports() at the v0.14.0-beta.1 cut)";
 
     // The SctpDataChannelFactory must be auto-registered (existing
-    // contract; the v0.x path that `init_datachannel_registry` relied
-    // on — verify it is still in place before we exercise the new
-    // dispatcher).
+    // contract) — it stays registered as the in-tree *test* backend
+    // (the module tests drive it directly), even though the engine no
+    // longer selects it.
     const auto* sctp_factory =
         PluginRegistry::instance().get_datachannel("sctp");
     ASSERT_NE(sctp_factory, nullptr)
-        << "v0.14.0-rc.1: SctpDataChannelFactory (\"sctp\") must be "
-           "auto-registered by core::register_all_default_plugins() "
-           "(this is the pre-rc.1 contract; the rc.1 dispatcher "
-           "relies on it for the \"sctp\" backend lookup)";
+        << "v1.2.0: SctpDataChannelFactory (\"sctp\") stays registered as "
+           "the in-tree test backend (the registry slot is not withdrawn; "
+           "only the engine's public selector is)";
 
     // The WebTransport DataChannel factory must be auto-registered too
     // (v0.14.0-beta.1 cut; the v0.15.0 default dispatcher relies on it).
@@ -1194,20 +1201,50 @@ TEST_F(EnginePluginLoading, dc0141_backend_default_sctp_resolves_sctp_factory) {
         << "v0.15.0: default config must NOT invoke on_error_ "
            "during open()";
     engine.close();
+}
 
-    // Explicit SCTP backend still resolves the sctp factory path.
-    EngineConfig sctp_cfg;
-    sctp_cfg.datachannel_backend = "sctp";
-    sctp_cfg.datachannel_name = "sctp";
-    NimRTCEngine sctp_engine(sctp_cfg);
-    sctp_engine.set_on_error([&](std::uint32_t, std::string_view) {
+TEST_F(EnginePluginLoading, dc0141_backend_sctp_is_rejected_as_test_only) {
+    // v1.2.0 (WP-A / DEC-4 = A1): the SCTP backend is a **test-only**
+    // backend — its factory opens an in-process usrsctp socket bound to
+    // 127.0.0.1 and the engine never wires SCTP-over-DTLS, so a channel
+    // created on it can never reach a remote peer.  Selecting it must
+    // fail loudly (kEngineInternal) instead of silently handing the
+    // caller a data plane that cannot work.
+    EngineConfig cfg;
+    cfg.datachannel_backend = "sctp";
+
+    NimRTCEngine engine(cfg);
+    std::atomic<std::uint32_t> err_code{0};
+    std::atomic<bool> err_called{false};
+    std::string err_msg;
+    engine.set_on_error([&](std::uint32_t err, std::string_view msg) {
+        err_code = err;
         err_called = true;
+        err_msg.assign(msg.data(), msg.size());
     });
-    EXPECT_EQ(sctp_engine.open(), 0u)
-        << "v0.15.0: explicit datachannel_backend=\"sctp\" must still "
-           "open() cleanly (legacy SCTP-over-DTLS path preserved)";
-    EXPECT_FALSE(err_called.load());
-    sctp_engine.close();
+    const uint32_t rc = engine.open();
+    EXPECT_NE(rc, 0u)
+        << "v1.2.0: datachannel_backend=\"sctp\" must fail open() "
+           "(the SCTP backend is test-only and cannot reach a peer); "
+           "got rc=" << rc;
+    EXPECT_TRUE(err_called.load())
+        << "v1.2.0: engine must invoke on_error_ when the retired \"sctp\" "
+           "backend is selected";
+    EXPECT_EQ(err_code.load(), static_cast<std::uint32_t>(nimrtc::core::kEngineInternal))
+        << "v1.2.0: the retired SCTP backend must surface kEngineInternal; "
+           "err_msg=" << err_msg;
+    EXPECT_NE(err_msg.find("test-only"), std::string::npos)
+        << "v1.2.0: the error message must name the test-only status of "
+           "the SCTP backend (err_msg=" << err_msg << ")";
+
+    // create_data_channel() must return nullptr (the resolved factory id
+    // stays empty after the hard-fail).
+    std::unique_ptr<nimrtc::plugins::IDataChannel> ch =
+        engine.create_data_channel("test");
+    EXPECT_EQ(ch, nullptr)
+        << "v1.2.0: create_data_channel() must return nullptr after the "
+           "retired SCTP backend was rejected";
+    engine.close();
 }
 
 TEST_F(EnginePluginLoading,
@@ -1309,7 +1346,7 @@ TEST_F(EnginePluginLoading,
     // stderr log; the test re-uses no log capture (KISS).
 
     // Cleanup: re-register the msquic factory so downstream tests
-    // (e.g. dc0141_backend_default_sctp_resolves_sctp_factory
+    // (e.g. dc0141_backend_default_resolves_wire_capable_factory
     // running in the same binary) see the v0.14.0-beta.1 baseline.
     nimrtc::core::register_all_default_plugins();
     engine.close();
@@ -1422,19 +1459,18 @@ TEST_F(EnginePluginLoading, dc0141_backend_empty_disables_datachannel) {
     engine.close();
 }
 
-TEST_F(EnginePluginLoading, dc0141_legacy_datachannel_name_only_sctp_still_works) {
-    // v0.14.0-rc.1 backward-compat contract: a v0.x caller that did
-    // not set `datachannel_backend` (the field did not exist) but
-    // explicitly set `datachannel_name = "sctp"` (the v0.x default)
-    // must continue to land on the SCTP family without any
-    // behaviour change.
+TEST_F(EnginePluginLoading, dc0141_legacy_datachannel_name_sctp_is_rejected) {
+    // v1.2.0 (WP-A / DEC-4 = A1): the legacy v0.x spelling of the SCTP
+    // backend — `datachannel_backend` empty + `datachannel_name = "sctp"`
+    // — is rejected exactly like the modern spelling.  Both selectors
+    // resolve to the same retired family, so both must fail loudly
+    // instead of handing the caller a loopback-only data plane.
     //
     // The dispatch logic in `init_datachannel_registry()`:
     //   1. `cfg.datachannel_backend.empty()` → fall back to legacy
     //      `cfg.datachannel_name` ("sctp") as the dispatch input.
-    //   2. The legacy "sctp" value maps to the new "sctp" backend
-    //      family (so the engine's behaviour is byte-identical to
-    //      the v0.x contract for this input).
+    //   2. The legacy "sctp" value maps to the retired "sctp" backend
+    //      family, which the dispatcher rejects with kEngineInternal.
     EngineConfig cfg;
     cfg.datachannel_backend = "";    // not yet set (legacy v0.x)
     cfg.datachannel_name    = "sctp"; // v0.x default
@@ -1444,18 +1480,25 @@ TEST_F(EnginePluginLoading, dc0141_legacy_datachannel_name_only_sctp_still_works
     NimRTCEngine engine(cfg);
     std::atomic<std::uint32_t> err_code{0};
     std::atomic<bool> err_called{false};
-    engine.set_on_error([&](std::uint32_t err, std::string_view) {
+    std::string err_msg;
+    engine.set_on_error([&](std::uint32_t err, std::string_view msg) {
         err_code = err;
         err_called = true;
+        err_msg.assign(msg.data(), msg.size());
     });
     const uint32_t rc = engine.open();
-    EXPECT_EQ(rc, 0u)
-        << "v0.14.0-rc.1: legacy (datachannel_backend empty, "
-           "datachannel_name=\"sctp\") must open() cleanly; on_error "
-           "code=0x" << std::hex << err_code.load() << std::dec;
-    EXPECT_FALSE(err_called.load())
-        << "v0.14.0-rc.1: legacy v0.x config must NOT change engine "
-           "behaviour (no spurious on_error firings)";
+    EXPECT_NE(rc, 0u)
+        << "v1.2.0: legacy (datachannel_backend empty, "
+           "datachannel_name=\"sctp\") must fail open() — the SCTP backend "
+           "is test-only; got rc=" << rc;
+    EXPECT_TRUE(err_called.load())
+        << "v1.2.0: the retired SCTP backend must fire on_error_";
+    EXPECT_EQ(err_code.load(), static_cast<std::uint32_t>(nimrtc::core::kEngineInternal))
+        << "v1.2.0: the retired SCTP backend must surface kEngineInternal; "
+           "err_msg=" << err_msg;
+    EXPECT_NE(err_msg.find("test-only"), std::string::npos)
+        << "v1.2.0: the error message must name the test-only status of "
+           "the SCTP backend (err_msg=" << err_msg << ")";
     engine.close();
 }
 

@@ -1,6 +1,6 @@
 /**
  * @file src/modules/sched/tests/test_priority.cpp
- * @brief DC-2: L1 strict-priority scheduler — unit tests.
+ * @brief DC-2: per-stream (S-family) strict-priority scheduler — unit tests.
  *
  * Scenarios:
  *   A — High + Low pending → High packets emitted first until bucket empty.

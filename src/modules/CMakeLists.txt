@@ -48,7 +48,20 @@ if(NIMRTC_MODULE_BWE)
     add_subdirectory(bwe)
 endif()
 
+# v1.2.0 M3 (P1): the token-bucket pacer.  It must come before sched:
+# nimrtc_sched links nimrtc::pacing, so the target has to exist first.
+# This is the documented cross-module dependency pattern (same shape as
+# modules/jb using modules/jb_strategy).
+if(NIMRTC_MODULE_PACING)
+    add_subdirectory(pacing)
+endif()
+
 if(NIMRTC_MODULE_SCHED)
+    if(NOT NIMRTC_MODULE_PACING)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_SCHED requires NIMRTC_MODULE_PACING "
+            "(the token-bucket pacer that shapes the outbound traffic)")
+    endif()
     add_subdirectory(sched)
 endif()
 
@@ -88,6 +101,13 @@ endif()
 
 if(NIMRTC_MODULE_SESSION)
     add_subdirectory(session)
+endif()
+
+# v1.2.0 (session capability plan D1 / D2): the RFC 4733 telephone-event
+# codec.  Self-contained -- it depends on nimrtc::core and nimrtc::plugins
+# only.
+if(NIMRTC_MODULE_DTMF)
+    add_subdirectory(dtmf)
 endif()
 
 if(NIMRTC_MODULE_ASSEMBLY)

@@ -27,8 +27,8 @@ EngineConfig
 │   ├── bwe_name                        = "aimd"
 │   ├── scheduler_name                  = "strict_priority"
 │   ├── video_codec_name                = "h264"
-│   ├── datachannel_backend             = "sctp"        ← new in v0.14.0-rc.1
-│   ├── datachannel_name                = "sctp"
+│   ├── datachannel_backend             = "web_transport"  ← new in v0.14.0-rc.1
+│   ├── datachannel_name                = ""             (legacy factory slot)
 │   ├── web_transport_name              = "msquic"       ← new in v0.14.0-rc.1
 │   ├── video_source_name               = "memory"
 │   ├── video_sink_name                 = "headless"
@@ -231,15 +231,37 @@ cfg.video_receiver_name   = "videotoolbox";  // Apple
 ### 2.6 DataChannel
 
 ```cpp
-std::string datachannel_backend = "sctp";   // "sctp" | "web_transport" | ""
-std::string datachannel_name    = "sctp";   // empty = no DataChannel; OR power-user factory id
+std::string datachannel_backend = "web_transport"; // "web_transport" | "" ("sctp" retired in v1.2.0)
+std::string datachannel_name    = "";    // legacy factory slot; empty = no DataChannel
 std::string web_transport_name  = "msquic"; // WebTransport session factory id
 std::uint16_t sctp_port        = 5000;
+
+// v1.2.0 (DataChannel capability plan WP-B / WP-E1 / WP-D4):
+plugins::DataChannelFraming datachannel_framing = plugins::DataChannelFraming::kRaw;
+std::uint8_t datachannel_priority = 128;
+std::uint16_t datachannel_max_retransmits = 0;          // 0 = unlimited
+std::uint16_t datachannel_max_packet_lifetime_ms = 0;   // 0 = unlimited
 ```
 
 **v0.14.0-rc.1** added the `datachannel_backend` + `web_transport_name`
 fields to support the DC-1 v1.0.0 headline gate (WebTransport / QUIC
 data plane; see `docs/plan/v1.0-plan.md` §2.1.1 PR-3).
+
+**v1.2.0** retired the `"sctp"` backend from the public selectors and
+changed the default of `datachannel_name` from `"sctp"` to `""`
+(`docs/plan/datachannel-capability-plan.md` WP-A, DEC-4 = A1).
+
+#### 2.6.0 Which backends can actually reach a peer
+
+| Backend | Reaches a remote peer? | Notes |
+|---|---|---|
+| `"web_transport"` (default) | ✅ yes | WebTransport / QUIC on its own connection (separate from the ICE/DTLS media 5-tuple). This is the production data plane. |
+| `"sctp"` | ❌ **no** — **rejected** | **Retired in v1.2.0** (`docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1). The SCTP factory opens an in-process usrsctp socket bound to `127.0.0.1` (`src/sctp/src/usrsctp_socket.cpp`); the engine never wires SCTP-over-DTLS, so the backend could never reach a peer. Passing `"sctp"` now fails `open()` with `kEngineInternal` and an error message that says it is test-only. |
+
+The SCTP factory stays registered in `core::PluginRegistry` as the
+in-tree **reference implementation** for the DCEP codec and the
+PR-SCTP semantics — the module tests drive it directly.  What was
+retired is the *public selector*, not the backend.
 
 #### 2.6.1 Backend dispatch
 
@@ -248,35 +270,52 @@ The engine resolves `core::PluginRegistry::get_datachannel(<id>)` at
 
 | `datachannel_backend` | Resolved factory id       | Notes                                           |
 |-----------------------|---------------------------|-------------------------------------------------|
-| `"sctp"` (default)    | `"sctp"` (or `datachannel_name` override when set) | Legacy SCTP-over-DTLS path; same as v0.x.        |
-| `"web_transport"`     | `"web_transport"` (fixed; `datachannel_name` is ignored) | Production path. Also verifies `web_transport_name` session factory (default `"msquic"`). |
+| `"web_transport"` (default) | `"web_transport"` (fixed; `datachannel_name` is ignored) | Production path — the only backend with a wire path. Also verifies `web_transport_name` session factory (default `"msquic"`). |
+| `"sctp"`              | **(hard error)**          | Retired in v1.2.0 — surfaces `kEngineInternal` via `on_error_`; the message names the backend as test-only (§2.6.0). |
 | `""`                  | `datachannel_name` (legacy v0.x fallback) | Backward compat — a v0.x caller that set only `datachannel_name` continues to work without code changes. |
-| `<other>`             | **(hard error)**          | Surfaces `kEngineInternal` via `on_error_` — engine does NOT silently fall back to `"sctp"` (typos would mask integrator errors). |
+| `<other>`             | **(hard error)**          | Surfaces `kEngineInternal` via `on_error_` — engine does NOT silently fall back to another backend (typos would mask integrator errors). |
+
+The legacy spelling reaches the same retired family: `datachannel_backend`
+empty plus `datachannel_name = "sctp"` is rejected exactly like
+`datachannel_backend = "sctp"`.
 
 #### 2.6.2 WebTransport session factory
 
-When `datachannel_backend = "web_transport"`, the engine additionally
-resolves `core::PluginRegistry::get_web_transport(web_transport_name)`
-(default `"msquic"`) for **readiness verification** only — the
-physical session creation PR (DTLS↔WebTransport plumbing) lands in a
-follow-up v0.14.0-rc.1 PR.  A missing session factory at the rc.1
-cut is a soft-warn (logged via `core::log`); the physical plumbing
-PR promotes it to hard-fail.
+When `datachannel_backend = "web_transport"`, the engine resolves
+`core::PluginRegistry::get_web_transport(web_transport_name)`
+(default `"msquic"`) at `init_modules_once()` time.  A missing
+session factory is a soft-warn (logged via `core::log`); the failure
+surfaces later, when `create_data_channel()` tries to create the
+session.
+
+The physical session is created **lazily, on the first
+`create_data_channel()` call**, and is then **shared by every channel
+of that engine** (`Impl::wt_session`).  The engine therefore needs
+`web_transport_peer_host` (and, for a non-default port,
+`web_transport_peer_port`) to be set before the first channel is
+created — an empty peer host means in-process loopback (unit tests).
 
 #### 2.6.3 Disabling DataChannel
 
-Setting `datachannel_name = ""` disables DataChannel entirely
-(mirrors the v0.x contract). This works in **every** backend family,
-including `"sctp"` (the default) where `datachannel_name` stays the
-authoritative knob:
+Set `datachannel_backend = ""` to disable DataChannel entirely:
 
 - `create_offer()` does **not** emit `m=application`;
 - `process_remote_sdp()` silently drops any `m=application` from
   the peer;
 - `create_data_channel()` returns `nullptr`.
 
-To disable by way of the new field instead, set
-`datachannel_backend = ""` **and** `datachannel_name = ""`.
+In the legacy path (where `datachannel_backend` is empty),
+`datachannel_name = ""` is the equivalent switch (it is the
+authoritative knob there, mirroring the v0.x contract).  **In the
+default `"web_transport"` family `datachannel_name` is ignored**, so
+clearing it alone does *not* disable DataChannel — clear
+`datachannel_backend` as well.
+
+Note that in the `"web_transport"` family the engine emits **no**
+`m=application` line at all: the data plane rides its own QUIC
+connection rather than the ICE/DTLS 5-tuple.  An offer without
+`m=application` therefore does not by itself mean "DataChannel
+disabled".
 
 #### 2.6.4 Power-user factory override (legacy v0.x)
 
@@ -286,7 +325,68 @@ other than `"sctp"`) continues to resolve that id directly through
 treats the legacy value as a direct factory id when it is not one
 of the recognised backend families.  For the v1.0.0 release, prefer
 using the new `datachannel_backend` switch with the built-in factory
-ids (`"sctp"` or `"web_transport"`).
+id `"web_transport"` (the production path).
+
+#### 2.6.5 Framing mode (`datachannel_framing`)
+
+A QUIC stream is a **byte** stream: `send()` boundaries are not
+preserved.  `datachannel_framing` decides whether the payload carries
+its own message boundary.
+
+| Mode | Behaviour |
+|---|---|
+| `plugins::DataChannelFraming::kRaw` (**default**) | The payload reaches the transport verbatim.  Two `send()` calls may surface as one callback, one `send()` may surface as several, and the bytes carry **no channel identity**.  This is the mode Chrome's `RTCDataChannel`-over-WebTransport speaks, so it is the default and existing deployments keep working unchanged. |
+| `plugins::DataChannelFraming::kFramed` | Every payload is wrapped in a length-prefixed frame that also carries the channel label.  One `send()` is one inbound message, and the label routes the message to the right channel. |
+
+**Both ends must agree.**  The framing is a NimRTC-internal convention
+(the plan's DEC-2 = (b)); there is no on-the-wire negotiation, because
+Chrome will not speak one.  A framed peer cannot read a raw stream and
+vice versa.
+
+The field applies to every channel the engine creates.  For the frame
+layout and the isolation rules see
+[`docs/guides/datachannel.md`](../guides/datachannel.md).
+
+#### 2.6.6 Channel priority (`datachannel_priority`)
+
+```cpp
+cfg.datachannel_priority = 16;   // lower value = higher priority
+```
+
+The value reaches the backend and orders the **data plane's own**
+outbound queue: a high-priority control channel is not stuck behind a
+bulk-transfer channel on the same QUIC connection.  The default is 128
+(the value the engine used to hard-code before v1.2.0 — there was no
+setter at all).
+
+**What it does not do.**  The media plane and the data plane run
+independent congestion control on two different connections, so the
+scheduler cannot arbitrate between them.  The honest statement is: *the
+data channel has its own connection and therefore its own priority; the
+scheduler does not arbitrate between media and data* (the plan's
+WP-E2).
+
+#### 2.6.7 Partial-reliability budgets (`datachannel_max_retransmits` /
+`datachannel_max_packet_lifetime_ms`)
+
+```cpp
+cfg.datachannel_framing = plugins::DataChannelFraming::kFramed;
+cfg.datachannel_max_retransmits = 2;           // PR-count budget
+cfg.datachannel_max_packet_lifetime_ms = 500;  // PR-TTL lifetime
+```
+
+Both fields reach every channel the engine creates and bound the
+**application-level ARQ** that the partial-reliability modes run under
+`kFramed` (plan WP-D4 / DEC-3 = (a)):
+
+| Field | Meaning |
+|---|---|
+| `datachannel_max_retransmits` | Per-message retransmission budget. `0` = unlimited (the documented meaning in `plugins::DataChannelConfig`). |
+| `datachannel_max_packet_lifetime_ms` | Per-message lifetime in milliseconds. `0` = unlimited. |
+
+An expired or exhausted message is dropped and **the channel stays
+open**. The ARQ is inactive in `kRaw` and in the reliable / unreliable
+modes. See [`docs/guides/datachannel.md` §4](../guides/datachannel.md).
 
 ### 2.7 Video codec
 

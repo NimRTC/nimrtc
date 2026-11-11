@@ -65,6 +65,13 @@
 // complete for callers that need them.
 #include <nimrtc/core/registry.hpp>
 
+// The stability markers.  This umbrella declares itself STABLE (see the
+// @note at the top of the file), so the marker macro has to be visible
+// here -- the header is meant to be included first by a consumer that
+// wants the published surface, and MSVC then reports an obscure
+// "uses undefined struct NIMRTC_API_STABLE" instead of a clean error.
+#include <nimrtc/core/api_version.hpp>
+
 // The 13 nimrtc/plugins/ seam interfaces.
 #include <nimrtc/plugins/transport.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>

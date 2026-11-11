@@ -152,12 +152,12 @@ NimRTC 既可用来构建 **RTC 服务端应用**（in-process SFU、转发网�
 | dtls | nimrtc_dtls | DTLS 封装，**后端可插拔**（BoringSSL / mbedTLS / 国密） | ✅ P1 |
 | srtp | nimrtc_srtp | SRTP/SRTCP 封装，**后端可插拔**（libsrtp / 国密 SM4） | ✅ P1 |
 | rtp | nimrtc_rtp | RTP/RTCP 编解码、媒体 payload 打包/解析、标准反馈（transport-cc / NACK / REMB） | ✅ P1 |
-| sched | nimrtc_sched | L1 发送调度：同一 Scheduler 实例内 RTP × 数据严格优先级 + pacing（DC-2） | ⏸ 接口 P1 / 实现 P2 |
+| sched | nimrtc_sched | **传输层（L1）**发送调度：同一 Scheduler 实例内 RTP × 数据严格优先级 + pacing（DC-2；见 §8.3 术语澄清——P 族逐包五级 / S 族逐流三档，两族互不比较） | ⏸ 接口 P1 / 实现 P2 |
 | sctp | nimrtc_sctp | DataChannel（usrsctp）：可靠 / 不可靠 / 有序 / 无序 + 部分可靠 | ✅ P2 |
 | timeline | nimrtc_timeline | 统一时间线：RTCP-SR NTP↔RTP ts 映射、帧 capture ts、渲染 age | ⏸ 接口 P2 / 完整 P3 |
 | codec | nimrtc_codec | 编解码**注入接口**（encoder/decoder 由宿主或插件提供）+ 统一封装；不捆绑解码器（payload 打包归 rtp 模块） | ✅ 接口 P1 最小 / 完整 P3 |
 | jitter | nimrtc_jitter | 音/视频 JitterBuffer 抽象 + 固定窗口默认实现（自适应版 P3） | ✅ P1 最小可用 |
-| bwe | nimrtc_bwe | 拥塞控制抽象 + 接口 + 固定/AIMD 默认实现（Goog-CC 完整 P3） | ✅ P1 |
+| bwe | nimrtc_bwe | 拥塞控制抽象 + 接口 + 固定/AIMD 默认实现；另有**简化版 Goog-CC 风格**估计（延迟+丢包混合，非完整 trendline 移植）作为 opt-in 后端，完整 Goog-CC 主线仍是 P3 计划 | ✅ P1 |
 | audio3a | nimrtc_audio3a | 3A 抽象（内置 passthrough + 基础降噪 / 可关 / 第三方） | ✅ P1 |
 | session | nimrtc_session | 会话编排、SDP 生成/解析、Track/Stream | ✅ P1 |
 | assembly | nimrtc_assembly | **场景装配**：Profile 注册表 + Engine::Builder，把各接缝实现按场景绑定；运行期受限重配 | ✅ P1 骨架 / P2 Profile 库 |
@@ -192,13 +192,13 @@ nimrtc/
 | 接缝 | 抽象点 | 已知实现方向 | 默认 |
 |---|---|---|---|
 | Crypto 后端 | DTLS/SSL 库、SRTP 加解密 | 国际（BoringSSL/mbedTLS + libsrtp）／国密（SM2/SM4，P4） | 国际套件 |
-| BWE | 发送码率决策器 | Goog-CC 兼容主线／自定义 | Goog-CC 兼容 |
+| BWE | 发送码率决策器 | AIMD（默认）／简化 Goog-CC 风格（延迟+丢包混合估计，opt-in；**不是**完整 trendline 移植）／自定义 | AIMD（完整 Goog-CC 主线为 P3 计划） |
 | JitterBuffer | 音/视频抖动缓冲策略 | 低延迟通话 / 直播 / 对讲 | 通话主线 |
 | 3A | AEC/ANS/AGC | 内置实现 / 第三方 / 关闭 | 可关闭 |
 | Codec | 解码器接入 + payload 封装 | H.264/H.265/VP8/VP9/AV1/Opus（外部解码器） | 仅封装，不捆绑 |
 | Device（后期） | 采集 / 播放 | 四平台后端 | 插件化 |
 | DataChannel 语义 | 每消息流：可靠性 / 有序性 / 部分可靠 TTL / 优先级 | 浏览器互通子集（可靠·不可靠）／引擎扩展（部分可靠 + 严格优先级，§8.3） | 引擎扩展主线 |
-| 发送调度策略 | 同一 Scheduler 实例内 RTP × 数据排序（DC-2 范围声明适用） | 严格优先级默认（控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据）／自定义 | 严格优先级 |
+| 发送调度策略 | 同一 Scheduler 实例内 RTP × 数据排序（DC-2 范围声明适用；默认 web_transport 后端下数据面走独立连接，不进调度器） | 严格优先级默认（逐包五级：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；逐流三档：High / Normal / Low，两族互不比较，§8.3）／自定义 | 严格优先级 |
 
 ### 2.6 场景装配与实现切换（Scene Assembly）
 
@@ -219,13 +219,13 @@ nimrtc/
 
 | Profile | 适用 | BWE | JitterBuffer | 3A | 调度 / DC 语义 | timeline | crypto |
 |---|---|---|---|---|---|---|---|
-| call | 双向音视频通话 | Goog-CC 主线 | 低延迟通话档 | 内置 | 默认；媒体为主 | 关 | 国际 |
-| live | 直播 / 收看 | Goog-CC（延迟容忍） | 直播抗抖动档 | 内置 | 默认 | 关 | 国际 |
-| ptt | 半双工对讲 / 集群 | Goog-CC 主线 | 对讲档（延迟优先） | 可关 | 音频优先 | 关 | 国际 |
-| agent | AI Agent 实时交互（**SDK 形态：Agent 终端**） | Goog-CC 主线 | 低延迟通话档 | 内置（流式） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语（§8.7）** | **帧级开** | 国际 |
-| **agent-gateway** | AI Agent 实时交互（**服务端形态：媒体网关 / transceiver**，直连 1:1 Agent） | Goog-CC 主线 | **无 L2（网关侧不解码可选旁路解码 + 模型输入 tap）** | 透传（模型侧处理） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语** | 帧级开 | 国际 |
+| call | 双向音视频通话 | AIMD 默认（简化 Goog-CC 可 opt-in） | 低延迟通话档 | 内置 | 默认；媒体为主 | 关 | 国际 |
+| live | 直播 / 收看 | AIMD 默认（延迟容忍档；简化 Goog-CC 可 opt-in） | 直播抗抖动档 | 内置 | 默认 | 关 | 国际 |
+| ptt | 半双工对讲 / 集群 | AIMD 默认（简化 Goog-CC 可 opt-in） | 对讲档（延迟优先） | 可关 | 音频优先 | 关 | 国际 |
+| agent | AI Agent 实时交互（**SDK 形态：Agent 终端**） | AIMD 默认（简化 Goog-CC 可 opt-in） | 低延迟通话档 | 内置（流式） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语（§8.7）** | **帧级开** | 国际 |
+| **agent-gateway** | AI Agent 实时交互（**服务端形态：媒体网关 / transceiver**，直连 1:1 Agent） | AIMD 默认（简化 Goog-CC 可 opt-in） | **无 L2（网关侧不解码可选旁路解码 + 模型输入 tap）** | 透传（模型侧处理） | 控制 > 音频；事件 DC 部分可靠有序；**模型输入 PCM tap 原语** | 帧级开 | 国际 |
 | **relay-agent** | AI Agent 实时交互（**relay 形态：Agent 作为 relay 参与者**，控制/事件 DC 选择性转发） | 无（转发跳过 L2） | 无 | 无（透传） | 转发公平 + **DC 转发策略（按消息流声明的转发标签转发）** | 帧级开 + **重新校准**（不让时间戳随 hop 漂移） | 国际 |
-| teleop | 机器人 / 无人设备遥操作 | Goog-CC 主线 | 低延迟通话档 | 关或第三方 | **严格优先级（指令插队）+ DC 不可靠无序 + TTL 丢旧保新** | **帧级 + 样本级** | 国际 / 国密可选 |
+| teleop | 机器人 / 无人设备遥操作 | AIMD 默认（简化 Goog-CC 可 opt-in） | 低延迟通话档 | 关或第三方 | **严格优先级（指令插队）+ DC 不可靠无序 + TTL 丢旧保新** | **帧级 + 样本级** | 国际 / 国密可选 |
 | takeover | 自动驾驶远程接管 / 云控 | 同 teleop（多路视频） | 低延迟通话档 | 关或第三方 | 同 teleop + 高频心跳 / dead-man | 帧级 + 样本级 | **国密（SM）+ 双链路** |
 | cloudgame | 云游戏 / 云渲染串流（teleop 族，**长线候选，未进官方组合**） | **高码率主线**（视频即体验本体，降级坡度缓） | 低延迟档（下行为主） | 关（无采集端） | 同 teleop（输入严格优先级 / 丢旧保新）+ **上行高频状态流原语** | **帧级（输入↔渲染帧）** | 国际 |
 | relay | 服务端转发 | 无（转发跳过 L2） | 无 | 无 | 转发公平 | 关 | 国际 |
@@ -233,6 +233,7 @@ nimrtc/
 
 - Profile 是**默认推荐 + 可覆盖**：上层可继承官方 Profile 再单点覆盖某条接缝（"teleop 但 3A 用第三方"），不设硬编码模式。**Profile JSON schema 见 [ADR-010](../adr/ADR-010-profile-json-format.md)**；接缝后端由 PAL resolver 注入（Slice 1 见 [ADR-009](../adr/ADR-009-pal-slice-1.md)）。
 - 落点：机制在 `assembly` 模块（Profile 注册表 + Builder）；`profiles/` 目录放声明式示例（JSON / TOML），C++ Builder 为第一形态。
+- **BWE 后端的诚实边界（v1.2 现状，勿按 "Goog-CC 兼容" 理解）**：当前默认后端是 **AIMD**；可 opt-in 打开的 `goog-cc` 后端是**简化版**——RTT 阈值 + 丢包乘性回退的**延迟 + 丢包混合估计**，**不是** Google 的 trendline 延迟梯度估计的完整移植，其实现文件首行即自述 "Simplified Goog-CC mainline (NOT a full port)"。完整主线是 P3 计划项。对外表述统一用 README 的口径（"simplified Goog-CC-style BWE, opt-in, AIMD stays the default"），不再出现无修饰的"Goog-CC 兼容"。
 - **防呆（呼应 D2）**：每个 Profile 的官方组合**只有一条高质量主线**；可覆盖项是"专家模式"，README 不宣传为默认。
 - **cloudgame 与 teleop 的差异**（同属「画面下行 + 控制输入上行」族，仅 4 处覆盖，官方组合不另起炉灶）：
   ① **视频权重反转**——teleop 中视频是「观察」，拥塞时可大幅压码率保控制；云游戏中视频是**体验本体**，BWE 走高码率主线（HEVC/AV1/4K）、降级坡度缓。好在输入包体积小到可忽略，两者不构成带宽竞争，不会逼引擎做二选一；
@@ -258,7 +259,7 @@ nimrtc/
 | D5 | 引用计数媒体 Buffer，转发路径零整帧拷贝 | 高码率、多路转发性能关键 | 生命期规则写进贡献者文档 |
 | D6 | 时钟全抽象：媒体时钟 / RTP 时间戳 / 系统时钟解耦 | 单测可模拟时间；嵌入式时钟漂移可控 | — |
 | D7 | SDP 独立模块，不绑定会话状态机 | 可单独复用（信令网关、录制分析） | — |
-| D8 | **数据面发送严格优先级调度（同一 Scheduler 实例内，DC-2）**：控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据；拥塞时由 BWE 压视频让带宽（BWE 行为）；默认 web_transport 后端下不跨连接抢占 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在 L1，与 BWE/JB 联合调参，遵守 D2 单主线 |
+| D8 | **数据面发送严格优先级调度（同一 Scheduler 实例内，DC-2）**：逐包五级阶梯 控制指令 > 音频 > 视频关键帧 > 普通视频 > 尽力而为数据（`plugins::Priority`）；逐流三档 High / Normal / Low（`sched::StreamPriority`）；两族队列互不比较，阶梯只描述逐包族（§8.3 术语澄清）；拥塞时由 BWE 压视频让带宽（BWE 行为）；默认 web_transport 后端下不跨连接抢占 | 遥操作 / Agent 场景"到达率优先于清晰度"（§8.1）；浏览器 DataChannel priority 只是 hint——引擎侧可控是差异化 | 调度器在传输层（L1），与 BWE/JB 联合调参，遵守 D2 单主线 |
 | D9 | **媒体-数据统一时间线**：RTCP-SR NTP↔RTP ts 映射 + 帧 capture 时间戳 + 渲染 age 查询 | "画面-控制同步"无法靠两端独立时钟达成；AI 对"所见帧"决策、遥操作闭环都是刚需 | 接口在架构中默认就位、按场景开启（关闭路径仍可编译通过 = 零开销）；`agent` / `agent-gateway` / `relay-agent` / `teleop` / `takeover` / `cloudgame` Profile 默认开启（Profile 表已声明；`takeover` / `cloudgame` 为设计预留，尚未进官方组合） |
 | D10 | **场景装配与切换纪律**：实现选择只发生在 构建期 / 装配期 / 会话边界 三处 + 运行期显式 `Reconfigure`；有内部状态的模块（JB / BWE / 3A）禁止静默热换（走 Pause→Drain→Rebind→Resume 或流重建）；Profile 官方组合每场景仅一条高质量主线 | "多场景 = 多实现"若无纪律会退化成组合爆炸，运行期乱换实现会静默丢状态 | 集中在 assembly 模块 + 显式 API；切换事件全部进统计（§9） |
 | D11 | **PAL Slice 1 — engine plugin resolver seam**：`engine.cpp` 通过 `pal::resolve_*` 内联 forwarder 走 `core::PluginRegistry`，公开 API 字节一致；Slice 2/3 进 v0.10.x 补丁轨道 | 详 [ADR-009](../adr/ADR-009-pal-slice-1.md) + [PAL 架构](../plan/pal-architecture.md) §4 | Slice 1 是 ~50 LOC 薄 alias，后续 API 演化成本随 transitive 依赖放大 → header-only + 字节级向后兼容 |
@@ -402,7 +403,14 @@ DataChannel 不止"开 / 关"——每条流声明一组语义：
 
 ### 8.3 发送调度：同一 Scheduler 内排序，默认后端下不跨连接抢占
 
-- L1 统一发送调度器（`sched` 模块）：RTP（媒体）与数据按**同一 `Scheduler` 实例内的严格优先级**排序（DC-2；默认 web_transport 后端下媒体与数据分属两条独立连接，见 sched.hpp Scope note），默认策略：
+- **L1（传输层）统一发送调度器**（`sched` 模块）：RTP（媒体）与数据按**同一 `Scheduler` 实例内的严格优先级**排序（DC-2；默认 web_transport 后端下媒体与数据分属两条独立连接，见 sched.hpp Scope note）。
+
+  > **术语澄清（避免与分层 L0–L3 混淆）**：`Scheduler` 内部有**两个互不比较的队列族**，这里的 "L1" 指的是**架构分层的传输层**（本模块所在层），不是队列族名称：
+  > - **P 族（逐包优先级）**：`plugins::Priority` 五级阶梯 —— `kControl > kAudio > kVideoKeyframe > kVideo > kBestEffort`；由 `drain()` / `drain_with()` 排空。
+  > - **S 族（逐流优先级）**：`sched::StreamPriority` 三档桶 —— High / Normal / Low；由 `select_next_packet()` 排空。
+  >
+  > 两族队列**不做跨族比较**，因此上面的五级阶梯只描述 P 族内部次序；`kBestEffort` 是逐包优先级的最低档，**不等于**"数据通道消息一定进调度器"。默认 `web_transport` 后端下数据面走独立 QUIC 连接，根本不进入 `Scheduler`（见下方 Scope note）。
+  - 默认策略（**P 族内**的次序）：
   **控制指令 > 音频 > 视频关键帧（I 帧）> 普通视频 > 尽力而为数据**；
 - 拥塞时**先由 BWE 压视频码率 / 帧率让出带宽**，同一队列内不允许"视频把控制消息挤掉"或"控制等视频排完队"——这是队列内排序，不是跨连接线端保证；
 - 关键帧突发（PLI 响应 / 新端全帧）也要分级节流，避免洪泛压死控制面；

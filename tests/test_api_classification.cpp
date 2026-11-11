@@ -302,12 +302,36 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - plugins/registry.hpp (the registry + the 13 nimrtc/plugins/
     //       seam interfaces; the optional-module seams stay out of it)
     //
+    // v1.2.0 bump (2026-11-10): +4 public headers (113 -> 117) for the
+    //   session-model seam, the session module's model header, and the
+    //   RFC 4733 (DTMF) seam (session capability plan N1 / T1 / D1):
+    //     - plugins/session.hpp (ISession + factory) -- the seam the
+    //       engine drives to build the SDP media list; the concrete
+    //       model stays in src/modules/session/ and is reached through
+    //       the registry, not by including the module's headers.
+    //     - session/session_model.hpp (the module's public header --
+    //       the `plugins::ISession` implementation the engine drives)
+    //     - plugins/dtmf.hpp (IDtmfCodec -- the RFC 4733
+    //       telephone-event seam; DTMF is off by default, see the
+    //       session capability plan's decision OD-B)
+    //     - dtmf/dtmf.hpp (the DTMF module's own public header -- the
+    //       concrete RFC 4733 codec; the seam above is what the engine
+    //       resolves through the registry)
+    //
+    // v1.2.0 M3 bump: +1 public header (117 -> 118) for the token-bucket
+    //   pacer (video-pipeline plan P1):
+    //     - pacing/pacing.hpp (the token bucket on a monotonic clock)
+    //
+    // `session/track.hpp` already existed at v1.1.0 and is part of the
+    // 113 baseline; it is only listed above because the two session
+    // headers that are new are siblings of it.
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 113;
+    constexpr std::size_t kBaselineHeaderCount = 118;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

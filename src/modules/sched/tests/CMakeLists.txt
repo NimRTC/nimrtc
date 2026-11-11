@@ -9,6 +9,10 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_plugin.cpp
     DEPS nimrtc::sched)
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_priority.cpp
     DEPS nimrtc::sched)
-# DC-2: L1+L0 cross-plane priority integration (DataChannel × RTP)
+# v1.2.0 M3 (P2): the per-class pacing integration (the token buckets the
+# scheduler owns).  The token bucket itself is tested in modules/pacing.
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_pacing_integration.cpp
+    DEPS nimrtc::sched)
+# DC-2: P-family + S-family cross-plane priority integration (DataChannel × RTP)
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_sched_priority_dc.cpp
     DEPS nimrtc::sched)

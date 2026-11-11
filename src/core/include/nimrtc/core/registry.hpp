@@ -92,6 +92,15 @@ class NIMRTC_API_STABLE INetFeedbackFactory;
 // (Layout Invariant 1).
 class NIMRTC_API_STABLE IAudioDecoderFactory;
 class NIMRTC_API_STABLE IAudioReceiverFactory;
+// v1.2.0 (session capability plan, N1 / T1): the session-model seam.
+// The engine drives renegotiation through this interface and never
+// includes `src/modules/session/`'s headers (Layout Invariant 4).
+class NIMRTC_API_STABLE ISessionFactory;
+// v1.2.0 (session capability plan, D1 / D2): the RFC 4733
+// (telephone-event) seam.  A telephone-event payload is *not* audio, so
+// it does not belong to the audio-decoder category -- it has its own
+// slot and its own exit next to the audio routing table.
+class NIMRTC_API_STABLE IDtmfCodecFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -171,6 +180,20 @@ namespace datachannel      { void register_default_plugins() noexcept; }
 // engine starts linking nimrtc::audio_rx.  Until then nobody takes the
 // address of this symbol, so the declaration alone is harmless.
 namespace audio_rx { void register_default_plugins() noexcept; }
+// v1.2.0 (session capability plan, N1 / T1): the session-model module.
+// Its entry point populates the session registry slot
+// (register_session) so `core::register_all_default_plugins()` can
+// wire the built-in session model through the unified table.  The
+// engine then resolves it through
+// `core::PluginRegistry::get_session(EngineConfig::session_name)`.
+namespace session    { void register_default_plugins() noexcept; }
+// v1.2.0 (session capability plan, D1 / D2): the RFC 4733
+// (telephone-event) codec module.  Its entry point populates the DTMF
+// registry slot (register_dtmf) so
+// `core::register_all_default_plugins()` can wire the built-in codec
+// through the unified table.  The engine then resolves it through
+// `core::PluginRegistry::get_dtmf(EngineConfig::dtmf_codec_name)`.
+namespace dtmf       { void register_default_plugins() noexcept; }
 // Transport PAL Slice 8 (v0.10.2): module-level entry points for the
 // DTLS / SCTP / raw_udp / transport-stack seams. Each one populates
 // its matching typed registry slot (register_dtls_session /
@@ -398,6 +421,46 @@ public:
     }
     [[nodiscard]] std::vector<std::string_view> list_audio_receivers() const {
         return audio_receiver_.list_ids();
+    }
+
+    // -- Session (v1.2.0, session capability plan N1 / T1) ---------------
+    //
+    // Typed slot for `plugins::ISessionFactory*` — the session model
+    // the engine drives to build the SDP media list.  The built-in
+    // implementation lives in `src/modules/session/` and registers
+    // under the id "session"; a host can register its own to change
+    // the mid-allocation or BUNDLE policy without touching the engine.
+    //
+    // The engine resolves this through `EngineConfig::session_name`.
+    void register_session(std::string_view id,
+                          const plugins::ISessionFactory* f);
+    [[nodiscard]] const plugins::ISessionFactory*
+    get_session(std::string_view id) const {
+        return session_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_sessions() const {
+        return session_.list_ids();
+    }
+
+    // -- DTMF (v1.2.0, session capability plan D1 / D2) ------------------
+    //
+    // Typed slot for `plugins::IDtmfCodecFactory*` — the RFC 4733
+    // (telephone-event) codec.  It is a slot of its own because a
+    // telephone-event payload is not audio: handing it to the audio
+    // decoder would push a four-byte event header into an Opus decoder.
+    //
+    // The built-in implementation lives in `src/modules/dtmf/` and
+    // registers under the id "dtmf"; the engine resolves it through
+    // `EngineConfig::dtmf_codec_name` and drives it through the
+    // interface declared in `nimrtc/plugins/dtmf.hpp`.
+    void register_dtmf(std::string_view id,
+                       const plugins::IDtmfCodecFactory* f);
+    [[nodiscard]] const plugins::IDtmfCodecFactory*
+    get_dtmf(std::string_view id) const {
+        return dtmf_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_dtmfs() const {
+        return dtmf_.list_ids();
     }
 
     // -- Video Codec --------------------------------------------------------
@@ -639,6 +702,13 @@ private:
     TypedRegistry<plugins::ICodecFactory>        codec_;
     TypedRegistry<plugins::IAudioDecoderFactory> audio_decoder_;
     TypedRegistry<plugins::IAudioReceiverFactory> audio_receiver_;
+    // v1.2.0 (session capability plan N1 / T1): the session-model
+    // slot.  The built-in model registers under "session".
+    TypedRegistry<plugins::ISessionFactory>     session_;
+    // v1.2.0 (session capability plan D1 / D2): the RFC 4733
+    // (telephone-event) slot.  The built-in codec registers under
+    // "dtmf".
+    TypedRegistry<plugins::IDtmfCodecFactory>    dtmf_;
     TypedRegistry<plugins::IVideoCodecFactory>   video_codec_;
     TypedRegistry<plugins::IVideoSourceFactory>  video_source_;
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
@@ -766,6 +836,36 @@ private:
         NIMRTC_UNIQUE_NAME(_reg_audio_receiver_){                        \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kAudioReceiver,  \
+            id, factory_ptr }
+
+/** Register a session-model plugin by ID and factory pointer.
+ *  v1.2.0 (session capability plan, N1 / T1) — typed slot for
+ *  `plugins::ISessionFactory*`.
+ *
+ *  @param id         A string literal, e.g. "session".
+ *  @param factory_ptr A pointer to a static ISessionFactory.
+ *
+ *  Usage: NIMRTC_REGISTER_SESSION("session", &g_factory); */
+#define NIMRTC_REGISTER_SESSION(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_session_){                             \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kSession,     \
+            id, factory_ptr }
+
+/** Register an RFC 4733 (telephone-event) codec by ID and factory pointer.
+ *  v1.2.0 (session capability plan, D1 / D2) — typed slot for
+ *  `plugins::IDtmfCodecFactory*`.
+ *
+ *  @param id         A string literal, e.g. "dtmf".
+ *  @param factory_ptr A pointer to a static IDtmfCodecFactory.
+ *
+ *  Usage: NIMRTC_REGISTER_DTMF("dtmf", &g_factory); */
+#define NIMRTC_REGISTER_DTMF(id, factory_ptr)                       \
+    static ::nimrtc::core::detail::Registrar                        \
+        NIMRTC_UNIQUE_NAME(_reg_dtmf_){                              \
+            ::nimrtc::core::PluginRegistry::instance(),              \
+            ::nimrtc::core::detail::Registrar::Category::kDtmf,      \
             id, factory_ptr }
 
 /** Register a video codec plugin by ID and factory pointer. */
@@ -941,6 +1041,13 @@ public:
         // v1.2.0 (audio pipeline): the two new audio seams -- the
         // codec-side decoder and the pipeline-side receiver.
         kAudioDecoder, kAudioReceiver,
+        // v1.2.0 (session capability plan N1 / T1): the session-model
+        // seam -- see register_session().
+        kSession,
+        // v1.2.0 (session capability plan D1 / D2): the RFC 4733
+        // (telephone-event) seam -- see register_dtmf().  It has its
+        // own category because a telephone-event payload is not audio.
+        kDtmf,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
         kBwe, kScheduler,
         // v1.2.0 M1 (F2): the receiver-side network-feedback collector
@@ -998,6 +1105,14 @@ public:
             case Category::kAudioReceiver:
                 reg.register_audio_receiver(id,
                     static_cast<const plugins::IAudioReceiverFactory*>(factory));
+                break;
+            case Category::kSession:
+                reg.register_session(id,
+                    static_cast<const plugins::ISessionFactory*>(factory));
+                break;
+            case Category::kDtmf:
+                reg.register_dtmf(id,
+                    static_cast<const plugins::IDtmfCodecFactory*>(factory));
                 break;
             case Category::kVideoCodec:
                 reg.register_video_codec(id,

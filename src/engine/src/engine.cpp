@@ -154,6 +154,15 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     if (const uint32_t rc = init_datachannel_registry(); rc != 0) return rc;
     if (const uint32_t rc = init_dtls_handshake();       rc != 0) return rc;
 
+    // ---- Session model (v1.2.0, session capability plan N1 / T1) -------
+    //
+    // The engine drives renegotiation through a pluggable session model
+    // (`plugins::ISession`), resolved from the registry's session slot
+    // with `EngineConfig::session_name`.  Resolution is not fatal: when
+    // the model is missing the engine keeps its pre-v1.2.0 fixed media
+    // list and the track API reports "no session".
+    resolve_session_model();
+
     return 0;
 }
 
@@ -245,6 +254,13 @@ uint32_t NimRTCEngine::open() noexcept {
     // opens them. Failures are non-fatal at engine level (R3 scope: just
     // expose the accessors); warnings go through on_error_.
     init_video_plugins();
+
+    // ---- Session base state (v1.2.0, session capability plan N1) --------
+    //
+    // The video m-line only exists when the video pipeline resolved, so
+    // the base session state is (re)built once the video plugins are
+    // known.  The call is idempotent — it only adds what is missing.
+    ensure_base_session_state();
 
     // ---- Cross-end timeline anchor (ADR-017) --------------------------------
     //
@@ -498,11 +514,33 @@ NimRTCEngine::create_data_channel(
         }
         if (on_data_message_) wch->set_on_message(on_data_message_);
         if (on_data_state_)   wch->set_on_state(on_data_state_);
+        // WP-C1: install the identity-carrying callback.  The backend
+        // reports the channel's label; the engine adds the id it
+        // assigned to the channel.
+        if (on_data_message_ex_) {
+            const std::uint32_t cid = next_data_channel_id_++;
+            const std::string lbl{label};
+            wch->set_on_message_ex(
+                [this, cid, lbl](const plugins::DataChannelMessage& m) noexcept {
+                    if (!on_data_message_ex_) return;
+                    plugins::DataChannelMessage out = m;
+                    out.channel_id = cid;
+                    if (out.label.empty()) out.label = lbl;
+                    on_data_message_ex_(out);
+                });
+        }
         plugins::DataChannelConfig wdc_cfg;
         wdc_cfg.label       = std::string{label};
         wdc_cfg.reliability = reliability;
         wdc_cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
-        wdc_cfg.priority    = 128;
+        wdc_cfg.priority    = config_.datachannel_priority;
+        wdc_cfg.framing     = config_.datachannel_framing;
+        // WP-D4: the partial-reliability budgets are per message and
+        // reach the backend, so the ARQ can enforce them.
+        wdc_cfg.max_retransmits =
+            config_.datachannel_max_retransmits;
+        wdc_cfg.max_packet_lifetime_ms =
+            config_.datachannel_max_packet_lifetime_ms;
         wch->open(wdc_cfg);
         wch->open();
         return wch;
@@ -530,6 +568,19 @@ NimRTCEngine::create_data_channel(
     // (per `plugins/datachannel.hpp` §"Thread safety").
     if (on_data_message_) ch->set_on_message(on_data_message_);
     if (on_data_state_)   ch->set_on_state(on_data_state_);
+    // WP-C1: the identity-carrying callback (the engine assigns the id).
+    if (on_data_message_ex_) {
+        const std::uint32_t cid = next_data_channel_id_++;
+        const std::string lbl{label};
+        ch->set_on_message_ex(
+            [this, cid, lbl](const plugins::DataChannelMessage& m) noexcept {
+                if (!on_data_message_ex_) return;
+                plugins::DataChannelMessage out = m;
+                out.channel_id = cid;
+                if (out.label.empty()) out.label = lbl;
+                on_data_message_ex_(out);
+            });
+    }
 
     // Default config: matches WebRTC's ordered+reliable channel
     // (the common case for control / telemetry).  The reliability-aware
@@ -538,7 +589,12 @@ NimRTCEngine::create_data_channel(
     cfg.label       = std::string{label};
     cfg.reliability = reliability;
     cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
-    cfg.priority    = 128;
+    cfg.priority    = config_.datachannel_priority;
+    cfg.framing     = config_.datachannel_framing;
+    // WP-D4: the partial-reliability budgets are per message and reach
+    // the backend, so the ARQ can enforce them.
+    cfg.max_retransmits = config_.datachannel_max_retransmits;
+    cfg.max_packet_lifetime_ms = config_.datachannel_max_packet_lifetime_ms;
     ch->open(cfg);
 
     // NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport
@@ -645,6 +701,37 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
     }
     ice_t_->add_turn_server(host, port, username, password);
     return 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// ICE restart (RFC 8445 §9.1.1.1)
+// ---------------------------------------------------------------------------
+
+bool NimRTCEngine::restart_ice() noexcept {
+    if (!ice_t_) {
+        core::log::Logger::instance().error(
+            "restart_ice: ICE transport not yet created — call pre_open() first");
+        return false;
+    }
+    const auto rc = ice_t_->restart();
+    if (rc != plugins::kOk) {
+        core::log::Logger::instance().error(
+            std::string{"restart_ice: ICE restart failed, status="} +
+            plugins::status_string(rc));
+        return false;
+    }
+    core::log::Logger::instance().info(
+        "restart_ice: ICE restart done, new local ufrag=" + ice_t_->local_ufrag());
+    return true;
+}
+
+std::uint32_t NimRTCEngine::ice_restart_count() const noexcept {
+    return ice_t_ ? ice_t_->restart_count() : 0u;
+}
+
+void NimRTCEngine::set_on_ice_restart(plugins::OnIceRestart cb) noexcept {
+    on_ice_restart_ = std::move(cb);
 }
 
 

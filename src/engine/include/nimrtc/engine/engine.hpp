@@ -86,7 +86,9 @@
 #include <nimrtc/plugins/audio_decoder.hpp>
 #include <nimrtc/plugins/audio_receiver.hpp>
 #include <nimrtc/plugins/codec.hpp>
+#include <nimrtc/plugins/dtmf.hpp>          // v1.2.0 (session plan D1/D2) — RFC 4733 seam
 #include <nimrtc/plugins/net_feedback.hpp>   // v1.2.0 M1 (F2) — feedback collector seam
+#include <nimrtc/plugins/session.hpp>         // v1.2.0 (session plan N1/T1) — session seam
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
@@ -418,7 +420,10 @@ struct NIMRTC_API_STABLE EngineConfig {
     // on_state callbacks per channel.
     //
     // Default = "web_transport" (since v0.15.0; WebTransport/QUIC path).
-    // `"sctp"` remains available as the legacy SCTP-over-DTLS path.
+    // `"sctp"` was retired in v1.2.0: it was a loopback *test* backend
+    // (in-process usrsctp socket on 127.0.0.1, no SCTP-over-DTLS wiring),
+    // so it could never reach a remote peer — passing it now fails the
+    // engine's `open()` with `kEngineInternal`.
     // Empty disables DataChannel entirely:
     //   - create_offer() does NOT emit m=application
     //   - process_remote_sdp() silently drops any m=application from the peer
@@ -427,16 +432,25 @@ struct NIMRTC_API_STABLE EngineConfig {
     // See `src/plugins/include/nimrtc/plugins/datachannel.hpp` for the
     // IDataChannel / IDataChannelFactory contract.
 
-    /** IDataChannel plugin id. Default = "sctp" (low-level factory slot;
-     *  the effective backend is selected by `datachannel_backend`,
-     *  default `"web_transport"` since v0.15.0). Empty = no DataChannel.
+    /** IDataChannel plugin id. Default = "" (unset).
+     *
      *  This is the **low-level** factory-slot selector: the engine resolves
      *  `core::PluginRegistry::get_datachannel(datachannel_name)` at
      *  `init_modules_once()` time and uses the result for
      *  `create_data_channel()`.
      *
-     *  Setting this to `""` disables DataChannel entirely (in every backend
-     *  family, including `"sctp"` — this is the v0.x contract).
+     *  v1.2.0: the default changed from `"sctp"` to `""` because the SCTP
+     *  backend was retired from the public selectors (see
+     *  `datachannel_backend` below and
+     *  `docs/plan/datachannel-capability-plan.md` WP-A / DEC-4 = A1).
+     *  `"sctp"` is now rejected: the SCTP factory opens an in-process
+     *  usrsctp loopback socket and the engine never wires SCTP-over-DTLS,
+     *  so it cannot reach a peer.
+     *
+     *  Setting this to `""` disables DataChannel entirely **in the legacy
+     *  path** (this is the v0.x contract).  In the default
+     *  `"web_transport"` family this field is ignored — clear
+     *  `datachannel_backend` instead to disable the data plane.
      *
      *  Most callers should prefer `datachannel_backend` (below); `datachannel_name`
      *  is retained for power users that want to inject a custom factory
@@ -444,7 +458,7 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  When `datachannel_backend` is empty, `datachannel_name` is the
      *  effective selector; otherwise `datachannel_backend` wins.
      */
-    std::string datachannel_name = "sctp";
+    std::string datachannel_name = "";
 
     /** DataChannel backend family selector (v0.14.0-rc.1, DC-1 v1.0.0
      *  headline gate).  The engine resolves this at `init_modules_once()`
@@ -457,16 +471,22 @@ struct NIMRTC_API_STABLE EngineConfig {
      *      factory + the `web_transport_name` (default `"msquic"`)
      *      WebTransport session factory. `datachannel_name` is ignored
      *      in this mode.
-     *    - `"sctp"` — SCTP-over-DTLS path (legacy).  Uses the
-     *      `"sctp"` DataChannel factory; `datachannel_name` may override.
+     *    - `"sctp"` — **retired** (v1.2.0, `docs/plan/datachannel-capability-plan.md`
+     *      WP-A / DEC-4 = A1).  The SCTP backend was a loopback *test*
+     *      backend: its factory opens an in-process usrsctp socket bound
+     *      to `127.0.0.1` and the engine never wires SCTP-over-DTLS, so
+     *      it could never reach a remote peer.  Passing `"sctp"` now
+     *      surfaces `kEngineInternal` via `on_error_` at `open()` time
+     *      instead of silently resolving to a data plane that cannot work.
      *    - `""`               — DataChannel disabled (same as
      *      `datachannel_name = ""`); falls back to `datachannel_name` if
      *      non-empty (backward compatibility for v0.x callers that set
      *      `datachannel_name` without `datachannel_backend`).
      *
-     *  Unknown values surface as `kEngineInternal` via `on_error_` at
-     *  `open()` time — the engine does **not** silently fall back to
-     *  `"sctp"` (typo'd backend ids would mask integrator errors).
+     *  Unknown values — and the retired `"sctp"` — surface as
+     *  `kEngineInternal` via `on_error_` at `open()` time; the engine
+     *  does **not** silently fall back to another backend (typo'd backend
+     *  ids would mask integrator errors).
      *
      *  Added in v0.14.0-rc.1 per `docs/plan/v1.0-plan.md` §2.1.1 PR-3
      *  (DC-1-LAND dependency) and the v0.14.0-beta.1 release notes
@@ -476,6 +496,59 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  v0.15.0: default flipped from `"sctp"` to `"web_transport"`
      *  (WebTransport / QUIC product route). */
     std::string datachannel_backend = "web_transport";
+
+    /** Data-channel framing mode (v1.2.0, DataChannel capability plan
+     *  WP-B / WP-C).
+     *
+     *  - `plugins::DataChannelFraming::kRaw` (default) — the payload
+     *    goes to the transport verbatim.  A QUIC stream is a byte
+     *    stream, so two sends may surface as one message and one send
+     *    may surface as several; and a byte stream carries no channel
+     *    identity, so several channels on one connection cannot be
+     *    told apart.  This is the mode Chrome's
+     *    `RTCDataChannel`-over-WebTransport speaks.
+     *  - `plugins::DataChannelFraming::kFramed` — every payload is
+     *    wrapped in a length-prefixed frame that also carries the
+     *    channel label.  The frame restores the message boundary (one
+     *    `send()` == one inbound message) and it carries the channel
+     *    identity, which is what makes several channels on one
+     *    connection isolable.
+     *
+     *  Both ends must agree: a framed peer cannot read a raw stream and
+     *  vice versa.  The setting applies to every channel the engine
+     *  creates. */
+    plugins::DataChannelFraming datachannel_framing =
+        plugins::DataChannelFraming::kRaw;
+
+    /** Scheduling priority of the channels the engine creates
+     *  (v1.2.0, WP-E1).  Lower value = higher priority.  The value
+     *  reaches the backend and orders the data plane's own outbound
+     *  queue (a control channel is not stuck behind a bulk transfer
+     *  channel on the same QUIC connection).  It does NOT arbitrate
+     *  against the media plane — the data channel rides its own
+     *  connection.  Default = 128 (the historical hard-coded value). */
+    std::uint8_t datachannel_priority = 128;
+
+    /** Maximum retransmission attempts of the partial-reliability
+     *  count mode (v1.2.0, WP-D4).  The value reaches the backend and
+     *  bounds the application-level retransmission protocol: a message
+     *  that is not acknowledged within the budget is dropped, and the
+     *  channel stays open.
+     *
+     *  0 = unlimited (the documented meaning in
+     *  `plugins::DataChannelConfig`).  The setting applies to every
+     *  channel the engine creates. */
+    std::uint16_t datachannel_max_retransmits = 0;
+
+    /** Packet lifetime of the partial-reliability TTL mode (v1.2.0,
+     *  WP-D4), in milliseconds.  The value reaches the backend and
+     *  bounds the lifetime of *one message*: a message that did not
+     *  leave the sender within the lifetime is dropped, and the
+     *  channel stays open.
+     *
+     *  0 = unlimited.  The setting applies to every channel the
+     *  engine creates. */
+    std::uint16_t datachannel_max_packet_lifetime_ms = 0;
 
     /** IWebTransportSession factory id (v0.14.0-rc.1, DC-1 v1.0.0
      *  headline gate).  Consumed only when `datachannel_backend ==
@@ -504,8 +577,12 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::uint16_t web_transport_peer_port = 443;
 
     /** SCTP port advertised in `m=application` SDP lines (RFC 8831 §6.1).
-     *  Default = 5000 (matches Chrome / WebRTC interop).  Only used when
-     *  `datachannel_name` is non-empty. */
+     *  Default = 5000 (matches Chrome / WebRTC interop).
+     *
+     *  v1.2.0: the SCTP backend was retired from the public backend
+     *  selector (WP-A / DEC-4 = A1), so this field is now only reached by
+     *  the legacy power-user factory path (a custom `datachannel_name`
+     *  factory).  It no longer configures any supported data plane. */
     std::uint16_t sctp_port = 5000;
 
     // ---- Cross-end timeline (ADR-017) -------------------------------------
@@ -729,6 +806,91 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  The adaptation runs from `tick()`, so the effective granularity
      *  is this value.  Default 1000 ms. */
     int audio_bitrate_update_interval_ms = 1000;
+
+    // ---- Session model selection (v1.2.0, session capability plan N1/T1) --
+    //
+    // The engine drives renegotiation (add / remove a track, change a
+    // direction) through a *pluggable* session model.  The model is
+    // resolved at `open()` time through the registry's session slot:
+    //
+    //     core::PluginRegistry::instance().get_session(session_name)
+    //
+    // The built-in implementation lives in `src/modules/session/` and
+    // registers under the id "session"; a host that wants a different
+    // mid-allocation or BUNDLE policy implements `plugins::ISession`
+    // and registers it under its own id.
+    //
+    // An empty string disables the session model entirely: the engine
+    // then keeps the pre-v1.2.0 behaviour (a fixed two-m-line offer with
+    // no track API).  The field is appended at the **end** of the struct
+    // so an existing host that aggregate-initialises `EngineConfig`
+    // keeps compiling.
+    std::string_view session_name = "session";
+
+    // ---- DTMF (v1.2.0, session capability plan D1-D4) ------------------
+    //
+    // RFC 4733 carries DTMF digits as in-band `telephone-event`
+    // payloads on the audio m-line.  Decision OD-B of the plan: DTMF is
+    // **off by default** -- a host has to ask for it explicitly, so the
+    // default offer carries no telephone-event declaration and the
+    // pre-existing drop path for an unknown audio payload type stays
+    // untouched.
+    //
+    // With `dtmf_enabled == true` the engine
+    //
+    //   - declares `a=rtpmap:<pt> telephone-event/8000` and
+    //     `a=fmtp:<pt> 0-16` on the audio m-line (RFC 4733 §2.3.2),
+    //   - decodes a received telephone-event payload into key events and
+    //     reports them through `set_on_dtmf()`,
+    //   - encodes the events a host passes to `send_dtmf()`.
+    bool dtmf_enabled = false;
+
+    /** The dynamic payload type used for telephone-event.
+     *
+     *  RFC 4733 §2.3.2 negotiates it in the SDP.  The default is 126,
+     *  the value Chrome uses. */
+    std::uint8_t dtmf_payload_type = 126;
+
+    /** IDtmfCodec plugin name.  Default = "dtmf" (the built-in
+     *  RFC 4733 codec in `src/modules/dtmf/`).  An empty string
+     *  disables the DTMF path even when `dtmf_enabled` is true. */
+    std::string_view dtmf_codec_name = "dtmf";
+
+    // ---- RTCP XR / TMMBR (v1.2.0, session capability plan X2-X5) ------
+    //
+    /** Send RFC 3611 Receiver Estimated Quality (BT=1) and DLRR
+     *  (BT=6) reports.
+     *
+     *  Default = false: an XR report is a QoE report, and a host that
+     *  does not consume QoE metrics should not pay for the packets. */
+    bool rtcp_xr_enabled = false;
+
+    /** Do not send TMMBR feedback (RFC 5104).
+     *
+     *  The `disable_tmmbr` knob of `plugins::SdpCodecConfig` used to be
+     *  a dead field: nothing in the engine read it.  This field is the
+     *  engine-side switch -- when it is set, the engine sends no
+     *  TMMBR, and the SDP carries no `a=rtcp-fb` entry for it either.
+     *
+     *  Default = false (TMMBR is sent). */
+    bool disable_tmmbr = false;
+
+    // ---- Media pacing (v1.2.0 M3, video plan P2) ----------------------
+    //
+    // When true (the default) the engine drives the scheduler's
+    // **per-class token buckets** from the bandwidth estimate: the
+    // session's estimate is split between the streams (the audio takes
+    // its reserved share first, the video takes what is left), and each
+    // class is paced at its own share.  A saturated video stream can
+    // therefore no longer eat the audio's budget, and the outbound
+    // traffic leaves the machine at a *rate* instead of in bursts.
+    //
+    // The control plane (RTCP feedback, NACK retransmissions) is never
+    // paced: delaying feedback costs more than the bytes it occupies.
+    //
+    // Set it to false to restore the pre-v1.2.0 behaviour, where the
+    // scheduler only had the aggregate session budget.
+    bool media_pacing_enabled = true;
 };
 // ---------------------------------------------------------------------------
 // Public callbacks
@@ -738,6 +900,17 @@ using NIMRTC_API_STABLE AudioFrameCallback = std::function<void(const float* pcm
 using NIMRTC_API_STABLE VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
 using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
 using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* state)>;
+
+/** Called for every DTMF event the engine decodes.
+ *
+ *  v1.2.0 (session capability plan D1): the callback fires once per
+ *  *completed* RFC 4733 event -- that is, when the end-of-event packet
+ *  arrives, with the accumulated duration of the whole key press.  The
+ *  intermediate packets of the repetition sequence (RFC 4733 §2.5) do
+ *  not fire it, so a host that counts events does not have to
+ *  de-duplicate. */
+using NIMRTC_API_STABLE DtmfEventCallback =
+    std::function<void(const nimrtc::plugins::DtmfEvent& event)>;
 
 // ---------------------------------------------------------------------------
 // Audio frame details (v1.2.0, audio pipeline WP-10, spec E-1)
@@ -925,11 +1098,34 @@ public:
     //
     // No-op when the engine has `cfg.datachannel_name.empty()` — the
     // callbacks are still stored so callers don't have to gate by config.
+    // (v1.2.0: `datachannel_name` defaults to `""`; in the default
+    // `"web_transport"` backend family the field is ignored altogether
+    // and the callbacks are still installed on the created channels.)
     NIMRTC_API_STABLE void set_on_data_message(plugins::DataMessageCallback cb) noexcept {
         on_data_message_ = std::move(cb);
     }
     NIMRTC_API_STABLE void set_on_data_state(plugins::DataChannelStateCallback cb) noexcept {
         on_data_state_ = std::move(cb);
+    }
+
+    /**
+     * @brief Install the identity-carrying data-message callback
+     *        (v1.2.0, WP-C1).
+     *
+     * The additive counterpart of `set_on_data_message()`: the callback
+     * receives the same payloads, plus the identity of the channel the
+     * message arrived on (`plugins::DataChannelMessage::label` and
+     * `::channel_id`).
+     *
+     * A host that opens two channels can therefore tell which one a
+     * message belongs to — the plain callback cannot express that.
+     * The callback is installed on every channel the engine creates;
+     * `channel_id` is assigned by the engine (monotonically increasing
+     * per engine, starting at 1) and `label` is the channel's label.
+     */
+    NIMRTC_API_STABLE void set_on_data_message_ex(
+        plugins::DataChannelMessageCallback cb) noexcept {
+        on_data_message_ex_ = std::move(cb);
     }
 
     // ---- DataChannel creation --------------------------------------------
@@ -939,7 +1135,9 @@ public:
     // `core::PluginRegistry::instance().get_datachannel(datachannel_name)`.
     //
     // Returns nullptr when:
-    //   - `cfg.datachannel_name.empty()` (DataChannel disabled)
+    //   - The data plane is disabled (the resolved factory id is empty —
+    //     `datachannel_backend == ""`, see `init_datachannel_registry()`)
+    //   - The engine is not open()ed yet
     //   - The factory id is not registered (the engine is open but the
     //     caller hasn't called `core::register_all_default_plugins()` or
     //     registered the requested backend themselves).
@@ -996,6 +1194,148 @@ public:
     // and consumed by Chrome / libjuice / libwebrtc peers.
     NIMRTC_API_STABLE std::string create_offer() noexcept;
     NIMRTC_API_STABLE std::optional<std::string> process_remote_sdp(std::string_view remote_sdp) noexcept;
+
+    // ---- Session / tracks / transceivers (v1.2.0, session capability plan)
+    //
+    // N1 / N2 / N3 / N4 / N5 and T1 / T2 / T3 / T4 of
+    // `docs/plan/session-capability-plan.md`.
+    //
+    // ## The model
+    //
+    // The engine keeps a *session* — a set of tracks and a set of
+    // transceivers (one transceiver per SDP m-line).  The session model
+    // itself is a plugin (`plugins::ISession`), resolved through
+    // `EngineConfig::session_name`; the built-in one registers under
+    // the id "session".
+    //
+    // The host mutates the session through the calls below and then
+    // asks for a new offer.  `needs_negotiation()` tells the host
+    // whether the session changed since the last offer / answer, so a
+    // signalling loop does not have to track the changes itself.
+    //
+    // ## Direction mapping (N4)
+    //
+    // The m-line's direction attribute is the direction of the
+    // transceiver that owns the m-line:
+    //
+    //   | transceiver / track state            | m-line attribute |
+    //   |--------------------------------------|------------------|
+    //   | send + receive                       | `a=sendrecv`     |
+    //   | send only                            | `a=sendonly`     |
+    //   | receive only                         | `a=recvonly`     |
+    //   | nothing attached                     | `a=inactive`     |
+    //
+    // ## Removed tracks and stopped transceivers (OD-A / N5 / T4)
+    //
+    // A removed track does **not** make its m-line disappear: the m-line
+    // stays in the offer / answer with the direction `inactive`, and its
+    // mid is never recycled.  The same holds for a stopped transceiver.
+    // Keeping the mid stable is what stops the peer from mistaking a
+    // removed m-line for a newly negotiated one.
+    //
+    // @note The media pipeline carries **one** audio stream and **one**
+    //       video stream.  A transceiver the host adds beyond those is
+    //       advertised in the SDP (so the negotiation is complete and
+    //       the peer sees the m-line), but it does not open a second
+    //       media pipeline.
+
+    /** Add a track to the session.
+     *
+     *  The track is bound to a transceiver of the same kind — an
+     *  existing one with a free send slot, or a new transceiver, in
+     *  which case the offer grows by one m-line.
+     *
+     *  @return false when the id is already taken or the session model
+     *          is disabled. */
+    NIMRTC_API_STABLE bool add_track(std::string_view id,
+                                     plugins::MediaKind kind,
+                                     plugins::Direction dir) noexcept;
+
+    /** Remove a track.
+     *
+     *  The track leaves the transceiver's slot; the m-line stays and
+     *  turns `inactive` (OD-A).  The mid is not recycled.
+     *
+     *  @return false when no track with that id existed. */
+    NIMRTC_API_STABLE bool remove_track(std::string_view id) noexcept;
+
+    /** Change a track's direction.
+     *
+     *  The m-line that carries the track follows: `kSendOnly` becomes
+     *  `a=sendonly`, `kRecvOnly` becomes `a=recvonly`, `kInactive`
+     *  becomes `a=inactive`.
+     *
+     *  @return false when no track with that id existed. */
+    NIMRTC_API_STABLE bool set_track_direction(std::string_view id,
+                                               plugins::Direction dir) noexcept;
+
+    /** Snapshot of every track in the session. */
+    NIMRTC_API_STABLE std::vector<plugins::TrackInfo> tracks() const noexcept;
+
+    /** Create a transceiver — one new m-line.
+     *
+     *  @return The allocated mid, or an empty string on failure.  The
+     *          mid is unique and never reused. */
+    NIMRTC_API_STABLE std::string add_transceiver(plugins::MediaKind kind,
+                                                  plugins::Direction dir) noexcept;
+
+    /** Change a transceiver's direction (the m-line's direction
+     *  attribute). */
+    NIMRTC_API_STABLE bool set_transceiver_direction(std::string_view mid,
+                                                     plugins::Direction dir) noexcept;
+
+    /** Stop a transceiver.
+     *
+     *  The m-line stays in the SDP with the direction `inactive` and the
+     *  mid is not recycled (OD-A / T4).
+     *
+     *  @return false when no transceiver with that mid existed. */
+    NIMRTC_API_STABLE bool stop_transceiver(std::string_view mid) noexcept;
+
+    /** Restart a stopped transceiver (its previous direction is
+     *  restored). */
+    NIMRTC_API_STABLE bool restart_transceiver(std::string_view mid) noexcept;
+
+    /** Snapshot of every transceiver in the session. */
+    NIMRTC_API_STABLE std::vector<plugins::TransceiverInfo> transceivers() const noexcept;
+
+    /** True when the session changed since the last offer / answer.
+     *
+     *  A host that drives renegotiation polls this (or watches the
+     *  return value of the mutating calls) to decide whether it has to
+     *  produce and send a new offer.  The flag is cleared by
+     *  `create_offer()` and by `process_remote_sdp()`. */
+    NIMRTC_API_STABLE bool needs_negotiation() const noexcept;
+
+    // ---- DTMF (v1.2.0, session capability plan D1 / D2) ----------------
+    //
+    // RFC 4733 in-band DTMF over the audio m-line.  Both calls need
+    // `EngineConfig::dtmf_enabled == true`; without it the engine
+    // behaves exactly as it did before DTMF existed (no telephone-event
+    // declaration in the SDP, a received telephone-event payload counts
+    // as an unknown payload type).
+    //
+    // @see `docs/plan/session-capability-plan.md` §2 (Track D) and the
+    //      decision OD-B.
+
+    /** Install the callback that receives decoded DTMF events.
+     *
+     *  The callback fires once per completed event (RFC 4733 §2.5 end
+     *  packet), with the accumulated duration of the key press. */
+    NIMRTC_API_STABLE void set_on_dtmf(DtmfEventCallback cb) noexcept;
+
+    /** Send a DTMF event.
+     *
+     *  The engine encodes the event into RFC 4733 telephone-event
+     *  payloads and sends them on the audio m-line, following the
+     *  repetition and end-of-event timing of RFC 4733 §2.5.
+     *
+     *  @param event_code   The RFC 4733 event code (0..16).
+     *  @param duration_ms  How long the key was held, in milliseconds.
+     *  @return false when DTMF is disabled, when the event code is out
+     *          of range, or when the engine is not open. */
+    NIMRTC_API_STABLE bool send_dtmf(std::uint8_t event_code,
+                                     std::uint16_t duration_ms) noexcept;
 
     // ---- Audio I/O --------------------------------------------------------
     //
@@ -1180,6 +1520,44 @@ public:
     NIMRTC_API_STABLE int add_turn_server(std::string_view host, std::uint16_t port,
                         std::string_view username,
                         std::string_view password) noexcept;
+
+    // --- ICE restart (RFC 8445 §9.1.1.1) ---------------------------------
+    //
+    // A restart re-runs the whole ICE session with a fresh credential pair
+    // and re-gathers the candidates, which is what makes the session
+    // survive a network change (WiFi -> 4G, VPN up/down, DHCP renewal).
+
+    /** Perform an ICE restart (RFC 8445 §9.1.1.1).
+     *
+     *  The local ICE credentials are regenerated and the candidates are
+     *  gathered again.  The peer can only observe the restart through the
+     *  new credentials, so the host has to publish a fresh offer
+     *  afterwards — `create_offer()` picks the new credentials up
+     *  automatically:
+     *
+     *      engine.restart_ice();
+     *      send_to_peer(engine.create_offer());
+     *
+     *  @return true if the restart was performed; false if no ICE transport
+     *          exists yet (call pre_open() first) or if the restart failed.
+     *
+     *  Thread-safety: not thread-safe; call from the same thread that
+     *  drives the signaling. */
+    NIMRTC_API_STABLE bool restart_ice() noexcept;
+
+    /** Number of ICE restarts performed on this engine's transport. */
+    NIMRTC_API_STABLE std::uint32_t ice_restart_count() const noexcept;
+
+    /** Install the callback fired when the *peer* restarts ICE.
+     *
+     *  The peer published new ICE credentials, so the engine regenerated its
+     *  own (RFC 8445 §9.1.1.1 requires both sides to change).  The host has
+     *  to answer with the new credentials — that is what this callback is
+     *  for: call `process_remote_sdp()`-equivalent answer generation and
+     *  send it to the peer.
+     *
+     *  Pass a null callback to clear. */
+    NIMRTC_API_STABLE void set_on_ice_restart(plugins::OnIceRestart cb) noexcept;
 
     /** Inbound raw bytes — alternative entry point for test injection.
      *
@@ -1636,6 +2014,29 @@ private:
     EngineErrorCallback on_error_;
     EngineStateCallback on_state_change_;
 
+    /** Fired when the peer restarts ICE (RFC 8445 §9.1.1.1).
+     *  Installed on the ICE transport when the transport is created; the
+     *  transport calls it when the peer's description carries new ICE
+     *  credentials.  The host has to answer with the new credentials. */
+    plugins::OnIceRestart on_ice_restart_;
+
+    // ---- DTMF (v1.2.0, session capability plan D1 / D2) ----------------
+    //
+    // The RFC 4733 codec is resolved from the registry's DTMF slot when
+    // `config_.dtmf_enabled` is true; it is null when DTMF is off, when
+    // the module is not built, or when the resolution failed.
+    std::unique_ptr<plugins::IDtmfCodec> dtmf_codec_;
+
+    /** The callback that receives decoded DTMF events. */
+    DtmfEventCallback on_dtmf_;
+
+    /** The telephone-event payload type the *peer* negotiated (RFC 4733
+     *  §2.3.2).  Zero when the peer did not negotiate one -- which is
+     *  the case when DTMF is off, and the case in which a
+     *  telephone-event payload must still count as an unknown audio
+     *  payload type (decision D4). */
+    std::uint8_t negotiated_dtmf_pt_ = 0;
+
     // ---- DataChannel callbacks ---------------------------------------------
     //
     // Stored on the engine so create_data_channel() can install them on
@@ -1644,12 +2045,18 @@ private:
     // explicitly allows `cb = nullptr` because it's a `std::function`).
     plugins::DataMessageCallback    on_data_message_;
     plugins::DataChannelStateCallback on_data_state_;
+    // The identity-carrying data-message callback (v1.2.0, WP-C1).
+    plugins::DataChannelMessageCallback on_data_message_ex_;
+    // The next channel id the engine hands out (WP-C1): monotonically
+    // increasing per engine, starting at 1.
+    std::uint32_t next_data_channel_id_ = 1;
 
     // ---- DataChannel factory dispatch (v0.14.0-rc.1, DC-1 v1.0.0 headline) -
     //
     // Resolved at `init_modules_once()` time by dispatching on
-    // `config_.datachannel_backend` ("sctp" / "web_transport" / "" + legacy
-    // `datachannel_name` fallback); the result is the factory id the engine
+    // `config_.datachannel_backend` ("web_transport" / "" + legacy
+    // `datachannel_name` fallback; the "sctp" family was retired in
+    // v1.2.0 and is rejected); the result is the factory id the engine
     // hands to `core::PluginRegistry::get_datachannel(id)` in
     // `create_data_channel()`.  When empty, DataChannel is disabled
     // (mirrors `cfg.datachannel_backend.empty() && cfg.datachannel_name.empty()`).
@@ -1746,12 +2153,50 @@ private:
     /** BWE-linked audio bitrate adaptation — see
      *  `Config::audio_bitrate_adaptive`.  Called from `tick()`. */
     void maybe_update_audio_bitrate() noexcept;
+    /** Drive the scheduler's per-class pacing buckets from the bandwidth
+     *  estimate (v1.2.0 M3, video plan P2).  Called from `tick()`.
+     *
+     *  The estimate is split between the streams with the *same* rule the
+     *  audio bitrate adaptation uses (`bandwidth_allocation.hpp`, F8):
+     *  the audio is the reserved stream, the video is the elastic one.
+     *  Each class is then paced at its own share, so a saturated video
+     *  stream cannot starve the audio. */
+    void update_pacing_rates() noexcept;
     /** The configured audio encoder ceiling, in bits per second:
      *  `Config::audio_bitrate_bps` when set, otherwise the codec
      *  default for the channel count (32 kbps mono / 64 kbps stereo). */
     int resolve_audio_bitrate_ceiling() const noexcept;
     void init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
+
+    // ---- Session model helpers (v1.2.0, session capability plan) --------
+    //
+    // `resolve_session_model()` resolves the pluggable session model
+    // from the registry's session slot (`EngineConfig::session_name`).
+    // `ensure_base_session_state()` creates the base transceivers and
+    // the tracks that ride on them — it is idempotent and only ever
+    // adds what is missing, so it can run from `create_offer()` and
+    // again after `open()` resolved the video / datachannel plugins.
+    bool resolve_session_model() noexcept;
+    void ensure_base_session_state() noexcept;
+    /** Recompute the direction of a transceiver from the tracks that
+     *  ride on it (N4).  A transceiver with no attached track is
+     *  `inactive` — that is how a removed track turns its m-line
+     *  `inactive` (OD-A). */
+    void sync_transceiver_direction(std::string_view mid) noexcept;
+    /** Mirror the peer's m-lines into the session model (T2 / T3).
+     *
+     *  Called when the remote description is an *offer*: every media
+     *  section the peer sent gets a transceiver with the same mid, so
+     *  the two ends agree on the mid ↔ m-line mapping and a later
+     *  renegotiation keeps the mids stable. */
+    void mirror_remote_media(const sdp::SessionDescription& remote) noexcept;
+    /** Bind a track to a transceiver: an existing transceiver of the
+     *  same kind with a free send slot, or a fresh one.  Returns the
+     *  mid of the transceiver the track was bound to (empty on
+     *  failure). */
+    std::string bind_track_to_transceiver(std::string_view track_id,
+                                          plugins::MediaKind kind);
 
     // ---- init_modules_once() phase helpers (P0 refactor) -----------------
     //
@@ -1813,11 +2258,38 @@ private:
      *  side, so those paths return 0.
      *
      *  Returns `kEngineInternal` when `cfg.datachannel_backend` holds an
-     *  unrecognised value: the engine does not silently fall back to
-     *  `"sctp"` (a typo'd backend id would otherwise mask an integrator
-     *  error).  The error is also routed through `on_error_` before the
+     *  unrecognised value — or the retired `"sctp"` value (v1.2.0, WP-A):
+     *  the engine does not silently fall back to another backend (a typo'd
+     *  backend id would otherwise mask an integrator error, and the SCTP
+     *  backend is a test-only loopback socket that cannot reach a peer).
+     *  The error is also routed through `on_error_` before the
      *  return, matching the other `init_*` failure paths. */
     uint32_t init_datachannel_registry() noexcept;
+
+    // ---- DTMF (v1.2.0, session capability plan D1–D4) ----------------
+    //
+    // The two private helpers of the DTMF plane.  They live in
+    // `src/engine/src/engine_dtmf.cpp`; they are declared here so the
+    // other engine TUs (the SDP builder and the inbound RTP demux)
+    // can reach them.
+
+    /** Resolve the RFC 4733 codec from the registry's DTMF slot.
+     *
+     *  A no-op when `config_.dtmf_enabled` is false (DTMF is off by
+     *  default, decision OD-B) or when the plugin is not registered —
+     *  a missing codec degrades the DTMF path, it does not fail the
+     *  engine. */
+    void resolve_dtmf_codec() noexcept;
+
+    /** Handle one inbound telephone-event payload.
+     *
+     *  Decodes the payload, accumulates the event duration across the
+     *  repeats RFC 4733 §2.5.1.2 describes, and reports the completed
+     *  event through `on_dtmf_`.
+     *
+     *  @param pv  The parsed RTP packet; its payload is the four-byte
+     *             telephone-event header. */
+    void handle_dtmf_payload(const rtp::PacketView& pv) noexcept;
 
     /** Phase 6 — create the SRTP context, open the DTLS session
      *  (skipping Rule 2 raw-UDP-ARQ strategies where `impl_->dtls`

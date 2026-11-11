@@ -179,6 +179,19 @@ endif()
 if(NIMRTC_MODULE_NET_FEEDBACK)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_NET_FEEDBACK=1)
 endif()
+# v1.2.0 (session capability plan, N1 / T1): the session-model module.
+# Its registrar entry materialises only when the module is built; the
+# engine then resolves the session model through the registry's
+# session slot.
+if(NIMRTC_MODULE_SESSION)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_SESSION=1)
+endif()
+# v1.2.0 (session capability plan, D1 / D2): the RFC 4733 codec module.
+# Its registrar entry materialises only when the module is built; the
+# engine then resolves the codec through the registry's DTMF slot.
+if(NIMRTC_MODULE_DTMF)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_DTMF=1)
+endif()
 nimrtc_apply_options(nimrtc_core_objects)
 nimrtc_apply_options(nimrtc_registry)
 

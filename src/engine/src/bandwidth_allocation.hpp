@@ -137,6 +137,24 @@ struct BandwidthDemand {
     std::uint32_t weight = 1;
 };
 
+/** Build the demand of the session's *reserved* audio stream.
+ *
+ *  The audio is the only reserved stream today: it takes its share of
+ *  the estimate first, and its `floor_bps` is hard.  The helper exists
+ *  so that the two places that need the audio's demand — the audio
+ *  bitrate adaptation and the pacing split — describe it *identically*.
+ *  One rule, not two. */
+inline BandwidthDemand reserved_audio_demand(double share,
+                                             std::uint32_t floor_bps,
+                                             std::uint32_t ceiling_bps) noexcept {
+    BandwidthDemand d;
+    d.reserved   = true;
+    d.share      = share;
+    d.floor_bps  = floor_bps;
+    d.ceiling_bps = ceiling_bps;
+    return d;
+}
+
 /** The result of the split: one target per demand, plus the totals. */
 struct BandwidthAllocation {
     /** The allocation of every demand, in the order the demands were

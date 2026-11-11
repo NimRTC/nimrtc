@@ -99,6 +99,20 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_OPUS
     &nimrtc::opus::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_SESSION
+    // v1.2.0 (session capability plan, N1 / T1): the session model.
+    // Its entry point populates the registry's session slot under the
+    // id "session", so the engine can resolve the session model
+    // through the seam without naming a concrete module.
+    &nimrtc::session::register_default_plugins,
+#endif
+#ifdef NIMRTC_HAS_DTMF
+    // v1.2.0 (session capability plan, D1 / D2): the RFC 4733
+    // telephone-event codec.  Its entry point populates the registry's
+    // DTMF slot under the id "dtmf", so the engine can resolve the
+    // codec through the seam without naming a concrete module.
+    &nimrtc::dtmf::register_default_plugins,
+#endif
     &nimrtc::rtp::register_default_plugins,
     &nimrtc::sched::register_default_plugins,
     &nimrtc::sdp::register_default_plugins,

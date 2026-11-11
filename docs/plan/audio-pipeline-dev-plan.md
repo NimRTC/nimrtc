@@ -14,7 +14,7 @@
 > | Plan opened | 2026-11-07 |
 > | Baseline | `main` @ `v1.1.0` release-candidate cut (see `docs/plan/v1.1.0-release-notes.md`) |
 > | Scope class | Audio pipeline — new plugin seams, wire-format completion, no transport rewrite |
-> | Status | **Development plan + version plan written; the ladder amendment in §6.2 was fixed by the owner on 2026-11-06 (the compressed `v1.2.0` carries WP-0 … WP-11)** |
+> | Status | **Development plan + version plan written; the ladder amendment in §6.2 was fixed by the owner on 2026-11-06 (the compressed `v1.2.0` carries WP-0 … WP-11). Amended 2026-11-10 (owner): C-4 (engine-internal A/V synchronisation), C-5 (G.711) and Part L (the logging contract) join the `v1.2.0` body as WP-13 … WP-15** |
 > | Owner | BDFL |
 > | Related | `docs/plan/audio-pipeline-spec.md` (the binding spec), ADR-001 (plugin system), ADR-008 (PCM tap), ADR-015 (API stability), ADR-017 (cross-end timeline), `docs/plan/video-pipeline-v2-plan.md` (the same shape on the video side), `docs/plan/v1.1-plan.md` §5.6 (version ladder) |
 
@@ -28,10 +28,18 @@
 |---|---|---|
 | Spec Part A (P0 — make the receive path real) | A-1 … A-10 | WP-4, WP-5, WP-7 |
 | Spec Part B (P1 — the interfaces) | B-1 … B-17 | WP-1, WP-3, WP-5, WP-6, WP-7, WP-8, WP-9 |
-| Spec Part C (P2 — quality and platform) | C-1 … C-5 | WP-5 (C-1 only), WP-12 (C-2 … C-5) |
+| Spec Part C (P2 — quality and platform) | C-1 … C-5 | WP-5 (C-1 only), WP-12 (C-2, C-3), **WP-13 (C-5)**, **WP-14 (C-4)** |
 | Spec Part D (error handling) | the `0x1A40`–`0x1A48` range | WP-7 (mapping), WP-11 (coverage) |
 | Spec Part E (the P1 public SDK) | E-1 … E-9 | WP-10 |
-| Spec Part V (verification) | V-1 … V-5 | WP-11 |
+| **Spec Part L (logging and observability)** | **L-1 … L-12** | **WP-15** |
+| Spec Part V (verification) | V-1 … V-5 | WP-11 (V-1 … V-5), WP-13 … WP-15 (their own rows) |
+
+**Amendment of 2026-11-10 (owner).** Three items left the P2 line and
+joined the `v1.2.0` body: **C-5 (G.711)**, **C-4 (A/V synchronisation,
+now engine-internal and switchable)** and **Part L (the logging
+contract)**. They are carried by the three new packages WP-13, WP-14 and
+WP-15 below. WP-12 keeps the two P2 items that did not move (C-2 DTX/VAD
+coupling, C-3 device layer) and stays on the `v1.4.0` line.
 
 ### 1.2 What this plan does not cover
 
@@ -40,8 +48,10 @@
 * **The video pipeline.** Its stages are planned in
   `docs/plan/video-pipeline-v2-plan.md`; §6.3 of this document only
   records how the two plans share infrastructure.
-* **The codec implementations themselves.** Opus stays the only
-  production codec; G.711 (C-5) is a later work package.
+* **The codec implementations themselves.** The plan ships the codec
+  *modules*, not the codec science: Opus is already there, and the
+  G.711 module (WP-13) is a companding law — a codec whose output is
+  defined by the integer mapping, not by a tuning decision.
 * **The device layer** (C-3) — it belongs to the host application, and
   the engine's contract towards it is fixed in the specification only.
 
@@ -77,10 +87,21 @@ Two rules shape the split:
 | WP-9 | Cross-end capture timestamp | B-17 | WP-7, ADR-017 | v1.2.0 |
 | WP-10 | The P1 public SDK | E-1 … E-9 | WP-7, WP-8, WP-9 | v1.2.0 |
 | WP-11 | Verification and interop | V-1 … V-5 | WP-2 … WP-10 | v1.2.0 |
-| WP-12 | P2 quality and platform | C-2, C-3, C-4, C-5 | WP-11 | v1.4.0 |
+| WP-12 | P2 quality and platform | C-2, C-3 | WP-11 | v1.4.0 |
+| WP-13 | The G.711 module | C-5 | WP-1, WP-6 | v1.2.0 |
+| WP-14 | Engine-internal A/V synchronisation | C-4 | WP-9, WP-10 | v1.2.0 |
+| WP-15 | The logging contract | L-1 … L-12 | WP-3, WP-7 | v1.2.0 |
 
 > **The "Ships in" column is the ladder of §6.2, as the owner fixed it
 > on 2026-11-06.** See §6 before anyone schedules the work.
+
+> **WP-12 … WP-15 are numbered in the order the items were written, not
+> in release order.** The 2026-11-10 owner decision moved C-4, C-5 and
+> Part L out of the P2 line and into the `v1.2.0` body, so WP-13 … WP-15
+> ship *with* WP-0 … WP-11, while WP-12 (the two P2 items that did not
+> move) stays on the `v1.4.0` line. The numbering is not renumbered,
+> because the WP numbers are already referenced from the release notes
+> and from the video plan.
 
 ### 2.1 Progress log
 
@@ -389,10 +410,35 @@ defect F-1).
 | `python tools/run_e2e_acceptance.py --case d_rev` | **PASS** — the same two assertions with the signaling roles flipped (NimRTC offers, Chrome answers) |
 
 **What is still open after WP-11.**  WP-12 (the P2 body: DTX/VAD
-coupling, the device-layer contract, A/V synchronisation, G.711) is the
-`v1.4.0` line.  With the E-9 migration guide and the V-3 reverse
-direction both closed, **WP-11 is complete** — the P0+P1 audio body is
-feature-complete and the whole `v1.2.0` audio scope has landed.
+coupling, the device-layer contract) is the `v1.4.0` line.  With the
+E-9 migration guide and the V-3 reverse direction both closed,
+**WP-11 is complete** — the P0+P1 audio body is feature-complete and
+the whole `v1.2.0` audio scope has landed.
+
+**Planning amendment — 2026-11-10 (owner).**  No code changed with
+this entry; it records a decision and the plan rewrite it caused.
+
+The owner moved three items into the `v1.2.0` body:
+
+* **C-5 — G.711 (PCMU / PCMA)** becomes **WP-13**, because the engine
+  should speak the two mandatory WebRTC codecs and the "falls back to
+  PCMU" promise in `AudioCodecConfig` (F-26) describes a fallback that
+  never existed.
+* **C-4 — A/V synchronisation** becomes **WP-14**, re-specified as an
+  *engine-internal*, switchable feature: the engine measures the skew
+  between the audio and the video capture timelines and adjusts the
+  audio playout, with `EngineConfig::av_sync_enabled` as the switch.
+  The receiver seam gains one method (`set_playout_offset_ms`), so the
+  engine still includes no concrete module header (L4).
+* **Part L — the logging contract** becomes **WP-15**: the audio path
+  fails silently, so the log points, their levels, their throttling and
+  the "no PCM, no keys" rule become a contract instead of a habit.
+
+The spec was amended accordingly (Part L as a new §9 with the following
+sections renumbered, C-4 and C-5 rewritten, E-8 amended by A-1: 21 → 27
+public symbols and 109 → 110 public headers), and this plan was amended
+in §1.1, §2, §5, §6.2.1, §7, §8 and §9.  The next code change in this
+line is WP-13.
 
 ---
 
@@ -689,12 +735,98 @@ assertions in place.
 
 ### WP-12 — P2 quality and platform (later line)
 
-**Spec items.** C-2 (DTX / VAD coupling), C-3 (device layer contract),
-C-4 (A/V synchronisation), C-5 (G.711).
+**Spec items.** C-2 (DTX / VAD coupling), C-3 (device layer contract).
 
-**Note.** C-4 depends on WP-9 (the capture timestamp) *and* on the
-device layer of C-3; C-5 depends on a second decoder implementation and
-therefore on the decoder seam being proven by more than one codec.
+**Note.** Both items stayed on the P2 line after the 2026-11-10 owner
+decision: C-4 and C-5 left the package and became WP-14 and WP-13.
+
+### WP-13 — The G.711 module
+
+**Spec items.** C-5. **Depends on** WP-1 (the decoder seam) and WP-6
+(the PT routing and the SDP completion, because G.711 changes both).
+
+**Work.**
+
+* New module `src/modules/g711/` — own `CMakeLists.txt`, `include/`,
+  `src/`, `tests/` (L3). It depends on `nimrtc::core` and
+  `nimrtc::plugins` only; it links neither the Opus nor the JB module.
+* `plugins::IAudioDecoder` for PCMU and PCMA, registered under the ids
+  `pcmu` and `pcma` in the `kAudioDecoder` category; `plugins::ICodec`
+  for the send path, registered in the `kCodec` category under the same
+  two ids (ids are per category, DEC-6).
+* The companding laws: µ-law (PCMU) and A-law (PCMA) per ITU-T G.711,
+  8000 Hz, 160 samples per 20 ms frame, RFC 3551 payload types 0 and 8.
+* The clock-rate rule becomes "the PCM rate must equal the negotiated
+  codec's clock rate" — 48000 for Opus, 8000 for G.711
+  (`kAudioClockMismatch`). The engine's hard error is generalised, not
+  removed.
+* The SDP: `a=rtpmap:<pt> PCMU/8000` and **no** `a=fmtp:` line for
+  G.711; the Opus-only `a=fmtp` builder must not run for G.711.
+* `AudioCodecConfig`'s doc comment loses the promise of a fallback that
+  never existed (F-26).
+
+**Done when** the module's own tests are green (the round-trip is
+sample-exact), the engine answers a PCMU offer with `PCMU/8000`, an
+8000 Hz PCM rate is accepted and a 48000 Hz one is rejected with
+`kAudioClockMismatch`, and the API-freeze scan reports the one new
+public header (`g711/g711.hpp`) with `Missing == 0`.
+
+### WP-14 — Engine-internal A/V synchronisation
+
+**Spec items.** C-4. **Depends on** WP-9 (the capture timestamp) and
+WP-10 (the SDK, because the new config fields and the new statistics
+are public).
+
+**Work.**
+
+* The engine measures the skew between the audio capture timeline
+  (`capture_time_us`, B-17) and the video capture timeline
+  (`capture_ts_us_for_ssrc()`, ADR-017), and turns it into a playout
+  offset for the audio receiver.
+* The receiver seam gains one method,
+  `set_playout_offset_ms(std::int32_t)`; the receiver clamps the value
+  to its own delay bounds. The engine keeps driving the receiver through
+  the plugin interface — no concrete include (L4).
+* Two new `EngineConfig` fields (`av_sync_enabled`, default `true`;
+  `av_sync_max_skew_ms`, default `100`) and two new `Stats` counters
+  (`av_sync_skew_us`, `av_sync_frames_aligned`), all appended at the end
+  of their structs (E-6).
+* The degradation path: no video track, no reconstructible capture
+  instant, or a skew beyond the bound → the receiver keeps its own
+  delay, nothing is faked, and the counters say so.
+
+**Done when** the V-1 rows "A/V sync offset" and "A/V sync switch" and
+the V-2 row "A/V sync" are green, and the engine still contains no
+`nimrtc/jb/*` or `nimrtc/opus/*` include.
+
+### WP-15 — The logging contract
+
+**Spec items.** L-1 … L-12. **Depends on** WP-3 (the `audio_rx` module,
+which owns most of the log points) and WP-7 (the engine's module
+resolution and send path).
+
+**Work.**
+
+* The twelve mandatory log points of L-2, each at its mandated level,
+  each carrying its mandated fields, each starting with its component's
+  prefix (`audio:`, `audio-rx:`, `opus:`, `g711:`).
+* The throttling rule of L-5 (first occurrence + every 50th), driven by
+  the same counters that feed `Stats` (L-9).
+* The level guard of L-7 on every per-frame path — the `NIMRTC_LOG_*`
+  macros format unconditionally, so a per-frame call without the guard
+  pays the formatting cost on every frame.
+* The metadata-only rule of L-6: no PCM, no keys, no whole SDP.
+* The tests of L-11: a capturing `core::log::Sink` asserts exactly one
+  `Warn` line with the `audio-rx:` prefix for an induced decode
+  failure, no PCM byte in it, and no per-frame line at the default
+  level.
+* The documentation of L-12: `docs/api/engine_api.md` gains the log
+  surface section, `docs/zh/architecture.md` mirrors the three
+  architectural decisions (ADR-012).
+
+**Done when** the L-11 tests are green, the mandatory points exist at
+their levels, and no log line in the audio path contains PCM or key
+material.
 
 ---
 
@@ -737,7 +869,11 @@ therefore on the decoder seam being proven by more than one codec.
 | B-17 | "capture timestamp" | `tests/test_engine_audio_state.cpp` |
 | E-1 … E-9 | V-4 criteria 7 and 8 + the freeze scans | `scripts/api_freeze_scan.js`, `scripts/check_api_marker_includes.py`, `scripts/check-release-freeze.sh` |
 | Part D | error-code mapping | `tests/test_engine_audio_state.cpp` |
-| C-1 … C-5 | WP-12 | later line |
+| C-1 | encoder bitrate adaptation | `tests/test_engine_audio_state.cpp` (WP-5) |
+| C-2, C-3 | DTX/VAD coupling, device-layer contract | later line (WP-12) |
+| C-4 | "A/V sync offset", "A/V sync switch", V-2 "A/V sync" | `tests/test_engine_audio_state.cpp`, `tests/test_engine_audio_loopback.cpp` |
+| C-5 | "G.711 round-trip", "G.711 negotiation" | `src/modules/g711/tests/test_g711.cpp`, `tests/test_engine_audio_state.cpp` |
+| L-1 … L-12 | "log surface" | `tests/test_engine_audio_log.cpp` |
 
 **CI gates that must be green for the audio line to ship** (all five of
 V-5, plus the acceptance runner's Case D):
@@ -768,7 +904,8 @@ python tools/run_e2e_acceptance.py --case d
 | `v1.3.0` / `v1.4.0` | The remaining video-pipeline stages (hardware codec negotiation, the codec plug-in contract for H.265/AV1, the rendering-side alignment work) |
 
 **Consequence for this plan: no audio item lands in `v1.1.0` or
-`v1.1.x`.** The audio pipeline adds 21 public symbols and two new plugin
+`v1.1.x`.** The audio pipeline adds 27 public symbols (21 in the P0+P1
+body, 6 more in the 2026-11-10 amendment A-1) and two new plugin
 categories — by the §5.6 rule that is new behaviour, so it cannot ship
 in a patch line.
 
@@ -786,7 +923,27 @@ the audio work one release line further out.
 | `v1.1.x` | unchanged — fixes only |
 | `v1.2.0` | the video Part B (feedback → BWE → pacing → rate-control closure, the encoder plug-in seam, the profile → mode table), **plus the audio pipeline P0+P1 body: WP-0 … WP-11**, plus the usrsctp removal and SM4-GCM SRTP |
 | `v1.3.0` | the video codec-breadth / hardware-first stage (unchanged from the video plan, §B.1) |
-| `v1.4.0` | the video device layer / receive experience **and** the audio P2 body (WP-12: DTX/VAD, device layer, A/V sync, G.711) |
+| `v1.4.0` | the video device layer / receive experience **and** the audio P2 body (WP-12: DTX/VAD, device layer) |
+
+### 6.2.1 Second ladder amendment — owner decision, 2026-11-10
+
+Three more items joined the `v1.2.0` body. The reasoning is the same as
+in §6.2: each of them is *useful on its own*, each of them is a
+correction of something that is currently missing, and each of them
+rides along with work that is already in the release.
+
+| Item | Package | Why it moves to `v1.2.0` |
+|---|---|---|
+| **C-5 — G.711 (PCMU / PCMA)** | WP-13 | It closes F-26 and provides the two mandatory WebRTC codecs. Without it the engine can only talk Opus, and the stale "falls back to PCMU" promise in `AudioCodecConfig` keeps inviting users to configure a fallback that does not exist. It is a small, self-contained module that reuses the decoder seam that is already proven. |
+| **C-4 — A/V synchronisation (engine-internal, switchable)** | WP-14 | The owner decided that the alignment belongs to the engine, with a configuration switch. Shipping it in the same release as the video Part B is what makes it meaningful: the skew the engine corrects is measured against the video capture timeline, and the video side is being reworked in the same release anyway. |
+| **Part L — the logging contract** | WP-15 | The audio path fails silently; a log contract is what makes a release diagnosable in the field. It is also the cheapest of the three: no public symbol, no behaviour change, and it makes the two items above debuggable on day one. |
+
+**What this does not change.** The `v1.1.x` line stays fixes-only, and
+the video plan's own release map (`docs/plan/video-pipeline-v2-plan.md`
+§B.1) is untouched — the video side's own render clock (its item R3)
+stays on `v1.4.0` and consumes the same skew later. The total public
+API of the release grows from 21 to 27 symbols and from 109 to 110
+public headers (spec E-8, amendment A-1).
 
 **Why this ordering.**
 
@@ -822,14 +979,16 @@ question. The shared points, and the decision for each:
 | Feedback → BWE → pacing | The video Part B work in `v1.2.0` establishes the loop; the audio path joins it as a consumer rather than re-implementing the pacing |
 | Pack / payload framing | RFC 7587 framing for audio (B-5) sits next to the video RTP path; both use the engine's per-engine SSRC / sequence / timestamp state from A-6 |
 | Error codes | The audio range `0x1A40`–`0x1A48` extends the existing block; the video side keeps its own ranges — one numbering scheme, no overlap |
+| Logging | One logger (`core::log::Logger` — the only global L6 allows) and one prefix convention (Part L). The video side follows the same rules when its own log points are specified; no second logger, no second convention |
+| A/V synchronisation | The engine corrects the **audio playout** against the capture timeline (C-4, WP-14). The video side's own render clock is the video plan's item R3 (`v1.4.0`) and consumes the same skew later. Neither side re-times the other |
 
 ---
 
 ## 7. Open items — status
 
-The specification's §11 lists eleven points where it had to make a call
-that the owner may want to revisit. Each has a default, so the
-implementation is never blocked. This plan takes **all eleven defaults**
+The specification's §12 lists **fifteen** points where it had to make a
+call that the owner may want to revisit. Each has a default, so the
+implementation is never blocked. This plan takes **all fifteen defaults**
 and records them as the working assumption:
 
 | # | Decision taken | Status |
@@ -838,18 +997,23 @@ and records them as the working assumption:
 | O-2 | The legacy callback's `size_t` is total interleaved floats | default accepted |
 | O-3 | One frame of latency for FEC recovery is accepted and flagged per frame | default accepted |
 | O-4 | The audio tick rate rises from ≥ 30 Hz to ≥ 100 Hz (documentation change) | default accepted |
-| O-5 | `pcm_sample_rate_hz != 48000` is a hard error until a resampler exists | default accepted |
+| O-5 | `pcm_sample_rate_hz` must equal the negotiated codec's clock rate (48000 for Opus, 8000 for G.711) — a hard error until a resampler exists | default accepted |
 | O-6 | The `0x1A40`–`0x1A48` error-code range | default accepted |
 | O-7 | A missing decoder or receiver is a hard error, no fallback receiver | default accepted |
 | O-8 | Downmix to `pcm_channels` by default, switchable | default accepted |
 | O-9 | `capture_time_us` comes from the ADR-017 timeline, never faked | default accepted |
 | O-10 | `audio_ptime_ms` configurable (10/20/40/60), default 20 | default accepted |
 | O-11 | `Engine::Stats` stays `NIMRTC_API_UNSTABLE` | default accepted |
+| O-12 | The A/V synchronisation lives in the engine, switchable (`av_sync_enabled`) | owner decision 2026-11-10 |
+| O-13 | G.711 (PCMU / PCMA) ships in `v1.2.0` (WP-13) | owner decision 2026-11-10 |
+| O-14 | The log surface is a binding contract (Part L), not a matter of taste | default accepted |
+| O-15 | `av_sync_enabled` defaults to on, inert without a video track | default accepted |
 
-**The one item that is not a default but a plan decision** is the ladder
-amendment of §6.2 — it changes a release line, so it belongs to the
-owner. The owner fixed it on 2026-11-06: the compressed `v1.2.0`
-carries the audio P0+P1 body together with the video Part B.
+**The items that are not defaults but owner decisions** are the two
+ladder amendments: §6.2 (2026-11-06 — the compressed `v1.2.0` carries
+the audio P0+P1 body together with the video Part B) and §6.2.1
+(2026-11-10 — C-4, C-5 and Part L join the same `v1.2.0` body). Both
+change a release line, so both belong to the owner; both are recorded.
 
 ---
 
@@ -857,7 +1021,7 @@ carries the audio P0+P1 body together with the video Part B.
 
 | Risk | Mitigation |
 |---|---|
-| The public API grows by 21 symbols and the freeze scan goes red | WP-0 takes the baseline *before* any change; WP-10 is a package of its own; the inventory in E-8 is exhaustive, and anything beyond it needs a spec amendment |
+| The public API grows by 27 symbols and the freeze scan goes red | WP-0 takes the baseline *before* any change; WP-10 is a package of its own; the inventory in E-8 (with amendment A-1) is exhaustive, and anything beyond it needs a spec amendment |
 | The engine keeps (or regains) concrete module includes, breaking L4 | WP-7's "done" condition is that `src/engine/` contains no `nimrtc/jb/*` or `nimrtc/opus/*` include — a checkable condition, not a review opinion |
 | The audio receiver grows its own playout heuristic instead of using the shared strategy | WP-3's "done" condition names the shared strategy module; §6.3 records the decision |
 | The legacy callback's semantics drift while the new callback is added | The V-1 row "legacy callback semantics" pins the relation between the two callbacks (`num_samples == samples_per_channel * channels` of the new frame) |
@@ -866,6 +1030,11 @@ carries the audio P0+P1 body together with the video Part B.
 | The receive path's thread affinity is assumed rather than verified | The specification's §3.3 makes this a verification task (V-2), not an assumption: if `handle_rtp` runs on the transport thread, the receiver gets an internal mutex |
 | The engine's `send_audio` contract changes break a host that pushes arbitrary block sizes | The frame accumulator (B-6) keeps accepting any block size; the V-1 row "sender framing" asserts one packet per 20 ms and a continuous timestamp |
 | The audio work and the video Part B work collide in `v1.2.0` | §6.2 puts both bodies in `v1.2.0` on purpose; the collision points are named in §6.3 *before* the work starts, and the intra-release order is the dependency order of §2 |
+| The engine starts "correcting" a skew it cannot measure | WP-14's rule: the skew comes from the ADR-017 capture instants only, the correction is clamped at `av_sync_max_skew_ms`, and a capture instant that is not reconstructible leaves the receiver's delay untouched (C-4, O-9) |
+| The A/V correction changes the playout timing of an existing host | `av_sync_enabled` defaults to on but is inert without a video track; the V-1 row "A/V sync switch" asserts that the receiver's delay is untouched when it is off (C-4, O-15) |
+| The G.711 clock-rate rule breaks a host that sends 48 kHz PCM to a PCMU peer | The rule is checked at negotiation time and reported as `kAudioClockMismatch` (a clear error, not silence); the spec states the rule in O-5 and in C-5, and the V-1 row "G.711 negotiation" asserts both directions |
+| The logging contract becomes a wall of text nobody applies | The mandatory list is short (twelve points), the level of each point is fixed by a table, and the per-frame path is guarded by a level check — the review checks three things, not a prose style |
+| The log is used to leak PCM or key material | L-6 forbids it explicitly, and the L-11 test asserts that no PCM byte appears in a captured line |
 
 ---
 
@@ -873,24 +1042,25 @@ carries the audio P0+P1 body together with the video Part B.
 
 The audio pipeline line is done when **all** of the following hold:
 
-1. WP-0 … WP-11 are merged, each with its own "done" condition met.
+1. WP-0 … WP-11 and WP-13 … WP-15 are merged, each with its own "done"
+   condition met. (WP-12 stays on the `v1.4.0` line.)
 2. All five V-5 gates are green; the API-freeze scan reports
-   `Missing == 0` and the public-header count is 109.
+   `Missing == 0` and the public-header count is 110.
 3. V-1, V-2, V-3 and V-4 are green, including the acceptance runner's
    Case D with the audio assertions.
-4. The public API matches the E-8 inventory exactly, and the E-9
-   migration guide is published.
+4. The public API matches the E-8 inventory exactly (including
+   amendment A-1), and the E-9 migration guide is published.
 5. The Chinese documentation mirrors the English change (ADR-012).
-6. The ladder amendment of §6.2 is applied in the release note of the
-   carrying version (`v1.2.0`), which states the audio scope
-   accurately.
+6. The ladder amendments of §6.2 and §6.2.1 are applied in the release
+   note of the carrying version (`v1.2.0`), which states the audio
+   scope accurately.
 
 ---
 
 ## 10. References
 
 * `docs/plan/audio-pipeline-spec.md` — the binding specification
-  (Part A/B/C/D/E/V/G, §11 open items, §12 traceability).
+  (Part A/B/C/D/E/L/V/G, §12 open items, §13 traceability).
 * `docs/plan/v1.1-plan.md` §5.6 — the version ladder this plan amends.
 * `docs/plan/video-pipeline-v2-plan.md` — the video side of the same
   shape, and the other half of §6.3.

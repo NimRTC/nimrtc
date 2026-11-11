@@ -31,6 +31,7 @@ endif()
 
 add_executable(test_ice_test test_ice.cpp)
 add_executable(test_consent_freshness_test test_consent_freshness.cpp)
+add_executable(test_ice_restart_test test_ice_restart.cpp)
 
 # The VS multi-config generator sets LinkLibraryDependencies=false on
 # Application targets, which strips transitive PUBLIC deps from the vcxproj.
@@ -40,12 +41,17 @@ set_target_properties(test_ice_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 set_target_properties(test_consent_freshness_test PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+set_target_properties(test_ice_restart_test PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 
 nimrtc_apply_options(test_ice_test LENIENT)
 nimrtc_link_libjuice(test_ice_test)
 
 nimrtc_apply_options(test_consent_freshness_test LENIENT)
 nimrtc_link_libjuice(test_consent_freshness_test)
+
+nimrtc_apply_options(test_ice_restart_test LENIENT)
+nimrtc_link_libjuice(test_ice_restart_test)
 
 target_link_libraries(test_ice_test PRIVATE
     nimrtc::ice
@@ -61,6 +67,13 @@ target_link_libraries(test_consent_freshness_test PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
+target_link_libraries(test_ice_restart_test PRIVATE
+    nimrtc::ice
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
 # NOTE: No top-level add_test() —see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).
 if(COMMAND gtest_discover_tests)
@@ -69,5 +82,8 @@ if(COMMAND gtest_discover_tests)
         DISCOVERY_TIMEOUT 10)
     gtest_discover_tests(test_consent_freshness_test
         PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+    gtest_discover_tests(test_ice_restart_test
+        PROPERTIES TIMEOUT 60
         DISCOVERY_TIMEOUT 10)
 endif()

@@ -87,17 +87,16 @@ void print_usage(const char* prog) {
                  "  %s --no-stun              Disable STUN candidate gathering\n"
                  "  %s --video                Enable synthetic H.264 video stream\n"
                  "                           (640x480 @ 15 fps, stub encoder; off by default)\n"
-                 "  %s --datachannel          Create a single SCTP DataChannel labelled\n"
+                 "  %s --datachannel          Create a single DataChannel labelled\n"
                  "                           'interop' after open().  Wires on_data_message\n"
                  "                           and on_data_state callbacks (logs to stderr) and\n"
                  "                           attempts a 32-byte NimRTC→Chrome send once\n"
                  "                           ICE+DTLS reach Connected.  Default = enabled\n"
-                 "                           (cfg.datachannel_name = \"sctp\").  DoD Gate\n"
-                 "                           #1 for v0.11.0 \"Beta 前哨\".\n"
+                 "                           (cfg.datachannel_backend = \"web_transport\").\n"
                  "  %s --no-datachannel       Explicitly disable DataChannel (clears\n"
-                 "                           cfg.datachannel_name).  SDP will NOT carry\n"
-                 "                           m=application even when the plugin is\n"
-                 "                           registered.  Default = enabled.\n",
+                 "                           cfg.datachannel_backend + cfg.datachannel_name).\n"
+                 "                           SDP will NOT carry m=application even when the\n"
+                 "                           plugin is registered.  Default = enabled.\n",
                  prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
@@ -455,8 +454,9 @@ struct ProxyState {
 
     // ---- DataChannel driver (v0.11.0 DoD Gate #1) -------------------------
     //
-    // The engine resolves the usrsctp-backed IDataChannel factory via
-    // `cfg.datachannel_name = "sctp"` (the engine's default).  When
+    // The engine resolves the IDataChannel factory via
+    // `cfg.datachannel_backend` (the engine's default is "web_transport";
+    // the SCTP backend was retired in v1.2.0).  When
     // DataChannel is enabled we create FOUR channels after ICE connects,
     // one per reliability variant used by the Chrome e2e harness:
     //   "reliable_ordered"     — kReliableOrdered, ordered=true,  maxRetransmits=0
@@ -786,15 +786,17 @@ int run_signaling_proxy(nimrtc::engine::NimRTCEngine& engine,
     st.duration_sec = duration_sec;
     st.video_fps = (engine.video_source() != nullptr) ? 15 : 0;
 
-    // DoD Gate #1: DataChannel is enabled by default (cfg.datachannel_name
-    // defaults to "sctp" in EngineConfig).  --no-datachannel was detected
-    // in main() and reflected in cfg.datachannel_name before engine.open().
+    // DoD Gate #1: DataChannel is enabled by default (cfg.datachannel_backend
+    // defaults to "web_transport" in EngineConfig).  --no-datachannel was
+    // detected in main() and reflected in cfg.datachannel_backend /
+    // cfg.datachannel_name before engine.open().
     st.dc_enable = dc_enable;
     if (dc_enable) {
         std::fprintf(stderr,
-            "[datachannel] enabled (cfg.datachannel_name=\"%.*s\", sctp_port=%u)\n",
-            static_cast<int>(engine.config().datachannel_name.size()),
-            engine.config().datachannel_name.data(),
+            "[datachannel] enabled (cfg.datachannel_backend=\"%.*s\", "
+            "sctp_port=%u)\n",
+            static_cast<int>(engine.config().datachannel_backend.size()),
+            engine.config().datachannel_backend.data(),
             static_cast<unsigned>(engine.config().sctp_port));
     } else {
         std::fprintf(stderr, "[datachannel] explicitly disabled\n");
@@ -1220,7 +1222,7 @@ int main(int argc, char** argv) {
     // empty peer host).  Clear BOTH to truly disable DataChannel.
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-datachannel") == 0) {
-            cfg.datachannel_name.clear();     // prevents m=application in SDP (sctp path)
+            cfg.datachannel_name.clear();     // legacy factory slot
             cfg.datachannel_backend.clear();  // prevents web_transport session creation
         }
     }

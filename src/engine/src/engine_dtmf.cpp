@@ -66,6 +66,15 @@ constexpr std::uint8_t kMaxDtmfEventCode = 16;
  *  (`EngineConfig::dtmf_payload_type`). */
 constexpr std::uint8_t kDefaultDtmfPayloadType = 126;
 
+/** The SRTP authentication tag size, in bytes.
+ *
+ *  The scheduler hands out packet buffers that already reserve room for
+ *  the SRTP auth tag, so the DTMF send path asks for
+ *  `payload + tag` bytes.  It mirrors the same constant in
+ *  `engine_media.cpp`: the two paths protect different packets but with
+ *  the same profile, so the tag size is the same. */
+constexpr std::size_t kSrtpAuthTagBytes = 10;
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------

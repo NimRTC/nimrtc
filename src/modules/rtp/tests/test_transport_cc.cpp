@@ -179,7 +179,8 @@ ByteBuffer make_transport_cc_packet(std::uint32_t sender_ssrc,
 // Run length chunk: 0 | symbol (2 bit) | run length (13 bit).
 std::uint16_t run_length_chunk(std::uint8_t symbol, std::uint16_t run) {
     return static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(symbol & 0x3u) << 13) | (run & 0x1FFFu));
+        ((static_cast<unsigned>(symbol) & 0x3u) << 13) |
+        (static_cast<unsigned>(run) & 0x1FFFu));
 }
 
 // One-bit status vector chunk: 1 | 0 | 14 symbol bits (symbol 0 at bit 13).
@@ -187,9 +188,9 @@ std::uint16_t run_length_chunk(std::uint8_t symbol, std::uint16_t run) {
 // true = received with a small (8-bit) delta.
 std::uint16_t one_bit_chunk(const bool (&received)[14]) {
     std::uint16_t w = 0x8000u;
-    for (int i = 0; i < 14; ++i) {
+    for (unsigned i = 0; i < 14u; ++i) {
         if (received[i]) {
-            w |= static_cast<std::uint16_t>(1u << (13 - i));
+            w |= static_cast<std::uint16_t>(1u << (13u - i));
         }
     }
     return w;
@@ -199,8 +200,9 @@ std::uint16_t one_bit_chunk(const bool (&received)[14]) {
 // bits 13..12).
 std::uint16_t two_bit_chunk(const std::uint8_t (&symbols)[7]) {
     std::uint16_t w = 0xC000u;
-    for (int i = 0; i < 7; ++i) {
-        w |= static_cast<std::uint16_t>((symbols[i] & 0x3u) << (12 - 2 * i));
+    for (unsigned i = 0; i < 7u; ++i) {
+        w |= static_cast<std::uint16_t>(
+            (static_cast<unsigned>(symbols[i]) & 0x3u) << (12u - 2u * i));
     }
     return w;
 }

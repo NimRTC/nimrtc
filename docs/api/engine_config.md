@@ -167,8 +167,8 @@ then carries no copy at all and the FEC recovery path cannot work.
 | Field | Default | Effect |
 |---|---|---|
 | `audio_bitrate_bps` | `0` | Target bitrate of the audio encoder. 0 = codec default: **32 kbps for mono** (the default `pcm_channels` is 1), 64 kbps for stereo. Also the ceiling of the adaptation. |
-| `audio_min_bitrate_bps` | `8000` | Floor of the adaptation — the encoder never goes below it. |
-| `audio_bitrate_adaptive` | `true` | Enable the BWE-linked adaptation. `false` pins the encoder at `audio_bitrate_bps`. |
+| `audio_min_bitrate_bps` | `8000` | Floor of the adaptation — the encoder never goes below it.  A peer's TMMBR limit overrides it (see below). |
+| `audio_bitrate_adaptive` | `true` | Enable the BWE-linked adaptation. `false` pins the encoder at `audio_bitrate_bps`.  A peer's TMMBR limit is honoured regardless. |
 | `audio_bwe_share` | `0.1` | Share of the bandwidth estimate the audio encoder may use (the rest belongs to video). |
 | `audio_bitrate_update_interval_ms` | `1000` | Minimum interval between two adaptation steps. |
 
@@ -194,6 +194,27 @@ its statistics survive the step, so an adaptation never interrupts the
 stream.
 
 The effective bitrate is observable through `Stats::audio_encoder_bitrate_bps`.
+
+##### The peer's TMMBR limit outranks the floor
+
+A TMMBR the peer sends (RFC 5104 section 4.2.1.2) caps the encoder as
+well, and the cap **overrides `audio_min_bitrate_bps`**.  The two
+constraints are not of the same kind:
+
+- `audio_min_bitrate_bps` exists so that a *congestion collapse* cannot
+  starve the audio — it protects the stream against the network.
+- The peer's limit is a *promise*: the engine answers the TMMBR with a
+  TMMBN (RFC 5104 section 4.2.2.2), and that acknowledgement tells the
+  peer "this bound is in force".  A commitment to send *less* is not
+  something the sender may quietly exceed, so it wins over the local
+  floor — the encoder is allowed to drop **below** `audio_min_bitrate_bps`
+  when the peer asks for less.
+
+The same limit clamps the scheduler budget and the pacing rates, so the
+promise holds end to end: the encoder, the pacer and the budget all
+stay under it.  It is honoured even when `audio_bitrate_adaptive` is
+`false` — that switch says "do not move the encoder because of the
+*estimate*", not "break the promises the engine made on the wire".
 
 ### 2.4 BWE / Scheduler
 
@@ -268,9 +289,9 @@ is sent, and the SDP carries no `tmmbr` parameter.  It overrides
 `tmmbr_enabled`.
 
 The *inbound* side needs no configuration: a TMMBR the peer sends is
-always honoured — the engine clamps its scheduler budget and its
-pacing rates to `peer_tmmbr_limit_bps()` and answers with a TMMBN
-(RFC 5104 section 4.2.2.2).  See
+always honoured — the engine clamps its scheduler budget, its pacing
+rates **and its audio encoder** to `peer_tmmbr_limit_bps()` and answers
+with a TMMBN (RFC 5104 section 4.2.2.2).  See
 [`engine_api.md` §8.7](./engine_api.md) for the details.
 
 ### 2.5 Video plugins

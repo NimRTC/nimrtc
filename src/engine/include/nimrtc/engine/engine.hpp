@@ -2340,8 +2340,19 @@ private:
      *  (ADR-018 Decision 6). */
     bool wants_transport_cc() const noexcept;
     /** BWE-linked audio bitrate adaptation — see
-     *  `Config::audio_bitrate_adaptive`.  Called from `tick()`. */
+     *  `Config::audio_bitrate_adaptive`.  Called from `tick()`.
+     *
+     *  The peer's TMMBR limit (v1.2.0, session plan X5) is honoured
+     *  here as well: it caps the encoder and overrides the local
+     *  `Config::audio_min_bitrate_bps` floor, because the TMMBN that
+     *  acknowledged the TMMBR is a promise the engine must keep. */
     void maybe_update_audio_bitrate() noexcept;
+    /** Push a new bitrate into the running audio encoder (in-place
+     *  reconfigure).  A codec plugin that refuses the rate leaves the
+     *  engine's view of the current rate unchanged. */
+    void apply_audio_bitrate(int target, int current,
+                              std::uint32_t bwe_bps,
+                              std::uint32_t peer_limit) noexcept;
     /** Drive the scheduler's per-class pacing buckets from the bandwidth
      *  estimate (v1.2.0 M3, video plan P2).  Called from `tick()`.
      *

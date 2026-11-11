@@ -341,6 +341,26 @@ core::Result<std::string> Munger::to_sdp(const SessionDescription& sdp) const {
         attr(out, "a=setup:", sdp.dtls_setup);
     }
 
+    // a=rtcp-xr (RFC 3611 §5.1) — the session-level copy.
+    //
+    // "It is both a session and a media level attribute.  When specified
+    // at session level, it applies to all media level blocks in the
+    // session.  Any media level specification MUST replace a session
+    // level specification, if one is present, for that media block."
+    //
+    // The attribute is emitted only when it is *present*; a bare
+    // "a=rtcp-xr" (no colon) is the RFC's way of saying "I understand
+    // the attribute but send no XR blocks", and it is a different
+    // statement from silence.
+    if (sdp.rtcp_xr_present) {
+        out += "a=rtcp-xr";
+        if (!sdp.rtcp_xr.empty()) {
+            out += ':';
+            out += sdp.rtcp_xr;
+        }
+        out += "\r\n";
+    }
+
     // Session-level extra attrs
     for (auto& [k, v] : sdp.extra_attrs) {
         out += 'a';

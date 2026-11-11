@@ -420,6 +420,65 @@ TEST_F(EngineXrTmmbr, NoXrReportWhenTheFeatureIsOff) {
 }
 
 // ===========================================================================
+// X-T6 — the session-level "rtcp-xr" attribute (RFC 3611 §5.1)
+// ===========================================================================
+
+TEST_F(EngineXrTmmbr, TheSessionLevelXrAttributeAuthorisesTheReport) {
+    // RFC 3611 §5.1: the "rtcp-xr" attribute "is both a session and a
+    // media level attribute.  When specified at session level, it
+    // applies to all media level blocks in the session."
+    //
+    // So a peer that named the format at *session* level only is still
+    // authorising the XR blocks — the media level is not the only
+    // place the attribute may live.
+    EngineConfig cfg = make_config();
+    cfg.rtcp_xr_enabled = true;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    // The "a=rtcp-xr:" line sits *before* the m= line, so it is a
+    // session-level attribute.
+    const std::string peer_offer =
+        "v=0\r\n"
+        "o=- 1 1 IN IP4 127.0.0.1\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "a=rtcp-xr:rcvr-rtt=all\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n";
+    const auto answer = engine.process_remote_sdp(peer_offer);
+    ASSERT_TRUE(answer.has_value());
+
+    ice->clear_sent();
+    run_for(engine, 1500ms);
+
+    const auto* xr = find_xr(ice->sent());
+    ASSERT_NE(xr, nullptr)
+        << "RFC 3611 §5.1: a session-level \"rtcp-xr\" applies to every "
+           "media block in the session";
+
+    const auto parsed = nimrtc::rtp::parse_xr_packet(
+        nimrtc::core::ByteSpan(xr->data(), xr->size()));
+    ASSERT_TRUE(parsed.ok());
+
+    bool found_rrtr = false;
+    for (const auto& b : parsed.value().blocks) {
+        if (b.type == nimrtc::rtp::XrBlockType::kReceiverReferenceTime) {
+            found_rrtr = true;
+        }
+    }
+    EXPECT_TRUE(found_rrtr)
+        << "the session-level \"rcvr-rtt\" authorises the Receiver "
+           "Reference Time block";
+}
+
+// ===========================================================================
 // X-T3 — the DLRR block answers the peer's own report (RFC 3611 §4.5)
 // ===========================================================================
 
@@ -571,11 +630,25 @@ TEST_F(EngineXrTmmbr, TheStatisticsSummaryReportsTheInboundAudioStream) {
     ASSERT_NE(stat, nullptr)
         << "RFC 3611 §4.6: the Statistics Summary block reports the "
            "inbound stream's loss and jitter";
-    EXPECT_EQ(stat->ssrc, kPeerAudioSsrc)
-        << "the summary must describe the inbound audio source";
+    EXPECT_EQ(stat->ssrc, kPeerAudioSsrc)        << "the summary must describe the inbound audio source";
     EXPECT_TRUE(stat->has_loss);
     EXPECT_TRUE(stat->has_jitter)
         << "the peer asked for \"loss,jitt\", so both flag bits are set";
+
+    // RFC 3611 §4.1 defines the sequence fields as:
+    //
+    //     begin_seq: "The first sequence number that this block
+    //                  reports on."
+    //     end_seq:   "The last sequence number that this block
+    //                  reports on *plus one*."
+    //
+    // So `end_seq` is the *exclusive* end of the interval.  The two
+    // packets fed in were seq 1 and seq 3, so the interval starts at 1
+    // and ends *after* 3 — i.e. end_seq must be 4, not 3.
+    EXPECT_EQ(stat->begin_seq, 1u)
+        << "the interval starts at the first sequence number seen";
+    EXPECT_EQ(stat->end_seq, 4u)
+        << "RFC 3611 §4.1: end_seq is the last sequence number plus one";
 }
 
 TEST_F(EngineXrTmmbr, TheStatisticsSummaryOnlyCarriesTheRequestedFields) {
@@ -866,6 +939,69 @@ TEST_F(EngineXrTmmbr, TheTmmbnIsSentOnlyOnceForABatchOfTmmbrs) {
     }
     EXPECT_EQ(tmmbn_count, 1)
         << "RFC 5104 §4.2.2.2: exactly one TMMBN per batch of TMMBRs";
+}
+
+// ===========================================================================
+// T-T5 — the TMMBN is immediate feedback (RFC 5104 §4.2.2.3)
+// ===========================================================================
+
+TEST_F(EngineXrTmmbr, TheTmmbnGoesOutAsImmediateFeedback) {
+    // RFC 5104 §4.2.2.3: "The TMMBN acknowledgement SHOULD be sent as
+    // soon as allowed by the applied timing rules for the session.
+    // Immediate or early feedback mode SHOULD be used for these
+    // messages."
+    //
+    // So the acknowledgement must not wait for the next RTCP slot: it
+    // goes out on the very next tick.  A test that only checks "a TMMBN
+    // eventually arrived" would pass even with a one-second delay, so
+    // this one measures the delay.
+    EngineConfig cfg = make_config();
+    cfg.tmmbr_enabled = true;
+
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    const std::string peer_offer =
+        "v=0\r\n"
+        "o=- 1 1 IN IP4 127.0.0.1\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n"
+        "a=rtcp-fb:111 ccm tmmbr\r\n";
+    const auto answer = engine.process_remote_sdp(peer_offer);
+    ASSERT_TRUE(answer.has_value());
+
+    FakeIceTransport* ice = FakeIceFactory::last_created();
+    ASSERT_NE(ice, nullptr);
+    ice->clear_sent();
+
+    const std::uint32_t our_ssrc = engine.config().audio_ssrc;
+    nimrtc::rtp::TmmbrEntry entry;
+    entry.ssrc        = our_ssrc;
+    entry.bitrate_bps = 320'000;
+    const ByteBuffer tmmbr =
+        nimrtc::rtp::build_tmmbr(0xAABBCCDDu, {entry});
+    ASSERT_FALSE(tmmbr.empty());
+
+    // The TMMBR arrives; the engine must answer it without waiting for
+    // the RTCP interval.
+    engine.feed_media_inbound(tmmbr.data(), tmmbr.size());
+
+    // A handful of ticks — far less than the one-second RTCP interval.
+    bool answered = false;
+    for (int i = 0; i < 5 && !answered; ++i) {
+        engine.tick();
+        for (const auto& p : ice->sent()) {
+            if (is_rtpfb(p, 4)) { answered = true; break; }
+        }
+        if (!answered) std::this_thread::sleep_for(20ms);
+    }
+
+    ASSERT_TRUE(answered)
+        << "RFC 5104 §4.2.2.3: the TMMBN is immediate feedback — it must "
+           "not wait for the next RTCP slot";
 }
 
 }  // namespace

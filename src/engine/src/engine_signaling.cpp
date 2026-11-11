@@ -27,6 +27,42 @@ bool audio_encoding_decodable(const std::string& encoding) {
     return core::PluginRegistry::instance().get_audio_decoder(encoding) != nullptr;
 }
 
+/** Build the `a=rtcp-xr` answer value from the offer's parameter list.
+ *
+ *  RFC 3611 §5.2 splits the XR parameters into two halves, and the
+ *  answer mirrors each with its own meaning:
+ *
+ *    - "rcvr-rtt" is *collaborative* — the answerer's copy declares
+ *      "I can receive the initiator and send the response", so it is
+ *      echoed when the offer named it;
+ *    - "stat-summary" is *unilateral* — the peer's copy asks *us* for
+ *      the blocks, so the answer's copy asks the peer for them; the
+ *      indicators are the ones the engine produces, narrowed to what
+ *      the offer asked for.
+ *
+ *  @param offer_xr  The offer's `a=rtcp-xr` parameter list.
+ *  @return          The answer's parameter list (may be empty).
+ *
+ *  @note The caller sets `local_xr_rcvr_rtt` when the collaborative
+ *        parameter survives — the echo is what authorises the DLRR
+ *        half of the exchange, so the flag has to follow the value.
+ */
+std::string build_xr_answer(const std::string& offer_xr,
+                            bool* local_rcvr_rtt = nullptr) {
+    std::string xr;
+    if (detail::rtcp_xr_has_format(offer_xr, "rcvr-rtt")) {
+        xr = "rcvr-rtt=all";
+        if (local_rcvr_rtt) *local_rcvr_rtt = true;
+    }
+    const std::string stat =
+        detail::rtcp_xr_stat_summary_supported(offer_xr);
+    if (!stat.empty()) {
+        if (!xr.empty()) xr += ' ';
+        xr += "stat-summary=" + stat;
+    }
+    return xr;
+}
+
 // ---------------------------------------------------------------------------
 // RFC 4733 (telephone-event) helpers
 // ---------------------------------------------------------------------------
@@ -930,16 +966,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         for (const auto& m : remote.media) {
             if (m.type != sdp::MediaType::Audio) continue;
 
-            if (m.rtcp_xr_present) {
+            // RFC 3611 §5.1: the "rtcp-xr" attribute "is both a session
+            // and a media level attribute.  When specified at session
+            // level, it applies to all media level blocks in the
+            // session.  Any media level specification MUST replace a
+            // session level specification, if one is present, for that
+            // media block."
+            //
+            // So the media-level copy wins where there is one, and the
+            // session-level copy is the default everywhere else.  A
+            // peer that sent *only* the session-level attribute is
+            // still authorising the XR blocks — which is the whole
+            // point of the session-level form.
+            const bool has_xr = m.rtcp_xr_present || remote.rtcp_xr_present;
+            if (has_xr) {
+                const std::string& xr =
+                    m.rtcp_xr_present ? m.rtcp_xr : remote.rtcp_xr;
                 impl_->peer_xr_rcvr_rtt =
-                    detail::rtcp_xr_has_format(m.rtcp_xr, "rcvr-rtt");
+                    detail::rtcp_xr_has_format(xr, "rcvr-rtt");
                 impl_->peer_xr_stat_summary =
-                    detail::rtcp_xr_has_format(m.rtcp_xr, "stat-summary");
+                    detail::rtcp_xr_has_format(xr, "stat-summary");
                 // The field indicators the peer asked for, narrowed to the
                 // ones the engine produces (RFC 3611 §5.1 — the list says
                 // which fields SHOULD be included in the blocks we send).
                 impl_->peer_xr_stat_summary_flags =
-                    detail::rtcp_xr_stat_summary_supported(m.rtcp_xr);
+                    detail::rtcp_xr_stat_summary_supported(xr);
             }
 
             for (const std::string& entry : m.rtcp_fb) {
@@ -1600,6 +1651,34 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     ans.bundle_mids             = remote.bundle_mids;
     ans.msid_semantic_token     = "WMS";
 
+    // ---- The session-level a=rtcp-xr echo (RFC 3611 §5.1 / §5.2) ------
+    //
+    // The offer may name the XR formats at *session* level, in which
+    // case they apply to every media block that does not override them.
+    // The answer mirrors the offer's level: a session-level offer gets
+    // a session-level answer, and a media-level offer gets a
+    // media-level answer (the per-media block below handles that one).
+    //
+    // RFC 3611 §5.1: "When specified at session level, it applies to
+    // all media level blocks in the session.  Any media level
+    // specification MUST replace a session level specification, if one
+    // is present, for that media block."  So the session-level copy is
+    // the default, and a media block that carried its own copy replaces
+    // it — which is why the media blocks below only echo a *media-level*
+    // offer.
+    if (remote.rtcp_xr_present) {
+        ans.rtcp_xr_present = true;
+        if (config_.rtcp_xr_enabled) {
+            ans.rtcp_xr = build_xr_answer(remote.rtcp_xr,
+                                          &impl_->local_xr_rcvr_rtt);
+        }
+        // Otherwise the attribute is present but empty: RFC 3611 §5.2 —
+        // "If a participant receives an SDP offer and understands the
+        // 'rtcp-xr' attribute but does not wish to implement XR
+        // functionality offered, its answer SHOULD include an 'rtcp-xr'
+        // attribute without parameters."
+    }
+
     for (const auto& rm : remote.media) {
         // Support audio (RTP), video (RTP/H.264), and application (data
         // channel, DTLS/SCTP).  Skipping other types avoids leaking
@@ -1808,26 +1887,22 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // An offer with no "rtcp-xr" at all gets no answer copy:
             // RFC 3611 §5.1 says the attribute is not to be supplied when
             // XR is not used from the start of the session.
+            //
+            // RFC 3611 §5.1 also says the attribute is "both a session
+            // and a media level attribute", so an offer that named it
+            // only at session level still authorises the exchange — but
+            // that one is echoed at *session* level in the answer (above),
+            // so the media block only echoes a *media-level* offer.
             if (rm.rtcp_xr_present) {
                 am.rtcp_xr_present = true;
                 if (config_.rtcp_xr_enabled) {
-                    std::string xr;
-                    if (detail::rtcp_xr_has_format(rm.rtcp_xr, "rcvr-rtt")) {
-                        xr = "rcvr-rtt=all";
-                        // Our answer echoes the collaborative parameter,
-                        // so we are prepared to receive the peer's Receiver
-                        // Reference Time Report and to answer it with a
-                        // DLRR (RFC 3611 §5.2).  The flag authorises the
-                        // DLRR half of the exchange.
-                        impl_->local_xr_rcvr_rtt = true;
-                    }
-                    const std::string stat =
-                        detail::rtcp_xr_stat_summary_supported(rm.rtcp_xr);
-                    if (!stat.empty()) {
-                        if (!xr.empty()) xr += ' ';
-                        xr += "stat-summary=" + stat;
-                    }
-                    am.rtcp_xr = xr;
+                    // Our answer echoes the collaborative parameter, so we
+                    // are prepared to receive the peer's Receiver
+                    // Reference Time Report and to answer it with a DLRR
+                    // (RFC 3611 §5.2).  The flag authorises the DLRR half
+                    // of the exchange.
+                    am.rtcp_xr = build_xr_answer(rm.rtcp_xr,
+                                                 &impl_->local_xr_rcvr_rtt);
                 }
                 // Otherwise the attribute is present but empty: RFC 3611
                 // §5.2 — "If a participant receives an SDP offer and

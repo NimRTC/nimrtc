@@ -252,6 +252,21 @@ public:
     /** Deliver the bytes to the peer stream in fixed-size chunks. */
     void set_chunk_size(std::size_t n) noexcept { chunk_size_ = n; }
 
+    /** Connect this session to a peer session: the bytes a local
+     *  stream offers are delivered to the peer's peer-stream, exactly
+     *  like a message that arrives from a remote peer.  Without a peer
+     *  the session loops the traffic back to itself. */
+    void set_peer(MockSession* peer) noexcept { peer_ = peer; }
+
+    /** Drop the next `n` ARQ data frames — the frames that carry a
+     *  sequence number (v1.2.0, WP-D4).  The bytes are accepted by the
+     *  transport and then lost, so the sender's retransmission timer
+     *  fires. */
+    void drop_next_arq_data(int n) noexcept { drop_arq_data_ = n; }
+
+    /** Drop the next `n` acknowledgement frames. */
+    void drop_next_arq_ack(int n) noexcept { drop_arq_ack_ = n; }
+
     /** The chunks that were offered to the transport, in order. */
     const std::vector<std::vector<std::uint8_t>>& sent_chunks() const noexcept {
         return sent_chunks_;
@@ -295,7 +310,33 @@ public:
         std::span<const std::uint8_t> bytes) {
         sent_chunks_.emplace_back(bytes.begin(), bytes.end());
         if (fail_sends_) return nimrtc::plugins::kErrNotReady;
-        deliver_peer_stream(std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+
+        // The loss simulation reads the frame header (v1.2.0, WP-D4):
+        // the kind is byte 0 (1 = data, 2 = ack) and the sequence
+        // number is bytes 4..7.
+        if (bytes.size() >= 8) {
+            const std::uint8_t kind = bytes[0];
+            const std::uint32_t seq =
+                (static_cast<std::uint32_t>(bytes[4]) << 24) |
+                (static_cast<std::uint32_t>(bytes[5]) << 16) |
+                (static_cast<std::uint32_t>(bytes[6]) << 8) |
+                static_cast<std::uint32_t>(bytes[7]);
+            if (kind == 1 && seq != 0 && drop_arq_data_ > 0) {
+                --drop_arq_data_;
+                return nimrtc::plugins::kOk;  // accepted, then lost
+            }
+            if (kind == 2 && drop_arq_ack_ > 0) {
+                --drop_arq_ack_;
+                return nimrtc::plugins::kOk;  // accepted, then lost
+            }
+        }
+
+        const std::vector<std::uint8_t> copy(bytes.begin(), bytes.end());
+        if (peer_) {
+            peer_->deliver_peer_stream(copy);
+            return nimrtc::plugins::kOk;
+        }
+        deliver_peer_stream(copy);
         return nimrtc::plugins::kOk;
     }
 
@@ -334,6 +375,9 @@ private:
     std::vector<std::vector<std::uint8_t>> datagrams_;
     OnDatagramCb legacy_datagram_;
     OnPeerStreamCb legacy_peer_stream_;
+    MockSession* peer_ = nullptr;
+    int drop_arq_data_ = 0;
+    int drop_arq_ack_ = 0;
     bool fail_sends_ = false;
     std::size_t chunk_size_ = 0;
 };
@@ -442,9 +486,15 @@ TEST(WebTransportDataChannelFraming, OversizedFrameDrivesTheChannelToError) {
 
     // A frame whose payload length prefix exceeds the negotiated maximum
     // is a protocol error: the channel must not allocate the buffer.
-    const std::vector<std::uint8_t> bogus = {0x00, 0x00, 0x00, 0x01,  // label len
-                                              0xFF, 0xFF, 0xFF, 0xFF,  // payload len
-                                              'a'};
+    //
+    // The frame header (v1.2.0, WP-D4): kind | flags | reserved |
+    // seq | label_len | payload_len.
+    const std::vector<std::uint8_t> bogus = {
+        0x01, 0x00, 0x00, 0x00,        // kind = data, flags, reserved
+        0x00, 0x00, 0x00, 0x00,        // seq
+        0x00, 0x00, 0x00, 0x01,        // label_len = 1
+        0xFF, 0xFF, 0xFF, 0xFF,        // payload_len = 0xFFFFFFFF
+        'a'};
     session.deliver_peer_stream(bogus);
 
     EXPECT_TRUE(c.payloads.empty());
@@ -786,6 +836,244 @@ TEST(WebTransportDataChannelPriority, HigherPriorityIsOfferedFirst) {
     ASSERT_FALSE(session.flush_order().empty());
     EXPECT_EQ(session.flush_order().front(), 16);
     EXPECT_LT(session.flush_order().front(), 240);
+}
+
+// ===========================================================================
+// WP-D4 — the application-level ARQ (sequence number + acknowledgement)
+// ===========================================================================
+//
+// A QUIC stream gives the application no per-message retry hook, so
+// the partial-reliability modes run their own retransmission protocol
+// on top of the frame: every message carries a sequence number, the
+// receiver acknowledges it, and the sender retransmits the messages
+// that were not acknowledged in time.
+//
+// The tests below run the two ends against each other (two mock
+// sessions, one link) and simulate the loss on the link.
+
+namespace {
+
+/** Wait long enough for the ARQ retransmission timer (250 ms) to
+ *  expire. */
+void wait_for_retransmit_timer() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+/** The configuration of a partial-reliability channel on both ends of
+ *  the link. */
+DataChannelConfig make_arq_cfg(std::uint16_t max_retransmits) {
+    DataChannelConfig cfg =
+        make_cfg("a", DataChannelReliability::kPartialReliableCount);
+    cfg.max_retransmits = max_retransmits;
+    return cfg;
+}
+
+} // anonymous namespace
+
+TEST(WebTransportDataChannelArq, MessageIsDeliveredAndAcknowledged) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector ca;
+    Collector cb;
+    ca.attach(a);
+    cb.attach(b);
+
+    a.open(make_arq_cfg(2));
+    b.open(make_arq_cfg(2));
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    const std::vector<std::uint8_t> payload(8, 0xA1);
+    a.send(BufferView{payload.data(), payload.size()});
+
+    // The peer received the message exactly once ...
+    ASSERT_EQ(cb.payloads.size(), 1u);
+    EXPECT_EQ(cb.payloads[0], payload);
+    EXPECT_EQ(cb.labels.size(), 1u);
+    EXPECT_EQ(cb.labels[0], "a");
+    // ... and the sender's in-flight window is empty again: the
+    // message was acknowledged.
+    EXPECT_EQ(a.in_flight_messages(), 0u);
+    EXPECT_EQ(a.retransmitted_messages(), 0u);
+    EXPECT_EQ(a.dropped_messages(), 0u);
+}
+
+TEST(WebTransportDataChannelArq, LostMessageIsRetransmittedAndDeliveredOnce) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector cb;
+    cb.attach(b);
+
+    a.open(make_arq_cfg(2));
+    b.open(make_arq_cfg(2));
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    // The first attempt is lost on the link.
+    sa.drop_next_arq_data(1);
+
+    const std::vector<std::uint8_t> payload(8, 0xB2);
+    a.send(BufferView{payload.data(), payload.size()});
+
+    EXPECT_EQ(cb.payloads.size(), 0u) << "the frame was lost on the link";
+    EXPECT_EQ(a.in_flight_messages(), 1u) << "the message waits for its ack";
+
+    // The retransmission timer fires: the engine's tick calls
+    // flush_outbound(), which runs the ARQ sweep.
+    wait_for_retransmit_timer();
+    sa.flush_outbound();
+
+    EXPECT_EQ(a.retransmitted_messages(), 1u);
+    ASSERT_EQ(cb.payloads.size(), 1u) << "the retransmission is delivered";
+    EXPECT_EQ(cb.payloads[0], payload);
+    EXPECT_EQ(a.in_flight_messages(), 0u) << "the retransmission was acked";
+}
+
+TEST(WebTransportDataChannelArq, ExhaustedBudgetDropsTheMessageAndKeepsTheChannelOpen) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector cb;
+    cb.attach(b);
+
+    a.open(make_arq_cfg(2));
+    b.open(make_arq_cfg(2));
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    // Every attempt is lost on the link.
+    sa.drop_next_arq_data(16);
+
+    const std::vector<std::uint8_t> payload(8, 0xC3);
+    a.send(BufferView{payload.data(), payload.size()});
+    EXPECT_EQ(a.in_flight_messages(), 1u);
+
+    // The budget is two retransmissions: the first attempt plus two
+    // retries, then the message is dropped.
+    for (int i = 0; i < 3; ++i) {
+        wait_for_retransmit_timer();
+        sa.flush_outbound();
+    }
+
+    EXPECT_EQ(a.retransmitted_messages(), 2u)
+        << "the budget is two retransmissions, not two attempts";
+    EXPECT_EQ(a.dropped_messages(), 1u);
+    EXPECT_EQ(a.in_flight_messages(), 0u);
+    EXPECT_TRUE(a.is_open()) << "an exhausted budget must not kill the channel";
+    EXPECT_EQ(cb.payloads.size(), 0u);
+}
+
+TEST(WebTransportDataChannelArq, DuplicateIsDeliveredOnlyOnce) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector cb;
+    cb.attach(b);
+
+    a.open(make_arq_cfg(2));
+    b.open(make_arq_cfg(2));
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    // The acknowledgement is lost, so the sender retransmits.
+    sb.drop_next_arq_ack(1);
+
+    const std::vector<std::uint8_t> payload(8, 0xD4);
+    a.send(BufferView{payload.data(), payload.size()});
+
+    ASSERT_EQ(cb.payloads.size(), 1u);
+    EXPECT_EQ(a.in_flight_messages(), 1u) << "the ack was lost";
+
+    wait_for_retransmit_timer();
+    sa.flush_outbound();
+
+    // The retransmission arrives, but the message is not delivered a
+    // second time — the de-duplication window saw the sequence number.
+    EXPECT_EQ(a.retransmitted_messages(), 1u);
+    EXPECT_EQ(cb.payloads.size(), 1u) << "a retransmission is not a new message";
+    // The receiver re-acknowledged the duplicate, so the in-flight
+    // window closes.
+    EXPECT_EQ(a.in_flight_messages(), 0u);
+}
+
+TEST(WebTransportDataChannelArq, TtlExpiresWhileInFlightAndKeepsTheChannelOpen) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector cb;
+    cb.attach(b);
+
+    DataChannelConfig cfg =
+        make_cfg("a", DataChannelReliability::kPartialReliableTTL);
+    cfg.max_packet_lifetime_ms = 50;
+    a.open(cfg);
+    b.open(cfg);
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    // Every attempt is lost on the link: the message stays in flight
+    // until its lifetime passes.
+    sa.drop_next_arq_data(16);
+
+    const std::vector<std::uint8_t> payload(8, 0xE5);
+    a.send(BufferView{payload.data(), payload.size()});
+    EXPECT_EQ(a.in_flight_messages(), 1u);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    sa.flush_outbound();
+
+    EXPECT_EQ(a.dropped_messages(), 1u);
+    EXPECT_EQ(a.in_flight_messages(), 0u);
+    EXPECT_TRUE(a.is_open());
+    EXPECT_EQ(cb.payloads.size(), 0u);
+}
+
+TEST(WebTransportDataChannelArq, ReliableModeDoesNotUseTheArq) {
+    MockSession sa;
+    MockSession sb;
+    sa.set_peer(&sb);
+    sb.set_peer(&sa);
+
+    WebTransportDataChannel a(&sa);
+    WebTransportDataChannel b(&sb);
+    Collector cb;
+    cb.attach(b);
+
+    // The reliable mode rides QUIC's own retransmission: no sequence
+    // number, no acknowledgement, no in-flight window.
+    a.open(make_cfg("a"));
+    b.open(make_cfg("a"));
+    ASSERT_EQ(a.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(b.open(), nimrtc::plugins::kOk);
+
+    const std::vector<std::uint8_t> payload(8, 0xF6);
+    a.send(BufferView{payload.data(), payload.size()});
+
+    ASSERT_EQ(cb.payloads.size(), 1u);
+    EXPECT_EQ(a.in_flight_messages(), 0u);
+    EXPECT_EQ(a.retransmitted_messages(), 0u);
 }
 
 }  // namespace

@@ -529,6 +529,27 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  connection.  Default = 128 (the historical hard-coded value). */
     std::uint8_t datachannel_priority = 128;
 
+    /** Maximum retransmission attempts of the partial-reliability
+     *  count mode (v1.2.0, WP-D4).  The value reaches the backend and
+     *  bounds the application-level retransmission protocol: a message
+     *  that is not acknowledged within the budget is dropped, and the
+     *  channel stays open.
+     *
+     *  0 = unlimited (the documented meaning in
+     *  `plugins::DataChannelConfig`).  The setting applies to every
+     *  channel the engine creates. */
+    std::uint16_t datachannel_max_retransmits = 0;
+
+    /** Packet lifetime of the partial-reliability TTL mode (v1.2.0,
+     *  WP-D4), in milliseconds.  The value reaches the backend and
+     *  bounds the lifetime of *one message*: a message that did not
+     *  leave the sender within the lifetime is dropped, and the
+     *  channel stays open.
+     *
+     *  0 = unlimited.  The setting applies to every channel the
+     *  engine creates. */
+    std::uint16_t datachannel_max_packet_lifetime_ms = 0;
+
     /** IWebTransportSession factory id (v0.14.0-rc.1, DC-1 v1.0.0
      *  headline gate).  Consumed only when `datachannel_backend ==
      *  "web_transport"`; the engine resolves

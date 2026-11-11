@@ -31,6 +31,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <set>
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/registry.hpp>
@@ -49,6 +50,20 @@ namespace {
 
 // "Unlimited" sentinel for the per-message retransmit budget.
 constexpr std::uint16_t kUnlimitedRetries = 0xFFFF;
+
+// The ARQ retransmission timer (v1.2.0, WP-D4).  A message that is
+// on the wire but not acknowledged within this window is offered to
+// the transport again.  The value is a compromise: long enough not to
+// retransmit a message that is merely slow, short enough that the
+// partial-reliability modes keep their promise within one TTL.
+constexpr std::chrono::milliseconds kArqRetransmitTimeout{250};
+
+// The bound of the de-duplication window (v1.2.0, WP-D4): the number
+// of sequence numbers the receiver remembers.  A retransmission that
+// arrives later than this window is delivered again — the window is
+// sized for the in-flight window of the sender, not for an unbounded
+// history.
+constexpr std::size_t kArqMaxRememberedSeqs = 4096;
 
 // The WebTransport stream-type signal (RFC draft-ietf-webtrans-http3
 // §4.2): the stream starts with the varint 0x41 (the "WebTransport
@@ -110,8 +125,8 @@ enum class HeaderProbe : std::uint8_t {
 //
 // A first byte that is not the signal means "no WebTransport header" —
 // a NimRTC peer starts the stream with the frame header (whose first
-// byte is the high byte of the big-endian label length, i.e. 0x00), and
-// a raw-mode peer may start with arbitrary payload bytes.
+// byte is the frame kind, i.e. 0x01 for a data frame), and a raw-mode
+// peer may start with arbitrary payload bytes.
 HeaderProbe probe_webtransport_header(const std::vector<std::uint8_t>& buf,
                                       std::size_t& consumed) noexcept {
     consumed = 0;
@@ -173,6 +188,27 @@ struct WebTransportDataChannel::State {
          *  exhausted" and drop the message on the first refusal —
          *  the v1.1.0 "the channel dies" defect in a new shape. */
         bool has_budget = false;
+        /** The ARQ sequence number of the message (WP-D4).  Zero when
+         *  the message does not take part in the application-level
+         *  retransmission protocol. */
+        std::uint32_t seq = 0;
+    };
+
+    /** One message that is on the wire but not acknowledged yet
+     *  (v1.2.0, WP-D4 — the ARQ in-flight window). */
+    struct InFlight {
+        /** The wire bytes (the framed message, ready to be resent). */
+        std::vector<std::uint8_t> bytes;
+        /** The per-message deadline (PR-TTL mode only). */
+        std::chrono::steady_clock::time_point deadline{};
+        /** True when `deadline` is meaningful. */
+        bool has_deadline = false;
+        /** Remaining retransmission budget (PR-count mode). */
+        std::uint16_t retries_left = 0;
+        /** True when `retries_left` is a real budget. */
+        bool has_budget = false;
+        /** When the message was last handed to the transport. */
+        std::chrono::steady_clock::time_point last_sent{};
     };
 
     /** Per-stream inbound state: the bytes that arrived but were not
@@ -198,9 +234,21 @@ struct WebTransportDataChannel::State {
     /** Scratch reader for inbound datagrams (framed mode): a datagram
      *  carries exactly one frame, so the reader is reset per datagram. */
     std::unique_ptr<detail::FrameReader> dgram_reader;
+    /** The messages that are on the wire but not acknowledged yet
+     *  (WP-D4). */
+    std::map<std::uint32_t, InFlight> inflight;
+    /** The next ARQ sequence number of this channel (WP-D4). */
+    std::uint32_t next_seq = 1;
+    /** The sequence numbers already received (the de-duplication
+     *  window, WP-D4). */
+    std::set<std::uint32_t> received_seqs;
+    /** The insertion order of `received_seqs` (the FIFO that bounds
+     *  the de-duplication window). */
+    std::deque<std::uint32_t> received_order;
     /** Counters (test-only surface). */
     std::uint64_t sent = 0;
     std::uint64_t dropped = 0;
+    std::uint64_t retransmitted = 0;
 };
 
 /** One decoded inbound message, ready to be delivered to the user. */
@@ -287,6 +335,12 @@ void WebTransportDataChannel::close() noexcept {
     if (state_) {
         std::lock_guard<std::mutex> l{tx_mutex_};
         state_->tx.clear();
+        // The ARQ state dies with the channel (WP-D4): the in-flight
+        // messages are never acknowledged, and the de-duplication
+        // window must not outlive the channel.
+        state_->inflight.clear();
+        state_->received_seqs.clear();
+        state_->received_order.clear();
         // The per-stream data subscriptions outlive the channel unless
         // they are removed: the stream is owned by the session and may
         // call the handler after this channel is gone.  Unsubscribe
@@ -328,9 +382,22 @@ void WebTransportDataChannel::send(plugins::BufferView data) {
     State::Pending pending;
     try {
         if (cfg_.framing == plugins::DataChannelFraming::kFramed) {
+            // WP-D4: the partial-reliability modes run an
+            // application-level retransmission protocol, so the frame
+            // carries a sequence number the peer acknowledges.  The
+            // reliable mode does not need it (QUIC retransmits the
+            // stream itself) and the unreliable mode rides datagrams.
+            std::uint32_t seq = 0;
+            if (arq_enabled()) {
+                std::lock_guard<std::mutex> l{tx_mutex_};
+                seq = state_->next_seq++;
+                if (seq == 0) seq = state_->next_seq++;  // 0 means "no ARQ"
+            }
+            pending.seq = seq;
             // WP-B: the frame carries the channel label, so the peer can
             // route the message to the right channel (WP-C3).
-            pending.bytes = detail::encode_frame(cfg_.label, payload);
+            pending.bytes = detail::encode_frame(cfg_.label, payload,
+                                                 detail::FrameKind::kData, seq);
         } else {
             pending.bytes.assign(payload.begin(), payload.end());
         }
@@ -527,6 +594,11 @@ void WebTransportDataChannel::flush_outbound() noexcept {
     if (!state_) return;
     if (!opened_.load(std::memory_order_acquire)) return;
 
+    // WP-D4: the ARQ sweep runs first — the retransmission timer must
+    // fire even when the outbound queue is empty (a message that is
+    // waiting for its acknowledgement *is* pending traffic).
+    arq_sweep();
+
     for (;;) {
         State::Pending pending;
         {
@@ -545,10 +617,35 @@ void WebTransportDataChannel::flush_outbound() noexcept {
             continue;
         }
 
+        // WP-D4: the message enters the in-flight window *before* it
+        // is offered to the transport.  The acknowledgement can arrive
+        // while the transport call is still on the stack (a
+        // synchronous loopback delivers the frame and the answer
+        // straight back), and it must find the message there.
+        if (pending.seq != 0) {
+            State::InFlight f;
+            f.bytes        = pending.bytes;
+            f.deadline     = pending.deadline;
+            f.has_deadline = pending.has_deadline;
+            f.retries_left = pending.retries_left;
+            f.has_budget   = pending.has_budget;
+            f.last_sent    = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> l{tx_mutex_};
+            state_->inflight[pending.seq] = std::move(f);
+        }
+
         if (offer_to_transport(pending.bytes)) {
             std::lock_guard<std::mutex> l{tx_mutex_};
             ++state_->sent;
             continue;
+        }
+
+        // The transport refused the message: it never reached the
+        // wire, so it leaves the in-flight window and goes back to the
+        // queue.
+        if (pending.seq != 0) {
+            std::lock_guard<std::mutex> l{tx_mutex_};
+            state_->inflight.erase(pending.seq);
         }
 
         // The transport refused the message: requeue it and account one
@@ -579,6 +676,149 @@ void WebTransportDataChannel::flush_outbound() noexcept {
         // The transport is not ready — stop here and retry on the next
         // flush (the engine's tick).
         return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Application-level ARQ (v1.2.0, WP-D4)
+// ---------------------------------------------------------------------------
+
+bool WebTransportDataChannel::arq_enabled() const noexcept {
+    // The application-level retransmission protocol needs two things a
+    // QUIC stream does not give the application: a message boundary
+    // (the frame) and a per-message retry hook (the sequence number
+    // and the acknowledgement frame).
+    //
+    //   - the framed mode carries the boundary and the sequence
+    //     number;
+    //   - the two partial-reliability modes are the ones that need a
+    //     retry hook: the reliable mode rides QUIC's own
+    //     retransmission and the unreliable mode rides datagrams.
+    if (cfg_.framing != plugins::DataChannelFraming::kFramed) return false;
+    return cfg_.reliability == plugins::DataChannelReliability::kPartialReliableTTL
+        || cfg_.reliability == plugins::DataChannelReliability::kPartialReliableCount;
+}
+
+void WebTransportDataChannel::handle_arq_data(
+    std::uint32_t seq,
+    std::string_view label,
+    std::span<const std::uint8_t> payload) noexcept {
+    if (!state_) return;
+
+    bool duplicate = false;
+    {
+        std::lock_guard<std::mutex> l{tx_mutex_};
+        duplicate = state_->received_seqs.find(seq) != state_->received_seqs.end();
+        if (!duplicate) {
+            state_->received_seqs.insert(seq);
+            state_->received_order.push_back(seq);
+            // The de-duplication window is bounded: the oldest
+            // sequence numbers fall out of it.
+            while (state_->received_order.size() > kArqMaxRememberedSeqs) {
+                state_->received_seqs.erase(state_->received_order.front());
+                state_->received_order.pop_front();
+            }
+        }
+    }
+
+    if (!duplicate) {
+        deliver(label, payload);
+    }
+
+    // The acknowledgement is sent even for a duplicate: the previous
+    // ACK may have been the frame that got lost, and the peer is
+    // waiting for it.
+    send_ack(seq, label);
+}
+
+void WebTransportDataChannel::handle_arq_ack(std::uint32_t seq) noexcept {
+    if (!state_) return;
+    std::lock_guard<std::mutex> l{tx_mutex_};
+    // The message is delivered — it leaves the in-flight window.
+    state_->inflight.erase(seq);
+}
+
+void WebTransportDataChannel::send_ack(std::uint32_t seq,
+                                       std::string_view label) noexcept {
+    if (!session_) return;
+
+    std::vector<std::uint8_t> frame;
+    try {
+        frame = detail::encode_frame(label, {}, detail::FrameKind::kAck, seq);
+    } catch (...) {
+        return;
+    }
+
+    // The ACK travels on the channel's own outbound stream: the peer
+    // reads it from the stream it opened for us, which is the mirror
+    // image of the stream the acknowledged message came in on.
+    if (!stream_ready_.load(std::memory_order_acquire)) {
+        if (!ensure_stream_open()) return;
+    }
+    if (!stream_raw_) return;
+    try {
+        stream_raw_->send(
+            std::span<const std::uint8_t>{frame.data(), frame.size()});
+    } catch (...) {
+    }
+}
+
+void WebTransportDataChannel::arq_sweep() noexcept {
+    if (!state_) return;
+
+    const auto now = std::chrono::steady_clock::now();
+
+    // Phase 1 (under the lock): decide what to retransmit and what to
+    // drop.  The transport calls happen outside the lock — a
+    // synchronous loopback delivers the retransmission straight into
+    // the inbound path, which takes the lock itself.
+    std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> to_send;
+    {
+        std::lock_guard<std::mutex> l{tx_mutex_};
+        for (auto it = state_->inflight.begin(); it != state_->inflight.end();) {
+            State::InFlight& f = it->second;
+
+            // WP-D1: the TTL belongs to the message.  An expired
+            // message is dropped — the channel and its stream stay
+            // alive.
+            if (f.has_deadline && now > f.deadline) {
+                ++state_->dropped;
+                it = state_->inflight.erase(it);
+                continue;
+            }
+
+            if (now - f.last_sent < kArqRetransmitTimeout) {
+                ++it;
+                continue;
+            }
+
+            // WP-D2: the retransmission budget belongs to the
+            // message.  An exhausted budget drops the message — the
+            // channel stays open.
+            if (f.has_budget && f.retries_left == 0) {
+                ++state_->dropped;
+                it = state_->inflight.erase(it);
+                continue;
+            }
+            if (f.has_budget && f.retries_left != kUnlimitedRetries) {
+                --f.retries_left;
+            }
+
+            f.last_sent = now;
+            to_send.emplace_back(it->first, f.bytes);
+            // The retransmission is counted when it is *scheduled*:
+            // the transport call happens outside the lock, and the
+            // acknowledgement it triggers may already have removed the
+            // message from the in-flight window.
+            ++state_->retransmitted;
+            ++it;
+        }
+    }
+
+    // Phase 2 (outside the lock): hand the retransmissions to the
+    // transport.
+    for (const auto& entry : to_send) {
+        if (!offer_to_transport(entry.second)) continue;
     }
 }
 
@@ -626,11 +866,28 @@ void WebTransportDataChannel::on_session_datagram(
         return;
     }
     const std::string_view label{reader.label()};
-    const std::span<const std::uint8_t> payload = reader.payload();
-    if (label == cfg_.label) {
-        deliver(label, payload);
-    }
+    // The frame is copied out and consumed *before* it is handled: the
+    // handling (the user callback, the acknowledgement) can re-enter
+    // this path — a synchronous loopback delivers straight back into
+    // the reader — and a frame that is still "current" would be
+    // delivered twice.
+    const std::string label_copy{label};
+    std::vector<std::uint8_t> payload_copy(reader.payload().begin(),
+                                           reader.payload().end());
+    const detail::FrameKind kind = reader.kind();
+    const std::uint32_t seq = reader.seq();
     reader.consume();
+    if (label_copy == cfg_.label) {
+        // WP-D4: the frame kind decides what the frame is — a user
+        // message, an ARQ message or an acknowledgement.
+        if (kind == detail::FrameKind::kAck) {
+            handle_arq_ack(seq);
+        } else if (seq != 0) {
+            handle_arq_data(seq, label_copy, payload_copy);
+        } else {
+            deliver(label_copy, payload_copy);
+        }
+    }
 }
 
 void WebTransportDataChannel::on_peer_stream(IBidirectionalStream* stream) noexcept {
@@ -726,9 +983,9 @@ void WebTransportDataChannel::on_peer_stream_data(IBidirectionalStream* stream,
     // A Chrome peer starts every data stream with the signal 0x41 (the
     // "WebTransport data stream" type) followed by the session-id
     // varint.  A NimRTC peer starts the stream directly with the frame
-    // header, whose first byte is 0x00 (the high byte of the
-    // big-endian label length) — so a first byte that is not the
-    // signal means "no WebTransport header", not "not a data stream".
+    // header, whose first byte is the frame kind (0x01 for a data
+    // frame) — so a first byte that is not the signal means "no
+    // WebTransport header", not "not a data stream".
     // Both are handled here.
     //
     // `skip` is the number of bytes to drop from *this* chunk: the
@@ -771,12 +1028,26 @@ void WebTransportDataChannel::on_peer_stream_data(IBidirectionalStream* stream,
         return;
     }
     while (in.reader->has_frame()) {
-        const std::string_view label{in.reader->label()};
-        const std::span<const std::uint8_t> payload = in.reader->payload();
-        if (label == cfg_.label) {
-            deliver(label, payload);
-        }
+        const std::string label_copy{in.reader->label()};
+        // See `on_session_datagram`: the frame is copied out and
+        // consumed before it is handled, so that a re-entrant delivery
+        // (the synchronous loopback) cannot deliver it twice.
+        std::vector<std::uint8_t> payload_copy(in.reader->payload().begin(),
+                                               in.reader->payload().end());
+        const detail::FrameKind kind = in.reader->kind();
+        const std::uint32_t seq = in.reader->seq();
         in.reader->consume();
+        if (label_copy == cfg_.label) {
+            // WP-D4: the frame kind decides what the frame is — a user
+            // message, an ARQ message or an acknowledgement.
+            if (kind == detail::FrameKind::kAck) {
+                handle_arq_ack(seq);
+            } else if (seq != 0) {
+                handle_arq_data(seq, label_copy, payload_copy);
+            } else {
+                deliver(label_copy, payload_copy);
+            }
+        }
     }
 }
 
@@ -829,6 +1100,18 @@ std::size_t WebTransportDataChannel::pending_sends() const noexcept {
     if (!state_) return 0;
     std::lock_guard<std::mutex> l{tx_mutex_};
     return state_->tx.size();
+}
+
+std::size_t WebTransportDataChannel::in_flight_messages() const noexcept {
+    if (!state_) return 0;
+    std::lock_guard<std::mutex> l{tx_mutex_};
+    return state_->inflight.size();
+}
+
+std::uint64_t WebTransportDataChannel::retransmitted_messages() const noexcept {
+    if (!state_) return 0;
+    std::lock_guard<std::mutex> l{tx_mutex_};
+    return state_->retransmitted;
 }
 
 // ===========================================================================

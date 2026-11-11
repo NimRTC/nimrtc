@@ -535,6 +535,12 @@ NimRTCEngine::create_data_channel(
         wdc_cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
         wdc_cfg.priority    = config_.datachannel_priority;
         wdc_cfg.framing     = config_.datachannel_framing;
+        // WP-D4: the partial-reliability budgets are per message and
+        // reach the backend, so the ARQ can enforce them.
+        wdc_cfg.max_retransmits =
+            config_.datachannel_max_retransmits;
+        wdc_cfg.max_packet_lifetime_ms =
+            config_.datachannel_max_packet_lifetime_ms;
         wch->open(wdc_cfg);
         wch->open();
         return wch;
@@ -585,6 +591,10 @@ NimRTCEngine::create_data_channel(
     cfg.ordered     = (reliability != plugins::DataChannelReliability::kUnreliable);
     cfg.priority    = config_.datachannel_priority;
     cfg.framing     = config_.datachannel_framing;
+    // WP-D4: the partial-reliability budgets are per message and reach
+    // the backend, so the ARQ can enforce them.
+    cfg.max_retransmits = config_.datachannel_max_retransmits;
+    cfg.max_packet_lifetime_ms = config_.datachannel_max_packet_lifetime_ms;
     ch->open(cfg);
 
     // NOTE: SCTP-over-DTLS wiring deferred to the **v1.x WebTransport

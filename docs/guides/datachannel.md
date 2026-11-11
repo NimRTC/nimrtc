@@ -63,20 +63,26 @@ cfg.datachannel_framing = nimrtc::plugins::DataChannelFraming::kFramed;
 ```
 
 Every payload is wrapped in a length-prefixed frame that also carries
-the channel label:
+the channel label, a frame kind, and a per-message sequence number
+(v1.2.0, WP-D4):
 
 ```text
-  0            4            8                        8+label_len
-  +------------+------------+------------------------+-------------+
-  | u32 BE     | u32 BE     | label bytes (UTF-8)    | payload     |
-  | label_len  | payload_len|                        | bytes       |
-  +------------+------------+------------------------+-------------+
+  0     1     2         4                 8                 12
+  +-----+-----+---------+-----------------+-----------------+--------+
+  |kind |flags| reserved| seq (u32 BE)    | label_len (u32) | payload|
+  | 1B  | 1B  |   2B    |                 |                 |_len    |
+  +-----+-----+---------+-----------------+-----------------+--------+
+  | label bytes (UTF-8)                                  | payload |
+  |                                                       | bytes   |
+  +-------------------------------------------------------+--------+
 ```
 
 - one `send()` == one inbound message, whatever the transport does to
   the bytes in between;
 - the frame carries the channel identity, which is what makes several
   channels on one connection isolable;
+- `kind` is `DATA` (user message) or `ACK` (acknowledgement of one
+  sequence number); `seq == 0` on a DATA frame means "no ARQ";
 - a length prefix larger than the negotiated maximum is a **protocol
   error**: the channel transitions to `error` instead of allocating an
   unbounded buffer.
@@ -125,10 +131,10 @@ WebTransport backend:
 
 | Mode | Behaviour |
 |---|---|
-| `kReliableOrdered` | Stream send; the QUIC stream retransmits internally. |
+| `kReliableOrdered` | Stream send; the QUIC stream retransmits internally. No application-level ARQ. |
 | `kUnreliable` | QUIC datagram; message-preserving by definition, no retransmission. |
-| `kPartialReliableTTL` | Each **message** carries its own deadline (`max_packet_lifetime_ms`). An expired message is dropped; **the channel stays open**. |
-| `kPartialReliableCount` | Each **message** carries its own retransmission budget (`max_retransmits`). `max_retransmits == 0` means **unlimited**, not "dropped on the first send". |
+| `kPartialReliableTTL` | Each **message** carries its own deadline (`max_packet_lifetime_ms`). Under `kFramed`, the channel runs an application-level ARQ (sequence number + ACK) and drops a message whose deadline expires; **the channel stays open**. |
+| `kPartialReliableCount` | Each **message** carries its own retransmission budget (`max_retransmits`). Under `kFramed`, the ARQ retransmits until the budget is exhausted; `max_retransmits == 0` means **unlimited**, not "dropped on the first send". |
 
 Two semantics worth stating explicitly, because v1.1.0 got both wrong:
 
@@ -137,13 +143,16 @@ Two semantics worth stating explicitly, because v1.1.0 got both wrong:
   gets a fresh one — the channel does not die;
 - `max_retransmits == 0` is the documented "unlimited" value.
 
-**What is not claimed.** A QUIC stream has no per-message retry hook
-at the application layer — msquic handles retransmission internally
-and exposes no per-message retry callback. The budgets above are
-therefore *send-side* policies: they decide whether a queued message
-is still worth offering to the transport. They are **not** a
-delivery guarantee and not an end-to-end acknowledgment protocol
-(plan DEC-3 = (c)).
+**The ARQ (WP-D4 / DEC-3 = (a)).** A QUIC stream has no per-message
+retry hook at the application layer, so the two partial-reliability
+modes under `kFramed` run their own retransmission protocol on top of
+the frame: every message carries a sequence number, the receiver
+acknowledges it, duplicates are delivered once, and the sender
+retransmits the messages that were not acknowledged in time. The
+engine surfaces the budgets as
+`EngineConfig::datachannel_max_retransmits` and
+`datachannel_max_packet_lifetime_ms`. The ARQ is **not** active in
+`kRaw` (Chrome path) or in the reliable / unreliable modes.
 
 ---
 

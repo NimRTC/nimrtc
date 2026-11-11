@@ -76,6 +76,21 @@ constexpr std::uint8_t kDefaultDtmfPayloadType = 126;
  *  so the tag size is the same. */
 constexpr std::size_t kSrtpAuthTagBytes = 10;
 
+/** The interval between the repeats of one DTMF event (RFC 4733 §2.5.1.2).
+ *
+ *  The RFC describes the sender as repeating the event packet while the
+ *  key is held; 20 ms is the interval every implementation uses (and the
+ *  one the RFC's own example works with). */
+constexpr std::int64_t kDtmfPacketIntervalMs = 20;
+
+/** The largest number of packets one DTMF event is spread over.
+ *
+ *  The event is closed as soon as the key press has lasted as long as
+ *  the host said it would, so a long press does not produce an endless
+ *  series of repeats.  Four packets is what Chrome sends for a key
+ *  press. */
+constexpr int kMaxDtmfPackets = 4;
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -143,6 +158,10 @@ void NimRTCEngine::set_on_dtmf(DtmfEventCallback cb) noexcept {
     on_dtmf_ = std::move(cb);
 }
 
+std::uint8_t NimRTCEngine::negotiated_dtmf_payload_type() const noexcept {
+    return negotiated_dtmf_pt_;
+}
+
 bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
                              std::uint16_t duration_ms) noexcept {
     // --- Preconditions -------------------------------------------------
@@ -168,13 +187,100 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
     // silently sent.
     if (duration_ms == 0) return false;
 
+    // --- Queue the event (RFC 4733 §2.5) ------------------------------
+    //
+    // The event is not sent as a single packet: RFC 4733 §2.5.1.2
+    // describes a *sequence* — the event packet is repeated while the
+    // key is held, each repeat carrying a larger duration, and the last
+    // packet carries the end-of-event bit.  The queue holds the event;
+    // `pump_dtmf_tx()` (driven by the tick) emits the repeats.
+    //
+    // The first packet goes out right away, so the peer learns about the
+    // key press without waiting for the next tick.
+    Impl::DtmfTxEvent ev;
+    ev.code        = event_code;
+    ev.duration_ms = duration_ms;
+    ev.start       = core::SteadyClock::now();
+    ev.next_send   = ev.start;
+    impl_->dtmf_tx_queue.push_back(ev);
+
+    pump_dtmf_tx();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The transmit path (RFC 4733 §2.5)
+// ---------------------------------------------------------------------------
+
+void NimRTCEngine::pump_dtmf_tx() noexcept {
+    if (impl_->dtmf_tx_queue.empty()) return;
+
+    const auto now = core::SteadyClock::now();
+
+    // The queue holds the events in order and a host may press the next
+    // key before the previous event closed, so only the front event is
+    // in progress.
+    Impl::DtmfTxEvent ev = impl_->dtmf_tx_queue.front();
+    if (now < ev.next_send) return;
+
+    // How long the key has been held, in milliseconds.  The duration
+    // field of a repeat reports the elapsed time (RFC 4733 §2.5.1.2):
+    // the peer reconstructs the key press from the last packet it sees.
+    const std::int64_t elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - ev.start).count();
+
+    // The event closes when the key press has lasted as long as the
+    // host said, or when the packet budget is spent — whichever comes
+    // first.  The closing packet carries the end-of-event bit and the
+    // full duration.
+    const bool elapsed_reached = elapsed_ms >= ev.duration_ms;
+    const bool budget_reached  = ev.packets_sent + 1 >= kMaxDtmfPackets;
+    const bool last             = elapsed_reached || budget_reached;
+
+    const std::uint16_t duration = last
+        ? ev.duration_ms
+        : static_cast<std::uint16_t>(
+              std::min<std::int64_t>(elapsed_ms, ev.duration_ms));
+
+    // The marker bit marks the *beginning* of an event (RFC 4733
+    // §2.2.2), so only the first packet of the event carries it.
+    const bool marker = (ev.packets_sent == 0);
+
+    const bool sent = emit_dtmf_packet(ev.code, duration, last, marker);
+    ++ev.packets_sent;
+
+    if (!sent) {
+        // The packet could not be built or sent.  The event is dropped
+        // rather than retried: a half-sent event would tell the peer
+        // that a key was pressed and never released.
+        core::log::Logger::instance().warn(
+            "engine[dtmf]: the event packet could not be sent — the event "
+            "was dropped");
+        impl_->dtmf_tx_queue.pop_front();
+        return;
+    }
+
+    if (last) {
+        impl_->dtmf_tx_queue.pop_front();
+        return;
+    }
+
+    // The next repeat goes out one interval later.
+    ev.next_send = now + std::chrono::milliseconds(kDtmfPacketIntervalMs);
+    impl_->dtmf_tx_queue.front() = ev;
+}
+
+bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
+                                    std::uint16_t duration_ms,
+                                    bool end, bool marker) noexcept {
+    if (!dtmf_codec_) return false;
+
     // --- Encode --------------------------------------------------------
     plugins::DtmfEvent event;
-    event.code        = event_code;
+    event.code        = code;
     event.duration_ms = duration_ms;
-    // The event ends here: this is the final packet of the event, so
-    // it carries the end bit (RFC 4733 §2.5.1.2).
-    event.end         = true;
+    event.end         = end;
 
     const std::string payload = dtmf_codec_->encode(event);
     if (payload.empty()) return false;
@@ -183,9 +289,7 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
     //
     // RFC 4733 §2.1: the event packets share the audio stream's
     // sequence number space and timestamp base.  The marker bit marks
-    // the beginning of a new event (RFC 4733 §2.2.2) — and since this
-    // is the only packet of the event, it is both the first and the
-    // last.
+    // the beginning of a new event (RFC 4733 §2.2.2).
     //
     // The timestamp is the *current* audio timestamp, not an advanced
     // one: the event does not consume audio time, and advancing the
@@ -195,8 +299,8 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
     pb.set_ssrc(impl_->audio_ssrc)
       .set_seq(impl_->audio_seq++)
       .set_timestamp(impl_->audio_ts)
-      .set_payload_type(pt)
-      .set_marker(true);
+      .set_payload_type(negotiated_dtmf_pt_)
+      .set_marker(marker);
 
     pb.set_payload(core::ByteSpan(
         reinterpret_cast<const std::uint8_t*>(payload.data()),
@@ -236,6 +340,7 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
 
     ++impl_->audio_packet_count;
     impl_->audio_octet_count += static_cast<std::uint32_t>(payload.size());
+    ++impl_->dtmf_packets_sent;
 
     if (scheduler_) {
         scheduler_->enqueue_owned(plugins::Priority::kAudio,

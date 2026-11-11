@@ -1448,6 +1448,21 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.audio_playout_delay_ms = rx.current_delay_ms;
     }
 
+    // ---- DTMF counters (v1.2.0, session capability plan D1–D4) ---------
+    //
+    // The telephone-event plane has counters of its own because a
+    // telephone-event payload never reaches the audio pipeline: the
+    // audio counters above say nothing about it.  `dtmf_payload_type`
+    // is the negotiated payload type (RFC 4733 §2.3.2); zero means the
+    // peer never negotiated one — the state in which a received
+    // telephone-event payload counts as an unknown audio payload type
+    // (decision D4).
+    out.dtmf_packets_sent      = impl_->dtmf_packets_sent;
+    out.dtmf_packets_received  = impl_->dtmf_packets_received;
+    out.dtmf_packets_malformed = impl_->dtmf_packets_malformed;
+    out.dtmf_events_delivered  = impl_->dtmf_events_delivered;
+    out.dtmf_payload_type      = negotiated_dtmf_pt_;
+
     // The bitrate the outbound audio encoder currently runs at — the
     // value the BWE-linked adaptation last applied (it starts at the
     // configured ceiling).

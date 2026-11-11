@@ -36,18 +36,27 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nimrtc/core/engine_errors.hpp>
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/dtls/dtls_session_factory.hpp>
 #include <nimrtc/engine/engine.hpp>
+#include <nimrtc/plugins/ice_transport.hpp>
 #include <nimrtc/rtp/packet.hpp>
 
 namespace {
 
+namespace np = nimrtc::plugins;
+namespace nd = nimrtc::dtls;
+
+using nimrtc::core::PluginRegistry;
 using nimrtc::engine::EngineConfig;
 using nimrtc::engine::NimRTCEngine;
 
@@ -57,6 +66,38 @@ constexpr std::uint8_t kDtmfPt = 126;
 
 /** The engine's default audio payload type (Opus). */
 constexpr std::uint8_t kOpusPt = 111;
+
+/** A peer offer that declares a telephone-event payload type.
+ *
+ *  The peer is a bare SDP string rather than a second engine, so the
+ *  test controls exactly what the peer declared — including the
+ *  event-code list, which is the input the negotiation intersects.
+ *
+ *  @param pt      The telephone-event payload type the peer declares.
+ *  @param events  The peer's `a=fmtp:` event-code list. */
+std::string peer_offer_with_telephone_event(
+    std::uint8_t pt = kDtmfPt,
+    std::string_view events = "0-16") {
+    std::string sdp;
+    sdp += "v=0\r\n";
+    sdp += "o=- 123456 2 IN IP4 127.0.0.1\r\n";
+    sdp += "s=-\r\n";
+    sdp += "t=0 0\r\n";
+    sdp += "a=group:BUNDLE 0\r\n";
+    sdp += "m=audio 9 UDP/TLS/RTP/SAVPF 111 ";
+    sdp += std::to_string(pt);
+    sdp += "\r\n";
+    sdp += "c=IN IP4 0.0.0.0\r\n";
+    sdp += "a=mid:0\r\n";
+    sdp += "a=rtcp-mux\r\n";
+    sdp += "a=rtpmap:111 opus/48000/2\r\n";
+    sdp += "a=rtpmap:" + std::to_string(pt) +
+           " telephone-event/8000\r\n";
+    sdp += "a=fmtp:" + std::to_string(pt) + " " + std::string(events) +
+           "\r\n";
+    sdp += "a=ssrc:1234 cname:peer\r\n";
+    return sdp;
+}
 
 class EngineDtmf : public ::testing::Test {
 protected:
@@ -170,35 +211,6 @@ protected:
             pos += needle.size();
         }
         return n;
-    }
-
-    /** A peer offer that declares a telephone-event payload type.
-     *
-     *  The peer is a bare SDP string rather than a second engine, so
-     *  the test controls exactly what the peer declared — including the
-     *  event-code list, which is the input the negotiation intersects. */
-    static std::string peer_offer_with_telephone_event(
-        std::uint8_t pt = kDtmfPt,
-        std::string_view events = "0-16") {
-        std::string sdp;
-        sdp += "v=0\r\n";
-        sdp += "o=- 123456 2 IN IP4 127.0.0.1\r\n";
-        sdp += "s=-\r\n";
-        sdp += "t=0 0\r\n";
-        sdp += "a=group:BUNDLE 0\r\n";
-        sdp += "m=audio 9 UDP/TLS/RTP/SAVPF 111 ";
-        sdp += std::to_string(pt);
-        sdp += "\r\n";
-        sdp += "c=IN IP4 0.0.0.0\r\n";
-        sdp += "a=mid:0\r\n";
-        sdp += "a=rtcp-mux\r\n";
-        sdp += "a=rtpmap:111 opus/48000/2\r\n";
-        sdp += "a=rtpmap:" + std::to_string(pt) +
-               " telephone-event/8000\r\n";
-        sdp += "a=fmtp:" + std::to_string(pt) + " " + std::string(events) +
-               "\r\n";
-        sdp += "a=ssrc:1234 cname:peer\r\n";
-        return sdp;
     }
 
     /** One telephone-event RTP packet.
@@ -539,6 +551,323 @@ TEST_F(EngineDtmf, SendDtmfSucceedsOnceThePayloadTypeIsNegotiated) {
     // An event code outside the RFC's range is rejected.
     EXPECT_FALSE(engine.send_dtmf(17, 100))
         << "event code 17 is outside the range RFC 4733 §2.1 defines";
+
+    engine.close();
+}
+
+// ============================================================================
+// D2 — the send path on the wire (RFC 4733 §2.5)
+// ============================================================================
+//
+// The suite above runs on the "shell" transport, which never puts a
+// packet on a wire.  The D2 acceptance criterion is about the wire —
+// "a key press must reach the peer with its event code and its
+// duration, and the end packet must appear with the RFC 4733 §2.5
+// timing" — so this fixture drives the engine through the same two
+// fakes `test_engine_audio_send.cpp` uses: a fake ICE transport that
+// captures every outbound datagram and a fake DTLS session that
+// reports the handshake as complete but exports no SRTP keying
+// material.  The second one is what makes the send path reachable, and
+// it is also why the captured datagrams are plain RTP: with no
+// keying material the engine never installs an SRTP context, so the
+// test can read the telephone-event payload directly.
+
+/** A fake ICE transport that reports `Connected` and captures every
+ *  outbound datagram. */
+class FakeIceTransport final : public np::IICETransport {
+public:
+    // ---- IPlugin ---------------------------------------------------------
+    const char* name() const noexcept override { return "fake-ice"; }
+    np::Status open() noexcept override { return np::kOk; }
+    void close() noexcept override {}
+
+    // ---- ITransport ------------------------------------------------------
+    void set_callbacks(np::RecvCallback on_recv,
+                       np::ErrorCallback on_error) noexcept override {
+        on_recv_  = std::move(on_recv);
+        on_error_ = std::move(on_error);
+    }
+
+    np::Status send(np::BufferView view, np::Addr = {}) noexcept override {
+        sent_.emplace_back(view.data(), view.data() + view.size());
+        return np::kOk;
+    }
+
+    int recv() noexcept override {
+        int n = 0;
+        while (!inbound_.empty()) {
+            std::vector<std::uint8_t> pkt = std::move(inbound_.front());
+            inbound_.erase(inbound_.begin());
+            if (on_recv_) on_recv_(np::BufferView(pkt.data(), pkt.size()));
+            ++n;
+        }
+        return n;
+    }
+
+    np::Addr local_addr() const noexcept override { return {}; }
+    np::Addr remote_addr() const noexcept override { return {}; }
+
+    // ---- IICETransport ---------------------------------------------------
+    np::IceState state() const noexcept override { return np::IceState::Connected; }
+    std::string local_ufrag() const noexcept override { return "fakeufrag"; }
+    std::string local_password() const noexcept override { return "fakepassword"; }
+    bool wait_for_gathering(int) noexcept override { return true; }
+    std::vector<std::string> gathered_local_candidates() const noexcept override {
+        return {};
+    }
+    np::Status set_remote_description(std::string_view) noexcept override {
+        return np::kOk;
+    }
+    np::Status add_remote_candidate(std::string_view) noexcept override {
+        return np::kOk;
+    }
+    void set_bind_address(std::string_view) noexcept override {}
+    void set_stun_server(std::string_view, std::uint16_t) noexcept override {}
+    void set_local_port_range(std::uint16_t, std::uint16_t) noexcept override {}
+    void add_turn_server(std::string_view, std::uint16_t, std::string_view,
+                         std::string_view) noexcept override {}
+    void set_bwe(np::IBwe*) noexcept override {}
+    void set_scheduler(np::IScheduler*) noexcept override {}
+
+    // ---- Test helpers ----------------------------------------------------
+    const std::vector<std::vector<std::uint8_t>>& sent() const noexcept {
+        return sent_;
+    }
+
+private:
+    np::RecvCallback   on_recv_;
+    np::ErrorCallback  on_error_;
+    std::vector<std::vector<std::uint8_t>> inbound_;
+    std::vector<std::vector<std::uint8_t>> sent_;
+};
+
+class FakeIceFactory final : public np::IICETransportFactory {
+public:
+    std::string_view id() const noexcept override { return "fake-ice"; }
+    std::string_view display_name() const noexcept override {
+        return "Fake ICE transport (test)";
+    }
+    np::IICETransport* create_ice() const override {
+        auto* t = new FakeIceTransport();
+        last_created() = t;
+        return t;
+    }
+    static FakeIceTransport*& last_created() {
+        static FakeIceTransport* instance = nullptr;
+        return instance;
+    }
+};
+
+/** A DTLS session that reports the handshake as complete and exports no
+ *  SRTP keying material -- the same fake `test_engine_audio_send.cpp`
+ *  uses, for the same reason: no keys means no SRTP, so the captured
+ *  datagrams are plain RTP. */
+class FakeDtlsSession final : public nd::IDtlsSession {
+public:
+    // ---- The seam surface ------------------------------------------------
+    void set_role(nd::Role) noexcept override {}
+    void set_peer_fingerprint(std::span<const std::uint8_t>) noexcept override {}
+    void start() noexcept override {}
+    void pump() noexcept override {}
+    void on_handshake_complete(OnCompleteCb) noexcept override {}
+    np::Status export_srtp_key_material(std::span<std::uint8_t, 60>) noexcept override {
+        return np::kErrNotReady;
+    }
+
+    // ---- The legacy engine-facing surface --------------------------------
+    nimrtc::core::Result<void> open() noexcept override {
+        return nimrtc::core::Result<void>::make_ok();
+    }
+    void set_role(nd::DtlsRole) noexcept override {}
+    void set_peer_fingerprint(std::string, std::vector<std::uint8_t>) noexcept override {}
+    std::size_t feed_inbound(std::span<const std::uint8_t>,
+                             const nd::DtlsAddr&) noexcept override {
+        return 0;
+    }
+    std::vector<nd::DtlsRecord> take_outbound() noexcept override { return {}; }
+    void tick() noexcept override {}
+    nd::DtlsState state() const noexcept override { return nd::DtlsState::Connected; }
+    bool is_connected() const noexcept override { return true; }
+    const nd::Fingerprint& local_fingerprint() const noexcept override {
+        return fingerprint_;
+    }
+    std::optional<nd::SrtpKeyingMaterial>
+    srtp_keying_material() const noexcept override {
+        return std::nullopt;
+    }
+
+private:
+    nd::Fingerprint fingerprint_{"sha-256", {}, {}, ""};
+};
+
+class FakeDtlsFactory final : public nd::IDtlsSessionFactory {
+public:
+    std::string_view id() const noexcept override { return "fake-dtls"; }
+    std::string_view display_name() const noexcept override {
+        return "Fake DTLS session (test)";
+    }
+    std::unique_ptr<nd::IDtlsSession> create(const nd::DtlsConfig&) const override {
+        return std::make_unique<FakeDtlsSession>();
+    }
+};
+
+class EngineDtmfTx : public ::testing::Test {
+protected:
+    static void SetUpTestSuite() {
+        nimrtc::core::register_all_default_plugins();
+
+        static FakeIceFactory ice_factory;
+        static FakeDtlsFactory dtls_factory;
+        PluginRegistry::instance().register_ice_transport("fake-ice", &ice_factory);
+        PluginRegistry::instance().register_dtls_session("fake-dtls", &dtls_factory);
+    }
+
+    EngineConfig make_config() {
+        EngineConfig cfg{};
+        cfg.transport_name          = "fake-ice";
+        cfg.dtls_name               = "fake-dtls";
+        cfg.datachannel_backend     = "";
+        cfg.bwe_name                = "";
+        cfg.scheduler_config.enabled = false;
+        cfg.dtmf_enabled            = true;
+        return cfg;
+    }
+
+    /** A decoded telephone-event payload (RFC 4733 §2.3, Figure 1). */
+    struct EventView {
+        std::uint8_t  code = 0;
+        bool          end = false;
+        std::uint16_t duration_ms = 0;
+    };
+
+    /** Decode a four-byte telephone-event payload.
+     *
+     *  The duration field counts 8000 Hz timestamp units, not
+     *  milliseconds (RFC 4733 §2.3.5) -- the conversion is the detail
+     *  a peer gets wrong, so the test does it explicitly rather than
+     *  trusting the engine's own codec. */
+    static EventView decode_event(const nimrtc::rtp::PacketView& pv) {
+        EventView ev;
+        if (pv.payload.size() < 4) return ev;
+        const std::uint8_t* p = pv.payload.data();
+        ev.code = p[0];
+        ev.end  = (p[1] & 0x80) != 0;               // the E bit
+        const std::uint16_t units =
+            static_cast<std::uint16_t>((static_cast<std::uint16_t>(p[2]) << 8) | p[3]);
+        ev.duration_ms = static_cast<std::uint16_t>(
+            (static_cast<std::uint32_t>(units) * 125u) / 1000u);
+        return ev;
+    }
+
+    /** The telephone-event packets the engine put on the wire. */
+    static std::vector<nimrtc::rtp::PacketView> dtmf_packets(
+        const std::vector<std::vector<std::uint8_t>>& datagrams) {
+        std::vector<nimrtc::rtp::PacketView> out;
+        nimrtc::rtp::Parser parser;
+        for (const auto& d : datagrams) {
+            auto parsed = parser.parse(nimrtc::core::ByteSpan(d.data(), d.size()));
+            if (!parsed.ok()) continue;
+            const nimrtc::rtp::PacketView& view = parsed.value();
+            if (view.payload_type != kDtmfPt) continue;
+            out.push_back(view);
+        }
+        return out;
+    }
+};
+
+TEST_F(EngineDtmfTx, AKeyPressGoesOutAsAnRfc4733EventSequence) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_TRUE(engine.process_remote_sdp(
+                    peer_offer_with_telephone_event()).has_value());
+    ASSERT_EQ(engine.negotiated_dtmf_payload_type(), kDtmfPt);
+
+    ASSERT_TRUE(engine.send_dtmf(5, 100));
+
+    // The first packet leaves right away: the peer learns about the
+    // key press without waiting for the next tick.
+    auto packets = dtmf_packets(FakeIceFactory::last_created()->sent());
+    ASSERT_EQ(packets.size(), 1u);
+
+    // RFC 4733 §2.5.1.2: the event is a *sequence*.  The packet is
+    // repeated while the key is held -- each repeat carrying a larger
+    // duration -- and the packet that closes the event carries the
+    // end-of-event bit.  The repeats are paced by the engine's tick.
+    for (int i = 0; i < 20; ++i) {
+        bool ended = false;
+        for (const auto& p : packets) {
+            if (decode_event(p).end) ended = true;
+        }
+        if (ended) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        engine.tick();
+        packets = dtmf_packets(FakeIceFactory::last_created()->sent());
+    }
+
+    ASSERT_GE(packets.size(), 2u)
+        << "RFC 4733 §2.5.1.2: the event must be repeated while the key is "
+           "held, not sent as a single packet";
+
+    // Every packet of the event carries the event code the host asked
+    // for -- that is what the peer decodes the key press from.
+    for (const auto& p : packets) {
+        EXPECT_EQ(decode_event(p).code, 5u);
+    }
+
+    // RFC 4733 §2.2.2: only the *first* packet of an event carries the
+    // marker bit -- that is what tells the peer "a new event starts
+    // here".
+    EXPECT_TRUE(packets.front().marker)
+        << "the first packet must mark the beginning of the event";
+    for (std::size_t i = 1; i < packets.size(); ++i) {
+        EXPECT_FALSE(packets[i].marker)
+            << "only the first packet of an event carries the marker bit";
+    }
+
+    // The event closes with the end-of-event bit, and the closing
+    // packet reports the duration the host asked for.
+    const EventView last = decode_event(packets.back());
+    EXPECT_TRUE(last.end)
+        << "the last packet of the event must carry the end-of-event bit";
+    EXPECT_EQ(last.duration_ms, 100u)
+        << "the peer must learn how long the key was held";
+
+    // The duration grows from packet to packet (RFC 4733 §2.5.1.2): the
+    // peer reconstructs the key press from the largest one it sees.
+    for (std::size_t i = 1; i < packets.size(); ++i) {
+        EXPECT_GE(decode_event(packets[i]).duration_ms,
+                  decode_event(packets[i - 1]).duration_ms);
+    }
+
+    // RFC 4733 §2.1: the event packets share the audio stream's
+    // sequence number space and timestamp base.
+    for (std::size_t i = 1; i < packets.size(); ++i) {
+        EXPECT_EQ(packets[i].seq,
+                  static_cast<std::uint16_t>(packets[i - 1].seq + 1))
+            << "the event packets share the audio sequence space";
+        EXPECT_EQ(packets[i].timestamp, packets[0].timestamp);
+        EXPECT_EQ(packets[i].ssrc, packets[0].ssrc);
+    }
+
+    EXPECT_EQ(engine.stats().dtmf_packets_sent, packets.size());
+
+    engine.close();
+}
+
+TEST_F(EngineDtmfTx, AKeyPressIsNotPutOnTheWireWithoutANegotiatedPayloadType) {
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    // No description exchange: nothing was negotiated, so the key press
+    // cannot reach the peer (RFC 3264 §6.1).
+    EXPECT_FALSE(engine.send_dtmf(5, 100));
+
+    auto packets = dtmf_packets(FakeIceFactory::last_created()->sent());
+    EXPECT_TRUE(packets.empty())
+        << "no telephone-event packet may go out on a payload type the "
+           "peer never agreed to";
 
     engine.close();
 }

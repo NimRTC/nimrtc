@@ -10,7 +10,7 @@
  *      model is resolved through the registry's session slot
  *      (`EngineConfig::session_name`), and the engine reaches it only
  *      through `plugins::ISession` — `src/engine/` contains no
- *      include of `nimrtc/session/**`.
+ *      include of any `nimrtc/session/` header.
  *
  *   2. **N2 — the negotiation trigger.**  A host that adds or removes
  *      a track can ask the engine whether a renegotiation is due

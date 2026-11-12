@@ -59,6 +59,16 @@
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/transport.hpp>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 namespace {
 
 using nimrtc::ice::Candidate;
@@ -82,6 +92,41 @@ bool is_wsl2() noexcept {
     }
 #endif
     return false;
+}
+
+// Can this host bind a socket to an address inside 127.0.0.0/8 other than
+// 127.0.0.1?
+//
+// The data-path test needs the two agents on *different* loopback
+// addresses (see the comment on cfg_a.bind_address below), and it
+// therefore needs 127.0.0.2 and 127.0.0.3 to be bindable.  Linux treats
+// the whole 127/8 range as loopback, but macOS only has 127.0.0.1
+// configured, so binding 127.0.0.2 there fails with EADDRNOTAVAIL.
+// Rather than hard-coding a platform list, probe for it.
+bool can_bind_secondary_loopback() noexcept {
+    static const bool ok = [] {
+#ifdef _WIN32
+        // The probe needs Winsock; the juice server brings it up later, so
+        // bring it up here too (the extra WSAStartup is refcounted).
+        WSADATA wsa{};
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+#endif
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) return false;
+        sockaddr_in addr{};
+        addr.sin_family      = AF_INET;
+        addr.sin_port        = 0;
+        addr.sin_addr.s_addr = htonl(0x7F000002); // 127.0.0.2
+        const bool bound = ::bind(fd, reinterpret_cast<sockaddr *>(&addr),
+                                  sizeof(addr)) == 0;
+#ifdef _WIN32
+        closesocket(fd);
+#else
+        ::close(fd);
+#endif
+        return bound;
+    }();
+    return ok;
 }
 
 // Port windows for the loopback test.  They have to be disjoint from the
@@ -584,6 +629,9 @@ TEST(TurnTcp, UnreachableTcpTurnServerProducesNoRelayCandidate) {
 
 TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
+    if (!can_bind_secondary_loopback())
+        GTEST_SKIP() << "this host cannot bind 127.0.0.2; the test needs two "
+                        "distinct loopback addresses";
 
     // The server listens on both UDP and TCP; the clients use the TCP
     // control connection.

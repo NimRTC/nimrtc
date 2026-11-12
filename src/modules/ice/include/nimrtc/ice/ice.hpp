@@ -408,6 +408,12 @@ public:
                          std::string_view username,
                          std::string_view password) noexcept override;
 
+    // The declarations above hide every other `add_turn_server` in the
+    // base class, which GCC reports as -Woverloaded-virtual (an error
+    // under -Werror).  Bring the base's transport-selecting overload
+    // back into scope so the two hierarchies agree on one name.
+    using plugins::IICETransport::add_turn_server;
+
     /** Add a TURN server with an explicit transport.
      *
      *  Same precondition as set_bind_address (before open()).

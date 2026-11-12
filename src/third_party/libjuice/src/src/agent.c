@@ -870,14 +870,14 @@ int agent_direct_send(juice_agent_t *agent, const addr_record_t *dst, const char
 //
 // Over TURN/UDP the message is sent as a datagram to the server address.
 // Over TURN/TCP the message is written to the control connection instead.
-static int agent_turn_control_send(juice_agent_t *agent, agent_stun_entry_t *entry,
+static int agent_turn_control_send(juice_agent_t *agent, const agent_stun_entry_t *entry,
                                     const char *data, size_t size, int ds) {
 	if (!entry->turn) {
 		JLOG_ERROR("Missing TURN state on relay entry");
 		return -1;
 	}
 
-	if (entry->turn->transport != JUICE_TURN_TRANSPORT_UDP) {
+	if (agent_turn_is_tcp(entry)) {
 		if (!entry->turn->stream) {
 			JLOG_ERROR("Missing TURN-over-TCP stream");
 			return -1;

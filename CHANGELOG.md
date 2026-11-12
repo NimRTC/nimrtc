@@ -57,6 +57,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     seam — a capture device is not a frame source, so it gets its own
     slot (`register_video_capture()` / `get_video_capture()`) rather
     than being folded into the source registry.
+  - **Not yet done (deliberately):** no platform backend exists yet.  The
+    engine does not pump frames from a capture device on its own either —
+    that is plan item A10, and until it lands the capture layer is a
+    plug-in-level facility exercised by the unit tests, not a
+    user-visible screen-sharing feature.
 
 - **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
   Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264
@@ -923,6 +928,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **`CaptureQueue::pop()` handed out a pointer to freed memory.**  The
+  popped frame was moved into a *local* `Frame`, and the queue then
+  published `f.pixels.data()` through the `CaptureFrame` — so the
+  consumer read a heap block that the local's destructor had already
+  released by the time `pop()` returned.  The `CaptureFrame` contract
+  promises the pixels stay valid until the next `pop_frame()`, so this
+  was a use-after-free on every frame the consumer kept.  The queue now
+  keeps the popped frame in its own storage (`popped_`) and hands out a
+  pointer into that; the previous frame's buffer is released exactly when
+  the contract says it stops being valid, on the next `pop()`.  Caught by
+  AddressSanitizer and pinned by a regression test.
 
 - **`ParsedFmtp` wrote its payload into an inactive union member (UB, caught
   by UBSan as `load of value 13, which is not a valid value for type

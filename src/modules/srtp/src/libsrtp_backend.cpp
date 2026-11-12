@@ -9,8 +9,8 @@
  * `plugins::ISrtpSessionBackend` seam.
  *
  * The adapter owns one libsrtp `srtp_t` context and installs the master
- * key with the polarity the caller asked for (outbound â†?`ssrc_any_outbound`,
- * inbound â†?`ssrc_any_inbound`).
+ * key with the polarity the caller asked for (outbound -> `ssrc_any_outbound`,
+ * inbound -> `ssrc_any_inbound`).
  */
 
 #include <nimrtc/srtp/libsrtp_backend.hpp>
@@ -26,7 +26,7 @@ namespace nimrtc::srtp {
 
 namespace {
 
-// libsrtp init guard â€?srtp_init() must be called once before any other
+// libsrtp init guard - srtp_init() must be called once before any other
 // srtp_*.  Use std::call_once on first use.
 std::once_flag g_srtp_init_once;
 
@@ -35,7 +35,7 @@ void ensure_srtp_init() {
         srtp_err_status_t rc = srtp_init();
         if (rc != srtp_err_status_ok) {
             core::log::Logger::instance().error(
-                "srtp_init() failed â€?SRTP unusable");
+                "srtp_init() failed - SRTP unusable");
         } else {
             core::log::Logger::instance().debug(
                 "libsrtp2 initialised");
@@ -65,7 +65,7 @@ std::size_t auth_tag_len_for(std::uint32_t suite_id) noexcept {
 
 /** Build a libsrtp policy with the requested key and SSRC polarity, and
  *  create the crypto context.  Shared by the outbound and inbound
- *  initialisers â€?the only difference is the SSRC selector. */
+ *  initialisers - the only difference is the SSRC selector. */
 core::Result<void> create_context(std::span<const std::uint8_t> master_key,
                                   std::span<const std::uint8_t> master_salt,
                                   std::uint32_t suite_id,
@@ -124,7 +124,7 @@ core::Result<void> create_context(std::span<const std::uint8_t> master_key,
 } // namespace
 
 // ---------------------------------------------------------------------------
-// LibsrtpSessionBackend â€?the concrete crypto context.
+// LibsrtpSessionBackend - the concrete crypto context.
 // ---------------------------------------------------------------------------
 
 LibsrtpSessionBackend::LibsrtpSessionBackend() = default;

@@ -329,8 +329,24 @@ public:
     // reset() explicitly if you want to discard.
     core::ByteBuffer build() const;
 
-    // Compute serialised size without actually building. Useful for sizing
-    // output buffers in tight paths.
+    /// Serialise into a caller-provided buffer — the allocation-free
+    /// form of `build()`.
+    ///
+    /// The caller owns the storage and keeps it alive for as long as the
+    /// serialised packet is used; that is what makes the hot send path
+    /// allocation-free (the engine keeps a per-session scratch buffer and
+    /// reuses it for every packet).
+    ///
+    /// @param out     Destination buffer (may be null only if @p capacity
+    ///                 is 0, in which case nothing is written).
+    /// @param capacity Bytes available in @p out.
+    /// @return The number of bytes written, or 0 when the buffer is too
+    ///         small (or null). A 0-byte packet is not representable, so
+    ///         0 unambiguously means "nothing was written".
+    std::size_t build_into(std::uint8_t* out, std::size_t capacity) const noexcept;
+
+    /// Compute serialised size without actually building. Useful for sizing
+    /// output buffers in tight paths.
     std::size_t compute_size() const noexcept;
 
     void reset() noexcept;

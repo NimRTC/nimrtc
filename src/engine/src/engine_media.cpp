@@ -763,8 +763,22 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 }
 
                 pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
-                core::ByteBuffer built = pb.build();
-                if (built.empty()) {
+
+                // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
+                //
+                // Same reasoning as the audio path: `pb.build()` would
+                // allocate a fresh buffer per video packet.  The scratch is
+                // read immediately below — the bytes are copied into the
+                // scheduler's pooled outbound buffer — so it never escapes
+                // this callback.
+                const std::size_t built_size = pb.compute_size();
+                if (impl_->video_rtp_scratch.size() < built_size) {
+                    impl_->video_rtp_scratch.resize(built_size);
+                }
+                const std::size_t built_written =
+                    pb.build_into(impl_->video_rtp_scratch.data(),
+                                  impl_->video_rtp_scratch.size());
+                if (built_written == 0) {
                     if (on_error_) {
                         on_error_(core::kVideoEncodeFailed,
                                   "video send: the RTP packet could not be built");
@@ -780,11 +794,11 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 std::vector<std::uint8_t> rtp_pkt;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
-                        built.size() + kSrtpAuthTagBytes);
-                    rtp_pkt.assign(built.begin(), built.end());
-                } else {
-                    rtp_pkt.assign(built.begin(), built.end());
+                        built_written + kSrtpAuthTagBytes);
                 }
+                rtp_pkt.assign(impl_->video_rtp_scratch.begin(),
+                               impl_->video_rtp_scratch.begin() +
+                                   static_cast<std::ptrdiff_t>(built_written));
 
                 // ---- SRTP protect (if DTLS is connected) ----------------------
                 if (impl_->srtp_installed && impl_->srtp) {
@@ -1174,13 +1188,27 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     }
 
         pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
-        auto pkt_buf = pb.build();
-        if (pkt_buf.empty()) {
+
+        // ---- Serialise into the reusable scratch (Phase 3 / C4) --------------
+        //
+        // `pb.build()` would allocate a fresh buffer for every audio
+        // packet.  `build_into()` writes into the engine's per-session
+        // scratch instead, so the steady-state send path performs no heap
+        // allocation for the RTP header + payload copy.
+        const std::size_t pkt_size = pb.compute_size();
+        if (impl_->audio_rtp_scratch.size() < pkt_size) {
+            impl_->audio_rtp_scratch.resize(pkt_size);
+        }
+        const std::size_t pkt_written =
+            pb.build_into(impl_->audio_rtp_scratch.data(),
+                          impl_->audio_rtp_scratch.size());
+        if (pkt_written == 0) {
             report_error(core::kAudioEncodeFailed,
                          "send_audio: the RTP packet could not be built");
             impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;
         }
+        core::ByteSpan pkt_span(impl_->audio_rtp_scratch.data(), pkt_written);
 
         // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
         // RTP timestamp is sampled *before* SRTP so the SR and the media packet
@@ -1191,7 +1219,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
         impl_->audio_rtp_timestamp = cur_ts;
         ++impl_->audio_frames_sent;
-        impl_->audio_bytes_sent += pkt_buf.size();
+        impl_->audio_bytes_sent += pkt_span.size();
 
         // The media clock advances by the frame duration whether or not the
         // packet reaches the wire (A-7): a dropped frame leaves a gap in
@@ -1210,9 +1238,9 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         std::vector<std::uint8_t> send_buf;
         if (scheduler_) {
             send_buf = scheduler_->acquire_packet_buffer(
-                pkt_buf.size() + kSrtpAuthTagBytes);
+                pkt_span.size() + kSrtpAuthTagBytes);
         }
-        core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
+        core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
         if (impl_->srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
                                                    /*outgoing=*/true);

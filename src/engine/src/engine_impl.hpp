@@ -883,6 +883,29 @@ struct NimRTCEngine::Impl {
     // matches the worst-case 64 KiB IDR; resize grows monotonically.
     std::vector<std::uint8_t> video_enc_buf;
 
+    // ---- RTP serialisation scratch buffers (Phase 3 / C4) ------------------
+    //
+    // `rtp::PacketBuilder::build()` allocates a fresh buffer per call.  On
+    // the send path that is one heap allocation per media packet, which is
+    // the dominant allocation cost of a steady 50 fps audio + 30 fps video
+    // stream.  `build_into()` serialises into caller-owned storage instead,
+    // so these two scratch buffers absorb the whole cost: they are reused
+    // for every packet and only ever grow.
+    //
+    // Lifetime: the scratch is read *before* the packet is copied into the
+    // scheduler's pooled outbound buffer, so the scratch never escapes the
+    // call that filled it.
+    std::vector<std::uint8_t> audio_rtp_scratch;
+    std::vector<std::uint8_t> video_rtp_scratch;
+
+    /// Scratch for the DTMF (RFC 4733) packet.
+    ///
+    /// DTMF has its own scratch rather than sharing the audio one: a host
+    /// may press a key from a different thread than the one feeding
+    /// `send_audio()`, and sharing one buffer would introduce a data race
+    /// that did not exist when every call allocated its own packet.
+    std::vector<std::uint8_t> dtmf_rtp_scratch;
+
     // ---- Cross-end timeline (ADR-017) --------------------------------------
     //
     // `EngineConfig::timeline_enabled` turns this seam on.  Four things

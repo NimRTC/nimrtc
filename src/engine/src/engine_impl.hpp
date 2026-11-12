@@ -914,6 +914,14 @@ struct NimRTCEngine::Impl {
     /// call, so its capacity is the only thing that persists.
     std::vector<rtp::RtcpBlock> rtcp_blocks_scratch;
 
+    /// Pool the staged video frames come from (Phase 3 / C1).
+    ///
+    /// `stage_source_frame()` used to allocate a fresh frame-sized block
+    /// for every frame the host pushed through `send_video()`.  The pool
+    /// recycles the storage instead, so the steady-state send path
+    /// performs no allocation and no full-frame memset.
+    video_frame::VideoFrameBufferPool video_frame_pool;
+
     // ---- Cross-end timeline (ADR-017) --------------------------------------
     //
     // `EngineConfig::timeline_enabled` turns this seam on.  Four things

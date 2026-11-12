@@ -170,6 +170,19 @@ VideoFrameBuffer::VideoFrameBuffer(VideoFrameLayout layout)
     ctrl_ = std::make_shared<OwnedFrameControl>(layout);
 }
 
+VideoFrameBuffer::VideoFrameBuffer(std::vector<std::uint8_t>&& storage,
+                                   VideoFrameLayout layout)
+    : layout_(layout) {
+    if (layout_.buffer_size == 0) return;
+    if (storage.size() < layout_.buffer_size) return;
+    // Adopt the storage without copying it — this is the whole point of
+    // the pooling path.  `storage_.swap` hands the buffer's allocation
+    // over in O(1); the vector's own (smaller) buffer is released with
+    // the temporary.
+    storage_.swap(storage);
+    ctrl_ = std::make_shared<OwnedFrameControl>(layout);
+}
+
 VideoFrameBuffer::VideoFrameBuffer(std::uint8_t* external_data,
                                    std::size_t  external_capacity,
                                    VideoFrameLayout layout,
@@ -191,6 +204,87 @@ VideoFrameBuffer::~VideoFrameBuffer() noexcept {
     if (ctrl_) {
         ctrl_->ref_count.fetch_sub(1, std::memory_order_acq_rel);
     }
+}
+
+void VideoFrameBuffer::adopt_storage(std::vector<std::uint8_t>&& storage,
+                                     VideoFrameLayout layout) noexcept {
+    layout_ = layout;
+    storage_.swap(storage);
+    ctrl_ = std::make_shared<OwnedFrameControl>(layout);
+}
+
+std::vector<std::uint8_t> VideoFrameBuffer::release_storage() noexcept {
+    std::vector<std::uint8_t> out;
+    out.swap(storage_);
+    ctrl_.reset();
+    layout_ = {};
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// VideoFrameBufferPool
+// ---------------------------------------------------------------------------
+
+std::shared_ptr<VideoFrameBuffer>
+VideoFrameBufferPool::acquire(VideoFrameLayout layout) {
+    if (layout.buffer_size == 0) return nullptr;
+
+    auto state = state_;
+
+    // Find a parked storage block that is big enough.  The pool keeps
+    // the blocks it has handed back, but a caller may ask for a bigger
+    // layout than last time (a resolution change), so the search is
+    // for "at least this big" rather than "exactly this big".
+    std::size_t chosen = state->idle.size();
+    for (std::size_t i = 0; i < state->idle.size(); ++i) {
+        if (state->idle[i].size() >= layout.buffer_size) {
+            chosen = i;
+            break;
+        }
+    }
+
+    std::vector<std::uint8_t> storage;
+    if (chosen != state->idle.size()) {
+        storage = std::move(state->idle[chosen]);
+        state->idle.erase(state->idle.begin() +
+                          static_cast<std::ptrdiff_t>(chosen));
+    } else {
+        // Nothing big enough is parked -- allocate.  The memset that
+        // `resize` performs happens once per *allocation*, and the pool
+        // means it happens once per pool lifetime rather than once per
+        // frame (at 1080p that is a ~3 MB memset per frame).
+        storage.resize(layout.buffer_size);
+        ++state->total_allocations;
+    }
+    ++state->in_flight;
+
+    // The buffer's storage comes back to the pool when the last
+    // reference dies.  The deleter holds a reference to the shared
+    // state, so a buffer that outlives the pool still returns its
+    // storage somewhere valid.
+    auto buf = std::shared_ptr<VideoFrameBuffer>(
+        new VideoFrameBuffer(std::move(storage), layout),
+        [state](VideoFrameBuffer* b) {
+            auto back = b->release_storage();
+            if (state->in_flight > 0) --state->in_flight;
+            if (back.capacity() != 0) {
+                state->idle.push_back(std::move(back));
+            }
+            delete b;
+        });
+    return buf;
+}
+
+std::size_t VideoFrameBufferPool::idle() const noexcept {
+    return state_->idle.size();
+}
+
+std::size_t VideoFrameBufferPool::in_flight() const noexcept {
+    return state_->in_flight;
+}
+
+std::size_t VideoFrameBufferPool::total_allocations() const noexcept {
+    return state_->total_allocations;
 }
 
 // ---------------------------------------------------------------------------

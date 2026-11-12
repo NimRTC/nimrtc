@@ -85,12 +85,14 @@ void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
  *
  *  @param frame  Caller-owned source frame (planes valid for this call).
  *  @param fmt    Target pixel format for the staged buffer.
+ *  @param pool   Pool the staged buffer's storage comes from (Phase 3 / C1).
  *  @return The staged buffer, or nullptr when the frame cannot be staged
  *          (no planes, zero dimensions, or an unsupported source format).
  */
 std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
         const plugins::VideoSourceFrame& frame,
-        plugins::VideoPixelFormat fmt) noexcept {
+        plugins::VideoPixelFormat fmt,
+        video_frame::VideoFrameBufferPool& pool) noexcept {
     if (frame.width == 0 || frame.height == 0) return nullptr;
     if (!frame.plane_y) return nullptr;
 
@@ -115,7 +117,12 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
     const auto layout = video_frame::compute_layout(fmt, frame.width, frame.height);
     if (layout.buffer_size == 0) return nullptr;
 
-    auto staged = std::make_shared<video_frame::VideoFrameBuffer>(layout);
+    // Phase 3 / C1: take the storage from the pool instead of allocating
+    // a fresh frame-sized block per frame.  At 1080p30 that was a ~3 MB
+    // allocation *and* a ~3 MB memset every 33 ms, on top of the copy the
+    // staging itself does.
+    auto staged = pool.acquire(layout);
+    if (!staged) return nullptr;
 
     const std::uint32_t half_w = (frame.width + 1u) / 2u;
     const std::uint32_t half_h = (frame.height + 1u) / 2u;
@@ -1342,7 +1349,7 @@ plugins::Status NimRTCEngine::send_video(
     // The codec-facing pixel format comes from the codec's own config
     // (I420 for every backend today).
     const auto codec_fmt = video_codec_->config().pixel_format;
-    raw.buffer = stage_source_frame(frame, codec_fmt);
+    raw.buffer = stage_source_frame(frame, codec_fmt, impl_->video_frame_pool);
     if (!raw.buffer) {
         // The frame cannot be staged (no planes, zero dimensions, or a
         // packed source format).  Software codecs can still encode a

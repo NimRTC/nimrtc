@@ -1095,6 +1095,51 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a=ssrc` line, which is what makes Chrome count our inbound RTP at
     all. The demo no longer appends a stale constant SSRC of its own.
 
+### Performance
+
+- **The media hot paths no longer allocate per frame or per packet
+  (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
+  the seven C items landed here; C7 (the video path's RTP-packet
+  concatenation) was already removed in Phase 1.3.
+  - **C1 / C2 -- the staged video frames are pooled.**
+    `stage_source_frame()` allocated a fresh `VideoFrameBuffer` per
+    frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
+    3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
+    I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
+    storage: the pool hands out a `shared_ptr<VideoFrameBuffer>` whose
+    custom deleter extracts the storage via `release_storage()` and
+    parks it in the idle list when the last reference drops.  The steady
+    state performs no allocation and no full-frame memset.
+  - **C3 -- the GPU zero-copy video send path is open.**
+    `send_video()` always staged the frame into a CPU I420 buffer before
+    handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
+    de-interleave for an NV12 source.  `plugins::VideoSourceFrame`
+    gained three **additive** fields (`gpu_backend`, `gpu_handle`,
+    `gpu_pitch_bytes`), and `EngineConfig::video_zero_copy` (default:
+    off) opts the host in.  The zero-copy path is taken only when the
+    flag is on **and** the frame carries a live GPU handle **and** the
+    codec reports `supports_zero_copy_encode()`; otherwise the CPU
+    staging path runs exactly as before, so turning the flag on is
+    always safe.  When the codec supports the handle but the encode
+    fails, the engine falls back to the CPU path rather than dropping
+    the frame.  `Stats::video_zero_copy_frames` and
+    `Stats::video_zero_copy_fallbacks` make the decision observable.
+  - **C4 -- `PacketBuilder::build_into()`.**  `build()` allocated a new
+    `core::ByteBuffer` on every packet (50 Hz audio, 30 Hz video).  The
+    new overload serialises directly into caller-provided memory, and
+    the engine keeps **per-path** scratch buffers (audio, video and DTMF
+    separately) so the three threads never share one buffer.
+  - **C5 -- the SRTP scratch high-water mark.**  The libsrtp backend
+    called `resize(out_len)` before encrypt / decrypt and `resize(actual)`
+    after, so the vector was repeatedly shrunk and grown -- and each
+    `resize` value-initialises (zeroes) the memory.  The scratch is now
+    sized to the **high-water mark** and never shrinks during the
+    session's lifetime, which removes the memset churn entirely.
+  - **C6 -- the RTCP compound demux.**  `demux_rtcp()` returned a
+    `std::vector<RtcpBlock>` **by value** -- one heap allocation per
+    RTCP datagram.  The new overload clears and refills a caller-owned
+    scratch vector, keeping its capacity across calls.
+
 ### Fixed
 
 - **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
@@ -1115,6 +1160,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   -model and DTMF families were missing entirely.
   - `docs/api/engine_config.md` carries the same table, and documents
     the removal of `rtp_name` / `sdp_name`.
+
+- **Every SRTCP protect failed -- the RTCP feedback path was broken end
+  to end (v1.2.0).**  libsrtp's SRTCP layout is the RTCP packet, then a
+  4-byte index trailer (a 31-bit index plus the E bit), then the auth
+  tag.  `protect_rtcp()` sized the scratch as `rtcp.size() + tag_len`,
+  which left out the trailer; libsrtp validates the buffer against the
+  full total and returned `srtp_err_status_buffer_small`, so every
+  SRTCP protect failed.
+
+  The bug survived for a long time because the SRTP module's own test
+  suite never ran (see the test-discovery fix below) -- nothing could
+  catch it.
+
+- **The libsrtp adapter silently mapped every unknown crypto-suite id
+  onto AES-128-CM-SHA1-80 instead of rejecting it.**  The `default:`
+  branch of `to_lib_profile()` meant a caller that passed a libsrtp
+  `srtp_profile_t` (a different numbering scheme) got a *different*
+  protection profile, and the wrong auth tag length with it, instead of
+  an error.  An out-of-range id is now rejected.
+
+- **AES-128-GCM is advertised but not providable.**  The vendored
+  libsrtp is built against the "internal" crypto backend, which ships
+  AES-CM only (`GCM=OFF`), so the `Aes128Gcm_128` suite cannot be
+  supplied.  The backend now refuses that suite with a message that
+  says why, instead of failing deep inside `srtp_create()` with a
+  generic error.  The vendored build exports
+  `NIMRTC_LIBSRTP_HAS_GCM=0` to say so.
+
+- **212 tests across six module suites never executed.**  The modules
+  `src/modules/{dtls,jb,jb_strategy,sched,session,srtp}` called
+  `add_subdirectory(tests)` without `enable_testing()`.  Under the
+  CMake 4.0 VS generator no `CTestTestfile.cmake` is emitted at that
+  level, so ctest never recursed into those directories and none of
+  their tests ever ran.  The ctest count goes from **1176 to 1396**.
+
+  The one test that failed once it finally ran
+  (`SessionModel.MidIsNeverReused`) asserted that removing an unknown
+  track returns `true`, contradicting `SessionModel::remove_track()`
+  and the sibling test above it; the expectation was wrong and is
+  corrected.
 
 - **The e2e acceptance Case C (NimRTC ↔ NimRTC loopback) failed on the
   Windows CI runner with `WSAEACCES (errno 10013)`, because the example

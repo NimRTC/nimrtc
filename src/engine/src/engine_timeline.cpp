@@ -217,7 +217,9 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             const std::uint8_t negotiated_vpt =
                 impl_->negotiated_video_pt.load(std::memory_order_relaxed);
             const std::uint8_t local_video_pt =
-                config_.video_receiver_tuning.payload_type;
+                impl_->video_payload_type != 0
+                    ? impl_->video_payload_type
+                    : config_.video_receiver_tuning.payload_type;
             auto rit = impl_->remote_clock_rate_hz.find(pv.payload_type);
             if (rit != impl_->remote_clock_rate_hz.end()) {
                 clock_rate = rit->second;
@@ -328,9 +330,12 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     } else {
         const std::uint8_t negotiated_vpt =
             impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+        const std::uint8_t local_video_pt =
+            impl_->video_payload_type != 0
+                ? impl_->video_payload_type
+                : config_.video_receiver_tuning.payload_type;
         route_to_video = video_receiver_ &&
-                         (pv.payload_type ==
-                              config_.video_receiver_tuning.payload_type ||
+                         (pv.payload_type == local_video_pt ||
                           (negotiated_vpt != 0 &&
                            pv.payload_type == negotiated_vpt));
         route_to_audio = !route_to_video;

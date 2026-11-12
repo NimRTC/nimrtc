@@ -22,7 +22,8 @@ if(NOT GTEST_FOUND)
     endif()
 endif()
 
-add_executable(test_video_payload test_h264.cpp test_vp8.cpp test_vp9.cpp)
+add_executable(test_video_payload
+    test_h264.cpp test_vp8.cpp test_vp9.cpp test_h265.cpp test_av1.cpp)
 
 set_target_properties(test_video_payload PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)

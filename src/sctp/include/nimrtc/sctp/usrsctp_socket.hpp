@@ -309,6 +309,10 @@ private:
         plugins::OnSctpRecvCb on_recv;
         plugins::OnSctpRecvWithPpidCb on_recv_ppid;
 
+        /** Signalled when `in_flight_callbacks` drops to zero.  Awaited by
+         *  the destructor while it holds `recv_mu`. */
+        std::condition_variable recv_cv;
+
         /** State machine: guarded by `state_mu`, awaited via `state_cv`. */
         std::mutex state_mu;
         std::condition_variable state_cv;
@@ -317,6 +321,32 @@ private:
         /** Cleared by the destructor before the socket's own members go
          *  away. The trampoline checks it before touching the slot. */
         std::atomic<bool> alive{true};
+
+        /** Number of trampoline invocations currently inside the user
+         *  callback.
+         *
+         *  `alive` alone is not enough to make teardown safe.  The
+         *  trampoline checks it, but a callback that was already past
+         *  that check can still be running when the socket is destroyed:
+         *  the check and the dispatch are not atomic with respect to
+         *  each other.  A caller whose callback captures state that
+         *  dies with the caller (the usual pattern: a test-local queue,
+         *  a connection object) then has that state destroyed while the
+         *  trampoline is still inside the callback -- a data race on the
+         *  captured object, reported by ThreadSanitizer as a race
+         *  between the callback's access and the owner's destructor.
+         *
+         *  The trampoline therefore increments this counter *while
+         *  holding `recv_mu`*, dispatches the callback under the same
+         *  lock, and decrements it before releasing the lock.  The
+         *  destructor takes `recv_mu` and waits for the counter to
+         *  reach zero, so when the destructor returns, no callback is
+         *  running and none can start: the trampoline cannot enter the
+         *  callback without `recv_mu`, and the destructor holds it
+         *  until the in-flight one is done.
+         *
+         *  Guarded by `recv_mu`. */
+        std::size_t in_flight_callbacks = 0;
     };
 
     /** The slot shared with usrsctp's worker thread. */

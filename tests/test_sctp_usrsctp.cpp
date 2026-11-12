@@ -514,6 +514,140 @@ TEST_F(SctpUsrsctpTest, LateAssociationChangeDoesNotCloseFreshSocket) {
 }
 
 // ---------------------------------------------------------------------------
+// (5) The destructor must not return while a user recv callback is running
+// ---------------------------------------------------------------------------
+//
+// The user recv callback runs on usrsctp's own worker thread, and the
+// usual pattern is to capture state that dies with the caller:
+//
+//     SctpRecvQueue queue;                       // stack-local
+//     sock->set_on_recv([&queue](auto, auto d) { queue.push(d); });
+//
+// If `~UsrsctpSocket` could return while the trampoline was still
+// inside that callback, the callback would touch a destroyed queue.
+// ThreadSanitizer reports exactly that as a data race between
+// `SctpRecvQueue::push` and `~SctpRecvQueue` -- it is what the
+// sanitizer leg of PR #51 caught.
+//
+// The contract the library must provide: when the destructor returns,
+// no user callback is running, and none can start afterwards.  This
+// test pins it directly: the callback blocks until the test says so,
+// the destructor is called from another thread, and the test asserts
+// that the destructor did NOT return until the callback was released.
+//
+// (The callback is invoked by the trampoline, which only runs while an
+// association is delivering data, so the test drives a real loopback
+// datagram to make the callback fire.)
+TEST_F(SctpUsrsctpTest, DestructorWaitsForInFlightRecvCallback) {
+#if !defined(__linux__)
+    // The reproduction needs an SCTP handshake that actually
+    // completes, which only the Linux runner manages (usrsctp's
+    // connect() never completes on the macOS / Windows runners).
+    GTEST_SKIP() << "usrsctp_connect() does not complete on macOS or "
+                    "Windows CI runners";
+#endif
+    SctpConfig cfg_a{};
+    cfg_a.label = "inflight-A";
+    SctpConfig cfg_b{};
+    cfg_b.label = "inflight-B";
+
+    auto iface_b_ptr = make_usrsctp_socket(cfg_b);
+    ASSERT_NE(iface_b_ptr, nullptr);
+    UsrsctpSocket* sock_b = static_cast<UsrsctpSocket*>(iface_b_ptr.get());
+    auto* sock_b_holder = iface_b_ptr.release();
+
+    auto iface_a_ptr = make_usrsctp_socket(cfg_a);
+    ASSERT_NE(iface_a_ptr, nullptr);
+    UsrsctpSocket* sock_a = static_cast<UsrsctpSocket*>(iface_a_ptr.get());
+    auto* sock_a_holder = iface_a_ptr.release();
+
+    // The callback blocks inside the trampoline until `release` is
+    // signalled, and records that it was running while the socket was
+    // being destroyed.
+    std::mutex gate_mu;
+    std::condition_variable gate_cv;
+    bool release = false;
+    bool callback_entered = false;
+    std::atomic<bool> destructor_returned{false};
+    std::atomic<bool> callback_saw_destructor_returned{false};
+
+    sock_b->set_on_recv([&](std::uint16_t, plugins::BufferView) {
+        {
+            std::lock_guard<std::mutex> lk(gate_mu);
+            callback_entered = true;
+        }
+        gate_cv.notify_all();
+
+        // Block inside the callback until the test releases it.
+        {
+            std::unique_lock<std::mutex> lk(gate_mu);
+            gate_cv.wait(lk, [&] { return release; });
+        }
+
+        // If the destructor returned while this callback was running,
+        // the caller could already have destroyed the state this
+        // callback captured -- exactly the race under test.
+        if (destructor_returned.load(std::memory_order_acquire)) {
+            callback_saw_destructor_returned.store(true,
+                                                   std::memory_order_release);
+        }
+    });
+
+    ASSERT_EQ(sock_b->listen(/*local_port=*/0), plugins::kOk);
+    const std::uint16_t b_port = sock_b->local_port();
+    ASSERT_NE(b_port, 0u);
+
+    ASSERT_EQ(sock_a->connect("127.0.0.1", b_port), plugins::kOk);
+    ASSERT_TRUE(sock_a->wait_for_established(std::chrono::seconds(60)));
+    ASSERT_TRUE(sock_b->wait_for_established(std::chrono::seconds(60)));
+
+    // Make the callback fire.
+    const std::uint8_t payload[] = {0x01, 0x02, 0x03, 0x04};
+    ASSERT_EQ(sock_a->send_datagram(
+                  /*stream=*/0,
+                  plugins::BufferView{payload, sizeof(payload)}),
+              plugins::kOk);
+
+    // Wait for the callback to be in flight.
+    {
+        std::unique_lock<std::mutex> lk(gate_mu);
+        ASSERT_TRUE(gate_cv.wait_for(lk, std::chrono::seconds(10),
+                                     [&] { return callback_entered; }))
+            << "the recv callback never fired";
+    }
+
+    // Destroy the socket from another thread while the callback is
+    // blocked inside it.
+    std::thread destroyer([&] {
+        delete sock_b_holder;
+        destructor_returned.store(true, std::memory_order_release);
+    });
+
+    // The destructor must NOT return while the callback is in flight.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_FALSE(destructor_returned.load(std::memory_order_acquire))
+        << "~UsrsctpSocket returned while a user recv callback was still "
+           "running -- the caller could have destroyed the state the "
+           "callback captured";
+
+    // Release the callback; the destructor can now finish.
+    {
+        std::lock_guard<std::mutex> lk(gate_mu);
+        release = true;
+    }
+    gate_cv.notify_all();
+
+    destroyer.join();
+
+    EXPECT_FALSE(callback_saw_destructor_returned.load(
+        std::memory_order_acquire))
+        << "the recv callback observed the destructor returning while it "
+           "was still running";
+
+    delete sock_a_holder;
+}
+
+// ---------------------------------------------------------------------------
 // (4) UsrsctpNotAutoRegistered — v0.11.0 contract: "usrsctp" slot is
 // NOT populated after register_default_plugins()
 // ---------------------------------------------------------------------------

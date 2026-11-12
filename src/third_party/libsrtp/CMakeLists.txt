@@ -42,4 +42,10 @@ target_compile_definitions(nimrtc_vendor_libsrtp
     INTERFACE
         NIMRTC_USE_LIBSRTP=1
         SRTP_NO_DEPRECATED=1
+        # The vendored build ships the "internal" crypto backend, which
+        # provides AES-CM + HMAC-SHA1 but NOT AES-GCM (GCM is forced OFF
+        # above).  The SRTP module needs to know, so it can refuse a
+        # GCM suite with a clear message instead of letting libsrtp fail
+        # deep inside `srtp_create()` with a generic error.
+        NIMRTC_LIBSRTP_HAS_GCM=0
 )

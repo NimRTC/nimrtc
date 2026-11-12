@@ -58,6 +58,27 @@ public:
                                     std::span<const std::uint8_t> master_salt,
                                     std::uint32_t suite_id) noexcept override;
 
+    /** The suite ids this backend understands.
+     *
+     *  These are the **seam** suite ids (`plugins::SrtpCryptoSuite`),
+     *  NOT libsrtp's own `srtp_profile_t` values.  The two numbering
+     *  schemes differ:
+     *
+     *      seam id                              libsrtp profile id
+     *      -------------------------------     -----------------------
+     *      kAes128CmSha1_80 (0)                srtp_profile_aes128_cm_sha1_80 (2)
+     *      kAes128CmSha1_32 (1)                srtp_profile_aes128_cm_sha1_32 (3)
+     *      kAes128Gcm_128   (2)                srtp_profile_aead_aes_128_gcm  (10)
+     *      kAes256CmSha1_80 (3)                srtp_profile_aes256_cm_sha1_80 (6)
+     *
+     *  `srtp::to_libsrtp_profile()` returns the *libsrtp* id and is a
+     *  public API in its own right — it must NOT be fed to
+     *  `init_outbound` / `init_inbound`.  Doing so silently selects the
+     *  wrong protection profile (and, for id 1, selects a 32-bit-auth
+     *  profile where 80-bit auth was asked for).
+     *
+     *  @see plugins::SrtpCryptoSuite for the seam-side enum. */
+
     core::Result<core::ByteSpan> protect_rtp(
         core::ByteSpan header_and_plaintext) noexcept override;
     core::Result<core::ByteSpan> unprotect_rtp(

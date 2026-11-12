@@ -83,7 +83,12 @@ TEST(SessionModel, MidIsNeverReused) {
     const std::string first = m.add_transceiver(MediaKind::kAudio, Direction::kSendRecv);
     ASSERT_FALSE(first.empty());
     ASSERT_TRUE(m.stop_transceiver(first));
-    ASSERT_TRUE(m.remove_track("nothing"));  // no-op, keeps the flow linear
+
+    // Removing an unknown track is a no-op and reports that nothing was
+    // removed.  (It used to be asserted to return `true` here, which
+    // contradicted `RemoveTrack` above -- and the module's tests never
+    // ran, so the contradiction stayed hidden.)
+    EXPECT_FALSE(m.remove_track("nothing"));
 
     // A brand-new transceiver must not take the dead mid.
     const std::string second = m.add_transceiver(MediaKind::kVideo, Direction::kSendRecv);

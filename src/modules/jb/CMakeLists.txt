@@ -45,5 +45,10 @@ target_compile_definitions(nimrtc_jb PUBLIC NIMRTC_HAS_JB=1)
 add_library(nimrtc::jb ALIAS nimrtc_jb)
 
 if(NIMRTC_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    # ensure a CTestTestfile.cmake gets generated at this level so ctest
+    # can recurse into the tests/ subdir from src/modules/ (CMake 4.0
+    # VS generator quirk -- without enable_testing() here the file is
+    # silently skipped and the module's tests never register).
+    enable_testing()
     add_subdirectory(tests)
 endif()

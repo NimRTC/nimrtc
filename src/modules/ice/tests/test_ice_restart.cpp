@@ -34,6 +34,8 @@
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/transport.hpp>
 
+#include "ice_test_ports.hpp"
+
 namespace {
 
 using nimrtc::ice::IceConfig;
@@ -58,18 +60,26 @@ bool is_wsl2() noexcept {
     return false;
 }
 
-// Fixed loopback port windows. They have to be disjoint: libjuice sets
-// SO_REUSEPORT, so two agents on the same port would silently share the
-// socket and the loopback path would break.
-constexpr std::uint16_t kPortA = 63400;
-constexpr std::uint16_t kPortB = 63600;
+// Each test case gets its own port window.
+//
+// ctest runs every gtest case in its own process, and the CI runs
+// `ctest -j 2`, so two of these cases really do run side by side.  They
+// must not pick the same port: libjuice's socket sets SO_REUSEPORT, so a
+// second bind on the same port succeeds and the two sockets share it.
+// The kernel then hands libjuice's 0-byte "wake me up" datagram to the
+// wrong socket, the mux thread stays in poll() for its full 60 s
+// timeout, and juice_destroy() blocks in thread_join() until ctest
+// kills the test.
+//
+// See ice_test_ports.hpp for the full story.
+using namespace nimrtc::ice::test_ports;
 
-IceConfig make_config(Role role, std::uint16_t port) {
+IceConfig make_config(Role role, Window window) {
     IceConfig cfg;
     cfg.role = role;
     cfg.bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = port;
-    cfg.local_port_range_end   = port + 99;
+    cfg.local_port_range_begin = window_begin(window);
+    cfg.local_port_range_end   = window_end(window);
     return cfg;
 }
 
@@ -97,7 +107,7 @@ bool wait_for_connection(IceTransport& a, IceTransport& b,
 // -----------------------------------------------------------------------------
 
 TEST(IceRestart, RestartOnClosedTransportIsNotReady) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling, Window::RestartOnClosed);
     IceTransport t{cfg};
     // Never opened → no agent → nothing to restart.
     EXPECT_EQ(t.restart(), nimrtc::plugins::kErrNotReady);
@@ -109,7 +119,7 @@ TEST(IceRestart, RestartOnClosedTransportIsNotReady) {
 // -----------------------------------------------------------------------------
 
 TEST(IceRestart, RestartMintsNewCredentials) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling, Window::RestartMintsNewCredentials);
     // libjuice requires a ufrag of at least 4 and a password of at least 22
     // characters (agent_set_local_ice_attributes), otherwise it silently
     // falls back to generated credentials.
@@ -140,7 +150,7 @@ TEST(IceRestart, RestartMintsNewCredentials) {
 }
 
 TEST(IceRestart, RestartRegathersCandidates) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling, Window::RestartRegathersCandidates);
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), 0u);
 
@@ -160,7 +170,7 @@ TEST(IceRestart, RestartRegathersCandidates) {
 }
 
 TEST(IceRestart, RestartKeepsRemoteCandidates) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling, Window::RestartKeepsRemoteCandidates);
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), 0u);
 
@@ -182,8 +192,8 @@ TEST(IceRestart, RestartKeepsRemoteCandidates) {
 TEST(IceRestart, PeerRestartIsDetectedAndFiresCallback) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    IceConfig cfg_a = make_config(Role::Controlling, kPortA);
-    IceConfig cfg_b = make_config(Role::Controlled,  kPortB);
+    IceConfig cfg_a = make_config(Role::Controlling, Window::RestartPeerDetectedA);
+    IceConfig cfg_b = make_config(Role::Controlled,  Window::RestartPeerDetectedB);
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};
@@ -220,7 +230,7 @@ TEST(IceRestart, PeerRestartIsDetectedAndFiresCallback) {
 }
 
 TEST(IceRestart, CloseResetsRestartStateAndRestoresPinnedCredentials) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling, Window::RestartCloseResets);
     // libjuice requires a ufrag of at least 4 and a password of at least 22
     // characters (agent_set_local_ice_attributes), otherwise it silently
     // falls back to generated credentials.
@@ -255,8 +265,8 @@ TEST(IceRestart, CloseResetsRestartStateAndRestoresPinnedCredentials) {
 TEST(IceRestart, TwoAgentsRestartAndReconnect) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    IceConfig cfg_a = make_config(Role::Controlling, kPortA);
-    IceConfig cfg_b = make_config(Role::Controlled,  kPortB);
+    IceConfig cfg_a = make_config(Role::Controlling, Window::RestartTwoAgentsA);
+    IceConfig cfg_b = make_config(Role::Controlled,  Window::RestartTwoAgentsB);
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

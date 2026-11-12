@@ -1225,7 +1225,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `add_subdirectory(tests)` without `enable_testing()`.  Under the
   CMake 4.0 VS generator no `CTestTestfile.cmake` is emitted at that
   level, so ctest never recursed into those directories and none of
-  their tests ever ran.  The ctest count goes from **1176 to 1396**.
+  their tests ever ran.  The ctest count goes from **1176 to 1388**; the
+  seven tests added by the C3 work bring it to **1396**.
 
   The one test that failed once it finally ran
   (`SessionModel.MidIsNeverReused`) asserted that removing an unknown

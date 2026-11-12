@@ -15,6 +15,7 @@
 add_library(nimrtc_srtp STATIC
     src/srtp.cpp
     src/libsrtp_backend.cpp
+    src/srtp_plugin.cpp
     )
 
 nimrtc_apply_options(nimrtc_srtp)
@@ -27,12 +28,13 @@ if(TARGET nimrtc::vendor::libsrtp)
             nimrtc::plugins
         PRIVATE
             nimrtc::vendor::libsrtp
-        )
+    )
     target_compile_definitions(nimrtc_srtp PRIVATE NIMRTC_USE_LIBSRTP=1)
 else()
     target_link_libraries(nimrtc_srtp
         PUBLIC
             nimrtc::core
+            nimrtc::plugins
         )
     message(STATUS "SRTP: libsrtp not available, using stub mode")
 endif()

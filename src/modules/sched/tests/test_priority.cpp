@@ -69,14 +69,14 @@ DrainResult drain_all_record_ids(Scheduler& sch) {
     DrainResult r{};
     int n;
     do {
-        n = sch.select_next_packet(128, [&](sched::Priority /*p*/,
-                                            core::ByteSpan data) -> bool {
+        n = sch.select_next_packet(128, plugins::DrainCallback(
+            [&](sched::Priority /*p*/, core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 // Encode stream_id in first byte for tracking.
                 r.stream_id_order.push_back(static_cast<std::uint32_t>(data[0]));
             }
             return true;
-        });
+        }));
         r.total += n;
     } while (n > 0);
     return r;
@@ -148,20 +148,22 @@ TEST(StreamPriority, DrainLimitRespectedAcrossBuckets) {
 
     // Drain only 2 — must be from High bucket.
     std::vector<std::uint32_t> first_two;
-    sch.select_next_packet(2, [&](sched::Priority, core::ByteSpan d) -> bool {
+    sch.select_next_packet(2, plugins::DrainCallback(
+        [&](sched::Priority, core::ByteSpan d) -> bool {
         if (!d.empty()) first_two.push_back(static_cast<std::uint32_t>(d[0]));
         return true;
-    });
+    }));
     ASSERT_EQ(first_two.size(), 2u);
     EXPECT_EQ(first_two[0], kStreamHighA & 0xFF);
     EXPECT_EQ(first_two[1], kStreamHighB & 0xFF);
 
     // Next drain(2) should get the last High + first Low.
     std::vector<std::uint32_t> next_two;
-    sch.select_next_packet(2, [&](sched::Priority, core::ByteSpan d) -> bool {
+    sch.select_next_packet(2, plugins::DrainCallback(
+        [&](sched::Priority, core::ByteSpan d) -> bool {
         if (!d.empty()) next_two.push_back(static_cast<std::uint32_t>(d[0]));
         return true;
-    });
+    }));
     ASSERT_EQ(next_two.size(), 2u);
     EXPECT_EQ(next_two[0], kStreamHighA & 0xFF);
     EXPECT_EQ(next_two[1], kStreamLowA & 0xFF);
@@ -357,9 +359,12 @@ TEST(StreamPriority, MultipleStreamsIndependentPriorities) {
 
 TEST(StreamPriority, EmptyDrainReturnsZero) {
     Scheduler sch{};
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
-    EXPECT_EQ(sch.select_next_packet(0, nullptr), 0);
-    EXPECT_EQ(sch.select_next_packet(-1, nullptr), 0);
+    // `nullptr` is ambiguous between the two `select_next_packet()`
+    // overloads (per-packet vs stream-aware callback), so name the
+    // per-packet one explicitly.
+    EXPECT_EQ(sch.select_next_packet(10, plugins::DrainCallback{}), 0);
+    EXPECT_EQ(sch.select_next_packet(0,  plugins::DrainCallback{}), 0);
+    EXPECT_EQ(sch.select_next_packet(-1, plugins::DrainCallback{}), 0);
 }
 
 TEST(StreamPriority, ResetClearsStreamBucketsAndMap) {
@@ -372,15 +377,19 @@ TEST(StreamPriority, ResetClearsStreamBucketsAndMap) {
 
     sch.reset();
 
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
+    EXPECT_EQ(sch.select_next_packet(10, plugins::DrainCallback{}), 0);
     EXPECT_EQ(sch.get_stream_priority(kStreamHighA), StreamPriority::Normal);
     EXPECT_EQ(sch.get_stream_priority(kStreamLowA),  StreamPriority::Normal);
 }
 
 TEST(StreamPriority, StreamPriorityHelpers) {
-    EXPECT_EQ(stream_priority_rank(StreamPriority::High),   0u);
-    EXPECT_EQ(stream_priority_rank(StreamPriority::Normal), 1u);
-    EXPECT_EQ(stream_priority_rank(StreamPriority::Low),    2u);
+    // `nimrtc::sched::stream_priority_rank` is called qualified: the
+    // `StreamPriority` type is an alias of `plugins::StreamPriority`, so an
+    // unqualified call would also find `plugins::stream_priority_rank`
+    // through ADL and the two candidates would be ambiguous.
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::High),   0u);
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::Normal), 1u);
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::Low),    2u);
 }
 
 TEST(StreamPriority, EnqueueForStreamCopiesData) {
@@ -392,10 +401,11 @@ TEST(StreamPriority, EnqueueForStreamCopiesData) {
     sch.enqueue_for_stream(7u, nimrtc::core::ByteSpan{kPayload}, dst);
 
     std::vector<std::uint8_t> out;
-    sch.select_next_packet(1, [&](sched::Priority, core::ByteSpan d) -> bool {
+    sch.select_next_packet(1, plugins::DrainCallback(
+        [&](sched::Priority, core::ByteSpan d) -> bool {
         out.assign(d.data(), d.data() + d.size());
         return true;
-    });
+    }));
 
     ASSERT_EQ(out.size(), kPayload.size());
     EXPECT_EQ(out[0], kPayload[0]);  // bucket marker: High=0

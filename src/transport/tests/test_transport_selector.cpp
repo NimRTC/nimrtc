@@ -320,5 +320,163 @@ TEST(CapabilitySelectorConfig, StackConfigRawIdSetForHighFreqControl) {
     EXPECT_EQ(captured_configs[1].raw_id, "arq");
 }
 
+// =========================================================================
+// The engine's StackConfig reaches the factory (v1.2.0, B9 / Q4)
+// =========================================================================
+//
+// Before v1.2.0 the Selector always used a hard-coded default
+// `StackConfig`, so the engine's `EngineConfig` (DTLS backend, SCTP
+// socket, raw-UDP factory) never reached the stack factory.  The
+// Selector now carries the per-stack backend selection.
+TEST(CapabilitySelectorConfig, EngineStackConfigReachesTheFactory) {
+    std::vector<StackConfig> captured;
+    static const MockStackFactory s_mock_factory;
+
+    StackConfig engine_cfg;
+    engine_cfg.ice_id  = "my-ice";
+    engine_cfg.dtls_id = "my-dtls";
+    engine_cfg.sctp_id = "my-sctp";
+    engine_cfg.rtp_id  = "my-rtp";
+    engine_cfg.raw_id  = "my-raw";
+
+    CapabilitySelector selector(
+        [](std::string_view) -> const ITransportStackFactory* {
+            return &s_mock_factory;
+        },
+        [&](const ITransportStackFactory*,
+            const StackConfig& cfg) -> std::unique_ptr<ITransportStack> {
+            captured.push_back(cfg);
+            return nullptr;
+        },
+        engine_cfg);
+
+    TransportRequirements req;   // browser interop → media only
+    selector.select(req);
+
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].ice_id,  "my-ice");
+    EXPECT_EQ(captured[0].dtls_id, "my-dtls");
+    EXPECT_EQ(captured[0].sctp_id, "my-sctp");
+    EXPECT_EQ(captured[0].rtp_id,  "my-rtp");
+    EXPECT_EQ(captured[0].raw_id,  "my-raw");
+}
+
+// =========================================================================
+// An explicit raw-UDP id is honoured for the ARQ control plane
+// =========================================================================
+TEST(CapabilitySelectorConfig, ExplicitRawIdIsUsedForTheArqControlPlane) {
+    std::vector<StackConfig> captured;
+    static const MockStackFactory s_mock_factory;
+
+    StackConfig engine_cfg;
+    engine_cfg.raw_id = "my-arq";
+
+    CapabilitySelector selector(
+        [](std::string_view) -> const ITransportStackFactory* {
+            return &s_mock_factory;
+        },
+        [&](const ITransportStackFactory*,
+            const StackConfig& cfg) -> std::unique_ptr<ITransportStack> {
+            captured.push_back(cfg);
+            return nullptr;
+        },
+        engine_cfg);
+
+    TransportRequirements req;
+    req.needs_browser_interop   = true;
+    req.needs_high_freq_control = true;
+    selector.select(req);
+
+    ASSERT_EQ(captured.size(), 2u);
+    EXPECT_EQ(captured[1].raw_id, "my-arq")
+        << "the control plane must use the engine's raw-UDP factory id, "
+           "not the hard-coded \"arq\"";
+}
+
+// =========================================================================
+// The media-stack override wins over the §5.3 rule
+// =========================================================================
+TEST(CapabilitySelectorOverride, MediaOverrideBeatsTheRule) {
+    CapabilitySelector s;
+    s.set_media_factory_override("my-stack");
+
+    TransportRequirements req;   // browser interop → "webrtc-classic"
+    auto session = s.select(req);
+
+    EXPECT_EQ(session.media_stack_id, "my-stack");
+    EXPECT_EQ(s.last_trace().media_factory_id, "my-stack");
+}
+
+TEST(CapabilitySelectorOverride, MediaOverrideDoesNotAffectTheControlPlane) {
+    CapabilitySelector s;
+    s.set_media_factory_override("my-stack");
+
+    TransportRequirements req;
+    req.needs_browser_interop   = true;
+    req.needs_high_freq_control = true;
+    auto session = s.select(req);
+
+    EXPECT_EQ(session.media_stack_id, "my-stack");
+    EXPECT_EQ(session.control_stack_id, "raw-udp-arq")
+        << "the control plane is a property of the strategy, not of the "
+           "media backend";
+}
+
+TEST(CapabilitySelectorOverride, EmptyOverrideLeavesTheRuleInCharge) {
+    CapabilitySelector s;
+
+    TransportRequirements req;
+    auto session = s.select(req);
+
+    EXPECT_EQ(session.media_stack_id, "webrtc-classic");
+}
+
+// =========================================================================
+// instantiate() builds from explicit ids (no rule resolution)
+// =========================================================================
+TEST(CapabilitySelectorInstantiate, ExplicitIdsAreUsedVerbatim) {
+    std::vector<std::string> looked_up;
+    static const MockStackFactory s_mock_factory;
+
+    CapabilitySelector selector(
+        [&](std::string_view id) -> const ITransportStackFactory* {
+            looked_up.push_back(std::string{id});
+            return &s_mock_factory;
+        },
+        [](const ITransportStackFactory*,
+           const StackConfig&) -> std::unique_ptr<ITransportStack> {
+            return nullptr;
+        });
+
+    auto session = selector.instantiate("alpha", "beta");
+
+    EXPECT_EQ(session.media_stack_id, "alpha");
+    EXPECT_EQ(session.control_stack_id, "beta");
+    ASSERT_EQ(looked_up.size(), 2u);
+    EXPECT_EQ(looked_up[0], "alpha");
+    EXPECT_EQ(looked_up[1], "beta");
+}
+
+TEST(CapabilitySelectorInstantiate, EmptyControlIdMeansNoControlStack) {
+    std::vector<std::string> looked_up;
+    static const MockStackFactory s_mock_factory;
+
+    CapabilitySelector selector(
+        [&](std::string_view id) -> const ITransportStackFactory* {
+            looked_up.push_back(std::string{id});
+            return &s_mock_factory;
+        },
+        [](const ITransportStackFactory*,
+           const StackConfig&) -> std::unique_ptr<ITransportStack> {
+            return nullptr;
+        });
+
+    auto session = selector.instantiate("alpha", "");
+
+    EXPECT_EQ(session.control_stack_id, "");
+    EXPECT_EQ(session.control_stack, nullptr);
+    ASSERT_EQ(looked_up.size(), 1u);
+}
+
 }  // namespace
 }  // namespace nimrtc

@@ -54,6 +54,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <nimrtc/transport/transport_stack.hpp>
 
@@ -103,19 +104,40 @@ public:
 // CapabilitySelector — default ITransportSelector (Slice 7)
 // ---------------------------------------------------------------------------
 //
-// Implements the four-rule priority list from §5.3. The body currently
-// returns TransportSession values with empty `unique_ptr<ITransportStack>`
-// because default StackFactory implementations are Slice 7.5 work.
-// Test code injects MockStackFactory through the resolver below so the
-// rule engine itself is testable today.
+// Implements the four-rule priority list from §5.3.
+//
+// The rule engine resolves a factory id for the media plane and (when the
+// requirements ask for it) for the control plane.  Whether a *stack* is
+// actually constructed depends on the resolver hooks:
+//
+//   - "rule-only" mode (default ctor): the ids are resolved and recorded
+//     in `last_trace()`, but no stack is built.  The Slice-7 unit tests
+//     use this mode.
+//   - "resolving" mode (the engine): the resolver hooks are bound to
+//     `core::PluginRegistry`, so the returned `TransportSession` carries
+//     live `ITransportStack` instances.
 // ---------------------------------------------------------------------------
 class NIMRTC_API_STABLE CapabilitySelector final : public ITransportSelector {
 public:
+    /** Factory lookup hook — maps a factory id to a borrowed
+     *  `ITransportStackFactory*` (or nullptr when the id is unknown). */
+    using StackFactoryResolver =
+        std::function<const ITransportStackFactory*(std::string_view id)>;
+    /** Stack construction hook — invokes the factory's `create(cfg)`. */
+    using StackCreateResolver =
+        std::function<std::unique_ptr<ITransportStack>(
+            const ITransportStackFactory*, const StackConfig&)>;
+
+    /** Default-constructed selector — "rule-only" mode.
+     *
+     *  No resolver hooks are installed, so `select()` resolves the §5.3
+     *  factory ids but constructs no stacks (the returned session carries
+     *  the id strings and null stack pointers).  This is the mode the
+     *  Slice-7 unit tests use.
+     */
     CapabilitySelector() = default;
 
-    /** Selector with explicit resolver hooks. Production code uses the
-     *  default constructor (registry-driven lookup) but tests inject
-     *  mocks to assert the rule engine without standing up the registry.
+    /** Selector with explicit resolver hooks.
      *
      *  Resolver signatures:
      *    - `stack_factory(id)` returns a borrowed factory pointer (or
@@ -125,25 +147,68 @@ public:
      *    - `create_stack(factory, cfg)` invokes the factory's create()
      *      method and returns a unique_ptr to the resulting stack.
      *
-     *  Both resolvers default to nullptr, which makes the selector
-     *  operate in "rule-only" mode (returns empty TransportSession +
-     *  sets the id strings correctly for downstream debugging).
+     *  A null resolver makes the selector operate in "rule-only" mode
+     *  (returns an empty TransportSession + sets the id strings
+     *  correctly for downstream debugging).
      *
      *  std::function is used (not raw function pointers) so that tests
      *  can pass capturing lambdas without forcing the selector to depend
      *  on type-erased std::function in production code.
+     *
+     *  @param cfg  The per-stack backend selection handed to the create
+     *               resolver.  Before v1.2.0 the selector always used a
+     *               hard-coded default `StackConfig`, which meant the
+     *               engine's `EngineConfig` (DTLS backend, SCTP socket,
+     *               raw-UDP factory) never reached the stack factory.
+     *               The default constructor keeps the old behaviour
+     *               (default `StackConfig`); the engine passes its own.
      */
-    using StackFactoryResolver =
-        std::function<const ITransportStackFactory*(std::string_view id)>;
-    using StackCreateResolver =
-        std::function<std::unique_ptr<ITransportStack>(
-            const ITransportStackFactory*, const StackConfig&)>;
-
     CapabilitySelector(StackFactoryResolver factory_lookup,
-                       StackCreateResolver factory_create) noexcept;
+                       StackCreateResolver factory_create,
+                       const StackConfig& cfg = StackConfig{}) noexcept;
+
+    /** Set the per-stack backend selection.  Equivalent to passing it
+     *  to the three-argument constructor. */
+    void set_stack_config(const StackConfig& cfg) noexcept { stack_cfg_ = cfg; }
+
+    /** The per-stack backend selection in force. */
+    [[nodiscard]] const StackConfig& stack_config() const noexcept { return stack_cfg_; }
+
+    /** Explicit media-stack override.
+     *
+     *  When non-empty, the selector ignores the §5.3 rule's media id and
+     *  uses this one instead.  This is the engine's escape hatch for
+     *  `EngineConfig::transport_stack_name`: the user says "I want THIS
+     *  stack", the Selector says "the strategy would have chosen THAT
+     *  one".  The user's explicit choice wins.
+     *
+     *  The control stack is NOT affected — the strategy still decides
+     *  whether a separate control plane exists.
+     */
+    void set_media_factory_override(std::string id) {
+        media_override_ = std::move(id);
+    }
 
     TransportSession select(
         const TransportRequirements& requirements) const override;
+
+    /** Build a session from **explicit** factory ids.
+     *
+     *  This is the "the caller already knows which stack it wants" entry
+     *  point, and it is what `nimrtc::transport::make_transport_instance()`
+     *  delegates to.  It performs no rule resolution — the ids are taken
+     *  verbatim — but it uses the same resolver hooks and the same
+     *  `StackConfig` handling as `select()`, so there is exactly one
+     *  implementation of "turn a factory id into a stack".
+     *
+     *  @param media_factory_id   The media stack factory id.  Must be
+     *                             non-empty; an empty id yields an empty
+     *                             session (the caller reports the error).
+     *  @param control_factory_id The control stack factory id.  Empty = no
+     *                             control stack.
+     */
+    TransportSession instantiate(std::string_view media_factory_id,
+                                 std::string_view control_factory_id) const;
 
     // ---- Test-only accessors ---------------------------------------------
     //
@@ -160,6 +225,15 @@ private:
     StackFactoryResolver factory_lookup_ = nullptr;
     StackCreateResolver  factory_create_  = nullptr;
     mutable SelectionTrace last_trace_{};
+
+    /** The per-stack backend selection handed to the create resolver.
+     *  Mirrors what the engine's `EngineConfig` prescribes (ICE / DTLS /
+     *  RTP / SCTP / raw-UDP ids). */
+    StackConfig stack_cfg_{};
+
+    /** Explicit media-stack id override (see
+     *  `set_media_factory_override`).  Empty = the §5.3 rule decides. */
+    std::string media_override_;
 };
 
 } // namespace nimrtc

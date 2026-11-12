@@ -216,8 +216,33 @@ bool TokenBucket::try_consume(std::uint64_t bytes, core::TimePoint now) noexcept
     return true;
 }
 
-void TokenBucket::reset(core::TimePoint now) noexcept {
-    credit_milli_bytes_ = 0;
+void TokenBucket::refund(std::uint64_t bytes) noexcept {
+    if (bytes == 0) return;
+
+    // A bucket that is not paced never charged for the bytes in the first
+    // place (`try_consume` short-circuits on rate_bps_ == 0 and only
+    // bumps the telemetry), so there is nothing to give back.
+    if (rate_bps_ == 0) return;
+
+    constexpr std::uint64_t kMaxAffordable =
+        std::numeric_limits<std::uint64_t>::max() / 1000u;
+    if (bytes > kMaxAffordable) return;
+
+    credit_milli_bytes_ += bytes * 1000u;
+
+    // The credit may not exceed the burst ceiling: refunding must not
+    // manufacture a burst the bucket could never have held.
+    const std::uint64_t cap_milli =
+        static_cast<std::uint64_t>(effective_burst_bytes()) * 1000u;
+    if (credit_milli_bytes_ > cap_milli) {
+        credit_milli_bytes_ = cap_milli;
+    }
+
+    // The telemetry must reflect that the bytes did not go out.
+    bytes_sent_ = (bytes_sent_ > bytes) ? (bytes_sent_ - bytes) : 0;
+}
+
+void TokenBucket::reset(core::TimePoint now) noexcept {    credit_milli_bytes_ = 0;
     last_time_          = now;
     has_last_time_      = true;
     bytes_sent_         = 0;

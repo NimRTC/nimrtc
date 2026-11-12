@@ -127,6 +127,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     &nimrtc::rtp::register_default_plugins,
     &nimrtc::sched::register_default_plugins,
     &nimrtc::sdp::register_default_plugins,
+#ifdef NIMRTC_HAS_SRTP
+    // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend.
+    // Its entry point populates the registry's SRTP-backend slot
+    // (register_srtp_backend) under the id "libsrtp", so the engine can
+    // resolve the crypto backend through the seam without naming a
+    // concrete module (Layout Invariant 4).
+    &nimrtc::srtp::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_VIDEO_PIPELINE
     &nimrtc::video_pipeline::register_default_plugins,
 #endif

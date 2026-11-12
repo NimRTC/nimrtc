@@ -36,6 +36,26 @@
  *     Normal — audio, video keyframes and regular frames
  *     Low    — padding, padding RTCP
  *
+ * ## Flow control: both families share one budget
+ *
+ *   The S-family is **not** a bypass of the congestion control.  The
+ *   packets it emits are charged to the **same** session send credit
+ *   (the BWE-derived token bucket) and to the **same** per-class pacing
+ *   buckets as the P-family packets, and the two families share **one**
+ *   credit clock: the elapsed wall-clock time between two grants is
+ *   credited once, no matter which family asked for it.
+ *
+ *   Two independent pools would double the effective send rate, so a
+ *   session that drains both families would put twice as many bytes on
+ *   the wire as the bandwidth estimate allows.  (This is exactly the bug
+ *   the architecture remediation plan lists as A9.)
+ *
+ *   The paced class of a stream is chosen with `set_stream_paced_class()`
+ *   and defaults to `PacedClass::kData` — the conservative choice, because
+ *   a stream whose traffic class is unknown must not consume a budget it
+ *   does not own.  Each class owns its own FIFO inside a bucket, so a
+ *   class whose budget is exhausted does not starve the other classes.
+ *
  * ## Scope note (DC-2 under the default `web_transport` backend)
  *
  *   The DC-2 guarantee is **intra-scheduler ordering only**: it orders
@@ -56,11 +76,14 @@
  *   No shipped backend puts the two planes on one connection: the legacy
  *   `"sctp"` backend was retired in v1.2.0 (WP-A / DEC-4 = A1) and is now a
  *   test-only in-process usrsctp loopback socket that never reaches a peer,
- *   so it cannot provide wire-level cross-plane priority either.  Today the
- *   honest statement is: **the scheduler arbitrates within a connection, and
- *   the data plane does not use it at all** — the per-stream API has no
- *   caller in the data path (see `docs/plan/datachannel-capability-plan.md`
- *   WP-E2).
+ *   so it cannot provide wire-level cross-plane priority either.
+ *
+ *   The honest statement, then: **the scheduler arbitrates within a
+ *   connection**.  The S-family is *available and flow-controlled* — it is
+ *   the per-stream priority landing point for the multi-stream (M4) case,
+ *   where a screen stream and a camera stream share one connection and
+ *   must be ordered against each other.  The current data plane does not
+ *   consume it, because the data plane rides its own connection.
  *
  * ## P-family: per-packet priority (§8.3)
  *
@@ -103,9 +126,11 @@
 // Re-export plugin types under nimrtc::sched:: for backwards-compatibility.
 namespace nimrtc::sched {
     using NIMRTC_API_STABLE Priority           = plugins::Priority;
+    using NIMRTC_API_STABLE PacedClass         = plugins::PacedClass;
     using NIMRTC_API_STABLE SchedulerConfig    = plugins::SchedulerConfig;
     using NIMRTC_API_STABLE SchedulerStats     = plugins::SchedulerStats;
     using NIMRTC_API_STABLE DrainCallback      = plugins::DrainCallback;
+    using NIMRTC_API_STABLE StreamDrainCallback = plugins::StreamDrainCallback;
     using NIMRTC_API_STABLE IScheduler         = plugins::IScheduler;
     NIMRTC_API_STABLE constexpr std::size_t kPriorityCount = plugins::kPriorityCount;
 
@@ -135,20 +160,22 @@ namespace nimrtc::sched {
      *    Normal — audio, video keyframes, video frames
      *    Low    — padding packets
      *
-     *  Lower ordinal = higher priority (matches `plugins::Priority` convention). */
-    enum class StreamPriority : std::uint8_t {
-        High   = 0,  /**< RTX / NACK / urgent feedback — always sent first. */
-        Normal = 1,  /**< Audio / video — sent when High bucket is empty. */
-        Low    = 2,  /**< Padding — sent only when High and Normal are empty. */
-    };
+     *  Lower ordinal = higher priority (matches `plugins::Priority` convention).
+     *
+     *  @note The type now lives in `plugins::` so that the S-family seam can
+     *        be part of the public `IScheduler` interface (a third-party
+     *        scheduler must be able to implement the per-stream family).
+     *        This alias keeps `nimrtc::sched::StreamPriority` working. */
+    using NIMRTC_API_STABLE StreamPriority = plugins::StreamPriority;
 
     /** Number of per-stream priority buckets (High / Normal / Low). */
-    NIMRTC_API_STABLE constexpr std::size_t kStreamPriorityCount = 3;
+    NIMRTC_API_STABLE constexpr std::size_t kStreamPriorityCount =
+        plugins::kStreamPriorityCount;
 
     /** Convert a StreamPriority to its integer rank (0 = High, 2 = Low). */
     [[nodiscard]] NIMRTC_API_STABLE constexpr std::size_t
     stream_priority_rank(StreamPriority p) noexcept {
-        return static_cast<std::size_t>(p);
+        return plugins::stream_priority_rank(p);
     }
 
 } // namespace nimrtc::sched
@@ -217,18 +244,36 @@ public:
     // =====================================================================
     // DC-2: S-family (per-stream) priority API
     // =====================================================================
+    //
+    // These override the `plugins::IScheduler` defaults declared above; the
+    // concrete scheduler *does* implement the per-stream family.
 
     /** Set the per-stream priority for a stream.  All subsequent packets
      *  enqueued via `enqueue_for_stream()` for this `stream_id` will be
-     *  placed in the matching bucket.  Existing packets already in queues
-     *  are not moved.  Thread-safe. */
+     *  placed in the matching bucket.  Already-queued packets are moved to
+     *  the new bucket atomically.  Thread-safe. */
     void              set_stream_priority(std::uint32_t stream_id,
-                                          StreamPriority level) noexcept;
+                                          StreamPriority level) noexcept override;
 
     /** Return the current per-stream priority of a stream.  Returns Normal
      *  if the stream has not been assigned a priority yet.  Thread-safe. */
     [[nodiscard]] StreamPriority
-                    get_stream_priority(std::uint32_t stream_id) const noexcept;
+                    get_stream_priority(std::uint32_t stream_id) const noexcept override;
+
+    /** The paced traffic class of a stream's packets.
+     *
+     *  Defaults to `PacedClass::kData` — a stream whose traffic class is
+     *  unknown must not consume a budget it does not own. */
+    [[nodiscard]] plugins::PacedClass
+                    stream_paced_class(std::uint32_t stream_id) const noexcept override;
+
+    /** Assign a paced traffic class to a stream.
+     *
+     *  A multi-stream session (screen capture + camera, say) usually wants
+     *  the screen stream paced by the video class and the control/pointer
+     *  stream paced by the data class. */
+    void              set_stream_paced_class(std::uint32_t stream_id,
+                                             plugins::PacedClass cls) noexcept override;
 
     /** Zero-copy enqueue for a specific stream.
      *
@@ -239,7 +284,7 @@ public:
      *  Thread-safe. */
     void              enqueue_for_stream_owned(std::uint32_t stream_id,
                                                std::vector<std::uint8_t>&& owned_data,
-                                               plugins::Addr dst) noexcept;
+                                               plugins::Addr dst) noexcept override;
 
     /** Copying enqueue for a specific stream.
      *
@@ -249,7 +294,7 @@ public:
      *  Thread-safe. */
     void              enqueue_for_stream(std::uint32_t stream_id,
                                          core::ByteSpan data,
-                                         plugins::Addr dst) noexcept;
+                                         plugins::Addr dst) noexcept override;
 
     /** Drain up to `max_packets` from the highest non-empty stream bucket.
      *
@@ -257,9 +302,33 @@ public:
      *  non-empty queue.  Does NOT interact with the legacy 5-level
      *  per-packet priority queues (drain / drain_with).
      *
+     *  The callback receives the stream id and the stream's priority level.
+     *  Returning false stops the selection and the packet stays queued.
+     *
      *  Thread-safe. */
     int               select_next_packet(int max_packets,
+                                         plugins::StreamDrainCallback cb) noexcept override;
+
+    /** Convenience overload: the legacy `DrainCallback` shape.
+     *
+     *  The stream id and the stream's priority level are not visible
+     *  through `DrainCallback` (it only sees the per-packet `Priority` and
+     *  the byte span), so this overload reports `Priority::kBestEffort`
+     *  and lets the caller read the stream identity from the payload or
+     *  from `get_stream_priority()`.  It exists so that existing callers
+     *  keep compiling. */
+    int               select_next_packet(int max_packets,
                                          plugins::DrainCallback cb) noexcept;
+
+    /** Drain without a callback.
+     *
+     *  `nullptr` would be ambiguous between the `DrainCallback` and the
+     *  `StreamDrainCallback` overloads, so the literal `nullptr` is
+     *  matched by this overload instead.  It drains the packets and
+     *  discards them (they are accounted as sent, exactly as the
+     *  callback-less `drain()` does). */
+    int               select_next_packet(int max_packets,
+                                         std::nullptr_t) noexcept;
 
 private:
     struct Impl;
@@ -271,11 +340,34 @@ private:
     void enqueue_locked(plugins::Priority p,
                         std::vector<std::uint8_t>&& owned_data,
                         plugins::Addr dst) noexcept;
+
+    /** Put a batch of collected packets back into their queues and refund
+     *  the credit and the pacing tokens they consumed.
+     *
+     *  Called from the *veto* path of `drain_with()` / `select_next_packet()`
+     *  when the drain callback refuses a packet.  The packets from
+     *  `first_vetoed` onwards are restored — in their original order — at
+     *  the FRONT of the queue they came from, so the next drain sees them
+     *  again exactly as if they had never been collected.
+     *
+     *  @param first_vetoed  The index of the vetoed packet in the batch.
+     *  @param s_family      true for the per-stream queues, false for the
+     *                       per-packet priority queues. */
+    void undo_batch(std::size_t first_vetoed, bool s_family) noexcept;
 };
 
 // =============================================================================
 // C ABI wrapper — opaque handle + C linkage for FFI consumers
 // =============================================================================
+//
+// These five entry points are the **S-family (per-stream) interface for C
+// hosts** — the embedded / FFI consumers who cannot use the C++ API.  They
+// are not legacy leftovers: the per-stream priority family is a supported
+// capability (see the scope note at the top of this header), and these
+// wrappers are how a C host reaches it.
+//
+// `sched_select_next_packet()` reports the **real** stream id and the
+// **real** bucket priority — not placeholders.
 
 /** Opaque handle to a Scheduler instance for the C ABI. */
 struct NIMRTC_API_STABLE SchedulerHandle;

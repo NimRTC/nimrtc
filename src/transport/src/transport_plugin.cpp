@@ -27,6 +27,9 @@
 #include <nimrtc/transport/transport_selector.hpp>
 #include <nimrtc/transport/transport_stack.hpp>
 
+#include <memory>
+#include <string>
+
 namespace nimrtc::transport {
 
 namespace detail {
@@ -80,7 +83,6 @@ nimrtc::TransportSession make_transport_instance(
     const nimrtc::StackConfig& cfg) noexcept {
 
     nimrtc::TransportSession session;
-    auto& reg = core::PluginRegistry::instance();
 
     // ---- media stack ----------------------------------------------------
     if (media_factory_id.empty()) {
@@ -96,59 +98,54 @@ nimrtc::TransportSession make_transport_instance(
         return session;
     }
 
-    session.media_stack_id = std::string{media_factory_id};
-    if (const ITransportStackFactory* f = reg.get_transport_stack(media_factory_id)) {
-        session.media_stack = f->create(cfg);
-        if (!session.media_stack) {
-            core::log::Logger::instance().error(
-                std::string{"transport::make_transport_instance: media factory '"} +
-                std::string{media_factory_id} +
-                "' returned null ITransportStack (factory-side bug).");
-        } else {
-            core::log::Logger::instance().info(
-                std::string{"transport::make_transport_instance: media stack '"} +
-                std::string{media_factory_id} + "' created (id='" +
-                std::string{session.media_stack->id()} + "').");
-        }
+    // The construction itself is delegated to `CapabilitySelector::
+    // instantiate()` so there is exactly ONE implementation of "turn a
+    // factory id into a stack" in the codebase — this free function and
+    // the Selector share it.  Before v1.2.0 the two paths were
+    // independent copies, which is how they drifted.
+    CapabilitySelector selector(
+        [](std::string_view id) -> const ITransportStackFactory* {
+            return core::PluginRegistry::instance().get_transport_stack(id);
+        },
+        [](const ITransportStackFactory* factory,
+           const StackConfig& c) -> std::unique_ptr<ITransportStack> {
+            return factory ? factory->create(c) : nullptr;
+        },
+        cfg);
+
+    session = selector.instantiate(media_factory_id, control_factory_id);
+
+    // ---- Diagnostics -----------------------------------------------------
+    //
+    // The selector does the construction; these log lines report the
+    // outcome so the operator can see which stack was built and which
+    // one was missing.
+    if (session.media_stack) {
+        core::log::Logger::instance().info(
+            std::string{"transport::make_transport_instance: media stack '"} +
+            std::string{media_factory_id} + "' created (id='" +
+            std::string{session.media_stack->id()} + "').");
     } else {
         core::log::Logger::instance().error(
             std::string{"transport::make_transport_instance: media factory '"} +
             std::string{media_factory_id} +
-            "' not registered (did nimrtc::transport::register_default_plugins() "
-            "run before this call?).");
+            "' not registered or returned null (did "
+            "nimrtc::transport::register_default_plugins() run "
+            "before this call?).");
     }
 
-    // ---- control stack (optional) ---------------------------------------
-    if (control_factory_id.empty()) {
-        // Strategy without high-freq control — e.g. browser-call,
-        // sfu-relay, cross-network-peer. No control stack to build.
-        return session;
-    }
-
-    session.control_stack_id = std::string{control_factory_id};
-    if (const ITransportStackFactory* f = reg.get_transport_stack(control_factory_id)) {
-        // Control stacks use the same StackConfig — the per-stack
-        // backend fields (dtls_id, ice_id, etc.) are mostly unused by
-        // the control plane (raw-udp-arq ignores them), but raw_id
-        // carries the ARQ factory id which IS consulted by
-        // RawUdpArqStack::start().
-        session.control_stack = f->create(cfg);
-        if (!session.control_stack) {
-            core::log::Logger::instance().error(
-                std::string{"transport::make_transport_instance: control factory '"} +
-                std::string{control_factory_id} +
-                "' returned null ITransportStack (factory-side bug).");
-        } else {
+    if (!control_factory_id.empty()) {
+        if (session.control_stack) {
             core::log::Logger::instance().info(
                 std::string{"transport::make_transport_instance: control stack '"} +
                 std::string{control_factory_id} + "' created (id='" +
                 std::string{session.control_stack->id()} + "').");
+        } else {
+            core::log::Logger::instance().warn(
+                std::string{"transport::make_transport_instance: control factory '"} +
+                std::string{control_factory_id} +
+                "' not registered (control plane will be inactive for this strategy).");
         }
-    } else {
-        core::log::Logger::instance().warn(
-            std::string{"transport::make_transport_instance: control factory '"} +
-            std::string{control_factory_id} +
-            "' not registered (control plane will be inactive for this strategy).");
     }
 
     return session;

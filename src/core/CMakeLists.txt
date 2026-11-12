@@ -209,6 +209,12 @@ endif()
 if(NIMRTC_MODULE_DTMF)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_DTMF=1)
 endif()
+# v1.2.0 (remediation plan B7 / Q3): the SRTP crypto-backend module.  Its
+# registrar entry materialises only when the module is built; the engine
+# then resolves the crypto backend through the registry's SRTP slot.
+if(NIMRTC_MODULE_SRTP)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_SRTP=1)
+endif()
 nimrtc_apply_options(nimrtc_core_objects)
 nimrtc_apply_options(nimrtc_registry)
 

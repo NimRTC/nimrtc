@@ -37,6 +37,7 @@
 
 #include <nimrtc/core/error.hpp>
 #include <nimrtc/core/log.hpp>
+#include <nimrtc/core/registry.hpp>
 
 namespace nimrtc::srtp {
 
@@ -97,89 +98,88 @@ std::uint32_t to_libsrtp_profile(CryptoSuite suite) {
 
 struct SrtpSession::Impl {
     Config                                  config{};
-    srtp_t                                  session = nullptr;
-    bool                                    owns_session = true;  // we created it via srtp_create
+
+    // The pluggable crypto backend (v1.2.0, remediation plan B7 / Q3).
+    // Every protect / unprotect goes through this seam; the libsrtp
+    // specifics live inside `LibsrtpSessionBackend`.
+    std::unique_ptr<plugins::ISrtpSessionBackend> backend;
+    std::string                               backend_id;
+
     std::uint32_t                           bound_ssrc = 0;
     bool                                    is_outbound = true;
     Stats                                   stats_{};
 
     // Working buffer for protect (must hold plaintext + auth tag).
     std::vector<std::uint8_t>               work_buf_;
-
-    ~Impl() {
-        if (session) {
-            srtp_dealloc(session);
-            session = nullptr;
-        }
-    }
-
-    /** Build a libsrtp policy + add a key.  libsrtp v3 expects the master
-     *  key and master salt to be passed SEPARATELY (not concatenated). */
-    bool install(std::span<const std::uint8_t> key,
-                 std::span<const std::uint8_t> salt,
-                 std::uint32_t ssrc,
-                 bool outbound,
-                 CryptoSuite suite,
-                 srtp_sec_serv_t sec_serv) {
-        ensure_srtp_init();
-
-        if (session) {
-            srtp_dealloc(session);
-            session = nullptr;
-        }
-        owns_session = true;
-
-        srtp_policy_t policy;
-        srtp_err_status_t rc = srtp_policy_create(&policy);
-        if (rc != srtp_err_status_ok) return false;
-
-        srtp_ssrc_t ssrc_sel;
-        // For tests that pre-allocate a session before knowing SSRC, use the
-        // "any" wildcard: any-outbound for senders, any-inbound for receivers.
-        // Real production code should pass the actual SSRC via ssrc_specific.
-        if (outbound) {
-            ssrc_sel.type  = ssrc_any_outbound;
-            ssrc_sel.value = 0;
-        } else {
-            ssrc_sel.type  = ssrc_any_inbound;
-            ssrc_sel.value = 0;
-        }
-        srtp_policy_set_ssrc(policy, ssrc_sel);
-        srtp_policy_set_profile(policy, to_lib_profile(suite));
-        srtp_policy_set_sec_serv(policy, sec_serv, sec_serv);
-
-        rc = srtp_policy_add_key(policy,
-                                 key.data(),
-                                 key.size(),
-                                 salt.data(),
-                                 salt.size(),
-                                 /*mki=*/nullptr,
-                                 /*mki_len=*/0);
-        if (rc != srtp_err_status_ok) {
-            core::log::Logger::instance().error(
-                "SRTP: srtp_policy_add_key failed rc=" +
-                std::to_string(static_cast<int>(rc)));
-            srtp_policy_destroy(policy);
-            return false;
-        }
-
-        rc = srtp_create(&session, policy);
-        srtp_policy_destroy(policy);
-        if (rc != srtp_err_status_ok) {
-            session = nullptr;
-            return false;
-        }
-
-        bound_ssrc = ssrc;
-        is_outbound = outbound;
-        return true;
-    }
 };
 
-SrtpSession::SrtpSession() : impl_(std::make_unique<Impl>()) {}
+// ---------------------------------------------------------------------------
+// Backend resolution
+// ---------------------------------------------------------------------------
+//
+// The backend id is resolved through `core::PluginRegistry` — the same
+// registry every other plugin family uses.  A third-party backend
+// registers with `NIMRTC_REGISTER_SRTP_BACKEND(id, &factory)` (or
+// `PluginRegistry::register_srtp_backend(id, &factory)`) and is picked
+// up by the engine through `EngineConfig::srtp_backend_name`.
+//
+// There is NO fallback to libsrtp here: an unknown id is an error, and
+// the engine turns it into a hard `open()` failure.  Silently
+// substituting a different crypto backend would be a security bug.
+namespace {
+
+std::unique_ptr<plugins::ISrtpSessionBackend> make_backend(
+        const std::string& backend_id) {
+    if (backend_id.empty()) return nullptr;
+
+    auto& reg = nimrtc::core::PluginRegistry::instance();
+    const plugins::ISrtpBackendFactory* factory =
+        reg.get_srtp_backend(backend_id);
+    if (!factory) {
+        core::log::Logger::instance().error(
+            "SRTP: no crypto backend registered under id '" + backend_id + "'");
+        return nullptr;
+    }
+    auto backend = factory->create();
+    if (!backend) {
+        core::log::Logger::instance().error(
+            "SRTP: crypto backend '" + backend_id + "' failed to create a session");
+    }
+    return backend;
+}
+
+/** Map the module's `CryptoSuite` onto the seam's suite id.  The two
+ *  enums share their ordering (see `plugins::SrtpCryptoSuite`). */
+std::uint32_t seam_suite_id(CryptoSuite suite) noexcept {
+    return static_cast<std::uint32_t>(suite);
+}
+
+} // anonymous namespace
+
+SrtpSession::SrtpSession() : impl_(std::make_unique<Impl>()) {
+    impl_->backend_id = "libsrtp";
+    impl_->backend = make_backend(impl_->backend_id);
+}
+
+SrtpSession::SrtpSession(std::string backend_id)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->backend_id = std::move(backend_id);
+    impl_->backend = make_backend(impl_->backend_id);
+}
+
+SrtpSession::SrtpSession(std::unique_ptr<plugins::ISrtpSessionBackend> backend)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->backend = std::move(backend);
+    impl_->backend_id = impl_->backend ? "custom" : "";
+}
+
 SrtpSession::~SrtpSession() = default;
 SrtpSession::SrtpSession(SrtpSession&&) noexcept = default;
 SrtpSession& SrtpSession::operator=(SrtpSession&&) noexcept = default;
+
+std::string_view SrtpSession::backend_id() const noexcept {
+    return impl_->backend_id;
+}
 
 core::Result<void> SrtpSession::init_from_master_key(
         const Config& config,
@@ -190,19 +190,20 @@ core::Result<void> SrtpSession::init_from_master_key(
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: empty key/salt");
     }
-
-    // Default bound SSRC = 0; library treats that as outbound-any, fine
-    // for the stub usage; for test purposes we pass 0 here.
-    if (!impl_->install(master_key, master_salt,
-                        /*ssrc=*/0, /*outbound=*/true,
-                        config.suite,
-                        config.enable_encryption
-                            ? sec_serv_conf_and_auth
-                            : sec_serv_auth)) {
+    if (!impl_->backend) {
         return core::Result<void>::fail(
-            core::ErrorCode::InvalidArgument,
-            "SRTP: libsrtp install failed");
+            core::ErrorCode::InvalidState,
+            "SRTP: no crypto backend available for session");
     }
+    auto rc = impl_->backend->init_outbound(
+        master_key, master_salt, seam_suite_id(config.suite));
+    if (!rc) {
+        return core::Result<void>::fail(
+            core::ErrorCode::CryptoError,
+            "SRTP: crypto backend failed to install the outbound key (" +
+                rc.error().message() + ")");
+    }
+    impl_->is_outbound = true;
     return core::Result<void>::make_ok();
 }
 
@@ -215,32 +216,43 @@ core::Result<void> SrtpSession::init_from_master_key_inbound(
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: empty key/salt");
     }
-
-    if (!impl_->install(master_key, master_salt,
-                        /*ssrc=*/0, /*outbound=*/false,
-                        config.suite,
-                        config.enable_encryption
-                            ? sec_serv_conf_and_auth
-                            : sec_serv_auth)) {
+    if (!impl_->backend) {
         return core::Result<void>::fail(
-            core::ErrorCode::InvalidArgument,
-            "SRTP: libsrtp install (inbound) failed");
+            core::ErrorCode::InvalidState,
+            "SRTP: no crypto backend available for session");
     }
+    auto rc = impl_->backend->init_inbound(
+        master_key, master_salt, seam_suite_id(config.suite));
+    if (!rc) {
+        return core::Result<void>::fail(
+            core::ErrorCode::CryptoError,
+            "SRTP: crypto backend failed to install the inbound key (" +
+                rc.error().message() + ")");
+    }
+    impl_->is_outbound = false;
     return core::Result<void>::make_ok();
 }
 
 core::Result<void> SrtpSession::init_from_session_keys(const Config& config) {
-    // Same code path: libsrtp expects separate master key + master salt.
     impl_->config = config;
     if (config.session_key_rtp.empty() || config.session_salt_rtp.empty()) {
         return core::Result<void>::fail(
             core::ErrorCode::InvalidArgument, "SRTP: empty session keys");
     }
-    if (!impl_->install(config.session_key_rtp, config.session_salt_rtp,
-                        /*ssrc=*/0, true, config.suite,
-                        config.enable_encryption ? sec_serv_conf_and_auth : sec_serv_auth)) {
+    if (!impl_->backend) {
         return core::Result<void>::fail(
-            core::ErrorCode::InvalidArgument, "SRTP: libsrtp install failed");
+            core::ErrorCode::InvalidState,
+            "SRTP: no crypto backend available for session");
+    }
+    auto rc = impl_->backend->init_outbound_session_keys(
+        config.session_key_rtp, config.session_salt_rtp,
+        seam_suite_id(config.suite));
+    if (!rc) {
+        // A backend that cannot install session keys (the default seam
+        // implementation returns NotImplemented) is not an error — the
+        // caller falls back to the master-key path.
+        return core::Result<void>::fail(
+            rc.error().code(), rc.error().message());
     }
     return core::Result<void>::make_ok();
 }
@@ -249,37 +261,26 @@ core::Result<core::ByteSpan> SrtpSession::protect_rtp(
         core::ByteSpan header_and_plaintext,
         std::uint32_t /*ssrc*/,
         std::uint32_t /*rtp_timestamp*/) {
-    if (!impl_->session) {
+    if (!impl_->backend) {
         return core::Result<core::ByteSpan>::fail(
             core::ErrorCode::InvalidState, "SRTP: session not initialised");
     }
-    std::size_t in_len = header_and_plaintext.size();
-    std::size_t out_len = in_len + auth_tag_len_for(impl_->config.suite);
-    impl_->work_buf_.resize(out_len);
-
-    srtp_err_status_t rc = srtp_protect(impl_->session,
-                                       header_and_plaintext.data(),
-                                       in_len,
-                                       impl_->work_buf_.data(),
-                                       &out_len,
-                                       /*mki_index=*/0);
-    if (rc != srtp_err_status_ok) {
+    auto rc = impl_->backend->protect_rtp(header_and_plaintext);
+    if (!rc) {
         ++impl_->stats_.decryption_failures;
         return core::Result<core::ByteSpan>::fail(
-            core::ErrorCode::ProtocolError, "SRTP: srtp_protect failed");
+            core::ErrorCode::ProtocolError,
+            "SRTP: protect_rtp failed (" + rc.error().message() + ")");
     }
-
     ++impl_->stats_.rtp_packets_encrypted;
-    impl_->work_buf_.resize(out_len);
-    return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(impl_->work_buf_.data(), impl_->work_buf_.size()));
+    return rc;
 }
 
 core::Result<core::ByteSpan> SrtpSession::unprotect_rtp(
         core::ByteSpan srtp_packet,
         std::uint32_t* out_ssrc,
         std::uint32_t* out_timestamp) {
-    if (!impl_->session) {
+    if (!impl_->backend) {
         return core::Result<core::ByteSpan>::fail(
             core::ErrorCode::InvalidState, "SRTP: session not initialised");
     }
@@ -288,6 +289,9 @@ core::Result<core::ByteSpan> SrtpSession::unprotect_rtp(
         return core::Result<core::ByteSpan>::fail(
             core::ErrorCode::ProtocolError, "SRTP: packet too short");
     }
+    // The SSRC / timestamp read-out happens BEFORE the unprotect so the
+    // caller still sees them when the auth tag check fails (the caller
+    // uses them to demux the packet to the right session).
     if (out_ssrc) {
         const auto* d = srtp_packet.data();
         *out_ssrc = (static_cast<std::uint32_t>(d[8]) << 24) |
@@ -302,76 +306,54 @@ core::Result<core::ByteSpan> SrtpSession::unprotect_rtp(
                          (static_cast<std::uint32_t>(d[6]) << 8) |
                          static_cast<std::uint32_t>(d[7]);
     }
-    // Output buffer must be at least srtp_in_len (tags add a few bytes).
-    std::vector<std::uint8_t> out_buf(srtp_packet.size());
-    std::size_t out_len = out_buf.size();
-    srtp_err_status_t rc = srtp_unprotect(impl_->session,
-                                          srtp_packet.data(),
-                                          srtp_packet.size(),
-                                          out_buf.data(),
-                                          &out_len);
-    if (rc != srtp_err_status_ok) {
+    auto rc = impl_->backend->unprotect_rtp(srtp_packet);
+    if (!rc) {
         ++impl_->stats_.decryption_failures;
         return core::Result<core::ByteSpan>::fail(
-            core::ErrorCode::ProtocolError, "SRTP: srtp_unprotect failed");
+            core::ErrorCode::ProtocolError,
+            "SRTP: unprotect_rtp failed (" + rc.error().message() + ")");
     }
     ++impl_->stats_.rtp_packets_decrypted;
-
-    // Stash output for return (work_buf_ reused for protect — use a stack-copy).
-    static thread_local std::vector<std::uint8_t> tls_buf;
-    tls_buf.assign(out_buf.begin(), out_buf.begin() + static_cast<std::ptrdiff_t>(out_len));
-    return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(tls_buf.data(), tls_buf.size()));
+    return rc;
 }
 
 core::Result<core::ByteSpan> SrtpSession::protect_rtcp(core::ByteSpan rtcp_packet) {
-    if (!impl_->session) return core::Result<core::ByteSpan>::ok(rtcp_packet);
-    std::size_t out_len = rtcp_packet.size() + auth_tag_len_for(impl_->config.suite);
-    impl_->work_buf_.resize(out_len);
-    srtp_err_status_t rc = srtp_protect_rtcp(impl_->session,
-                                              rtcp_packet.data(),
-                                              rtcp_packet.size(),
-                                              impl_->work_buf_.data(),
-                                              &out_len,
-                                              /*mki_index=*/0);
-    if (rc != srtp_err_status_ok) {
-        return core::Result<core::ByteSpan>::fail(
-            core::ErrorCode::ProtocolError, "SRTP: protect_rtcp failed");
+    if (!impl_->backend) {
+        return core::Result<core::ByteSpan>::ok(rtcp_packet);
     }
-    impl_->work_buf_.resize(out_len);
+    auto rc = impl_->backend->protect_rtcp(rtcp_packet);
+    if (!rc) {
+        return core::Result<core::ByteSpan>::fail(
+            core::ErrorCode::ProtocolError,
+            "SRTP: protect_rtcp failed (" + rc.error().message() + ")");
+    }
     ++impl_->stats_.rtcp_packets_encrypted;
-    return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(impl_->work_buf_.data(), impl_->work_buf_.size()));
+    return rc;
 }
 
 core::Result<core::ByteSpan> SrtpSession::unprotect_rtcp(core::ByteSpan srtcp_packet) {
-    if (!impl_->session) return core::Result<core::ByteSpan>::ok(srtcp_packet);
-    std::vector<std::uint8_t> out_buf(srtcp_packet.size());
-    std::size_t out_len = out_buf.size();
-    srtp_err_status_t rc = srtp_unprotect_rtcp(impl_->session,
-                                                srtcp_packet.data(),
-                                                srtcp_packet.size(),
-                                                out_buf.data(),
-                                                &out_len);
-    if (rc != srtp_err_status_ok) {
+    if (!impl_->backend) {
+        return core::Result<core::ByteSpan>::ok(srtcp_packet);
+    }
+    auto rc = impl_->backend->unprotect_rtcp(srtcp_packet);
+    if (!rc) {
         return core::Result<core::ByteSpan>::fail(
-            core::ErrorCode::ProtocolError, "SRTP: unprotect_rtcp failed");
+            core::ErrorCode::ProtocolError,
+            "SRTP: unprotect_rtcp failed (" + rc.error().message() + ")");
     }
     ++impl_->stats_.rtcp_packets_decrypted;
-    static thread_local std::vector<std::uint8_t> tls_buf;
-    tls_buf.assign(out_buf.begin(), out_buf.begin() + static_cast<std::ptrdiff_t>(out_len));
-    return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(tls_buf.data(), tls_buf.size()));
+    return rc;
 }
 
 std::uint32_t SrtpSession::current_roc() const {
-    if (!impl_->session) return 0;
-    std::uint32_t roc = 0;
-    srtp_stream_get_roc(impl_->session, impl_->bound_ssrc, &roc);
-    return roc;
+    if (!impl_->backend) return 0;
+    return impl_->backend->current_roc();
 }
 SrtpSession::Stats SrtpSession::stats() const { return impl_->stats_; }
-void SrtpSession::reset() { impl_->stats_ = Stats{}; }
+void SrtpSession::reset() {
+    impl_->stats_ = Stats{};
+    if (impl_->backend) impl_->backend->reset();
+}
 
 // ---------------------------------------------------------------------------
 // SrtpContext::Impl
@@ -382,6 +364,11 @@ struct SrtpContext::Impl {
     std::unordered_map<std::uint32_t, std::unique_ptr<SrtpSession>> outbound_sessions_;
     std::unordered_map<std::uint32_t, std::unique_ptr<SrtpSession>> inbound_sessions_;
 
+    // The crypto-backend id every session of this context uses
+    // (v1.2.0, remediation plan B7 / Q3).  Resolved through the
+    // registry when the first session is created.
+    std::string                               backend_id = "libsrtp";
+
     // DTLS-derived keying material (master key + salt) — used to install
     // a new session per SSRC.
     std::vector<std::uint8_t>                outbound_key;   // master key for THIS side
@@ -390,16 +377,13 @@ struct SrtpContext::Impl {
     std::vector<std::uint8_t>                inbound_salt;
 
     SrtpSession* install(std::uint32_t ssrc, bool outgoing) {
-        ensure_srtp_init();
-
         // Separate the inbound and outbound slot maps.  Sharing one map
         // keyed only by SSRC is wrong: a side that has *received* an
         // RTP packet from the peer (creating an inbound session for
         // ssrc=X) and then needs to *send* its own RTP traffic on the
         // same ssrc=X would otherwise get back the inbound session,
-        // and `srtp_protect()` on an inbound-only session returns
-        // `srtp_err_status_cipher_fail` because the libsrtp stream was
-        // installed with `ssrc_any_inbound` (see Impl::install below).
+        // and the protect call on an inbound-only session fails because
+        // the crypto context was installed with the inbound polarity.
         // In a WebRTC PeerConnection this happens on both sides every
         // time the same SSRC is used for send AND receive — e.g.
         // when audio RTCP reports arrive on the same SSRC as audio
@@ -409,7 +393,7 @@ struct SrtpContext::Impl {
                               : inbound_sessions_[ssrc];
         if (slot) return slot.get();
 
-        auto sess = std::make_unique<SrtpSession>();
+        auto sess = std::make_unique<SrtpSession>(backend_id);
         srtp::Config cfg;
         cfg.suite = default_suite;
         cfg.enable_auth = true;
@@ -422,14 +406,12 @@ struct SrtpContext::Impl {
                 "SRTP context: no key set, session creation will fail");
             return nullptr;
         }
-        // CRITICAL: `init_from_master_key` ALWAYS installs an OUTBOUND
-        // libsrtp stream (ssrc_any_outbound); the inbound counterpart is
-        // `init_from_master_key_inbound` (ssrc_any_inbound).  Calling the
-        // outbound version when the caller asked for an INBOUND session
-        // produces a wildcard ssrc_any_outbound session on both sides,
-        // and `srtp_unprotect()` then refuses to match the peer's
-        // outbound-encrypted packet — `srtp_err_status_replay_fail`
-        // / `srtp_err_status_auth_fail` and the test prints
+        // CRITICAL: the OUTBOUND and INBOUND installs use *different*
+        // polarities.  Calling the outbound variant when the caller
+        // asked for an INBOUND session produces a session whose
+        // decryption direction is wrong, and the peer's
+        // outbound-encrypted packet is then rejected — the failure
+        // surfaces as an auth/replay failure and the test prints
         // "SRTP unprotect failed".  This was masked for a long time
         // because the SRTP master key was all zeros (the wolfSSL
         // KeepArrays bug we fixed earlier), which made every direction
@@ -438,7 +420,8 @@ struct SrtpContext::Impl {
             ? sess->init_from_master_key(cfg, key, salt)
             : sess->init_from_master_key_inbound(cfg, key, salt);
         if (!rc) {
-            core::log::Logger::instance().error("SRTP install failed for SSRC");
+            core::log::Logger::instance().error(
+                "SRTP install failed for SSRC: " + rc.error().message());
             (outgoing ? outbound_sessions_ : inbound_sessions_).erase(ssrc);
             return nullptr;
         }
@@ -473,6 +456,15 @@ struct SrtpContext::Impl {
 
 SrtpContext::SrtpContext() : impl_(std::make_unique<Impl>()) {}
 SrtpContext::~SrtpContext() = default;
+
+SrtpContext::SrtpContext(std::string backend_id)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->backend_id = std::move(backend_id);
+}
+
+std::string_view SrtpContext::backend_id() const noexcept {
+    return impl_->backend_id;
+}
 
 void SrtpContext::derive_keys_for_remote(
         std::span<const std::uint8_t> srtp_master_key,

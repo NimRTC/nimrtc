@@ -29,7 +29,7 @@ source. Two cells do not survive the check and are corrected in §1.2.
 | DC-B | Message boundary (message vs. stream semantics) | ✅ | ❌ byte-stream pass-through on the default backend | confirmed | ✅ `kFramed` restores the boundary (WP-B / DEC-2 = (b)); `kRaw` stays byte-stream for Chrome |
 | DC-C | Multi-channel isolation | ✅ | ❌ shared callback, cross-wired | confirmed, **worse than stated** (§1.2.2) | ✅ the session's inbound routes are multicast, and the message callback carries the channel identity (WP-C) |
 | DC-D | Partial reliability (PR-TTL / maxRetransmits) | ✅ | ❌ **implemented incorrectly**; expiry / count exhaustion kills the channel | confirmed | ✅ the TTL and the budget are per message; under `kFramed` an application-level ARQ (seq + ACK) retransmits until the budget / TTL is exhausted, and the channel stays open (WP-D / WP-D4 / DEC-3 = (a)) |
-| DC-E | Priority scheduling reaching the data channel | — | ❌ `priority` is written to DCEP and otherwise ignored | confirmed | ✅ the priority is settable and orders the data plane's own outbound queue (WP-E); it does **not** arbitrate against the media plane |
+| DC-E | Priority scheduling reaching the data channel | — | ❌ `priority` is written to DCEP and otherwise ignored | confirmed | ✅ the priority is settable and orders the data plane's own outbound queue (WP-E); it does **not** arbitrate against the media plane. **Update 2026-11-12 (A9):** the scheduler's S-family is now flow-controlled (shared BWE credit + per-class pacing) and part of the `plugins::IScheduler` interface; the data plane still does not consume it because it rides its own connection. |
 
 ### 1.1 Evidence per item
 
@@ -103,6 +103,14 @@ the public API. The scheduler's per-stream (S-family) priority API
 any data-channel code path**; `tests/test_sched_priority_dc.cpp` exercises
 the scheduler in isolation, which is why DC-2 was recorded as a v1.0.0
 DoD gate that the data plane never actually consumes.
+
+> **Update 2026-11-12 (remediation plan A9).** The S-family API itself is
+> no longer the problem — it is now flow-controlled (it draws from the
+> shared session BWE credit and the per-class pacing buckets, instead of
+> bypassing both) and it is part of the `plugins::IScheduler` interface so
+> a replacement scheduler can provide it. What remains true is the
+> *caller* fact: the data plane does not enqueue into the media scheduler,
+> because it rides a separate QUIC connection.  See §2 "WP-E follow-up".
 
 ### 1.2 Two corrections to the input table
 
@@ -447,6 +455,38 @@ for is the same.
   `docs/guides/datachannel.md`) that says explicitly what the priority
   does and does not guarantee. ✔
   (`docs/api/engine_config.md` §2.6.6 and `docs/guides/datachannel.md` §5)
+
+### WP-E follow-up — the S-family is now flow-controlled (2026-11-12)
+
+**Status update.** The architecture remediation plan (item **A9**) changed the
+DC-E row from *"the per-stream API has no caller"* to *"the per-stream API
+is available and flow-controlled; the current data plane does not consume
+it, because it rides its own connection"*.  Concretely:
+
+* The scheduler's **S-family is no longer a congestion-control bypass.**
+  Before this change `select_next_packet()` drew from neither the session
+  BWE credit nor the per-class pacing buckets, so a stream that used the
+  per-stream API could put an unbounded amount of data on the wire.  The
+  S-family now shares **one** credit pool and **one** credit clock with
+  the P-family, and it consumes the per-class pacing bucket of its
+  stream's traffic class.  (`src/modules/sched/src/scheduler.cpp`,
+  `Scheduler::select_next_packet`.)
+* The S-family is part of the **`plugins::IScheduler` interface** (with a
+  default implementation, so a third-party scheduler keeps compiling), so
+  a replacement scheduler can provide the per-stream family.  The
+  `StreamPriority` type moved to `plugins::` for the same reason; the
+  `nimrtc::sched::StreamPriority` alias keeps the old spelling working.
+* The scope note in `src/modules/sched/include/nimrtc/sched/sched.hpp` now
+  states the boundary precisely: **the scheduler arbitrates within one
+  connection**, and the S-family is the per-stream priority landing point
+  for the multi-stream case (two video streams on one connection), *not* a
+  cross-connection priority mechanism.
+
+**What did not change.** The data plane still rides its own QUIC
+connection and still orders itself with the WebTransport session's own
+priority-source list.  Cross-connection priority would require joint
+pacing above two connections and remains out of scope for a data-channel
+project — the caveat in §E2 stands.
 
 ---
 

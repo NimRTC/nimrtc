@@ -8,25 +8,29 @@
  * the rule set without running anything.
  *
  * ----------------------------------------------------------------------------
- * WHAT THIS FILE DOES NOT DO (intentional, Slice-7.5 work)
+ * WHAT THIS FILE DOES NOT DO (intentional)
  * ----------------------------------------------------------------------------
- *   - It does NOT look up real `WebRtcClassicStackFactory` /
- *     `RawUdpArqStackFactory` instances. Those land in Slice 7.5,
- *     which depends on Slice 4 (DTLS) / 5 (SCTP) / 6 (raw_udp) default
- *     impls being merged.
- *   - The resolver callbacks passed at construction time are the test
- *     seam. Production code passes nullptr for both and the selector
- *     returns TransportSession with `media_stack = nullptr` and the
- *     chosen id strings recorded in `last_trace_` so downstream code
- *     (or post-mortem logs) can see what would have been picked.
+ *   - It does NOT know about `core::PluginRegistry`.  The registry lookups
+ *     are injected by the caller through the two resolver hooks, so the
+ *     transport module stays independent of the plugin registry and the
+ *     rule engine remains unit-testable without standing up real
+ *     factories.
  *
- *   Once Slice 7.5 lands, the engine will pass registry-driven resolvers
- *   here. The contract change is purely additive.
+ *   - The `webrtc-quic` branch (rule 3) is still a stub — it needs the
+ *     msquic / ngtcp2 backends.  The id is recorded so the choice is
+ *     visible, but no media stack is constructed for it.
+ *
+ *   The engine (src/engine/src/engine_transport.cpp) binds the resolvers
+ *   to `core::PluginRegistry::get_transport_stack` and passes its
+ *   `EngineConfig`-derived `StackConfig`, so the Selector produces live
+ *   `ITransportStack` instances in production.
  * ----------------------------------------------------------------------------
  */
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/transport/transport_selector.hpp>
 #include <nimrtc/transport/transport_stack.hpp>
+
+#include <utility>
 
 namespace nimrtc {
 
@@ -61,9 +65,11 @@ void TransportSession::close() noexcept {
 // CapabilitySelector
 // -----------------------------------------------------------------------------
 CapabilitySelector::CapabilitySelector(StackFactoryResolver factory_lookup,
-                                       StackCreateResolver factory_create) noexcept
-    : factory_lookup_(factory_lookup),
-      factory_create_(factory_create) {}
+                                       StackCreateResolver factory_create,
+                                       const StackConfig& cfg) noexcept
+    : factory_lookup_(std::move(factory_lookup)),
+      factory_create_(std::move(factory_create)),
+      stack_cfg_(cfg) {}
 
 // -----------------------------------------------------------------------------
 // §5.3 SELECTION RULE TABLE
@@ -114,107 +120,107 @@ static void set_trace(CapabilitySelector::SelectionTrace& trace,
 TransportSession CapabilitySelector::select(
     const TransportRequirements& req) const {
 
-    TransportSession session;
+    // ---------------------------------------------------------------------
+    // Rule resolution.
+    //
+    // The four §5.3 rules are enumerated in the comments below in the
+    // same order as the doc, so a reviewer can verify the rule set
+    // without running anything.  Each rule decides exactly two ids:
+    // the media factory id and the control factory id.
+    // ---------------------------------------------------------------------
+    std::string media_id;
+    std::string control_id;
 
-    // Default stack config: bind ICE/DTLS/RTP/SCTP to whatever the
-    // profile / env vars say. The stack factory will read this when
-    // it builds its concrete plugins.
-    StackConfig cfg;
-    // (Future: cfg.ice_id / dtls_id / sctp_id / rtp_id populated from
-    // the Profile's `transport.media` section. Slice 7 leaves them at
-    // their defaults; the JSON parsing layer lands with the engine.)
-
-    // ------- Rule 1 -----------------------------------------------------
     if (req.needs_browser_interop) {
         // Rule 1 — media_stack = webrtc-classic
-        set_trace(last_trace_, "webrtc-classic",
-                  req.needs_high_freq_control ? "raw-udp-arq" : "");
-        session.media_stack_id   = "webrtc-classic";
-        session.control_stack_id = req.needs_high_freq_control
-                                       ? "raw-udp-arq" : "";
-
-        const ITransportStackFactory* factory =
-            factory_lookup_ ? factory_lookup_("webrtc-classic") : nullptr;
-        session.media_stack =
-            try_create_stack(factory, factory_create_, cfg);
-
-        if (req.needs_high_freq_control) {
-            cfg.raw_id = "arq";
-            const ITransportStackFactory* ctrl_factory =
-                factory_lookup_ ? factory_lookup_("raw-udp-arq") : nullptr;
-            session.control_stack =
-                try_create_stack(ctrl_factory, factory_create_, cfg);
-        }
-        return session;
-    }
-
-    // ------- Rule 2 -----------------------------------------------------
-    if (!req.needs_browser_interop && req.needs_high_freq_control) {
-        // Rule 2 — media_stack + control_stack both = raw-udp-arq
-        set_trace(last_trace_, "raw-udp-arq", "raw-udp-arq");
-        session.media_stack_id   = "raw-udp-arq";
-        session.control_stack_id = "raw-udp-arq";
-
-        cfg.raw_id = "arq";
-
-        const ITransportStackFactory* media_factory =
-            factory_lookup_ ? factory_lookup_("raw-udp-arq") : nullptr;
-        session.media_stack =
-            try_create_stack(media_factory, factory_create_, cfg);
-
-        const ITransportStackFactory* ctrl_factory =
-            factory_lookup_ ? factory_lookup_("raw-udp-arq") : nullptr;
-        session.control_stack =
-            try_create_stack(ctrl_factory, factory_create_, cfg);
-        return session;
-    }
-
-    // ------- Rule 3 -----------------------------------------------------
-    if (!req.needs_browser_interop && req.prefer_quic) {
+        //          control_stack = raw-udp-arq if needs_high_freq_control
+        media_id   = "webrtc-classic";
+        control_id = req.needs_high_freq_control ? "raw-udp-arq" : "";
+    } else if (req.needs_high_freq_control) {
+        // Rule 2 — media_stack = raw-udp-arq
+        //          control_stack = raw-udp-arq (independent stack)
+        media_id   = "raw-udp-arq";
+        control_id = "raw-udp-arq";
+    } else if (req.prefer_quic) {
         // Rule 3 — media_stack = webrtc-quic (Slice 7.x 二期)
-        set_trace(last_trace_, "webrtc-quic",
-                  req.needs_high_freq_control ? "raw-udp-arq" : "");
-        session.media_stack_id   = "webrtc-quic";
-        session.control_stack_id = req.needs_high_freq_control
-                                       ? "raw-udp-arq" : "";
-
-        // TODO (Slice 7.x 二期): wire msquic / ngtcp2 + a real
-        // WebRtcQuicStackFactory. Until then this branch logs and
-        // returns an empty media_stack so the rule selection is still
-        // visible in `last_trace_`.
+        //          control_stack = per needs_high_freq_control
+        //
+        // The QUIC factory does not exist yet, so the media stack stays
+        // null.  The id is still recorded so the choice is visible in
+        // the trace and in the engine's accessors.
+        media_id   = "webrtc-quic";
+        control_id = req.needs_high_freq_control ? "raw-udp-arq" : "";
         NIMRTC_LOG_WARN("transport: webrtc-quic factory not yet "
                         "implemented (Slice 7.x 二期); media_stack is null");
-        if (req.needs_high_freq_control) {
-            cfg.raw_id = "arq";
-            const ITransportStackFactory* ctrl_factory =
-                factory_lookup_ ? factory_lookup_("raw-udp-arq") : nullptr;
-            session.control_stack =
-                try_create_stack(ctrl_factory, factory_create_, cfg);
-        }
-        return session;
+    } else {
+        // Rule 4 — default: media_stack = webrtc-classic
+        //          control_stack = per needs_high_freq_control
+        media_id   = "webrtc-classic";
+        control_id = req.needs_high_freq_control ? "raw-udp-arq" : "";
     }
 
-    // ------- Rule 4 -----------------------------------------------------
-    // Default: media_stack = webrtc-classic; control per
-    // needs_high_freq_control.
-    set_trace(last_trace_, "webrtc-classic",
-              req.needs_high_freq_control ? "raw-udp-arq" : "");
-    session.media_stack_id   = "webrtc-classic";
-    session.control_stack_id = req.needs_high_freq_control
-                                   ? "raw-udp-arq" : "";
+    // ---- Explicit user override (EngineConfig::transport_stack_name) ----
+    //
+    // The user's choice wins over the rule's media id.  The control
+    // plane is NOT affected: whether a separate control stack exists is
+    // a property of the strategy, not of the media backend.
+    if (!media_override_.empty()) {
+        media_id = media_override_;
+    }
 
-    const ITransportStackFactory* factory =
-        factory_lookup_ ? factory_lookup_("webrtc-classic") : nullptr;
-    session.media_stack =
-        try_create_stack(factory, factory_create_, cfg);
+    set_trace(last_trace_, media_id, control_id);
 
-    if (req.needs_high_freq_control) {
-        cfg.raw_id = "arq";
+    return instantiate(media_id, control_id);
+}
+
+TransportSession CapabilitySelector::instantiate(
+    std::string_view media_factory_id,
+    std::string_view control_factory_id) const {
+
+    TransportSession session;
+
+    // The per-stack backend selection.  The engine injects its own
+    // (ICE / DTLS / RTP / SCTP / raw-UDP ids from `EngineConfig`); the
+    // default constructor leaves the struct's defaults in place.
+    StackConfig cfg = stack_cfg_;
+
+    // The ARQ control plane needs a raw-UDP factory id.  The engine may
+    // name one explicitly (`EngineConfig::raw_udp_name`); when it does
+    // not, the in-tree default ("arq") is used — that is the id the
+    // `raw_udp` module registers.
+    const std::string arq_raw_id = cfg.raw_id.empty() ? std::string{"arq"}
+                                                      : cfg.raw_id;
+
+    session.media_stack_id   = std::string{media_factory_id};
+    session.control_stack_id = std::string{control_factory_id};
+
+    // ---- Media stack ----------------------------------------------------
+    //
+    // An ARQ media stack (Rule 2) needs the raw-UDP factory; a
+    // webrtc-classic media stack does not.
+    if (media_factory_id == "raw-udp-arq") {
+        cfg.raw_id = arq_raw_id;
+    }
+    {
+        const ITransportStackFactory* factory =
+            factory_lookup_ ? factory_lookup_(media_factory_id) : nullptr;
+        session.media_stack =
+            try_create_stack(factory, factory_create_, cfg);
+    }
+
+    // ---- Control stack (optional) ---------------------------------------
+    //
+    // The control plane is always ARQ, so it always gets the raw-UDP
+    // factory id.
+    if (!control_factory_id.empty()) {
+        StackConfig ccfg = cfg;
+        ccfg.raw_id = arq_raw_id;
         const ITransportStackFactory* ctrl_factory =
-            factory_lookup_ ? factory_lookup_("raw-udp-arq") : nullptr;
+            factory_lookup_ ? factory_lookup_(control_factory_id) : nullptr;
         session.control_stack =
-            try_create_stack(ctrl_factory, factory_create_, cfg);
+            try_create_stack(ctrl_factory, factory_create_, ccfg);
     }
+
     return session;
 }
 

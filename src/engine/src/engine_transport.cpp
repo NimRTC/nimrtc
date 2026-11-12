@@ -260,6 +260,15 @@ void NimRTCEngine::shutdown_bwe_scheduler() noexcept {
 //
 // On success, the resolved pair is stored in `impl_` and surfaced
 // through the `transport_strategy_session()` accessor.
+//
+// v1.2.0 (remediation plan B9 / Q4): the Selector is no longer used in
+// "rule-only" mode.  The engine binds the Selector's resolver hooks to
+// `core::PluginRegistry::get_transport_stack(...)`, so `select()`
+// returns a session with **live** `ITransportStack` instances, and the
+// per-stack backend selection comes from the engine's `EngineConfig`
+// (ICE / DTLS / SCTP / raw-UDP ids).  The Selector's rule engine is now
+// the single source of truth for *which* stacks are built, instead of the
+// engine recording the ids and then building the stacks by hand.
 // ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_transport_strategy() noexcept {
     {
@@ -284,90 +293,133 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // well-known reserved name documented in the public EngineConfig
         // header (see engine.hpp).
         // ==================================================================
-        if (config_.transport_strategy_name == "shell") {
-            impl_->resolved_strategy_name     = "shell";
-            impl_->resolved_media_factory_id  = "default";
-            impl_->resolved_control_factory_id = "";     // no control plane
-            core::log::Logger::instance().info(
-                "engine: transport strategy 'shell' — using Slice 8 "
-                "shell stack factory (id=\"default\"); ICE/DTLS/SRTP "
-                "are inactive by design");
-            return 0;
-        }
+        const bool is_shell = (config_.transport_strategy_name == "shell");
 
-        // Resolve the strategy name.  `strategy_by_name("")` returns the
-        // browser-call default, so empty `cfg.transport_strategy_name`
-        // is handled silently.
-        std::string_view resolved_name;
-        try {
-            // requirements_from_profile_input() throws on unknown names.
-            // The base call below has no per-instance overrides — it
-            // returns the strategy's canonical TransportRequirements.
-            ProfileTransportInput in;
-            in.strategy = config_.transport_strategy_name;
-            (void)requirements_from_profile_input(in);
-            resolved_name = config_.transport_strategy_name.empty()
-                ? std::string_view{"browser-call"}
-                : config_.transport_strategy_name;
-        } catch (const std::invalid_argument& e) {
-            impl_->last_open_rc = core::kEngineInvalidParam;
-            const std::string msg = std::string{"transport_strategy_name: "} + e.what();
-            core::log::Logger::instance().error(msg);
-            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
-            return core::kEngineInvalidParam;
+        // ---- The strategy name → TransportRequirements ------------------
+        std::string resolved_name;
+        TransportRequirements req;
+        if (is_shell) {
+            // The shell stack has no control plane, so the browser-call
+            // requirement shape (media only) is the right input.
+            resolved_name = "shell";
+            req = kStrategyBrowserCall;
+        } else {
+            try {
+                // requirements_from_profile_input() throws on unknown names.
+                // The base call below has no per-instance overrides — it
+                // returns the strategy's canonical TransportRequirements.
+                ProfileTransportInput in;
+                in.strategy = config_.transport_strategy_name;
+                req = requirements_from_profile_input(in);
+                resolved_name = config_.transport_strategy_name.empty()
+                    ? std::string_view{"browser-call"}
+                    : config_.transport_strategy_name;
+            } catch (const std::invalid_argument& e) {
+                impl_->last_open_rc = core::kEngineInvalidParam;
+                const std::string msg = std::string{"transport_strategy_name: "} + e.what();
+                core::log::Logger::instance().error(msg);
+                if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+                return core::kEngineInvalidParam;
+            }
         }
         impl_->resolved_strategy_name = resolved_name;
 
-        // Apply the Selector.  We construct a default CapabilitySelector
-        // (no resolver hooks), which in "rule-only mode" returns empty
-        // stacks but records the chosen factory ids in `last_trace()`.
-        // Those ids are the §5.3-rule-derived factory names — exactly
-        // what the engine's accessors need to expose.
-        CapabilitySelector selector;
-        TransportRequirements req;
-        try {
-            req = requirements_from_profile_input(
-                ProfileTransportInput{resolved_name});
-        } catch (const std::invalid_argument&) {
-            // Unreachable — we just validated the name above.  Keep the
-            // catch as a defensive belt-and-braces; if it ever fires
-            // it indicates a logic bug, not a config error.
-            impl_->last_open_rc = core::kEngineInternal;
-            return core::kEngineInternal;
+        // ---- The per-stack backend selection (from EngineConfig) --------
+        //
+        // Before v1.2.0 this lived in `init_transport_session()` and only
+        // ever reached the stack factory from there; the Selector itself
+        // always used a hard-coded default `StackConfig`, so the
+        // engine's DTLS / SCTP / raw-UDP choices never travelled with the
+        // Selector's decision.  Now the same `StackConfig` is handed to
+        // the Selector and forwarded to the factory's `create()`.
+        StackConfig scfg;
+        scfg.ice_id  = config_.transport_name.empty() ? std::string{"ice"}
+                                                      : config_.transport_name;
+        scfg.dtls_id = config_.dtls_name.empty() ? std::string{"wolfssl"}
+                                                  : config_.dtls_name;
+        scfg.sctp_id = config_.sctp_socket_name.empty() ? std::string{"stub"}
+                                                        : config_.sctp_socket_name;
+        // `scfg.rtp_id` keeps the struct default ("webrtc" — the id the
+        // RTP module registers).  There is deliberately no
+        // `EngineConfig::rtp_name` knob: the RTP layer is not a
+        // user-pluggable seam yet (see the remediation plan's B1 note).
+        scfg.raw_id  = config_.raw_udp_name;
+
+        // ---- Bind the Selector to the plugin registry --------------------
+        //
+        // The transport module does not depend on `core::PluginRegistry`
+        // (the transport module is a peer of core, not a consumer of it),
+        // so the lookup is injected here rather than hard-coded in the
+        // Selector.
+        CapabilitySelector selector(
+            [](std::string_view id) -> const ITransportStackFactory* {
+                return core::PluginRegistry::instance().get_transport_stack(id);
+            },
+            [](const ITransportStackFactory* factory,
+               const StackConfig& cfg) -> std::unique_ptr<ITransportStack> {
+                return factory ? factory->create(cfg) : nullptr;
+            },
+            scfg);
+
+        // ---- The user's explicit media-stack choice ----------------------
+        //
+        // `EngineConfig::transport_stack_name` wins over the §5.3 rule's
+        // media id: the user said "I want THIS stack".  The control plane
+        // is NOT affected — whether a separate control stack exists is a
+        // property of the strategy, not of the media backend.
+        if (is_shell) {
+            selector.set_media_factory_override("default");
+        } else if (!config_.transport_stack_name.empty()) {
+            selector.set_media_factory_override(config_.transport_stack_name);
         }
+
+        // ---- Apply the Selector -----------------------------------------
+        //
+        // The Selector resolves the §5.3 factory ids AND builds the
+        // stacks through the resolvers bound above, so the returned
+        // session carries live `ITransportStack` instances.
         TransportSession session = selector.select(req);
         const auto trace = selector.last_trace();
 
         // The Selector's trace carries the §5.3-rule-derived factory
         // ids.  An empty trace.media_factory_id means the Selector
-        // could not resolve a media stack (rule 3 / `webrtc-quic` is
-        // not yet implemented; the `webrtc-quic-call` strategy lands
-        // in v1.x per transport-strategies.md §6 #1).
+        // could not resolve a media stack.
         //
-        // The "shell" sentinel (no real ICE/DTLS) is handled earlier
-        // in `init_transport_strategy()` and never reaches this block.
+        // Before v1.2.0 this fell back to a hard-coded "webrtc-classic"
+        // so a mis-resolved strategy would still "work".  That was the
+        // worst kind of failure: the engine silently disagreed with the
+        // strategy the user asked for.  The remediation plan (B9 step 4)
+        // replaces it with a loud failure — the user asked for a
+        // strategy that the §5.3 rules cannot satisfy, and the engine
+        // says so instead of pretending.
         //
-        // We copy the trace strings into impl_->resolved_*_factory_id
-        // (owned `std::string` storage) because `trace` is a local that
-        // goes out of scope at the end of this block; views into it
-        // would dangle.
+        // (The "shell" sentinel never reaches this branch: it sets an
+        // explicit "default" media override, so its trace is non-empty.)
         if (trace.media_factory_id.empty()) {
-            // Fall back to the legacy v0.10.x media-stack id
-            // ("webrtc-classic") for v0.12.0 strategies.  This
-            // preserves the engine's pre-PR3 media-stack path while
-            // keeping the strategy recorded.  Slice 7.x 2nd-half work
-            // (v0.13+) will replace this with the Selector's actual
-            // choice.
-            impl_->resolved_media_factory_id = "webrtc-classic";
-        } else {
-            impl_->resolved_media_factory_id = trace.media_factory_id;
+            impl_->last_open_rc = core::kEngineInvalidParam;
+            const std::string msg =
+                std::string{"engine: transport strategy '"} +
+                impl_->resolved_strategy_name +
+                "' did not resolve a media stack (the §5.3 rule set "
+                "produced no factory id). The webrtc-quic stack "
+                "(Slice 7.x 二期) is not implemented yet.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+            return core::kEngineInvalidParam;
         }
+        impl_->resolved_media_factory_id = trace.media_factory_id;
         impl_->resolved_control_factory_id = trace.control_factory_id;
 
-        // (void)session — the rule-only Selector returns empty stacks.
-        // We log the trace instead so diagnostics still see what the
-        // Selector would have chosen in production.
-        (void)session;
+        // The Selector built the stacks; the engine owns them from here.
+        impl_->session = std::move(session);
+
+        if (is_shell) {
+            core::log::Logger::instance().info(
+                "engine: transport strategy 'shell' — using Slice 8 "
+                "shell stack factory (id=\"default\"); ICE/DTLS/SRTP "
+                "are inactive by design");
+        }
+
         core::log::Logger::instance().info(
             std::string{"transport: strategy '"} +
             impl_->resolved_strategy_name +
@@ -381,20 +433,28 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 
 
 // ---------------------------------------------------------------------------
-// Phase 2 — TransportSession build + ICE pre-open configuration.
+// Phase 2 — TransportSession wiring + ICE pre-open configuration.
 //
 // Slice 7.6 PR3 replaces the pre-PR3 manual ICE + DTLS construction
 // path with a TransportSession that owns the media_stack and
-// control_stack.  The factory lookups are expressed inline here (rather
-// than via a helper in the transport module) to keep the engine's
-// link surface unchanged for existing consumers — nimrtc::transport is
-// still linked, but the PUBLIC link is sufficient; no new API
-// boundary is required.
+// control_stack.
 //
-// StackConfig defaults mirror what the pre-PR3 engine set on each
-// plugin individually.  The §5.3 factory ids (webrtc-classic /
-// raw-udp-arq) are stored in impl_->resolved_media_factory_id /
-// control_factory_id.
+// v1.2.0 (remediation plan B9 / Q4): the session is no longer built
+// here.  `init_transport_strategy()` runs the `CapabilitySelector` with
+// the registry-bound resolvers, so the Selector itself constructs the
+// stacks and hands the engine a ready `TransportSession`.  This phase
+// therefore only:
+//
+//   1. validates that the media stack exists (hard failure otherwise),
+//   2. extracts the engine's handles into it (ICE + the DTLS weak_ptr),
+//   3. applies the pre-open ICE configuration.
+//
+// Keeping the construction in the Selector is what makes the §5.3 rule
+// engine authoritative: there is exactly one place that decides which
+// stacks exist, and the engine does not second-guess it.
+//
+// The §5.3 factory ids (webrtc-classic / raw-udp-arq) are stored in
+// impl_->resolved_media_factory_id / control_factory_id.
 //
 // Rule 2 caveat (teleop-ultra-low-latency):
 //   §5.3 Rule 2 maps "no browser interop + high-freq control" to
@@ -403,20 +463,6 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 // ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_transport_session() noexcept {
     {
-        StackConfig scfg;
-        scfg.ice_id  = config_.transport_name;
-        scfg.dtls_id = config_.dtls_name.empty()
-                           ? std::string{"wolfssl"}
-                           : config_.dtls_name;
-        // The sctp_id and rtp_id use the factory defaults; leave them
-        // empty so the factory uses its own defaults.
-
-        // v1.1 Ts3: canonical entry point — replaces the hand-rolled
-        // get_transport_stack + create two-step with a single call.
-        impl_->session = nimrtc::transport::make_transport_instance(
-            impl_->resolved_media_factory_id,
-            impl_->resolved_control_factory_id, scfg);
-
         if (!impl_->session.media_stack) {
             impl_->last_open_rc = core::kEngineInternal;
             const std::string msg =
@@ -778,9 +824,39 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
 // ---------------------------------------------------------------------------
 uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
     // ---- SRTP ----------------------------------------------------------
-    impl_->srtp = std::make_unique<srtp::SrtpContext>();
+    //
+    // The crypto backend is resolved through the registry (v1.2.0,
+    // remediation plan B7 / Q3).  An unknown id is a HARD failure: the
+    // engine must not silently fall back to libsrtp — a wrong crypto
+    // backend behind the user's back is a security bug, not a
+    // convenience.
+    if (!config_.srtp_backend_name.empty()) {
+        const auto* factory = pal::resolve_srtp_backend(config_.srtp_backend_name);
+        if (!factory) {
+            impl_->last_open_rc = core::kEngineInvalidParam;
+            const std::string msg =
+                std::string{"engine: SRTP crypto backend '"} +
+                config_.srtp_backend_name +
+                "' is not registered (known backends: " +
+                [&] {
+                    std::string ids;
+                    for (const auto& id :
+                         core::PluginRegistry::instance().list_srtp_backends()) {
+                        if (!ids.empty()) ids += ", ";
+                        ids += id;
+                    }
+                    return ids.empty() ? std::string{"<none>"} : ids;
+                }() +
+                ")";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+            return core::kEngineInvalidParam;
+        }
+    }
+    impl_->srtp = std::make_unique<srtp::SrtpContext>(config_.srtp_backend_name);
     core::log::Logger::instance().debug(
-        "engine: srtp_ created, about to open dtls_");
+        "engine: srtp_ created (backend=" + config_.srtp_backend_name +
+        "), about to open dtls_");
 
     // ---- DTLS ----------------------------------------------------------
     if (auto* d = impl_->dtls.lock().get()) {

@@ -27,6 +27,10 @@ namespace {
 constexpr const char* kDeviceId   = "synthetic:0";
 constexpr const char* kDeviceName = "Synthetic display";
 
+// The pixel layout the synthetic device delivers: 8-bit BGRA, the
+// format every desktop compositor produces natively.
+constexpr const char* kPixelTag = "bgra";
+
 // The highlight box that moves across the frame.  Its size is a fraction
 // of the frame so the dirty rect is meaningful at any resolution.
 constexpr std::uint32_t kBoxDivisor = 4;
@@ -122,6 +126,21 @@ plugins::Status SyntheticCapture::open() noexcept {
         cfg_.format.height = cfg_.region.height;
     }
 
+    // The negotiated format names the pixel layout the device will
+    // deliver.  The synthetic device produces BGRA -- the format every
+    // desktop compositor hands over natively -- and the tag is what
+    // tells the consumer (the capture -> frame-stream adapter) how to
+    // read the bytes.  A caller that asked for a specific layout is
+    // told the truth instead of being silently given a different one.
+    if (cfg_.format.tag.empty()) {
+        cfg_.format.tag = kPixelTag;
+    } else if (cfg_.format.tag != kPixelTag) {
+        // The synthetic device cannot deliver another layout.
+        return plugins::kErrInvalidParam;
+    }
+    cfg_.format.zero_copy     = false;
+    cfg_.format.has_dirty_rects = true;
+
     const std::size_t bytes = static_cast<std::size_t>(cfg_.format.width) *
                               static_cast<std::size_t>(cfg_.format.height) * 4u;
     scratch_.assign(bytes, 0u);
@@ -164,7 +183,7 @@ SyntheticCapture::supported_formats(const std::string& device_id) const noexcept
         f.width  = s[0];
         f.height = s[1];
         f.fps    = 30;
-        f.tag    = "bgra";
+        f.tag    = kPixelTag;
         f.zero_copy = false;   // a synthetic device has no GPU surface
         f.has_dirty_rects = true;
         out.push_back(std::move(f));

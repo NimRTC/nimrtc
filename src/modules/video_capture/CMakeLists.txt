@@ -21,6 +21,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_video_capture STATIC
     src/synthetic_capture.cpp
+    src/capture_source_adapter.cpp
     )
 
 nimrtc_apply_options(nimrtc_video_capture)
@@ -28,6 +29,13 @@ target_link_libraries(nimrtc_video_capture
     PUBLIC
         nimrtc::core
         nimrtc::plugins
+    )
+# The capture -> VideoSourceFrame adapter needs the video_frame module's
+# layout maths.  `nimrtc::plugins` already re-exports the video_frame
+# types, so this is a link-time dependency only.
+target_link_libraries(nimrtc_video_capture
+    PUBLIC
+        nimrtc::video_frame
     )
 
 target_include_directories(nimrtc_video_capture

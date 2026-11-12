@@ -57,6 +57,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     seam — a capture device is not a frame source, so it gets its own
     slot (`register_video_capture()` / `get_video_capture()`) rather
     than being folded into the source registry.
+  - **The shared "capture → frame stream" adapter**,
+    `src/modules/video_capture/include/nimrtc/video_capture/capture_source_adapter.hpp`:
+    `CaptureSourceAdapter` presents a capture device as the plain
+    `IVideoSource` the engine's video path already consumes, so a
+    platform backend never has to learn the engine's internals and the
+    engine never learns a platform API.  The adapter opens and closes
+    the device with the source, pops one frame from the bounded queue
+    per `produce_one()`, converts the device's pixel layout into the
+    requested one (BGRA / RGBA / NV12 / I420, with a portable BT.601
+    BGRA→I420 conversion; the SIMD version is plan item C2), and
+    republishes the frame carrying the capture timestamp, the frame
+    sequence number and the dirty-rectangle metadata.
+    - The pixel layout is taken from the device's negotiated
+      `CaptureFormat::tag`, and the mapping is **strict**: an unknown
+      tag is refused with `kErrInvalidParam` rather than guessed at,
+      because guessing a pixel layout produces garbage pixels instead of
+      an error.
+    - The device is the authority on its own geometry: the adapter
+      reports the size the device actually negotiated, not the size the
+      caller asked for.  Resizing is the scaler's job (plan C1 / C2),
+      and doing it here would hide the mismatch instead of reporting it.
+    - An empty capture queue is a **no-op**, not an error: a quiet
+      device must not park the engine's tick loop.
   - **Not yet done (deliberately):** no platform backend exists yet.  The
     engine does not pump frames from a capture device on its own either —
     that is plan item A10, and until it lands the capture layer is a
@@ -1043,6 +1066,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **The synthetic capture device never named its pixel layout, so a
+  consumer could not read its frames.**  `supported_formats()` advertised
+  the `"bgra"` tag, but `open()` copied the *requested* format into
+  `config()` without setting the tag -- so the negotiated format carried
+  an empty tag, and a consumer that maps the tag onto a pixel layout (the
+  capture → frame-stream adapter) had nothing to map and had to refuse
+  the device.  `open()` now sets the tag to the layout the device
+  actually delivers, and refuses a request for a layout it cannot
+  produce with `kErrInvalidParam` instead of silently delivering a
+  different one.
 
 - **`CaptureQueue::pop()` handed out a pointer to freed memory.**  The
   popped frame was moved into a *local* `Frame`, and the queue then

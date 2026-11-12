@@ -46,6 +46,8 @@ inline bool is_wsl2() noexcept {
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/transport.hpp>
 
+#include "ice_test_ports.hpp"
+
 namespace {
 
 using nimrtc::ice::Candidate;
@@ -294,27 +296,38 @@ TEST(IceTransportLoopback, TwoAgentsConnectAndExchangeData) {
     // 50000-50099 / 50100-50199 — fine on developer workstations and on
     // Linux, but on the Windows CI runner ports in 50100-50199 return
     // WSAEACCES (errno=10013) — typically Hyper-V / Defender-Firewall
-    // reservations. 63000-63099 / 63200-63299 are well above the OS-
-    // dynamic-exclusion band (52297-59006) seen on workstations and the
-    // 60000-60999 range that the Windows CI runner keeps reserving, yet
-    // still below the uint16_t ceiling (65535).  Running both ports out
-    // of *separate* small windows also keeps the test immune to per-band
-    // reservations either side of the band might impose, and the
+    // reservations.  Later revisions moved to 63000-63099 / 63200-63299,
+    // which the Windows CI runner then reserved instead: the runner
+    // excludes *100-port blocks* against the ephemeral range and the
+    // block it picks moves between runs (63000, 63200, 63600, 64200 and
+    // 64500 were all observed being excluded).
+    //
+    // A hardcoded window therefore cannot be made safe -- it is a bet on
+    // where the runner will not reserve today.  ice_test_ports.hpp
+    // probes the machine instead and hands out a window that is actually
+    // bindable, so this test does not care where the block landed.
+    //
+    // The two agents still get *separate* windows, and the
     // SO_REUSEPORT that libjuice sets for ICE means we cannot collapse
     // to port=0 (both sockets would share).
+
+    using namespace nimrtc::ice::test_ports;
+
+    NIMRTC_ICE_TEST_SKIP_IF_SLOT_UNUSABLE(Window::IceLoopbackConnectA,
+                                          Window::IceLoopbackConnectB);
 
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    cfg_a.local_port_range_begin = 63000;
-    cfg_a.local_port_range_end   = 63099;
+    cfg_a.local_port_range_begin = window_begin(Window::IceLoopbackConnectA);
+    cfg_a.local_port_range_end   = window_end(Window::IceLoopbackConnectA);
     cfg_a.local_ufrag     = "ufragAaaaaaaaaaaaaa";   // 4..256 chars per RFC 5245
     cfg_a.local_password  = "pwdAaaaaaaaaaaaaaaaaaaa";
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.local_port_range_begin = 63200;
-    cfg_b.local_port_range_end   = 63299;
+    cfg_b.local_port_range_begin = window_begin(Window::IceLoopbackConnectB);
+    cfg_b.local_port_range_end   = window_end(Window::IceLoopbackConnectB);
     cfg_b.local_ufrag     = "ufragBbbbbbbbbbbbbbb";
     cfg_b.local_password  = "pwdBbbbbbbbbbbbbbbbbbb";
 
@@ -451,22 +464,31 @@ TEST(IceTransportLoopback, TwoAgentsWithRandomUfrag) {
     // WSL2's UDP loopback is unreliable; skip on that platform.
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping ICE test";
 
-    // Port ranges 63000-63099 / 63200-63299 chosen to avoid the WSAEACCES
-    // collision seen on the Windows CI runner with 60000-60099. Same
-    // rationale as TwoAgentsConnectAndExchangeData — keep the two agents
-    // on disjoint fixed ranges because SO_REUSEPORT in libjuice allows
+    // Port windows come from ice_test_ports.hpp, which probes the machine
+    // for a window that is actually bindable.  A hardcoded range is not
+    // safe here: the Windows CI runner excludes *100-port blocks* against
+    // the ephemeral range and the block it picks moves between runs, so
+    // any fixed window is a bet on where it will not reserve today.
+    //
+    // Same rationale as TwoAgentsConnectAndExchangeData — keep the two
+    // agents on disjoint windows because SO_REUSEPORT in libjuice allows
     // both sockets to share a port, which silently breaks loopback.
+    using namespace nimrtc::ice::test_ports;
+
+    NIMRTC_ICE_TEST_SKIP_IF_SLOT_UNUSABLE(Window::IceLoopbackRandomUfragA,
+                                          Window::IceLoopbackRandomUfragB);
+
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    cfg_a.local_port_range_begin = 63000;
-    cfg_a.local_port_range_end   = 63099;
+    cfg_a.local_port_range_begin = window_begin(Window::IceLoopbackRandomUfragA);
+    cfg_a.local_port_range_end   = window_end(Window::IceLoopbackRandomUfragA);
     // local_ufrag / local_password left EMPTY → libjuice generates random.
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.local_port_range_begin = 63200;
-    cfg_b.local_port_range_end   = 63299;
+    cfg_b.local_port_range_begin = window_begin(Window::IceLoopbackRandomUfragB);
+    cfg_b.local_port_range_end   = window_end(Window::IceLoopbackRandomUfragB);
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

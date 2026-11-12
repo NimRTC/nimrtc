@@ -242,4 +242,14 @@ void PluginRegistry::register_web_transport(
     web_transport_.register_one(id, f);
 }
 
+// v1.2.0 (architecture remediation plan B7 / Q3): the SRTP crypto
+// backend slot.  The built-in libsrtp adapter registers under
+// "libsrtp"; the engine resolves it through
+// `EngineConfig::srtp_backend_name`.
+void PluginRegistry::register_srtp_backend(
+    std::string_view id,
+    const plugins::ISrtpBackendFactory* f) {
+    srtp_backend_.register_one(id, f);
+}
+
 } // namespace nimrtc::core

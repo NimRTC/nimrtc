@@ -241,8 +241,8 @@ using namespace std::chrono_literals;
 int main() {
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 51000;
-    cfg.local_port_range_end   = 51099;
+    // local_port_range_begin / _end 保持 0：由操作系统分配临时端口，
+    // 两个 engine 各自独占一个 socket，不会互相抢端口。
     cfg.pcm_sample_rate_hz     = 48000;
     cfg.pcm_channels           = 1;
 

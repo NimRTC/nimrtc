@@ -33,6 +33,7 @@
 #include <nimrtc/plugins/dtmf.hpp>
 #include <nimrtc/plugins/net_feedback.hpp>
 #include <nimrtc/plugins/scheduler.hpp>
+#include <nimrtc/plugins/srtp_backend.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
@@ -173,6 +174,18 @@ resolve_datachannel(std::string_view id) noexcept {
 [[nodiscard]] inline const web_transport::IWebTransportSessionFactory*
 resolve_web_transport(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_web_transport(id);
+}
+
+/** Resolve an `ISrtpBackendFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Used by the engine to satisfy `EngineConfig::srtp_backend_name`
+ *  (default "libsrtp") — the pluggable SRTP crypto-backend seam
+ *  (v1.2.0, architecture remediation plan B7 / Q3).  An unknown id is a
+ *  hard failure at `open()` time; there is no fallback to libsrtp. */
+[[nodiscard]] inline const plugins::ISrtpBackendFactory*
+resolve_srtp_backend(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_srtp_backend(id);
 }
 
 } // namespace nimrtc::engine::pal

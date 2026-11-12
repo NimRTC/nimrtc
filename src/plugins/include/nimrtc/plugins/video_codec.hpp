@@ -181,7 +181,26 @@ public:
 
     // ---- Codec metadata ----------------------------------------------------
 
-    /** Codec family this implementation handles. */
+    /** Codec family this implementation handles.
+     *
+     *  This is the **authoritative** statement of the wire format.  The
+     *  engine derives the SDP `a=rtpmap:` encoding name, the RTP payload
+     *  type, and the packetizer / depacketizer selection from this
+     *  value — NOT from the plugin id.
+     *
+     *  Contract:
+     *   - A plugin that implements exactly one family MUST return that
+     *     family.  `VideoCodecKind::kUnknown` is reserved for a codec
+     *     that genuinely does not know (a composite / future-proofing
+     *     implementation).
+     *   - A composite codec (e.g. NVENC + NVDEC) reports the family of
+     *     the sub-codec it wraps.
+     *   - The engine falls back to parsing the plugin id only when this
+     *     returns `kUnknown`; when *both* are unknown the engine fails
+     *     the session with `kEngineInvalidParam` rather than
+     *     negotiating a codec family it cannot describe.
+     *
+     *  @see VideoCodecKind */
     virtual VideoCodecKind kind() const noexcept = 0;
 
     /** Human-readable codec name (e.g. "h264", "vp8"). */

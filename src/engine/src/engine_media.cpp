@@ -494,7 +494,7 @@ void NimRTCEngine::set_video_source(
 }
 
 
-void NimRTCEngine::init_video_plugins() noexcept {
+uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // PHASE 1 — create all plugins (order: sink, source, receiver, sender,
     // codec). The 5-step factory dance for each plugin is consolidated
     // into pal::make_plugin() (PAL Slice 1.5); see make_plugin.hpp.
@@ -592,6 +592,11 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // The instantiated codec is the authority on the codec family.  A
     // composite codec (NVENC + NVDEC) reports the family of the
     // sub-codecs it wraps, so this works for the hardware path too.
+    //
+    // v1.2.0 (remediation plan B6): the resolution order is now
+    // *explicit* — `kind()` first, the plugin id only as a fallback,
+    // and when neither yields a family the engine says so instead of
+    // continuing with `kUnknown`.
     if (video_codec_) {
         const plugins::VideoCodecKind kind = video_codec_->kind();
         const detail::VideoCodecFamily from_plugin =
@@ -602,6 +607,26 @@ void NimRTCEngine::init_video_plugins() noexcept {
             codec_family = from_kind;
         } else if (from_plugin != detail::VideoCodecFamily::kUnknown) {
             codec_family = from_plugin;
+        } else {
+            // Neither the codec nor its id names a family the engine
+            // knows.  Continuing would put an empty `a=rtpmap:`
+            // encoding on the wire — a malformed offer that no peer can
+            // parse.  This is a plugin-contract violation (see
+            // `IVideoCodec::kind()`), so it is reported loudly.
+            const std::string msg =
+                std::string{"engine: video codec '"} +
+                config_.video_codec_name +
+                "' does not identify a codec family: kind() returned "
+                "kUnknown and the plugin id does not name one either "
+                "(expected h264 / h265 / hevc / av1). The SDP encoding "
+                "name cannot be derived.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+            impl_->last_open_rc = core::kEngineInvalidParam;
+            // Leave the video plugins down: the engine cannot describe
+            // this codec, so advertising a video m-line would be a lie.
+            shutdown_video_plugins();
+            return core::kEngineInvalidParam;
         }
     }
 
@@ -929,6 +954,8 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 video_sink_->render(sink_frame);
             });
     }
+
+    return plugins::kOk;
 }
 
 

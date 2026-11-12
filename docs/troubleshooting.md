@@ -164,12 +164,22 @@ means "default"; length is significant.
 Common causes (in order of likelihood):
 
 1. **Both engines on the same host, same port range** — each takes
-   the same UDP port and processes the other's STUN. Pick
-   non-overlapping ranges:
+   the same UDP port and processes the other's STUN. The fix is to
+   leave the port range at its default (`0`, the OS picks):
+   ```cpp
+   // Leave local_port_range_begin / _end at 0: each engine gets its own
+   // OS-assigned ephemeral port, so the two never share a UDP socket.
+   EngineConfig cfg;      // no local_port_range_begin/end needed
+   ```
+   If you must pin a fixed range, give each engine a non-overlapping
+   one:
    ```cpp
    A.cfg.local_port_range_begin = 51000;  A.cfg.local_port_range_end = 51099;
    B.cfg.local_port_range_begin = 51100;  B.cfg.local_port_range_end = 51199;
    ```
+   A pinned range is a liability on Windows: the runner's Hyper-V / HNS
+   reservations can cover it, and the bind then fails with `WSAEACCES`
+   (errno `10013`) — see §3.13.
 
 2. **Answerer doesn't know offerer's ICE ufrag/pwd** — call
    `set_remote_ice(...)` on the answerer before `open()`:
@@ -250,12 +260,20 @@ answerer.
 
 ### 3.5 "Address already in use" on rapid restarts
 
-SO_REUSEADDR or SO_REUSEPORT not set. Wait ~30 s or kill the
-stray process. On Windows the TCP table reclaims ports faster.
+Another process still holds the port. UDP sockets have no `TIME_WAIT`,
+so the port is released the moment the socket closes — a lingering
+holder is a live process, not a stale socket. Find it and stop it, or
+let the OS pick the port (`local_port_range_begin = 0`).
 
 ```bash
 lsof -iUDP:51000  # which process holds the port
 ```
+
+Note that the vendored libjuice deliberately does **not** set
+`SO_REUSEADDR` / `SO_REUSEPORT`: both let a second socket bind a port
+that is already bound, so two agents would silently share one UDP port
+and could not be told apart by the ICE demultiplexer. If you see
+"address already in use", that is the socket option doing its job.
 
 ### 3.6 PCM tap callback fires but PCM is silence
 
@@ -351,6 +369,40 @@ python tools/fetch_webrtc_apm.py
 ```
 
 Then re-link.
+
+### 3.13 ICE open fails with `WSAEACCES` (errno 10013) on Windows
+
+The symptom in the log is:
+
+```
+[warn] udp.c:178: UDP socket binding failed on port range 127.0.0.1:[51000,51099], errno=10013
+[error] conn_mux.c:270: UDP socket creation failed
+[error] conn.c:88: Registry initialization failed
+```
+
+**Cause.** Windows reserves whole blocks of UDP ports for the
+hypervisor (Hyper-V / HNS). `netsh interface ipv4 show excludedportrange
+protocol=udp` lists them. A `bind()` inside a reserved block fails with
+`WSAEACCES` (errno `10013`), and libjuice walks the *entire* requested
+range before giving up — so the ICE agent fails to open outright rather
+than falling back to another port.
+
+The reservations move around between runs, so a pinned range that
+worked yesterday can fail today with no change on your side. This is
+also why the same commit can pass in one CI job and fail in another:
+the two jobs landed on runners with different reservations.
+
+**Fix.** Let the OS assign the port. Set
+`local_port_range_begin = local_port_range_end = 0` (the default) and
+the kernel's ephemeral allocator picks a port that is never reserved.
+Two engines in one process are fine on ephemeral ports: each gets its
+own socket on its own port.
+
+To see what a given machine has reserved:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=udp
+```
 
 ---
 

@@ -163,6 +163,48 @@ paced_class_index(plugins::Priority p) noexcept {
     return -1;  // the control plane bypasses the pacer
 }
 
+// ---------------------------------------------------------------------------
+// BatchItem — one entry of a drain batch (PIMPL internal type).
+// ---------------------------------------------------------------------------
+//
+// A drain collects the packets it is about to dispatch into a **batch**
+// and then hands them to the callback *without* the queue lock held.  The
+// batch entry carries the accounting that the settle phase needs (the
+// estimated size, the queue the packet came from and the class it was
+// charged to), so that the "undo" path — the veto path — can put the
+// packets back and refund what they consumed.
+struct BatchItem {
+    PacketRecord rec;
+    /** The estimated wire size of the packet, in bytes. */
+    std::uint32_t est_bytes = 0;
+    /** P-family: the priority-queue index the packet came from.
+     *  S-family: the StreamPriority bucket index it came from. */
+    std::size_t   src_index = 0;
+    /** S-family only: the paced-class FIFO index inside the bucket. */
+    std::size_t   src_class = 0;
+    /** S-family only: the bucket's priority level. */
+    StreamPriority prio = StreamPriority::Normal;
+    /** The paced class the packet was charged to, or -1 when the packet
+     *  is not paced at all (control plane, or a class with rate 0). */
+    int           class_idx = -1;
+    /** True when the session BWE credit was charged for this packet. */
+    bool          credit_charged = false;
+};
+
+/** The scratch batch of the drain that is currently running.
+ *
+ *  It is **thread-local** so that two concurrent drains never share it
+ *  while the queue lock is released during the dispatch phase, and it is
+ *  reused across calls so the send path performs no heap allocation per
+ *  drain. */
+thread_local std::vector<BatchItem> g_drain_batch;
+
+/** The nesting depth of the drain that is currently running on this
+ *  thread.  A drain callback may (indirectly) call back into the
+ *  scheduler; a nested drain would interleave with the outer one and
+ *  corrupt the accounting, so it is refused. */
+thread_local int g_drain_depth = 0;
+
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -214,13 +256,30 @@ struct Scheduler::Impl {
     // packet's cost is not lost between drains.
     std::uint64_t credit_milli_bytes_ = 0;
 
-    // ---- Measured drain cadence ----------------------------------------
+    // ---- Credit clock (shared by both families) -------------------------
+    //
+    // The credit is granted against the *total* wall-clock time since the
+    // last grant — no matter which family asked for it.  The P-family and
+    // the S-family therefore cannot both claim the same elapsed time:
+    // a session that drains both families every 20 ms grants the credit
+    // for 20 ms once, not twice.  Two independent clocks would double the
+    // effective send rate, which is exactly the bug A9 is about.
+    core::TimePoint credit_last_time_{};
+    bool            has_credit_last_ = false;
+
+    // ---- Measured drain cadence (P-family) ------------------------------
     core::TimePoint last_drain_time_{};
     bool            has_last_drain_ = false;
     std::uint32_t   measured_interval_ms_ = 0;  // 0 = not measured yet
-    // Bytes emitted by the last drain — used to report the observed
-    // egress rate in stats().
+    // Bytes emitted by the last P-family drain — used to report the
+    // observed egress rate in stats().
     std::uint64_t   bytes_last_drain_ = 0;
+
+    // ---- Measured drain cadence (S-family) ------------------------------
+    core::TimePoint stream_last_drain_time_{};
+    bool            has_stream_last_drain_ = false;
+    std::uint32_t   stream_measured_interval_ms_ = 0;
+    std::uint64_t   stream_bytes_last_drain_ = 0;
 
     // ---- Per-class pacing buckets (v1.2.0 M3, video plan P2) ----------
     //
@@ -245,9 +304,20 @@ struct Scheduler::Impl {
     // ---- S-family (per-stream) priority state (DC-2) -------------------
     // stream_id → StreamPriority.  Unseen streams default to Normal.
     std::unordered_map<std::uint32_t, StreamPriority> stream_priority_{};
+    // stream_id → the paced traffic class the stream's packets are
+    // charged to.  Unseen streams default to PacedClass::kData — the
+    // conservative choice, because a stream whose traffic class is
+    // unknown must not eat a class budget it does not own.
+    std::unordered_map<std::uint32_t, plugins::PacedClass> stream_paced_class_{};
     // Three per-stream buckets, indexed by StreamPriority rank (High=0,
-    // Normal=1, Low=2).
-    std::array<std::deque<PacketRecord>, kStreamPriorityCount> stream_buckets_{};
+    // Normal=1, Low=2).  Each bucket holds **one FIFO per paced traffic
+    // class**: a class owns its own budget, so a stream whose class is
+    // out of credit must not block the streams of the other classes in
+    // the same bucket (and vice versa).  Within a class the order is
+    // exact FIFO.
+    using StreamClassQueues = std::array<std::deque<PacketRecord>,
+                                          plugins::kPacedClassCount>;
+    std::array<StreamClassQueues, kStreamPriorityCount> stream_buckets_{};
 
     // ---- Last destination address (for empty dst in enqueue) -----------
     plugins::Addr last_dst_addr_;
@@ -299,6 +369,75 @@ struct Scheduler::Impl {
 
     // ---- Thread safety --------------------------------------------------
     std::mutex mu_;
+
+    // ---- Send-credit bookkeeping ---------------------------------------
+    //
+    // The credit is granted per drain call, proportionally to the measured
+    // wall-clock time since the previous grant.  The P-family and the
+    // S-family share **one** clock and **one** credit pool: the session
+    // may not exceed the bandwidth estimate in total, whichever family
+    // spends it, and the elapsed time may only be credited once.  Two
+    // independent pools (or two independent clocks) would double the
+    // effective send rate.
+    //
+    // Returns the elapsed time (in microseconds) the credit was granted
+    // for, so the caller can report the observed drain cadence.
+    std::uint64_t grant_credit(core::TimePoint now) noexcept {
+        std::uint64_t elapsed_us = 0;
+        if (has_credit_last_) {
+            elapsed_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - credit_last_time_).count());
+        } else {
+            // The very first drain has no predecessor to measure against:
+            // it uses the configured drain interval as the seed.
+            elapsed_us =
+                static_cast<std::uint64_t>(config_.drain_interval_ms) * 1000;
+        }
+        credit_last_time_ = now;
+        has_credit_last_ = true;
+
+        if (bwe_limit_active_ && target_bps_ > 0) {
+            // credit += bytes_per_sec * elapsed_us / 1000  [milli-bytes]
+            const std::uint64_t bytes_per_sec =
+                static_cast<std::uint64_t>(target_bps_) / 8;
+            credit_milli_bytes_ += (bytes_per_sec * elapsed_us) / 1000;
+            // Cap the credit at one second's worth so a long idle gap
+            // cannot turn into an unbounded burst when the host resumes.
+            const std::uint64_t cap_milli = bytes_per_sec * 1000;
+            if (credit_milli_bytes_ > cap_milli) {
+                credit_milli_bytes_ = cap_milli;
+            }
+        }
+        return elapsed_us;
+    }
+
+    /** Give back credit for bytes that did **not** leave the machine.
+     *
+     *  Used when a drain callback vetoes a packet: the packet was taken
+     *  out of the queue and its credit was spent, but the bytes never
+     *  crossed the wire, so the credit must be returned. */
+    void refund_credit(std::uint64_t bytes) noexcept {
+        if (!bwe_limit_active_ || target_bps_ == 0 || bytes == 0) return;
+        credit_milli_bytes_ += bytes * 1000;
+        const std::uint64_t cap_milli =
+            (static_cast<std::uint64_t>(target_bps_) / 8) * 1000;
+        if (credit_milli_bytes_ > cap_milli) {
+            credit_milli_bytes_ = cap_milli;
+        }
+    }
+
+    /** The paced traffic class of a stream.
+     *
+     *  Unseen streams default to `PacedClass::kData` — the conservative
+     *  choice, because a stream whose traffic class is unknown must not
+     *  consume a budget it does not own. */
+    [[nodiscard]] plugins::PacedClass
+    paced_class_for_stream(std::uint32_t stream_id) const noexcept {
+        auto it = stream_paced_class_.find(stream_id);
+        if (it != stream_paced_class_.end()) return it->second;
+        return plugins::PacedClass::kData;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -412,161 +551,186 @@ int Scheduler::drain_with(int max_packets,
                           plugins::DrainCallback cb) noexcept {
     if (max_packets <= 0) return 0;
 
-    std::lock_guard<std::mutex> lock(impl_->mu_);
+    // A drain callback may re-enter the scheduler (for example by
+    // enqueueing a packet).  A nested drain would interleave with this
+    // one and corrupt the accounting, so it is refused rather than
+    // silently corrupting the state.
+    if (g_drain_depth > 0) return 0;
+
+    // ---- Phase 1: collect (locked) --------------------------------------
+    //
+    // The packets are moved out of the queues into a thread-local batch
+    // while the lock is held, and the callback is invoked in phase 2
+    // **without** the lock.  Holding the lock across the callback meant
+    // holding it across `ice_t_->send()` — a blocking UDP write — which
+    // froze every other producer (audio, video, control) for the
+    // duration of the write.  The batch is the decoupling: the lock
+    // protects the queues, not the network.
+    g_drain_batch.clear();
+    g_drain_depth = 1;
 
     int sent = 0;
-    impl_->packets_sent_this_cycle_ = 0;
-    bool vetoed = false;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu_);
 
-    // ---- Grant the send credit for the period this drain covers -------
-    //
-    // The credit is proportional to the *measured* wall-clock time since
-    // the previous drain, so the effective send rate is the same whether
-    // the host ticks every 20 ms or every 200 ms.  The very first drain
-    // has no predecessor to measure against and uses the configured
-    // SchedulerConfig::drain_interval_ms as the seed.
-    const auto now = core::SteadyClock::now();
-    std::uint64_t elapsed_us = 0;
-    if (impl_->has_last_drain_) {
-        elapsed_us = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                now - impl_->last_drain_time_).count());
-    } else {
-        elapsed_us = static_cast<std::uint64_t>(
-                         impl_->config_.drain_interval_ms) * 1000;
-    }
-    impl_->last_drain_time_ = now;
-    impl_->has_last_drain_ = true;
-    impl_->measured_interval_ms_ = static_cast<std::uint32_t>(
-        clamp_interval_ms(static_cast<std::int64_t>(elapsed_us / 1000)));
-    impl_->bytes_last_drain_ = 0;
+        impl_->packets_sent_this_cycle_ = 0;
 
-    if (impl_->bwe_limit_active_ && impl_->target_bps_ > 0) {
-        // Credit granted = bytes_per_sec * elapsed_us / 1000, expressed in
-        // milli-bytes so the fractional remainder of a packet's cost is
-        // not lost between drains.
-        const std::uint64_t bytes_per_sec =
-            static_cast<std::uint64_t>(impl_->target_bps_) / 8;
-        impl_->credit_milli_bytes_ += (bytes_per_sec * elapsed_us) / 1000;
-        // Cap the credit at one second's worth so a long idle gap cannot
-        // turn into an unbounded burst when the host resumes.
-        const std::uint64_t cap_milli = bytes_per_sec * 1000;
-        if (impl_->credit_milli_bytes_ > cap_milli) {
-            impl_->credit_milli_bytes_ = cap_milli;
+        // ---- Grant the send credit for the period this drain covers -----
+        //
+        // The credit is proportional to the *measured* wall-clock time
+        // since the previous drain, so the effective send rate is the
+        // same whether the host ticks every 20 ms or every 200 ms.  The
+        // very first drain has no predecessor to measure against and
+        // uses the configured SchedulerConfig::drain_interval_ms as the
+        // seed.
+        const auto now = core::SteadyClock::now();
+        const std::uint64_t elapsed_us = impl_->grant_credit(now);
+        impl_->last_drain_time_ = now;
+        impl_->has_last_drain_ = true;
+        impl_->measured_interval_ms_ = static_cast<std::uint32_t>(
+            clamp_interval_ms(static_cast<std::int64_t>(elapsed_us / 1000)));
+        impl_->bytes_last_drain_ = 0;
+
+        for (std::size_t idx = 0;
+             idx < kPriorityCount && static_cast<int>(g_drain_batch.size()) < max_packets;
+             ++idx) {
+            auto& q = impl_->queues_[idx];
+
+            // The control plane bypasses the pacer entirely (v1.2.0 M3, P2):
+            // RTX / NACK / RTCP feedback must never wait behind a saturated
+            // media bucket, and it is the *media* traffic that has to be
+            // shaped.  The control packets are small and rare, so letting
+            // them through does not measurably change the load on the link.
+            const bool is_control =
+                idx == plugins::priority_rank(plugins::Priority::kControl);
+
+            // The paced class of this queue (-1 for the control plane).
+            const int class_idx = is_control ? -1 : paced_class_index(
+                static_cast<plugins::Priority>(idx));
+
+            while (!q.empty() &&
+                   static_cast<int>(g_drain_batch.size()) < max_packets) {
+                // If a BWE limit is active, stop once the send credit is
+                // exhausted: the packet stays queued and goes out on a later
+                // drain, when enough time has passed to earn the credit.
+                // The credit is only consumed once the packet really left
+                // the queue — a vetoed packet keeps its credit.
+                std::uint32_t peek_bytes = 0;
+                if (!is_control && impl_->bwe_limit_active_) {
+                    peek_bytes = estimated_packet_bytes(
+                        q.front(), impl_->config_.avg_packet_size_bytes);
+                    const std::uint64_t cost_milli =
+                        static_cast<std::uint64_t>(peek_bytes) * 1000;
+                    if (impl_->credit_milli_bytes_ < cost_milli) {
+                        break;  // not enough credit yet — keep the packet queued
+                    }
+                }
+
+                // The per-class pacer (v1.2.0 M3, P2).  A class whose rate is
+                // 0 is not paced; a class with a rate holds the packet back
+                // until its own bucket has earned the bytes.  The packet
+                // stays queued, so the class keeps its place in the queue.
+                const bool class_paced =
+                    class_idx >= 0 &&
+                    impl_->class_rate_bps_[static_cast<std::size_t>(class_idx)] > 0;
+                if (class_paced) {
+                    peek_bytes = estimated_packet_bytes(
+                        q.front(), impl_->config_.avg_packet_size_bytes);
+                    // `available()` refills the bucket as a side effect, so it
+                    // is not a const member — the bucket must be reached
+                    // through a mutable reference here.
+                    auto& bucket =
+                        impl_->class_buckets_[static_cast<std::size_t>(class_idx)];
+                    if (bucket.available(now) < peek_bytes) {
+                        ++impl_->paced_blocked_total_;
+                        break;  // this class is out of credit — keep the packet
+                    }
+                }
+
+                // Take ownership of the packet.  The record leaves the queue
+                // here and lives in the batch until the dispatch phase
+                // settles it.
+                BatchItem item;
+                item.rec = std::move(q.front());
+                q.pop_front();
+                item.est_bytes = estimated_packet_bytes(
+                    item.rec, impl_->config_.avg_packet_size_bytes);
+                item.src_index = idx;
+                item.class_idx = class_paced ? class_idx : -1;
+
+                // Charge the credit and the pacing bucket **now**, while
+                // the lock is held.  A veto in phase 2 refunds both.
+                if (!is_control && impl_->bwe_limit_active_) {
+                    impl_->credit_milli_bytes_ -=
+                        static_cast<std::uint64_t>(item.est_bytes) * 1000;
+                    item.credit_charged = true;
+                }
+                if (class_paced) {
+                    impl_->class_buckets_[static_cast<std::size_t>(class_idx)]
+                        .try_consume(item.est_bytes, now);
+                }
+
+                g_drain_batch.push_back(std::move(item));
+            }
         }
-    }
+    }  // <- the queue lock is released here
 
-    for (std::size_t idx = 0; idx < kPriorityCount && sent < max_packets; ++idx) {
-        auto& q = impl_->queues_[idx];
-
-        // The control plane bypasses the pacer entirely (v1.2.0 M3, P2):
-        // RTX / NACK / RTCP feedback must never wait behind a saturated
-        // media bucket, and it is the *media* traffic that has to be
-        // shaped.  The control packets are small and rare, so letting
-        // them through does not measurably change the load on the link.
-        const bool is_control =
-            idx == plugins::priority_rank(plugins::Priority::kControl);
-
-        // The paced class of this queue (-1 for the control plane).
-        const int class_idx = is_control ? -1 : paced_class_index(
-            static_cast<plugins::Priority>(idx));
-
-        while (!q.empty() && sent < max_packets) {
-            // If a BWE limit is active, stop once the send credit is
-            // exhausted: the packet stays queued and goes out on a later
-            // drain, when enough time has passed to earn the credit.
-            // The credit is only consumed once the packet really left
-            // the queue — a vetoed packet keeps its credit.
-            std::uint32_t peek_bytes = 0;
-            if (!is_control && impl_->bwe_limit_active_) {
-                peek_bytes = estimated_packet_bytes(
-                    q.front(), impl_->config_.avg_packet_size_bytes);
-                const std::uint64_t cost_milli =
-                    static_cast<std::uint64_t>(peek_bytes) * 1000;
-                if (impl_->credit_milli_bytes_ < cost_milli) {
-                    break;  // not enough credit yet — keep the packet queued
-                }
-            }
-
-            // The per-class pacer (v1.2.0 M3, P2).  A class whose rate is
-            // 0 is not paced; a class with a rate holds the packet back
-            // until its own bucket has earned the bytes.  The packet
-            // stays queued, so the class keeps its place in the queue.
-            const bool class_paced =
-                class_idx >= 0 &&
-                impl_->class_rate_bps_[static_cast<std::size_t>(class_idx)] > 0;
-            if (class_paced) {
-                peek_bytes = estimated_packet_bytes(
-                    q.front(), impl_->config_.avg_packet_size_bytes);
-                // `available()` refills the bucket as a side effect, so it
-                // is not a const member — the bucket must be reached
-                // through a mutable reference here.
-                auto& bucket =
-                    impl_->class_buckets_[static_cast<std::size_t>(class_idx)];
-                if (bucket.available(now) < peek_bytes) {
-                    ++impl_->paced_blocked_total_;
-                    break;  // this class is out of credit — keep the packet
-                }
-            }
-
-            // Take ownership of the packet so we can update stats
-            // even when no callback is registered.
-            PacketRecord rec = std::move(q.front());
-            q.pop_front();
-
-            // If the caller wants per-packet observation, give them a chance
-            // to veto the dequeue by returning false from the callback.
-            if (cb) {
-                core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
-                if (!cb(rec.priority, span)) {
-                    // Caller vetoed the packet.  Put it back at the FRONT of
-                    // its queue so the next drain() sees it again — the
-                    // previous behaviour silently discarded it, which lost
-                    // data and left the "dropped" statistic understating
-                    // the real loss.
-                    //
-                    // The record is put back as-is (not counted as sent),
-                    // so a vetoing transport does not lose the packet and
-                    // the statistics stay truthful.  Draining stops
-                    // entirely — a veto means "the transport is not
-                    // accepting traffic right now", so lower-priority
-                    // queues must not be attempted either.
-                    q.push_front(std::move(rec));
-                    vetoed = true;
-                    break;
-                }
-            }
-
-            const std::uint32_t est_bytes = estimated_packet_bytes(
-                rec, impl_->config_.avg_packet_size_bytes);
-            if (!is_control && impl_->bwe_limit_active_) {
-                impl_->credit_milli_bytes_ -=
-                    static_cast<std::uint64_t>(est_bytes) * 1000;
-            }
-            if (class_paced) {
-                // The bytes really left the machine: the class bucket
-                // spends its credit now (and not before, so a vetoed
-                // packet keeps the credit it never used).
-                impl_->class_buckets_[static_cast<std::size_t>(class_idx)]
-                    .try_consume(est_bytes, now);
+    // ---- Phase 2: dispatch (unlocked) -----------------------------------
+    //
+    // The callback runs without the queue lock, so a blocking network
+    // write inside it cannot stall the producers.
+    if (cb) {
+        for (auto& item : g_drain_batch) {
+            core::ByteSpan span{item.rec.owned_data.data(),
+                                item.rec.owned_data.size()};
+            if (!cb(item.rec.priority, span)) {
+                // The caller vetoed the packet.  Everything from this
+                // packet onwards goes back into its queue — the packet
+                // itself and the ones that were collected but not yet
+                // dispatched — and the credit and pacing tokens they
+                // consumed are refunded.
+                //
+                // The records are put back as-is (not counted as sent), so
+                // a vetoing transport does not lose the packets and the
+                // statistics stay truthful.  Draining stops entirely — a
+                // veto means "the transport is not accepting traffic right
+                // now", so lower-priority queues must not be attempted
+                // either.
+                const std::size_t veto_index =
+                    static_cast<std::size_t>(&item - g_drain_batch.data());
+                undo_batch(veto_index, /*s_family=*/false);
+                g_drain_depth = 0;
+                g_drain_batch.clear();
+                return sent;
             }
             ++sent;
+        }
+    } else {
+        sent = static_cast<int>(g_drain_batch.size());
+    }
+
+    // ---- Phase 3: settle (locked) --------------------------------------
+    //
+    // The packets really left the machine: the statistics are updated and
+    // the buffers go back onto the free-list.
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu_);
+        for (auto& item : g_drain_batch) {
             ++impl_->packets_sent_this_cycle_;
             ++impl_->sent_total_;
-            impl_->sent_bytes_total_ += est_bytes;
-            impl_->bytes_last_drain_ += est_bytes;
-
+            impl_->sent_bytes_total_ += item.est_bytes;
+            impl_->bytes_last_drain_ += item.est_bytes;
             // The packet has been dispatched: the drain callback is done
             // with the bytes, so the buffer can go back onto the free-list
             // instead of being freed (P1 hardening, 2026-11-09).  This is
             // what removes the per-packet heap allocation from the send
             // path.
-            impl_->recycle_buffer_locked(std::move(rec.owned_data));
+            impl_->recycle_buffer_locked(std::move(item.rec.owned_data));
         }
-
-        if (vetoed) break;  // a veto stops the whole drain
     }
 
+    g_drain_depth = 0;
+    g_drain_batch.clear();
     return sent;
 }
 
@@ -698,11 +862,20 @@ void Scheduler::reset() noexcept {
     impl_->has_last_drain_      = false;
     impl_->measured_interval_ms_ = 0;
     impl_->bytes_last_drain_     = 0;
+    impl_->has_credit_last_     = false;
+    impl_->has_stream_last_drain_ = false;
+    impl_->stream_measured_interval_ms_ = 0;
+    impl_->stream_bytes_last_drain_ = 0;
     impl_->dropped_total_       = 0;
     impl_->sent_total_          = 0;
     impl_->sent_bytes_total_    = 0;
     impl_->stream_priority_.clear();
-    for (auto& bucket : impl_->stream_buckets_) impl_->recycle_queue_locked(bucket);
+    impl_->stream_paced_class_.clear();
+    for (auto& bucket : impl_->stream_buckets_) {
+        for (auto& class_queue : bucket) {
+            impl_->recycle_queue_locked(class_queue);
+        }
+    }
     impl_->stream_dropped_total_ = 0;
     impl_->stream_sent_total_   = 0;
     impl_->last_dst_addr_       = {};
@@ -759,6 +932,14 @@ plugins::SchedulerStats Scheduler::stats() const noexcept {
     plugins::SchedulerStats s;
     for (std::size_t i = 0; i < kPriorityCount; ++i) {
         s.queued_packets += static_cast<std::uint32_t>(impl_->queues_[i].size());
+    }
+    // The S-family buckets are queues too — a packet waiting in a stream
+    // bucket is just as "queued" as one waiting in a priority queue.
+    for (std::size_t i = 0; i < kStreamPriorityCount; ++i) {
+        for (const auto& class_queue : impl_->stream_buckets_[i]) {
+            s.queued_packets +=
+                static_cast<std::uint32_t>(class_queue.size());
+        }
     }
     s.dropped_packets   = impl_->dropped_total_;
     s.sent_packets      = impl_->sent_total_;
@@ -845,33 +1026,48 @@ void Scheduler::set_stream_priority(std::uint32_t stream_id,
     // new bucket in their original order.  This satisfies DC-2's
     // "set_stream_priority moves the stream between buckets atomically"
     // contract: subsequent drain() observes the new ordering immediately.
-    auto& old_bucket = impl_->stream_buckets_[stream_priority_rank(prev)];
-    auto& new_bucket = impl_->stream_buckets_[stream_priority_rank(level)];
+    //
+    // `nimrtc::sched::stream_priority_rank` is called *qualified* here:
+    // `StreamPriority` is an alias of `plugins::StreamPriority`, so an
+    // unqualified call would also find `plugins::stream_priority_rank`
+    // through ADL and the two candidates would be ambiguous.
+    auto& old_bucket =
+        impl_->stream_buckets_[nimrtc::sched::stream_priority_rank(prev)];
+    auto& new_bucket =
+        impl_->stream_buckets_[nimrtc::sched::stream_priority_rank(level)];
 
-    // Walk old_bucket, move matching packets to a temporary, then append
-    // them to new_bucket in original order.  We splice in two passes so
-    // new_bucket's existing packets keep their relative order.
-    std::deque<PacketRecord> moved;
-    std::deque<PacketRecord> retained;
-    while (!old_bucket.empty()) {
-        PacketRecord rec = std::move(old_bucket.front());
-        old_bucket.pop_front();
-        if (rec.stream_id == stream_id) {
-            moved.push_back(std::move(rec));
-        } else {
-            retained.push_back(std::move(rec));
+    // A bucket holds one FIFO per paced class, so the migration walks the
+    // class queues in turn.  Within a class the packets keep their
+    // relative order; the packets of the moved stream are appended to the
+    // tail of the destination class queue.
+    std::size_t moved_count = 0;
+    for (std::size_t c = 0; c < plugins::kPacedClassCount; ++c) {
+        auto& old_class_queue = old_bucket[c];
+        auto& new_class_queue = new_bucket[c];
+
+        std::deque<PacketRecord> moved;
+        std::deque<PacketRecord> retained;
+        while (!old_class_queue.empty()) {
+            PacketRecord rec = std::move(old_class_queue.front());
+            old_class_queue.pop_front();
+            if (rec.stream_id == stream_id) {
+                moved.push_back(std::move(rec));
+            } else {
+                retained.push_back(std::move(rec));
+            }
         }
-    }
-    old_bucket = std::move(retained);
-    while (!moved.empty()) {
-        new_bucket.push_back(std::move(moved.front()));
-        moved.pop_front();
+        old_class_queue = std::move(retained);
+        while (!moved.empty()) {
+            new_class_queue.push_back(std::move(moved.front()));
+            moved.pop_front();
+        }
+        moved_count += moved.size();
     }
 
     impl_->stream_priority_[stream_id] = level;
     sched_debug("Scheduler: stream %u priority %u -> %u, moved %zu packets",
                 stream_id, static_cast<unsigned>(prev),
-                static_cast<unsigned>(level), new_bucket.size());
+                static_cast<unsigned>(level), moved_count);
 }
 
 StreamPriority Scheduler::get_stream_priority(std::uint32_t stream_id) const noexcept {
@@ -879,6 +1075,18 @@ StreamPriority Scheduler::get_stream_priority(std::uint32_t stream_id) const noe
     auto it = impl_->stream_priority_.find(stream_id);
     if (it != impl_->stream_priority_.end()) return it->second;
     return StreamPriority::Normal;  // default
+}
+
+plugins::PacedClass
+Scheduler::stream_paced_class(std::uint32_t stream_id) const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    return impl_->paced_class_for_stream(stream_id);
+}
+
+void Scheduler::set_stream_paced_class(std::uint32_t stream_id,
+                                       plugins::PacedClass cls) noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    impl_->stream_paced_class_[stream_id] = cls;
 }
 
 void Scheduler::enqueue_for_stream_owned(std::uint32_t stream_id,
@@ -912,10 +1120,15 @@ void Scheduler::enqueue_for_stream_owned(std::uint32_t stream_id,
     rec.enqueue_time       = core::SteadyClock::now();
     rec.estimated_size_bytes = 0;
 
-    impl_->stream_buckets_[stream_priority_rank(level)].push_back(std::move(rec));
-    sched_debug("Scheduler: enqueued stream=%u into bucket=%u (total=%zu)",
-                stream_id, static_cast<unsigned>(level),
-                impl_->stream_buckets_[stream_priority_rank(level)].size());
+    // The packet goes into the FIFO of its stream's *paced class* inside
+    // the bucket of its StreamPriority.  See the comment on
+    // `Impl::stream_buckets_`.
+    const auto class_idx =
+        static_cast<std::size_t>(impl_->paced_class_for_stream(stream_id));
+    auto& bucket = impl_->stream_buckets_[nimrtc::sched::stream_priority_rank(level)];
+    bucket[class_idx].push_back(std::move(rec));
+    sched_debug("Scheduler: enqueued stream=%u into bucket=%u class=%zu",
+                stream_id, static_cast<unsigned>(level), class_idx);
 }
 
 void Scheduler::enqueue_for_stream(std::uint32_t stream_id,
@@ -926,105 +1139,256 @@ void Scheduler::enqueue_for_stream(std::uint32_t stream_id,
     enqueue_for_stream_owned(stream_id, std::move(buf), dst);
 }
 
-namespace {
+// ---------------------------------------------------------------------------
+// S-family drain — the flow-controlled counterpart of drain_with()
+// ---------------------------------------------------------------------------
+//
+// The S-family shares the session's send credit and the per-class pacing
+// buckets with the P-family (A9-a / A9-b).  Before this was wired up the
+// S-family path bypassed both, so a stream that used the per-stream
+// priority API could push the total egress rate arbitrarily far past the
+// bandwidth estimate.  The two families now draw from the *same* credit
+// pool against the *same* clock, so the session's send rate is bounded
+// no matter which family spends it.
 
-/** Helper: drain one stream bucket (called from select_next_packet).
- *
- *  A veto from `inner_cb` stops the drain and puts the packet back at the
- *  FRONT of the bucket — the previous behaviour dropped it silently, which
- *  lost data and left the "dropped" statistic understating the real loss. */
-int drain_stream_bucket(std::deque<PacketRecord>& bucket,
-                        std::uint32_t& sent_total,
-                        std::uint64_t& sent_bytes_total,
-                        std::uint32_t avg_packet_size,
-                        int max_packets,
-                        plugins::DrainCallback inner_cb,
-                        std::uint32_t stream_id,
-                        StreamPriority bucket_priority,
-                        bool& vetoed,
-                        std::vector<std::vector<std::uint8_t>>* buffer_pool,
-                        std::size_t pool_limit) noexcept {
+int Scheduler::select_next_packet(int max_packets,
+                                  plugins::StreamDrainCallback cb) noexcept {
+    if (max_packets <= 0) return 0;
+
+    // A nested drain would interleave with the running one — see the
+    // matching guard in drain_with().
+    if (g_drain_depth > 0) return 0;
+
+    g_drain_batch.clear();
+    g_drain_depth = 1;
+
     int sent = 0;
-    while (!bucket.empty() && sent < max_packets) {
-        PacketRecord rec = std::move(bucket.front());
-        bucket.pop_front();
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu_);
 
-        if (inner_cb) {
-            core::ByteSpan span{rec.owned_data.data(), rec.owned_data.size()};
-            if (!inner_cb(rec.priority, span)) {
-                bucket.push_front(std::move(rec));  // veto — keep the packet
-                vetoed = true;
-                break;
+        // The credit is granted against the shared clock: the S-family
+        // does not get its own time base.  A session that drains both
+        // families every 20 ms therefore grants 20 ms worth of credit —
+        // once — not twice.
+        const auto now = core::SteadyClock::now();
+        const std::uint64_t elapsed_us = impl_->grant_credit(now);
+        impl_->stream_last_drain_time_ = now;
+        impl_->has_stream_last_drain_ = true;
+        impl_->stream_measured_interval_ms_ = static_cast<std::uint32_t>(
+            clamp_interval_ms(static_cast<std::int64_t>(elapsed_us / 1000)));
+        impl_->stream_bytes_last_drain_ = 0;
+
+        // Walk from highest priority (0 = High) to lowest (2 = Low).
+        bool budget_exhausted = false;
+        for (std::size_t idx = 0;
+             idx < kStreamPriorityCount &&
+             static_cast<int>(g_drain_batch.size()) < max_packets &&
+             !budget_exhausted;
+             ++idx) {
+            auto& bucket = impl_->stream_buckets_[idx];
+
+            // The bucket priority determines the StreamPriority reported
+            // to the callback.
+            const StreamPriority bucket_prio = static_cast<StreamPriority>(idx);
+
+            // Each paced class owns its own FIFO inside the bucket, so a
+            // class whose budget is exhausted does not block the other
+            // classes.  The classes are visited round-robin so that no
+            // class can starve the others.
+            bool progress = true;
+            while (progress &&
+                   static_cast<int>(g_drain_batch.size()) < max_packets) {
+                progress = false;
+                for (std::size_t c = 0;
+                     c < plugins::kPacedClassCount &&
+                     static_cast<int>(g_drain_batch.size()) < max_packets;
+                     ++c) {
+                    auto& class_queue = bucket[c];
+                    if (class_queue.empty()) continue;
+
+                    // ---- A9-a: the shared session credit ----------------
+                    // The S-family packets are charged to the same credit
+                    // pool as the P-family packets.  Without this check a
+                    // stream on the S-family could exceed the BWE budget.
+                    //
+                    // The session credit is a *global* budget: when it is
+                    // exhausted, no packet of any stream can go, so the
+                    // whole selection stops here.
+                    if (impl_->bwe_limit_active_) {
+                        const std::uint32_t peek_bytes = estimated_packet_bytes(
+                            class_queue.front(),
+                            impl_->config_.avg_packet_size_bytes);
+                        const std::uint64_t cost_milli =
+                            static_cast<std::uint64_t>(peek_bytes) * 1000;
+                        if (impl_->credit_milli_bytes_ < cost_milli) {
+                            // The budget is spent — stop the selection, but
+                            // keep the packets that were already collected.
+                            budget_exhausted = true;
+                            break;
+                        }
+                    }
+
+                    // ---- A9-b: the per-class pacing bucket --------------
+                    const bool class_paced = impl_->class_rate_bps_[c] > 0;
+                    if (class_paced) {
+                        const std::uint32_t peek_bytes = estimated_packet_bytes(
+                            class_queue.front(),
+                            impl_->config_.avg_packet_size_bytes);
+                        auto& class_bucket = impl_->class_buckets_[c];
+                        if (class_bucket.available(now) < peek_bytes) {
+                            ++impl_->paced_blocked_total_;
+                            continue;  // this class waits — try the next one
+                        }
+                    }
+
+                    BatchItem item;
+                    item.rec = std::move(class_queue.front());
+                    class_queue.pop_front();
+                    item.est_bytes = estimated_packet_bytes(
+                        item.rec, impl_->config_.avg_packet_size_bytes);
+                    item.src_index = idx;
+                    item.src_class = c;
+                    item.prio = bucket_prio;
+                    item.class_idx = class_paced ? static_cast<int>(c) : -1;
+
+                    // Charge the credit and the pacing bucket now; a veto
+                    // refunds both.
+                    if (impl_->bwe_limit_active_) {
+                        impl_->credit_milli_bytes_ -=
+                            static_cast<std::uint64_t>(item.est_bytes) * 1000;
+                        item.credit_charged = true;
+                    }
+                    if (class_paced) {
+                        impl_->class_buckets_[c].try_consume(item.est_bytes, now);
+                    }
+
+                    g_drain_batch.push_back(std::move(item));
+                    progress = true;
+                }
             }
         }
+    }  // <- the queue lock is released here
 
-        ++sent;
-        ++sent_total;
-        const std::uint32_t est_bytes =
-            rec.estimated_size_bytes != 0 ? rec.estimated_size_bytes : avg_packet_size;
-        sent_bytes_total += est_bytes;
-        // The packet has been dispatched — recycle its buffer instead of
-        // freeing it (P1 hardening, 2026-11-09).  The pool is bounded by
-        // the queue depth; a full pool simply frees the buffer.
-        if (buffer_pool != nullptr) {
-            if (buffer_pool->size() < pool_limit) {
-                rec.owned_data.clear();
-                buffer_pool->push_back(std::move(rec.owned_data));
+    // ---- Dispatch (unlocked) --------------------------------------------
+    if (cb) {
+        for (auto& item : g_drain_batch) {
+            core::ByteSpan span{item.rec.owned_data.data(),
+                                item.rec.owned_data.size()};
+            if (!cb(item.rec.stream_id, item.prio, span)) {
+                // Veto — put the packets back and refund what they spent.
+                const std::size_t veto_index =
+                    static_cast<std::size_t>(&item - g_drain_batch.data());
+                undo_batch(veto_index, /*s_family=*/true);
+                g_drain_depth = 0;
+                g_drain_batch.clear();
+                return sent;
             }
+            ++sent;
         }
-        (void)stream_id;
-        (void)bucket_priority;
+    } else {
+        sent = static_cast<int>(g_drain_batch.size());
     }
+
+    // ---- Settle (locked) -------------------------------------------------
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu_);
+        for (auto& item : g_drain_batch) {
+            ++impl_->stream_sent_total_;
+            ++impl_->sent_total_;
+            impl_->sent_bytes_total_ += item.est_bytes;
+            impl_->stream_bytes_last_drain_ += item.est_bytes;
+            impl_->recycle_buffer_locked(std::move(item.rec.owned_data));
+        }
+    }
+
+    g_drain_depth = 0;
+    g_drain_batch.clear();
     return sent;
 }
 
-}  // anonymous namespace
+int Scheduler::select_next_packet(int max_packets,
+                                  std::nullptr_t) noexcept {
+    // Drain the packets without dispatching them.  They are accounted as
+    // sent (they left the queue), exactly as the callback-less `drain()`
+    // does for the P-family.
+    return select_next_packet(
+        max_packets,
+        [](std::uint32_t, StreamPriority, core::ByteSpan) -> bool {
+            return true;
+        });
+}
 
 int Scheduler::select_next_packet(int max_packets,
                                   plugins::DrainCallback cb) noexcept {
-    if (max_packets <= 0) return 0;
+    // The legacy shape only sees the per-packet Priority and the byte
+    // span; the stream identity and the bucket level are not part of it.
+    // The adapter reports them through the richer callback and drops the
+    // stream-specific parts.
+    return select_next_packet(
+        max_packets,
+        [cb](std::uint32_t /*stream_id*/, StreamPriority /*level*/,
+             core::ByteSpan span) -> bool {
+            if (!cb) return true;
+            return cb(plugins::Priority::kBestEffort, span);
+        });
+}
+
+// ---------------------------------------------------------------------------
+// undo_batch — the veto path
+// ---------------------------------------------------------------------------
+//
+// The drain collects the packets it is about to dispatch into a batch
+// (under the lock) and then dispatches them (without the lock).  When the
+// callback vetoes a packet, every packet from the vetoed one onwards must
+// go back where it came from — and the credit and the pacing tokens the
+// collection spent must be returned, because those bytes never left the
+// machine.
+//
+// The packets are restored at the FRONT of their queue, in their original
+// order: they were queued before the packets that are still in the queue,
+// so putting them back at the front preserves the FIFO order of the
+// queue.  (The previous behaviour silently *dropped* the vetoed packet,
+// which lost data and left the "dropped" statistic understating the real
+// loss.)
+
+void Scheduler::undo_batch(std::size_t first_vetoed, bool s_family) noexcept {
+    if (first_vetoed >= g_drain_batch.size()) return;
 
     std::lock_guard<std::mutex> lock(impl_->mu_);
 
-    int sent = 0;
-
-    // Walk from highest priority (0 = High) to lowest (2 = Low).
-    for (std::size_t idx = 0; idx < kStreamPriorityCount && sent < max_packets; ++idx) {
-        auto& bucket = impl_->stream_buckets_[idx];
-        if (bucket.empty()) continue;
-
-        // The bucket priority determines the StreamPriority for the C callback.
-        const StreamPriority bucket_prio = static_cast<StreamPriority>(idx);
-
-        // Capture bucket_prio so each packet in this bucket carries it.
-        // Currently the C drain path doesn't pass per-bucket priority
-        // through (it uses the plugins::Priority supplied at enqueue
-        // time); the capture is reserved for the next-stage explicit
-        // bucket override path.  Suppress -Wunused-lambda-capture so
-        // Clang doesn't warn under -Werror.
-        auto wrapped_cb = cb ? [cb, bucket_prio](plugins::Priority p,
-                                                  core::ByteSpan span) -> bool {
-            (void)bucket_prio;
-            return cb(p, span);
-        } : plugins::DrainCallback{};
-
-        // Peek at stream_id from the front of the bucket for the C ABI.
-        std::uint32_t peek_stream_id = bucket.front().stream_id;
-
-        bool vetoed = false;
-        int n = drain_stream_bucket(bucket, impl_->stream_sent_total_,
-                                   impl_->sent_bytes_total_,
-                                   impl_->config_.avg_packet_size_bytes,
-                                   max_packets - sent, wrapped_cb,
-                                   peek_stream_id, bucket_prio, vetoed,
-                                   &impl_->buffer_pool_,
-                                   impl_->pool_limit());
-        sent += n;
-        if (vetoed) break;  // a veto stops the whole selection
-        if (n == 0) break;  // bucket became empty mid-drain
+    // ---- Refund what the collection spent ------------------------------
+    std::uint64_t refund_bytes = 0;
+    for (std::size_t i = first_vetoed; i < g_drain_batch.size(); ++i) {
+        const auto& item = g_drain_batch[i];
+        if (item.credit_charged) {
+            refund_bytes += item.est_bytes;
+        }
+        if (item.class_idx >= 0) {
+            // The pacing bucket must get the bytes back as well, otherwise
+            // a vetoing transport would slowly starve its own class.
+            impl_->class_buckets_[static_cast<std::size_t>(item.class_idx)]
+                .refund(item.est_bytes);
+        }
+    }
+    if (refund_bytes > 0) {
+        impl_->refund_credit(refund_bytes);
     }
 
-    return sent;
+    // ---- Put the packets back ------------------------------------------
+    //
+    // The batch is ordered by queue: all the packets of queue 0 first,
+    // then queue 1, and so on.  Restoring them in *reverse* batch order
+    // with `push_front` therefore restores each queue in its original
+    // FIFO order.
+    for (std::size_t i = g_drain_batch.size(); i-- > first_vetoed;) {
+        auto& item = g_drain_batch[i];
+        if (s_family) {
+            impl_->stream_buckets_[item.src_index][item.src_class]
+                .push_front(std::move(item.rec));
+        } else {
+            impl_->queues_[item.src_index].push_front(std::move(item.rec));
+        }
+    }
 }
 
 // ===============================================================================
@@ -1088,18 +1452,17 @@ int sched_select_next_packet(SchedulerHandle* h,
                              void* user_data) noexcept {
     if (!h) return 0;
     if (!on_packet) {
+        // Drain without a callback.
         return h->sched->select_next_packet(max_packets, nullptr);
     }
-    // Wrap the C function pointer into a DrainCallback.
-    // NOTE: stream_id and bucket priority are not accessible through the
-    // standard DrainCallback interface (which only sees Priority + ByteSpan).
-    // The C ABI caller receives 0u / Normal as placeholders here; for full
-    // stream info, call the C++ API select_next_packet() directly.
-    return h->sched->select_next_packet(max_packets,
-        [on_packet, user_data](plugins::Priority,
+    // The C function pointer is wrapped into the stream-aware callback,
+    // so the C ABI caller receives the real stream id and the real bucket
+    // priority — not placeholders.
+    return h->sched->select_next_packet(
+        max_packets,
+        [on_packet, user_data](std::uint32_t stream_id, StreamPriority level,
                                core::ByteSpan span) -> bool {
-            on_packet(0u, StreamPriority::Normal,
-                      span.data(), span.size(), user_data);
+            on_packet(stream_id, level, span.data(), span.size(), user_data);
             return true;
         });
 }

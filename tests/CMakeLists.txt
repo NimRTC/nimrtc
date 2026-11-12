@@ -798,6 +798,12 @@ function(nimrtc_add_engine_test name source)
             PROPERTIES TIMEOUT 90
             DISCOVERY_TIMEOUT 10)
     endif()
+    # Linking nimrtc::engine pulls in nimrtc::dtls (via the unified
+    # kDefaultRegistrars[] table), and the wolfSSL backend resolves its
+    # certificate from disk at DTLS-session setup time.  Seed the certs
+    # into the test output directories so any test that opens a real DTLS
+    # session finds them.  See cmake/NimRTCTest.cmake for the rationale.
+    nimrtc_copy_wolfssl_certs(${name})
 endfunction()
 
 # ----------------------------------------------------------------------------
@@ -970,6 +976,9 @@ function(nimrtc_add_engine_video_test name source)
             PROPERTIES TIMEOUT 30
             DISCOVERY_TIMEOUT 10)
     endif()
+    # Links nimrtc::engine → nimrtc::dtls; the wolfSSL backend resolves
+    # its certificate from disk at DTLS-session setup time.
+    nimrtc_copy_wolfssl_certs(${name})
 endfunction()
 
 # (Function above is referenced only inside the video-source-gated block below;
@@ -1028,6 +1037,9 @@ function(nimrtc_add_engine_video_feedback_test name source)
             PROPERTIES TIMEOUT 30
             DISCOVERY_TIMEOUT 10)
     endif()
+    # Links nimrtc::engine → nimrtc::dtls; the wolfSSL backend resolves
+    # its certificate from disk at DTLS-session setup time.
+    nimrtc_copy_wolfssl_certs(${name})
 endfunction()
 
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
@@ -1128,6 +1140,17 @@ nimrtc_add_engine_codec_test(test_engine_video_codec
                               test_engine_video_codec.cpp)
 endif()
 
+# B6 (remediation plan §2.4) — the video codec family contract.
+# `IVideoCodec::kind()` is authoritative; the plugin id is only a
+# lookup hint.  The test needs the video pipeline (receiver / sender
+# "reference") and the H.264 module (the default codec), so it reuses
+# `nimrtc_add_engine_codec_test`'s link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_codec_test(test_engine_video_codec_family
+                              test_engine_video_codec_family.cpp)
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
@@ -1197,7 +1220,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # `NIMRTC_MODULE_*` options and their `register_default_plugins()`
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
-              video_capture audio_rx dtmf)
+              video_capture audio_rx dtmf srtp)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -1222,6 +1245,9 @@ set_tests_properties(test_registry_contract PROPERTIES TIMEOUT 30)
 # runtime DLL on Windows.  Without it the exe fails to load (0xc0000135),
 # which `gtest_discover_tests` reports as a build failure.
 nimrtc_copy_msquic_dll(test_registry_contract)
+# The target links the DTLS seam (and thus the wolfSSL backend), which
+# resolves its certificate from disk at DTLS-session setup time.
+nimrtc_copy_wolfssl_certs(test_registry_contract)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_registry_contract
         PROPERTIES TIMEOUT 30

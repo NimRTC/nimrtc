@@ -155,6 +155,20 @@ public:
      *          false when it was not (nothing is taken in that case). */
     bool try_consume(std::uint64_t bytes, core::TimePoint now) noexcept;
 
+    /** Give back bytes that were taken out of the bucket.
+     *
+     *  This is the counterpart of `try_consume()` for the case where the
+     *  bytes were taken but the packet did **not** leave the machine — for
+     *  example a scheduler drain whose callback vetoed the packet and
+     *  returned it to the queue.  The bytes never crossed the wire, so the
+     *  bucket must not charge for them.
+     *
+     *  The credit is clamped to the burst ceiling, and `bytes_sent()` is
+     *  decremented (saturating at zero) so the telemetry stays truthful.
+     *
+     *  @param bytes  The bytes to return.  0 is a no-op. */
+    void refund(std::uint64_t bytes) noexcept;
+
     /** Drop the accumulated credit, restart the clock and clear the
      *  telemetry counters. */
     void reset(core::TimePoint now) noexcept;

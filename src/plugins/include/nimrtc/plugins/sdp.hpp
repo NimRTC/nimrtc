@@ -2,14 +2,56 @@
  * @file nimrtc/plugins/sdp.hpp
  * @brief ISDP — pluggable SDP parsing and munging interface.
  *
- * Replace this to support proprietary SDP extensions (e.g. TURN+ICE
- * credentials, codec-specific attributes) without touching the engine.
+ * @deprecated **Not pluggable as of v1.2.0.**  The engine uses the
+ * concrete `sdp::` implementation directly and never resolves an
+ * `ISDP` factory from the registry.  The interface and its registry
+ * slot are retained for ABI stability only.
  *
- * ## Implementing a custom SDP plugin
+ * ## Why this is not a working seam
  *
- * 1. Implement `ISDP` for your SDP variant.
- * 2. Register: `PluginRegistry::instance().register_sdp("my_sdp", factory);`
- * 3. Set `NimRTCEngine::Config::sdp_name = "my_sdp"`.
+ * The SDP layer is the *contract document* of a session, and every
+ * other component is written against the concrete types it produces:
+ *
+ *   - The negotiation layer compares the peer's `a=rtpmap:` encoding
+ *     against `impl_->video_codec_family` and the negotiated payload
+ *     type.  Those are concrete `sdp::` structures.
+ *   - The codec family → `a=rtpmap:` encoding → `a=fmtp:` body
+ *     mapping is a single table (`engine/src/video_codec_config.hpp`),
+ *     and the SDP layer emits from it directly.
+ *   - The transport layer contributes the ICE / DTLS / fingerprint
+ *     attributes, and the answer-validation path checks them by
+ *     `sdp::MediaDescription` field.
+ *
+ * A replaceable SDP layer would have to reproduce *all* of those
+ * semantics in a form the negotiation code can consume — meaning the
+ * seam would not be "replace the SDP text", it would be "replace the
+ * negotiation model".  That is a much larger redesign, and until it
+ * exists, a third-party SDP plugin would produce an offer whose
+ * structure the engine's own negotiation code cannot read.
+ *
+ * The remediation plan (§2.1, decision: *do not replace SDP/RTP for
+ * now*) therefore keeps the concrete implementation and removed the
+ * `rtp_name` / `sdp_name` config knobs rather than pretending the seam
+ * works.
+ *
+ * ## If you need custom SDP attributes today
+ *
+ * The supported extension points are *additive*, not replacements:
+ *
+ *   - `src/modules/video_sdp_attributes/` — a codec-specific helper
+ *     that parses and builds the `a=fmtp:` body for a codec family
+ *     (`parse_fmtp` / `build_h264_fmtp` / …) and maps an
+ *     `a=rtpmap:` encoding name onto a codec kind.  It is a library,
+ *     not a plugin; the engine's own `video_codec_config.hpp` table
+ *     plays the same role for the families it negotiates.
+ *   - The codec plugin's own `kind()` — the engine derives the
+ *     `a=rtpmap:` encoding, the payload type, and (for the built-in
+ *     families) the `a=fmtp:` body from the codec family, so a
+ *     third-party codec gets a coherent SDP without touching the SDP
+ *     layer.
+ *
+ * @see nimrtc/plugins/rtp.hpp for the same story on the RTP side.
+ * @see docs/plan/architecture-remediation-plan.md §2.1.
  *
  * @note P0 scaffold — interface stable, binary layout TBD P1.
  */

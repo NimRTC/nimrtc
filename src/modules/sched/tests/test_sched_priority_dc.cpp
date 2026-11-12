@@ -1,31 +1,31 @@
 /**
  * @file test_sched_priority_dc.cpp
- * @brief DC-2: P-family + S-family cross-plane priority integration — DataChannel × RTP.
+ * @brief DC-2: P-family + S-family cross-plane priority integration �?DataChannel × RTP.
  *
  * ## Purpose
  *
  * Verify that the unified `Scheduler` correctly handles simultaneous
  * traffic from two planes:
  *
- *   - **DC plane (S-family)** — DataChannel streams via `enqueue_for_stream_*()`
+ *   - **DC plane (S-family)** �?DataChannel streams via `enqueue_for_stream_*()`
  *     and `select_next_packet()` / `set_stream_priority()`.
  *
- *   - **RTP plane (P-family)** — Media/control packets via `enqueue()` /
+ *   - **RTP plane (P-family)** �?Media/control packets via `enqueue()` /
  *     `drain()` with `plugins::Priority`.
  *
  * These two systems are orthogonal in the implementation:
- *   P-family `drain()` / `drain_with()`   — drains the 5-level plugins::Priority queues.
- *   S-family `select_next_packet()`        — drains the 3-level StreamPriority buckets.
+ *   P-family `drain()` / `drain_with()`   �?drains the 5-level plugins::Priority queues.
+ *   S-family `select_next_packet()`        �?drains the 3-level StreamPriority buckets.
  *
  * Each plane is independently correct (covered by test_priority.cpp and
  * test_scheduler.cpp).  This file covers their **interaction**.
  *
  * ## What is NOT tested here
  *
- * - Pure S-family bucket ordering (→ test_priority.cpp)
- * - Pure P-family priority ordering and BWE (→ test_scheduler.cpp)
- * - WebTransportDataChannel network I/O (→ integration tests)
- * - Real DC stream creation (→ DC-1 integration tests)
+ * - Pure S-family bucket ordering (�?test_priority.cpp)
+ * - Pure P-family priority ordering and BWE (�?test_scheduler.cpp)
+ * - WebTransportDataChannel network I/O (�?integration tests)
+ * - Real DC stream creation (�?DC-1 integration tests)
  *
  * ## Scope note (DC-2 under the default `web_transport` backend)
  *
@@ -44,9 +44,9 @@
  * | # | Scenario                         | Key invariant verified                |
  * |---|----------------------------------|---------------------------------------|
  * | 1 | DC_Plane_Integration            | P-family and S-family operate independently      |
- * | 2 | Cross_Plane_Priority            | P-family kControl ≥ S-family High bucket         |
+ * | 2 | Cross_Plane_Priority            | P-family kControl �?S-family High bucket         |
  * | 3 | Datachannel_Stream_Id_Isolation | Multiple DC streams keep own priority|
- * | 4 | Priority_Promotion_Effects_RTP  | S-family promote → bucket switch, P-family unchanged|
+ * | 4 | Priority_Promotion_Effects_RTP  | S-family promote �?bucket switch, P-family unchanged|
  * | 5 | Select_Next_Respects_Budget      | select_next_packet(max) limits drain |
  * | 6 | P_S_Isolation_No_Cross_Pollution | drain() never sees S-family-only packets |
  *
@@ -128,19 +128,25 @@ std::vector<std::uint32_t> drain_all_s_stream_ids(nimrtc::sched::Scheduler& sch)
     std::vector<std::uint32_t> ids;
     int n;
     do {
-        n = sch.select_next_packet(128, [&](nimrtc::plugins::Priority /*p*/,
-                                           nimrtc::core::ByteSpan data) -> bool {
+        // The callback is spelled with the explicit `plugins::DrainCallback`
+        // type: `Scheduler::select_next_packet` has an overload for the
+        // per-packet callback and one for the stream-aware
+        // (`plugins::StreamDrainCallback`) callback, and an unqualified
+        // lambda is ambiguous between the two.
+        n = sch.select_next_packet(128, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority /*p*/,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 ids.push_back(static_cast<std::uint32_t>(data[0]));
             }
             return true;
-        });
+        }));
     } while (n > 0);
     return ids;
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1 — DC_Plane_Integration
+// Scenario 1 �?DC_Plane_Integration
 // ---------------------------------------------------------------------------
 
 /**
@@ -184,7 +190,7 @@ TEST(StreamPriorityCrossPlane, DC_Plane_Integration) {
 
     // ---- Both planes should now be empty ----
     EXPECT_EQ(sch.drain(10), 0);
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
+    EXPECT_EQ(sch.select_next_packet(10, nimrtc::plugins::DrainCallback{}), 0);
 }
 
 /**
@@ -222,11 +228,11 @@ TEST(StreamPriorityCrossPlane, DC_Plane_Integration_MultiCycle) {
 
     // Final state: both planes empty
     EXPECT_EQ(sch.drain(10), 0);
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
+    EXPECT_EQ(sch.select_next_packet(10, nimrtc::plugins::DrainCallback{}), 0);
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2 — Cross_Plane_Priority
+// Scenario 2 �?Cross_Plane_Priority
 // ---------------------------------------------------------------------------
 
 /**
@@ -325,7 +331,7 @@ TEST(StreamPriorityCrossPlane, Cross_Plane_Priority_AllLevels) {
         EXPECT_EQ(counts[4], 1);  // kBestEffort
     }
 
-    // ---- S-family select_next_packet: High → Normal → Low ----
+    // ---- S-family select_next_packet: High �?Normal �?Low ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
@@ -336,7 +342,7 @@ TEST(StreamPriorityCrossPlane, Cross_Plane_Priority_AllLevels) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3 — Datachannel_Stream_Id_Isolation
+// Scenario 3 �?Datachannel_Stream_Id_Isolation
 // ---------------------------------------------------------------------------
 
 /**
@@ -365,7 +371,7 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation) {
     EXPECT_EQ(sch.get_stream_priority(kDCStreamNormal), nimrtc::sched::StreamPriority::Normal);
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow),    nimrtc::sched::StreamPriority::Low);
 
-    // Verify drain order: High → Normal → Low
+    // Verify drain order: High �?Normal �?Low
     auto ids = drain_all_s_stream_ids(sch);
     ASSERT_EQ(ids.size(), 3u);
     EXPECT_EQ(ids[0], kDCStreamHigh   & 0xFF);
@@ -391,14 +397,14 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_DemoteOne) {
     sch.enqueue_for_stream_owned(kDCStreamLow,
                                  make_s_payload(kDCStreamLow), dst);
 
-    // Demote kDCStreamHigh from High → Low
+    // Demote kDCStreamHigh from High �?Low
     sch.set_stream_priority(kDCStreamHigh, nimrtc::sched::StreamPriority::Low);
 
     // Verify others are unchanged
     EXPECT_EQ(sch.get_stream_priority(kDCStreamNormal), nimrtc::sched::StreamPriority::Normal);
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow),    nimrtc::sched::StreamPriority::Low);
 
-    // Drain order should now be: Normal (1) → High+Low (2) — High moved to Low bucket
+    // Drain order should now be: Normal (1) �?High+Low (2) �?High moved to Low bucket
     auto ids = drain_all_s_stream_ids(sch);
     ASSERT_EQ(ids.size(), 3u);
     // First: Normal (rank 1)
@@ -414,7 +420,7 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_DemoteOne) {
  */
 TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_UnseenDefault) {
     nimrtc::sched::Scheduler sch{};
-    // kDCStreamAlt has never been seen — should default to Normal
+    // kDCStreamAlt has never been seen �?should default to Normal
     EXPECT_EQ(sch.get_stream_priority(kDCStreamAlt),
               nimrtc::sched::StreamPriority::Normal);
 
@@ -435,11 +441,11 @@ TEST(StreamPriorityCrossPlane, Datachannel_Stream_Id_Isolation_UnseenDefault) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4 — Priority_Promotion_Effects_RTP
+// Scenario 4 �?Priority_Promotion_Effects_RTP
 // ---------------------------------------------------------------------------
 
 /**
- * Promoting a DC stream from Low → High should switch it to the High bucket
+ * Promoting a DC stream from Low �?High should switch it to the High bucket
  * and cause it to preempt Normal/Low streams on the next drain.
  * P-family (RTP) packets are unaffected by S-family priority changes.
  */
@@ -459,7 +465,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
     sch.enqueue_for_stream_owned(kDCStreamNormal,
                                  make_s_payload(kDCStreamNormal), dst);
 
-    // ---- Baseline: S-family drains Normal → Low ----
+    // ---- Baseline: S-family drains Normal �?Low ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 2u);
@@ -488,7 +494,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
     // Verify the promotion took effect
     EXPECT_EQ(sch.get_stream_priority(kDCStreamLow), nimrtc::sched::StreamPriority::High);
 
-    // ---- S-family drain: High (kDCStreamLow) → Normal (kDCStreamNormal) ----
+    // ---- S-family drain: High (kDCStreamLow) �?Normal (kDCStreamNormal) ----
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 2u);
@@ -501,7 +507,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP) {
 }
 
 /**
- * Demoting a DC stream from High → Normal should place it behind existing
+ * Demoting a DC stream from High �?Normal should place it behind existing
  * Normal streams and ahead of Low streams.
  */
 TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
@@ -519,7 +525,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
     sch.enqueue_for_stream_owned(kDCStreamLow,
                                  make_s_payload(kDCStreamLow), dst);
 
-    // Baseline: High → Normal → Low
+    // Baseline: High �?Normal �?Low
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
@@ -528,7 +534,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
         EXPECT_EQ(ids[2], kDCStreamLow    & 0xFF);
     }
 
-    // Re-enqueue and demote kDCStreamHigh from High → Normal
+    // Re-enqueue and demote kDCStreamHigh from High �?Normal
     sch.set_stream_priority(kDCStreamHigh,   nimrtc::sched::StreamPriority::High);
     sch.set_stream_priority(kDCStreamNormal, nimrtc::sched::StreamPriority::Normal);
     sch.set_stream_priority(kDCStreamLow,    nimrtc::sched::StreamPriority::Low);
@@ -541,12 +547,12 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
 
     sch.set_stream_priority(kDCStreamHigh, nimrtc::sched::StreamPriority::Normal);
 
-    // Drain: High bucket empty, Normal bucket (Normal + demoted High) → Low
+    // Drain: High bucket empty, Normal bucket (Normal + demoted High) �?Low
     {
         auto ids = drain_all_s_stream_ids(sch);
         ASSERT_EQ(ids.size(), 3u);
         // High bucket empty (no streams at High)
-        // Normal bucket: Normal (enqueued first) → High (demoted)
+        // Normal bucket: Normal (enqueued first) �?High (demoted)
         EXPECT_EQ(ids[0], kDCStreamNormal & 0xFF);  // Normal
         EXPECT_EQ(ids[1], kDCStreamHigh   & 0xFF);  // High (now Normal)
         EXPECT_EQ(ids[2], kDCStreamLow    & 0xFF);  // Low
@@ -554,7 +560,7 @@ TEST(StreamPriorityCrossPlane, Priority_Promotion_Effects_RTP_Demote) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5 — Select_Next_Respects_Budget
+// Scenario 5 �?Select_Next_Respects_Budget
 // ---------------------------------------------------------------------------
 
 /**
@@ -579,13 +585,14 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget) {
     // select_next_packet(max=2) should drain only the first 2 from High
     {
         std::vector<std::uint32_t> first_two;
-        sch.select_next_packet(2, [&](nimrtc::plugins::Priority,
-                                      nimrtc::core::ByteSpan data) -> bool {
+        sch.select_next_packet(2, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 first_two.push_back(static_cast<std::uint32_t>(data[0]));
             }
             return true;
-        });
+        }));
         ASSERT_EQ(first_two.size(), 2u);
         EXPECT_EQ(first_two[0], kDCStreamHigh & 0xFF);
         EXPECT_EQ(first_two[1], kDCStreamHigh & 0xFF);
@@ -594,13 +601,14 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget) {
     // select_next_packet(max=2) again: should get remaining High + first Normal
     {
         std::vector<std::uint32_t> next_two;
-        sch.select_next_packet(2, [&](nimrtc::plugins::Priority,
-                                      nimrtc::core::ByteSpan data) -> bool {
+        sch.select_next_packet(2, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 next_two.push_back(static_cast<std::uint32_t>(data[0]));
             }
             return true;
-        });
+        }));
         ASSERT_EQ(next_two.size(), 2u);
         EXPECT_EQ(next_two[0], kDCStreamHigh   & 0xFF);  // last High
         EXPECT_EQ(next_two[1], kDCStreamNormal & 0xFF);  // first Normal
@@ -609,19 +617,20 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget) {
     // select_next_packet(max=1): remaining Normal
     {
         std::vector<std::uint32_t> last_one;
-        sch.select_next_packet(1, [&](nimrtc::plugins::Priority,
-                                      nimrtc::core::ByteSpan data) -> bool {
+        sch.select_next_packet(1, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 last_one.push_back(static_cast<std::uint32_t>(data[0]));
             }
             return true;
-        });
+        }));
         ASSERT_EQ(last_one.size(), 1u);
         EXPECT_EQ(last_one[0], kDCStreamNormal & 0xFF);
     }
 
     // Now S-family should be empty; P-family also empty
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
+    EXPECT_EQ(sch.select_next_packet(10, nimrtc::plugins::DrainCallback{}), 0);
     EXPECT_EQ(sch.drain(10), 0);
 }
 
@@ -635,8 +644,8 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget_EdgeCases) {
     sch.set_stream_priority(kDCStreamHigh, nimrtc::sched::StreamPriority::High);
     sch.enqueue_for_stream_owned(kDCStreamHigh, make_s_payload(kDCStreamHigh), dst);
 
-    EXPECT_EQ(sch.select_next_packet(0, nullptr), 0);
-    EXPECT_EQ(sch.select_next_packet(-1, nullptr), 0);  // negative = no-op
+    EXPECT_EQ(sch.select_next_packet(0, nimrtc::plugins::DrainCallback{}), 0);
+    EXPECT_EQ(sch.select_next_packet(-1, nimrtc::plugins::DrainCallback{}), 0);  // negative = no-op
 }
 
 /**
@@ -668,11 +677,12 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget_P_Unaffected) {
     // Drain S-family with limit=1: should get 1 High packet
     {
         std::vector<std::uint32_t> ids;
-        sch.select_next_packet(1, [&](nimrtc::plugins::Priority,
-                                      nimrtc::core::ByteSpan data) -> bool {
+        sch.select_next_packet(1, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) ids.push_back(static_cast<std::uint32_t>(data[0]));
             return true;
-        });
+        }));
         ASSERT_EQ(ids.size(), 1u);
         EXPECT_EQ(ids[0], kDCStreamHigh & 0xFF);
     }
@@ -682,7 +692,7 @@ TEST(StreamPriorityCrossPlane, Select_Next_Respects_Budget_P_Unaffected) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 6 — P_S_Isolation_No_Cross_Pollution
+// Scenario 6 �?P_S_Isolation_No_Cross_Pollution
 // ---------------------------------------------------------------------------
 
 /**
@@ -721,8 +731,9 @@ TEST(StreamPriorityCrossPlane, P_S_Isolation_No_Cross_Pollution) {
     // select_next_packet() should NOT see P-family packets
     {
         std::vector<std::uint32_t> s_stream_ids;
-        sch.select_next_packet(10, [&](nimrtc::plugins::Priority,
-                                       nimrtc::core::ByteSpan data) -> bool {
+        sch.select_next_packet(10, nimrtc::plugins::DrainCallback(
+            [&](nimrtc::plugins::Priority,
+                nimrtc::core::ByteSpan data) -> bool {
             if (!data.empty()) {
                 // S-family packet marker: stream_id byte (not 0xEx)
                 if ((data[0] & 0xF0) != 0xE0) {
@@ -730,7 +741,7 @@ TEST(StreamPriorityCrossPlane, P_S_Isolation_No_Cross_Pollution) {
                 }
             }
             return true;
-        });
+        }));
         // Should get exactly 1 S-family packet (stream_id = kDCStreamNormal & 0xFF)
         ASSERT_EQ(s_stream_ids.size(), 1u);
         EXPECT_EQ(s_stream_ids[0], kDCStreamNormal & 0xFF);
@@ -800,7 +811,7 @@ TEST(StreamPriorityCrossPlane, Reset_Clears_Both_Planes) {
 
     // Both planes should be empty
     EXPECT_EQ(sch.drain(10), 0);
-    EXPECT_EQ(sch.select_next_packet(10, nullptr), 0);
+    EXPECT_EQ(sch.select_next_packet(10, nimrtc::plugins::DrainCallback{}), 0);
     EXPECT_EQ(sch.get_stream_priority(kDCStreamHigh),
              nimrtc::sched::StreamPriority::Normal);  // default after reset
 }
@@ -835,12 +846,15 @@ TEST(StreamPriorityCrossPlane, Stats_Reflect_Both_Planes) {
 // ---------------------------------------------------------------------------
 
 TEST(StreamPriorityCrossPlane, StreamPriorityHelpers) {
-    using nimrtc::sched::stream_priority_rank;
+    // The helper is called *qualified*: `StreamPriority` is an alias of
+    // `plugins::StreamPriority`, so an unqualified call would also find
+    // `plugins::stream_priority_rank` through ADL and the two candidates
+    // would be ambiguous.
     using nimrtc::sched::StreamPriority;
 
-    EXPECT_EQ(stream_priority_rank(StreamPriority::High),   0u);
-    EXPECT_EQ(stream_priority_rank(StreamPriority::Normal), 1u);
-    EXPECT_EQ(stream_priority_rank(StreamPriority::Low),    2u);
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::High),   0u);
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::Normal), 1u);
+    EXPECT_EQ(nimrtc::sched::stream_priority_rank(StreamPriority::Low),    2u);
 }
 
 }  // namespace nimrtc::tests

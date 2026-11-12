@@ -18,8 +18,6 @@ plugin a capability resolves to.
 EngineConfig
 ├── Plugin selection (string IDs)
 │   ├── transport_name                  = "ice"
-│   ├── rtp_name                        = "webrtc"
-│   ├── sdp_name                        = "webrtc"
 │   ├── jb_name                         = "adaptive"
 │   ├── audio3a_name                    = "webrtc_apm"
 │   ├── codec_name                      = "opus"
@@ -92,18 +90,37 @@ registered via `core::PluginRegistry::register_<family>()` or
 implementing your own plugin see `docs/plugin_author_guide.md`.
 
 If a configured id is not registered when `open()` runs, the engine
-returns a non-zero error code via `last_open_rc()` and fires
-`on_error_`. **There is no silent fallback.** This is intentional:
-configuration typos must surface immediately.
+reports it. **How loudly depends on the family:**
+
+| Behaviour | Families | What the host sees |
+|---|---|---|
+| **Hard failure** | ICE transport, transport stack, DTLS, SCTP socket, SRTP backend, DataChannel backend | `open()` returns non-zero, `last_open_rc()` is set, `on_error_` fires. No built-in substitute is used. |
+| **Soft degradation** | BWE, scheduler, net-feedback, XR report, jitter buffer, audio 3A, audio/video codecs, video source / sink / receiver / sender | The engine logs a warning and continues without that component. `open()` still succeeds. |
+| **Disabled by configuration** | DataChannel (`datachannel_backend == ""`), raw-UDP bypass (`raw_udp_name` empty), capture (`video_capture_name` empty) | The feature is off; no resolution is attempted. |
+
+The hard-failure rows are the ones where a typo must not be papered
+over — a missing DTLS backend is a session that cannot secure media,
+and silently substituting a built-in would hide the mistake. The
+soft-degradation rows are the ones where the component is an
+*enhancement* (a better estimator, a nicer 3A pipeline) rather than a
+protocol requirement.
+
+`docs/plugin_author_guide.md` §4.1 carries the same table with the
+per-family mapping.
 
 ### 2.1 Wire / transport
 
 | Field | Default | Effect |
 |---|---|---|
 | `transport_name` | `"ice"` | `ITransport` plugin id (ICE-based). See §6.1 below. |
-| `rtp_name` | `"webrtc"` | `IRTP` plugin id. |
-| `sdp_name` | `"webrtc"` | `ISDP` plugin id. |
 | `jb_name` | `"adaptive"` | `IJB` plugin id. |
+
+> **Removed in v1.2.0:** `rtp_name` and `sdp_name`. The RTP and SDP
+> layers are **not** pluggable — the engine uses the concrete `rtp::` /
+> `sdp::` implementations directly. The `IRTP` / `ISDP` interfaces still
+> exist (ABI stability) but are deprecated and are never resolved from
+> the registry. See `docs/plugin_author_guide.md` §4.2 for why, and
+> `docs/plan/architecture-remediation-plan.md` §2.1 for the decision.
 
 ### 2.2 DTLS backend
 
@@ -537,13 +554,29 @@ std::uint16_t local_port_range_end   = 0;
 ### 4.1 Port ranges
 
 `local_port_range_begin` / `_end` define the UDP socket pool the
-ICE transport binds. Both `0` = OS picks. **When you run multiple
-`NimRTCEngine` instances on the same host (e.g. loopback demo), each
-must have a unique port range** — otherwise they steal each other's
-STUN packets.
+ICE transport binds. Both `0` = OS picks.
 
-The loopback-p2p example uses `51000–51099`; demo-agent-gateway uses
-`52000–52099`. Pick non-overlapping ranges in your own code.
+**Leave both at 0 (the default).** The OS-assigned ephemeral port is
+the safe choice:
+
+- Windows runners hand out *excluded* port ranges (Hyper-V / HNS
+  reservations). A bind inside one fails with `WSAEACCES` (errno
+  `10013`), and libjuice walks the entire requested range before
+  giving up, so the agent fails to open outright. A pinned range that
+  worked yesterday can fail today with no change on your side. The
+  kernel's ephemeral allocation never picks an excluded port.
+- A pinned range is a cross-process collision risk: two sessions on the
+  same host that pick the same range silently steal each other's STUN
+  packets.
+
+**Multiple engines on one host do not need disjoint ranges.** An
+ephemeral-port request gives each engine its own socket on its own
+port, so two engines in the same process never share a UDP socket.
+Non-overlapping ranges are only required if you pin fixed ranges for
+both.
+
+The `loopback-p2p` and `demo-agent-gateway` examples both leave the
+range at 0 for this reason.
 
 ### 4.2 TURN
 

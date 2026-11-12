@@ -54,7 +54,21 @@ target_compile_definitions(nimrtc_dtls
     PUBLIC
         NIMRTC_HAS_DTLS=1
         NIMRTC_USE_WOLFSSL_DTLS=1
-    )
+    PRIVATE
+        # Absolute path to the directory holding the vendored ECC cert/key.
+        # The wolfSSL session resolves its certificate relative to the
+        # process working directory first (so a build-dir override wins),
+        # then falls back to this absolute source-tree path.  The fallback
+        # matters because CTest runs each test with the *test-file* directory
+        # as its working directory, which is one level above the
+        # `<config>/certs/` directory the build's copy rule populates.
+        # Without it every DTLS-dependent engine test fails with
+        # "wolfSSL_CTX setup failed" on multi-config generators.
+        #
+        # The path is spelled relative to *this* directory (not
+        # CMAKE_SOURCE_DIR) so it stays correct when NimRTC is consumed
+        # via add_subdirectory() from a larger project.
+        NIMRTC_WOLFSSL_CERT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/wolfssl/src/certs")
 
 target_include_directories(nimrtc_dtls
     PUBLIC

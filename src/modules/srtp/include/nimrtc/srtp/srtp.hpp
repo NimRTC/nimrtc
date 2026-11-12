@@ -9,10 +9,13 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/core/error.hpp>
+#include <nimrtc/plugins/srtp_backend.hpp>
 
 // =============================================================================
 // nimrtc::srtp
@@ -114,6 +117,27 @@ struct NIMRTC_API_STABLE Config {
 // SrtpSession
 // -----------------------------------------------------------------------------
 
+/**
+ * @brief One SRTP session — the per-SSRC, per-direction crypto context.
+ *
+ * ## Backend routing (v1.2.0, remediation plan B7 / Q3)
+ *
+ * The session **no longer talks to libsrtp directly**.  It owns a
+ * `plugins::ISrtpSessionBackend` (the pluggable crypto-backend seam) and
+ * forwards every protect / unprotect to it.  The built-in backend is
+ * `LibsrtpSessionBackend`, which owns a `SrtpSession` of its own — so
+ * the libsrtp-specific code moved down one level and the *seam* became
+ * the path the engine actually uses.
+ *
+ * This is what makes the SRTP family replaceable: a third-party backend
+ * (e.g. an SM4-GCM national-crypto backend) implements
+ * `plugins::ISrtpSessionBackend`, registers under its own id, and the
+ * engine selects it through `EngineConfig::srtp_backend_name`.
+ *
+ * ## Thread safety
+ *
+ * NOT thread-safe — the caller must serialise encrypt / decrypt calls.
+ */
 class NIMRTC_API_STABLE SrtpSession {
 public:
     SrtpSession();
@@ -123,6 +147,23 @@ public:
     SrtpSession& operator=(const SrtpSession&) = delete;
     SrtpSession(SrtpSession&&)                 noexcept;
     SrtpSession& operator=(SrtpSession&&)      noexcept;
+
+    /** Construct a session backed by a specific crypto backend.
+     *
+     *  The factory is consulted through `core::PluginRegistry`; an
+     *  unknown id makes every subsequent operation fail with
+     *  `ErrorCode::NotFound`.  The default constructor uses the
+     *  built-in "libsrtp" backend. */
+    explicit SrtpSession(std::string backend_id);
+
+    /** Construct a session backed by an already-created backend instance.
+     *  The session takes ownership.  A null backend yields a session
+     *  whose operations fail with `ErrorCode::InvalidState`. */
+    explicit SrtpSession(
+        std::unique_ptr<plugins::ISrtpSessionBackend> backend);
+
+    /** The id of the crypto backend this session uses. */
+    [[nodiscard]] std::string_view backend_id() const noexcept;
 
     // Create session from crypto suite and master key material.
     // Returns error if keys are invalid for the chosen suite.
@@ -195,6 +236,20 @@ class NIMRTC_API_STABLE SrtpContext {
 public:
     SrtpContext();
     ~SrtpContext();
+
+    /** Construct a context whose sessions use the given crypto backend.
+     *
+     *  The id is resolved through `core::PluginRegistry` when the first
+     *  session is created.  An unknown id makes every `get_session()`
+     *  return nullptr (and every operation on the context fail) — the
+     *  engine surfaces this as a hard `open()` error rather than
+     *  silently falling back to libsrtp.
+     *
+     *  The default constructor uses the built-in "libsrtp" backend. */
+    explicit SrtpContext(std::string backend_id);
+
+    /** The id of the crypto backend this context's sessions use. */
+    [[nodiscard]] std::string_view backend_id() const noexcept;
 
     // Derive keys for the REMOTE participant (DTLS-SRTP key derivation).
     // Stores the peer's master key/salt for INBOUND session creation.

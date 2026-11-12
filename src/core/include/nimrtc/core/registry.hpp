@@ -120,6 +120,13 @@ class NIMRTC_API_STABLE IDtmfCodecFactory;
 // registry's TypedRegistry<> field can reference it without pulling the
 // seam header into core (Layout Invariant 1).
 class NIMRTC_API_STABLE IXrReportFactory;
+// v1.2.0 (architecture remediation plan B7 / Q3): the SRTP crypto
+// backend seam.  The engine routes every SRTP protect / unprotect
+// through the factory selected by `EngineConfig::srtp_backend_name`.
+// Forward-declared like the other factory types so the registry's
+// TypedRegistry<> field can reference it without pulling the seam
+// header into core (Layout Invariant 1).
+class NIMRTC_API_UNSTABLE ISrtpBackendFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -190,6 +197,11 @@ namespace video_sink      { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
+// v1.2.0 (remediation plan B7 / Q3): the SRTP crypto-backend module.
+// Its entry point populates the registry's SRTP-backend slot
+// (register_srtp_backend) so `core::register_all_default_plugins()`
+// can wire the built-in libsrtp backend through the unified table.
+namespace srtp             { void register_default_plugins() noexcept; }
 // v1.2.0 M1 (F2): the receiver-side network-feedback collector module.
 // Its entry point populates the registry's net-feedback slot
 // (register_net_feedback) so `core::register_all_default_plugins()` can
@@ -771,6 +783,28 @@ public:
         return web_transport_.list_ids();
     }
 
+    // -- SRTP crypto backend (v1.2.0, remediation plan B7 / Q3) -----------
+    //
+    // Typed slot for `plugins::ISrtpBackendFactory*`.  The built-in
+    // backend is `LibsrtpBackendFactory` (id = "libsrtp"); a third-party
+    // backend (e.g. an SM4-GCM national-crypto backend) registers under
+    // its own id and is selected through
+    // `EngineConfig::srtp_backend_name`.
+    //
+    // Before this slot existed the seam was a "fake seam": the interface
+    // and the libsrtp adapter both existed, but `SrtpContext` called
+    // libsrtp directly and no registry lookup ever happened.  The slot
+    // is what makes the seam real.
+    void register_srtp_backend(std::string_view id,
+                               const plugins::ISrtpBackendFactory* f);
+    [[nodiscard]] const plugins::ISrtpBackendFactory*
+    get_srtp_backend(std::string_view id) const {
+        return srtp_backend_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_srtp_backends() const {
+        return srtp_backend_.list_ids();
+    }
+
 private:
     TypedRegistry<plugins::ITransportFactory>    transport_;
     TypedRegistry<plugins::IICETransportFactory> ice_transport_;
@@ -828,6 +862,9 @@ private:
     // cycle.
     TypedRegistry<web_transport::IWebTransportSessionFactory>
                                                 web_transport_;
+    // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend slot.
+    // The built-in libsrtp adapter registers under "libsrtp".
+    TypedRegistry<plugins::ISrtpBackendFactory>  srtp_backend_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1108,6 +1145,19 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kWebTransport, \
             #id, factory_ptr }
 
+/** Register an SRTP crypto-backend factory by ID and factory pointer.
+ *  v1.2.0 (architecture remediation plan B7 / Q3) — typed slot for
+ *  `plugins::ISrtpBackendFactory*`.  The built-in libsrtp adapter
+ *  registers under "libsrtp"; a third-party backend (e.g. SM4-GCM)
+ *  registers under its own id and is selected through
+ *  `EngineConfig::srtp_backend_name`. */
+#define NIMRTC_REGISTER_SRTP_BACKEND(id, factory_ptr)                  \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_srtp_backend_){                        \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kSrtpBackend, \
+            #id, factory_ptr }
+
 namespace detail {
 
 // Tiny utility macros
@@ -1178,7 +1228,10 @@ public:
         // v0.14.0 alpha.2 (ADR-014): WebTransport / QUIC seam.
         // The factory slot lands in alpha.2; the msquic factory
         // lands in beta.1 via NIMRTC_REGISTER_WEB_TRANSPORT().
-        kWebTransport
+        kWebTransport,
+        // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend
+        // seam -- see register_srtp_backend().
+        kSrtpBackend
     };
 
     Registrar(core::PluginRegistry& reg, Category cat,
@@ -1291,6 +1344,10 @@ public:
             case Category::kWebTransport:
                 reg.register_web_transport(id,
                     static_cast<const web_transport::IWebTransportSessionFactory*>(factory));
+                break;
+            case Category::kSrtpBackend:
+                reg.register_srtp_backend(id,
+                    static_cast<const plugins::ISrtpBackendFactory*>(factory));
                 break;
         }
     }

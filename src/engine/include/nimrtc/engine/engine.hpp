@@ -19,14 +19,27 @@
  * `register_default_plugins()` entry points:
  *
  *   cfg.transport_name    = "ice";       // nimrtc::ice::register_default_plugins()
- *   cfg.rtp_name        = "webrtc";    // nimrtc::rtp::register_default_plugins()
- *   cfg.sdp_name        = "webrtc";    // nimrtc::sdp::register_default_plugins()
  *   cfg.jb_name         = "adaptive";   // nimrtc::jb::register_default_plugins()
  *   cfg.audio3a_name    = "webrtc_apm";// nimrtc::audio3a::register_default_plugins()
  *   cfg.codec_name      = "opus";      // nimrtc::opus::register_default_plugins() (if enabled)
  *   cfg.bwe_name        = "aimd";      // nimrtc::bwe::register_default_plugins()
  *   cfg.scheduler_name   = "strict_priority"; // nimrtc::sched::register_default_plugins()
  *   cfg.video_codec_name = "h264";     // nimrtc::h264::register_default_plugins()
+ *
+ * ## Modules that are NOT pluggable (v1.2.0, remediation plan §2.1)
+ *
+ * RTP and SDP are **not** replaceable.  `plugins::IRTP` / `plugins::ISDP`
+ * and their registry slots still exist (removing published public
+ * headers is a breaking change that needs its own version cycle), but
+ * the engine does not route through them:
+ *
+ *   - RTP packetisation runs on the concrete `rtp::PacketBuilder` on
+ *     the per-packet hot path, so the compiler can inline it.
+ *   - SDP handling uses `sdp::Munger`'s per-attribute API, which the
+ *     `ISDP` interface does not express.
+ *
+ * Therefore `EngineConfig` has **no** `rtp_name` / `sdp_name` knob —
+ * a knob that is never read is a lie.  See ADR-021.
  *
  * Open() calls `core::register_all_default_plugins()` first, so callers
  * normally do not need to do anything to populate the registry.
@@ -156,11 +169,37 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** ITransport plugin name. Default = "ice". */
     std::string transport_name = "ice";
 
-    /** IRTP plugin name. Default = "webrtc". */
-    std::string rtp_name = "webrtc";
+    /** Transport-stack factory id (the `ITransportStackFactory` seam).
+     *
+     *  Default = "webrtc-classic".  When this is non-empty it acts as an
+     *  **explicit user override**: it wins over the `CapabilitySelector`
+     *  rule that `transport_strategy_name` would otherwise resolve to.
+     *  Set it to "" to let the Selector decide (the normal case).
+     *
+     *  @see `EngineConfig::transport_strategy_name`. */
+    std::string transport_stack_name;
 
-    /** ISDP plugin name. Default = "webrtc". */
-    std::string sdp_name = "webrtc";
+    /** SCTP socket factory id (the `sctp::ISctpSocketFactory` seam).
+     *  Default = "stub" — the in-tree loopback reference backend.
+     *  (The former default "usrsctp" resolved to no registered factory,
+     *  so every stack was built with a null SCTP component.) */
+    std::string sctp_socket_name = "stub";
+
+    /** Raw-UDP datagram factory id (the `raw_udp::IRawUdpFactory` seam).
+     *  Empty = the raw-UDP bypass is disabled (the default). */
+    std::string raw_udp_name;
+
+    /** SRTP crypto backend factory id (the `plugins::ISrtpBackendFactory`
+     *  seam).  Default = "libsrtp" — the vendored libsrtp2 backend.
+     *  A third-party backend (e.g. an SM4-GCM national-crypto backend)
+     *  registers under its own id and is selected here.
+     *
+     *  An unknown id is a **hard failure** at `open()` time
+     *  (`kEngineInvalidParam`) — the engine does not fall back to
+     *  libsrtp behind the user's back.
+     *
+     *  @see `plugins/srtp_backend.hpp`. */
+    std::string srtp_backend_name = "libsrtp";
 
     /** IJB plugin name. Default = "adaptive". */
     std::string jb_name = "adaptive";
@@ -219,9 +258,24 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string stun_server_host;
     std::uint16_t stun_server_port = 3478;
 
-    /** Local UDP port range for ICE. 0 = OS picks. MUST be unique across
-     *  multiple NimRTCEngine instances on the same host or both will bind
-     *  to the same port and process each other's STUN packets. */
+    /** Local UDP port range for ICE. 0 = OS picks.
+     *
+     *  Leave both at 0 (the default) unless you have a specific reason
+     *  not to.  The OS-assigned ephemeral port is the safest choice:
+     *
+     *   - Windows runners hand out *excluded* port ranges (Hyper-V / HNS
+     *     reservations).  A bind inside one fails with WSAEACCES (errno
+     *     10013), so a pinned range that worked yesterday can fail today
+     *     with no change on your side.  The kernel's ephemeral
+     *     allocation never picks an excluded port.
+     *   - A pinned range is a cross-process collision risk: two sessions
+     *     on the same host that pick the same range silently steal each
+     *     other's STUN packets.
+     *
+     *  Two engines in one process do NOT need disjoint ranges: an
+     *  ephemeral-port request gives each engine its own socket on its
+     *  own port.  (Non-overlapping ranges are only required if you pin
+     *  fixed ranges for both.) */
     std::uint16_t local_port_range_begin = 0;
     std::uint16_t local_port_range_end   = 0;
 
@@ -290,6 +344,23 @@ struct NIMRTC_API_STABLE EngineConfig {
 
     /** IVideoSource plugin id (e.g. "memory", or HW plugin id). */
     std::string video_source_name = "memory";
+
+    /** IVideoCapture plugin id (the *device* capture seam).
+     *
+     *  Empty = the engine does not instantiate a capture device — the
+     *  normal case, where the host feeds frames itself (or drives
+     *  `IVideoSource` directly).  When non-empty, the engine resolves
+     *  the factory at `open()` time and the resolved instance is
+     *  reachable through the `video_capture()` accessor.
+     *
+     *  The `IVideoCapture` seam is deliberately *separate* from
+     *  `IVideoSource`: capture is a *device* (enumeration, format
+     *  negotiation, region selection, dirty-rect metadata), while the
+     *  source is a *frame stream*.  A capture plug-in is turned into a
+     *  source by an adapter, not by the engine.
+     *
+     *  @see `plugins/video_capture.hpp`. */
+    std::string video_capture_name;
 
     /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
     std::string video_sink_name   = "headless";
@@ -2411,7 +2482,18 @@ private:
      *  `Config::audio_bitrate_bps` when set, otherwise the codec
      *  default for the channel count (32 kbps mono / 64 kbps stereo). */
     int resolve_audio_bitrate_ceiling() const noexcept;
-    void init_video_plugins() noexcept;
+    /** Resolve and open the video plugins.
+     *
+     *  @return `plugins::kOk` on success, or the error code of the first
+     *          fatal failure.  A *fatal* failure is one where the engine
+     *          cannot describe the negotiated codec family (the codec
+     *          plugin violates the `IVideoCodec::kind()` contract) — in
+     *          that case the video plugins are left down and the engine
+     *          does not advertise a video m-line.  Everything else
+     *          (a missing source, a failing sink) is non-fatal: the
+     *          engine opens without that piece and reports it through
+     *          `on_error_`. */
+    uint32_t init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------

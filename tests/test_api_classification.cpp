@@ -391,12 +391,20 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - video_capture/capture_queue.hpp (the portable bounded queue)
     //     - video_capture/synthetic_capture.hpp (the synthetic device)
     //
+    // v1.2.0 bump: +1 public header (136 -> 137) for the SRTP
+    //   crypto-backend seam's registration entry point (architecture
+    //   remediation plan B7 / Q3) — the module-side entry point that
+    //   publishes the built-in backend into the registry's SRTP slot:
+    //     - srtp/srtp_plugin.hpp (register_default_plugins() for the
+    //       SRTP backend family; mirrors the DTLS seam's
+    //       dtls_plugin.hpp)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 136;
+    constexpr std::size_t kBaselineHeaderCount = 137;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

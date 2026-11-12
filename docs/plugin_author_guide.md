@@ -162,36 +162,94 @@ nimrtc::engine::EngineConfig cfg;
 cfg.<family>_name = "myid";   // <-- matches what you registered under
 ```
 
-If the id is not registered by the time the engine resolves it,
-`open()` returns a non-zero error and `on_error()` fires with the
-resolution failure. There is **no silent fallback** — typos in
-factory ids surface immediately, which is the entire point of the
-seam.
+#### 4.1 What "no silent fallback" actually means
+
+Not every family fails the same way when the id is unknown. The
+table below is the contract; the §4 catalogue lists which family is
+in which row.
+
+| Behaviour | Families | What the host sees |
+|---|---|---|
+| **Hard failure** — `open()` returns non-zero, `on_error()` fires with the resolution failure | ICE transport, DTLS, SCTP socket, transport stack, SRTP backend, DataChannel backend, transport strategy | `kEngineInvalidParam` (or `kEngineInternal` for a factory-side fault). The engine does **not** substitute a built-in implementation. |
+| **Soft degradation** — the engine logs a warning and continues without that component | BWE, scheduler, network-feedback collector, XR report consumer, jitter buffer, audio 3A | The session still opens; the affected feature is inert. `on_error()` is **not** fired (the engine uses the `Warn` failure mode for these). |
+| **Disabled by configuration** — the knob is empty, so the family is never resolved | DataChannel (`datachannel_backend == ""`), raw-UDP bypass (`raw_udp_name` empty), capture / source / sink plugins | The corresponding SDP section is omitted, or the accessor returns `nullptr`. |
+
+Two consequences worth internalising:
+
+- A typo in a **hard-failure** family's id is loud. That is the point
+  of the seam.
+- A typo in a **soft-degradation** family's id is quiet (a log line
+  only). If you are debugging a missing feature, read the engine's
+  warning log before suspecting your plugin.
+
+#### 4.2 The families that are *not* replaceable
+
+The RTP and SDP layers are **not** pluggable. The interfaces
+(`plugins/rtp.hpp`, `plugins/sdp.hpp`) exist and are registered, but
+the engine uses the concrete `rtp::` / `sdp::` implementations
+directly — there is no `EngineConfig` knob for them, and adding one
+would be misleading. See `docs/plan/architecture-remediation-plan.md`
+§2.1 (decision: keep the concrete implementations, mark the
+interfaces deprecated).
+
+If you need to change RTP packetisation or SDP generation today, you
+must fork the module; the plugin system does not cover it.
 
 ---
 
 ## 4. Interface catalogue
 
-| Family       | Interface header                                 | Engine config knob          | Factory macro                  | Notes |
-|--------------|--------------------------------------------------|-----------------------------|--------------------------------|-------|
-| ICE transport | `plugins/ice_transport.hpp`                      | `transport_name`            | `NIMRTC_REGISTER_ICE_TRANSPORT` | Default = `"ice"` (libjuice). |
-| RTP          | `plugins/rtp.hpp`                                | `rtp_name`                  | `NIMRTC_REGISTER_RTP`          | — |
-| SDP          | `plugins/sdp.hpp`                                | `sdp_name`                  | `NIMRTC_REGISTER_SDP`          | — |
-| Jitter buffer | `plugins/jb.hpp`                                 | `jb_name`                   | `NIMRTC_REGISTER_JB`           | `adaptive` is the v0.11.0 default. |
-| Audio 3A     | `plugins/audio3a.hpp`                            | `audio3a_name`              | `NIMRTC_REGISTER_AUDIO3A`      | `webrtc_apm`, plus `webrtc` (Null stub). See §6.2. |
-| Codec (audio)| `plugins/codec.hpp`                              | `codec_name`                | `NIMRTC_REGISTER_CODEC`        | `opus`, `pcmu` (fallback). |
-| Video codec  | `plugins/video_codec.hpp`                        | `video_codec_name`          | `NIMRTC_REGISTER_VIDEO_CODEC`  | `h264` (P1 reference). |
-| Video source | `plugins/video_source.hpp`                       | `video_source_name`         | `NIMRTC_REGISTER_VIDEO_SOURCE` | `memory` default. HW guide: §6.3. |
-| Video sink   | `plugins/video_sink.hpp`                         | `video_sink_name`           | `NIMRTC_REGISTER_VIDEO_SINK`   | `headless`, `pinned`. |
-| Video rx     | `plugins/video_pipeline.hpp` (`IVideoReceiver`)  | `video_receiver_name`       | `NIMRTC_REGISTER_VIDEO_RX`     | — |
-| Video tx     | `plugins/video_pipeline.hpp` (`IVideoSender`)    | `video_sender_name`         | `NIMRTC_REGISTER_VIDEO_TX`     | — |
-| DTLS         | `dtls/dtls_session_iface.hpp`                    | `dtls_name`                 | `register_dtls_session` (PAL Slice 4) | `wolfssl`, `gmssl`. |
-| SCTP socket  | `sctp/sctp_socket_iface.hpp`                     | `sctp_socket_name` (via factory lookup) | `register_sctp_socket` | `stub`, `usrsctp`. |
-| Raw UDP      | `raw_udp/raw_udp_datagram.hpp`                   | `raw_udp_name`              | `register_raw_udp_datagram`    | `arq` (Loopback Case D). |
-| Transport stack | `transport/transport_stack.hpp`                | `transport_stack_name`      | `register_transport_stack`     | `webrtc-classic`. |
-| BWE          | `plugins/bwe.hpp`                                | `bwe_name`                  | `NIMRTC_REGISTER_BWE`          | `aimd`. |
-| Scheduler    | `plugins/scheduler.hpp`                          | `scheduler_name`            | `NIMRTC_REGISTER_SCHEDULER`    | `strict_priority`. |
-| DataChannel  | `plugins/datachannel.hpp`                        | `datachannel_name`          | `NIMRTC_REGISTER_DATACHANNEL`  | `sctp`. |
+The **Failure** column uses the §4.1 vocabulary: `hard` = `open()`
+returns non-zero, `soft` = the engine degrades with a warning,
+`off` = disabled by an empty config knob.
+
+| Family       | Interface header                                 | Engine config knob          | Factory macro                  | Failure | Notes |
+|--------------|--------------------------------------------------|-----------------------------|--------------------------------|---------|-------|
+| ICE transport | `plugins/ice_transport.hpp`                      | `transport_name`            | `NIMRTC_REGISTER_ICE_TRANSPORT` | hard | Default = `"ice"` (libjuice). Also selects the ICE backend inside the transport stack. |
+| Transport stack | `transport/transport_stack.hpp`               | `transport_stack_name`      | `NIMRTC_REGISTER_TRANSPORT_STACK` | hard | Empty = the `CapabilitySelector` decides (`webrtc-classic` / `raw-udp-arq`). Non-empty = explicit override of the media stack. |
+| DTLS         | `dtls/dtls_session_iface.hpp`                    | `dtls_name`                 | `NIMRTC_REGISTER_DTLS_SESSION` | hard | `wolfssl`, `gmssl`. Empty = `"wolfssl"`. |
+| SCTP socket  | `sctp/sctp_socket_iface.hpp`                     | `sctp_socket_name`          | `NIMRTC_REGISTER_SCTP_SOCKET`  | hard | Default = `"stub"` (in-tree loopback reference backend). |
+| Raw UDP      | `raw_udp/raw_udp_datagram.hpp`                   | `raw_udp_name`              | `NIMRTC_REGISTER_RAW_UDP_DATAGRAM` | soft | Empty = the raw-UDP bypass is disabled. The ARQ control plane falls back to the in-tree `"arq"` id. |
+| SRTP backend | `plugins/srtp_backend.hpp`                       | `srtp_backend_name`         | `NIMRTC_REGISTER_SRTP_BACKEND` | hard | Default = `"libsrtp"`. A third-party crypto backend registers under its own id. |
+| DataChannel  | `plugins/datachannel.hpp`                        | `datachannel_backend`       | `NIMRTC_REGISTER_DATACHANNEL`  | hard | `"web_transport"` (default) or `""` (disabled). The `"sctp"` family is retired — it was a test-only in-process socket. |
+| WebTransport | `web_transport/web_transport_session_factory.hpp`| `web_transport_name`        | `NIMRTC_REGISTER_WEB_TRANSPORT` | soft | `"msquic"`. The QUIC session factory behind the `web_transport` DataChannel backend. |
+| Audio decoder| `plugins/audio_decoder.hpp`                      | `audio_decoder_name`        | `NIMRTC_REGISTER_AUDIO_DECODER` | soft | `opus`. The codec-side seam of the audio receive pipeline. |
+| Audio receiver| `plugins/audio_receiver.hpp`                    | `audio_receiver_name`       | `NIMRTC_REGISTER_AUDIO_RECEIVER` | soft | `nimrtc_audio_rx`. The pipeline-side seam of the audio receive path. |
+| Session model| `plugins/session.hpp`                            | `session_name`              | `NIMRTC_REGISTER_SESSION`     | soft | `session`. The renegotiation model (transceivers / tracks). |
+| DTMF codec   | `plugins/dtmf.hpp`                               | `dtmf_codec_name`           | `NIMRTC_REGISTER_DTMF`        | soft | `dtmf`. The RFC 4733 telephone-event codec. |
+| Jitter buffer | `plugins/jb.hpp`                                 | `jb_name`                   | `NIMRTC_REGISTER_JB`           | soft | `adaptive` is the v0.11.0 default. |
+| Audio 3A     | `plugins/audio3a.hpp`                            | `audio3a_name`              | `NIMRTC_REGISTER_AUDIO3A`      | soft | `webrtc_apm`, plus `webrtc` (Null stub). See §6.2. |
+| Codec (audio)| `plugins/codec.hpp`                              | `codec_name`                | `NIMRTC_REGISTER_CODEC`        | soft | `opus`, `pcmu` (fallback). |
+| Video codec  | `plugins/video_codec.hpp`                        | `video_codec_name`          | `NIMRTC_REGISTER_VIDEO_CODEC`  | soft | `h264` (P1 reference). |
+| Video source | `plugins/video_source.hpp`                       | `video_source_name`         | `NIMRTC_REGISTER_VIDEO_SOURCE` | soft | `memory` default. HW guide: §6.3. |
+| Video capture| `plugins/video_capture.hpp`                      | `video_capture_name`        | `NIMRTC_REGISTER_VIDEO_CAPTURE`| soft | Empty = disabled. The capture *device* seam; a source is derived from it by an adapter. |
+| Video sink   | `plugins/video_sink.hpp`                         | `video_sink_name`           | `NIMRTC_REGISTER_VIDEO_SINK`   | soft | `headless`, `pinned`. |
+| Video rx     | `plugins/video_pipeline.hpp` (`IVideoReceiver`)  | `video_receiver_name`       | `NIMRTC_REGISTER_VIDEO_RECEIVER` | soft | — |
+| Video tx     | `plugins/video_pipeline.hpp` (`IVideoSender`)    | `video_sender_name`         | `NIMRTC_REGISTER_VIDEO_SENDER` | soft | — |
+| BWE          | `plugins/bwe.hpp`                                | `bwe_name`                  | `NIMRTC_REGISTER_BWE`          | soft | `aimd`. |
+| Scheduler    | `plugins/scheduler.hpp`                          | `scheduler_name`            | `NIMRTC_REGISTER_SCHEDULER`    | soft | `strict_priority`. |
+| Net feedback | `plugins/net_feedback.hpp`                       | `net_feedback_name`         | `NIMRTC_REGISTER_NET_FEEDBACK` | soft | The receiver-side collector that feeds the BWE estimator. |
+| XR report    | `plugins/xr_report.hpp`                          | `xr_report_name`            | `NIMRTC_REGISTER_XR_REPORT`    | soft | The RFC 3611 extended-report consumer. |
+
+**Not pluggable today** (see §4.2): the RTP layer
+(`plugins/rtp.hpp`) and the SDP layer (`plugins/sdp.hpp`). The
+interfaces exist and are registered, but the engine uses the concrete
+`rtp::` / `sdp::` implementations — there is deliberately no
+`EngineConfig` knob for them.
+
+### 4.3 Registered, but the engine does not resolve them
+
+These families have an interface, a registry slot, and a registration
+macro, but **no `EngineConfig` knob and no engine-side lookup**. They
+are listed here so the catalogue is complete — a plugin author who
+finds `NIMRTC_REGISTER_RTP` in the registry header deserves to learn
+that registering it changes nothing.
+
+| Family | Interface header | Engine config knob | Factory macro | Failure | Notes |
+|---|---|---|---|---|---|
+| Generic transport | `plugins/transport.hpp` | — (none) | `NIMRTC_REGISTER_TRANSPORT` | n/a | The engine resolves the **ICE-typed** slot (`get_ice_transport`) through the transport stack, not the generic `ITransport` slot. The generic slot exists so a consumer can pick the weakest typed view. |
+| RTP | `plugins/rtp.hpp` | — (none) | `NIMRTC_REGISTER_RTP` | n/a | **Deprecated.** The engine uses the concrete `rtp::` implementation. See §4.2. |
+| SDP | `plugins/sdp.hpp` | — (none) | `NIMRTC_REGISTER_SDP` | n/a | **Deprecated.** The engine uses the concrete `sdp::` implementation. See §4.2. |
 
 ---
 

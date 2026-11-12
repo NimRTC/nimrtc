@@ -108,27 +108,61 @@ inline constexpr plugins::VideoCodecKind codec_kind_of(VideoCodecFamily f) noexc
     }
 }
 
-/** Map a plugin id ("h264" / "h265" / "av1", case-insensitive) onto the
- *  codec family.
+/** Map a plugin id onto the codec family.
+ *
+ *  The id is a *fallback* source of the family: it is used to look the
+ *  factory up, and — only when the instantiated codec's `kind()`
+ *  returns `kUnknown` — to name the family.
+ *
+ *  A plugin id is accepted when it is **exactly** one of the canonical
+ *  names, or when it *starts with* one of them followed by a
+ *  separator.  The prefix rule is what lets a vendor register
+ *  "h265-nvenc" or "av1-daemon" and still have the engine derive the
+ *  right family from the id alone:
+ *
+ *    "h264"        → kH264
+ *    "h264-openh264" → kH264
+ *    "h265-nvenc"  → kH265
+ *    "hevc"        → kH265
+ *    "av1"         → kAV1
+ *    "av1-daemon"  → kAV1
+ *
+ *  The separator must be one of `-`, `_` or `.` — a bare prefix match
+ *  would mis-classify a hypothetical "h2650" as H.265.
  *
  *  @return kUnknown when the id names no codec the engine supports. */
 inline VideoCodecFamily codec_family_from_plugin_id(std::string_view id) noexcept {
     // The comparison is case-insensitive because a user may write
     // "H265" in the config; the registry's slot key is lower-case.
-    auto eq_ci = [](std::string_view a, std::string_view b) noexcept {
+    auto lower = [](char c) noexcept -> char {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    auto eq_ci = [&](std::string_view a, std::string_view b) noexcept {
         if (a.size() != b.size()) return false;
         for (std::size_t i = 0; i < a.size(); ++i) {
-            char ca = a[i];
-            char cb = b[i];
-            if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
-            if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
-            if (ca != cb) return false;
+            if (lower(a[i]) != lower(b[i])) return false;
         }
         return true;
     };
-    if (eq_ci(id, "h264")) return VideoCodecFamily::kH264;
-    if (eq_ci(id, "h265") || eq_ci(id, "hevc")) return VideoCodecFamily::kH265;
-    if (eq_ci(id, "av1"))  return VideoCodecFamily::kAV1;
+    auto starts_with_ci = [&](std::string_view a, std::string_view prefix) noexcept {
+        if (a.size() < prefix.size()) return false;
+        for (std::size_t i = 0; i < prefix.size(); ++i) {
+            if (lower(a[i]) != lower(prefix[i])) return false;
+        }
+        return true;
+    };
+    // A trailing separator ("h265-") is still a match.
+    auto matches = [&](std::string_view canonical) noexcept {
+        if (eq_ci(id, canonical)) return true;
+        if (!starts_with_ci(id, canonical)) return false;
+        if (id.size() == canonical.size()) return true;
+        const char sep = id[canonical.size()];
+        return sep == '-' || sep == '_' || sep == '.';
+    };
+
+    if (matches("h264")) return VideoCodecFamily::kH264;
+    if (matches("h265") || matches("hevc")) return VideoCodecFamily::kH265;
+    if (matches("av1"))  return VideoCodecFamily::kAV1;
     return VideoCodecFamily::kUnknown;
 }
 

@@ -105,44 +105,90 @@ using nimrtc::dtls::SrtpProfile;
 // Lookup order is "build dir, then source tree" so the test harness can
 // drop an alternative cert into `build/tests/<cfg>/certs/` and have it
 // win without recompiling.
+//
+// IMPORTANT (CWD independence):
+//
+// The lookup below used to be *purely* relative to the process working
+// directory.  That is fragile: CTest runs a test with its working
+// directory set to the directory that owns the test's `CTestTestfile.cmake`
+// (e.g. `<build>/tests/`), while CMake's `copy_if_different` rules drop
+// the certs next to the *executable* (`<build>/tests/<cfg>/certs/`).  The
+// two paths differ by one directory level on multi-config generators, so
+// the relative lookup missed and every DTLS-dependent engine test failed
+// with "wolfSSL_CTX setup failed".
+//
+// `NIMRTC_WOLFSSL_CERT_DIR` is a compile-time absolute path to the
+// directory holding the vendored certs; it is defined by CMake for the
+// `nimrtc_dtls` target (see src/modules/dtls/CMakeLists.txt) and is the
+// authoritative fallback.  The relative candidates are kept ahead of it so
+// a build-dir override still wins.
+//
+// `NIMRTC_WOLFSSL_CERT_DIR` is not defined when the module is compiled
+// outside the project's CMake build (e.g. a hand-rolled compile), so every
+// use of it is guarded.
 // ---------------------------------------------------------------------------
-std::string get_wolfssl_cert_path() {
-    const char* candidates[] = {
-        // Build-output copies seeded by CMake's copy_if_different rule
-        // (see tests/wolfssl_dtls/CMakeLists.txt and friends).
-        "certs/server-ecc.pem",
-        // Source-tree fixtures.
-        "tests/wolfssl_dtls/certs/server-ecc.pem",
-        "src/third_party/wolfssl/src/certs/server-ecc.pem",
-        "../../src/third_party/wolfssl/src/certs/server-ecc.pem",
-        "../src/third_party/wolfssl/src/certs/server-ecc.pem",
+
+// Absolute path to the directory holding the vendored certs, injected by
+// CMake.  Empty when the module is built without the project's CMake.
+#ifdef NIMRTC_WOLFSSL_CERT_DIR
+const char* const kWolfsslCertDir = NIMRTC_WOLFSSL_CERT_DIR;
+#else
+const char* const kWolfsslCertDir = nullptr;
+#endif
+
+// True when `path` names an existing, readable regular file.
+bool file_exists(const char* path) {
+    if (!path || !*path) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+    fclose(f);
+    return true;
+}
+
+// Join a directory and a file name with the platform separator.
+std::string join_path(const char* dir, const char* name) {
+    if (!dir || !*dir) return std::string(name);
+    std::string s(dir);
+    const char sep =
+#ifdef _WIN32
+        '\\';
+#else
+        '/';
+#endif
+    if (s.back() != '/' && s.back() != '\\') s.push_back(sep);
+    s.append(name);
+    return s;
+}
+
+// Shared lookup: try `basename` under each candidate directory in order.
+std::string find_wolfssl_cert_file(const char* basename) {
+    // Build-output copies seeded by CMake's copy_if_different rule
+    // (see cmake/NimRTCTest.cmake and friends) — relative to the CWD.
+    const char* relative_candidates[] = {
+        "certs/",
+        "tests/wolfssl_dtls/certs/",
+        "src/third_party/wolfssl/src/certs/",
+        "../../src/third_party/wolfssl/src/certs/",
+        "../src/third_party/wolfssl/src/certs/",
     };
-    for (auto p : candidates) {
-        FILE* f = nullptr;
-        if (fopen_s(&f, p, "rb") == 0 && f) {
-            fclose(f);
-            return std::string(p);
-        }
+    for (auto dir : relative_candidates) {
+        const std::string p = join_path(dir, basename);
+        if (file_exists(p.c_str())) return p;
     }
-    return "certs/server-ecc.pem";
+    // Absolute source-tree fallback — independent of the CWD.
+    if (kWolfsslCertDir) {
+        const std::string p = join_path(kWolfsslCertDir, basename);
+        if (file_exists(p.c_str())) return p;
+    }
+    return std::string("certs/") + basename;
+}
+
+std::string get_wolfssl_cert_path() {
+    return find_wolfssl_cert_file("server-ecc.pem");
 }
 
 std::string get_wolfssl_key_path() {
-    const char* candidates[] = {
-        "certs/ecc-key.pem",
-        "tests/wolfssl_dtls/certs/ecc-key.pem",
-        "src/third_party/wolfssl/src/certs/ecc-key.pem",
-        "../../src/third_party/wolfssl/src/certs/ecc-key.pem",
-        "../src/third_party/wolfssl/src/certs/ecc-key.pem",
-    };
-    for (auto p : candidates) {
-        FILE* f = nullptr;
-        if (fopen_s(&f, p, "rb") == 0 && f) {
-            fclose(f);
-            return std::string(p);
-        }
-    }
-    return "certs/ecc-key.pem";
+    return find_wolfssl_cert_file("ecc-key.pem");
 }
 
 std::string hex_colon(const std::uint8_t* data, std::size_t len) {

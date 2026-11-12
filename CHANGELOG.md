@@ -848,6 +848,59 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The plugin contract is now explicit — the engine says which families it
+  can actually replace, and what happens when one is missing (v1.2.0,
+  architecture remediation plan §2).**  The plugin system had three
+  different failure behaviours (hard failure, silent degradation, and a
+  third "the interface exists but the engine never resolves it" case that
+  read exactly like a working seam), and the documentation promised a
+  uniform "no silent fallback" that was never true.  This change makes
+  the contract match the code, and closes the two seams that were
+  registered-but-bypassed.
+  - **`CapabilitySelector` is now wired into the engine
+    (remediation §2.6 / B9).**  The Selector used to resolve a
+    strategy to a pair of factory ids and then *throw the result away*
+    — the engine kept instantiating a hard-coded media stack.  The
+    engine now builds a registry-backed `CapabilitySelector`, hands it
+    the engine's own `StackConfig` (ICE / DTLS / SCTP / raw-UDP backend
+    ids), calls `select()`, and uses the resulting stacks as the session's
+    actual transport.  `CapabilitySelector::instantiate()` is the single
+    implementation of "build a media stack + a control stack", and
+    `nimrtc::transport::make_transport_instance()` now delegates to it,
+    so the explicit path and the strategy-driven path cannot drift.
+    `EngineConfig::transport_stack_name` is the explicit user override
+    that wins over the strategy's rule.
+  - **The SRTP backend is now pluggable (remediation §2.5 / B7).**
+    `plugins::ISrtpSessionBackend` had an interface and a libsrtp
+    implementation but no registry slot and no wiring, so
+    `EngineConfig::srtp_backend_name` resolved to nothing.  The registry
+    gains an `srtp_backend` slot (`register_srtp_backend()` /
+    `get_srtp_backend()` / `list_srtp_backends()` plus the
+    `NIMRTC_REGISTER_SRTP_BACKEND` macro), and every SRTP protect /
+    unprotect call — media and RTCP — now routes through the resolved
+    backend instead of the concrete libsrtp calls.  The built-in backend
+    registers under `"libsrtp"` (the default).
+  - **The video codec family contract is explicit (remediation §2.4 /
+    B6).**  `IVideoCodec::kind()` is documented as the *authoritative*
+    statement of the wire format; the engine derives the SDP
+    `a=rtpmap:` encoding name, the payload type, and the
+    packetizer / depacketizer from it.  The plugin id is only a lookup
+    hint, and is used as the fallback only when `kind()` returns
+    `kUnknown` — in which case the id must name a family, either
+    exactly (`"h264"`) or as a `family` + separator prefix
+    (`"h265-nvenc"`).  When *neither* source names a family, `open()`
+    now fails with `kEngineInvalidParam` instead of advertising an
+    empty encoding that no peer can parse.
+  - **The RTP and SDP layers are documented as *not* pluggable
+    (remediation §2.1 / B8).**  `IRTP` and `ISDP` are retained for ABI
+    stability, but both headers now carry a `@deprecated` notice
+    explaining *why* they are not seams: the SDP layer is the contract
+    document that the negotiation, BWE, jitter-buffer and RTCP paths are
+    all written against, so replacing it is a protocol redesign rather
+    than a plugin swap.  `docs/plugin_author_guide.md` §4.2 states the
+    same, and     the `rtp_name` / `sdp_name` rows are gone from the
+    catalogue.
+
 - **The `"sctp"` data-channel backend was retired from the public selectors
   (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP
   backend was a **test-only** backend: `SctpDataChannel` opens an in-process
@@ -1043,6 +1096,61 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
+  fallback" (remediation §2.3 / B4 / B5 / B10).**  The guide's §4
+  catalogue now lists every pluggable family with its real
+  `EngineConfig` knob, its real registration macro, and its real failure
+  mode, and §4.1 spells out the three behaviours: **hard failure**
+  (ICE transport, transport stack, DTLS, SCTP socket, SRTP backend,
+  DataChannel backend — `open()` returns non-zero and `on_error` fires),
+  **soft degradation** (BWE, scheduler, net-feedback, XR report, jitter
+  buffer, audio 3A, the codecs, the video source / sink / receiver /
+  sender — the engine logs a warning and opens without the component),
+  and **disabled by configuration** (an empty knob).  The macro names in
+  the table were wrong in three places (`NIMRTC_REGISTER_VIDEO_RX` /
+  `_TX` → `_RECEIVER` / `_SENDER`; the DTLS / SCTP / raw-UDP / transport
+  -stack rows named a bare function instead of the actual macro), and
+  the SRTP-backend, WebTransport, audio-decoder, audio-receiver, session
+  -model and DTMF families were missing entirely.
+  - `docs/api/engine_config.md` carries the same table, and documents
+    the removal of `rtp_name` / `sdp_name`.
+
+- **The e2e acceptance Case C (NimRTC ↔ NimRTC loopback) failed on the
+  Windows CI runner with `WSAEACCES (errno 10013)`, because the example
+  pinned a fixed UDP port range that the runner reserved.**  The
+  `loopback-p2p` example asked for `51000–51099` (and `51100–51199`
+  for the second engine), and `demo-agent-gateway` asked for
+  `52000–52099`.  Windows reserves whole blocks of UDP ports for the
+  hypervisor (Hyper-V / HNS); a `bind()` inside a reserved block fails
+  with `WSAEACCES`, and `libjuice` walks the *entire* requested range
+  before giving up — so the ICE agent fails to open outright:
+  ```
+  [warn]  udp.c:178: UDP socket binding failed on port range 127.0.0.1:[51000,51099], errno=10013
+  [error] conn_mux.c:270: UDP socket creation failed
+  [error] engine A open failed
+  ```
+  The reservations move between runs, so the same commit passes in one
+  CI job and fails in another: `windows / msvc` (which builds the
+  example) was green while `ci-e2e` (which runs it) was red, because
+  the two jobs landed on runners with different reservations.
+  - Both examples now leave `local_port_range_begin` / `_end` at 0 and
+    let the OS assign an ephemeral port.  The kernel's ephemeral
+    allocation never picks a reserved port.
+  - Two engines in one process no longer need disjoint ranges: an
+    ephemeral-port request gives each engine its own socket on its own
+    port (this is the same `conn_mux_get_registry()` behaviour the ICE
+    unit tests already rely on).
+  - The docs that recommended a pinned range were corrected:
+    `EngineConfig::local_port_range_begin`, `docs/api/engine_config.md`
+    §4.1, `docs/troubleshooting.md` §3.1 (which told users to pick
+    non-overlapping ranges), the two READMEs, and
+    `docs/guides/building-on-openharmony.md`.  `docs/troubleshooting.md`
+    gains §3.13 for the `WSAEACCES` failure mode, and §3.5 is
+    rewritten: the vendored `libjuice` deliberately does *not* set
+    `SO_REUSEADDR` / `SO_REUSEPORT` (they let two sockets share one
+    UDP port, which breaks ICE), so "address already in use" is the
+    socket option working as intended.
 
 - **The ICE loopback and restart tests bound a fixed UDP port range that
   the Windows CI runner reserves, so both failed there with

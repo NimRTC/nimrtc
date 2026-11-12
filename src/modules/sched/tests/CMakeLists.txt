@@ -16,3 +16,7 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_pacing_integration.cpp
 # DC-2: P-family + S-family cross-plane priority integration (DataChannel × RTP)
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_sched_priority_dc.cpp
     DEPS nimrtc::sched)
+# Architecture remediation plan A8 / A9: the lock-free drain dispatch and
+# the S-family flow control (shared BWE credit + per-class pacing).
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_flow_control.cpp
+    DEPS nimrtc::sched)

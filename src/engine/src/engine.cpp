@@ -257,7 +257,15 @@ uint32_t NimRTCEngine::open() noexcept {
     // Resolves all four video_* plugins from core::PluginRegistry and
     // opens them. Failures are non-fatal at engine level (R3 scope: just
     // expose the accessors); warnings go through on_error_.
-    init_video_plugins();
+    //
+    // The one *fatal* case is a codec plugin that does not identify its
+    // codec family (see `IVideoCodec::kind()`): the engine cannot
+    // derive the SDP `a=rtpmap:` encoding name from it, so the session
+    // would advertise a malformed video m-line.  In that case the video
+    // plugins stay down and `open()` fails.
+    if (const uint32_t video_rc = init_video_plugins(); video_rc != plugins::kOk) {
+        return video_rc;
+    }
 
     // ---- Session base state (v1.2.0, session capability plan N1) --------
     //

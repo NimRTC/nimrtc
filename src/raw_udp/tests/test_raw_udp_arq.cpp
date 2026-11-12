@@ -127,8 +127,8 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
     ASSERT_EQ(datagram->open(), nimrtc::plugins::kOk);
 
     std::mutex lat_mu;
-    std::vector<std::int64_t> latencies_us;
-    latencies_us.reserve(kPackets);
+    std::vector<std::int64_t> latencies_ns;
+    latencies_ns.reserve(kPackets);
 
     datagram->on_recv([](BufferView /*bv*/) {
         // No-op; latency is recorded by the sender thread right after
@@ -161,8 +161,8 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
             nimrtc::raw_udp::arq_test_inject_inbound(h.concrete, payload);
 
             std::lock_guard<std::mutex> lk(lat_mu);
-            latencies_us.push_back(
-                std::chrono::duration_cast<std::chrono::microseconds>(
+            latencies_ns.push_back(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
                     recv_at - send_at).count());
 
             std::this_thread::sleep_for(kSendInterval);
@@ -175,22 +175,39 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
     datagram->close();
 
     // ---- Latency histogram ----
-    ASSERT_EQ(latencies_us.size(), static_cast<std::size_t>(kPackets));
-    std::sort(latencies_us.begin(), latencies_us.end());
+    //
+    // The samples are NANOSECONDS, not microseconds.  The measured
+    // quantity is the duration of a `send()` call on an in-process
+    // path, which on a fast runner is well under one microsecond --
+    // so a microsecond-truncated sample is legitimately 0, and
+    // `EXPECT_GT(p50, 0)` on a microsecond sample was a flake: it
+    // failed on the Linux CI runner with "p50=0us p99=14us" even
+    // though the path had got faster, not slower.  Nanoseconds keep the
+    // resolution; the microsecond figures are still what the
+    // thresholds below are written against.
+    ASSERT_EQ(latencies_ns.size(), static_cast<std::size_t>(kPackets));
+    std::sort(latencies_ns.begin(), latencies_ns.end());
     auto pct = [&](double p) -> std::int64_t {
-        if (latencies_us.empty()) return 0;
-        std::size_t idx = static_cast<std::size_t>(p * static_cast<double>(latencies_us.size()));
-        if (idx >= latencies_us.size()) idx = latencies_us.size() - 1;
-        return latencies_us[idx];
+        if (latencies_ns.empty()) return 0;
+        std::size_t idx = static_cast<std::size_t>(p * static_cast<double>(latencies_ns.size()));
+        if (idx >= latencies_ns.size()) idx = latencies_ns.size() - 1;
+        return latencies_ns[idx];
     };
 
-    std::int64_t p50  = pct(0.500);
-    std::int64_t p99  = pct(0.990);
-    std::int64_t p999 = pct(0.999);
+    const std::int64_t p50_ns  = pct(0.500);
+    const std::int64_t p99_ns  = pct(0.990);
+    const std::int64_t p999_ns = pct(0.999);
+
+    // The microsecond view the assertions below are written against.
+    const std::int64_t p50  = p50_ns  / 1000;
+    const std::int64_t p99  = p99_ns  / 1000;
+    const std::int64_t p999 = p999_ns / 1000;
 
     NIMRTC_LOG_INFO("ArqRawUdp 100Hz loopback: "
-                    << "p50=" << p50 << "us p99=" << p99
-                    << "us p999=" << p999 << "us n=" << latencies_us.size());
+                    << "p50=" << p50_ns << "ns (" << p50 << "us) p99="
+                    << p99_ns << "ns (" << p99 << "us) p999="
+                    << p999_ns << "ns (" << p999 << "us) n="
+                    << latencies_ns.size());
 
     // Skeleton is allowed to be slow — we just want a finite number and
     // an order of magnitude that's reasonable for an in-process mutex-
@@ -206,14 +223,19 @@ TEST(ArqRawUdpLoopback, HundredHertzLatency) {
     // EXPECT_GT(p999, p99) a flake even though the numbers are good
     // news rather than a regression. Assert monotonicity here and keep
     // the strict (tie-proof) spread check below.
-    EXPECT_GT(p50,  0);
-    EXPECT_GE(p99,  p50);
-    EXPECT_GE(p999, p99);
+    //
+    // The median must be a real measurement: at nanosecond resolution
+    // a `send()` call cannot take zero time, so this says "the clock
+    // worked and the path did something" without depending on the
+    // machine being slow.
+    EXPECT_GT(p50_ns, 0);
+    EXPECT_GE(p99_ns,  p50_ns);
+    EXPECT_GE(p999_ns, p99_ns);
 
     // The tail must still be measurably worse than the median. This
     // compares the maximum against the median, so it still holds when
     // the top order statistics happen to coincide.
-    EXPECT_GT(p999, p50);
+    EXPECT_GT(p999_ns, p50_ns);
 
     // Sanity: total loopback latency should never exceed the send
     // interval (10 ms = 10 000 us) by more than a small fudge factor

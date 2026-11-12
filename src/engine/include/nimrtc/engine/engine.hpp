@@ -103,6 +103,10 @@
 #include <nimrtc/plugins/dtmf.hpp>          // v1.2.0 (session plan D1/D2) — RFC 4733 seam
 #include <nimrtc/plugins/net_feedback.hpp>   // v1.2.0 M1 (F2) — feedback collector seam
 #include <nimrtc/plugins/session.hpp>         // v1.2.0 (session plan N1/T1) — session seam
+// Remote-desktop plan A1: the capture-*device* seam.  Distinct from the
+// source seam below: a capture device enumerates and negotiates, while a
+// source is a plain frame stream.
+#include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
@@ -1989,6 +1993,26 @@ public:
     NIMRTC_API_UNSTABLE const plugins::IVideoReceiver* video_receiver() const noexcept { return video_receiver_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoSender*   video_sender()   const noexcept { return video_sender_.get(); }
 
+    /** The capture-*device* plugin (remote-desktop plan A1).
+     *
+     *  Returns nullptr when `EngineConfig::video_capture_name` was empty
+     *  (the normal case: the host feeds frames itself, or drives
+     *  `IVideoSource` directly).  Otherwise it is the device the engine
+     *  resolved and opened at `open()` time.
+     *
+     *  The capture seam is deliberately *separate* from the source seam:
+     *  a capture device enumerates devices, negotiates a format and
+     *  reports per-frame dirty-rect metadata, while a source is a plain
+     *  frame stream.  Turning a capture device into a source is an
+     *  adapter's job, not the engine's — so the engine hands out the
+     *  device and lets the host decide what to do with it.
+     *
+     *  UNSTABLE: this is a plugin-seam handle; the capture ABI is still
+     *  evolving as the platform backends land (remote-desktop plan
+     *  M1-c). */
+    NIMRTC_API_UNSTABLE plugins::IVideoCapture*     video_capture()     noexcept { return video_capture_.get(); }
+    NIMRTC_API_UNSTABLE const plugins::IVideoCapture* video_capture() const noexcept { return video_capture_.get(); }
+
     /** Replace the video sink at runtime (e.g. swap "headless" for an SDL
      *  renderer). Closes the previous sink and transfers ownership of @p sink.
      *  Safe to call before or after open(); if called before open(), the
@@ -2240,6 +2264,10 @@ private:
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
+    // Remote-desktop plan A1: the capture-*device* plugin.  Present only
+    // when `EngineConfig::video_capture_name` names a registered factory;
+    // null otherwise (the normal case — the host feeds frames itself).
+    std::unique_ptr<plugins::IVideoCapture>     video_capture_;
 
     // ---- BWE / Scheduler plugins (ADR-001: resolved via PluginRegistry) ----
     // Created in init_bwe_scheduler() (called from pre_open/open).

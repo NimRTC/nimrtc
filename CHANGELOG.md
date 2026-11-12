@@ -1142,6 +1142,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`EngineConfig::video_capture_name` was a knob the engine never read
+  (remote-desktop plan A1; remediation Phase 2 §2.2).**  The capture
+  seam was fully built — the `IVideoCapture` interface, the registry
+  slot, the `NIMRTC_REGISTER_VIDEO_CAPTURE` macro, the bounded queue
+  with its dirty-rect model, and the synthetic device — but nothing
+  ever resolved the id.  A host that set `video_capture_name` and
+  expected a capture device got silence: the field was accepted,
+  documented as pluggable, and ignored.
+  - The engine now resolves the factory
+    (`pal::resolve_video_capture`), creates the device and opens it at
+    `open()` time, and hands it to the host through the new
+    `video_capture()` accessor.  The device is closed explicitly on
+    teardown — it may own an OS handle (a DXGI duplication, a PipeWire
+    stream), so dropping the pointer is not enough.
+  - An empty name still installs no device (the normal case: the host
+    feeds frames itself).  A *named* device that cannot be resolved is
+    reported through `on_error` with the new
+    `kVideoCapturePluginMissing` / `kVideoCaptureOpenFailed` codes
+    rather than silently downgraded to "no capture device" — a typo
+    must not turn into a session that quietly never produces a frame.
+  - This closes the last gap in the remediation plan's Phase 2
+    acceptance criterion (§2.7): every `EngineConfig` `*_name` field
+    now has at least one real read site in `src/engine/`.
+  - The capture device is deliberately **not** wired into the encoder:
+    turning a device into a frame stream is an adapter's job, and the
+    automatic capture → encoder pump on the tick thread is remote-
+    desktop plan item A10.
+  - New test `tests/test_engine_video_capture.cpp` pins the four cases:
+    an empty name installs nothing; a registered id is resolved, created
+    *and* opened; an unknown id fires `on_error` and installs nothing;
+    and the device is closed when the engine closes.
+
 - **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
   fallback" (remediation §2.3 / B4 / B5 / B10).**  The guide's §4
   catalogue now lists every pluggable family with its real

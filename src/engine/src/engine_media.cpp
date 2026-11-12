@@ -522,6 +522,32 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         if (impl_->video_feedback_ssrc_ == 0) impl_->video_feedback_ssrc_ = 1;
     }
 
+    // ---- Video Capture device (remote-desktop plan A1) --------------------
+    //
+    // The capture seam is *optional*: an empty video_capture_name means
+    // "the host feeds frames itself", which is the normal case.  A
+    // non-empty name is a hard promise — the user asked for a specific
+    // capture device — so an unknown id or a device that refuses to open
+    // is reported as an error rather than silently downgraded to "no
+    // capture device".  Silently ignoring it would turn a typo into a
+    // session that quietly never produces a frame.
+    //
+    // Note that the capture device is NOT wired into the encoder here.
+    // The engine hands the device to the host through video_capture();
+    // turning a device into a frame stream is an adapter's job, and the
+    // automatic capture → encoder pump is remote-desktop plan item A10.
+    if (!config_.video_capture_name.empty() && !video_capture_) {
+        (void)pal::make_plugin<&pal::resolve_video_capture>(
+            config_.video_capture_name,
+            video_capture_,
+            plugins::CaptureConfig{},                  // default config
+            {.err_open_failed = core::kVideoCaptureOpenFailed,
+             .err_missing = core::kVideoCapturePluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
+    }
+
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
         // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
@@ -991,6 +1017,10 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
+    // The capture device (remote-desktop plan A1) is a *device*: it may
+    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
+    // has to be closed explicitly rather than merely dropped.
+    close_all(video_capture_);
 }
 
 

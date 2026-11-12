@@ -12,7 +12,8 @@
 >
 > **当前 `main`（v1.0.2 之后，尚未发版）**：主干比已发布 tag 多出合并后的 **v1.1** 发布内容
 > （原 v1.1 / v1.2 / v1.3 三份草稿合并为一个版本目标）：打包 + 基准轨、传输 / 媒体 / DTLS
-> 加固轨，以及质量线的落地项（共享自适应抖动策略 `src/modules/jb_strategy`、Goog-CC BWE、
+> 加固轨，以及质量线的落地项（共享自适应抖动策略 `src/modules/jb_strategy`、简化版
+> Goog-CC 风格 BWE（RTT + 丢包混合估计，**不是**完整 trendline 移植）、
 > RTCP feedback 回环、引擎级 `ref_frame` / video stats、GMSSL 以 submodule 形式 vendor +
 > SRTP 后端 seam、引擎源码拆分）。Windows/MSVC Debug 本地全套件 **651/651 PASS**（2026-11-04 实测）。
 > 打包规则（`NIMRTC_INSTALL=ON` → `include/` + `lib/` + `lib/cmake/NimRTC/`）已在 `main` 落地，
@@ -71,7 +72,8 @@ NimRTC 是从零用 C++20 写的实现：保留你需要的**线缆级互通**�
     DTLS IPv6 `set_peer()`、NAT rebinding `rehandshake()`）；质量线（RFC 3550 抖动估计与
     "base + 4·J" 目标延迟策略现在**只实现一份**，放在 `src/modules/jb_strategy`，音频（`jb`）
     与视频（`video_jb`）两个前端共用，视频侧自适应播放通过
-    `EngineConfig::video_receiver_tuning.adaptive_playout` 开关启用；另有 Goog-CC BWE、
+    `EngineConfig::video_receiver_tuning.adaptive_playout` 开关启用；另有简化版 Goog-CC 风格 BWE
+    （RTT + 丢包混合估计，**不是**完整 trendline 移植）、
     RTCP feedback 回环、引擎级 `ref_frame` / video stats、GMSSL 以 submodule 形式 vendor、
     SRTP 后端 seam、引擎源码拆分）。
   公共 API 按 ADR-015 冻结（`NIMRTC_API_VERSION` = 10002），破坏性变更需要 MINOR/MAJOR 版本号。
@@ -550,7 +552,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 版本 | 定位 | 范围 | 状态 |
 |---|---|---|---|
 | **v1.0.x** | Stable | WebTransport / msquic 数据面（DC-1）、调度器内排序（DC-2）、Chrome e2e Case D + E | ✅ **v1.0.2 已发布** 2026-11-03 |
-| **v1.1** | 质量 + 打包 + 加固 + 质量线 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿）；传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护）；弱网质量链（Goog-CC BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | 🟡 已落地在 `main`，等待发布加固门禁 |
+| **v1.1** | 质量 + 打包 + 加固 + 质量线 | 可复现的传输层基线并产出 CI artifact；安装规则 + `NimRTCConfig.cmake`，让 `find_package(NimRTC)` 在安装树里可用；APM 预编译产物随包发布；发布加固（签名 tag、四平台 release 腿）；传输栈残留（`ISctpSocket` 生命周期、ICE `last_recv_packet()` 分流、统一 `make_transport_instance()`、ARQ tech-preview 标注）；媒体/RTP（SDP `a=rtpmap` 视频时钟率、p99 策略校验器）；DTLS P2（IPv6 `set_peer()`、NAT rebinding `rehandshake()`、pump 重入保护）；弱网质量链（简化版 Goog-CC 风格 BWE、统一自适应 JB、RTCP feedback 回环、netem 弱网基线）；`ref_frame` 与指令-帧 API 提升到引擎公开面；引擎级 video stats；GMSSL 以 submodule 形式 vendor + SRTP 后端 seam；引擎源码拆分 | 🟡 已落地在 `main`，等待发布加固门禁 |
 | **v1.2+** | — | SM4-GCM SRTP 实现、`cloudgame`（长线候选）、`takeover`（远程车辆接管，P4） | ⏸️ 规划中 |
 | — | 已关闭 | 进程内 SFU 模块（`nimrtc_sfu`）、DC 转发策略（DC-3）、`sfu-relay` 基准（BENCH-1） | ❌ **NO** —— 2026-10-19 关闭，BDFL：SFU 不是项目核心目标（`docs/plan/v1.0-plan.md` §7） |
 
@@ -617,7 +619,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | 共享自适应抖动策略（`src/modules/jb_strategy`）：RFC 3550 抖动估计器 + "base + 4·J" 目标延迟，音频与视频抖动缓冲共用；视频侧自适应播放为 opt-in | ✅ 已落地 | v1.1 Track Q2 |
 | 3A 与自身契约对齐（输入域电平表、遵循 VAD / 电平开关、真实 APM 参考信号、引擎不再改动调用方的 PCM） | ✅ 已落地 | v1.0.2 之后的修复 |
 | libsrtp 转为真正的 git submodule；vendor 清单区分已验证 submodule 与签入树 | ✅ 已落地 | v1.0.2 之后的杂项 |
-| Goog-CC BWE（opt-in，默认仍走 AIMD）、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam、引擎源码拆分 | ✅ 已落地 | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| 简化版 Goog-CC 风格 BWE（opt-in，默认仍走 AIMD；RTT + 丢包混合估计，不是完整 trendline 移植）、RTCP feedback 回环、netem 弱网基线、引擎级 `ref_frame` / video stats、GMSSL vendor + SRTP seam、引擎源码拆分 | ✅ 已落地 | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
 | OHOS Stage 1 工具链实证（`debug.ohos-arm64` 零 error、无未解符号） | ⏸️ 阻塞 —— 本机无 OHOS SDK | v1.1 Track O1 |
 
 > v1.0.2 是**已发布的 Stable** 版本 —— 公共 API 按 ADR-015 冻结
@@ -664,7 +666,7 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | 使用 vendored WebRTC APM |
 | `NIMRTC_INSTALL` | OFF | 启用 `install()` 规则 —— `include/` + `lib/` + `lib/cmake/NimRTC/`（Track D 打包） |
 | `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | 构建 GMSSL 后端的 DTLS 工厂（id=`gmssl`）；使用 `src/third_party/gmssl/src` 的 vendored 子模块（pin v3.2.0），默认 OFF，非国密构建零成本 |
-| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC + NVDEC（Win/Linux） |
+| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **编码器**（Win/Linux）。NVDEC 解码器**未实现** —— `make_nvdec_h264_codec()` 返回 `nullptr`。 |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF（Windows） |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF（Windows） |

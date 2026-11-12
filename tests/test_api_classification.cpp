@@ -377,13 +377,15 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       capture -> VideoSourceFrame adapter)
     //     - video_capture/dxgi_desktop_dup.hpp (the Windows DXGI
     //       Desktop Duplication device and its factory)
+    //     - video_capture/win_cursor_source.hpp (the Windows cursor
+    //       source: GetCursorInfo + GetIconInfo pointer extraction)
     //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 139;
+    constexpr std::size_t kBaselineHeaderCount = 140;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -17,11 +17,12 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **A pluggable cursor layer, and the Windows DXGI Desktop Duplication
-  capture backend (v1.3.0, Remote Desktop plan A6 / A3).**  The
-  portable capture layer was landed above, but it had no *platform*
-  backend to drive and no way to show the pointer on the platforms
-  whose capture API does not draw it.  Both are now in place.
+- **A pluggable cursor layer (with its Windows platform source), and the
+  Windows DXGI Desktop Duplication capture backend (v1.3.0, Remote
+  Desktop plan A6 / A3).**  The portable capture layer was landed
+  above, but it had no *platform* backend to drive and no way to show
+  the pointer on the platforms whose capture API does not draw it.  Both
+  are now in place.
   - **The cursor layer**,
     `src/modules/video_capture/include/nimrtc/video_capture/cursor_compositor.hpp`,
     splits the pointer into two seams so that "the platform already
@@ -45,6 +46,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       (`CaptureSourceAdapter::set_cursor`), and only for a *packed*
       output: alpha blending needs the pixels' alpha channel, which a
       planar YUV frame does not have.
+  - **The Windows cursor source**,
+    `src/modules/video_capture/include/nimrtc/video_capture/win_cursor_source.hpp`,
+    is the platform half of that layer: `WinCursorSource` reads the
+    pointer with `GetCursorInfo` (the hotspot) and `GetIconInfo` (the
+    bitmaps), and reports it in the *captured display's* coordinate
+    space — `set_display_origin()` translates the virtual-desktop
+    hotspot, because a captured frame is one display's surface and a
+    display is not at the virtual desktop's origin.  The bitmap is
+    cached per `HCURSOR` handle, so a pointer that does not change is
+    not re-extracted on every frame; only the position is re-read.
+    - The bitmaps are always read back as **32-bit BGRA**, even for a
+      monochrome cursor's 1-bit AND/XOR mask.  Asking `GetDIBits` for
+      1-bit output for a *cursor mask* makes GDI write past the end of
+      the caller's buffer (the mask's own `bmWidthBytes` stride and the
+      requested DIB stride disagree), which corrupts the heap; reading
+      the same bitmap as 32 bits is well-defined and lets the bit
+      pattern be recovered from the colour channels instead.
+    - Three cursor shapes are handled: a **modern** cursor (a 32-bit
+      colour bitmap whose alpha is authoritative — the pointer's
+      anti-aliased edges live there), a **24-bit** cursor (colour
+      without alpha, so the AND mask says which pixels are opaque), and
+      a **legacy monochrome** cursor (no colour bitmap at all, so the
+      mask's top half is the AND plane and its bottom half the XOR
+      image).
   - **The DXGI Desktop Duplication backend**,
     `src/modules/video_capture/src/platform/dxgi_desktop_dup.cpp`,
     registered under the plug-in id `"dxgi_desktop"`.  It is the

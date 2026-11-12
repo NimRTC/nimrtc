@@ -33,12 +33,17 @@ add_library(nimrtc_video_capture STATIC
 # (the factory and the duplication object).
 target_sources(nimrtc_video_capture PRIVATE
     src/platform/dxgi_desktop_dup.cpp
+    src/platform/win_cursor_source.cpp
     )
 
 if(WIN32)
     target_link_libraries(nimrtc_video_capture PRIVATE
         d3d11
         dxgi
+        # The cursor source reads the pointer through user32
+        # (GetCursorInfo / GetIconInfo / GetDIBits).
+        user32
+        gdi32
         )
 endif()
 

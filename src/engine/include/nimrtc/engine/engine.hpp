@@ -219,9 +219,19 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string stun_server_host;
     std::uint16_t stun_server_port = 3478;
 
-    /** Local UDP port range for ICE. 0 = OS picks. MUST be unique across
-     *  multiple NimRTCEngine instances on the same host or both will bind
-     *  to the same port and process each other's STUN packets. */
+    /** Local UDP port range for ICE.  0 = the OS assigns an ephemeral port.
+     *
+     *  Leaving both ends at 0 is the recommended setting.  The kernel's
+     *  ephemeral allocation never returns a port that is reserved by
+     *  Windows for the hypervisor (Hyper-V / HNS), whereas a pinned range
+     *  fails with WSAEACCES (errno 10013) when it happens to fall inside
+     *  such a reservation -- and those reservations move between runs, so
+     *  a pinned range passes on one machine and fails on the next.
+     *
+     *  Multiple NimRTCEngine instances on the same host do NOT need
+     *  disjoint ranges: the vendored libjuice in Mux mode hands every
+     *  agent its own OS-assigned port, so each engine gets its own
+     *  socket. */
     std::uint16_t local_port_range_begin = 0;
     std::uint16_t local_port_range_end   = 0;
 

@@ -268,10 +268,11 @@ MyOHOSApp/
 extern "C" int NimRTCMain(int /*argc*/, char** /*argv*/) {
     nimrtc::engine::EngineConfig cfg;
     cfg.local_bind_address     = "0.0.0.0";   // listen on the device's IP
-    cfg.local_port_range_begin = 51000;
-    cfg.local_port_range_end   = 51099;
     cfg.pcm_sample_rate_hz     = 48000;
     cfg.pcm_channels           = 1;
+    // cfg.local_port_range_begin / _end stay 0: the OS assigns an
+    // ephemeral port.  A pinned range can collide with the port blocks
+    // Windows reserves for the hypervisor (WSAEACCES / errno 10013).
     cfg.dtls_name              = "gmssl";      // OHOS profile default
 
     nimrtc::engine::NimRTCEngine engine(std::move(cfg));

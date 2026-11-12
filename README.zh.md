@@ -241,10 +241,10 @@ using namespace std::chrono_literals;
 int main() {
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 51000;
-    cfg.local_port_range_end   = 51099;
     cfg.pcm_sample_rate_hz     = 48000;
     cfg.pcm_channels           = 1;
+    // cfg.local_port_range_begin / _end 保持 0：由操作系统分配临时端口，
+    // 这样就不会和 Windows 为 Hyper-V 保留的端口段冲突。
 
     // Offerer（CONTROLLING）
     NimRTCEngine A(cfg);

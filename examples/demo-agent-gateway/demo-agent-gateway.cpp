@@ -155,8 +155,13 @@ int run_demo(double seconds) {
     // ---- Engine config (audio3a off on engine — we drive it ourselves) -
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 52000;
-    cfg.local_port_range_end   = 52099;
+    // Leave local_port_range_begin / _end at 0 and let the OS assign an
+    // ephemeral port.  Windows reserves whole blocks of UDP ports for the
+    // hypervisor (Hyper-V / HNS), and a bind() inside a reserved block
+    // fails with WSAEACCES (errno 10013).  The reservations move between
+    // runs, so a pinned range passes on one CI runner and fails on the
+    // next.  The kernel's ephemeral allocation never picks a reserved
+    // port, so it is always safe.
     cfg.pcm_sample_rate_hz    = profile.audio_sample_rate_hz;
     cfg.pcm_channels          = profile.audio_channels;
     cfg.audio3a_name          = "";  // demo drives audio3a via registry instance

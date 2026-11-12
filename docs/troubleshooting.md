@@ -164,11 +164,13 @@ means "default"; length is significant.
 Common causes (in order of likelihood):
 
 1. **Both engines on the same host, same port range** — each takes
-   the same UDP port and processes the other's STUN. Pick
-   non-overlapping ranges:
+   the same UDP port and processes the other's STUN. The fix is to
+   leave the range at 0 and let the OS assign an ephemeral port; the
+   vendored libjuice in Mux mode then gives each engine its own socket
+   on its own port:
    ```cpp
-   A.cfg.local_port_range_begin = 51000;  A.cfg.local_port_range_end = 51099;
-   B.cfg.local_port_range_begin = 51100;  B.cfg.local_port_range_end = 51199;
+   A.cfg.local_port_range_begin = 0;  A.cfg.local_port_range_end = 0;
+   B.cfg.local_port_range_begin = 0;  B.cfg.local_port_range_end = 0;
    ```
 
 2. **Answerer doesn't know offerer's ICE ufrag/pwd** — call
@@ -250,12 +252,17 @@ answerer.
 
 ### 3.5 "Address already in use" on rapid restarts
 
-SO_REUSEADDR or SO_REUSEPORT not set. Wait ~30 s or kill the
-stray process. On Windows the TCP table reclaims ports faster.
+The vendored libjuice deliberately does **not** set `SO_REUSEADDR` /
+`SO_REUSEPORT`: those options let two sockets share one UDP port, which
+breaks ICE (the two agents would receive each other's STUN traffic).
+So a stale socket keeps the port until the OS reclaims it. Wait ~30 s or
+kill the stray process. On Windows the UDP table reclaims ports faster.
 
 ```bash
 lsof -iUDP:51000  # which process holds the port
 ```
+
+Do **not** "fix" this by enabling `SO_REUSEADDR` in the ICE backend.
 
 ### 3.6 PCM tap callback fires but PCM is silence
 
@@ -351,6 +358,43 @@ python tools/fetch_webrtc_apm.py
 ```
 
 Then re-link.
+
+### 3.13 `WSAEACCES` (errno 10013) when binding a UDP port
+
+Windows reserves whole blocks of UDP ports for the hypervisor
+(Hyper-V / HNS). A `bind()` inside a reserved block fails with
+`WSAEACCES`, errno 10013:
+
+```
+[warn]  udp.c:178: UDP socket binding failed on port range 127.0.0.1:[51000,51099], errno=10013
+[error] conn_mux.c:270: UDP socket creation failed
+[error] engine A open failed
+```
+
+The reservations move between runs and between machines, so a pinned
+port range passes on one CI runner and fails on the next — the failure
+looks flaky and has nothing to do with your code. libjuice walks the
+*entire* requested range before giving up, so one reserved port inside
+the range is enough to fail the whole agent.
+
+The fix is to leave the port range at 0 and let the OS assign an
+ephemeral port. The kernel's ephemeral allocation never picks a
+reserved port:
+
+```cpp
+cfg.local_port_range_begin = 0;  // 0 = the OS picks
+cfg.local_port_range_end   = 0;
+```
+
+Two engines in one process need no disjoint ranges either — the
+vendored libjuice in Mux mode hands every agent its own OS-assigned
+port, so each engine gets its own socket.
+
+You can confirm which ports are currently reserved on Windows with:
+
+```powershell
+netsh int ipv4 show excludedportrange protocol=udp
+```
 
 ---
 

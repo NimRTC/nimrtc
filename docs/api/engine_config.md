@@ -537,13 +537,34 @@ std::uint16_t local_port_range_end   = 0;
 ### 4.1 Port ranges
 
 `local_port_range_begin` / `_end` define the UDP socket pool the
-ICE transport binds. Both `0` = OS picks. **When you run multiple
-`NimRTCEngine` instances on the same host (e.g. loopback demo), each
-must have a unique port range** — otherwise they steal each other's
-STUN packets.
+ICE transport binds. Both `0` = the OS assigns an ephemeral port.
 
-The loopback-p2p example uses `51000–51099`; demo-agent-gateway uses
-`52000–52099`. Pick non-overlapping ranges in your own code.
+**Leave them at 0.** The kernel's ephemeral allocation never returns a
+port that the OS has reserved, which is exactly what a pinned range
+cannot guarantee: Windows reserves whole blocks of UDP ports for the
+hypervisor (Hyper-V / HNS), and a `bind()` inside a reserved block
+fails with `WSAEACCES` (errno 10013). Those reservations move between
+runs and between machines, so a pinned range passes on one CI runner
+and fails on the next — the failure looks flaky and has nothing to do
+with your code. libjuice walks the *entire* requested range before
+giving up, so a single reserved port inside the range fails the whole
+agent:
+
+```
+[warn]  udp.c:178: UDP socket binding failed on port range 127.0.0.1:[51000,51099], errno=10013
+[error] conn_mux.c:270: UDP socket creation failed
+```
+
+Multiple `NimRTCEngine` instances on the same host do **not** need
+disjoint ranges. The vendored libjuice in Mux mode hands every agent
+its own OS-assigned port, so each engine gets its own socket and the
+agents never see each other's STUN traffic.
+
+On Windows you can inspect the current reservations with:
+
+```powershell
+netsh int ipv4 show excludedportrange protocol=udp
+```
 
 ### 4.2 TURN
 

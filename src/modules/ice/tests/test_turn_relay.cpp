@@ -160,27 +160,19 @@ constexpr std::uint16_t kRelayPortBeginB = 64300;
 constexpr std::uint16_t kRelayPortEndB   = 64399;
 constexpr std::uint16_t kRelayPortBeginC = 64400;
 constexpr std::uint16_t kRelayPortEndC   = 64499;
-// The client agents bind their own UDP sockets, so their ranges have to
-// be disjoint from each other too.  Each range is 20 ports wide, which
-// is more than any single agent needs.
-constexpr std::uint16_t kAgentPortBegin   = 64500;
-constexpr std::uint16_t kAgentPortEnd     = 64519;
-constexpr std::uint16_t kAgentPortBegin2  = 64520;
-constexpr std::uint16_t kAgentPortEnd2    = 64539;
-constexpr std::uint16_t kAgentPortBegin3  = 64540;
-constexpr std::uint16_t kAgentPortEnd3    = 64559;
-constexpr std::uint16_t kAgentPortBegin4  = 64560;
-constexpr std::uint16_t kAgentPortEnd4    = 64579;
-constexpr std::uint16_t kAgentPortBegin5  = 64580;
-constexpr std::uint16_t kAgentPortEnd5    = 64599;
-constexpr std::uint16_t kAgentPortBegin6  = 64600;
-constexpr std::uint16_t kAgentPortEnd6    = 64619;
-constexpr std::uint16_t kAgentPortBegin7  = 64620;
-constexpr std::uint16_t kAgentPortEnd7    = 64639;
-constexpr std::uint16_t kAgentPortBegin8  = 64640;
-constexpr std::uint16_t kAgentPortEnd8    = 64659;
-constexpr std::uint16_t kAgentPortBegin9  = 64660;
-constexpr std::uint16_t kAgentPortEnd9    = 64679;
+// The client agents bind their own UDP sockets.  They must NOT pin a port
+// range: Windows reserves whole blocks of UDP ports for the hypervisor
+// (Hyper-V / HNS), and a bind() inside a reserved block fails with
+// WSAEACCES (errno 10013).  The reservations move between runs, so a
+// pinned range passes on one CI runner and fails on the next.
+//
+// Instead every client agent asks for an ephemeral port (begin == end ==
+// 0), which the kernel allocates from the free pool and therefore never
+// picks a reserved port.  The vendored libjuice in Mux mode hands out a
+// distinct OS-assigned port per agent, so two agents in the same process
+// no longer need disjoint ranges either.
+constexpr std::uint16_t kAgentPortBegin   = 0;
+constexpr std::uint16_t kAgentPortEnd     = 0;
 
 constexpr const char* kTurnUser = "nimrtc";
 constexpr const char* kTurnPass = "nimrtc-turn-password";
@@ -377,7 +369,7 @@ TEST(TurnRelay, ConfiguredTurnServerLeavesMuxMode) {
 }
 
 TEST(TurnRelay, ExplicitMuxModeIsHonoured) {
-    IceConfig cfg = make_agent_config(kAgentPortBegin2, kAgentPortEnd2);
+    IceConfig cfg = make_agent_config(kAgentPortBegin, kAgentPortEnd);
     cfg.mode = IceConfig::Mode::Mux;
     cfg.mode_is_explicit = true;
 
@@ -404,7 +396,7 @@ TEST(TurnRelay, RelayCandidateIsGathered) {
     TurnServerFixture server(kTurnServerPort);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
-    IceTransport t{make_agent_config(kAgentPortBegin3, kAgentPortEnd3)};
+    IceTransport t{make_agent_config(kAgentPortBegin, kAgentPortEnd)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = server.port();
@@ -438,7 +430,7 @@ TEST(TurnRelay, UnreachableTurnServerProducesNoRelayCandidate) {
 
     // No server is listening on this port.  The transport must not wedge:
     // gathering completes, it just produces no relay candidate.
-    IceTransport t{make_agent_config(kAgentPortBegin4, kAgentPortEnd4)};
+    IceTransport t{make_agent_config(kAgentPortBegin, kAgentPortEnd)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = 64999;   // nothing listening
@@ -500,7 +492,7 @@ TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
                   "TurnTransport::Tls must match");
 
     // The concrete transport must answer through the plugin seam too.
-    IceTransport t{make_agent_config(kAgentPortBegin5, kAgentPortEnd5)};
+    IceTransport t{make_agent_config(kAgentPortBegin, kAgentPortEnd)};
     EXPECT_TRUE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tcp));
     EXPECT_FALSE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tls));
 
@@ -537,7 +529,7 @@ TEST(TurnTcp, RelayCandidateIsGatheredOverTcp) {
                              kRelayPortBeginB, kRelayPortEndB);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
-    IceTransport t{make_agent_config(kAgentPortBegin6, kAgentPortEnd6)};
+    IceTransport t{make_agent_config(kAgentPortBegin, kAgentPortEnd)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = kTurnTcpPortB;
@@ -571,7 +563,7 @@ TEST(TurnTcp, UnreachableTcpTurnServerProducesNoRelayCandidate) {
     // Nothing is listening on the TCP port: the transport must not wedge.
     // The host candidates are still gathered and no relay candidate is
     // invented.
-    IceTransport t{make_agent_config(kAgentPortBegin7, kAgentPortEnd7)};
+    IceTransport t{make_agent_config(kAgentPortBegin, kAgentPortEnd)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = 64998;   // nothing listening on TCP
@@ -642,11 +634,11 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     // Pinned credentials: the two agents need to agree on them before the
     // candidates are exchanged, and pinning them lets the test build the
     // remote descriptions deterministically.
-    IceConfig cfg_a = make_agent_config(kAgentPortBegin8, kAgentPortEnd8);
+    IceConfig cfg_a = make_agent_config(kAgentPortBegin, kAgentPortEnd);
     cfg_a.local_ufrag    = "ufragTurnTcpA0000000";
     cfg_a.local_password = "pwdTurnTcpA00000000000000000";
 
-    IceConfig cfg_b = make_agent_config(kAgentPortBegin9, kAgentPortEnd9);
+    IceConfig cfg_b = make_agent_config(kAgentPortBegin, kAgentPortEnd);
     cfg_b.role          = Role::Controlled;
     cfg_b.local_ufrag    = "ufragTurnTcpB0000000";
     cfg_b.local_password = "pwdTurnTcpB00000000000000000";
@@ -668,11 +660,12 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     cfg_a.bind_address = "127.0.0.2";
     cfg_b.bind_address = "127.0.0.3";
 
-    // Disjoint local port ranges, so the two agents do not share a socket.
-    cfg_a.local_port_range_begin = kAgentPortBegin8;
-    cfg_a.local_port_range_end   = kAgentPortEnd8;
-    cfg_b.local_port_range_begin = kAgentPortBegin9;
-    cfg_b.local_port_range_end   = kAgentPortEnd9;
+    // Each agent asks for an ephemeral port, so the OS assigns them two
+    // different ones and the two agents never share a socket.
+    cfg_a.local_port_range_begin = kAgentPortBegin;
+    cfg_a.local_port_range_end   = kAgentPortEnd;
+    cfg_b.local_port_range_begin = kAgentPortBegin;
+    cfg_b.local_port_range_end   = kAgentPortEnd;
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

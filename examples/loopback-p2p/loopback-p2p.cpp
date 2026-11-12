@@ -58,8 +58,14 @@ int run_loopback(double seconds) {
     // ---- Offerer (A): pre_open → open → CONTROLLING → create offer ---
     nimrtc::engine::EngineConfig cfgA;
     cfgA.local_bind_address = "127.0.0.1";
-    cfgA.local_port_range_begin = 51000;
-    cfgA.local_port_range_end   = 51099;
+    // Leave local_port_range_begin / _end at 0 and let the OS assign an
+    // ephemeral port.  Windows reserves whole blocks of UDP ports for the
+    // hypervisor (Hyper-V / HNS), and a bind() inside a reserved block
+    // fails with WSAEACCES (errno 10013).  The reservations move between
+    // runs, so a pinned range passes on one CI runner and fails on the
+    // next.  The kernel's ephemeral allocation never picks a reserved
+    // port, so it is always safe -- and it also means the two engines
+    // below no longer need disjoint ranges.
     cfgA.pcm_sample_rate_hz = 48000;
     cfgA.pcm_channels       = 1;
 
@@ -84,9 +90,9 @@ int run_loopback(double seconds) {
     std::fprintf(stderr, "[loopback-p2p] offer length=%zu\n", offer.size());
 
     // ---- Answerer (B): pre_open → set_remote_ice → open (CONTROLLED) ----
+    // B inherits A's config, including the ephemeral-port setting, so the
+    // OS assigns it its own port.  No disjoint range is needed.
     nimrtc::engine::EngineConfig cfgB = cfgA;
-    cfgB.local_port_range_begin = 51100;
-    cfgB.local_port_range_end   = 51199;
     nimrtc::engine::NimRTCEngine B(cfgB);
 
     // Key fix: extract A's ICE credentials BEFORE B's ICE starts gathering.

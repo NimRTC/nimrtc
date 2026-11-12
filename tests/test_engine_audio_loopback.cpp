@@ -554,8 +554,12 @@ bool is_connected(std::string_view state) {
 TEST_F(EngineAudioLoopback, TwoEnginesOverLoopbackDeliverDecodedAudio) {
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 51800;
-    cfg.local_port_range_end   = 51899;
+    // Ephemeral ports (0 = OS picks).  A pinned range would fail with
+    // WSAEACCES (errno 10013) whenever Windows reserves it for the
+    // hypervisor (Hyper-V / HNS), and those reservations move between
+    // runs.  The kernel's ephemeral allocation never picks a reserved
+    // port, and the vendored libjuice in Mux mode gives each engine its
+    // own socket, so the two engines below need no disjoint range.
     cfg.stun_server_host       = "";
     cfg.pcm_sample_rate_hz     = kClockRate;
     cfg.pcm_channels           = 1;
@@ -575,8 +579,6 @@ TEST_F(EngineAudioLoopback, TwoEnginesOverLoopbackDeliverDecodedAudio) {
     ASSERT_FALSE(offer.empty());
 
     EngineConfig cfg_b = cfg;
-    cfg_b.local_port_range_begin = 51900;
-    cfg_b.local_port_range_end   = 51999;
 
     NimRTCEngine b(cfg_b);
     const std::string ice_block = extract_ice_block(offer);

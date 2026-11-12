@@ -156,7 +156,7 @@ wolfssl (production DTLS — most cautious).
 | wolfssl | submodule | — |
 | msquic | submodule (NimRTC fork, one patch commit) | — |
 | libsrtp | submodule | — (converted 2026-11-03: the tree was byte-identical to the pinned revision `2f82ec0`, so it converted directly with no NimRTC-local patch) |
-| libjuice | checked-in tree | the tree carries one NimRTC-local patch on top of `77daa8b` (SO_REUSEADDR/SO_REUSEPORT in `src/udp.c`); it is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` and has to be re-applied (or carried by a fork) after the conversion |
+| libjuice | checked-in tree | the tree carries one NimRTC-local patch on top of `77daa8b` (it stops `src/udp.c` from setting `SO_REUSEADDR`/`SO_REUSEPORT` and stops `src/conn_mux.c` from merging an ephemeral-port agent into an existing mux registry); it is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` and has to be re-applied (or carried by a fork) after the conversion |
 | mbedtls | checked-in tree | the tree inlines the contents of upstream's separate `framework` submodule (2039 tracked files vs 332 upstream entries), so it is not byte-identical to `023aca8`; the conversion has to decide how to carry the inlined framework tree |
 
 `tools/check_vendor.py` distinguishes the two states from the index: a
@@ -223,7 +223,7 @@ into `vendor.json` once the last checked-in tree is converted.
 | D4 | Allow `branch = master` pins (no tagged release)? | **Yes**, with `commit_sha` as ground truth | libjuice and libsrtp don't tag frequently; pinning the HEAD SHA is sufficient. |
 | D5 | WebRTC APM — clone `master` or a stable commit? | **master** | PulseAudio fork moves slowly; no recent stable tag. |
 | D6 | Should WebRTC APM become a real submodule? | **No** | The tree is never committed to this repo, so a gitlink would have nothing to point at. NimRTC's changes to upstream travel as versioned patches applied by `tools/apply_webrtc_apm_patches.py`; the pinned upstream SHA stays in `vendor.json`. |
-| D7 | How is the NimRTC-local libjuice patch carried? | **Versioned patch file** | `src/udp.c` sets SO_REUSEADDR/SO_REUSEPORT (commit `450dde2`). The delta is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` against base `77daa8b`, mirroring the APM patch mechanism. The alternative — a NimRTC/libjuice fork like NimRTC/msquic — is still open; the patch file is the cheap first step and keeps the conversion reversible. |
+| D7 | How is the NimRTC-local libjuice patch carried? | **Versioned patch file** | The delta is preserved as `src/third_party/libjuice/patches/0001-so-reuseaddr.patch` against base `77daa8b`, mirroring the APM patch mechanism. It removes the `SO_REUSEADDR`/`SO_REUSEPORT` sets in `src/udp.c` (they let two ICE agents share one UDP port, and made the kernel ephemeral allocator hand out duplicate ports) and makes `src/conn_mux.c` refuse to merge an ephemeral-port agent into an existing mux registry. The alternative — a NimRTC/libjuice fork like NimRTC/msquic — is still open; the patch file is the cheap first step and keeps the conversion reversible. |
 | D8 | How is upstream's mbedtls `framework` submodule carried? | **Open** | The checked-in tree inlines the framework sources (2039 tracked files vs 332 upstream entries). Converting mbedtls means either dropping the inlined framework tree (the tree is archival and not built) or keeping a second submodule for it. No decision taken yet. |
 
 ## 5. Risks

@@ -57,6 +57,28 @@ static int conn_mux_registries_size;
 static int conn_mux_registries_count;
 
 conn_registry_t *conn_mux_get_registry(udp_socket_config_t *config) {
+	// An ephemeral-port request (port_begin == 0 && port_end == 0) means
+	// "give me a socket and let the kernel pick the port".  It must NOT
+	// reuse an existing registry: the caller has no way to know which
+	// port it will end up on, so merging it into somebody else's socket
+	// would silently give two agents the same local candidate.
+	//
+	// The previous code matched on `impl->port >= config->port_begin`,
+	// which is always true when port_begin == 0, so the *first* registry
+	// in the process absorbed every later agent.  Two ICE agents in one
+	// process (e.g. two NimRTCEngine instances talking to each other over
+	// the loopback) then shared one UDP socket, advertised the same
+	// 127.0.0.1:port candidate, and could not be told apart: the STUN
+	// Binding request came back with a ufrag mismatch and the session
+	// never connected.
+	//
+	// PR #49 worked around this in the tests by switching them to Poll
+	// mode.  Fixing it here means the *default* Mux mode is safe too, so
+	// an application that creates two engines does not have to know about
+	// this at all.
+	if (config->port_begin == 0 && config->port_end == 0)
+		return NULL;
+
 	for (int i = 0; i < conn_mux_registries_size; i++) {
 		if (!conn_mux_registries[i]) {
 			continue;

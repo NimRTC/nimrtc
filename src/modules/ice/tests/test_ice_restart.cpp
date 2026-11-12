@@ -81,29 +81,21 @@ bool is_wsl2() noexcept {
 // The kernel never hands the same ephemeral port to two live sockets, so
 // two concurrently-running test cases cannot share one.  Within one test
 // case the two agents are likewise on distinct ports, which is what the
-// loopback path needs.  Verified empirically on both Windows (with and
-// without SO_REUSEPORT set) and Linux: 40 sockets bound to port 0 all
-// received distinct ports.
+// loopback path needs.
 //
-// Note that SO_REUSEPORT is not actually set on Windows -- libjuice's
-// `#ifdef SO_REUSEPORT` is false there, because Windows does not define
-// the macro in its default SDK headers.  Only SO_REUSEADDR is set.  That
-// makes the sharing hazard weaker on Windows, not absent, so the
-// reasoning above holds either way.
+// The default Mux mode is used, deliberately: that is what the engine
+// uses, so the test exercises the shipping configuration.  Mux mode gives
+// each agent its own socket as long as the agent asks for an ephemeral
+// port -- libjuice's conn_mux_get_registry() no longer folds an
+// ephemeral-port request into an existing registry (see
+// src/third_party/libjuice/src/src/conn_mux.c).  Before that fix the
+// second agent joined the first agent's socket, both advertised the same
+// 127.0.0.1:port, and the STUN Binding request came back with a ufrag
+// mismatch.
 IceConfig make_config(Role role) {
     IceConfig cfg;
     cfg.role = role;
     cfg.bind_address = "127.0.0.1";
-    // Poll mode, not the default Mux mode.  In Mux mode libjuice
-    // multiplexes every agent onto ONE shared UDP socket: with
-    // port_begin == 0, conn_mux_get_registry() matches the first existing
-    // registry, so a second agent joins the first agent's socket.  Both
-    // agents then have the same local IP:port, ICE cannot tell them
-    // apart, and the STUN binding request is rejected with a ufrag
-    // mismatch.  Poll mode gives each agent its own socket
-    // (conn_poll_init() calls udp_create_socket() per agent), which is
-    // what a two-agent loopback test needs.
-    cfg.mode = IceConfig::Mode::Poll;
     return cfg;
 }
 

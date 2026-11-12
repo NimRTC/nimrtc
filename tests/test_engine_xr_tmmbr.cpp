@@ -47,6 +47,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -249,7 +250,10 @@ protected:
         cc.payload_type   = pt;
         cc.name           = "opus";
 
-        auto enc = factory->create(cc);
+        // The codec adapter owns the Opus encoder, so it has to be
+        // released when this helper returns -- otherwise the encoder
+        // state leaks and ASan reports it.
+        std::unique_ptr<nimrtc::plugins::ICodec> enc(factory->create(cc));
         if (!enc) return {};
         if (enc->open() != np::kOk) return {};
 

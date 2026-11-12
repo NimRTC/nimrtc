@@ -47,7 +47,7 @@ namespace nimrtc::nvcodec {
 /** The NVIDIA codecs this backend family implements.
  *
  * `kUnsupported` is a sentinel that is never passed to the driver. */
-enum class NvCodec : std::uint8_t {
+enum class NIMRTC_API_STABLE NvCodec : std::uint8_t {
     kUnsupported = 0,
     kH264        = 1,
     kH265        = 2,
@@ -55,7 +55,7 @@ enum class NvCodec : std::uint8_t {
 };
 
 /** Everything the NVENC / NVDEC backends need to know about a codec. */
-struct NvCodecDesc {
+struct NIMRTC_API_STABLE NvCodecDesc {
     /** The codec itself. */
     NvCodec codec = NvCodec::kUnsupported;
 

@@ -72,6 +72,15 @@ namespace {
 constexpr std::uint32_t kWidth  = 320;
 constexpr std::uint32_t kHeight = 240;
 
+/** The byte stride of plane @p plane, as a size_t.
+ *
+ *  The layout's strides are signed -- a negative stride would mean a
+ *  bottom-up plane -- but compute_layout() always returns forward,
+ *  positive strides, so the narrowing is safe here. */
+std::size_t stride_of(const video_frame::VideoFrameLayout& layout, int plane) {
+    return static_cast<std::size_t>(layout.strides[plane]);
+}
+
 /** Create the NVENC encoder for H.264, or nullptr when the backend was
  *  not compiled in (no NVIDIA SDK at build time) or is unavailable on
  *  this host. */
@@ -134,15 +143,15 @@ plugins::VideoFrame make_video_frame(const TestFrame& f,
 
     // The layout uses 16-byte aligned strides; copy plane by plane.
     for (std::uint32_t row = 0; row < h; ++row) {
-        std::memcpy(buf->plane(0) + static_cast<std::size_t>(row) * layout.strides[0],
+        std::memcpy(buf->plane(0) + static_cast<std::size_t>(row) * stride_of(layout, 0),
                     f.y.data() + static_cast<std::size_t>(row) * w, w);
     }
     const std::uint32_t cw = w / 2;
     const std::uint32_t ch = h / 2;
     for (std::uint32_t row = 0; row < ch; ++row) {
-        std::memcpy(buf->plane(1) + static_cast<std::size_t>(row) * layout.strides[1],
+        std::memcpy(buf->plane(1) + static_cast<std::size_t>(row) * stride_of(layout, 1),
                     f.u.data() + static_cast<std::size_t>(row) * cw, cw);
-        std::memcpy(buf->plane(2) + static_cast<std::size_t>(row) * layout.strides[2],
+        std::memcpy(buf->plane(2) + static_cast<std::size_t>(row) * stride_of(layout, 2),
                     f.v.data() + static_cast<std::size_t>(row) * cw, cw);
     }
 
@@ -306,7 +315,7 @@ TEST(HwRoundTrip, NvencEncodeThenNvdecDecode) {
     std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
     for (std::uint32_t row = 0; row < kHeight; ++row) {
         std::memcpy(dec_y.data() + static_cast<std::size_t>(row) * kWidth,
-                    planes[0] + static_cast<std::size_t>(row) * layout.strides[0],
+                    planes[0] + static_cast<std::size_t>(row) * stride_of(layout, 0),
                     kWidth);
     }
 
@@ -372,7 +381,7 @@ TEST(HwRoundTrip, NvdecDecodesToNv12) {
     const auto layout = video_frame::compute_layout(video_frame::PixelFormat::kNV12,
                                                     kWidth, kHeight);
     ASSERT_EQ(layout.num_planes, 2);
-    EXPECT_EQ(layout.strides[1], (kWidth + 15u) & ~15u)
+    EXPECT_EQ(layout.strides[1], static_cast<std::int32_t>((kWidth + 15u) & ~15u))
         << "the NV12 UV stride must hold the full interleaved row";
 
     std::vector<std::uint8_t> out_pixels(layout.buffer_size, 0);
@@ -390,7 +399,7 @@ TEST(HwRoundTrip, NvdecDecodesToNv12) {
     std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
     for (std::uint32_t row = 0; row < kHeight; ++row) {
         std::memcpy(dec_y.data() + static_cast<std::size_t>(row) * kWidth,
-                    planes[0] + static_cast<std::size_t>(row) * layout.strides[0],
+                    planes[0] + static_cast<std::size_t>(row) * stride_of(layout, 0),
                     kWidth);
     }
     const auto [min_it, max_it] = std::minmax_element(dec_y.begin(), dec_y.end());
@@ -402,7 +411,7 @@ TEST(HwRoundTrip, NvdecDecodesToNv12) {
     double uv_sum = 0.0;
     std::size_t uv_count = 0;
     for (std::uint32_t row = 0; row < kHeight / 2; ++row) {
-        const std::uint8_t* uv = planes[1] + static_cast<std::size_t>(row) * layout.strides[1];
+        const std::uint8_t* uv = planes[1] + static_cast<std::size_t>(row) * stride_of(layout, 1);
         for (std::uint32_t col = 0; col < kWidth; ++col) {
             uv_sum += uv[col];
             ++uv_count;
@@ -472,7 +481,7 @@ TEST(HwRoundTrip, NvdecDecodesMultipleFrames) {
         std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
         for (std::uint32_t row = 0; row < kHeight; ++row) {
             std::memcpy(dec_y.data() + static_cast<std::size_t>(row) * kWidth,
-                        planes[0] + static_cast<std::size_t>(row) * layout.strides[0],
+                        planes[0] + static_cast<std::size_t>(row) * stride_of(layout, 0),
                         kWidth);
         }
         const auto [min_it, max_it] = std::minmax_element(dec_y.begin(), dec_y.end());
@@ -567,7 +576,7 @@ TEST(HwRoundTrip, NvdecHandlesResolutionChange) {
         std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(s.w) * s.h);
         for (std::uint32_t row = 0; row < s.h; ++row) {
             std::memcpy(dec_y.data() + static_cast<std::size_t>(row) * s.w,
-                        planes[0] + static_cast<std::size_t>(row) * layout.strides[0],
+                        planes[0] + static_cast<std::size_t>(row) * stride_of(layout, 0),
                         s.w);
         }
         const auto [min_it, max_it] = std::minmax_element(dec_y.begin(), dec_y.end());
@@ -754,11 +763,11 @@ TEST(HwRoundTrip, NvencPadsBelowMinimumGeometry) {
 // content is a horizontal luma ramp from 16 to 235 (BT.601 limited
 // range) with neutral chroma (U = V = 128), encoded with:
 //
-//   ffmpeg -f lavfi -i color=c=black:s=320x240 \
-//          -vf "geq=lum='X/W*219+16':cb=128:cr=128" \
-//          -frames:v 1 -c:v libx264 -profile:v high -preset medium \
-//          -crf 18 -pix_fmt yuv420p \
-//          -x264-params "keyint=1:scenecut=0:aud=0" \
+//   ffmpeg -f lavfi -i color=c=black:s=320x240
+//          -vf "geq=lum='X/W*219+16':cb=128:cr=128"
+//          -frames:v 1 -c:v libx264 -profile:v high -preset medium
+//          -crf 18 -pix_fmt yuv420p
+//          -x264-params "keyint=1:scenecut=0:aud=0"
 //          -bsf:v h264_mp4toannexb -f h264 out.264
 //
 // The decoded picture is therefore fully predictable: every luma row
@@ -837,7 +846,7 @@ TEST(HwRoundTrip, NvdecDecodesSelfContainedBitstream) {
     int    luma_max_err = 0;
     for (std::uint32_t row = 0; row < kVecHeight; ++row) {
         const std::uint8_t* y = planes[0] +
-                                static_cast<std::size_t>(row) * layout.strides[0];
+                                static_cast<std::size_t>(row) * stride_of(layout, 0);
         for (std::uint32_t col = 0; col < kVecWidth; ++col) {
             const int want = expected_luma(col, kVecWidth);
             const int got  = y[col];
@@ -863,9 +872,9 @@ TEST(HwRoundTrip, NvdecDecodesSelfContainedBitstream) {
     int chroma_max_err = 0;
     for (std::uint32_t row = 0; row < ch; ++row) {
         const std::uint8_t* u = planes[1] +
-                                static_cast<std::size_t>(row) * layout.strides[1];
+                                static_cast<std::size_t>(row) * stride_of(layout, 1);
         const std::uint8_t* v = planes[2] +
-                                static_cast<std::size_t>(row) * layout.strides[2];
+                                static_cast<std::size_t>(row) * stride_of(layout, 2);
         for (std::uint32_t col = 0; col < cw; ++col) {
             chroma_max_err = std::max(chroma_max_err,
                                       std::abs(static_cast<int>(u[col]) - expected_chroma()));
@@ -924,7 +933,6 @@ TEST(HwRoundTrip, NvdecAllocatesItsOwnOutputBuffer) {
     EXPECT_EQ(buf->layout().format, video_frame::PixelFormat::kI420);
 
     // The luma must still hold the ramp.
-    const auto layout = buf->layout();
     const std::uint8_t* y = buf->plane(0);
     ASSERT_NE(y, nullptr);
     for (std::uint32_t col = 0; col < 320; col += 16) {

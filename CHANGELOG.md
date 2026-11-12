@@ -769,6 +769,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every hand-written `ctest` wrapper test was reported as "Not Run" in a
+  non-Debug build.**  CMake 4.0's multi-config generator wraps each
+  `add_test()` in a four-branch `CTEST_CONFIGURATION_TYPE` conditional
+  whose fall-through is `NOT_AVAILABLE`.  The post-configure hook
+  (`cmake/FixCTestTestfile.cmake`) resolved that by throwing away the
+  Release / MinSizeRel / RelWithDebInfo branches and keeping only the
+  **Debug** body — which works for the Debug build CI runs, but in a
+  Release build every wrapper test then pointed at a `Debug/` path that
+  does not exist.  ctest reported 76 tests as "Not Run" and the suite
+  failed even though every binary was present and green.
+  - The hook now keeps all four branches verbatim, so `ctest -C <config>`
+    resolves exactly as CMake intended, and replaces the `NOT_AVAILABLE`
+    fall-through with an existence probe that picks whichever
+    configuration actually has its binaries on disk.  A plain `ctest`
+    (no `-C`) therefore finds the tests that were really built.
+  - The hook also stopped mangling the `_BACKTRACE_TRIPLES` property:
+    those values contain semicolons, and the previous revision split the
+    file on `;` (the CMake list separator), which rewrote the backtrace
+    triples into garbage.
+  - Affected: every non-`gtest_discover_tests` wrapper — the DTLS, E2E,
+    plugin-loading and seam tests.
+
 - **The WebTransport data channel mistook a Chrome stream header for
   payload.**  A peer-initiated bidirectional stream starts with the
   WebTransport stream-type signal `0x41` followed by the session-id

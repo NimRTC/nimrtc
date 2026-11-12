@@ -91,19 +91,29 @@ constexpr std::uint16_t kBandBegin = 63000;
 // that happens to grab a port in the band.
 constexpr std::uint16_t kWindowSize = 50;
 
+// The windows are laid out as
+//
+//     begin(w) = kBandBegin + index(w) * kWindowSize
+//     end(w)   = begin(w) + kWindowSize - 1
+//
+// The arithmetic is done in std::uint32_t and narrowed at the very end:
+// GCC's -Werror=conversion rejects an `int` -> `std::uint16_t` narrowing
+// even when the value provably fits.
 constexpr std::uint16_t window_begin(Window w) noexcept {
-    return kBandBegin + static_cast<std::uint16_t>(w) * kWindowSize;
+    const auto index = static_cast<std::uint32_t>(w);
+    return static_cast<std::uint16_t>(kBandBegin + index * kWindowSize);
 }
 
 constexpr std::uint16_t window_end(Window w) noexcept {
-    return window_begin(w) + kWindowSize - 1;
+    return static_cast<std::uint16_t>(window_begin(w) + kWindowSize - 1);
 }
 
 // The windows must stay inside the band and must not reach into the
 // TURN relay tests' range.
-static_assert(kBandBegin + static_cast<std::uint16_t>(Window::RestartTwoAgentsB) * kWindowSize +
-                  kWindowSize <=
-              64000,
+static_assert(static_cast<std::uint32_t>(kBandBegin) +
+                      static_cast<std::uint32_t>(Window::RestartTwoAgentsB) * kWindowSize +
+                      kWindowSize <=
+                  64000u,
               "the ICE test port windows run into the TURN relay tests' range");
 
 } // namespace nimrtc::ice::test_ports

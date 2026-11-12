@@ -367,8 +367,8 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // After the merge with main the count is 132 + 4 (the XR / TMMBR
     // headers main added on top of this branch's 121-header base) = 136.
     //
-    // Remote-desktop plan A6 / A10 / A3 bump: +3 public headers
-    // (136 -> 139) for the capture layer's cursor seam, the shared
+    // Remote-desktop plan A6 / A10 / A3 bump: +4 public headers
+    // (136 -> 140) for the capture layer's cursor seam, the shared
     // capture -> frame-stream adapter, and the Windows display-capture
     // backend:
     //     - video_capture/cursor_compositor.hpp (the pluggable cursor

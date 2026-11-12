@@ -90,6 +90,24 @@ set(_nimrtc_configs Debug Release MinSizeRel RelWithDebInfo)
 # semicolons inside _BACKTRACE_TRIPLES from CMake's list handling.
 set(_nimrtc_semi "@NIMRTC_SEMICOLON@")
 
+# Marker written into every rewritten file so the next run recognises it
+# and leaves it alone.
+#
+# The rewrite KEEPS the four configuration branches, so the rewritten file
+# still contains the literal text "CTEST_CONFIGURATION_TYPE MATCHES" --
+# which is exactly the token the "needs rewriting?" test below looks for.
+# Without a marker the script therefore rewrote the same file on every
+# single build, forever.  Worse, the rewrite appended a blank line per
+# line (see the sentinel handling below), so the file doubled in size on
+# each pass: one CTestTestfile.cmake in a stale build tree reached 655381
+# lines, and the fixup target then took longer than the build it was
+# supposed to accompany -- a livelock that wedged `cmake --build`.
+#
+# The marker is placed in a comment, so it does not change what ctest
+# sees, and the test below checks for the marker *before* the
+# CTEST_CONFIGURATION_TYPE token.
+set(_nimrtc_marker "@NIMRTC_FIXED_CTEST_CONDITIONALS@")
+
 foreach(testfile IN LISTS testfiles)
     math(EXPR scanned "${scanned} + 1")
 
@@ -99,6 +117,14 @@ foreach(testfile IN LISTS testfiles)
     # Hide semicolons so the line split below does not break the
     # _BACKTRACE_TRIPLES property apart.
     string(REPLACE ";" "${_nimrtc_semi}" content "${content}")
+
+    # Already rewritten by an earlier run?  Leave it alone -- this is
+    # what makes the script idempotent.
+    string(FIND "${content}" "${_nimrtc_marker}" already)
+    if(NOT already EQUAL -1)
+        math(EXPR unchanged "${unchanged} + 1")
+        continue()
+    endif()
 
     # Quick reject: file has no CTEST_CONFIGURATION_TYPE conditional.
     string(FIND "${content}" "CTEST_CONFIGURATION_TYPE MATCHES" hit)
@@ -116,6 +142,12 @@ foreach(testfile IN LISTS testfiles)
     set(cur_branch "")
 
     foreach(line IN LISTS lines)
+        # The split above left the EOL sentinel at the end of every line.
+        # Strip it here: every append site below adds the sentinel back,
+        # so leaving it in place would emit each line with TWO newlines
+        # and double the file's size on every pass.
+        string(REGEX REPLACE "@NIMRTC_EOL@$" "" line "${line}")
+
         if(in_block)
             # --- inside a conditional block -----------------------------
             if(line MATCHES "^elseif\\(CTEST_CONFIGURATION_TYPE MATCHES")
@@ -255,6 +287,12 @@ foreach(testfile IN LISTS testfiles)
     # Restore the protected semicolons and the newlines.
     string(REPLACE "@NIMRTC_EOL@" "\n" out "${out}")
     string(REPLACE "${_nimrtc_semi}" ";" out "${out}")
+
+    # Stamp the file as already rewritten, so the next run skips it.
+    string(PREPEND out
+        "# ${_nimrtc_marker}\n"
+        "# Rewritten by cmake/FixCTestTestfile.cmake -- do not edit by hand.\n")
+
     if(NOT out MATCHES "\n$")
         string(APPEND out "\n")
     endif()

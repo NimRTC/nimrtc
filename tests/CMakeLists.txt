@@ -1152,6 +1152,28 @@ else()
     target_link_libraries(test_registry_contract PRIVATE atomic)
 endif()
 target_link_libraries(test_registry_contract PRIVATE
+    # LINK-ORDER CRITICAL (GNU ld single-pass archive scan).
+    #
+    # `nimrtc_core_objects` holds `pal_default_registrars.cpp.o`, i.e. the
+    # unified `kDefaultRegistrars[]` table.  Every entry of that table is an
+    # unresolved external until the owning module's archive is scanned, so
+    # the table's object file MUST be pulled into the link BEFORE the
+    # module archives -- otherwise GNU ld has already walked past
+    # `libnimrtc_audio3a.a` & friends when the table introduces
+    # `nimrtc::audio3a::register_default_plugins()` and the link fails with
+    # "undefined reference" (the LNK2001 rationale documented in
+    # `nimrtc_add_engine_test`).
+    #
+    # `nimrtc::core` cannot provide that ordering on its own: every module
+    # depends on `nimrtc::core`, so CMake always emits core's artefacts
+    # (including `libnimrtc_registry.a`) at the END of the link line.  The
+    # engine tests dodge this because `nimrtc::engine` PUBLICly links
+    # `nimrtc_core_objects` and therefore absorbs the table's object file
+    # into `libnimrtc_engine.a`, which lands FIRST on the link line.
+    #
+    # Linking the OBJECT library directly gives this test the same shape
+    # without dragging the whole engine into it.
+    nimrtc_core_objects
     nimrtc::core
     nimrtc::transport
     nimrtc::ice

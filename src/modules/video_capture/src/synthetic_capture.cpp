@@ -20,6 +20,7 @@
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/video_capture/dxgi_desktop_dup.hpp>
 #include <nimrtc/video_capture/portal_capture.hpp>
+#include <nimrtc/video_capture/screen_capture_kit.hpp>
 #include <nimrtc/video_capture/wgc_capture.hpp>
 #include <nimrtc/video_capture/x11_capture.hpp>
 
@@ -352,6 +353,12 @@ void register_default_plugins() noexcept {
     //   - "xdg_portal" — the Wayland path (GIO + PipeWire).
     register_x11_capture();
     register_portal_capture();
+
+    // Remote-desktop plan A4: the macOS backend.  It registers itself
+    // only on macOS — everywhere else there is no ScreenCaptureKit to
+    // talk to, and a host that asks for "sck" there gets the engine's
+    // "capture plugin missing" error rather than a silent no-op device.
+    register_screen_capture_kit();
 }
 
 } // namespace nimrtc::video_capture

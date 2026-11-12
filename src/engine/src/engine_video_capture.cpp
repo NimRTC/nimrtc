@@ -154,13 +154,31 @@ void NimRTCEngine::init_video_capture() noexcept {
     // (a permission denial on macOS, a display that went away on
     // Windows, a missing portal on Linux) — the plan's A4 asks for
     // exactly that distinction.
-    if (video_capture_source_->open() != plugins::kOk) {
+    const plugins::Status open_rc = video_capture_source_->open();
+    if (open_rc != plugins::kOk) {
+        // The device refused to open.  Two *different* things can
+        // cause that, and the host must be able to tell them apart:
+        //
+        //   - a **permission denial** (the macOS Screen Recording
+        //     prompt was answered with "no"; a portal's picker was
+        //     dismissed) — only the *user* can fix this, and the host
+        //     should say so rather than reporting a broken device;
+        //   - anything else (a display that went away, a missing
+        //     portal) — the host's or the platform's problem.
         const std::string msg =
             std::string{"engine: video capture device '"}
                 + config_.video_capture_name
                 + "' failed to open";
         core::log::Logger::instance().error(msg);
-        if (on_error_) on_error_(core::kVideoCaptureOpenFailed, msg);
+        if (on_error_) {
+            if (open_rc == plugins::kErrPermissionDenied) {
+                on_error_(core::kVideoCapturePermissionDenied,
+                          msg + " (the screen-recording permission was not "
+                                "granted)");
+            } else {
+                on_error_(core::kVideoCaptureOpenFailed, msg);
+            }
+        }
         shutdown_video_capture();
         return;
     }

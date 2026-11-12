@@ -40,6 +40,42 @@ target_sources(nimrtc_video_capture PRIVATE
     src/platform/portal_capture.cpp
     )
 
+# -----------------------------------------------------------------------------
+# The macOS capture backend (remote-desktop plan A4).
+#
+# ScreenCaptureKit is an Objective-C framework, so the backend is
+# Objective-C++ (`.mm`).  It is compiled on every platform because it
+# carries a portable stub — the class exists everywhere, and on a
+# non-macOS host `open()` fails with kErrUnsupported.  Only the *link*
+# libraries are macOS-only:
+#
+#   - ScreenCaptureKit — the capture stream itself,
+#   - AVFoundation     — the sample buffers' media types,
+#   - CoreMedia        — CMSampleBuffer,
+#   - CoreVideo        — CVPixelBuffer,
+#   - CoreGraphics     — the screen-recording permission probe.
+# -----------------------------------------------------------------------------
+if(APPLE)
+    target_sources(nimrtc_video_capture PRIVATE
+        src/platform/screen_capture_kit.mm
+        )
+    target_link_libraries(nimrtc_video_capture PRIVATE
+        "-framework ScreenCaptureKit"
+        "-framework AVFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework CoreGraphics"
+        )
+    message(STATUS "  ScreenCaptureKit  : enabled (macOS)")
+else()
+    # The portable stub of the same backend, so that a host can name
+    # "sck" in a cross-platform configuration and get a clean
+    # "unsupported" rather than "plugin missing".
+    target_sources(nimrtc_video_capture PRIVATE
+        src/platform/screen_capture_kit_stub.cpp
+        )
+endif()
+
 if(WIN32)
     target_link_libraries(nimrtc_video_capture PRIVATE
         d3d11

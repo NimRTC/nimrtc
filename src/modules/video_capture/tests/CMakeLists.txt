@@ -7,6 +7,7 @@ add_executable(test_video_capture
     test_win_cursor_source.cpp
     test_wgc_capture.cpp
     test_linux_capture.cpp
+    test_macos_capture.cpp
     )
 
 target_link_libraries(test_video_capture

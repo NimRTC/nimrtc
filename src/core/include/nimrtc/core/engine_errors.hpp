@@ -121,6 +121,19 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureOpenFailed    = 0x
  *  exists but the device would not open". */
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePluginMissing = 0x1A29;
 
+/** The user (or the OS) refused the screen capture.
+ *
+ *  Distinct from `kVideoCaptureOpenFailed`: that one means "the device
+ *  would not open" (a display that went away, a missing portal), this
+ *  one means "the permission was not granted" — the macOS Screen
+ *  Recording prompt was answered with "no", or the portal's picker was
+ *  dismissed (remote-desktop plan A4).
+ *
+ *  The distinction matters to the host: this one is fixable by the
+ *  *user*, and the host should say so rather than reporting a broken
+ *  device. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePermissionDenied = 0x1A2A;
+
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 

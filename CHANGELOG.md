@@ -17,8 +17,90 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **A pluggable cursor layer (with its Windows platform source), and the
-  two Windows capture backends — DXGI Desktop Duplication and Windows
+- **The macOS ScreenCaptureKit capture backend (v1.3.0, Remote Desktop
+  plan A4).**  The third of the three platform capture backends, and the
+  one with the most interesting failure mode.
+  - The backend lives in
+    `src/modules/video_capture/include/nimrtc/video_capture/screen_capture_kit.hpp`
+    and `src/modules/video_capture/src/platform/screen_capture_kit.mm`
+    and registers under the plug-in id `"sck"`.  It enumerates the
+    machine's **displays** (`sck:display:<n>`) and **windows**
+    (`sck:window:<window-id>` — the `CGWindowID`, because two windows
+    can share a title but not an id), opens an `SCContentFilter` +
+    `SCStreamConfiguration` (BGRA, `showsCursor` honoured, the frame
+    interval from the negotiated rate), and receives `CMSampleBuffer`s
+    through an `SCStreamOutput` on a private dispatch queue.  The
+    samples' `CVPixelBuffer`s are read back row by row into the shared
+    bounded queue, with the requested region **cropped out of the
+    readback** — the pixels the consumer sees are the display's own
+    pixels, not a resampling of them.
+  - **The geometry is negotiated in *pixels*, not in points.**
+    `SCDisplay::width` is a *point* count, so a capture that trusted it
+    would come back at half resolution on every Retina display.  The
+    display's *mode* (`CGDisplayCopyDisplayMode`) is asked for the true
+    pixel size instead, and the backing scale factor covers the
+    window case (`SCWindow::frame` is in points too).
+  - **The screen-recording permission is a first-class outcome, not a
+    crash.**  `CGPreflightScreenCaptureAccess()` *reports* whether the
+    host application holds the permission and never prompts, so the
+    **enumeration** never shows a modal dialog — a library that popped
+    one during an enumeration would be unusable in a server process.
+    `open()` is the only place that asks
+    (`CGRequestScreenCaptureAccess()`), because that is where the user
+    has expressed the intent to capture something.
+  - A refusal returns the **distinct** status
+    `plugins::kErrPermissionDenied` (`0x1008`), and the engine maps it
+    onto the **distinct** error code
+    `core::kVideoCapturePermissionDenied` (`0x1A2A`) — so the host can
+    tell "the user said no" from "the device is broken" and can say
+    "grant screen recording access" instead of "device error".  Only the
+    *user* can fix a permission denial, and the remedy is worth naming.
+  - The cursor is composited by the OS into the captured surface, so
+    this backend reports `cursor_composited = true` and the plan's A6
+    cursor layer is not needed on this path.
+  - The `.mm` translation unit is the **only Objective-C++ in the
+    tree**; `enable_language(OBJCXX)` is conditional on `APPLE`, and
+    the backend's portable half lives in
+    `src/modules/video_capture/src/platform/screen_capture_kit_stub.cpp`
+    and is compiled everywhere.  A host that names `"sck"` on Windows
+    or Linux therefore gets a clean `kErrUnsupported` rather than a
+    "capture plugin missing" error, and the stub reports the *same*
+    static capability flags as the real backend — a capability query
+    must not answer differently depending on the host it was asked on.
+  - The `CVPixelBufferRef` is the GPU surface a VideoToolbox encoder
+    would consume without a CPU round-trip; the *seam* has no slot for
+    a `GpuBuffer` yet, so this backend takes the CPU path and reports
+    `zero_copy = false`.  The zero-copy hand-off is the encoder's half
+    (plan item B10).
+
+- **The Linux capture backends — XDG Desktop Portal + PipeWire (Wayland)
+  and X11 — with the X11 pointer source (v1.3.0, Remote Desktop plan
+  A5).**  The two ways to capture a screen on Linux, which are nothing
+  like each other.
+  - The **X11 backend** (`x11_capture.hpp`, id `"x11"`) is the
+    *fallback*: it grabs the root window with `XGetImage` and swizzles
+    the server's native pixel layout into the portable layer's BGRA.  It
+    needs no portal, no D-Bus and no user consent — which is exactly
+    why it is the path that works on a headless X server, over `ssh -X`,
+    and on a kiosk.  The cost is a round trip to the X server per frame.
+  - The **XDG Desktop Portal backend** (`portal_capture.hpp`, id
+    `"xdg_portal"`) is the Wayland path: it asks the portal (over D-Bus)
+    for a screen-cast source, waits for the user's answer, and connects
+    a PipeWire stream to the node id the portal granted.  The consent
+    is a *value*, not a crash: a dismissed picker or a missing portal
+    is a clean error.
+  - The **X11 cursor source** (`x11_cursor_source.hpp`) is the Linux
+    half of the plan's A6 cursor layer: `XGetImage` does not include the
+    pointer, so the pointer is read through the Xfixes extension's
+    `XFixesGetCursorImage` — the same 32-bit BGRA shape the Windows
+    cursor source produces, so the portable alpha compositor needs no
+    conversion.
+  - Both backends are optional: their libraries are detected with
+    `pkg-config`, and where they are missing the classes compile to
+    their portable stub (the class exists, the factory is not
+    registered, `open()` reports `kErrUnsupported`).
+
+- **A pluggable cursor layer (with its Windows platform source), and the two Windows capture backends — DXGI Desktop Duplication and Windows
   Graphics Capture (v1.3.0, Remote Desktop plan A6 / A3).**  The
   portable capture layer was landed
   above, but it had no *platform* backend to drive and no way to show
@@ -255,14 +337,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       and doing it here would hide the mismatch instead of reporting it.
     - An empty capture queue is a **no-op**, not an error: a quiet
       device must not park the engine's tick loop.
-  - **Not yet done (deliberately):** the macOS ScreenCaptureKit and the
-    Linux portal / PipeWire / X11 backends are still plan items A4 / A5,
-    and the Windows backend still has no zero-copy `GpuBuffer` hand-off
-    (plan item B10).  What *does* exist is the portable layer, the
-    engine's pump over it (plan item A10, above), the cursor layer
-    (A6) and the DXGI display backend (A3), so a third-party capture
-    plug-in can already be driven by the engine end to end and a
-    Windows host can capture a real display.
+  - **Not yet done (deliberately):** all three platform capture backends
+    now exist (Windows DXGI / WGC, macOS ScreenCaptureKit, Linux portal
+    / X11), but the Windows backend still has no zero-copy `GpuBuffer`
+    hand-off (plan item B10) — and the same is true of the macOS one,
+    whose `CVPixelBuffer` is the surface that hand-off would consume.
+    What *does* exist is the portable layer, the engine's pump over it
+    (plan item A10, above), the cursor layer (A6) and the three
+    platform backends (A3 / A4 / A5), so a third-party capture plug-in
+    can already be driven by the engine end to end and a host can
+    capture a real screen on each of the three platforms.
 
 - **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
   Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264

@@ -214,8 +214,10 @@ inline bool port_is_bindable(std::uint16_t port) noexcept {
 #endif
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(port);
-    addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    // No `::` prefix: on macOS `htons` / `htonl` are macros, not
+    // functions, and a `::` in front of a macro does not compile.
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     const bool ok = ::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
     ::closesocket(s);
     return ok;
@@ -229,8 +231,10 @@ inline bool port_is_bindable(std::uint16_t port) noexcept {
 #endif
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(port);
-    addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    // No `::` prefix: on macOS `htons` / `htonl` are macros, not
+    // functions, and a `::` in front of a macro does not compile.
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     const bool ok = ::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
     ::close(s);
     return ok;

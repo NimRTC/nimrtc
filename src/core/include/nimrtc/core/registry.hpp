@@ -31,11 +31,21 @@
  * @code
  * NimRTCEngine::Config cfg;
  * cfg.transport_name = "my_udp";  // look up by ID
- * cfg.rtp_name      = "webrtc";
  * cfg.jb_name       = "adaptive";
  * NimRTCEngine engine(cfg);
  * engine.open();
  * @endcode
+ *
+ * @note The RTP and SDP factories are **not** selectable through
+ * `EngineConfig` at this cut: `rtp_name` / `sdp_name` exist for
+ * forward compatibility but the engine always uses the built-in RTP and
+ * SDP implementations.  Do not promise a custom RTP/SDP backend in
+ * documentation or marketing until the engine actually resolves them
+ * through the registry.
+ *
+ * @note `cfg.transport_name` selects the **ICE transport** plugin
+ * (it is forwarded to `StackConfig::ice_id`); it does not select the
+ * generic `ITransport` slot.
  *
  * @note Thread-safe for get_*() calls. register_*() is not thread-safe
  * and must be called before any engine is created.
@@ -241,7 +251,19 @@ namespace nimrtc::core {
 
 template<class T>
 class NIMRTC_API_STABLE TypedRegistry {
-    std::vector<std::pair<std::string_view, const T*>> entries_;
+    // Keys are stored by VALUE, not by view.
+    //
+    // A third-party plugin author may reasonably write
+    //     reg.register_video_codec(std::string("myid"), &factory);
+    // With a `std::string_view` key that call would store a view onto a
+    // temporary that dies at the end of the full expression, leaving a
+    // dangling key in the registry: the entry becomes unreachable
+    // (lookup by "myid" never matches) and any subsequent read of the
+    // key is undefined behaviour.  Owning the key removes the whole
+    // class of bug at the cost of one small allocation per registration
+    // (registrations happen at static-init time, so the cost is
+    // irrelevant at run time).
+    std::vector<std::pair<std::string, const T*>> entries_;
     mutable std::mutex mutex_;
 
 public:
@@ -254,7 +276,7 @@ public:
                 return;
             }
         }
-        entries_.push_back({id, factory});
+        entries_.emplace_back(std::string(id), factory);
     }
 
     [[nodiscard]] const T* get(std::string_view id) const {
@@ -281,9 +303,16 @@ public:
         return false;
     }
 
-    [[nodiscard]] std::vector<std::string_view> list_ids() const {
+    /// List every registered id.
+    ///
+    /// Returns owned strings, not views: the views would dangle as
+    /// soon as a later registration mutates `entries_` (reallocation
+    /// invalidates the moved-from `std::string`s).  Callers that only
+    /// compare against literals are unaffected; callers that need a
+    /// stable view can copy the string themselves.
+    [[nodiscard]] std::vector<std::string> list_ids() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::string_view> out;
+        std::vector<std::string> out;
         out.reserve(entries_.size());
         for (auto& [k, _] : entries_) out.push_back(k);
         return out;
@@ -343,7 +372,7 @@ public:
     get_transport(std::string_view id) const {
         return transport_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_transports() const {
+    [[nodiscard]] std::vector<std::string> list_transports() const {
         return transport_.list_ids();
     }
 
@@ -362,7 +391,7 @@ public:
     get_ice_transport(std::string_view id) const {
         return ice_transport_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_ice_transports() const {
+    [[nodiscard]] std::vector<std::string> list_ice_transports() const {
         return ice_transport_.list_ids();
     }
 
@@ -371,7 +400,7 @@ public:
     [[nodiscard]] const plugins::IRTPFactory* get_rtp(std::string_view id) const {
         return rtp_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_rtp() const {
+    [[nodiscard]] std::vector<std::string> list_rtp() const {
         return rtp_.list_ids();
     }
 
@@ -380,7 +409,7 @@ public:
     [[nodiscard]] const plugins::ISDPFactory* get_sdp(std::string_view id) const {
         return sdp_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_sdp() const {
+    [[nodiscard]] std::vector<std::string> list_sdp() const {
         return sdp_.list_ids();
     }
 
@@ -389,7 +418,7 @@ public:
     [[nodiscard]] const plugins::IJBFactory* get_jb(std::string_view id) const {
         return jb_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_jb() const {
+    [[nodiscard]] std::vector<std::string> list_jb() const {
         return jb_.list_ids();
     }
 
@@ -399,7 +428,7 @@ public:
     get_audio3a(std::string_view id) const {
         return audio3a_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_audio3a() const {
+    [[nodiscard]] std::vector<std::string> list_audio3a() const {
         return audio3a_.list_ids();
     }
 
@@ -410,7 +439,7 @@ public:
     get_codec(std::string_view id) const {
         return codec_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_codecs() const {
+    [[nodiscard]] std::vector<std::string> list_codecs() const {
         return codec_.list_ids();
     }
 
@@ -425,7 +454,7 @@ public:
     get_audio_decoder(std::string_view id) const {
         return audio_decoder_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_audio_decoders() const {
+    [[nodiscard]] std::vector<std::string> list_audio_decoders() const {
         return audio_decoder_.list_ids();
     }
 
@@ -437,7 +466,7 @@ public:
     get_audio_receiver(std::string_view id) const {
         return audio_receiver_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_audio_receivers() const {
+    [[nodiscard]] std::vector<std::string> list_audio_receivers() const {
         return audio_receiver_.list_ids();
     }
 
@@ -456,7 +485,7 @@ public:
     get_session(std::string_view id) const {
         return session_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_sessions() const {
+    [[nodiscard]] std::vector<std::string> list_sessions() const {
         return session_.list_ids();
     }
 
@@ -477,7 +506,7 @@ public:
     get_dtmf(std::string_view id) const {
         return dtmf_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_dtmfs() const {
+    [[nodiscard]] std::vector<std::string> list_dtmfs() const {
         return dtmf_.list_ids();
     }
 
@@ -488,7 +517,7 @@ public:
     get_video_codec(std::string_view id) const {
         return video_codec_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_codecs() const {
+    [[nodiscard]] std::vector<std::string> list_video_codecs() const {
         return video_codec_.list_ids();
     }
 
@@ -499,7 +528,7 @@ public:
     get_video_source(std::string_view id) const {
         return video_source_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_sources() const {
+    [[nodiscard]] std::vector<std::string> list_video_sources() const {
         return video_source_.list_ids();
     }
 
@@ -510,7 +539,7 @@ public:
     get_video_capture(std::string_view id) const {
         return video_capture_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_captures() const {
+    [[nodiscard]] std::vector<std::string> list_video_captures() const {
         return video_capture_.list_ids();
     }
 
@@ -521,7 +550,7 @@ public:
     get_video_sink(std::string_view id) const {
         return video_sink_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_sinks() const {
+    [[nodiscard]] std::vector<std::string> list_video_sinks() const {
         return video_sink_.list_ids();
     }
 
@@ -532,7 +561,7 @@ public:
     get_video_receiver(std::string_view id) const {
         return video_receiver_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_receivers() const {
+    [[nodiscard]] std::vector<std::string> list_video_receivers() const {
         return video_receiver_.list_ids();
     }
 
@@ -543,7 +572,7 @@ public:
     get_video_sender(std::string_view id) const {
         return video_sender_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_video_senders() const {
+    [[nodiscard]] std::vector<std::string> list_video_senders() const {
         return video_sender_.list_ids();
     }
 
@@ -554,7 +583,7 @@ public:
     get_bwe(std::string_view id) const {
         return bwe_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_bwes() const {
+    [[nodiscard]] std::vector<std::string> list_bwes() const {
         return bwe_.list_ids();
     }
 
@@ -565,7 +594,7 @@ public:
     get_scheduler(std::string_view id) const {
         return scheduler_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_schedulers() const {
+    [[nodiscard]] std::vector<std::string> list_schedulers() const {
         return scheduler_.list_ids();
     }
 
@@ -582,7 +611,7 @@ public:
     get_net_feedback(std::string_view id) const {
         return net_feedback_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_net_feedbacks() const {
+    [[nodiscard]] std::vector<std::string> list_net_feedbacks() const {
         return net_feedback_.list_ids();
     }
 
@@ -602,7 +631,7 @@ public:
     get_xr_report(std::string_view id) const {
         return xr_report_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_xr_reports() const {
+    [[nodiscard]] std::vector<std::string> list_xr_reports() const {
         return xr_report_.list_ids();
     }
 
@@ -630,7 +659,7 @@ public:
     get_datachannel(std::string_view id) const {
         return datachannel_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_datachannels() const {
+    [[nodiscard]] std::vector<std::string> list_datachannels() const {
         return datachannel_.list_ids();
     }
 
@@ -646,7 +675,7 @@ public:
     get_dtls_session(std::string_view id) const {
         return dtls_session_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_dtls_sessions() const {
+    [[nodiscard]] std::vector<std::string> list_dtls_sessions() const {
         return dtls_session_.list_ids();
     }
 
@@ -664,7 +693,7 @@ public:
     get_sctp_socket(std::string_view id) const {
         return sctp_socket_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_sctp_sockets() const {
+    [[nodiscard]] std::vector<std::string> list_sctp_sockets() const {
         return sctp_socket_.list_ids();
     }
 
@@ -681,7 +710,7 @@ public:
     get_raw_udp_datagram(std::string_view id) const {
         return raw_udp_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_raw_udp_datagrams() const {
+    [[nodiscard]] std::vector<std::string> list_raw_udp_datagrams() const {
         return raw_udp_.list_ids();
     }
 
@@ -705,7 +734,7 @@ public:
     get_transport_stack(std::string_view id) const {
         return transport_stack_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_transport_stacks() const {
+    [[nodiscard]] std::vector<std::string> list_transport_stacks() const {
         return transport_stack_.list_ids();
     }
 
@@ -737,7 +766,7 @@ public:
     get_web_transport(std::string_view id) const {
         return web_transport_.get(id);
     }
-    [[nodiscard]] std::vector<std::string_view> list_web_transports() const {
+    [[nodiscard]] std::vector<std::string> list_web_transports() const {
         return web_transport_.list_ids();
     }
 

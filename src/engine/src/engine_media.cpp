@@ -534,9 +534,9 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // ---- Video Source ------------------------------------------------------
     if (!video_source_) {
         plugins::VideoSourceConfig cfg{};
-        cfg.width  = 640;
-        cfg.height = 480;
-        cfg.fps    = 30;
+        cfg.width  = config_.video_width;
+        cfg.height = config_.video_height;
+        cfg.fps    = config_.video_fps;
         cfg.ssrc   = config_.video_sender_tuning.ssrc;
         (void)pal::make_plugin<&pal::resolve_video_source>(
             config_.video_source_name,
@@ -569,9 +569,9 @@ void NimRTCEngine::init_video_plugins() noexcept {
 
     if (!config_.video_codec_name.empty() && !video_codec_) {
         plugins::VideoCodecConfig cfg{};
-        cfg.width = 640;
-        cfg.height = 480;
-        cfg.fps = 30;
+        cfg.width = config_.video_width;
+        cfg.height = config_.video_height;
+        cfg.fps = config_.video_fps;
         cfg.bitrate_bps = 1'000'000;
         cfg.keyframe_interval = 60;
         cfg.pixel_format = plugins::VideoPixelFormat::kI420;
@@ -682,9 +682,17 @@ void NimRTCEngine::init_video_plugins() noexcept {
                                           std::uint32_t rtp_ts,
                                           std::uint16_t seq,
                                           bool marker) {
-                // ---- Build 12-byte RTP header ---------------------------------
-                // byte 0: V=2 P=0 X=0 CC=0 → 0x80
-                // byte 1: M=X(1) PT(7)
+                // ---- Build the RTP packet (rtp::PacketBuilder) -----------------
+                //
+                // The video path used to hand-assemble the 12-byte RTP
+                // header and hard-code "no extensions" (X=0).  That left
+                // the video stream without the ADR-017 abs-send-time
+                // extension, so the receiver-side timeline had no
+                // send-instant for video and the bandwidth estimator
+                // could not correlate video packets with their wall
+                // clock send time.  The audio path already used
+                // `rtp::PacketBuilder`; both paths now share it, so a
+                // fix to the RTP header lands in one place.
                 //
                 // The payload type is the *negotiated* one (C9 / C11):
                 // it is the number the description exchange settled on,
@@ -698,21 +706,46 @@ void NimRTCEngine::init_video_plugins() noexcept {
                     impl_->video_payload_type != 0
                         ? impl_->video_payload_type
                         : config_.video_sender_tuning.payload_type;
-                std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
-                std::uint8_t hdr[12] = {
-                    0x80,                             // version, no extensions
-                    static_cast<std::uint8_t>((marker ? 0x80 : 0x00) | (pt & 0x7F)),
-                    static_cast<std::uint8_t>((seq >> 8) & 0xFF),
-                    static_cast<std::uint8_t>(seq & 0xFF),
-                    static_cast<std::uint8_t>((rtp_ts >> 24) & 0xFF),
-                    static_cast<std::uint8_t>((rtp_ts >> 16) & 0xFF),
-                    static_cast<std::uint8_t>((rtp_ts >>  8) & 0xFF),
-                    static_cast<std::uint8_t>(rtp_ts & 0xFF),
-                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >> 24) & 0xFF),
-                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >> 16) & 0xFF),
-                    static_cast<std::uint8_t>((config_.video_sender_tuning.ssrc >>  8) & 0xFF),
-                    static_cast<std::uint8_t>(config_.video_sender_tuning.ssrc & 0xFF),
-                };
+                const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
+
+                rtp::PacketBuilder pb;
+                pb.set_ssrc(config_.video_sender_tuning.ssrc)
+                  .set_seq(seq)
+                  .set_timestamp(rtp_ts)
+                  .set_payload_type(pt)
+                  .set_marker(marker);
+
+                // ---- Cross-end timeline: stamp abs-send-time (ADR-017) --------
+                // Same contract as the audio path: only when the seam is
+                // on *and* the extension id was negotiated (the id is set
+                // by create_offer() / set_remote_description()).  The
+                // monotonic reading is taken once and serves both the
+                // abs-send-time encoder and the Sender Report's
+                // instant-vs-timestamp pairing.
+                if (config_.timeline_enabled) {
+                    const std::int64_t steady_us =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            core::SteadyClock::now().time_since_epoch()).count();
+                    impl_->video_last_send_unix_us =
+                        impl_->boot_epoch_offset_us + steady_us;
+                    if (impl_->local_abs_send_time_id != 0) {
+                        const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
+                            std::chrono::microseconds{steady_us},
+                            impl_->monotonic_origin_ntp64);
+                        pb.set_abs_send_time(rtp::AbsSendTime{ast24},
+                                             impl_->local_abs_send_time_id);
+                    }
+                }
+
+                pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
+                core::ByteBuffer built = pb.build();
+                if (built.empty()) {
+                    if (on_error_) {
+                        on_error_(core::kVideoEncodeFailed,
+                                  "video send: the RTP packet could not be built");
+                    }
+                    return;
+                }
 
                 // ---- Assemble full RTP packet ----------------------------------
                 // The buffer comes from the scheduler's packet pool (P1
@@ -722,11 +755,11 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 std::vector<std::uint8_t> rtp_pkt;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
-                        12 + payload.size());
+                        built.size() + kSrtpAuthTagBytes);
+                    rtp_pkt.assign(built.begin(), built.end());
+                } else {
+                    rtp_pkt.assign(built.begin(), built.end());
                 }
-                rtp_pkt.insert(rtp_pkt.end(), hdr, hdr + 12);
-                rtp_pkt.insert(rtp_pkt.end(),
-                               payload.data(), payload.data() + payload.size());
 
                 // ---- SRTP protect (if DTLS is connected) ----------------------
                 if (impl_->srtp_installed && impl_->srtp) {
@@ -807,55 +840,88 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 // Decode + render if the codec and sink are available.
                 if (!video_codec_ || !video_sink_) return;
 
-                const std::uint32_t w = enc.payload.size() > 0 ? 640 : 0;
-                const std::uint32_t h = 480;
-
-                // Lazily allocate / resize decode buffers to the frame size.
-                // Stride is aligned to 16 bytes.
-                auto align16 = [](std::uint32_t v) -> std::uint32_t {
-                    return (v + 15u) & ~15u;
-                };
-                const std::uint32_t stride_y = align16(w);
-                const std::uint32_t stride_uv = align16(w / 2);
-                const std::size_t y_size = static_cast<std::size_t>(stride_y) * h;
-                const std::size_t uv_size = static_cast<std::size_t>(stride_uv) * (h / 2);
-                const std::size_t total = y_size + uv_size + uv_size;
-
-                // Use a ping-pong buffer: alternate between two allocations.
-                std::size_t buf_idx = impl_->video_decode_buf_idx_.fetch_add(1)
-                                      % 2;
-                auto& buf = impl_->video_decode_bufs[buf_idx];
-                if (buf.size() < total) buf.resize(total);
-
-                // Set plane pointers into the flat buffer.
-                std::uint8_t* planes[3] = {
-                    buf.data(),
-                    buf.data() + y_size,
-                    buf.data() + y_size + uv_size,
-                };
-
-                // Decode.
+                // ---- Resolve the decoded geometry ------------------------------
+                //
+                // The decode buffers must match the *actual* geometry of
+                // the incoming frame, not a hard-coded 640×480.  Two
+                // sources are available:
+                //
+                //   1. The codec's own report.  `IVideoCodec::decode()`
+                //       publishes the decoded geometry through the
+                //       `VideoFrame`'s buffer layout (the codec allocates
+                //       a `VideoFrameBuffer` with the native layout when
+                //       the caller does not supply buffers).  The engine
+                //       therefore asks the codec to own the allocation
+                //       and reads the geometry back from the frame it
+                //       produced.
+                //   2. The configured geometry.  The stub codecs do not
+                //       parse the SPS, so their decoded geometry falls
+                //       back to `VideoCodecConfig::width` / `height` —
+                //       which the engine now forwards from
+                //       `EngineConfig::video_width` / `video_height`.
+                //
+                // The engine used to hard-code 640×480 here, which
+                // silently mis-sized the decode buffers for every other
+                // resolution (and could write past the end of the
+                // buffer).
+                //
+                // Strategy: decode into codec-owned buffers (the codec
+                // knows the native geometry), then hand the *codec's*
+                // planes to the sink.  This removes the engine's
+                // geometry guess entirely.
                 plugins::VideoFrame raw_out{};
                 raw_out.info.capture_ts_us = enc.info.capture_ts_us;
                 raw_out.info.frame_seq     = enc.info.frame_seq;
                 raw_out.info.rtp_timestamp = enc.info.rtp_timestamp;
 
-                if (video_codec_->decode(enc, raw_out, planes) != plugins::kOk) {
+                // Decode with no caller-supplied buffers: the codec
+                // allocates (and knows) the native geometry.
+                if (video_codec_->decode(enc, raw_out, nullptr) != plugins::kOk) {
                     return;
                 }
+
+                const std::shared_ptr<video_frame::VideoFrameBuffer> cpu_buf =
+                    raw_out.cpu_buffer();
+                if (!cpu_buf) return;
+
+                const video_frame::VideoFrameLayout& layout = cpu_buf->layout();
+                const std::uint32_t w = layout.width;
+                const std::uint32_t h = layout.height;
+                if (w == 0 || h == 0) return;
+
+                const std::uint32_t stride_y =
+                    static_cast<std::uint32_t>(layout.strides[0]);
+                const std::uint32_t stride_uv =
+                    static_cast<std::uint32_t>(layout.strides[1]);
+
+                // The engine's ping-pong buffers are no longer used for
+                // decoding: the codec owns the pixel memory (that is the
+                // only party that knows the true geometry).  The engine
+                // keeps its own buffers for the *HW* path, where the
+                // zero-copy decoder hands back a GPU surface instead of
+                // CPU planes.
+                std::uint8_t* planes[3] = {
+                    cpu_buf->plane(0),
+                    cpu_buf->plane(1),
+                    cpu_buf->plane(2),
+                };
 
                 // Render to sink.
                 plugins::VideoSourceFrame sink_frame{};
                 sink_frame.width   = w;
                 sink_frame.height  = h;
-                sink_frame.format  = plugins::VideoPixelFormat::kI420;
+                // The format follows the codec's actual output layout, not
+                // a hard-coded I420: an NV12 decoder produces an NV12
+                // frame, and telling the sink "I420" would make it
+                // mis-interpret the chroma planes.
+                sink_frame.format  = layout.format;
                 sink_frame.stride_y = static_cast<std::int32_t>(stride_y);
                 sink_frame.stride_u = static_cast<std::int32_t>(stride_uv);
-                sink_frame.stride_v = static_cast<std::int32_t>(stride_uv);
+                sink_frame.stride_v = static_cast<std::int32_t>(layout.strides[2]);
                 sink_frame.plane_y  = planes[0];
                 sink_frame.plane_u  = planes[1];
                 sink_frame.plane_v  = planes[2];
-                sink_frame.buffer_size = total;
+                sink_frame.buffer_size = layout.buffer_size;
                 sink_frame.capture_ts_us = enc.info.capture_ts_us;
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;

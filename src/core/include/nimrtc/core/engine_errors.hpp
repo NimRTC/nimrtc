@@ -117,6 +117,15 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A
  *  answer rejects the video m-line (RFC 3264 §6.1). */
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecUnsupported = 0x1A32;
 
+/** The outbound video RTP packet could not be built.
+ *
+ *  The video path assembles its RTP header through
+ *  `rtp::PacketBuilder`; an empty result means the builder rejected
+ *  the header/extension combination (e.g. an extension that does not
+ *  fit).  The packet is dropped and the error is reported so the
+ *  condition is visible instead of silently truncating the stream. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoEncodeFailed = 0x1A33;
+
 // ---------------------------------------------------------------------------
 // Audio pipeline — 0x1A40..0x1A4F (v1.2.0)
 // ---------------------------------------------------------------------------

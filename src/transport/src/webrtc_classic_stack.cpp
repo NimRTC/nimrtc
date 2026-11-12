@@ -236,7 +236,10 @@ public:
             if (!f) {
                 NIMRTC_LOG_ERROR("transport: WebRtcClassicStackFactory: "
                                  "ICE factory not found: " << cfg.ice_id);
-                return stack;
+                // A half-built stack would sail past the caller's null
+                // check and detonate later at the first component
+                // access.  Fail loudly instead.
+                return nullptr;
             }
             stack->set_ice(
                 std::unique_ptr<plugins::IICETransport>(f->create_ice()));
@@ -251,7 +254,7 @@ public:
             if (!f) {
                 NIMRTC_LOG_ERROR("transport: WebRtcClassicStackFactory: "
                                  "DTLS factory not found: " << cfg.dtls_id);
-                return stack;
+                return nullptr;
             }
             // Build a default DtlsConfig matching what engine.cpp used pre-Slice 7.5.
             // Slice 7.5 follow-up: read cfg fields to populate role / srtp_profile.
@@ -270,7 +273,7 @@ public:
             if (!f) {
                 NIMRTC_LOG_ERROR("transport: WebRtcClassicStackFactory: "
                                  "RTP factory not found: " << cfg.rtp_id);
-                return stack;
+                return nullptr;
             }
             stack->set_rtp(std::unique_ptr<plugins::IRTP>(f->create()));
             NIMRTC_LOG_INFO("transport: WebRtcClassicStackFactory resolved RTP: "
@@ -285,7 +288,7 @@ public:
                 NIMRTC_LOG_WARN("transport: WebRtcClassicStackFactory: "
                                 "SCTP factory not found: " << cfg.sctp_id
                                 << " (stub; v0.11.0 adds usrsctp)");
-                return stack;
+                return nullptr;
             }
             sctp::SctpConfig scfg;
             scfg.label = "webrtc-classic-sctp";

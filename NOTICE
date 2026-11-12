@@ -69,6 +69,19 @@ This product includes software developed by the WebM project (libvpx).
   - License:  BSD-3-Clause
   - Location: third_party/libvpx/   (P1/P2)
 
+This product includes NVIDIA's Video Codec SDK headers (nvEncodeAPI.h for
+NVENC, plus the nvcuvid / CUVID and dynamic-loader headers used by the
+NVDEC decoder), redistributed by the FFmpeg project.
+  - Source:   https://github.com/FFmpeg/nv-codec-headers
+  - Version:  13.1.15  (tag n13.1.15.0, vendored at
+                       src/third_party/nv_codec_headers/)
+  - License:  MIT  (the notice is embedded verbatim at the top of every
+                   header)
+  - Scope:    header-only, runtime.  No NVIDIA binary is linked or
+              shipped: the NVENC / NVDEC backends load nvEncodeAPI64.dll,
+              nvcuvid.dll and nvcuda.dll from the installed driver at
+              runtime.
+
 ============================================================
 SCTP (P2)
 ============================================================

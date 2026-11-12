@@ -97,9 +97,11 @@ void bgra_to_i420(std::uint32_t width,
 
                 const std::size_t cx = i / 2u;
                 const std::size_t cy = j / 2u;
-                u_plane[static_cast<std::ptrdiff_t>(cy) * u_stride + cx] =
+                u_plane[static_cast<std::size_t>(cy) *
+                             static_cast<std::size_t>(u_stride) + cx] =
                     static_cast<std::uint8_t>(std::clamp(u, 0, 255));
-                v_plane[static_cast<std::ptrdiff_t>(cy) * v_stride + cx] =
+                v_plane[static_cast<std::size_t>(cy) *
+                             static_cast<std::size_t>(v_stride) + cx] =
                     static_cast<std::uint8_t>(std::clamp(v, 0, 255));
             }
         }
@@ -142,7 +144,9 @@ void bgra_to_nv12(std::uint32_t width,
                 const std::int32_t v =
                     ((9184 * r - kUScale * g - kVScale * b) >> 16) + kUVOffset;
                 const std::size_t idx =
-                    static_cast<std::size_t>(j / 2u) * uv_stride + (i / 2u) * 2u;
+                    static_cast<std::size_t>(j / 2u) *
+                        static_cast<std::size_t>(uv_stride) +
+                    static_cast<std::size_t>(i / 2u) * 2u;
                 uv_plane[idx + 0] = static_cast<std::uint8_t>(std::clamp(u, 0, 255));
                 uv_plane[idx + 1] = static_cast<std::uint8_t>(std::clamp(v, 0, 255));
             }
@@ -417,9 +421,11 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
             // The capture reports one stride; the chroma planes of a
             // planar 4:2:0 buffer use half of it.
             const std::int32_t chroma_stride = src_stride / 2;
-            const std::size_t y_bytes = static_cast<std::size_t>(h) * src_stride;
+            const std::size_t y_bytes =
+                static_cast<std::size_t>(h) * static_cast<std::size_t>(src_stride);
             const std::size_t u_bytes =
-                static_cast<std::size_t>(h / 2u) * chroma_stride;
+                static_cast<std::size_t>(h / 2u) *
+                static_cast<std::size_t>(chroma_stride);
             out_.plane_u = in.pixels + y_bytes;
             out_.plane_v = in.pixels + y_bytes + u_bytes;
             out_.stride_u = chroma_stride;
@@ -464,7 +470,8 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
             if (want == plugins::VideoPixelFormat::kI420) {
                 // The UV plane of an NV12 buffer follows the Y plane.
                 const std::uint8_t* uv_plane = in.pixels +
-                    static_cast<std::size_t>(h) * src_stride;
+                    static_cast<std::size_t>(h) *
+                    static_cast<std::size_t>(src_stride);
                 nv12_to_i420(w, h, in.pixels, src_stride, uv_plane, src_stride,
                              y_plane, layout.strides[0],
                              u_plane, layout.strides[1],
@@ -479,9 +486,11 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
                 // The capture reports one stride; the chroma planes of
                 // a planar 4:2:0 buffer use half of it.
                 const std::int32_t chroma_stride = src_stride / 2;
-                const std::size_t y_bytes = static_cast<std::size_t>(h) * src_stride;
+                const std::size_t y_bytes =
+                    static_cast<std::size_t>(h) * static_cast<std::size_t>(src_stride);
                 const std::size_t u_bytes =
-                    static_cast<std::size_t>(h / 2u) * chroma_stride;
+                    static_cast<std::size_t>(h / 2u) *
+                    static_cast<std::size_t>(chroma_stride);
                 video_frame::convert_i420_to_nv12(
                     w, h,
                     in.pixels, src_stride,

@@ -18,6 +18,8 @@
 
 #include <nimrtc/video_capture/x11_capture.hpp>
 
+#include "x11_support.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -52,6 +54,17 @@ constexpr int kDefaultFrameIntervalMs = 33; // ~30 fps
 
 /** The X11 display number used when the caller did not name a device. */
 constexpr int kDefaultDisplayNumber = 0;
+
+/**
+ * @brief How many grabs in a row the X server may refuse before the
+ *        device gives up.
+ *
+ * Some X servers (and most remote-desktop sessions) refuse to read
+ * the root window back — the grab fails with a BadMatch.  Retrying
+ * forever would spin at the frame rate and drown the log, so the
+ * device reports the error and stops; the engine can re-open it.
+ */
+constexpr int kMaxConsecutiveGrabFailures = 3;
 
 /**
  * @brief The X server's pixel layout.
@@ -259,6 +272,7 @@ plugins::Status X11Capture::open() noexcept {
             "x11: the X display could not be opened (is DISPLAY set?)");
         return plugins::kErrHardwareError;
     }
+    x11_detail::install_x11_error_handler();
 
     if (screen_index >= ScreenCount(probe)) {
         XCloseDisplay(probe);
@@ -423,6 +437,9 @@ void X11Capture::capture_loop() noexcept {
         state_->running_.store(false, std::memory_order_release);
         return;
     }
+    // The non-fatal error handler: a grab the server refuses must be a
+    // device error, not the end of the process.
+    x11_detail::install_x11_error_handler();
 
     const int screen_index = state_->screen_;
     const std::uint32_t src_w = state_->source_width_;
@@ -452,6 +469,10 @@ void X11Capture::capture_loop() noexcept {
         static_cast<std::size_t>(src_w) * static_cast<std::size_t>(src_h) * 4u;
     std::vector<std::uint8_t> full(full_bytes, 0u);
 
+    // How many grabs in a row the server has refused.  The counter is
+    // reset by the first successful grab.
+    int consecutive_failures = 0;
+
     while (state_->running_.load(std::memory_order_acquire)) {
         // ---- Grab -------------------------------------------------------------
         //
@@ -462,13 +483,30 @@ void X11Capture::capture_loop() noexcept {
                                    0, 0, src_w, src_h, AllPlanes, ZPixmap);
         if (image == nullptr) {
             // The server may have gone away (the user logged out, the
-            // X server was restarted).  That is a device error, not a
-            // crash.
+            // X server was restarted), or it may refuse the grab (a
+            // root window that cannot be read back — some compositors
+            // and some remote sessions behave that way).  Either way
+            // this is a device error, not a crash.
             device_errors_.fetch_add(1, std::memory_order_relaxed);
             core::log::Logger::instance().error(
                 "x11: the screen could not be grabbed");
-            break;
+
+            // A server that refuses *every* grab is not going to start
+            // working, and retrying at the frame rate would drown the
+            // log.  Give up after a few attempts: the device reports
+            // the error, and the engine can re-open it if the cause is
+            // fixed.
+            if (++consecutive_failures >= kMaxConsecutiveGrabFailures) {
+                core::log::Logger::instance().error(
+                    "x11: the screen could not be grabbed after " +
+                    std::to_string(kMaxConsecutiveGrabFailures) +
+                    " attempts; giving up");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            continue;
         }
+        consecutive_failures = 0;
 
         const X11PixelLayout layout = classify_layout(image);
         if (layout == X11PixelLayout::kUnsupported) {

@@ -79,11 +79,14 @@ if(UNIX AND NOT APPLE)
         # ---- X11 + Xfixes --------------------------------------------------
         pkg_check_modules(NIMRTC_X11 QUIET x11 xfixes)
         if(NIMRTC_X11_FOUND)
-            target_include_directories(nimrtc_video_capture PRIVATE
+            # SYSTEM: the third-party headers are not held to this
+            # project's warning set (X11's own macros trip
+            # -Wold-style-cast and friends).
+            target_include_directories(nimrtc_video_capture SYSTEM PRIVATE
                 ${NIMRTC_X11_INCLUDE_DIRS})
             target_link_libraries(nimrtc_video_capture PRIVATE
                 ${NIMRTC_X11_LIBRARIES})
-            target_compile_definitions(nimrtc_video_capture PRIVATE
+            target_compile_definitions(nimrtc_video_capture PUBLIC
                 NIMRTC_HAVE_X11=1)
             message(STATUS "  X11 capture        : found "
                            "(${NIMRTC_X11_LIBRARIES})")
@@ -95,11 +98,11 @@ if(UNIX AND NOT APPLE)
         # ---- GIO (the portal's D-Bus client) --------------------------------
         pkg_check_modules(NIMRTC_GIO QUIET gio-2.0)
         if(NIMRTC_GIO_FOUND)
-            target_include_directories(nimrtc_video_capture PRIVATE
+            target_include_directories(nimrtc_video_capture SYSTEM PRIVATE
                 ${NIMRTC_GIO_INCLUDE_DIRS})
             target_link_libraries(nimrtc_video_capture PRIVATE
                 ${NIMRTC_GIO_LIBRARIES})
-            target_compile_definitions(nimrtc_video_capture PRIVATE
+            target_compile_definitions(nimrtc_video_capture PUBLIC
                 NIMRTC_HAVE_GIO=1)
         else()
             message(STATUS "  XDG portal capture : not found (install "
@@ -109,11 +112,11 @@ if(UNIX AND NOT APPLE)
         # ---- PipeWire -------------------------------------------------------
         pkg_check_modules(NIMRTC_PIPEWIRE QUIET libpipewire-0.3)
         if(NIMRTC_PIPEWIRE_FOUND)
-            target_include_directories(nimrtc_video_capture PRIVATE
+            target_include_directories(nimrtc_video_capture SYSTEM PRIVATE
                 ${NIMRTC_PIPEWIRE_INCLUDE_DIRS})
             target_link_libraries(nimrtc_video_capture PRIVATE
                 ${NIMRTC_PIPEWIRE_LIBRARIES})
-            target_compile_definitions(nimrtc_video_capture PRIVATE
+            target_compile_definitions(nimrtc_video_capture PUBLIC
                 NIMRTC_HAVE_PIPEWIRE=1)
             message(STATUS "  PipeWire capture   : found "
                            "(${NIMRTC_PIPEWIRE_LIBRARIES})")

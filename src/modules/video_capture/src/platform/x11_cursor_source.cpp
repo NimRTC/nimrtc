@@ -13,6 +13,8 @@
 
 #include <nimrtc/video_capture/x11_cursor_source.hpp>
 
+#include "x11_support.hpp"
+
 #include <cstring>
 #include <utility>
 
@@ -149,6 +151,11 @@ std::unique_ptr<ICursorSource> make_x11_cursor_source() {
         source->impl_ = std::move(impl);
         return source;
     }
+
+    // Xlib's default error handler calls `exit()`.  The Xfixes query
+    // below can fail on a server that does not have the extension
+    // enabled, and that must not take the process down.
+    x11_detail::install_x11_error_handler();
 
     impl->has_xfixes = XFixesQueryExtension(impl->display,
                                             &impl->event_base,

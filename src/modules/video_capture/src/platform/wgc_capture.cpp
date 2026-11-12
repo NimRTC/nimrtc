@@ -978,6 +978,16 @@ WgcCapture::supported_formats(const std::string&) const noexcept {
 
 plugins::CaptureCapabilities WgcCapture::capabilities() const noexcept {
     plugins::CaptureCapabilities c;
+    // The stub reports the *same* static design flags as the real
+    // backend: the platform's capabilities are a property of the
+    // backend, not of the host it runs on.  A query must not answer
+    // differently depending on where it is asked from.
+    c.zero_copy = false;
+    c.dirty_rects = false;
+    c.cursor_composited = true;
+    c.region_selection = true;
+    c.enumeration = true;
+    c.max_pixels = 0;
     c.backend = "wgc-capture";
     return c;
 }

@@ -179,6 +179,11 @@ TEST(X11Capture, ARealDeviceProducesFrames) {
     // none, so the test reports that it was skipped rather than
     // failing — a test that fails for a reason that has nothing to do
     // with the code is worse than no test.
+    //
+    // A display can also be *present but unreadable*: some compositors
+    // and some remote sessions refuse to read the root window back.
+    // That is a legitimate state too, and the backend reports it as a
+    // device error rather than crashing.
     CaptureConfig cfg;
     X11Capture dev(cfg);
     if (dev.open() != nimrtc::plugins::kOk) {
@@ -208,6 +213,16 @@ TEST(X11Capture, ARealDeviceProducesFrames) {
     EXPECT_GE(after.frames_dropped, before.frames_dropped);
     EXPECT_GE(after.device_errors, before.device_errors);
 
+    // The process must still be alive: the X11 backend installs a
+    // non-fatal error handler, so a refused grab is a device error and
+    // not the end of the process.  A display that refuses every grab
+    // is reported as a skip — the backend behaved correctly, the host
+    // simply cannot be captured.
+    if (after.device_errors > before.device_errors) {
+        dev.close();
+        GTEST_SKIP() << "the X server refused to read the screen back";
+    }
+
     dev.close();
     EXPECT_FALSE(dev.is_open());
 }
@@ -232,6 +247,12 @@ TEST(X11Capture, ARegionIsCroppedOutOfTheFrame) {
     }
     if (!got) {
         dev.close();
+        // A display that refuses every grab is a legitimate state on
+        // some compositors and remote sessions: the backend reported
+        // the device error instead of crashing, which is the contract.
+        if (dev.stats().device_errors > 0) {
+            GTEST_SKIP() << "the X server refused to read the screen back";
+        }
         GTEST_SKIP() << "no frame arrived from the X server";
     }
 

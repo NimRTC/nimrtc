@@ -566,14 +566,16 @@ public:
                          std::uint8_t* output,
                          std::size_t   output_capacity,
                          plugins::EncodedVideoFrame& encoded_out) noexcept override {
-        if (broken_) return plugins::kErrHardwareError;
-        if (!opened_) return plugins::kErrNotReady;
+        if (broken_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is broken"); return plugins::kErrHardwareError; }
+        if (!opened_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is not open"); return plugins::kErrNotReady; }
         if (!output || output_capacity == 0) {
             stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: encode — no output buffer");
             return plugins::kErrInvalidParam;
         }
         if (!session_) {
             stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: encode — no session");
             return plugins::kErrNotReady;
         }
 
@@ -582,6 +584,9 @@ public:
         const uint32_t h = raw.height() ? raw.height() : height_;
         if (w == 0 || h == 0) {
             stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: encode — the source frame has no "
+                             "dimensions (raw=" << raw.width() << "x"
+                             << raw.height() << ")");
             return plugins::kErrInvalidParam;
         }
 

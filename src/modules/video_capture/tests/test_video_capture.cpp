@@ -70,6 +70,34 @@ TEST(CaptureQueue, RoundTripsThePixels) {
     EXPECT_EQ(f.frame_seq, 7u);
 }
 
+// Regression: `pop()` used to hand out a pointer into a *local* frame
+// that died with the call, so the consumer read freed memory.  The
+// `CaptureFrame` contract says the pixels stay valid until the next
+// `pop_frame()`.  Under ASan this test fails with a heap-use-after-free
+// if the popped buffer is not kept alive inside the queue.
+TEST(CaptureQueue, ThePoppedPixelsOutliveThePop) {
+    CaptureQueue q(2);
+    const std::uint8_t pixels[4] = {10, 20, 30, 40};
+    ASSERT_EQ(q.push(pixels, sizeof(pixels), 4, 1, 1, 5, 1, {}),
+              CaptureQueue::PushResult::kQueued);
+
+    CaptureFrame f{};
+    ASSERT_TRUE(q.pop(f));
+    ASSERT_NE(f.pixels, nullptr);
+
+    // Read the pixels *after* pop() returned — this is the use-after-free.
+    EXPECT_EQ(f.pixels[0], 10);
+    EXPECT_EQ(f.pixels[1], 20);
+    EXPECT_EQ(f.pixels[2], 30);
+    EXPECT_EQ(f.pixels[3], 40);
+
+    // And they survive a subsequent (failing) pop, which does not
+    // invalidate the previous frame.
+    CaptureFrame g{};
+    EXPECT_FALSE(q.pop(g));
+    EXPECT_EQ(f.pixels[0], 10);
+}
+
 TEST(CaptureQueue, KeepsTheOrder) {
     CaptureQueue q(4);
     const std::uint8_t a[1] = {1};

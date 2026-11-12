@@ -1737,6 +1737,36 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the shift and left the correct result resting on an integer-promotion
   accident.  The variable is now 32 bits wide, and a reliable channel
   carries a reliability parameter of 0 as RFC 8832 requires.
+- **`Session.EndToEnd` failed on every platform whose `unordered_map`
+  orders the session's streams differently from x86_64.**  The test
+  indexed `Session::streams()` positionally (`streams()[0]` for the
+  audio track, `streams()[1]` for the video track), but `streams()`
+  returns the entries of an `unordered_map`, so the order is
+  unspecified — and on aarch64 (and on macOS arm64) the video stream
+  came first, so the audio lookup returned `nullptr` and the test
+  failed.  The test now looks each stream up by its id.
+- **The DTLS handshake-reassembler test helper shifted a 16-bit value by
+  40 bits, which is undefined behaviour.**  `make_record()` writes the
+  six bytes of the 48-bit DTLS record sequence number, but
+  `record_seq` is a `std::uint16_t`: the expression promoted it to
+  `int` and shifted by `8 * 5 == 40`, which UBSan reports as *"shift
+  exponent 40 is too large for 32-bit type 'int'"*.  The helper
+  widened the value to `std::uint64_t` before shifting.  The bug only
+  became visible now because the DTLS module's own test suite never
+  ran before the test-discovery fix above — with it running, the
+  `asan-ubsan` CI leg failed on all eight of its cases.
+- **The Phase 0.3 benchmark's allocation probe collided with the
+  sanitizer runtimes.**  `bench_engine_hotpath` replaces the global
+  `operator new` / `operator delete` to count allocations, but a
+  sanitizer runtime (TSan, ASan) ships its own strong definitions of
+  those symbols in `libclang_rt.*.a`, so the `tsan.clang` leg failed
+  to link with *"multiple definition of `operator new(unsigned long)'"*.
+  The replacements are now compiled out whenever a sanitizer is
+  enabled (`__SANITIZE_ADDRESS__` / `__SANITIZE_THREAD__`, or Clang's
+  `__has_feature(address_sanitizer)` /
+  `__has_feature(thread_sanitizer)`), and the benchmark reports
+  `alloc_probe_enabled: false` in that build — a sanitizer build is
+  about races and memory errors, not about allocation counts.
 
 ### Tooling
 

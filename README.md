@@ -13,7 +13,8 @@
 > **v1.1** release, which consolidates the former v1.1 / v1.2 / v1.3 drafts into one
 > version target: the packaging + benchmark track, the transport / media / DTLS hardening
 > track, and the quality-line items (shared adaptive jitter strategy, `src/modules/jb_strategy`;
-> Goog-CC BWE; RTCP feedback loop; engine-level `ref_frame` and video stats; GMSSL vendoring
+> a simplified Goog-CC-style BWE — delay + loss hybrid estimation, **not** a full
+> trendline port; RTCP feedback loop; engine-level `ref_frame` and video stats; GMSSL vendoring
 > as a submodule + the SRTP backend seam; engine source split).
 > Local suite on Windows/MSVC Debug: **651/651 PASS** (measured 2026-11-04).
 > The packaging rules (`NIMRTC_INSTALL=ON` → `include/` + `lib/` + `lib/cmake/NimRTC/`) are landed
@@ -74,8 +75,9 @@ NimRTC is a from-scratch C++20 implementation that keeps the **wire-level intero
     `rehandshake()`); and the quality line — the RFC 3550 jitter estimator and the
     "base + 4·J" target-delay policy now live **once** in `src/modules/jb_strategy`, with the
     audio (`jb`) and video (`video_jb`) front-ends sharing it (video-side adaptive playout is
-    opt-in via `EngineConfig::video_receiver_tuning.adaptive_playout`), plus Goog-CC BWE,
-    the RTCP feedback loop, engine-level `ref_frame` / video stats, GMSSL vendoring as a
+    opt-in via `EngineConfig::video_receiver_tuning.adaptive_playout`), plus a
+    simplified Goog-CC-style BWE (delay + loss hybrid estimation — **not** a full
+    trendline port), the RTCP feedback loop, engine-level `ref_frame` / video stats, GMSSL vendoring as a
     submodule, the SRTP backend seam and the engine source split.
   Public API is frozen per ADR-015 (`NIMRTC_API_VERSION` = 10002); breaking changes require a
   MINOR/MAJOR bump. Local suite on Windows/MSVC Debug: **651/651 PASS**.
@@ -558,7 +560,7 @@ authoritative plan documents are `docs/plan/v1.*-plan.md`.
 | Version | Label | Scope | Status |
 |---|---|---|---|
 | **v1.0.x** | Stable | WebTransport / msquic data plane (DC-1), intra-scheduler ordering (DC-2, see `sched.hpp` § Scope note), Chrome e2e Case D + E | ✅ **v1.0.2 published** 2026-11-03 |
-| **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (Goog-CC BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 landed on `main`, awaiting the release-hardening gates |
+| **v1.1** | Quality + Packaging + Hardening | Reproducible transport-floor benchmarks with CI artifacts; install rules + `NimRTCConfig.cmake` so `find_package(NimRTC)` works from an installed tree; APM prebuilt shipped with it; release hardening (signed tags, four-platform release legs); transport-stack residuals (`ISctpSocket` lifecycle, ICE `last_recv_packet()` demux, unified `make_transport_instance()`, ARQ tech-preview labelling); media/RTP (SDP `a=rtpmap` video clock rate, p99 strategy validator); DTLS P2 (IPv6 `set_peer()`, NAT-rebinding `rehandshake()`, pump re-entrancy guard); weak-network quality chain (simplified Goog-CC-style BWE, unified adaptive JB, RTCP feedback loop, netem weak-network baselines); `ref_frame` and command-to-frame APIs promoted to the engine's public surface; engine-level video stats; GMSSL vendoring as a submodule + SRTP backend seam; engine source split | 🟡 landed on `main`, awaiting the release-hardening gates |
 | **v1.2+** | — | SM4-GCM SRTP implementation, `cloudgame` (long-term candidate), `takeover` (remote-vehicle takeover, P4) | ⏸️ planned |
 | — | Closed | In-process SFU module (`nimrtc_sfu`), DC forwarding policy (DC-3), `sfu-relay` benchmark (BENCH-1) | ❌ **NO** — closed 2026-10-19, BDFL: SFU is not a project core goal (`docs/plan/v1.0-plan.md` §7) |
 
@@ -626,7 +628,7 @@ has not closed.
 | Shared adaptive jitter strategy (`src/modules/jb_strategy`): RFC 3550 jitter estimator + "base + 4·J" target delay, shared by the audio and video jitter buffers; video adaptive playout is opt-in | ✅ landed | v1.1 Track Q2 |
 | 3A stage brought in line with its own contract (input-domain level meters, honoured VAD / level flags, real APM reference signal, engine no longer mutates the caller's PCM) | ✅ landed | post-v1.0.2 fix |
 | libsrtp converted to a real git submodule; the vendor manifest now distinguishes verified submodules from checked-in trees | ✅ landed | post-v1.0.2 chore |
-| Goog-CC BWE (opt-in, AIMD stays the default), RTCP feedback loop, netem weak-network baselines, engine-level `ref_frame` / video stats, GMSSL vendoring + SRTP seam, engine source split | ✅ landed | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
+| Simplified Goog-CC-style BWE (opt-in, AIMD stays the default; delay + loss hybrid estimation, not a full trendline port), RTCP feedback loop, netem weak-network baselines, engine-level `ref_frame` / video stats, GMSSL vendoring + SRTP seam, engine source split | ✅ landed | v1.1 Tracks Q1 / Q3 / Q4 / T / V / X / R |
 | OHOS Stage 1 toolchain proof (`debug.ohos-arm64` zero errors, no unresolved symbols) | ⏸️ blocked — no OHOS SDK on this host | v1.1 Track O1 |
 
 > v1.0.2 is the **published Stable** release — public API frozen per ADR-015
@@ -674,7 +676,7 @@ Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | Use vendored WebRTC APM library |
 | `NIMRTC_INSTALL` | OFF | Enable `install()` rules — `include/` + `lib/` + `lib/cmake/NimRTC/` (Track D packaging) |
 | `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | Build the GMSSL-backed DTLS factory (id=`gmssl`); uses the vendored submodule at `src/third_party/gmssl/src` (pin v3.2.0), default OFF so non-GM builds pay zero cost |
-| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC + NVDEC (Win/Linux) |
+| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **encoder** (Win/Linux). The NVDEC decoder is **not** implemented — `make_nvdec_h264_codec()` returns `nullptr`. |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF (Windows) |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF (Windows) |

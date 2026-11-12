@@ -81,8 +81,20 @@ class NIMRTC_API_STABLE IRawUdpFactory;
 struct NIMRTC_API_STABLE StackConfig {
     std::string ice_id   = "ice";      // plugins::IICETransportFactory id
     std::string dtls_id  = "wolfssl";  // dtls::IDtlsSessionFactory id (Slice 4)
-    std::string sctp_id  = "usrsctp";  // sctp::ISctpSocketFactory id (Slice 5)
-    std::string rtp_id   = "nim";      // plugins::IRTPFactory id
+    // sctp::ISctpSocketFactory id (Slice 5).
+    //
+    // The registered SCTP id is "stub", NOT "usrsctp" — the usrsctp
+    // backend was retired from the default registration in v0.11.0
+    // (see `src/sctp/src/sctp_stub_factory.hpp` and the SCTP module's
+    // `register_default_plugins()`).  The previous default here was
+    // "usrsctp", which resolved to no factory at all, so every stack
+    // was built with a null SCTP component.
+    std::string sctp_id  = "stub";
+    // plugins::IRTPFactory id.  The registered RTP id is "webrtc"
+    // (see `src/modules/rtp/src/rtp_plugin.cpp`).  The previous default
+    // here was "nim", which resolved to no factory, so every stack was
+    // built with a null RTP component.
+    std::string rtp_id   = "webrtc";
     std::string raw_id;                // raw_udp factory id (Slice 6);
                                        // empty = do not enable raw_control()
 };

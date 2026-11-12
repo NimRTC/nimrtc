@@ -50,6 +50,27 @@ nimrtc_add_core_api_test(test_api_version        test_api_version.cpp
 nimrtc_add_core_api_test(test_api_classification test_api_classification.cpp)
 
 # ----------------------------------------------------------------------------
+# Architecture-remediation Phase 0.2 — registry consistency guard.
+#
+# Pins the contract that the `StackConfig` defaults match the ids the
+# modules actually register, that every resolvable registry slot is
+# populated, that a registration id survives the lifetime of the string
+# that carried it, and that a failed factory lookup yields a nullptr
+# rather than a half-built stack.
+#
+# See `docs/plan/architecture-remediation-plan.md` §0.2 (defects A1, A2,
+# A3, A11) and the file header of `test_registry_contract.cpp`.
+#
+# This test is deliberately RED on the unfixed tree — that is what makes
+# it a guard rather than a passing decoration.
+#
+# NOTE: the target is created further down, right after
+# `nimrtc_add_engine_test()` is defined, because it must link every
+# module that appears in the unified `kDefaultRegistrars[]` table
+# (see the LNK2001 rationale in `nimrtc_add_engine_test`).
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
 # v0.14.0 alpha.2 — WebTransport seam compile-only test
 # (`docs/plan/v0.14-plan.md` §3.1 Gate #2 + `docs/adr/ADR-014`).
 #
@@ -1109,6 +1130,104 @@ endif()
 
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
+
+# ----------------------------------------------------------------------------
+# Architecture-remediation Phase 0.2 — registry consistency guard.
+#
+# The same module set as `nimrtc_add_engine_test` is required, because
+# `core::register_all_default_plugins()` walks the unified
+# `kDefaultRegistrars[]` table and every entry in that table is an
+# unresolved external until its module is linked (the LNK2001 rationale
+# documented in `nimrtc_add_engine_test`).
+#
+# `nimrtc::transport` is additionally linked for the `StackConfig`
+# defaults and the `ITransportStackFactory` the guard drives.
+# ----------------------------------------------------------------------------
+add_executable(test_registry_contract test_registry_contract.cpp)
+if(WIN32)
+    target_link_libraries(test_registry_contract PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_registry_contract PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_registry_contract PRIVATE atomic)
+endif()
+target_link_libraries(test_registry_contract PRIVATE
+    # LINK-ORDER CRITICAL (GNU ld single-pass archive scan).
+    #
+    # `nimrtc_core_objects` holds `pal_default_registrars.cpp.o`, i.e. the
+    # unified `kDefaultRegistrars[]` table.  Every entry of that table is an
+    # unresolved external until the owning module's archive is scanned, so
+    # the table's object file MUST be pulled into the link BEFORE the
+    # module archives -- otherwise GNU ld has already walked past
+    # `libnimrtc_audio3a.a` & friends when the table introduces
+    # `nimrtc::audio3a::register_default_plugins()` and the link fails with
+    # "undefined reference" (the LNK2001 rationale documented in
+    # `nimrtc_add_engine_test`).
+    #
+    # `nimrtc::core` cannot provide that ordering on its own: every module
+    # depends on `nimrtc::core`, so CMake always emits core's artefacts
+    # (including `libnimrtc_registry.a`) at the END of the link line.  The
+    # engine tests dodge this because `nimrtc::engine` PUBLICly links
+    # `nimrtc_core_objects` and therefore absorbs the table's object file
+    # into `libnimrtc_engine.a`, which lands FIRST on the link line.
+    #
+    # Linking the OBJECT library directly gives this test the same shape
+    # without dragging the whole engine into it.
+    nimrtc_core_objects
+    nimrtc::core
+    nimrtc::transport
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::bwe
+    nimrtc::sched
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    GTest::gtest_main)
+# The remaining modules from the unified `kDefaultRegistrars[]` table.
+# They are linked here (rather than through a helper) because the set is
+# build-configuration dependent: several of them are gated behind
+# `NIMRTC_MODULE_*` options and their `register_default_plugins()`
+# symbol only exists when the module is compiled in.
+foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
+              video_capture audio_rx dtmf)
+    if(TARGET nimrtc::${_mod})
+        target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
+    endif()
+endforeach()
+target_include_directories(test_registry_contract PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/raw_udp/include")
+if(WIN32)
+    target_compile_definitions(test_registry_contract PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_registry_contract PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_registry_contract LENIENT)
+add_test(NAME test_registry_contract
+    COMMAND $<TARGET_FILE:test_registry_contract>)
+set_tests_properties(test_registry_contract PROPERTIES TIMEOUT 30)
+# The target links `nimrtc::web_transport`, whose msquic dependency is a
+# runtime DLL on Windows.  Without it the exe fails to load (0xc0000135),
+# which `gtest_discover_tests` reports as a build failure.
+nimrtc_copy_msquic_dll(test_registry_contract)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_registry_contract
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10
+        DISCOVERY_MODE PRE_TEST)
+endif()
 
 # ---------------------------------------------------------------------------
 # TPAL-4 cleanup (v0.11.0) — DTLS seam engine-routing regression test.

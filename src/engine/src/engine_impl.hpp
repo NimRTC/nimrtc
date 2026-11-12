@@ -776,15 +776,21 @@ struct NimRTCEngine::Impl {
     std::string base_video_mid;
     std::string base_data_mid;
 
-    // ---- Video receive pipeline decode buffers (ping-pong I420) ------------
-    // Allocated lazily on first decoded frame; reused across frames.
-    // We keep two buffers so we can receive a new frame while the previous
-    // one is still being rendered (the sink takes a view, not ownership).
-    static constexpr std::size_t kDecodeBufferCount = 2;
-    std::array<std::vector<std::uint8_t>, kDecodeBufferCount> video_decode_bufs;
-    std::atomic<std::size_t> video_decode_buf_idx_{0};
-    std::uint32_t video_decode_width_  = 0;
-    std::uint32_t video_decode_height_ = 0;
+    // ---- Video receive pipeline decode buffers (retired) -------------------
+    //
+    // The engine used to own a pair of ping-pong I420 buffers and hand
+    // the planes to `IVideoCodec::decode()` as caller-supplied output
+    // buffers.  That required the engine to *guess* the decoded geometry
+    // (it hard-coded 640×480), which silently mis-sized the buffers for
+    // every other resolution.
+    //
+    // The decode now runs in the codec-owned mode: the codec allocates
+    // the buffer with the native geometry and the engine reads the
+    // geometry back from the frame it produced.  The engine's own
+    // buffers are therefore dead and have been removed.
+    //
+    // Kept as a comment rather than deleted outright so the reason for
+    // the change stays visible to the next reader.
 
     // ---- Video send pipeline state ------------------------------------------
     // Tracks whether the next encoded frame is a keyframe (forced by
@@ -1464,6 +1470,20 @@ struct NimRTCEngine::Impl {
      *  Zero means "no packet sent yet"; the SR path already refuses to
      *  emit a report before the first packet. */
     std::int64_t audio_last_send_unix_us = 0;
+
+    // ---- Video: the send instant of the last video packet ---------------
+    //
+    // The video counterpart of `audio_last_send_unix_us`.  The video
+    // path stamps the abs-send-time extension (ADR-017) on every
+    // outbound video packet; the Sender Report for the video stream
+    // reuses the same instant so the report's NTP field denotes the
+    // exact send instant of the packet whose RTP timestamp it
+    // carries — the same pairing the audio path already had.  Without
+    // it the video stream's timeline reconstruction inherits the
+    // report-cadence bias the audio path fixed.
+    //
+    // Zero means "no packet sent yet".
+    std::int64_t video_last_send_unix_us = 0;
 
     // Reusable buffer for the outbound SRTCP packet (avoid a per-tick
     // allocation; SR is 1 Hz by default so this is not hot, but tick() is

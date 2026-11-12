@@ -154,16 +154,16 @@ struct NIMRTC_API_STABLE EngineConfig {
     // ---- Plugin selection (ADR-001: look up by string ID in PluginRegistry) ----
 
     /** ITransport plugin name. Default = "ice". */
-    std::string_view transport_name = "ice";
+    std::string transport_name = "ice";
 
     /** IRTP plugin name. Default = "webrtc". */
-    std::string_view rtp_name = "webrtc";
+    std::string rtp_name = "webrtc";
 
     /** ISDP plugin name. Default = "webrtc". */
-    std::string_view sdp_name = "webrtc";
+    std::string sdp_name = "webrtc";
 
     /** IJB plugin name. Default = "adaptive". */
-    std::string_view jb_name = "adaptive";
+    std::string jb_name = "adaptive";
 
     /** IAudio3A plugin name.
      *  Default = "webrtc_apm" (real WebRTC Audio Processing Module —
@@ -172,10 +172,10 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  missing, WebRtcPluginFactory transparently falls back to
      *  NullAudio3A so the engine still works.  Set to "" to disable 3A
      *  entirely (raw passthrough). */
-    std::string_view audio3a_name = "webrtc_apm";
+    std::string audio3a_name = "webrtc_apm";
 
     /** ICodec plugin name. Default = "opus". */
-    std::string_view codec_name = "opus";
+    std::string codec_name = "opus";
 
     /** Audio codec parameters for the SDP offer and send_audio().
      *  Defaults to RFC 7587 Opus (payload type 111, 48 kHz, stereo).
@@ -289,16 +289,16 @@ struct NIMRTC_API_STABLE EngineConfig {
     // different ids; see `plugins::hw::*`).
 
     /** IVideoSource plugin id (e.g. "memory", or HW plugin id). */
-    std::string_view video_source_name = "memory";
+    std::string video_source_name = "memory";
 
     /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
-    std::string_view video_sink_name   = "headless";
+    std::string video_sink_name   = "headless";
 
     /** IVideoReceiver plugin id (e.g. "reference"). */
-    std::string_view video_receiver_name = "reference";
+    std::string video_receiver_name = "reference";
 
     /** IVideoSender plugin id (e.g. "reference"). */
-    std::string_view video_sender_name   = "reference";
+    std::string video_sender_name   = "reference";
 
     /** Defaults forwarded to plugins::VideoReceiverConfig when the engine
      *  instantiates the video receiver plugin. */
@@ -324,6 +324,28 @@ struct NIMRTC_API_STABLE EngineConfig {
         std::uint16_t mtu          = 1200;
         std::uint16_t initial_seq  = 0;
     } video_sender_tuning;
+
+    // ---- Video geometry ---------------------------------------------------
+    //
+    // These three fields used to be hard-coded to 640×480@30 inside the
+    // engine, which made any other resolution impossible to select and
+    // silently mis-sized the decode buffers on the receive side (a
+    // non-640×480 stream decoded into a buffer that did not match its
+    // actual geometry).
+    //
+    // The values are forwarded to the video source plugin, to the video
+    // codec plugin (`VideoCodecConfig::width` / `height` / `fps`), and
+    // used to size the decode buffers.  The defaults preserve the
+    // previous behaviour exactly.
+
+    /** Capture / encode width in pixels. Default = 640. */
+    std::uint32_t video_width  = 640;
+
+    /** Capture / encode height in pixels. Default = 480. */
+    std::uint32_t video_height = 480;
+
+    /** Capture / encode frame rate in frames per second. Default = 30. */
+    std::uint32_t video_fps    = 30;
 
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
@@ -691,7 +713,7 @@ struct NIMRTC_API_STABLE EngineConfig {
     // The sentinel is documented as a stable public API; downstream
     // tests and integration shims can rely on it as the canonical way
     // to construct a network-free engine instance.
-    std::string_view transport_strategy_name = "";
+    std::string transport_strategy_name = "";
 
     // ---- Audio pipeline plugin selection (v1.2.0, audio pipeline WP-7) ---
     //
@@ -715,7 +737,7 @@ struct NIMRTC_API_STABLE EngineConfig {
      *
      *  An empty string disables the audio track explicitly (no error is
      *  reported: the host asked for it). */
-    std::string_view audio_decoder_name = "opus";
+    std::string audio_decoder_name = "opus";
 
     /** Audio receive-pipeline plugin id (the registry's audio-receiver
      *  slot).  Default = "nimrtc_audio_rx" — the id the audio_rx module
@@ -723,7 +745,7 @@ struct NIMRTC_API_STABLE EngineConfig {
      *
      *  An empty string disables the audio track explicitly (no error is
      *  reported: the host asked for it). */
-    std::string_view audio_receiver_name = "nimrtc_audio_rx";
+    std::string audio_receiver_name = "nimrtc_audio_rx";
 
     // ---- Audio pipeline behaviour (v1.2.0, audio pipeline WP-10) -------
     //
@@ -842,7 +864,7 @@ struct NIMRTC_API_STABLE EngineConfig {
     // no track API).  The field is appended at the **end** of the struct
     // so an existing host that aggregate-initialises `EngineConfig`
     // keeps compiling.
-    std::string_view session_name = "session";
+    std::string session_name = "session";
 
     // ---- DTMF (v1.2.0, session capability plan D1-D4) ------------------
     //
@@ -871,7 +893,7 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** IDtmfCodec plugin name.  Default = "dtmf" (the built-in
      *  RFC 4733 codec in `src/modules/dtmf/`).  An empty string
      *  disables the DTMF path even when `dtmf_enabled` is true. */
-    std::string_view dtmf_codec_name = "dtmf";
+    std::string dtmf_codec_name = "dtmf";
 
     // ---- RTCP XR / TMMBR (v1.2.0, session capability plan X2-X5) ------
     //

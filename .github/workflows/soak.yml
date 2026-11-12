@@ -97,7 +97,7 @@ jobs:
     # verdict.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           # The tree the window measures.  Must be the candidate tree
@@ -156,7 +156,7 @@ jobs:
 
       - name: Upload the evidence record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-linux-x86_64-${{ github.run_id }}
           path: build/soak/linux-x86_64-*.jsonl
@@ -208,7 +208,7 @@ jobs:
     # record, not in the job status.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           # The tree the window measures.  Must be the candidate tree
@@ -246,7 +246,7 @@ jobs:
 
       - name: Upload the evidence record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-windows-${{ github.run_id }}
           path: build/soak/windows-*.jsonl

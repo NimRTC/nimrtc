@@ -152,6 +152,11 @@ void PluginRegistry::register_video_source(std::string_view id,
     video_source_.register_one(id, f);
 }
 
+void PluginRegistry::register_video_capture(std::string_view id,
+                                            const plugins::IVideoCaptureFactory* f) {
+    video_capture_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_sink(std::string_view id,
                                          const plugins::IVideoSinkFactory* f) {
     video_sink_.register_one(id, f);

@@ -151,6 +151,12 @@ target_link_libraries(nimrtc_registry
 if(NIMRTC_MODULE_VIDEO_SOURCE)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_SOURCE=1)
 endif()
+# Remote-desktop plan A1: the capture-device module's registrar entry
+# materialises only when the module is built.  Same shape as the
+# video_source entry above.
+if(NIMRTC_MODULE_VIDEO_CAPTURE)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_CAPTURE=1)
+endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_SINK=1)
 endif()

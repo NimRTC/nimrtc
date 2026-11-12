@@ -17,6 +17,52 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The capture-device seam, and the portable half of screen capture
+  (v1.3.0, Remote Desktop plan A1 / A2 / A2b).**  The existing
+  `IVideoSource` seam describes a *stream of raw frames* and is
+  deliberately dumb: no device notion, no enumeration, no region
+  selection, no format negotiation.  A remote-desktop product needs all
+  four, plus two things the source seam has no room for — per-frame
+  dirty-rectangle metadata (a static screen must not cost a full frame
+  every tick) and a capability query (does this device offer zero-copy?
+  does it composite the cursor? what is its maximum resolution?), so the
+  engine can pick a backend and a ladder rung *before* the first frame
+  arrives.
+  - A new plugin seam, `src/plugins/include/nimrtc/plugins/video_capture.hpp`:
+    `IVideoCapture` (device enumeration, format negotiation, region
+    selection, capabilities, `pop_frame()`) and `IVideoCaptureFactory`.
+    It is layered on the source seam rather than replacing it —
+    `IVideoCapture` produces frames *from a device*, an `IVideoSource`
+    produces frames — and it is pure C++20: no pixel formats, no
+    `VideoSourceFrame`, no OS headers.  The device describes its own
+    output through `CaptureFormat` and the adapter translates, so the
+    engine never learns a platform API.
+  - A new module, `src/modules/video_capture/`, owning the *portable*
+    half of capture: the bounded frame queue with its explicit drop
+    policy, the dirty-rectangle model, the format-negotiation contract,
+    and a synthetic device that exercises all of it on every CI leg.
+    The three platform backends (Windows DXGI Desktop Duplication /
+    Windows Graphics Capture, macOS ScreenCaptureKit, Linux XDG Desktop
+    Portal + PipeWire / X11) land in M1-c as thin adapters over this
+    mechanism.
+  - The queue is bounded on purpose.  If the encoder cannot keep up, the
+    right behaviour for a remote desktop is to drop a frame, not to grow
+    a backlog and add latency without bound.  The overflow policy is
+    explicit and configurable (`CaptureDropPolicy`): screen content drops
+    the *oldest* frame (the newest frame is the truth; a stale frame of a
+    screen that has since changed is worth nothing), a camera drops the
+    *newest* (a slightly stale frame beats one that arrives too late to
+    be displayed).
+  - The registry gains a video-capture category alongside the source
+    seam — a capture device is not a frame source, so it gets its own
+    slot (`register_video_capture()` / `get_video_capture()`) rather
+    than being folded into the source registry.
+  - **Not yet done (deliberately):** no platform backend exists yet.  The
+    engine does not pump frames from a capture device on its own either —
+    that is plan item A10, and until it lands the capture layer is a
+    plug-in-level facility exercised by the unit tests, not a
+    user-visible screen-sharing feature.
+
 - **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
   Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264
   only: the codec family was hard-coded in the SDP writer, the
@@ -997,6 +1043,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **`CaptureQueue::pop()` handed out a pointer to freed memory.**  The
+  popped frame was moved into a *local* `Frame`, and the queue then
+  published `f.pixels.data()` through the `CaptureFrame` — so the
+  consumer read a heap block that the local's destructor had already
+  released by the time `pop()` returned.  The `CaptureFrame` contract
+  promises the pixels stay valid until the next `pop_frame()`, so this
+  was a use-after-free on every frame the consumer kept.  The queue now
+  keeps the popped frame in its own storage (`popped_`) and hands out a
+  pointer into that; the previous frame's buffer is released exactly when
+  the contract says it stops being valid, on the next `pop()`.  Caught by
+  AddressSanitizer and pinned by a regression test.
 
 - **The SDP parser threw `std::out_of_range` on a truncated attribute
   line.**  The parser skips a fixed number of characters to get past the

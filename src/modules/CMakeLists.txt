@@ -194,6 +194,14 @@ if(NIMRTC_MODULE_VIDEO_SOURCE)
     add_subdirectory(video_source)
 endif()
 
+# Remote-desktop plan A1 / A2: the capture-*device* layer.  It is a
+# sibling of video_source, not a child: a capture device enumerates
+# devices and negotiates a format, and the source seam turns its output
+# into the frame stream the engine already knows how to pump.
+if(NIMRTC_MODULE_VIDEO_CAPTURE)
+    add_subdirectory(video_capture)
+endif()
+
 if(NIMRTC_MODULE_VIDEO_STATS
         AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/video_stats/CMakeLists.txt")
     add_subdirectory(video_stats)

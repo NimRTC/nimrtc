@@ -322,6 +322,30 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   pacer (video-pipeline plan P1):
     //     - pacing/pacing.hpp (the token bucket on a monotonic clock)
     //
+    //
+    // v1.3 bump: +2 public headers (121 -> 123) for the H.265 / AV1 RTP
+    //   payload formats (video plan C4 / C6):
+    //     - video_payload/h265.hpp (RFC 7798 Single NAL / AP / FU)
+    //     - video_payload/av1.hpp (draft-ietf-payload-av1 framing)
+    //
+    // v1.3 bump: +3 public headers (123 -> 126) for the shared `nvcodec`
+    //   module -- the NVIDIA driver integration (NVENC / NVDEC) that the
+    //   H.264, H.265 and AV1 codec modules consume:
+    //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
+    //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
+    //       entry points)
+    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //
+    // v1.3 bump: +6 public headers (126 -> 132) for the H.265 and AV1
+    //   codec modules (video plan C4 / C8) — the codec-specific halves
+    //   that sit on top of the shared `nvcodec` driver integration:
+    //     - h265/codec_plugin.hpp (the H.265 plugin factory)
+    //     - h265/decoder.hpp (the H.265 software decoder)
+    //     - h265/hw_backends.hpp (the H.265 NVENC / NVDEC backend ids)
+    //     - av1/codec_plugin.hpp (the AV1 plugin factory)
+    //     - av1/decoder.hpp (the AV1 software decoder)
+    //     - av1/hw_backends.hpp (the AV1 NVENC / NVDEC backend ids)
+    //
     // v1.2.0 (session capability plan X1 / X3) bump: +4 public headers
     //   (118 -> 122) for the RTCP Extended Report seam and the TMMBR
     //   messages:
@@ -359,12 +383,20 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
     //
+    // v1.3 bump: +3 public headers (133 -> 136) for the video-capture
+    //   layer (remote-desktop plan A2 / A2b) — the bounded frame queue
+    //   the capture backends hand frames to, and the plugin seam the
+    //   engine resolves the capture device through:
+    //     - plugins/video_capture.hpp (IVideoCapture + factory seam)
+    //     - video_capture/capture_queue.hpp (the portable bounded queue)
+    //     - video_capture/synthetic_capture.hpp (the synthetic device)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 133;
+    constexpr std::size_t kBaselineHeaderCount = 136;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

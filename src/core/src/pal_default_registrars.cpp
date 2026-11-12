@@ -136,6 +136,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
     &nimrtc::video_source::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_VIDEO_CAPTURE
+    // Remote-desktop plan A1: the capture-device module.  Its entry
+    // populates the registry's video-capture slot (register_video_capture)
+    // under the id "synthetic", so the engine can resolve a capture
+    // backend through the seam without naming a concrete module
+    // (Layout Invariant 4).
+    &nimrtc::video_capture::register_default_plugins,
+#endif
     // Transport PAL Slice 8 (v0.10.2): DTLS / SCTP / raw_udp /
     // transport-stack default-plugins entries. These mirror the
     // unconditional entries above — there are no `NIMRTC_HAS_*` guards

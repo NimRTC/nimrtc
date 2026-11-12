@@ -82,6 +82,7 @@
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/video_source.hpp>
+#include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/bwe.hpp>

@@ -185,6 +185,11 @@ endif()
 if(NIMRTC_MODULE_VIDEO_SOURCE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_source)
 endif()
+# Remote-desktop plan A1: the capture-device module.  Same linker-strip
+# reason as the video_source entry above.
+if(NIMRTC_MODULE_VIDEO_CAPTURE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_capture)
+endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
 endif()

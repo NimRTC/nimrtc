@@ -74,6 +74,7 @@ class NIMRTC_API_STABLE IAudio3AFactory;
 class NIMRTC_API_STABLE ICodecFactory;
 class NIMRTC_API_STABLE IVideoCodecFactory;
 class NIMRTC_API_STABLE IVideoSourceFactory;
+class NIMRTC_API_STABLE IVideoCaptureFactory;
 class NIMRTC_API_STABLE IVideoSinkFactory;
 class NIMRTC_API_STABLE IVideoReceiverFactory;
 class NIMRTC_API_STABLE IVideoSenderFactory;
@@ -158,6 +159,10 @@ namespace av1     { void register_default_plugins() noexcept; }
 #endif
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
 namespace video_source    { void register_default_plugins() noexcept; }
+#endif
+// Remote-desktop plan A1: the capture-device module.
+#ifdef NIMRTC_HAS_VIDEO_CAPTURE
+namespace video_capture   { void register_default_plugins() noexcept; }
 #endif
 #ifdef NIMRTC_HAS_VIDEO_PIPELINE
 namespace video_pipeline  { void register_default_plugins() noexcept; }
@@ -491,6 +496,17 @@ public:
         return video_source_.list_ids();
     }
 
+    // -- Video Capture (remote-desktop plan A1) ----------------------------
+    void register_video_capture(std::string_view id,
+                                const plugins::IVideoCaptureFactory* f);
+    [[nodiscard]] const plugins::IVideoCaptureFactory*
+    get_video_capture(std::string_view id) const {
+        return video_capture_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_video_captures() const {
+        return video_capture_.list_ids();
+    }
+
     // -- Video Sink ---------------------------------------------------------
     void register_video_sink(std::string_view id,
                              const plugins::IVideoSinkFactory* f);
@@ -717,6 +733,11 @@ private:
     TypedRegistry<plugins::IDtmfCodecFactory>    dtmf_;
     TypedRegistry<plugins::IVideoCodecFactory>   video_codec_;
     TypedRegistry<plugins::IVideoSourceFactory>  video_source_;
+    // Remote-desktop plan A1: the capture-*device* seam.  Distinct from
+    // the source seam above: a source produces frames, a capture produces
+    // frames *from a device*, with enumeration, negotiation, region
+    // selection and dirty-rect metadata.
+    TypedRegistry<plugins::IVideoCaptureFactory> video_capture_;
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
     TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_;
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
@@ -890,6 +911,15 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kVideoSource,    \
             #id, factory_ptr }
 
+/** Register a capture-device plugin by ID and factory pointer
+ *  (remote-desktop plan A1). */
+#define NIMRTC_REGISTER_VIDEO_CAPTURE(id, factory_ptr)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_capture_){                         \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoCapture,   \
+            #id, factory_ptr }
+
 /** Register a video sink plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_SINK(id, factory_ptr)                      \
     static ::nimrtc::core::detail::Registrar                          \
@@ -1055,6 +1085,10 @@ public:
         // own category because a telephone-event payload is not audio.
         kDtmf,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
+        // Remote-desktop plan A1: the capture-device seam.  It has its
+        // own category because a capture device is not a frame source:
+        // it enumerates devices and negotiates a format.
+        kVideoCapture,
         kBwe, kScheduler,
         // v1.2.0 M1 (F2): the receiver-side network-feedback collector
         // seam -- see register_net_feedback().
@@ -1127,6 +1161,10 @@ public:
             case Category::kVideoSource:
                 reg.register_video_source(id,
                     static_cast<const plugins::IVideoSourceFactory*>(factory));
+                break;
+            case Category::kVideoCapture:
+                reg.register_video_capture(id,
+                    static_cast<const plugins::IVideoCaptureFactory*>(factory));
                 break;
             case Category::kVideoSink:
                 reg.register_video_sink(id,

@@ -130,6 +130,9 @@ option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
        "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)
 option(NIMRTC_MODULE_VIDEO_SOURCE
        "Build video source module (memory frame source for testing/demo)" ON)
+# Remote-desktop plan A1 / A2: the capture-device layer.
+option(NIMRTC_MODULE_VIDEO_CAPTURE
+       "Build video capture module (device capture layer: queue, dirty-rects, synthetic device)" ON)
 option(NIMRTC_MODULE_VIDEO_STATS
        "Build video stats module (per-stream statistics)" ON)
 option(NIMRTC_MODULE_VIDEO_RTCP_FEEDBACK

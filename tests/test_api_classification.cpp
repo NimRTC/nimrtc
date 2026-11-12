@@ -340,6 +340,21 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       entry points)
     //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
     //
+    // v1.3 bump: +2 public headers (125 -> 127) for the H.265 / AV1 RTP
+    //   payload formats (video plan C4 / C6):
+    //     - video_payload/h265.hpp (RFC 7798 Single NAL / AP / FU)
+    //     - video_payload/av1.hpp (draft-ietf-payload-av1 framing)
+    //
+    // v1.3 bump: +6 public headers (127 -> 133) for the H.265 and AV1
+    //   codec modules (video plan C4 / C8) — the codec-specific halves
+    //   that sit on top of the shared `nvcodec` driver integration:
+    //     - h265/codec_plugin.hpp (the H.265 plugin factory)
+    //     - h265/decoder.hpp (the H.265 software decoder)
+    //     - h265/hw_backends.hpp (the H.265 NVENC / NVDEC backend ids)
+    //     - av1/codec_plugin.hpp (the AV1 plugin factory)
+    //     - av1/decoder.hpp (the AV1 software decoder)
+    //     - av1/hw_backends.hpp (the AV1 NVENC / NVDEC backend ids)
+    //
     // `session/track.hpp` already existed at v1.1.0 and is part of the
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
@@ -349,7 +364,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 125;
+    constexpr std::size_t kBaselineHeaderCount = 133;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -120,6 +120,11 @@ option(NIMRTC_MODULE_VIDEO_PAYLOAD "Build video RTP payload module (H.264/VP8/VP
 option(NIMRTC_MODULE_VIDEO_JB      "Build video-aware jitter buffer module (FU-A reassembly)"     ON)
 option(NIMRTC_MODULE_H264          "Build H.264 module (bitstream + stub decoder + plugin adapter)" ON)
 option(NIMRTC_MODULE_NVCODEC       "Build shared NVIDIA codec module (NVENC / NVDEC, H.264+H.265+AV1)" ON)
+# The H.265 / AV1 codec modules (video plan C4 / C6 / C8).  They consume the
+# shared `nvcodec` module, so the NVIDIA driver integration serves all three
+# codec families from one copy of the driver code.
+option(NIMRTC_MODULE_H265          "Build H.265 module (codec plugin + hardware backend table)" ON)
+option(NIMRTC_MODULE_AV1           "Build AV1 module (codec plugin + hardware backend table)" ON)
 # Video R2:
 option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
        "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)

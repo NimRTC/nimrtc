@@ -17,6 +17,67 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
+  Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264
+  only: the codec family was hard-coded in the SDP writer, the
+  negotiation, and the packet path, and the H.265 / AV1 modules had no
+  RTP payload format at all.  A session can now select either codec and
+  negotiate it against a peer.
+  - Two new modules, `src/modules/h265/` and `src/modules/av1/`, each
+    self-contained (own `CMakeLists.txt`, `include/`, `src/`, `tests/`)
+    per Layout Invariant 3.  Each registers a video-codec plugin under
+    the id `"h265"` / `"av1"` — the spelling
+    `EngineConfig::video_codec_name` uses — plus its own video backends
+    (a software stub encoder/decoder and the NVIDIA NVENC / NVDEC
+    entries).
+  - Two new RTP payload modules,
+    `src/modules/video_payload/{h265,av1}.{hpp,cpp}`:
+    - H.265 follows **RFC 7798**: the two-byte payload header
+      (`F(1) | Type(6) | LayerId(6) | TID(3)`), single-NAL-unit packets,
+      aggregation packets (type 48) and fragmentation units (type 49,
+      `S(1) | E(1) | FuType(6)`).
+    - AV1 follows **draft-ietf-payload-av1** / the aomediacodec
+      `av1-rtp-spec`: the one-byte aggregation header
+      (`Z(1) | Y(1) | W(2) | N(1)`), LEB128 element length fields, the
+      OBU header (`obu_type(4) | obu_extension_flag(1) |
+      obu_has_size_field(1)`), Annex-B framing and a reassembler that
+      drops a truncated OBU rather than emitting it.
+  - The SDP layer learned both codecs' format parameters
+    (`src/modules/video_sdp_attributes/`):
+    - H.265: `profile-id`, `level-id`, `tier-flag` and **`tx-mode`**.
+      `tx-mode` is the RFC 7798 §4.4 *string* token — one of `"SRST"` /
+      `"MRST"` / `"MRMT"` — and the parser rejects a numeric value,
+      because a peer that sends `tx-mode=0` has a different
+      understanding of the wire.  The three parameter sets are the
+      separate `sprop-vps` / `sprop-sps` / `sprop-pps` parameters; the
+      H.264-style combined `sprop-parameter-sets` is still accepted for
+      legacy peers.
+    - AV1: `profile`, `level-idx`, `tier`, and the optional
+      `bit-depth` / `monochrome` / `chroma-subsampling` parameters.
+  - The engine holds **one** video codec per session (the single-codec
+    rule), and the four places that name a codec — the plugin id, the
+    plugin-layer `VideoCodecKind`, the SDP `a=rtpmap:` encoding and the
+    `a=fmtp:` body — now come from **one** table,
+    `src/engine/src/video_codec_config.hpp`.  Keeping the mapping in one
+    place is what stops the four from drifting apart.
+  - The payload type is resolved per codec family: H.264 = 102
+    (RFC 6184's static type), H.265 = 116 and AV1 = 45 (the values
+    Chrome's Unified Plan and the AV1 payload specification use).  A
+    host that pinned a payload type still wins; a host that left H.264's
+    102 in place while selecting another family gets that family's own
+    default, because RFC 6184's 102 is H.264's and no other codec may
+    reuse it.
+  - The engine's offer, answer, packet path and inbound routing all use
+    the *resolved* payload type and the negotiated codec family, so an
+    H.265 session negotiates H.265 end to end — and an H.265 engine
+    facing an H.264 offer rejects the video section (port 0) instead
+    of silently switching codecs.
+  - Covered by 8 new cases in
+    `src/modules/video_payload/tests/test_h265.cpp` and
+    `src/modules/video_payload/tests/test_av1.cpp`, 11 new cases in
+    `src/modules/video_sdp_attributes/tests/test_video_sdp_attributes.cpp`
+    and 6 new cases in `tests/test_video_negotiation.cpp`.
+
 - **A real NVIDIA NVDEC hardware decoder (v1.1, Remote Desktop plan
   B5a/B10a).**  The NVDEC seam used to be an *empty* entry: the id
   existed, but `available()` returned `false` and `create()` returned
@@ -58,6 +119,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     depending on any one codec module's registry.  Every case calls
     `GTEST_SKIP()` when the backend is unavailable, so it never fails on
     a machine without NVIDIA hardware.
+    - The round trip is asserted for **every** codec the driver offers,
+      not only for H.264: `NvencNvdecRoundTripH265` and
+      `NvencNvdecRoundTripAv1` run the same encode → decode → compare
+      -pixels leg for H.265 and AV1.  Without them, a regression that
+      hard-coded H.264 inside the NVENC / NVDEC session code would still
+      pass every H.264 case while silently breaking the H.265 / AV1
+      codec modules, which call into this module's driver code.
+    - On a host whose silicon has no encoder for a codec (e.g. an
+      RTX 3060, which has no AV1 encoder) the availability probe reports
+      the truth and the case skips with that reason.
   - The README / README.zh capability tables and the
     `docs/hw_plugin_seam.md` backend matrix now state the truth: NVDEC
     **is** implemented; the macOS VideoToolbox and Android MediaCodec
@@ -972,6 +1043,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Covered by `tests/test_engine_xr_tmmbr.cpp` (the Statistics Summary
     cases assert the L and J flag bits on the parsed wire block, for
     both a "loss,jitt" and a "loss"-only peer request).
+- **`ParsedFmtp` wrote its payload into an inactive union member (UB, caught
+  by UBSan as `load of value 13, which is not a valid value for type
+  'bool'`).**  `ParsedFmtp` is a hand-rolled variant: an anonymous union of
+  the five codec fmtp payloads plus a `kind` discriminator, with manual
+  lifetime management.  `parse_fmtp()` set `out.kind` *before* the payload
+  was in place and then assigned through the union (`out.h265 = ...`),
+  which is only well-defined when `h265` is already the *active* member —
+  it never was, because the constructor placement-news `h264`.  The
+  assignment operator of the payload therefore ran against a
+  never-constructed `std::optional`, and the destructor later destroyed a
+  member that did not match the one `kind` named.  The variant now has
+  typed setters (`set_h264()` / `set_h265()` / `set_vp8()` / `set_vp9()` /
+  `set_av1()`) that destroy the active member, placement-new the new one
+  and update `kind` atomically; `parse_fmtp()` and the copy / move
+  operations go through them, so the "the member named by `kind` is the
+  constructed one" invariant holds on every path.  Four regression tests
+  pin the invariant.
+- **The H.265 `sprop-parameter-sets` parser read freed memory.**  The
+  combined legacy form (`sprop-parameter-sets=vps,sps,pps`) was parsed by
+  binding a `std::string_view` to `v.substr(...)`, where `v` is a
+  `std::string` — so the view pointed at a temporary that died at the end
+  of the full expression.  The parser then validated base64 characters
+  out of freed memory and rejected a perfectly valid parameter as
+  "non-base64 char".  The sub-view is now taken from `v` directly.
+
+- **The AV1 fragmenter dropped the OBU header of every fragmented OBU.**
+  A fragmented OBU's first fragment carries the OBU header *in addition*
+  to its payload, but the packet buffer was sized for the payload alone
+  (`overhead + take`).  The header was written past the end of the
+  buffer, so the reassembled OBU was two bytes short of the original and
+  the OBU type was lost.  The buffer is now sized for the header as
+  well.
 - **Every hand-written `ctest` wrapper test was reported as "Not Run" in a
   non-Debug build.**  CMake 4.0's multi-config generator wraps each
   `add_test()` in a four-branch `CTEST_CONFIGURATION_TYPE` conditional

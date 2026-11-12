@@ -40,6 +40,9 @@ endif()
 #   - the NV12 output path,
 #   - the multi-frame / reference-chain path,
 #   - the resolution-change path,
+#   - the sub-minimum-geometry padding path,
+#   - the codec-generic leg (H.265 / AV1), which proves the driver
+#     integration really is codec-parameterised and not H.264-only,
 #   - and a decoder-only leg that decodes a self-contained H.264 bitstream
 #     checked into src/modules/nvcodec/tests/nvdec_test_vector.hpp — so the
 #     decode path can be verified on a host whose NVENC session is

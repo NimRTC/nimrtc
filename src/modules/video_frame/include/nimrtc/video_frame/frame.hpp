@@ -793,4 +793,40 @@ NIMRTC_API_STABLE void convert_i420_to_nv12(std::uint32_t width,
                           std::uint8_t* y_out, std::int32_t y_out_stride,
                           std::uint8_t* uv_out, std::int32_t uv_out_stride) noexcept;
 
+// ---------------------------------------------------------------------------
+// Test pattern
+// ---------------------------------------------------------------------------
+
+/** Paint a recognisable synthetic I420 pattern into three planes.
+ *
+ *  The pattern is a three-band horizontal colour ramp whose brightness is
+ *  modulated by @p frame_seq, so successive frames look different on the
+ *  wire and on the screen while staying cheap to compute (no floating
+ *  point).  The chroma planes carry a neutral grey (BT.601 limited-range
+ *  "no chroma"), so the luma ramp is what the eye sees.
+ *
+ *  This exists so the *stub* video codecs (H.264 / H.265 / AV1) can produce
+ *  a decoded picture without linking a real decoder: the round trip is
+ *  then observable end-to-end (the receiver paints the same pattern back
+ *  out) without dragging a proprietary codec into the tree.
+ *
+ *  @param y, u, v   Destination planes (caller-owned).
+ *  @param w, h      Picture dimensions in pixels.
+ *  @param frame_seq The frame's sequence number — seeds the pattern.
+ *  @param stride_y  Y plane row stride in bytes.
+ *  @param stride_u  U plane row stride in bytes.
+ *  @param stride_v  V plane row stride in bytes.
+ *
+ *  A null plane pointer is skipped (so an NV12 sink can pass `v == nullptr`).
+ */
+NIMRTC_API_STABLE void paint_test_pattern_i420(std::uint8_t* y,
+                                                std::uint8_t* u,
+                                                std::uint8_t* v,
+                                                std::uint32_t w,
+                                                std::uint32_t h,
+                                                std::uint32_t frame_seq,
+                                                std::int32_t stride_y,
+                                                std::int32_t stride_u,
+                                                std::int32_t stride_v) noexcept;
+
 } // namespace nimrtc::video_frame

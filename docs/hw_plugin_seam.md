@@ -1126,6 +1126,16 @@ decodes a self-contained H.264 bitstream checked into
 host, so the test never fails on a machine without NVIDIA hardware — it
 just reports the skip reason.
 
+The round trip is asserted for **every codec the driver offers**, not just
+H.264: `NvencNvdecRoundTripH265` and `NvencNvdecRoundTripAv1` run the same
+encode → decode → compare-pixels leg for H.265 and AV1.  That leg matters
+because a regression hard-coding H.264 inside the session code would pass
+every H.264 case while silently breaking the `h265` and `av1` codec
+modules, which call into this module's driver code.  On a host whose
+silicon has no encoder for a codec (e.g. an RTX 3060, which has no AV1
+encoder) the availability probe reports the truth and the case skips with
+that reason.
+
 The round-trip test lives in the `nvcodec` module rather than in the
 `h264` module because the code it exercises is *not* H.264-specific: the
 same NVENC / NVDEC session code serves H.265 and AV1.  The `h264` module's

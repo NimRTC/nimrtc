@@ -611,31 +611,6 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
     // buffer belongs to usrsctp and is freed by `data_guard` when this
     // function returns.
     std::lock_guard<std::mutex> lk(slot->recv_mu);
-
-    // In-flight guard.  The destructor takes `recv_mu` and waits for
-    // `in_flight_callbacks` to reach zero, so when it returns no user
-    // callback is running.  Without this the destructor could destroy
-    // state the caller captured in its callback while the trampoline
-    // was still inside it -- a data race that ThreadSanitizer reports
-    // between the callback's access and the owner's destructor.
-    //
-    // The counter is incremented while `recv_mu` is held and the
-    // callback is dispatched under the same lock, so a callback can
-    // never start once the destructor has taken the lock.
-    ++slot->in_flight_callbacks;
-
-    // RAII so the counter is decremented even if the user callback
-    // throws (the callbacks are `noexcept`-ish std::function
-    // wrappers, but a user lambda is not obliged to be).
-    struct InFlightGuard {
-        Slot& slot;
-        ~InFlightGuard() {
-            if (--slot.in_flight_callbacks == 0) {
-                slot.recv_cv.notify_all();
-            }
-        }
-    } in_flight_guard{*slot};
-
     if (slot->on_recv_ppid) {
         // PPID-aware delivery takes precedence.  The PPID callback
         // carries the payload protocol identifier, which the DCEP
@@ -1053,17 +1028,14 @@ UsrsctpSocket::~UsrsctpSocket() {
     // returning while that callback runs is a data race on the captured
     // object.
     //
-    // Taking `recv_mu` makes this safe: the trampoline cannot start a
-    // new callback without the same lock, and the one that is running
-    // holds it, so acquiring it means the running callback has already
-    // finished.
+    // Taking `recv_mu` is the whole barrier: the trampoline dispatches
+    // the user callback while holding `recv_mu`, so acquiring that lock
+    // here means any callback that was running has already finished,
+    // and no new one can start until this lock is released.  The
+    // callbacks are then cleared under the same lock, so a trampoline
+    // invocation that arrives later finds no callback to fire.
     {
-        std::unique_lock<std::mutex> lk(slot_->recv_mu);
-        slot_->recv_cv.wait(lk, [this] {
-            return slot_->in_flight_callbacks == 0;
-        });
-        // Drop the user callbacks while we still hold the lock, so no
-        // later trampoline invocation can dispatch into them.
+        std::lock_guard<std::mutex> lk(slot_->recv_mu);
         slot_->on_recv = nullptr;
         slot_->on_recv_ppid = nullptr;
     }

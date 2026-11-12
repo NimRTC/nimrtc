@@ -52,6 +52,23 @@ python tools/check_md_links.py README.md  # specific files
 Exit code is non-zero when a link points at a missing file or an anchor
 that no heading produces.
 
+## The plugin-catalogue contract
+
+| Script | Purpose |
+|--------|---------|
+| `check_doc_contract.py` | Check the §4 catalogue in `docs/plugin_author_guide.md` against the code: every `EngineConfig` knob it names must exist, every registration macro it names must exist, and every `NIMRTC_REGISTER_*` macro in the registry must be listed. Wired into CI as the `docs / markdown links` job. |
+
+```
+python tools/check_doc_contract.py
+```
+
+The catalogue is a promise about the code, so it has to be checked in both
+directions. A knob the guide names but the engine does not have sends the
+author to a runtime failure; a macro the guide forgot to list sends them
+looking for a seam that exists but is undocumented. The check is a text
+check rather than a C++ reflection check, which keeps it cheap enough to
+run on every push.
+
 ## CI sanitizer gate
 
 `linux-sanitizers` in `.github/workflows/ci.yml` runs the test suite under

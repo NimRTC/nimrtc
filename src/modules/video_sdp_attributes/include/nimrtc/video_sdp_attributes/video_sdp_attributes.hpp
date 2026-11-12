@@ -196,6 +196,25 @@ struct NIMRTC_API_STABLE ParsedFmtp {
     ParsedFmtp& operator=(const ParsedFmtp&);
     ParsedFmtp(ParsedFmtp&&) noexcept;
     ParsedFmtp& operator=(ParsedFmtp&&) noexcept;
+
+    /** Replace the active union member with `v` and update `kind`.
+     *
+     *  The union holds one of five mutually-exclusive payload types, so a
+     *  direct `p.h265 = ...` is only well-defined when `h265` is already
+     *  the *active* member.  These setters always destroy the previously
+     *  active member first and placement-new the new one, which keeps the
+     *  union invariant ("the member named by `kind` is constructed") intact
+     *  for every entry point — parsing, tests and future call sites. */
+    void set_h264(H264Fmtp v);
+    void set_h265(H265Fmtp v);
+    void set_vp8(Vp8Fmtp v);
+    void set_vp9(Vp9Fmtp v);
+    void set_av1(Av1Fmtp v);
+
+private:
+    /** Destroy the currently active union member (the one named by `kind`;
+     *  the default-constructed `h264` when `kind` is `kUnknown`). */
+    void destroy_active() noexcept;
 };
 
 // ---------------------------------------------------------------------------

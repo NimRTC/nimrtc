@@ -1019,6 +1019,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Covered by `tests/test_engine_xr_tmmbr.cpp` (the Statistics Summary
     cases assert the L and J flag bits on the parsed wire block, for
     both a "loss,jitt" and a "loss"-only peer request).
+- **`ParsedFmtp` wrote its payload into an inactive union member (UB, caught
+  by UBSan as `load of value 13, which is not a valid value for type
+  'bool'`).**  `ParsedFmtp` is a hand-rolled variant: an anonymous union of
+  the five codec fmtp payloads plus a `kind` discriminator, with manual
+  lifetime management.  `parse_fmtp()` set `out.kind` *before* the payload
+  was in place and then assigned through the union (`out.h265 = ...`),
+  which is only well-defined when `h265` is already the *active* member —
+  it never was, because the constructor placement-news `h264`.  The
+  assignment operator of the payload therefore ran against a
+  never-constructed `std::optional`, and the destructor later destroyed a
+  member that did not match the one `kind` named.  The variant now has
+  typed setters (`set_h264()` / `set_h265()` / `set_vp8()` / `set_vp9()` /
+  `set_av1()`) that destroy the active member, placement-new the new one
+  and update `kind` atomically; `parse_fmtp()` and the copy / move
+  operations go through them, so the "the member named by `kind` is the
+  constructed one" invariant holds on every path.  Four regression tests
+  pin the invariant.
 - **The H.265 `sprop-parameter-sets` parser read freed memory.**  The
   combined legacy form (`sprop-parameter-sets=vps,sps,pps`) was parsed by
   binding a `std::string_view` to `v.substr(...)`, where `v` is a

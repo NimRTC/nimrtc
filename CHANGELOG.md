@@ -846,6 +846,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     builds up moves the estimate even though not a single packet was
     lost.
 
+### Changed
+
 - **The plugin contract is now explicit — the engine says which families it
   can actually replace, and what happens when one is missing (v1.2.0,
   architecture remediation plan §2).**  The plugin system had three
@@ -896,29 +898,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     document that the negotiation, BWE, jitter-buffer and RTCP paths are
     all written against, so replacing it is a protocol redesign rather
     than a plugin swap.  `docs/plugin_author_guide.md` §4.2 states the
-    same, and the `rtp_name` / `sdp_name` rows are gone from the
+    same, and     the `rtp_name` / `sdp_name` rows are gone from the
     catalogue.
-
-### Fixed
-
-- **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
-  fallback" (remediation §2.3 / B4 / B5 / B10).**  The guide's §4
-  catalogue now lists every pluggable family with its real
-  `EngineConfig` knob, its real registration macro, and its real failure
-  mode, and §4.1 spells out the three behaviours: **hard failure**
-  (ICE transport, transport stack, DTLS, SCTP socket, SRTP backend,
-  DataChannel backend — `open()` returns non-zero and `on_error` fires),
-  **soft degradation** (BWE, scheduler, net-feedback, XR report, jitter
-  buffer, audio 3A, the codecs, the video source / sink / receiver /
-  sender — the engine logs a warning and opens without the component),
-  and **disabled by configuration** (an empty knob).  The macro names in
-  the table were wrong in three places (`NIMRTC_REGISTER_VIDEO_RX` /
-  `_TX` → `_RECEIVER` / `_SENDER`; the DTLS / SCTP / raw-UDP / transport
-  -stack rows named a bare function instead of the actual macro), and
-  the SRTP-backend, WebTransport, audio-decoder, audio-receiver, session
-  -model and DTMF families were missing entirely.
-  - `docs/api/engine_config.md` carries the same table, and documents
-    the removal of `rtp_name` / `sdp_name`.
 
 - **The `"sctp"` data-channel backend was retired from the public selectors
   (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP
@@ -1115,6 +1096,25 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
+  fallback" (remediation §2.3 / B4 / B5 / B10).**  The guide's §4
+  catalogue now lists every pluggable family with its real
+  `EngineConfig` knob, its real registration macro, and its real failure
+  mode, and §4.1 spells out the three behaviours: **hard failure**
+  (ICE transport, transport stack, DTLS, SCTP socket, SRTP backend,
+  DataChannel backend — `open()` returns non-zero and `on_error` fires),
+  **soft degradation** (BWE, scheduler, net-feedback, XR report, jitter
+  buffer, audio 3A, the codecs, the video source / sink / receiver /
+  sender — the engine logs a warning and opens without the component),
+  and **disabled by configuration** (an empty knob).  The macro names in
+  the table were wrong in three places (`NIMRTC_REGISTER_VIDEO_RX` /
+  `_TX` → `_RECEIVER` / `_SENDER`; the DTLS / SCTP / raw-UDP / transport
+  -stack rows named a bare function instead of the actual macro), and
+  the SRTP-backend, WebTransport, audio-decoder, audio-receiver, session
+  -model and DTMF families were missing entirely.
+  - `docs/api/engine_config.md` carries the same table, and documents
+    the removal of `rtp_name` / `sdp_name`.
 
 - **The e2e acceptance Case C (NimRTC ↔ NimRTC loopback) failed on the
   Windows CI runner with `WSAEACCES (errno 10013)`, because the example

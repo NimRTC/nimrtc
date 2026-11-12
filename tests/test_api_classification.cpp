@@ -345,7 +345,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   layer (remote-desktop plan A2 / A2b) — the bounded frame queue
     //   the capture backends hand frames to, and the plugin seam the
     //   engine resolves the capture device through:
-    //     - plugins/video_capture.hpp (ICaptureDevice + factory seam)
+    //     - plugins/video_capture.hpp (IVideoCapture + factory seam)
     //     - video_capture/capture_queue.hpp (the portable bounded queue)
     //     - video_capture/synthetic_capture.hpp (the synthetic device)
     //

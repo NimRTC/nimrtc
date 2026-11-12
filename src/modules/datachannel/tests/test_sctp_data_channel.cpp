@@ -2,15 +2,21 @@
  * @file src/modules/datachannel/tests/test_sctp_data_channel.cpp
  * @brief Unit tests for SctpDataChannel + SctpDataChannelFactory.
  *
- * Verifies the P2 datachannel implementation:
+ * Verifies the datachannel implementation:
  *   1. SctpDataChannelFactory doesn't return null from create().
  *   2. Factory id is exactly "sctp".
  *   3. send() before open() doesn't crash and signals failure via
  *      the on_state callback.
  *   4. set_on_message / set_on_state before open() are safe.
- *   5. open() wires the SCTP recv callback and reports opened.
- *   6. send() after open() routes to the matching SCTP send method
- *      based on cfg.reliability (verified via a MockSctpSocket).
+ *   5. open() wires the SCTP recv callback and reports "connecting";
+ *      "open" is reported only once the DCEP handshake completes.
+ *   6. send() after the handshake routes to the matching SCTP send
+ *      method based on cfg.reliability (verified via a MockSctpSocket).
+ *   7. The DCEP handshake (RFC 8832): the DATA_CHANNEL_OPEN goes out
+ *      exactly once, an inbound user message is delivered exactly once,
+ *      an inbound DATA_CHANNEL_OPEN is answered with exactly one ACK.
+ *   8. Before the handshake completes, every user message is sent
+ *      ordered (RFC 8832 §6), whatever the channel's own semantics are.
  *
  * All tests use a `MockSctpSocket` injected via the test-only
  * `SctpDataChannel(std::unique_ptr<ISctpSocket>)` constructor so we
@@ -34,6 +40,7 @@
 #include <nimrtc/datachannel/sctp_data_channel.hpp>
 #include <nimrtc/plugins/base.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+#include <nimrtc/sctp/dcep.hpp>
 #include <nimrtc/sctp/sctp_socket_iface.hpp>
 
 namespace {
@@ -47,6 +54,7 @@ using nimrtc::plugins::DataChannelStateCallback;
 using nimrtc::plugins::DataMessageCallback;
 using nimrtc::plugins::Status;
 using nimrtc::sctp::ISctpSocket;
+namespace sctp = nimrtc::sctp;
 
 // ---------------------------------------------------------------------------
 // MockSctpSpy — out-of-band observation point for the mock socket.
@@ -75,6 +83,12 @@ struct MockSctpSpy {
 // worker thread in production; here we just call it from the test
 // thread, but the atomicity makes the test future-proof against
 // threaded scenarios).
+//
+// The mock mirrors the production backend's inbound delivery rule
+// (`UsrsctpSocket`): the PPID-aware callback wins when it is
+// registered, the legacy callback is the fallback. Exactly one of them
+// fires per inbound chunk — a fan-out would deliver every user message
+// twice.
 // ---------------------------------------------------------------------------
 class MockSctpSocket final : public ISctpSocket {
 public:
@@ -98,6 +112,11 @@ public:
         std::uint16_t           stream = 0;
         std::vector<std::uint8_t> data{};
         std::int64_t            ttl_ms = 0;
+        /** The wire PPID (RFC 8831 §6). 0 = the legacy send method was
+         *  used (no PPID on the wire). */
+        std::uint32_t           ppid = 0;
+        /** Whether the send went through a PPID-aware method. */
+        bool                    has_ppid = false;
     };
 
     MockSctpSocket() = default;
@@ -151,6 +170,57 @@ public:
         return partial_rc_;
     }
 
+    // ---- PPID-aware send surface ----------------------------------------
+    //
+    // The channel routes its traffic through these; the mock records
+    // the PPID so the tests can tell a DCEP message (50) from a user
+    // payload (53).
+
+    Status send_stream_with_ppid(std::uint16_t stream,
+                                 BufferView data,
+                                 std::uint32_t ppid) noexcept override {
+        SendRecord r;
+        r.method = Method::kStream;
+        r.stream = stream;
+        r.data.assign(data.begin(), data.end());
+        r.ttl_ms = 0;
+        r.ppid = ppid;
+        r.has_ppid = true;
+        record(std::move(r));
+        return stream_rc_;
+    }
+
+    Status send_datagram_with_ppid(std::uint16_t stream,
+                                   BufferView data,
+                                   std::uint32_t ppid) noexcept override {
+        SendRecord r;
+        r.method = Method::kDatagram;
+        r.stream = stream;
+        r.data.assign(data.begin(), data.end());
+        r.ttl_ms = 0;
+        r.ppid = ppid;
+        r.has_ppid = true;
+        record(std::move(r));
+        return datagram_rc_;
+    }
+
+    Status send_partial_reliable_with_ppid(
+        std::uint16_t stream,
+        BufferView data,
+        std::chrono::milliseconds ttl,
+        std::uint32_t ppid,
+        bool /*unordered*/) noexcept override {
+        SendRecord r;
+        r.method = Method::kPartialReliable;
+        r.stream = stream;
+        r.data.assign(data.begin(), data.end());
+        r.ttl_ms = static_cast<std::int64_t>(ttl.count());
+        r.ppid = ppid;
+        r.has_ppid = true;
+        record(std::move(r));
+        return partial_rc_;
+    }
+
     void set_on_recv(nimrtc::plugins::OnSctpRecvCb cb) noexcept override {
         // noexcept per the ISctpSocket seam contract. On macOS in CI
         // (Apple Silicon runner, Xcode 16.x, libc++ debug) we've seen
@@ -177,22 +247,47 @@ public:
         }
     }
 
-    // ---- Test helpers ----------------------------------------------------
-
-    /** Simulate an inbound SCTP DATA payload from the peer. Fires the
-     *  callback registered by `set_on_recv`. */
-    void simulate_recv(std::uint16_t stream, nimrtc::core::ByteSpan data) {
-        nimrtc::plugins::OnSctpRecvCb cb_copy;
+    void set_on_recv_with_ppid(
+        nimrtc::plugins::OnSctpRecvWithPpidCb cb) noexcept override {
         try {
             std::lock_guard<std::mutex> lk(recv_mu_);
-            cb_copy = on_recv_;
+            on_recv_ppid_ = std::move(cb);
+        } catch (...) {
+            // See set_on_recv — the same macOS-libc++ debug corner case.
+        }
+    }
+
+    // ---- Test helpers ----------------------------------------------------
+
+    /** Simulate an inbound SCTP DATA payload from the peer.  Mirrors the
+     *  production backend: the PPID-aware callback wins when it is
+     *  registered, otherwise the legacy callback is used.  Exactly one
+     *  of them fires — a user message is delivered once. */
+    void simulate_recv(std::uint16_t stream, nimrtc::core::ByteSpan data) {
+        simulate_recv_with_ppid(stream, sctp::kPpidBinary, data);
+    }
+
+    /** Simulate an inbound SCTP DATA payload with an explicit PPID. */
+    void simulate_recv_with_ppid(std::uint16_t stream,
+                                 std::uint32_t ppid,
+                                 nimrtc::core::ByteSpan data) {
+        nimrtc::plugins::OnSctpRecvWithPpidCb ppid_cb;
+        nimrtc::plugins::OnSctpRecvCb legacy_cb;
+        try {
+            std::lock_guard<std::mutex> lk(recv_mu_);
+            ppid_cb    = on_recv_ppid_;
+            legacy_cb  = on_recv_;
         } catch (...) {
             // Same macOS-libc++ debug corner case as set_on_recv; treat
             // a failed lock as "no callback registered" so the test
             // continues instead of propagating an exception.
             return;
         }
-        if (cb_copy) cb_copy(stream, data);
+        if (ppid_cb) {
+            ppid_cb(stream, ppid, data);
+        } else if (legacy_cb) {
+            legacy_cb(stream, data);
+        }
     }
 
     /** Returns the recorded send calls. Thread-safe. */
@@ -233,11 +328,21 @@ private:
     mutable std::mutex                 recv_mu_;
     nimrtc::plugins::OnSctpRecvCb      on_recv_;
     std::shared_ptr<MockSctpSpy>       spy_;
+    nimrtc::plugins::OnSctpRecvWithPpidCb on_recv_ppid_;
 
     Status datagram_rc_   = nimrtc::plugins::kOk;
     Status stream_rc_     = nimrtc::plugins::kOk;
     Status partial_rc_    = nimrtc::plugins::kOk;
 };
+
+/** Open a channel and complete the DCEP handshake by delivering an
+ *  inbound user message (RFC 8832 §6: "the DATA_CHANNEL_ACK or any
+ *  other message has been received on a data channel"). */
+void complete_handshake(MockSctpSocket& mock, SctpDataChannel& ch) {
+    const std::uint8_t payload[] = {'h', 's'};
+    mock.simulate_recv_with_ppid(/*stream=*/0, sctp::kPpidBinary, payload);
+    (void)ch;
+}
 
 // ---------------------------------------------------------------------------
 // Test 1: factory returns a non-null channel.
@@ -317,10 +422,11 @@ TEST(SctpDataChannel, SetCallbacksBeforeOpen) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: open() wires the SCTP recv callback, marks opened_=true,
-//         and fires "connecting" then "open" state events.
+// Test 5: open() wires the SCTP recv callback, marks opened_=true, and
+//         reports "connecting". "open" must NOT be reported yet — the
+//         DCEP handshake has not completed.
 // ---------------------------------------------------------------------------
-TEST(SctpDataChannel, OpenWithReliableOrdered) {
+TEST(SctpDataChannel, OpenReportsConnectingUntilHandshakeCompletes) {
     auto mock = std::make_unique<MockSctpSocket>();
     auto* mock_raw = mock.get();
 
@@ -337,13 +443,13 @@ TEST(SctpDataChannel, OpenWithReliableOrdered) {
     EXPECT_TRUE(mock_raw->has_recv_callback())
         << "open() must wire set_on_recv into the SCTP socket";
 
-    // Expect "connecting" then "open" in that order.
-    ASSERT_GE(state_events.size(), 2u);
-    EXPECT_EQ(state_events[0], "connecting");
-    EXPECT_EQ(state_events[1], "open");
+    ASSERT_EQ(state_events.size(), 1u);
+    EXPECT_EQ(state_events[0], "connecting")
+        << "the channel must report \"connecting\" until the DCEP "
+           "handshake completes — reporting \"open\" here would be a lie";
 
     // Inbound path: simulate a recv on the mock socket and verify the
-    // message callback fires.
+    // message callback fires (and that the handshake now completes).
     bool msg_called = false;
     std::vector<std::uint8_t> received;
     ch.set_on_message([&](BufferView bv) {
@@ -358,13 +464,17 @@ TEST(SctpDataChannel, OpenWithReliableOrdered) {
     ASSERT_EQ(received.size(), 3u);
     EXPECT_EQ(received[0], 'a');
     EXPECT_EQ(received[2], 'c');
+
+    ASSERT_EQ(state_events.size(), 2u);
+    EXPECT_EQ(state_events[1], "open")
+        << "the handshake completes when a message arrives on the channel";
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: send() after open() routes to the matching SCTP send method
-//         based on cfg.reliability.
+// Test 6: send() after the handshake routes to the matching SCTP send
+//         method based on cfg.reliability.
 // ---------------------------------------------------------------------------
-TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
+TEST(SctpDataChannel, SendAfterHandshakeRoutesByReliability) {
     // --- ReliableOrdered -> send_stream ------------------------------------
     {
         auto mock = std::make_unique<MockSctpSocket>();
@@ -375,17 +485,22 @@ TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
         DataChannelConfig cfg;
         cfg.reliability = DataChannelReliability::kReliableOrdered;
         ch.open(cfg);
+        complete_handshake(*mock_raw, ch);
+
+        const auto before = mock_raw->snapshot().size();
 
         std::uint8_t payload[] = {'f', 'i', 'l', 'e'};
         ch.send(payload);
 
         auto recs = mock_raw->snapshot();
-        ASSERT_EQ(recs.size(), 1u);
-        EXPECT_EQ(recs[0].method, MockSctpSocket::Method::kStream);
-        EXPECT_EQ(recs[0].stream, 0u);
-        ASSERT_EQ(recs[0].data.size(), 4u);
-        EXPECT_EQ(recs[0].data[0], 'f');
-        EXPECT_EQ(recs[0].data[3], 'e');
+        ASSERT_EQ(recs.size(), before + 1);
+        EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kStream);
+        EXPECT_EQ(recs.back().stream, 0u);
+        EXPECT_TRUE(recs.back().has_ppid);
+        EXPECT_EQ(recs.back().ppid, sctp::kPpidBinary);
+        ASSERT_EQ(recs.back().data.size(), 4u);
+        EXPECT_EQ(recs.back().data[0], 'f');
+        EXPECT_EQ(recs.back().data[3], 'e');
     }
 
     // --- Unreliable -> send_datagram --------------------------------------
@@ -397,14 +512,18 @@ TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
 
         DataChannelConfig cfg;
         cfg.reliability = DataChannelReliability::kUnreliable;
+        cfg.ordered     = false;
         ch.open(cfg);
+        complete_handshake(*mock_raw, ch);
+
+        const auto before = mock_raw->snapshot().size();
 
         std::uint8_t payload[] = {'t', 'e', 'l'};
         ch.send(payload);
 
         auto recs = mock_raw->snapshot();
-        ASSERT_EQ(recs.size(), 1u);
-        EXPECT_EQ(recs[0].method, MockSctpSocket::Method::kDatagram);
+        ASSERT_EQ(recs.size(), before + 1);
+        EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kDatagram);
     }
 
     // --- PartialReliableTTL -> send_partial_reliable(ttl=max_packet_lifetime_ms)
@@ -418,14 +537,17 @@ TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
         cfg.reliability = DataChannelReliability::kPartialReliableTTL;
         cfg.max_packet_lifetime_ms = 250;
         ch.open(cfg);
+        complete_handshake(*mock_raw, ch);
+
+        const auto before = mock_raw->snapshot().size();
 
         std::uint8_t payload[] = {'c', 'm', 'd'};
         ch.send(payload);
 
         auto recs = mock_raw->snapshot();
-        ASSERT_EQ(recs.size(), 1u);
-        EXPECT_EQ(recs[0].method, MockSctpSocket::Method::kPartialReliable);
-        EXPECT_EQ(recs[0].ttl_ms, 250);
+        ASSERT_EQ(recs.size(), before + 1);
+        EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kPartialReliable);
+        EXPECT_EQ(recs.back().ttl_ms, 250);
     }
 
     // --- PartialReliableCount -> send_partial_reliable(ttl=count*100ms) ---
@@ -439,14 +561,17 @@ TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
         cfg.reliability = DataChannelReliability::kPartialReliableCount;
         cfg.max_retransmits = 5;
         ch.open(cfg);
+        complete_handshake(*mock_raw, ch);
+
+        const auto before = mock_raw->snapshot().size();
 
         std::uint8_t payload[] = {'r', 'e', 'x'};
         ch.send(payload);
 
         auto recs = mock_raw->snapshot();
-        ASSERT_EQ(recs.size(), 1u);
-        EXPECT_EQ(recs[0].method, MockSctpSocket::Method::kPartialReliable);
-        EXPECT_EQ(recs[0].ttl_ms, 500)   // 5 * 100 ms
+        ASSERT_EQ(recs.size(), before + 1);
+        EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kPartialReliable);
+        EXPECT_EQ(recs.back().ttl_ms, 500)   // 5 * 100 ms
             << "PartialReliableCount should map count → count * 100ms TTL";
     }
 }
@@ -466,6 +591,9 @@ TEST(SctpDataChannel, CloseIsIdempotentAndTearsDownSocket) {
     EXPECT_TRUE(mock_raw->has_recv_callback());
     EXPECT_TRUE(spy->recv_callback_set.load());
 
+    std::vector<std::string> state_events;
+    ch.set_on_state([&](const char* s) { state_events.emplace_back(s); });
+
     ch.close();
     EXPECT_FALSE(ch.is_opened());
     EXPECT_FALSE(ch.is_socket_ready());
@@ -475,9 +603,13 @@ TEST(SctpDataChannel, CloseIsIdempotentAndTearsDownSocket) {
     EXPECT_TRUE(spy->recv_callback_cleared.load())
         << "close() must clear the SCTP recv callback so usrsctp's "
            "worker thread can't fire into a torn-down channel";
+    ASSERT_EQ(state_events.size(), 1u);
+    EXPECT_EQ(state_events[0], "closed");
 
     // Second close — must be a no-op (no crash, no double-free).
     EXPECT_NO_THROW(ch.close());
+    EXPECT_EQ(state_events.size(), 1u)
+        << "close() must report \"closed\" exactly once";
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +635,166 @@ TEST(SctpDataChannelRegistry, RegisterDefaultPluginsPublishesSctp) {
         if (id == "sctp") { found = true; break; }
     }
     EXPECT_TRUE(found);
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: the DATA_CHANNEL_OPEN is emitted exactly once (RFC 8832 §5.1).
+// ---------------------------------------------------------------------------
+TEST(SctpDataChannel, DcepOpenIsSentExactlyOnce) {
+    auto mock = std::make_unique<MockSctpSocket>();
+    auto* mock_raw = mock.get();
+    SctpDataChannel ch(std::move(mock));
+
+    DataChannelConfig cfg;
+    cfg.label = "telemetry";
+    ch.open(cfg);
+
+    // open(cfg) before open() — the OPEN goes out when the socket is
+    // wired (i.e. on open()).
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+
+    auto recs = mock_raw->snapshot();
+    ASSERT_EQ(recs.size(), 1u)
+        << "exactly one DATA_CHANNEL_OPEN must be sent";
+    EXPECT_TRUE(recs[0].has_ppid);
+    EXPECT_EQ(recs[0].ppid, sctp::kPpidDcep);
+    EXPECT_EQ(recs[0].method, MockSctpSocket::Method::kStream)
+        << "the DCEP OPEN must ride the ordered + reliable path";
+
+    // The payload must decode as a DATA_CHANNEL_OPEN carrying the label.
+    const auto params =
+        sctp::dcep_decode_open(recs[0].data.data(), recs[0].data.size());
+    ASSERT_TRUE(params.has_value());
+    EXPECT_EQ(params->label, "telemetry");
+
+    // Repeating open() / open(cfg) must not send a second OPEN.
+    ch.open(cfg);
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+    EXPECT_EQ(mock_raw->snapshot().size(), 1u)
+        << "the DATA_CHANNEL_OPEN must be sent at most once";
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: an inbound user message is delivered exactly once.
+// ---------------------------------------------------------------------------
+TEST(SctpDataChannel, InboundMessageIsDeliveredOnce) {
+    auto mock = std::make_unique<MockSctpSocket>();
+    auto* mock_raw = mock.get();
+    SctpDataChannel ch(std::move(mock));
+
+    std::atomic<int> msg_count{0};
+    ch.set_on_message([&](BufferView) { ++msg_count; });
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+
+    const std::uint8_t payload[] = {'x', 'y', 'z'};
+    mock_raw->simulate_recv_with_ppid(/*stream=*/0, sctp::kPpidBinary, payload);
+
+    EXPECT_EQ(msg_count.load(), 1)
+        << "an inbound user message must reach the application exactly "
+           "once — the PPID demux and the legacy callback must not both "
+           "fire for the same chunk";
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: an inbound DATA_CHANNEL_OPEN is answered with exactly one
+//           DATA_CHANNEL_ACK, and the channel reports "open".
+// ---------------------------------------------------------------------------
+TEST(SctpDataChannel, InboundDcepOpenIsAnsweredWithOneAck) {
+    auto mock = std::make_unique<MockSctpSocket>();
+    auto* mock_raw = mock.get();
+    SctpDataChannel ch(std::move(mock));
+
+    std::vector<std::string> state_events;
+    ch.set_on_state([&](const char* s) { state_events.emplace_back(s); });
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+
+    // The peer opens a channel toward us.
+    DataChannelConfig peer_cfg;
+    peer_cfg.label       = "peer";
+    peer_cfg.priority    = 32;
+    peer_cfg.reliability = DataChannelReliability::kReliableOrdered;
+    const auto open_bytes = sctp::dcep_encode_open(peer_cfg);
+
+    mock_raw->simulate_recv_with_ppid(/*stream=*/0, sctp::kPpidDcep,
+                                      open_bytes);
+
+    // Exactly one DATA_CHANNEL_ACK must go back.
+    auto recs = mock_raw->snapshot();
+    ASSERT_EQ(recs.size(), 1u)
+        << "an inbound DATA_CHANNEL_OPEN must be answered with exactly "
+           "one DATA_CHANNEL_ACK";
+    EXPECT_EQ(recs[0].ppid, sctp::kPpidDcep);
+    ASSERT_EQ(recs[0].data.size(), 1u);
+    EXPECT_EQ(recs[0].data[0], sctp::kDcepAck);
+
+    // The channel reports "open" — and the peer's QoS was adopted.
+    ASSERT_EQ(state_events.size(), 2u);
+    EXPECT_EQ(state_events[0], "connecting");
+    EXPECT_EQ(state_events[1], "open");
+    EXPECT_EQ(ch.config().label, "peer");
+    EXPECT_EQ(ch.config().priority, 32);
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: before the handshake completes, every user message is sent
+//           ordered — even on an unordered channel (RFC 8832 §6).
+// ---------------------------------------------------------------------------
+TEST(SctpDataChannel, UnorderedChannelSendsOrderedBeforeHandshake) {
+    auto mock = std::make_unique<MockSctpSocket>();
+    auto* mock_raw = mock.get();
+    SctpDataChannel ch(std::move(mock));
+
+    DataChannelConfig cfg;
+    cfg.label       = "telemetry";
+    cfg.reliability = DataChannelReliability::kUnreliable;
+    cfg.ordered     = false;
+    ch.open(cfg);
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+
+    const auto before = mock_raw->snapshot().size();
+
+    std::uint8_t payload[] = {'t', 'e', 'l'};
+    ch.send(payload);
+
+    auto recs = mock_raw->snapshot();
+    ASSERT_EQ(recs.size(), before + 1);
+    EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kStream)
+        << "RFC 8832 §6: before the DATA_CHANNEL_ACK (or any other "
+           "message) has been received, user data MUST be sent ordered";
+
+    // Once the handshake completes, the channel's own semantics apply.
+    complete_handshake(*mock_raw, ch);
+    const auto after_handshake = mock_raw->snapshot().size();
+
+    ch.send(payload);
+    recs = mock_raw->snapshot();
+    ASSERT_EQ(recs.size(), after_handshake + 1);
+    EXPECT_EQ(recs.back().method, MockSctpSocket::Method::kDatagram)
+        << "after the handshake the channel's own unordered semantics apply";
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: an inbound DATA_CHANNEL_ACK completes the handshake.
+// ---------------------------------------------------------------------------
+TEST(SctpDataChannel, InboundDcepAckCompletesTheHandshake) {
+    auto mock = std::make_unique<MockSctpSocket>();
+    auto* mock_raw = mock.get();
+    SctpDataChannel ch(std::move(mock));
+
+    std::vector<std::string> state_events;
+    ch.set_on_state([&](const char* s) { state_events.emplace_back(s); });
+
+    DataChannelConfig cfg;
+    cfg.label = "cmd";
+    ch.open(cfg);
+    ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
+
+    const auto ack = sctp::dcep_encode_ack();
+    mock_raw->simulate_recv_with_ppid(/*stream=*/0, sctp::kPpidDcep, ack);
+
+    ASSERT_EQ(state_events.size(), 2u);
+    EXPECT_EQ(state_events[0], "connecting");
+    EXPECT_EQ(state_events[1], "open");
 }
 
 } // namespace

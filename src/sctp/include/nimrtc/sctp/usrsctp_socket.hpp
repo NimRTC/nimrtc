@@ -210,9 +210,12 @@ public:
     //
     // PPID-aware sends stamp the wire PPID (DCEP=50, string=51,
     // binary=53) via SCTP_SENDV_SNDINFO; unordered forces SCTP_UNORDERED.
-    // Inbound delivery fans out to both the legacy callback (no PPID,
-    // for existing AF_INET loopback tests) and the PPID-aware callback
-    // (for SctpDataChannel's DCEP demux). The packet hooks bridge the
+    // Inbound delivery is **either/or**, not a fan-out: the PPID-aware
+    // callback wins when it is registered (the payload protocol
+    // identifier is what the DCEP demux needs); the legacy callback
+    // is the fallback for callers that do not speak the PPID seam
+    // (the AF_INET loopback tests register only `set_on_recv`).
+    // Firing both would deliver every user message twice. The packet hooks bridge the
     // engine's DTLS AppData pump: set_on_packet forwards usrsctp
     // conn_output bytes to IDtlsSession::send_app_data, and
     // feed_inbound_packet passes DTLS-decrypted bytes to

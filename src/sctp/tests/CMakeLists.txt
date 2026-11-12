@@ -47,6 +47,23 @@ target_link_libraries(test_sctp_factory PRIVATE
     GTest::gtest_main
     GTest::gtest)
 
+# -----------------------------------------------------------------------------
+# test_dcep — DCEP (RFC 8832) encode / decode round-trip
+# -----------------------------------------------------------------------------
+add_executable(test_dcep test_dcep.cpp)
+
+set_target_properties(test_dcep PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_dcep LENIENT)
+
+target_link_libraries(test_dcep PRIVATE
+    nimrtc::sctp
+    nimrtc::plugins
+    nimrtc::core
+    GTest::gtest_main
+    GTest::gtest)
+
 # Test needs the full `SctpStubFactory` definition (the public include root
 # only forward-declares it; the concrete definition lives in src/, which
 # is PRIVATE on nimrtc_sctp). Expose the private path only to the test
@@ -58,6 +75,9 @@ target_include_directories(test_sctp_factory PRIVATE
 # for the rationale (CMake 4.0 multi-config conditional bug).
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_sctp_factory
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+    gtest_discover_tests(test_dcep
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()

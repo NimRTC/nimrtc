@@ -1105,6 +1105,54 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The acceptance runner lost a port race.** The runner now waits for the
   port instead of assuming it is free, so a slow start no longer turns
   into a spurious failure.
+- **The SCTP DataChannel was a shell: it was never opened, and every
+  inbound message arrived twice.**  `create_data_channel()` called only
+  `IDataChannel::open(cfg)` — the overload that caches the config — and
+  never `IPlugin::open()`, the one that wires the backend's receive
+  callbacks and marks the channel usable.  The channel that came back
+  could therefore never send (`send()` returned `kErrNotReady` every
+  time) and never received anything either.  The engine now arms the
+  channel with `IPlugin::open()` and, when that fails, reports the
+  error through `on_error_` and returns `nullptr` instead of handing
+  back a channel that silently fails.
+- **An inbound SCTP message was delivered to the application twice.**  The
+  socket fired both the payload-protocol-aware callback and the legacy
+  callback for the same chunk, and the channel had registered both — so
+  every user message arrived twice, and a single `DATA_CHANNEL_OPEN`
+  was answered with two `DATA_CHANNEL_ACK`s.  The two callbacks are now
+  mutually exclusive: the payload-protocol-aware one wins when it is
+  registered, the legacy one is the fallback for backends that do not
+  speak that seam.
+- **The DCEP wire format did not carry the channel's QoS.**  The channel
+  type was encoded as one of only three values, so an unordered or
+  unreliable channel looked like a reliable in-order one to the peer,
+  and the peer's priority was read off the wire and thrown away.  The
+  six channel types RFC 8832 registers are now implemented (the
+  high-order bit flags unordered delivery), the priority survives the
+  round trip, and a malformed or reserved channel type is rejected
+  instead of being guessed at.
+- **The DCEP handshake never happened, and the channel lied about its
+  state.**  The channel announced `"open"` the moment it was opened —
+  before any association existed and before the peer had acknowledged
+  anything — and the code that emits the `DATA_CHANNEL_OPEN` had no
+  caller at all, so the peer never learned the channel's label or QoS
+  and never answered.  The channel now reports `"connecting"` on open
+  and `"open"` only once the handshake completes (a `DATA_CHANNEL_ACK`,
+  a peer `DATA_CHANNEL_OPEN`, or any user message on the channel),
+  reports `"closed"` on close, and emits the `DATA_CHANNEL_OPEN` exactly
+  once.
+  - **Behaviour change:** a channel that used to be `"open"` right after
+    creation is now `"connecting"` until the handshake completes.  Before
+    the SCTP-over-DTLS transport lands the channel stays in
+    `"connecting"` — the old `"open"` was reported without a peer ever
+    having acknowledged the channel.
+  - Until the handshake completes, every user message is sent ordered,
+    whatever the channel's own ordering semantics are (RFC 8832 §6).
+- **The reliability parameter was encoded through a 16-bit variable.**
+  The shift chain assumed a 32-bit value, which made MSVC warn about
+  the shift and left the correct result resting on an integer-promotion
+  accident.  The variable is now 32 bits wide, and a reliable channel
+  carries a reliability parameter of 0 as RFC 8832 requires.
 
 ### Tooling
 

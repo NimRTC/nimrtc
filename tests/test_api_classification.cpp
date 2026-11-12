@@ -341,12 +341,20 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
     //
+    // v1.3 bump: +3 public headers (129 -> 132) for the video-capture
+    //   layer (remote-desktop plan A2 / A2b) — the bounded frame queue
+    //   the capture backends hand frames to, and the plugin seam the
+    //   engine resolves the capture device through:
+    //     - plugins/video_capture.hpp (ICaptureDevice + factory seam)
+    //     - video_capture/capture_queue.hpp (the portable bounded queue)
+    //     - video_capture/synthetic_capture.hpp (the synthetic device)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 129;
+    constexpr std::size_t kBaselineHeaderCount = 132;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

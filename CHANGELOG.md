@@ -927,6 +927,30 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The SDP parser threw `std::out_of_range` on a truncated attribute
+  line.**  The parser skips a fixed number of characters to get past the
+  attribute name -- `a=msid-semantic:` skips 15, `a=ice-options:` skips
+  13 -- with `std::string_view::substr`.  `substr` throws when the
+  position exceeds the string's size, so an attribute line carrying no
+  value at all killed the parser:
+
+      terminate called after throwing an instance of 'std::out_of_range'
+        what():  basic_string_view::substr: __pos (which is 15) > __size (which is 14)
+
+  - The fuzzer found it on a 15-byte input (`a=msid-semantic:`), in the
+    `fuzz_sdp` target.
+  - The consequence for an application was a hard crash while parsing a
+    remote peer's offer: the parser is fed attacker-controlled bytes, so
+    it had to report the malformed line rather than throw.
+  - A new `drop_prefix()` helper takes the tail of a string view when it
+    is long enough and yields an empty view when it is not -- which is
+    the answer the caller wanted anyway, since a truncated attribute has
+    no value.  All 19 attribute-skip sites go through it now, so the
+    class of bug is closed rather than the two instances that happened
+    to fire.
+  - Covered by `SdpParser.TruncatedAttributeLineDoesNotThrow` in
+    `src/modules/sdp/tests/test_sdp.cpp`.
+
 - **The XR Statistics Summary block lost every field the peer had asked
   for.**  The engine narrows the peer's `stat-summary` list to the
   fields it actually measures (`loss` and `jitt`), and the narrowing

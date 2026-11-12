@@ -101,6 +101,13 @@ class NIMRTC_API_STABLE ISessionFactory;
 // it does not belong to the audio-decoder category -- it has its own
 // slot and its own exit next to the audio routing table.
 class NIMRTC_API_STABLE IDtmfCodecFactory;
+// v1.2.0 (session capability plan, X1): the RTCP Extended Report
+// consumer seam.  The engine routes inbound XR sub-packets (payload
+// type 207) into it; it decodes the RFC 3611 report blocks for the
+// host.  Forward-declared like the other factory types so the
+// registry's TypedRegistry<> field can reference it without pulling the
+// seam header into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IXrReportFactory;
 } // namespace plugins
 
 // Transport PAL Slice 8 (v0.10.2): typed factory slots for DTLS / SCTP /
@@ -557,6 +564,26 @@ public:
         return net_feedback_.list_ids();
     }
 
+    // -- XR report (v1.2.0, session capability plan X1) ------------------
+    //
+    // Typed slot for the RTCP Extended Report consumer seam
+    // (`plugins::IXrReport`).  The engine routes inbound RTCP XR
+    // sub-packets (payload type 207) into it, and it decodes the
+    // RFC 3611 report blocks for the host.
+    //
+    // The built-in implementation lives in `src/modules/rtp/` and
+    // registers under the id "nimrtc_xr"; the engine resolves it
+    // through `EngineConfig::xr_report_name`.
+    void register_xr_report(std::string_view id,
+                            const plugins::IXrReportFactory* f);
+    [[nodiscard]] const plugins::IXrReportFactory*
+    get_xr_report(std::string_view id) const {
+        return xr_report_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string_view> list_xr_reports() const {
+        return xr_report_.list_ids();
+    }
+
     // -- DataChannel (P2: typed factory slot for IDataChannelFactory*) -----
     //
     // Mirrors the SCTP / DTLS / raw_udp / transport-stack slots above.
@@ -720,6 +747,10 @@ private:
     // collector seam.  The built-in collector registers under
     // "nimrtc_net_feedback".
     TypedRegistry<plugins::INetFeedbackFactory>    net_feedback_;
+    // v1.2.0 (session capability plan X1): typed factory slot for the
+    // RTCP Extended Report consumer seam.  The built-in consumer
+    // registers under "nimrtc_xr".
+    TypedRegistry<plugins::IXrReportFactory>       xr_report_;
     // DataChannel P2 typed slot — see register_datachannel() above for
     // the rationale.
     TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
@@ -933,6 +964,16 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kNetFeedback,  \
             #id, factory_ptr }
 
+/** Register an RTCP Extended Report consumer plugin by ID and factory pointer.
+ *  v1.2.0 (session capability plan X1) — typed slot for
+ *  `plugins::IXrReportFactory*`. */
+#define NIMRTC_REGISTER_XR_REPORT(id, factory_ptr)                     \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_xr_report_){                            \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kXrReport,     \
+            #id, factory_ptr }
+
 /** Register a DataChannel plugin by ID and factory pointer.
  *  P2 typed slot ??mirrors the SCTP / DTLS / raw_udp / transport-stack
  *  hooks above; see `register_datachannel()` for the canonical
@@ -1053,6 +1094,9 @@ public:
         // v1.2.0 M1 (F2): the receiver-side network-feedback collector
         // seam -- see register_net_feedback().
         kNetFeedback,
+        // v1.2.0 (session capability plan X1): the RTCP Extended Report
+        // consumer seam -- see register_xr_report().
+        kXrReport,
         // P2: DataChannel typed factory slot ??see register_datachannel().
         kDataChannel,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
@@ -1145,6 +1189,10 @@ public:
             case Category::kNetFeedback:
                 reg.register_net_feedback(id,
                     static_cast<const plugins::INetFeedbackFactory*>(factory));
+                break;
+            case Category::kXrReport:
+                reg.register_xr_report(id,
+                    static_cast<const plugins::IXrReportFactory*>(factory));
                 break;
             case Category::kDataChannel:
                 reg.register_datachannel(id,

@@ -1179,7 +1179,39 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
             }
 
             case rtp::RtcpBlockKind::kReceiverReport:
+                // The receiver-side network feedback goes to the collector,
+                // which aggregates it into one snapshot (v1.2.0 M1, F1/F2).
+                // The collector decides what it understands — the payload
+                // type and the FMT are handed over so it can tell a REMB
+                // from a PLI and a transport-cc from a NACK.
+                if (net_feedback_) {
+                    net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
+                                                 blk.packet, now);
+                    ++impl_->net_feedback_blocks;
+                }
+                break;
+
             case rtp::RtcpBlockKind::kRtpFeedback:
+                // The RTPFB packet type carries several feedback
+                // messages, told apart by the FMT (RFC 4585 §6.4):
+                // NACK (1), TMMBR (3), TMMBN (4), transport-cc (15).
+                //
+                // A TMMBR is *not* receiver-side network feedback: it
+                // is the peer telling us how much we may send, so it
+                // goes to the TMMBR path (v1.2.0, session plan X5)
+                // rather than to the bandwidth collector.  Everything
+                // else (NACK, transport-cc) is the collector's business.
+                if (blk.fmt == 3) {   // TMMBR — RFC 5104 §4.2.1
+                    handle_inbound_tmmbr(blk.packet);
+                    break;
+                }
+                if (net_feedback_) {
+                    net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
+                                                 blk.packet, now);
+                    ++impl_->net_feedback_blocks;
+                }
+                break;
+
             case rtp::RtcpBlockKind::kPayloadSpecificFeedback:
                 // The receiver-side network feedback goes to the collector,
                 // which aggregates it into one snapshot (v1.2.0 M1, F1/F2).
@@ -1193,8 +1225,26 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 }
                 break;
 
+            case rtp::RtcpBlockKind::kExtendedReport:
+                // The RFC 3611 extended report goes to the XR consumer,
+                // which decodes the report blocks for the host (v1.2.0,
+                // session capability plan X1).  The consumer decides
+                // what it understands — a PT that is not 207 is never
+                // its business.
+                if (xr_report_) {
+                    xr_report_->on_rtcp_block(blk.payload_type, blk.packet, now);
+                    ++impl_->xr_report_blocks;
+                }
+                // The Receiver Reference Time block (BT = 4) is the
+                // one block that needs the *engine's* attention: our
+                // next DLRR answers it (RFC 3611 §4.5).  The consumer
+                // decodes it for the host; the engine remembers it so
+                // the DLRR can carry the right LRR / DLRR pair.
+                note_peer_reference_time(blk.packet);
+                break;
+
             default:
-                // SDES, BYE, APP, XR and anything this build does not know
+                // SDES, BYE, APP and anything this build does not know
                 // about: not ours.
                 break;
         }
@@ -1309,11 +1359,26 @@ int NimRTCEngine::resolve_audio_bitrate_ceiling() const noexcept {
 }
 
 void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
-    if (!config_.audio_bitrate_adaptive) return;
     if (!codec_plugin_ || !bwe_) return;
 
     const int current = audio_bitrate_current_bps_;
     if (current <= 0) return;
+
+    // ---- The peer's TMMBR limit (v1.2.0, session plan X5) -----------
+    //
+    // RFC 5104 §4.2.1.2: a TMMBR "indicates the maximum bitrate the
+    // sender of the packet ... is willing to receive".  The TMMBN we
+    // answer it with (RFC 5104 §4.2.2.2) *acknowledges* that bound, so
+    // from that moment on the limit is a promise, not a suggestion.
+    //
+    // The scheduler budget and the pacer are already clamped by it (see
+    // engine_transport.cpp), but the *encoder* is what actually decides
+    // how many bits go on the wire — a pacer that drops the excess just
+    // loses frames.  So the limit has to reach the encoder too, or the
+    // engine would encode above the ceiling it promised in the TMMBN.
+    //
+    // A limit of 0 means "no limit" (the peer has not sent a TMMBR).
+    const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
 
     // ---- Rate limit: one step per `audio_bitrate_update_interval_ms` ----
     const auto now = std::chrono::steady_clock::now();
@@ -1327,12 +1392,39 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
     }
 
     const std::uint32_t bwe_bps = bwe_->estimate().target_bitrate_bps;
-    if (bwe_bps == 0) {
+
+    // ---- The peer's promise outranks the "pinned encoder" switch ----
+    //
+    // `Config::audio_bitrate_adaptive = false` says "do not move the
+    // encoder because of the *estimate*".  It is not a licence to break
+    // a promise the engine already made on the wire: the TMMBN that
+    // acknowledged the TMMBR told the peer "this bound is in force".
+    // RFC 5104 §4.2.2.2 makes the bounding set a commitment, so the
+    // encoder is brought under the limit even when the estimate-driven
+    // adaptation is off.
+    if (!config_.audio_bitrate_adaptive) {
+        if (peer_limit > 0 && current > static_cast<int>(peer_limit)) {
+            apply_audio_bitrate(static_cast<int>(peer_limit), current,
+                                bwe_bps, peer_limit);
+        }
+        return;
+    }
+
+    if (bwe_bps == 0 && peer_limit == 0) {
         // No estimate yet — keep the current bitrate rather than
         // reading "0" as "no bandwidth at all".
         return;
     }
     audio_bitrate_last_step_ = now;
+
+    // The effective estimate is the tighter of the two: the link's own
+    // estimate and the ceiling the peer asked for.  When only the peer
+    // limit is known (no estimate yet), the peer limit is the estimate.
+    std::uint32_t estimate_bps = bwe_bps;
+    if (peer_limit > 0 &&
+        (estimate_bps == 0 || estimate_bps > peer_limit)) {
+        estimate_bps = peer_limit;
+    }
 
     // ---- Target = the reserved share of the estimate -------------------
     //
@@ -1345,11 +1437,33 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
     //
     // The rule clamps the floor to the ceiling (a ceiling configured
     // below the floor wins), so the two are passed through unchanged.
-    const int ceiling = audio_bitrate_ceiling_bps_ > 0 ? audio_bitrate_ceiling_bps_
-                                                       : current;
-    const int floor_bps = config_.audio_min_bitrate_bps > 0
-                              ? config_.audio_min_bitrate_bps
-                              : 1000;
+    //
+    // ---- The peer's limit wins over the local floor -------------------
+    //
+    // The local floor (`Config::audio_min_bitrate_bps`) exists so that a
+    // congestion collapse does not starve the audio.  The peer's TMMBR
+    // limit is a *different* kind of constraint: it is a promise the
+    // engine makes in its TMMBN, and exceeding it means the engine
+    // breaks its own promise — the peer has told us it cannot receive
+    // more, and a promise is not something a local floor may override.
+    //
+    // So when the peer's limit is below the local floor, the peer limit
+    // wins and the floor is lowered to it.  (OD-E decision 3:
+    // "peer-wins".)  A TMMBN is a commitment, and a commitment to send
+    // *less* is not something the sender may quietly exceed.
+    int ceiling = audio_bitrate_ceiling_bps_ > 0 ? audio_bitrate_ceiling_bps_
+                                                  : current;
+    int floor_bps = config_.audio_min_bitrate_bps > 0
+                        ? config_.audio_min_bitrate_bps
+                        : 1000;
+    if (peer_limit > 0) {
+        if (ceiling > static_cast<int>(peer_limit)) {
+            ceiling = static_cast<int>(peer_limit);
+        }
+        if (floor_bps > static_cast<int>(peer_limit)) {
+            floor_bps = static_cast<int>(peer_limit);
+        }
+    }
 
     detail::BandwidthDemand audio_demand = detail::reserved_audio_demand(
         config_.audio_bwe_share,
@@ -1357,7 +1471,7 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
         static_cast<std::uint32_t>(ceiling));
 
     const detail::BandwidthAllocation alloc =
-        detail::allocate_bandwidth(bwe_bps, {audio_demand});
+        detail::allocate_bandwidth(estimate_bps, {audio_demand});
     if (alloc.targets.empty() || alloc.targets[0] == 0) return;
     int target = static_cast<int>(alloc.targets[0]);
     if (target < floor_bps) target = floor_bps;
@@ -1373,14 +1487,37 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
         target = current + hysteresis;
     } else {
         // Fall fast: at most -50 % per step.
-        if (target > current - hysteresis) return;
-        target = std::max(target, current / 2);
+        //
+        // ...except when the peer's limit is already being violated.
+        // A limit that is in force *now* is not something to "ramp down
+        // to" over the next few steps — the promise is already broken,
+        // and the rate-limited ramp would keep it broken for seconds.
+        // So the encoder drops straight to the target (which is already
+        // clamped to the limit by the ceiling above) in one step.
+        if (peer_limit > 0 && current > static_cast<int>(peer_limit)) {
+            target = std::min(target, static_cast<int>(peer_limit));
+        } else {
+            if (target > current - hysteresis) return;
+            target = std::max(target, current / 2);
+        }
     }
     if (target < floor_bps) target = floor_bps;
     if (target > ceiling) target = ceiling;
     if (target == current) return;
 
-    // ---- Push to the codec (in-place reconfigure) ----------------------
+    apply_audio_bitrate(target, current, bwe_bps, peer_limit);
+}
+
+/** Push a new bitrate into the running encoder (in-place reconfigure).
+ *
+ *  The codec state and its statistics survive the step — only the
+ *  target rate changes.  A codec plugin that refuses the new rate is
+ *  left alone (and the engine keeps the old rate), because a rejected
+ *  reconfigure must not leave the engine believing it is sending at a
+ *  rate it is not. */
+void NimRTCEngine::apply_audio_bitrate(int target, int current,
+                                        std::uint32_t bwe_bps,
+                                        std::uint32_t peer_limit) noexcept {
     plugins::CodecConfig cfg = codec_plugin_->config();
     cfg.bitrate_bps = target;
     if (codec_plugin_->update_config(cfg) != plugins::kOk) {
@@ -1393,7 +1530,8 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
     core::log::Logger::instance().info(
         "engine: audio encoder bitrate " + std::to_string(current) +
         " -> " + std::to_string(target) + " bps (bwe=" +
-        std::to_string(bwe_bps) + ")");
+        std::to_string(bwe_bps) + ", peer_tmmbr_limit=" +
+        std::to_string(peer_limit) + ")");
 }
 
 NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
@@ -1414,6 +1552,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // never fed, so the bandwidth target never moves.
     out.net_feedback_blocks   = impl_->net_feedback_blocks;
     out.bwe_feedback_samples  = impl_->bwe_feedback_samples;
+    // v1.2.0 (session plan X1): the XR routing counter.
+    out.xr_report_blocks      = impl_->xr_report_blocks;
     if (bwe_) {
         out.bandwidth_estimate_bps = bwe_->estimate().target_bitrate_bps;
     }

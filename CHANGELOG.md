@@ -178,6 +178,121 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     codec's own wire format is covered by
     `src/modules/dtmf/tests/test_dtmf_codec.cpp`.
 
+- **An RTCP Extended Report (RFC 3611) seam, so PT 207 stops being an
+  opaque byte span (v1.2.0, session capability plan X1).**  The
+  compound demultiplexer already *recognised* payload type 207, but
+  recognition was the whole of the implementation: the XR sub-packet
+  came out of the demux as a byte span that nothing consumed, so a
+  peer that sent extended reports was reporting into a void.
+  - `plugins::IXrReport` — a seam of its own, because the plugin layer
+    may not name a concrete module.  It defines its own neutral value
+    types (`XrPacket` / `XrBlock` / `XrBlockType`) and the module-side
+    adapter translates between them and the wire-level ones.
+  - `src/modules/rtp/` — the built-in implementation, registered under
+    the id `"nimrtc_xr"`.  The engine reaches it through the registry's
+    XR slot and never includes the module's headers.
+  - The blocks NimRTC parses are **BT=4** (Receiver Reference Time),
+    **BT=5** (DLRR) and **BT=6** (Statistics Summary).  The other
+    block types RFC 3611 registers -- Loss RLE (1), Duplicate RLE (2),
+    Packet Receipt Times (3), VoIP Metrics (7) -- are *recognised but
+    not parsed*: the block walk skips them by their length, which is
+    what makes the format extensible, so an unknown block is never an
+    error.
+  - The engine surface: `EngineConfig::xr_report_name` (default
+    `"nimrtc_xr"`), `NimRTCEngine::xr_report()` -- the host reads the
+    decoded blocks out of `snapshot()` -- and `Stats::xr_report_blocks`,
+    the counter that makes the routing observable.  A malformed report
+    from a peer is *counted*, not thrown: the read path must not fail
+    because one peer sent a broken report.
+  - **The block numbering is RFC 3611's, not a draft's.**  There is no
+    block type named "Receiver Estimated Quality" in the standard; that
+    was the numbering of an early draft (where BT=1 was it and BT=6 was
+    DLRR).  A report built with the draft's numbering would not
+    interoperate with a conforming peer, so the implementation and the
+    plan document both use the standard's actual registry.
+  - Covered by `src/modules/rtp/tests/test_rtcp_xr.cpp` (the wire
+    format), `src/modules/rtp/tests/test_xr_report_plugin.cpp` (the
+    seam) and `tests/test_engine_xr_report.cpp` (the engine wiring).
+
+- **The outbound RTCP XR / TMMBR plane, so the engine can answer the
+  peer's feedback instead of only receiving it (v1.2.0, session
+  capability plan X2 / X4 / X5 / X5b / X6).**  The XR seam landed the
+  *receive* half; the engine could not yet say anything, and the
+  `disable_tmmbr` knob of `plugins::SdpCodecConfig` was a dead field
+  that nothing read.
+  - **The engine sends an RFC 3611 extended report** (BT=4 Receiver
+    Reference Time, BT=5 DLRR, BT=6 Statistics Summary), one per RTCP
+    interval.  The DLRR sub-block names the *peer's* SSRC (the receiver
+    whose report is being answered), the middle 32 bits of that
+    report's NTP timestamp, and the delay since its arrival -- the three
+    values a peer needs to compute the round-trip time.
+  - **The engine sends a TMMBR** carrying the bit rate its bandwidth
+    estimator is *currently using*, so the peer throttles to a number
+    the engine actually honours.  A changed rate is reported at the
+    next RTCP interval; an unchanged one is refreshed every five
+    intervals, because the peer may have missed the previous message.
+  - **An inbound TMMBR is obeyed**: the tightest limit the peers ask
+    for clamps the scheduler's session budget, the per-class pacing
+    rates **and the audio encoder**, and every TMMBR is answered with
+    exactly one TMMBN (RFC 5104 §4.2.2.2) -- even when the tuple was
+    not accepted, which is what lets a participant that missed the last
+    TMMBR recover the state.  A tuple naming a media source the engine
+    does not send is recorded but not applied: it is somebody else's
+    constraint.
+  - **The peer's limit outranks the local audio floor.**  The
+    acknowledgement (the TMMBN) is a promise, so the limit the peer
+    asked for overrides `EngineConfig::audio_min_bitrate_bps`: the
+    encoder is allowed to drop *below* the local floor when the peer
+    asks for less.  The two constraints are not of the same kind -- the
+    local floor protects the audio against a congestion collapse,
+    while the peer's limit is a commitment the engine made on the wire.
+    The limit is honoured even when `audio_bitrate_adaptive` is
+    `false`: that switch says "do not move the encoder because of the
+    *estimate*", not "break the promises the engine already made".
+  - **TMMBR is opt-in.**  `EngineConfig::tmmbr_enabled` defaults to
+    `false` -- the engine sends no TMMBR unless the host asks for it.
+    `EngineConfig::disable_tmmbr` vetoes the feature in both
+    directions and overrides `tmmbr_enabled`.  The *inbound* side
+    needs no switch: a TMMBR the peer sends is always honoured.
+  - **Both features are negotiated, not assumed.**  The offer carries
+    `a=rtcp-fb:<pt> ccm tmmbr` (RFC 5104 §7.2) and
+    `a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt` (RFC 3611 §5.1); the
+    answer echoes the negotiated subset.  RFC 3611 §5.1 says a
+    participant "SHOULD NOT send XR blocks other than the ones indicated
+    by the parameters", and RFC 5104 §7.2 says "only the joint subset
+    of CCM parameters from the offer and answer may be used" -- so an
+    un-negotiated XR report or TMMBR is not merely wasteful, it is a
+    protocol violation.
+  - **The Statistics Summary's field list is the peer's.**  RFC 3611
+    §5.1 says the "stat-summary" parameter "contains a list indicating
+    which fields SHOULD be included in the Statistics Summary report
+    blocks that are sent", so the block's L and J flag bits follow the
+    peer's list: a peer that asked for "loss" alone gets no jitter
+    flag.  The engine produces loss and jitter and nothing else.
+  - `sdp::MediaDescription` gains `rtcp_xr` / `rtcp_xr_present`, with
+    parser and munger support.  The bare `a=rtcp-xr` attribute (no
+    parameters) is preserved as its own statement: RFC 3611 §5.2 gives
+    it the meaning "I understand the attribute but send me no XR
+    blocks".
+  - The engine surface: `EngineConfig::rtcp_xr_enabled`,
+    `EngineConfig::tmmbr_enabled`, `EngineConfig::disable_tmmbr` (the
+    switch that finally makes `plugins::SdpCodecConfig::disable_tmmbr`
+    meaningful), plus the observability accessors
+    `xr_reports_sent_count()`, `peer_tmmbr_limit_bps()`,
+    `last_tmmbr_bps()`, `tmmbr_sent_count()` and
+    `tmmbr_received_count()`.
+  - Covered by `tests/test_engine_tmmbr.cpp` (13 cases: the offer, the
+    answer, the limit, the tightest-limit rule, the foreign-source
+    rule and the malformed-packet rule),
+    `tests/test_engine_xr_tmmbr.cpp` (11 cases that assert on the
+    **wire bytes**: the XR report's RRTR / DLRR / Statistics Summary
+    blocks, the TMMBR's live bit rate, the `disable_tmmbr` veto and the
+    TMMBN's owner SSRC),
+    `tests/test_engine_audio_bitrate.cpp` (the encoder side of the
+    inbound TMMBR: the cap, the floor override, the pinned encoder and
+    the tightest-limit rule) and
+    `src/modules/rtp/tests/test_rtcp_xr.cpp` (the wire format).
+
 - **A pluggable session model, so a host can renegotiate instead of
   rebuilding the engine (v1.2.0, session capability plan N1 / T1).**  The
   engine used to build a *fixed* SDP media list (one audio m-line, one
@@ -768,6 +883,28 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **The XR Statistics Summary block lost every field the peer had asked
+  for.**  The engine narrows the peer's `stat-summary` list to the
+  fields it actually measures (`loss` and `jitt`), and the narrowing
+  helper walked the list with
+  `const std::string_view tok = flags.substr(start, i - start);` --
+  but `std::string::substr` returns a **temporary** `std::string`, and
+  the view was bound to that temporary.  The temporary died at the end
+  of the full expression, so the token read as garbage (an empty one
+  in practice), every field was rejected, and the negotiated field list
+  came back empty.
+  - The consequence on the wire: the engine's Statistics Summary block
+    went out with **neither** the L nor the J flag bit set, so a peer
+    that had asked for `loss,jitt` (or for `loss` alone) received a
+    block that reported no loss and no jitter -- the block was
+    syntactically valid and semantically empty.
+  - The helper now takes the view over the *named* string
+    (`const std::string_view fv(flags);`) and slices that, so the
+    token's lifetime is the string's.
+  - Covered by `tests/test_engine_xr_tmmbr.cpp` (the Statistics Summary
+    cases assert the L and J flag bits on the parsed wire block, for
+    both a "loss,jitt" and a "loss"-only peer request).
 
 - **The WebTransport data channel mistook a Chrome stream header for
   payload.**  A peer-initiated bidirectional stream starts with the

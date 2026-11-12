@@ -42,6 +42,7 @@
 #include <nimrtc/plugins/bwe.hpp>
 #include <nimrtc/plugins/codec.hpp>
 #include <nimrtc/plugins/ice_transport.hpp>
+#include <nimrtc/rtp/rtcp_tmmbr.hpp>
 
 namespace {
 
@@ -333,7 +334,23 @@ protected:
         // with a 1 ms interval so the steps are observable without
         // sleeping for seconds.
         cfg.audio_bitrate_update_interval_ms = 1;
+        // A reproducible SSRC: the inbound TMMBR names *our* stream
+        // (RFC 5104 §4.2.1.2), so the test needs to know the value the
+        // engine sends under.
+        cfg.audio_ssrc = 0x1234ABCDu;
         return cfg;
+    }
+
+    /// The peer asks us to send at most `bps` — the TMMBR path
+    /// (RFC 5104 §4.2.1.2), delivered as a real RTPFB packet so the
+    /// test exercises the same code the wire does.
+    static void send_peer_tmmbr(NimRTCEngine& engine, std::uint32_t bps) {
+        nimrtc::rtp::TmmbrEntry entry;
+        entry.ssrc        = engine.config().audio_ssrc;
+        entry.bitrate_bps = bps;
+        const auto pkt = nimrtc::rtp::build_tmmbr(0xAABBCCDDu, {entry});
+        ASSERT_FALSE(pkt.empty());
+        engine.feed_media_inbound(pkt.data(), pkt.size());
     }
 
     /** Run `steps` adaptation steps, sleeping past the interval between
@@ -473,6 +490,116 @@ TEST_F(EngineAudioBitrate, AnExplicitCeilingIsHonoured) {
     FakeBweFactory::last_created()->set_target(1'000'000);
     pump(engine, 30);
     EXPECT_LE(engine.stats().audio_encoder_bitrate_bps, 24000u);
+}
+
+// ===========================================================================
+// The peer's TMMBR limit (v1.2.0, session plan X5 / OD-E decision 3)
+// ===========================================================================
+
+TEST_F(EngineAudioBitrate, AnInboundTmmbrCapsTheEncoderBitrate) {
+    // RFC 5104 §4.2.1.2: a TMMBR "indicates the maximum bitrate the
+    // sender ... is willing to receive".  The engine answers it with a
+    // TMMBN (RFC 5104 §4.2.2.2), and that acknowledgement is a
+    // *promise* that the bound is in force.
+    //
+    // The scheduler budget and the pacer were clamped from the start,
+    // but the *encoder* decides how many bits go on the wire — so the
+    // limit has to reach the encoder as well.  Otherwise the engine
+    // encodes above the ceiling it just promised.
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_NE(FakeBweFactory::last_created(), nullptr);
+
+    // The link is wide open — the peer is the only constraint.
+    FakeBweFactory::last_created()->set_target(1'000'000);
+
+    EXPECT_EQ(engine.stats().audio_encoder_bitrate_bps, 32000u);
+
+    // The peer asks for at most 8 kbps.
+    send_peer_tmmbr(engine, 8'000);
+    EXPECT_EQ(engine.peer_tmmbr_limit_bps(), 8'000u);
+
+    pump(engine, 4);
+
+    EXPECT_LE(engine.stats().audio_encoder_bitrate_bps, 8'000u)
+        << "the peer's TMMBR limit caps the encoder — the engine must not "
+           "encode above the bound it acknowledged in its TMMBN";
+
+    // The codec plugin saw the capped value, too.
+    ASSERT_NE(FakeCodecFactory::last_created(), nullptr);
+    const auto& seen = FakeCodecFactory::last_created()->bitrates();
+    ASSERT_FALSE(seen.empty());
+    EXPECT_LE(static_cast<std::uint32_t>(seen.back()), 8'000u);
+}
+
+TEST_F(EngineAudioBitrate, ThePeerLimitWinsOverTheLocalFloor) {
+    // OD-E decision 3 ("peer-wins"): the local floor
+    // (`Config::audio_min_bitrate_bps`) exists so a congestion collapse
+    // cannot starve the audio.  The peer's TMMBR limit is a different
+    // kind of constraint — a promise the engine makes on the wire — so
+    // when the two conflict, the peer's limit wins and the encoder is
+    // allowed to go *below* the floor.
+    EngineConfig cfg = make_config();
+    cfg.audio_min_bitrate_bps = 8000;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+    ASSERT_NE(FakeBweFactory::last_created(), nullptr);
+
+    FakeBweFactory::last_created()->set_target(1'000'000);
+
+    // The peer asks for 5 kbps — below the 8 kbps floor.
+    send_peer_tmmbr(engine, 5'000);
+    ASSERT_EQ(engine.peer_tmmbr_limit_bps(), 5'000u);
+
+    pump(engine, 4);
+
+    EXPECT_LE(engine.stats().audio_encoder_bitrate_bps, 5'000u)
+        << "the peer's limit wins over the local floor";
+    EXPECT_LT(engine.stats().audio_encoder_bitrate_bps, 8'000u)
+        << "the encoder is allowed to go below the local floor — a TMMBN "
+           "is a commitment, and a commitment to send less is not "
+           "something the sender may quietly exceed";
+}
+
+TEST_F(EngineAudioBitrate, ThePeerLimitBeatsThePinnedEncoder) {
+    // `audio_bitrate_adaptive = false` says "do not move the encoder
+    // because of the *estimate*".  It is not a licence to break a
+    // promise the engine already made on the wire: the TMMBN that
+    // acknowledged the TMMBR told the peer "this bound is in force".
+    EngineConfig cfg = make_config();
+    cfg.audio_bitrate_adaptive = false;
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    EXPECT_EQ(engine.stats().audio_encoder_bitrate_bps, 32000u);
+
+    send_peer_tmmbr(engine, 12'000);
+    pump(engine, 4);
+
+    EXPECT_LE(engine.stats().audio_encoder_bitrate_bps, 12'000u)
+        << "the acknowledged TMMBR limit is honoured even when the "
+           "estimate-driven adaptation is off";
+}
+
+TEST_F(EngineAudioBitrate, TheTightestLimitWins) {
+    // RFC 5104 §3.5.4.2: with several receivers the bounding set is the
+    // tightest constraint, so a later, *looser* TMMBR must not raise
+    // the limit back up.
+    EngineConfig cfg = make_config();
+    NimRTCEngine engine(cfg);
+    ASSERT_EQ(engine.open(), 0u);
+
+    send_peer_tmmbr(engine, 16'000);
+    ASSERT_EQ(engine.peer_tmmbr_limit_bps(), 16'000u);
+
+    send_peer_tmmbr(engine, 24'000);
+    EXPECT_EQ(engine.peer_tmmbr_limit_bps(), 16'000u)
+        << "RFC 5104 §3.5.4.2: the tightest constraint is the one that "
+           "applies";
+
+    pump(engine, 4);
+    EXPECT_LE(engine.stats().audio_encoder_bitrate_bps, 16'000u);
 }
 
 }  // namespace

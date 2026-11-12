@@ -322,38 +322,38 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   pacer (video-pipeline plan P1):
     //     - pacing/pacing.hpp (the token bucket on a monotonic clock)
     //
-// v1.2.0 (session capability plan X1 / X3) bump: +4 public headers
-//   (118 -> 122) for the RTCP Extended Report seam and the TMMBR
-//   messages:
-//     - plugins/xr_report.hpp (IXrReport + factory -- the RFC 3611
-//       seam the engine routes the inbound XR sub-packets into)
-//     - rtp/rtcp_xr.hpp (the RFC 3611 XR block parser / builder)
-//     - rtp/rtcp_tmmbr.hpp (the RFC 5104 TMMBR / TMMBN messages)
-//     - rtp/xr_report_plugin.hpp (the module-side adapter that puts
-//       the XR parser behind the seam)
-//
-// v1.3 bump: +3 public headers (122 -> 125) for the shared `nvcodec`
-//   module -- the NVIDIA driver integration (NVENC / NVDEC) that the
-//   H.264, H.265 and AV1 codec modules consume:
-//     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
-//     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
-//       entry points)
-//     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    // v1.2.0 (session capability plan X1 / X3) bump: +4 public headers
+    //   (118 -> 122) for the RTCP Extended Report seam and the TMMBR
+    //   messages:
+    //     - plugins/xr_report.hpp (IXrReport + factory -- the RFC 3611
+    //       seam the engine routes the inbound XR sub-packets into)
+    //     - rtp/rtcp_xr.hpp (the RFC 3611 XR block parser / builder)
+    //     - rtp/rtcp_tmmbr.hpp (the RFC 5104 TMMBR / TMMBN messages)
+    //     - rtp/xr_report_plugin.hpp (the module-side adapter that puts
+    //       the XR parser behind the seam)
     //
-// v1.3 bump: +2 public headers (125 -> 127) for the H.265 / AV1 RTP
-//   payload formats (video plan C4 / C6):
-//     - video_payload/h265.hpp (RFC 7798 Single NAL / AP / FU)
-//     - video_payload/av1.hpp (draft-ietf-payload-av1 framing)
-//
-// v1.3 bump: +6 public headers (127 -> 133) for the H.265 and AV1
-//   codec modules (video plan C4 / C8) — the codec-specific halves
-//   that sit on top of the shared `nvcodec` driver integration:
-//     - h265/codec_plugin.hpp (the H.265 plugin factory)
-//     - h265/decoder.hpp (the H.265 software decoder)
-//     - h265/hw_backends.hpp (the H.265 NVENC / NVDEC backend ids)
-//     - av1/codec_plugin.hpp (the AV1 plugin factory)
-//     - av1/decoder.hpp (the AV1 software decoder)
-//     - av1/hw_backends.hpp (the AV1 NVENC / NVDEC backend ids)
+    // v1.3 bump: +3 public headers (122 -> 125) for the shared `nvcodec`
+    //   module -- the NVIDIA driver integration (NVENC / NVDEC) that the
+    //   H.264, H.265 and AV1 codec modules consume:
+    //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
+    //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
+    //       entry points)
+    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //
+    // v1.3 bump: +2 public headers (125 -> 127) for the H.265 / AV1 RTP
+    //   payload formats (video plan C4 / C6):
+    //     - video_payload/h265.hpp (RFC 7798 Single NAL / AP / FU)
+    //     - video_payload/av1.hpp (draft-ietf-payload-av1 framing)
+    //
+    // v1.3 bump: +6 public headers (127 -> 133) for the H.265 and AV1
+    //   codec modules (video plan C4 / C8) — the codec-specific halves
+    //   that sit on top of the shared `nvcodec` driver integration:
+    //     - h265/codec_plugin.hpp (the H.265 plugin factory)
+    //     - h265/decoder.hpp (the H.265 software decoder)
+    //     - h265/hw_backends.hpp (the H.265 NVENC / NVDEC backend ids)
+    //     - av1/codec_plugin.hpp (the AV1 plugin factory)
+    //     - av1/decoder.hpp (the AV1 software decoder)
+    //     - av1/hw_backends.hpp (the AV1 NVENC / NVDEC backend ids)
     //
     // `session/track.hpp` already existed at v1.1.0 and is part of the
     // 113 baseline; it is only listed above because the two session

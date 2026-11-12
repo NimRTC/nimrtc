@@ -427,8 +427,15 @@ std::string NimRTCEngine::create_offer() noexcept {
         // m-section uses one payload type for both directions.  Using
         // the receiver's tuning here would advertise a number the
         // packet path never stamps (C9 / C11).
+        //
+        // The number is the *resolved* one: `init_video_plugins()`
+        // derived it from the codec family (H.264 → 102, H.265 → 116,
+        // AV1 → 45) and the host's explicit choice, so the SDP, the
+        // RTP header and the receive pipeline all agree.
         const std::string vpt =
-            std::to_string(config_.video_sender_tuning.payload_type);
+            std::to_string(impl_->video_payload_type != 0
+                               ? impl_->video_payload_type
+                               : config_.video_sender_tuning.payload_type);
         video.formats         = {vpt};
         video.direction       = dir;
         video.mid             = mid;
@@ -443,11 +450,17 @@ std::string NimRTCEngine::create_offer() noexcept {
             video.dtls_fingerprint_value = d->local_fingerprint().hex_colon;
         }
 
-        // a=rtpmap:<vpt> H264/90000  (RFC 6184 §5.6)
+        // a=rtpmap:<vpt> <encoding>/90000  (RFC 6184 §5.6 for H.264,
+        // RFC 7798 §4.1 for H.265, draft-ietf-payload-av1 §6 for AV1).
+        //
+        // The encoding name comes from the codec family the session
+        // actually uses, so the offer cannot claim H.264 while the
+        // pipeline emits H.265.
+        const detail::VideoCodecFamily family = impl_->video_codec_family;
         sdp::MediaDescription::RtpMap video_map;
-        video_map.encoding   = "H264";
+        video_map.encoding   = std::string(detail::sdp_encoding_of(family));
         video_map.clock_rate = 90000;
-        video_map.channels   = 1;             // H.264 clock is 90 kHz, no audio channels
+        video_map.channels   = 1;             // video clock is 90 kHz, no channels
         video.rtpmap[vpt]    = video_map;
 
         // Cross-end timeline extmap (ADR-017).  Same id and rationale as the
@@ -462,21 +475,26 @@ std::string NimRTCEngine::create_offer() noexcept {
             video.extmap.push_back(ast);
         }
 
-        // a=fmtp:<vpt> profile-level-id=42E01F;packetization-mode=1;
-        //                  sprop-parameter-sets=Z0LAHtkA,aM4G4g==
-        // Baseline profile, level 3.1 — matches the synthetic SPS/PPS our
-        // H.264 stub encoder emits (see h264::StubEncoder::encode).  When
-        // a real codec plugin replaces the stub, the codec should override
-        // these via a getter or config (out of scope for this round).
+        // a=fmtp:<vpt> <codec-specific parameters>
+        //
+        // H.264 (RFC 6184 §8.2): profile-level-id + packetization-mode,
+        // plus the synthetic SPS/PPS the H.264 stub encoder emits
+        // (Baseline profile, level 3.1).
+        //
+        // H.265 (RFC 7798 §4.4): profile-id / level-id / tier-flag /
+        // tx-mode.  The parameter sets are deliberately *not* advertised:
+        // the WebRTC HEVC profile sends the VPS/SPS/PPS in-band.
+        //
+        // AV1 (draft-ietf-payload-av1 §7): profile / level-idx / tier.
+        //
+        // The body is derived from the same codec family as the
+        // `a=rtpmap:` line above, so the two cannot disagree.
         if (video_codec_) {
             video.fmtp[vpt] =
-                "profile-level-id=42E01F;"
-                "packetization-mode=1;"
-                "level-asymmetry-allowed=1;"
-                "sprop-parameter-sets=Z0LAHtkA,aM4G4g==";
+                std::string(detail::default_fmtp_of(family, /*with_sprop=*/true));
         } else {
             video.fmtp[vpt] =
-                "profile-level-id=42E01F;packetization-mode=1";
+                std::string(detail::default_fmtp_of(family, /*with_sprop=*/false));
         }
 
         // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
@@ -1044,18 +1062,26 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     impl_->video_rx_disabled = false;
     impl_->video_codec_unsupported_reported = false;
 
-    // H.264 is the only video codec NimRTC implements today: the H.264
-    // module ships the packetizer, the depacketizer and the codec
-    // plug-in.  The list grows with the codec-breadth work of the video
-    // plan (C4 / C6 / C8: H.265, AV1, VP8, VP9); each new codec adds
-    // one line here and the negotiation picks it up automatically.
+    // The video codec this session uses.  The engine holds *one* video
+    // codec (the plugin named by `EngineConfig::video_codec_name`),
+    // so only that codec's encoding is decodable here — a session is
+    // single-codec on the video side, exactly as it is on the wire
+    // (the `a=rtpmap:` line names one encoding).
+    //
+    // The family comes from the instantiated codec's `kind()` (see
+    // `init_video_plugins()`), so the answer's `a=rtpmap:` and this
+    // check always agree.
     //
     // The codec also has to be *present*: without a video codec plug-in
     // the engine cannot decode a single frame, so an H.264 offer is no
     // more decodable than a VP9 one.
-    const auto video_encoding_decodable = [this](const std::string& enc) {
-        if (enc == "h264") return video_codec_ != nullptr;
-        return false;
+    const detail::VideoCodecFamily our_family = impl_->video_codec_family;
+    const auto video_encoding_decodable = [this, our_family](const std::string& enc) {
+        if (video_codec_ == nullptr) return false;
+        const detail::VideoCodecFamily peer_family =
+            detail::codec_family_from_sdp_encoding(enc);
+        return peer_family != detail::VideoCodecFamily::kUnknown &&
+               peer_family == our_family;
     };
 
     const sdp::MediaDescription* remote_video = nullptr;
@@ -1067,7 +1093,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
     if (remote_video != nullptr && !remote_video->formats.empty()) {
         // The payload type our own sender stamps into the outbound RTP
-        // header (`EngineConfig::video_sender_tuning.payload_type`).
+        // header (the *resolved* one — see `init_video_plugins()`).
         //
         // It plays two roles:
         //   * when we are the OFFERER and receive an answer, the answer
@@ -1076,7 +1102,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         //   * when the peer offers several supported payload types, this
         //     one wins, so the outbound path keeps a stable number.
         const std::uint8_t our_video_pt =
-            config_.video_sender_tuning.payload_type;
+            impl_->video_payload_type != 0
+                ? impl_->video_payload_type
+                : config_.video_sender_tuning.payload_type;
 
         std::uint8_t chosen = 0;
         std::string  chosen_encoding;

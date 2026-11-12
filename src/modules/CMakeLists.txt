@@ -153,6 +153,32 @@ if(NIMRTC_MODULE_H264)
     add_subdirectory(h264)
 endif()
 
+# v1.3 (video plan C4 / C8): the H.265 codec module.  It links
+# nimrtc::nvcodec — the shared lower-level module that owns the NVIDIA
+# driver integration (NVENC / NVDEC) and exposes it through
+# codec-parameterised entry points.  This is the documented
+# cross-module dependency pattern (same shape as modules/jb using
+# modules/jb_strategy).
+if(NIMRTC_MODULE_H265 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/h265/CMakeLists.txt")
+    if(NOT NIMRTC_MODULE_NVCODEC)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_H265 requires NIMRTC_MODULE_NVCODEC "
+            "(the shared NVIDIA NVENC / NVDEC backend module)")
+    endif()
+    add_subdirectory(h265)
+endif()
+
+# v1.3 (video plan C6 / C8): the AV1 codec module.  Same cross-module
+# dependency on nimrtc::nvcodec as the H.265 module above.
+if(NIMRTC_MODULE_AV1 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/av1/CMakeLists.txt")
+    if(NOT NIMRTC_MODULE_NVCODEC)
+        message(FATAL_ERROR
+            "NIMRTC_MODULE_AV1 requires NIMRTC_MODULE_NVCODEC "
+            "(the shared NVIDIA NVENC / NVDEC backend module)")
+    endif()
+    add_subdirectory(av1)
+endif()
+
 # -----------------------------------------------------------------------------
 # Video R2 modules — must each be self-contained, no cross-module deps
 # unless explicitly listed in the module's own CMakeLists.txt.

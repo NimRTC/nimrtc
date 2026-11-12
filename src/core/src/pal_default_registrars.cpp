@@ -87,6 +87,17 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_H264
     &nimrtc::h264::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_H265
+    // v1.3 (video plan C4 / C8): the H.265 codec module.  Its registrar
+    // entry materialises only when the module is built; the engine then
+    // resolves it through the registry's video-codec slot.
+    &nimrtc::h265::register_default_plugins,
+#endif
+#ifdef NIMRTC_HAS_AV1
+    // v1.3 (video plan C6 / C8): the AV1 codec module.  Same shape as
+    // the H.265 entry above.
+    &nimrtc::av1::register_default_plugins,
+#endif
     &nimrtc::ice::register_default_plugins,
     &nimrtc::jb::register_default_plugins,
 #ifdef NIMRTC_HAS_NET_FEEDBACK

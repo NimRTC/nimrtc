@@ -36,6 +36,7 @@
 #include "nimrtc/engine/engine.hpp"
 #include "audio_routing.hpp"
 #include "bandwidth_allocation.hpp"
+#include "video_codec_config.hpp"
 #include "video_negotiation.hpp"
 
 #include <array>
@@ -881,6 +882,28 @@ struct NimRTCEngine::Impl {
      *  "nothing was negotiated" — the caller then falls back to its
      *  locally configured payload type. */
     std::atomic<std::uint8_t> negotiated_video_pt{0};
+
+    /** The video codec family this session uses.
+     *
+     *  Resolved once when the video plugins are created (see
+     *  `init_video_plugins()`), from the instantiated
+     *  `IVideoCodec::kind()`.  The SDP layer reads it to name the
+     *  `a=rtpmap:` encoding and to emit the matching `a=fmtp:` body;
+     *  the negotiation layer reads it to decide whether the peer's
+     *  offered encoding is one this session can decode.
+     *
+     *  `kUnknown` means "no video codec" — the session has no video
+     *  m-line at all. */
+    detail::VideoCodecFamily video_codec_family =
+        detail::VideoCodecFamily::kUnknown;
+
+    /** The effective RTP payload type of the video stream.
+     *
+     *  Resolved from the host's configured payload type and the codec
+     *  family (see `detail::resolve_payload_type`).  This is the number
+     *  the offer advertises, the answer echoes, and the outbound RTP
+     *  header stamps. */
+    std::uint8_t video_payload_type = 0;
 
     /** The negotiation concluded that we cannot decode the peer's video.
      *

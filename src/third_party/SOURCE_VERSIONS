@@ -52,9 +52,15 @@ gmssl                     v3.2.0         7c9f029   7c9f02904ef33e59c87b4f16621cc
 # change on top of the pinned upstream revision:
 #
 #   src/third_party/libjuice/patches/0001-so-reuseaddr.patch
-#       set SO_REUSEADDR/SO_REUSEPORT on the agent socket so loopback
-#       agents can coexist when the OS recycles a port through TIME_WAIT
-#       (commit 450dde2).
+#       1. src/udp.c no longer sets SO_REUSEADDR/SO_REUSEPORT.  Both
+#          let a second bind on an already-bound UDP port succeed, so
+#          two ICE agents could end up sharing one UDP port; with
+#          SO_REUSEADDR set the kernel ephemeral allocator also handed
+#          out duplicate ports to live sockets.
+#       2. src/conn_mux.c no longer merges an ephemeral-port request
+#          (port_begin == 0 && port_end == 0) into an existing mux
+#          registry, so two agents in one process no longer share a
+#          single socket and candidate.
 #
 # Upstream base commit for 0001-so-reuseaddr.patch:
 #   77daa8befd828046169adbb012d8de928bfdcdd4

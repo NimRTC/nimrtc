@@ -1046,29 +1046,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The ICE loopback and restart tests bound a fixed UDP port range that
   the Windows CI runner reserves, so both failed there with
-  `WSAEACCES (errno 10013)`.**  The tests hardcoded disjoint windows
-  (63000-63099 / 63200-63299, later 63400-63600) to keep the two agents
-  off each other's ports, and every one of those windows has eventually
-  been caught by a Hyper-V / HNS excluded-port reservation on the runner
-  — `libjuice` walks the whole requested range before giving up, so the
-  agent fails to open outright rather than retrying.
+  `WSAEACCES (errno 10013)`, and the vendored `libjuice` let two ICE
+  agents silently share one UDP port.**  The tests hardcoded disjoint
+  windows (63000-63099 / 63200-63299, later 63400-63600) to keep the two
+  agents off each other's ports, and every one of those windows has
+  eventually been caught by a Hyper-V / HNS excluded-port reservation on
+  the runner — `libjuice` walks the whole requested range before giving
+  up, so the agent fails to open outright rather than retrying.
   - The tests now let the OS pick the local ports
     (`local_port_range_begin == local_port_range_end == 0`).  The
     kernel's ephemeral allocation never picks an excluded port.
-  - The two agents also have to run in `Poll` mode rather than the
-    default `Mux` mode.  In Mux mode `libjuice` multiplexes every agent
-    onto *one* shared UDP socket: with `port_begin == 0`,
-    `conn_mux_get_registry()` matches the first existing registry, so the
-    second agent joins the first agent's socket.  Both agents then have
-    the same local IP:port, ICE cannot tell them apart, and the STUN
-    binding request is rejected with a ufrag mismatch.  `Poll` mode gives
-    each agent its own socket (`conn_poll_init()` calls
-    `udp_create_socket()` per agent).
-  - Verified: 40 sockets bound to port 0 all receive distinct ephemeral
-    ports on Windows (with and without `SO_REUSEPORT` set) and on Linux;
-    the two agents now log two distinct binds; and all 9 ICE tests pass
-    three times in a row and while the two test binaries run side by
-    side, which is how `ctest -j 2` runs them.
+  - The real root cause of the remaining failures was in the vendored
+    `libjuice`, not in the tests.  Two NimRTC-local changes were made
+    to the pinned upstream revision `77daa8b`:
+    - `src/udp.c` no longer sets `SO_REUSEADDR` / `SO_REUSEPORT`.  Both
+      make a second `bind()` on an already-bound UDP port *succeed*, so
+      two sockets end up sharing one port; with `SO_REUSEADDR` set the
+      kernel's ephemeral allocator also hands out ports that a live
+      socket already owns (measured on Linux with the ephemeral range
+      narrowed to 11 ports: 30 sockets bound, but only 11 distinct
+      ports were handed out — 19 pairs shared a port).  A shared port
+      breaks ICE twice over: across processes, `libjuice`'s self-wakeup
+      datagram (`conn_mux_interrupt` → `udp_sendto_self`) can be
+      delivered to the *other* process's socket, stranding the
+      interrupting process in `poll()` for its full 60 s timeout while
+      `juice_destroy()` blocks in `thread_join()` — the 60.01 s
+      `ctest` timeout; and within one process, both agents advertise
+      the same local candidate and cannot be told apart.
+    - `src/conn_mux.c` no longer merges an ephemeral-port request
+      (`port_begin == 0 && port_end == 0`) into an existing mux
+      registry.  `conn_mux_get_registry()` matched on
+      `impl->port >= config->port_begin`, which is always true when
+      `port_begin == 0`, so the first registry in the process absorbed
+      every later agent: two agents shared one socket and one candidate,
+      and the STUN binding request came back with a ufrag mismatch so
+      the session never connected.
+  - The tests therefore run in the production default `Mux` mode again
+    (the earlier `Poll` mode workaround is gone) and still use
+    OS-assigned ephemeral ports.
+  - Verified: all 15 ICE tests pass — 5 sequential runs and 4
+    `ctest -j 4` runs, all 15/15.
 
 - **`CaptureQueue::pop()` handed out a pointer to freed memory.**  The
   popped frame was moved into a *local* `Frame`, and the queue then

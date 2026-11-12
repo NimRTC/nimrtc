@@ -53,21 +53,48 @@ static socket_t create_socket_for_addrinfo(const udp_socket_config_t *config,
 		return INVALID_SOCKET;
 	}
 
-	// SO_REUSEADDR - allow re-binding to a port that is in TIME_WAIT or held
-	// by a previously-closed socket. Critical for CI runners where many
-	// tests run in sequence and ports are recycled; without this, bind()
-	// can return EACCES (10013 on Windows) on a port that is technically
-	// free but still owned by the OS until TIME_WAIT expires.
-	// Also lets the ICE loopback tests share a port when port=0 is used.
-	const sockopt_t reuse = 1;
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
-#ifdef SO_REUSEPORT
-	// SO_REUSEPORT (Linux/macOS): allows multiple sockets to bind the
-	// same port simultaneously. Combined with SO_REUSEADDR this gives
-	// ICE loopback tests a way to coexist with other test runs without
-	// changing the test code. Linux 3.9+, macOS 10.12+, FreeBSD 12+.
-	setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuse, sizeof(reuse));
-#endif
+	// NOTE: no SO_REUSEADDR / SO_REUSEPORT here.
+	//
+	// NimRTC used to set both here (see
+	// src/third_party/libjuice/patches/0001-so-reuseaddr.patch).  Both
+	// break ICE silently, and the second one breaks it in a way that is
+	// easy to mistake for a CI flake:
+	//
+	//   - On Linux and macOS SO_REUSEPORT lets a second socket bind a
+	//     port that is already bound, and on every platform SO_REUSEADDR
+	//     does the same for UDP.  Two sockets then share one UDP port.
+	//   - Worse, SO_REUSEADDR also makes the *ephemeral* allocator unsafe:
+	//     with it set, binding to port 0 can hand back a port that a live
+	//     socket already owns.  Measured on Linux with the ephemeral
+	//     range narrowed to 11 ports: 30 sockets bound, but only 11
+	//     distinct ports were handed out -- 19 pairs shared a port.
+	//     Without SO_REUSEADDR the same 30 sockets could only bind 11
+	//     times; the rest failed with EADDRINUSE, as they should.
+	//
+	// A shared UDP port breaks ICE in two ways:
+	//
+	//   1. Across processes: libjuice wakes its mux thread with a 0-byte
+	//      datagram sent to its own address (conn_mux_interrupt ->
+	//      udp_sendto_self).  With two sockets sharing the port the
+	//      kernel may deliver that datagram to the *other* process's
+	//      socket, so the interrupting process stays in poll() for its
+	//      full 60 s timeout and juice_destroy() blocks in thread_join()
+	//      inside conn_mux_registry_cleanup.  The test then hangs until
+	//      ctest kills it -- exactly the 60.01 s timeout we saw.
+	//   2. Within one process: two agents on the same port offer the
+	//      same candidate, so they cannot be told apart by the mux
+	//      demux.
+	//
+	// Nothing is lost by not setting SO_REUSEADDR: UDP sockets have no
+	// TIME_WAIT, so the port is released the moment the socket closes
+	// (verified on both Windows and Linux).
+	//
+	// The other reason to leave the socket options alone is the Windows
+	// CI runner, which reserves whole port ranges (Hyper-V / HNS).  A
+	// bind inside one fails with WSAEACCES (errno 10013), and libjuice
+	// walks the whole requested range before giving up, so the agent
+	// fails to open outright.  Asking the kernel for an ephemeral port
+	// never lands in an excluded range.
 
 	// Listen on both IPv6 and IPv4
 	const sockopt_t disabled = 0;

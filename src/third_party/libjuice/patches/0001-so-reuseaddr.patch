@@ -1,38 +1,125 @@
 From: NimRTC contributors <bot@nimrtc.local>
-Subject: [PATCH] libjuice: set SO_REUSEADDR/SO_REUSEPORT on the agent socket
+Subject: [PATCH] libjuice: do not share a UDP port, and do not merge
+ ephemeral-port agents into one mux registry
 
 Upstream base commit: 77daa8befd828046169adbb012d8de928bfdcdd4
 
-Binding the agent socket with SO_REUSEADDR lets a loopback agent
-re-bind a port that the OS still holds in TIME_WAIT, and
-SO_REUSEPORT (Linux/macOS) lets two loopback agents share a port.
-Without this, bind() can fail with EACCES (10013 on Windows) on a
-port that is technically free, which flaked the ICE loopback tests
-on the CI runners (see commit 450dde2).
+Two NimRTC-local changes on top of the pinned upstream revision.  Both
+replace a change that used to live here (the SO_REUSEADDR/SO_REUSEPORT
+set), which is itself removed by this patch.
 
----
+1. src/udp.c: drop SO_REUSEADDR and SO_REUSEPORT.
+
+   Both make a second bind on an already-bound UDP port *succeed*, so
+   two sockets end up sharing one port.  With SO_REUSEADDR set, the
+   ephemeral allocator is unsafe as well: binding to port 0 can hand
+   back a port a live socket already owns.  Measured on Linux with the
+   ephemeral range narrowed to 11 ports: 30 sockets bound, but only 11
+   distinct ports were handed out.
+
+   A shared UDP port breaks ICE across processes: libjuice wakes its
+   mux thread with a 0-byte datagram sent to its own address
+   (conn_mux_interrupt -> udp_sendto_self), the kernel may deliver it
+   to the *other* process's socket, and the interrupting process then
+   stays in poll() for its full 60 s timeout while juice_destroy()
+   blocks in thread_join().
+
+   Nothing is lost: UDP sockets have no TIME_WAIT, so the port is
+   released as soon as the socket closes.
+
+2. src/conn_mux.c: an ephemeral-port request must not reuse an existing
+   mux registry.
+
+   conn_mux_get_registry() matched on impl->port >= config->port_begin,
+   which is always true when port_begin == 0, so the first registry in
+   the process absorbed every later agent.  Two agents then shared one
+   UDP socket, advertised the same 127.0.0.1:port candidate, and could
+   not be told apart: the STUN Binding request came back with a ufrag
+   mismatch and the session never connected.
+diff --git a/src/udp.c b/src/udp.c
+index 993ec0f..d65d244 100644
 --- a/src/udp.c
 +++ b/src/udp.c
-@@ -52,6 +52,22 @@
- 		JLOG_WARN("UDP socket creation failed, errno=%d", sockerrno);
+@@ -53,6 +53,49 @@ static socket_t create_socket_for_addrinfo(const udp_socket_config_t *config,
  		return INVALID_SOCKET;
  	}
-+
-+	// SO_REUSEADDR - allow re-binding to a port that is in TIME_WAIT or held
-+	// by a previously-closed socket. Critical for CI runners where many
-+	// tests run in sequence and ports are recycled; without this, bind()
-+	// can return EACCES (10013 on Windows) on a port that is technically
-+	// free but still owned by the OS until TIME_WAIT expires.
-+	// Also lets the ICE loopback tests share a port when port=0 is used.
-+	const sockopt_t reuse = 1;
-+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
-+#ifdef SO_REUSEPORT
-+	// SO_REUSEPORT (Linux/macOS): allows multiple sockets to bind the
-+	// same port simultaneously. Combined with SO_REUSEADDR this gives
-+	// ICE loopback tests a way to coexist with other test runs without
-+	// changing the test code. Linux 3.9+, macOS 10.12+, FreeBSD 12+.
-+	setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuse, sizeof(reuse));
-+#endif
  
++	// NOTE: no SO_REUSEADDR / SO_REUSEPORT here.
++	//
++	// NimRTC used to set both here (see
++	// src/third_party/libjuice/patches/0001-so-reuseaddr.patch).  Both
++	// break ICE silently, and the second one breaks it in a way that is
++	// easy to mistake for a CI flake:
++	//
++	//   - On Linux and macOS SO_REUSEPORT lets a second socket bind a
++	//     port that is already bound, and on every platform SO_REUSEADDR
++	//     does the same for UDP.  Two sockets then share one UDP port.
++	//   - Worse, SO_REUSEADDR also makes the *ephemeral* allocator unsafe:
++	//     with it set, binding to port 0 can hand back a port that a live
++	//     socket already owns.  Measured on Linux with the ephemeral
++	//     range narrowed to 11 ports: 30 sockets bound, but only 11
++	//     distinct ports were handed out -- 19 pairs shared a port.
++	//     Without SO_REUSEADDR the same 30 sockets could only bind 11
++	//     times; the rest failed with EADDRINUSE, as they should.
++	//
++	// A shared UDP port breaks ICE in two ways:
++	//
++	//   1. Across processes: libjuice wakes its mux thread with a 0-byte
++	//      datagram sent to its own address (conn_mux_interrupt ->
++	//      udp_sendto_self).  With two sockets sharing the port the
++	//      kernel may deliver that datagram to the *other* process's
++	//      socket, so the interrupting process stays in poll() for its
++	//      full 60 s timeout and juice_destroy() blocks in thread_join()
++	//      inside conn_mux_registry_cleanup.  The test then hangs until
++	//      ctest kills it -- exactly the 60.01 s timeout we saw.
++	//   2. Within one process: two agents on the same port offer the
++	//      same candidate, so they cannot be told apart by the mux
++	//      demux.
++	//
++	// Nothing is lost by not setting SO_REUSEADDR: UDP sockets have no
++	// TIME_WAIT, so the port is released the moment the socket closes
++	// (verified on both Windows and Linux).
++	//
++	// The other reason to leave the socket options alone is the Windows
++	// CI runner, which reserves whole port ranges (Hyper-V / HNS).  A
++	// bind inside one fails with WSAEACCES (errno 10013), and libjuice
++	// walks the whole requested range before giving up, so the agent
++	// fails to open outright.  Asking the kernel for an ephemeral port
++	// never lands in an excluded range.
++
  	// Listen on both IPv6 and IPv4
  	const sockopt_t disabled = 0;
+ 	if (ai->ai_family == AF_INET6)
+diff --git a/src/conn_mux.c b/src/conn_mux.c
+index 1c406ae..85458e0 100644
+--- a/src/conn_mux.c
++++ b/src/conn_mux.c
+@@ -57,6 +57,28 @@ static int conn_mux_registries_size;
+ static int conn_mux_registries_count;
+ 
+ conn_registry_t *conn_mux_get_registry(udp_socket_config_t *config) {
++	// An ephemeral-port request (port_begin == 0 && port_end == 0) means
++	// "give me a socket and let the kernel pick the port".  It must NOT
++	// reuse an existing registry: the caller has no way to know which
++	// port it will end up on, so merging it into somebody else's socket
++	// would silently give two agents the same local candidate.
++	//
++	// The previous code matched on `impl->port >= config->port_begin`,
++	// which is always true when port_begin == 0, so the *first* registry
++	// in the process absorbed every later agent.  Two ICE agents in one
++	// process (e.g. two NimRTCEngine instances talking to each other over
++	// the loopback) then shared one UDP socket, advertised the same
++	// 127.0.0.1:port candidate, and could not be told apart: the STUN
++	// Binding request came back with a ufrag mismatch and the session
++	// never connected.
++	//
++	// PR #49 worked around this in the tests by switching them to Poll
++	// mode.  Fixing it here means the *default* Mux mode is safe too, so
++	// an application that creates two engines does not have to know about
++	// this at all.
++	if (config->port_begin == 0 && config->port_end == 0)
++		return NULL;
++
+ 	for (int i = 0; i < conn_mux_registries_size; i++) {
+ 		if (!conn_mux_registries[i]) {
+ 			continue;

@@ -63,7 +63,7 @@
       "submodule_path": "src/third_party/libjuice/src",
       "license": "MIT",
       "build": "add_subdirectory(src) — see src/third_party/libjuice/CMakeLists.txt",
-      "notes": "ICE transport. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending), so commit_sha pins the upstream revision the tree was taken from rather than the tree itself. The tree additionally carries one NimRTC-local patch on top of that revision: src/udp.c sets SO_REUSEADDR/SO_REUSEPORT on the agent socket so loopback agents can coexist when the OS recycles a port through TIME_WAIT (commit 450dde2). Converting it to a submodule requires that patch to be preserved (fork or versioned patch file) first.",
+      "notes": "ICE transport. NOT yet a submodule: the sources are still checked into this repository (vendor-migration.md Phase 3 pending), so commit_sha pins the upstream revision the tree was taken from rather than the tree itself. The tree carries one NimRTC-local patch on top of that revision: src/third_party/libjuice/patches/0001-so-reuseaddr.patch. It does two things: (1) src/udp.c no longer sets SO_REUSEADDR/SO_REUSEPORT, so two ICE agents can never end up sharing one UDP port (the old setting let a second bind succeed, and also made the kernel ephemeral allocator hand out duplicate ports); (2) src/conn_mux.c refuses to merge an ephemeral-port (port_begin == 0 && port_end == 0) request into an existing mux registry, so two agents in one process no longer share a single socket and candidate. Converting it to a submodule requires that patch to be preserved (fork or versioned patch file) first.",
       "size_estimate": "0.5 MB / 78 files"
     },
     {

@@ -307,35 +307,26 @@ TEST(IceTransportLoopback, TwoAgentsConnectAndExchangeData) {
     //
     // The kernel never hands the same ephemeral port to two live sockets,
     // so two concurrently-running cases cannot share one, and within a
-    // case the two agents are likewise on distinct ports.  Verified
-    // empirically on both Windows (with and without SO_REUSEPORT set) and
-    // Linux: 40 sockets bound to port 0 all received distinct ports.
+    // case the two agents are likewise on distinct ports.
     //
-    // Note that SO_REUSEPORT is not actually set on Windows -- libjuice's
-    // `#ifdef SO_REUSEPORT` is false there, because Windows does not
-    // define the macro in its default SDK headers.  Only SO_REUSEADDR is
-    // set.  That makes the sharing hazard weaker on Windows, not absent,
-    // so the reasoning above holds either way.
+    // The default Mux mode is used here, deliberately: that is what the
+    // engine uses, so the test exercises the shipping configuration.
+    // Mux mode gives each agent its own socket as long as the agent asks
+    // for an ephemeral port -- libjuice's conn_mux_get_registry() no
+    // longer folds an ephemeral-port request into an existing registry
+    // (see src/third_party/libjuice/src/src/conn_mux.c).  Before that
+    // fix the second agent joined the first agent's socket, both
+    // advertised the same 127.0.0.1:port, and the STUN Binding request
+    // came back with a ufrag mismatch.
 
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    // Poll mode, not the default Mux mode.  In Mux mode libjuice
-    // multiplexes every agent onto ONE shared UDP socket: with
-    // port_begin == 0, conn_mux_get_registry() matches the first existing
-    // registry, so the second agent joins the first agent's socket.  Both
-    // agents then have the same local IP:port, ICE cannot tell them
-    // apart, and the STUN binding request is rejected with a ufrag
-    // mismatch.  Poll mode gives each agent its own socket
-    // (conn_poll_init() calls udp_create_socket() per agent), which is
-    // what a two-agent loopback test needs.
-    cfg_a.mode = IceConfig::Mode::Poll;
     cfg_a.local_ufrag     = "ufragAaaaaaaaaaaaaa";   // 4..256 chars per RFC 5245
     cfg_a.local_password  = "pwdAaaaaaaaaaaaaaaaaaaa";
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.mode = IceConfig::Mode::Poll;
     cfg_b.local_ufrag     = "ufragBbbbbbbbbbbbbbb";
     cfg_b.local_password  = "pwdBbbbbbbbbbbbbbbbbbb";
 
@@ -479,16 +470,12 @@ TEST(IceTransportLoopback, TwoAgentsWithRandomUfrag) {
     IceConfig cfg_a;
     cfg_a.role = Role::Controlling;
     cfg_a.bind_address = "127.0.0.1";
-    // Poll mode, not the default Mux mode -- see the note in
-    // TwoAgentsConnectAndExchangeData.  In Mux mode libjuice shares one
-    // UDP socket between the agents, which breaks a two-agent loopback
-    // test when both agents ask for an ephemeral port.
-    cfg_a.mode = IceConfig::Mode::Poll;
+    // The default Mux mode -- see the note in
+    // TwoAgentsConnectAndExchangeData.
     // local_ufrag / local_password left EMPTY → libjuice generates random.
 
     IceConfig cfg_b = cfg_a;
     cfg_b.role = Role::Controlled;
-    cfg_b.mode = IceConfig::Mode::Poll;
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

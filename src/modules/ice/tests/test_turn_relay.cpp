@@ -131,8 +131,8 @@ bool can_bind_secondary_loopback() noexcept {
 
 // Port windows for the loopback test.  They have to be disjoint from the
 // windows the other ICE tests use (63000-63099 / 63200-63299) and from
-// each other, because libjuice sets SO_REUSEPORT and two sockets on the
-// same port would silently share it.
+// each other: every port the suite binds has to be unique, because two
+// sockets on the same port would silently share it.
 //
 // Rationale for the ranges: the Windows CI runner reserves 60000-60999
 // and the OS dynamic-exclusion band starts at 52297, so the 64000s are
@@ -200,8 +200,8 @@ public:
     //
     // Every port the server binds has to be unique across the suite:
     // CI runs ctest with -j 2, so two servers on the same TCP port race
-    // for it, and two servers on the same UDP port silently share it
-    // (libjuice sets SO_REUSEPORT).
+    // for it, and two servers on the same UDP port would silently share
+    // it.
     TurnServerFixture(std::uint16_t udp_port, std::uint16_t tcp_port = 0,
                       std::uint16_t relay_port_begin = kRelayPortBegin,
                       std::uint16_t relay_port_end = kRelayPortEnd) {

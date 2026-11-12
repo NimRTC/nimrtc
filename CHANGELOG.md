@@ -846,7 +846,79 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     builds up moves the estimate even though not a single packet was
     lost.
 
-### Changed
+- **The plugin contract is now explicit — the engine says which families it
+  can actually replace, and what happens when one is missing (v1.2.0,
+  architecture remediation plan §2).**  The plugin system had three
+  different failure behaviours (hard failure, silent degradation, and a
+  third "the interface exists but the engine never resolves it" case that
+  read exactly like a working seam), and the documentation promised a
+  uniform "no silent fallback" that was never true.  This change makes
+  the contract match the code, and closes the two seams that were
+  registered-but-bypassed.
+  - **`CapabilitySelector` is now wired into the engine
+    (remediation §2.6 / B9).**  The Selector used to resolve a
+    strategy to a pair of factory ids and then *throw the result away*
+    — the engine kept instantiating a hard-coded media stack.  The
+    engine now builds a registry-backed `CapabilitySelector`, hands it
+    the engine's own `StackConfig` (ICE / DTLS / SCTP / raw-UDP backend
+    ids), calls `select()`, and uses the resulting stacks as the session's
+    actual transport.  `CapabilitySelector::instantiate()` is the single
+    implementation of "build a media stack + a control stack", and
+    `nimrtc::transport::make_transport_instance()` now delegates to it,
+    so the explicit path and the strategy-driven path cannot drift.
+    `EngineConfig::transport_stack_name` is the explicit user override
+    that wins over the strategy's rule.
+  - **The SRTP backend is now pluggable (remediation §2.5 / B7).**
+    `plugins::ISrtpSessionBackend` had an interface and a libsrtp
+    implementation but no registry slot and no wiring, so
+    `EngineConfig::srtp_backend_name` resolved to nothing.  The registry
+    gains an `srtp_backend` slot (`register_srtp_backend()` /
+    `get_srtp_backend()` / `list_srtp_backends()` plus the
+    `NIMRTC_REGISTER_SRTP_BACKEND` macro), and every SRTP protect /
+    unprotect call — media and RTCP — now routes through the resolved
+    backend instead of the concrete libsrtp calls.  The built-in backend
+    registers under `"libsrtp"` (the default).
+  - **The video codec family contract is explicit (remediation §2.4 /
+    B6).**  `IVideoCodec::kind()` is documented as the *authoritative*
+    statement of the wire format; the engine derives the SDP
+    `a=rtpmap:` encoding name, the payload type, and the
+    packetizer / depacketizer from it.  The plugin id is only a lookup
+    hint, and is used as the fallback only when `kind()` returns
+    `kUnknown` — in which case the id must name a family, either
+    exactly (`"h264"`) or as a `family` + separator prefix
+    (`"h265-nvenc"`).  When *neither* source names a family, `open()`
+    now fails with `kEngineInvalidParam` instead of advertising an
+    empty encoding that no peer can parse.
+  - **The RTP and SDP layers are documented as *not* pluggable
+    (remediation §2.1 / B8).**  `IRTP` and `ISDP` are retained for ABI
+    stability, but both headers now carry a `@deprecated` notice
+    explaining *why* they are not seams: the SDP layer is the contract
+    document that the negotiation, BWE, jitter-buffer and RTCP paths are
+    all written against, so replacing it is a protocol redesign rather
+    than a plugin swap.  `docs/plugin_author_guide.md` §4.2 states the
+    same, and the `rtp_name` / `sdp_name` rows are gone from the
+    catalogue.
+
+### Fixed
+
+- **`docs/plugin_author_guide.md` no longer promises a uniform "no silent
+  fallback" (remediation §2.3 / B4 / B5 / B10).**  The guide's §4
+  catalogue now lists every pluggable family with its real
+  `EngineConfig` knob, its real registration macro, and its real failure
+  mode, and §4.1 spells out the three behaviours: **hard failure**
+  (ICE transport, transport stack, DTLS, SCTP socket, SRTP backend,
+  DataChannel backend — `open()` returns non-zero and `on_error` fires),
+  **soft degradation** (BWE, scheduler, net-feedback, XR report, jitter
+  buffer, audio 3A, the codecs, the video source / sink / receiver /
+  sender — the engine logs a warning and opens without the component),
+  and **disabled by configuration** (an empty knob).  The macro names in
+  the table were wrong in three places (`NIMRTC_REGISTER_VIDEO_RX` /
+  `_TX` → `_RECEIVER` / `_SENDER`; the DTLS / SCTP / raw-UDP / transport
+  -stack rows named a bare function instead of the actual macro), and
+  the SRTP-backend, WebTransport, audio-decoder, audio-receiver, session
+  -model and DTMF families were missing entirely.
+  - `docs/api/engine_config.md` carries the same table, and documents
+    the removal of `rtp_name` / `sdp_name`.
 
 - **The `"sctp"` data-channel backend was retired from the public selectors
   (2026-11-10; DataChannel capability plan WP-A, DEC-4 = A1).**  The SCTP

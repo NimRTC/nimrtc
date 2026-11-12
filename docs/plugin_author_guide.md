@@ -237,6 +237,20 @@ interfaces exist and are registered, but the engine uses the concrete
 `rtp::` / `sdp::` implementations — there is deliberately no
 `EngineConfig` knob for them.
 
+### 4.3 Registered, but the engine does not resolve them
+
+These families have an interface, a registry slot, and a registration
+macro, but **no `EngineConfig` knob and no engine-side lookup**. They
+are listed here so the catalogue is complete — a plugin author who
+finds `NIMRTC_REGISTER_RTP` in the registry header deserves to learn
+that registering it changes nothing.
+
+| Family | Interface header | Engine config knob | Factory macro | Failure | Notes |
+|---|---|---|---|---|---|
+| Generic transport | `plugins/transport.hpp` | — (none) | `NIMRTC_REGISTER_TRANSPORT` | n/a | The engine resolves the **ICE-typed** slot (`get_ice_transport`) through the transport stack, not the generic `ITransport` slot. The generic slot exists so a consumer can pick the weakest typed view. |
+| RTP | `plugins/rtp.hpp` | — (none) | `NIMRTC_REGISTER_RTP` | n/a | **Deprecated.** The engine uses the concrete `rtp::` implementation. See §4.2. |
+| SDP | `plugins/sdp.hpp` | — (none) | `NIMRTC_REGISTER_SDP` | n/a | **Deprecated.** The engine uses the concrete `sdp::` implementation. See §4.2. |
+
 ---
 
 ## 5. The lifecycle contract

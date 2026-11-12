@@ -285,6 +285,15 @@ jobs:
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 
+      # The plugin catalogue in docs/plugin_author_guide.md section 4 is
+      # a promise about the code: every knob it names must exist in
+      # EngineConfig, every macro it names must exist in the registry,
+      # and every registry macro must be listed.  A drift here is how
+      # a plugin author ends up calling a macro that does not compile
+      # or setting a knob the engine never reads.
+      - name: Check the plugin catalogue against the code
+        run: python tools/check_doc_contract.py
+
       # The offline release-signature verifier carries its own Ed25519
       # implementation.  A wrong curve equation or an inverted
       # verification equation makes it reject *valid* release

@@ -1139,6 +1139,33 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `std::vector<RtcpBlock>` **by value** -- one heap allocation per
     RTCP datagram.  The new overload clears and refills a caller-owned
     scratch vector, keeping its capacity across calls.
+  - **The Phase 0.3 hot-path benchmark harness ships with the fix**
+    (remediation plan §0.3), so the numbers are reproducible rather than
+    asserted: `tests/bench_engine_hotpath.cpp` (an allocation probe --
+    overridden `operator new` / `operator delete` backed by CRT
+    `malloc` / `free` with an atomic arming flag, plus latency
+    percentiles for `send_video()`, `tick()` and the scheduler under
+    contention) and `tools/benchmark_hotpath.py` (the capture/compare
+    wrapper).
+    Measured on one machine at 1080p30 over 300 frames, `main` versus
+    this branch:
+
+    | metric | `main` | this branch | delta |
+    | --- | --- | --- | --- |
+    | `send_video` bytes/frame | 3 112 483 | 2 023 | **-99.9 %** |
+    | `send_video` mean latency | 902.97 us | 134.34 us | **-85.1 %** |
+    | `send_video` p50 latency | 861.55 us | 129.75 us | **-84.9 %** |
+    | `send_video` p99 latency | 1 387.36 us | 169.32 us | **-87.8 %** |
+    | `send_video` allocations/frame | 23.18 | 22.18 | -4.3 % |
+    | `tick` p99 | 0.3 us | 0.2 us | -33 % |
+
+    The allocation *count* barely moves because `main` staged each frame
+    with one 3 MB allocation; what C1 / C2 removed is the **volume**
+    (3.1 MB of allocator traffic per frame, plus the full-frame memset
+    that came with it), not the number of `new` calls.  The remaining
+    ~22 allocations per frame are in the encode / packetise path (the
+    codec's own output buffer and the RTP packet vector), not in the
+    frame staging.
 
 ### Fixed
 
@@ -1226,7 +1253,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CMake 4.0 VS generator no `CTestTestfile.cmake` is emitted at that
   level, so ctest never recursed into those directories and none of
   their tests ever ran.  The ctest count goes from **1176 to 1388**; the
-  seven tests added by the C3 work bring it to **1396**.
+  seven tests added by the C3 work bring it to **1396**, and the
+  capture-seam suite merged from `main` brings it to **1401**.
 
   The one test that failed once it finally ran
   (`SessionModel.MidIsNeverReused`) asserted that removing an unknown

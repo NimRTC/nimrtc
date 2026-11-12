@@ -68,6 +68,7 @@
 
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_source.hpp>
+#include <nimrtc/video_capture/cursor_compositor.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -216,11 +217,61 @@ public:
         return last_dirty_;
     }
 
+    // ---- Cursor compositing (remote-desktop plan A6) ---------------------
+
+    /**
+     * Install a cursor source and a compositor.
+     *
+     *  The adapter draws the pointer into the captured frame when the
+     *  *device* does not do it itself -- DXGI Desktop Duplication hands
+     *  over a raw desktop texture with no pointer in it, and X11's
+     *  `XGetImage` is the same.  A backend that composites the cursor
+     *  itself (WGC, ScreenCaptureKit) installs a compositor whose
+     *  `should_composite()` is false, or installs none at all.
+     *
+     *  Neither object is owned: the caller keeps them alive for at
+     *  least as long as the adapter is used.
+     *
+     *  The compositing only applies to a **packed** output (BGRA): the
+     *  pointer is drawn with alpha blending, which needs the pixels'
+     *  alpha channel, and a planar YUV frame has none.
+     */
+    void set_cursor(ICursorSource* source,
+                    ICursorCompositor* compositor) noexcept {
+        cursor_source_ = source;
+        cursor_compositor_ = compositor;
+    }
+
+    /** The installed cursor source (null when none). */
+    [[nodiscard]] ICursorSource* cursor_source() const noexcept {
+        return cursor_source_;
+    }
+
+    /** The installed cursor compositor (null when none). */
+    [[nodiscard]] ICursorCompositor* cursor_compositor() const noexcept {
+        return cursor_compositor_;
+    }
+
+    /** How many frames the cursor was drawn into. */
+    [[nodiscard]] std::uint64_t cursor_frames_composited() const noexcept {
+        return cursor_frames_;
+    }
+
 private:
     /** Convert the popped frame into the output format.  @return false when
      *  the frame cannot be represented in the output format (in which case
      *  it is counted as a drop). */
     bool convert(const plugins::CaptureFrame& in) noexcept;
+
+    /** Draw the pointer into the output frame, if a compositor is
+     *  installed and the output layout allows it.
+     *
+     *  @return true iff the frame was modified.  A frame that points
+     *          into the *device's* buffer is copied into the scratch
+     *          buffer first -- the device owns its pixels and may
+     *          recycle them the moment the callback returns, so the
+     *          adapter must not write into them. */
+    bool composite_cursor(plugins::VideoSourceFrame& out) noexcept;
 
     plugins::IVideoCapture* capture_ = nullptr;
     plugins::VideoSourceConfig cfg_{};
@@ -241,6 +292,19 @@ private:
      *  `scratch_` (or into the capture's own buffer when no conversion
      *  was needed). */
     plugins::VideoSourceFrame out_{};
+
+    /** The cursor source and compositor (plan A6).  Not owned. */
+    ICursorSource* cursor_source_ = nullptr;
+    ICursorCompositor* cursor_compositor_ = nullptr;
+
+    /** How many frames the cursor was drawn into. */
+    std::uint64_t cursor_frames_ = 0;
+
+    /** The base pointer of the frame that was popped from the device.
+     *  The adapter compares it against the output frame's own pointer to
+     *  know whether the output points into the *device's* pixels (which
+     *  must not be written into) or into its own scratch buffer. */
+    const std::uint8_t* in_pixels_base_ = nullptr;
 
     plugins::CaptureDirtyRects last_dirty_{};
 

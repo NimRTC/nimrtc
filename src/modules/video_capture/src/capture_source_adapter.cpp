@@ -310,6 +310,7 @@ void CaptureSourceAdapter::produce_one() noexcept {
     }
 
     last_dirty_ = in.dirty;
+    in_pixels_base_ = in.pixels;
 
     if (!convert(in)) {
         ++dropped_;
@@ -317,7 +318,68 @@ void CaptureSourceAdapter::produce_one() noexcept {
     }
 
     ++produced_;
+    if (composite_cursor(out_)) {
+        ++cursor_frames_;
+    }
     if (cb_) cb_(out_);
+}
+
+bool CaptureSourceAdapter::composite_cursor(
+        plugins::VideoSourceFrame& out) noexcept {
+    if (cursor_source_ == nullptr || cursor_compositor_ == nullptr) return false;
+    if (!cursor_compositor_->should_composite()) return false;
+
+    // Alpha blending needs the pixels' alpha channel, so only a packed
+    // 32-bit layout can carry the pointer.  A planar YUV frame has no
+    // alpha, and compositing into one would mean a full colour-space
+    // conversion — that is the plan's C2 (SIMD format conversion) work,
+    // not the cursor's.
+    if (out.format != plugins::VideoPixelFormat::kBGRA &&
+        out.format != plugins::VideoPixelFormat::kRGBA) {
+        return false;
+    }
+    if (out.plane_y == nullptr) return false;
+
+    // A frame that points into the *device's* buffer must not be
+    // written into: the device owns those pixels and may recycle them
+    // the moment the callback returns.  In that case the frame is
+    // copied into the adapter's own scratch buffer first.
+    if (out.plane_y == in_pixels_base_) {
+        const std::size_t needed =
+            static_cast<std::size_t>(out.height) *
+            static_cast<std::size_t>(out.stride_y);
+        if (needed == 0 || needed > out.buffer_size) return false;
+        if (scratch_.size() < needed) scratch_.assign(needed, 0u);
+        std::memcpy(scratch_.data(), out.plane_y, needed);
+        out.plane_y = scratch_.data();
+        out.buffer_size = needed;
+    }
+
+    const CursorState state = cursor_source_->query();
+    if (!state.visible) return false;
+
+    // The device may have captured a *region* of a larger surface, so
+    // the pointer's source-space position has to be shifted by the
+    // region's origin.  The adapter does not know the origin (the
+    // device owns it), so the origin is zero unless the device
+    // negotiated one — which it reports through its config.
+    std::int32_t origin_x = 0;
+    std::int32_t origin_y = 0;
+    if (capture_ != nullptr) {
+        const plugins::CaptureConfig cfg = capture_->config();
+        origin_x = static_cast<std::int32_t>(cfg.region.x);
+        origin_y = static_cast<std::int32_t>(cfg.region.y);
+    }
+
+    return cursor_compositor_->composite(
+        const_cast<std::uint8_t*>(out.plane_y),
+        out.buffer_size,
+        out.stride_y,
+        out.width,
+        out.height,
+        state,
+        origin_x,
+        origin_y);
 }
 
 bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {

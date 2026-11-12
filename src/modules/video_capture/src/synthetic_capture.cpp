@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/video_capture/dxgi_desktop_dup.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -329,6 +330,13 @@ void register_default_plugins() noexcept {
     registered = true;
     core::PluginRegistry::instance().register_video_capture(
         kSyntheticFactory.id(), &kSyntheticFactory);
+
+    // Remote-desktop plan A3: the Windows display-capture backend
+    // registers itself under "dxgi_desktop".  On a non-Windows host
+    // the call is a no-op — there is no DXGI to talk to, and a host
+    // that asks for "dxgi_desktop" there gets the engine's "capture
+    // plugin missing" error rather than a silent no-op device.
+    register_dxgi_desktop_dup();
 }
 
 } // namespace nimrtc::video_capture

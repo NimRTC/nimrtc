@@ -22,7 +22,25 @@
 add_library(nimrtc_video_capture STATIC
     src/synthetic_capture.cpp
     src/capture_source_adapter.cpp
+    src/cursor_compositor.cpp
     )
+
+# Remote-desktop plan A3: the Windows display-capture backend.  The
+# file is compiled on every platform because it carries a portable
+# stub (the class exists everywhere; on a non-Windows host `open()`
+# fails with kErrUnsupported).  Only the *link* libraries are
+# Windows-only: d3d11 (the device and the staging texture) and dxgi
+# (the factory and the duplication object).
+target_sources(nimrtc_video_capture PRIVATE
+    src/platform/dxgi_desktop_dup.cpp
+    )
+
+if(WIN32)
+    target_link_libraries(nimrtc_video_capture PRIVATE
+        d3d11
+        dxgi
+        )
+endif()
 
 nimrtc_apply_options(nimrtc_video_capture)
 target_link_libraries(nimrtc_video_capture

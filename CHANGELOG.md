@@ -17,6 +17,119 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A pluggable cursor layer, and the Windows DXGI Desktop Duplication
+  capture backend (v1.3.0, Remote Desktop plan A6 / A3).**  The
+  portable capture layer was landed above, but it had no *platform*
+  backend to drive and no way to show the pointer on the platforms
+  whose capture API does not draw it.  Both are now in place.
+  - **The cursor layer**,
+    `src/modules/video_capture/include/nimrtc/video_capture/cursor_compositor.hpp`,
+    splits the pointer into two seams so that "the platform already
+    composited it" is a *value* rather than a flag that can be set
+    wrongly:
+    - `ICursorSource` reports **where** the pointer is and what it
+      looks like (a BGRA bitmap, its size and its stride).
+    - `ICursorCompositor` decides **whether** to draw it at all, and
+      draws it.  `AlphaCursorCompositor` is the portable
+      implementation: an integer fixed-point alpha blend of the BGRA
+      cursor bitmap over the BGRA frame pixels, clipped against the
+      frame and rebased onto the region origin, so **pixels outside the
+      pointer's bounding box stay byte-exact** — a screen-capture
+      consumer can diff the composited frame against the raw one and
+      find exactly the pointer.
+    - `PinnedCursorSource` is the "cursor is always drawn at the last
+      position" fallback: when the platform cannot report a live
+      pointer, the last known state keeps being drawn instead of the
+      pointer vanishing.
+    - The adapter applies the layer before the frame is published
+      (`CaptureSourceAdapter::set_cursor`), and only for a *packed*
+      output: alpha blending needs the pixels' alpha channel, which a
+      planar YUV frame does not have.
+  - **The DXGI Desktop Duplication backend**,
+    `src/modules/video_capture/src/platform/dxgi_desktop_dup.cpp`,
+    registered under the plug-in id `"dxgi_desktop"`.  It is the
+    *display* capture path on Windows: fast (a GPU-side copy), no
+    consent prompt, but no pointer in the frame — which is precisely
+    what the cursor layer above is for.
+    - The device enumerates the display outputs, opens an
+      `IDXGIOutputDuplication`, and runs a **capture thread** of its
+      own that blocks in `AcquireNextFrame` — the natural place to
+      wait, because the OS wakes the thread when the desktop changes.
+      The engine's tick thread only ever *pops* an already-queued
+      frame, so a quiet desktop never parks the tick loop.
+    - The frame is read back through a CPU-readable staging texture
+      (BGRA), which is why this backend reports
+      `CaptureCapabilities::zero_copy == false`: the zero-copy hand-off
+      to a hardware encoder is plan item B10.
+    - The dirty rectangles come from DXGI itself
+      (`GetFrameDirtyRects` / `GetFrameMoveRects`), so the backend
+      reports *real* per-frame changed regions rather than a
+      conservative bounding box.  They are clipped against the
+      selected region and rebased onto its origin.
+    - A **region request is honoured exactly**: the captured frame is
+      cropped to the requested source rectangle before it is queued.
+    - The counters (`frames_captured`, `frames_dropped`,
+      `device_errors`, `bytes_copied`) are atomic, because the capture
+      thread writes them and the engine's tick thread reads them.
+    - A lost duplication object (the display was resized, the session
+      was locked) is counted as a device error and reported, rather
+      than silently spinning on a dead device.
+  - **What this backend is *not*:** Windows Graphics Capture (windows,
+    and a cursor the OS composites) is still open, and so is the
+    zero-copy `GpuBuffer` hand-off.  See plan item A3's "Status" note.
+
+- **The engine pumps the capture device on its own tick thread
+  (v1.3.0, Remote Desktop plan A10 / A11).**  Until now a capture
+  device was a plug-in-level facility: a third-party device could be
+  registered and driven, but the *host* still had to pull the frames out
+  of it and hand them to the engine with `send_video()` — one call per
+  frame, from the host's thread.  That is the wrong contract for a
+  screen-capture product: it puts the codec on the host's thread, it
+  makes every host write a frame-pumping loop, and it gives the engine
+  no way to know what the device is doing.
+  - The engine now owns the pump.  `EngineConfig::video_capture_name`
+    names the capture plug-in to use, `EngineConfig::video_capture_config`
+    carries the device request (the geometry, the pixel-layout tag, the
+    queue depth), and `EngineConfig::video_capture_auto_pump` (default
+    `true`) selects the automatic path.  With it off, the host keeps
+    driving `send_video()` by hand — `send_video()` remains the
+    explicit manual path, exactly as the plan says.
+  - The pump pops **at most one frame per tick** and drives the encoder
+    with it, on the engine's tick thread.  This is what makes the
+    encoder single-threaded: `IVideoCodec` and `IVideoSender` are not
+    thread-safe, and the tick thread is now the only thread that ever
+    touches them.  A capture plug-in may own a thread (DXGI's
+    duplication event, ScreenCaptureKit's stream, PipeWire's buffer);
+    the engine does not.
+  - The pump never blocks.  An empty capture queue is a no-op — a quiet
+    device must not park the engine's tick loop — and the pump runs
+    *before* the scheduler drain, so the packets a frame produces leave
+    in the same tick that produced them.
+  - **Capture telemetry in `Engine::Stats`** (plan A11):
+    `video_capture_frames`, `video_capture_frames_pumped`,
+    `video_capture_dropped`, `video_capture_device_errors`,
+    `video_capture_restarts`, `video_capture_format_changes` and
+    `video_capture_bytes_copied`.  The counters are read against a
+    **baseline** the pump remembers, not as a delta taken around the
+    pop: the device drops frames on its *own* thread, so a delta around
+    the pop would miss every drop that happened between two ticks.
+  - A device that reports an error (a display unplugged, a compositor
+    restarted) is reopened once, and the restart is counted.  A device
+    that cannot be reopened is reported through `on_error` with
+    `kVideoCaptureOpenFailed` and the pump stops rather than spinning on
+    a broken device.
+  - A missing capture plug-in is reported through `on_error` with
+    `kVideoCapturePluginMissing` — it is *not* silently ignored, but it
+    is also not fatal for the rest of the session.
+  - Covered by 9 cases in `tests/test_engine_capture_pump.cpp`, driven
+    through the "shell" transport strategy so no ICE/DTLS handshake is
+    involved.  The test registers its own capture device and its own
+    codec plug-in, so it exercises the *seams* rather than a concrete
+    backend: one case records the thread id at `encode()` time and
+    asserts it is the thread that called `tick()`, and another asserts
+    the producer thread is a *different* thread — so the first assertion
+    cannot pass vacuously.
+
 - **The capture-device seam, and the portable half of screen capture
   (v1.3.0, Remote Desktop plan A1 / A2 / A2b).**  The existing
   `IVideoSource` seam describes a *stream of raw frames* and is
@@ -80,11 +193,14 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       and doing it here would hide the mismatch instead of reporting it.
     - An empty capture queue is a **no-op**, not an error: a quiet
       device must not park the engine's tick loop.
-  - **Not yet done (deliberately):** no platform backend exists yet.  The
-    engine does not pump frames from a capture device on its own either —
-    that is plan item A10, and until it lands the capture layer is a
-    plug-in-level facility exercised by the unit tests, not a
-    user-visible screen-sharing feature.
+  - **Not yet done (deliberately):** the macOS ScreenCaptureKit and the
+    Linux portal / PipeWire / X11 backends are still plan items A4 / A5,
+    and the Windows backend still has no zero-copy `GpuBuffer` hand-off
+    (plan item B10).  What *does* exist is the portable layer, the
+    engine's pump over it (plan item A10, above), the cursor layer
+    (A6) and the DXGI display backend (A3), so a third-party capture
+    plug-in can already be driven by the engine end to end and a
+    Windows host can capture a real display.
 
 - **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
   Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264
@@ -1066,6 +1182,23 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **The DXGI Desktop Duplication backend called three DXGI APIs that do
+  not exist, so the capture module did not compile on Windows.**  The
+  file was written against a *newer* DXGI than the SDK it builds
+  against provides, and the errors were not cosmetic — each one was a
+  misreading of what the API returns.
+  - `IDXGIOutput::GetDisplayModeList` takes **four** arguments (format,
+    flags, mode count, mode array), not three.  The count is an in/out
+    parameter, so the first call passes `nullptr` for the array and the
+    second passes the array.
+  - `DXGI_MODE_DESC` has **no** `DesktopCoordinates` member.  The mode
+    list is already scoped to one output, so every mode in it belongs
+    to that output; the desktop area comes from `GetDesc` alone, and
+    the mode list is consulted only for the refresh rate.
+  - `DXGI_OUTDUPL_MOVE_RECT` carries a `POINT SourcePoint` and a `RECT
+    DestinationRect` — there is no `SourceRect` member.  The reported
+    stale region is now the degenerate rect at the source point.
 
 - **The synthetic capture device never named its pixel layout, so a
   consumer could not read its frames.**  `supported_formats()` advertised

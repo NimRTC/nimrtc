@@ -94,6 +94,10 @@
 #include <nimrtc/plugins/video_sink.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+// Remote-desktop plan A10: the capture-*device* seam.  The engine
+// resolves an `IVideoCaptureFactory` through the registry and pumps the
+// device's frames into the encoder on its tick thread.
+#include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
 #include <nimrtc/plugins/xr_report.hpp>        // v1.2.0 (session plan X1) — RTCP XR seam
 
@@ -324,6 +328,52 @@ struct NIMRTC_API_STABLE EngineConfig {
         std::uint16_t mtu          = 1200;
         std::uint16_t initial_seq  = 0;
     } video_sender_tuning;
+
+    // ---- Video capture device (remote-desktop plan A10) -------------------
+    //
+    // The capture seam is *not* the source seam.  A source produces
+    // frames; a capture produces frames *from a device* — it enumerates
+    // devices, negotiates a format, selects a region and reports the
+    // changed region(s) of every frame.
+    //
+    // When `video_capture_name` is set, the engine:
+    //
+    //   1. resolves the `IVideoCaptureFactory` under that id through
+    //      `core::PluginRegistry`,
+    //   2. creates the device with `video_capture_config`,
+    //   3. starts it, and
+    //   4. **pumps** it: on every `tick()` it pops the next frame from
+    //      the device's bounded queue and drives the encoder with it.
+    //
+    // That last step is the point of A10: the host does *not* have to
+    // pull frames and call `send_video()` — the engine does it, on the
+    // tick thread, so the codec and the sender are only ever touched
+    // from one thread.
+    //
+    // `send_video()` remains the explicit manual path and is unchanged.
+    // Do **not** call it from another thread while a capture pump is
+    // running: `IVideoCodec` and `IVideoSender` are not thread-safe.
+    //
+    // Empty (the default) = no capture device; the engine behaves
+    // exactly as before.
+    std::string video_capture_name;
+
+    /** The capture request handed to the device's factory.
+     *
+     *  The device is the authority on the geometry it negotiates: read
+     *  it back from `Engine::video_capture()->config()` after `open()`
+     *  rather than assuming the request was granted.
+     */
+    plugins::CaptureConfig video_capture_config;
+
+    /** Whether the engine pumps the capture device on its tick thread.
+     *
+     *  Default = true when `video_capture_name` is set.  Set it to
+     *  false to open the device and let the host drive it by hand
+     *  (through `Engine::video_capture()`), without the engine
+     *  encoding anything.
+     */
+    bool video_capture_auto_pump = true;
 
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
@@ -1928,6 +1978,25 @@ public:
     NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
 
+    // ---- Video capture device accessor (remote-desktop plan A10) ---------
+    //
+    // The capture device the engine resolved from
+    // `EngineConfig::video_capture_name`.  Null when no capture device
+    // is configured (the default).
+    //
+    // When `EngineConfig::video_capture_auto_pump` is true the engine
+    // drives this device itself, on its tick thread: it pops a frame,
+    // encodes it and puts it on the wire.  A host that wants to drive
+    // the device by hand sets the flag to false — and must then not
+    // call `send_video()` from another thread, because the encoder and
+    // the sender are not thread-safe.
+    NIMRTC_API_UNSTABLE plugins::IVideoCapture* video_capture() noexcept {
+        return video_capture_.get();
+    }
+    NIMRTC_API_UNSTABLE const plugins::IVideoCapture* video_capture() const noexcept {
+        return video_capture_.get();
+    }
+
     // ---- Audio3A plugin accessor (for PCM tap setup in demos/tests) ----
     /** Returns the IAudio3A plugin instance (or nullptr if not created).
      *  Call after open().  Used by demos to set up pre/post process taps. */
@@ -1948,6 +2017,19 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- Video capture counters (remote-desktop plan A11, additive) ---
+        //
+        // The capture device owns the detailed bookkeeping (the seam's
+        // `CaptureStats`), and the engine republishes the numbers that
+        // matter to a host watching a live session here.  All cumulative
+        // since open(); all zero when no capture device is configured.
+        std::uint64_t video_capture_frames      = 0;  // frames pulled from the device
+        std::uint64_t video_capture_frames_pumped = 0;  // frames handed to the encoder
+        std::uint64_t video_capture_dropped     = 0;  // queue-overflow drops
+        std::uint64_t video_capture_device_errors = 0;  // device-lost / read errors
+        std::uint64_t video_capture_restarts    = 0;  // times the device was reopened
+        std::uint64_t video_capture_format_changes = 0;  // negotiated format changed
+        std::uint64_t video_capture_bytes_copied = 0;  // CPU<->GPU bytes (0 = zero-copy)
         // ---- Audio counters (WP-5, additive) -------------------------
         // Cumulative since open().  `audio_encode_errors` is the
         // "never silently dropped" counter: every PCM block that could
@@ -2088,6 +2170,79 @@ private:
     std::unique_ptr<plugins::IVideoSink>        video_sink_;
     std::unique_ptr<plugins::IVideoReceiver>    video_receiver_;
     std::unique_ptr<plugins::IVideoSender>      video_sender_;
+
+    // ---- Video capture device (remote-desktop plan A10) ----------------
+    //
+    // The capture *device*, resolved from
+    // `EngineConfig::video_capture_name` through the registry's
+    // capture slot.  Null when no capture device is configured.
+    //
+    // The device is a *device*, not a frame source: it enumerates,
+    // negotiates a format and fills a bounded queue.  The engine pumps
+    // that queue on its tick thread (see `pump_video_capture()`), so
+    // the host never has to pull frames by hand.
+    //
+    // The engine speaks only the `plugins::IVideoCapture` seam here,
+    // so it includes no concrete capture-module header (Layout
+    // Invariant 4).
+    std::unique_ptr<plugins::IVideoCapture>    video_capture_;
+
+    // The capture -> frame-stream adapter, held through the *source*
+    // seam (`plugins::IVideoSource`).  The adapter does not own the
+    // device — the engine does — and the engine drives it with
+    // `produce_one()` from its tick thread.
+    //
+    // Null when the capture module is not built into this
+    // configuration, or when no capture device is configured.
+    std::unique_ptr<plugins::IVideoSource>     video_capture_source_;
+
+    // The frame pump's own state.  Kept here rather than in the
+    // capture module so the engine's tick loop owns the cadence.
+    struct CapturePumpState {
+        /** The format the device negotiated at open() time.  A change
+         *  means the device renegotiated (a resolution change, a
+         *  format switch) and is counted in the stats. */
+        std::uint32_t width  = 0;
+        std::uint32_t height = 0;
+        std::string   tag;
+
+        /** The negotiated frame rate.  It sets the RTP media-clock
+         *  step: one frame interval per delivered frame. */
+        std::uint32_t fps = 30;
+
+        /** The next RTP media-clock value to stamp on a frame. */
+        std::uint32_t rtp_timestamp = 0;
+
+        /** True once the device has been opened successfully. */
+        bool running = false;
+
+        /** How many frames the pump has handed to the encoder. */
+        std::uint64_t pumped = 0;
+
+        /** How many times the device had to be reopened after an
+         *  error (the "device lost" recovery path). */
+        std::uint64_t restarts = 0;
+
+        /** The device's error counter as the pump last saw it.  The
+         *  pump compares against it to notice a *new* device error —
+         *  the counter only ever grows, so a plain comparison would
+         *  fire on every tick. */
+        std::uint64_t seen_device_errors = 0;
+
+        /** The device's counter of frames it captured, as the pump last
+         *  saw it.  Same reason as `seen_device_errors`: the counters
+         *  are cumulative, so the pump tracks the baseline it has
+         *  already accounted for. */
+        std::uint64_t seen_frames_captured = 0;
+
+        /** The device's counter of dropped frames, as the pump last saw
+         *  it. */
+        std::uint64_t seen_frames_dropped = 0;
+
+        /** The device's counter of bytes copied CPU↔GPU, as the pump
+         *  last saw it. */
+        std::uint64_t seen_bytes_copied = 0;
+    } capture_pump_;
 
     // ---- BWE / Scheduler plugins (ADR-001: resolved via PluginRegistry) ----
     // Created in init_bwe_scheduler() (called from pre_open/open).
@@ -2368,6 +2523,28 @@ private:
     int resolve_audio_bitrate_ceiling() const noexcept;
     void init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
+
+    // ---- Video capture pump (remote-desktop plan A10) --------------------
+    //
+    // `init_video_capture()` resolves the capture device from
+    // `EngineConfig::video_capture_name`, wraps it in the shared
+    // capture -> frame-stream adapter and opens it.  It is called from
+    // `init_video_plugins()`, after the codec and the sender exist,
+    // because the pump drives them.
+    //
+    // `pump_video_capture()` pops one frame from the device's bounded
+    // queue and encodes it.  It is called from `tick()` — the engine
+    // thread — so the codec and the sender are only ever touched from
+    // one thread.
+    //
+    // `pump_deliver_frame()` is the adapter's callback: it stamps the
+    // RTP media clock and hands the frame to `send_video()`.
+    //
+    // `shutdown_video_capture()` closes the device.  Idempotent.
+    void init_video_capture() noexcept;
+    void shutdown_video_capture() noexcept;
+    void pump_video_capture() noexcept;
+    void pump_deliver_frame(const plugins::VideoSourceFrame& frame) noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------
     //

@@ -367,12 +367,23 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // After the merge with main the count is 132 + 4 (the XR / TMMBR
     // headers main added on top of this branch's 121-header base) = 136.
     //
+    // Remote-desktop plan A6 / A10 / A3 bump: +3 public headers
+    // (136 -> 139) for the capture layer's cursor seam, the shared
+    // capture -> frame-stream adapter, and the Windows display-capture
+    // backend:
+    //     - video_capture/cursor_compositor.hpp (the pluggable cursor
+    //       layer: ICursorSource / ICursorCompositor)
+    //     - video_capture/capture_source_adapter.hpp (the shared
+    //       capture -> VideoSourceFrame adapter)
+    //     - video_capture/dxgi_desktop_dup.hpp (the Windows DXGI
+    //       Desktop Duplication device and its factory)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 136;
+    constexpr std::size_t kBaselineHeaderCount = 139;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

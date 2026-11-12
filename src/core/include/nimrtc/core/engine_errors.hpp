@@ -106,6 +106,21 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoReceiverPluginMissing = 0
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderOpenFailed    = 0x1A26;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1A27;
 
+/** The capture device could not be opened (remote-desktop plan A10).
+ *
+ *  Reported when `EngineConfig::video_capture_name` names a factory
+ *  that exists, but the device itself refuses to open — a permission
+ *  denial on macOS, a missing device on Linux, a display that went
+ *  away on Windows. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureOpenFailed    = 0x1A28;
+
+/** No capture factory is registered under the configured id.
+ *
+ *  Distinct from `kVideoCaptureOpenFailed`: this one means "you asked
+ *  for a plug-in that does not exist", the other means "the plug-in
+ *  exists but the device would not open". */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePluginMissing = 0x1A29;
+
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 

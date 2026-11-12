@@ -140,6 +140,19 @@ resolve_video_source(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_source(id);
 }
 
+/** Resolve an `IVideoCaptureFactory` by plugin id. Returns nullptr if not
+ *  registered.
+ *
+ *  Remote-desktop plan A10: the capture-*device* seam.  Distinct from
+ *  the source seam above — a source produces frames, a capture produces
+ *  frames *from a device* (enumeration, format negotiation, region
+ *  selection, dirty-rect metadata).
+ */
+[[nodiscard]] inline const plugins::IVideoCaptureFactory*
+resolve_video_capture(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance().get_video_capture(id);
+}
+
 /** Resolve an `IVideoReceiverFactory` by plugin id. Returns nullptr if not registered. */
 [[nodiscard]] inline const plugins::IVideoReceiverFactory*
 resolve_video_receiver(std::string_view id) noexcept {

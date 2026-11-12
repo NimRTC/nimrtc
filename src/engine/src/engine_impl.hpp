@@ -684,6 +684,17 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_keyframes_q       = 0;
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
+    // ---- Video capture counters (remote-desktop plan A11) ----------------
+    // The capture device owns the detailed bookkeeping (the seam's
+    // `CaptureStats`); the engine republishes the numbers a host
+    // watching a live session needs.  All cumulative since open().
+    std::uint64_t video_capture_frames        = 0;  // frames captured by the device
+    std::uint64_t video_capture_frames_pumped = 0;  // frames handed to the encoder
+    std::uint64_t video_capture_dropped       = 0;  // queue-overflow drops
+    std::uint64_t video_capture_device_errors = 0;  // device-lost / read errors
+    std::uint64_t video_capture_restarts      = 0;  // times the device was reopened
+    std::uint64_t video_capture_format_changes = 0; // negotiated format changed
+    std::uint64_t video_capture_bytes_copied  = 0;  // CPU<->GPU bytes (0 = zero-copy)
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------

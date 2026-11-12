@@ -863,6 +863,13 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 video_sink_->render(sink_frame);
             });
     }
+
+    // ---- Video capture device (remote-desktop plan A10) ----------------
+    //
+    // The capture device is set up *last*, because the pump drives the
+    // codec and the sender: the device must not be able to deliver a
+    // frame before those two exist.
+    init_video_capture();
 }
 
 
@@ -872,6 +879,10 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
         p.reset();
     };
     stop_video();   // stop video source if running
+    // Remote-desktop plan A10: close the capture device *before* the
+    // codec and the sender, so the pump cannot be mid-encode when the
+    // encoder disappears.
+    shutdown_video_capture();
     close_all(video_source_);
     close_all(video_sink_);
     close_all(video_receiver_);
@@ -1185,8 +1196,14 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
 
 plugins::Status NimRTCEngine::start_video() noexcept {
     if (!is_open()) return plugins::kErrNotReady;
+    // Remote-desktop plan A10: the capture device is opened with the
+    // rest of the video plugins (at open() time), so there is nothing
+    // to start here — the pump drives it from the tick thread.
     if (video_source_) {
         video_source_->start();
+        return plugins::kOk;
+    }
+    if (video_capture_source_) {
         return plugins::kOk;
     }
     return plugins::kErrNotReady;
@@ -1197,6 +1214,9 @@ void NimRTCEngine::stop_video() noexcept {
     if (video_source_) {
         video_source_->stop();
     }
+    // The capture device stays open: stopping the source does not mean
+    // "stop the screen capture".  The device is closed when the engine
+    // shuts its video plugins down (see shutdown_video_plugins()).
 }
 
 
@@ -1740,6 +1760,16 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_keyframes_q;
     out.video_feedback_applied  = impl_->video_feedback_applied;
     out.video_keyframes_applied = impl_->video_keyframes_applied;
+    // Remote-desktop plan A11: the capture counters.  They are zero
+    // when no capture device is configured, so a host that never
+    // configured one sees no change in its telemetry.
+    out.video_capture_frames         = impl_->video_capture_frames;
+    out.video_capture_frames_pumped  = impl_->video_capture_frames_pumped;
+    out.video_capture_dropped        = impl_->video_capture_dropped;
+    out.video_capture_device_errors  = impl_->video_capture_device_errors;
+    out.video_capture_restarts       = impl_->video_capture_restarts;
+    out.video_capture_format_changes = impl_->video_capture_format_changes;
+    out.video_capture_bytes_copied   = impl_->video_capture_bytes_copied;
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.

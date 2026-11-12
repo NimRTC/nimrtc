@@ -78,7 +78,16 @@ RtcpBlockKind classify(std::uint8_t payload_type) noexcept {
 
 std::vector<RtcpBlock> demux_rtcp(core::ByteSpan compound) noexcept {
     std::vector<RtcpBlock> blocks;
-    if (compound.empty()) return blocks;
+    demux_rtcp(compound, blocks);
+    return blocks;
+}
+
+void demux_rtcp(core::ByteSpan compound, std::vector<RtcpBlock>& out) noexcept {
+    // Phase 3 / C6: the vector is cleared and then refilled, so the
+    // caller can hand the same vector to every datagram and pay no
+    // allocation after the capacity has grown to the high-water mark.
+    out.clear();
+    if (compound.empty()) return;
 
     const std::uint8_t* base = compound.data();
     std::size_t offset = 0;
@@ -107,12 +116,10 @@ std::vector<RtcpBlock> demux_rtcp(core::ByteSpan compound) noexcept {
         block.fmt          = static_cast<std::uint8_t>(b0 & 0x1Fu);
         block.payload_type = payload_type;
         block.packet       = compound.subspan(offset, sub_len);
-        blocks.push_back(block);
+        out.push_back(block);
 
         offset += sub_len;
     }
-
-    return blocks;
 }
 
 

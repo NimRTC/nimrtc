@@ -1454,7 +1454,10 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     // but that is not an error worth failing the read path for, and the
     // well-formed head of the datagram must not be thrown away.
     const core::ByteSpan compound(view.data(), view.size());
-    const std::vector<rtp::RtcpBlock> blocks = rtp::demux_rtcp(compound);
+    // Phase 3 / C6: demultiplex into the engine's reusable vector, so
+    // the receive path performs no heap allocation per RTCP datagram.
+    rtp::demux_rtcp(compound, impl_->rtcp_blocks_scratch);
+    const std::vector<rtp::RtcpBlock>& blocks = impl_->rtcp_blocks_scratch;
     const core::TimePoint now = core::SteadyClock::now();
 
     for (const rtp::RtcpBlock& blk : blocks) {

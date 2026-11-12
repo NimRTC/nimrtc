@@ -165,7 +165,22 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::protect_rtp(
     auto* ctx = static_cast<srtp_t>(session_);
     const std::size_t in_len = header_and_plaintext.size();
     std::size_t out_len = in_len + auth_tag_len_for(suite_id_);
-    work_buf_.resize(out_len);
+
+    // Phase 3 / C5: grow the scratch to a high-water mark and never
+    // shrink it.  The old code did `resize(out_len)` before the call
+    // and `resize(actual_len)` after it, so the vector's size tracked
+    // the *last* packet.  The next packet with a different size then
+    // grew the vector again — and `std::vector::resize()` value-
+    // initialises the newly added bytes, so every size change cost a
+    // memset of the whole difference.  Keeping the size at the
+    // high-water mark makes the steady-state path allocation-free and
+    // memset-free.
+    //
+    // Only the vector's *storage* matters to libsrtp: `data()` plus the
+    // explicit `out_len` the call writes back.
+    if (work_buf_.size() < out_len) {
+        work_buf_.resize(out_len);
+    }
 
     srtp_err_status_t rc = srtp_protect(ctx,
                                        header_and_plaintext.data(),
@@ -177,9 +192,8 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::protect_rtp(
         return core::Result<core::ByteSpan>::fail(core::ErrorCode::ProtocolError,
                                                   "SRTP backend: protect failed");
     }
-    work_buf_.resize(out_len);
     return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(work_buf_.data(), work_buf_.size()));
+        core::ByteSpan(work_buf_.data(), out_len));
 }
 
 core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtp(
@@ -189,7 +203,13 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtp(
             core::ErrorCode::InvalidState, "SRTP backend: not initialised");
     }
     auto* ctx = static_cast<srtp_t>(session_);
-    out_buf_.resize(srtp_packet.size());
+
+    // Phase 3 / C5: same high-water-mark scratch policy as protect_rtp().
+    // `out_len` is the *available* capacity handed to libsrtp; libsrtp
+    // writes the actual plaintext length back into it.
+    if (out_buf_.size() < srtp_packet.size()) {
+        out_buf_.resize(srtp_packet.size());
+    }
     std::size_t out_len = out_buf_.size();
     srtp_err_status_t rc = srtp_unprotect(ctx,
                                           srtp_packet.data(),
@@ -200,9 +220,8 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtp(
         return core::Result<core::ByteSpan>::fail(core::ErrorCode::ProtocolError,
                                                   "SRTP backend: unprotect failed");
     }
-    out_buf_.resize(out_len);
     return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(out_buf_.data(), out_buf_.size()));
+        core::ByteSpan(out_buf_.data(), out_len));
 }
 
 core::Result<core::ByteSpan> LibsrtpSessionBackend::protect_rtcp(
@@ -212,7 +231,9 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::protect_rtcp(
     }
     auto* ctx = static_cast<srtp_t>(session_);
     std::size_t out_len = rtcp_packet.size() + auth_tag_len_for(suite_id_);
-    work_buf_.resize(out_len);
+    if (work_buf_.size() < out_len) {
+        work_buf_.resize(out_len);
+    }
     srtp_err_status_t rc = srtp_protect_rtcp(ctx,
                                               rtcp_packet.data(),
                                               rtcp_packet.size(),
@@ -223,9 +244,8 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::protect_rtcp(
         return core::Result<core::ByteSpan>::fail(core::ErrorCode::ProtocolError,
                                                   "SRTP backend: protect_rtcp failed");
     }
-    work_buf_.resize(out_len);
     return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(work_buf_.data(), work_buf_.size()));
+        core::ByteSpan(work_buf_.data(), out_len));
 }
 
 core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtcp(
@@ -234,7 +254,9 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtcp(
         return core::Result<core::ByteSpan>::ok(srtcp_packet);
     }
     auto* ctx = static_cast<srtp_t>(session_);
-    out_buf_.resize(srtcp_packet.size());
+    if (out_buf_.size() < srtcp_packet.size()) {
+        out_buf_.resize(srtcp_packet.size());
+    }
     std::size_t out_len = out_buf_.size();
     srtp_err_status_t rc = srtp_unprotect_rtcp(ctx,
                                                 srtcp_packet.data(),
@@ -245,9 +267,8 @@ core::Result<core::ByteSpan> LibsrtpSessionBackend::unprotect_rtcp(
         return core::Result<core::ByteSpan>::fail(core::ErrorCode::ProtocolError,
                                                   "SRTP backend: unprotect_rtcp failed");
     }
-    out_buf_.resize(out_len);
     return core::Result<core::ByteSpan>::ok(
-        core::ByteSpan(out_buf_.data(), out_buf_.size()));
+        core::ByteSpan(out_buf_.data(), out_len));
 }
 
 std::uint32_t LibsrtpSessionBackend::current_roc() const noexcept {

@@ -906,6 +906,14 @@ struct NimRTCEngine::Impl {
     /// that did not exist when every call allocated its own packet.
     std::vector<std::uint8_t> dtmf_rtp_scratch;
 
+    /// Reusable destination for the inbound RTCP demultiplexer.
+    ///
+    /// `rtp::demux_rtcp()` used to return a fresh `std::vector` per
+    /// inbound datagram.  The scratch holds the blocks of the datagram
+    /// currently being processed; it is cleared and refilled on every
+    /// call, so its capacity is the only thing that persists.
+    std::vector<rtp::RtcpBlock> rtcp_blocks_scratch;
+
     // ---- Cross-end timeline (ADR-017) --------------------------------------
     //
     // `EngineConfig::timeline_enabled` turns this seam on.  Four things

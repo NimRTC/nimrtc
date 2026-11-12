@@ -230,6 +230,94 @@ TEST(RtcpDemux, BlockSpanPointsIntoTheCallerBuffer) {
 }
 
 // ---------------------------------------------------------------------------
+// The caller-owned overload (Phase 3 / C6)
+// ---------------------------------------------------------------------------
+//
+// `demux_rtcp(compound, out)` is the allocation-free form the engine's
+// receive path uses.  It must behave exactly like the returning
+// overload, and -- the point of the exercise -- it must not allocate
+// once the vector has reached its high-water mark.
+
+TEST(RtcpDemux, CallerOwnedOverloadMatchesTheReturningOne) {
+    ByteBuffer sr_body;
+    put_be32(sr_body, 0x11111111u);
+    ByteBuffer sr = make_subpacket(0, 200, sr_body);
+
+    ByteBuffer rr_body;
+    put_be32(rr_body, 0x22222222u);
+    ByteBuffer rr = make_subpacket(0, 201, rr_body);
+
+    ByteBuffer compound;
+    compound.insert(compound.end(), sr.begin(), sr.end());
+    compound.insert(compound.end(), rr.begin(), rr.end());
+
+    const auto expected = demux_rtcp(ByteSpan{compound.data(), compound.size()});
+
+    std::vector<RtcpBlock> out;
+    demux_rtcp(ByteSpan{compound.data(), compound.size()}, out);
+
+    ASSERT_EQ(out.size(), expected.size());
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        EXPECT_EQ(out[i].kind, expected[i].kind);
+        EXPECT_EQ(out[i].payload_type, expected[i].payload_type);
+        EXPECT_EQ(out[i].fmt, expected[i].fmt);
+        EXPECT_EQ(out[i].packet.data(), expected[i].packet.data());
+        EXPECT_EQ(out[i].packet.size(), expected[i].packet.size());
+    }
+}
+
+TEST(RtcpDemux, CallerOwnedOverloadClearsTheVectorFirst) {
+    // The vector is cleared before the walk, so it never carries blocks
+    // from a *previous* datagram into this one.  A stale block would
+    // make the engine act on a report that the peer never sent.
+    ByteBuffer body;
+    put_be32(body, 0x11111111u);
+    ByteBuffer pkt = make_subpacket(0, 200, body);
+
+    std::vector<RtcpBlock> out;
+    demux_rtcp(ByteSpan{pkt.data(), pkt.size()}, out);
+    ASSERT_EQ(out.size(), 1u);
+
+    // Now demultiplex a *different*, shorter datagram into the same
+    // vector.  The old block must be gone.
+    ByteBuffer rr_body;
+    put_be32(rr_body, 0x22222222u);
+    ByteBuffer rr = make_subpacket(0, 201, rr_body);
+
+    demux_rtcp(ByteSpan{rr.data(), rr.size()}, out);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].kind, RtcpBlockKind::kReceiverReport);
+
+    // An empty datagram must leave the vector empty, not stale.
+    demux_rtcp(ByteSpan{}, out);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(RtcpDemux, CallerOwnedOverloadReusesItsCapacity) {
+    // The whole point of the overload: after the vector has grown to its
+    // high-water mark, no further call allocates.  A capacity that stays
+    // put across calls of *different* sizes proves the vector is never
+    // shrunk back to the last datagram's block count.
+    ByteBuffer big_body(64, 0x11);
+    ByteBuffer big = make_subpacket(0, 200, big_body);
+
+    ByteBuffer small_body;
+    put_be32(small_body, 0x22222222u);
+    ByteBuffer small = make_subpacket(0, 201, small_body);
+
+    std::vector<RtcpBlock> out;
+    demux_rtcp(ByteSpan{big.data(), big.size()}, out);
+    const std::size_t capacity_after_big = out.capacity();
+    ASSERT_GE(capacity_after_big, 1u);
+
+    demux_rtcp(ByteSpan{small.data(), small.size()}, out);
+    // The capacity never shrinks: the vector is reused, not rebuilt.
+    EXPECT_EQ(out.capacity(), capacity_after_big);
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].kind, RtcpBlockKind::kReceiverReport);
+}
+
+// ---------------------------------------------------------------------------
 // REMB
 // ---------------------------------------------------------------------------
 

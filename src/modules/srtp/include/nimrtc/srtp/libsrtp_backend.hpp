@@ -73,7 +73,21 @@ public:
 private:
     void*                    session_ = nullptr;
     std::uint32_t            suite_id_ = 0;
+
+    /// Scratch buffer for the *protect* direction.
+    ///
+    /// The buffer is grown to fit and then reused for the next packet,
+    /// so the steady-state protect path performs no allocation.  The
+    /// buffer is never shrunk back — `reset()` clears it outright.
     std::vector<std::uint8_t> work_buf_;   // protect output
+
+    /// Scratch buffer for the *unprotect* direction — see `work_buf_`.
+    ///
+    /// Before Phase 3 this was a fresh `std::vector` per packet on the
+    /// `SrtpSession::unprotect_rtp()` path (one heap allocation per
+    /// inbound RTP packet).  The Phase 2 refactor moved the crypto
+    /// behind the `ISrtpSessionBackend` seam, and this member is where
+    /// the reuse landed.
     std::vector<std::uint8_t> out_buf_;    // unprotect output
 };
 

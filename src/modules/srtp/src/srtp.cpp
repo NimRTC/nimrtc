@@ -86,9 +86,6 @@ struct SrtpSession::Impl {
     std::uint32_t                           bound_ssrc = 0;
     bool                                    is_outbound = true;
     Stats                                   stats_{};
-
-    // Working buffer for protect (must hold plaintext + auth tag).
-    std::vector<std::uint8_t>               work_buf_;
 };
 
 // ---------------------------------------------------------------------------

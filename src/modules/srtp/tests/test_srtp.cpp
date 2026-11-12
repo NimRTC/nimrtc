@@ -197,3 +197,120 @@ TEST(SrtpBackendSeamTest, EmptyKeyFails) {
     EXPECT_FALSE(backend->init_outbound(empty, empty, suite).ok());
     EXPECT_FALSE(backend->init_inbound(empty, empty, suite).ok());
 }
+
+// -----------------------------------------------------------------------------
+// The scratch buffers (Phase 3 / C5)
+//
+// The libsrtp backend keeps one scratch per direction and grows it to a
+// high-water mark.  Two properties matter and are easy to break:
+//
+//   1. The returned span's length must be the *actual* crypto output
+//      length, never the scratch's capacity.  When the scratch was
+//      grown by a previous, larger packet, returning its size would
+//      hand the caller trailing garbage -- and for `unprotect_rtp` it
+//      would hand back ciphertext-tag bytes as if they were plaintext.
+//
+//   2. A smaller packet after a larger one must still work: the
+//      scratch is not shrunk, so the length has to come from the
+//      crypto call, not from the vector.
+//
+// These are the exact regressions the high-water-mark rewrite could
+// introduce, so they are pinned here.
+// -----------------------------------------------------------------------------
+TEST(SrtpScratchTest, ProtectReturnsTheExactCiphertextLength) {
+    LibsrtpBackendFactory factory;
+    auto sender = factory.create();
+    auto receiver = factory.create();
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+
+    std::vector<std::uint8_t> key(16, 0xAA);
+    std::vector<std::uint8_t> salt(14, 0xBB);
+    const std::uint32_t suite = to_libsrtp_profile(CryptoSuite::Aes128CmSha1_80);
+    ASSERT_TRUE(sender->init_outbound(key, salt, suite).ok());
+    ASSERT_TRUE(receiver->init_inbound(key, salt, suite).ok());
+
+    // A big packet first: this grows the scratch to its high-water mark.
+    std::vector<std::uint8_t> big(12 + 512, 0x5A);
+    big[0] = 0x80;
+    auto enc_big = sender->protect_rtp(core::ByteSpan(big.data(), big.size()));
+    ASSERT_TRUE(enc_big.ok());
+    EXPECT_EQ(enc_big.value().size(), big.size() + 10u);   // + the auth tag
+
+    // Now a small packet through the *same* backend: the scratch is
+    // still large, so a length taken from the scratch would be wrong.
+    auto small = make_min_rtp();
+    auto enc_small = sender->protect_rtp(core::ByteSpan(small.data(), small.size()));
+    ASSERT_TRUE(enc_small.ok());
+    EXPECT_EQ(enc_small.value().size(), small.size() + 10u);
+
+    // And it must still decrypt to the original plaintext.
+    std::vector<std::uint8_t> wire(enc_small.value().begin(), enc_small.value().end());
+    auto dec = receiver->unprotect_rtp(core::ByteSpan(wire.data(), wire.size()));
+    ASSERT_TRUE(dec.ok());
+    EXPECT_EQ(dec.value().size(), small.size());
+    EXPECT_EQ(0, std::memcmp(dec.value().data(), small.data(), small.size()));
+}
+
+TEST(SrtpScratchTest, UnprotectReturnsTheExactPlaintextLength) {
+    LibsrtpBackendFactory factory;
+    auto sender = factory.create();
+    auto receiver = factory.create();
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+
+    std::vector<std::uint8_t> key(16, 0xAA);
+    std::vector<std::uint8_t> salt(14, 0xBB);
+    const std::uint32_t suite = to_libsrtp_profile(CryptoSuite::Aes128CmSha1_80);
+    ASSERT_TRUE(sender->init_outbound(key, salt, suite).ok());
+    ASSERT_TRUE(receiver->init_inbound(key, salt, suite).ok());
+
+    // Grow the receiver's scratch with a large packet.
+    std::vector<std::uint8_t> big(12 + 512, 0x5A);
+    big[0] = 0x80;
+    auto enc_big = sender->protect_rtp(core::ByteSpan(big.data(), big.size()));
+    ASSERT_TRUE(enc_big.ok());
+    std::vector<std::uint8_t> wire_big(enc_big.value().begin(), enc_big.value().end());
+    auto dec_big = receiver->unprotect_rtp(
+        core::ByteSpan(wire_big.data(), wire_big.size()));
+    ASSERT_TRUE(dec_big.ok());
+    EXPECT_EQ(dec_big.value().size(), big.size());
+
+    // A small packet next.  The scratch is still 512+ bytes, so the
+    // returned length must be the plaintext length -- not the scratch.
+    auto small = make_min_rtp();
+    auto enc_small = sender->protect_rtp(core::ByteSpan(small.data(), small.size()));
+    ASSERT_TRUE(enc_small.ok());
+    std::vector<std::uint8_t> wire(enc_small.value().begin(), enc_small.value().end());
+    auto dec = receiver->unprotect_rtp(core::ByteSpan(wire.data(), wire.size()));
+    ASSERT_TRUE(dec.ok());
+    EXPECT_EQ(dec.value().size(), small.size());
+    EXPECT_EQ(0, std::memcmp(dec.value().data(), small.data(), small.size()));
+}
+
+TEST(SrtpScratchTest, RtcpProtectAndUnprotectRoundTrip) {
+    LibsrtpBackendFactory factory;
+    auto sender = factory.create();
+    auto receiver = factory.create();
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+
+    std::vector<std::uint8_t> key(16, 0xAA);
+    std::vector<std::uint8_t> salt(14, 0xBB);
+    const std::uint32_t suite = to_libsrtp_profile(CryptoSuite::Aes128CmSha1_80);
+    ASSERT_TRUE(sender->init_outbound(key, salt, suite).ok());
+    ASSERT_TRUE(receiver->init_inbound(key, salt, suite).ok());
+
+    // A receiver-report-shaped RTCP packet: 8-byte header + 4 bytes.
+    std::vector<std::uint8_t> rtcp = {0x81, 200, 0x00, 0x03, 0x11, 0x22, 0x33, 0x44};
+
+    auto enc = sender->protect_rtcp(core::ByteSpan(rtcp.data(), rtcp.size()));
+    ASSERT_TRUE(enc.ok());
+    EXPECT_EQ(enc.value().size(), rtcp.size() + 10u);
+
+    std::vector<std::uint8_t> wire(enc.value().begin(), enc.value().end());
+    auto dec = receiver->unprotect_rtcp(core::ByteSpan(wire.data(), wire.size()));
+    ASSERT_TRUE(dec.ok());
+    EXPECT_EQ(dec.value().size(), rtcp.size());
+    EXPECT_EQ(0, std::memcmp(dec.value().data(), rtcp.data(), rtcp.size()));
+}

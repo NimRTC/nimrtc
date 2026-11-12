@@ -294,14 +294,32 @@ TEST(Session, EndToEnd) {
     ASSERT_EQ(streams.size(), 2u);
 
     // Verify tracks reachable via streams.
-    auto audio_s = sess.streams()[0]->track_by_id("audio-1");
+    //
+    // `Session::streams()` returns the streams out of an unordered_map,
+    // so the order is unspecified — the test must look the stream up by
+    // its id, not by position.  (It used to index positionally, and the
+    // assertion happened to pass on the runners where the map's bucket
+    // order happened to match the insertion order.  It failed on
+    // aarch64.)
+    auto find_stream = [&](const std::string& id) -> std::shared_ptr<Stream> {
+        for (const auto& s : streams) {
+            if (s->id() == id) return s;
+        }
+        return nullptr;
+    };
+
+    auto audio_stream_s = find_stream("audio-stream");
+    ASSERT_NE(audio_stream_s, nullptr);
+    auto audio_s = audio_stream_s->track_by_id("audio-1");
     ASSERT_NE(audio_s, nullptr);
     EXPECT_TRUE(audio_s->has_ssrc());
     EXPECT_EQ(audio_s->ssrc(), 0x11111111u);
     EXPECT_TRUE(audio_s->bundled());
     EXPECT_EQ(audio_s->direction(), TrackDirection::kSendOnly);
 
-    auto video_s = sess.streams()[1]->track_by_id("video-1");
+    auto video_stream_s = find_stream("video-stream");
+    ASSERT_NE(video_stream_s, nullptr);
+    auto video_s = video_stream_s->track_by_id("video-1");
     ASSERT_NE(video_s, nullptr);
     EXPECT_TRUE(video_s->bundled());
     EXPECT_EQ(video_s->direction(), TrackDirection::kSendRecv);

@@ -17,6 +17,7 @@
 #include "random.h"
 #include "stun.h"
 #include "turn.h"
+#include "turn_tcp.h"
 #include "udp.h"
 
 #include <assert.h>
@@ -86,6 +87,10 @@ static void delete_allocation(server_turn_alloc_t *alloc) {
 	closesocket(alloc->sock);
 	alloc->sock = INVALID_SOCKET;
 	alloc->credentials = NULL;
+
+	// The allocation may own the TCP control connection it was created
+	// over.  The session itself is closed by the caller.
+	alloc->stream = NULL;
 }
 
 static thread_return_t THREAD_CALL server_thread_entry(void *arg) {
@@ -124,6 +129,8 @@ juice_server_t *server_create(const juice_server_config_t *config) {
 		return NULL;
 	}
 
+	server->tcp_sock = INVALID_SOCKET;
+
 	mutex_init(&server->mutex, MUTEX_RECURSIVE);
 
 	bool alloc_failed = false;
@@ -133,6 +140,7 @@ juice_server_t *server_create(const juice_server_config_t *config) {
 	server->config.bind_address = alloc_string_copy(config->bind_address, &alloc_failed);
 	server->config.external_address = alloc_string_copy(config->external_address, &alloc_failed);
 	server->config.port = config->port;
+	server->config.tcp_port = config->tcp_port;
 	server->config.relay_port_range_begin = config->relay_port_range_begin;
 	server->config.relay_port_range_end = config->relay_port_range_end;
 	server->config.realm = alloc_string_copy(
@@ -187,10 +195,20 @@ juice_server_t *server_create(const juice_server_config_t *config) {
 	if (server->config.max_peers == 0)
 		server->config.max_peers = SERVER_DEFAULT_MAX_PEERS;
 
+	if (server->config.tcp_port) {
+		if (server_tcp_listen(server) < 0) {
+			JLOG_FATAL("TURN-over-TCP listener creation failed");
+			goto error;
+		}
+	}
+
 	if (server->config.bind_address)
 		JLOG_INFO("Created server on %s:%hu", server->config.bind_address, server->config.port);
 	else
 		JLOG_INFO("Created server on port %hu", server->config.port);
+
+	if (server->config.tcp_port)
+		JLOG_INFO("Created TURN-over-TCP listener on port %hu", server->config.tcp_port);
 
 	int ret = thread_init(&server->thread, server_thread_entry, server);
 	if (ret) {
@@ -208,6 +226,7 @@ error:
 void server_do_destroy(juice_server_t *server) {
 	JLOG_DEBUG("Destroying server");
 
+	server_tcp_close(server);
 	closesocket(server->sock);
 	mutex_destroy(&server->mutex);
 
@@ -346,9 +365,18 @@ void server_run(juice_server_t *server) {
 		if (timediff < 0)
 			timediff = 0;
 
-		if (!pfd || nfd != (nfds_t)(1 + server->allocs_count)) {
+		// The polled descriptors are the server UDP socket, the TURN
+		// allocations, the TURN-over-TCP listener and the accepted
+		// TURN-over-TCP sessions.
+		nfds_t expected = (nfds_t)(1 + server->allocs_count);
+		if (server->tcp_sock != INVALID_SOCKET)
+			++expected;
+		for (server_turn_session_t *s = server->sessions; s; s = s->next)
+			++expected;
+
+		if (!pfd || nfd != expected) {
 			free(pfd);
-			nfd = (nfds_t)(1 + server->allocs_count);
+			nfd = expected;
 			pfd = calloc(nfd, sizeof(struct pollfd));
 			if (!pfd) {
 				JLOG_FATAL("Memory allocation for poll descriptors failed");
@@ -356,17 +384,34 @@ void server_run(juice_server_t *server) {
 			}
 		}
 
-		pfd[0].fd = server->sock;
-		pfd[0].events = POLLIN;
+		nfds_t index = 0;
+		pfd[index].fd = server->sock;
+		pfd[index].events = POLLIN;
+		++index;
 
 		for (int i = 0; i < server->allocs_count; ++i) {
 			server_turn_alloc_t *alloc = server->allocs + i;
 			if (alloc->state == SERVER_TURN_ALLOC_FULL) {
-				pfd[1 + i].fd = alloc->sock;
-				pfd[1 + i].events = POLLIN;
+				pfd[index].fd = alloc->sock;
+				pfd[index].events = POLLIN;
 			} else {
-				pfd[1 + i].fd = -1; // ignore
+				pfd[index].fd = -1; // ignore
 			}
+			++index;
+		}
+
+		nfds_t tcp_index = index;
+		if (server->tcp_sock != INVALID_SOCKET) {
+			pfd[index].fd = server->tcp_sock;
+			pfd[index].events = POLLIN;
+			++index;
+		}
+
+		nfds_t session_index = index;
+		for (server_turn_session_t *s = server->sessions; s; s = s->next) {
+			pfd[index].fd = turn_tcp_stream_socket(s->stream);
+			pfd[index].events = POLLIN;
+			++index;
 		}
 
 		JLOG_VERBOSE("Entering poll for %d ms", (int)timediff);
@@ -404,6 +449,36 @@ void server_run(juice_server_t *server) {
 			if (alloc->state == SERVER_TURN_ALLOC_FULL && pfd[1 + i].revents & POLLIN)
 				server_forward(server, alloc);
 		}
+
+		if (server->tcp_sock != INVALID_SOCKET && pfd[tcp_index].revents & POLLIN)
+			server_tcp_accept(server);
+
+		if (session_index < nfd) {
+			// The session list may have changed while accepting, so the
+			// sessions are matched by socket rather than by index.
+			for (nfds_t i = session_index; i < nfd; ++i) {
+				if (!(pfd[i].revents & (POLLIN | POLLERR | POLLHUP)))
+					continue;
+
+				socket_t sock = pfd[i].fd;
+				server_turn_session_t *session = NULL;
+				for (server_turn_session_t *s = server->sessions; s; s = s->next) {
+					if (turn_tcp_stream_socket(s->stream) == sock) {
+						session = s;
+						break;
+					}
+				}
+				if (!session)
+					continue;
+
+				if (pfd[i].revents & (POLLERR | POLLHUP)) {
+					server_tcp_session_close(server, session);
+					continue;
+				}
+
+				server_tcp_session_recv(server, session);
+			}
+		}
 	}
 
 	JLOG_DEBUG("Leaving server thread");
@@ -413,6 +488,17 @@ void server_run(juice_server_t *server) {
 
 int server_send(juice_server_t *server, const addr_record_t *dst, const char *data, size_t size) {
 	JLOG_VERBOSE("Sending datagram, size=%d", size);
+
+	// A message received over a TCP control connection must be answered
+	// over that very same connection.
+	if (server->current_conn && server->current_conn->stream) {
+		int ret = turn_tcp_stream_send(server->current_conn->stream, data, size);
+		if (ret < 0) {
+			JLOG_WARN("TURN stream send failed");
+			return -1;
+		}
+		return (int)size;
+	}
 
 	int ret = udp_sendto(server->sock, data, size, dst);
 	if (ret < 0 && sockerrno != SEAGAIN && sockerrno != SEWOULDBLOCK)
@@ -496,6 +582,18 @@ int server_forward(juice_server_t *server, server_turn_alloc_t *alloc) {
 		uint16_t channel;
 		if (turn_get_bound_channel(&alloc->map, &record, &channel)) {
 			// Use ChannelData
+			if (alloc->stream) {
+				// RFC 8656 section 12.5: over TCP the ChannelData payload is
+				// padded to a multiple of four bytes.
+				int ret = turn_tcp_stream_send_channel_data(alloc->stream, buffer, (size_t)len,
+				                                           channel);
+				if (ret < 0) {
+					JLOG_ERROR("TURN stream ChannelData send failed");
+					return -1;
+				}
+				return len;
+			}
+
 			len = turn_wrap_channel_data(buffer, BUFFER_SIZE, buffer, len, channel);
 			if (len <= 0) {
 				JLOG_ERROR("TURN ChannelData wrapping failed");
@@ -524,6 +622,21 @@ int server_forward(juice_server_t *server, server_turn_alloc_t *alloc) {
 			msg.data_size = len;
 			juice_random(msg.transaction_id, STUN_TRANSACTION_ID_SIZE);
 
+			if (alloc->stream) {
+				char response[BUFFER_SIZE];
+				int size = stun_write(response, BUFFER_SIZE, &msg, NULL);
+				if (size <= 0) {
+					JLOG_ERROR("STUN message write failed");
+					return -1;
+				}
+				int ret = turn_tcp_stream_send(alloc->stream, response, (size_t)size);
+				if (ret < 0) {
+					JLOG_ERROR("TURN stream Data indication send failed");
+					return -1;
+				}
+				return size;
+			}
+
 			return server_stun_send(server, &alloc->record, &msg, NULL);
 		}
 	}
@@ -532,7 +645,16 @@ int server_forward(juice_server_t *server, server_turn_alloc_t *alloc) {
 }
 
 int server_input(juice_server_t *server, char *buf, size_t len, const addr_record_t *src) {
+	server_conn_t conn;
+	conn.src = *src;
+	conn.stream = NULL;
+	return server_input_conn(server, buf, len, &conn);
+}
+
+int server_input_conn(juice_server_t *server, char *buf, size_t len, const server_conn_t *conn) {
 	JLOG_VERBOSE("Received datagram, size=%d", len);
+
+	const addr_record_t *src = &conn->src;
 
 	if (is_stun_datagram(buf, len)) {
 		if (JLOG_DEBUG_ENABLED) {
@@ -545,7 +667,16 @@ int server_input(juice_server_t *server, char *buf, size_t len, const addr_recor
 			JLOG_ERROR("STUN message reading failed");
 			return -1;
 		}
-		return server_dispatch_stun(server, buf, len, &msg, src);
+
+		// Remember the connection the message came from, so that the
+		// response goes back over the same transport.
+		server_conn_t *previous = server->current_conn;
+		server->current_conn = (server_conn_t *)conn;
+
+		int ret = server_dispatch_stun(server, buf, len, &msg, src);
+
+		server->current_conn = previous;
+		return ret;
 	}
 
 	if (is_channel_data(buf, len)) {
@@ -905,6 +1036,10 @@ int server_process_turn_allocate(juice_server_t *server, const stun_message_t *m
 		alloc->record = *src;
 		alloc->credentials = credentials;
 
+		// Remember the control connection the allocation was created
+		// over, so that the relayed data goes back the same way.
+		alloc->stream = server->current_conn ? server->current_conn->stream : NULL;
+
 		--credentials->allocations_quota;
 	}
 
@@ -1184,6 +1319,166 @@ int server_process_channel_data(juice_server_t *server, char *buf, size_t len,
 		JLOG_WARN("Send failed, errno=%d", sockerrno);
 
 	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// TURN over TCP (RFC 8656 section 12)
+// ---------------------------------------------------------------------------
+
+int server_tcp_listen(juice_server_t *server) {
+	struct addrinfo hints;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_flags = AI_PASSIVE | AI_NUMERICSERV;
+
+	char service[8];
+	snprintf(service, sizeof(service), "%hu", server->config.tcp_port);
+
+	struct addrinfo *ai_list = NULL;
+	int ret = getaddrinfo(server->config.bind_address, service, &hints, &ai_list);
+	if (ret != 0) {
+		JLOG_ERROR("getaddrinfo for the TURN-over-TCP listener failed");
+		return -1;
+	}
+
+	socket_t sock = INVALID_SOCKET;
+	for (struct addrinfo *ai = ai_list; ai; ai = ai->ai_next) {
+		if (ai->ai_family != AF_INET && ai->ai_family != AF_INET6)
+			continue;
+
+		sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (sock == INVALID_SOCKET)
+			continue;
+
+		const sockopt_t reuse = 1;
+		setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+
+		if (bind(sock, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0 &&
+		    listen(sock, 16) == 0)
+			break;
+
+		JLOG_WARN("TURN-over-TCP listener binding failed, errno=%d", sockerrno);
+		closesocket(sock);
+		sock = INVALID_SOCKET;
+	}
+
+	freeaddrinfo(ai_list);
+
+	if (sock == INVALID_SOCKET) {
+		JLOG_ERROR("TURN-over-TCP listener creation failed");
+		return -1;
+	}
+
+	if (turn_tcp_set_nonblocking(sock) < 0) {
+		closesocket(sock);
+		return -1;
+	}
+
+	server->tcp_sock = sock;
+	return 0;
+}
+
+void server_tcp_close(juice_server_t *server) {
+	if (server->tcp_sock != INVALID_SOCKET) {
+		closesocket(server->tcp_sock);
+		server->tcp_sock = INVALID_SOCKET;
+	}
+
+	server_turn_session_t *session = server->sessions;
+	while (session) {
+		server_turn_session_t *next = session->next;
+		turn_tcp_stream_destroy(session->stream);
+		free(session);
+		session = next;
+	}
+	server->sessions = NULL;
+}
+
+int server_tcp_accept(juice_server_t *server) {
+	if (server->tcp_sock == INVALID_SOCKET)
+		return 0;
+
+	for (;;) {
+		struct sockaddr_storage addr;
+		socklen_t addr_len = sizeof(addr);
+		socket_t sock = accept(server->tcp_sock, (struct sockaddr *)&addr, &addr_len);
+		if (sock == INVALID_SOCKET) {
+			if (sockerrno == SEAGAIN || sockerrno == SEWOULDBLOCK)
+				return 0;
+			if (sockerrno == SEINTR)
+				continue;
+			JLOG_WARN("accept failed, errno=%d", sockerrno);
+			return -1;
+		}
+
+		addr_record_t peer;
+		memset(&peer, 0, sizeof(peer));
+		memcpy(&peer.addr, &addr, addr_len);
+		peer.len = addr_len;
+		addr_unmap_inet6_v4mapped((struct sockaddr *)&peer.addr, &peer.len);
+
+		turn_tcp_stream_t *stream = turn_tcp_stream_create_accepted(sock);
+		if (!stream) {
+			JLOG_WARN("Failed to create the TURN-over-TCP session");
+			closesocket(sock);
+			continue;
+		}
+
+		server_turn_session_t *session = calloc(1, sizeof(server_turn_session_t));
+		if (!session) {
+			JLOG_FATAL("Memory allocation for the TURN-over-TCP session failed");
+			turn_tcp_stream_destroy(stream);
+			continue;
+		}
+
+		session->stream = stream;
+		session->peer = peer;
+		session->next = server->sessions;
+		server->sessions = session;
+
+		char peer_str[ADDR_MAX_STRING_LEN];
+		addr_record_to_string(&peer, peer_str, ADDR_MAX_STRING_LEN);
+		JLOG_INFO("Accepted TURN-over-TCP connection from %s", peer_str);
+	}
+}
+
+void server_tcp_session_close(juice_server_t *server, server_turn_session_t *session) {
+	server_turn_session_t **pnode = &server->sessions;
+	while (*pnode) {
+		if (*pnode == session) {
+			server_turn_session_t *next = (*pnode)->next;
+			turn_tcp_stream_destroy((*pnode)->stream);
+			free(*pnode);
+			*pnode = next;
+			return;
+		}
+		pnode = &(*pnode)->next;
+	}
+}
+
+int server_tcp_session_recv(juice_server_t *server, server_turn_session_t *session) {
+	char buffer[BUFFER_SIZE];
+
+	for (;;) {
+		size_t size = 0;
+		int ret = turn_tcp_stream_recv(session->stream, buffer, sizeof(buffer), &size);
+		if (ret < 0) {
+			JLOG_INFO("TURN-over-TCP session closed");
+			server_tcp_session_close(server, session);
+			return -1;
+		}
+
+		if (ret == 0)
+			return 0;
+
+		server_conn_t conn;
+		conn.src = session->peer;
+		conn.stream = session->stream;
+
+		server_input_conn(server, buffer, size, &conn);
+	}
 }
 
 #endif // ifndef NO_SERVER

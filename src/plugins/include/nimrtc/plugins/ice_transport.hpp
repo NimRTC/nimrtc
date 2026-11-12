@@ -111,6 +111,31 @@ enum class NIMRTC_API_STABLE IceState : std::uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// TurnTransport — the transport a TURN server is reached over.
+//
+// Mirrors `nimrtc::ice::TurnTransport` 1:1, so the concrete ICE transport can
+// cast trivially and engine code never has to reach back into the concrete
+// module to pick a TURN transport.
+//
+//   - `Udp` — plain TURN over UDP (RFC 5766).  Works everywhere, but a
+//             firewall that blocks UDP also blocks it.
+//   - `Tcp` — TURN over TCP (RFC 8656 § 12): the *control connection* to
+//             the server is a TCP stream, while the relayed transport
+//             address allocated by the server stays a UDP transport towards
+//             the peer.  Traverses enterprise firewalls that only let TCP
+//             through, at the cost of head-of-line blocking.
+//   - `Tls` — TURN over TLS (RFC 6062 § 3.2).  The only option that
+//             survives a middlebox that terminates TLS for anything but the
+//             SNI it is configured with.
+//
+// STABLE (v1.2.0): part of the frozen `IICETransport` contract (ADR-015).
+enum class NIMRTC_API_STABLE TurnTransport : std::uint8_t {
+    Udp = 0,
+    Tcp,
+    Tls,
+};
+
+// ---------------------------------------------------------------------------
 // IICETransport
 // ---------------------------------------------------------------------------
 
@@ -230,6 +255,48 @@ public:
                                 std::uint16_t port,
                                 std::string_view username,
                                 std::string_view password) noexcept = 0;
+
+    /** Add a TURN server with an explicit transport.
+     *
+     *  `add_turn_server()` above reaches the server over plain TURN/UDP.
+     *  This one lets the host pick TURN over TCP (RFC 8656 § 12), which is
+     *  what traverses an enterprise firewall that only lets TCP through.
+     *
+     *  Same precondition as `add_turn_server()`: call before open().
+     *
+     *  @note The name is deliberately *not* an overload of
+     *        `add_turn_server()`.  A second virtual with the same name
+     *        would be hidden by every existing `add_turn_server()`
+     *        declaration in a derived class, which GCC reports as
+     *        -Woverloaded-virtual (an error under -Werror) and which
+     *        would break every out-of-tree plugin that implements the
+     *        interface.  A separate name keeps the frozen interface
+     *        (ADR-015) additive.
+     *
+     *  @note TURN over TLS (RFC 6062) is accepted and reported, but the
+     *        underlying vendor build does not negotiate it yet; it falls
+     *        back to TCP.  The concrete transport exposes
+     *        `turn_transport_supported()` for the authoritative answer.
+     */
+    virtual void add_turn_server_with_transport(std::string_view host,
+                                                 std::uint16_t port,
+                                                 std::string_view username,
+                                                 std::string_view password,
+                                                 TurnTransport transport) noexcept {
+        // Default implementation: a transport that cannot select the
+        // transport falls back to plain TURN/UDP, which every TURN server
+        // supports.  The concrete ICE transport overrides this.
+        (void)transport;
+        add_turn_server(host, port, username, password);
+    }
+
+    /** True when the transport can actually speak the given TURN
+     *  transport.  `Tls` is false today: the vendored libjuice build has no
+     *  TLS code path for TURN (RFC 6062). */
+    virtual bool turn_transport_supported(TurnTransport transport) const noexcept {
+        (void)transport;
+        return true;
+    }
 
     // ---- BWE / Scheduler injection -------------------------------------------
     //

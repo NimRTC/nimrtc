@@ -104,11 +104,45 @@ NIMRTC_API_STABLE std::optional<Candidate> parse_candidate(std::string_view sdp)
 // TURN server config
 // -----------------------------------------------------------------------------
 
+/** The transport a TURN server is reached over.
+ *
+ *  RFC 8656 § 3 defines the TURN client/server transport.  The three
+ *  values map onto the ones libwebrtc exposes through its
+ *  `turn_transport` enum:
+ *
+ *  - `Udp`  — plain TURN over UDP (RFC 5766).  Works everywhere, but
+ *             a firewall that blocks UDP also blocks it.
+ *  - `Tcp`  — TURN over TCP (RFC 8656 § 12): the *control connection*
+ *             to the server is a TCP stream, while the relayed
+ *             transport address allocated by the server stays a UDP
+ *             transport towards the peer.  Traverses enterprise
+ *             firewalls that only let TCP through, at the cost of
+ *             head-of-line blocking.
+ *  - `Tls`  — TURN over TLS (RFC 6062 § 3.2, the "TURN over TLS"
+ *             profile).  The only option that survives a middlebox
+ *             that terminates TLS for anything but the SNI it is
+ *             configured with.  Not implemented by the vendored
+ *             libjuice build yet — see `turn_transport_supported()`. */
+enum class NIMRTC_API_STABLE TurnTransport : std::uint8_t {
+    Udp = 0,
+    Tcp,
+    Tls,
+};
+
 struct NIMRTC_API_STABLE TurnServer {
     std::string   host;
     std::uint16_t port = 0;
     std::string   username;
     std::string   password;
+
+    /** Transport used to reach this server.  Defaults to `Udp`, which
+     *  is what every TURN server supports. */
+    TurnTransport transport = TurnTransport::Udp;
+
+    /** SNI / certificate hostname used to verify the server's
+     *  certificate when `transport == TurnTransport::Tls`.  Empty means
+     *  "use `host`". */
+    std::string   tls_server_name;
 };
 
 // -----------------------------------------------------------------------------
@@ -145,9 +179,24 @@ struct NIMRTC_API_STABLE IceConfig {
     std::string local_password;
 
     /** Concurrency model. MUX is the recommended default: one libjuice
-     *  thread multiplexes all connections on a single UDP socket. */
+     *  thread multiplexes all connections on a single UDP socket.
+     *
+     *  @warning MUX and TURN relay are mutually exclusive in libjuice:
+     *          the multiplexer owns a single UDP socket and has no way
+     *          to open the extra socket a TURN allocation needs, so
+     *          libjuice *silently ignores* the configured TURN servers
+     *          and no relay candidate is ever gathered.  When
+     *          `turn_servers` is non-empty and the caller did not pick a
+     *          mode explicitly, NimRTC therefore falls back to
+     *          `Mode::Poll` (see `resolved_mode()` in the .cpp).  Set
+     *          `mode` explicitly to override that. */
     enum class Mode : std::uint8_t { Poll, Mux, Thread };
     Mode mode = Mode::Mux;
+
+    /** True when the caller set `mode` explicitly (i.e. it is not the
+     *  implicit default).  When false, NimRTC may pick a different mode
+     *  to satisfy the TURN requirement above. */
+    bool mode_is_explicit = false;
 
     // -------------------------------------------------------------------------
     // ICE consent freshness (RFC 7675 / RFC 8445 §10)
@@ -351,10 +400,49 @@ public:
     void set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept override;
 
     /** Add a TURN server for relay candidate gathering. Same precondition
-     *  as set_bind_address. */
+     *  as set_bind_address.
+     *
+     *  This overload reaches the server over plain TURN/UDP.  Use the
+     *  `TurnServer` overload to select TURN/TCP or TURN/TLS. */
     void add_turn_server(std::string_view host, std::uint16_t port,
                          std::string_view username,
                          std::string_view password) noexcept override;
+
+    /** Add a TURN server with an explicit transport.
+     *
+     *  Same precondition as set_bind_address (before open()).
+     *
+     *  @note TURN over TCP (RFC 8656 § 12) *is* implemented at the
+     *        libjuice level: the control connection is a TCP stream and
+     *        the messages are framed per RFC 8656 § 12.4/§ 12.5.
+     *        `TurnTransport::Tls` is accepted and reported, but the
+     *        underlying vendor build does not yet negotiate it.  See
+     *        `turn_transport_supported()`. */
+    void add_turn_server(const TurnServer& server) noexcept;
+
+    /** @override plugins::IICETransport
+     *
+     *  Selects the transport the TURN server is reached over. */
+    void add_turn_server_with_transport(std::string_view host,
+                                        std::uint16_t port,
+                                        std::string_view username,
+                                        std::string_view password,
+                                        plugins::TurnTransport transport) noexcept override;
+
+    /** @override plugins::IICETransport */
+    bool turn_transport_supported(plugins::TurnTransport transport) const noexcept override;
+
+    /** True when the vendored libjuice build can actually speak the
+     *  given TURN transport.  `Tls` is false today: the vendored
+     *  libjuice build has no TLS code path for TURN (RFC 6062). */
+    static bool turn_transport_supported(TurnTransport transport) noexcept;
+
+    /** The concurrency mode the transport will actually run with.
+     *
+     *  It differs from `config.mode` when TURN servers are configured
+     *  and the mode was not pinned explicitly: MUX cannot carry a TURN
+     *  allocation, so the transport falls back to `Mode::Poll`. */
+    IceConfig::Mode resolved_mode() const noexcept;
 
     /** ICE credentials as generated by libjuice (or as overridden via config). */
     std::string local_ufrag()    const noexcept override;

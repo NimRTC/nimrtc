@@ -55,6 +55,7 @@ set(LIBJUICE_SOURCES
 	${CMAKE_CURRENT_SOURCE_DIR}/src/stun.c
 	${CMAKE_CURRENT_SOURCE_DIR}/src/timestamp.c
 	${CMAKE_CURRENT_SOURCE_DIR}/src/turn.c
+	${CMAKE_CURRENT_SOURCE_DIR}/src/turn_tcp.c
 	${CMAKE_CURRENT_SOURCE_DIR}/src/udp.c
 )
 source_group("Source Files" FILES "${LIBJUICE_SOURCES}")

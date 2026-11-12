@@ -35,6 +35,9 @@ target_sources(nimrtc_video_capture PRIVATE
     src/platform/dxgi_desktop_dup.cpp
     src/platform/win_cursor_source.cpp
     src/platform/wgc_capture.cpp
+    src/platform/x11_capture.cpp
+    src/platform/x11_cursor_source.cpp
+    src/platform/portal_capture.cpp
     )
 
 if(WIN32)
@@ -51,6 +54,74 @@ if(WIN32)
         # runtime support all live in windowsapp.lib.
         windowsapp
         )
+endif()
+
+# -----------------------------------------------------------------------------
+# The Linux capture backends (remote-desktop plan A5).
+#
+# Two of them, with very different needs:
+#
+#   * **X11** — `XGetImage` needs the X11 client library and the
+#     Xfixes extension (for the cursor source).  Both are core X11
+#     packages that any desktop install has.
+#   * **XDG Portal + PipeWire** — the portal needs GIO (for the D-Bus
+#     session bus) and the PipeWire client library.
+#
+# Neither is a hard requirement: when the libraries are absent the
+# backends compile to their portable stub (the class exists, the
+# factory is not registered, `open()` reports kErrUnsupported), so a
+# Linux build without them still works — it just has no screen capture
+# on Linux.
+# -----------------------------------------------------------------------------
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        # ---- X11 + Xfixes --------------------------------------------------
+        pkg_check_modules(NIMRTC_X11 QUIET x11 xfixes)
+        if(NIMRTC_X11_FOUND)
+            target_include_directories(nimrtc_video_capture PRIVATE
+                ${NIMRTC_X11_INCLUDE_DIRS})
+            target_link_libraries(nimrtc_video_capture PRIVATE
+                ${NIMRTC_X11_LIBRARIES})
+            target_compile_definitions(nimrtc_video_capture PRIVATE
+                NIMRTC_HAVE_X11=1)
+            message(STATUS "  X11 capture        : found "
+                           "(${NIMRTC_X11_LIBRARIES})")
+        else()
+            message(STATUS "  X11 capture        : not found (install "
+                           "libx11-dev libxfixes-dev)")
+        endif()
+
+        # ---- GIO (the portal's D-Bus client) --------------------------------
+        pkg_check_modules(NIMRTC_GIO QUIET gio-2.0)
+        if(NIMRTC_GIO_FOUND)
+            target_include_directories(nimrtc_video_capture PRIVATE
+                ${NIMRTC_GIO_INCLUDE_DIRS})
+            target_link_libraries(nimrtc_video_capture PRIVATE
+                ${NIMRTC_GIO_LIBRARIES})
+            target_compile_definitions(nimrtc_video_capture PRIVATE
+                NIMRTC_HAVE_GIO=1)
+        else()
+            message(STATUS "  XDG portal capture : not found (install "
+                           "libglib2.0-dev)")
+        endif()
+
+        # ---- PipeWire -------------------------------------------------------
+        pkg_check_modules(NIMRTC_PIPEWIRE QUIET libpipewire-0.3)
+        if(NIMRTC_PIPEWIRE_FOUND)
+            target_include_directories(nimrtc_video_capture PRIVATE
+                ${NIMRTC_PIPEWIRE_INCLUDE_DIRS})
+            target_link_libraries(nimrtc_video_capture PRIVATE
+                ${NIMRTC_PIPEWIRE_LIBRARIES})
+            target_compile_definitions(nimrtc_video_capture PRIVATE
+                NIMRTC_HAVE_PIPEWIRE=1)
+            message(STATUS "  PipeWire capture   : found "
+                           "(${NIMRTC_PIPEWIRE_LIBRARIES})")
+        else()
+            message(STATUS "  PipeWire capture   : not found (install "
+                           "libpipewire-0.3-dev)")
+        endif()
+    endif()
 endif()
 
 nimrtc_apply_options(nimrtc_video_capture)

@@ -19,7 +19,9 @@
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/video_capture/dxgi_desktop_dup.hpp>
+#include <nimrtc/video_capture/portal_capture.hpp>
 #include <nimrtc/video_capture/wgc_capture.hpp>
+#include <nimrtc/video_capture/x11_capture.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -343,6 +345,13 @@ void register_default_plugins() noexcept {
     // registers itself under "wgc".  It is the *window* capture path
     // and the one that composites the pointer into the frame.
     register_wgc_capture();
+
+    // Remote-desktop plan A5: the two Linux backends.  Both register
+    // themselves only where their platform libraries exist:
+    //   - "x11"        — the XGetImage fallback (X11 + Xfixes),
+    //   - "xdg_portal" — the Wayland path (GIO + PipeWire).
+    register_x11_capture();
+    register_portal_capture();
 }
 
 } // namespace nimrtc::video_capture

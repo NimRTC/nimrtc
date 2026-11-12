@@ -385,12 +385,21 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - video_capture/wgc_capture.hpp (the Windows Graphics
     //       Capture device and its factory)
     //
+    // Remote-desktop plan A5 bump: +3 public headers (141 -> 144) for
+    // the Linux capture backends:
+    //     - video_capture/x11_capture.hpp (the X11 XGetImage display
+    //       capture device and its factory)
+    //     - video_capture/x11_cursor_source.hpp (the X11 cursor
+    //       source: XFixesGetCursorImage pointer extraction)
+    //     - video_capture/portal_capture.hpp (the XDG Desktop Portal +
+    //       PipeWire capture device and its factory)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 141;
+    constexpr std::size_t kBaselineHeaderCount = 144;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

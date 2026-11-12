@@ -118,7 +118,13 @@ void encode_fci(std::uint8_t* p, const TmmbrEntry& entry) noexcept {
     const std::uint16_t overhead =
         std::min<std::uint16_t>(entry.measured_overhead_bytes, kMaxOverhead);
 
-    p[4] = static_cast<std::uint8_t>((exp << 2) |
+    // `exp` is a std::uint8_t, so `exp << 2` promotes to int.  The
+    // mantissa half is unsigned 64-bit, and mixing an int with it in
+    // one `|` makes Clang's -Wsign-conversion fire on the int side.
+    // Widening the exponent to uint64_t keeps both operands unsigned.
+    const std::uint64_t exp_field = static_cast<std::uint64_t>(exp) << 2;
+
+    p[4] = static_cast<std::uint8_t>(exp_field |
                                      ((mantissa >> 15) & 0x03u));
     p[5] = static_cast<std::uint8_t>((mantissa >> 7) & 0xFFu);
     p[6] = static_cast<std::uint8_t>(((mantissa & 0x7Fu) << 1) |

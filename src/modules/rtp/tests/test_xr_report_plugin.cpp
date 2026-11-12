@@ -73,7 +73,9 @@ ByteBuffer make_rrtr_block(std::uint64_t ntp) {
     out[1] = 0;    // type-specific
     out[2] = 0;    // block length = 2 (words minus one)
     out[3] = 2;
-    for (int i = 0; i < 8; ++i) {
+    // `i` is signed, so `4 + i` is an int and indexing a vector with
+    // it trips Clang's -Wsign-conversion.  Keep the index unsigned.
+    for (std::size_t i = 0; i < 8; ++i) {
         out[4 + i] = static_cast<std::uint8_t>(ntp >> (56 - 8 * i));
     }
     return out;

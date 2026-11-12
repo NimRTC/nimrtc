@@ -93,6 +93,34 @@ struct NIMRTC_API_STABLE MediaDescription {
     // stored verbatim to preserve ordering and exact formatting
     std::vector<std::string> rtcp_fb;
 
+    // a=rtcp-xr:<parameter> [<parameter>...]  (RFC 3611 §5.1)
+    //
+    // The RTCP Extended Report negotiation attribute.  It is a
+    // *media-level* attribute whose value is the list of XR
+    // parameters the endpoint supports:
+    //
+    //   - "rcvr-rtt=all"          — the Receiver Reference Time block
+    //                              (BT = 4) and its DLRR answer (BT = 5);
+    //   - "stat-summary=loss,jitt" — the Statistics Summary block
+    //                              (BT = 6), with the field indicators
+    //                              the peer asked for.
+    //
+    // RFC 3611 §5.1: "When the 'rtcp-xr' attribute is present,
+    // participants SHOULD NOT send XR blocks other than the ones
+    // indicated by the parameters."  So an empty value means "I
+    // understand the attribute but send no XR blocks at all" — the
+    // value is stored verbatim to keep that distinction.
+    std::string rtcp_xr;
+
+    /** True when the description carried an `a=rtcp-xr` attribute at
+     *  all — with or without a parameter list.
+     *
+     *  RFC 3611 §5.1 gives the bare attribute (no parameters) a
+     *  meaning of its own: "I understand the attribute, but send me
+     *  no XR blocks."  Without this flag an empty `rtcp_xr` would be
+     *  indistinguishable from "no attribute at all". */
+    bool rtcp_xr_present = false;
+
     // a=extmap:<id>[/<direction>] <URI> [<params>]
     struct ExtMap {
         int id = 0;
@@ -153,6 +181,23 @@ struct NIMRTC_API_STABLE SessionDescription {
     std::string dtls_fingerprint_algo;
     std::string dtls_fingerprint_value;
     std::string dtls_setup;
+
+    // a=rtcp-xr:<parameter> [<parameter>...]  (RFC 3611 §5.1)
+    //
+    // The RTCP Extended Report negotiation attribute at *session* level.
+    // RFC 3611 §5.1: "It is both a session and a media level
+    // attribute.  When specified at session level, it applies to all
+    // media level blocks in the session.  Any media level specification
+    // MUST replace a session level specification, if one is present,
+    // for that media block."
+    //
+    // So the session-level value is the *default* for every media
+    // section, and a media section that carries its own `a=rtcp-xr`
+    // overrides it.  The same empty-vs-absent distinction as the
+    // media-level field applies: an empty value with the present flag
+    // set means "I understand the attribute but send no XR blocks".
+    std::string rtcp_xr;
+    bool rtcp_xr_present = false;
 
     // Session-level attributes not captured above.
     std::vector<std::pair<std::string, std::string>> extra_attrs;

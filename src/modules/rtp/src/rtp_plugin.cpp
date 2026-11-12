@@ -12,6 +12,8 @@
 
 #include <nimrtc/rtp/rtp_plugin.hpp>
 
+#include <nimrtc/rtp/xr_report_plugin.hpp>
+
 #include <atomic>
 #include <cstdint>
 #include <utility>
@@ -286,6 +288,10 @@ void do_register_default_plugins() noexcept {
 void register_default_plugins() noexcept {
     static const int once = []() {
         detail::do_register_default_plugins();
+        // v1.2.0 X1: the XR report consumer rides along with the RTP
+        // module's registration — the XR parser lives in this module,
+        // so a consumer that pulls in nimrtc_rtp gets it too.
+        register_xr_report_plugin();
         return 1;
     }();
     (void)once;

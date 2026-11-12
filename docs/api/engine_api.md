@@ -497,6 +497,245 @@ pipeline).
 
 ---
 
+### 8.6 RTCP Extended Reports (RFC 3611)
+
+The **Extended Report** (XR, RTCP payload type 207) is an optional
+QoE / network-statistics channel.  NimRTC both *receives and decodes*
+it and — when `EngineConfig::rtcp_xr_enabled` is set — *sends* it.
+
+```cpp
+plugins::IXrReport* xr_report() noexcept;          // non-owning
+const plugins::IXrReport* xr_report() const noexcept;
+
+// Outbound side (v1.2.0, session capability plan X2).
+std::uint64_t xr_reports_sent_count() const noexcept;
+```
+
+The engine demultiplexes every inbound RTCP compound datagram and
+routes the XR sub-packets into this consumer.  Read the decoded
+report blocks out of its snapshot:
+
+```cpp
+if (auto* xr = engine.xr_report()) {
+    const auto snap = xr->snapshot();
+    if (snap.has_data) {
+        for (const auto& blk : snap.last_packet.blocks) {
+            switch (blk.type) {
+                case plugins::XrBlockType::kReceiverReferenceTime:
+                    // blk.receiver_reference_time.ntp_timestamp
+                    break;
+                case plugins::XrBlockType::kDlrr:
+                    // blk.dlrr.sub_reports[]
+                    break;
+                case plugins::XrBlockType::kStatisticsSummary:
+                    // blk.statistics_summary.lost_packets, .max_jitter, ...
+                    break;
+                default:
+                    break;   // recognised but not parsed
+            }
+        }
+    }
+}
+```
+
+**The supported block types** are RFC 3611's own registry
+(RFC 3611 section 6.2):
+
+| BT | Block | NimRTC |
+|----|-------|--------|
+| 1 | Loss RLE | recognised, **not parsed** |
+| 2 | Duplicate RLE | recognised, **not parsed** |
+| 3 | Packet Receipt Times | recognised, **not parsed** |
+| 4 | Receiver Reference Time | **parsed** |
+| 5 | DLRR (Delay since Last Receiver Report) | **parsed** |
+| 6 | Statistics Summary | **parsed** |
+| 7 | VoIP Metrics | recognised, **not parsed** |
+
+A block NimRTC does not parse is **skipped by its length**, never an
+error — that is what makes the format extensible.
+
+> **Note on block numbering.**  There is **no** block type named
+> "Receiver Estimated Quality" in RFC 3611; that was the numbering of an
+> early draft (where BT=1 was it and BT=6 was DLRR).  A report built
+> with the draft's numbering would not interoperate with a conforming
+> peer, so NimRTC only speaks the standard's actual numbering.
+
+**Configuration.**  `EngineConfig::xr_report_name` selects the
+consumer plugin (default `"nimrtc_xr"`, the built-in one).  An empty
+string disables the consumer entirely — the XR sub-packet is then
+recognised by the demultiplexer and dropped, which is the pre-v1.2.0
+behaviour.
+
+**A malformed report is counted, not fatal.**  `snapshot()` reports
+`packets_malformed`; the read path never fails because one peer sent a
+broken report.  `Stats::xr_report_blocks` counts the XR sub-packets
+that were routed to the consumer — a peer that sends extended reports
+and a counter stuck at zero means the routing is not wired.
+
+#### 8.6.1 The outbound side
+
+Setting `EngineConfig::rtcp_xr_enabled = true` makes the engine emit
+one XR report per RTCP interval (one second), carrying:
+
+| BT | Block | When it is sent |
+|----|-------|-----------------|
+| 4 | Receiver Reference Time | the peer negotiated `rcvr-rtt` |
+| 5 | DLRR | the peer negotiated `rcvr-rtt` **and** a Receiver Reference Time report has been received |
+| 6 | Statistics Summary | the peer negotiated `stat-summary` **and** inbound audio has been seen |
+
+The DLRR's sub-block names the SSRC of the *peer* whose Receiver
+Reference Time report is being answered, together with the middle 32
+bits of that report's NTP timestamp and the delay since its arrival
+(RFC 3611 section 4.5) — the three values a peer needs to compute the
+round-trip time.
+**The SDP negotiates it.**  The offer carries
+
+```
+a=rtcp-xr:rcvr-rtt=all stat-summary=loss,jitt
+```
+
+on the audio m-section, and the answer echoes the subset the engine
+implements (RFC 3611 section 5.2).  RFC 3611 section 5.1 says a
+participant "SHOULD NOT send XR blocks other than the ones indicated
+by the parameters", so the engine sends nothing until the peer has
+named the format — an XR report that was never negotiated is not
+merely wasteful, it is a protocol violation.
+
+**The field list is the peer's, not the engine's.**  RFC 3611 section
+5.1 says the `stat-summary` parameter "contains a list indicating which
+fields SHOULD be included in the Statistics Summary report blocks that
+are sent" — so the L and J flag bits of the block the engine emits
+follow the *peer's* list.  A peer that asked for `loss` alone gets a
+block with the loss flag set and the jitter flag clear; a peer that
+asked for `loss,jitt` gets both.  The engine produces loss and jitter
+and nothing else, so a list naming only fields it does not measure
+(`dup`, `TTL`, `HL`) narrows to nothing and the format is not echoed.
+
+If the peer offers the attribute and the host does not want XR at all,
+the answer carries the **bare** attribute (`a=rtcp-xr`, no
+parameters): that is the RFC's way of saying "I understand the
+attribute but send me no XR blocks".
+
+---
+
+### 8.7 TMMBR / TMMBN (RFC 5104)
+
+The **Temporary Maximum Media Bit Rate** request is the receiver's
+statement of the highest rate it can accept; the **TMMBN** is the
+sender's confirmation of the bounding set that actually applies.
+
+```cpp
+// Outbound (v1.2.0, session capability plan X4 / X5).
+std::uint32_t peer_tmmbr_limit_bps() const noexcept;  // the peer's limit
+std::uint32_t last_tmmbr_bps() const noexcept;         // what we last reported
+std::uint64_t tmmbr_sent_count() const noexcept;       // TMMBR + TMMBN sent
+std::uint64_t tmmbr_received_count() const noexcept;    // TMMBRs honoured
+```
+
+**What the engine sends.**  With `EngineConfig::tmmbr_enabled = true`
+the engine emits a TMMBR carrying the bit rate its bandwidth
+estimator is *currently using* — never a stale number and never a
+limit the engine does not honour itself.  A changed rate is reported
+at the next RTCP interval; an unchanged rate is repeated only every
+five intervals, because the peer may have missed the previous one
+(RFC 5104 section 4.2.1.2).
+
+The FCI entry names the *media source* the limit applies to (the
+peer's inbound audio SSRC), and the "SSRC of media source" field of
+the RTPFB header is zero — RFC 5104 section 4.2.1.2 says it is
+unused.
+
+**What the engine obeys.**  An inbound TMMBR is a limit the engine
+must respect, and the engine does:
+
+* the scheduler's session budget is clamped to
+  `peer_tmmbr_limit_bps()`;
+* the per-class pacing rates are clamped the same way;
+* the **audio encoder** is clamped the same way — the encoder is what
+  decides how many bits go on the wire, so a limit that stopped at the
+  pacer would only *lose* frames rather than keep the promise;
+* the limit **overrides `EngineConfig::audio_min_bitrate_bps`**: the
+  local floor protects the audio against a congestion collapse, while
+  the peer's limit is a commitment the engine made on the wire (the
+  TMMBN is the acknowledgement of it), so the two are not of the same
+  kind — the peer's limit wins, and the encoder may go *below* the
+  local floor;
+* the tightest limit wins — a looser TMMBR never raises a ceiling a
+  tighter one has set (RFC 5104 section 3.5.4.2);
+* a tuple naming a media source the engine does not send is recorded
+  but **not** applied: it is somebody else's constraint.
+
+The peer's limit is honoured even when
+`EngineConfig::audio_bitrate_adaptive` is `false` — that switch says
+"do not move the encoder because of the *estimate*", not "break the
+promises the engine already made on the wire".
+
+Every inbound TMMBR is answered with exactly one TMMBN (RFC 5104
+section 4.2.2.2), even when the tuple was not accepted — that is what
+lets a participant which missed the last TMMBR recover the state.
+
+The TMMBN's FCI entry names the **owner** of the bounding tuple
+(RFC 5104 section 4.2.2.1).  In the unicast case the receiver that
+issued the TMMBR becomes the owner of the one bounding tuple as soon
+as it has sent its first TMMBR (RFC 5104 section 4.2.2.2), so the
+owner is the SSRC of the peer's feedback — the SSRC the TMMBR's own
+"SSRC of packet sender" field carried.
+
+**The SDP negotiates it.**  RFC 5104 section 7.2 gives TMMBR the
+codec-control-message form:
+
+```
+a=rtcp-fb:<pt> ccm tmmbr
+```
+
+Only the joint subset of the offer's and the answer's CCM parameters
+may be used, so the engine sends no TMMBR unless the peer's
+description carried the `tmmbr` parameter *and* the host's own
+configuration keeps the feature on.  The answer removes the `tmmbr`
+parameter when the answerer does not support it — the rest of the
+entry survives (RFC 5104 section 7.2 says the answerer removes the
+*parameters* it does not support, not the whole entry).
+
+`EngineConfig::disable_tmmbr` vetoes the feature in both directions:
+no TMMBR is sent and the SDP carries no `tmmbr` parameter.  It
+overrides `tmmbr_enabled`.
+
+---
+
+### 8.8 The RTCP support matrix
+
+What the engine understands on the RTCP plane, so a host does not have
+to guess.  "Send" means the engine *emits* the message; "Receive"
+means it *parses* it.
+
+| Packet | PT | Format | NimRTC |
+|--------|----|--------|--------|
+| SR | 200 | Sender Report | receive (timeline anchor) + **send** |
+| RR | 201 | Receiver Report | receive (bandwidth collector) + **send** |
+| SDES | 202 | Source Description | recognised, not parsed |
+| BYE | 203 | Goodbye | recognised, not parsed |
+| APP | 204 | Application-defined | recognised, not parsed |
+| RTPFB | 205 | FMT 1 — NACK | receive |
+| RTPFB | 205 | FMT 3 — **TMMBR** | **receive + send** |
+| RTPFB | 205 | FMT 4 — **TMMBN** | **send** |
+| RTPFB | 205 | FMT 15 — transport-cc | receive (ADR-018 bandwidth signal) |
+| PSFB | 206 | FMT 1 — PLI | receive (video keyframe request) |
+| PSFB | 206 | FMT 2 — SLI | receive (video keyframe request) |
+| PSFB | 206 | FMT 15 — REMB | receive (bandwidth collector) |
+| XR | 207 | BT 4 / 5 / 6 | **receive + send** (see §8.6) |
+
+The XR block types NimRTC does *not* parse (Loss RLE BT=1, Duplicate
+RLE BT=2, Packet Receipt Times BT=3, VoIP Metrics BT=7) are skipped
+by their length field, never an error — see §8.6.
+
+The codec-control-message family (RFC 5104) is **partially**
+implemented: `tmmbr` is supported, `fir` / `tstr` / `tstn` / `vbcm`
+are not.  An `a=rtcp-fb:` entry that names an unsupported CCM
+parameter has that *parameter* removed from the answer — the rest of
+the entry survives (RFC 5104 section 7.2).
+
+---
+
 ## 9. Video I/O
 
 ### 9.1 `start_video()` / `stop_video()`
@@ -625,6 +864,7 @@ Pointers can be `nullptr` if the configured id was not registered
 | `video_codec()` | `IVideoCodec*` | H.264 hardware vs software selection. |
 | `bwe()` | `IBwe*` | Reading BWE stats (current estimate, loss rate). |
 | `scheduler()` | `IScheduler*` | Reading scheduler queue depth. |
+| `xr_report()` | `IXrReport*` | Reading the peer's decoded RFC 3611 extended reports. |
 | `config()` | `const EngineConfig&` | Re-reading effective cfg (e.g. PCM rate for ASR sidecar). |
 
 ### Runtime swaps
@@ -683,6 +923,9 @@ struct Stats {
     uint64_t net_feedback_blocks    = 0;  // RTCP blocks routed to the collector
     uint64_t bwe_feedback_samples  = 0;  // samples handed to IBwe::on_feedback()
     uint32_t bandwidth_estimate_bps = 0; // current BWE target, in bit/s
+
+    // RTCP Extended Reports (v1.2.0, session plan X1).
+    uint64_t xr_report_blocks      = 0;  // XR blocks routed to the consumer
 };
 Stats stats() const noexcept;
 ```

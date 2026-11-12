@@ -272,6 +272,70 @@ TEST(SdpParser, WebRtcOfferExcerpt) {
 }
 
 // -----------------------------------------------------------------------------
+// Parser / Munger — the "rtcp-xr" attribute at session and media level
+// (RFC 3611 §5.1)
+// -----------------------------------------------------------------------------
+TEST(SdpRtcpXr, SessionLevelAndMediaLevelAreDistinct) {
+    // RFC 3611 §5.1: the "rtcp-xr" attribute "is both a session and a
+    // media level attribute.  When specified at session level, it
+    // applies to all media level blocks in the session.  Any media level
+    // specification MUST replace a session level specification, if one
+    // is present, for that media block."
+    constexpr std::string_view text =
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "a=rtcp-xr:rcvr-rtt=all\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n"
+        "a=rtcp-xr:stat-summary=loss,jitt\r\n";
+
+    Parser p;
+    auto r = p.parse(text);
+    ASSERT_TRUE(r.ok()) << r.error().message();
+    const auto& sdp = r.value();
+
+    // The session-level copy is on the session.
+    EXPECT_TRUE(sdp.rtcp_xr_present);
+    EXPECT_EQ(sdp.rtcp_xr, "rcvr-rtt=all");
+
+    // The media-level copy is on the media block, and it does not
+    // clobber the session-level one.
+    ASSERT_EQ(sdp.media.size(), 1u);
+    EXPECT_TRUE(sdp.media[0].rtcp_xr_present);
+    EXPECT_EQ(sdp.media[0].rtcp_xr, "stat-summary=loss,jitt");
+}
+
+TEST(SdpRtcpXr, TheBareAttributeIsPresentButEmpty) {
+    // RFC 3611 §5.1 gives the bare attribute a meaning of its own:
+    // "I understand the attribute but send no XR blocks" — which is
+    // different from the attribute being absent.  The `rtcp_xr_present`
+    // flag is what keeps the two apart.
+    constexpr std::string_view text =
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "a=rtcp-xr\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+
+    Parser p;
+    auto r = p.parse(text);
+    ASSERT_TRUE(r.ok()) << r.error().message();
+
+    EXPECT_TRUE(r.value().rtcp_xr_present);
+    EXPECT_TRUE(r.value().rtcp_xr.empty());
+
+    // The munger re-emits it in the bare form.
+    Munger m;
+    auto out = m.to_sdp(r.value());
+    ASSERT_TRUE(out.ok()) << out.error().message();
+    EXPECT_NE(out.value().find("a=rtcp-xr\r\n"), std::string::npos);
+    EXPECT_EQ(out.value().find("a=rtcp-xr:"), std::string::npos);
+}
+
+// -----------------------------------------------------------------------------
 // Parser — extmap with optional direction suffix (the bug we just fixed)
 // -----------------------------------------------------------------------------
 TEST(SdpParser, ExtmapDirectionSuffix) {

@@ -191,6 +191,15 @@ void PluginRegistry::register_net_feedback(
     net_feedback_.register_one(id, f);
 }
 
+// v1.2.0 (session capability plan X1): the RTCP Extended Report
+// consumer slot.  The built-in consumer registers under "nimrtc_xr";
+// the engine resolves it by `EngineConfig::xr_report_name`.
+void PluginRegistry::register_xr_report(
+    std::string_view id,
+    const plugins::IXrReportFactory* f) {
+    xr_report_.register_one(id, f);
+}
+
 void PluginRegistry::register_datachannel(std::string_view id,
                                           const plugins::IDataChannelFactory* f) {
     datachannel_.register_one(id, f);

@@ -435,6 +435,40 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                 if (cur_media) {
                     cur_media->rtcp_fb.push_back(std::string(av.substr(8)));
                 }
+            } else if (av.starts_with("rtcp-xr:")) {
+                // RFC 3611 §5.1 — the RTCP Extended Report negotiation
+                // attribute.  The value is the list of XR parameters
+                // ("rcvr-rtt=all stat-summary=loss,jitt"), stored verbatim.
+                //
+                // A bare "a=rtcp-xr" (no colon) means "I understand the
+                // attribute but send no XR blocks"; the parser cannot
+                // express that with an empty string, so it is stored as
+                // an empty parameter list and the munger re-emits the
+                // attribute without a colon.  See `rtcp_xr_present`.
+                //
+                // RFC 3611 §5.1: "It is both a session and a media level
+                // attribute.  When specified at session level, it
+                // applies to all media level blocks in the session."
+                // So the session-level copy is stored on the session and
+                // acts as the default for every media section.
+                if (cur_media) {
+                    cur_media->rtcp_xr = std::string(trim(av.substr(8)));
+                    cur_media->rtcp_xr_present = true;
+                } else {
+                    session.rtcp_xr = std::string(trim(av.substr(8)));
+                    session.rtcp_xr_present = true;
+                }
+            } else if (av == "rtcp-xr") {
+                // The bare form (RFC 3611 §5.1): the attribute is
+                // present but carries no parameters, which tells the
+                // peer not to send any XR block.
+                if (cur_media) {
+                    cur_media->rtcp_xr.clear();
+                    cur_media->rtcp_xr_present = true;
+                } else {
+                    session.rtcp_xr.clear();
+                    session.rtcp_xr_present = true;
+                }
             } else if (av.starts_with("extmap:")) {
                 if (cur_media) {
                     MediaDescription::ExtMap em;

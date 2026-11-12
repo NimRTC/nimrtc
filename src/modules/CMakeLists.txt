@@ -138,6 +138,17 @@ if(NIMRTC_MODULE_VIDEO_JB)
     add_subdirectory(video_jb)
 endif()
 
+# v1.3 (video plan C4 / C8): the shared NVIDIA codec module.  It owns the
+# NVENC / NVDEC driver integration and exposes it through
+# codec-parameterised entry points, so the H.264, H.265 and AV1 codec
+# modules share one copy of the driver code instead of triplicating it.
+# NOTE: nvcodec must come before h264 — nimrtc_h264 links nimrtc::nvcodec,
+# so the target has to exist first.  This is the documented cross-module
+# dependency pattern (same shape as modules/jb using modules/jb_strategy).
+if(NIMRTC_MODULE_NVCODEC)
+    add_subdirectory(nvcodec)
+endif()
+
 if(NIMRTC_MODULE_H264)
     add_subdirectory(h264)
 endif()

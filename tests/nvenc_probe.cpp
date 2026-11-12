@@ -6,22 +6,28 @@
  * needed).  Opens a D3D11 device, opens an NVENC session, calls
  * nvEncInitializeEncoder, and exits.
  *
- * Driver 616.92 (Game Ready / Studio 616.92, RTX 3060) has a hybrid ABI:
- * it accepts SDK 11.1.5.4 NVENCAPI_VERSION + init.encodeConfig = nullptr
- * but rejects every NV_ENC_PIC_PARAMS layout (sub-ver 4-7 with type 0x0B
- * return INVALID_PARAM + corrupt the heap; type 0x0C/0x0D return
- * INVALID_VERSION).  See docs/hw_plugin_seam.md ?2.1.
+ * This is the *low-level* driver probe: it exercises the raw NVENC ABI
+ * with nothing but the NVIDIA headers, so it can tell "the driver is
+ * broken / the ABI does not match" apart from "the NimRTC encoder has a
+ * bug".  The end-to-end proof (encode frames, decode them back) lives in
+ * `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp`.
  *
- * So this probe stops right after nvEncInitializeEncoder succeeds ?
- * it's the most we can verify with the SDK 11.1.5.4 headers without
- * triggering the encode-path crash.
- *
- * Compile: cl /std:c++17 /EHsc nvenc_probe.cpp /link d3d11.lib
+ * ABI note
+ * --------
+ * The probe builds against the *vendored* Video Codec SDK 13.1 header
+ * pack (`src/third_party/nv_codec_headers/`), which is the ABI NimRTC
+ * itself compiles against (see `src/third_party/vendor.json`).  It must
+ * therefore use the header's own `NV_ENC_*_VER` constants and a real
+ * `NV_ENC_CONFIG` — no hand-patched struct-version magic.  An earlier
+ * revision of this probe forced the SDK-11.1.5 struct layout
+ * (`0x0100000B | (7u << 16) | ...`) to work around a hybrid-ABI driver;
+ * with the SDK-13 headers the driver rejects that layout with
+ * `NV_ENC_ERR_INVALID_VERSION` (status 15), so the hack had to go.
  *
  * Exit codes:
  *   0 = success (DLL loaded, function table populated, session opened,
  *       encoder initialized)
- *   1 = encode path attempted but failed (skipped on this build)
+ *   1 = the driver was found but rejected the encoder initialization
  *  77 = no GPU / driver issue, or SDK not configured
  */
 
@@ -37,19 +43,57 @@
   #include <windows.h>
   #include <d3d11.h>
   #include <nvEncodeAPI.h>
-  // SDK 11.1.5 type ID 0x0B + (1u<<31) for the init-time structs.
-  #undef  NV_ENC_PRESET_CONFIG_VER
-  #define NV_ENC_PRESET_CONFIG_VER    (0x0100000Bu | (4u << 16) | (0x7u << 28) | (1u << 31))
-  #undef  NV_ENC_CONFIG_VER
-  #define NV_ENC_CONFIG_VER           (0x0100000Bu | (7u << 16) | (0x7u << 28) | (1u << 31))
-  #undef  NV_ENC_INITIALIZE_PARAMS_VER
-  #define NV_ENC_INITIALIZE_PARAMS_VER (0x0100000Bu | (5u << 16) | (0x7u << 28) | (1u << 31))
-  #undef  NV_ENC_PIC_PARAMS_VER
-  #define NV_ENC_PIC_PARAMS_VER       (0x0100000Bu | (4u << 16) | (0x7u << 28) | (1u << 31))
 #endif
 
 typedef NVENCSTATUS(NVENCAPI* PfnNvEncodeAPICreateInstance)(
     NV_ENCODE_API_FUNCTION_LIST*);
+
+/** Build the NV_ENC_CONFIG the probe initializes the encoder with.
+ *
+ *  Mirrors what the NimRTC encoder does (src/modules/nvcodec/src/
+ *  nvenc_encoder.cpp): VBR rate control, one temporal layer, no
+ *  lookahead, H.264 Main profile. */
+static NV_ENC_CONFIG build_config() {
+    NV_ENC_CONFIG cfg{};
+    cfg.version        = NV_ENC_CONFIG_VER;
+    cfg.gopLength      = 30;
+    cfg.frameIntervalP = 1;   // IPP — no B-frames
+    cfg.mvPrecision    = NV_ENC_MV_PRECISION_DEFAULT;
+    cfg.frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
+
+    NV_ENC_RC_PARAMS& rc = cfg.rcParams;
+    rc.version         = NV_ENC_RC_PARAMS_VER;
+    rc.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+    rc.averageBitRate  = 1'000'000;
+    rc.maxBitRate      = 1'500'000;
+    rc.vbvBufferSize   = 500'000;
+    rc.vbvInitialDelay = rc.vbvBufferSize;
+    rc.minQP = NV_ENC_QP{0};
+    rc.maxQP = NV_ENC_QP{51};
+    rc.initialRCQP = NV_ENC_QP{26};
+    rc.enableMinQP = 0;
+    rc.enableMaxQP = 0;
+    rc.enableInitialRCQP = 1;
+    rc.enableAQ = 0;
+    rc.enableLookahead = 0;
+
+    cfg.profileGUID = NV_ENC_H264_PROFILE_MAIN_GUID;
+    NV_ENC_CONFIG_H264& h264 = cfg.encodeCodecConfig.h264Config;
+    h264.level              = NV_ENC_LEVEL_AUTOSELECT;
+    h264.idrPeriod          = cfg.gopLength;
+    h264.repeatSPSPPS       = 1;
+    h264.chromaFormatIDC    = 1;   // 4:2:0
+    h264.maxNumRefFrames    = 1;
+    h264.sliceMode          = 0;
+    h264.sliceModeData      = 0;
+    h264.outputBitDepth     = NV_ENC_BIT_DEPTH_8;
+    h264.inputBitDepth      = NV_ENC_BIT_DEPTH_8;
+    h264.numTemporalLayers  = 1;
+    h264.spsId              = 0;
+    h264.ppsId              = 0;
+    h264.entropyCodingMode  = NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
+    return cfg;
+}
 
 int main() {
 #if !defined(_WIN32)
@@ -110,11 +154,8 @@ int main() {
     }
     std::fprintf(stderr, "nvenc_probe: NVENC session opened\n");
 
-    // Driver 616.92 quirk: any hand-built NV_ENC_CONFIG passed via
-    // init.encodeConfig causes nvEncInitializeEncoder to return
-    // NV_ENC_ERR_INVALID_PARAM no matter what struct version we use.
-    // Only init.encodeConfig = nullptr works ? the driver derives
-    // everything from presetGUID + tuningInfo.
+    NV_ENC_CONFIG enc_cfg = build_config();
+
     NV_ENC_INITIALIZE_PARAMS init{};
     init.version      = NV_ENC_INITIALIZE_PARAMS_VER;
     init.encodeGUID   = NV_ENC_CODEC_H264_GUID;
@@ -127,7 +168,7 @@ int main() {
     init.frameRateDen = 1;
     init.enablePTD    = 1;
     init.tuningInfo   = NV_ENC_TUNING_INFO_LOW_LATENCY;
-    init.encodeConfig = nullptr;
+    init.encodeConfig = &enc_cfg;
 
     s = fnList.nvEncInitializeEncoder(enc, &init);
     if (s != NV_ENC_SUCCESS) {
@@ -140,12 +181,12 @@ int main() {
     }
     std::fprintf(stderr, "nvenc_probe: encoder initialized 320x240 @ 30 fps (preset P4)\n");
 
-    // Driver 616.92 rejects every NV_ENC_PIC_PARAMS layout (SDK 11.x
-    // returns INVALID_PARAM + corrupts heap; SDK 12.x/13.x returns
-    // INVALID_VERSION).  We deliberately stop here instead of trying
-    // to encode.  See docs/hw_plugin_seam.md ?2.1.
+    // The probe stops here on purpose: it verifies the *driver ABI*, not
+    // the encode path.  The full NVENC -> NVDEC round trip (including the
+    // bitstream and the NV12 output path) lives in
+    // src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp.
     std::fprintf(stderr,
-        "nvenc_probe: encode loop SKIPPED (hybrid ABI: init OK, encode rejects)\n");
+        "nvenc_probe: encode loop SKIPPED (this probe checks the driver ABI only)\n");
 
     fnList.nvEncDestroyEncoder(enc);
     dev->Release();
@@ -154,5 +195,3 @@ int main() {
     return 0;
 #endif
 }
-
-

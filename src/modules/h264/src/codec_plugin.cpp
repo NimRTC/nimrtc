@@ -12,6 +12,8 @@
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/h264/hw_backends.hpp>
+
+#include <nimrtc/nvcodec/hw_composite_codec.hpp>
 #include <nimrtc/plugins/hw_video_backend.hpp>
 
 namespace nimrtc::h264 {
@@ -152,10 +154,6 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
         stats_.decode_errors++;
         return plugins::kErrInvalidParam;
     }
-    if (output_buffers == nullptr) {
-        stats_.decode_errors++;
-        return plugins::kErrInvalidParam;
-    }
 
     // Convert plugins::EncodedVideoFrame::Info → video_frame::VideoFrameInfo.
     video_frame::VideoFrameInfo info{};
@@ -202,8 +200,11 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
     //      buffer → allocate a fresh VideoFrameBuffer for raw_out so its
     //      `plane()` / `format()` can be inspected, and paint into the
     //      caller's output_buffers (the caller's working memory).
-    //   3. No caller buffers → allocate a fresh VideoFrameBuffer and paint
-    //      into it; raw_out takes ownership.
+    //   3. No caller buffers (output_buffers == nullptr) → allocate a
+    //      fresh VideoFrameBuffer and paint into it; raw_out takes
+    //      ownership.  This is the contract the hardware decoders use:
+    //      the decoder owns the allocation because only it knows the
+    //      native decoded geometry.
     //
     // Zero-copy note: a real HW decoder would set `raw_out.gpu_buffer()`
     // instead and skip this CPU paint entirely.
@@ -216,8 +217,7 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
 
     if (caller_supplied_buffers) {
         y_plane = output_buffers[0];
-        u_plane = (cfg_.pixel_format == plugins::VideoPixelFormat::kNV12)
-                      ? output_buffers[1] : output_buffers[1];
+        u_plane = output_buffers[1];
         v_plane = (cfg_.pixel_format == plugins::VideoPixelFormat::kNV12)
                       ? nullptr          : output_buffers[2];
         if (auto existing = raw_out.cpu_buffer();
@@ -231,11 +231,13 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
         cpu_buf = std::make_shared<video_frame::VideoFrameBuffer>(layout);
         if (!caller_supplied_buffers) {
             // No caller buffers — reuse our own allocation for painting.
-            const std::size_t y_bytes = static_cast<std::size_t>(w) * h;
-            const std::size_t u_bytes = y_bytes / 4;
-            y_plane = cpu_buf->data();
-            u_plane = cpu_buf->data() + y_bytes;
-            v_plane = cpu_buf->data() + y_bytes + u_bytes;
+            // The plane pointers must come from the layout (which knows
+            // the 16-byte-aligned strides and the plane offsets), not
+            // from a hand-computed w*h offset: the layout's strides are
+            // padded, so the planes are *not* contiguous.
+            y_plane = cpu_buf->plane(0);
+            u_plane = cpu_buf->plane(1);
+            v_plane = cpu_buf->plane(2);
         }
         // else: caller_supplied_buffers == true; y/u/v_plane already point
         // at the caller's output_buffers. cpu_buf is a fresh allocation
@@ -249,7 +251,23 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
     // modulated by the frame_seq so successive frames look different on the
     // wire / on the screen).  This is enough for a human-eye demo and for
     // tests that verify "frame N painted with expected colours".
-    paint_i420(y_plane, u_plane, v_plane, w, h, decoded->frame_seq);
+    //
+    // The destination strides depend on who owns the memory:
+    //   - caller-supplied buffers: the interface carries no stride
+    //     information, so the planes are assumed to be tightly packed
+    //     (stride == width), which is what the engine's decode path and
+    //     the module tests use.
+    //   - decoder-owned buffers: the strides come from the layout, which
+    //     pads them to a 16-byte boundary.
+    if (caller_supplied_buffers) {
+        paint_i420(y_plane, u_plane, v_plane, w, h, decoded->frame_seq,
+                   w, w / 2, w / 2);
+    } else {
+        const video_frame::VideoFrameLayout layout =
+            video_frame::compute_layout(video_frame::PixelFormat::kI420, w, h);
+        paint_i420(y_plane, u_plane, v_plane, w, h, decoded->frame_seq,
+                   layout.strides[0], layout.strides[1], layout.strides[2]);
+    }
 
     // ---- Wire up the caller-visible VideoFrame ----------------------------
     raw_out.buffer = std::move(cpu_buf);
@@ -264,7 +282,10 @@ void CodecPluginAdapter::paint_i420(std::uint8_t* y,
                                     std::uint8_t* u,
                                     std::uint8_t* v,
                                     std::uint32_t w, std::uint32_t h,
-                                    std::uint32_t frame_seq) noexcept {
+                                    std::uint32_t frame_seq,
+                                    std::uint32_t stride_y,
+                                    std::uint32_t stride_u,
+                                    std::uint32_t stride_v) noexcept {
     if (!y) return;
     // ---- Y plane: 3 horizontal bands whose brightness ramps with frame_seq
     const std::uint32_t band_h = h / 3;
@@ -273,13 +294,21 @@ void CodecPluginAdapter::paint_i420(std::uint8_t* y,
     for (std::uint32_t row = 0; row < h; ++row) {
         const std::uint32_t band = std::min<std::uint32_t>(2, row / std::max<std::uint32_t>(1u, band_h));
         const std::uint8_t yv = static_cast<std::uint8_t>(base_y + band * 60u);
-        std::memset(y + row * w, yv, w);
+        std::memset(y + static_cast<std::size_t>(row) * stride_y, yv, w);
     }
     // ---- U/V planes (BT.601 limited-range neutral grey chroma)
-    const std::uint32_t half_w = w / 2;
-    const std::uint32_t half_h = h / 2;
-    if (u) std::memset(u, 128, half_w * half_h);
-    if (v) std::memset(v, 128, half_w * half_h);
+    const std::uint32_t cw = w / 2;
+    const std::uint32_t ch = h / 2;
+    if (u) {
+        for (std::uint32_t row = 0; row < ch; ++row) {
+            std::memset(u + static_cast<std::size_t>(row) * stride_u, 128, cw);
+        }
+    }
+    if (v) {
+        for (std::uint32_t row = 0; row < ch; ++row) {
+            std::memset(v + static_cast<std::size_t>(row) * stride_v, 128, cw);
+        }
+    }
 }
 
 plugins::Status CodecPluginAdapter::update_config(plugins::VideoCodecConfig cfg) noexcept {
@@ -305,22 +334,77 @@ plugins::IVideoCodec* H264PluginFactory::create(plugins::VideoCodecConfig cfg) c
     // this very file implements). On hosts with NVENC / VideoToolbox /
     // MediaCodec / VAAPI / etc. the out-of-tree plugin's `create` runs
     // instead, returning a real HW codec instance.
-    if (auto* be = select_encoder_backend(cfg); be && be->create) {
-        auto c = be->create(cfg);
-        if (c) {
-            const std::string hw_str = be->is_hw ? "yes" : "no";
-            const std::string zc_str = be->zero_copy_supported ? "yes" : "no";
-            const std::string id_str{be->id};
-            const std::string be_str{plugins::hw_backend_name(be->backend)};
+    //
+    // The engine holds ONE IVideoCodec per session and drives both
+    // directions through it, so the factory has to hand back something
+    // that can encode *and* decode.  The hardware backends are
+    // one-directional (NVENC encodes, NVDEC decodes), so when the two
+    // directions resolve to different backends they are wrapped in a
+    // HwCompositeCodec.
+    std::unique_ptr<plugins::IVideoCodec> encoder;
+    const plugins::VideoEncoderBackend* enc_be = select_encoder_backend(cfg);
+    if (enc_be && enc_be->create) {
+        encoder = enc_be->create(cfg);
+        if (encoder) {
+            const std::string hw_str = enc_be->is_hw ? "yes" : "no";
+            const std::string zc_str = enc_be->zero_copy_supported ? "yes" : "no";
+            const std::string id_str{enc_be->id};
+            const std::string be_str{plugins::hw_backend_name(enc_be->backend)};
             core::log::Logger::instance().info(
-                std::string{"h264: selected backend '"} + id_str +
+                std::string{"h264: selected encoder backend '"} + id_str +
                 "' (" + be_str + ", hw=" + hw_str +
                 ", zero_copy=" + zc_str + ")");
-            return c.release();
         }
     }
-    // Last-resort fallback (selector should always return at least the stub).
-    return new CodecPluginAdapter(std::move(cfg));
+
+    // The encoder already serves both directions (the software stub) —
+    // no composite needed.
+    if (encoder && encoder->can_decode()) {
+        return encoder.release();
+    }
+
+    // Pick the decoder backend for the receive direction.
+    std::unique_ptr<plugins::IVideoCodec> decoder;
+    const plugins::VideoDecoderBackend* dec_be = select_decoder_backend(cfg);
+    if (dec_be && dec_be->create) {
+        decoder = dec_be->create(cfg);
+        if (decoder) {
+            const std::string id_str{dec_be->id};
+            const std::string be_str{plugins::hw_backend_name(dec_be->backend)};
+            core::log::Logger::instance().info(
+                std::string{"h264: selected decoder backend '"} + id_str +
+                "' (" + be_str + ")");
+        }
+    }
+
+    if (!encoder && !decoder) {
+        // Last-resort fallback (selector should always return at least the stub).
+        return new CodecPluginAdapter(std::move(cfg));
+    }
+
+    if (!decoder) {
+        // An encoder without a decoder: the receive path is unusable, but
+        // the send path still works. Handing the encoder back unchanged
+        // keeps the instance's identity honest.
+        core::log::Logger::instance().warn(
+            "h264: no decoder backend available — the codec can encode only");
+        return encoder.release();
+    }
+
+    if (!encoder) {
+        // A decoder without an encoder: the send path is unusable.
+        core::log::Logger::instance().warn(
+            "h264: no encoder backend available — the codec can decode only");
+        return decoder.release();
+    }
+
+    // Two one-directional backends: pair them.
+    auto* composite = new nvcodec::HwCompositeCodec(std::move(cfg),
+                                                    std::move(encoder),
+                                                    std::move(decoder));
+    core::log::Logger::instance().info(
+        "h264: combined the encoder and the decoder into a composite codec");
+    return composite;
 }
 
 // ---------------------------------------------------------------------------

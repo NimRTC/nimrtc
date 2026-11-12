@@ -322,6 +322,14 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   pacer (video-pipeline plan P1):
     //     - pacing/pacing.hpp (the token bucket on a monotonic clock)
     //
+    // v1.3 bump: +3 public headers (118 -> 121) for the shared `nvcodec`
+    //   module -- the NVIDIA driver integration (NVENC / NVDEC) that the
+    //   H.264, H.265 and AV1 codec modules consume:
+    //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
+    //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
+    //       entry points)
+    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //
     // `session/track.hpp` already existed at v1.1.0 and is part of the
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
@@ -331,7 +339,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 118;
+    constexpr std::size_t kBaselineHeaderCount = 121;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

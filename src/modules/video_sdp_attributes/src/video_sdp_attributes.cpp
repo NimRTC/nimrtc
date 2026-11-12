@@ -597,10 +597,15 @@ core::Result<Av1Fmtp> parse_av1(std::string_view fmtp_raw) noexcept {
     Av1Fmtp out;
     auto pairs = split_fmtp_pairs(fmtp_raw);
     for (const auto& [k, v] : pairs) {
+        // Copy the structured binding into a plain local before the lambda
+        // captures it: capturing a structured binding by reference is a
+        // C++20 feature (P1091) that Clang still rejects, so the copy
+        // keeps one spelling compiling under both GCC and Clang.
+        const std::string_view value = v;
         auto int_param = [&](std::optional<std::uint32_t>& dst,
                              std::int64_t lo,
                              std::int64_t hi) -> bool {
-            auto val = parse_int_value(v);
+            auto val = parse_int_value(value);
             if (!val || *val < lo || *val > hi) return false;
             dst = static_cast<std::uint32_t>(*val);
             return true;

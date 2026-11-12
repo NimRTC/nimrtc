@@ -119,6 +119,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     depending on any one codec module's registry.  Every case calls
     `GTEST_SKIP()` when the backend is unavailable, so it never fails on
     a machine without NVIDIA hardware.
+    - The round trip is asserted for **every** codec the driver offers,
+      not only for H.264: `NvencNvdecRoundTripH265` and
+      `NvencNvdecRoundTripAv1` run the same encode → decode → compare
+      -pixels leg for H.265 and AV1.  Without them, a regression that
+      hard-coded H.264 inside the NVENC / NVDEC session code would still
+      pass every H.264 case while silently breaking the H.265 / AV1
+      codec modules, which call into this module's driver code.
+    - On a host whose silicon has no encoder for a codec (e.g. an
+      RTX 3060, which has no AV1 encoder) the availability probe reports
+      the truth and the case skips with that reason.
   - The README / README.zh capability tables and the
     `docs/hw_plugin_seam.md` backend matrix now state the truth: NVDEC
     **is** implemented; the macOS VideoToolbox and Android MediaCodec

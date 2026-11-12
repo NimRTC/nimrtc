@@ -45,10 +45,19 @@ void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
                      const std::uint8_t* src, std::int32_t src_stride,
                      std::uint32_t rows, std::size_t row_bytes) noexcept {
     if (!dst || !src || rows == 0 || row_bytes == 0) return;
+
+    // The strides are signed because a layout can describe a bottom-up
+    // plane (row 0 at the highest address).  Keep the arithmetic signed
+    // so that case works, instead of narrowing them to size_t and
+    // wrapping a negative stride into a huge offset.
+    const std::ptrdiff_t d_step = dst_stride;
+    const std::ptrdiff_t s_step = src_stride;
+    std::uint8_t* d = dst;
+    const std::uint8_t* s = src;
     for (std::uint32_t row = 0; row < rows; ++row) {
-        std::memcpy(dst + static_cast<std::size_t>(row) * dst_stride,
-                    src + static_cast<std::size_t>(row) * src_stride,
-                    row_bytes);
+        std::memcpy(d, s, row_bytes);
+        d += d_step;
+        s += s_step;
     }
 }
 

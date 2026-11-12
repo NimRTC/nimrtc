@@ -29,6 +29,19 @@
  * of these backends is covered separately by the h264 module's own
  * `test_hw_backends`.
  *
+ * ## Why the codec-generic leg matters
+ *
+ * Most cases here are H.264-specific, because H.264 is the codec whose
+ * NAL structure the payload layer parses in this tree.  But the H.265
+ * and AV1 codec modules ship their own NVENC backends (plan items B5 /
+ * B6), and they call into *this* module's driver code.  A regression
+ * that hard-coded H.264 somewhere inside the NVENC / NVDEC session
+ * code would still pass every H.264 case while silently breaking those
+ * two modules.  `NvencNvdecRoundTripH265` / `NvencNvdecRoundTripAv1`
+ * close that hole: they assert the framing and the decoded picture for
+ * every codec the driver offers, and they skip honestly on a host
+ * whose silicon has no encoder for that codec.
+ *
  * ## Host dependency
  *
  * The test is skipped (GTEST_SKIP) when the NVIDIA runtime or the GPU is
@@ -94,6 +107,18 @@ std::unique_ptr<plugins::IVideoCodec> make_nvenc(
 std::unique_ptr<plugins::IVideoCodec> make_nvdec(
     const plugins::VideoCodecConfig& cfg) {
     return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH264, cfg);
+}
+
+/** Create the NVENC encoder for an arbitrary codec. */
+std::unique_ptr<plugins::IVideoCodec> make_nvenc_for(
+    nvcodec::NvCodec codec, const plugins::VideoCodecConfig& cfg) {
+    return nvcodec::make_nvenc_codec(codec, cfg);
+}
+
+/** Create the NVDEC decoder for an arbitrary codec. */
+std::unique_ptr<plugins::IVideoCodec> make_nvdec_for(
+    nvcodec::NvCodec codec, const plugins::VideoCodecConfig& cfg) {
+    return nvcodec::make_nvdec_codec(codec, cfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,4 +1034,142 @@ TEST(HwRoundTrip, NvdecRejectsEmptyPayload) {
     const auto stats = decoder->stats();
     EXPECT_EQ(stats.decode_errors, 1u);
     EXPECT_EQ(stats.frames_decoded, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// The codec-generic round trip: H.265 and AV1.
+//
+// The tests above are H.264-specific because H.264 is the codec the
+// *payload* layer parses in this tree (the H.265 / AV1 payload formats
+// exist too — `nimrtc/video_payload/h265.hpp` and `av1.hpp` — but their
+// NAL / OBU headers are not the same shape as H.264's).
+//
+// What this test pins down is that the *driver integration* is genuinely
+// codec-parameterised: the same session code, the same encoder, the same
+// decoder, the same bitstream plumbing — only the `NvCodec` enum value
+// differs.  Without it, a regression that hard-coded H.264 somewhere in
+// the NVENC / NVDEC code would still pass every H.264 test above while
+// silently breaking the H.265 and AV1 codec modules that ship their own
+// NVENC backends (plan items B5 / B6).
+//
+// The bitstream check is deliberately codec-agnostic: Annex-B start-code
+// prefixing, a non-empty payload, and a keyframe flag.  The *decoded
+// picture* check is codec-agnostic too: the luma must not be flat and
+// must resemble the source.
+//
+// A host whose silicon has no HEVC (or no AV1) encoder simply skips —
+// the availability probe is honest about that.
+// ---------------------------------------------------------------------------
+
+/** The shared body of the codec-generic round trip. */
+static void round_trip_codec(nvcodec::NvCodec codec) {
+    const auto desc = nvcodec::codec_desc(codec);
+
+    if (!nvcodec::nvenc_codec_available(codec)) {
+        GTEST_SKIP() << "NVENC cannot encode " << desc.rtpmap_encoding
+                     << " on this host — skipping the round trip";
+    }
+    if (!nvcodec::nvdec_codec_available(codec)) {
+        GTEST_SKIP() << "NVDEC cannot decode " << desc.rtpmap_encoding
+                     << " on this host — skipping the round trip";
+    }
+
+    auto cfg = make_config();
+    cfg.codec        = desc.kind;
+    cfg.payload_type = desc.default_payload_type;
+
+    auto encoder = make_nvenc_for(codec, cfg);
+    ASSERT_NE(encoder, nullptr)
+        << "the NVENC backend failed to open for " << desc.rtpmap_encoding;
+    ASSERT_TRUE(encoder->can_encode());
+    ASSERT_FALSE(encoder->can_decode());
+
+    const TestFrame src = make_test_frame(kWidth, kHeight);
+    const plugins::VideoFrame raw = make_video_frame(src, kWidth, kHeight);
+    ASSERT_TRUE(raw.buffer);
+
+    std::vector<std::uint8_t> bs(2 * 1024 * 1024);
+    plugins::EncodedVideoFrame encoded;
+    const plugins::Status enc_status = encoder->encode(raw, bs.data(), bs.size(),
+                                                       encoded);
+    ASSERT_EQ(enc_status, plugins::kOk)
+        << "NVENC encode failed for " << desc.rtpmap_encoding
+        << " (status=" << enc_status << ")";
+    ASSERT_GT(encoded.payload.size(), 0u);
+
+    // The bitstream must be Annex-B start-code prefixed and must carry a
+    // keyframe.  The exact parameter-set NAL types differ per codec
+    // (H.264 has SPS=7/PPS=8, H.265 has VPS=32/SPS=33/PPS=34, AV1 has
+    // OBUs rather than NAL units), so only the framing is asserted here;
+    // the per-codec structure is covered by the payload layer's own
+    // tests and by the H.264 leg above.
+    const auto* p = encoded.payload.data();
+    const std::size_t n = encoded.payload.size();
+    ASSERT_GE(n, 4u);
+    EXPECT_EQ(p[0], 0x00);
+    EXPECT_EQ(p[1], 0x00);
+    EXPECT_EQ(p[2], 0x00);
+    EXPECT_EQ(p[3], 0x01)
+        << "the NVENC output for " << desc.rtpmap_encoding
+        << " is not Annex-B start-code prefixed";
+    EXPECT_TRUE(encoded.is_keyframe)
+        << "the first encoded " << desc.rtpmap_encoding << " frame must be a keyframe";
+
+    // ---- decode it back -------------------------------------------------
+    auto decoder = make_nvdec_for(codec, cfg);
+    ASSERT_NE(decoder, nullptr)
+        << "the NVDEC backend failed to open for " << desc.rtpmap_encoding;
+    ASSERT_TRUE(decoder->can_decode());
+
+    const auto layout = video_frame::compute_layout(video_frame::PixelFormat::kI420,
+                                                    kWidth, kHeight);
+    std::vector<std::uint8_t> out_pixels(layout.buffer_size, 0);
+    std::uint8_t* planes[3] = {
+        out_pixels.data(),
+        out_pixels.data() + layout.plane_offsets[1],
+        out_pixels.data() + layout.plane_offsets[2],
+    };
+
+    plugins::VideoFrame decoded;
+    decoded.info.capture_ts_us = encoded.info.capture_ts_us;
+    decoded.info.frame_seq     = encoded.info.frame_seq;
+
+    const plugins::Status dec_status = decoder->decode(encoded, decoded, planes);
+    ASSERT_EQ(dec_status, plugins::kOk)
+        << "NVDEC decode failed for " << desc.rtpmap_encoding
+        << " (status=" << dec_status << ")";
+
+    // The decoded luma must be a real picture, not a flat grey.
+    std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
+    for (std::uint32_t row = 0; row < kHeight; ++row) {
+        std::memcpy(dec_y.data() + static_cast<std::size_t>(row) * kWidth,
+                    planes[0] + static_cast<std::size_t>(row) * stride_of(layout, 0),
+                    kWidth);
+    }
+    const auto [min_it, max_it] = std::minmax_element(dec_y.begin(), dec_y.end());
+    EXPECT_GT(static_cast<int>(*max_it) - static_cast<int>(*min_it), 20)
+        << "the decoded " << desc.rtpmap_encoding
+        << " luma is nearly flat — the decoder produced garbage";
+
+    // And it must resemble the source.
+    const double mae = luma_mae(src.y, dec_y);
+    EXPECT_LT(mae, 12.0)
+        << "the decoded " << desc.rtpmap_encoding
+        << " luma differs too much from the source (MAE=" << mae << ")";
+
+    const auto enc_stats = encoder->stats();
+    EXPECT_EQ(enc_stats.frames_encoded, 1u);
+    EXPECT_EQ(enc_stats.encode_errors, 0u);
+
+    const auto dec_stats = decoder->stats();
+    EXPECT_EQ(dec_stats.frames_decoded, 1u);
+    EXPECT_EQ(dec_stats.decode_errors, 0u);
+}
+
+TEST(HwRoundTrip, NvencNvdecRoundTripH265) {
+    round_trip_codec(nvcodec::NvCodec::kH265);
+}
+
+TEST(HwRoundTrip, NvencNvdecRoundTripAv1) {
+    round_trip_codec(nvcodec::NvCodec::kAv1);
 }

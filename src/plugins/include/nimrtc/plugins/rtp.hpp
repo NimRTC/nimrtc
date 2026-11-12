@@ -2,14 +2,50 @@
  * @file nimrtc/plugins/rtp.hpp
  * @brief IRTP — pluggable RTP/RTCP packet processing interface.
  *
- * Replace this to use a custom RTP codec, header extension format,
- * or a proprietary framing scheme (e.g. Tencent's RDT).
+ * @deprecated **Not pluggable as of v1.2.0.**  The engine uses the
+ * concrete `rtp::` implementation directly and never resolves an
+ * `IRTP` factory from the registry.  The interface and its registry
+ * slot are retained for ABI stability only.
  *
- * ## Implementing a custom RTP plugin
+ * ## Why this is not a working seam
  *
- * 1. Implement `IRTP` over your RTP payload format.
- * 2. Register: `PluginRegistry::instance().register_rtp("my_rtp", factory);`
- * 3. Set `NimRTCEngine::Config::rtp_name = "my_rtp"`.
+ * The RTP layer is not a *leaf* plugin — it is woven through the whole
+ * media path:
+ *
+ *   - The SDP layer emits the `a=rtpmap:` / `a=fmtp:` lines that
+ *     describe the RTP payload format, and it derives the payload type
+ *     from the codec family.  A replaceable RTP layer would need a
+ *     matching SDP layer, or the offer would describe a format the
+ *     wire does not carry.
+ *   - The BWE estimator consumes the RTP header (sequence numbers,
+ *     timestamps, the `has_ext` flag) to compute the arrival-time
+ *     jitter and the loss rate.  Its correctness depends on the RTP
+ *     header layout being the RFC 3550 one.
+ *   - The jitter buffer, the NACK generator, the RTX retransmitter
+ *     and the RTCP path all address RTP fields by RFC 3550 name.
+ *   - `VideoCodecConfig::payload_type` and the negotiated payload type
+ *     flow from the codec family into the RTP header.
+ *
+ * In other words, making RTP pluggable means making the *SDP* layer
+ * pluggable too, and re-specifying the BWE / jitter-buffer / RTCP
+ * contracts in terms of "whatever the RTP plugin says the header
+ * looks like".  That is a protocol redesign, not a plugin seam — and
+ * until the SDP layer moves to a matching model, a third-party RTP
+ * plugin would produce an offer the peer cannot parse and feedback the
+ * BWE estimator cannot interpret.
+ *
+ * The remediation plan (§2.1, decision: *do not replace SDP/RTP for
+ * now*) therefore keeps the concrete implementations and removed the
+ * `rtp_name` / `sdp_name` config knobs rather than pretending the seam
+ * works.
+ *
+ * ## If you need a different RTP format today
+ *
+ * Fork `src/modules/rtp/`.  The packetisation logic is small and
+ * self-contained; the H.264 / H.265 / AV1 packetisers live next to it.
+ *
+ * @see nimrtc/plugins/sdp.hpp for the same story on the SDP side.
+ * @see docs/plan/architecture-remediation-plan.md §2.1.
  *
  * @note P0 scaffold — interface stable, binary layout TBD P1.
  */

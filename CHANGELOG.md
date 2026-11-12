@@ -1044,6 +1044,42 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The e2e acceptance Case C (NimRTC ↔ NimRTC loopback) failed on the
+  Windows CI runner with `WSAEACCES (errno 10013)`, because the example
+  pinned a fixed UDP port range that the runner reserved.**  The
+  `loopback-p2p` example asked for `51000–51099` (and `51100–51199`
+  for the second engine), and `demo-agent-gateway` asked for
+  `52000–52099`.  Windows reserves whole blocks of UDP ports for the
+  hypervisor (Hyper-V / HNS); a `bind()` inside a reserved block fails
+  with `WSAEACCES`, and `libjuice` walks the *entire* requested range
+  before giving up — so the ICE agent fails to open outright:
+  ```
+  [warn]  udp.c:178: UDP socket binding failed on port range 127.0.0.1:[51000,51099], errno=10013
+  [error] conn_mux.c:270: UDP socket creation failed
+  [error] engine A open failed
+  ```
+  The reservations move between runs, so the same commit passes in one
+  CI job and fails in another: `windows / msvc` (which builds the
+  example) was green while `ci-e2e` (which runs it) was red, because
+  the two jobs landed on runners with different reservations.
+  - Both examples now leave `local_port_range_begin` / `_end` at 0 and
+    let the OS assign an ephemeral port.  The kernel's ephemeral
+    allocation never picks a reserved port.
+  - Two engines in one process no longer need disjoint ranges: an
+    ephemeral-port request gives each engine its own socket on its own
+    port (this is the same `conn_mux_get_registry()` behaviour the ICE
+    unit tests already rely on).
+  - The docs that recommended a pinned range were corrected:
+    `EngineConfig::local_port_range_begin`, `docs/api/engine_config.md`
+    §4.1, `docs/troubleshooting.md` §3.1 (which told users to pick
+    non-overlapping ranges), the two READMEs, and
+    `docs/guides/building-on-openharmony.md`.  `docs/troubleshooting.md`
+    gains §3.13 for the `WSAEACCES` failure mode, and §3.5 is
+    rewritten: the vendored `libjuice` deliberately does *not* set
+    `SO_REUSEADDR` / `SO_REUSEPORT` (they let two sockets share one
+    UDP port, which breaks ICE), so "address already in use" is the
+    socket option working as intended.
+
 - **The ICE loopback and restart tests bound a fixed UDP port range that
   the Windows CI runner reserves, so both failed there with
   `WSAEACCES (errno 10013)`, and the vendored `libjuice` let two ICE

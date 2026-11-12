@@ -258,9 +258,24 @@ struct NIMRTC_API_STABLE EngineConfig {
     std::string stun_server_host;
     std::uint16_t stun_server_port = 3478;
 
-    /** Local UDP port range for ICE. 0 = OS picks. MUST be unique across
-     *  multiple NimRTCEngine instances on the same host or both will bind
-     *  to the same port and process each other's STUN packets. */
+    /** Local UDP port range for ICE. 0 = OS picks.
+     *
+     *  Leave both at 0 (the default) unless you have a specific reason
+     *  not to.  The OS-assigned ephemeral port is the safest choice:
+     *
+     *   - Windows runners hand out *excluded* port ranges (Hyper-V / HNS
+     *     reservations).  A bind inside one fails with WSAEACCES (errno
+     *     10013), so a pinned range that worked yesterday can fail today
+     *     with no change on your side.  The kernel's ephemeral
+     *     allocation never picks an excluded port.
+     *   - A pinned range is a cross-process collision risk: two sessions
+     *     on the same host that pick the same range silently steal each
+     *     other's STUN packets.
+     *
+     *  Two engines in one process do NOT need disjoint ranges: an
+     *  ephemeral-port request gives each engine its own socket on its
+     *  own port.  (Non-overlapping ranges are only required if you pin
+     *  fixed ranges for both.) */
     std::uint16_t local_port_range_begin = 0;
     std::uint16_t local_port_range_end   = 0;
 
@@ -2467,7 +2482,18 @@ private:
      *  `Config::audio_bitrate_bps` when set, otherwise the codec
      *  default for the channel count (32 kbps mono / 64 kbps stereo). */
     int resolve_audio_bitrate_ceiling() const noexcept;
-    void init_video_plugins() noexcept;
+    /** Resolve and open the video plugins.
+     *
+     *  @return `plugins::kOk` on success, or the error code of the first
+     *          fatal failure.  A *fatal* failure is one where the engine
+     *          cannot describe the negotiated codec family (the codec
+     *          plugin violates the `IVideoCodec::kind()` contract) — in
+     *          that case the video plugins are left down and the engine
+     *          does not advertise a video m-line.  Everything else
+     *          (a missing source, a failing sink) is non-fatal: the
+     *          engine opens without that piece and reports it through
+     *          `on_error_`. */
+    uint32_t init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------

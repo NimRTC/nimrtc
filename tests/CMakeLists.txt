@@ -1140,6 +1140,17 @@ nimrtc_add_engine_codec_test(test_engine_video_codec
                               test_engine_video_codec.cpp)
 endif()
 
+# B6 (remediation plan §2.4) — the video codec family contract.
+# `IVideoCodec::kind()` is authoritative; the plugin id is only a
+# lookup hint.  The test needs the video pipeline (receiver / sender
+# "reference") and the H.264 module (the default codec), so it reuses
+# `nimrtc_add_engine_codec_test`'s link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_codec_test(test_engine_video_codec_family
+                              test_engine_video_codec_family.cpp)
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 

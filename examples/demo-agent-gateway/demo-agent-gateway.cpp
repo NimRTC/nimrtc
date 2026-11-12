@@ -153,10 +153,14 @@ int run_demo(double seconds) {
                  int(profile.jitter_buffer.initial_delay_ms));
 
     // ---- Engine config (audio3a off on engine — we drive it ourselves) -
+    //
+    // The local port range stays at 0 (the default): the OS assigns an
+    // ephemeral port.  A pinned range would fail outright on a Windows
+    // runner whose Hyper-V / HNS reservation happens to cover it (bind
+    // returns WSAEACCES / errno 10013), and it would collide with any
+    // other session on the same host.
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 52000;
-    cfg.local_port_range_end   = 52099;
     cfg.pcm_sample_rate_hz    = profile.audio_sample_rate_hz;
     cfg.pcm_channels          = profile.audio_channels;
     cfg.audio3a_name          = "";  // demo drives audio3a via registry instance

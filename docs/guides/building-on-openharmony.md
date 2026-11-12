@@ -268,8 +268,9 @@ MyOHOSApp/
 extern "C" int NimRTCMain(int /*argc*/, char** /*argv*/) {
     nimrtc::engine::EngineConfig cfg;
     cfg.local_bind_address     = "0.0.0.0";   // listen on the device's IP
-    cfg.local_port_range_begin = 51000;
-    cfg.local_port_range_end   = 51099;
+    // Leave local_port_range_begin / _end at 0: the OS assigns an ephemeral
+    // port.  A pinned range can be blocked by the platform's reserved-port
+    // ranges and then the bind fails outright.
     cfg.pcm_sample_rate_hz     = 48000;
     cfg.pcm_channels           = 1;
     cfg.dtls_name              = "gmssl";      // OHOS profile default
@@ -308,7 +309,7 @@ source via `engine.send_audio(...)`.
 | `cmake --preset debug.ohos-arm64` errors with "Could not find OHOS toolchain" | `OHOS_NATIVE_HOME` not exported, or OHOS SDK < 4.0 | `export OHOS_NATIVE_HOME=/opt/ohos-sdk`; install DevEco Studio native SDK ≥ 4.0 |
 | Link fails with undefined references in `__cxxabi_*` symbols | STL linkage wrong; `-stdlib=libc++` missing | ensure preset's `if(OHOS)` branch applied; re-run cmake with `-DCMAKE_CXX_FLAGS="-stdlib=libc++"` |
 | `libnimrtc_engine.a` builds but ELF has musl-incompatible syscall refs | one of the vendored libs (libopus / libsrtp / libjuice) picked up glibc configurations | re-vendor with `CC=$OHOS_NATIVE_HOME/llvm/bin/clang --target=aarch64-linux-ohos`; see [plan/ohos-musl-compat.md](../plan/ohos-musl-compat.md) |
-| `test_dtls_gcm_aead` runs but doesn't reach Connected | OHOS firewall blocks UDP loopback at 127.0.0.1:51000 | check `hdc_std shell`; allow via `iptables -A INPUT -p udp -j ACCEPT` for local testing |
+| `test_dtls_gcm_aead` runs but doesn't reach Connected | OHOS firewall blocks UDP loopback on 127.0.0.1 | check `hdc_std shell`; allow via `iptables -A INPUT -p udp -j ACCEPT` for local testing |
 | GMSSL link fails on `SSL_export_keying_material` | OpenSSL without srtp patch | install GMSSL or apply openssl-srtp patch; see [switching-dtls-backend.md §5.2](./switching-dtls-backend.md) |
 | Build is green but binary doesn't load on device | sysroot mismatch — `--target` mismatch between compiler and link step | use Mode A (real cross clang) instead of Mode B (`--target` fallback) |
 

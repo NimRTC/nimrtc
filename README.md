@@ -248,8 +248,8 @@ using namespace std::chrono_literals;
 int main() {
     EngineConfig cfg;
     cfg.local_bind_address    = "127.0.0.1";
-    cfg.local_port_range_begin = 51000;
-    cfg.local_port_range_end   = 51099;
+    // Leave local_port_range_begin / _end at 0: the OS assigns each engine
+    // its own ephemeral UDP port, so the two never share a socket.
     cfg.pcm_sample_rate_hz     = 48000;
     cfg.pcm_channels           = 1;
 

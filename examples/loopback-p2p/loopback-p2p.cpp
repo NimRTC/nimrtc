@@ -56,10 +56,29 @@ int run_loopback(double seconds) {
     std::fprintf(stderr, "[loopback-p2p] starting\n");
 
     // ---- Offerer (A): pre_open → open → CONTROLLING → create offer ---
+    //
+    // The local port range is left at 0 (the default), so the OS assigns
+    // an ephemeral port.  Do NOT pin a fixed range here:
+    //
+    //   - Windows runners hand out *excluded* port ranges (Hyper-V / HNS
+    //     reservations).  A bind inside one fails with WSAEACCES (errno
+    //     10013) and libjuice walks the whole requested range before
+    //     giving up, so the agent fails to open outright.  Every fixed
+    //     range this example has used has eventually been caught by such
+    //     a reservation (51000-51099, then 60000-60999, then 63000s).
+    //     The kernel's ephemeral allocation never picks an excluded port.
+    //
+    //   - A pinned range is also a cross-process collision risk: two
+    //     concurrent CI jobs on the same runner, or a developer's own
+    //     loopback session, can land on the same port and silently
+    //     steal each other's STUN packets.
+    //
+    // Two engines in one process no longer need disjoint ranges: with an
+    // ephemeral request each one gets its own socket on its own port
+    // (libjuice's conn_mux_get_registry() does not fold an ephemeral-port
+    // request into an existing registry).
     nimrtc::engine::EngineConfig cfgA;
     cfgA.local_bind_address = "127.0.0.1";
-    cfgA.local_port_range_begin = 51000;
-    cfgA.local_port_range_end   = 51099;
     cfgA.pcm_sample_rate_hz = 48000;
     cfgA.pcm_channels       = 1;
 
@@ -84,9 +103,10 @@ int run_loopback(double seconds) {
     std::fprintf(stderr, "[loopback-p2p] offer length=%zu\n", offer.size());
 
     // ---- Answerer (B): pre_open → set_remote_ice → open (CONTROLLED) ----
+    //
+    // B inherits the ephemeral-port configuration from A: each engine gets
+    // its own OS-assigned port, so the two never share a UDP socket.
     nimrtc::engine::EngineConfig cfgB = cfgA;
-    cfgB.local_port_range_begin = 51100;
-    cfgB.local_port_range_end   = 51199;
     nimrtc::engine::NimRTCEngine B(cfgB);
 
     // Key fix: extract A's ICE credentials BEFORE B's ICE starts gathering.

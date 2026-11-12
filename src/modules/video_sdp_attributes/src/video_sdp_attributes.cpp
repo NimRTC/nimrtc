@@ -598,7 +598,6 @@ core::Result<Av1Fmtp> parse_av1(std::string_view fmtp_raw) noexcept {
     auto pairs = split_fmtp_pairs(fmtp_raw);
     for (const auto& [k, v] : pairs) {
         auto int_param = [&](std::optional<std::uint32_t>& dst,
-                             const char* name,
                              std::int64_t lo,
                              std::int64_t hi) -> bool {
             auto val = parse_int_value(v);
@@ -607,47 +606,47 @@ core::Result<Av1Fmtp> parse_av1(std::string_view fmtp_raw) noexcept {
             return true;
         };
         if (iequals(k, "profile")) {
-            if (!int_param(out.profile, "profile", 0, 3)) {
+            if (!int_param(out.profile, 0, 3)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 profile");
             }
         } else if (iequals(k, "level-idx")) {
-            if (!int_param(out.level_idx, "level-idx", 0, 31)) {
+            if (!int_param(out.level_idx, 0, 31)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 level-idx");
             }
         } else if (iequals(k, "tier")) {
-            if (!int_param(out.tier, "tier", 0, 1)) {
+            if (!int_param(out.tier, 0, 1)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 tier");
             }
         } else if (iequals(k, "bit-depth")) {
-            if (!int_param(out.bit_depth, "bit-depth", 8, 12)) {
+            if (!int_param(out.bit_depth, 8, 12)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 bit-depth");
             }
         } else if (iequals(k, "monochrome")) {
-            if (!int_param(out.monochrome, "monochrome", 0, 1)) {
+            if (!int_param(out.monochrome, 0, 1)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 monochrome");
             }
         } else if (iequals(k, "chroma-subsampling")) {
-            if (!int_param(out.chroma_subsampling, "chroma-subsampling", 0, 3)) {
+            if (!int_param(out.chroma_subsampling, 0, 3)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 chroma-subsampling");
             }
         } else if (iequals(k, "color-primaries")) {
-            if (!int_param(out.color_primaries, "color-primaries", 0, 255)) {
+            if (!int_param(out.color_primaries, 0, 255)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 color-primaries");
             }
         } else if (iequals(k, "transfer-characteristics")) {
-            if (!int_param(out.transfer_characteristics, "transfer-characteristics", 0, 255)) {
+            if (!int_param(out.transfer_characteristics, 0, 255)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 transfer-characteristics");
             }
         } else if (iequals(k, "matrix-coefficients")) {
-            if (!int_param(out.matrix_coefficients, "matrix-coefficients", 0, 255)) {
+            if (!int_param(out.matrix_coefficients, 0, 255)) {
                 return core::Result<Av1Fmtp>::fail(
                     core::ErrorCode::InvalidArgument, "av1 matrix-coefficients");
             }

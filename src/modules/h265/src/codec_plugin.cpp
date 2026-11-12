@@ -249,8 +249,16 @@ plugins::Status CodecPluginAdapter::decode(const plugins::EncodedVideoFrame& enc
     } else {
         const video_frame::VideoFrameLayout layout =
             video_frame::compute_layout(video_frame::PixelFormat::kI420, w, h);
+        // The layout's strides are signed (a negative stride would mean a
+        // bottom-up plane), while paint_i420 takes them unsigned.  A
+        // negative stride is not something this path can produce --
+        // compute_layout always returns forward, positive strides -- so
+        // the cast is a narrowing of a value the caller has already
+        // validated.
         paint_i420(y_plane, u_plane, v_plane, w, h, decoded->frame_seq,
-                   layout.strides[0], layout.strides[1], layout.strides[2]);
+                   static_cast<std::uint32_t>(layout.strides[0]),
+                   static_cast<std::uint32_t>(layout.strides[1]),
+                   static_cast<std::uint32_t>(layout.strides[2]));
     }
 
     // ---- Wire up the caller-visible VideoFrame ----------------------------

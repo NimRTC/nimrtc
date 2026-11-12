@@ -26,8 +26,17 @@
 name: ci
 
 on:
+  # The full matrix is reserved for the refs that actually merge:
+  # `main` itself and the release branches, plus every PR that targets
+  # `main`.  A push to a working branch gets the fast leg
+  # (`ci-fast.yml`) instead -- see the comment there for the throughput
+  # argument.  The five checks the repository ruleset gates on
+  # (`windows / msvc`, `windows / build`, `linux-gcc / x86_64`,
+  # `macos-clang / arm64`, `docs / markdown links`) are all produced
+  # here or in `interop.yml`, and both still run on `main` and on every
+  # PR into `main`.
   push:
-    branches: [main, feat/**, fix/**, chore/**, release/**]
+    branches: [main, release/**]
   pull_request:
     branches: [main]
   # Manual trigger.  Useful for re-running the 4-platform matrix on

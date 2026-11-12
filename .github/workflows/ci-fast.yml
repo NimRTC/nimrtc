@@ -22,13 +22,13 @@
 #                  only refs the repository ruleset gates on, so this is
 #                  where "is it really green" is answered.
 #   ci-fast.yml -- one platform (Windows / MSVC, the primary dev
-#                  environment), build + unit tests only.  Runs on the
-#                  *push* to a stacked branch, where the question is
+#                  environment), build + unit tests only.  Runs on every
+#                  *push* to a working branch, where the question is
 #                  only "did I break the build on the way up".
 #
 # The two never overlap, which is the point: exactly one workflow runs
-# per event.  A push to `split/7` runs the fast leg; the PR that later
-# proposes `split/7` into `main` runs the full matrix.  The fast leg
+# per event.  A push to `fix/foo` runs the fast leg; the PR that later
+# proposes `fix/foo` into `main` runs the full matrix.  The fast leg
 # deliberately does NOT also fire on `pull_request`, because the PR
 # event already triggers the full matrix on the same commit -- running
 # both would spend the queue budget twice on the same tree.
@@ -61,10 +61,13 @@
 name: ci-fast
 
 on:
+  # Every branch except `main` and the release branches.  Those two are
+  # covered by the full matrix (`ci.yml`), and running both legs on the
+  # same commit would spend the queue budget twice on the same tree.
   push:
-    branches: [split/**, feature/**]
-  pull_request:
-    branches: [split/**, feature/**]
+    branches-ignore:
+      - main
+      - 'release/**'
   workflow_dispatch:
 
 concurrency:

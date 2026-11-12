@@ -59,8 +59,15 @@ std::vector<std::uint8_t> make_record(std::uint8_t msg_type,
     rec.push_back(0xfe); rec.push_back(0xff);  // DTLS 1.2
     rec.push_back(static_cast<std::uint8_t>((epoch >> 8) & 0xff));
     rec.push_back(static_cast<std::uint8_t>(epoch & 0xff));
+    // The DTLS record sequence number is a 48-bit field, so the six
+    // bytes are written from a 64-bit value.  `record_seq` is a
+    // `std::uint16_t`, so without the widening cast it would be
+    // promoted to `int` and shifted by 8 * 5 == 40 -- which is UB for
+    // a 32-bit `int` (and UBSan flags it as "shift exponent 40 is too
+    // large for 32-bit type 'int'").
+    const std::uint64_t seq64 = static_cast<std::uint64_t>(record_seq);
     for (int i = 5; i >= 0; --i) {
-        rec.push_back(static_cast<std::uint8_t>((record_seq >> (8 * i)) & 0xff));
+        rec.push_back(static_cast<std::uint8_t>((seq64 >> (8 * i)) & 0xff));
     }
     const std::uint16_t payload_len = static_cast<std::uint16_t>(12 + body.size());
     rec.push_back(static_cast<std::uint8_t>((payload_len >> 8) & 0xff));

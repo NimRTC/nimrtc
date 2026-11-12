@@ -13,6 +13,7 @@
 #include "random.h"
 #include "stun.h"
 #include "turn.h"
+#include "turn_tcp.h"
 #include "udp.h"
 
 #include <assert.h>
@@ -38,6 +39,25 @@
 #define BUFFER_SIZE 4096
 #define DEFAULT_MAX_RECORDS_COUNT 8
 
+// Maximum time the TURN-over-TCP control connection may take to be
+// established before the allocation is considered failed.
+#define TURN_TCP_CONNECT_TIMEOUT 10000 // msecs
+
+// Poll interval of the TURN-over-TCP reader thread.
+#define TURN_TCP_POLL_INTERVAL 20 // msecs
+
+// Sleep for the given number of milliseconds.
+static void sleep_ms(int ms) {
+#ifdef _WIN32
+	Sleep((DWORD)ms);
+#else
+	struct timespec ts;
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	nanosleep(&ts, NULL);
+#endif
+}
+
 static char *alloc_string_copy(const char *orig, bool *alloc_failed) {
 	if (!orig)
 		return NULL;
@@ -53,12 +73,17 @@ static char *alloc_string_copy(const char *orig, bool *alloc_failed) {
 	return copy;
 }
 
+// Forward declaration: the TURN-over-TCP reader thread is stopped when the
+// agent is destroyed.
+static void agent_turn_tcp_reader_stop(juice_agent_t *agent, agent_stun_entry_t *entry);
+
 static int copy_turn_server(juice_turn_server_t *dst, const juice_turn_server_t *src) {
 	bool alloc_failed = false;
 	dst->host = alloc_string_copy(src->host, &alloc_failed);
 	dst->username = alloc_string_copy(src->username, &alloc_failed);
 	dst->password = alloc_string_copy(src->password, &alloc_failed);
 	dst->port = src->port;
+	dst->transport = src->transport;
 
 	if (alloc_failed) {
 		JLOG_FATAL("Memory allocation for TURN server configuration copy failed");
@@ -160,6 +185,15 @@ void agent_destroy(juice_agent_t *agent) {
 		thread_join(agent->resolver_thread, NULL);
 	}
 
+	// The TURN-over-TCP reader threads must be stopped before the
+	// connection is destroyed: they wake up through conn_interrupt() and
+	// take the connection lock.
+	for (int i = 0; i < agent->entries_count; ++i) {
+		agent_stun_entry_t *entry = agent->entries + i;
+		if (entry->turn)
+			agent_turn_tcp_reader_stop(agent, entry);
+	}
+
 	if (agent->conn_impl) {
 		conn_destroy(agent);
 	}
@@ -168,6 +202,8 @@ void agent_destroy(juice_agent_t *agent) {
 	for (int i = 0; i < agent->entries_count; ++i) {
 		agent_stun_entry_t *entry = agent->entries + i;
 		if (entry->turn) {
+			turn_tcp_stream_destroy(entry->turn->stream);
+			entry->turn->stream = NULL;
 			turn_destroy_map(&entry->turn->map);
 			free(entry->turn);
 		}
@@ -311,6 +347,136 @@ int agent_gather_candidates(juice_agent_t *agent) {
 	return 0;
 }
 
+// ---------------------------------------------------------------------------
+// TURN over TCP (RFC 8656 section 12)
+// ---------------------------------------------------------------------------
+
+// Forward declarations
+static void agent_turn_tcp_reader_stop(juice_agent_t *agent, agent_stun_entry_t *entry);
+static void agent_turn_tcp_input(juice_agent_t *agent, agent_stun_entry_t *entry, char *buf,
+                                  size_t len);
+
+static bool agent_turn_is_tcp(const agent_stun_entry_t *entry) {
+	return entry->turn && entry->turn->transport != JUICE_TURN_TRANSPORT_UDP;
+}
+
+// The reader thread pumps the TURN-over-TCP control connection.
+//
+// Everything the TURN server sends on that connection — the Allocate
+// response, the CreatePermission / ChannelBind responses, and the relayed
+// data (as ChannelData messages or Data indications) — arrives here.
+static thread_return_t THREAD_CALL agent_turn_tcp_reader_entry(void *arg) {
+	agent_turn_entry_arg_t *entry_arg = (agent_turn_entry_arg_t *)arg;
+	juice_agent_t *agent = entry_arg->agent;
+	agent_stun_entry_t *entry = entry_arg->entry;
+
+	JLOG_DEBUG("Starting TURN-over-TCP reader thread");
+
+	agent_turn_state_t *turn = entry->turn;
+	turn_tcp_stream_t *stream = turn->stream;
+
+	char buffer[BUFFER_SIZE];
+
+	while (!atomic_load(&turn->reader_stopped)) {
+		if (!stream)
+			break;
+
+		// Complete the pending connection attempt.
+		int ret = turn_tcp_stream_check_connected(stream);
+		if (ret < 0) {
+			JLOG_INFO("TURN-over-TCP connection failed");
+			break;
+		}
+
+		if (ret == 0) {
+			// Still connecting: check the timeout.
+			if (turn->stream_timestamp &&
+			    current_timestamp() > turn->stream_timestamp + TURN_TCP_CONNECT_TIMEOUT) {
+				JLOG_WARN("TURN-over-TCP connection timed out");
+				break;
+			}
+
+			conn_interrupt(agent);
+			sleep_ms(TURN_TCP_POLL_INTERVAL);
+			continue;
+		}
+
+		// Flush anything that was buffered while the connection was
+		// being established.
+		if (turn_tcp_stream_has_pending(stream)) {
+			if (turn_tcp_stream_flush(stream) < 0)
+				break;
+		}
+
+		size_t size = 0;
+		ret = turn_tcp_stream_recv(stream, buffer, sizeof(buffer), &size);
+		if (ret < 0) {
+			JLOG_INFO("TURN-over-TCP stream closed");
+			break;
+		}
+
+		if (ret == 0) {
+			conn_interrupt(agent);
+			sleep_ms(TURN_TCP_POLL_INTERVAL);
+			continue;
+		}
+
+		agent_turn_tcp_input(agent, entry, buffer, size);
+	}
+
+	atomic_store(&turn->reader_stopped, true);
+	JLOG_DEBUG("Leaving TURN-over-TCP reader thread");
+	return (thread_return_t)0;
+}
+
+static void agent_turn_tcp_reader_stop(juice_agent_t *agent, agent_stun_entry_t *entry) {
+	if (!entry->turn)
+		return;
+
+	agent_turn_state_t *turn = entry->turn;
+	if (!turn->reader_thread_started)
+		return;
+
+	atomic_store(&turn->reader_stopped, true);
+	conn_interrupt(agent);
+	thread_join(turn->reader_thread, NULL);
+	turn->reader_thread_started = false;
+}
+
+// Handle a message received on the TURN-over-TCP control connection.
+//
+// The message is either a STUN message (Allocate / Refresh /
+// CreatePermission / ChannelBind response, or a Data indication) or a
+// ChannelData message carrying the relayed application data.
+static void agent_turn_tcp_input(juice_agent_t *agent, agent_stun_entry_t *entry, char *buf,
+                                  size_t len) {
+	conn_lock(agent);
+
+	if (is_stun_datagram(buf, len)) {
+		stun_message_t msg;
+		if (stun_read(buf, len, &msg) < 0) {
+			JLOG_ERROR("STUN message reading failed");
+			conn_unlock(agent);
+			return;
+		}
+
+		// The source of a message received over the control connection
+		// is the TURN server itself.
+		agent_dispatch_stun(agent, buf, len, &msg, &entry->record, NULL);
+		conn_unlock(agent);
+		return;
+	}
+
+	if (is_channel_data(buf, len)) {
+		agent_process_channel_data(agent, entry, buf, len);
+		conn_unlock(agent);
+		return;
+	}
+
+	JLOG_WARN("Received unexpected message on the TURN-over-TCP connection");
+	conn_unlock(agent);
+}
+
 int agent_resolve_servers(juice_agent_t *agent) {
 	conn_lock(agent);
 
@@ -398,9 +564,49 @@ int agent_resolve_servers(juice_agent_t *agent) {
 					snprintf(entry->turn->credentials.username, STUN_MAX_USERNAME_LEN, "%s",
 					         turn_server->username);
 					entry->turn->password = turn_server->password;
+					entry->turn->transport = turn_server->transport;
 					juice_random(entry->transaction_id, STUN_TRANSACTION_ID_SIZE);
 					entry->transaction_id_expired = false;
 					++agent->entries_count;
+
+					// For TURN over TCP, the control connection to the
+					// server is opened here and pumped by a dedicated
+					// reader thread.
+					if (turn_server->transport != JUICE_TURN_TRANSPORT_UDP) {
+						if (turn_server->transport == JUICE_TURN_TRANSPORT_TLS) {
+							JLOG_WARN("TURN over TLS is not supported, falling back to TCP");
+							entry->turn->transport = JUICE_TURN_TRANSPORT_TCP;
+						}
+
+						entry->turn->stream = turn_tcp_stream_create(record);
+						if (!entry->turn->stream) {
+							JLOG_WARN("Failed to open the TURN-over-TCP connection to %s:%s",
+							          hostname, service);
+							entry->turn->stream = NULL;
+							// The entry stays pending; the retransmission
+							// will fail and the allocation is reported
+							// as failed.
+						} else {
+							entry->turn->stream_timestamp = current_timestamp();
+
+							agent_turn_entry_arg_t *thread_arg =
+							    calloc(1, sizeof(agent_turn_entry_arg_t));
+							if (thread_arg) {
+								thread_arg->agent = agent;
+								thread_arg->entry = entry;
+
+								atomic_store(&entry->turn->reader_stopped, false);
+								int ret = thread_init(&entry->turn->reader_thread,
+								                      agent_turn_tcp_reader_entry, thread_arg);
+								if (ret) {
+									JLOG_FATAL("TURN-over-TCP reader thread creation failed");
+									free(thread_arg);
+								} else {
+									entry->turn->reader_thread_started = true;
+								}
+							}
+						}
+					}
 
 					agent_arm_transmission(agent, entry, STUN_PACING_TIME * i);
 
@@ -659,6 +865,29 @@ int agent_direct_send(juice_agent_t *agent, const addr_record_t *dst, const char
 	return conn_send(agent, dst, data, size, ds);
 }
 
+// Send a TURN control message (Allocate, Refresh, CreatePermission,
+// ChannelBind, Send indication) to the TURN server.
+//
+// Over TURN/UDP the message is sent as a datagram to the server address.
+// Over TURN/TCP the message is written to the control connection instead.
+static int agent_turn_control_send(juice_agent_t *agent, const agent_stun_entry_t *entry,
+                                    const char *data, size_t size, int ds) {
+	if (!entry->turn) {
+		JLOG_ERROR("Missing TURN state on relay entry");
+		return -1;
+	}
+
+	if (agent_turn_is_tcp(entry)) {
+		if (!entry->turn->stream) {
+			JLOG_ERROR("Missing TURN-over-TCP stream");
+			return -1;
+		}
+		return turn_tcp_stream_send(entry->turn->stream, data, size);
+	}
+
+	return agent_direct_send(agent, &entry->record, data, size, ds);
+}
+
 int agent_relay_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr_record_t *dst,
                      const char *data, size_t size, int ds) {
 	if (!entry->turn) {
@@ -691,7 +920,7 @@ int agent_relay_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr
 		return -1;
 	}
 
-	return agent_direct_send(agent, &entry->record, buffer, size, ds);
+	return agent_turn_control_send(agent, entry, buffer, size, ds);
 }
 
 int agent_channel_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr_record_t *record,
@@ -708,6 +937,16 @@ int agent_channel_send(juice_agent_t *agent, agent_stun_entry_t *entry, const ad
 			return -1;
 
 	JLOG_VERBOSE("Sending datagram via TURN ChannelData, channel=0x%hX, size=%d", channel, size);
+
+	// Over TCP, the ChannelData payload must be padded to a multiple of
+	// four bytes (RFC 8656 section 12.5).
+	if (entry->turn->transport != JUICE_TURN_TRANSPORT_UDP) {
+		if (!entry->turn->stream) {
+			JLOG_ERROR("Missing TURN-over-TCP stream");
+			return -1;
+		}
+		return turn_tcp_stream_send_channel_data(entry->turn->stream, data, size, channel);
+	}
 
 	// Send the data wrapped as ChannelData
 	char buffer[BUFFER_SIZE];
@@ -1907,7 +2146,7 @@ int agent_send_turn_allocate_request(juice_agent_t *agent, const agent_stun_entr
 		JLOG_ERROR("STUN message write failed");
 		return -1;
 	}
-	if (agent_direct_send(agent, &entry->record, buffer, size, 0) < 0) {
+	if (agent_turn_control_send(agent, entry, buffer, size, 0) < 0) {
 		JLOG_WARN("STUN message send failed");
 		return -1;
 	}
@@ -2004,7 +2243,7 @@ int agent_send_turn_create_permission_request(juice_agent_t *agent, agent_stun_e
 		JLOG_ERROR("STUN message write failed");
 		return -1;
 	}
-	if (agent_direct_send(agent, &entry->record, buffer, size, ds) < 0) {
+	if (agent_turn_control_send(agent, entry, buffer, size, ds) < 0) {
 		JLOG_WARN("STUN message send failed");
 		return -1;
 	}
@@ -2112,7 +2351,7 @@ int agent_send_turn_channel_bind_request(juice_agent_t *agent, agent_stun_entry_
 		JLOG_ERROR("STUN message write failed");
 		return -1;
 	}
-	if (agent_direct_send(agent, &entry->record, buffer, size, ds) < 0) {
+	if (agent_turn_control_send(agent, entry, buffer, size, ds) < 0) {
 		JLOG_WARN("STUN message send failed");
 		return -1;
 	}

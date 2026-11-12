@@ -552,6 +552,11 @@ TURN servers are configured at runtime via
 config struct, because TURN servers are typically per-session
 (rotated by a relay-rotation / TURN service).
 
+An overload takes an explicit `plugins::TurnTransport`
+(`Udp` / `Tcp` / `Tls`) so the control connection can be forced over
+TCP or TLS when UDP is blocked by the network. See
+[engine_api.md](engine_api.md) §6.4.
+
 ---
 
 ## 5. Audio frame parameters

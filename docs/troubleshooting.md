@@ -195,6 +195,22 @@ Common causes (in order of likelihood):
    engine.add_turn_server("turn.example.com", 3478, "user", "pass");
    ```
 
+6. **The network blocks UDP** (enterprise firewall, some mobile
+   carriers) — plain TURN cannot get through either, because it is
+   still UDP. Force the TURN control connection over TCP:
+   ```cpp
+   engine.add_turn_server("turn.example.com", 3478, "user", "pass",
+                          nimrtc::plugins::TurnTransport::Tcp);
+   ```
+   This is the RFC 8656 §12 model: the *control connection* to the
+   TURN server is a TCP stream, while the relayed transport address
+   the server allocates stays a UDP transport towards the peer.  If
+   the deployment also needs the control connection itself encrypted,
+   pass `TurnTransport::Tls` — note that the vendored libjuice build
+   has no TLS path for TURN yet, so it degrades to plain TCP.  Ask
+   `turn_transport_supported()` on the plugin seam for the
+   authoritative answer rather than assuming.
+
 ### 3.2 `dtls_state` stuck at `HelloSent` / `HelloReceived`
 
 DTLS handshake didn't complete. Most common causes:

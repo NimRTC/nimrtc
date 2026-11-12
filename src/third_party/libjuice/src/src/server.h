@@ -18,6 +18,7 @@
 #include "thread.h"
 #include "timestamp.h"
 #include "turn.h"
+#include "turn_tcp.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,6 +47,13 @@ typedef struct server_turn_alloc {
 	timestamp_t timestamp;
 	socket_t sock;
 	turn_map_t map;
+
+	// Stream transport (TURN over TCP, RFC 8656 section 12).
+	//
+	// When this is set, the allocation was created over a TCP control
+	// connection and the responses are sent over that stream instead of
+	// over the server's UDP socket.
+	turn_tcp_stream_t *stream;
 } server_turn_alloc_t;
 
 typedef struct juice_credentials_list {
@@ -55,12 +63,32 @@ typedef struct juice_credentials_list {
 	timestamp_t timestamp;
 } juice_credentials_list_t;
 
+// A TCP control connection accepted by the server.
+typedef struct server_turn_session {
+	struct server_turn_session *next;
+	turn_tcp_stream_t *stream;
+	addr_record_t peer;
+} server_turn_session_t;
+
+// The connection a TURN message was received on.
+//
+// For UDP this is the peer address only.  For TURN over TCP it also
+// carries the control connection the message arrived on, so that the
+// response goes back over the very same stream.
+typedef struct server_conn {
+	addr_record_t src;
+	turn_tcp_stream_t *stream; // NULL for UDP
+} server_conn_t;
+
 typedef struct juice_server {
 	juice_server_config_t config;          // Note config.credentials will be empty
 	juice_credentials_list_t *credentials; // Credentials are stored in this list
 	uint8_t nonce_key[SERVER_NONCE_KEY_SIZE];
 	timestamp_t nonce_key_timestamp;
 	socket_t sock;
+	socket_t tcp_sock;
+	server_turn_session_t *sessions;
+	server_conn_t *current_conn; // set while dispatching a message
 	thread_t thread;
 	mutex_t mutex;
 	bool thread_stopped;
@@ -88,6 +116,7 @@ int server_stun_send(juice_server_t *server, const addr_record_t *dst, const stu
 int server_recv(juice_server_t *server);
 int server_forward(juice_server_t *server, server_turn_alloc_t *alloc);
 int server_input(juice_server_t *agent, char *buf, size_t len, const addr_record_t *src);
+int server_input_conn(juice_server_t *server, char *buf, size_t len, const server_conn_t *conn);
 int server_interrupt(juice_server_t *server);
 int server_bookkeeping(juice_server_t *agent, timestamp_t *next_timestamp);
 
@@ -117,6 +146,13 @@ int server_process_turn_send(juice_server_t *server, const stun_message_t *msg,
                              const addr_record_t *src);
 int server_process_channel_data(juice_server_t *server, char *buf, size_t len,
                                 const addr_record_t *src);
+
+// TURN over TCP (RFC 8656 section 12)
+int server_tcp_listen(juice_server_t *server);
+void server_tcp_close(juice_server_t *server);
+int server_tcp_accept(juice_server_t *server);
+int server_tcp_session_recv(juice_server_t *server, server_turn_session_t *session);
+void server_tcp_session_close(juice_server_t *server, server_turn_session_t *session);
 
 #endif // ifndef NO_SERVER
 

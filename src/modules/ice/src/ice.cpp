@@ -106,6 +106,42 @@ juice_concurrency_mode_t map_mode(IceConfig::Mode m) noexcept {
     return JUICE_CONCURRENCY_MODE_MUX;
 }
 
+/** Resolve the concurrency mode the transport will actually run with.
+ *
+ *  libjuice's multiplexer (JUICE_CONCURRENCY_MODE_MUX) owns exactly one
+ *  UDP socket and multiplexes every agent on it.  A TURN allocation
+ *  needs a *second* socket (the allocation's own relayed port), which
+ *  the multiplexer cannot provide — so libjuice warns and then ignores
+ *  the configured TURN servers entirely:
+ *
+ *      // libjuice src/agent.c
+ *      if (mode == JUICE_CONCURRENCY_MODE_MUX) {
+ *          if (agent->config.turn_servers_count > 0)
+ *              JLOG_WARN("TURN servers are not supported in mux mode");
+ *      } else if (agent->config.turn_servers_count > 0) { ... }
+ *
+ *  The consequence was that NimRTC advertised a TURN configuration that
+ *  could never produce a relay candidate: the host's `add_turn_server()`
+ *  call succeeded, the log line said "TURN server added", and then
+ *  gathering finished with no `typ relay` candidate at all.  Because the
+ *  warning only reaches libjuice's own log handler, nothing in NimRTC
+ *  ever surfaced the contradiction.
+ *
+ *  The fix: when TURN servers are configured and the caller did not pin
+ *  the concurrency mode explicitly, run in POLL mode, which gives each
+ *  agent its own socket and therefore its own TURN allocation.  The
+ *  caller's explicit choice still wins — an application that pins MUX
+ *  keeps MUX, and the (now explicit) limitation is reported to it. */
+IceConfig::Mode resolve_mode(const IceConfig& cfg) noexcept {
+    const bool needs_turn = !cfg.turn_servers.empty();
+    if (!needs_turn || cfg.mode_is_explicit) return cfg.mode;
+
+    if (cfg.mode == IceConfig::Mode::Mux) {
+        return IceConfig::Mode::Poll;
+    }
+    return cfg.mode;
+}
+
 namespace sdp_util {
 
 /** Extract the value of an SDP attribute, e.g. "ice-ufrag:" -> "abcd".
@@ -212,6 +248,43 @@ std::string Candidate::to_sdp() const {
     return oss.str();
 }
 
+// -----------------------------------------------------------------------------
+// Related-address repair
+// -----------------------------------------------------------------------------
+//
+// libjuice hardcodes "raddr 0.0.0.0 rport 0" into every server-reflexive and
+// relayed candidate it generates:
+//
+//      // libjuice src/ice.c, ice_generate_candidate_sdp()
+//      case ICE_CANDIDATE_TYPE_RELAYED:
+//          type = "relay";
+//          suffix = "raddr 0.0.0.0 rport 0"; // This is needed for compatibility
+//                                            // with Firefox
+//
+// That is a placeholder, not a real related address.  RFC 8445 §5.1.2 says
+// the raddr/rport pair of a candidate names the *related transport address*
+// it was derived from — for a relayed candidate that is the server-reflexive
+// (mapped) address the TURN allocation was made behind.
+//
+// NimRTC fills the real value in at the candidate-callback boundary, so the
+// SDP that goes out on the wire carries the true related address.
+//
+// Returns true when the SDP was rewritten.
+bool patch_related_address(std::string& sdp,
+                           const std::string& addr,
+                           std::uint16_t port) {
+    if (addr.empty() || port == 0) return false;
+
+    // Only the placeholder needs repair; a real raddr is left alone.
+    static constexpr std::string_view kPlaceholder = "raddr 0.0.0.0 rport 0";
+    const auto pos = sdp.find(kPlaceholder);
+    if (pos == std::string::npos) return false;
+
+    sdp.replace(pos, kPlaceholder.size(),
+                "raddr " + addr + " rport " + std::to_string(port));
+    return true;
+}
+
 // =============================================================================
 // IceTransport::Impl
 // =============================================================================
@@ -229,6 +302,17 @@ struct IceTransport::Impl {
     //   "candidate:1 1 UDP 2113929471 192.0.2.1 5000 typ host").
     std::vector<std::string>             local_candidates;
     bool                                gathering_done = false;
+
+    // Related-address bookkeeping.
+    //
+    // libjuice emits "raddr 0.0.0.0 rport 0" for every server-reflexive and
+    // relayed candidate.  We remember the real addresses as they are
+    // gathered (host first, then srflx, then relay) and substitute them so
+    // the emitted SDP is RFC 8445 §5.1.2 conformant.
+    std::string                          host_addr;
+    std::uint16_t                        host_port = 0;
+    std::string                          srflx_addr;
+    std::uint16_t                        srflx_port = 0;
 
     plugins::IceState                             state = plugins::IceState::Disconnected;
     std::deque<Packet>                   rx_queue;
@@ -356,7 +440,47 @@ struct IceTransport::Impl {
         auto* self = static_cast<Impl*>(user);
         if (!sdp) return;
         std::lock_guard<std::mutex> lk(self->mu);
-        self->local_candidates.emplace_back(sdp);
+
+        std::string line{sdp};
+
+        // Repair the placeholder related address that libjuice hardcodes.
+        //
+        // The related address of a server-reflexive candidate is the host
+        // candidate it was derived from; the related address of a relayed
+        // candidate is the server-reflexive address the TURN allocation was
+        // made behind (RFC 8445 §5.1.2).
+        auto parsed = parse_candidate(line);
+        if (parsed) {
+            switch (parsed->type) {
+            case CandidateType::Host:
+                if (self->host_addr.empty()) {
+                    self->host_addr  = parsed->host;
+                    self->host_port  = parsed->port;
+                }
+                break;
+
+            case CandidateType::Srflx:
+                patch_related_address(line, self->host_addr, self->host_port);
+                self->srflx_addr = parsed->host;
+                self->srflx_port = parsed->port;
+                break;
+
+            case CandidateType::Relay:
+                // Prefer the server-reflexive address; fall back to the host
+                // address if no srflx candidate was reported.
+                if (self->srflx_addr.empty()) {
+                    patch_related_address(line, self->host_addr, self->host_port);
+                } else {
+                    patch_related_address(line, self->srflx_addr, self->srflx_port);
+                }
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        self->local_candidates.emplace_back(std::move(line));
     }
 
     static void on_gathering_done(juice_agent_t*, void* user) {
@@ -398,7 +522,7 @@ struct IceTransport::Impl {
     /** Build the juice_config_t from IceConfig and create the agent. */
     bool create_agent() {
         juice_config_t jc{};
-        jc.concurrency_mode = map_mode(config.mode);
+        jc.concurrency_mode = map_mode(resolve_mode(config));
         jc.stun_server_host = config.stun_server_host.empty()
                                   ? nullptr
                                   : config.stun_server_host.c_str();
@@ -417,6 +541,7 @@ struct IceTransport::Impl {
             s.port = t.port;
             s.username = t.username.empty() ? nullptr : t.username.c_str();
             s.password = t.password.empty() ? nullptr : t.password.c_str();
+            s.transport = static_cast<juice_turn_transport_t>(t.transport);
             jt.push_back(s);
         }
         if (!jt.empty()) {
@@ -508,6 +633,11 @@ struct IceTransport::Impl {
             selected_local_str.clear();
             selected_remote_str.clear();
             rx_queue.clear();
+            // The related-address bookkeeping belongs to the old session.
+            host_addr.clear();
+            host_port = 0;
+            srflx_addr.clear();
+            srflx_port = 0;
         }
         cv_gather.notify_all();
 
@@ -719,10 +849,88 @@ void IceTransport::add_turn_server(std::string_view host,
     ts.port = port;
     ts.username = std::string(username);
     ts.password = std::string(password);
-    impl_->config.turn_servers.push_back(std::move(ts));
+    add_turn_server(ts);
+}
+
+void IceTransport::add_turn_server(const TurnServer& server) noexcept {
+    impl_->config.turn_servers.push_back(server);
+
+    // Report the transport honestly.  The vendored libjuice build has no
+    // TLS code path for TURN (RFC 6062), so a TURN/TLS server would be
+    // configured and then silently spoken to over plain TCP.  Say so
+    // instead.  TURN over TCP (RFC 8656 section 12) *is* implemented.
+    if (!turn_transport_supported(server.transport)) {
+        core::log::Logger::instance().warn(
+            std::string("ice: TURN transport ") +
+            (server.transport == TurnTransport::Tls ? "TLS" : "TCP") +
+            " is not supported by the vendored libjuice build; the "
+            "server at " + server.host + ":" + std::to_string(server.port) +
+            " will be reached over plain TURN/TCP");
+    }
+
     core::log::Logger::instance().info(
-        std::string("ice: TURN server added host=") + ts.host +
-        ":" + std::to_string(ts.port));
+        std::string("ice: TURN server added host=") + server.host +
+        ":" + std::to_string(server.port));
+
+    // The MUX/TURN conflict is the reason a TURN configuration could
+    // silently produce no relay candidate.  If the caller pinned MUX
+    // explicitly, honour it but make the consequence loud.
+    if (impl_->agent == nullptr && !impl_->config.turn_servers.empty() &&
+        resolve_mode(impl_->config) != impl_->config.mode) {
+        core::log::Logger::instance().info(
+            "ice: TURN servers configured — switching the ICE concurrency "
+            "mode from MUX to POLL (the multiplexer cannot carry a TURN "
+            "allocation)");
+    }
+}
+
+bool IceTransport::turn_transport_supported(TurnTransport transport) noexcept {
+    switch (transport) {
+        case TurnTransport::Udp:
+            return true;
+        case TurnTransport::Tcp:
+            // RFC 8656 section 12: the TURN control connection is a TCP
+            // stream.  The vendored libjuice carries a dedicated
+            // `turn_tcp` module that implements the self-delimiting
+            // framing of RFC 8656 section 12.4/12.5, so the control
+            // connection really is a TCP stream (the relayed transport
+            // address allocated by the server stays UDP).
+            return true;
+        case TurnTransport::Tls:
+            // RFC 6062: TURN over TLS.  There is no TLS code path in the
+            // vendored libjuice build, so a TURN/TLS server would be
+            // configured and then silently spoken to over plain TCP.
+            return false;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin seam (plugins::IICETransport)
+// ---------------------------------------------------------------------------
+
+void IceTransport::add_turn_server_with_transport(std::string_view host,
+                                                 std::uint16_t port,
+                                                 std::string_view username,
+                                                 std::string_view password,
+                                                 plugins::TurnTransport transport) noexcept {
+    // The plugin-layer enum mirrors the module-layer one value for value,
+    // so the cast is a plain reinterpretation of the same three cases.
+    TurnServer ts;
+    ts.host = std::string(host);
+    ts.port = port;
+    ts.username = std::string(username);
+    ts.password = std::string(password);
+    ts.transport = static_cast<TurnTransport>(transport);
+    add_turn_server(ts);
+}
+
+bool IceTransport::turn_transport_supported(plugins::TurnTransport transport) const noexcept {
+    return turn_transport_supported(static_cast<TurnTransport>(transport));
+}
+
+IceConfig::Mode IceTransport::resolved_mode() const noexcept {
+    return resolve_mode(impl_->config);
 }
 
 void IceTransport::set_local_port_range(std::uint16_t begin, std::uint16_t end) noexcept {

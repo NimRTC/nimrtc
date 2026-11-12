@@ -311,4 +311,45 @@ void convert_i420_to_nv12(std::uint32_t width,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test pattern
+// ---------------------------------------------------------------------------
+
+void paint_test_pattern_i420(std::uint8_t* y,
+                             std::uint8_t* u,
+                             std::uint8_t* v,
+                             std::uint32_t w,
+                             std::uint32_t h,
+                             std::uint32_t frame_seq,
+                             std::int32_t stride_y,
+                             std::int32_t stride_u,
+                             std::int32_t stride_v) noexcept {
+    if (!y || w == 0 || h == 0) return;
+
+    // ---- Y plane: three horizontal bands whose brightness ramps with the
+    //      frame sequence number.
+    const std::uint32_t band_h = std::max(h / 3u, 1u);
+    const std::uint8_t base_y  = static_cast<std::uint8_t>(
+        16u + ((frame_seq * 7u) % 200u));   // BT.601 limited range
+    for (std::uint32_t row = 0; row < h; ++row) {
+        const std::uint32_t band = std::min<std::uint32_t>(2u, row / band_h);
+        const std::uint8_t yv = static_cast<std::uint8_t>(base_y + band * 60u);
+        std::memset(y + static_cast<std::ptrdiff_t>(row) * stride_y, yv, w);
+    }
+
+    // ---- U / V planes: neutral grey chroma (BT.601 limited range).
+    const std::uint32_t cw = w / 2u;
+    const std::uint32_t ch = h / 2u;
+    if (u) {
+        for (std::uint32_t row = 0; row < ch; ++row) {
+            std::memset(u + static_cast<std::ptrdiff_t>(row) * stride_u, 128, cw);
+        }
+    }
+    if (v) {
+        for (std::uint32_t row = 0; row < ch; ++row) {
+            std::memset(v + static_cast<std::ptrdiff_t>(row) * stride_v, 128, cw);
+        }
+    }
+}
+
 } // namespace nimrtc::video_frame

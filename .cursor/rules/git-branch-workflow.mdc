@@ -1,0 +1,98 @@
+---
+description: Git branch workflow for agents pushing code (trunk model, stacked PRs, rebase discipline)
+alwaysApply: true
+---
+
+# Git Branch Workflow (agents must follow when pushing code)
+
+## Branch model
+
+- `main` is the trunk. Never commit to it directly — it is protected
+  (ruleset `protect-main-and-releases` covers `main` + `release/*`).
+- Long-lived: `main`, `release/*` (e.g. `release/1.1`).
+- Short-lived: `feature/*`, `fix/*`, `chore/*`. Delete after merge.
+- Stacked PRs (splitting a large body of work): `split/1-*`, `split/2-*`, …
+  chained as PR base branches (`split/2` → `split/1` → `main`, …).
+
+## Protection (already enforced on GitHub, do not weaken)
+
+- PR required (single-person repo: 0 approvals required, self-merge allowed —
+  do NOT try `gh pr review --approve` on your own PR, GitHub rejects it).
+  All conversations must be resolved.
+- `strict` status checks: the branch must be up to date with the base.
+  Required checks: `windows / msvc`, `windows / build`,
+  `linux-gcc / x86_64`, `macos-clang / arm64`, `docs / markdown links`.
+- `delete_branch_on_merge=true`: merged head branches auto-delete on
+  the remote. Also delete the local branch (`git branch -d …`).
+
+## Rebasing a stack (mandatory when `main` moves)
+
+Protection is `strict`, so every `main` commit (including dependabot
+squashes) makes the stack base stale. Rebase bottom-up, in the clean
+worktree only (see below):
+
+```powershell
+git checkout split/1-foundation; git rebase origin/main
+git checkout split/2-video-bwe;  git rebase split/1-foundation
+git checkout split/3-datachannel; git rebase split/2-video-bwe
+# or in one go on the stack tip (git >= 2.38):
+git rebase --update-refs origin/main
+git push --force-with-lease  # NEVER bare --force
+```
+
+- Prefer merging the stack bottom first (smallest PR, e.g. `split/1`);
+  each merge shortens the chain and shrinks future conflicts.
+- After a squash-merge of a lower layer, do NOT plain-rebase the upper
+  layer (`git rebase origin/main` replays the already-squashed commits and
+  conflicts on e.g. `c256c6a`). Transplant only the upper layer's own
+  commits with `--onto`:
+  `git rebase --onto origin/main <old-lower-tip> split/2-...`
+  (e.g. old tip `8ce7a59`), then
+  `git rebase --onto <new-split/2-tip> <old-split/2-tip> split/3-...`.
+  The merged `split/1` remote branch auto-deletes — don't fetch it, fetch
+  `origin/main` instead.
+- Conflict policy: when the same hunk was hand-written in the old stack
+  and later refactored upstream (e.g. a helper like `reserved_audio_demand()`),
+  take the newer upstream side; `CHANGELOG.md` entries from both sides are
+  usually both kept (delete only the `<<<<<<<`/`=======`/`>>>>>>>` markers).
+- After any rebase + force-push, old approvals are dismissed by policy —
+  re-request review. Verify with `git diff --check` (no markers left) and
+  `git rev-list --left-right --count origin/main...<branch>` (behind = 0).
+
+## Retiring a branch (never just leave it)
+
+- Merged: delete local + remote (remote is usually auto-deleted).
+- Superseded / abandoned (e.g. a monolith replaced by a split stack):
+  tag the tip first, then delete, so it stays recoverable:
+  `git tag -a archive/<name> <branch> -m "<why>"; git push origin archive/<name>`
+  then `git branch -D <branch>; git push origin --delete <branch>`.
+- Dangling single-commit branches: check whether the content exists in
+  `main` or the stack before deleting — a unique fix (e.g. DCEP wire
+  format) must get its own PR, not silent deletion.
+
+## Dependabot
+
+- Trivial, CI-green dependabot PRs (e.g. 1-line version bumps): squash-merge
+  promptly instead of letting them rot. Each merge moves `main`, so rebase
+  the stack right after.
+- If a dependabot branch is far behind and CI is red/stale: close the PR
+  and let dependabot regenerate instead of hand-rebasing it.
+
+## Worktree discipline (`build/split/w*`)
+
+- `w1` is the clean full checkout — do ALL rebases, cherry-picks and
+  pushes there.
+- `w2+` contain `src/third_party/*` symlinks pointing back at the main
+  worktree (disk saving). Git reports them as `T`/deleted + untracked.
+  That is environment noise, not real change: NEVER commit or rebase in
+  `w2+`. Before reusing a branch name held by another worktree, detach it
+  there first (`git checkout --detach HEAD`), then work in `w1`, then
+  reattach (`git checkout <branch>`).
+
+## Commit hygiene
+
+- Conventional Commits, English message, DCO `Signed-off-by:` (see AGENTS.md).
+- No BOM in commit messages or files (UTF-8 without BOM; a `﻿` prefix
+  breaks parsing). Write `build/ruleset.json`-style temp files BOM-free.
+- Keep PRs small and reviewable; a `+13k` PR inside a stack defeats the
+  purpose of splitting — split further by module instead.

@@ -126,28 +126,53 @@ function(_nimrtc_locate_vaapi)
 endfunction()
 
 # --- NVDEC --------------------------------------------------------------------
-# NVDEC reuses the NVENC SDK header set (nvcuvid.h).  So we only flip the
-# flag when NVENC was located successfully OR when the user explicitly
-# wants decoder-only support.
+# NVDEC is a *decoder* and needs the CUVID / CUDA headers (nvcuvid.h and
+# friends).  Those ship in the same MIT-licensed header pack as the NVENC
+# headers, and NimRTC vendors them under
+# src/third_party/nv_codec_headers — so a NVDEC-only build needs no
+# NVIDIA SDK install at all.
+#
+# The vendored pack is preferred over any system SDK install: it pins the
+# struct layout to one known ABI (see the README next to the headers).
 function(_nimrtc_locate_nvdec)
     if(NOT NIMRTC_PLUGINS_NVDEC)
         return()
     endif()
 
+    set(_nvdec_vendor_include
+        "${CMAKE_SOURCE_DIR}/src/third_party/nv_codec_headers/include/ffnvcodec")
+
+    # The vendored pack is only usable when vendoring is enabled — the
+    # NIMRTC_VENDORED=OFF escape hatch means "do not use the in-tree
+    # copies", and the headers are an in-tree copy.
+    if(NIMRTC_VENDORED AND EXISTS "${_nvdec_vendor_include}/dynlink_nvcuvid.h")
+        set(NIMRTC_HW_HAVE_NVDEC TRUE
+            CACHE INTERNAL "NVDEC headers available (vendored nv-codec-headers)" FORCE)
+        set(NIMRTC_NVDEC_INCLUDE_DIR "${_nvdec_vendor_include}"
+            CACHE INTERNAL "NVDEC header include dir" FORCE)
+        message(STATUS "  NVIDIA NVDEC     : vendored nv-codec-headers")
+        return()
+    endif()
+
+    # Fall back to a system SDK install (an NVIDIA Video Codec SDK or a
+    # CUDA toolkit).  The CUVID headers are not in every SDK layout, so
+    # probe for them explicitly.
     if(NOT NVENC_FOUND)
         find_package(NVENC QUIET)
     endif()
 
-    if(NVENC_FOUND)
+    if(NVENC_FOUND AND EXISTS "${NVENC_INCLUDE_DIR}/nvcuvid.h")
         set(NIMRTC_HW_HAVE_NVDEC TRUE
             CACHE INTERNAL "NVDEC runtime available (nvcuvid.h)" FORCE)
-        message(STATUS "  NVIDIA NVDEC     : using same SDK as NVENC")
+        set(NIMRTC_NVDEC_INCLUDE_DIR "${NVENC_INCLUDE_DIR}"
+            CACHE INTERNAL "NVDEC header include dir" FORCE)
+        message(STATUS "  NVIDIA NVDEC     : using system SDK at ${NVENC_INCLUDE_DIR}")
     else()
-        message(STATUS "  NVIDIA NVDEC     : requires NVENC SDK headers; "
-                        "set NIMRTC_PLUGINS_NVENC=ON or provide NVENC_INCLUDE_DIR")
+        message(STATUS "  NVIDIA NVDEC     : headers not found (the vendored "
+                        "nv-codec-headers tree is missing and no system SDK "
+                        "with nvcuvid.h was located)")
     endif()
 endfunction()
-
 # -----------------------------------------------------------------------------
 # Top-level: run all locators.
 # -----------------------------------------------------------------------------
@@ -169,9 +194,9 @@ function(nimrtc_link_nvenc target)
         target_link_libraries(${target} PRIVATE NimRTC::nvenc)
         target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_NVENC_ON=1)
         target_include_directories(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/nvcodec/src")
         target_sources(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/nvenc_encoder.cpp")
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/nvcodec/src/nvenc_encoder.cpp")
     endif()
 endfunction()
 
@@ -225,12 +250,17 @@ endfunction()
 
 function(nimrtc_link_nvdec target)
     if(NIMRTC_HW_HAVE_NVDEC)
-        target_link_libraries(${target} PRIVATE NimRTC::nvenc)
         target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_NVDEC_ON=1)
         target_include_directories(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/nvcodec/src")
+        # The CUVID / CUDA headers.  They are self-contained (the vendored
+        # pack ships the dynamic-loader headers too), so no NVIDIA SDK
+        # library is linked — nvcuvid.dll / nvcuda.dll are loaded at
+        # runtime with LoadLibrary / dlopen.
+        target_include_directories(${target} PRIVATE
+            "${NIMRTC_NVDEC_INCLUDE_DIR}")
         target_sources(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/nvenc_encoder.cpp")
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/nvcodec/src/nvdec_decoder.cpp")
     endif()
 endfunction()
 

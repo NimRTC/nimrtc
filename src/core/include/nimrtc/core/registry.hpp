@@ -150,6 +150,12 @@ namespace opus    { void register_default_plugins() noexcept; }
 #ifdef NIMRTC_HAS_H264
 namespace h264    { void register_default_plugins() noexcept; }
 #endif
+#ifdef NIMRTC_HAS_H265
+namespace h265    { void register_default_plugins() noexcept; }
+#endif
+#ifdef NIMRTC_HAS_AV1
+namespace av1     { void register_default_plugins() noexcept; }
+#endif
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
 namespace video_source    { void register_default_plugins() noexcept; }
 #endif

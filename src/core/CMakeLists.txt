@@ -163,6 +163,17 @@ endif()
 if(NIMRTC_MODULE_H264)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_H264=1)
 endif()
+# v1.3 (video plan C4 / C8): the H.265 codec module.  Its registrar entry
+# materialises only when the module is built; the engine then resolves it
+# through the registry's video-codec slot.
+if(NIMRTC_MODULE_H265)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_H265=1)
+endif()
+# v1.3 (video plan C6 / C8): the AV1 codec module.  Same shape as the
+# H.265 entry above.
+if(NIMRTC_MODULE_AV1)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_AV1=1)
+endif()
 # v1.2.0 (audio pipeline): the audio receive-pipeline module's own
 # visibility macro is set by the module itself (src/modules/audio_rx/
 # CMakeLists.txt, PUBLIC).  It is mirrored here so the kDefaultRegistrars[]

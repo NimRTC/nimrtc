@@ -30,6 +30,7 @@
 
 #include <nimrtc/jb_strategy/adaptive_delay.hpp>
 
+#include <nimrtc/video_payload/av1.hpp>
 #include <nimrtc/video_payload/h264.hpp>
 
 #include <algorithm>
@@ -47,6 +48,10 @@ namespace {
 using video_payload::h264::FuAHeader;
 using video_payload::h264::NaluType;
 using video_payload::h264::parse_fu_a_header;
+
+// The AV1 payload helpers live in their own namespace; the alias keeps the
+// `av1::contains_sequence_header(...)` call sites readable.
+namespace av1 = video_payload::av1;
 
 // kRtpSeqMod / kRtpTsMod are reserved for future sequence/timestamp
 // wrap-around arithmetic; suppress -Werror=unused-const-variable on
@@ -206,6 +211,28 @@ inline bool is_keyframe_payload(video_frame::CodecKind codec,
             // bitstream with D=0 in the descriptor is intra/key. Without
             // descriptor parse, we return false (let the receiver decide).
             return false;
+        case video_frame::CodecKind::kH265: {
+            // RFC 7798 §1.1.4 — the NAL unit header is two bytes:
+            //   byte 0: F(1) | Type(6) | LayerId MSB(1)
+            //   byte 1: LayerId low 5 bits(5) | TID(3)
+            // A key frame is signalled by an IRAP NAL unit: types 16..21
+            // (BLA_W_LP..CRA_NUT), of which the IDR types 19 and 20
+            // (IDR_W_RADL / IDR_N_LP) are the common ones.
+            if (payload.size() < 2) return false;
+            const std::uint8_t type = static_cast<std::uint8_t>((payload[0] >> 1) & 0x3F);
+            // 16..21 = BLA/IDR/CRA IRAP pictures.
+            if (type >= 16 && type <= 21) return true;
+            // 32..34 = VPS/SPS/PPS parameter sets (the H.264 analogue).
+            return type >= 32 && type <= 34;
+        }
+        case video_frame::CodecKind::kAV1: {
+            // AV1: the random-access point is signalled by the frame header's
+            // `show_existing_frame` / `frame_type` bits, which live inside
+            // the OBU payload — not reachable without a bit-reader.  The
+            // cheap and reliable proxy is the presence of a *sequence
+            // header* OBU, which the encoder repeats on every key frame.
+            return av1::contains_sequence_header(payload);
+        }
         default:
             return false;
     }

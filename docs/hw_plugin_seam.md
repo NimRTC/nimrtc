@@ -1029,16 +1029,21 @@ std::string_view select_best_video_sender() {
 ## 11. In-Tree HW Backends (P3-Batch)
 
 As of P3-Batch, NimRTC ships **real SDK bindings** for six HW backends,
-not just placeholder stubs. Each backend lives in its own source file under
-`src/modules/h264/src/` and is gated by a `NIMRTC_PLUGINS_<NAME>_ON` compile
-flag plus a corresponding SDK detection step in `cmake/NimRTHwPlugins.cmake`.
+not just placeholder stubs. Each backend lives in its own source file and is
+gated by a `NIMRTC_PLUGINS_<NAME>_ON` compile flag plus a corresponding SDK
+detection step in `cmake/NimRTHwPlugins.cmake`.
+
+The NVIDIA integration does **not** live in the H.264 module: it is shared by
+the H.264, H.265 and AV1 codec modules and therefore lives in its own lower-
+level module, `src/modules/nvcodec/` (see §11.5). The per-codec modules link
+against `nimrtc::nvcodec` and call its codec-parameterised entry points.
 
 ### 11.1 Backend matrix
 
 | Backend    | File                          | Platforms       | SDK / library                | Priority |
 |------------|-------------------------------|-----------------|------------------------------|----------|
-| NVENC      | `nvenc_encoder.cpp`           | Win + Linux     | NVIDIA Video Codec SDK       | 450      |
-| NVDEC      | `nvenc_encoder.cpp` (decoder) | Win + Linux     | NVIDIA Video Codec SDK       | 430      |
+| NVENC      | `src/modules/nvcodec/src/nvenc_encoder.cpp` | Win + Linux | NVIDIA Video Codec SDK  | 450      |
+| NVDEC      | `src/modules/nvcodec/src/nvdec_decoder.cpp` | Win + Linux | NVIDIA Video Codec SDK (CUVID) | 430      |
 | AMF        | `amf_encoder.cpp`             | Windows only    | AMD AMF SDK                  | 380      |
 | VA-API     | `vaapi_encoder.cpp`           | Linux only      | libva + libva-drm            | 360      |
 | QSV        | `qsv_encoder.cpp`             | Win + Linux     | Intel libvpl / oneVPL        | 340      |
@@ -1052,8 +1057,8 @@ flag plus a corresponding SDK detection step in `cmake/NimRTHwPlugins.cmake`.
 # Default: all HW plugins OFF (clean tree build).
 cmake -S . -B build -DNIMRTC_BUILD_TESTS=ON
 
-# Enable NVIDIA NVENC + NVDEC:
-cmake -S . -B build -DNIMRTC_PLUGINS_NVENC=ON
+# Enable NVIDIA NVENC (encoder) + NVDEC (decoder):
+cmake -S . -B build -DNIMRTC_PLUGINS_NVENC=ON -DNIMRTC_PLUGINS_NVDEC=ON
 # (CMake auto-probes NVIDIA Video Codec SDK / CUDA include dirs)
 
 # Enable AMD AMF (Windows only):
@@ -1104,13 +1109,59 @@ is selected. When the SDK is absent, the stub backend (priority 0) wins.
 
 ### 11.4 Testing HW backends
 
-The unit test suite `tests/test_hw_backends.cpp` validates the dispatch
-surface (registration, priority ordering, helper functions in
-`hw_backend_base.hpp`) on **any host** — no GPU required. Integration
-tests that actually exercise each SDK live in the SDK's vendor package
-(sunshine's `tests/hw/` for NVENC, etc.) and are out of scope here.
+The unit test suite `src/modules/h264/tests/test_hw_backends.cpp` validates
+the dispatch surface (registration, priority ordering, helper functions in
+`hw_backend_base.hpp`) on **any host** — no GPU required.
 
-### 11.5 Adding a new backend
+Beyond that, `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp` is a
+**host-dependent** end-to-end proof: it drives the *shipped* backends
+through the `nvcodec` module's public seam (not a re-implementation of the
+SDK calls) and covers the NVENC → NVDEC round trip, the NV12 output path,
+multi-frame reference chains, resolution changes (including a
+non-16-aligned picture that the driver crops via its VPP), the
+sub-minimum-geometry padding path (§12.3), and a decoder-only leg that
+decodes a self-contained H.264 bitstream checked into
+`src/modules/nvcodec/tests/nvdec_test_vector.hpp`. Every case calls
+`GTEST_SKIP()` when the backend is not compiled in or not available on the
+host, so the test never fails on a machine without NVIDIA hardware — it
+just reports the skip reason.
+
+The round-trip test lives in the `nvcodec` module rather than in the
+`h264` module because the code it exercises is *not* H.264-specific: the
+same NVENC / NVDEC session code serves H.265 and AV1.  The `h264` module's
+own registration of these backends (the `nvenc_h264` / `nvdec_h264` table
+entries) is covered by `test_hw_backends`.
+
+### 11.5 The shared `nvcodec` module
+
+The NVIDIA driver integration is *not* H.264-specific: the same NVENC
+session code serves H.264, HEVC and AV1, and the same NVDEC parser /
+decoder code serves all three. Rather than triplicate the driver code
+across three codec modules — which would guarantee the copies drift apart —
+the driver integration lives in `src/modules/nvcodec/`, one lower-level
+module that the H.264 / H.265 / AV1 codec modules link against. This is
+the documented cross-module dependency pattern, the same shape as
+`modules/jb` using `modules/jb_strategy`.
+
+Public surface:
+
+| Header                                   | Contents |
+|------------------------------------------|----------|
+| `nimrtc/nvcodec/nv_codec_kind.hpp`       | the codec descriptor table (encode GUID, profile GUID, CUVID codec type) |
+| `nimrtc/nvcodec/nv_backends.hpp`         | `nvenc_codec_available()` / `make_nvenc_codec()` / `nvdec_codec_available()` / `make_nvdec_codec()` |
+| `nimrtc/nvcodec/hw_composite_codec.hpp`  | the encoder + decoder adapter |
+
+The generic entry points are *always* present — they return `false` /
+`nullptr` when the NVIDIA SDK is not compiled in — so the codec modules
+need no `#if` guards of their own.
+
+NVENC and NVDEC are each naturally **one-directional** (NVENC encodes,
+NVDEC decodes), but the engine holds a single `IVideoCodec` per session.
+`HwCompositeCodec` bridges the two: it pairs an encoder instance with a
+decoder instance behind the one `IVideoCodec` interface, so a single
+registered plugin covers hardware acceleration in both directions.
+
+### 11.6 Adding a new backend
 
 1. Create `Find<X>.cmake` in `cmake/` (search pattern, env vars, fallback).
 2. Add a `NIMRTC_PLUGINS_<X>` cache option to the top-level
@@ -1237,7 +1288,58 @@ For now, `nvenc_encoder.cpp` correctly returns `nullptr` from
 `make_nvenc_h264_codec()`, so the engine falls through to the next
 backend in priority order — no risk of a runtime crash.
 
-### 12.2 Ad-hoc probe binaries
+### 12.3 NVENC refuses a frame below the hardware minimum geometry
+
+Symptom: `nvEncInitializeEncoder` fails with `NV_ENC_ERR_INVALID_PARAM`
+(status 8) and the driver error string (retrieved with
+`nvEncGetLastErrorString`) is:
+
+```
+Frame Dimension less than the minimum supported value.
+```
+
+This is **not** a bad config: the geometry is legal for H.264 in general,
+it is just below the silicon's minimum.  A source frame smaller than the
+minimum (e.g. a 64x48 thumbnail, or a test that sends a tiny frame) takes
+the whole encoder session down, and — because `reinit_at()` tears the
+session down first — the encoder is left *broken* for every subsequent
+frame.
+
+Measured on the reference host (RTX 3060, Video Codec SDK 13.1) by
+probing `nvEncInitializeEncoder` over a width x height matrix:
+
+| Dimension | Rejected | Accepted |
+|-----------|----------|----------|
+| width     | `< 145`  | `>= 145` |
+| height    | `< 49`   | `>= 49`  |
+
+The limits are per-silicon, so the code does **not** hard-code them as the
+truth.  `nvenc_encoder.cpp` clamps the requested geometry up to a
+conservative minimum (`kMinEncodeWidth = 160`, `kMinEncodeHeight = 64`)
+and **pads** the picture to that size:
+
+- the luma padding is `16` (the BT.601 limited-range black point),
+- the chroma padding is `128` (neutral),
+- the source picture sits in the top-left corner.
+
+A driver with a stricter minimum then rejects the padded session and the
+frame is dropped with an error — which is honest.  A driver with a laxer
+minimum simply gets a picture with a small invisible border.
+
+The clamping happens in three places, all of which must agree:
+
+- `open()` — the initial session geometry,
+- `encode()` — a resolution change mid-stream (the source may shrink),
+- `update_config()` — an explicit resize request.
+
+The regression test is `HwRoundTrip.NvencPadsBelowMinimumGeometry` in
+`src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp`.
+
+> Note: this also means an engine that negotiates 640x480 but is fed a
+> 64x48 source frame does **not** fail — the frame is encoded at the
+> hardware minimum and padded.
+
+### 12.4 Ad-hoc probe binaries
 
 `build/nvenc_probe_v2.exe`, `build/nvenc_maxver.exe`,
 `build/nvenc_walk_versions.exe`, `build/nvenc_session_open.exe`,

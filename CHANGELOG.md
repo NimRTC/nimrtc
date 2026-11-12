@@ -17,6 +17,113 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **H.265 (HEVC) and AV1 video codec support, end to end (v1.2.0,
+  Remote Desktop plan B5b/B10b).**  The engine previously spoke H.264
+  only: the codec family was hard-coded in the SDP writer, the
+  negotiation, and the packet path, and the H.265 / AV1 modules had no
+  RTP payload format at all.  A session can now select either codec and
+  negotiate it against a peer.
+  - Two new modules, `src/modules/h265/` and `src/modules/av1/`, each
+    self-contained (own `CMakeLists.txt`, `include/`, `src/`, `tests/`)
+    per Layout Invariant 3.  Each registers a video-codec plugin under
+    the id `"h265"` / `"av1"` — the spelling
+    `EngineConfig::video_codec_name` uses — plus its own video backends
+    (a software stub encoder/decoder and the NVIDIA NVENC / NVDEC
+    entries).
+  - Two new RTP payload modules,
+    `src/modules/video_payload/{h265,av1}.{hpp,cpp}`:
+    - H.265 follows **RFC 7798**: the two-byte payload header
+      (`F(1) | Type(6) | LayerId(6) | TID(3)`), single-NAL-unit packets,
+      aggregation packets (type 48) and fragmentation units (type 49,
+      `S(1) | E(1) | FuType(6)`).
+    - AV1 follows **draft-ietf-payload-av1** / the aomediacodec
+      `av1-rtp-spec`: the one-byte aggregation header
+      (`Z(1) | Y(1) | W(2) | N(1)`), LEB128 element length fields, the
+      OBU header (`obu_type(4) | obu_extension_flag(1) |
+      obu_has_size_field(1)`), Annex-B framing and a reassembler that
+      drops a truncated OBU rather than emitting it.
+  - The SDP layer learned both codecs' format parameters
+    (`src/modules/video_sdp_attributes/`):
+    - H.265: `profile-id`, `level-id`, `tier-flag` and **`tx-mode`**.
+      `tx-mode` is the RFC 7798 §4.4 *string* token — one of `"SRST"` /
+      `"MRST"` / `"MRMT"` — and the parser rejects a numeric value,
+      because a peer that sends `tx-mode=0` has a different
+      understanding of the wire.  The three parameter sets are the
+      separate `sprop-vps` / `sprop-sps` / `sprop-pps` parameters; the
+      H.264-style combined `sprop-parameter-sets` is still accepted for
+      legacy peers.
+    - AV1: `profile`, `level-idx`, `tier`, and the optional
+      `bit-depth` / `monochrome` / `chroma-subsampling` parameters.
+  - The engine holds **one** video codec per session (the single-codec
+    rule), and the four places that name a codec — the plugin id, the
+    plugin-layer `VideoCodecKind`, the SDP `a=rtpmap:` encoding and the
+    `a=fmtp:` body — now come from **one** table,
+    `src/engine/src/video_codec_config.hpp`.  Keeping the mapping in one
+    place is what stops the four from drifting apart.
+  - The payload type is resolved per codec family: H.264 = 102
+    (RFC 6184's static type), H.265 = 116 and AV1 = 45 (the values
+    Chrome's Unified Plan and the AV1 payload specification use).  A
+    host that pinned a payload type still wins; a host that left H.264's
+    102 in place while selecting another family gets that family's own
+    default, because RFC 6184's 102 is H.264's and no other codec may
+    reuse it.
+  - The engine's offer, answer, packet path and inbound routing all use
+    the *resolved* payload type and the negotiated codec family, so an
+    H.265 session negotiates H.265 end to end — and an H.265 engine
+    facing an H.264 offer rejects the video section (port 0) instead
+    of silently switching codecs.
+  - Covered by 8 new cases in
+    `src/modules/video_payload/tests/test_h265.cpp` and
+    `src/modules/video_payload/tests/test_av1.cpp`, 11 new cases in
+    `src/modules/video_sdp_attributes/tests/test_video_sdp_attributes.cpp`
+    and 6 new cases in `tests/test_video_negotiation.cpp`.
+
+- **A real NVIDIA NVDEC hardware decoder (v1.1, Remote Desktop plan
+  B5a/B10a).**  The NVDEC seam used to be an *empty* entry: the id
+  existed, but `available()` returned `false` and `create()` returned
+  `nullptr`.  It is now a working CUVID decoder.
+  - The decoder lives in a new shared module, `src/modules/nvcodec/`,
+    because the NVIDIA driver integration is **not** H.264-specific:
+    the same NVENC session code serves H.264, HEVC and AV1, and the same
+    NVDEC parser / decoder code serves all three.  Triplicating the
+    driver code across three codec modules would guarantee the copies
+    drift apart, so the driver integration lives in one lower-level
+    module that the H.264 / H.265 / AV1 codec modules link against —
+    the same cross-module dependency shape as `modules/jb` using
+    `modules/jb_strategy`.
+  - The decoder runs the full CUVID pipeline: `cuvidCreateVideoParser`
+    → `cuvidParseVideoData` → sequence callback (`cuvidCreateDecoder`)
+    → `cuvidDecodePicture` → `cuvidMapVideoFrame` → `cuMemcpy2D` to host
+    memory.  Output is NV12.
+  - The driver is loaded **at runtime** (`nvcuvid.dll` / `libnvcuvid.so`),
+    not linked at build time, so a binary built with the plugin enabled
+    still starts on a host without the driver.
+  - Non-macroblock-aligned pictures are handled: an H.264 stream that is
+    not a multiple of 16 pixels is coded at the macroblock-aligned size
+    with `frame_cropping` metadata in the SPS, and the decoder passes the
+    SPS `display_area` plus the target geometry to the driver so its VPP
+    crops the visible picture in one hardware step.
+  - NVENC and NVDEC are each **one-directional**, but the engine holds a
+    single `IVideoCodec` per session.  `HwCompositeCodec` bridges the
+    two, so one registered plugin now covers hardware acceleration in
+    both directions.
+  - The vendored `nv-codec-headers` (n13.1.15.0) is pinned in
+    `src/third_party/vendor.json`.
+  - Covered by `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp` — a
+    host-dependent end-to-end proof (NVENC → NVDEC round trip, the NV12
+    output path, multi-frame reference chains, resolution changes, and a
+    decoder-only leg over a self-contained bitstream).  The test exercises
+    the generic `nvcodec::make_nvenc_codec()` / `make_nvdec_codec()`
+    entry points directly, so it covers every codec the shared module
+    serves (H.264, and H.265 / AV1 once those modules exist) without
+    depending on any one codec module's registry.  Every case calls
+    `GTEST_SKIP()` when the backend is unavailable, so it never fails on
+    a machine without NVIDIA hardware.
+  - The README / README.zh capability tables and the
+    `docs/hw_plugin_seam.md` backend matrix now state the truth: NVDEC
+    **is** implemented; the macOS VideoToolbox and Android MediaCodec
+    decoders are not.
+
 - **A data-channel message boundary, so `send()` is a message again
   (v1.2.0, DataChannel capability plan WP-B / WP-C).**  The default
   WebTransport backend rides a QUIC stream, which is a **byte** stream:
@@ -649,22 +756,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   capability table claimed "H.264 hardware backends (NVENC / NVDEC /
   AMF / QSV / DXVA / VA-API / OpenH264)" without distinguishing the
   encoders that exist from the decoders that do not.
-  - NVENC **encoding** is implemented; **NVDEC decoding is not** —
-    `make_nvdec_h264_codec()` returns `nullptr`.  The decoder entry is
-    kept so the seam id stays stable, but its `available()` probe now
-    returns `false` to match, so the selector can never hand a caller
-    a backend whose `create()` cannot produce a codec.
-  - The same applies to the macOS VideoToolbox and the Android
+  - NVENC **encoding** is implemented, and **NVDEC decoding now is too**
+    (see the *Added* entry above) — the decoder entry is no longer a
+    seam id only.
+  - The same still applies to the macOS VideoToolbox and the Android
     MediaCodec entries: they exist as seam ids, report
     `available() == false` and return `nullptr` from `create()`.
-  - The Windows **DXVA decoder is real** and is now named as the
-    supported hardware decode path; macOS and Android use the software
-    H.264 path.
+  - The Windows **DXVA decoder is real** and is named as a supported
+    hardware decode path; macOS and Android use the software H.264 path.
   - The "simplified Goog-CC" wording now says what it is everywhere it
     appears (README, README.zh): a delay + loss hybrid estimator, not
     a full trendline port, and AIMD remains the default.
   - The CMake options were re-worded to match: `NIMRTC_PLUGINS_NVENC`
-    is the encoder, `NIMRTC_PLUGINS_NVDEC` registers a seam id only, and
+    is the encoder, `NIMRTC_PLUGINS_NVDEC` is the decoder, and
     `NIMRTC_PLUGINS_VAAPI` is the encoder.
 - **`opus::EncoderConfig::bitrate_bps` now defaults to 0 (= codec
   default) instead of 64000.**  0 resolves to 32 kbps for a mono encoder
@@ -726,6 +830,82 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all. The demo no longer appends a stale constant SSRC of its own.
 
 ### Fixed
+
+- **The H.265 `sprop-parameter-sets` parser read freed memory.**  The
+  combined legacy form (`sprop-parameter-sets=vps,sps,pps`) was parsed by
+  binding a `std::string_view` to `v.substr(...)`, where `v` is a
+  `std::string` — so the view pointed at a temporary that died at the end
+  of the full expression.  The parser then validated base64 characters
+  out of freed memory and rejected a perfectly valid parameter as
+  "non-base64 char".  The sub-view is now taken from `v` directly.
+
+- **The AV1 fragmenter dropped the OBU header of every fragmented OBU.**
+  A fragmented OBU's first fragment carries the OBU header *in addition*
+  to its payload, but the packet buffer was sized for the payload alone
+  (`overhead + take`).  The header was written past the end of the
+  buffer, so the reassembled OBU was two bytes short of the original and
+  the OBU type was lost.  The buffer is now sized for the header as
+  well.
+
+- **Every hand-written `ctest` wrapper test was reported as "Not Run" in a
+  non-Debug build.**  CMake 4.0's multi-config generator wraps each
+  `add_test()` in a four-branch `CTEST_CONFIGURATION_TYPE` conditional
+  whose fall-through is `NOT_AVAILABLE`.  The post-configure hook
+  (`cmake/FixCTestTestfile.cmake`) resolved that by throwing away the
+  Release / MinSizeRel / RelWithDebInfo branches and keeping only the
+  **Debug** body — which works for the Debug build CI runs, but in a
+  Release build every wrapper test then pointed at a `Debug/` path that
+  does not exist.  ctest reported 76 tests as "Not Run" and the suite
+  failed even though every binary was present and green.
+  - The hook now keeps all four branches verbatim, so `ctest -C <config>`
+    resolves exactly as CMake intended, and replaces the `NOT_AVAILABLE`
+    fall-through with an existence probe that picks whichever
+    configuration actually has its binaries on disk.  A plain `ctest`
+    (no `-C`) therefore finds the tests that were really built.
+  - The hook also stopped mangling the `_BACKTRACE_TRIPLES` property:
+    those values contain semicolons, and the previous revision split the
+    file on `;` (the CMake list separator), which rewrote the backtrace
+    triples into garbage.
+  - Affected: every non-`gtest_discover_tests` wrapper — the DTLS, E2E,
+    plugin-loading and seam tests.
+
+- **The standalone NVENC driver probe could not initialize the encoder
+  any more.**  `tests/nvenc_probe.cpp` forced the SDK-11.1.5 struct layout
+  (`0x0100000B | (7u << 16) | ...`) to work around a hybrid-ABI driver,
+  but the build now compiles against the vendored Video Codec SDK 13.1
+  header pack (`src/third_party/nv_codec_headers/`) — the same ABI the
+  NimRTC encoder uses.  The driver rejected the mismatched struct version
+  with `NV_ENC_ERR_INVALID_VERSION` (status 15), so the probe failed on
+  a machine whose driver was perfectly fine.
+  - The probe now uses the header's own `NV_ENC_*_VER` constants and a
+    real `NV_ENC_CONFIG` (VBR, one temporal layer, H.264 Main), which is
+    what the driver actually expects.
+  - The probe stays a *driver-ABI* probe: it stops right after
+    `nvEncInitializeEncoder` succeeds.  The full NVENC -> NVDEC round
+    trip lives in `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp`.
+
+- **NVENC took the whole session down when the source frame was smaller
+  than the hardware minimum geometry.**  A frame below the silicon's
+  minimum size (e.g. 64x48) made `nvEncInitializeEncoder` fail with
+  `NV_ENC_ERR_INVALID_PARAM` and the driver error string *"Frame
+  Dimension less than the minimum supported value."* — and because the
+  reconfigure path tears the session down first, the encoder was left
+  permanently broken, so **every** subsequent frame failed too.  This
+  surfaced as `EngineRefFrame.send_video_auto_records_mapping` failing
+  on an RTX 3060: the session was negotiated at 640x480, then handed a
+  64x48 source frame, and the resolution change tore the session down.
+  - `nvenc_encoder.cpp` now clamps the requested geometry to a
+    conservative minimum (`kMinEncodeWidth = 160`,
+    `kMinEncodeHeight = 64`) and **pads** the picture: the source sits
+    in the top-left corner, the luma padding is `16` (BT.601 limited
+    black) and the chroma padding is `128` (neutral).
+  - The clamp is applied consistently in `open()`, `encode()` (a
+    mid-stream resolution change) and `update_config()`.
+  - The measured driver limit on the reference host is width `>= 145`
+    and height `>= 49`; the code deliberately does not hard-code those
+    numbers, since they are per-silicon.
+  - Covered by `HwRoundTrip.NvencPadsBelowMinimumGeometry` in
+    `src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp`.
 
 - **The WebTransport data channel mistook a Chrome stream header for
   payload.**  A peer-initiated bidirectional stream starts with the

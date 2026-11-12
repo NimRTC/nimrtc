@@ -143,6 +143,28 @@ public:
      *  here means the platform has no pointer to report, so the
      *  compositor's pinned fallback is the only option. */
     [[nodiscard]] virtual bool has_live_cursor() const noexcept = 0;
+
+    /**
+     * @brief Tell the source where the captured surface sits.
+     *
+     * A pointer is reported in the platform's *global* space — the
+     * virtual desktop on Windows, the root window on X11 — while a
+     * captured frame is one *surface* inside that space.  The source
+     * needs the surface's origin to translate the pointer into the
+     * frame's own coordinates.
+     *
+     * The default implementation ignores it: a source that already
+     * reports surface-relative coordinates (the portable ones) has
+     * nothing to translate.
+     *
+     * @param x The surface's left edge in global pixels.
+     * @param y The surface's top edge in global pixels.
+     */
+    virtual void set_surface_origin(std::int32_t x,
+                                     std::int32_t y) noexcept {
+        (void)x;
+        (void)y;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -352,9 +374,40 @@ public:
         return inner_ != nullptr && inner_->has_live_cursor();
     }
 
+    /** Forwarded to the inner source: the pinned copy holds the *same*
+     *  pointer bitmap, so it has to be translated the same way. */
+    void set_surface_origin(std::int32_t x, std::int32_t y) noexcept override {
+        if (inner_ != nullptr) inner_->set_surface_origin(x, y);
+    }
+
 private:
     ICursorSource* inner_ = nullptr;
     CursorState pinned_{};
 };
+
+// ---------------------------------------------------------------------------
+// The platform cursor source
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Create the cursor source for *this* platform.
+ *
+ * The pointer is a platform affair: Windows reads it through
+ * `GetCursorInfo` / `GetIconInfo`, X11 through the Xfixes extension's
+ * `XFixesGetCursorImage`, and macOS needs none at all (ScreenCaptureKit
+ * composites the pointer into the frame itself).
+ *
+ * This factory is the one place that knows which of those applies, so
+ * the *adapter* — which is portable — can ask for "the pointer on this
+ * platform" without naming a platform.
+ *
+ * @return The platform's cursor source, or nullptr when the platform has
+ *         no pointer to read (macOS, a build without the X11 libraries,
+ *         a host with no X display).  A null source means "no pointer",
+ *         which is a *value* the caller can act on — the adapter then
+ *         leaves the frame alone rather than drawing a phantom pointer.
+ */
+[[nodiscard]] NIMRTC_API_STABLE std::unique_ptr<ICursorSource>
+make_platform_cursor_source();
 
 } // namespace nimrtc::video_capture

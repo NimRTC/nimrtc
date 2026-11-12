@@ -101,6 +101,12 @@ public:
      */
     void set_display_origin(std::int32_t x, std::int32_t y) noexcept;
 
+    /** The seam's spelling of the same thing: the captured surface's
+     *  origin in the platform's global pointer space. */
+    void set_surface_origin(std::int32_t x, std::int32_t y) noexcept override {
+        set_display_origin(x, y);
+    }
+
 private:
     /** The cached bitmap, keyed by the cursor handle it came from. */
     struct Bitmap {

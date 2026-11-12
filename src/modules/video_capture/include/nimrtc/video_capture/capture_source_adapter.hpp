@@ -62,6 +62,7 @@
 #include <nimrtc/core/api_version.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -240,6 +241,9 @@ public:
                     ICursorCompositor* compositor) noexcept {
         cursor_source_ = source;
         cursor_compositor_ = compositor;
+        // A host-installed cursor survives `stop()` and is never
+        // replaced by the adapter's own automatic layer.
+        host_installed_cursor_ = (source != nullptr) || (compositor != nullptr);
     }
 
     /** The installed cursor source (null when none). */
@@ -257,21 +261,54 @@ public:
         return cursor_frames_;
     }
 
+    /**
+     * @brief Whether the adapter draws the pointer itself.
+     *
+     * True when the adapter installed its own cursor layer at
+     * `start()` — which it does exactly when the *device* does not
+     * composite the pointer into the frame itself.
+     *
+     * A host that wants to own the cursor (a remote-desktop agent that
+     * already tracks the pointer) can install its own source and
+     * compositor through `set_cursor()`; that overrides the automatic
+     * choice.
+     */
+    [[nodiscard]] bool cursor_layer_installed() const noexcept {
+        return cursor_layer_installed_;
+    }
+
 private:
     /** Convert the popped frame into the output format.  @return false when
      *  the frame cannot be represented in the output format (in which case
      *  it is counted as a drop). */
     bool convert(const plugins::CaptureFrame& in) noexcept;
 
-    /** Draw the pointer into the output frame, if a compositor is
-     *  installed and the output layout allows it.
+    /**
+     * Install the automatic cursor layer (plan A6).
      *
-     *  @return true iff the frame was modified.  A frame that points
-     *          into the *device's* buffer is copied into the scratch
-     *          buffer first -- the device owns its pixels and may
-     *          recycle them the moment the callback returns, so the
-     *          adapter must not write into them. */
-    bool composite_cursor(plugins::VideoSourceFrame& out) noexcept;
+     * Done exactly when the device does **not** composite the pointer
+     * into the frame itself and the caller asked for a pointer.  A
+     * host-installed cursor wins over it.
+     */
+    void install_cursor_layer() noexcept;
+
+    /** Draw the pointer into the captured frame, if a compositor is
+     *  installed and the device's layout allows it.
+     *
+     *  The drawing happens on the *device's* pixels, before the
+     *  format conversion: alpha blending needs a packed 32-bit
+     *  layout, and the device delivers one (BGRA), while the output
+     *  is usually planar I420 — which has no alpha to blend into.
+     *
+     *  A frame that points into the *device's* buffer is copied into
+     *  the adapter's scratch buffer first -- the device owns its
+     *  pixels and may recycle them the moment the callback returns,
+     *  so the adapter must not write into them.  The copy is what the
+     *  conversion then reads, so the pointer becomes part of the
+     *  published picture.
+     *
+     *  @return true iff the frame was modified. */
+    bool composite_cursor(plugins::CaptureFrame& in) noexcept;
 
     plugins::IVideoCapture* capture_ = nullptr;
     plugins::VideoSourceConfig cfg_{};
@@ -288,6 +325,16 @@ private:
     /** Scratch buffer for the converted frame. */
     std::vector<std::uint8_t> scratch_;
 
+    /** Scratch buffer for the cursor's copy of the device's pixels.
+     *  Separate from `scratch_` because the two have different
+     *  lifetimes: the cursor's copy holds the *device's* layout (so
+     *  the conversion can read it), while `scratch_` holds the
+     *  *output* layout. */
+    std::vector<std::uint8_t> cursor_scratch_;
+
+    /** True while `cursor_scratch_` holds this frame's copy. */
+    bool cursor_scratch_ready_ = false;
+
     /** The frame handed to the callback.  Its plane pointers point into
      *  `scratch_` (or into the capture's own buffer when no conversion
      *  was needed). */
@@ -296,6 +343,21 @@ private:
     /** The cursor source and compositor (plan A6).  Not owned. */
     ICursorSource* cursor_source_ = nullptr;
     ICursorCompositor* cursor_compositor_ = nullptr;
+
+    /** The adapter's *own* cursor layer, installed at `start()` when
+     *  the device does not composite the pointer itself.  Owned (the
+     *  source and the compositor are heap objects), unlike the two
+     *  borrowed pointers above. */
+    std::unique_ptr<ICursorSource> owned_cursor_source_;
+    std::unique_ptr<ICursorCompositor> owned_cursor_compositor_;
+
+    /** True once the adapter has installed its own cursor layer. */
+    bool cursor_layer_installed_ = false;
+
+    /** True once the *host* installed a cursor source or compositor
+     *  through `set_cursor()`.  Such an installation wins over the
+     *  adapter's automatic one and survives `stop()`. */
+    bool host_installed_cursor_ = false;
 
     /** How many frames the cursor was drawn into. */
     std::uint64_t cursor_frames_ = 0;

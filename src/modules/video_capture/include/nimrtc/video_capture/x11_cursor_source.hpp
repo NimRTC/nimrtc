@@ -97,6 +97,12 @@ public:
      */
     void set_screen_origin(std::int32_t x, std::int32_t y) noexcept;
 
+    /** The seam's spelling of the same thing: the captured surface's
+     *  origin in the platform's global pointer space. */
+    void set_surface_origin(std::int32_t x, std::int32_t y) noexcept override {
+        set_screen_origin(x, y);
+    }
+
 private:
     /**
      * @brief The factory needs to install the pimpl.

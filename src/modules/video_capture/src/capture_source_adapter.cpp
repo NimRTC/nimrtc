@@ -292,6 +292,8 @@ plugins::Status CaptureSourceAdapter::start() noexcept {
 
     scratch_.clear();
     running_ = true;
+
+    install_cursor_layer();
     return plugins::kOk;
 }
 
@@ -301,6 +303,66 @@ void CaptureSourceAdapter::stop() noexcept {
     if (capture_ != nullptr) capture_->close();
     scratch_.clear();
     scratch_.shrink_to_fit();
+
+    // The automatic cursor layer belongs to the *open* session: a
+    // closed device has no surface, so a pointer position would be
+    // meaningless.  A host-installed source and compositor survive the
+    // close, because the host owns them.
+    owned_cursor_source_.reset();
+    owned_cursor_compositor_.reset();
+    cursor_layer_installed_ = false;
+    if (!host_installed_cursor_) {
+        cursor_source_ = nullptr;
+        cursor_compositor_ = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The automatic cursor layer (remote-desktop plan A6)
+// ---------------------------------------------------------------------------
+
+void CaptureSourceAdapter::install_cursor_layer() noexcept {
+    if (capture_ == nullptr) return;
+
+    const plugins::CaptureConfig cfg = capture_->config();
+
+    // A host that already installed its own cursor keeps it: the host
+    // knows something about the pointer that the adapter cannot know
+    // (a remote agent that tracks the *remote* pointer, a test that
+    // wants a deterministic picture).
+    if (!host_installed_cursor_) {
+        // The device may have composited the pointer into the frame
+        // itself (Windows Graphics Capture, macOS
+        // ScreenCaptureKit).  Drawing it again would double-draw it.
+        const plugins::CaptureCapabilities caps = capture_->capabilities();
+        if (!caps.cursor_composited && cfg.want_cursor) {
+            // The platform's own pointer reader.  A platform without
+            // one (macOS composites it itself, a build without the
+            // pointer libraries) yields nullptr, and there is then
+            // nothing to draw.
+            owned_cursor_source_ = make_platform_cursor_source();
+            if (owned_cursor_source_) {
+                // The drawing is the portable alpha blend, with the
+                // pinned fallback: when the platform cannot report a
+                // live pointer, the last known one stays on screen
+                // rather than vanishing.
+                owned_cursor_compositor_ =
+                    std::make_unique<AlphaCursorCompositor>(true);
+                cursor_source_ = owned_cursor_source_.get();
+                cursor_compositor_ = owned_cursor_compositor_.get();
+                cursor_layer_installed_ = true;
+            }
+        }
+    }
+
+    // The pointer is reported in the platform's *global* space, while
+    // the captured frame is one surface inside it.  Whichever source
+    // is installed has to know where that surface sits — the
+    // adapter's own and a host's alike.
+    if (cursor_source_ != nullptr) {
+        cursor_source_->set_surface_origin(cfg.surface_origin_x,
+                                           cfg.surface_origin_y);
+    }
 }
 
 void CaptureSourceAdapter::produce_one() noexcept {
@@ -316,57 +378,82 @@ void CaptureSourceAdapter::produce_one() noexcept {
     last_dirty_ = in.dirty;
     in_pixels_base_ = in.pixels;
 
+    // The cursor is drawn into the *device's* pixels, before the
+    // format conversion.
+    //
+    // The order matters: alpha blending needs a packed 32-bit layout,
+    // and the device delivers one (BGRA), while the *output* is
+    // usually planar I420 — which has no alpha channel to blend into.
+    // Compositing after the conversion would therefore never draw
+    // anything on the engine's own path.  Drawing first also means the
+    // pointer is converted along with the rest of the picture, so it
+    // lands in the encoder in the right colours.
+    cursor_scratch_ready_ = false;
+    const bool drew = composite_cursor(in);
+
     if (!convert(in)) {
         ++dropped_;
         return;
     }
 
     ++produced_;
-    if (composite_cursor(out_)) {
+    if (drew) {
         ++cursor_frames_;
     }
     if (cb_) cb_(out_);
 }
 
 bool CaptureSourceAdapter::composite_cursor(
-        plugins::VideoSourceFrame& out) noexcept {
+        plugins::CaptureFrame& in) noexcept {
     if (cursor_source_ == nullptr || cursor_compositor_ == nullptr) return false;
     if (!cursor_compositor_->should_composite()) return false;
 
     // Alpha blending needs the pixels' alpha channel, so only a packed
-    // 32-bit layout can carry the pointer.  A planar YUV frame has no
-    // alpha, and compositing into one would mean a full colour-space
-    // conversion — that is the plan's C2 (SIMD format conversion) work,
-    // not the cursor's.
-    if (out.format != plugins::VideoPixelFormat::kBGRA &&
-        out.format != plugins::VideoPixelFormat::kRGBA) {
+    // 32-bit layout can carry the pointer.  The *device* delivers one;
+    // the output format is irrelevant here, because the drawing happens
+    // before the conversion.
+    if (device_format_ != CapturePixelFormat::kBGRA &&
+        device_format_ != CapturePixelFormat::kRGBA) {
         return false;
     }
-    if (out.plane_y == nullptr) return false;
+    if (in.pixels == nullptr || in.size == 0) return false;
+
+    const std::uint32_t w = in.width;
+    const std::uint32_t h = in.height;
+    if (w == 0 || h == 0) return false;
+
+    const std::int32_t src_stride = in.stride > 0
+        ? in.stride
+        : static_cast<std::int32_t>(w * 4u);
+
+    // The pointer is asked for *before* the copy: a pointer that is
+    // hidden costs nothing, and a hidden pointer must not force a
+    // full-frame copy on every tick.
+    const CursorState state = cursor_source_->query();
+    if (!state.visible) return false;
 
     // A frame that points into the *device's* buffer must not be
     // written into: the device owns those pixels and may recycle them
     // the moment the callback returns.  In that case the frame is
-    // copied into the adapter's own scratch buffer first.
-    if (out.plane_y == in_pixels_base_) {
-        const std::size_t needed =
-            static_cast<std::size_t>(out.height) *
-            static_cast<std::size_t>(out.stride_y);
-        if (needed == 0 || needed > out.buffer_size) return false;
-        if (scratch_.size() < needed) scratch_.assign(needed, 0u);
-        std::memcpy(scratch_.data(), out.plane_y, needed);
-        out.plane_y = scratch_.data();
-        out.buffer_size = needed;
+    // copied into the adapter's own scratch buffer first — and the
+    // conversion then reads *that* copy, so the pointer becomes part
+    // of the published picture.
+    if (!cursor_scratch_ready_) {
+        // The copy is exactly the device's own buffer size, so the
+        // conversion sees the same geometry it would have seen
+        // without the cursor.
+        if (in.size == 0) return false;
+        if (cursor_scratch_.size() != in.size) cursor_scratch_.assign(in.size, 0u);
+        std::memcpy(cursor_scratch_.data(), in.pixels, in.size);
+        cursor_scratch_ready_ = true;
+        // The conversion must read the copy, not the device's buffer.
+        in.pixels = cursor_scratch_.data();
     }
-
-    const CursorState state = cursor_source_->query();
-    if (!state.visible) return false;
+    const std::uint8_t* pixels = in.pixels;
 
     // The device may have captured a *region* of a larger surface, so
-    // the pointer's source-space position has to be shifted by the
-    // region's origin.  The adapter does not know the origin (the
-    // device owns it), so the origin is zero unless the device
-    // negotiated one — which it reports through its config.
+    // the pointer's surface-relative position has to be shifted by the
+    // region's origin to land in the frame's own coordinates.
     std::int32_t origin_x = 0;
     std::int32_t origin_y = 0;
     if (capture_ != nullptr) {
@@ -376,11 +463,11 @@ bool CaptureSourceAdapter::composite_cursor(
     }
 
     return cursor_compositor_->composite(
-        const_cast<std::uint8_t*>(out.plane_y),
-        out.buffer_size,
-        out.stride_y,
-        out.width,
-        out.height,
+        const_cast<std::uint8_t*>(pixels),
+        in.size,
+        src_stride,
+        w,
+        h,
         state,
         origin_x,
         origin_y);

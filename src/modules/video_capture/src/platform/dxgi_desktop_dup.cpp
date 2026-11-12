@@ -100,6 +100,13 @@ public:
     UINT out_width_  = 0;
     UINT out_height_ = 0;
 
+    /** The output's place in the virtual desktop.  The pointer is
+     *  reported in virtual-desktop coordinates, so the cursor layer
+     *  needs this to translate it into the captured output's own space
+     *  (plan A6). */
+    LONG origin_x_ = 0;
+    LONG origin_y_ = 0;
+
     /** The bounded frame queue the capture thread fills. */
     CaptureQueue queue_{2};
 
@@ -144,7 +151,8 @@ namespace {
  *     refresh rate.
  */
 bool query_output_mode(IDXGIOutput* output,
-                       UINT& width, UINT& height, UINT& fps) {
+                       UINT& width, UINT& height, UINT& fps,
+                       LONG& origin_x, LONG& origin_y) {
     DXGI_OUTPUT_DESC desc{};
     if (FAILED(output->GetDesc(&desc))) return false;
 
@@ -152,6 +160,13 @@ bool query_output_mode(IDXGIOutput* output,
                                desc.DesktopCoordinates.left);
     height = static_cast<UINT>(desc.DesktopCoordinates.bottom -
                                desc.DesktopCoordinates.top);
+
+    // The output's place in the *virtual desktop*.  The pointer is
+    // reported in virtual-desktop coordinates, so a capture of the
+    // second monitor needs this to translate the pointer into the
+    // captured display's own space (plan A6).
+    origin_x = desc.DesktopCoordinates.left;
+    origin_y = desc.DesktopCoordinates.top;
 
     // The refresh rate: the *highest* rate the output advertises is the
     // one the desktop compositor runs at (the list is sorted by the
@@ -198,7 +213,9 @@ bool enumerate_outputs(std::vector<plugins::CaptureDevice>& devices) {
             UINT w = 0;
             UINT h = 0;
             UINT fps = 0;
-            if (!query_output_mode(output.Get(), w, h, fps)) continue;
+            LONG ox = 0;
+            LONG oy = 0;
+            if (!query_output_mode(output.Get(), w, h, fps, ox, oy)) continue;
 
             plugins::CaptureDevice d;
             d.id = std::string{"dxgi:"} +
@@ -315,11 +332,16 @@ plugins::Status DxgiDesktopDupCapture::open() noexcept {
     UINT out_w = 0;
     UINT out_h = 0;
     UINT out_fps = 0;
-    if (!query_output_mode(output.Get(), out_w, out_h, out_fps)) {
+    LONG out_origin_x = 0;
+    LONG out_origin_y = 0;
+    if (!query_output_mode(output.Get(), out_w, out_h, out_fps,
+                           out_origin_x, out_origin_y)) {
         return plugins::kErrHardwareError;
     }
     state->out_width_  = out_w;
     state->out_height_ = out_h;
+    state->origin_x_   = out_origin_x;
+    state->origin_y_   = out_origin_y;
 
     // ---- Create the duplication object ----------------------------------
     ComPtr<IDXGIOutput1> output1;
@@ -352,6 +374,13 @@ plugins::Status DxgiDesktopDupCapture::open() noexcept {
     cfg_.format.tag = "bgra";
     cfg_.format.zero_copy = false;
     cfg_.format.has_dirty_rects = true;
+
+    // The output's place in the virtual desktop.  The pointer is
+    // reported in virtual-desktop coordinates, so the cursor layer
+    // (plan A6) needs this to translate the pointer into the captured
+    // output's own space.
+    cfg_.surface_origin_x = static_cast<std::int32_t>(state->origin_x_);
+    cfg_.surface_origin_y = static_cast<std::int32_t>(state->origin_y_);
 
     description_ = devices[adapter_index].name;
 

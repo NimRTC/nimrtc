@@ -14,6 +14,9 @@
 
 #include <nimrtc/video_capture/cursor_compositor.hpp>
 
+#include <nimrtc/video_capture/win_cursor_source.hpp>
+#include <nimrtc/video_capture/x11_cursor_source.hpp>
+
 #include <algorithm>
 #include <cstring>
 
@@ -149,6 +152,33 @@ CursorState PinnedCursorSource::query() noexcept {
     pinned_.visible = true;
     pinned_.live = false;
     return pinned_;
+}
+
+// ---------------------------------------------------------------------------
+// The platform cursor source
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<ICursorSource> make_platform_cursor_source() {
+    // The pointer is read differently on each platform, but the *shape*
+    // of the answer is the same: a BGRA bitmap plus a position.  This
+    // factory is the single place that knows which platform it is on,
+    // so the adapter above it stays portable.
+    //
+    // The order matters only in that the platform-specific factory is
+    // asked first: on macOS neither Windows nor X11 is meaningful, and
+    // both return nullptr there anyway.
+    if (auto win = make_win_cursor_source()) {
+        return win;
+    }
+    if (auto x11 = make_x11_cursor_source()) {
+        return x11;
+    }
+
+    // macOS (ScreenCaptureKit composites the pointer itself), or a
+    // build without the pointer libraries.  There is no pointer to
+    // read, so there is no source — and the caller treats a null
+    // source as "leave the frame alone".
+    return nullptr;
 }
 
 } // namespace nimrtc::video_capture

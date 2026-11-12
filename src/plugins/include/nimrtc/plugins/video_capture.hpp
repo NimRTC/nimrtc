@@ -286,6 +286,23 @@ struct NIMRTC_API_STABLE CaptureConfig {
      *  Honoured only if the device can do it — check
      *  `CaptureCapabilities::cursor_composited`. */
     bool want_cursor = true;
+
+    /** The captured surface's origin in the platform's *global* pointer
+     *  coordinate space.
+     *
+     *  A pointer is reported in the platform's global space — the
+     *  virtual desktop on Windows, the root window on X11 — while a
+     *  captured frame is one *surface* within that space, and a surface
+     *  is not necessarily at the global origin (a second monitor sits
+     *  to the right of the first).  The device fills these two fields
+     *  in when it opens, so the cursor layer can translate the pointer
+     *  into the frame's own coordinates.
+     *
+     *  Both are zero for a capture that starts at the global origin,
+     *  and for a device whose surface *is* the global space.
+     */
+    std::int32_t surface_origin_x = 0;
+    std::int32_t surface_origin_y = 0;
 };
 
 // ---------------------------------------------------------------------------

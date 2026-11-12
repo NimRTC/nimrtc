@@ -209,6 +209,13 @@ public:
     std::uint32_t source_width_  = 0;
     std::uint32_t source_height_ = 0;
 
+    /** The captured surface's origin in the root window.  The pointer
+     *  is reported in root-window coordinates, so the cursor layer
+     *  (plan A6) needs this to translate it into the captured screen's
+     *  own space. */
+    std::int32_t origin_x_ = 0;
+    std::int32_t origin_y_ = 0;
+
     /** The bounded frame queue the capture thread fills. */
     CaptureQueue queue_{2};
 
@@ -321,6 +328,16 @@ plugins::Status X11Capture::open() noexcept {
     state->screen_ = screen_index;
     state->source_width_  = src_w;
     state->source_height_ = src_h;
+
+    // The captured surface's origin in the root window.  The grab starts
+    // at the root window's top-left corner, so the surface *is* the
+    // root window's origin.  The pointer is reported in root-window
+    // coordinates, so this is what the cursor layer (plan A6) needs to
+    // translate the pointer into the captured frame's own space.
+    state->origin_x_ = 0;
+    state->origin_y_ = 0;
+    cfg_.surface_origin_x = state->origin_x_;
+    cfg_.surface_origin_y = state->origin_y_;
 
     // ---- Configure the queue -------------------------------------------------
     state->queue_.set_drop_policy(cfg_.drop_policy);

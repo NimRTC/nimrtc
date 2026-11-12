@@ -3,6 +3,7 @@ add_executable(test_video_capture
     test_video_capture.cpp
     test_capture_source_adapter.cpp
     test_cursor_compositor.cpp
+    test_cursor_wiring.cpp
     test_dxgi_desktop_dup.cpp
     test_win_cursor_source.cpp
     test_wgc_capture.cpp

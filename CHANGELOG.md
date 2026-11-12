@@ -17,6 +17,46 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The cursor layer is wired up — the pointer now actually reaches the
+  captured frame (v1.3.0, Remote Desktop plan A6).**  The layer, both
+  platform sources and the compositing maths were already in place, but
+  **nothing installed them**: the layer was a piece of code a host had
+  to know to reach for, so on every platform whose capture API does not
+  draw the pointer (DXGI Desktop Duplication, X11) the outbound
+  picture had **no pointer at all**.  The layer is now the default.
+  - `CaptureSourceAdapter::start()` asks
+    `make_platform_cursor_source()` for *this* platform's pointer and
+    installs the layer exactly when the device does **not** composite
+    the pointer itself and the caller asked for a pointer.  A device
+    that composites it (Windows Graphics Capture, macOS
+    ScreenCaptureKit) gets **no** layer, so the pointer is never
+    double-drawn.
+  - A host that already tracks the pointer (a remote agent that knows
+    where the *remote* pointer is) keeps its own source through
+    `set_cursor()`, which wins over the automatic one and survives
+    `stop()`.
+  - **The pointer is drawn into the *device's* BGRA pixels, before the
+    format conversion.**  The engine's capture pump asks for **I420**
+    (the encoders want YUV 4:2:0), and a planar frame has no alpha
+    channel to blend into — so a layer that composited *after* the
+    conversion would never have drawn on the path that matters.
+    Compositing first also means the pointer is converted along with
+    the rest of the picture, so it reaches the encoder in the right
+    colours.
+  - **The device's own pixels are never written into.**  The device
+    owns them and may recycle them the moment the callback returns, so
+    the adapter copies the frame into its own scratch buffer first and
+    the conversion reads *that* copy.
+  - **The surface origin closes the multi-monitor gap.**  A pointer is
+    reported in the platform's *global* space — the virtual desktop on
+    Windows, the root window on X11 — while a captured frame is one
+    surface *inside* that space, and a second monitor is not at the
+    global origin.  The device now reports where its surface sits
+    (`CaptureConfig::surface_origin_x/y`; the DXGI backend reads
+    `DXGI_OUTPUT_DESC::DesktopCoordinates`) and the adapter hands it to
+    the source, which subtracts it exactly as the Windows and X11
+    sources already did for their own origins.
+
 - **The macOS ScreenCaptureKit capture backend (v1.3.0, Remote Desktop
   plan A4).**  The third of the three platform capture backends, and the
   one with the most interesting failure mode.
@@ -125,10 +165,12 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       position" fallback: when the platform cannot report a live
       pointer, the last known state keeps being drawn instead of the
       pointer vanishing.
-    - The adapter applies the layer before the frame is published
-      (`CaptureSourceAdapter::set_cursor`), and only for a *packed*
-      output: alpha blending needs the pixels' alpha channel, which a
-      planar YUV frame does not have.
+    - The adapter applies the layer before the frame is published.
+      The layer is installed **automatically** (see the entry above),
+      and it draws into the *device's* BGRA pixels — before the
+      conversion into the source's own format — so it also works on
+      the engine's I420 path, where a planar frame's lack of an alpha
+      channel would otherwise make the blend impossible.
   - **The Windows cursor source**,
     `src/modules/video_capture/include/nimrtc/video_capture/win_cursor_source.hpp`,
     is the platform half of that layer: `WinCursorSource` reads the

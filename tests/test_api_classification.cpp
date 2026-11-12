@@ -380,12 +380,17 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - video_capture/win_cursor_source.hpp (the Windows cursor
     //       source: GetCursorInfo + GetIconInfo pointer extraction)
     //
+    // Remote-desktop plan A3 bump: +1 public header (140 -> 141) for
+    // the Windows Graphics Capture backend:
+    //     - video_capture/wgc_capture.hpp (the Windows Graphics
+    //       Capture device and its factory)
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 140;
+    constexpr std::size_t kBaselineHeaderCount = 141;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

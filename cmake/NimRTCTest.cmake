@@ -51,6 +51,27 @@ endif()
 # to the given test target that copies the two cert files from the wolfssl source
 # tree into the test's output directory at build time.
 # Call it from any test function that links nimrtc::dtls.
+#
+# Two destinations are seeded, because the CWD a test actually runs with is not
+# the same as the directory the executable lives in:
+#
+#   * `$<TARGET_FILE_DIR:target>/certs/` — next to the executable.  This is
+#     what a developer sees when running the .exe by hand, and what the
+#     relative lookup "certs/server-ecc.pem" finds when the CWD happens to
+#     be the executable's directory.
+#
+#   * `${CMAKE_CURRENT_BINARY_DIR}/certs/` — the *test-file* directory,
+#     i.e. the directory that owns the test's `CTestTestfile.cmake`.  CTest
+#     sets a test's working directory to that directory, so this is the copy
+#     the relative lookup actually finds when the suite runs under `ctest`.
+#     On a multi-config generator the executable sits one level deeper
+#     (`tests/<config>/`), which is exactly why seeding only the executable
+#     directory left every DTLS-dependent engine test failing with
+#     "wolfSSL_CTX setup failed".
+#
+# `CMAKE_CURRENT_BINARY_DIR` is evaluated in the *caller's* scope (CMake
+# functions inherit the caller's variable scope), so it resolves to the
+# binary dir of whichever test directory invoked this helper.
 # -----------------------------------------------------------------------------
 set(_nimrtc_wolfssl_cert_dir
     "${CMAKE_SOURCE_DIR}/src/third_party/wolfssl/src/certs")
@@ -71,6 +92,19 @@ function(nimrtc_copy_wolfssl_certs target)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${_nimrtc_wolfssl_cert_dir}/ecc-key.pem"
             "$<TARGET_FILE_DIR:${target}>/certs/"
+        # Also seed the CTest working directory (the test-file directory),
+        # so `ctest` finds the certs via the relative "certs/server-ecc.pem"
+        # lookup.  Only meaningful when the target lives under `<dir>/<cfg>/`
+        # (multi-config generators); on a single-config generator the two
+        # paths coincide and the second copy is a no-op.
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/certs"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/server-ecc.pem"
+            "${CMAKE_CURRENT_BINARY_DIR}/certs/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nimrtc_wolfssl_cert_dir}/ecc-key.pem"
+            "${CMAKE_CURRENT_BINARY_DIR}/certs/"
         COMMENT "Copy wolfssl certs to test output directory"
         VERBATIM)
 endfunction()

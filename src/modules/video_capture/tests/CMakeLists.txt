@@ -5,6 +5,7 @@ add_executable(test_video_capture
     test_cursor_compositor.cpp
     test_dxgi_desktop_dup.cpp
     test_win_cursor_source.cpp
+    test_wgc_capture.cpp
     )
 
 target_link_libraries(test_video_capture

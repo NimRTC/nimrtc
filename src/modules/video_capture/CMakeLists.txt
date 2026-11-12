@@ -34,6 +34,7 @@ add_library(nimrtc_video_capture STATIC
 target_sources(nimrtc_video_capture PRIVATE
     src/platform/dxgi_desktop_dup.cpp
     src/platform/win_cursor_source.cpp
+    src/platform/wgc_capture.cpp
     )
 
 if(WIN32)
@@ -44,6 +45,11 @@ if(WIN32)
         # (GetCursorInfo / GetIconInfo / GetDIBits).
         user32
         gdi32
+        # The WGC backend talks to the WinRT capture APIs: the
+        # activation factory (RoGetActivationFactory), the HSTRING
+        # helpers (WindowsCreateString) and the C++/WinRT projection's
+        # runtime support all live in windowsapp.lib.
+        windowsapp
         )
 endif()
 

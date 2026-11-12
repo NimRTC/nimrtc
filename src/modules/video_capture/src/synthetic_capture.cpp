@@ -19,6 +19,7 @@
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/video_capture/dxgi_desktop_dup.hpp>
+#include <nimrtc/video_capture/wgc_capture.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -337,6 +338,11 @@ void register_default_plugins() noexcept {
     // that asks for "dxgi_desktop" there gets the engine's "capture
     // plugin missing" error rather than a silent no-op device.
     register_dxgi_desktop_dup();
+
+    // Remote-desktop plan A3: the Windows Graphics Capture backend
+    // registers itself under "wgc".  It is the *window* capture path
+    // and the one that composites the pointer into the frame.
+    register_wgc_capture();
 }
 
 } // namespace nimrtc::video_capture

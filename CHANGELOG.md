@@ -18,8 +18,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **A pluggable cursor layer (with its Windows platform source), and the
-  Windows DXGI Desktop Duplication capture backend (v1.3.0, Remote
-  Desktop plan A6 / A3).**  The portable capture layer was landed
+  two Windows capture backends — DXGI Desktop Duplication and Windows
+  Graphics Capture (v1.3.0, Remote Desktop plan A6 / A3).**  The
+  portable capture layer was landed
   above, but it had no *platform* backend to drive and no way to show
   the pointer on the platforms whose capture API does not draw it.  Both
   are now in place.
@@ -99,9 +100,45 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - A lost duplication object (the display was resized, the session
       was locked) is counted as a device error and reported, rather
       than silently spinning on a dead device.
-  - **What this backend is *not*:** Windows Graphics Capture (windows,
-    and a cursor the OS composites) is still open, and so is the
-    zero-copy `GpuBuffer` hand-off.  See plan item A3's "Status" note.
+  - **The Windows Graphics Capture backend**,
+    `src/modules/video_capture/src/platform/wgc_capture.cpp`,
+    registered under the plug-in id `"wgc"`.  It is the *window*
+    capture path on Windows, and the one that gets the pointer for
+    free: WGC asks the desktop compositor to draw the cursor into the
+    captured surface, so this backend reports
+    `CaptureCapabilities::cursor_composited == true` and the cursor
+    layer above is not needed on this path.
+    - The device enumerates the displays *and* the top-level windows
+      (visible, with a title), and resolves the device id to an
+      `HMONITOR` or an `HWND`.
+    - The capture item is created through
+      `IGraphicsCaptureItemInterop` — `CreateForMonitor` for a
+      display, `CreateForWindow` for a window.  That interop factory
+      is the only way to create a capture item, and it is what makes
+      the window path possible at all.
+    - The frame pool is created **free-threaded**
+      (`CreateFreeThreaded`), so the library needs no `DispatcherQueue`
+      and imposes no message loop on its host.  The cost is that the
+      frame arrives on a WinRT thread-pool thread rather than on the
+      capture thread — which the D3D11 device accommodates, because it
+      is deliberately created *without*
+      `D3D11_CREATE_DEVICE_SINGLETHREADED`.
+    - The readback goes through a staging texture, so this backend
+      reports `CaptureCapabilities::zero_copy == false`; the zero-copy
+      hand-off is plan item B10.
+    - The Windows 11 24H2 capture border is switched off through
+      `IGraphicsCaptureSession3` — a remote-desktop client does not
+      want the border in the stream.
+    - A region request is honoured exactly: the frame pool is created
+      at the *source* size (so the consumer sees the source's pixels
+      and not a resampling of them) and the region is cropped out of
+      the readback afterwards.
+    - WGC does **not** report changed regions, so the backend reports
+      the conservative "the whole frame changed" answer rather than
+      pretending to a precision it does not have.
+  - **What these backends are *not*:** the zero-copy `GpuBuffer`
+    hand-off is still open — the frames reach the encoder as CPU
+    pixels.  See plan item A3's "Status" note.
 
 - **The engine pumps the capture device on its own tick thread
   (v1.3.0, Remote Desktop plan A10 / A11).**  Until now a capture

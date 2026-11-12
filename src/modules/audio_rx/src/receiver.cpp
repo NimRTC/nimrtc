@@ -274,6 +274,16 @@ void Pipeline::consume(StreamState& st, const plugins::MediaSample& sample,
         const plugins::AudioDecodedFrame& f = frames[i];
         if (!f.pcm || f.samples_per_channel == 0 || f.channels == 0) continue;
 
+        // `f.pcm` is owned by the decoder and is only valid until the
+        // next call into it (the IAudioDecoder seam's contract).  The
+        // concealment path below calls decode_plc(), which invalidates
+        // the buffer, so the samples are copied out before anything
+        // else can touch the decoder.  Holding the pointer across the
+        // conceal() call read freed memory (ASan: heap-use-after-free
+        // in downmix_to()).
+        std::vector<float> pcm(f.pcm,
+                               f.pcm + f.samples_per_channel * f.channels);
+
         if (!st.have_expected) {
             // The first decoded frame defines the origin of the timeline.
             st.expected_ts = f.rtp_timestamp;
@@ -303,7 +313,7 @@ void Pipeline::consume(StreamState& st, const plugins::MediaSample& sample,
         const std::uint8_t out_channels =
             (cfg_.enable_downmix && cfg_.output_channels > 0) ? cfg_.output_channels
                                                               : f.channels;
-        downmix_to(f.pcm, f.samples_per_channel, f.channels, out_channels,
+        downmix_to(pcm.data(), f.samples_per_channel, f.channels, out_channels,
                    slot.pcm);
         slot.channels = out_channels;
 

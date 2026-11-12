@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/raw_udp/udp_socket.hpp
  * @brief Tiny cross-platform UDP socket wrapper for the ArqRawUdp layer.
  *
@@ -34,9 +34,12 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 #include <nimrtc/core/api_version.hpp>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <span>
+#include <vector>
 
 #include <nimrtc/plugins/base.hpp>
 
@@ -52,7 +55,7 @@ namespace nimrtc::raw_udp {
 class NIMRTC_API_STABLE UdpSocket {
 public:
     UdpSocket() noexcept = default;
-    ~UdpSocket() noexcept { close(); }
+    ~UdpSocket() noexcept;
 
     UdpSocket(const UdpSocket&)            = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
@@ -70,6 +73,12 @@ public:
 
     /**
      * @brief Release the socket.  Idempotent.
+     *
+     * The handle is published as invalid immediately, so no new
+     * send/recv starts on it.  The *physical* close (the ::close()
+     * syscall) is deferred to the destructor: closing an fd while a
+     * peer thread is inside recvfrom()/sendto() on it is a data race
+     * on the kernel's descriptor state.
      */
     void close() noexcept;
 
@@ -87,10 +96,15 @@ public:
 
     /**
      * @brief Blocking recvfrom into `buf`.  Sets `from` on success.
-     * @return number of bytes received, or -1 on error / after close().
+     * @return number of bytes received, -1 on error / after close(),
+     *         or 0 when the wait timed out without a datagram arriving.
      *
-     * @note This blocks forever on a healthy socket.  Use a non-blocking
-     *       variant (added in Slice 7.5) if the caller wants a poll loop.
+     * @note The wait is bounded (see `kRecvPollTimeoutMs`): the socket
+     *       is polled before every recvfrom, so a caller that wants a
+     *       periodic wake-up (to check a stop flag) gets one at least
+     *       every timeout period.  Returning 0 on timeout is what lets
+     *       `ArqRawUdp::recv_main()` notice its stop flag without the
+     *       socket ever having to be closed out from under it.
      */
     std::ptrdiff_t recv_from(void* buf, std::size_t buf_size,
                               plugins::Addr* src_addr_out) noexcept;
@@ -118,7 +132,39 @@ private:
     using socket_t = int;
     static constexpr socket_t kInvalid = -1;
 #endif
-    socket_t sock_ = kInvalid;
+    // How long recv_from() waits for a datagram before it gives the
+    // caller a chance to observe a stop flag.  See recv_from().
+    static constexpr int kRecvPollTimeoutMs = 50;
+
+    /** Wait until the socket is readable, or `kRecvPollTimeoutMs`
+     *  elapses.  Returns true when a datagram is pending. */
+    bool wait_readable(socket_t sock) const noexcept;
+
+    // The socket handle.
+    //
+    // It is atomic because close() runs on the owner thread while a
+    // recv thread may be blocked in recv_from() on the same handle:
+    // close() has to publish "the handle is gone" so the blocked
+    // recv_from() notices.  A plain `socket_t` was a data race
+    // (TSan: read of size 4 in UdpSocket::recv_from() vs. write in
+    // UdpSocket::close()).
+    std::atomic<socket_t> sock_{kInvalid};
+
+    // Handles whose *logical* close has happened but whose *physical*
+    // close (the ::close() syscall) is deferred to the destructor.
+    //
+    // The physical close must not happen while another thread may still
+    // be inside a syscall on that fd: closing an fd that a peer thread
+    // is inside recvfrom()/sendto() on is a data race on the kernel's
+    // file-descriptor state (TSan: "data race ... in UdpSocket::close()"
+    // against the fd read by recvfrom()), and the fd number can be
+    // recycled while the kernel is still using it.
+    //
+    // The destructor is the safe place for the physical close: by then
+    // every user of the socket holds (or has released) a shared_ptr to
+    // this object, so no thread can be inside a syscall on the fd.
+    mutable std::mutex            retired_mu_;
+    std::vector<socket_t>         retired_;
 
 #if defined(_WIN32)
     bool winsock_initialized_ = false;

@@ -125,13 +125,57 @@ jobs:
             -BuildDir "${{ github.workspace }}/build"
 
       - name: Configure
-        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
 
       - name: Build
         run: cmake --build --preset debug.msvc -j 2
 
       - name: Test
         run: ctest --preset tests.msvc --output-on-failure -j 2
+
+      # Track D downstream proof (Windows / MSVC): stage the installed
+      # bundle and build a minimal find_package(NimRTC) consumer against
+      # it.  The Linux leg of this proof cannot catch an MSVC-only
+      # packaging defect: GCC 11+ defaults to gnu++17, which is enough
+      # for the public headers, while MSVC defaults to C++14 and needs
+      # the standard the package config has to declare.  The consumer
+      # below deliberately pins NO CMAKE_CXX_STANDARD -- inheriting the
+      # standard from the package is exactly what has to work.
+      #
+      # CMAKE_MSVC_RUNTIME_LIBRARY does have to match: the bundle is
+      # built with MultiThreadedDLL (/MD, the dev.msvc preset), so the
+      # consumer has to use the same CRT or the linker reports
+      # LNK2038 (incompatible CRT).
+      - name: Install + downstream proof
+        shell: pwsh
+        run: |
+          cmake --install build --config Debug --prefix build/_install/windows-x86_64
+          $cfg = Get-ChildItem build/_install/windows-x86_64 -Recurse -Filter NimRTCConfig.cmake | Select-Object -First 1
+          if (-not $cfg) { throw "NimRTCConfig.cmake not found in the staged bundle" }
+          New-Item -ItemType Directory -Force build/downstream-proof | Out-Null
+          @'
+          #include <nimrtc/engine/engine.hpp>
+          #include <cstdio>
+          int main() {
+            std::printf("nimrtc %s\n", NIMRTC_API_VERSION_STRING);
+            return 0;
+          }
+          '@ | Set-Content build/downstream-proof/main.cpp
+          @'
+          cmake_minimum_required(VERSION 3.20)
+          project(nimrtc_downstream_proof LANGUAGES CXX)
+          find_package(NimRTC 1.0 REQUIRED)
+          add_executable(downstream_proof main.cpp)
+          target_link_libraries(downstream_proof PRIVATE nimrtc::engine)
+          '@ | Set-Content build/downstream-proof/CMakeLists.txt
+          cmake -S build/downstream-proof -B build/downstream-proof/build `
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/_install/windows-x86_64" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+          cmake --build build/downstream-proof/build --config Debug
+          $exe = Get-ChildItem build/downstream-proof/build -Recurse -Filter downstream_proof.exe | Select-Object -First 1
+          if (-not $exe) { throw "downstream_proof.exe was not produced" }
+          & $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "downstream proof exited $LASTEXITCODE" }
 
       - name: Loopback smoke
         shell: cmd
@@ -259,6 +303,17 @@ jobs:
       - name: Self-test the soak evidence fetcher
         run: python tools/fetch_soak_evidence.py --self-test
 
+      # The sanitizer gate decides whether the sanitizer CI leg fails, so
+      # a bug in the gate's own classification is a silent hole in the
+      # coverage: a NimRTC finding misfiled as vendored would stop the
+      # gate from ever firing.  The self-test pins the classification:
+      # an ASan report rooted in our own code is ours, a report rooted in
+      # src/third_party is upstream even when our code is on the stack,
+      # a data race whose other party is our code is shared, and a test
+      # failure that no upstream report explains is a plain failure.
+      - name: Self-test the sanitizer gate
+        run: python tools/sanitizer_gate.py --self-test
+
       # Pre-tag guardrail (v1.1 plan Track C, item C3).  These are
       # repo-level facts that no unit test sees and that rot quietly
       # between releases: the SFU track must stay unwired, every public
@@ -333,8 +388,8 @@ jobs:
       # schema v6 which requires CMake ≥ 3.25. Pin a recent cmake via pip.
       - name: Install ninja + Python (CMake via pip)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -439,6 +494,239 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # linux-sanitizers: ASan + UBSan + TSan on ubuntu-22.04
+  #
+  # P0 hardening (2026-11-09): the project had sanitizer *options*
+  # (NIMRTC_ASAN / NIMRTC_UBSAN) but no CI leg ever enabled them, so the
+  # ~274 std::mutex / ~222 std::atomic in the tree were never checked for
+  # data races.  This job is the gate.
+  #
+  # Two legs in one job (matrix over the preset):
+  #   - asan-ubsan : memory errors + undefined behaviour   (GCC)
+  #   - tsan.clang : data races                           (Clang compiler-rt)
+  #
+  # The TSan leg uses Clang's compiler-rt, not GCC's libtsan.  GCC 11's
+  # libtsan does not intercept pthread_cond_clockwait(), which libstdc++
+  # uses for condition_variable::wait_for() / wait_until() with a
+  # steady_clock deadline.  TSan therefore never observes the
+  # unlock/relock that happens inside such a wait, keeps believing the
+  # thread still owns the mutex, and reports a bogus "double lock of a
+  # mutex" for every timed condition-variable wait in the tree (the
+  # video_source cadence loop, the SCTP state machine, the ICE consent
+  # tracker, ...).  Clang's compiler-rt TSan intercepts it correctly and
+  # reports zero findings on the same tree.
+  #
+  # ASan and TSan are mutually exclusive, so they cannot live in the same
+  # build; the presets set the others OFF explicitly and
+  # cmake/NimRTCOptions.cmake raises a hard FATAL_ERROR if both end up ON.
+  #
+  # The sanitizer flags are applied GLOBALLY (add_compile_options /
+  # add_link_options) so the vendored third-party static libs are
+  # instrumented too and the sanitizer runtime is present in every final
+  # link line — a per-target application would produce undefined
+  # references to the runtime in the test executables.
+  #
+  # Vendor code noise: wolfSSL / usrsctp / libjuice / msquic are upstream
+  # code and may trip the sanitizers on their own.  Suppressing their
+  # reports globally would hide real issues in the code we call into, and
+  # failing on every upstream finding would train everyone to ignore the
+  # gate.  So tools/sanitizer_gate.py classifies every report by the
+  # ownership of its root frame:
+  #
+  #   owned  : the root frame is in src/ or tests/       -> the job FAILS
+  #   vendor : the root frame is in src/third_party/     -> reported only
+  #   shared : upstream root, NimRTC is the other party  -> reported only
+  #
+  # The ctest step is continue-on-error so that a sanitizer abort -- which
+  # kills the test binary -- cannot stop the job before the gate has read
+  # the log.  The gate step is what decides the outcome of the job: a
+  # NimRTC-owned finding fails it, an upstream finding does not.  A test
+  # failure that no upstream report explains is a plain test failure and
+  # fails the gate too -- the sanitizer build can expose timing bugs the
+  # plain build does not.
+  # ---------------------------------------------------------------------------
+  linux-sanitizers:
+    name: linux-sanitizers / ${{ matrix.preset }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: asan-ubsan
+          - preset: tsan.clang
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-sanitizers-${{ matrix.preset }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ninja + clang + Python (CMake via pip)
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build clang python3 && break || { sudo apt-get update; sleep 15; }; done
+          clang --version
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Pre-flight tool check
+        run: python3 tools/ci_preflight.py --preset ${{ matrix.preset }}
+
+      - name: Configure (${{ matrix.preset }})
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_INSTALL=OFF
+
+      - name: Build (${{ matrix.preset }})
+        run: cmake --build --preset ${{ matrix.preset }} -j 2
+
+      - name: Test (${{ matrix.preset }})
+        # continue-on-error: a sanitizer abort kills the test binary, and
+        # the gate below still has to read what the sanitizer printed
+        # before the job is allowed to end.
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          set +e
+          ctest --preset tests.${{ matrix.preset }} -j 2 --output-on-failure 2>&1 | tee build/sanitizer-ctest.log
+          echo "${PIPESTATUS[0]}" > build/ctest-exit.txt
+          exit 0
+
+      - name: Classify the sanitizer findings
+        # The gate is the point of this job.  LastTest.log is read as
+        # well: ctest only echoes the output of *failing* tests, so a
+        # leak report printed by a test that still passed would otherwise
+        # never be seen.
+        run: |
+          python3 tools/sanitizer_gate.py \
+            --ctest-status build/ctest-exit.txt \
+            build/sanitizer-ctest.log \
+            build/Testing/Temporary/LastTest.log
+
+      - name: Upload sanitizer build directory on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.preset }}-${{ github.run_id }}
+          path: build/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Linux fuzzing: libFuzzer over the untrusted-input parsers.
+  #
+  # Three things run here:
+  #
+  #   1. The corpus replay driver (`test_fuzz_replay`) — the same
+  #      driver that runs in the ordinary test suite.  It replays every
+  #      committed seed plus a deterministic mutation set.  This is
+  #      the regression floor: a crash libFuzzer finds is committed as
+  #      a seed, and the seed keeps being replayed.
+  #
+  #   2. A short libFuzzer run per target (60 s each, under
+  #      ASan+UBSan).  The runs are deliberately short: CI has to be
+  #      affordable, and a 60 s run over the committed corpus already
+  #      reaches the interesting states that a random byte flip never
+  #      would.
+  #
+  #   3. The crash artefacts are uploaded, so a finding can be
+  #      minimised and committed as a seed.
+  #
+  # Clang is required for `-fsanitize=fuzzer`; the leg installs it
+  # explicitly rather than relying on the runner image.
+  # ---------------------------------------------------------------------------
+  linux-fuzz:
+    name: linux-fuzz / clang
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-linux-fuzz
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install clang + ninja
+        run: |
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y clang ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
+          clang --version
+
+      - name: Install CMake
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "cmake>=3.25"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (clang + fuzzing + sanitizers)
+        run: |
+          cmake -S . -B build/fuzz \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DNIMRTC_FUZZING=ON \
+            -DNIMRTC_ASAN=ON \
+            -DNIMRTC_UBSAN=ON \
+            -DNIMRTC_BUILD_TESTS=ON \
+            -DNIMRTC_BUILD_EXAMPLES=OFF \
+            -DNIMRTC_VENDORED_WEBRTC_APM=OFF \
+            -DNIMRTC_INSTALL=OFF
+
+      - name: Build
+        run: cmake --build build/fuzz -j 2
+
+      - name: Materialise the fuzz corpus
+        # The seeds are checked in as *text* (`.hex`), never as binary
+        # blobs: binary files review badly, merge badly, and are
+        # reproducible from the generator script anyway.  libFuzzer
+        # needs raw bytes, so the hex seeds are decoded into a build
+        # directory here.
+        run: python3 tests/fuzz/tools/make_corpus.py --materialize build/fuzz-corpus
+
+      - name: Replay the committed corpus
+        # The replay driver must pass before the fuzzing runs: a seed
+        # that already crashes means the corpus was committed without
+        # fixing the bug it documents.
+        run: ctest --test-dir build/fuzz -R test_fuzz_replay --output-on-failure
+
+      - name: Run libFuzzer (60 s per target)
+        # `-runs=0` means "run until the time limit expires"; the
+        # time limit is what keeps CI affordable.  A crash makes
+        # libFuzzer exit non-zero, which fails the step.
+        run: |
+          set -e
+          mkdir -p build/fuzz-artifacts
+          for target in sdp rtp video_payload; do
+            echo "::group::fuzz_${target}"
+            ASAN_OPTIONS=abort_on_error=1 \
+            UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            ./build/fuzz/tests/fuzz/fuzz_${target} \
+              -max_total_time=60 \
+              -max_len=4096 \
+              -artifact_prefix=build/fuzz-artifacts/ \
+              "build/fuzz-corpus/${target}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload fuzzing artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: build/fuzz-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
   # Linux aarch64: GCC on a native arm64 runner
   #
   # ROOT CAUSE (corrected 2026-10-28): the "ARM64 runner pool is
@@ -522,8 +810,8 @@ jobs:
         # not have.  `g++` (not `g++-aarch64-linux-gnu`) is the native
         # arm64 package on this image.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build python3 g++
+          for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 g++ && break || { sudo apt-get update; sleep 15; }; done
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

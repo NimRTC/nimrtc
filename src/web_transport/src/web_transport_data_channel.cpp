@@ -275,6 +275,20 @@ WebTransportDataChannel::WebTransportDataChannel(IWebTransportSession* session) 
 }
 
 WebTransportDataChannel::~WebTransportDataChannel() {
+    // A destructor must not invoke user callbacks.  The callback target
+    // (a collector, a lambda's captures) is very often already
+    // destroyed by the time the channel is -- the channel and the
+    // target are siblings on the caller's stack, and the target is
+    // usually declared first, so it dies first.  Firing "closed" from
+    // here would then write into freed memory (ASan:
+    // heap-use-after-free in the collector's vector).
+    //
+    // The explicit close() still reports "closed"; only the implicit
+    // teardown is silent.  Detach the callbacks *before* close() so
+    // nothing inside close() can reach user code either.
+    on_state_ = nullptr;
+    on_msg_ = nullptr;
+    on_msg_ex_ = nullptr;
     close();
 }
 

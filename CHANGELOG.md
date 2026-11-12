@@ -136,6 +136,48 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     as a `DtmfEvent` with the accumulated duration, instead of being
     dropped as unknown.
 
+- **A negotiated telephone-event payload type, so the DTMF path is
+  actually reachable (v1.2.0, session capability plan D3 / D4).**  The
+  RFC 4733 codec and the send path existed, but the *payload type* was
+  never negotiated: the offer declared nothing, the answer echoed
+  nothing, and the codec sat idle.  A key press therefore had nowhere
+  to go, and a telephone-event payload arriving from the peer landed on
+  a payload type the engine did not recognise.
+  - The offer now carries `a=rtpmap:<pt> telephone-event/8000` and
+    `a=fmtp:<pt> 0-16` (RFC 4733 §2.3.2), and the payload type joins
+    the m-line's format list — RFC 3550 §5.14 scopes a payload type
+    to its m-section, so a payload type that is not in the `m=` line
+    is not part of the session.  The declaration is conditional:
+    `EngineConfig::dtmf_enabled` is **off** by default (OD-B), so a
+    default engine offers no telephone-event line at all.
+  - The answer carries the **negotiated** event codes — the peer's
+    list narrowed to the codes this side implements — rather than a
+    blind echo of the offer.  An answer that names a code the offerer
+    never offered describes something the peer will not accept.
+  - `NimRTCEngine::negotiated_dtmf_payload_type()` reports the number
+    both ends use, or `0` when nothing was negotiated.  `send_dtmf()`
+    fails in exactly that state, so a host can ask before it presses a
+    key rather than sending a packet on a payload type the peer never
+    agreed to (RFC 3264 §6.1).
+  - The counting boundary is now explicit (D4): a **negotiated**
+    telephone-event payload is decoded and reported to the host and is
+    **not** counted as an unknown audio payload type; an
+    **un-negotiated** one still is (the peer sent something we never
+    agreed to).  A malformed payload is counted separately, so it never
+    masquerades as a delivered event.
+  - The telephone-event plane has counters of its own in `Stats` —
+    `dtmf_packets_sent`, `dtmf_packets_received`,
+    `dtmf_packets_malformed`, `dtmf_events_delivered` and
+    `dtmf_payload_type` — because the audio counters say nothing about
+    it: the payload never reaches the audio pipeline.
+  - Covered by 13 cases in `tests/test_engine_dtmf.cpp`: eleven on the
+    SDP declaration and the counting rules, and two on the wire -- a
+    key press has to leave the engine as an RFC 4733 *event sequence*
+    (the repeats, the marker bit on the first packet, and the
+    end-of-event packet that closes it), not as a single packet.  The
+    codec's own wire format is covered by
+    `src/modules/dtmf/tests/test_dtmf_codec.cpp`.
+
 - **A pluggable session model, so a host can renegotiate instead of
   rebuilding the engine (v1.2.0, session capability plan N1 / T1).**  The
   engine used to build a *fixed* SDP media list (one audio m-line, one
@@ -929,6 +971,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tooling
 
+- **A CI leg that actually runs the sanitizers, and a gate that knows
+  whose bug it found.** The project had sanitizer *options*
+  (`NIMRTC_ASAN` / `NIMRTC_UBSAN`) but no CI leg ever turned them on, so
+  the ~274 `std::mutex` and ~222 `std::atomic` in the tree were never
+  checked for data races and the memory errors the options were meant to
+  catch were never caught. The new `linux-sanitizers` job runs two
+  configurations on `ubuntu-22.04`: `asan-ubsan` (memory errors and
+  undefined behaviour) and `tsan` (data races). ASan and TSan cannot
+  coexist in one build, so the presets set the other one OFF explicitly
+  and `cmake/NimRTCOptions.cmake` raises a `FATAL_ERROR` if both end up
+  ON. The sanitizer flags are applied globally (`add_compile_options` /
+  `add_link_options`) rather than per target: the sanitizer runtime has
+  to be linked into every final binary, and the vendored static libraries
+  are linked into the test executables, so instrumenting only the
+  `nimrtc_*` targets left the final link line without the runtime and
+  produced undefined references to it.
+  The leg's problem is the vendored stacks -- wolfSSL, usrsctp,
+  libjuice, msquic -- which are upstream code and trip the sanitizers on
+  their own. Suppressing their reports globally would hide real issues in
+  the code we call into, and failing on every upstream finding would
+  train everyone to ignore the gate. So `tools/sanitizer_gate.py`
+  classifies every report by the ownership of its root frame: a report
+  rooted in `src/` or `tests/` fails the job, a report rooted in
+  `src/third_party/` is printed and does not, and a report whose other
+  party to the fault is NimRTC code (the usual shape of a data race) is
+  printed as shared. A test failure that no upstream report explains is a
+  plain test failure and fails the job too. The gate's own classification
+  is pinned by a self-test that runs on every push.
 - **A tag watcher for `v1.1.0`, with signature verification and a
   release-gate status snapshot.** The watcher probes the repository it is
   pointed at separately from the repository the scripts live in, so a

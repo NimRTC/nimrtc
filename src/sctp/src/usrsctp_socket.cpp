@@ -231,6 +231,25 @@ void finish_usrsctp_once() noexcept {
     (void)usrsctp_finish();
 }
 
+// ---------------------------------------------------------------------------
+// Slot registry — socket pointer → shared callback state.
+//
+// usrsctp calls our receive trampoline from its own worker thread and
+// identifies the socket only through the raw `ulp_info` pointer we
+// handed to `usrsctp_socket()`. A peer-initiated ABORT is turned into
+// an SCTP_ASSOC_CHANGE notification that usrsctp delivers
+// *asynchronously* — it can land after `~UsrsctpSocket()` returned, so
+// the trampoline must not dereference the socket.
+//
+// The trampoline therefore resolves the shared `Slot` through this
+// registry. The slot is kept alive by the shared_ptr copy the
+// trampoline takes, so the state it protects outlives the socket.
+// ---------------------------------------------------------------------------
+// The slot registry itself is defined as static members of UsrsctpSocket
+// (see s_slot_registry() / s_slot_registry_mutex() below) so that the
+// private `Slot` type does not have to be leaked into this anonymous
+// namespace.
+
 // NOTE: A previous design ran a custom udp_recv_thread_main() that
 // received packets on our own shared UDP listener and dispatched
 // them via usrsctp_conninput(). That code was abandoned in favour
@@ -281,6 +300,25 @@ void close_shared_udp_socket() noexcept {
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Slot registry — the process-wide map from socket pointer to shared Slot.
+//
+// Defined here (not in the anonymous namespace) because `Slot` is a
+// private nested type of UsrsctpSocket and cannot be named from
+// outside the class.
+// ---------------------------------------------------------------------------
+
+std::unordered_map<const void*, std::shared_ptr<UsrsctpSocket::Slot>>&
+UsrsctpSocket::s_slot_registry() noexcept {
+    static std::unordered_map<const void*, std::shared_ptr<Slot>> registry;
+    return registry;
+}
+
+std::mutex& UsrsctpSocket::s_slot_registry_mutex() noexcept {
+    static std::mutex mu;
+    return mu;
+}
 
 void UsrsctpSocket::s_acquire_global_init() noexcept {
     bool expected = false;
@@ -483,8 +521,42 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
                                       struct sctp_rcvinfo rcvinfo,
                                       int flags,
                                       void* ulp_info) {
-    auto* self = static_cast<UsrsctpSocket*>(ulp_info);
-    if (self == nullptr || data == nullptr) {
+    // `ulp_info` is the socket pointer we handed to usrsctp_socket().
+    // It is used ONLY to look up the shared Slot — we never dereference
+    // the socket itself here, because usrsctp may deliver a
+    // notification after the socket has been destroyed (the peer-initiated
+    // ABORT path does exactly that).
+    std::shared_ptr<Slot> slot;
+    {
+        std::lock_guard<std::mutex> lk(s_slot_registry_mutex());
+        auto it = s_slot_registry().find(ulp_info);
+        if (it != s_slot_registry().end()) {
+            slot = it->second;
+        }
+    }
+
+    // usrsctp allocates the payload buffer with malloc() and hands the
+    // ownership to the application — every upstream example frees it
+    // (see usrsctp's src/programs/client.c). Not freeing it leaks one
+    // buffer per delivered message (LeakSanitizer flagged 21 leaked
+    // allocations in the SCTP leg).
+    //
+    // `data == NULL` means "socket closed" (usrsctp's convention) and
+    // there is nothing to free.
+    if (data == nullptr) {
+        return 0;
+    }
+    struct DataGuard {
+        void* p;
+        ~DataGuard() { ::free(p); }
+    } data_guard{data};
+
+    if (!slot) {
+        // The socket is gone — drop the event.
+        return 0;
+    }
+    if (!slot->alive.load(std::memory_order_acquire)) {
+        // The socket is being destroyed — drop the event.
         return 0;
     }
 
@@ -495,9 +567,9 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
     // delivered to the user callback.
     constexpr int kMsgNotification = 0x2000;
     if ((flags & kMsgNotification) != 0) {
-        // handle_notification() takes state_mu_ briefly; we don't
+        // handle_notification() takes state_mu briefly; we don't
         // hold it across the user-callback dispatch below.
-        std::lock_guard<std::mutex> lk(self->state_mu_);
+        std::lock_guard<std::mutex> lk(slot->state_mu);
         if (datalen >= sizeof(struct sctp_tlv)) {
             const auto* tlv = static_cast<const struct sctp_tlv*>(data);
             core::log::Logger::instance().warn(
@@ -512,11 +584,11 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
                     " error=" + std::to_string((int)sac->sac_error));
             }
         }
-        self->handle_notification(data, datalen);
+        handle_notification(*slot, data, datalen);
         return 0;
     }
 
-    // Forward DATA payloads to the user callbacks under recv_mu_ so
+    // Forward DATA payloads to the user callbacks under recv_mu so
     // set_on_recv / set_on_recv_with_ppid can swap the function
     // pointers safely. BOTH callbacks fire when registered (fan-out,
     // not either/or): the legacy callback keeps existing AF_INET
@@ -524,15 +596,19 @@ int UsrsctpSocket::s_instance_recv_cb(struct socket* /*sock*/,
     // feeds SctpDataChannel's DCEP demux. rcv_ppid arrives in network
     // byte order — convert with ntohl() per the OnSctpRecvWithPpidCb
     // host-byte-order contract.
-    std::lock_guard<std::mutex> lk(self->recv_mu_);
-    if (self->on_recv_) {
-        self->on_recv_(static_cast<std::uint16_t>(rcvinfo.rcv_sid),
-                       plugins::BufferView{
-                           static_cast<const std::uint8_t*>(data),
-                           datalen});
+    //
+    // The payload view is only valid for the duration of the call: the
+    // buffer belongs to usrsctp and is freed by `data_guard` when this
+    // function returns.
+    std::lock_guard<std::mutex> lk(slot->recv_mu);
+    if (slot->on_recv) {
+        slot->on_recv(static_cast<std::uint16_t>(rcvinfo.rcv_sid),
+                      plugins::BufferView{
+                          static_cast<const std::uint8_t*>(data),
+                          datalen});
     }
-    if (self->on_recv_ppid_) {
-        self->on_recv_ppid_(
+    if (slot->on_recv_ppid) {
+        slot->on_recv_ppid(
             static_cast<std::uint16_t>(rcvinfo.rcv_sid),
             ntohl(rcvinfo.rcv_ppid),
             plugins::BufferView{
@@ -553,7 +629,7 @@ int UsrsctpSocket::s_instance_send_cb(struct socket* /*sock*/,
 // ---------------------------------------------------------------------------
 // handle_notification — parse an SCTP_ASSOC_CHANGE notification
 //
-// Called with state_mu_ held by s_instance_recv_cb. We dispatch on
+// Called with slot_->state_mu held by s_instance_recv_cb. We dispatch on
 // `tlv->sn_type` first and only act on SCTP_ASSOC_CHANGE — every
 // other notification type (SCTP_PEER_ADDR_CHANGE,
 // SCTP_REMOTE_ERROR, SCTP_SHUTDOWN_EVENT, ...) has its own struct
@@ -573,7 +649,8 @@ int UsrsctpSocket::s_instance_send_cb(struct socket* /*sock*/,
 // association a notification belongs to is therefore decided from
 // the socket's own state, not from a query against usrsctp.
 // ---------------------------------------------------------------------------
-void UsrsctpSocket::handle_notification(const void* data,
+void UsrsctpSocket::handle_notification(Slot& slot,
+                                        const void* data,
                                         std::size_t datalen) noexcept {
     if (data == nullptr || datalen < sizeof(struct sctp_tlv)) {
         return;
@@ -624,8 +701,8 @@ void UsrsctpSocket::handle_notification(const void* data,
     // for a socket that owns none, the notification is somebody
     // else's.
     if (sac_state == SCTP_COMM_UP) {
-        if (state_ != UsrsctpSocketState::kConnecting &&
-            state_ != UsrsctpSocketState::kListening) {
+        if (slot.state != UsrsctpSocketState::kConnecting &&
+            slot.state != UsrsctpSocketState::kListening) {
             core::log::Logger::instance().warn(
                 "nimrtc::sctp::UsrsctpSocket: ignoring SCTP_COMM_UP "
                 "addressed to a socket that owns no association");
@@ -634,7 +711,7 @@ void UsrsctpSocket::handle_notification(const void* data,
         // Transition to kEstablished regardless of whether we
         // were kListening (inbound peer) or kConnecting (we
         // initiated the handshake).
-        s_transition_to(UsrsctpSocketState::kEstablished);
+        s_slot_transition_to(slot, UsrsctpSocketState::kEstablished);
         return;
     }
 
@@ -642,18 +719,18 @@ void UsrsctpSocket::handle_notification(const void* data,
         // "Cannot start association" is reported for the connect
         // attempt this socket made; it is only meaningful while the
         // handshake is in flight.
-        if (state_ != UsrsctpSocketState::kConnecting) {
+        if (slot.state != UsrsctpSocketState::kConnecting) {
             core::log::Logger::instance().warn(
                 "nimrtc::sctp::UsrsctpSocket: ignoring SCTP_CANT_STR_ASSOC "
                 "for a socket that is not connecting");
             return;
         }
-        s_transition_to(UsrsctpSocketState::kClosed);
+        s_slot_transition_to(slot, UsrsctpSocketState::kClosed);
         return;
     }
 
     if (sac_state == SCTP_COMM_LOST || sac_state == SCTP_SHUTDOWN_COMP) {
-        if (state_ != UsrsctpSocketState::kEstablished) {
+        if (slot.state != UsrsctpSocketState::kEstablished) {
             core::log::Logger::instance().warn(
                 std::string("nimrtc::sctp::UsrsctpSocket: ignoring "
                             "association-loss notification (state ") +
@@ -662,7 +739,7 @@ void UsrsctpSocket::handle_notification(const void* data,
             return;
         }
         // The association is gone: kEstablished -> kClosed.
-        s_transition_to(UsrsctpSocketState::kClosed);
+        s_slot_transition_to(slot, UsrsctpSocketState::kClosed);
         return;
     }
 
@@ -800,28 +877,31 @@ plugins::Status UsrsctpSocket::s_bind_and_configure(std::uint16_t local_port) no
 // s_transition_to — state machine helper.
 // ---------------------------------------------------------------------------
 void UsrsctpSocket::s_transition_to(UsrsctpSocketState next) noexcept {
-    // Caller must hold state_mu_ OR call from a single-threaded
-    // context (the constructor). handle_notification holds state_mu_;
-    // listen()/connect() don't need it because they transition the
-    // state BEFORE the worker thread can fire any notification.
-    //
-    // We re-acquire the lock defensively here so callers from any
-    // context are safe; the cost is a recursive mutex — we use
-    // std::mutex which is non-recursive. To avoid deadlocks, callers
-    // MUST NOT hold state_mu_ when calling this. handle_notification
-    // is the only existing caller and it acquires state_mu_ before
-    // calling us, so we add a no-op path here for the listen/connect
-    // callers (they don't need a lock).
-    bool need_notify = (state_ != next);
-    const UsrsctpSocketState prev = state_;
-    state_ = next;
+    // The state lives in the shared Slot so that usrsctp's worker
+    // thread can reach it without dereferencing the socket. The caller
+    // must NOT hold `slot.state_mu` — std::mutex is non-recursive and
+    // handle_notification() already holds it when it calls the
+    // slot-based variant below.
+    std::lock_guard<std::mutex> lk(slot_->state_mu);
+    s_slot_transition_to(*slot_, next);
+}
+
+// ---------------------------------------------------------------------------
+// s_slot_transition_to — state machine helper on the shared slot.
+// ---------------------------------------------------------------------------
+void UsrsctpSocket::s_slot_transition_to(Slot& slot,
+                                         UsrsctpSocketState next) noexcept {
+    // The caller holds `slot.state_mu`.
+    bool need_notify = (slot.state != next);
+    const UsrsctpSocketState prev = slot.state;
+    slot.state = next;
     if (need_notify) {
         core::log::Logger::instance().warn(
             std::string("s_transition_to: ") + to_string(prev) + " -> " +
             to_string(next));
     }
     (void)need_notify;
-    state_cv_.notify_all();
+    slot.state_cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +909,8 @@ void UsrsctpSocket::s_transition_to(UsrsctpSocketState next) noexcept {
 // ---------------------------------------------------------------------------
 
 UsrsctpSocket::UsrsctpSocket(const SctpConfig& cfg)
-    : sock_(nullptr)
+    : slot_(std::make_shared<Slot>())
+    , sock_(nullptr)
     , cfg_(cfg) {
     s_acquire_global_init();
     s_acquire_shared_udp();
@@ -842,7 +923,7 @@ UsrsctpSocket::UsrsctpSocket(const SctpConfig& cfg)
     // too complex for the smoke test.
     //
     // We pass `s_instance_recv_cb` as the per-socket receive callback
-    // (routes to instance's on_recv_ under recv_mu_ AND routes
+    // (routes to instance's slot_->on_recv under slot_->recv_mu AND routes
     // SCTP_ASSOC_CHANGE notifications to handle_notification()).
     //
     // NB: the function-pointer types are spelled in terms of usrsctp's
@@ -883,6 +964,17 @@ UsrsctpSocket::UsrsctpSocket(const SctpConfig& cfg)
 
     sock_ = s;
 
+    // Publish the shared slot under our address so that usrsctp's
+    // worker thread can find it from the `ulp_info` pointer without
+    // dereferencing this socket. The slot outlives the socket (it is
+    // kept alive by the trampoline's shared_ptr copy), so a
+    // notification that arrives after the destructor returns is
+    // dropped instead of dereferencing freed memory.
+    {
+        std::lock_guard<std::mutex> lk(s_slot_registry_mutex());
+        s_slot_registry()[this] = slot_;
+    }
+
     // Auto-bind to 127.0.0.1:0 so the socket is usable for both
     // listen() and connect() (Stage 2 API). listen() will
     // re-bind to the requested local_port (or keep ephemeral if 0).
@@ -892,28 +984,33 @@ UsrsctpSocket::UsrsctpSocket(const SctpConfig& cfg)
 }
 
 UsrsctpSocket::~UsrsctpSocket() {
-    // Capture the pre-destroy state under state_mu_ for the log line;
-    // the engine has already torn down higher layers before calling
-    // us, but a peer-initiated SHUTDOWN may have arrived first so
-    // state_ is not always kEstablished here.
+    // Capture the pre-destroy state under the slot's state_mu for the
+    // log line; the engine has already torn down higher layers before
+    // calling us, but a peer-initiated SHUTDOWN may have arrived first
+    // so the state is not always kEstablished here.
     UsrsctpSocketState pre_state = UsrsctpSocketState::kUnbound;
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        pre_state = state_;
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        pre_state = slot_->state;
     }
     core::log::Logger::instance().info(
         std::string("nimrtc::sctp::UsrsctpSocket::~UsrsctpSocket: entering "
                     "destructor (state=") + to_string(pre_state) +
         ", sock_=" + (sock_ != nullptr ? "non-null" : "null") + ")");
 
+    // Mark the slot dead BEFORE anything else: from this point on the
+    // usrsctp worker thread drops every event for this socket instead
+    // of dispatching into state that is about to be torn down.
+    slot_->alive.store(false, std::memory_order_release);
+
     if (sock_ != nullptr) {
         // Mark kClosed so any in-flight wait_for_established()
         // observers wake up promptly.
         {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            if (state_ != UsrsctpSocketState::kClosed) {
-                state_ = UsrsctpSocketState::kClosed;
-                state_cv_.notify_all();
+            std::lock_guard<std::mutex> lk(slot_->state_mu);
+            if (slot_->state != UsrsctpSocketState::kClosed) {
+                slot_->state = UsrsctpSocketState::kClosed;
+                slot_->state_cv.notify_all();
             }
         }
         // usrsctp_close() shuts down the SCTP association (sends
@@ -932,6 +1029,13 @@ UsrsctpSocket::~UsrsctpSocket() {
         core::log::Logger::instance().info(
             "nimrtc::sctp::UsrsctpSocket::~UsrsctpSocket: sock_ was already "
             "nullptr; skipping usrsctp_close()");
+    }
+    // Remove the slot from the process-wide registry so the trampoline
+    // stops resolving it. The slot itself stays alive as long as an
+    // in-flight callback holds a reference to it.
+    {
+        std::lock_guard<std::mutex> lk(s_slot_registry_mutex());
+        s_slot_registry().erase(this);
     }
     // Unregister from the endpoint registry. We look up by
     // pointer identity (`this`) and erase the matching entry.
@@ -984,8 +1088,8 @@ std::uint16_t UsrsctpSocket::local_port() const noexcept {
 }
 
 UsrsctpSocketState UsrsctpSocket::state() const noexcept {
-    std::lock_guard<std::mutex> lk(state_mu_);
-    return state_;
+    std::lock_guard<std::mutex> lk(slot_->state_mu);
+    return slot_->state;
 }
 
 // ---------------------------------------------------------------------------
@@ -994,8 +1098,8 @@ UsrsctpSocketState UsrsctpSocket::state() const noexcept {
 
 plugins::Status UsrsctpSocket::listen(std::uint16_t local_port) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        if (state_ != UsrsctpSocketState::kUnbound) {
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        if (slot_->state != UsrsctpSocketState::kUnbound) {
             return plugins::kErrInvalidParam;
         }
     }
@@ -1042,8 +1146,8 @@ plugins::Status UsrsctpSocket::listen(std::uint16_t local_port) noexcept {
     }
 
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        state_ = UsrsctpSocketState::kListening;
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        slot_->state = UsrsctpSocketState::kListening;
     }
     core::log::Logger::instance().info(
         "nimrtc::sctp::UsrsctpSocket: listening on SCTP port " +
@@ -1055,8 +1159,8 @@ plugins::Status UsrsctpSocket::listen(std::uint16_t local_port) noexcept {
 plugins::Status UsrsctpSocket::connect(std::string_view remote_addr,
                                        std::uint16_t remote_port) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        if (state_ != UsrsctpSocketState::kUnbound) {
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        if (slot_->state != UsrsctpSocketState::kUnbound) {
             return plugins::kErrInvalidParam;
         }
     }
@@ -1127,8 +1231,8 @@ plugins::Status UsrsctpSocket::connect(std::string_view remote_addr,
     // in kConnecting until wait_for_established() timed out instead
     // of failing fast with kClosed.
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        state_ = UsrsctpSocketState::kConnecting;
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        slot_->state = UsrsctpSocketState::kConnecting;
     }
 
     // Initiate the SCTP handshake. usrsctp_connect returns 0 on
@@ -1174,12 +1278,12 @@ plugins::Status UsrsctpSocket::connect(std::string_view remote_addr,
 
 bool UsrsctpSocket::wait_for_established(
     std::chrono::milliseconds timeout) noexcept {
-    std::unique_lock<std::mutex> lk(state_mu_);
-    const bool ok = state_cv_.wait_for(lk, timeout, [this] {
-        return state_ == UsrsctpSocketState::kEstablished ||
-               state_ == UsrsctpSocketState::kClosed;
+    std::unique_lock<std::mutex> lk(slot_->state_mu);
+    const bool ok = slot_->state_cv.wait_for(lk, timeout, [this] {
+        return slot_->state == UsrsctpSocketState::kEstablished ||
+               slot_->state == UsrsctpSocketState::kClosed;
     });
-    return ok && state_ == UsrsctpSocketState::kEstablished;
+    return ok && slot_->state == UsrsctpSocketState::kEstablished;
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,11 +1310,11 @@ bool s_sendable_state(UsrsctpSocketState s) noexcept {
 plugins::Status UsrsctpSocket::send_datagram(std::uint16_t stream,
                                               plugins::BufferView data) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1247,11 +1351,11 @@ plugins::Status UsrsctpSocket::send_datagram(std::uint16_t stream,
 plugins::Status UsrsctpSocket::send_stream(std::uint16_t stream,
                                             plugins::BufferView data) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1286,11 +1390,11 @@ plugins::Status UsrsctpSocket::send_partial_reliable(
     plugins::BufferView data,
     std::chrono::milliseconds ttl) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1379,11 +1483,11 @@ plugins::Status UsrsctpSocket::send_stream_with_ppid(
     plugins::BufferView data,
     std::uint32_t ppid) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1415,11 +1519,11 @@ plugins::Status UsrsctpSocket::send_datagram_with_ppid(
     plugins::BufferView data,
     std::uint32_t ppid) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1453,11 +1557,11 @@ plugins::Status UsrsctpSocket::send_partial_reliable_with_ppid(
     std::uint32_t ppid,
     bool unordered) noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
         if (sock_ == nullptr) {
             return plugins::kErrInternal;
         }
-        if (!s_sendable_state(state_)) {
+        if (!s_sendable_state(slot_->state)) {
             return plugins::kErrNotReady;
         }
     }
@@ -1507,7 +1611,7 @@ plugins::Status UsrsctpSocket::send_partial_reliable_with_ppid(
 }
 
 void UsrsctpSocket::set_on_packet(plugins::OnSctpPacketCb cb) noexcept {
-    std::lock_guard<std::mutex> lk(recv_mu_);
+    std::lock_guard<std::mutex> lk(slot_->recv_mu);
     on_packet_ = std::move(cb);
 }
 
@@ -1527,8 +1631,8 @@ plugins::Status UsrsctpSocket::feed_inbound_packet(
 
 void UsrsctpSocket::set_on_recv_with_ppid(
     plugins::OnSctpRecvWithPpidCb cb) noexcept {
-    std::lock_guard<std::mutex> lk(recv_mu_);
-    on_recv_ppid_ = std::move(cb);
+    std::lock_guard<std::mutex> lk(slot_->recv_mu);
+    slot_->on_recv_ppid = std::move(cb);
 }
 
 // ---------------------------------------------------------------------------
@@ -1538,8 +1642,8 @@ void UsrsctpSocket::set_on_recv_with_ppid(
 // ---------------------------------------------------------------------------
 
 void UsrsctpSocket::set_on_recv(plugins::OnSctpRecvCb cb) noexcept {
-    std::lock_guard<std::mutex> lk(recv_mu_);
-    on_recv_ = std::move(cb);
+    std::lock_guard<std::mutex> lk(slot_->recv_mu);
+    slot_->on_recv = std::move(cb);
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,12 +1659,12 @@ plugins::Status UsrsctpSocket::open() noexcept {
 
 void UsrsctpSocket::close() noexcept {
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        if (state_ == UsrsctpSocketState::kClosed) {
+        std::lock_guard<std::mutex> lk(slot_->state_mu);
+        if (slot_->state == UsrsctpSocketState::kClosed) {
             return;
         }
-        state_ = UsrsctpSocketState::kClosed;
-        state_cv_.notify_all();
+        slot_->state = UsrsctpSocketState::kClosed;
+        slot_->state_cv.notify_all();
     }
 }
 

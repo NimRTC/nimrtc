@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/raw_udp/arq_raw_udp.hpp
  * @brief ArqRawUdp concrete implementation.
  *
@@ -134,11 +134,14 @@ public:
         if (cfg_.enable_real_socket) {
             // Open the UDP socket.  If this fails, flip `opened_` back so
             // a subsequent close() is a no-op.
-            socket_ = std::make_unique<UdpSocket>();
-            if (!socket_->open(cfg_.local_host, cfg_.local_port)) {
-                socket_.reset();
+            auto sock = std::make_shared<UdpSocket>();
+            if (!sock->open(cfg_.local_host, cfg_.local_port)) {
                 opened_.store(false, std::memory_order_release);
                 return plugins::kErrInternal;
+            }
+            {
+                std::lock_guard<std::mutex> lk(socket_mu_);
+                socket_ = std::move(sock);
             }
             recv_thread_should_stop_.store(false, std::memory_order_release);
             recv_thread_ = std::thread([this] { recv_main(); });
@@ -149,8 +152,8 @@ public:
 
         NIMRTC_LOG_INFO("raw_udp: ArqRawUdp opened "
                         << "(local=" << cfg_.local_host
-                        << ":" << (socket_ ? socket_->local_port()
-                                            : cfg_.local_port)
+                        << ":" << (socket_snapshot() ? socket_snapshot()->local_port()
+                                                     : cfg_.local_port)
                         << " peer_set=" << (cfg_.peer_endpoint.len != 0)
                         << " real_socket=" << cfg_.enable_real_socket
                         << " rto=" << cfg_.rto_base_ms << "ms"
@@ -166,34 +169,46 @@ public:
         }
 
         // Order matters here:
-        //   1. Set the stop flag so a recv thread that's about to
-        //      enter its next iteration sees it before doing another
-        //      recv_from().
-        //   2. Close the socket so a recv thread that's already
-        //      blocked in recv_from() gets woken up with -1.
-        //   3. Join the recv thread BEFORE resetting the unique_ptr —
-        //      the recv thread is still using `socket_->recv_from()`
-        //      and the destructor on `socket_.reset()` would free the
-        //      UdpSocket out from under the worker thread, causing
-        //      a use-after-free that some Linux kernels mask as
-        //      "stuck forever" (the recv thread ends up blocked in
-        //      the kernel on a freed fd).
-        //   4. NOW reset the unique_ptr (free the UdpSocket) and
-        //      repeat the same dance for the retransmit thread.
+        //   1. Set the recv thread's stop flag.  The recv thread wakes
+        //      up at least every `UdpSocket::kRecvPollTimeoutMs`
+        //      (recv_from() polls with a bounded timeout), so it
+        //      observes the flag and returns without the socket ever
+        //      having to be closed underneath it.
+        //   2. Join the recv thread.  Only after it has exited can the
+        //      socket be closed: closing the fd while the thread is
+        //      inside recvfrom() on it is a data race on the kernel's
+        //      descriptor state (TSan: "data race ... in
+        //      UdpSocket::close()").
+        //   3. Same dance for the retransmit thread (it uses the
+        //      socket in its send path).
+        //   4. NOW close and release the socket.
         // The previous order (close-then-reset-then-stop-then-join)
         // could delete the UdpSocket while the recv thread was
         // still using it; on Linux this caused close() to wedge for
         // the full ctest 60 s timeout (kernel keeps the dangling fd
         // pinned, recv thread never observes should_stop_).
         recv_thread_should_stop_.store(true, std::memory_order_release);
-        if (socket_) {
-            socket_->close();
-        }
         if (recv_thread_.joinable()) recv_thread_.join();
-        socket_.reset();
 
+        // The retransmit thread also dereferences the socket (in its
+        // send path), so it must be joined before the socket is
+        // released -- releasing it earlier was a use-after-free and a
+        // data race on the pointer (TSan: "data race" between
+        // ArqRawUdp::retransmit_main() and ArqRawUdp::close()).
         retransmit_thread_should_stop_.store(true, std::memory_order_release);
         if (retransmit_thread_.joinable()) retransmit_thread_.join();
+
+        // Both worker threads are gone: nothing can be inside a
+        // syscall on the fd any more, so the socket can be closed and
+        // released safely.
+        {
+            std::shared_ptr<UdpSocket> sock = socket_snapshot();
+            if (sock) sock->close();
+        }
+        {
+            std::lock_guard<std::mutex> lk(socket_mu_);
+            socket_.reset();
+        }
 
         {
             std::lock_guard<std::mutex> lk(rx_mu_);
@@ -263,22 +278,23 @@ public:
         {
             std::lock_guard<std::mutex> lk(tx_mu_);
             if (tx_pending_.size() >= cfg_.rx_window_packets) {
-                ++stats_.packets_dropped;
+                ++stat_packets_dropped_;
                 return plugins::kErrBufferTooSmall;
             }
             tx_pending_.push_back(std::move(p));
         }
 
-        // Send on the wire (no-op when socket_ is null = test path).
+        // Send on the wire (no-op when there is no socket = test path).
         // We send AFTER releasing the tx lock; framed_for_send is a
         // stable copy that is unaffected by the retransmit thread.
-        if (socket_) {
+        std::shared_ptr<UdpSocket> sock = socket_snapshot();
+        if (sock) {
             std::lock_guard<std::mutex> lk(peer_mu_);
             if (peer_endpoint_.len != 0) {
-                socket_->send_to(peer_endpoint_, framed_for_send);
+                sock->send_to(peer_endpoint_, framed_for_send);
             }
         }
-        stats_.packets_sent++;
+        ++stat_packets_sent_;
         return plugins::kOk;
     }
 
@@ -304,9 +320,10 @@ public:
     }
 
     plugins::Endpoint local_endpoint() const noexcept override {
-        if (socket_ && socket_->is_open()) {
+        std::shared_ptr<UdpSocket> sock = socket_snapshot();
+        if (sock && sock->is_open()) {
             return UdpSocket::make_endpoint_v4(cfg_.local_host,
-                                               socket_->local_port());
+                                               sock->local_port());
         }
         return encode_endpoint(cfg_.local_host, cfg_.local_port);
     }
@@ -316,10 +333,32 @@ public:
         return peer_endpoint_;
     }
 
-    RawUdpStats stats() const noexcept override { return stats_; }
+    RawUdpStats stats() const noexcept override {
+        // Assembled from the atomic counters -- see the note next to
+        // them.  The snapshot is not atomic across the whole struct
+        // (a counter may advance between two loads), which is fine for
+        // a statistics readout.
+        RawUdpStats s;
+        s.packets_sent     = stat_packets_sent_.load(std::memory_order_relaxed);
+        s.packets_recv     = stat_packets_recv_.load(std::memory_order_relaxed);
+        s.packets_retransmit =
+            stat_packets_retransmit_.load(std::memory_order_relaxed);
+        s.packets_dropped  = stat_packets_dropped_.load(std::memory_order_relaxed);
+        s.acks_sent        = stat_acks_sent_.load(std::memory_order_relaxed);
+        s.acks_recv        = stat_acks_recv_.load(std::memory_order_relaxed);
+        s.nacks_sent       = stat_nacks_sent_.load(std::memory_order_relaxed);
+        s.nacks_recv       = stat_nacks_recv_.load(std::memory_order_relaxed);
+        return s;
+    }
 
     // ---- Accessors used by the recv thread ---------------------------------
-    UdpSocket* socket_for_recv() noexcept { return socket_.get(); }
+    /** A reference to the UDP socket, or nullptr when no real socket is
+     *  in use (the in-process test path).  The reference keeps the
+     *  socket alive for the caller even if close() runs concurrently. */
+    std::shared_ptr<UdpSocket> socket_snapshot() const noexcept {
+        std::lock_guard<std::mutex> lk(socket_mu_);
+        return socket_;
+    }
     std::uint16_t rx_base_seq() const noexcept { return rx_base_seq_.load(); }
 
     // Advance rx_base_seq_ to deliver contiguous received seqs to
@@ -349,7 +388,22 @@ private:
     // ---- state ----
     RawUdpConfig cfg_;
     std::atomic<bool> opened_{false};
-    std::unique_ptr<UdpSocket> socket_;
+
+    /** The UDP socket.
+     *
+     *  The socket is created by open() on the caller thread and used by
+     *  the recv thread (recv_from), the retransmit thread (send_to)
+     *  and the caller thread (send_to / local_endpoint).  close()
+     *  releases it.  A plain std::unique_ptr was a data race: the
+     *  retransmit thread read the pointer while close() reset it
+     *  (TSan: "data race" on the unique_ptr's storage in
+     *  ArqRawUdp::retransmit_main() vs. ArqRawUdp::close()).
+     *
+     *  It is a shared_ptr so that a worker that grabbed a reference
+     *  keeps the socket alive even if close() releases the owner's
+     *  reference; the pointer is handed out under socket_mu_. */
+    std::shared_ptr<UdpSocket> socket_;
+    mutable std::mutex socket_mu_;        // guards socket_
 
     plugins::Endpoint peer_endpoint_;
     mutable std::mutex peer_mu_;       // guards peer_endpoint_ reads/writes
@@ -373,7 +427,23 @@ private:
     std::thread retransmit_thread_;
     std::atomic<bool> retransmit_thread_should_stop_{false};
 
-    RawUdpStats stats_;
+    /** The statistics counters.
+     *
+     *  They are incremented by the recv thread, the retransmit thread
+     *  and the caller thread, and read as a snapshot by stats() from
+     *  the caller thread.  A plain `RawUdpStats` member was a data
+     *  race (TSan: read of size 8 in ArqRawUdp::stats() vs. write in
+     *  ArqRawUdp::retransmit_main()).  The public `RawUdpStats` type is
+     *  part of the stable API and stays plain; the atomic counters
+     *  live next to it and are assembled into a snapshot on demand. */
+    std::atomic<std::uint64_t> stat_packets_sent_{0};
+    std::atomic<std::uint64_t> stat_packets_recv_{0};
+    std::atomic<std::uint64_t> stat_packets_retransmit_{0};
+    std::atomic<std::uint64_t> stat_packets_dropped_{0};
+    std::atomic<std::uint64_t> stat_acks_sent_{0};
+    std::atomic<std::uint64_t> stat_acks_recv_{0};
+    std::atomic<std::uint64_t> stat_nacks_sent_{0};
+    std::atomic<std::uint64_t> stat_nacks_recv_{0};
 };
 
 // ---- Test hooks (free functions in nimrtc::raw_udp namespace). -------------

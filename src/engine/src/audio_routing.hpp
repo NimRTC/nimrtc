@@ -310,7 +310,6 @@ inline std::string build_negotiated_opus_fmtp(const OpusFmtpParams& peer) {
 // ---------------------------------------------------------------------------
 // The ssrc-audio-level header extension (B-14)
 // ---------------------------------------------------------------------------
-
 /** The RTP header extension URI for the audio level (RFC 6464). */
 inline constexpr std::string_view kAudioLevelExtUri =
     "urn:ietf:params:rtp-hdrext:ssrc-audio-level";

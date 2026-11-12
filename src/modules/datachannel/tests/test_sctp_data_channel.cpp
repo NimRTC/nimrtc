@@ -49,6 +49,24 @@ using nimrtc::plugins::Status;
 using nimrtc::sctp::ISctpSocket;
 
 // ---------------------------------------------------------------------------
+// MockSctpSpy — out-of-band observation point for the mock socket.
+//
+// The mock is owned by the SctpDataChannel and is therefore destroyed
+// by `close()` (that is exactly the behaviour the test asserts: the
+// channel tears the socket down).  Reading the mock's fields *after*
+// `close()` is a heap-use-after-free — ASan flags it — so the mock
+// publishes its observable state into this shared spy object, which
+// outlives the socket itself.
+// ---------------------------------------------------------------------------
+struct MockSctpSpy {
+    /** True once `set_on_recv` was called with a non-empty callback. */
+    std::atomic<bool> recv_callback_set{false};
+    /** True once `set_on_recv` was called with an empty callback
+     *  (i.e. the channel cleared it during close()). */
+    std::atomic<bool> recv_callback_cleared{false};
+};
+
+// ---------------------------------------------------------------------------
 // MockSctpSocket — minimal ISctpSocket that records every send method call.
 //
 // Used by every test that needs to verify "the channel routed to the
@@ -84,6 +102,14 @@ public:
 
     MockSctpSocket() = default;
     ~MockSctpSocket() override = default;
+
+    /** Attach an out-of-band observation point. The spy must outlive
+     *  the socket — it is how the tests observe state *after* the
+     *  channel destroyed the mock (which would otherwise be a
+     *  use-after-free). */
+    void set_spy(std::shared_ptr<MockSctpSpy> spy) noexcept {
+        spy_ = std::move(spy);
+    }
 
     MockSctpSocket(const MockSctpSocket&)            = delete;
     MockSctpSocket& operator=(const MockSctpSocket&) = delete;
@@ -139,6 +165,13 @@ public:
         try {
             std::lock_guard<std::mutex> lk(recv_mu_);
             on_recv_ = std::move(cb);
+            if (spy_) {
+                if (on_recv_) {
+                    spy_->recv_callback_set.store(true);
+                } else {
+                    spy_->recv_callback_cleared.store(true);
+                }
+            }
         } catch (...) {
             // Best-effort: the next test cleanup will reset state.
         }
@@ -199,6 +232,7 @@ private:
 
     mutable std::mutex                 recv_mu_;
     nimrtc::plugins::OnSctpRecvCb      on_recv_;
+    std::shared_ptr<MockSctpSpy>       spy_;
 
     Status datagram_rc_   = nimrtc::plugins::kOk;
     Status stream_rc_     = nimrtc::plugins::kOk;
@@ -421,18 +455,24 @@ TEST(SctpDataChannel, SendAfterOpenQueuesToSocket) {
 // Test 7 (bonus): close() is idempotent and tears down the socket.
 // ---------------------------------------------------------------------------
 TEST(SctpDataChannel, CloseIsIdempotentAndTearsDownSocket) {
+    auto spy = std::make_shared<MockSctpSpy>();
     auto mock = std::make_unique<MockSctpSocket>();
+    mock->set_spy(spy);
     auto* mock_raw = mock.get();
 
     SctpDataChannel ch(std::move(mock));
     ASSERT_EQ(ch.open(), nimrtc::plugins::kOk);
     EXPECT_TRUE(ch.is_opened());
     EXPECT_TRUE(mock_raw->has_recv_callback());
+    EXPECT_TRUE(spy->recv_callback_set.load());
 
     ch.close();
     EXPECT_FALSE(ch.is_opened());
     EXPECT_FALSE(ch.is_socket_ready());
-    EXPECT_FALSE(mock_raw->has_recv_callback())
+    // NOTE: the mock socket is destroyed by close() (that IS the
+    // teardown this test asserts), so the "callback was cleared" check
+    // reads the out-of-band spy instead of the (freed) mock.
+    EXPECT_TRUE(spy->recv_callback_cleared.load())
         << "close() must clear the SCTP recv callback so usrsctp's "
            "worker thread can't fire into a torn-down channel";
 

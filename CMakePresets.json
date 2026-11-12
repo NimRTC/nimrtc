@@ -189,6 +189,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "ON",
+        "NIMRTC_TSAN": "OFF",
         "NIMRTC_UBSAN": "OFF",
         "NIMRTC_WARNINGS_AS_ERRORS": "ON"
       }
@@ -201,6 +202,46 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "NIMRTC_ASAN": "OFF",
+        "NIMRTC_TSAN": "OFF",
+        "NIMRTC_UBSAN": "ON",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer (GCC/Clang, Linux)",
+      "description": "Debug build with ThreadSanitizer enabled",
+      "inherits": ["dev.gcc"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_TSAN": "ON",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "tsan.clang",
+      "displayName": "ThreadSanitizer (Clang compiler-rt, Linux)",
+      "description": "Debug build with ThreadSanitizer enabled, using Clang's compiler-rt TSan instead of GCC's libtsan. GCC 11's libtsan does not intercept pthread_cond_clockwait(), which libstdc++ uses for condition_variable::wait_for()/wait_until() with a steady_clock deadline. TSan therefore never sees the unlock/relock that happens inside such a wait and reports a bogus 'double lock of a mutex' for every timed condition-variable wait in the tree. Clang's compiler-rt TSan handles it correctly.",
+      "inherits": ["dev.clang"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "OFF",
+        "NIMRTC_TSAN": "ON",
+        "NIMRTC_UBSAN": "OFF",
+        "NIMRTC_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "AddressSanitizer + UndefinedBehaviourSanitizer (GCC/Clang, Linux)",
+      "description": "Debug build with both ASan and UBSan enabled (they compose; TSan does not)",
+      "inherits": ["dev.gcc"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMRTC_ASAN": "ON",
+        "NIMRTC_TSAN": "OFF",
         "NIMRTC_UBSAN": "ON",
         "NIMRTC_WARNINGS_AS_ERRORS": "ON"
       }
@@ -318,6 +359,21 @@
       "configurePreset": "ubsan"
     },
     {
+      "name": "tsan",
+      "displayName": "Build: TSan (Linux)",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "tsan.clang",
+      "displayName": "Build: TSan (Clang compiler-rt, Linux)",
+      "configurePreset": "tsan.clang"
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Build: ASan + UBSan (Linux)",
+      "configurePreset": "asan-ubsan"
+    },
+    {
       "name": "coverage",
       "displayName": "Build: Coverage (Linux)",
       "configurePreset": "coverage"
@@ -339,6 +395,58 @@
       "displayName": "Run all tests (Debug/Linux)",
       "description": "Run all tests via ctest",
       "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.tsan",
+      "displayName": "Run all tests (TSan/Linux)",
+      "description": "Run all tests via ctest under ThreadSanitizer",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.tsan.clang",
+      "displayName": "Run all tests (TSan, Clang compiler-rt/Linux)",
+      "description": "Run all tests via ctest under ThreadSanitizer (Clang's compiler-rt TSan)",
+      "configurePreset": "tsan.clang",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.asan",
+      "displayName": "Run all tests (ASan/Linux)",
+      "description": "Run all tests via ctest under AddressSanitizer",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "tests.asan-ubsan",
+      "displayName": "Run all tests (ASan+UBSan/Linux)",
+      "description": "Run all tests via ctest under AddressSanitizer + UBSan",
+      "configurePreset": "asan-ubsan",
       "output": {
         "outputOnFailure": true
       },

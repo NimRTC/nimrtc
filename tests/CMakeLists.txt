@@ -1343,6 +1343,25 @@ nimrtc_add_engine_test(test_engine_ref_frame test_engine_ref_frame.cpp)
 nimrtc_add_engine_test(test_engine_session test_engine_session.cpp)
 
 # ---------------------------------------------------------------------------
+# v1.2.0 (session capability plan) — D3 / D4: the RFC 4733 SDP declaration
+# and the unknown-payload-type counting semantics.
+#
+# D3 — a default engine offers no telephone-event line (OD-B), an engine
+#      that was asked for DTMF declares `a=rtpmap:<pt> telephone-event/8000`
+#      and `a=fmtp:<pt> 0-16` exactly once, and the answer carries the
+#      *negotiated* event codes rather than a blind echo of the offer.
+# D4 — a negotiated telephone-event payload is decoded and reported, and is
+#      NOT counted as an unknown audio payload type; an unnegotiated one
+#      still counts as unknown.
+#
+# The DTMF codec's own wire format is covered by
+# `src/modules/dtmf/tests/test_dtmf_codec.cpp`.
+#
+# Shell transport strategy, no ICE/DTLS handshake involved.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_dtmf test_engine_dtmf.cpp)
+
+# ---------------------------------------------------------------------------
 # Fuzz targets + corpus replay driver (P2 hardening, 2026-11-09).
 #
 # The three `run_*()` entry points (SDP / RTP / video payload) live in

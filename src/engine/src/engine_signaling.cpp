@@ -27,6 +27,149 @@ bool audio_encoding_decodable(const std::string& encoding) {
     return core::PluginRegistry::instance().get_audio_decoder(encoding) != nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// RFC 4733 (telephone-event) helpers
+// ---------------------------------------------------------------------------
+
+/** The RFC 4733 encoding name.
+ *
+ *  RFC 4733 §2.3.2 declares the payload type with the encoding name
+ *  `telephone-event` and a clock rate of 8000 Hz. */
+constexpr std::string_view kTelephoneEventEncoding = "telephone-event";
+
+/** The telephone-event payload type a media description declares.
+ *
+ *  RFC 4733 §2.3.2 negotiates the payload type in the SDP: the
+ *  `a=rtpmap:` line carries the encoding name `telephone-event`.  The
+ *  payload type is therefore *read* from the description — it is never
+ *  assumed, because the two ends may pick different numbers (RFC 3264
+ *  §6.1: the answerer must use the offerer's number).
+ *
+ *  @return The payload type, or 0 when the section declares none.
+ */
+std::uint8_t telephone_event_payload_type(const sdp::MediaDescription& m) noexcept {
+    for (const auto& [fmt, map] : m.rtpmap) {
+        if (detail::decoder_id_for_encoding(map.encoding) !=
+            kTelephoneEventEncoding) {
+            continue;
+        }
+        std::uint8_t pt = 0;
+        if (!detail::parse_payload_type(fmt, pt)) continue;
+        return pt;
+    }
+    return 0;
+}
+
+/** Parse a single decimal event code.
+ *
+ *  Hand-rolled rather than `std::stoi`: the caller runs inside a
+ *  `noexcept` function, where a thrown `std::invalid_argument` would
+ *  terminate the process. */
+bool parse_event_code(std::string_view tok, int& out) noexcept {
+    if (tok.empty() || tok.size() > 3) return false;
+    int v = 0;
+    for (char c : tok) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+        if (v > 255) return false;
+    }
+    out = v;
+    return true;
+}
+
+/** The negotiated `a=fmtp:` event-code list of a telephone-event payload
+ *  type (RFC 4733 §2.3.2).
+ *
+ *  The format parameter lists the event codes the sender may use
+ *  ("0-16").  The answer carries the *negotiated* subset — the codes
+ *  both ends support — rather than a blind echo of the offer: an
+ *  answer that names a code the offerer never offered is a description
+ *  of something the peer will not accept.
+ *
+ *  @param peer_fmtp  The peer's format parameter (may be empty).
+ *  @return The negotiated list ("0-16"), or an empty string when the
+ *          two ends have no event code in common (the caller then does
+ *          not negotiate the payload type at all). */
+std::string negotiate_dtmf_fmtp(std::string_view peer_fmtp) noexcept {
+    // The whole range RFC 4733 §2.1 defines.
+    constexpr int kFirstCode = 0;
+    constexpr int kLastCode  = 16;
+
+    // No format parameter at all: the RFC's default is the full range.
+    if (peer_fmtp.empty()) return "0-16";
+
+    // The peer's list, parsed.  A list is a comma-separated set of
+    // single codes ("5") and ranges ("0-16").
+    std::vector<int> peer_codes;
+    std::size_t pos = 0;
+    while (pos <= peer_fmtp.size()) {
+        const std::size_t comma = peer_fmtp.find(',', pos);
+        std::string_view tok = peer_fmtp.substr(
+            pos, comma == std::string_view::npos ? std::string_view::npos
+                                                  : comma - pos);
+        // Trim the surrounding blanks.
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) {
+            tok.remove_prefix(1);
+        }
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) {
+            tok.remove_suffix(1);
+        }
+        if (!tok.empty()) {
+            const std::size_t dash = tok.find('-');
+            int lo = 0;
+            int hi = 0;
+            bool ok = false;
+            if (dash == std::string_view::npos) {
+                ok = parse_event_code(tok, lo);
+                hi = lo;
+            } else {
+                ok = parse_event_code(tok.substr(0, dash), lo) &&
+                     parse_event_code(tok.substr(dash + 1), hi);
+            }
+            if (ok) {
+                if (lo > hi) std::swap(lo, hi);
+                for (int c = lo; c <= hi; ++c) peer_codes.push_back(c);
+            }
+        }
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+
+    // An unparsable list means the peer sent something we do not
+    // understand; the RFC's default (the full range) is the safe
+    // reading, and it is what a peer that says nothing gets too.
+    if (peer_codes.empty()) return "0-16";
+
+    // The negotiated subset: the codes the peer offered that are also
+    // codes we implement.
+    std::vector<int> common;
+    for (int c : peer_codes) {
+        if (c < kFirstCode || c > kLastCode) continue;
+        if (std::find(common.begin(), common.end(), c) != common.end()) continue;
+        common.push_back(c);
+    }
+    if (common.empty()) return {};
+
+    std::sort(common.begin(), common.end());
+
+    // Render the codes back as ranges ("0-16"), which is the form the
+    // RFC's own examples use.
+    std::string out;
+    std::size_t i = 0;
+    while (i < common.size()) {
+        std::size_t j = i;
+        while (j + 1 < common.size() && common[j + 1] == common[j] + 1) ++j;
+        if (!out.empty()) out += ",";
+        out += std::to_string(common[i]);
+        if (j > i) {
+            out += "-";
+            out += std::to_string(common[j]);
+        }
+        i = j + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 
@@ -131,6 +274,43 @@ std::string NimRTCEngine::create_offer() noexcept {
         audio.fmtp[pt] = config_.audio_codec.fmtp;
     } else if (detail::decoder_id_for_encoding(config_.audio_codec.encoding) == "opus") {
         audio.fmtp[pt] = detail::build_local_opus_fmtp(config_.pcm_channels);
+    }
+
+    // ---- a=rtpmap:<pt> telephone-event/8000 (RFC 4733 §2.3.2) --------
+    //
+    // The telephone-event payload type is negotiated in the SDP.  Without
+    // the declaration the peer does not know that this session carries
+    // in-band DTMF, and a telephone-event packet would arrive on a
+    // payload type it never agreed to (RFC 3264 §6.1).
+    //
+    // The declaration is made only when the host asked for DTMF
+    // (`EngineConfig::dtmf_enabled`) *and* the codec resolved — the
+    // decision OD-B of the session capability plan: DTMF is off by
+    // default, so the default offer carries no telephone-event line and
+    // the pre-existing drop path for an unknown audio payload type
+    // stays untouched.
+    if (config_.dtmf_enabled && dtmf_codec_ &&
+        config_.dtmf_payload_type != config_.audio_codec.payload_type) {
+        const std::string dpt = std::to_string(config_.dtmf_payload_type);
+        audio.formats.push_back(dpt);
+
+        sdp::MediaDescription::RtpMap dtmf_map;
+        dtmf_map.encoding   = std::string(kTelephoneEventEncoding);
+        dtmf_map.clock_rate = 8000;   // RFC 4733 §2.4
+        dtmf_map.channels   = 1;
+        audio.rtpmap[dpt]   = dtmf_map;
+
+        // The format parameter lists the event codes this side may send
+        // (RFC 4733 §2.3.2).  The engine implements the whole range the
+        // RFC defines (0..16).
+        audio.fmtp[dpt]     = "0-16";
+    } else if (dtmf_codec_ &&
+               config_.dtmf_payload_type == config_.audio_codec.payload_type) {
+        core::log::Logger::instance().warn(
+            "engine[dtmf]: dtmf_payload_type (" +
+            std::to_string(config_.dtmf_payload_type) +
+            ") collides with the audio payload type — the telephone-event "
+            "payload type is not offered");
     }
 
     // a=ssrc:<audio_ssrc> cname:nimrtc-audio (RFC 5576 section 4.1).
@@ -683,6 +863,69 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     impl_->audio_rx_disabled = false;
     impl_->audio_codec_unsupported_reported = false;
     impl_->pt_routing_active = true;
+
+    // ---- Negotiated telephone-event payload type (RFC 4733 §2.3.2) ----
+    //
+    // A telephone-event payload type is negotiated like any other
+    // payload type: the *peer's* description names it, and both ends
+    // then use that number (RFC 3264 §6.1 — the answer may only use a
+    // payload type the offer contained, and the answerer must use the
+    // offerer's number).
+    //
+    // The two cases differ in what "the peer's number" is:
+    //
+    //   * we are the answerer (the remote description is an offer): the
+    //     offerer's number is the one we use, in *both* directions;
+    //   * we are the offerer (the remote description is an answer): the
+    //     answer must echo the number *we* offered, so a different
+    //     number is a protocol violation and is ignored.
+    //
+    // Zero means "not negotiated", and that is the state in which a
+    // received telephone-event payload still counts as an unknown audio
+    // payload type (decision D4).
+    negotiated_dtmf_pt_ = 0;
+    negotiated_dtmf_fmtp_.clear();
+    if (dtmf_codec_) {
+        for (const auto& m : remote.media) {
+            if (m.type != sdp::MediaType::Audio) continue;
+            const std::uint8_t pt = telephone_event_payload_type(m);
+            if (pt == 0) continue;
+            if (remote_is_answer && pt != config_.dtmf_payload_type) {
+                core::log::Logger::instance().warn(
+                    "engine[dtmf]: the peer's answer names the telephone-event "
+                    "payload type " + std::to_string(pt) +
+                    ", but our offer carried " +
+                    std::to_string(config_.dtmf_payload_type) +
+                    " — the telephone-event payload type is not negotiated");
+                continue;
+            }
+            // The event codes: the peer's list narrowed to the codes
+            // this side implements.  An empty result means the two ends
+            // have no event code in common, and the payload type is then
+            // not negotiated at all.
+            const std::string dpt = std::to_string(pt);
+            const std::string fmtp = negotiate_dtmf_fmtp(
+                m.fmtp.count(dpt) ? m.fmtp.at(dpt) : std::string{});
+            if (fmtp.empty()) {
+                core::log::Logger::instance().warn(
+                    "engine[dtmf]: the peer offers no event code NimRTC "
+                    "implements — the telephone-event payload type is not "
+                    "negotiated");
+                continue;
+            }
+            negotiated_dtmf_pt_ = pt;
+            negotiated_dtmf_fmtp_ = fmtp;
+            core::log::Logger::instance().info(
+                "engine[dtmf]: negotiated telephone-event payload type " +
+                std::to_string(pt) + " (events " + fmtp + ")");
+            break;
+        }
+    }
+    // The DTMF negotiation restarts with every description: the block
+    // above resets `negotiated_dtmf_pt_` / `negotiated_dtmf_fmtp_`
+    // before it starts, so a peer that stops offering telephone-event
+    // in its next offer stops being treated as a DTMF peer (decision
+    // D4).
 
     for (const auto& m : remote.media) {
         if (m.type != sdp::MediaType::Audio &&
@@ -1355,6 +1598,28 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                         ? detail::build_local_opus_fmtp(config_.pcm_channels)
                         : impl_->negotiated_opus_fmtp_text;
                 if (!negotiated.empty()) am.fmtp[selected] = negotiated;
+
+                // ---- The telephone-event payload type (RFC 4733 §2.3.2) --
+                //
+                // The answer names the payload type the *offer* carried
+                // (RFC 3264 §6.1: the answer's format list is a subset
+                // of the offer's) and echoes its `a=rtpmap:` line — the
+                // answerer has to use the offerer's number, in both
+                // directions.
+                //
+                // The `a=fmtp:` line carries the *negotiated* event
+                // codes — the codes both ends support — not a blind echo
+                // of the offer.  An answer that names a code the offerer
+                // never offered describes something the peer will not
+                // accept.
+                if (negotiated_dtmf_pt_ != 0 && !negotiated_dtmf_fmtp_.empty()) {
+                    const std::string dpt =
+                        std::to_string(negotiated_dtmf_pt_);
+                    am.formats.push_back(dpt);
+                    auto dit = rm.rtpmap.find(dpt);
+                    if (dit != rm.rtpmap.end()) am.rtpmap[dpt] = dit->second;
+                    am.fmtp[dpt] = negotiated_dtmf_fmtp_;
+                }
             } else {
                 // Nothing the peer offered is decodable here, so the
                 // m-line is rejected (RFC 3264 §6.1: a rejected m-line

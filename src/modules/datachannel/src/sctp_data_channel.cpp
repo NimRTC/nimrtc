@@ -165,6 +165,15 @@ SctpDataChannel::~SctpDataChannel() {
     // belt-and-braces: if the user forgot to call close() before
     // destruction, drop the socket here so usrsctp's recv thread
     // doesn't fire callbacks into a freed object.
+    //
+    // A destructor must not invoke user callbacks either: the
+    // callback target is usually a sibling on the caller's stack that
+    // was declared *before* the channel, so it is already destroyed
+    // when the channel dies.  Firing "closed" from here wrote into
+    // freed memory (ASan: heap-use-after-free in the test's state
+    // vector).  Detach the callbacks first, then tear down.
+    on_state_ = nullptr;
+    on_msg_ = nullptr;
     close();
 }
 

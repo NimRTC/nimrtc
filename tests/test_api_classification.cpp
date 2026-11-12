@@ -332,6 +332,14 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - rtp/xr_report_plugin.hpp (the module-side adapter that puts
     //       the XR parser behind the seam)
     //
+    // v1.3 bump: +3 public headers (122 -> 125) for the shared `nvcodec`
+    //   module -- the NVIDIA driver integration (NVENC / NVDEC) that the
+    //   H.264, H.265 and AV1 codec modules consume:
+    //     - nvcodec/nv_codec_kind.hpp (the codec descriptor table)
+    //     - nvcodec/nv_backends.hpp (the codec-generic NVENC / NVDEC
+    //       entry points)
+    //     - nvcodec/hw_composite_codec.hpp (the encoder+decoder adapter)
+    //
     // `session/track.hpp` already existed at v1.1.0 and is part of the
     // 113 baseline; it is only listed above because the two session
     // headers that are new are siblings of it.
@@ -341,7 +349,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 122;
+    constexpr std::size_t kBaselineHeaderCount = 125;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

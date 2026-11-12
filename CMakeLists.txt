@@ -49,24 +49,25 @@ option(NIMRTC_FUZZING          "Build the libFuzzer harnesses (Clang only; the c
 #   - QSV/libvpl   : Windows + Linux (Intel GPU + driver)
 #   - DXVA         : Windows only
 #   - VA-API       : Linux only
-#   - NVDEC        : seam id only — the decoder is NOT implemented, so the
-#                    "nvdec_h264" backend is registered but its
-#                    `available()` returns false and `create()` returns
-#                    nullptr.  See src/modules/h264/src/nvenc_encoder.cpp.
-#   - VideoToolbox : macOS only — NOT implemented (same shape as NVDEC)
-#   - MediaCodec   : Android only — NOT implemented (same shape as NVDEC)
+#   - NVDEC        : Windows + Linux (NVIDIA drivers) — decoder, backed by
+#                    the vendored MIT-licensed nv-codec-headers.  It talks
+#                    to nvcuvid.dll / nvcuda.dll at runtime, so no NVIDIA
+#                    binary is linked.  See
+#                    src/modules/h264/src/nvdec_decoder.cpp.
+#   - VideoToolbox : macOS only — NOT implemented (same shape as NVDEC was)
+#   - MediaCodec   : Android only — NOT implemented (same shape as NVDEC was)
 #
 # Each switch is a *runtime* decision (you can flip it on/off without
 # touching CMake) — see HW codec plugin docs.  The CMake flag controls
 # whether the SDK is even *attempted* to be located on the build host.
 # -----------------------------------------------------------------------------
-option(NIMRTC_PLUGINS_NVENC  "Build NVIDIA NVENC H.264 encoder (the NVDEC decoder is NOT implemented)" OFF)
-option(NIMRTC_PLUGINS_AMF    "Build AMD AMF H.264 encoder"                             OFF)
-option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 encoder"  OFF)
-option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                      OFF)
-option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder (Linux Intel/AMD)"             OFF)
-option(NIMRTC_PLUGINS_NVDEC  "Register the NVIDIA NVDEC H.264 decoder seam id (the decoder itself is NOT implemented)" OFF)
-option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                 OFF)
+option(NIMRTC_PLUGINS_NVENC  "Build NVIDIA NVENC H.264 encoder"                                    OFF)
+option(NIMRTC_PLUGINS_AMF    "Build AMD AMF H.264 encoder"                                          OFF)
+option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 encoder"               OFF)
+option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                                   OFF)
+option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder (Linux Intel/AMD)"                          OFF)
+option(NIMRTC_PLUGINS_NVDEC  "Build NVIDIA NVDEC H.264 decoder"                                     OFF)
+option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                              OFF)
 
 # Helper that prints a one-liner summary at the end of CMake configure.
 set(_nimrtc_hw_summary "")
@@ -118,6 +119,7 @@ option(NIMRTC_MODULE_VIDEO_FRAME   "Build video frame module (pixel formats, lay
 option(NIMRTC_MODULE_VIDEO_PAYLOAD "Build video RTP payload module (H.264/VP8/VP9 packetizers)"  ON)
 option(NIMRTC_MODULE_VIDEO_JB      "Build video-aware jitter buffer module (FU-A reassembly)"     ON)
 option(NIMRTC_MODULE_H264          "Build H.264 module (bitstream + stub decoder + plugin adapter)" ON)
+option(NIMRTC_MODULE_NVCODEC       "Build shared NVIDIA codec module (NVENC / NVDEC, H.264+H.265+AV1)" ON)
 # Video R2:
 option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
        "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)

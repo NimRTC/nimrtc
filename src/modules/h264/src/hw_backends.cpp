@@ -8,12 +8,17 @@
  *
  * The actual HW backends live in individual source files under
  * src/modules/h264/src/:
- *   - nvenc_encoder.cpp  : NVIDIA NVENC + NVDEC   (NIMRTC_PLUGINS_NVENC_ON)
  *   - amf_encoder.cpp    : AMD AMF                (NIMRTC_PLUGINS_AMF_ON, Win)
  *   - qsv_encoder.cpp    : Intel QSV / libvpl     (NIMRTC_PLUGINS_QSV_ON)
  *   - dxva_decoder.cpp   : Microsoft DXVA/MF        (NIMRTC_PLUGINS_DXVA_ON, Win)
  *   - vaapi_encoder.cpp  : Linux VA-API           (NIMRTC_PLUGINS_VAAPI_ON, Linux)
  *   - openh264_encoder.cpp: OpenH264              (NIMRTC_PLUGINS_OPENH264_ON)
+ *
+ * The NVIDIA backends (NVENC / NVDEC) are *shared* with the H.265 and
+ * AV1 codec modules: they live in the `nvcodec` module, which owns the
+ * driver integration and exposes it through codec-parameterised entry
+ * points (`nvcodec::nvenc_codec_available()` and friends).  This module
+ * simply registers the H.264-flavoured entries for them.
  *
  * Each source file exposes two symbols (stub when SDK absent):
  *   bool    <backend>_h264_available() noexcept;
@@ -27,6 +32,8 @@
 
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/h264/codec_plugin.hpp>
+#include <nimrtc/nvcodec/nv_backends.hpp>
+#include <nimrtc/nvcodec/nv_codec_kind.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
 namespace nimrtc::h264 {
@@ -36,33 +43,7 @@ namespace nimrtc::h264 {
 // source file compiles the real implementation; otherwise the stub
 // (returning nullptr / false) is used.  Declared inside the
 // `nimrtc::h264` namespace so they match the definitions in
-// nvenc_encoder.cpp / amf_encoder.cpp / etc.
-
-#if defined(NIMRTC_PLUGINS_NVENC_ON)
-extern bool nvenc_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_nvenc_h264_codec(plugins::VideoCodecConfig cfg);
-extern bool nvdec_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_nvdec_h264_codec(plugins::VideoCodecConfig cfg);
-#define HAS_NVENC 1
-#else
-#define HAS_NVENC 0
-#endif
-
-// NVDEC can be requested on its own (NIMRTC_PLUGINS_NVDEC=ON) without
-// NVENC.  The NVDEC decoder is not implemented, so the entry is only
-// registered to keep the seam id stable — but it MUST be registered here,
-// otherwise a NVDEC-only build would silently drop the "nvdec_h264" id
-// from the registry while the CMake option claimed to enable it.
-#if defined(NIMRTC_PLUGINS_NVDEC_ON) || defined(NIMRTC_PLUGINS_NVENC_ON)
-extern bool nvdec_h264_available() noexcept;
-extern std::unique_ptr<plugins::IVideoCodec>
-make_nvdec_h264_codec(plugins::VideoCodecConfig cfg);
-#define HAS_NVDEC 1
-#else
-#define HAS_NVDEC 0
-#endif
+// amf_encoder.cpp / qsv_encoder.cpp / etc.
 
 #if defined(NIMRTC_PLUGINS_AMF_ON) && defined(_WIN32)
 extern bool amf_h264_available() noexcept;
@@ -184,9 +165,12 @@ plugins::VideoEncoderBackend make_openh264_encoder_backend() {
 
 // ---------------------------------------------------------------------------
 // NVENC —NVIDIA. Priority 450. available() probes the SDK directly.
+//
+// The probe is codec-aware: it initializes a real encoder session for
+// the requested codec, so a GPU without an HEVC (or AV1) encoder reports
+// "not available" instead of "yes, because NVENC exists".
 // ---------------------------------------------------------------------------
 
-#if HAS_NVENC
 plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "nvenc_h264";
@@ -197,42 +181,43 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
     be.is_hw          = true;
     be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
-        return nvenc_h264_available();
+        return nvcodec::nvenc_codec_available(nvcodec::NvCodec::kH264);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_nvenc_h264_codec(std::move(cfg));
+        return nvcodec::make_nvenc_codec(nvcodec::NvCodec::kH264, std::move(cfg));
     };
     return be;
 }
 
+// ---------------------------------------------------------------------------
+// NVDEC — NVIDIA hardware decoder. Priority 430.
+//
+// Registered independently of NVENC: a decode-only build (or a host whose
+// NVENC session is unusable) must still expose the `nvdec_h264` seam id
+// when the NIMRTC_PLUGINS_NVDEC option is on.
+// ---------------------------------------------------------------------------
+
 plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
     plugins::VideoDecoderBackend be;
     be.id             = "nvdec_h264";
-    // NOTE: the NVDEC decoder is NOT implemented — `create()` returns
-    // nullptr.  The entry is kept so the seam ids and the
-    // `HwBackend::Nvdec` kind stay stable, and `available()` is wired to
-    // `nvdec_h264_available()`, which returns false for exactly that
-    // reason.  The selector therefore never picks this backend.
-    be.description    = "NVIDIA NVDEC H.264 decoder (NOT IMPLEMENTED — create() returns nullptr)";
+    be.description    = "NVIDIA NVDEC H.264 decoder";
     be.backend        = plugins::HwBackend::Nvdec;
     be.priority       = 430;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    // No GPU output surface is produced, so the zero-copy path does not
-    // apply — claiming it would make the engine wire a pool that never
-    // receives a buffer.
+    // The decoder copies the mapped NV12 surface into host memory, so it
+    // produces no GPU output surface — the zero-copy path does not apply.
     be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
-        return nvdec_h264_available();
+        return nvcodec::nvdec_codec_available(nvcodec::NvCodec::kH264);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return make_nvdec_h264_codec(std::move(cfg));
+        return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH264, std::move(cfg));
     };
     return be;
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // VideoToolbox —Apple. Priority 400. macOS only.
@@ -416,13 +401,12 @@ void register_default_video_backends() noexcept {
     reg.register_encoder(make_openh264_encoder_backend());
 #endif
 
-#if HAS_NVENC
+    // The NVENC / NVDEC entries are always registered — the availability
+    // probe is what decides whether they are usable, and the probe is
+    // honest about both "no NVIDIA driver" and "this GPU has no encoder
+    // for that codec".
     reg.register_encoder(make_nvenc_encoder_backend());
-#endif
-
-#if HAS_NVDEC
     reg.register_decoder(make_nvdec_decoder_backend());
-#endif
 
 #ifdef __APPLE__
     reg.register_encoder(make_videotoolbox_encoder_backend());

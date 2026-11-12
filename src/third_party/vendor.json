@@ -123,6 +123,18 @@
       "build": "add_subdirectory(src) — see src/third_party/msquic/CMakeLists.txt",
       "notes": "WebTransport / QUIC backend for IWebTransportSession. Source populated by git submodule; CMakeLists.txt wraps the upstream src/CMakeLists.txt and exposes nimrtc_vendor_msquic. ADR-014 Criterion 5 (active maintenance: < 180 days) is verified at build time by interop/v0_14_msquic_spike/ CMake scripts. If criterion 5 fails, ADR-014 reopens and the fallback is quiche (BSD-2, C API). Last upstream commit: 2026-10-16 (3 days ago as of 2026-10-19). The submodule tracks the NimRTC fork, whose 'nimrtc-patches' branch is upstream 42376ae plus one NimRTC commit (a5ae3a06) that forces the dummy raw datapath on Windows, because the xdp-for-windows SDK is absent in the CI build environment. The pin is pushed to github.com/NimRTC/msquic, so it is fetchable from a fresh clone.",
       "size_estimate": "~30 MB / 500 files"
+    },
+    {
+      "name": "nv_codec_headers",
+      "upstream_url": "https://github.com/FFmpeg/nv-codec-headers.git",
+      "upstream_version": "n13.1.15.0",
+      "commit_sha": "0a6fba9a2820628b8103464f4c8753ee05838baa",
+      "submodule_path": "src/third_party/nv_codec_headers",
+      "submodule": false,
+      "license": "MIT",
+      "build": "header-only INTERFACE library — see src/third_party/nv_codec_headers/CMakeLists.txt",
+      "notes": "NVIDIA Video Codec SDK headers (nvEncodeAPI.h for NVENC, plus the nvcuvid / CUVID and FFmpeg-style dynamic-loader headers used by the NVDEC decoder). MIT-licensed: the headers are NVIDIA's own, redistributed by the FFmpeg project under the MIT licence, with the notice embedded in every file. NOT a submodule: the headers are checked into this repository rather than fetched, because they pin the struct ABI the NVENC / NVDEC backends build against — a submodule would allow the pin to drift away from the headers actually compiled, and the whole point of the vendored copy is that the struct layouts and the struct-version words come from the same header set (see README.md next to the headers and docs/hw_plugin_seam.md §12.1). 'submodule': false tells tools/check_vendor.py that this is a checked-in tree, so the manifest SHA documents the upstream revision it was taken from rather than describing the tree itself. No NVIDIA binary is linked or shipped: the backends load nvEncodeAPI64.dll / nvcuvid.dll / nvcuda.dll from the installed driver at runtime.",
+      "size_estimate": "0.5 MB / 6 files (header-only)"
     }
   ],
 

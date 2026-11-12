@@ -47,19 +47,14 @@ if(NOT NVENC_INCLUDE_DIR)
     endif()
 
     list(APPEND _probe_paths
+        # The vendored header pack comes first: it is the pinned ABI NimRTC
+        # builds against (see src/third_party/nv_codec_headers/README.md),
+        # and it is MIT-licensed, so a machine without the NVIDIA SDK
+        # installed can still build the NVENC / NVDEC backends.
+        "${CMAKE_SOURCE_DIR}/src/third_party/nv_codec_headers/include/ffnvcodec"
         # Windows — legacy Video Codec SDK install (pre-CUDA 12)
         "C:/Program Files/NVIDIA Video Codec SDK"
         "C:/Program Files (x86)/NVIDIA Video Codec SDK"
-        # SDK 11.1.5 (legacy ffnvcodec header pack — what driver 591.x
-        # and many older Game Ready drivers were built against).
-        # Probe both the ffnvcodec/ subdir layout and the SDK's canonical
-        # Interface/ layout, since the two projects ship the same files
-        # under different names.
-        "D:/MyOpen/NimRTC/build/nv_sdk/Video_Codec_Interface_11.1.5/include/ffnvcodec"
-        "D:/MyOpen/NimRTC/build/nv_sdk/Video_Codec_Interface_11.1.5/include"
-        "D:/MyOpen/NimRTC/build/nv_sdk/Video_Codec_Interface_11.1.5/Interface"
-        # SDK 13.1.15 (current full NVIDIA Video Codec SDK)
-        "D:/MyOpen/NimRTC/build/nv_sdk/Video_Codec_Interface_13.1.15/Interface"
         # CUDA include (header is also shipped with the CUDA toolkit)
         "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
         "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.5/include"

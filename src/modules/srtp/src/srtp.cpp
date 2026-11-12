@@ -1,9 +1,7 @@
 /**
  * @file src/modules/srtp/src/srtp.cpp
- * @brief SRTP — libsrtp2 integration.
- *
- * Wraps libsrtp2 (RFC 3711) for SRTP_AES128_CM_SHA1_80 — the profile
- * negotiated by the DTLS-SRTP extension (RFC 5764) used in NimRTC.
+ * @brief SRTP — the engine-facing session/context, over the pluggable
+ *        crypto-backend seam.
  *
  * ## Suite mapping (libsrtp enums)
  *
@@ -12,15 +10,19 @@
  *   SrtpSuite::Aes128Gcm_128    ↔ srtp_profile_aead_aes_128_gcm
  *   SrtpSuite::Aes256CmSha1_80  ↔ srtp_profile_aes256_cm_sha1_80
  *
- * ## Key/salt layout
+ * ## Where the crypto lives
  *
- * libsrtp's `srtp_policy_add_key()` takes a single byte buffer of
- * `key_len + salt_len`.  For AES-CM-128 (key_len=16, salt_len=14) the
- * buffer is 30 bytes: `<16-byte key><14-byte salt>`.
+ * Since v1.2.0 (architecture remediation plan B7 / Q3) this file does
+ * **not** call libsrtp directly.  Every protect / unprotect goes
+ * through a `plugins::ISrtpSessionBackend` instance, and the built-in
+ * implementation of that seam is `LibsrtpSessionBackend`
+ * (`libsrtp_backend.cpp`).  A third-party backend registers under its
+ * own id and the engine selects it through
+ * `EngineConfig::srtp_backend_name`.
  *
- * When `enable_encryption` is true we add keys via `srtp_policy_add_key()`
- * directly from the master key + salt.  When false we add them but only
- * auth (placeholder, not exercised by NimRTC).
+ * `to_libsrtp_profile()` stays here because it is a public API that
+ * names a profile id; the mapping itself is the only libsrtp-specific
+ * knowledge this file keeps.
  *
  * ## Threading
  *
@@ -30,7 +32,6 @@
 #include <nimrtc/srtp/srtp.hpp>
 
 #include <cstring>
-#include <mutex>
 #include <unordered_map>
 
 #include <srtp.h>
@@ -38,28 +39,18 @@
 #include <nimrtc/core/error.hpp>
 #include <nimrtc/core/log.hpp>
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/srtp/libsrtp_backend.hpp>
 
 namespace nimrtc::srtp {
 
 namespace {
 
-// libsrtp init guard — srtp_init() must be called once before any other
-// srtp_*.  Use std::call_once on first use.
-std::once_flag g_srtp_init_once;
-
-void ensure_srtp_init() {
-    std::call_once(g_srtp_init_once, [] {
-        srtp_err_status_t rc = srtp_init();
-        if (rc != srtp_err_status_ok) {
-            core::log::Logger::instance().error(
-                "srtp_init() failed — SRTP unusable");
-        } else {
-            core::log::Logger::instance().debug(
-                "libsrtp2 initialised");
-        }
-    });
-}
-
+// libsrtp profile mapping.
+//
+// The crypto itself now lives in `libsrtp_backend.cpp` (the
+// `ISrtpSessionBackend` adapter); this file only speaks the seam.  The
+// profile mapping is kept here because `to_libsrtp_profile()` is a
+// public API that callers use to name a profile id.
 srtp_profile_t to_lib_profile(CryptoSuite suite) noexcept {
     switch (suite) {
         case CryptoSuite::Aes128CmSha1_80: return srtp_profile_aes128_cm_sha1_80;
@@ -68,19 +59,6 @@ srtp_profile_t to_lib_profile(CryptoSuite suite) noexcept {
         case CryptoSuite::Aes256CmSha1_80: return srtp_profile_aes256_cm_sha1_80;
     }
     return srtp_profile_aes128_cm_sha1_80;
-}
-
-constexpr std::size_t kAuthTagLenSha1_80 = 10;
-constexpr std::size_t kAuthTagLenSha1_32 = 4;
-
-std::size_t auth_tag_len_for(CryptoSuite suite) noexcept {
-    switch (suite) {
-        case CryptoSuite::Aes128CmSha1_80:
-        case CryptoSuite::Aes256CmSha1_80: return kAuthTagLenSha1_80;
-        case CryptoSuite::Aes128CmSha1_32: return kAuthTagLenSha1_32;
-        case CryptoSuite::Aes128Gcm_128:   return 16;
-    }
-    return kAuthTagLenSha1_80;
 }
 
 } // anonymous namespace
@@ -123,10 +101,30 @@ struct SrtpSession::Impl {
 // `PluginRegistry::register_srtp_backend(id, &factory)`) and is picked
 // up by the engine through `EngineConfig::srtp_backend_name`.
 //
-// There is NO fallback to libsrtp here: an unknown id is an error, and
-// the engine turns it into a hard `open()` failure.  Silently
-// substituting a different crypto backend would be a security bug.
+// ## The built-in backend is always reachable
+//
+// The *default* id ("libsrtp") names the backend that ships with the
+// module, so it must work even when nobody has called
+// `core::register_all_default_plugins()` — a module-level consumer
+// that constructs an `SrtpContext` directly (the SRTP unit tests, the
+// DTLS-over-ARQ integration tests) never goes through the engine and
+// therefore never runs the registrar table.
+//
+// So the resolution has two tiers:
+//
+//   1. The registry, if it has an entry for the id.  A third party
+//      that registers "libsrtp" wins over the built-in — the registry
+//      is the override point.
+//   2. Otherwise, the built-in `LibsrtpSessionBackend`, but ONLY for
+//      the id "libsrtp".  Any other unregistered id is an error.
+//
+// There is NO fallback for an *unknown* id: substituting a different
+// crypto backend behind the user's back would be a security bug.  The
+// engine turns that into a hard `open()` failure.
 namespace {
+
+/** The id of the backend that ships with the module. */
+constexpr const char* kBuiltinBackendId = "libsrtp";
 
 std::unique_ptr<plugins::ISrtpSessionBackend> make_backend(
         const std::string& backend_id) {
@@ -135,17 +133,26 @@ std::unique_ptr<plugins::ISrtpSessionBackend> make_backend(
     auto& reg = nimrtc::core::PluginRegistry::instance();
     const plugins::ISrtpBackendFactory* factory =
         reg.get_srtp_backend(backend_id);
-    if (!factory) {
-        core::log::Logger::instance().error(
-            "SRTP: no crypto backend registered under id '" + backend_id + "'");
-        return nullptr;
+    if (factory) {
+        auto backend = factory->create();
+        if (!backend) {
+            core::log::Logger::instance().error(
+                "SRTP: crypto backend '" + backend_id + "' failed to create a session");
+        }
+        return backend;
     }
-    auto backend = factory->create();
-    if (!backend) {
-        core::log::Logger::instance().error(
-            "SRTP: crypto backend '" + backend_id + "' failed to create a session");
+
+    // No registry entry.  The built-in id still resolves — the module
+    // owns that implementation, and the caller may never have run the
+    // registrar table.
+    if (backend_id == kBuiltinBackendId) {
+        static const LibsrtpBackendFactory builtin{};
+        return builtin.create();
     }
-    return backend;
+
+    core::log::Logger::instance().error(
+        "SRTP: no crypto backend registered under id '" + backend_id + "'");
+    return nullptr;
 }
 
 /** Map the module's `CryptoSuite` onto the seam's suite id.  The two

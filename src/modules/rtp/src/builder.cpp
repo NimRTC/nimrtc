@@ -175,7 +175,23 @@ core::ByteBuffer PacketBuilder::build() const {
     core::ByteBuffer out;
     out.resize(compute_size());
 
-    std::uint8_t* buf = out.data();
+    const std::size_t written = build_into(out.data(), out.size());
+    // `build_into` can only fail when the buffer is too small, and the
+    // buffer was sized from `compute_size()` — the two agree by
+    // construction.  If they ever disagreed the packet would be
+    // truncated, so shrink to what was actually written rather than
+    // shipping zero padding.
+    if (written != out.size()) {
+        out.resize(written);
+    }
+    return out;
+}
+
+std::size_t PacketBuilder::build_into(std::uint8_t* buf,
+                                      std::size_t capacity) const noexcept {
+    const std::size_t needed = compute_size();
+    if (!buf || capacity < needed) return 0;
+
     std::size_t offset = 0;
 
     // Byte 0: version=2 (bits 6-7), padding flag, extension flag, CSRC count
@@ -279,7 +295,7 @@ core::ByteBuffer PacketBuilder::build() const {
         offset += padding_bytes_ + 1;
     }
 
-    return out;
+    return offset;
 }
 
 void PacketBuilder::reset() noexcept {

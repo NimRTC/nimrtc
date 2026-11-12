@@ -135,6 +135,25 @@ struct NIMRTC_API_STABLE RtcpBlock {
 [[nodiscard]] NIMRTC_API_STABLE std::vector<RtcpBlock>
 demux_rtcp(core::ByteSpan compound) noexcept;
 
+/// Split an RTCP compound datagram into a caller-owned vector — the
+/// allocation-free form of `demux_rtcp()`.
+///
+/// The receive path demultiplexes every inbound RTCP datagram, and the
+/// returned vector used to be a fresh heap allocation per datagram.
+/// A host that keeps one vector around and reuses it pays no
+/// allocation at all; the vector's capacity grows to the high-water
+/// mark and is then reused for every datagram.
+///
+/// The vector is **cleared** before the walk, so it holds exactly the
+/// blocks of this datagram and nothing else.  The blocks' `packet`
+/// spans still point into @p compound (the caller owns that buffer),
+/// exactly as in the returning overload.
+///
+/// @param compound  The compound datagram.
+/// @param out       The destination vector; cleared and then filled.
+void demux_rtcp(core::ByteSpan compound,
+                std::vector<RtcpBlock>& out) noexcept;
+
 // -----------------------------------------------------------------------------
 // REMB — Receiver Estimated Maximum Bitrate
 // -----------------------------------------------------------------------------

@@ -306,12 +306,21 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
         reinterpret_cast<const std::uint8_t*>(payload.data()),
         payload.size()));
 
-    auto pkt_buf = pb.build();
-    if (pkt_buf.empty()) {
+    // Serialise into the DTMF scratch (Phase 3 / C4) — see the note on
+    // `Impl::dtmf_rtp_scratch` for why this is not the audio scratch.
+    const std::size_t pkt_size = pb.compute_size();
+    if (impl_->dtmf_rtp_scratch.size() < pkt_size) {
+        impl_->dtmf_rtp_scratch.resize(pkt_size);
+    }
+    const std::size_t pkt_written =
+        pb.build_into(impl_->dtmf_rtp_scratch.data(),
+                      impl_->dtmf_rtp_scratch.size());
+    if (pkt_written == 0) {
         core::log::Logger::instance().error(
             "engine[dtmf]: the RTP packet could not be built");
         return false;
     }
+    const core::ByteSpan pkt_span(impl_->dtmf_rtp_scratch.data(), pkt_written);
 
     // --- Protect and send ----------------------------------------------
     //
@@ -320,10 +329,10 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     std::vector<std::uint8_t> send_buf;
     if (scheduler_) {
         send_buf = scheduler_->acquire_packet_buffer(
-            pkt_buf.size() + kSrtpAuthTagBytes);
+            pkt_span.size() + kSrtpAuthTagBytes);
     }
 
-    const core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
+    const core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
     if (impl_->srtp_installed && impl_->srtp) {
         auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
                                                /*outgoing=*/true);

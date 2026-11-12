@@ -422,6 +422,34 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** Capture / encode frame rate in frames per second. Default = 30. */
     std::uint32_t video_fps    = 30;
 
+    /** Enable the GPU zero-copy video send path (Phase 3 / C3).
+     *
+     *  Default = **off**, which preserves the existing behaviour exactly:
+     *  `send_video()` stages the source frame into a CPU `I420` buffer and
+     *  hands that to the codec.
+     *
+     *  When this is **on** and the source frame carries a live GPU handle
+     *  (`VideoSourceFrame::has_gpu_handle()`), the engine skips the CPU
+     *  staging entirely and hands the handle to the codec through
+     *  `IVideoCodec::encode_zero_copy()`.  The staging copy (a full-frame
+     *  memcpy plus, for NV12 sources, a de-interleave) is then gone from
+     *  the hot path.
+     *
+     *  The flag is a *permission*, not a guarantee: the zero-copy path is
+     *  only taken when **both** hold:
+     *
+     *    1. this flag is true, and
+     *    2. the source frame carries a GPU handle, and
+     *    3. the codec reports `supports_zero_copy_encode()`.
+     *
+     *  Otherwise the engine falls back to the CPU staging path.  This
+     *  means turning the flag on is always safe — a software codec, or a
+     *  CPU source, simply keeps the old path.
+     *
+     *  @see `plugins::VideoSourceFrame::gpu_handle`
+     *  @see `plugins::IVideoCodec::encode_zero_copy` */
+    bool video_zero_copy = false;
+
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
     // BWE controls outbound pacing and adapts to network congestion.
@@ -2088,6 +2116,14 @@ public:
         std::uint64_t video_keyframes_q        = 0;  // keyframe reqs queued
         std::uint64_t video_feedback_applied   = 0;  // inbound RTCP actions
         std::uint64_t video_keyframes_applied  = 0;  // inbound keyframe reqs
+        // ---- Video zero-copy counters (Phase 3 / C3) ---------------------
+        // `video_zero_copy_frames` counts the frames that took the GPU
+        // path (the native handle went to the codec, no CPU staging);
+        // `video_zero_copy_fallbacks` counts the frames that carried a
+        // GPU handle but fell back to the CPU path (the codec does not
+        // support the zero-copy entry point, or it failed).
+        std::uint64_t video_zero_copy_frames    = 0;
+        std::uint64_t video_zero_copy_fallbacks = 0;
         // ---- Audio counters (WP-5, additive) -------------------------
         // Cumulative since open().  `audio_encode_errors` is the
         // "never silently dropped" counter: every PCM block that could

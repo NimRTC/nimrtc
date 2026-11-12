@@ -161,6 +161,47 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
     /** Total size of the pixel buffer (in bytes). */
     std::size_t buffer_size = 0;
 
+    // -- GPU / zero-copy handle (Phase 3 / C3) -------------------------------
+    //
+    // A hardware capture source (MediaCodec, VideoToolbox, D3D11, VAAPI,
+    // MMAL, ...) produces its frame inside GPU memory.  Such a source
+    // cannot hand out `plane_y` / `plane_u` / `plane_v` CPU pointers
+    // without a readback, and the readback is exactly the copy the
+    // zero-copy path exists to avoid.
+    //
+    // These fields carry the native handle instead.  When
+    // `gpu_handle != nullptr` (and `gpu_backend != kNone`) the frame
+    // lives on the GPU and the `plane_*` pointers are either null or a
+    // *stale* CPU mirror — the consumer MUST use the handle.
+    //
+    // The handle is a **borrowed** reference: the source keeps the
+    // underlying surface alive for the duration of the callback (the
+    // same contract as the `plane_*` pointers).  A consumer that needs
+    // to hold the surface past the callback must take its own
+    // reference (see `video_frame::GpuBuffer::acquire_ref()`).
+    //
+    // When the handle is null the frame is a plain CPU frame and every
+    // consumer behaves exactly as before — the field is purely
+    // additive, so existing sources and sinks keep working unchanged.
+
+    /** The GPU backend that owns `gpu_handle` (kNone = CPU frame). */
+    GpuBackend   gpu_backend = GpuBackend::kNone;
+
+    /** The native GPU resource (surface / texture / array). Null on the
+     *  CPU path. The concrete type is determined by `gpu_backend`:
+     *  `AMediaCodec`/`ANativeWindow`, `CVPixelBuffer`, `ID3D11Texture2D`,
+     *  `VASurface`, `VkImage`, `MTLTexture`, ... */
+    void*        gpu_handle  = nullptr;
+
+    /** Native row stride / pitch in bytes (0 when the backend has an
+     *  implicit layout, or when the frame is CPU-side). */
+    std::uint32_t gpu_pitch_bytes = 0;
+
+    /** True iff this frame carries a live GPU handle. */
+    [[nodiscard]] bool has_gpu_handle() const noexcept {
+        return gpu_backend != GpuBackend::kNone && gpu_handle != nullptr;
+    }
+
     // -- Timeline metadata (§8.4) ------------------------------------------
 
     /** Monotonic-clock capture timestamp (microseconds). */

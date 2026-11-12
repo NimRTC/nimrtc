@@ -13,6 +13,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <numeric>
 #include <vector>
 
@@ -181,6 +183,116 @@ TEST(VideoFrameBuffer, ResetDropsRef) {
     buf.reset();
     EXPECT_FALSE(buf.valid());
     EXPECT_EQ(buf.ref_count(), 0u);
+}
+
+// -----------------------------------------------------------------------------
+// VideoFrameBufferPool — the recycling pool behind the engine's staging path
+// -----------------------------------------------------------------------------
+
+TEST(VideoFrameBufferPool, AcquireReturnsAUsableBuffer) {
+    nimrtc::video_frame::VideoFrameBufferPool pool;
+    const auto layout = compute_layout(PixelFormat::kI420, 64, 48);
+
+    auto buf = pool.acquire(layout);
+    ASSERT_NE(buf, nullptr);
+    EXPECT_TRUE(buf->valid());
+    EXPECT_EQ(buf->width(),  64u);
+    EXPECT_EQ(buf->height(), 48u);
+    EXPECT_EQ(buf->format(), PixelFormat::kI420);
+    EXPECT_NE(buf->data(),   nullptr);
+    EXPECT_NE(buf->plane(0), nullptr);
+    EXPECT_NE(buf->plane(1), nullptr);
+    EXPECT_NE(buf->plane(2), nullptr);
+    EXPECT_EQ(pool.in_flight(), 1u);
+}
+
+TEST(VideoFrameBufferPool, ZeroSizedLayoutYieldsNull) {
+    nimrtc::video_frame::VideoFrameBufferPool pool;
+    EXPECT_EQ(pool.acquire(VideoFrameLayout{}), nullptr);
+    EXPECT_EQ(pool.total_allocations(), 0u);
+}
+
+TEST(VideoFrameBufferPool, StorageIsRecycledAndNotReallocated) {
+    // This is the property the whole pool exists for: the steady state
+    // must not allocate.  Without the pool the send path allocated a
+    // fresh frame-sized block per frame.
+    nimrtc::video_frame::VideoFrameBufferPool pool;
+    const auto layout = compute_layout(PixelFormat::kI420, 64, 48);
+
+    {
+        auto buf = pool.acquire(layout);
+        ASSERT_NE(buf, nullptr);
+        // Write into it so the recycling path has real content to carry.
+        std::memset(buf->plane(0), 0xAB, layout.buffer_size);
+    }
+    EXPECT_EQ(pool.in_flight(), 0u);
+    EXPECT_EQ(pool.idle(),      1u);
+    EXPECT_EQ(pool.total_allocations(), 1u);
+
+    // Twenty more frames: the storage comes back each time, so the
+    // allocation counter must not move.
+    for (int i = 0; i < 20; ++i) {
+        auto buf = pool.acquire(layout);
+        ASSERT_NE(buf, nullptr);
+        std::memset(buf->plane(0), 0xCD, layout.buffer_size);
+    }
+    EXPECT_EQ(pool.total_allocations(), 1u);
+    EXPECT_EQ(pool.in_flight(), 0u);
+    EXPECT_EQ(pool.idle(),      1u);
+}
+
+TEST(VideoFrameBufferPool, RecycledStorageCarriesNoStaleControlData) {
+    // The buffer is a *new* frame every time, so the metadata must not
+    // leak from the previous use.
+    nimrtc::video_frame::VideoFrameBufferPool pool;
+    const auto layout = compute_layout(PixelFormat::kI420, 32, 32);
+
+    {
+        auto buf = pool.acquire(layout);
+        buf->set_capture_ts_us(999999);
+        buf->set_frame_seq(7);
+    }
+    auto buf = pool.acquire(layout);
+    ASSERT_NE(buf, nullptr);
+    EXPECT_EQ(buf->capture_ts_us(), 0);
+    EXPECT_EQ(buf->frame_seq(),     0u);
+}
+
+TEST(VideoFrameBufferPool, ALargerLayoutGetsItsOwnStorage) {
+    // A resolution change must not be served from a too-small block.
+    nimrtc::video_frame::VideoFrameBufferPool pool;
+
+    {
+        auto small = pool.acquire(compute_layout(PixelFormat::kI420, 32, 32));
+        ASSERT_NE(small, nullptr);
+    }
+    EXPECT_EQ(pool.idle(), 1u);
+
+    const auto big_layout = compute_layout(PixelFormat::kI420, 128, 96);
+    {
+        auto big = pool.acquire(big_layout);
+        ASSERT_NE(big, nullptr);
+        EXPECT_GE(big->size(), big_layout.buffer_size);
+        EXPECT_NE(big->plane(0), nullptr);
+    }
+    // Two distinct allocations: the small block was too small for the
+    // big layout, so the pool had to make a second one.
+    EXPECT_EQ(pool.total_allocations(), 2u);
+}
+
+TEST(VideoFrameBufferPool, ABufferMayOutliveThePool) {
+    // The deleter holds the pool's shared state, so a buffer that
+    // outlives the pool still returns its storage somewhere valid
+    // instead of dereferencing a dangling pool pointer.
+    std::shared_ptr<VideoFrameBuffer> buf;
+    {
+        nimrtc::video_frame::VideoFrameBufferPool pool;
+        const auto layout = compute_layout(PixelFormat::kI420, 32, 32);
+        buf = pool.acquire(layout);
+        ASSERT_NE(buf, nullptr);
+    }
+    // The pool is gone; dropping the buffer must not crash.
+    EXPECT_NO_FATAL_FAILURE(buf.reset());
 }
 
 // -----------------------------------------------------------------------------

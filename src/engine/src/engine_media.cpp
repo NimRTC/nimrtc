@@ -85,12 +85,14 @@ void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
  *
  *  @param frame  Caller-owned source frame (planes valid for this call).
  *  @param fmt    Target pixel format for the staged buffer.
+ *  @param pool   Pool the staged buffer's storage comes from (Phase 3 / C1).
  *  @return The staged buffer, or nullptr when the frame cannot be staged
  *          (no planes, zero dimensions, or an unsupported source format).
  */
 std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
         const plugins::VideoSourceFrame& frame,
-        plugins::VideoPixelFormat fmt) noexcept {
+        plugins::VideoPixelFormat fmt,
+        video_frame::VideoFrameBufferPool& pool) noexcept {
     if (frame.width == 0 || frame.height == 0) return nullptr;
     if (!frame.plane_y) return nullptr;
 
@@ -115,7 +117,12 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
     const auto layout = video_frame::compute_layout(fmt, frame.width, frame.height);
     if (layout.buffer_size == 0) return nullptr;
 
-    auto staged = std::make_shared<video_frame::VideoFrameBuffer>(layout);
+    // Phase 3 / C1: take the storage from the pool instead of allocating
+    // a fresh frame-sized block per frame.  At 1080p30 that was a ~3 MB
+    // allocation *and* a ~3 MB memset every 33 ms, on top of the copy the
+    // staging itself does.
+    auto staged = pool.acquire(layout);
+    if (!staged) return nullptr;
 
     const std::uint32_t half_w = (frame.width + 1u) / 2u;
     const std::uint32_t half_h = (frame.height + 1u) / 2u;
@@ -789,8 +796,22 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 }
 
                 pb.set_payload(core::ByteSpan(payload.data(), payload.size()));
-                core::ByteBuffer built = pb.build();
-                if (built.empty()) {
+
+                // ---- Serialise into the reusable scratch (Phase 3 / C4) ------
+                //
+                // Same reasoning as the audio path: `pb.build()` would
+                // allocate a fresh buffer per video packet.  The scratch is
+                // read immediately below — the bytes are copied into the
+                // scheduler's pooled outbound buffer — so it never escapes
+                // this callback.
+                const std::size_t built_size = pb.compute_size();
+                if (impl_->video_rtp_scratch.size() < built_size) {
+                    impl_->video_rtp_scratch.resize(built_size);
+                }
+                const std::size_t built_written =
+                    pb.build_into(impl_->video_rtp_scratch.data(),
+                                  impl_->video_rtp_scratch.size());
+                if (built_written == 0) {
                     if (on_error_) {
                         on_error_(core::kVideoEncodeFailed,
                                   "video send: the RTP packet could not be built");
@@ -806,11 +827,11 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 std::vector<std::uint8_t> rtp_pkt;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
-                        built.size() + kSrtpAuthTagBytes);
-                    rtp_pkt.assign(built.begin(), built.end());
-                } else {
-                    rtp_pkt.assign(built.begin(), built.end());
+                        built_written + kSrtpAuthTagBytes);
                 }
+                rtp_pkt.assign(impl_->video_rtp_scratch.begin(),
+                               impl_->video_rtp_scratch.begin() +
+                                   static_cast<std::ptrdiff_t>(built_written));
 
                 // ---- SRTP protect (if DTLS is connected) ----------------------
                 if (impl_->srtp_installed && impl_->srtp) {
@@ -1204,13 +1225,27 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     }
 
         pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
-        auto pkt_buf = pb.build();
-        if (pkt_buf.empty()) {
+
+        // ---- Serialise into the reusable scratch (Phase 3 / C4) --------------
+        //
+        // `pb.build()` would allocate a fresh buffer for every audio
+        // packet.  `build_into()` writes into the engine's per-session
+        // scratch instead, so the steady-state send path performs no heap
+        // allocation for the RTP header + payload copy.
+        const std::size_t pkt_size = pb.compute_size();
+        if (impl_->audio_rtp_scratch.size() < pkt_size) {
+            impl_->audio_rtp_scratch.resize(pkt_size);
+        }
+        const std::size_t pkt_written =
+            pb.build_into(impl_->audio_rtp_scratch.data(),
+                          impl_->audio_rtp_scratch.size());
+        if (pkt_written == 0) {
             report_error(core::kAudioEncodeFailed,
                          "send_audio: the RTP packet could not be built");
             impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;
         }
+        core::ByteSpan pkt_span(impl_->audio_rtp_scratch.data(), pkt_written);
 
         // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
         // RTP timestamp is sampled *before* SRTP so the SR and the media packet
@@ -1221,7 +1256,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
         impl_->audio_rtp_timestamp = cur_ts;
         ++impl_->audio_frames_sent;
-        impl_->audio_bytes_sent += pkt_buf.size();
+        impl_->audio_bytes_sent += pkt_span.size();
 
         // The media clock advances by the frame duration whether or not the
         // packet reaches the wire (A-7): a dropped frame leaves a gap in
@@ -1240,9 +1275,9 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         std::vector<std::uint8_t> send_buf;
         if (scheduler_) {
             send_buf = scheduler_->acquire_packet_buffer(
-                pkt_buf.size() + kSrtpAuthTagBytes);
+                pkt_span.size() + kSrtpAuthTagBytes);
         }
-        core::ByteSpan out_payload(pkt_buf.data(), pkt_buf.size());
+        core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
         if (impl_->srtp_installed && impl_->srtp) {
             auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
                                                    /*outgoing=*/true);
@@ -1341,49 +1376,114 @@ plugins::Status NimRTCEngine::send_video(
     raw.info.frame_seq     = frame.frame_seq;
     raw.info.rtp_timestamp = frame.rtp_timestamp;
 
-    // The codec-facing pixel format comes from the codec's own config
-    // (I420 for every backend today).
-    const auto codec_fmt = video_codec_->config().pixel_format;
-    raw.buffer = stage_source_frame(frame, codec_fmt);
-    if (!raw.buffer) {
-        // The frame cannot be staged (no planes, zero dimensions, or a
-        // packed source format).  Software codecs can still encode a
-        // synthetic frame without pixels, so we only *warn* here and let
-        // the codec decide — a hardware codec will report the failure
-        // through its own error path.
-        core::log::Logger::instance().warn(
-            "send_video: the source frame could not be staged into a "
-            "codec-facing pixel buffer (the encoder receives no pixels)");
+    // ---- Phase 3 / C3: the GPU zero-copy path -----------------------------
+    //
+    // A hardware capture source hands the engine a *native* GPU handle
+    // rather than CPU pixels (`VideoSourceFrame::gpu_handle`).  When the
+    // host opted in (`EngineConfig::video_zero_copy`) and the codec can
+    // consume a handle directly, the engine passes the handle straight
+    // through — no staging copy, no de-interleave, no 3 MB memcpy per
+    // frame.
+    //
+    // The zero-copy branch is only taken when ALL of the following hold:
+    //
+    //   1. the host enabled `EngineConfig::video_zero_copy`;
+    //   2. the source frame carries a live GPU handle;
+    //   3. the codec reports `supports_zero_copy_encode()`.
+    //
+    // Otherwise the CPU staging path runs exactly as before, so the flag
+    // is always safe to turn on.  The counters make the decision
+    // observable from the outside.
+    const bool zero_copy_requested = config_.video_zero_copy;
+    const bool zero_copy_capable    = video_codec_->supports_zero_copy_encode();
+    const bool frame_has_gpu       = frame.has_gpu_handle();
+
+    plugins::EncodedVideoFrame encoded{};
+    bool encoded_ok = false;
+
+    if (zero_copy_requested && zero_copy_capable && frame_has_gpu) {
+        // Wrap the borrowed handle in a `GpuBuffer` so the codec seam can
+        // take it.  The wrapper does NOT own the surface — the source
+        // keeps it alive for the duration of this call, which is exactly
+        // the lifetime contract `encode_zero_copy()` documents ("the
+        // caller keeps the GpuBuffer alive until the encoder returns").
+        video_frame::GpuHandle handle{};
+        handle.backend           = frame.gpu_backend;
+        handle.handle            = frame.gpu_handle;
+        handle.native_pitch_bytes = frame.gpu_pitch_bytes;
+        handle.native_fd         = -1;
+
+        video_frame::GpuBuffer gpu(handle,
+                                   frame.width,
+                                   frame.height,
+                                   frame.format);
+
+        const plugins::Status zc_rc =
+            video_codec_->encode_zero_copy(gpu, encoded);
+        if (zc_rc == plugins::kOk) {
+            encoded_ok = true;
+            ++impl_->video_zero_copy_frames;
+        } else {
+            // The codec refused the handle (wrong backend, surface busy,
+            // driver error, ...).  Fall through to the CPU path *only* if
+            // the source also gave us CPU pixels — otherwise there is
+            // nothing to stage and the frame is simply lost.
+            ++impl_->video_zero_copy_fallbacks;
+            core::log::Logger::instance().warn(
+                "send_video: the zero-copy encode failed — falling back "
+                "to the CPU staging path");
+        }
+    } else if (zero_copy_requested && frame_has_gpu && !zero_copy_capable) {
+        // The host asked for zero-copy but the codec cannot consume a
+        // handle.  Count the missed opportunity so the host can see that
+        // the flag alone does not buy anything with this codec.
+        ++impl_->video_zero_copy_fallbacks;
     }
 
-    // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
-    // size on first use; subsequent calls within the same capacity reuse
-    // the storage and only pay the per-byte conversion cost inside the
-    // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
-    // — when that happens we resize and pay one reallocation.
-    constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
-    if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
-        impl_->video_enc_buf.reserve(kInitialVideoEncCap);
-    }
-    plugins::EncodedVideoFrame encoded{};
-    const auto enc_rc = video_codec_->encode(raw,
-                                             impl_->video_enc_buf.data(),
-                                             impl_->video_enc_buf.capacity(),
-                                             encoded);
-    if (enc_rc != plugins::kOk) {
-        // Codec may need a larger buffer than reserved (e.g. very high
-        // bitrate IDR).  Resize to the codec's expected capacity and retry
-        // exactly once to avoid an unbounded loop on a misbehaving codec.
-        const std::size_t needed = encoded.payload.size();
-        if (needed == 0 || needed > impl_->video_enc_buf.capacity() * 4) {
-            return plugins::kErrInternal;  // give up on pathological sizes
+    if (!encoded_ok) {
+        // The codec-facing pixel format comes from the codec's own config
+        // (I420 for every backend today).
+        const auto codec_fmt = video_codec_->config().pixel_format;
+        raw.buffer = stage_source_frame(frame, codec_fmt, impl_->video_frame_pool);
+        if (!raw.buffer) {
+            // The frame cannot be staged (no planes, zero dimensions, or a
+            // packed source format).  Software codecs can still encode a
+            // synthetic frame without pixels, so we only *warn* here and let
+            // the codec decide — a hardware codec will report the failure
+            // through its own error path.
+            core::log::Logger::instance().warn(
+                "send_video: the source frame could not be staged into a "
+                "codec-facing pixel buffer (the encoder receives no pixels)");
         }
-        impl_->video_enc_buf.reserve(needed);
-        if (video_codec_->encode(raw,
-                                 impl_->video_enc_buf.data(),
-                                 impl_->video_enc_buf.capacity(),
-                                 encoded) != plugins::kOk) {
-            return plugins::kErrInternal;
+
+        // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
+        // size on first use; subsequent calls within the same capacity reuse
+        // the storage and only pay the per-byte conversion cost inside the
+        // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
+        // — when that happens we resize and pay one reallocation.
+        constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
+        if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
+            impl_->video_enc_buf.reserve(kInitialVideoEncCap);
+        }
+        const auto enc_rc = video_codec_->encode(raw,
+                                                 impl_->video_enc_buf.data(),
+                                                 impl_->video_enc_buf.capacity(),
+                                                 encoded);
+        if (enc_rc != plugins::kOk) {
+            // Codec may need a larger buffer than reserved (e.g. very high
+            // bitrate IDR).  Resize to the codec's expected capacity and retry
+            // exactly once to avoid an unbounded loop on a misbehaving codec.
+            const std::size_t needed = encoded.payload.size();
+            if (needed == 0 || needed > impl_->video_enc_buf.capacity() * 4) {
+                return plugins::kErrInternal;  // give up on pathological sizes
+            }
+            impl_->video_enc_buf.reserve(needed);
+            if (video_codec_->encode(raw,
+                                     impl_->video_enc_buf.data(),
+                                     impl_->video_enc_buf.capacity(),
+                                     encoded) != plugins::kOk) {
+                return plugins::kErrInternal;
+            }
         }
     }
 
@@ -1456,7 +1556,10 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     // but that is not an error worth failing the read path for, and the
     // well-formed head of the datagram must not be thrown away.
     const core::ByteSpan compound(view.data(), view.size());
-    const std::vector<rtp::RtcpBlock> blocks = rtp::demux_rtcp(compound);
+    // Phase 3 / C6: demultiplex into the engine's reusable vector, so
+    // the receive path performs no heap allocation per RTCP datagram.
+    rtp::demux_rtcp(compound, impl_->rtcp_blocks_scratch);
+    const std::vector<rtp::RtcpBlock>& blocks = impl_->rtcp_blocks_scratch;
     const core::TimePoint now = core::SteadyClock::now();
 
     for (const rtp::RtcpBlock& blk : blocks) {
@@ -1863,6 +1966,9 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_keyframes_q       = impl_->video_keyframes_q;
     out.video_feedback_applied  = impl_->video_feedback_applied;
     out.video_keyframes_applied = impl_->video_keyframes_applied;
+    // Phase 3 / C3: the zero-copy path counters.
+    out.video_zero_copy_frames    = impl_->video_zero_copy_frames;
+    out.video_zero_copy_fallbacks = impl_->video_zero_copy_fallbacks;
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.

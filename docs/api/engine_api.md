@@ -787,6 +787,32 @@ camera frames directly when the configured `IVideoSource`
 (`memory` default) doesn't drive its own capture loop. The frame
 is encoded, RTP-packetised, and enqueued to the scheduler.
 
+#### GPU zero-copy (Phase 3 / C3)
+
+By default the engine *stages* the frame into a CPU `I420` buffer (a
+full-frame copy, plus a de-interleave for an NV12 source) before
+handing it to the codec. A hardware capture source can avoid that copy
+by carrying its native GPU handle in the frame:
+
+```cpp
+plugins::VideoSourceFrame f{};
+f.gpu_backend     = plugins::GpuBackend::kWindowsD3D11Texture;
+f.gpu_handle      = native_texture;   // borrowed for the call
+f.gpu_pitch_bytes = 1920;
+```
+
+With `EngineConfig::video_zero_copy = true`, a frame that carries such a
+handle is passed straight to `IVideoCodec::encode_zero_copy()` — no
+staging, no copy. The path is taken only when **all three** hold:
+
+1. `EngineConfig::video_zero_copy` is true,
+2. the frame carries a live GPU handle, and
+3. the codec reports `supports_zero_copy_encode()`.
+
+Otherwise the CPU staging path runs unchanged, so turning the flag on
+is always safe. `Stats::video_zero_copy_frames` and
+`Stats::video_zero_copy_fallbacks` make the decision observable.
+
 ---
 
 ## 10. DataChannel control plane
@@ -926,6 +952,10 @@ struct Stats {
     uint64_t video_keyframes_q = 0;
     uint64_t video_feedback_applied = 0;
     uint64_t video_keyframes_applied = 0;
+
+    // Video zero-copy counters (Phase 3 / C3) — cumulative since open().
+    uint64_t video_zero_copy_frames = 0;     // frames that took the GPU path
+    uint64_t video_zero_copy_fallbacks = 0;  // GPU frames that fell back to CPU
 
     // Audio send counters (audio pipeline WP-5) — cumulative since open().
     uint64_t audio_frames_sent = 0;

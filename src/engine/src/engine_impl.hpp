@@ -684,6 +684,19 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_keyframes_q       = 0;
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
+
+    // ---- Video zero-copy counters (Phase 3 / C3) --------------------------
+    //
+    // `video_zero_copy_frames` counts the frames that took the GPU path
+    // (the engine handed the native handle to the codec instead of
+    // staging CPU pixels).  `video_zero_copy_fallbacks` counts the frames
+    // that carried a GPU handle but could NOT take the zero-copy path —
+    // either the codec does not support it, or `encode_zero_copy()`
+    // returned an error.  The two counters make the flag observable: a
+    // host that turns `EngineConfig::video_zero_copy` on can see whether
+    // the path is actually being taken.
+    std::uint64_t video_zero_copy_frames    = 0;
+    std::uint64_t video_zero_copy_fallbacks = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------
@@ -882,6 +895,45 @@ struct NimRTCEngine::Impl {
     // Reusable buffer for the encoded H.264 frame.  Default reserve size
     // matches the worst-case 64 KiB IDR; resize grows monotonically.
     std::vector<std::uint8_t> video_enc_buf;
+
+    // ---- RTP serialisation scratch buffers (Phase 3 / C4) ------------------
+    //
+    // `rtp::PacketBuilder::build()` allocates a fresh buffer per call.  On
+    // the send path that is one heap allocation per media packet, which is
+    // the dominant allocation cost of a steady 50 fps audio + 30 fps video
+    // stream.  `build_into()` serialises into caller-owned storage instead,
+    // so these two scratch buffers absorb the whole cost: they are reused
+    // for every packet and only ever grow.
+    //
+    // Lifetime: the scratch is read *before* the packet is copied into the
+    // scheduler's pooled outbound buffer, so the scratch never escapes the
+    // call that filled it.
+    std::vector<std::uint8_t> audio_rtp_scratch;
+    std::vector<std::uint8_t> video_rtp_scratch;
+
+    /// Scratch for the DTMF (RFC 4733) packet.
+    ///
+    /// DTMF has its own scratch rather than sharing the audio one: a host
+    /// may press a key from a different thread than the one feeding
+    /// `send_audio()`, and sharing one buffer would introduce a data race
+    /// that did not exist when every call allocated its own packet.
+    std::vector<std::uint8_t> dtmf_rtp_scratch;
+
+    /// Reusable destination for the inbound RTCP demultiplexer.
+    ///
+    /// `rtp::demux_rtcp()` used to return a fresh `std::vector` per
+    /// inbound datagram.  The scratch holds the blocks of the datagram
+    /// currently being processed; it is cleared and refilled on every
+    /// call, so its capacity is the only thing that persists.
+    std::vector<rtp::RtcpBlock> rtcp_blocks_scratch;
+
+    /// Pool the staged video frames come from (Phase 3 / C1).
+    ///
+    /// `stage_source_frame()` used to allocate a fresh frame-sized block
+    /// for every frame the host pushed through `send_video()`.  The pool
+    /// recycles the storage instead, so the steady-state send path
+    /// performs no allocation and no full-frame memset.
+    video_frame::VideoFrameBufferPool video_frame_pool;
 
     // ---- Cross-end timeline (ADR-017) --------------------------------------
     //

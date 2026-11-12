@@ -1151,6 +1151,15 @@ nimrtc_add_engine_codec_test(test_engine_video_codec_family
                               test_engine_video_codec_family.cpp)
 endif()
 
+# Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
+# video pipeline (receiver / sender "reference") so it reuses
+# `nimrtc_add_engine_codec_test`'s link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_codec_test(test_engine_video_zero_copy
+                              test_engine_video_zero_copy.cpp)
+endif()
+
 # ----------------------------------------------------------------------------
 # The capture-*device* seam wiring (remote-desktop plan A1; architecture
 # remediation plan Phase 2 §2.2).
@@ -1742,3 +1751,68 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# ---------------------------------------------------------------------------
+# Architecture-remediation Phase 0.3 — the hot-path performance baseline.
+#
+# Phase 3 ("消除热路径上的分配与拷贝") needs a number to compare against,
+# and §0.3 asks for three of them: `send_video()` at 1080p30 (per-call
+# heap allocations + CPU), `tick()` (p99), and the scheduler under load
+# (`drain_with()` vs. a concurrent `enqueue()`).
+#
+# `bench_engine_hotpath` produces those three as a JSON document on
+# stdout.  It is deliberately NOT a ctest case: the numbers are
+# machine-dependent, so a threshold assertion would be a flaky test
+# rather than a measurement.  `tools/benchmark_hotpath.py` is the
+# wrapper that captures a run into `build/` and compares two of them.
+#
+# The link set is the engine one (the same modules
+# `nimrtc_add_engine_test` links) plus the scheduler module, because the
+# benchmark drives the "strict_priority" scheduler directly through the
+# registry.
+# ---------------------------------------------------------------------------
+add_executable(bench_engine_hotpath bench_engine_hotpath.cpp)
+if(WIN32)
+    target_link_libraries(bench_engine_hotpath PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(bench_engine_hotpath PRIVATE c++ pthread)
+else()
+    target_link_libraries(bench_engine_hotpath PRIVATE atomic)
+endif()
+target_link_libraries(bench_engine_hotpath PRIVATE
+    nimrtc::engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::transport
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    nimrtc::sched
+    nimrtc::h264
+    nimrtc::video_source
+    nimrtc::video_sink
+    nimrtc::video_pipeline)
+target_include_directories(bench_engine_hotpath PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include")
+if(WIN32)
+    target_compile_definitions(bench_engine_hotpath PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(bench_engine_hotpath PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(bench_engine_hotpath LENIENT)
+# It is NOT registered with ctest (see the comment above), but it is
+# built by default so `tools/benchmark_hotpath.py` can find it.  The
+# wolfSSL certs are copied because the engine links the DTLS seam.
+nimrtc_copy_wolfssl_certs(bench_engine_hotpath)
+

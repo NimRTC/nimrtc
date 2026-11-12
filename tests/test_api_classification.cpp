@@ -349,12 +349,19 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - video_capture/capture_queue.hpp (the portable bounded queue)
     //     - video_capture/synthetic_capture.hpp (the synthetic device)
     //
+    // v1.3 bump: +1 public header (132 -> 133) for the shared
+    //   capture -> frame-stream adapter (remote-desktop plan A2b) -- the
+    //   bridge every platform backend feeds, which turns a capture
+    //   device's frames into the `VideoSourceFrame` stream the engine
+    //   already consumes:
+    //     - video_capture/capture_source_adapter.hpp
+    //
     // Logged baseline values from the alpha.1 dry run:
     //     2/2 PASS, headers=89 stable=107 unstable=6 deprecated=8
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 132;
+    constexpr std::size_t kBaselineHeaderCount = 133;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -57,6 +57,20 @@ split_at(std::string_view line, char delim) noexcept {
     return s;
 }
 
+/**
+ * Drop the first `n` characters of `s`, or everything if `s` is shorter.
+ *
+ * `std::string_view::substr` throws `std::out_of_range` when `pos > size()`,
+ * so the obvious `s.substr(n)` is not safe on attacker-controlled input: a
+ * truncated attribute line ("a=msid-semantic:" with no value) makes the
+ * skip length exceed the string, and the parser -- which must never throw on
+ * malformed input -- dies instead of reporting the malformed line.
+ */
+[[nodiscard]] inline std::string_view drop_prefix(std::string_view s,
+                                                  std::size_t n) noexcept {
+    return s.size() > n ? s.substr(n) : std::string_view{};
+}
+
 /** Parse a uint16_t from a string_view, or return nullopt. */
 [[nodiscard]] std::optional<std::uint16_t>
 parse_uint16(std::string_view s) noexcept {
@@ -302,7 +316,7 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                 core::ErrorCode::ProtocolError, impl.error_msg);
         }
         char type = line[0];
-        auto value = line.substr(2);
+        auto value = drop_prefix(line, 2);
 
         switch (type) {
         case 'v': {
@@ -387,21 +401,21 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                     else            session.extra_attrs.emplace_back("a", std::string(av));
                 }
             } else if (av.starts_with("ice-ufrag:")) {
-                auto ufrag = av.substr(10);  // skip "ice-ufrag:" (10 chars)
+                auto ufrag = drop_prefix(av, 10);  // skip "ice-ufrag:" (10 chars)
                 if (!cur_media) session.extra_attrs.emplace_back("ice-ufrag", std::string(ufrag));
                 else cur_media->ice_ufrag = std::string(ufrag);
             } else if (av.starts_with("ice-pwd:")) {
-                auto pwd = av.substr(8);
+                auto pwd = drop_prefix(av, 8);
                 if (!cur_media) session.extra_attrs.emplace_back("ice-pwd", std::string(pwd));
                 else cur_media->ice_pwd = std::string(pwd);
             } else if (av.starts_with("ice-options:")) {
-                auto opts = av.substr(13);  // skip "ice-options:" (13 chars)
+                auto opts = drop_prefix(av, 13);  // skip "ice-options:" (13 chars)
                 if (!cur_media) session.ice_options = std::string(opts);
                 else cur_media->ice_options = std::string(opts);
             } else if (av.starts_with("fingerprint:")) {
                 // a=fingerprint:<algo> <hash> — note no space after the colon;
                 // the colon is the 12th char and "sha-256" starts right at index 12.
-                auto fp = av.substr(12);
+                auto fp = drop_prefix(av, 12);
                 auto [algo, hash] = split_at(fp, ' ');
                 if (!cur_media) {
                     session.dtls_fingerprint_algo = std::string(algo);
@@ -411,29 +425,29 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                     cur_media->dtls_fingerprint_value = std::string(hash);
                 }
             } else if (av.starts_with("setup:")) {
-                auto setup = av.substr(6);  // skip "setup:" (6 chars)
+                auto setup = drop_prefix(av, 6);  // skip "setup:" (6 chars)
                 if (!cur_media) session.dtls_setup = std::string(setup);
                 else cur_media->dtls_setup = std::string(setup);
             } else if (av.starts_with("connection-address:")) {
-                if (cur_media) cur_media->connection_address = std::string(av.substr(17));
+                if (cur_media) cur_media->connection_address = std::string(drop_prefix(av, 17));
             } else if (av.starts_with("mid:")) {
-                if (cur_media) cur_media->mid = std::string(av.substr(4));
+                if (cur_media) cur_media->mid = std::string(drop_prefix(av, 4));
             } else if (av.starts_with("rtpmap:")) {
                 if (cur_media) {
                     std::string fmt_str;
                     MediaDescription::RtpMap map;
-                    parse_rtpmap(av.substr(7), fmt_str, map, impl.error_msg);
+                    parse_rtpmap(drop_prefix(av, 7), fmt_str, map, impl.error_msg);
                     cur_media->rtpmap.emplace(fmt_str, map);
                 }
             } else if (av.starts_with("fmtp:")) {
                 if (cur_media) {
-                    auto fp = av.substr(5);
+                    auto fp = drop_prefix(av, 5);
                     auto [fmt_key, params] = split_at(fp, ' ');
                     cur_media->fmtp.emplace(std::string(fmt_key), std::string(params));
                 }
             } else if (av.starts_with("rtcp-fb:")) {
                 if (cur_media) {
-                    cur_media->rtcp_fb.push_back(std::string(av.substr(8)));
+                    cur_media->rtcp_fb.push_back(std::string(drop_prefix(av, 8)));
                 }
             } else if (av.starts_with("rtcp-xr:")) {
                 // RFC 3611 §5.1 — the RTCP Extended Report negotiation
@@ -452,10 +466,10 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                 // So the session-level copy is stored on the session and
                 // acts as the default for every media section.
                 if (cur_media) {
-                    cur_media->rtcp_xr = std::string(trim(av.substr(8)));
+                    cur_media->rtcp_xr = std::string(trim(drop_prefix(av, 8)));
                     cur_media->rtcp_xr_present = true;
                 } else {
-                    session.rtcp_xr = std::string(trim(av.substr(8)));
+                    session.rtcp_xr = std::string(trim(drop_prefix(av, 8)));
                     session.rtcp_xr_present = true;
                 }
             } else if (av == "rtcp-xr") {
@@ -472,18 +486,18 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
             } else if (av.starts_with("extmap:")) {
                 if (cur_media) {
                     MediaDescription::ExtMap em;
-                    parse_extmap(av.substr(7), em, impl.error_msg);
+                    parse_extmap(drop_prefix(av, 7), em, impl.error_msg);
                     cur_media->extmap.push_back(em);
                 }
             } else if (av.starts_with("candidate:")) {
                 if (cur_media) {
-                    cur_media->candidates.push_back(std::string(av.substr(10)));
+                    cur_media->candidates.push_back(std::string(drop_prefix(av, 10)));
                 }
             } else if (av.starts_with("group:")) {
                 // a=group:BUNDLE <mid1> <mid2> ...
-                auto gv = av.substr(6);
+                auto gv = drop_prefix(av, 6);
                 if (gv.starts_with("BUNDLE")) {
-                    auto mids = gv.substr(6);  // skip "BUNDLE"
+                    auto mids = drop_prefix(gv, 6);  // skip "BUNDLE"
                     while (!mids.empty()) {
                         auto token = next_token(mids);  // advances mids
                         if (token.empty()) break;
@@ -491,7 +505,7 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                     }
                 }
             } else if (av.starts_with("msid-semantic:")) {
-                auto ms = av.substr(15);  // skip "msid-semantic: " (14+1 = 15 chars)
+                auto ms = drop_prefix(av, 15);  // skip "msid-semantic: " (14+1 = 15 chars)
                 auto [token, streams] = split_at(ms, ' ');
                 session.msid_semantic_token = std::string(trim(token));
                 while (!trim(streams).empty()) {
@@ -501,7 +515,7 @@ core::Result<SessionDescription> Parser::parse(std::string_view sdp_text) const 
                 }
             } else if (av.starts_with("msid:")) {
                 if (cur_media) {
-                    auto msid_str = av.substr(5);
+                    auto msid_str = drop_prefix(av, 5);
                     auto [stream_id, track_id] = split_at(msid_str, ' ');
                     Msid ms;
                     ms.stream_id = std::string(trim(stream_id));

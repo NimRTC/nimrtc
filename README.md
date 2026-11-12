@@ -320,7 +320,7 @@ window closed as NO (BDFL, 2026-10-19; see `docs/plan/v1.0-plan.md` §7 + §12.5
                                     ▼
             ┌──────────────────────────────────────────────────┐
             │  L2  Codecs + 3A          (skipped by `relay`)       │
-            │  Opus / G.711 / VP8 / H.264 · audio 3A pipeline  │
+            │  Opus / G.711 / VP8 / H.264 / H.265 / AV1 · audio 3A  │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -609,7 +609,9 @@ yet published**. Measured on Windows/MSVC Debug against a stock build: **651/651
 | DC-3 — DC forwarding policy in SFU relay context | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | BENCH-1 — `sfu-relay` benchmark pps/Mbps | ❌ **Closed — NO** | Inherits from SFU-1 (closed 2026-10-19). |
 | H.264 hardware backends — NVENC encoder (Win/Linux), AMF encoder (Win), QSV encoder (Win/Linux), VA-API encoder (Linux), DXVA decoder (Win), OpenH264 software fallback | ✅ | v0.9.2 |
-| H.264 hardware **decoding** — NVDEC (Win/Linux), VideoToolbox (macOS), MediaCodec (Android) | ❌ **not implemented** — the backend entries exist so the seam stays stable, but `create()` returns `nullptr` and `available()` returns `false`. On Windows use the DXVA decoder; on macOS/Android use the software H.264 path. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | — |
+| H.264 hardware **decoding** — NVDEC (Win/Linux) | ✅ **implemented** — `src/modules/nvcodec/` ships a real CUVID decoder (parser + decoder + NV12 surface → host copy), driven by runtime dynamic loading of `nvcuvid.dll` / `libnvcuvid.so`. `VideoToolbox` (macOS) and `MediaCodec` (Android) remain **not implemented** — the backend entries exist so the seam stays stable, but `create()` returns `nullptr` and `available()` returns `false`; use the software H.264 path there. See the [H.264 backend matrix](docs/hw_plugin_seam.md#111-backend-matrix). | v1.1 |
+| H.265 (HEVC) video codec — end to end | ✅ **implemented** — `src/modules/h265/` registers a video-codec plugin under the id `"h265"` (the spelling `EngineConfig::video_codec_name` uses). The RTP payload format is **RFC 7798** (single NAL unit, AP type 48, FU type 49 with a 6-bit `FuType`), and the SDP parameters are RFC 7798 too (`profile-id`, `level-id`, `tier-flag`, `tx-mode="SRST"`, `sprop-vps` / `sprop-sps` / `sprop-pps`). Hardware encode/decode rides the shared `nvcodec` module (NVENC / NVDEC). | v1.2 |
+| AV1 video codec — end to end | ✅ **implemented** — `src/modules/av1/` registers a video-codec plugin under the id `"av1"`. The RTP payload format is **draft-ietf-payload-av1** (aggregation header, LEB128 lengths, Annex-B framing, OBU reassembly). The SDP side is the AV1 Unified Plan `a=fmtp:` body. Hardware encode/decode rides the shared `nvcodec` module (NVENC / NVDEC). | v1.2 |
 
 ### Landed on `main`, not yet published
 
@@ -676,7 +678,8 @@ Details in [CHANGELOG](CHANGELOG.md) "Platform support matrix".
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | Use vendored WebRTC APM library |
 | `NIMRTC_INSTALL` | OFF | Enable `install()` rules — `include/` + `lib/` + `lib/cmake/NimRTC/` (Track D packaging) |
 | `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | Build the GMSSL-backed DTLS factory (id=`gmssl`); uses the vendored submodule at `src/third_party/gmssl/src` (pin v3.2.0), default OFF so non-GM builds pay zero cost |
-| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **encoder** (Win/Linux). The NVDEC decoder is **not** implemented — `make_nvdec_h264_codec()` returns `nullptr`. |
+| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **encoder** (Win/Linux) |
+| `NIMRTC_PLUGINS_NVDEC` | OFF | NVIDIA NVDEC H.264 **decoder** (Win/Linux) — CUVID parser + decoder via runtime dynamic loading of `nvcuvid.dll` / `libnvcuvid.so`; the decoder is a separate one-way backend and is paired with the encoder through the `HwCompositeCodec` adapter so a single `IVideoCodec` covers both directions. |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF (Windows) |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF (Windows) |

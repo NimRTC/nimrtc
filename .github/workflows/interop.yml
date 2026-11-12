@@ -18,8 +18,11 @@
 name: ci-e2e
 
 on:
+  # Same split as `ci.yml`: the e2e suite runs on `main`, on the release
+  # branches, and on every PR that targets `main`.  Working-branch
+  # pushes get the fast leg (`ci-fast.yml`) instead.
   push:
-    branches: [main, feat/**, fix/**, chore/**]
+    branches: [main, release/**]
   pull_request:
     branches: [main]
 

@@ -87,6 +87,17 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_H264
     &nimrtc::h264::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_H265
+    // v1.3 (video plan C4 / C8): the H.265 codec module.  Its registrar
+    // entry materialises only when the module is built; the engine then
+    // resolves it through the registry's video-codec slot.
+    &nimrtc::h265::register_default_plugins,
+#endif
+#ifdef NIMRTC_HAS_AV1
+    // v1.3 (video plan C6 / C8): the AV1 codec module.  Same shape as
+    // the H.265 entry above.
+    &nimrtc::av1::register_default_plugins,
+#endif
     &nimrtc::ice::register_default_plugins,
     &nimrtc::jb::register_default_plugins,
 #ifdef NIMRTC_HAS_NET_FEEDBACK
@@ -124,6 +135,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #endif
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
     &nimrtc::video_source::register_default_plugins,
+#endif
+#ifdef NIMRTC_HAS_VIDEO_CAPTURE
+    // Remote-desktop plan A1: the capture-device module.  Its entry
+    // populates the registry's video-capture slot (register_video_capture)
+    // under the id "synthetic", so the engine can resolve a capture
+    // backend through the seam without naming a concrete module
+    // (Layout Invariant 4).
+    &nimrtc::video_capture::register_default_plugins,
 #endif
     // Transport PAL Slice 8 (v0.10.2): DTLS / SCTP / raw_udp /
     // transport-stack default-plugins entries. These mirror the

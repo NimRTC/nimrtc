@@ -1,0 +1,151 @@
+# =============================================================================
+# NimRTC fast-feedback CI
+#
+# Purpose: give a stacked branch a *fast* green/red signal without paying
+# for the full 4-platform matrix.
+#
+# Why this exists
+# ---------------
+# `ci.yml` runs the full matrix (windows / msvc, linux-gcc / x86_64,
+# macos-clang / arm64, docs, plus the sanitizer and fuzz legs) on every
+# push.  The branch model uses `split/*` for stacked work, so a stack of
+# N branches queued N full matrices.  With a measured run time of
+# ~18 min median (83 min worst case) per job and 9 jobs in `ci.yml`, the
+# queue could not keep up: the observed backlog was 12 queued + 7
+# in-progress runs, and the *waiting* was the throughput limit, not the
+# *writing*.
+#
+# So the split between the two workflows is:
+#
+#   ci.yml      -- the full matrix.  Runs on `main`, on a PR targeting
+#                  `main`, and on the release branches.  These are the
+#                  only refs the repository ruleset gates on, so this is
+#                  where "is it really green" is answered.
+#   ci-fast.yml -- one platform (Windows / MSVC, the primary dev
+#                  environment), build + unit tests only.  Runs on every
+#                  *push* to a working branch, where the question is
+#                  only "did I break the build on the way up".
+#
+# The two never overlap, which is the point: exactly one workflow runs
+# per event.  A push to `fix/foo` runs the fast leg; the PR that later
+# proposes `fix/foo` into `main` runs the full matrix.  The fast leg
+# deliberately does NOT also fire on `pull_request`, because the PR
+# event already triggers the full matrix on the same commit -- running
+# both would spend the queue budget twice on the same tree.
+#
+# The 5 status checks the ruleset requires on `main`
+# (`windows / msvc`, `windows / build`, `linux-gcc / x86_64`,
+# `macos-clang / arm64`, `docs / markdown links`) are all produced by
+# `ci.yml` and `interop.yml`, and both still run on every push to
+# `main`.  Nothing this workflow does can satisfy -- or break -- that
+# gate, because it never runs on `main`.
+#
+# What the fast leg deliberately SKIPS, and why that is safe:
+#
+#   * The macOS / Linux / aarch64 legs      -- platform-specific
+#     behaviour is what they exist for, and they are cheap to run once
+#     per PR instead of once per commit on a stack.
+#   * The sanitizer and fuzz legs            -- slow, and they are most
+#     valuable when they run against a stable target rather than a
+#     moving one.
+#   * The benchmark steps                    -- the transport-floor
+#     numbers are a trend, not a gate; a stack does not need them.
+#   * The install + downstream-proof step   -- packaging is a property
+#     of the merge, not of the commit.
+#
+# The fast leg still runs the API-freeze gates, because a public header
+# that forgets its stability marker is a defect that must not be able to
+# sit on a branch unnoticed.
+# =============================================================================
+
+name: ci-fast
+
+on:
+  # Every branch except `main` and the release branches.  Those two are
+  # covered by the full matrix (`ci.yml`), and running both legs on the
+  # same commit would spend the queue budget twice on the same tree.
+  push:
+    branches-ignore:
+      - main
+      - 'release/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Debug
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows: MSVC on windows-2022 -- build + unit tests, nothing else.
+  # ---------------------------------------------------------------------------
+  windows-fast:
+    name: windows / fast
+    runs-on: windows-2022
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-windows-fast
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Vendor manifest drift gate.  Cheap, and a drifted manifest means
+      # the vendored tree no longer matches what the build expects.
+      - name: Verify vendor manifests
+        if: hashFiles('src/third_party/vendor.json') != ''
+        shell: pwsh
+        run: python tools/check_vendor.py
+
+      # API freeze -- per-symbol classification.  A public header that
+      # adds a symbol without a stability marker is a defect that would
+      # otherwise ride a branch until the PR.
+      - name: API freeze — per-symbol classification
+        run: node scripts/api_freeze_scan.js
+
+      # API freeze -- marker include hygiene.
+      - name: API freeze — marker include hygiene
+        run: python scripts/check_api_marker_includes.py
+
+      # Fail fast: detect missing tools before wasting minutes on configure.
+      - name: Pre-flight tool check
+        shell: pwsh
+        run: python tools/ci_preflight.py
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # The WebTransport server seam (Case E) needs a TLS certificate to
+      # complete the QUIC handshake.  msquic's SChannel backend loads the
+      # certificate from the Windows certificate store, so the certificate
+      # is created and installed here; its SHA-1 thumbprint is written to
+      # build/wtserver_hash.txt, which the listener reads at startup.
+      - name: Provision WebTransport TLS material
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass `
+            -File ./scripts/generate_wtserver_cert.ps1 `
+            -BuildDir "${{ github.workspace }}/build"
+
+      - name: Configure
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=OFF -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+
+      - name: Build
+        run: cmake --build --preset debug.msvc -j 4
+
+      # NB: use the `tests.msvc` preset (NOT `tests`) so that
+      # `configuration: "Debug"` propagates to `ctest --build-config Debug`.
+      # See the same note in `interop.yml` for the full explanation.
+      - name: Test
+        run: ctest --preset tests.msvc --output-on-failure -j 4

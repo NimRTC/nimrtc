@@ -191,6 +191,11 @@ endif()
 if(NIMRTC_MODULE_VIDEO_SOURCE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_source)
 endif()
+# Remote-desktop plan A1: the capture-device module.  Same linker-strip
+# reason as the video_source entry above.
+if(NIMRTC_MODULE_VIDEO_CAPTURE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_capture)
+endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sink)
 endif()
@@ -199,6 +204,23 @@ if(NIMRTC_MODULE_VIDEO_PIPELINE)
 endif()
 if(NIMRTC_MODULE_H264)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::h264)
+endif()
+# v1.3 (video plan C4 / C8): the H.265 / AV1 codec modules.  The engine
+# reaches them through the registry's video-codec slot (the same seam the
+# H.264 module uses), so the link is what makes the *symbol* available.
+if(NIMRTC_MODULE_H265)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::h265)
+endif()
+if(NIMRTC_MODULE_AV1)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::av1)
+endif()
+
+# The video pixel storage (nimrtc::video_frame) — send_video() stages the
+# caller's VideoSourceFrame into a VideoFrameBuffer so the codec can read
+# the planes.  The engine references the concrete types here (it builds
+# the buffer), so this is a real dependency, not a link-time-only one.
+if(NIMRTC_MODULE_VIDEO_FRAME)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_frame)
 endif()
 
 target_include_directories(nimrtc_engine

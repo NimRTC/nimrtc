@@ -21,14 +21,20 @@
 #include <nimrtc/video_sdp_attributes/video_sdp_attributes.hpp>
 
 using nimrtc::video_sdp_attributes::H264Fmtp;
+using nimrtc::video_sdp_attributes::H265Fmtp;
+using nimrtc::video_sdp_attributes::Av1Fmtp;
 using nimrtc::video_sdp_attributes::Vp8Fmtp;
 using nimrtc::video_sdp_attributes::Vp9Fmtp;
 using nimrtc::video_sdp_attributes::PacketizationMode;
 using nimrtc::video_sdp_attributes::parse_h264;
+using nimrtc::video_sdp_attributes::parse_h265;
+using nimrtc::video_sdp_attributes::parse_av1;
 using nimrtc::video_sdp_attributes::parse_vp8;
 using nimrtc::video_sdp_attributes::parse_vp9;
 using nimrtc::video_sdp_attributes::parse_fmtp;
 using nimrtc::video_sdp_attributes::build_h264_fmtp;
+using nimrtc::video_sdp_attributes::build_h265_fmtp;
+using nimrtc::video_sdp_attributes::build_av1_fmtp;
 using nimrtc::video_sdp_attributes::build_vp8_fmtp;
 using nimrtc::video_sdp_attributes::build_vp9_fmtp;
 using nimrtc::video_sdp_attributes::build_fmtp;
@@ -314,18 +320,284 @@ TEST(ParseFmtp, DispatchVP8) {
 }
 
 TEST(ParseFmtp, DispatchUnsupported) {
-    auto r = parse_fmtp(CodecKind::kAV1, "foo=bar");
+    auto r = parse_fmtp(CodecKind::kUnknown, "foo=bar");
     EXPECT_FALSE(r.ok());
+}
+
+// Regression: `ParsedFmtp` is a manual-lifetime union.  Writing a payload
+// into a member that is not the active one (or letting the discriminator
+// `kind` diverge from the constructed member) is UB — the destructors then
+// run against an unconstructed `std::optional`.  These tests exercise the
+// setter path that keeps the union invariant intact; under UBSan they fail
+// with "load of value N, which is not a valid value for type 'bool'".
+TEST(ParseFmtp, SetterSwitchesActiveMember) {
+    ParsedFmtp p;
+    EXPECT_EQ(p.kind, CodecKind::kUnknown);
+
+    H264Fmtp h;
+    h.profile_level_id = "42e01f";
+    p.set_h264(h);
+    EXPECT_EQ(p.kind, CodecKind::kH264);
+    EXPECT_EQ(*p.h264.profile_level_id, "42e01f");
+
+    H265Fmtp h265;
+    h265.tx_mode = "MRST";
+    p.set_h265(h265);
+    EXPECT_EQ(p.kind, CodecKind::kH265);
+    EXPECT_EQ(*p.h265.tx_mode, "MRST");
+
+    Av1Fmtp av1;
+    av1.profile = 0;
+    p.set_av1(av1);
+    EXPECT_EQ(p.kind, CodecKind::kAV1);
+    EXPECT_EQ(*p.av1.profile, 0u);
+}
+
+TEST(ParseFmtp, SetterOverwritesAPreviousMember) {
+    ParsedFmtp p;
+    Vp9Fmtp vp9;
+    vp9.profile_id = 2;
+    p.set_vp9(vp9);
+    EXPECT_EQ(p.kind, CodecKind::kVP9);
+
+    // Overwriting an engaged member with a *disengaged* one must not leave
+    // the old payload's `std::optional` state behind.
+    Vp8Fmtp vp8;
+    p.set_vp8(vp8);
+    EXPECT_EQ(p.kind, CodecKind::kVP8);
+    EXPECT_FALSE(p.vp8.max_fr.has_value());
+}
+
+TEST(ParseFmtp, CopyAndMovePreserveTheActiveMember) {
+    ParsedFmtp p;
+    H265Fmtp h265;
+    h265.level_id = 93;
+    h265.tx_mode = "SRST";
+    p.set_h265(h265);
+
+    ParsedFmtp copy(p);
+    EXPECT_EQ(copy.kind, CodecKind::kH265);
+    EXPECT_EQ(*copy.h265.level_id, 93u);
+    EXPECT_EQ(*copy.h265.tx_mode, "SRST");
+
+    ParsedFmtp moved(std::move(copy));
+    EXPECT_EQ(moved.kind, CodecKind::kH265);
+    EXPECT_EQ(*moved.h265.level_id, 93u);
+
+    ParsedFmtp assigned;
+    assigned = moved;
+    EXPECT_EQ(assigned.kind, CodecKind::kH265);
+    EXPECT_EQ(*assigned.h265.tx_mode, "SRST");
+}
+
+TEST(ParseFmtp, AssignmentSwitchesTheActiveMember) {
+    ParsedFmtp p;
+    H264Fmtp h;
+    h.packetization_mode = PacketizationMode::kNonInterleaved;
+    p.set_h264(h);
+
+    ParsedFmtp other;
+    H265Fmtp h265;
+    h265.profile_id = 1;
+    other.set_h265(h265);
+
+    p = other;
+    EXPECT_EQ(p.kind, CodecKind::kH265);
+    EXPECT_EQ(*p.h265.profile_id, 1u);
+}
+
+TEST(ParseFmtp, DispatchAV1) {
+    auto r = parse_fmtp(CodecKind::kAV1, "profile=0;level-idx=5;tier=0");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(r.value().kind, CodecKind::kAV1);
+    EXPECT_EQ(r.value().av1.profile, 0u);
+    EXPECT_EQ(r.value().av1.level_idx, 5u);
+}
+
+TEST(ParseFmtp, DispatchH265) {
+    auto r = parse_fmtp(CodecKind::kH265,
+                        "profile-id=1;level-id=93;tier-flag=0;tx-mode=SRST");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(r.value().kind, CodecKind::kH265);
+    EXPECT_EQ(r.value().h265.tx_mode, "SRST");
 }
 
 TEST(BuildFmtp, DispatchByKind) {
     H264Fmtp h;
     h.profile_level_id = "42e01f";
     ParsedFmtp p;
-    p.kind = CodecKind::kH264;
-    p.h264 = h;
+    p.set_h264(h);
     auto body = build_fmtp(p);
     auto re = parse_h264(body);
     ASSERT_TRUE(re.ok());
     EXPECT_EQ(*re.value().profile_level_id, "42e01f");
+}
+
+// -----------------------------------------------------------------------------
+// H.265 fmtp (RFC 7798 §4.4)
+// -----------------------------------------------------------------------------
+
+TEST(ParseH265, WebRtcProfileParameters) {
+    // The body Chrome's WebRTC stack emits for HEVC.
+    auto r = parse_h265("profile-id=1;level-id=93;tier-flag=0;tx-mode=SRST");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().profile_id, 1u);
+    EXPECT_EQ(*r.value().level_id, 93u);      // general_level_idc = level 3.1
+    EXPECT_EQ(*r.value().tier_flag, 0u);
+    ASSERT_TRUE(r.value().tx_mode.has_value());
+    EXPECT_EQ(*r.value().tx_mode, "SRST");
+}
+
+TEST(ParseH265, TxModeIsAStringToken) {
+    // RFC 7798 §4.4: tx-mode is one of "SRST" / "MRST" / "MRMT".
+    for (const char* token : {"SRST", "MRST", "MRMT"}) {
+        auto r = parse_h265(std::string{"tx-mode="} + token);
+        ASSERT_TRUE(r.ok()) << token;
+        ASSERT_TRUE(r.value().tx_mode.has_value());
+        EXPECT_EQ(*r.value().tx_mode, token);
+    }
+}
+
+TEST(ParseH265, TxModeIsCaseInsensitive) {
+    auto r = parse_h265("tx-mode=srst");
+    ASSERT_TRUE(r.ok());
+    ASSERT_TRUE(r.value().tx_mode.has_value());
+    EXPECT_EQ(*r.value().tx_mode, "SRST");
+}
+
+TEST(ParseH265, TxModeRejectsAnUnknownToken) {
+    // The RFC lists exactly three legal tokens; anything else is a
+    // malformed parameter, not a silently-ignored unknown key.
+    auto r = parse_h265("tx-mode=BOGUS");
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.error().code(), ErrorCode::InvalidArgument);
+}
+
+TEST(ParseH265, TxModeRejectsANumericValue) {
+    // The old (pre-RFC-7798) spelling "tx-mode=0" must not be accepted:
+    // a peer that sends it has a different understanding of the wire.
+    auto r = parse_h265("tx-mode=0");
+    EXPECT_FALSE(r.ok());
+}
+
+TEST(ParseH265, SeparateSpropParameters) {
+    // RFC 7798 §4.4 defines three separate parameters.
+    auto r = parse_h265("sprop-vps=AAAA;sprop-sps=BBBB;sprop-pps=CCCC");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().sprop_vps, "AAAA");
+    EXPECT_EQ(*r.value().sprop_sps, "BBBB");
+    EXPECT_EQ(*r.value().sprop_pps, "CCCC");
+}
+
+TEST(ParseH265, LegacyCombinedSpropParameterSets) {
+    // The H.264-style combined form is still accepted for peers that
+    // use it: the entries are VPS, SPS, PPS in that order.
+    auto r = parse_h265("sprop-parameter-sets=AAAA,BBBB,CCCC");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().sprop_vps, "AAAA");
+    EXPECT_EQ(*r.value().sprop_sps, "BBBB");
+    EXPECT_EQ(*r.value().sprop_pps, "CCCC");
+}
+
+TEST(ParseH265, SpropRejectsNonBase64) {
+    auto r = parse_h265("sprop-sps=not*base64");
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.error().code(), ErrorCode::InvalidArgument);
+}
+
+TEST(ParseH265, UnknownKeysAreIgnored) {
+    auto r = parse_h265("profile-id=1;some-future-parameter=7");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().profile_id, 1u);
+}
+
+TEST(BuildH265, EmitsTheStringTxMode) {
+    H265Fmtp cfg;
+    cfg.profile_id = 1;
+    cfg.level_id  = 93;
+    cfg.tier_flag = 0;
+    cfg.tx_mode   = "SRST";
+    const std::string body = build_h265_fmtp(cfg);
+    EXPECT_NE(body.find("tx-mode=SRST"), std::string::npos)
+        << "tx-mode must be emitted as the RFC 7798 string token, got: "
+        << body;
+    EXPECT_EQ(body.find("tx-mode=0"), std::string::npos);
+}
+
+TEST(BuildH265, EmitsSeparateSpropParameters) {
+    H265Fmtp cfg;
+    cfg.sprop_vps = "AAAA";
+    cfg.sprop_sps = "BBBB";
+    cfg.sprop_pps = "CCCC";
+    const std::string body = build_h265_fmtp(cfg);
+    EXPECT_NE(body.find("sprop-vps=AAAA"), std::string::npos);
+    EXPECT_NE(body.find("sprop-sps=BBBB"), std::string::npos);
+    EXPECT_NE(body.find("sprop-pps=CCCC"), std::string::npos);
+    EXPECT_EQ(body.find("sprop-parameter-sets="), std::string::npos)
+        << "the RFC 7798 spelling uses three separate parameters";
+}
+
+TEST(BuildH265, RoundTrip) {
+    const std::string body =
+        "profile-id=1;level-id=93;tier-flag=0;tx-mode=SRST";
+    auto r = parse_h265(body);
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(build_h265_fmtp(r.value()), body);
+}
+
+// -----------------------------------------------------------------------------
+// AV1 fmtp (draft-ietf-payload-av1 §7)
+// -----------------------------------------------------------------------------
+
+TEST(ParseAv1, ChromeUnifiedPlanParameters) {
+    auto r = parse_av1("profile=0;level-idx=5;tier=0");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().profile, 0u);
+    EXPECT_EQ(*r.value().level_idx, 5u);
+    EXPECT_EQ(*r.value().tier, 0u);
+}
+
+TEST(ParseAv1, OptionalParameters) {
+    auto r = parse_av1("profile=0;level-idx=5;tier=0;bit-depth=10;"
+                        "monochrome=1;chroma-subsampling=0;"
+                        "color-primaries=1;transfer-characteristics=16;"
+                        "matrix-coefficients=1");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(*r.value().bit_depth, 10u);
+    EXPECT_EQ(*r.value().monochrome, 1u);
+    EXPECT_EQ(*r.value().chroma_subsampling, 0u);
+    EXPECT_EQ(*r.value().color_primaries, 1u);
+    EXPECT_EQ(*r.value().transfer_characteristics, 16u);
+    EXPECT_EQ(*r.value().matrix_coefficients, 1u);
+}
+
+TEST(ParseAv1, RejectsAnOutOfRangeProfile) {
+    auto r = parse_av1("profile=9");
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.error().code(), ErrorCode::InvalidArgument);
+}
+
+TEST(BuildAv1, RoundTrip) {
+    const std::string body = "profile=0;level-idx=5;tier=0";
+    auto r = parse_av1(body);
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(build_av1_fmtp(r.value()), body);
+}
+
+TEST(BuildAv1, OmitsAbsentFields) {
+    Av1Fmtp cfg;
+    cfg.profile = 0;
+    const std::string body = build_av1_fmtp(cfg);
+    EXPECT_EQ(body, "profile=0");
+}
+
+// -----------------------------------------------------------------------------
+// codec_from_rtpmap_encoding — H.265 / AV1
+// -----------------------------------------------------------------------------
+
+TEST(CodecFromRtpmap, H265AndAv1) {
+    EXPECT_EQ(codec_from_rtpmap_encoding("H265"), CodecKind::kH265);
+    EXPECT_EQ(codec_from_rtpmap_encoding("AV1"),  CodecKind::kAV1);
+    EXPECT_EQ(codec_from_rtpmap_encoding("h265"), CodecKind::kH265);
+    EXPECT_EQ(codec_from_rtpmap_encoding("av1"),  CodecKind::kAV1);
 }

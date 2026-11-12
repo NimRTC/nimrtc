@@ -77,12 +77,20 @@ public:
     /** Fill an I420 (or NV12) framebuffer with a recognisable synthetic
      *  pattern derived from @p frame_seq.  Used by the stub decoder so
      *  round-tripped frames are visually identifiable on the wire /
-     *  on screen.  @p y, @p u, @p v are caller-owned. */
+     *  on screen.  @p y, @p u, @p v are caller-owned.
+     *
+     *  @p stride_y / @p stride_u / @p stride_v are the row strides of the
+     *  three planes in bytes.  They differ between a tightly packed
+     *  buffer (stride == width) and a padded one (the frame layout
+     *  aligns the strides to 16 bytes). */
     static void paint_i420(std::uint8_t* y,
                            std::uint8_t* u,
                            std::uint8_t* v,
                            std::uint32_t width, std::uint32_t height,
-                           std::uint32_t frame_seq) noexcept;
+                           std::uint32_t frame_seq,
+                           std::uint32_t stride_y,
+                           std::uint32_t stride_u,
+                           std::uint32_t stride_v) noexcept;
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
     plugins::Status update_config(plugins::VideoCodecConfig cfg) noexcept override;

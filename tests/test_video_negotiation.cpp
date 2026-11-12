@@ -411,4 +411,159 @@ TEST_F(VideoNegotiation, OfferNamesTheSenderPayloadType) {
     tx.close();
 }
 
+// ============================================================================
+// 7. H.265 and AV1 negotiate end-to-end
+// ============================================================================
+
+TEST_F(VideoNegotiation, H265OfferNamesTheRfc7798EncodingAndFmtp) {
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "h265";
+
+    NimRTCEngine tx(cfg);
+    ASSERT_EQ(tx.open(), 0u);
+
+    const std::string offer = tx.create_offer();
+    ASSERT_FALSE(offer.empty());
+
+    // RFC 7798 §4.1: the encoding name is "H265" and the clock rate is
+    // 90000 (the video clock, as for every video codec).
+    EXPECT_NE(offer.find("a=rtpmap:116 H265/90000"), std::string::npos)
+        << "the H.265 offer must name the H265 encoding on payload type 116";
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 116")
+        << "the H.265 offer must name the H.265 payload type";
+
+    // RFC 7798 §4.4: the format parameters.  `tx-mode` is a *string*
+    // token ("SRST" / "MRST" / "MRMT"), not a number.
+    EXPECT_NE(offer.find("a=fmtp:116 profile-id=1"), std::string::npos);
+    EXPECT_NE(offer.find("level-id=93"), std::string::npos);
+    EXPECT_NE(offer.find("tier-flag=0"), std::string::npos);
+    EXPECT_NE(offer.find("tx-mode=SRST"), std::string::npos)
+        << "RFC 7798 defines tx-mode as a string token";
+
+    // The WebRTC HEVC profile forbids the parameter sets in the SDP.
+    EXPECT_EQ(offer.find("sprop-vps"), std::string::npos)
+        << "the WebRTC HEVC profile forbids sprop-* in the SDP";
+
+    tx.close();
+}
+
+TEST_F(VideoNegotiation, Av1OfferNamesTheUnifiedPlanEncodingAndFmtp) {
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "av1";
+
+    NimRTCEngine tx(cfg);
+    ASSERT_EQ(tx.open(), 0u);
+
+    const std::string offer = tx.create_offer();
+    ASSERT_FALSE(offer.empty());
+
+    // draft-ietf-payload-av1 §10 / Chrome Unified Plan: the encoding
+    // name is "AV1" on payload type 45.
+    EXPECT_NE(offer.find("a=rtpmap:45 AV1/90000"), std::string::npos)
+        << "the AV1 offer must name the AV1 encoding on payload type 45";
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 45");
+
+    EXPECT_NE(offer.find("a=fmtp:45 profile=0"), std::string::npos);
+    EXPECT_NE(offer.find("level-idx=5"), std::string::npos);
+    EXPECT_NE(offer.find("tier=0"), std::string::npos);
+
+    tx.close();
+}
+
+TEST_F(VideoNegotiation, H265PeerOfferIsAnsweredWithH265) {
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "h265";
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    // The peer offers H.265 on its conventional payload type.
+    EngineConfig peer_cfg = make_test_config();
+    peer_cfg.video_codec_name = "h265";
+    std::string offer = peer_offer(peer_cfg);
+    ASSERT_FALSE(offer.empty());
+    ASSERT_NE(offer.find("a=rtpmap:116 H265/90000"), std::string::npos);
+
+    const auto answer = rx.process_remote_sdp(offer);
+    ASSERT_TRUE(answer.has_value()) << "an H.265 offer must be answerable";
+
+    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 116")
+        << "the answer must keep the negotiated H.265 payload type";
+    EXPECT_NE(answer->find("a=rtpmap:116 H265/90000"), std::string::npos);
+    EXPECT_EQ(answer->find("H264"), std::string::npos)
+        << "the answer must not fall back to H.264";
+
+    rx.close();
+}
+
+TEST_F(VideoNegotiation, Av1PeerOfferIsAnsweredWithAv1) {
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "av1";
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    EngineConfig peer_cfg = make_test_config();
+    peer_cfg.video_codec_name = "av1";
+    std::string offer = peer_offer(peer_cfg);
+    ASSERT_FALSE(offer.empty());
+    ASSERT_NE(offer.find("a=rtpmap:45 AV1/90000"), std::string::npos);
+
+    const auto answer = rx.process_remote_sdp(offer);
+    ASSERT_TRUE(answer.has_value()) << "an AV1 offer must be answerable";
+
+    EXPECT_EQ(video_media_line(*answer), "m=video 9 UDP/TLS/RTP/SAVPF 45");
+    EXPECT_NE(answer->find("a=rtpmap:45 AV1/90000"), std::string::npos);
+    EXPECT_EQ(answer->find("H264"), std::string::npos);
+
+    rx.close();
+}
+
+TEST_F(VideoNegotiation, H265IsNotNegotiableWithAnH264Peer) {
+    // A H.264-only peer must not be told "H265": the engine holds one
+    // video codec per session (the single-codec rule), so an H.265
+    // engine facing an H.264 offer rejects the video section rather
+    // than silently switching codecs.
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "h265";
+
+    NimRTCEngine rx(cfg);
+    ASSERT_EQ(rx.open(), 0u);
+
+    std::atomic<std::uint32_t> first_error{0};
+    rx.set_on_error([&](std::uint32_t code, std::string_view) {
+        if (first_error.load() == 0) first_error.store(code);
+    });
+
+    const std::string offer = peer_offer(make_test_config());   // H.264 peer
+    ASSERT_FALSE(offer.empty());
+
+    const auto answer = rx.process_remote_sdp(offer);
+    ASSERT_TRUE(answer.has_value());
+
+    EXPECT_EQ(video_media_line(*answer), "m=video 0 UDP/TLS/RTP/SAVPF")
+        << "an H.264 offer must not be accepted by an H.265 engine";
+    EXPECT_EQ(first_error.load(), nimrtc::core::kVideoCodecUnsupported);
+
+    rx.close();
+}
+
+TEST_F(VideoNegotiation, H265PinnedPayloadTypeIsHonoured) {
+    // The host pinned the payload type: it wins over the conventional
+    // default.
+    EngineConfig cfg = make_test_config();
+    cfg.video_codec_name = "h265";
+    cfg.video_sender_tuning.payload_type = 120;
+
+    NimRTCEngine tx(cfg);
+    ASSERT_EQ(tx.open(), 0u);
+
+    const std::string offer = tx.create_offer();
+    ASSERT_FALSE(offer.empty());
+    EXPECT_EQ(video_media_line(offer), "m=video 9 UDP/TLS/RTP/SAVPF 120");
+    EXPECT_NE(offer.find("a=rtpmap:120 H265/90000"), std::string::npos);
+
+    tx.close();
+}
+
 } // namespace

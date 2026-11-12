@@ -32,6 +32,136 @@ constexpr int kDefaultAudioBitrateStereoBps = 64000;
  *  reallocation. */
 constexpr std::size_t kSrtpAuthTagBytes = 10;
 
+/** Copy one plane row-block from a caller-owned source into a staged buffer.
+ *
+ *  @param dst        Destination plane base (already offset to the plane).
+ *  @param dst_stride Destination row stride in bytes.
+ *  @param src        Source plane base.
+ *  @param src_stride Source row stride in bytes.
+ *  @param rows       Number of rows to copy.
+ *  @param row_bytes  Number of bytes to copy per row.
+ */
+void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
+                     const std::uint8_t* src, std::int32_t src_stride,
+                     std::uint32_t rows, std::size_t row_bytes) noexcept {
+    if (!dst || !src || rows == 0 || row_bytes == 0) return;
+
+    // The strides are signed because a layout can describe a bottom-up
+    // plane (row 0 at the highest address).  Keep the arithmetic signed
+    // so that case works, instead of narrowing them to size_t and
+    // wrapping a negative stride into a huge offset.
+    const std::ptrdiff_t d_step = dst_stride;
+    const std::ptrdiff_t s_step = src_stride;
+    std::uint8_t* d = dst;
+    const std::uint8_t* s = src;
+    for (std::uint32_t row = 0; row < rows; ++row) {
+        std::memcpy(d, s, row_bytes);
+        d += d_step;
+        s += s_step;
+    }
+}
+
+/** Stage a caller-owned `plugins::VideoSourceFrame` into an owned
+ *  `video_frame::VideoFrameBuffer` that the codec can read.
+ *
+ *  Why this exists: the plugin-level `VideoSourceFrame` is a *view* — its
+ *  `plane_*` pointers belong to the source and are only valid for the
+ *  duration of the callback.  The codec seam, in contrast, takes a
+ *  `plugins::VideoFrame` whose `buffer` is a refcounted
+ *  `VideoFrameBuffer` that must stay alive across the `encode()` call.
+ *  Software codecs can ignore the pixels entirely, but a hardware encoder
+ *  (NVENC) reads them: with a null `buffer` it rejects the frame with
+ *  `kErrInvalidParam`.  So the engine owns the copy.
+ *
+ *  The staged buffer always uses the *codec-facing* pixel format (I420 by
+ *  default) rather than the source's own format, so a source that emits
+ *  NV12 is converted once here instead of forcing every codec to handle
+ *  both layouts.
+ *
+ *  Note on `plane_offset_*`: the plugin producers (e.g. the memory video
+ *  source) already resolve the offsets into the `plane_y/u/v` pointers, so
+ *  the pointers are treated as absolute plane bases here and the offset
+ *  fields are ignored — adding them again would read past the plane.
+ *
+ *  @param frame  Caller-owned source frame (planes valid for this call).
+ *  @param fmt    Target pixel format for the staged buffer.
+ *  @return The staged buffer, or nullptr when the frame cannot be staged
+ *          (no planes, zero dimensions, or an unsupported source format).
+ */
+std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
+        const plugins::VideoSourceFrame& frame,
+        plugins::VideoPixelFormat fmt) noexcept {
+    if (frame.width == 0 || frame.height == 0) return nullptr;
+    if (!frame.plane_y) return nullptr;
+
+    // Only I420-family sources can be staged without a colour-space
+    // conversion.  Packed formats (BGRA / RGBA) would need a YUV matrix
+    // the engine does not own — the caller must convert first.
+    const bool source_is_nv12 = frame.format == plugins::VideoPixelFormat::kNV12;
+    const bool source_is_planar_420 =
+        frame.format == plugins::VideoPixelFormat::kI420
+     || frame.format == plugins::VideoPixelFormat::kYV12
+     || source_is_nv12
+     || frame.format == plugins::VideoPixelFormat::kUnknown;
+    if (!source_is_planar_420) return nullptr;
+
+    // The target must be a planar 4:2:0 layout — that is what every
+    // hardware encoder consumes today.
+    if (fmt != plugins::VideoPixelFormat::kI420
+     && fmt != plugins::VideoPixelFormat::kYV12) {
+        return nullptr;
+    }
+
+    const auto layout = video_frame::compute_layout(fmt, frame.width, frame.height);
+    if (layout.buffer_size == 0) return nullptr;
+
+    auto staged = std::make_shared<video_frame::VideoFrameBuffer>(layout);
+
+    const std::uint32_t half_w = (frame.width + 1u) / 2u;
+    const std::uint32_t half_h = (frame.height + 1u) / 2u;
+
+    // The source strides default to a tight packing when the producer did
+    // not set them (e.g. a hand-built test frame).
+    const std::int32_t src_stride_y = frame.stride_y > 0
+        ? frame.stride_y : static_cast<std::int32_t>(frame.width);
+    // NV12's chroma plane is interleaved, so one row of it spans the full
+    // width; a planar 4:2:0 chroma row spans half the width.
+    const std::int32_t src_stride_c = frame.stride_u > 0
+        ? frame.stride_u
+        : static_cast<std::int32_t>(source_is_nv12 ? frame.width : half_w);
+
+    if (source_is_nv12) {
+        // NV12 source: one interleaved UV plane.  De-interleave it into the
+        // staged I420 U and V planes (this also copies the luma plane).
+        if (!frame.plane_u) return nullptr;
+        video_frame::convert_nv12_to_i420(
+            frame.width, frame.height,
+            frame.plane_y, src_stride_y,
+            frame.plane_u, src_stride_c,
+            staged->plane(0), layout.strides[0],
+            staged->plane(1), layout.strides[1],
+            staged->plane(2), layout.strides[2]);
+        return staged;
+    }
+
+    // I420 / YV12 source: three separate planes.
+    if (!frame.plane_u || !frame.plane_v) return nullptr;
+
+    // ---- Luma ---------------------------------------------------------------
+    copy_plane_rows(staged->plane(0), layout.strides[0],
+                    frame.plane_y, src_stride_y,
+                    frame.height, frame.width);
+
+    // ---- Chroma -------------------------------------------------------------
+    copy_plane_rows(staged->plane(1), layout.strides[1],
+                    frame.plane_u, src_stride_c,
+                    half_h, half_w);
+    copy_plane_rows(staged->plane(2), layout.strides[2],
+                    frame.plane_v, src_stride_c,
+                    half_h, half_w);
+    return staged;
+}
+
 } // anonymous namespace
 
 
@@ -419,12 +549,76 @@ void NimRTCEngine::init_video_plugins() noexcept {
              .on_error = on_error_});
     }
 
+    // ---- Video Codec (H.264 / H.265 / AV1) ---------------------------------
+    //
+    // The codec is created FIRST (before the receiver and the sender),
+    // because the receiver and the sender need to know *which* codec
+    // family the session uses: their configs carry a `VideoCodecKind`
+    // that selects the packetizer / depacketizer, and their payload
+    // type has to match the codec's own.
+    //
+    // The family is derived from the plugin id (`EngineConfig::
+    // video_codec_name`) and cross-checked against the instantiated
+    // codec's `kind()`.  The plugin id is the user's instruction; the
+    // `kind()` is the plugin's own claim.  When they disagree the
+    // plugin's claim wins — the *wire* format follows what the codec
+    // actually produces, and the SDP is derived from the same value so
+    // the two cannot drift apart.
+    detail::VideoCodecFamily codec_family =
+        detail::codec_family_from_plugin_id(config_.video_codec_name);
+
+    if (!config_.video_codec_name.empty() && !video_codec_) {
+        plugins::VideoCodecConfig cfg{};
+        cfg.width = 640;
+        cfg.height = 480;
+        cfg.fps = 30;
+        cfg.bitrate_bps = 1'000'000;
+        cfg.keyframe_interval = 60;
+        cfg.pixel_format = plugins::VideoPixelFormat::kI420;
+        cfg.codec = detail::codec_kind_of(codec_family);
+        cfg.payload_type = config_.video_receiver_tuning.payload_type;
+        cfg.name = config_.video_codec_name;
+        (void)pal::make_plugin<&pal::resolve_video_codec>(
+            config_.video_codec_name,
+            video_codec_,
+            std::move(cfg),
+            {.err_open_failed = core::kVideoCodecOpenFailed,
+             .err_missing = core::kVideoCodecPluginMissing,
+             .open_fail_mode = pal::PluginFailureMode::Error,
+             .missing_mode = pal::PluginFailureMode::Error,
+             .on_error = on_error_});
+    }
+
+    // The instantiated codec is the authority on the codec family.  A
+    // composite codec (NVENC + NVDEC) reports the family of the
+    // sub-codecs it wraps, so this works for the hardware path too.
+    if (video_codec_) {
+        const plugins::VideoCodecKind kind = video_codec_->kind();
+        const detail::VideoCodecFamily from_plugin =
+            detail::codec_family_from_plugin_id(config_.video_codec_name);
+        detail::VideoCodecFamily from_kind =
+            detail::codec_family_from_codec_kind(kind);
+        if (from_kind != detail::VideoCodecFamily::kUnknown) {
+            codec_family = from_kind;
+        } else if (from_plugin != detail::VideoCodecFamily::kUnknown) {
+            codec_family = from_plugin;
+        }
+    }
+
+    // The effective payload type: the host's explicit choice, or the
+    // family's conventional default (see `resolve_payload_type`).
+    const std::uint8_t video_pt = detail::resolve_payload_type(
+        codec_family, config_.video_sender_tuning.payload_type);
+
+    impl_->video_codec_family = codec_family;
+    impl_->video_payload_type  = video_pt;
+
     // ---- Video Receiver ----------------------------------------------------
     if (!video_receiver_) {
         plugins::VideoReceiverConfig cfg{};
-        cfg.codec        = plugins::VideoCodecKind::kH264;
+        cfg.codec        = detail::codec_kind_of(codec_family);
         cfg.ssrc         = config_.video_receiver_tuning.ssrc;
-        cfg.payload_type = config_.video_receiver_tuning.payload_type;
+        cfg.payload_type = video_pt;
         cfg.expect_fu_a  = config_.video_receiver_tuning.expect_fu_a;
         cfg.max_inflight_frames =
             config_.video_receiver_tuning.max_inflight_frames;
@@ -448,9 +642,9 @@ void NimRTCEngine::init_video_plugins() noexcept {
     // ---- Video Sender ------------------------------------------------------
     if (!video_sender_) {
         plugins::VideoSenderConfig cfg{};
-        cfg.codec        = plugins::VideoCodecKind::kH264;
+        cfg.codec        = detail::codec_kind_of(codec_family);
         cfg.ssrc         = config_.video_sender_tuning.ssrc;
-        cfg.payload_type = config_.video_sender_tuning.payload_type;
+        cfg.payload_type = video_pt;
         cfg.mtu          = config_.video_sender_tuning.mtu;
         cfg.initial_seq  = config_.video_sender_tuning.initial_seq;
         cfg.packetization_mode =
@@ -461,29 +655,6 @@ void NimRTCEngine::init_video_plugins() noexcept {
             std::move(cfg),
             {.err_open_failed = core::kVideoSenderOpenFailed,
              .err_missing = core::kVideoSenderPluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
-    }
-
-    // ---- Video Codec (H.264) -----------------------------------------------
-    if (!config_.video_codec_name.empty() && !video_codec_) {
-        plugins::VideoCodecConfig cfg{};
-        cfg.width = 640;
-        cfg.height = 480;
-        cfg.fps = 30;
-        cfg.bitrate_bps = 1'000'000;
-        cfg.keyframe_interval = 60;
-        cfg.pixel_format = plugins::VideoPixelFormat::kI420;
-        cfg.codec = plugins::VideoCodecKind::kH264;
-        cfg.payload_type = config_.video_receiver_tuning.payload_type;
-        cfg.name = config_.video_codec_name;
-        (void)pal::make_plugin<&pal::resolve_video_codec>(
-            config_.video_codec_name,
-            video_codec_,
-            std::move(cfg),
-            {.err_open_failed = core::kVideoCodecOpenFailed,
-             .err_missing = core::kVideoCodecPluginMissing,
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
@@ -523,9 +694,11 @@ void NimRTCEngine::init_video_plugins() noexcept {
                 // engine without SDP working.
                 const std::uint8_t negotiated_pt =
                     impl_->negotiated_video_pt.load(std::memory_order_relaxed);
-                std::uint8_t pt = negotiated_pt != 0
-                                       ? negotiated_pt
-                                       : config_.video_sender_tuning.payload_type;
+                const std::uint8_t local_pt =
+                    impl_->video_payload_type != 0
+                        ? impl_->video_payload_type
+                        : config_.video_sender_tuning.payload_type;
+                std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
                 std::uint8_t hdr[12] = {
                     0x80,                             // version, no extensions
                     static_cast<std::uint8_t>((marker ? 0x80 : 0x00) | (pt & 0x7F)),
@@ -1033,12 +1206,32 @@ plugins::Status NimRTCEngine::send_video(
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
 
     // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
-    // P0: only the metadata is propagated; the actual pixel storage is
-    // owned by `frame.plane_y/u/v` and must outlive the encode call.
+    //
+    // The source frame is a *view* into the producer's own storage, valid
+    // only for this call; the codec seam wants a refcounted buffer that
+    // stays alive across `encode()`.  So the engine stages its own copy
+    // (see `stage_source_frame` above).  A software codec may ignore the
+    // pixels, but a hardware encoder (NVENC) *must* have them — with a
+    // null buffer it rejects the frame with kErrInvalidParam.
     plugins::VideoFrame raw{};
     raw.info.capture_ts_us = frame.capture_ts_us;
     raw.info.frame_seq     = frame.frame_seq;
     raw.info.rtp_timestamp = frame.rtp_timestamp;
+
+    // The codec-facing pixel format comes from the codec's own config
+    // (I420 for every backend today).
+    const auto codec_fmt = video_codec_->config().pixel_format;
+    raw.buffer = stage_source_frame(frame, codec_fmt);
+    if (!raw.buffer) {
+        // The frame cannot be staged (no planes, zero dimensions, or a
+        // packed source format).  Software codecs can still encode a
+        // synthetic frame without pixels, so we only *warn* here and let
+        // the codec decide — a hardware codec will report the failure
+        // through its own error path.
+        core::log::Logger::instance().warn(
+            "send_video: the source frame could not be staged into a "
+            "codec-facing pixel buffer (the encoder receives no pixels)");
+    }
 
     // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
     // size on first use; subsequent calls within the same capacity reuse

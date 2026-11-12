@@ -1,16 +1,23 @@
 # modules/video_payload/CMakeLists.txt
 # ----------------------------------------------------------------------------
-# Video RTP payload packetizers / depacketizers (RFC 6184 / 7741 / 9559).
+# Video RTP payload packetizers / depacketizers
+# (RFC 6184 / 7741 / 9559 / 7798 / draft-ietf-payload-av1).
 #
 # P1 minimal:
 #   - H.264 Single NAL, STAP-A, FU-A packetizers/depacketizers
 #   - VP8 descriptor (RFC 7741, base + I-bit extension)
 #   - VP9 descriptor (RFC 9559, Z/Y/F + picture id + layer info)
 #
+# v1.3 (video plan C4 / C6 / C8):
+#   - H.265 Single NAL, AP, FU packetizers/depacketizers (RFC 7798)
+#   - AV1 aggregation-header framing (draft-ietf-payload-av1)
+#
 # No vendor libraries; pure C++.  Reuses nimrtc::core for ByteSpan / Result.
 # ----------------------------------------------------------------------------
 add_library(nimrtc_video_payload STATIC
     src/h264.cpp
+    src/h265.cpp
+    src/av1.cpp
     src/vp8.cpp
     src/vp9.cpp
     )

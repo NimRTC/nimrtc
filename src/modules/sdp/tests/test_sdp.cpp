@@ -175,6 +175,49 @@ TEST(SdpParser, MalformedLineRejected) {
 }
 
 // -----------------------------------------------------------------------------
+// Parser — a truncated attribute line must not throw
+//
+// The parser skips a fixed number of characters to get past the attribute
+// name ("a=msid-semantic:" -> skip 15, "a=ice-options:" -> skip 13).  When
+// the line carries no value at all, the skip length exceeds the line's
+// length, and std::string_view::substr throws std::out_of_range.  The parser
+// is fed attacker-controlled bytes (it parses a remote peer's offer), so it
+// must report the malformed line instead of dying.
+//
+// The fuzzer found this: `a=msid-semantic:` alone crashed fuzz_sdp with
+// "basic_string_view::substr: __pos (which is 15) > __size (which is 14)".
+// -----------------------------------------------------------------------------
+TEST(SdpParser, TruncatedAttributeLineDoesNotThrow) {
+    constexpr std::string_view text =
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        "s=-\r\n"
+        "t=0 0\r\n"
+        "a=msid-semantic:\r\n"      // 14 chars, the parser skips 15
+        "a=ice-options:\r\n"        // 12 chars, the parser skips 13
+        "a=ice-ufrag:\r\n"
+        "a=ice-pwd:\r\n"
+        "a=setup:\r\n"
+        "a=mid:\r\n"
+        "a=msid:\r\n"
+        "a=group:\r\n"
+        "a=candidate:\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n";
+
+    // The point of the test is that parse() returns at all -- before the
+    // fix it threw std::out_of_range out of the parser.
+    Parser p;
+    auto r = p.parse(text);
+    ASSERT_TRUE(r.ok()) << r.error().message();
+
+    // The truncated session-level attributes land as empty values, not as
+    // garbage read past the end of the line.
+    EXPECT_TRUE(r.value().msid_semantic_token.empty());
+    EXPECT_TRUE(r.value().ice_options.empty());
+}
+
+// -----------------------------------------------------------------------------
 // Parser — WebRTC offer with BUNDLE / ICE / DTLS / mid / rtpmap / fmtp /
 // rtcp-fb (multiple formats — exercises the bug we just fixed)
 // -----------------------------------------------------------------------------

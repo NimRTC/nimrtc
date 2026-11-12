@@ -25,7 +25,10 @@ add_library(nimrtc_sched STATIC
     src/scheduler_plugin.cpp
     )
 
-nimrtc_apply_options(nimrtc_sched)
+# STRICT_CONVERSIONS: the scheduler converts byte counts to BWE credit
+# and to pacing tokens in several places, so a narrowing conversion
+# here silently changes the congestion response.
+nimrtc_apply_options(nimrtc_sched STRICT_CONVERSIONS)
 target_link_libraries(nimrtc_sched
     PUBLIC
         nimrtc::core

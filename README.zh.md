@@ -311,7 +311,7 @@ profile 跳过 L2 编解码，见 `docs/zh/architecture.md` §7.1），原理就
                                     ▼
             ┌──────────────────────────────────────────────────┐
             │  L2  编解码 + 3A         （relay profile 跳过）     │
-            │  Opus / G.711 / VP8 / H.264 · 音频 3A 流水线      │
+            │  Opus / G.711 / VP8 / H.264 / H.265 / AV1 · 音频 3A 流水线 │
             └──────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -600,7 +600,10 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | SFU-1 —— 进程内 SFU relay（`nimrtc_sfu` 模块，BUNDLE/rtcp-mux） | ❌ **已关闭 — NO** | 2026-10-19 关闭（BDFL：SFU 不是项目核心目标）；不在关键路径上。见 `docs/plan/v1.0-plan.md` §7 + §12.5。 |
 | DC-3 —— SFU relay 场景下的 DC 转发策略 | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
 | BENCH-1 —— `sfu-relay` 基准 pps/Mbps | ❌ **已关闭 — NO** | 继承自 SFU-1（2026-10-19 关闭）。 |
-| H.264 硬件后端（NVENC / NVDEC / AMF / QSV / DXVA / VA-API / OpenH264） | ✅ | v0.9.2 |
+| H.264 硬件后端（NVENC / AMF / QSV / DXVA / VA-API / OpenH264 编码器与 DXVA 解码器） | ✅ | v0.9.2 |
+| H.264 硬件**解码** —— NVDEC（Win/Linux） | ✅ **已实现** —— `src/modules/nvcodec/` 提供真实的 CUVID 解码器（parser + decoder + NV12 surface → host 拷贝），通过运行时动态加载 `nvcuvid.dll` / `libnvcuvid.so` 驱动。`VideoToolbox`（macOS）与 `MediaCodec`（Android）仍**未实现** —— 后端条目保留以稳定 seam，但 `create()` 返回 `nullptr`、`available()` 返回 `false`；这两个平台请走软件 H.264 路径。见 [H.264 后端矩阵](docs/hw_plugin_seam.md#111-backend-matrix)。 | v1.1 |
+| H.265（HEVC）视频编解码 —— 端到端 | ✅ **已实现** —— `src/modules/h265/` 注册 id 为 `"h265"` 的 video-codec 插件（即 `EngineConfig::video_codec_name` 使用的拼写）。RTP 载荷格式遵循 **RFC 7798**（单 NAL 单元、AP type 48、FU type 49，其中 `FuType` 为 6 位）；SDP 参数同样遵循 RFC 7798（`profile-id`、`level-id`、`tier-flag`、`tx-mode="SRST"`、`sprop-vps` / `sprop-sps` / `sprop-pps`）。硬件编解码复用共享的 `nvcodec` 模块（NVENC / NVDEC）。 | v1.2 |
+| AV1 视频编解码 —— 端到端 | ✅ **已实现** —— `src/modules/av1/` 注册 id 为 `"av1"` 的 video-codec 插件。RTP 载荷格式遵循 **draft-ietf-payload-av1**（aggregation header、LEB128 长度、Annex-B 分帧、OBU 重组）；SDP 侧为 AV1 Unified Plan 的 `a=fmtp:` 字段。硬件编解码复用共享的 `nvcodec` 模块（NVENC / NVDEC）。 | v1.2 |
 | Chrome ↔ NimRTC 媒体互通 e2e（Case D，四平台全绿） | ✅ | v0.11.0 |
 
 ### 已落地在 `main`，尚未发版
@@ -666,7 +669,8 @@ Profile 是**编译期配置**，不是运行时分发。声明式 JSON 格式�
 | `NIMRTC_VENDORED_WEBRTC_APM` | **ON** | 使用 vendored WebRTC APM |
 | `NIMRTC_INSTALL` | OFF | 启用 `install()` 规则 —— `include/` + `lib/` + `lib/cmake/NimRTC/`（Track D 打包） |
 | `NIMRTC_ENABLE_DTLS_GMSSL` | OFF | 构建 GMSSL 后端的 DTLS 工厂（id=`gmssl`）；使用 `src/third_party/gmssl/src` 的 vendored 子模块（pin v3.2.0），默认 OFF，非国密构建零成本 |
-| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **编码器**（Win/Linux）。NVDEC 解码器**未实现** —— `make_nvdec_h264_codec()` 返回 `nullptr`。 |
+| `NIMRTC_PLUGINS_NVENC` | OFF | NVIDIA NVENC H.264 **编码器**（Win/Linux） |
+| `NIMRTC_PLUGINS_NVDEC` | OFF | NVIDIA NVDEC H.264 **解码器**（Win/Linux）—— 通过运行时动态加载 `nvcuvid.dll` / `libnvcuvid.so` 驱动 CUVID parser + decoder；解码器是独立的单向后端，通过 `HwCompositeCodec` 适配器与编码器配对，使单个 `IVideoCodec` 同时覆盖两个方向。 |
 | `NIMRTC_PLUGINS_AMF` | OFF | AMD AMF（Windows） |
 | `NIMRTC_PLUGINS_QSV` | OFF | Intel QSV via libvpl/oneVPL |
 | `NIMRTC_PLUGINS_DXVA` | OFF | Microsoft DXVA/MF（Windows） |

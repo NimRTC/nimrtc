@@ -61,6 +61,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <string>
 #include <string_view>
 #include <optional>
 #include <vector>

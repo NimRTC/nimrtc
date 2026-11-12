@@ -95,15 +95,23 @@ reports it. **How loudly depends on the family:**
 | Behaviour | Families | What the host sees |
 |---|---|---|
 | **Hard failure** | ICE transport, transport stack, DTLS, SCTP socket, SRTP backend, DataChannel backend | `open()` returns non-zero, `last_open_rc()` is set, `on_error_` fires. No built-in substitute is used. |
-| **Soft degradation** | BWE, scheduler, net-feedback, XR report, jitter buffer, audio 3A, audio/video codecs, video source / sink / receiver / sender | The engine logs a warning and continues without that component. `open()` still succeeds. |
+| **Reported, non-fatal** | audio / video codecs, video source / sink / receiver / sender, video capture, audio decoder, audio receiver, jitter buffer | `open()` still succeeds, but `on_error_` fires with the family's error code and the component is left absent (the accessor returns `nullptr`). The session is up; that one feature is inert. |
+| **Logged only** | BWE, scheduler, net-feedback, XR report, WebTransport session factory, session model, DTMF codec, audio 3A, audio codec | The engine logs a warning and continues without that component. `open()` still succeeds and `on_error_` does **not** fire. |
 | **Disabled by configuration** | DataChannel (`datachannel_backend == ""`), raw-UDP bypass (`raw_udp_name` empty), capture (`video_capture_name` empty) | The feature is off; no resolution is attempted. |
 
 The hard-failure rows are the ones where a typo must not be papered
 over — a missing DTLS backend is a session that cannot secure media,
 and silently substituting a built-in would hide the mistake. The
-soft-degradation rows are the ones where the component is an
+logged-only rows are the ones where the component is an
 *enhancement* (a better estimator, a nicer 3A pipeline) rather than a
 protocol requirement.
+
+The **reported, non-fatal** row is the middle ground: the session is
+perfectly usable without the component, but the host is told through
+`on_error_` so a typo does not turn into a feature that silently never
+works. A capture device that cannot be resolved is in this row: the
+user asked for a device by name, and "no device" is not a reasonable
+silent answer to that.
 
 `docs/plugin_author_guide.md` §4.1 carries the same table with the
 per-family mapping.

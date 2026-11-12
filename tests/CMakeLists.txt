@@ -1151,6 +1151,65 @@ nimrtc_add_engine_codec_test(test_engine_video_codec_family
                               test_engine_video_codec_family.cpp)
 endif()
 
+# ----------------------------------------------------------------------------
+# The capture-*device* seam wiring (remote-desktop plan A1; architecture
+# remediation plan Phase 2 §2.2).
+#
+# `EngineConfig::video_capture_name` was the one `*_name` field the engine
+# never read — naming a capture device did nothing.  The test proves the
+# id is resolved, the device is created and opened, an unknown id is
+# reported loudly, and the device is closed on teardown.
+#
+# It needs the capture module's registrar (the PAL Slice 2 default-
+# registrar table references `video_capture::register_default_plugins`),
+# so the link set is the plain `nimrtc_add_engine_test` one plus the
+# capture module.
+if(NIMRTC_MODULE_VIDEO_CAPTURE)
+  add_executable(test_engine_video_capture test_engine_video_capture.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_capture PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_capture PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_capture PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_capture PRIVATE
+      nimrtc::engine
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_capture
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_capture PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_capture PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_capture PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_capture LENIENT)
+  add_test(NAME test_engine_video_capture
+      COMMAND $<TARGET_FILE:test_engine_video_capture>)
+  set_tests_properties(test_engine_video_capture PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_capture
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 

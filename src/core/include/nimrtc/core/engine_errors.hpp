@@ -109,6 +109,22 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSenderPluginMissing = 0x1
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecOpenFailed    = 0x1A30;
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecPluginMissing = 0x1A31;
 
+/** The capture-device plugin could not be opened (remote-desktop plan A1).
+ *
+ *  Reported when `EngineConfig::video_capture_name` names a registered
+ *  factory whose `open()` fails — the device could not be acquired, the
+ *  requested format was refused, or the platform denied access. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureOpenFailed = 0x1A40;
+
+/** The capture-device plugin id in `EngineConfig::video_capture_name` is
+ *  not registered in the registry's video-capture slot.
+ *
+ *  A hard failure: the user asked for a capture device by name and the
+ *  name does not resolve.  Silently falling back to "no capture device"
+ *  would turn a typo into a session that quietly never produces a
+ *  frame. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCapturePluginMissing = 0x1A41;
+
 /** The peer offered a video codec NimRTC cannot decode (C9).
  *
  *  Reported once per negotiation, not once per packet — it is a

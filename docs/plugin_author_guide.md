@@ -171,14 +171,17 @@ in which row.
 | Behaviour | Families | What the host sees |
 |---|---|---|
 | **Hard failure** — `open()` returns non-zero, `on_error()` fires with the resolution failure | ICE transport, DTLS, SCTP socket, transport stack, SRTP backend, DataChannel backend, transport strategy | `kEngineInvalidParam` (or `kEngineInternal` for a factory-side fault). The engine does **not** substitute a built-in implementation. |
-| **Soft degradation** — the engine logs a warning and continues without that component | BWE, scheduler, network-feedback collector, XR report consumer, jitter buffer, audio 3A | The session still opens; the affected feature is inert. `on_error()` is **not** fired (the engine uses the `Warn` failure mode for these). |
-| **Disabled by configuration** — the knob is empty, so the family is never resolved | DataChannel (`datachannel_backend == ""`), raw-UDP bypass (`raw_udp_name` empty), capture / source / sink plugins | The corresponding SDP section is omitted, or the accessor returns `nullptr`. |
+| **Reported, non-fatal** — the session opens without the component, but `on_error()` fires with the family's error code | audio / video codecs, video source / sink / receiver / sender, video capture, audio decoder, audio receiver, jitter buffer | The affected feature is inert and its accessor returns `nullptr`, but the host is told. A typo does not turn into a feature that silently never works. |
+| **Logged only** — the engine logs a warning and continues without that component | BWE, scheduler, network-feedback collector, XR report consumer, WebTransport session factory, session model, DTMF codec | The session still opens; the affected feature is inert. `on_error()` is **not** fired (the engine uses the `Warn` failure mode for these). |
+| **Disabled by configuration** — the knob is empty, so the family is never resolved | DataChannel (`datachannel_backend == ""`), raw-UDP bypass (`raw_udp_name` empty), capture (`video_capture_name` empty) | The corresponding SDP section is omitted, or the accessor returns `nullptr`. |
 
-Two consequences worth internalising:
+Four consequences worth internalising:
 
-- A typo in a **hard-failure** family's id is loud. That is the point
-  of the seam.
-- A typo in a **soft-degradation** family's id is quiet (a log line
+- A typo in a **hard-failure** family's id is loud, and the session
+  does not open at all. That is the point of the seam.
+- A typo in a **reported, non-fatal** family's id is also loud — the
+  session opens, but `on_error()` tells you which piece is missing.
+- A typo in a **logged-only** family's id is quiet (a log line
   only). If you are debugging a missing feature, read the engine's
   warning log before suspecting your plugin.
 
@@ -200,8 +203,9 @@ must fork the module; the plugin system does not cover it.
 ## 4. Interface catalogue
 
 The **Failure** column uses the §4.1 vocabulary: `hard` = `open()`
-returns non-zero, `soft` = the engine degrades with a warning,
-`off` = disabled by an empty config knob.
+returns non-zero, `reported` = the session opens but `on_error()` fires,
+`logged` = the engine degrades with a log line only, `off` = disabled
+by an empty config knob.
 
 | Family       | Interface header                                 | Engine config knob          | Factory macro                  | Failure | Notes |
 |--------------|--------------------------------------------------|-----------------------------|--------------------------------|---------|-------|
@@ -209,27 +213,27 @@ returns non-zero, `soft` = the engine degrades with a warning,
 | Transport stack | `transport/transport_stack.hpp`               | `transport_stack_name`      | `NIMRTC_REGISTER_TRANSPORT_STACK` | hard | Empty = the `CapabilitySelector` decides (`webrtc-classic` / `raw-udp-arq`). Non-empty = explicit override of the media stack. |
 | DTLS         | `dtls/dtls_session_iface.hpp`                    | `dtls_name`                 | `NIMRTC_REGISTER_DTLS_SESSION` | hard | `wolfssl`, `gmssl`. Empty = `"wolfssl"`. |
 | SCTP socket  | `sctp/sctp_socket_iface.hpp`                     | `sctp_socket_name`          | `NIMRTC_REGISTER_SCTP_SOCKET`  | hard | Default = `"stub"` (in-tree loopback reference backend). |
-| Raw UDP      | `raw_udp/raw_udp_datagram.hpp`                   | `raw_udp_name`              | `NIMRTC_REGISTER_RAW_UDP_DATAGRAM` | soft | Empty = the raw-UDP bypass is disabled. The ARQ control plane falls back to the in-tree `"arq"` id. |
+| Raw UDP      | `raw_udp/raw_udp_datagram.hpp`                   | `raw_udp_name`              | `NIMRTC_REGISTER_RAW_UDP_DATAGRAM` | off | Empty = the raw-UDP bypass is disabled. The ARQ control plane falls back to the in-tree `"arq"` id. |
 | SRTP backend | `plugins/srtp_backend.hpp`                       | `srtp_backend_name`         | `NIMRTC_REGISTER_SRTP_BACKEND` | hard | Default = `"libsrtp"`. A third-party crypto backend registers under its own id. |
 | DataChannel  | `plugins/datachannel.hpp`                        | `datachannel_backend`       | `NIMRTC_REGISTER_DATACHANNEL`  | hard | `"web_transport"` (default) or `""` (disabled). The `"sctp"` family is retired — it was a test-only in-process socket. |
-| WebTransport | `web_transport/web_transport_session_factory.hpp`| `web_transport_name`        | `NIMRTC_REGISTER_WEB_TRANSPORT` | soft | `"msquic"`. The QUIC session factory behind the `web_transport` DataChannel backend. |
-| Audio decoder| `plugins/audio_decoder.hpp`                      | `audio_decoder_name`        | `NIMRTC_REGISTER_AUDIO_DECODER` | soft | `opus`. The codec-side seam of the audio receive pipeline. |
-| Audio receiver| `plugins/audio_receiver.hpp`                    | `audio_receiver_name`       | `NIMRTC_REGISTER_AUDIO_RECEIVER` | soft | `nimrtc_audio_rx`. The pipeline-side seam of the audio receive path. |
-| Session model| `plugins/session.hpp`                            | `session_name`              | `NIMRTC_REGISTER_SESSION`     | soft | `session`. The renegotiation model (transceivers / tracks). |
-| DTMF codec   | `plugins/dtmf.hpp`                               | `dtmf_codec_name`           | `NIMRTC_REGISTER_DTMF`        | soft | `dtmf`. The RFC 4733 telephone-event codec. |
-| Jitter buffer | `plugins/jb.hpp`                                 | `jb_name`                   | `NIMRTC_REGISTER_JB`           | soft | `adaptive` is the v0.11.0 default. |
-| Audio 3A     | `plugins/audio3a.hpp`                            | `audio3a_name`              | `NIMRTC_REGISTER_AUDIO3A`      | soft | `webrtc_apm`, plus `webrtc` (Null stub). See §6.2. |
-| Codec (audio)| `plugins/codec.hpp`                              | `codec_name`                | `NIMRTC_REGISTER_CODEC`        | soft | `opus`, `pcmu` (fallback). |
-| Video codec  | `plugins/video_codec.hpp`                        | `video_codec_name`          | `NIMRTC_REGISTER_VIDEO_CODEC`  | soft | `h264` (P1 reference). |
-| Video source | `plugins/video_source.hpp`                       | `video_source_name`         | `NIMRTC_REGISTER_VIDEO_SOURCE` | soft | `memory` default. HW guide: §6.3. |
-| Video capture| `plugins/video_capture.hpp`                      | `video_capture_name`        | `NIMRTC_REGISTER_VIDEO_CAPTURE`| soft | Empty = disabled. The capture *device* seam; a source is derived from it by an adapter. |
-| Video sink   | `plugins/video_sink.hpp`                         | `video_sink_name`           | `NIMRTC_REGISTER_VIDEO_SINK`   | soft | `headless`, `pinned`. |
-| Video rx     | `plugins/video_pipeline.hpp` (`IVideoReceiver`)  | `video_receiver_name`       | `NIMRTC_REGISTER_VIDEO_RECEIVER` | soft | — |
-| Video tx     | `plugins/video_pipeline.hpp` (`IVideoSender`)    | `video_sender_name`         | `NIMRTC_REGISTER_VIDEO_SENDER` | soft | — |
-| BWE          | `plugins/bwe.hpp`                                | `bwe_name`                  | `NIMRTC_REGISTER_BWE`          | soft | `aimd`. |
-| Scheduler    | `plugins/scheduler.hpp`                          | `scheduler_name`            | `NIMRTC_REGISTER_SCHEDULER`    | soft | `strict_priority`. |
-| Net feedback | `plugins/net_feedback.hpp`                       | `net_feedback_name`         | `NIMRTC_REGISTER_NET_FEEDBACK` | soft | The receiver-side collector that feeds the BWE estimator. |
-| XR report    | `plugins/xr_report.hpp`                          | `xr_report_name`            | `NIMRTC_REGISTER_XR_REPORT`    | soft | The RFC 3611 extended-report consumer. |
+| WebTransport | `web_transport/web_transport_session_factory.hpp`| `web_transport_name`        | `NIMRTC_REGISTER_WEB_TRANSPORT` | logged | `"msquic"`. The QUIC session factory behind the `web_transport` DataChannel backend. |
+| Audio decoder| `plugins/audio_decoder.hpp`                      | `audio_decoder_name`        | `NIMRTC_REGISTER_AUDIO_DECODER` | reported | `opus`. The codec-side seam of the audio receive pipeline. |
+| Audio receiver| `plugins/audio_receiver.hpp`                    | `audio_receiver_name`       | `NIMRTC_REGISTER_AUDIO_RECEIVER` | reported | `nimrtc_audio_rx`. The pipeline-side seam of the audio receive path. |
+| Session model| `plugins/session.hpp`                            | `session_name`              | `NIMRTC_REGISTER_SESSION`     | logged | `session`. The renegotiation model (transceivers / tracks). |
+| DTMF codec   | `plugins/dtmf.hpp`                               | `dtmf_codec_name`           | `NIMRTC_REGISTER_DTMF`        | logged | `dtmf`. The RFC 4733 telephone-event codec. |
+| Jitter buffer | `plugins/jb.hpp`                                 | `jb_name`                   | `NIMRTC_REGISTER_JB`           | reported | `adaptive` is the v0.11.0 default. Resolved inside the audio-receiver module; a missing plugin makes the receiver report `kAudioReceiverMissing`. |
+| Audio 3A     | `plugins/audio3a.hpp`                            | `audio3a_name`              | `NIMRTC_REGISTER_AUDIO3A`      | logged | `webrtc_apm`, plus `webrtc` (Null stub). See §6.2. A missing plugin falls back to the concrete `NullAudio3A`; an *open* failure fires `on_error`. |
+| Codec (audio)| `plugins/codec.hpp`                              | `codec_name`                | `NIMRTC_REGISTER_CODEC`        | logged | `opus`, `pcmu` (fallback). A missing plugin makes `send_audio()` report the frame as lost (throttled) rather than substituting a codec. |
+| Video codec  | `plugins/video_codec.hpp`                        | `video_codec_name`          | `NIMRTC_REGISTER_VIDEO_CODEC`  | reported | `h264` (P1 reference). |
+| Video source | `plugins/video_source.hpp`                       | `video_source_name`         | `NIMRTC_REGISTER_VIDEO_SOURCE` | reported | `memory` default. HW guide: §6.3. |
+| Video capture| `plugins/video_capture.hpp`                      | `video_capture_name`        | `NIMRTC_REGISTER_VIDEO_CAPTURE`| reported | Empty = disabled. The capture *device* seam; a source is derived from it by an adapter. |
+| Video sink   | `plugins/video_sink.hpp`                         | `video_sink_name`           | `NIMRTC_REGISTER_VIDEO_SINK`   | reported | `headless`, `pinned`. |
+| Video rx     | `plugins/video_pipeline.hpp` (`IVideoReceiver`)  | `video_receiver_name`       | `NIMRTC_REGISTER_VIDEO_RECEIVER` | reported | — |
+| Video tx     | `plugins/video_pipeline.hpp` (`IVideoSender`)    | `video_sender_name`         | `NIMRTC_REGISTER_VIDEO_SENDER` | reported | — |
+| BWE          | `plugins/bwe.hpp`                                | `bwe_name`                  | `NIMRTC_REGISTER_BWE`          | logged | `aimd`. |
+| Scheduler    | `plugins/scheduler.hpp`                          | `scheduler_name`            | `NIMRTC_REGISTER_SCHEDULER`    | logged | `strict_priority`. |
+| Net feedback | `plugins/net_feedback.hpp`                       | `net_feedback_name`         | `NIMRTC_REGISTER_NET_FEEDBACK` | logged | The receiver-side collector that feeds the BWE estimator. |
+| XR report    | `plugins/xr_report.hpp`                          | `xr_report_name`            | `NIMRTC_REGISTER_XR_REPORT`    | logged | The RFC 3611 extended-report consumer. |
 
 **Not pluggable today** (see §4.2): the RTP layer
 (`plugins/rtp.hpp`) and the SDP layer (`plugins/sdp.hpp`). The

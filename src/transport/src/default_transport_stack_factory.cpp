@@ -120,9 +120,6 @@ public:
                          std::uint16_t /*port*/,
                          std::string_view /*user*/,
                          std::string_view /*pass*/) noexcept override {}
-    // Keeps the base class's transport-selecting overload visible; the
-    // declaration above would otherwise hide it (-Woverloaded-virtual).
-    using plugins::IICETransport::add_turn_server;
     void set_bwe(plugins::IBwe* /*bwe*/) noexcept override {}
     void set_scheduler(plugins::IScheduler* /*sched*/) noexcept override {}
 };

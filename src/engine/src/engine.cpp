@@ -734,7 +734,7 @@ int NimRTCEngine::add_turn_server(std::string_view host, std::uint16_t port,
             "add_turn_server: ICE transport not yet created — call pre_open() first");
         return -1;
     }
-    ice_t_->add_turn_server(host, port, username, password, transport);
+    ice_t_->add_turn_server_with_transport(host, port, username, password, transport);
     return 0;
 }
 

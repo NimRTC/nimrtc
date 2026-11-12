@@ -419,8 +419,8 @@ TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     nimrtc::plugins::IICETransport* plugin = &t;
-    plugin->add_turn_server("127.0.0.1", kTurnTcpPort, kTurnUser, kTurnPass,
-                            nimrtc::plugins::TurnTransport::Tcp);
+    plugin->add_turn_server_with_transport("127.0.0.1", kTurnTcpPort, kTurnUser, kTurnPass,
+                                           nimrtc::plugins::TurnTransport::Tcp);
 
     ASSERT_EQ(t.open(), 0u) << "open() failed";
 

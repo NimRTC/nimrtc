@@ -909,11 +909,11 @@ bool IceTransport::turn_transport_supported(TurnTransport transport) noexcept {
 // Plugin seam (plugins::IICETransport)
 // ---------------------------------------------------------------------------
 
-void IceTransport::add_turn_server(std::string_view host,
-                                   std::uint16_t port,
-                                   std::string_view username,
-                                   std::string_view password,
-                                   plugins::TurnTransport transport) noexcept {
+void IceTransport::add_turn_server_with_transport(std::string_view host,
+                                                 std::uint16_t port,
+                                                 std::string_view username,
+                                                 std::string_view password,
+                                                 plugins::TurnTransport transport) noexcept {
     // The plugin-layer enum mirrors the module-layer one value for value,
     // so the cast is a plain reinterpretation of the same three cases.
     TurnServer ts;

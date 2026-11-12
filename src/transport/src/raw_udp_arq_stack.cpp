@@ -77,9 +77,6 @@ public:
     void set_local_port_range(std::uint16_t, std::uint16_t) noexcept override {}
     void add_turn_server(std::string_view, std::uint16_t,
                          std::string_view, std::string_view) noexcept override {}
-    // Keeps the base class's transport-selecting overload visible; the
-    // declaration above would otherwise hide it (-Woverloaded-virtual).
-    using plugins::IICETransport::add_turn_server;
     void set_bwe(plugins::IBwe*) noexcept override {}
     void set_scheduler(plugins::IScheduler*) noexcept override {}
 };

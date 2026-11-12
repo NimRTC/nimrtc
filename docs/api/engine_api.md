@@ -310,9 +310,14 @@ underlying vendor build cannot negotiate TLS it falls back to plain
 TCP.
 
 The plugin-level seam exposes the same choice via
-`plugins::IICETransport::add_turn_server(...)` plus
+`plugins::IICETransport::add_turn_server_with_transport(...)` plus
 `turn_transport_supported(TurnTransport)`, so a host application can
-query whether a transport is usable before committing to it.
+query whether a transport is usable before committing to it. The
+plugin-layer entry point carries a distinct name rather than being an
+overload of `add_turn_server()`: a second virtual with the same name
+would be hidden by every existing `add_turn_server()` declaration in a
+derived class, which breaks out-of-tree plugins that implement the
+interface.
 
 ---
 

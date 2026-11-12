@@ -258,22 +258,31 @@ public:
 
     /** Add a TURN server with an explicit transport.
      *
-     *  The overload above reaches the server over plain TURN/UDP.  This one
-     *  lets the host pick TURN over TCP (RFC 8656 § 12), which is what
-     *  traverses an enterprise firewall that only lets TCP through.
+     *  `add_turn_server()` above reaches the server over plain TURN/UDP.
+     *  This one lets the host pick TURN over TCP (RFC 8656 § 12), which is
+     *  what traverses an enterprise firewall that only lets TCP through.
      *
-     *  Same precondition as the UDP overload: call before open().
+     *  Same precondition as `add_turn_server()`: call before open().
+     *
+     *  @note The name is deliberately *not* an overload of
+     *        `add_turn_server()`.  A second virtual with the same name
+     *        would be hidden by every existing `add_turn_server()`
+     *        declaration in a derived class, which GCC reports as
+     *        -Woverloaded-virtual (an error under -Werror) and which
+     *        would break every out-of-tree plugin that implements the
+     *        interface.  A separate name keeps the frozen interface
+     *        (ADR-015) additive.
      *
      *  @note TURN over TLS (RFC 6062) is accepted and reported, but the
      *        underlying vendor build does not negotiate it yet; it falls
      *        back to TCP.  The concrete transport exposes
      *        `turn_transport_supported()` for the authoritative answer.
      */
-    virtual void add_turn_server(std::string_view host,
-                                 std::uint16_t port,
-                                 std::string_view username,
-                                 std::string_view password,
-                                 TurnTransport transport) noexcept {
+    virtual void add_turn_server_with_transport(std::string_view host,
+                                                 std::uint16_t port,
+                                                 std::string_view username,
+                                                 std::string_view password,
+                                                 TurnTransport transport) noexcept {
         // Default implementation: a transport that cannot select the
         // transport falls back to plain TURN/UDP, which every TURN server
         // supports.  The concrete ICE transport overrides this.

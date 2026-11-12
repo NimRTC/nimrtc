@@ -96,14 +96,7 @@ ParsedFmtp::ParsedFmtp() noexcept : kind(CodecKind::kUnknown) {
 }
 
 ParsedFmtp::~ParsedFmtp() {
-    switch (kind) {
-        case CodecKind::kH264: h264.~H264Fmtp(); break;
-        case CodecKind::kH265: h265.~H265Fmtp(); break;
-        case CodecKind::kVP8:  vp8.~Vp8Fmtp();   break;
-        case CodecKind::kVP9:  vp9.~Vp9Fmtp();   break;
-        case CodecKind::kAV1:  av1.~Av1Fmtp();   break;
-        default: break;
-    }
+    destroy_active();
 }
 
 ParsedFmtp::ParsedFmtp(const ParsedFmtp& other) : kind(other.kind) {
@@ -119,7 +112,7 @@ ParsedFmtp::ParsedFmtp(const ParsedFmtp& other) : kind(other.kind) {
 
 ParsedFmtp& ParsedFmtp::operator=(const ParsedFmtp& other) {
     if (this == &other) return *this;
-    this->~ParsedFmtp();
+    destroy_active();
     kind = other.kind;
     switch (kind) {
         case CodecKind::kH264: new (&h264) H264Fmtp(other.h264); break;
@@ -145,7 +138,7 @@ ParsedFmtp::ParsedFmtp(ParsedFmtp&& other) noexcept : kind(other.kind) {
 
 ParsedFmtp& ParsedFmtp::operator=(ParsedFmtp&& other) noexcept {
     if (this == &other) return *this;
-    this->~ParsedFmtp();
+    destroy_active();
     kind = other.kind;
     switch (kind) {
         case CodecKind::kH264: new (&h264) H264Fmtp(std::move(other.h264)); break;
@@ -156,6 +149,47 @@ ParsedFmtp& ParsedFmtp::operator=(ParsedFmtp&& other) noexcept {
         default: new (&h264) H264Fmtp(); break;
     }
     return *this;
+}
+
+void ParsedFmtp::destroy_active() noexcept {
+    switch (kind) {
+        case CodecKind::kH264: h264.~H264Fmtp(); break;
+        case CodecKind::kH265: h265.~H265Fmtp(); break;
+        case CodecKind::kVP8:  vp8.~Vp8Fmtp();   break;
+        case CodecKind::kVP9:  vp9.~Vp9Fmtp();   break;
+        case CodecKind::kAV1:  av1.~Av1Fmtp();   break;
+        default: h264.~H264Fmtp(); break;
+    }
+}
+
+void ParsedFmtp::set_h264(H264Fmtp v) {
+    destroy_active();
+    new (&h264) H264Fmtp(std::move(v));
+    kind = CodecKind::kH264;
+}
+
+void ParsedFmtp::set_h265(H265Fmtp v) {
+    destroy_active();
+    new (&h265) H265Fmtp(std::move(v));
+    kind = CodecKind::kH265;
+}
+
+void ParsedFmtp::set_vp8(Vp8Fmtp v) {
+    destroy_active();
+    new (&vp8) Vp8Fmtp(std::move(v));
+    kind = CodecKind::kVP8;
+}
+
+void ParsedFmtp::set_vp9(Vp9Fmtp v) {
+    destroy_active();
+    new (&vp9) Vp9Fmtp(std::move(v));
+    kind = CodecKind::kVP9;
+}
+
+void ParsedFmtp::set_av1(Av1Fmtp v) {
+    destroy_active();
+    new (&av1) Av1Fmtp(std::move(v));
+    kind = CodecKind::kAV1;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +703,6 @@ core::Result<Av1Fmtp> parse_av1(std::string_view fmtp_raw) noexcept {
 core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                                     std::string_view fmtp_raw) noexcept {
     ParsedFmtp out;
-    out.kind = kind;
     switch (kind) {
         case CodecKind::kH264: {
             auto r = parse_h264(fmtp_raw);
@@ -677,7 +710,7 @@ core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                 return core::Result<ParsedFmtp>::fail(
                     r.error().code(), r.error().message());
             }
-            out.h264 = std::move(r.value());
+            out.set_h264(std::move(r.value()));
             return core::Result<ParsedFmtp>::ok(std::move(out));
         }
         case CodecKind::kH265: {
@@ -686,7 +719,7 @@ core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                 return core::Result<ParsedFmtp>::fail(
                     r.error().code(), r.error().message());
             }
-            out.h265 = std::move(r.value());
+            out.set_h265(std::move(r.value()));
             return core::Result<ParsedFmtp>::ok(std::move(out));
         }
         case CodecKind::kVP8: {
@@ -695,7 +728,7 @@ core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                 return core::Result<ParsedFmtp>::fail(
                     r.error().code(), r.error().message());
             }
-            out.vp8 = std::move(r.value());
+            out.set_vp8(std::move(r.value()));
             return core::Result<ParsedFmtp>::ok(std::move(out));
         }
         case CodecKind::kVP9: {
@@ -704,7 +737,7 @@ core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                 return core::Result<ParsedFmtp>::fail(
                     r.error().code(), r.error().message());
             }
-            out.vp9 = std::move(r.value());
+            out.set_vp9(std::move(r.value()));
             return core::Result<ParsedFmtp>::ok(std::move(out));
         }
         case CodecKind::kAV1: {
@@ -713,7 +746,7 @@ core::Result<ParsedFmtp> parse_fmtp(CodecKind kind,
                 return core::Result<ParsedFmtp>::fail(
                     r.error().code(), r.error().message());
             }
-            out.av1 = std::move(r.value());
+            out.set_av1(std::move(r.value()));
             return core::Result<ParsedFmtp>::ok(std::move(out));
         }
         default:

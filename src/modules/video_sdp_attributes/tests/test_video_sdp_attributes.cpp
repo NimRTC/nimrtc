@@ -324,6 +324,88 @@ TEST(ParseFmtp, DispatchUnsupported) {
     EXPECT_FALSE(r.ok());
 }
 
+// Regression: `ParsedFmtp` is a manual-lifetime union.  Writing a payload
+// into a member that is not the active one (or letting the discriminator
+// `kind` diverge from the constructed member) is UB — the destructors then
+// run against an unconstructed `std::optional`.  These tests exercise the
+// setter path that keeps the union invariant intact; under UBSan they fail
+// with "load of value N, which is not a valid value for type 'bool'".
+TEST(ParseFmtp, SetterSwitchesActiveMember) {
+    ParsedFmtp p;
+    EXPECT_EQ(p.kind, CodecKind::kUnknown);
+
+    H264Fmtp h;
+    h.profile_level_id = "42e01f";
+    p.set_h264(h);
+    EXPECT_EQ(p.kind, CodecKind::kH264);
+    EXPECT_EQ(*p.h264.profile_level_id, "42e01f");
+
+    H265Fmtp h265;
+    h265.tx_mode = "MRST";
+    p.set_h265(h265);
+    EXPECT_EQ(p.kind, CodecKind::kH265);
+    EXPECT_EQ(*p.h265.tx_mode, "MRST");
+
+    Av1Fmtp av1;
+    av1.profile = 0;
+    p.set_av1(av1);
+    EXPECT_EQ(p.kind, CodecKind::kAV1);
+    EXPECT_EQ(*p.av1.profile, 0u);
+}
+
+TEST(ParseFmtp, SetterOverwritesAPreviousMember) {
+    ParsedFmtp p;
+    Vp9Fmtp vp9;
+    vp9.profile_id = 2;
+    p.set_vp9(vp9);
+    EXPECT_EQ(p.kind, CodecKind::kVP9);
+
+    // Overwriting an engaged member with a *disengaged* one must not leave
+    // the old payload's `std::optional` state behind.
+    Vp8Fmtp vp8;
+    p.set_vp8(vp8);
+    EXPECT_EQ(p.kind, CodecKind::kVP8);
+    EXPECT_FALSE(p.vp8.max_fr.has_value());
+}
+
+TEST(ParseFmtp, CopyAndMovePreserveTheActiveMember) {
+    ParsedFmtp p;
+    H265Fmtp h265;
+    h265.level_id = 93;
+    h265.tx_mode = "SRST";
+    p.set_h265(h265);
+
+    ParsedFmtp copy(p);
+    EXPECT_EQ(copy.kind, CodecKind::kH265);
+    EXPECT_EQ(*copy.h265.level_id, 93u);
+    EXPECT_EQ(*copy.h265.tx_mode, "SRST");
+
+    ParsedFmtp moved(std::move(copy));
+    EXPECT_EQ(moved.kind, CodecKind::kH265);
+    EXPECT_EQ(*moved.h265.level_id, 93u);
+
+    ParsedFmtp assigned;
+    assigned = moved;
+    EXPECT_EQ(assigned.kind, CodecKind::kH265);
+    EXPECT_EQ(*assigned.h265.tx_mode, "SRST");
+}
+
+TEST(ParseFmtp, AssignmentSwitchesTheActiveMember) {
+    ParsedFmtp p;
+    H264Fmtp h;
+    h.packetization_mode = PacketizationMode::kNonInterleaved;
+    p.set_h264(h);
+
+    ParsedFmtp other;
+    H265Fmtp h265;
+    h265.profile_id = 1;
+    other.set_h265(h265);
+
+    p = other;
+    EXPECT_EQ(p.kind, CodecKind::kH265);
+    EXPECT_EQ(*p.h265.profile_id, 1u);
+}
+
 TEST(ParseFmtp, DispatchAV1) {
     auto r = parse_fmtp(CodecKind::kAV1, "profile=0;level-idx=5;tier=0");
     ASSERT_TRUE(r.ok());
@@ -344,8 +426,7 @@ TEST(BuildFmtp, DispatchByKind) {
     H264Fmtp h;
     h.profile_level_id = "42e01f";
     ParsedFmtp p;
-    p.kind = CodecKind::kH264;
-    p.h264 = h;
+    p.set_h264(h);
     auto body = build_fmtp(p);
     auto re = parse_h264(body);
     ASSERT_TRUE(re.ok());

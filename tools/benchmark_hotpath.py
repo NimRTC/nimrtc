@@ -119,7 +119,14 @@ def metric(doc: dict, section: str, name: str):
 def compare(base: dict, new: dict, threshold: float) -> list[str]:
     """Return one line per metric that moved by more than `threshold`."""
     lines = []
+    # The allocation metrics only mean something when both runs had the
+    # probe enabled.  A sanitizer build reports zeros, which would show
+    # up as a spectacular "improvement" that never happened.
+    probe_on = (base.get("benchmark", {}).get("alloc_probe_enabled", True)
+                and new.get("benchmark", {}).get("alloc_probe_enabled", True))
     for section, name in LOWER_IS_BETTER:
+        if not probe_on and name in ("allocations_per_frame", "bytes_per_frame"):
+            continue
         b = metric(base, section, name)
         n = metric(new, section, name)
         if not isinstance(b, (int, float)) or not isinstance(n, (int, float)):
@@ -176,6 +183,12 @@ def main() -> int:
 
     doc = run_benchmark(binary, args)
 
+    # A sanitizer build cannot report the allocation counts — the
+    # sanitizer runtime owns `operator new` — so the benchmark says so
+    # explicitly.  Say it here too, rather than printing a misleading
+    # "0.00 allocs/frame".
+    probe_on = doc.get("benchmark", {}).get("alloc_probe_enabled", True)
+
     out = args.out or (args.build_dir / "bench_hotpath.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
@@ -184,9 +197,14 @@ def main() -> int:
     sv = doc.get("send_video", {})
     tk = doc.get("tick", {})
     sc = doc.get("scheduler", {})
-    print(f"  send_video : {sv.get('allocations_per_frame', 0):.2f} allocs/frame, "
-          f"{sv.get('bytes_per_frame', 0) / (1024 * 1024):.2f} MiB/frame, "
-          f"p99 {sv.get('p99_us', 0):.1f} us")
+    if probe_on:
+        print(f"  send_video : {sv.get('allocations_per_frame', 0):.2f} allocs/frame, "
+              f"{sv.get('bytes_per_frame', 0) / (1024 * 1024):.2f} MiB/frame, "
+              f"p99 {sv.get('p99_us', 0):.1f} us")
+    else:
+        print(f"  send_video : {sv.get('bytes_per_frame', 0) / (1024 * 1024):.2f} MiB/frame, "
+              f"p99 {sv.get('p99_us', 0):.1f} us "
+              f"(the allocation probe is off — this is a sanitizer build)")
     print(f"  tick       : p99 {tk.get('p99_us', 0):.2f} us, "
           f"max {tk.get('max_us', 0):.2f} us")
     print(f"  scheduler  : enqueue p99 {sc.get('enqueue_p99_us', 0):.1f} us, "

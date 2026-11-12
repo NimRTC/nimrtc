@@ -107,7 +107,30 @@ struct Scope {
 // ---------------------------------------------------------------------------
 // The global replacements.  They forward to the CRT allocator so the
 // program's behaviour is unchanged apart from the count.
+//
+// They are **not** defined in a sanitizer build.  A sanitizer runtime
+// (TSAN, ASAN) ships its own strong definitions of `operator new` /
+// `operator delete` in `libclang_rt.*.a`; a definition here would
+// collide with it at link time ("multiple definition of `operator
+// new(unsigned long)'").  In such a build the allocation metric is
+// simply reported as unavailable — a sanitizer build is about races and
+// memory errors, not about allocation counts.
 // ---------------------------------------------------------------------------
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#  define NIMRTC_BENCH_ALLOC_PROBE 0
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
+      __has_feature(memory_sanitizer)
+#    define NIMRTC_BENCH_ALLOC_PROBE 0
+#  else
+#    define NIMRTC_BENCH_ALLOC_PROBE 1
+#  endif
+#else
+#  define NIMRTC_BENCH_ALLOC_PROBE 1
+#endif
+
+#if NIMRTC_BENCH_ALLOC_PROBE
+
 void* operator new(std::size_t n) {
     alloc_probe::note(n);
     if (n == 0) n = 1;
@@ -168,6 +191,8 @@ void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
 void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+
+#endif  // NIMRTC_BENCH_ALLOC_PROBE
 
 namespace {
 
@@ -623,6 +648,7 @@ int main(int argc, char** argv) {
     j.begin_object();
     j.field("name", std::string("engine_hotpath"));
     j.field("schema", 1LL);
+    j.field("alloc_probe_enabled", NIMRTC_BENCH_ALLOC_PROBE != 0);
     j.end_object();
 
     j.key("send_video");

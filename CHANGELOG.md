@@ -1044,6 +1044,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The ICE loopback and restart tests bound a fixed UDP port range that
+  the Windows CI runner reserves, so both failed there with
+  `WSAEACCES (errno 10013)`.**  The tests hardcoded disjoint windows
+  (63000-63099 / 63200-63299, later 63400-63600) to keep the two agents
+  off each other's ports, and every one of those windows has eventually
+  been caught by a Hyper-V / HNS excluded-port reservation on the runner
+  — `libjuice` walks the whole requested range before giving up, so the
+  agent fails to open outright rather than retrying.
+  - The tests now let the OS pick the local ports
+    (`local_port_range_begin == local_port_range_end == 0`).  The
+    kernel's ephemeral allocation never picks an excluded port.
+  - The two agents also have to run in `Poll` mode rather than the
+    default `Mux` mode.  In Mux mode `libjuice` multiplexes every agent
+    onto *one* shared UDP socket: with `port_begin == 0`,
+    `conn_mux_get_registry()` matches the first existing registry, so the
+    second agent joins the first agent's socket.  Both agents then have
+    the same local IP:port, ICE cannot tell them apart, and the STUN
+    binding request is rejected with a ufrag mismatch.  `Poll` mode gives
+    each agent its own socket (`conn_poll_init()` calls
+    `udp_create_socket()` per agent).
+  - Verified: 40 sockets bound to port 0 all receive distinct ephemeral
+    ports on Windows (with and without `SO_REUSEPORT` set) and on Linux;
+    the two agents now log two distinct binds; and all 9 ICE tests pass
+    three times in a row and while the two test binaries run side by
+    side, which is how `ctest -j 2` runs them.
+
 - **`CaptureQueue::pop()` handed out a pointer to freed memory.**  The
   popped frame was moved into a *local* `Frame`, and the queue then
   published `f.pixels.data()` through the `CaptureFrame` — so the

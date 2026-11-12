@@ -58,18 +58,52 @@ bool is_wsl2() noexcept {
     return false;
 }
 
-// Fixed loopback port windows. They have to be disjoint: libjuice sets
-// SO_REUSEPORT, so two agents on the same port would silently share the
-// socket and the loopback path would break.
-constexpr std::uint16_t kPortA = 63400;
-constexpr std::uint16_t kPortB = 63600;
-
-IceConfig make_config(Role role, std::uint16_t port) {
+// Each test case lets the OS pick the local port.
+//
+// That is the only configuration that is immune to *both* of the hazards a
+// fixed range walks into on a shared CI runner:
+//
+//   1. Windows runners hand out excluded port ranges (Hyper-V / HNS
+//      reservations).  A bind inside one fails with WSAEACCES (errno
+//      10013), and libjuice walks the whole requested range before giving
+//      up, so the agent fails to open outright.  The kernel's ephemeral
+//      allocation never picks an excluded port.
+//
+//   2. ctest runs every gtest case in its own process, side by side
+//      (`ctest -j 2`).  If two processes landed on the same port they would
+//      *share* the socket -- libjuice wakes its mux thread with a 0-byte
+//      datagram sent to its own address, and with two sockets sharing the
+//      port the kernel may hand that datagram to the other process, whose
+//      mux thread then stays in poll() for the full 60 s timeout while
+//      juice_destroy() blocks in thread_join() -- the test hangs until
+//      ctest kills it.
+//
+// The kernel never hands the same ephemeral port to two live sockets, so
+// two concurrently-running test cases cannot share one.  Within one test
+// case the two agents are likewise on distinct ports, which is what the
+// loopback path needs.  Verified empirically on both Windows (with and
+// without SO_REUSEPORT set) and Linux: 40 sockets bound to port 0 all
+// received distinct ports.
+//
+// Note that SO_REUSEPORT is not actually set on Windows -- libjuice's
+// `#ifdef SO_REUSEPORT` is false there, because Windows does not define
+// the macro in its default SDK headers.  Only SO_REUSEADDR is set.  That
+// makes the sharing hazard weaker on Windows, not absent, so the
+// reasoning above holds either way.
+IceConfig make_config(Role role) {
     IceConfig cfg;
     cfg.role = role;
     cfg.bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = port;
-    cfg.local_port_range_end   = port + 99;
+    // Poll mode, not the default Mux mode.  In Mux mode libjuice
+    // multiplexes every agent onto ONE shared UDP socket: with
+    // port_begin == 0, conn_mux_get_registry() matches the first existing
+    // registry, so a second agent joins the first agent's socket.  Both
+    // agents then have the same local IP:port, ICE cannot tell them
+    // apart, and the STUN binding request is rejected with a ufrag
+    // mismatch.  Poll mode gives each agent its own socket
+    // (conn_poll_init() calls udp_create_socket() per agent), which is
+    // what a two-agent loopback test needs.
+    cfg.mode = IceConfig::Mode::Poll;
     return cfg;
 }
 
@@ -97,7 +131,7 @@ bool wait_for_connection(IceTransport& a, IceTransport& b,
 // -----------------------------------------------------------------------------
 
 TEST(IceRestart, RestartOnClosedTransportIsNotReady) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling);
     IceTransport t{cfg};
     // Never opened → no agent → nothing to restart.
     EXPECT_EQ(t.restart(), nimrtc::plugins::kErrNotReady);
@@ -109,7 +143,7 @@ TEST(IceRestart, RestartOnClosedTransportIsNotReady) {
 // -----------------------------------------------------------------------------
 
 TEST(IceRestart, RestartMintsNewCredentials) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling);
     // libjuice requires a ufrag of at least 4 and a password of at least 22
     // characters (agent_set_local_ice_attributes), otherwise it silently
     // falls back to generated credentials.
@@ -140,7 +174,7 @@ TEST(IceRestart, RestartMintsNewCredentials) {
 }
 
 TEST(IceRestart, RestartRegathersCandidates) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling);
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), 0u);
 
@@ -160,7 +194,7 @@ TEST(IceRestart, RestartRegathersCandidates) {
 }
 
 TEST(IceRestart, RestartKeepsRemoteCandidates) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling);
     IceTransport t{cfg};
     ASSERT_EQ(t.open(), 0u);
 
@@ -182,8 +216,8 @@ TEST(IceRestart, RestartKeepsRemoteCandidates) {
 TEST(IceRestart, PeerRestartIsDetectedAndFiresCallback) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    IceConfig cfg_a = make_config(Role::Controlling, kPortA);
-    IceConfig cfg_b = make_config(Role::Controlled,  kPortB);
+    IceConfig cfg_a = make_config(Role::Controlling);
+    IceConfig cfg_b = make_config(Role::Controlled);
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};
@@ -220,7 +254,7 @@ TEST(IceRestart, PeerRestartIsDetectedAndFiresCallback) {
 }
 
 TEST(IceRestart, CloseResetsRestartStateAndRestoresPinnedCredentials) {
-    IceConfig cfg = make_config(Role::Controlling, kPortA);
+    IceConfig cfg = make_config(Role::Controlling);
     // libjuice requires a ufrag of at least 4 and a password of at least 22
     // characters (agent_set_local_ice_attributes), otherwise it silently
     // falls back to generated credentials.
@@ -255,8 +289,8 @@ TEST(IceRestart, CloseResetsRestartStateAndRestoresPinnedCredentials) {
 TEST(IceRestart, TwoAgentsRestartAndReconnect) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    IceConfig cfg_a = make_config(Role::Controlling, kPortA);
-    IceConfig cfg_b = make_config(Role::Controlled,  kPortB);
+    IceConfig cfg_a = make_config(Role::Controlling);
+    IceConfig cfg_b = make_config(Role::Controlled);
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};

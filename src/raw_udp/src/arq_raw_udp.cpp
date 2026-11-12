@@ -175,7 +175,7 @@ void ArqRawUdp::advance_rx_window_after_insert(std::uint16_t inserted_seq) noexc
             }
             if (!payload.empty() || base == inserted_seq) {
                 rx_delivered_.push_back(std::move(payload));
-                ++stats_.packets_recv;
+                ++stat_packets_recv_;
             }
             base = static_cast<std::uint16_t>(base + 1);
             rx_base_seq_.store(base, std::memory_order_release);
@@ -186,7 +186,8 @@ void ArqRawUdp::advance_rx_window_after_insert(std::uint16_t inserted_seq) noexc
 }
 
 void ArqRawUdp::send_ack_to(plugins::Endpoint peer) noexcept {
-    if (!socket_ || peer.len == 0) return;
+    std::shared_ptr<UdpSocket> sock = socket_snapshot();
+    if (!sock || peer.len == 0) return;
     std::uint32_t bitmap = 0;
     std::uint16_t base = rx_base_seq_.load(std::memory_order_acquire);
     {
@@ -204,8 +205,8 @@ void ArqRawUdp::send_ack_to(plugins::Endpoint peer) noexcept {
     }
     std::vector<std::uint8_t> frame;
     build_ack_frame(frame, base, bitmap);
-    socket_->send_to(peer, frame);
-    ++stats_.acks_sent;
+    sock->send_to(peer, frame);
+    ++stat_acks_sent_;
 }
 
 void ArqRawUdp::apply_ack_frame(std::uint32_t cumulative_ack,
@@ -233,7 +234,7 @@ void ArqRawUdp::apply_ack_frame(std::uint32_t cumulative_ack,
         }
         if (acked) {
             it->in_flight = false;
-            ++stats_.acks_recv;
+            ++stat_acks_recv_;
             it = tx_pending_.erase(it);
         } else {
             ++it;
@@ -247,13 +248,18 @@ void ArqRawUdp::apply_ack_frame(std::uint32_t cumulative_ack,
 void ArqRawUdp::recv_main() {
     std::vector<std::uint8_t> buf(kMaxDatagramBytes);
     while (!recv_thread_should_stop_.load(std::memory_order_acquire)) {
-        if (!socket_) break;
+        // Take a reference to the socket for the whole loop: close()
+        // may release the owner's reference while this thread is
+        // blocked in recv_from(), and the shared_ptr keeps the socket
+        // alive until the thread is done with it.
+        std::shared_ptr<UdpSocket> sock = socket_snapshot();
+        if (!sock) break;
         plugins::Endpoint from{};
-        auto n = socket_->recv_from(buf.data(), buf.size(), &from);
+        auto n = sock->recv_from(buf.data(), buf.size(), &from);
         if (n < 0) break;                          // fatal socket error
         if (n == 0) continue;                       // recoverable
         if (static_cast<std::size_t>(n) < kDataHeaderBytes) {
-            ++stats_.packets_dropped;
+            ++stat_packets_dropped_;
             continue;
         }
         FrameType t = static_cast<FrameType>(buf[0]);
@@ -263,7 +269,7 @@ void ArqRawUdp::recv_main() {
 
         if (t == FrameType::Ack) {
             if (static_cast<std::size_t>(n) < kAckTotalBytes) {
-                ++stats_.packets_dropped;
+                ++stat_packets_dropped_;
                 continue;
             }
             // Wire layout (see build_ack_frame):
@@ -287,7 +293,7 @@ void ArqRawUdp::recv_main() {
         }
 
         if (t != FrameType::Data) {
-            ++stats_.packets_dropped;
+            ++stat_packets_dropped_;
             continue;
         }
 
@@ -306,7 +312,7 @@ void ArqRawUdp::recv_main() {
                 rx_initialized_ = true;
                 rx_base_seq_.store(seq, std::memory_order_release);
                 rx_delivered_.push_back(std::move(payload));
-                ++stats_.packets_recv;
+                ++stat_packets_recv_;
                 // Wake any waiters: callers can poll recv() at leisure.
             }
             send_ack_to(from);
@@ -316,12 +322,12 @@ void ArqRawUdp::recv_main() {
         if (seq == base) {
             // Already-delivered duplicate — re-ACK and move on.
             send_ack_to(from);
-            ++stats_.packets_dropped;
+            ++stat_packets_dropped_;
             continue;
         }
         if (!seq_in_window(seq, base, cfg_.rx_window_packets)) {
             // Out of window — drop.
-            ++stats_.packets_dropped;
+            ++stat_packets_dropped_;
             send_ack_to(from);  // best-effort: peer may catch up via cumulative
             continue;
         }
@@ -333,7 +339,7 @@ void ArqRawUdp::recv_main() {
                 // Direct in-order delivery.
                 std::lock_guard<std::mutex> lk(rx_mu_);
                 rx_delivered_.push_back(std::move(payload));
-                ++stats_.packets_recv;
+                ++stat_packets_recv_;
                 rx_base_seq_.store(static_cast<std::uint16_t>(base + 1),
                                     std::memory_order_release);
                 // Walk any buffered contig seqs.
@@ -342,7 +348,7 @@ void ArqRawUdp::recv_main() {
                     auto& v = rx_buffer_[new_base];
                     rx_delivered_.push_back(std::move(v));
                     rx_buffer_.erase(new_base);
-                    ++stats_.packets_recv;
+                    ++stat_packets_recv_;
                     new_base = static_cast<std::uint16_t>(new_base + 1);
                     rx_base_seq_.store(new_base, std::memory_order_release);
                 }
@@ -353,7 +359,7 @@ void ArqRawUdp::recv_main() {
             }
         } else {
             // seq "before" base — duplicate, re-ACK and skip.
-            ++stats_.packets_dropped;
+            ++stat_packets_dropped_;
         }
         send_ack_to(from);
     }
@@ -385,7 +391,7 @@ void ArqRawUdp::retransmit_main() {
                     continue;
                 }
                 ++p.retransmit_count;
-                ++stats_.packets_retransmit;
+                ++stat_packets_retransmit_;
                 p.sent_at = now;
                 p.rto = std::min(std::chrono::milliseconds(p.rto.count() * 2),
                                   cap);
@@ -395,7 +401,7 @@ void ArqRawUdp::retransmit_main() {
                 for (auto it = tx_pending_.begin(); it != tx_pending_.end(); ++it) {
                     if (it->seq == seq) {
                         it->in_flight = false;
-                        ++stats_.packets_dropped;
+                        ++stat_packets_dropped_;
                         tx_pending_.erase(it);
                         break;
                     }
@@ -405,11 +411,12 @@ void ArqRawUdp::retransmit_main() {
 
         // Send outside the lock so socket sendto latency doesn't stall
         // the timer thread for other packets' retransmits.
-        if (socket_) {
+        std::shared_ptr<UdpSocket> sock = socket_snapshot();
+        if (sock) {
             std::lock_guard<std::mutex> plk(peer_mu_);
             if (peer_endpoint_.len != 0) {
                 for (auto& [seq, framed] : to_resend) {
-                    socket_->send_to(peer_endpoint_, framed);
+                    sock->send_to(peer_endpoint_, framed);
                     (void)seq;
                 }
             }
@@ -435,7 +442,7 @@ void arq_test_inject_inbound(ArqRawUdp* impl,
     {
         std::lock_guard<std::mutex> lk(impl->rx_mu_);
         impl->rx_delivered_.push_back(std::move(bytes));
-        impl->stats_.packets_recv++;
+        impl->stat_packets_recv_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -445,10 +452,10 @@ void arq_test_tick_retransmit(ArqRawUdp* impl) {
     for (auto& p : impl->tx_pending_) {
         if (p.in_flight) {
             ++p.retransmit_count;
-            ++impl->stats_.packets_retransmit;
+            ++impl->stat_packets_retransmit_;
             if (p.retransmit_count >= impl->cfg_.max_retransmits) {
                 p.in_flight = false;
-                ++impl->stats_.packets_dropped;
+                ++impl->stat_packets_dropped_;
             }
         }
     }

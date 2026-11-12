@@ -33,6 +33,7 @@ using socklen_t_ = int;
 #  include <sys/types.h>
 #  include <unistd.h>
 #  include <fcntl.h>
+#  include <poll.h>
 #  include <cerrno>
 using socklen_t_ = socklen_t;
 #endif
@@ -109,28 +110,62 @@ std::string format_endpoint_v4(const sockaddr_in& sa) {
     return std::string(buf);
 }
 
+#ifdef _WIN32
+// Wait until `sock` is readable (or `timeout_ms` elapsed).
+//
+// Returns true when the socket became readable, false on timeout.
+// A hard error (the socket was closed underneath us) also returns
+// false — the caller re-checks the handle and reports the error.
+bool wait_readable_impl(std::uintptr_t sock, int timeout_ms) {
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(static_cast<SOCKET>(sock), &readfds);
+    timeval tv{};
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    const int rc = ::select(0, &readfds, nullptr, nullptr, &tv);
+    return rc > 0;
+}
+#else
+// Wait until `sock` is readable (or `timeout_ms` elapsed).
+//
+// Returns true when the socket became readable, false on timeout.
+bool wait_readable_impl(int sock, int timeout_ms) {
+    pollfd pfd{};
+    pfd.fd     = sock;
+    pfd.events = POLLIN;
+    const int rc = ::poll(&pfd, 1, timeout_ms);
+    return rc > 0;
+}
+#endif
+
 } // namespace
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
-    : sock_(other.sock_)
+    : sock_(other.sock_.load(std::memory_order_acquire))
 #if defined(_WIN32)
     , winsock_initialized_(other.winsock_initialized_)
 #endif
 {
-    other.sock_ = kInvalid;
+    other.sock_.store(kInvalid, std::memory_order_release);
 #if defined(_WIN32)
     other.winsock_initialized_ = false;
 #endif
+    // The retired handles stay with the source object: the physical
+    // close of a retired fd must happen when *that* object dies (it is
+    // the object that owns the fd's lifetime contract), and the source
+    // object is still alive here.
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
     if (this != &other) {
         close();
-        sock_ = other.sock_;
+        sock_.store(other.sock_.load(std::memory_order_acquire),
+                    std::memory_order_release);
 #if defined(_WIN32)
         winsock_initialized_ = other.winsock_initialized_;
 #endif
-        other.sock_ = kInvalid;
+        other.sock_.store(kInvalid, std::memory_order_release);
 #if defined(_WIN32)
         other.winsock_initialized_ = false;
 #endif
@@ -138,8 +173,12 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
     return *this;
 }
 
+bool UdpSocket::wait_readable(socket_t sock) const noexcept {
+    return wait_readable_impl(sock, kRecvPollTimeoutMs);
+}
+
 bool UdpSocket::open(const std::string& host, std::uint16_t port) noexcept {
-    if (sock_ != kInvalid) {
+    if (sock_.load(std::memory_order_acquire) != kInvalid) {
         // Already open; treat as success (idempotent).
         return true;
     }
@@ -197,44 +236,82 @@ bool UdpSocket::open(const std::string& host, std::uint16_t port) noexcept {
         return false;
     }
 
-    sock_ = s;
+    sock_.store(s, std::memory_order_release);
     NIMRTC_LOG_INFO("raw_udp: UDP socket bound to "
                      << host << ":" << local_port());
     return true;
 }
 
 void UdpSocket::close() noexcept {
-    if (sock_ == kInvalid) return;
+    // Take the handle out of the atomic first: the syscall must act on
+    // exactly the handle that was published, and the "invalid" marker
+    // is what tells a concurrent recv_from() that the socket is gone.
+    const socket_t sock = sock_.exchange(kInvalid, std::memory_order_acq_rel);
+    if (sock == kInvalid) return;
+
+    // Do NOT close the fd here.
+    //
+    // close() runs on the owner thread while a recv thread may be
+    // inside recvfrom() (or a send thread inside sendto()) on the very
+    // same fd.  Closing an fd that another thread is inside a syscall
+    // on is a data race on the kernel's file-descriptor state — TSan
+    // reported it as "data race ... in UdpSocket::close()" against the
+    // fd read by recvfrom() — and the fd number can be recycled while
+    // the kernel is still using it.
+    //
+    // Instead we retire the handle: the fd stays valid (so the peer
+    // thread's syscall completes normally) and the physical close
+    // happens in the destructor, by which time every user of the
+    // socket has released its shared_ptr and no thread can be inside a
+    // syscall on the fd any more.
+    //
+    // shutdown() still runs: it wakes a thread blocked in recvfrom()
+    // with an error instead of leaving it parked until a datagram
+    // arrives.  On Linux shutdown() on an unconnected UDP socket
+    // returns ENOTCONN and has no effect (the fd therefore stays
+    // usable); on Windows it is likewise a no-op for unconnected UDP
+    // sockets.  The bounded poll in recv_from() is what actually
+    // bounds the wait on the peer thread.
 #ifdef _WIN32
-    // Per MSDN, closesocket() will unblock any recvfrom() blocked in
-    // another thread with WSAEINTR / WSAEBADF.  shutdown() before
-    // close() is also a no-op here.
-    ::closesocket(static_cast<SOCKET>(sock_));
-    // Intentionally do NOT call WSACleanup() — winsock is process-wide
-    // refcounted and other ArqRawUdp instances / future sockets in the
-    // same process still need it.  WSACleanup at process exit is
-    // automatic.
+    ::shutdown(static_cast<SOCKET>(sock), SD_BOTH);
 #else
-    // shutdown(SHUT_RDWR) BEFORE close() so a concurrent thread blocked
-    // in recvfrom() on the same fd wakes up promptly with ENOTCONN /
-    // EINVAL (Linux: SHUT_RDWR on an unconnected UDP socket returns
-    // ENOTCONN; we ignore the return code).  Without this, close() on
-    // a fd that another thread is blocked in recvfrom() on can wedge
-    // for several seconds on busy Linux kernels (the kernel has to
-    // walk the wait queues; under heavy parallel-test load — ctest
-    // -j 2 with the entire test_dtls_over_arq_udp corpus in flight —
-    // we observed 30–60 s timeouts in CI).  See test_raw_udp_real_loopback
-    // #21/#22/#23 on the fix/windows-dll-boundary branch pre-shutdown
-    // for the original symptom.
-    ::shutdown(sock_, SHUT_RDWR);
-    ::close(sock_);
+    ::shutdown(sock, SHUT_RDWR);
 #endif
-    sock_ = kInvalid;
+
+    {
+        std::lock_guard<std::mutex> lk(retired_mu_);
+        retired_.push_back(sock);
+    }
+}
+
+UdpSocket::~UdpSocket() noexcept {
+    // The physical close happens here, and only here: by the time the
+    // last reference to this object is gone, no other thread can be
+    // inside a syscall on the fd (they all hold a shared_ptr to this
+    // object for the duration of the call).
+    close();
+
+    std::vector<socket_t> to_close;
+    {
+        std::lock_guard<std::mutex> lk(retired_mu_);
+        to_close.swap(retired_);
+    }
+    for (const socket_t sock : to_close) {
+#ifdef _WIN32
+        ::closesocket(static_cast<SOCKET>(sock));
+        // Intentionally do NOT call WSACleanup() — winsock is
+        // process-wide refcounted and other ArqRawUdp instances /
+        // future sockets in the same process still need it.
+#else
+        ::close(sock);
+#endif
+    }
 }
 
 bool UdpSocket::send_to(plugins::Addr dst,
                         std::span<const std::uint8_t> bytes) noexcept {
-    if (sock_ == kInvalid) return false;
+    const socket_t sock = sock_.load(std::memory_order_acquire);
+    if (sock == kInvalid) return false;
     sockaddr_in addr{};
     // Endpoint format is "ip:port" ASCII; convert to sockaddr_in via
     // parse_endpoint_v4 (which understands empty / null cases).
@@ -246,7 +323,7 @@ bool UdpSocket::send_to(plugins::Addr dst,
     }
     auto* buf = reinterpret_cast<const char*>(bytes.data());
 #ifdef _WIN32
-    int rc = ::sendto(static_cast<SOCKET>(sock_), buf,
+    int rc = ::sendto(static_cast<SOCKET>(sock), buf,
                       static_cast<int>(bytes.size()), 0,
                       reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc < 0) {
@@ -254,7 +331,7 @@ bool UdpSocket::send_to(plugins::Addr dst,
         return false;
     }
 #else
-    ssize_t rc = ::sendto(sock_, buf, bytes.size(), 0,
+    ssize_t rc = ::sendto(sock, buf, bytes.size(), 0,
                           reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc < 0) {
         NIMRTC_LOG_ERROR("raw_udp: sendto failed errno=" << errno);
@@ -266,11 +343,37 @@ bool UdpSocket::send_to(plugins::Addr dst,
 
 std::ptrdiff_t UdpSocket::recv_from(void* buf, std::size_t buf_size,
                                      plugins::Addr* src_addr_out) noexcept {
-    if (sock_ == kInvalid) return -1;
+    const socket_t sock = sock_.load(std::memory_order_acquire);
+    if (sock == kInvalid) return -1;
+
+    // Wait for the socket to become readable BEFORE entering recvfrom().
+    //
+    // The receive path must never be blocked inside recvfrom() when
+    // another thread closes the socket: closing an fd that another
+    // thread is inside a syscall on is a data race on the kernel's
+    // file-descriptor state (TSan: "data race ... in UdpSocket::close()"
+    // against the fd read by recvfrom()), and on Linux it can also make
+    // the fd number reusable while the kernel is still using it.
+    //
+    // Polling with a bounded timeout solves both: the syscall only
+    // ever runs when we know a datagram (or an error) is pending, and
+    // the caller gets a wake-up at least every kRecvPollTimeoutMs so
+    // it can observe its stop flag and exit without the socket having
+    // to be closed underneath it.
+    if (!wait_readable(sock)) {
+        // Timed out with no datagram pending: report "nothing received"
+        // so the caller loops and can check its stop flag.
+        return 0;
+    }
+    if (sock_.load(std::memory_order_acquire) != sock) {
+        // The socket was closed while we were waiting.
+        return -1;
+    }
+
     sockaddr_in addr{};
     socklen_t_ addr_len = sizeof(addr);
 #ifdef _WIN32
-    int rc = ::recvfrom(static_cast<SOCKET>(sock_),
+    int rc = ::recvfrom(static_cast<SOCKET>(sock),
                         reinterpret_cast<char*>(buf),
                         static_cast<int>(buf_size), 0,
                         reinterpret_cast<sockaddr*>(&addr), &addr_len);
@@ -286,7 +389,7 @@ std::ptrdiff_t UdpSocket::recv_from(void* buf, std::size_t buf_size,
         return -1;
     }
 #else
-    ssize_t rc = ::recvfrom(sock_, buf, buf_size, 0,
+    ssize_t rc = ::recvfrom(sock, buf, buf_size, 0,
                             reinterpret_cast<sockaddr*>(&addr), &addr_len);
     if (rc < 0) {
         if (errno == EINTR) return 0;
@@ -305,16 +408,17 @@ std::ptrdiff_t UdpSocket::recv_from(void* buf, std::size_t buf_size,
 }
 
 std::uint16_t UdpSocket::local_port() const noexcept {
-    if (sock_ == kInvalid) return 0;
+    const socket_t sock = sock_.load(std::memory_order_acquire);
+    if (sock == kInvalid) return 0;
     sockaddr_in addr{};
     socklen_t_ addr_len = sizeof(addr);
 #ifdef _WIN32
-    if (::getsockname(static_cast<SOCKET>(sock_),
+    if (::getsockname(static_cast<SOCKET>(sock),
                       reinterpret_cast<sockaddr*>(&addr), &addr_len) < 0) {
         return 0;
     }
 #else
-    if (::getsockname(sock_,
+    if (::getsockname(sock,
                       reinterpret_cast<sockaddr*>(&addr), &addr_len) < 0) {
         return 0;
     }
@@ -322,7 +426,9 @@ std::uint16_t UdpSocket::local_port() const noexcept {
     return ntohs(addr.sin_port);
 }
 
-bool UdpSocket::is_open() const noexcept { return sock_ != kInvalid; }
+bool UdpSocket::is_open() const noexcept {
+    return sock_.load(std::memory_order_acquire) != kInvalid;
+}
 
 plugins::Addr UdpSocket::make_endpoint_v4(const std::string& host,
                                                std::uint16_t port) noexcept {

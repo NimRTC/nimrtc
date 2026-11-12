@@ -95,6 +95,14 @@ MAX_BLOCK_LINES = 400
 def _classify_path(path):
     """Map a source path to 'owned', 'vendor' or 'unknown'."""
     norm = path.replace("\\", "/")
+    # The sanitizer runtimes live in a `src/libsanitizer/` tree of their
+    # own (GCC) or `compiler-rt/` (Clang).  Those paths contain a
+    # "/src/" segment, so the naive rule below would classify every
+    # LeakSanitizer frame as NimRTC-owned -- the runtime is neither our
+    # code nor vendored third-party code.  Attribute it to nobody: the
+    # report is still printed, it just cannot fail the gate on its own.
+    if "/src/libsanitizer/" in norm or "/src/compiler-rt/" in norm:
+        return "unknown"
     if "/src/third_party/" in norm or norm.startswith("src/third_party/"):
         return "vendor"
     if "/src/" in norm or norm.startswith("src/"):
@@ -346,6 +354,20 @@ UNKNOWN_ONLY = """
     #0 0x7f00 in __restore_rt (/usr/lib/x86_64-linux-gnu/libc.so.6+0x21b0)
 """
 
+# A LeakSanitizer report names the *sanitizer runtime* as the root frame
+# (the runtime's own allocator).  Its path contains a "/src/" segment,
+# so a naive classifier would blame NimRTC for a leak that is neither
+# ours nor ours to fix.  The report must not fail the gate.
+SANITIZER_RUNTIME_LEAK = """
+=================================================================
+==12345==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 152 byte(s) in 1 object(s) allocated from:
+    #0 0x4f1a2b in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:145
+    #1 0x4f22c1 in sctp_invoke_recv_callback() src/third_party/usrsctp/usrsctplib/netinet/sctputil.c:5234
+SUMMARY: AddressSanitizer: detected memory leaks
+"""
+
 MULTI = OWNED_ASAN + "\n" + VENDOR_ASAN
 
 
@@ -385,6 +407,18 @@ def _self_test():
     f = analyze(UNKNOWN_ONLY)
     check("unknown count", len(f), 1)
     check("unknown verdict", f[0]["verdict"], "unknown")
+
+    # The sanitizer runtime's own frames are neither NimRTC's nor
+    # vendored third-party code: a leak report rooted in
+    # src/libsanitizer/ must not fail the gate.
+    f = analyze(SANITIZER_RUNTIME_LEAK)
+    check("sanitizer-runtime leak count", len(f), 1)
+    check(
+        "sanitizer-runtime leak verdict",
+        f[0]["verdict"],
+        "vendor",
+    )
+    check("gate sanitizer-runtime leak", report(analyze(SANITIZER_RUNTIME_LEAK), False), 0)
 
     f = analyze(MULTI)
     check("multi count", len(f), 2)

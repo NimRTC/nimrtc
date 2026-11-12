@@ -502,8 +502,19 @@ jobs:
   # data races.  This job is the gate.
   #
   # Two legs in one job (matrix over the preset):
-  #   - asan-ubsan : memory errors + undefined behaviour
-  #   - tsan       : data races
+  #   - asan-ubsan : memory errors + undefined behaviour   (GCC)
+  #   - tsan.clang : data races                           (Clang compiler-rt)
+  #
+  # The TSan leg uses Clang's compiler-rt, not GCC's libtsan.  GCC 11's
+  # libtsan does not intercept pthread_cond_clockwait(), which libstdc++
+  # uses for condition_variable::wait_for() / wait_until() with a
+  # steady_clock deadline.  TSan therefore never observes the
+  # unlock/relock that happens inside such a wait, keeps believing the
+  # thread still owns the mutex, and reports a bogus "double lock of a
+  # mutex" for every timed condition-variable wait in the tree (the
+  # video_source cadence loop, the SCTP state machine, the ICE consent
+  # tracker, ...).  Clang's compiler-rt TSan intercepts it correctly and
+  # reports zero findings on the same tree.
   #
   # ASan and TSan are mutually exclusive, so they cannot live in the same
   # build; the presets set the others OFF explicitly and
@@ -543,7 +554,7 @@ jobs:
       matrix:
         include:
           - preset: asan-ubsan
-          - preset: tsan
+          - preset: tsan.clang
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-linux-sanitizers-${{ matrix.preset }}
       cancel-in-progress: true
@@ -552,16 +563,17 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install ninja + Python (CMake via pip)
+      - name: Install ninja + clang + Python (CMake via pip)
         run: |
           for i in 1 2 3 4 5; do sudo apt-get update && break || sleep 15; done
-          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build python3 && break || { sudo apt-get update; sleep 15; }; done
+          for i in 1 2 3 4 5; do sudo apt-get install -y ninja-build clang python3 && break || { sudo apt-get update; sleep 15; }; done
+          clang --version
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "cmake>=3.25"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Pre-flight tool check
-        run: python3 tools/ci_preflight.py
+        run: python3 tools/ci_preflight.py --preset ${{ matrix.preset }}
 
       - name: Configure (${{ matrix.preset }})
         run: |

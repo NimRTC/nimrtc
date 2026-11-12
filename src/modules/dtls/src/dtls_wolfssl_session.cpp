@@ -22,6 +22,7 @@
 #include <nimrtc/core/log.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1437,10 +1438,20 @@ std::size_t DtlsSessionWolfSSL::feed_inbound(
     // SPKI hash, not the cert hash, and only affects HTTPS — it has
     // never been relevant for the WebRTC DTLS path here.
     {
-        static bool logged_fp = false;
+        // `logged_fp` is a function-local static, but the DTLS session
+        // can be driven from more than one thread (the handshake pump
+        // thread and the engine thread both call feed_inbound()).  A
+        // plain `static bool` is therefore a data race — ThreadSanitizer
+        // flagged "data race ... in feed_inbound" on the byte that guards
+        // it.  A `std::atomic<bool>` with compare_exchange makes the
+        // "log exactly once" decision well defined; the flag is only a
+        // "have we printed the fingerprint yet" hint, so a benign race
+        // would also be harmless — but the sanitizer gate has to stay
+        // clean, and the atomic costs nothing.
+        static std::atomic<bool> logged_fp{false};
         const auto& fp = this->local_fingerprint();
-        if (!logged_fp && !fp.bytes.empty()) {
-            logged_fp = true;
+        if (!fp.bytes.empty() &&
+            !logged_fp.exchange(true, std::memory_order_acq_rel)) {
             // RFC 8122 colon-hex form (for SDP a=fingerprint).
             // Built as std::string to dodge glibc 2.38+'s
             // `-Werror=stringop-truncation` on `strncat(hex, b, 2)` where

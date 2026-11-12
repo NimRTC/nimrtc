@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/video_sink/video_sink.hpp
  * @brief Headless / file / debug video sinks.
  *
@@ -25,6 +25,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 #include <nimrtc/core/api_version.hpp>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -41,7 +42,10 @@ namespace nimrtc::video_sink {
 /** Headless sink: counts frames, drops pixel data. Useful for tests,
  *  benchmarks, and CI where rendering overhead is undesirable.
  *
- *  Thread safety: NOT thread-safe — render() must be serialized externally. */
+ *  Thread safety: the counters are atomic, so render() may run on the
+ *  producer thread while stats() is read from another one.  The
+ *  *ordering* of the rendered frames is still the caller's
+ *  responsibility — the sink does not serialize concurrent renders. */
 class NIMRTC_API_STABLE HeadlessSink : public plugins::IVideoSink {
 public:
     explicit HeadlessSink(plugins::VideoSinkConfig cfg) noexcept;
@@ -62,8 +66,12 @@ public:
 
 private:
     plugins::VideoSinkConfig cfg_;
-    plugins::VideoSinkStats  stats_{};
-    bool                     opened_ = false;
+    // The counters live in atomics: render() runs on the producer
+    // thread while stats() is read from the engine thread.  A plain
+    // `VideoSinkStats` member was a data race (TSan: write of size 8
+    // in HeadlessSink::render() vs. read in stats()).
+    std::atomic<std::uint64_t> frames_rendered_{0};
+    std::atomic<bool>          opened_{false};
 };
 
 /** PinnedSink — headless sink that asserts every frame's `capture_ts_us`
@@ -88,8 +96,12 @@ public:
 
 private:
     plugins::VideoSinkConfig cfg_;
-    plugins::VideoSinkStats  stats_{};
-    bool                     opened_              = false;
+    // Atomic counters — see HeadlessSink's note on the data race.
+    std::atomic<std::uint64_t> frames_rendered_{0};
+    std::atomic<std::uint64_t> render_errors_{0};
+    std::atomic<bool>          opened_{false};
+    // The capture timestamp of the last rendered frame.  Only touched
+    // by render(), which the caller serializes.
     plugins::TimestampUs     last_capture_ts_us_  = -1;
 };
 

@@ -30,22 +30,24 @@ const char* HeadlessSink::name() const noexcept {
 }
 
 plugins::Status HeadlessSink::open() noexcept {
-    opened_ = true;
+    opened_.store(true, std::memory_order_release);
     return plugins::kOk;
 }
 
 void HeadlessSink::close() noexcept {
-    opened_ = false;
+    opened_.store(false, std::memory_order_release);
 }
 
 plugins::Status HeadlessSink::render(const plugins::VideoSourceFrame& /*frame*/) noexcept {
-    if (!opened_) return plugins::kErrNotReady;
-    stats_.frames_rendered++;
+    if (!opened_.load(std::memory_order_acquire)) return plugins::kErrNotReady;
+    frames_rendered_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kOk;
 }
 
 plugins::VideoSinkStats HeadlessSink::stats() const noexcept {
-    return stats_;
+    plugins::VideoSinkStats s;
+    s.frames_rendered = frames_rendered_.load(std::memory_order_relaxed);
+    return s;
 }
 
 plugins::VideoSinkConfig HeadlessSink::config() const noexcept {
@@ -66,31 +68,34 @@ const char* PinnedSink::name() const noexcept {
 }
 
 plugins::Status PinnedSink::open() noexcept {
-    opened_ = true;
+    opened_.store(true, std::memory_order_release);
     last_capture_ts_us_ = -1;
     return plugins::kOk;
 }
 
 void PinnedSink::close() noexcept {
-    opened_ = false;
+    opened_.store(false, std::memory_order_release);
     last_capture_ts_us_ = -1;
 }
 
 plugins::Status PinnedSink::render(const plugins::VideoSourceFrame& frame) noexcept {
-    if (!opened_) return plugins::kErrNotReady;
+    if (!opened_.load(std::memory_order_acquire)) return plugins::kErrNotReady;
     // Strictly increasing capture_ts invariant.
     if (last_capture_ts_us_ >= 0
         && frame.capture_ts_us <= static_cast<plugins::TimestampUs>(last_capture_ts_us_)) {
-        stats_.render_errors++;
+        render_errors_.fetch_add(1, std::memory_order_relaxed);
         return plugins::kErrCorrupt;
     }
     last_capture_ts_us_ = frame.capture_ts_us;
-    stats_.frames_rendered++;
+    frames_rendered_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kOk;
 }
 
 plugins::VideoSinkStats PinnedSink::stats() const noexcept {
-    return stats_;
+    plugins::VideoSinkStats s;
+    s.frames_rendered = frames_rendered_.load(std::memory_order_relaxed);
+    s.render_errors   = render_errors_.load(std::memory_order_relaxed);
+    return s;
 }
 
 plugins::VideoSinkConfig PinnedSink::config() const noexcept {

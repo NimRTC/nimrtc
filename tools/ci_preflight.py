@@ -35,6 +35,9 @@ if hasattr(sys.stdout, "reconfigure"):
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRESETS_PATH = REPO_ROOT / "CMakePresets.json"
 
+# Index of the configure presets, filled in by load_presets().
+PRESETS_CACHE: dict[str, dict] = {}
+
 EXPECTED_CMAKE_VERSION_MIN = (3, 25)
 
 # ---------------------------------------------------------------------------
@@ -129,9 +132,19 @@ def load_presets() -> dict | None:
         return None
     try:
         with PRESETS_PATH.open(encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
         return None
+    # Index the hidden base presets so a preset that inherits from
+    # dev.clang / dev.gcc can be resolved without walking the whole
+    # inheritance chain.
+    global PRESETS_CACHE
+    PRESETS_CACHE = {
+        p["name"]: p
+        for p in data.get("configurePresets", [])
+        if p.get("name")
+    }
+    return data
 
 
 def preset_requires_toolchain(preset: dict) -> str | None:
@@ -151,6 +164,34 @@ def preset_condition(preset: dict) -> str:
     if t == "equals":
         return f"{lhs} {op} {rhs}"
     return str(c)
+
+
+def preset_compiler(preset: dict) -> str | None:
+    """Return the C/C++ compiler family the preset pins, if any.
+
+    The preset's own `inherits` chain is not resolved here — the
+    compiler is looked up directly on the preset and on the hidden
+    `dev.gcc` / `dev.clang` bases, which is where this project puts it.
+    """
+    candidates = [preset]
+    for name in ("dev.clang", "dev.gcc"):
+        base = PRESETS_CACHE.get(name)
+        if base:
+            candidates.append(base)
+    for p in candidates:
+        comp = p.get("cacheVariables", {}).get("CMAKE_CXX_COMPILER")
+        if comp:
+            return comp
+    return None
+
+
+def preset_extra_tools(preset: dict) -> list[tuple[str, str]]:
+    """Extra (tool, reason) pairs the preset needs beyond the platform set."""
+    compiler = preset_compiler(preset)
+    if compiler and "clang" in compiler:
+        return [("clang", "C compiler for this preset"),
+                ("clang++", "C++ compiler for this preset")]
+    return []
 
 
 def list_presets() -> int:
@@ -250,6 +291,18 @@ def check_platform(preset_name: str | None = None) -> int:
                     print(f"  toolchain:    {tc}")
                 else:
                     print(f"  toolchain:    (none)")
+                # A preset that pins a different compiler family needs
+                # that toolchain present too (e.g. tsan.clang needs
+                # clang; the platform default on Linux is gcc).
+                for name, reason in preset_extra_tools(match):
+                    found, version = tool_check(name)
+                    status = "FOUND" if found else "MISSING"
+                    print(f"  {name:<12} {version[:40]:<40} [preset-tool]  {status}")
+                    if not found:
+                        errors.append(
+                            f"{name} not found — required for {reason} "
+                            f"(preset {preset_name!r})"
+                        )
             else:
                 errors.append(f"preset {preset_name!r} not found in CMakePresets.json")
         else:

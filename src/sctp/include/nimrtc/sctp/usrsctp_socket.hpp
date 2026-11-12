@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/sctp/usrsctp_socket.hpp
  * @brief UsrsctpSocket — production implementation of ISctpSocket
  *        backed by upstream usrsctp 0.9.5.0.
@@ -100,6 +100,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <nimrtc/sctp/sctp_socket_factory.hpp>   // SctpConfig
 #include <nimrtc/sctp/sctp_socket_iface.hpp>      // ISctpSocket, plugins::*
@@ -280,25 +281,58 @@ public:
     UsrsctpSocketState state() const noexcept;
 
 private:
-    /** Per-instance receive callback (usrsctp's worker thread fires it).
-     *  The recv-dispatch trampoline holds `recv_mu_` while calling it. */
-    plugins::OnSctpRecvCb on_recv_;
-    /** PPID-aware inbound callback (v0.14.x DCEP demux). Same guard. */
-    plugins::OnSctpRecvWithPpidCb on_recv_ppid_;
+    /** Callback-visible state, shared with usrsctp's worker thread.
+     *
+     *  usrsctp calls our receive trampoline from its own background
+     *  thread ("SCTP/UDP/IP4 rc") and identifies the socket through
+     *  the `ulp_info` pointer we handed to `usrsctp_socket()`.  A
+     *  peer-initiated ABORT is turned into an SCTP_ASSOC_CHANGE
+     *  notification that usrsctp delivers *asynchronously* — it can
+     *  therefore land after `~UsrsctpSocket()` already returned, and
+     *  dereferencing the (freed) socket from the trampoline was a
+     *  heap-use-after-free (reported by the Linux sanitizer leg).
+     *
+     *  Everything the trampoline touches therefore lives in this
+     *  separately allocated `Slot`, which the socket shares with the
+     *  trampoline through `std::shared_ptr`.  The trampoline looks the
+     *  slot up in a process-wide registry keyed by the socket pointer,
+     *  so it never dereferences the socket itself; a slot that is
+     *  still alive after the socket is gone simply reports
+     *  `alive == false` and the trampoline drops the event.
+     */
+    struct Slot {
+        /** Guards `on_recv` / `on_recv_ppid` (the user callbacks). */
+        std::mutex recv_mu;
+        plugins::OnSctpRecvCb on_recv;
+        plugins::OnSctpRecvWithPpidCb on_recv_ppid;
+
+        /** State machine: guarded by `state_mu`, awaited via `state_cv`. */
+        std::mutex state_mu;
+        std::condition_variable state_cv;
+        UsrsctpSocketState state = UsrsctpSocketState::kUnbound;
+
+        /** Cleared by the destructor before the socket's own members go
+         *  away. The trampoline checks it before touching the slot. */
+        std::atomic<bool> alive{true};
+    };
+
+    /** The slot shared with usrsctp's worker thread. */
+    std::shared_ptr<Slot> slot_;
+
+    /** Process-wide registry: socket pointer → slot.
+     *
+     *  The trampoline receives only the raw `ulp_info` pointer, so it
+     *  resolves the slot through this registry instead of casting it
+     *  back to the socket.  A socket that has been destroyed is no
+     *  longer in the registry, and the trampoline then drops the
+     *  event. */
+    static std::unordered_map<const void*, std::shared_ptr<Slot>>&
+    s_slot_registry() noexcept;
+    static std::mutex& s_slot_registry_mutex() noexcept;
+
     /** Outbound SCTP packet sink (v0.14.x SCTP-over-DTLS). Guarded by
      *  `recv_mu_` for simplicity — set once from the engine thread. */
     plugins::OnSctpPacketCb on_packet_;
-    /** Mutex guarding `on_recv_` access from the usrsctp worker thread
-     *  and the engine thread (set_on_recv). */
-    mutable std::mutex recv_mu_;
-
-    /** State machine: guarded by `state_mu_`. Transitions are driven
-     *  by the recv trampoline (which fires on usrsctp's worker
-     *  thread when an SCTP_ASSOC_CHANGE notification arrives) and
-     *  by listen()/connect() on the engine thread. */
-    UsrsctpSocketState state_ = UsrsctpSocketState::kUnbound;
-    mutable std::mutex state_mu_;
-    std::condition_variable state_cv_;
 
     /** Opaque usrsctp socket handle (forward-declared to avoid leaking
      *  the C `struct socket` into this header). */
@@ -402,13 +436,21 @@ private:
      *  notification subscription. */
     plugins::Status s_bind_and_configure(std::uint16_t local_port) noexcept;
 
-    /** Transition state under state_mu_ and notify waiters. */
+    /** Transition state under `slot.state_mu` and notify waiters. */
     void s_transition_to(UsrsctpSocketState next) noexcept;
 
+    /** Slot-based variant of `s_transition_to` — used by the recv
+     *  trampoline, which reaches the shared state without a live
+     *  socket object. The caller must hold `slot.state_mu`. */
+    static void s_slot_transition_to(Slot& slot,
+                                     UsrsctpSocketState next) noexcept;
+
     /** Helper for s_instance_recv_cb: parse an SCTP_ASSOC_CHANGE
-     *  notification and update state_. Called with state_mu_ held by
-     *  the trampoline. */
-    void handle_notification(const void* data, std::size_t datalen) noexcept;
+     *  notification and update the slot's state. Called with
+     *  `slot.state_mu` held by the trampoline. */
+    static void handle_notification(Slot& slot,
+                                     const void* data,
+                                     std::size_t datalen) noexcept;
 };
 
 } // namespace nimrtc::sctp

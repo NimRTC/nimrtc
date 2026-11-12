@@ -93,11 +93,49 @@ bool is_wsl2() noexcept {
 // and the OS dynamic-exclusion band starts at 52297, so the 64000s are
 // above both while still below the uint16_t ceiling.
 constexpr std::uint16_t kTurnServerPort  = 64000;
-constexpr std::uint16_t kTurnTcpPort     = 64001;
+// One UDP/TCP port pair per test.  CI runs ctest with -j 2, so two
+// tests that each stand up a TURN server on the same port race for
+// it: the TCP listener fails to bind (EADDRINUSE) and the UDP socket
+// silently shares the port (libjuice sets SO_REUSEPORT), which lets
+// one test's client talk to the other test's server.  Every port the
+// suite binds has to be disjoint from the others.
+constexpr std::uint16_t kTurnUdpPortA    = 64010;
+constexpr std::uint16_t kTurnUdpPortB    = 64020;
+constexpr std::uint16_t kTurnUdpPortC    = 64030;
+constexpr std::uint16_t kTurnTcpPortA    = 64011;
+constexpr std::uint16_t kTurnTcpPortB    = 64021;
+constexpr std::uint16_t kTurnTcpPortC    = 64031;
+// The relay port range is exclusive per server too: each allocation
+// takes one port out of the range.
 constexpr std::uint16_t kRelayPortBegin  = 64100;
 constexpr std::uint16_t kRelayPortEnd    = 64199;
-constexpr std::uint16_t kAgentPortBegin  = 64200;
-constexpr std::uint16_t kAgentPortEnd    = 64299;
+constexpr std::uint16_t kRelayPortBegin2 = 64200;
+constexpr std::uint16_t kRelayPortEnd2   = 64299;
+constexpr std::uint16_t kRelayPortBeginB = 64300;
+constexpr std::uint16_t kRelayPortEndB   = 64399;
+constexpr std::uint16_t kRelayPortBeginC = 64400;
+constexpr std::uint16_t kRelayPortEndC   = 64499;
+// The client agents bind their own UDP sockets, so their ranges have to
+// be disjoint from each other too.  Each range is 20 ports wide, which
+// is more than any single agent needs.
+constexpr std::uint16_t kAgentPortBegin   = 64500;
+constexpr std::uint16_t kAgentPortEnd     = 64519;
+constexpr std::uint16_t kAgentPortBegin2  = 64520;
+constexpr std::uint16_t kAgentPortEnd2    = 64539;
+constexpr std::uint16_t kAgentPortBegin3  = 64540;
+constexpr std::uint16_t kAgentPortEnd3    = 64559;
+constexpr std::uint16_t kAgentPortBegin4  = 64560;
+constexpr std::uint16_t kAgentPortEnd4    = 64579;
+constexpr std::uint16_t kAgentPortBegin5  = 64580;
+constexpr std::uint16_t kAgentPortEnd5    = 64599;
+constexpr std::uint16_t kAgentPortBegin6  = 64600;
+constexpr std::uint16_t kAgentPortEnd6    = 64619;
+constexpr std::uint16_t kAgentPortBegin7  = 64620;
+constexpr std::uint16_t kAgentPortEnd7    = 64639;
+constexpr std::uint16_t kAgentPortBegin8  = 64640;
+constexpr std::uint16_t kAgentPortEnd8    = 64659;
+constexpr std::uint16_t kAgentPortBegin9  = 64660;
+constexpr std::uint16_t kAgentPortEnd9    = 64679;
 
 constexpr const char* kTurnUser = "nimrtc";
 constexpr const char* kTurnPass = "nimrtc-turn-password";
@@ -114,7 +152,14 @@ class TurnServerFixture {
 public:
     // `tcp_port` is non-zero to also stand up the TURN-over-TCP listener
     // (RFC 8656 section 12).  Zero means "UDP only".
-    explicit TurnServerFixture(std::uint16_t tcp_port = 0) {
+    //
+    // Every port the server binds has to be unique across the suite:
+    // CI runs ctest with -j 2, so two servers on the same TCP port race
+    // for it, and two servers on the same UDP port silently share it
+    // (libjuice sets SO_REUSEPORT).
+    TurnServerFixture(std::uint16_t udp_port, std::uint16_t tcp_port = 0,
+                      std::uint16_t relay_port_begin = kRelayPortBegin,
+                      std::uint16_t relay_port_end = kRelayPortEnd) {
         juice_server_credentials_t creds{};
         creds.username           = kTurnUser;
         creds.password           = kTurnPass;
@@ -126,10 +171,10 @@ public:
         cfg.max_allocations       = 16;
         cfg.max_peers             = 8;
         cfg.bind_address          = "127.0.0.1";
-        cfg.port                  = kTurnServerPort;
+        cfg.port                  = udp_port;
         cfg.tcp_port              = tcp_port;
-        cfg.relay_port_range_begin = kRelayPortBegin;
-        cfg.relay_port_range_end   = kRelayPortEnd;
+        cfg.relay_port_range_begin = relay_port_begin;
+        cfg.relay_port_range_end   = relay_port_end;
         cfg.realm                 = "nimrtc";
 
         server_ = juice_server_create(&cfg);
@@ -175,12 +220,13 @@ std::vector<Candidate> wait_for_relay_candidate(IceTransport& t,
     return {};
 }
 
-IceConfig make_agent_config() {
+IceConfig make_agent_config(std::uint16_t port_begin = kAgentPortBegin,
+                            std::uint16_t port_end = kAgentPortEnd) {
     IceConfig cfg;
     cfg.role = Role::Controlling;
     cfg.bind_address = "127.0.0.1";
-    cfg.local_port_range_begin = kAgentPortBegin;
-    cfg.local_port_range_end   = kAgentPortEnd;
+    cfg.local_port_range_begin = port_begin;
+    cfg.local_port_range_end   = port_end;
     return cfg;
 }
 
@@ -262,7 +308,7 @@ std::string host_address_of(const IceTransport& t) {
 // -----------------------------------------------------------------------------
 
 TEST(TurnRelay, ConfiguredTurnServerLeavesMuxMode) {
-    IceConfig cfg = make_agent_config();
+    IceConfig cfg = make_agent_config(kAgentPortBegin, kAgentPortEnd);
     // The default mode is MUX.
     ASSERT_EQ(cfg.mode, IceConfig::Mode::Mux);
     ASSERT_FALSE(cfg.mode_is_explicit);
@@ -286,7 +332,7 @@ TEST(TurnRelay, ConfiguredTurnServerLeavesMuxMode) {
 }
 
 TEST(TurnRelay, ExplicitMuxModeIsHonoured) {
-    IceConfig cfg = make_agent_config();
+    IceConfig cfg = make_agent_config(kAgentPortBegin2, kAgentPortEnd2);
     cfg.mode = IceConfig::Mode::Mux;
     cfg.mode_is_explicit = true;
 
@@ -310,10 +356,10 @@ TEST(TurnRelay, ExplicitMuxModeIsHonoured) {
 TEST(TurnRelay, RelayCandidateIsGathered) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    TurnServerFixture server;
+    TurnServerFixture server(kTurnServerPort);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
-    IceTransport t{make_agent_config()};
+    IceTransport t{make_agent_config(kAgentPortBegin3, kAgentPortEnd3)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = server.port();
@@ -347,7 +393,7 @@ TEST(TurnRelay, UnreachableTurnServerProducesNoRelayCandidate) {
 
     // No server is listening on this port.  The transport must not wedge:
     // gathering completes, it just produces no relay candidate.
-    IceTransport t{make_agent_config()};
+    IceTransport t{make_agent_config(kAgentPortBegin4, kAgentPortEnd4)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = 64999;   // nothing listening
@@ -409,17 +455,18 @@ TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
                   "TurnTransport::Tls must match");
 
     // The concrete transport must answer through the plugin seam too.
-    IceTransport t{make_agent_config()};
+    IceTransport t{make_agent_config(kAgentPortBegin5, kAgentPortEnd5)};
     EXPECT_TRUE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tcp));
     EXPECT_FALSE(t.turn_transport_supported(nimrtc::plugins::TurnTransport::Tls));
 
     // And the plugin-seam overload must actually reach the TURN server
     // over TCP: the relay candidate it produces is the observable proof.
-    TurnServerFixture server(kTurnTcpPort);
+    TurnServerFixture server(kTurnUdpPortA, kTurnTcpPortA,
+                             kRelayPortBegin2, kRelayPortEnd2);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     nimrtc::plugins::IICETransport* plugin = &t;
-    plugin->add_turn_server_with_transport("127.0.0.1", kTurnTcpPort, kTurnUser, kTurnPass,
+    plugin->add_turn_server_with_transport("127.0.0.1", kTurnTcpPortA, kTurnUser, kTurnPass,
                                            nimrtc::plugins::TurnTransport::Tcp);
 
     ASSERT_EQ(t.open(), 0u) << "open() failed";
@@ -441,13 +488,14 @@ TEST(TurnTcp, RelayCandidateIsGatheredOverTcp) {
 
     // The server listens on the TCP port as well, so the client can
     // reach it over a TCP control connection.
-    TurnServerFixture server(kTurnTcpPort);
+    TurnServerFixture server(kTurnUdpPortB, kTurnTcpPortB,
+                             kRelayPortBeginB, kRelayPortEndB);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
-    IceTransport t{make_agent_config()};
+    IceTransport t{make_agent_config(kAgentPortBegin6, kAgentPortEnd6)};
     TurnServer ts;
     ts.host = "127.0.0.1";
-    ts.port = kTurnTcpPort;
+    ts.port = kTurnTcpPortB;
     ts.username = kTurnUser;
     ts.password = kTurnPass;
     ts.transport = TurnTransport::Tcp;
@@ -478,7 +526,7 @@ TEST(TurnTcp, UnreachableTcpTurnServerProducesNoRelayCandidate) {
     // Nothing is listening on the TCP port: the transport must not wedge.
     // The host candidates are still gathered and no relay candidate is
     // invented.
-    IceTransport t{make_agent_config()};
+    IceTransport t{make_agent_config(kAgentPortBegin7, kAgentPortEnd7)};
     TurnServer ts;
     ts.host = "127.0.0.1";
     ts.port = 64998;   // nothing listening on TCP
@@ -539,17 +587,18 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
 
     // The server listens on both UDP and TCP; the clients use the TCP
     // control connection.
-    TurnServerFixture server(kTurnTcpPort);
+    TurnServerFixture server(kTurnUdpPortC, kTurnTcpPortC,
+                             kRelayPortBeginC, kRelayPortEndC);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     // Pinned credentials: the two agents need to agree on them before the
     // candidates are exchanged, and pinning them lets the test build the
     // remote descriptions deterministically.
-    IceConfig cfg_a = make_agent_config();
+    IceConfig cfg_a = make_agent_config(kAgentPortBegin8, kAgentPortEnd8);
     cfg_a.local_ufrag    = "ufragTurnTcpA0000000";
     cfg_a.local_password = "pwdTurnTcpA00000000000000000";
 
-    IceConfig cfg_b = make_agent_config();
+    IceConfig cfg_b = make_agent_config(kAgentPortBegin9, kAgentPortEnd9);
     cfg_b.role          = Role::Controlled;
     cfg_b.local_ufrag    = "ufragTurnTcpB0000000";
     cfg_b.local_password = "pwdTurnTcpB00000000000000000";
@@ -572,10 +621,10 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     cfg_b.bind_address = "127.0.0.3";
 
     // Disjoint local port ranges, so the two agents do not share a socket.
-    cfg_a.local_port_range_begin = 64200;
-    cfg_a.local_port_range_end   = 64249;
-    cfg_b.local_port_range_begin = 64250;
-    cfg_b.local_port_range_end   = 64299;
+    cfg_a.local_port_range_begin = kAgentPortBegin8;
+    cfg_a.local_port_range_end   = kAgentPortEnd8;
+    cfg_b.local_port_range_begin = kAgentPortBegin9;
+    cfg_b.local_port_range_end   = kAgentPortEnd9;
 
     IceTransport a{cfg_a};
     IceTransport b{cfg_b};
@@ -591,7 +640,7 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     for (const auto& t : {TurnTransport::Tcp}) {
         TurnServer ts;
         ts.host = "127.0.0.1";
-        ts.port = kTurnTcpPort;
+        ts.port = kTurnTcpPortC;
         ts.username = kTurnUser;
         ts.password = kTurnPass;
         ts.transport = t;

@@ -18,7 +18,11 @@ add_library(nimrtc_pacing STATIC
     src/token_bucket.cpp
     )
 
-nimrtc_apply_options(nimrtc_pacing)
+# STRICT_CONVERSIONS: the token bucket's arithmetic is all about
+# bytes-per-second and millisecond counts, so a narrowing conversion
+# here silently changes the pacing rate.  The module is tiny and clean,
+# so the strict setting costs nothing.
+nimrtc_apply_options(nimrtc_pacing STRICT_CONVERSIONS)
 target_link_libraries(nimrtc_pacing
     PUBLIC
         nimrtc::core      # core::TimePoint

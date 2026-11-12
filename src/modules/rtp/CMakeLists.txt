@@ -25,7 +25,13 @@ add_library(nimrtc_rtp STATIC
     src/xr_report_plugin.cpp # v1.2.0 X1: adapter → plugins::IXrReport
     )
 
-nimrtc_apply_options(nimrtc_rtp)
+# STRICT_CONVERSIONS: this module is where a narrowing conversion is a
+# *protocol* bug, not a style question -- an RTP header field is a
+# 16-bit quantity on the wire, and the parser / builder are the only
+# places that know that.  The module is small and has no historical
+# backlog, so keeping the conversion warnings fatal here costs
+# nothing and protects the wire format.
+nimrtc_apply_options(nimrtc_rtp STRICT_CONVERSIONS)
 target_link_libraries(nimrtc_rtp
     PUBLIC
         nimrtc::core

@@ -15,7 +15,10 @@ add_library(nimrtc_jb STATIC
     src/jb_plugin.cpp           # adapter wrapping concrete → plugins::IJB
     )
 
-nimrtc_apply_options(nimrtc_jb)
+# STRICT_CONVERSIONS: the jitter estimator is integer arithmetic over
+# timestamps and sequence numbers, so a narrowing conversion here
+# changes the playout decision.  The module is small and clean.
+nimrtc_apply_options(nimrtc_jb STRICT_CONVERSIONS)
 target_link_libraries(nimrtc_jb
     PUBLIC
         nimrtc::core

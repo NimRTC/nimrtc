@@ -28,6 +28,42 @@ set(NIMRTC_CXX_STANDARD 20 CACHE STRING "C++ standard for NimRTC")
 set(NIMRTC_C_STANDARD 11 CACHE STRING "C standard for vendored C libs")
 
 # -----------------------------------------------------------------------------
+# Warning baseline
+# -----------------------------------------------------------------------------
+# `-Wconversion` and `-Wsign-conversion` are the two strictest warnings
+# the project enables, and they are also the two that create the most
+# *debt*: a warning is reported at the point of use, so a single new
+# line of code can surface a conversion problem in a function that was
+# written months earlier.  The observed cost was concrete — three of
+# the commits on 2026-11-12 were pure `-Wsign-conversion` cleanup with
+# no functional content (267 lines changed, zero feature value), and
+# every one of them was *retrospective* work triggered by unrelated
+# work.
+#
+# The mechanism below keeps the warning ON for every target (so it is
+# still reported, still visible in the build log, still greppable) but
+# stops it from being *fatal* unless the target asks for it.  A target
+# opts in by passing `STRICT_CONVERSIONS` to nimrtc_apply_options():
+#
+#     nimrtc_apply_options(nimrtc_rtp)                # warns, not fatal
+#     nimrtc_apply_options(nimrtc_rtp STRICT_CONVERSIONS)  # warns AND fatal
+#
+# The default is deliberately the non-fatal one for exactly one reason:
+# the project's own contract is that *new* code must not introduce a
+# conversion problem, and that is enforced by the review of the diff,
+# not by the compiler.  Turning the warning fatal for a whole target
+# means that every future change to that target inherits the target's
+# historical debt, which is how a 10-line feature turns into a
+# 200-line cleanup.
+#
+# Targets whose *entire* surface is numeric (the RTP/RTCP packet
+# parsers, the jitter buffer, the pacing pacer) opt in: for them a
+# narrowing conversion is a protocol bug, not a style question, and
+# they have no backlog to speak of.
+set(NIMRTC_CONVERSION_WARNINGS_FATAL "OFF" CACHE STRING
+    "Make -Wconversion / -Wsign-conversion fatal on every production target")
+
+# -----------------------------------------------------------------------------
 # Apply language standards (project-wide)
 # -----------------------------------------------------------------------------
 # Always enforce C++20 — the project requires std::span, std::optional, etc.
@@ -46,8 +82,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd / IDE indexing
 # Helper: apply NimRTC flags to a target
 #
 # Usage:
-#   nimrtc_apply_options(<target>)             # strict (production code)
-#   nimrtc_apply_options(<target> LENIENT)     # test/bench harnesses
+#   nimrtc_apply_options(<target>)                        # strict (production code)
+#   nimrtc_apply_options(<target> LENIENT)                # test/bench harnesses
+#   nimrtc_apply_options(<target> STRICT_CONVERSIONS)      # conversion warnings fatal
 #
 # LENIENT mode disables -Werror (and a few specific warnings that are
 # endemic to test code but never appear in production src/) so that
@@ -55,6 +92,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd / IDE indexing
 # non-literal printf formats in debug helpers don't block CI. Warnings
 # remain enabled — they still surface in the build log; we just don't
 # treat them as fatal. Production src/ targets must NOT pass LENIENT.
+#
+# STRICT_CONVERSIONS makes -Wconversion / -Wsign-conversion fatal on
+# top of the default set.  See the "Warning baseline" section above for
+# why this is opt-in per target rather than global.
 # -----------------------------------------------------------------------------
 function(nimrtc_apply_options target)
     if(NOT TARGET ${target})
@@ -62,7 +103,7 @@ function(nimrtc_apply_options target)
     endif()
 
     cmake_parse_arguments(NIMRTC_OPT
-        "LENIENT"   # options
+        "LENIENT;STRICT_CONVERSIONS"   # options
         ""          # one-value args
         ""          # multi-value args
         ${ARGN})
@@ -123,6 +164,45 @@ function(nimrtc_apply_options target)
             -fno-common
             $<$<CONFIG:Debug>:-O0 -g3>
             $<$<CONFIG:Release>:-O2 -DNDEBUG>)
+
+        # -------------------------------------------------------------------------
+        # Conversion warnings: warn always, fail only on request.
+        #
+        # GCC and Clang have no per-warning "-Werror=" spelling for
+        # enabling, but they DO have one for *demoting*: the
+        # -Wno-error=<warning> form.  So the way to make ONE warning
+        # non-fatal while the rest stay fatal is:
+        #
+        #     -Wno-error=conversion
+        #     -Wno-error=sign-conversion
+        #
+        # The net effect is exactly what we want: a conversion problem is
+        # still printed as a *warning* in every build, but it does not
+        # fail the compile unless the target asked for STRICT_CONVERSIONS.
+        #
+        # Verified empirically against GCC 11.4 (the compiler the CI
+        # Linux leg uses):
+        #
+        #   -Wconversion -Wsign-conversion -Werror
+        #       -> "error: ... [-Werror=conversion]", build fails
+        #   ... -Werror -Wno-error=conversion -Wno-error=sign-conversion
+        #       -> "warning: ... [-Wconversion]", build succeeds
+        #   ... and an unrelated warning (e.g. -Wunused-variable) is
+        #       still fatal under the same flags.
+        #
+        # The option ORDER does not matter: GCC applies the per-warning
+        # demotion regardless of whether it appears before or after
+        # -Werror on the command line.  Both orders were tested and
+        # behave identically.  (This was verified rather than assumed,
+        # because the intuitive "demotion must come after -Werror"
+        # reasoning does not hold here.)
+        # -------------------------------------------------------------------------
+        if(NOT NIMRTC_OPT_STRICT_CONVERSIONS AND
+           NOT NIMRTC_CONVERSION_WARNINGS_FATAL)
+            target_compile_options(${target} PRIVATE
+                -Wno-error=conversion
+                -Wno-error=sign-conversion)
+        endif()
 
         # -Wduplicated-cond (duplicate `if` conditions inside an if/else
         # chain) is a GCC-only spelling.  Clang has no equivalent

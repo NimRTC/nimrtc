@@ -27,9 +27,9 @@ name: ci
 
 on:
   push:
-    branches: [main, feat/**, fix/**, chore/**, release/**, split/**]
+    branches: [main, feat/**, fix/**, chore/**, release/**]
   pull_request:
-    branches: [main, split/**]
+    branches: [main]
   # Manual trigger.  Useful for re-running the 4-platform matrix on
   # demand (e.g. after a runner-side hiccup) without pushing a commit.
   workflow_dispatch:

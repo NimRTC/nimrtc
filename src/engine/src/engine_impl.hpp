@@ -684,6 +684,19 @@ struct NimRTCEngine::Impl {
     std::uint64_t video_keyframes_q       = 0;
     std::uint64_t video_feedback_applied  = 0;
     std::uint64_t video_keyframes_applied = 0;
+
+    // ---- Video zero-copy counters (Phase 3 / C3) --------------------------
+    //
+    // `video_zero_copy_frames` counts the frames that took the GPU path
+    // (the engine handed the native handle to the codec instead of
+    // staging CPU pixels).  `video_zero_copy_fallbacks` counts the frames
+    // that carried a GPU handle but could NOT take the zero-copy path —
+    // either the codec does not support it, or `encode_zero_copy()`
+    // returned an error.  The two counters make the flag observable: a
+    // host that turns `EngineConfig::video_zero_copy` on can see whether
+    // the path is actually being taken.
+    std::uint64_t video_zero_copy_frames    = 0;
+    std::uint64_t video_zero_copy_fallbacks = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------

@@ -1151,6 +1151,15 @@ nimrtc_add_engine_codec_test(test_engine_video_codec_family
                               test_engine_video_codec_family.cpp)
 endif()
 
+# Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the
+# video pipeline (receiver / sender "reference") so it reuses
+# `nimrtc_add_engine_codec_test`'s link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_codec_test(test_engine_video_zero_copy
+                              test_engine_video_zero_copy.cpp)
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 

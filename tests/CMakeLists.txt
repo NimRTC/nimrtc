@@ -1207,8 +1207,99 @@ endif()
 # `nimrtc_add_engine_codec_test`'s link set.
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
    AND NIMRTC_MODULE_H264)
-nimrtc_add_engine_codec_test(test_engine_video_codec_family
+  nimrtc_add_engine_codec_test(test_engine_video_codec_family
                               test_engine_video_codec_family.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The M1 exit criterion (remote-desktop plan §B.2 / §B.6) — the engine-level
+# video loopback.
+#
+# "Two native clients see each other's real desktop, in real pixels, over the
+# network, with the picture actually encoded by a real codec ... pixel-diff
+# test on a synthetic pattern."
+#
+# The test drives a *transmitting* and a *receiving* engine through the whole
+# media path:
+#
+#   capture device (BGRA) → engine pump → BGRA→I420 staging → OpenH264
+#   encode → STAP-A / FU-A packetization → RTP → fake ICE wire →
+#   feed_media_inbound() → depacketize → Annex-B reassembly → OpenH264
+#   decode → recording sink
+#
+# and then *compares the pixels*: the decoded luma is diffed against the
+# reference luma of the source pattern (MAE < 12 grey levels, Pearson r >
+# 0.95).  The codec is pinned to the vendored OpenH264 backend, so the
+# synthetic stub (which would report "software-stub") can never satisfy the
+# assertion — a *real* codec is required.
+#
+# Link-wise it needs everything the other engine tests need, plus:
+#   - nimrtc::h264          (the OpenH264 backend + the backend registry)
+#   - nimrtc::video_frame   (the pixel-format vocabulary the codec seam uses)
+#   - nimrtc::video_capture (the capture-device seam the pump drives)
+#   - nimrtc::video_pipeline(the reference sender / receiver)
+#   - nimrtc::video_sink    (the sink seam the decoded frame is rendered to)
+#   - nimrtc::video_source  (the source seam the engine instantiates)
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_FRAME AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_e2e_loopback test_engine_video_e2e_loopback.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_e2e_loopback PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_e2e_loopback PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_e2e_loopback PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_e2e_loopback PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_e2e_loopback PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_e2e_loopback LENIENT)
+  add_test(NAME test_engine_video_e2e_loopback
+      COMMAND $<TARGET_FILE:test_engine_video_e2e_loopback>)
+  set_tests_properties(test_engine_video_e2e_loopback PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_e2e_loopback
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_e2e_loopback)
 endif()
 
 # Phase 3 / C3 — the GPU zero-copy video send path.  The test needs the

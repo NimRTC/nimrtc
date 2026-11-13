@@ -72,6 +72,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     stripped, the codec-owned buffer yields the same picture, the
     factory reaches dav1d).
 
+- **The M1 exit-criterion proof (v1.3, remote-desktop plan §B.2 / §B.6).**
+  The individual pieces of the video pipeline existed, but nothing proved
+  that a picture captured by one engine survives a *real* codec and
+  arrives at another engine as the *same* picture.  The new
+  `tests/test_engine_video_e2e_loopback.cpp` closes that gap: it drives
+  **two engines** through the complete chain at **1080p** —
+
+      capture (BGRA) → BT.601 staging → OpenH264 encode → STAP-A / FU-A
+      → RTP → transport → RTP → depacketize → Annex-B reassembly →
+      OpenH264 decode → render
+
+  — and compares the decoded luma against the reference luma computed
+  from the *same* source pattern with the *same* transform the staging
+  step uses (**mean absolute error < 12.0** grey levels, **Pearson
+  correlation > 0.95**).  The measured values on the reference machine
+  are **MAE 1.02** and **r 0.998**.
+    - The codec is pinned to the `openh264_h264` backend explicitly, so
+      the result does not depend on whether the host has an NVENC /
+      QSV / AMF card; the engine's telemetry has to report
+      `video_codec_backend == "openh264"`, which excludes the stub.
+    - The **negative control** is part of the test: a flat grey frame
+      must *fail* both thresholds, and the decoded frame must not be
+      byte-identical to the source (which would mean it never went
+      through the codec).
+    - The transport is a fake ICE transport (a seam, not a codec
+      shortcut) — the *network* part of the criterion is covered by the
+      transport-level work packages.
+
 - **The Windows rendering and engine pump (v1.3, remote-desktop plan
   WP-C / A10 / A11 / E2 / E8 / B10 / B15).**  The capture → encode →
   present loop could not be closed on Windows: there was no native

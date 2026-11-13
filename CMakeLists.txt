@@ -67,11 +67,12 @@ option(NIMRTC_PLUGINS_QSV    "Build Intel Quick Sync (libvpl/MediaSDK) H.264 enc
 option(NIMRTC_PLUGINS_DXVA   "Build Microsoft DXVA H.264 decoder"                                   OFF)
 option(NIMRTC_PLUGINS_VAAPI  "Build VA-API H.264 encoder (Linux Intel/AMD)"                          OFF)
 option(NIMRTC_PLUGINS_NVDEC  "Build NVIDIA NVDEC H.264 decoder"                                     OFF)
-option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder"                              OFF)
+option(NIMRTC_PLUGINS_OPENH264 "Build OpenH264 software H.264 encoder + decoder"                     OFF)
+option(NIMRTC_PLUGINS_DAV1D    "Build dav1d software AV1 decoder"                                    OFF)
 
 # Helper that prints a one-liner summary at the end of CMake configure.
 set(_nimrtc_hw_summary "")
-foreach(_hw NVENC AMF QSV DXVA VAAPI NVDEC OPENH264)
+foreach(_hw NVENC AMF QSV DXVA VAAPI NVDEC OPENH264 DAV1D)
     if(NIMRTC_PLUGINS_${_hw})
         set(_nimrtc_hw_summary "${_nimrtc_hw_summary} ${_hw}")
     endif()

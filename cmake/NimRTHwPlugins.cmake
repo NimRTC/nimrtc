@@ -266,12 +266,39 @@ endfunction()
 
 function(nimrtc_link_openh264 target)
     if(NIMRTC_PLUGINS_OPENH264)
-        # Real OpenH264 binding would link against libopenh264; for now
-        # the source file is a stub that delegates to CodecPluginAdapter.
-        target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_OPENH264_ON=1)
-        target_include_directories(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
-        target_sources(${target} PRIVATE
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/openh264_encoder.cpp")
+        # The real OpenH264 binding: the vendored source build of Cisco's
+        # codec (BSD-2-Clause).  The link helper is what decides whether
+        # the real codec or the "unavailable" path gets compiled in —
+        # see nimrtc_link_vendor_openh264() in cmake/NimRTCVendored.cmake.
+        nimrtc_link_vendor_openh264(${target})
+        # The plugin source is compiled ONLY when the vendored build is
+        # really there: the vendored switch off, or the submodule not
+        # populated, means there is no codec to link against — the
+        # registry then falls through to the software stub.
+        if(NIMRTC_VENDORED_OPENH264 AND TARGET nimrtc_vendor_openh264 AND
+           EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/openh264/src/codec/api/wels/codec_api.h")
+            target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_OPENH264_ON=1)
+            target_include_directories(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src")
+            target_sources(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/h264/src/openh264_encoder.cpp")
+        endif()
+    endif()
+endfunction()
+
+function(nimrtc_link_dav1d target)
+    if(NIMRTC_PLUGINS_DAV1D)
+        # The real dav1d binding: the vendored source build of VideoLAN's
+        # AV1 decoder (BSD-2-Clause).  dav1d is decode-only, so only the
+        # decoder source is added.
+        nimrtc_link_vendor_dav1d(${target})
+        if(NIMRTC_VENDORED_DAV1D AND TARGET nimrtc_vendor_dav1d AND
+           EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/dav1d/src/include/dav1d/dav1d.h")
+            target_compile_definitions(${target} PRIVATE NIMRTC_PLUGINS_DAV1D_ON=1)
+            target_include_directories(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/av1/src")
+            target_sources(${target} PRIVATE
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/modules/av1/src/dav1d_decoder.cpp")
+        endif()
     endif()
 endfunction()

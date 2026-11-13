@@ -64,6 +64,37 @@ _nimrtc_vendor_add_if_populated(webrtc_audio_processing)
 # https://codeload.github.com/sctplab/usrsctp/tar.gz/refs/tags/0.9.5.0).
 _nimrtc_vendor_add_if_populated(usrsctp)
 
+# -----------------------------------------------------------------------------
+# Remote-desktop plan WP-B — real software codecs.
+#
+#   openh264 : Cisco's BSD-2-Clause H.264 encoder + decoder.  Built from
+#               source (portable C path, no NASM / GAS) so no assembler
+#               toolchain is needed on the CI hosts.
+#   dav1d    : VideoLAN's BSD-2-Clause AV1 decoder.  Built from source
+#               (portable C path, no NASM / GAS), 8-bit only.
+#
+# NOTE: upstream ships a Meson build, not a CMakeLists.txt, so these two
+# are added EXPLICITLY (their wrapper lives next to `src/`, not inside
+# it, so the helper above would not find them).
+#
+# The wrappers are added only when the matching *plugin* is enabled:
+# with the plugin off nothing links the codec, and compiling ~800
+# upstream translation units on every CI push would be pure waste.  The
+# wrapper itself creates the target unconditionally — as an empty
+# INTERFACE stub when the submodule is absent or the vendored switch is
+# off — so the options can be flipped without a CMake error; the codec
+# then simply reports "not available" and the registry falls through to
+# the software stub.
+# -----------------------------------------------------------------------------
+if(NIMRTC_PLUGINS_OPENH264 AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/openh264/CMakeLists.txt")
+    add_subdirectory(openh264)
+endif()
+if(NIMRTC_PLUGINS_DAV1D AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dav1d/CMakeLists.txt")
+    add_subdirectory(dav1d)
+endif()
+
 # v0.14.0-beta.1 (ADR-014): msquic QUIC library.
 # WebTransport / QUIC backend for the IWebTransportSession seam.
 # Populated by: git submodule add https://github.com/microsoft/msquic src/third_party/msquic

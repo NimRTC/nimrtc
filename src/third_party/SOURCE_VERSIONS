@@ -35,6 +35,8 @@ wolfssl                   v5.9.2         ac01707   ac01707f552c611fbd135cc723b26
 webrtc_audio_processing   master         d0569cf   d0569cfa50c1858ee279d77b3fc8870be6902441   2026-09-11   https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing
 msquic                    master         a5ae3a0   a5ae3a06ed6e3c054c251892370801db98d85174   2026-10-19   https://github.com/NimRTC/msquic
 gmssl                     v3.2.0         7c9f029   7c9f02904ef33e59c87b4f16621cc8fd434e7579   2026-11-05   https://github.com/guanzhi/GmSSL
+openh264                  v2.6.0         652bdb7   652bdb7719f30b52b08e506645a7322ff1b2cc6f   2026-11-13   https://github.com/cisco/openh264
+dav1d                     v1.5.1         42b2b24   42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa   2026-11-13   https://code.videolan.org/videolan/dav1d
 
 # Patches applied on top of the upstream tree
 #

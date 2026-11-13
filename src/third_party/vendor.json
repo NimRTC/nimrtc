@@ -135,6 +135,28 @@
       "build": "header-only INTERFACE library — see src/third_party/nv_codec_headers/CMakeLists.txt",
       "notes": "NVIDIA Video Codec SDK headers (nvEncodeAPI.h for NVENC, plus the nvcuvid / CUVID and FFmpeg-style dynamic-loader headers used by the NVDEC decoder). MIT-licensed: the headers are NVIDIA's own, redistributed by the FFmpeg project under the MIT licence, with the notice embedded in every file. NOT a submodule: the headers are checked into this repository rather than fetched, because they pin the struct ABI the NVENC / NVDEC backends build against — a submodule would allow the pin to drift away from the headers actually compiled, and the whole point of the vendored copy is that the struct layouts and the struct-version words come from the same header set (see README.md next to the headers and docs/hw_plugin_seam.md §12.1). 'submodule': false tells tools/check_vendor.py that this is a checked-in tree, so the manifest SHA documents the upstream revision it was taken from rather than describing the tree itself. No NVIDIA binary is linked or shipped: the backends load nvEncodeAPI64.dll / nvcuvid.dll / nvcuda.dll from the installed driver at runtime.",
       "size_estimate": "0.5 MB / 6 files (header-only)"
+    },
+    {
+      "name": "openh264",
+      "upstream_url": "https://github.com/cisco/openh264.git",
+      "upstream_version": "v2.6.0",
+      "commit_sha": "652bdb7719f30b52b08e506645a7322ff1b2cc6f",
+      "submodule_path": "src/third_party/openh264/src",
+      "license": "BSD-2-Clause",
+      "build": "sources compiled directly via src/third_party/openh264/CMakeLists.txt wrapper into STATIC nimrtc_vendor_openh264 — active only when NIMRTC_PLUGINS_OPENH264=ON (default OFF)",
+      "notes": "Real software H.264 encoder + decoder (remote-desktop plan WP-B, CPU bring-up baseline). Replaces the stub delegation in src/modules/h264/src/openh264_encoder.cpp with a genuine WelsCreateSVCEncoder / WelsCreateDecoder implementation; the stub survives as the fallback backend and reports backend_id() == \"software-stub\", while this one reports \"openh264\". Upstream ships a Meson build, so the wrapper compiles the upstream sources directly with CMake. The wrapper builds the PORTABLE C/C++ path only (X86_ASM and HAVE_NEON stay undefined), because upstream's x86 fast paths are NASM and its ARM paths are GAS — neither assembler is guaranteed on a NimRTC build host. The result is a correct, if slower, codec, which is exactly what the software baseline needs. No system codec library is linked (L5).",
+      "size_estimate": "~9 MB / 460 files"
+    },
+    {
+      "name": "dav1d",
+      "upstream_url": "https://code.videolan.org/videolan/dav1d.git",
+      "upstream_version": "v1.5.1",
+      "commit_sha": "42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa",
+      "submodule_path": "src/third_party/dav1d/src",
+      "license": "BSD-2-Clause",
+      "build": "sources compiled directly via src/third_party/dav1d/CMakeLists.txt wrapper into STATIC nimrtc_vendor_dav1d — active only when NIMRTC_PLUGINS_DAV1D=ON (default OFF)",
+      "notes": "Real software AV1 decoder (remote-desktop plan WP-B, CPU bring-up baseline). Backs src/modules/av1/src/dav1d_decoder.cpp, which reports backend_id() == \"dav1d\"; the AV1 stub stays the fallback and reports \"software-stub\". Upstream ships a Meson build, so the wrapper compiles the upstream sources directly with CMake and reproduces the three things a naive source list would miss: (1) the generated config.h platform description, (2) the generated vcs_version.h, (3) the per-bitdepth instantiation of the templated DSP sources (*_tmpl.c) — here the 8-bit one only, in a separate OBJECT library so -DBITDEPTH=8 does not leak into the non-templated sources. Portable C path only (HAVE_ASM=0): upstream's x86 fast paths are NASM and its ARM ones are GAS, neither of which is guaranteed on a NimRTC build host. No system codec library is linked (L5).",
+      "size_estimate": "~5 MB / 360 files"
     }
   ],
 

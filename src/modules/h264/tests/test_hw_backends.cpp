@@ -93,12 +93,23 @@ TEST(HwBackends, SelectEncoderReturnsHighestPriorityAvailable) {
     const auto* be = h264::select_encoder_backend(cfg);
     ASSERT_NE(be, nullptr);
 
-    // Priority ordering: highest first. Stub is priority 0, any HW
-    // backend that compiled in must have priority > 0; if it doesn't,
-    // available() returns false and stub wins.
+    // Priority ordering: highest first.  The stub is priority 0, and
+    // every real backend (hardware *or* software) must sit above it.
+    //
+    // Note that the winner is no longer necessarily a hardware
+    // backend: the vendored OpenH264 software codec registers at
+    // priority 50, above the stub but below every HW backend.  So the
+    // invariant to check is "priority > 0", plus the consistency
+    // between `is_hw` and the backend's own identity.
     if (std::string(be->id) != "stub_h264") {
         EXPECT_GT(be->priority, 0);
-        EXPECT_TRUE(be->is_hw);
+        // A software backend must not claim to be hardware-accelerated,
+        // and a hardware backend must.
+        if (std::string(be->id) == "openh264_h264") {
+            EXPECT_FALSE(be->is_hw);
+        } else {
+            EXPECT_TRUE(be->is_hw);
+        }
     }
 }
 

@@ -23,6 +23,15 @@
 
 namespace nimrtc::av1 {
 
+#if defined(NIMRTC_PLUGINS_DAV1D_ON)
+extern bool dav1d_av1_available() noexcept;
+extern std::unique_ptr<plugins::IVideoCodec>
+make_dav1d_av1_codec(plugins::VideoCodecConfig cfg);
+#define HAS_DAV1D 1
+#else
+#define HAS_DAV1D 0
+#endif
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -32,6 +41,26 @@ namespace {
 // a sequence-header-carrying OBU stream, so the engine loop works
 // end-to-end without a proprietary codec.
 // ---------------------------------------------------------------------------
+
+/** The stub codec in its *encode-only* shape.
+ *
+ *  The stub does not decode AV1: it paints a synthetic pattern over the
+ *  frame it was handed.  Letting the stub answer `can_decode() == true`
+ *  would make the plugin factory stop at the encoder and hand the stub
+ *  back as a bidirectional codec — which would leave a real decoder
+ *  (dav1d) unreachable no matter how high its registry priority is.
+ *
+ *  So the *encoder* backend hands out this encode-only view of the stub,
+ *  and the factory composes it with whichever decoder the registry
+ *  selects (dav1d when the vendored build is linked in, the stub
+ *  otherwise). */
+class EncodeOnlyStubCodec final : public CodecPluginAdapter {
+public:
+    explicit EncodeOnlyStubCodec(plugins::VideoCodecConfig cfg) noexcept
+        : CodecPluginAdapter(std::move(cfg)) {}
+
+    bool can_decode() const noexcept override { return false; }
+};
 
 plugins::VideoEncoderBackend make_stub_encoder_backend() {
     plugins::VideoEncoderBackend be;
@@ -47,7 +76,7 @@ plugins::VideoEncoderBackend make_stub_encoder_backend() {
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        return std::make_unique<CodecPluginAdapter>(std::move(cfg));
+        return std::make_unique<EncodeOnlyStubCodec>(std::move(cfg));
     };
     return be;
 }
@@ -70,6 +99,37 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
     };
     return be;
 }
+
+// ---------------------------------------------------------------------------
+// dav1d software decoder — priority 50, above the synthetic stub.
+//
+// The vendored dav1d is a *real* AV1 decoder, so its `backend_id()` is
+// "dav1d" — distinct from the stub's "software-stub".
+//
+// There is no dav1d *encoder* (dav1d is decode-only), so the encoder
+// direction stays with the stub / NVENC.
+// ---------------------------------------------------------------------------
+
+#if HAS_DAV1D
+plugins::VideoDecoderBackend make_dav1d_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "dav1d_av1";
+    be.description    = "dav1d software AV1 decoder";
+    be.backend        = plugins::HwBackend::Dav1d;
+    be.priority       = 50;
+    be.codec_kind     = plugins::VideoCodecKind::kAV1;
+    be.is_hw          = false;
+    be.zero_copy_supported = false;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return dav1d_av1_available();
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoCodec> {
+        return make_dav1d_av1_codec(std::move(cfg));
+    };
+    return be;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // NVENC — NVIDIA. Priority 450.
@@ -136,6 +196,10 @@ void register_default_video_backends() noexcept {
 
     reg.register_encoder(make_stub_encoder_backend());
     reg.register_decoder(make_stub_decoder_backend());
+
+#if HAS_DAV1D
+    reg.register_decoder(make_dav1d_decoder_backend());
+#endif
 
     // The NVENC / NVDEC entries are always registered — the availability
     // probe is what decides whether they are usable.

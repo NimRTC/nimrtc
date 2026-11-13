@@ -17,6 +17,61 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The real software codecs (v1.3, remote-desktop plan WP-B / B3).**  The
+  CPU bring-up baseline carried no codec: the H.264 and AV1 plug-ins
+  delegated to *stubs* that emitted synthetic bitstreams and painted
+  synthetic pictures, so the pipeline could be exercised end to end but
+  never carried real video.
+  - **OpenH264 v2.6.0** (Cisco, BSD-2-Clause) is vendored under
+    `src/third_party/openh264/` as a git submodule and built from source
+    through a hand-written CMake wrapper (upstream ships a Meson build).
+    The wrapper mirrors upstream's *three-library* split — the encoder
+    and the decoder ship different headers under the same names, with
+    the **same include guard**, so they must not share an include path —
+    and compiles the **portable C path only**: upstream's x86 fast paths
+    are NASM and its ARM ones are GAS, and neither assembler is
+    guaranteed on a build host.
+  - `src/modules/h264/src/openh264_encoder.cpp` now holds a **real**
+    H.264 encoder *and* decoder (`WelsCreateSVCEncoder` /
+    `WelsCreateDecoder`) instead of delegating to the stub: Annex-B
+    output, CABAC, single-slice AVC, and a decoder that completes the
+    access unit explicitly (`DecodeFrame2(NULL, 0)`) and drains the POC
+    reorder queue (`DECODER_OPTION_END_OF_STREAM` + `FlushFrame()`), so
+    the codec stays **delay-free**.
+  - The encoder **follows the picture**: a host whose capture
+    resolution differs from the engine's configured default (or changes
+    mid-session) makes the codec re-configure its encoder rather than
+    reject the frame.
+  - **dav1d v1.5.1** (VideoLAN, BSD-2-Clause) is vendored the same way
+    under `src/third_party/dav1d/` and backs
+    `src/modules/av1/src/dav1d_decoder.cpp`, a **real software AV1
+    decoder** (8-bit, portable C path, the generated `config.h` and
+    `vcs_version.h` reproduced by the wrapper, the templated DSP
+    sources instantiated once for `BITDEPTH=8`).
+  - The **stubs stay in the tree as the fallback**, and the telemetry
+    now tells them apart: `IVideoCodec::backend_id()` reports
+    `"software-stub"` for a stub and `"openh264"` / `"dav1d"` for the
+    real software codecs, so `Stats::video_codec_backend` is honest
+    about what produced the bitstream.
+  - The AV1 plug-in's **stub encoder is encode-only**, so the factory
+    pairs it with the best decoder the registry offers — the real
+    dav1d decoder when the vendored build is linked in, the stub
+    otherwise.  `HwCompositeCodec::backend_id()` forwards the
+    sub-codec's identity instead of the interface's "unknown".
+  - New switches: `NIMRTC_PLUGINS_OPENH264`, `NIMRTC_PLUGINS_DAV1D`,
+    `NIMRTC_VENDORED_OPENH264`, `NIMRTC_VENDORED_DAV1D`.  There is **no
+    system fallback** (AGENTS.md L5), so switching the vendored build
+    off simply leaves the stub in charge.  The Windows, Linux and macOS
+    CI legs now build both codecs and run the new round-trip tests.
+  - Covered by `src/modules/h264/tests/test_openh264_software.cpp` (8
+    cases: the real bitstream carries SPS + PPS + IDR, the decoded
+    pixels match the source within a lossy-codec tolerance, the decoded
+    picture is not blank, the factory selects the real codec) and
+    `src/modules/av1/tests/test_dav1d_software.cpp` (8 cases: a real
+    AV1 key frame decodes to **non-zero pixels**, Annex-B framing is
+    stripped, the codec-owned buffer yields the same picture, the
+    factory reaches dav1d).
+
 - **The Windows rendering and engine pump (v1.3, remote-desktop plan
   WP-C / A10 / A11 / E2 / E8 / B10 / B15).**  The capture → encode →
   present loop could not be closed on Windows: there was no native

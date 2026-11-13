@@ -175,4 +175,14 @@ std::uint8_t HwCompositeCodec::payload_type() const noexcept {
     return cfg_.payload_type != 0 ? cfg_.payload_type : std::uint8_t{102};
 }
 
+std::string_view HwCompositeCodec::backend_id() const noexcept {
+    // The encoder first, for the same reason `kind()` and `codec_name()`
+    // prefer it: the engine's codec telemetry describes the outbound
+    // stream.  A receive-only composite (encoder == nullptr) falls back
+    // to the decoder.
+    if (encoder_) return encoder_->backend_id();
+    if (decoder_) return decoder_->backend_id();
+    return "unknown";
+}
+
 } // namespace nimrtc::nvcodec

@@ -139,7 +139,11 @@ plugins::VideoDecoderBackend make_stub_decoder_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// OpenH264 software —high enough to beat the stub when linked in.
+// OpenH264 software — high enough to beat the stub when linked in.
+//
+// The codec is a *real* H.264 encoder + decoder (the vendored OpenH264
+// source build), so its `backend_id()` is "openh264" — distinct from the
+// synthetic stub's "software-stub".
 // ---------------------------------------------------------------------------
 
 #if HAS_OPENH264
@@ -147,6 +151,25 @@ plugins::VideoEncoderBackend make_openh264_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "openh264_h264";
     be.description    = "OpenH264 software H.264 encoder";
+    be.backend        = plugins::HwBackend::OpenH264;
+    be.priority       = 50;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = false;
+    be.zero_copy_supported = false;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return openh264_h264_available();
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoCodec> {
+        return make_openh264_h264_codec(std::move(cfg));
+    };
+    return be;
+}
+
+plugins::VideoDecoderBackend make_openh264_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "openh264_h264";
+    be.description    = "OpenH264 software H.264 decoder";
     be.backend        = plugins::HwBackend::OpenH264;
     be.priority       = 50;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
@@ -399,6 +422,7 @@ void register_default_video_backends() noexcept {
 
 #if HAS_OPENH264
     reg.register_encoder(make_openh264_encoder_backend());
+    reg.register_decoder(make_openh264_decoder_backend());
 #endif
 
     // The NVENC / NVDEC entries are always registered — the availability

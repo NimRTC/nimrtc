@@ -31,6 +31,8 @@ option(NIMRTC_VENDORED_SRTP        "Use vendored libsrtp (default ON)"  ON)
 option(NIMRTC_VENDORED_JUICE        "Use vendored libjuice (default ON)" ON)
 option(NIMRTC_VENDORED_WOLFSSL      "Use vendored wolfSSL (default ON)"  ON)
 option(NIMRTC_VENDORED_WEBRTC_APM   "Use vendored WebRTC APM (default ON)" ON)
+option(NIMRTC_VENDORED_OPENH264     "Use vendored OpenH264 (default ON)"  ON)
+option(NIMRTC_VENDORED_DAV1D        "Use vendored dav1d (default ON)"     ON)
 
 # -----------------------------------------------------------------------------
 # Public target names (primary)
@@ -41,6 +43,9 @@ set(NIMRTC_VENDOR_LIBS
     nimrtc_vendor_libjuice
     nimrtc_vendor_wolfssl
     nimrtc_vendor_webrtc_apm
+    # Remote-desktop plan WP-B — real software codecs.
+    nimrtc_vendor_openh264
+    nimrtc_vendor_dav1d
     # P1+
     # nimrtc_vendor_libvpx
     # P2+
@@ -305,3 +310,36 @@ function(nimrtc_link_webrtc_apm target)
     target_compile_definitions(${target} PRIVATE NIMRTC_USE_WEBRTC_APM=1)
 endfunction()
 # function(nimrtc_link_libvpx target) ...
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan WP-B — real software codecs.
+#
+# These two have NO system fallback: the whole point of the plan is that
+# the CPU baseline carries a *real* codec, and the vendored source build
+# is the only supported way to get one (L5: no system crypto/codec
+# libraries).  When the submodule is not populated the wrapper declares an
+# empty INTERFACE target and the calling module compiles the "unavailable"
+# path instead — the codec then reports `available() == false` and the
+# registry falls through to the software stub.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_openh264 target)
+    if(NIMRTC_VENDORED_OPENH264 AND TARGET nimrtc_vendor_openh264 AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/openh264/src/codec/api/wels/codec_api.h")
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_openh264)
+        target_compile_definitions(${target} PRIVATE NIMRTC_USE_OPENH264=1)
+    else()
+        message(STATUS "  OpenH264          : vendored source tree not populated — "
+                       "the software-stub backend stays in charge")
+    endif()
+endfunction()
+
+function(nimrtc_link_vendor_dav1d target)
+    if(NIMRTC_VENDORED_DAV1D AND TARGET nimrtc_vendor_dav1d AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/dav1d/src/include/dav1d/dav1d.h")
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_dav1d)
+        target_compile_definitions(${target} PRIVATE NIMRTC_USE_DAV1D=1)
+    else()
+        message(STATUS "  dav1d             : vendored source tree not populated — "
+                       "the software-stub backend stays in charge")
+    endif()
+endfunction()

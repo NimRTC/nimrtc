@@ -105,3 +105,30 @@
 	url = https://github.com/guanzhi/GmSSL.git
 	# Pinned: v3.2.0 (7c9f02904ef33e59c87b4f16621cc8fd434e7579) — see src/third_party/vendor.json
 	# v1.1 X1 (ADR-013 correction): default OFF, opt-in via NIMRTC_ENABLE_DTLS_GMSSL=ON.
+
+# ---------------------------------------------------------------------------
+# Remote-desktop plan WP-B — real software codecs.
+#
+# Both are REAL submodules: the parent repository tracks the path as a
+# gitlink (index mode 160000), so `git submodule update --init` fetches
+# them.  Upstream ships a Meson build for each, so NimRTC compiles the
+# sources through its own CMake wrappers (see
+# src/third_party/openh264/CMakeLists.txt and
+# src/third_party/dav1d/CMakeLists.txt).
+#
+# The wrappers build the PORTABLE C path only (no NASM / GAS assembly),
+# because neither assembler is guaranteed on the NimRTC build hosts.
+# ---------------------------------------------------------------------------
+[submodule "src/third_party/openh264/src"]
+	path = src/third_party/openh264/src
+	url = https://github.com/cisco/openh264.git
+	# Pinned: v2.6.0 (652bdb7719f30b52b08e506645a7322ff1b2cc6f) — see src/third_party/vendor.json
+	# Real software H.264 encoder + decoder; opt-in via NIMRTC_PLUGINS_OPENH264=ON.
+	branch = v2.6.0
+
+[submodule "src/third_party/dav1d/src"]
+	path = src/third_party/dav1d/src
+	url = https://code.videolan.org/videolan/dav1d.git
+	# Pinned: v1.5.1 (42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa) — see src/third_party/vendor.json
+	# Real software AV1 decoder (decode only); opt-in via NIMRTC_PLUGINS_DAV1D=ON.
+	branch = 1.5.1

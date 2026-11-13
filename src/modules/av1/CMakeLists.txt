@@ -42,6 +42,12 @@ target_include_directories(nimrtc_av1
 
 target_compile_definitions(nimrtc_av1 PUBLIC NIMRTC_HAS_AV1=1)
 
+# Real software AV1 decoder (remote-desktop plan WP-B).  dav1d is
+# decode-only, so this adds only the decoder source.  The helper is a
+# no-op unless the vendored dav1d source tree is populated.
+include(NimRTHwPlugins)
+nimrtc_link_dav1d(nimrtc_av1)
+
 add_library(nimrtc::av1 ALIAS nimrtc_av1)
 
 # Tests

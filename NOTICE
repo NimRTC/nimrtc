@@ -82,6 +82,31 @@ NVDEC decoder), redistributed by the FFmpeg project.
               nvcuvid.dll and nvcuda.dll from the installed driver at
               runtime.
 
+This product includes software developed by Cisco Systems, Inc. and the
+OpenH264 contributors (OpenH264).
+  - Source:   https://github.com/cisco/openh264
+  - Version:  2.6.0  (tag v2.6.0, vendored at src/third_party/openh264/;
+                       pinned SHA in src/third_party/SOURCE_VERSIONS)
+  - License:  BSD-2-Clause
+  - Scope:    runtime, statically linked (NIMRTC_PLUGINS_OPENH264=ON).
+              Built from source — no Cisco prebuilt binary is linked or
+              shipped.  Serves as the software H.264 encoder / decoder
+              backend (backend id "openh264").
+  - Note:     the AVC patent attribution that Cisco's prebuilt binary
+              carries does not apply to a source build; the upstream
+              LICENSE file is retained verbatim in the vendored tree.
+
+This product includes software developed by the VideoLAN project and the
+dav1d contributors (dav1d).
+  - Source:   https://code.videolan.org/videolan/dav1d
+  - Version:  1.5.1  (tag 1.5.1, vendored at src/third_party/dav1d/;
+                       pinned SHA in src/third_party/SOURCE_VERSIONS)
+  - License:  BSD-2-Clause
+  - Scope:    runtime, statically linked (NIMRTC_PLUGINS_DAV1D=ON).
+              Built from source.  Serves as the software AV1 decoder
+              backend (backend id "dav1d").  Decode-only — dav1d has no
+              encoder, so AV1 *encoding* stays with the stub / NVENC.
+
 ============================================================
 SCTP (P2)
 ============================================================

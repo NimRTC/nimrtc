@@ -133,8 +133,12 @@ jobs:
             -File ./scripts/generate_wtserver_cert.ps1 `
             -BuildDir "${{ github.workspace }}/build"
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
+        run: cmake --preset debug.msvc -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.msvc -j 2
@@ -490,8 +494,12 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON
+        run: cmake --preset debug -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_INSTALL=ON -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug -j 2
@@ -1027,8 +1035,12 @@ jobs:
             -out build/wtserver_cert.pem \
             -config build/wtserver_openssl.cnf
 
+      # NIMRTC_PLUGINS_OPENH264 / NIMRTC_PLUGINS_DAV1D: the real software
+      # codecs (remote-desktop plan WP-B).  They are vendored source
+      # builds, so the leg proves that the wrappers compile and that the
+      # software round-trip tests pass on this platform too.
       - name: Configure
-        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF
+        run: cmake --preset debug.macos -DNIMRTC_BUILD_EXAMPLES=ON -DNIMRTC_VENDORED_WEBRTC_APM=OFF -DNIMRTC_PLUGINS_OPENH264=ON -DNIMRTC_PLUGINS_DAV1D=ON
 
       - name: Build
         run: cmake --build --preset debug.macos -j 2

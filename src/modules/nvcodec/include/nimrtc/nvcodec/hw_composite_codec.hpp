@@ -121,6 +121,21 @@ public:
     plugins::VideoCodecStats stats() const noexcept override;
     std::uint8_t payload_type() const noexcept override;
 
+    /** The backend identity of the sub-codec that carries the *outbound*
+     *  stream — the encoder, when there is one.
+     *
+     *  The engine reports this verbatim in `Stats::video_codec_backend`,
+     *  and those stats describe the encode path (frames encoded,
+     *  keyframes, encode latency), so the encoder is the sub-codec that
+     *  has to be named.  A receive-only composite falls back to the
+     *  decoder's id.
+     *
+     *  Without this override the composite would report the interface's
+     *  default "unknown", and a host could no longer tell a real
+     *  software codec ("openh264") from the synthetic stub
+     *  ("software-stub"). */
+    std::string_view backend_id() const noexcept override;
+
 private:
     plugins::VideoCodecConfig            cfg_;
     std::unique_ptr<plugins::IVideoCodec> encoder_;

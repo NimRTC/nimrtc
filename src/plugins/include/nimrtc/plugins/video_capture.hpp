@@ -63,6 +63,11 @@
 // base.hpp must be before include guard — see transport.hpp for rationale.
 #include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
+// `GpuHandle` is the zero-copy currency (plan B10).  It lives in the
+// video_frame module, which `nimrtc::plugins` already re-exports
+// (see video_codec.hpp) — but video_capture.hpp must not depend on
+// video_codec.hpp's *contents*, only on the shared type.
+#include <nimrtc/video_frame/frame.hpp>
 
 #ifndef NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
 #define NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
@@ -78,6 +83,17 @@
 #include <vector>
 
 namespace nimrtc::plugins {
+
+// ---------------------------------------------------------------------------
+// Shared type aliases
+// ---------------------------------------------------------------------------
+
+// `GpuHandle` is the zero-copy currency (remote-desktop plan B10): it
+// names a GPU surface and the device it lives on.  It is defined in the
+// video_frame module (the single source of truth) and re-exported here
+// so a capture plug-in can name it without pulling in the codec seam.
+using NIMRTC_API_STABLE GpuHandle  = video_frame::GpuHandle;
+using NIMRTC_API_STABLE GpuBackend = video_frame::GpuBackend;
 
 // ---------------------------------------------------------------------------
 // Device identity
@@ -363,9 +379,41 @@ struct NIMRTC_API_STABLE CaptureFrame {
     /** The changed region(s) in this frame. */
     CaptureDirtyRects dirty;
 
+    /** The colour description of the picture (remote-desktop plan C5).
+     *
+     *  A desktop compositor produces **full-range BT.709**; a camera
+     *  produces **limited-range BT.601**.  The device states what it
+     *  actually produces, and the adapter converts the pixels with that
+     *  description — so the encoder receives a picture whose luma and
+     *  chroma scaling it can trust.
+     *
+     *  `kUnspecified` on both fields means "the device did not say", and
+     *  the portable layer resolves that to the desktop default (full
+     *  range, BT.709). */
+    video_frame::ColorDescription color{};
+
     /** True iff this frame carries a GPU handle that a zero-copy
      *  encoder can consume directly. */
     bool has_gpu_handle = false;
+
+    // ---- Zero-copy surface (remote-desktop plan B10) ----------------------
+    //
+    // The GPU half of a captured frame.  When `gpu_surface` is set the
+    // frame's pixels live in GPU memory and `pixels` may be null: the
+    // surface *is* the picture, and no CPU readback has happened (or
+    // needs to).
+    //
+    // The handle is **borrowed**, not owned: it belongs to the capture
+    // device and stays valid until the device's next frame.  The
+    // consumer that wants to keep the surface past the current call
+    // must copy it (or ask the device for a persistent surface); the
+    // zero-copy path hands it straight to the hardware encoder within
+    // the call, which is the whole point of the path.
+    //
+    // The `device` token in the handle identifies the GPU device the
+    // surface belongs to — an encoder session is opened against one
+    // device, so producer and consumer must agree.
+    GpuHandle gpu_surface{};
 };
 
 /**

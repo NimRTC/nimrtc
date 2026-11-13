@@ -171,6 +171,35 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
 
     /** RTP timestamp (32-bit, media clock). */
     std::uint32_t rtp_timestamp = 0;
+
+    // -- Colour description (remote-desktop plan C5) ------------------------
+    //
+    // How the picture's luma and chroma are scaled and interpreted.
+    // A desktop compositor produces full-range BT.709; a camera produces
+    // limited-range BT.601.  The source states what it produces, the
+    // conversion uses it, and the encoder and the renderer both honour
+    // it — so a full-range screen does not come out washed out.
+    //
+    // `kUnspecified` on both fields means "nobody said"; the portable
+    // layer resolves that to the desktop default (full range, BT.709).
+    video_frame::ColorDescription color{};
+
+    // -- Zero-copy surface (remote-desktop plan B10) -------------------------
+    //
+    // The GPU half of the frame.  When `gpu_surface.backend` is not
+    // `kNone` the picture lives in GPU memory: `plane_y/u/v` may be
+    // null, and the *encoder* is expected to consume the surface
+    // directly (`IVideoCodec::encode_zero_copy`) rather than through a
+    // CPU staging copy.
+    //
+    // The handle is borrowed from the producer and is valid for the
+    // duration of the callback, exactly like `plane_y/u/v`.  A consumer
+    // that wants to keep it past the callback must copy it.
+    //
+    // `GpuHandle::device` identifies the GPU device the surface belongs
+    // to — the encoder session is opened against one device, so the
+    // producer and the consumer must agree on it.
+    GpuHandle gpu_surface{};
 };
 
 // ---------------------------------------------------------------------------

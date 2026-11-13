@@ -312,6 +312,409 @@ void convert_i420_to_nv12(std::uint32_t width,
 }
 
 // ---------------------------------------------------------------------------
+// Colour-aware conversions (remote-desktop plan C3 / C5)
+// ---------------------------------------------------------------------------
+//
+// The RGB<->YUV maths is the textbook ITU-R BT.601 / BT.709 form:
+//
+//   Y  =  Kr*R + Kg*G + Kb*B
+//   Cb = (B - Y) / (2*(1-Kb))
+//   Cr = (R - Y) / (2*(1-Kr))
+//
+// with the coefficients taken from the *matrix* and the scaling /
+// pedestal taken from the *range*.
+//
+// ## Units
+//
+// The luma `Y` and the chroma offsets `Cb - 128` / `Cr - 128` are
+// carried as **plain 0..255-scaled integers** (i.e. the same units as
+// an 8-bit RGB component).  The *coefficients* are Q8.8 (a fraction
+// multiplied by 256) and the *gains* are Q16.16.
+//
+// Forward (RGB -> YUV):
+//
+//   Y8    = (Kr*R + Kg*G + Kb*B) >> 8              // 0..255, unranged
+//   dCb   = (B - Y8) * (1 / (2*(1-Kb))) >> 16      // plain, signed
+//   dCr   = (R - Y8) * (1 / (2*(1-Kr))) >> 16      // plain, signed
+//   Y_out = Y8   * y_gain + y_offset              // into the target range
+//   Cb_out= dCb  * c_gain + 128                   // into the target range
+//
+// The chroma differences are computed against the **unranged** luma and
+// scaled **afterwards**.  Scaling first and differencing after would
+// apply the range gain to the difference, which is wrong for a
+// limited-range output.
+//
+// The inverse (YUV -> RGB) walks the same steps backwards, so a
+// BGRA -> I420 -> BGRA round trip is the identity (to within the
+// rounding of the fixed-point maths).
+
+namespace {
+
+/** The YUV coefficients for a matrix, in Q8.8. */
+struct YuvCoefficients {
+    std::int32_t kr;       ///< red's luma coefficient, Q8.8
+    std::int32_t kg;       ///< green's luma coefficient, Q8.8
+    std::int32_t kb;       ///< blue's luma coefficient, Q8.8
+    std::int32_t cb_gain;  ///< 1 / (2*(1-Kb)), Q16.16
+    std::int32_t cr_gain;  ///< 1 / (2*(1-Kr)), Q16.16
+};
+
+/** The luma / chroma scaling for a range. */
+struct RangeScaling {
+    std::int32_t y_scale;   ///< luma gain, Q16.16
+    std::int32_t y_offset;  ///< luma pedestal (16 for limited, 0 for full)
+    std::int32_t c_scale;   ///< chroma gain, Q16.16
+    std::int32_t c_offset;  ///< chroma pedestal (128 for both ranges)
+};
+
+YuvCoefficients coefficients_for(ColorMatrix m) noexcept {
+    switch (m) {
+        case ColorMatrix::kBT601:
+            // Kr = 0.299, Kb = 0.114, Kg = 0.587  (sums to 256)
+            // 1/(2*(1-Kb)) = 1/1.772  = 0.56433
+            // 1/(2*(1-Kr)) = 1/1.402  = 0.71327
+            return {77, 150, 29, 36979, 46751};
+        case ColorMatrix::kBT2020:
+            // Kr = 0.2627, Kb = 0.0593, Kg = 0.678  (sums to 256)
+            // 1/(2*(1-Kb)) = 1/1.8814 = 0.53156
+            // 1/(2*(1-Kr)) = 1/1.4746 = 0.67812
+            return {67, 174, 15, 34842, 44448};
+        case ColorMatrix::kBT709:
+        default:
+            // Kr = 0.2126, Kb = 0.0722, Kg = 0.7152  (sums to 256)
+            // 1/(2*(1-Kb)) = 1/1.8556 = 0.53890
+            // 1/(2*(1-Kr)) = 1/1.5748 = 0.63501
+            return {54, 184, 18, 35327, 41618};
+    }
+}
+
+RangeScaling scaling_for(ColorRange r) noexcept {
+    switch (r) {
+        case ColorRange::kLimited:
+            // Y: 0..255 -> 16..235, so gain = 219/255 and offset = 16.
+            // C: -128..127 -> -112..112, so gain = 224/255.
+            //
+            // The chroma gain must be *below* 1.  Limited range
+            // compresses the chroma into the studio swing; a gain above
+            // 1 pushes saturated colours past 0/255, where they are
+            // clamped and lose their hue entirely.  (The BT.601
+            // inverse coefficients 1.596027 / 2.017232 require exactly
+            // this 224/255 factor.)
+            return {56284, 16, 57569, 128};
+        case ColorRange::kFull:
+        default:
+            // Full range: identity scaling.
+            return {65536, 0, 65536, 128};
+    }
+}
+
+/** Round a Q16.16 product to an integer, with rounding. */
+inline std::int32_t mul_q16(std::int32_t value, std::int32_t gain) noexcept {
+    return static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(value) * gain + 32768) >> 16);
+}
+
+/** Divide by a Q16.16 gain, with rounding. */
+inline std::int32_t div_q16(std::int32_t value, std::int32_t gain) noexcept {
+    if (gain == 0) return value;
+    return static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(value) * 65536 + gain / 2) / gain);
+}
+
+/** The RGB components of one BGRA source pixel. */
+struct BgraPixel {
+    std::int32_t b;
+    std::int32_t g;
+    std::int32_t r;
+};
+
+inline BgraPixel load_bgra(const std::uint8_t* row, std::uint32_t i) noexcept {
+    return BgraPixel{
+        static_cast<std::int32_t>(row[i * 4 + 0]),
+        static_cast<std::int32_t>(row[i * 4 + 1]),
+        static_cast<std::int32_t>(row[i * 4 + 2]),
+    };
+}
+
+/** The luma and the two chroma offsets of one RGB pixel. */
+struct YuvSample {
+    std::int32_t y;    ///< 0..255, unranged
+    std::int32_t cb;   ///< signed, unranged, in 8-bit units
+    std::int32_t cr;   ///< signed, unranged, in 8-bit units
+};
+
+inline YuvSample rgb_to_yuv(const BgraPixel& px,
+                            const YuvCoefficients& c) noexcept {
+    const std::int32_t y = (c.kr * px.r + c.kg * px.g + c.kb * px.b) >> 8;
+    const std::int32_t cb = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(px.b - y) * c.cb_gain) >> 16);
+    const std::int32_t cr = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(px.r - y) * c.cr_gain) >> 16);
+    return YuvSample{y, cb, cr};
+}
+
+} // namespace
+
+void convert_bgra_to_i420_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* src,
+                          std::int32_t src_stride,
+                          ColorDescription color,
+                          std::uint8_t* y_plane, std::int32_t y_stride,
+                          std::uint8_t* u_plane, std::int32_t u_stride,
+                          std::uint8_t* v_plane, std::int32_t v_stride,
+                          ColorDescription* out_color) noexcept {
+    if (width == 0 || height == 0 || src == nullptr) return;
+    if (y_plane == nullptr || u_plane == nullptr || v_plane == nullptr) return;
+
+    const ColorDescription desc = resolve_color_description(color);
+    const YuvCoefficients c = coefficients_for(desc.matrix);
+    const RangeScaling   s = scaling_for(desc.range);
+
+    const std::uint32_t chroma_w = (width + 1u) / 2u;
+    const std::uint32_t chroma_h = (height + 1u) / 2u;
+
+    for (std::uint32_t cy = 0; cy < chroma_h; ++cy) {
+        const std::uint32_t j0 = cy * 2u;
+        const std::uint32_t j1 = (j0 + 1u < height) ? (j0 + 1u) : j0;
+        const std::uint8_t* const row0 =
+            src + static_cast<std::ptrdiff_t>(j0) * src_stride;
+        const std::uint8_t* const row1 =
+            src + static_cast<std::ptrdiff_t>(j1) * src_stride;
+        std::uint8_t* const y0 =
+            y_plane + static_cast<std::ptrdiff_t>(j0) * y_stride;
+        std::uint8_t* const y1 =
+            y_plane + static_cast<std::ptrdiff_t>(j1) * y_stride;
+
+        for (std::uint32_t cx = 0; cx < chroma_w; ++cx) {
+            const std::uint32_t i0 = cx * 2u;
+            const std::uint32_t i1 = (i0 + 1u < width) ? (i0 + 1u) : i0;
+
+            // Luma is full resolution: one sample per pixel.
+            const YuvSample s00 = rgb_to_yuv(load_bgra(row0, i0), c);
+            y0[i0] = static_cast<std::uint8_t>(
+                std::clamp(mul_q16(s00.y, s.y_scale) + s.y_offset, 0, 255));
+
+            std::int64_t cb_sum = s00.cb;
+            std::int64_t cr_sum = s00.cr;
+            std::int32_t samples = 1;
+
+            if (i1 != i0) {
+                const YuvSample s01 = rgb_to_yuv(load_bgra(row0, i1), c);
+                y0[i1] = static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(s01.y, s.y_scale) + s.y_offset, 0, 255));
+                cb_sum += s01.cb;
+                cr_sum += s01.cr;
+                ++samples;
+            }
+
+            if (j1 != j0) {
+                const YuvSample s10 = rgb_to_yuv(load_bgra(row1, i0), c);
+                y1[i0] = static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(s10.y, s.y_scale) + s.y_offset, 0, 255));
+                cb_sum += s10.cb;
+                cr_sum += s10.cr;
+                ++samples;
+
+                if (i1 != i0) {
+                    const YuvSample s11 = rgb_to_yuv(load_bgra(row1, i1), c);
+                    y1[i1] = static_cast<std::uint8_t>(
+                        std::clamp(mul_q16(s11.y, s.y_scale) + s.y_offset, 0, 255));
+                    cb_sum += s11.cb;
+                    cr_sum += s11.cr;
+                    ++samples;
+                }
+            }
+
+            // Chroma is one sample per 2x2 block: the *average* of the
+            // block's chroma offsets.  Point-sampling (taking only the
+            // top-left pixel of the block) is what a desktop
+            // compositor's own scaler does, but it aliases on anything
+            // with colour detail and it makes the round trip lossy in a
+            // way the caller cannot predict.  Averaging the *unranged*
+            // offsets and scaling afterwards is the same operation the
+            // range scaling does, so the two stay consistent.
+            const std::int32_t cb = static_cast<std::int32_t>(cb_sum / samples);
+            const std::int32_t cr = static_cast<std::int32_t>(cr_sum / samples);
+
+            u_plane[static_cast<std::size_t>(cy) *
+                        static_cast<std::size_t>(u_stride) + cx] =
+                static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(cb, s.c_scale) + s.c_offset, 0, 255));
+            v_plane[static_cast<std::size_t>(cy) *
+                        static_cast<std::size_t>(v_stride) + cx] =
+                static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(cr, s.c_scale) + s.c_offset, 0, 255));
+        }
+    }
+
+    if (out_color != nullptr) *out_color = desc;
+}
+
+void convert_bgra_to_nv12_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* src,
+                          std::int32_t src_stride,
+                          ColorDescription color,
+                          std::uint8_t* y_plane, std::int32_t y_stride,
+                          std::uint8_t* uv_plane, std::int32_t uv_stride,
+                          ColorDescription* out_color) noexcept {
+    if (width == 0 || height == 0 || src == nullptr) return;
+    if (y_plane == nullptr || uv_plane == nullptr) return;
+
+    const ColorDescription desc = resolve_color_description(color);
+    const YuvCoefficients c = coefficients_for(desc.matrix);
+    const RangeScaling   s = scaling_for(desc.range);
+
+    const std::uint32_t chroma_w = (width + 1u) / 2u;
+    const std::uint32_t chroma_h = (height + 1u) / 2u;
+
+    for (std::uint32_t cy = 0; cy < chroma_h; ++cy) {
+        const std::uint32_t j0 = cy * 2u;
+        const std::uint32_t j1 = (j0 + 1u < height) ? (j0 + 1u) : j0;
+        const std::uint8_t* const row0 =
+            src + static_cast<std::ptrdiff_t>(j0) * src_stride;
+        const std::uint8_t* const row1 =
+            src + static_cast<std::ptrdiff_t>(j1) * src_stride;
+        std::uint8_t* const y0 =
+            y_plane + static_cast<std::ptrdiff_t>(j0) * y_stride;
+        std::uint8_t* const y1 =
+            y_plane + static_cast<std::ptrdiff_t>(j1) * y_stride;
+
+        for (std::uint32_t cx = 0; cx < chroma_w; ++cx) {
+            const std::uint32_t i0 = cx * 2u;
+            const std::uint32_t i1 = (i0 + 1u < width) ? (i0 + 1u) : i0;
+
+            const YuvSample s00 = rgb_to_yuv(load_bgra(row0, i0), c);
+            y0[i0] = static_cast<std::uint8_t>(
+                std::clamp(mul_q16(s00.y, s.y_scale) + s.y_offset, 0, 255));
+
+            std::int64_t cb_sum = s00.cb;
+            std::int64_t cr_sum = s00.cr;
+            std::int32_t samples = 1;
+
+            if (i1 != i0) {
+                const YuvSample s01 = rgb_to_yuv(load_bgra(row0, i1), c);
+                y0[i1] = static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(s01.y, s.y_scale) + s.y_offset, 0, 255));
+                cb_sum += s01.cb;
+                cr_sum += s01.cr;
+                ++samples;
+            }
+
+            if (j1 != j0) {
+                const YuvSample s10 = rgb_to_yuv(load_bgra(row1, i0), c);
+                y1[i0] = static_cast<std::uint8_t>(
+                    std::clamp(mul_q16(s10.y, s.y_scale) + s.y_offset, 0, 255));
+                cb_sum += s10.cb;
+                cr_sum += s10.cr;
+                ++samples;
+
+                if (i1 != i0) {
+                    const YuvSample s11 = rgb_to_yuv(load_bgra(row1, i1), c);
+                    y1[i1] = static_cast<std::uint8_t>(
+                        std::clamp(mul_q16(s11.y, s.y_scale) + s.y_offset, 0, 255));
+                    cb_sum += s11.cb;
+                    cr_sum += s11.cr;
+                    ++samples;
+                }
+            }
+
+            // Averaged 2x2 chroma — see convert_bgra_to_i420_color.
+            const std::int32_t cb = static_cast<std::int32_t>(cb_sum / samples);
+            const std::int32_t cr = static_cast<std::int32_t>(cr_sum / samples);
+
+            const std::size_t idx =
+                static_cast<std::size_t>(cy) * static_cast<std::size_t>(uv_stride)
+                + static_cast<std::size_t>(cx) * 2u;
+            uv_plane[idx + 0] = static_cast<std::uint8_t>(
+                std::clamp(mul_q16(cb, s.c_scale) + s.c_offset, 0, 255));
+            uv_plane[idx + 1] = static_cast<std::uint8_t>(
+                std::clamp(mul_q16(cr, s.c_scale) + s.c_offset, 0, 255));
+        }
+    }
+
+    if (out_color != nullptr) *out_color = desc;
+}
+
+void convert_i420_to_bgra_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* y_plane, std::int32_t y_stride,
+                          const std::uint8_t* u_plane, std::int32_t u_stride,
+                          const std::uint8_t* v_plane, std::int32_t v_stride,
+                          ColorDescription color,
+                          std::uint8_t* bgra_out,
+                          std::int32_t bgra_stride) noexcept {
+    if (width == 0 || height == 0) return;
+    if (y_plane == nullptr || u_plane == nullptr || v_plane == nullptr) return;
+    if (bgra_out == nullptr) return;
+
+    const ColorDescription desc = resolve_color_description(color);
+    const YuvCoefficients c = coefficients_for(desc.matrix);
+    const RangeScaling   s = scaling_for(desc.range);
+
+    // Back to RGB:
+    //   R = Y + 2*(1-Kr)*Cr
+    //   B = Y + 2*(1-Kb)*Cb
+    //   G = Y - (2*Kr*(1-Kr)/Kg)*Cr - (2*Kb*(1-Kb)/Kg)*Cb
+    // The gains are Q8.8.
+    const std::int32_t kr8 = c.kr;
+    const std::int32_t kb8 = c.kb;
+    const std::int32_t kg8 = c.kg;
+    const std::int32_t r_gain = 512 - 2 * kr8;                 // 2*(1-Kr), Q8.8
+    const std::int32_t b_gain = 512 - 2 * kb8;                 // 2*(1-Kb), Q8.8
+    // G = Y - [2*Kr*(1-Kr)/Kg]*Cr - [2*Kb*(1-Kb)/Kg]*Cb
+    //
+    // The coefficient is 2*Kr*(1-Kr)/Kg.  With Kr = kr8/256 and
+    // (1-Kr) = r_gain/512, that expands to
+    //
+    //   2*Kr*(1-Kr)/Kg = kr8 * r_gain / kg8      (Q8.8)
+    //
+    // — note the *single* factor of 2.  Folding `r_gain` (which
+    // already carries a 2) into a second explicit 2 doubles the green
+    // correction and turns every saturated colour into a hue shift.
+    const std::int32_t g_r_gain = (kr8 * r_gain) / kg8;    // Q8.8
+    const std::int32_t g_b_gain = (kb8 * b_gain) / kg8;    // Q8.8
+
+    for (std::uint32_t j = 0; j < height; ++j) {
+        const std::uint8_t* y_row =
+            y_plane + static_cast<std::ptrdiff_t>(j) * y_stride;
+        const std::uint8_t* u_row =
+            u_plane + static_cast<std::ptrdiff_t>(j / 2u) * u_stride;
+        const std::uint8_t* v_row =
+            v_plane + static_cast<std::ptrdiff_t>(j / 2u) * v_stride;
+        std::uint8_t* dst =
+            bgra_out + static_cast<std::ptrdiff_t>(j) * bgra_stride;
+
+        for (std::uint32_t i = 0; i < width; ++i) {
+            // Undo the range scaling: recover the unranged luma and the
+            // signed, unranged chroma offsets.
+            const std::int32_t y = div_q16(
+                static_cast<std::int32_t>(y_row[i]) - s.y_offset, s.y_scale);
+            const std::int32_t cb = div_q16(
+                static_cast<std::int32_t>(u_row[i / 2u]) - s.c_offset,
+                s.c_scale);
+            const std::int32_t cr = div_q16(
+                static_cast<std::int32_t>(v_row[i / 2u]) - s.c_offset,
+                s.c_scale);
+
+            const std::int32_t r = y + ((r_gain * cr) >> 8);
+            const std::int32_t b = y + ((b_gain * cb) >> 8);
+            const std::int32_t g = y - ((g_r_gain * cr) >> 8)
+                                     - ((g_b_gain * cb) >> 8);
+
+            dst[i * 4 + 0] = static_cast<std::uint8_t>(std::clamp(b, 0, 255));  // B
+            dst[i * 4 + 1] = static_cast<std::uint8_t>(std::clamp(g, 0, 255));  // G
+            dst[i * 4 + 2] = static_cast<std::uint8_t>(std::clamp(r, 0, 255));  // R
+            dst[i * 4 + 3] = 0xFF;                                              // A
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test pattern
 // ---------------------------------------------------------------------------
 

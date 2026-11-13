@@ -21,7 +21,10 @@ if(NOT GTEST_FOUND)
     endif()
 endif()
 
-add_executable(test_video_frame test_video_frame.cpp)
+add_executable(test_video_frame
+    test_video_frame.cpp
+    test_video_frame_color.cpp
+    )
 
 set_target_properties(test_video_frame PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)

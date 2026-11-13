@@ -96,9 +96,18 @@ constexpr std::uint32_t kHeight = 240;
  *
  *  A ramp rather than a flat colour: see the file header.  The ends
  *  avoid 0 and 255 so that a limited-range interpretation of the input
- *  cannot clamp the ends of the ramp away. */
-constexpr float kRampLow  = 32.0f;
-constexpr float kRampHigh = 224.0f;
+ *  cannot clamp the ends of the ramp away.
+ *
+ *  The attribute is needed because both ends of the ramp are used only
+ *  by the Windows-only branches of the tests below: on a host without
+ *  D3D11 the test bodies take their `GTEST_SKIP()` path and the
+ *  constants are never read, which Clang's -Wunused-const-variable
+ *  rejects under -Werror.
+ *
+ *  (Unlike a *data member*, a namespace-scope variable is exactly what
+ *  `[[maybe_unused]]` is for, and both GCC and Clang honour it here.) */
+[[maybe_unused]] constexpr float kRampLow  = 32.0f;
+[[maybe_unused]] constexpr float kRampHigh = 224.0f;
 
 #if defined(_WIN32)
 

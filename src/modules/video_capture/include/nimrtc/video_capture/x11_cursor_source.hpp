@@ -120,9 +120,15 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    /** The captured screen's origin in the root window. */
-    std::int32_t origin_x_ = 0;
-    std::int32_t origin_y_ = 0;
+    /** The captured screen's origin in the root window.
+     *
+     *  Only the *X11* implementation of `set_screen_origin()` writes it,
+     *  so on a build without X11 (macOS, Windows) the field is never
+     *  read.  Clang's -Wunused-private-field rejects that with
+     *  -Werror on, so the field says so explicitly.
+     */
+    [[maybe_unused]] std::int32_t origin_x_ = 0;
+    [[maybe_unused]] std::int32_t origin_y_ = 0;
 };
 
 /**

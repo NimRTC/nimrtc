@@ -121,15 +121,26 @@ private:
 
     std::mutex mutex_;
 
+    // The three fields below are touched only by the *Windows*
+    // implementation of `query()` / `set_display_origin()`.  On a
+    // non-Windows build the class exists (so a host can refer to it
+    // portably) but never reads them — and Clang's
+    // -Wunused-private-field rejects a private field that no
+    // translation unit of the build reads, with -Werror on.  The
+    // attribute says "this field is unused *on this configuration*",
+    // which is exactly what is true.
+    //
+    // (The X11 source has the same shape and the same fix.)
+
     /** The cursor handle the cached bitmap came from (nullptr: none). */
-    void* cached_cursor_ = nullptr;
+    [[maybe_unused]] void* cached_cursor_ = nullptr;
 
     /** The cached bitmap. */
     Bitmap cached_{};
 
     /** The captured display's origin in the virtual desktop. */
-    std::int32_t origin_x_ = 0;
-    std::int32_t origin_y_ = 0;
+    [[maybe_unused]] std::int32_t origin_x_ = 0;
+    [[maybe_unused]] std::int32_t origin_y_ = 0;
 };
 
 /**

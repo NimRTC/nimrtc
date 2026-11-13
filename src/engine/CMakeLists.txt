@@ -43,6 +43,13 @@ add_library(nimrtc_engine STATIC
     # public header stays free of concrete module includes —
     # Layout Invariant 4).
     src/engine_rtcp_xr.cpp
+    # v1.3 (remote-desktop plan A10): the capture → engine pump.  The
+    # engine pops frames from the capture device's bounded queue and
+    # drives them through the encoder ON THE TICK THREAD, so a capture
+    # plug-in plus an encoder produce an outbound RTP stream without the
+    # host ever calling send_video().  RD-6: no new thread — the
+    # capture device owns its own, the engine only polls it.
+    src/engine_video_pump.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)

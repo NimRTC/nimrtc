@@ -16,7 +16,7 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 394 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
 > | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 024 / 025 / 026 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
@@ -873,7 +873,7 @@ TURN-over-TCP 端口按 TCP 探测、relay 端口区间按 UDP 探测。这样�
 
 #### 4.3 执行结果（2026-11-13）
 
-**结果：`engine_impl.hpp` 从 1076 行降到 393 行 —— 达标（目标 < 400）。**
+**结果：`engine_impl.hpp` 从 1076 行降到 394 行 —— 达标（目标 < 400）。**
 
 拆分方式与计划草案不同，说明如下。
 
@@ -897,9 +897,9 @@ TURN-over-TCP 端口按 TCP 探测、relay 端口区间按 UDP 探测。这样�
 可以独立评审、风险可控。所以本次只做了"把头的三类内容分开"这一半，
 留给后续 PR 逐个搬行为。
 
-**验证**：全量 `ctest` **1434 / 1434 通过**（0 失败），构建零 error 零 warning。
+**验证**：全量 `ctest` **1454 / 1454 通过**（0 失败），构建零 error 零 warning。
 
-**遗留**：`src/engine/src/engine_impl.hpp` 仍是 393 行 —— 达标了，但
+**遗留**：`src/engine/src/engine_impl.hpp` 仍是 394 行 —— 达标了，但
 `Impl` 本身仍持有"跨功能"的散装成员（RTCP 计数器、pacing demand 列表、
 SR 状态等）。真正把这些成员也归位，需要先有上面那几个行为协作者。
 
@@ -1139,9 +1139,13 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿 —— ✅ **1453 / 1453**（Windows MSVC Release，2026-11-13 复验；
-  §4.5.1 落地后的数字是 1436 / 1436，本轮因 ADR-023 的契约测试新增而增长）
-- `engine_impl.hpp` 行数 < 400 —— ✅ **393**
+- `ctest` 全绿 —— ✅ **1454 / 1454**（Windows MSVC Release，2026-11-13 复验；
+  §4.5.1 落地后的数字是 1436 / 1436，其后因 ADR-023 的契约测试与 ADR-025 /
+  ADR-026 两个守卫的 self-test 而增长）
+- `engine_impl.hpp` 行数 < 400 —— ✅ **394**
+  （ADR-025 的 layering guard 落地时把一条 11 行的说明注释加进了这个头，
+  把它推到 401 行；那条注释的完整理由本来就记在
+  `tools/check_engine_layering.py` 里，于是把它压缩成一行指向 —— 回到 394。）
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
 - `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅

@@ -258,6 +258,37 @@ struct VideoState {
     //
     // Zero means "no packet sent yet".
     std::int64_t video_last_send_unix_us = 0;
+
+    // ---- The capture → engine pump (remote-desktop plan A10) -------------
+    //
+    // The pump pops frames from the capture device's bounded queue and
+    // drives them through the encoder **on the tick thread**.  The
+    // counters below make the pump observable: a host that expects an
+    // automatic stream sees `video_capture_pumped_frames` move; a
+    // session where the pump never runs sees it stuck at zero, which
+    // is the difference between "the device produced nothing" and
+    // "the pump is not wired".
+
+    /** Frames the pump took from the capture device and pushed onto the
+     *  wire. */
+    std::uint64_t video_capture_pumped_frames = 0;
+
+    /** Frames the pump took but could not encode (or could not push). */
+    std::uint64_t video_capture_pump_errors = 0;
+
+    /** Metadata-only frames the pump skipped (no pixels to encode). */
+    std::uint64_t video_capture_pumped_metadata = 0;
+
+    /** True once the pump has established its media-clock origin. */
+    bool capture_rtp_base_valid = false;
+
+    /** The capture timestamp (microseconds) the media clock's origin is
+     *  anchored at. */
+    std::int64_t capture_rtp_base_us = 0;
+
+    /** The RTP timestamp (90 kHz) the media clock's origin is anchored
+     *  at. */
+    std::uint32_t capture_rtp_base_ts = 0;
 };
 
 }  // namespace nimrtc::engine::detail

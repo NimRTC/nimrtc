@@ -17,6 +17,58 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Windows rendering and engine pump (v1.3, remote-desktop plan
+  WP-C / A10 / A11 / E2 / E8 / B10 / B15).**  The capture → encode →
+  present loop could not be closed on Windows: there was no native
+  renderer, the engine never drove the capture device on its own, and
+  the codec's identity and latency were invisible from the outside.
+  - **A D3D11 / DXGI swap-chain renderer** (`video_sink/d3d11_renderer.hpp`):
+    `Present(0)` plus a **presentation clock** — the presenter waits
+    for its deadline (`condition_variable::wait_until`), so it never
+    busy-waits and never blocks the tick thread.  Back-pressure is
+    **latest-wins** through a single-slot mailbox: a render that
+    arrives while the previous one is still pending *replaces* it
+    rather than queueing, and the replacement is counted in
+    `VideoSinkStats::frames_dropped_present`.  The presenter also runs
+    **offscreen** (no native window) so its pacing and drop accounting
+    are testable without a display.
+  - **The engine's internal capture pump** (plan A10).  `tick()` pops
+    one frame from the capture device's bounded queue and drives it
+    through the very same encode → packetize → enqueue path
+    `send_video()` uses, so a capture plug-in plus an encoder produce
+    an outbound RTP stream **without the host ever calling
+    `send_video()`**.  `send_video()` stays exactly as it was — the
+    pump is an *additional* source, not a replacement, and
+    `EngineConfig::video_capture_pump = false` turns it off.
+    RD-6 is preserved: the capture *device* owns its own thread and
+    fills its queue; the engine only ever touches the codec from
+    `tick()`.  `tests/test_engine_capture_pump.cpp` asserts this by
+    recording the thread id at `encode()` time and comparing it with
+    the id of the thread that called `tick()`.
+  - **The NVENC zero-copy encode path** takes a D3D11 surface: the
+    texture is registered with the driver
+    (`NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX`) and mapped as an encoder
+    input, so `bytes_copied` stays at **zero** on the hardware route.
+    A surface the driver cannot take (a BGRA texture, for instance —
+    the driver accepts NV12 for a registered DirectX input) is
+    *refused* rather than silently copied, and the engine falls back
+    to the CPU staging path.
+  - **The telemetry is now in the engine's stats snapshot.**  The
+    capture counters (`frames_captured`, `frames_dropped`,
+    `frames_zero_copy` vs `frames_cpu_staged`, `bytes_copied`), the
+    pump's own counters, the codec's identity and timing
+    (`backend_id`, hardware-accelerated or not, zero-copy vs staged,
+    keyframes, mean and max encode latency) and the sink's counters
+    (`frames_presented`, `frames_dropped_present`, `present_fps`) all
+    appear in `NimRTCEngine::Stats`.
+  - `video_frame::convert_bgra_to_i420()` bridges the packed BGRA a
+    desktop compositor produces to the planar I420 every encoder
+    wants, on the CPU path.
+  - The public-header baseline in `test_api_classification.cpp` moves
+    **140 → 141** in the same commit that adds
+    `video_sink/d3d11_renderer.hpp` (and, in the companion capture
+    commit, `video_capture/windows_capture.hpp`).
+
 - **The GPU delivery path for decoded video, and the frozen capture
   semantics (v1.3, remote-desktop plan WP-A / A1 / E1).**  The video
   plane had a CPU-only receive side: a decoded frame always reached the
@@ -985,7 +1037,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`engine_impl.hpp` is no longer a 1000-line god header (v1.2.0,
   architecture remediation plan §4.3 / D1).**
-  The header fell from **1076 lines to 393** — the plan's target was
+  The header fell from **1076 lines to 394** — the plan's target was
   under 400.  What is left in it is the engine's *own* composition: the
   SDP parser / munger, the DTLS handle, the SRTP context, the transport
   session, and the handful of counters that do not belong to any one
@@ -1013,7 +1065,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   separately reviewable.
 
   Verified with a full build (zero errors, zero warnings) and the whole
-  `ctest` suite: **1434 / 1434 passing**.
+  `ctest` suite: **1454 / 1454 passing**.
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,

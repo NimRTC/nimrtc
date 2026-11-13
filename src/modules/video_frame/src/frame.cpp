@@ -471,6 +471,78 @@ void convert_i420_to_nv12(std::uint32_t width,
 }
 
 // ---------------------------------------------------------------------------
+// BGRA → I420 (remote-desktop plan A10 — the capture → encode CPU path)
+// ---------------------------------------------------------------------------
+
+void convert_bgra_to_i420(std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* bgra_in, std::int32_t bgra_stride,
+                          std::uint8_t* y_out, std::int32_t y_out_stride,
+                          std::uint8_t* u_out, std::int32_t u_out_stride,
+                          std::uint8_t* v_out, std::int32_t v_out_stride) noexcept {
+    if (!bgra_in || !y_out || !u_out || !v_out) return;
+    if (width == 0 || height == 0) return;
+
+    // The BT.601 limited-range coefficients, scaled by 256 so the
+    // transform is integer-only (no floating point on the hot path).
+    //
+    //   Y = (  66 R + 129 G +  25 B + 128) >> 8 + 16
+    //   U = (- 38 R -  74 G + 112 B + 128) >> 8 + 128
+    //   V = ( 112 R -  94 G -  18 B + 128) >> 8 + 128
+    //
+    // The `+ 128` before the shift is the rounding term (it approximates
+    // "add half an LSB"), so the result is the nearest integer rather
+    // than a truncation.
+    const std::uint32_t half_w = (width + 1u) / 2u;
+    const std::uint32_t half_h = (height + 1u) / 2u;
+
+    for (std::uint32_t row = 0; row < height; ++row) {
+        const std::uint8_t* src_row =
+            bgra_in + static_cast<std::ptrdiff_t>(row) * bgra_stride;
+        std::uint8_t* dst_y =
+            y_out + static_cast<std::ptrdiff_t>(row) * y_out_stride;
+
+        for (std::uint32_t col = 0; col < width; ++col) {
+            // BGRA order: B, G, R, A.
+            const std::int32_t b = src_row[col * 4u + 0u];
+            const std::int32_t g = src_row[col * 4u + 1u];
+            const std::int32_t r = src_row[col * 4u + 2u];
+
+            const std::int32_t y =
+                ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            dst_y[col] = static_cast<std::uint8_t>(
+                y < 0 ? 0 : (y > 255 ? 255 : y));
+        }
+    }
+
+    // The chroma is subsampled by point sampling: the U and V of a 2×2
+    // block come from its top-left pixel.  The chroma plane has half the
+    // width and half the height of the luma plane, so the source
+    // coordinates are doubled.
+    for (std::uint32_t row = 0; row < half_h; ++row) {
+        const std::uint32_t src_row = row * 2u;
+        if (src_row >= height) break;
+        const std::uint8_t* src =
+            bgra_in + static_cast<std::ptrdiff_t>(src_row) * bgra_stride;
+        std::uint8_t* dst_u = u_out + static_cast<std::ptrdiff_t>(row) * u_out_stride;
+        std::uint8_t* dst_v = v_out + static_cast<std::ptrdiff_t>(row) * v_out_stride;
+
+        for (std::uint32_t col = 0; col < half_w; ++col) {
+            const std::uint32_t src_col = col * 2u;
+            if (src_col >= width) break;
+            const std::int32_t b = src[src_col * 4u + 0u];
+            const std::int32_t g = src[src_col * 4u + 1u];
+            const std::int32_t r = src[src_col * 4u + 2u];
+
+            const std::int32_t u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+            const std::int32_t v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+            dst_u[col] = static_cast<std::uint8_t>(u < 0 ? 0 : (u > 255 ? 255 : u));
+            dst_v[col] = static_cast<std::uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test pattern
 // ---------------------------------------------------------------------------
 

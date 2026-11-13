@@ -97,15 +97,22 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
     if (!frame.plane_y) return nullptr;
 
     // Only I420-family sources can be staged without a colour-space
-    // conversion.  Packed formats (BGRA / RGBA) would need a YUV matrix
-    // the engine does not own — the caller must convert first.
+    // conversion.  Packed BGRA needs one, and the engine owns it now:
+    // `video_frame::convert_bgra_to_i420()` is the shared BT.601
+    // transform every desktop-capture path needs (the synthetic capture
+    // device produces BGRA, and so do the Windows / macOS compositors).
+    //
+    // RGBA is *not* accepted: it is a different byte order, and the
+    // shared transform reads BGR.  A source that has RGBA must convert
+    // it itself rather than have the engine guess.
     const bool source_is_nv12 = frame.format == plugins::VideoPixelFormat::kNV12;
+    const bool source_is_bgra = frame.format == plugins::VideoPixelFormat::kBGRA;
     const bool source_is_planar_420 =
         frame.format == plugins::VideoPixelFormat::kI420
      || frame.format == plugins::VideoPixelFormat::kYV12
      || source_is_nv12
      || frame.format == plugins::VideoPixelFormat::kUnknown;
-    if (!source_is_planar_420) return nullptr;
+    if (!source_is_planar_420 && !source_is_bgra) return nullptr;
 
     // The target must be a planar 4:2:0 layout — that is what every
     // hardware encoder consumes today.
@@ -136,6 +143,25 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
     const std::int32_t src_stride_c = frame.stride_u > 0
         ? frame.stride_u
         : static_cast<std::int32_t>(source_is_nv12 ? frame.width : half_w);
+
+    if (source_is_bgra) {
+        // Packed BGRA source (the desktop-compositor format).  One
+        // BT.601 conversion into the staged I420 planes — no
+        // intermediate copy, no second colour-space pass.
+        //
+        // The source stride defaults to the tight packing (4 bytes per
+        // pixel), which is what every compositor hands over.
+        const std::int32_t bgra_stride = frame.stride_y > 0
+            ? frame.stride_y
+            : static_cast<std::int32_t>(frame.width * 4u);
+        video_frame::convert_bgra_to_i420(
+            frame.width, frame.height,
+            frame.plane_y, bgra_stride,
+            staged->plane(0), layout.strides[0],
+            staged->plane(1), layout.strides[1],
+            staged->plane(2), layout.strides[2]);
+        return staged;
+    }
 
     if (source_is_nv12) {
         // NV12 source: one interleaved UV plane.  De-interleave it into the
@@ -1651,6 +1677,14 @@ plugins::Status NimRTCEngine::send_video(
     const plugins::VideoSourceFrame& frame) noexcept {
     if (!is_open()) return plugins::kErrNotReady;
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+    return encode_and_send_video_frame(frame);
+}
+
+
+plugins::Status NimRTCEngine::encode_and_send_video_frame(
+    const plugins::VideoSourceFrame& frame) noexcept {
+    if (!is_open()) return plugins::kErrNotReady;
+    if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
 
     // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
     //
@@ -1719,7 +1753,7 @@ plugins::Status NimRTCEngine::send_video(
             // nothing to stage and the frame is simply lost.
             ++impl_->video_state.video_zero_copy_fallbacks;
             core::log::Logger::instance().warn(
-                "send_video: the zero-copy encode failed — falling back "
+                "engine: the zero-copy encode failed — falling back "
                 "to the CPU staging path");
         }
     } else if (zero_copy_requested && frame_has_gpu && !zero_copy_capable) {
@@ -1741,7 +1775,7 @@ plugins::Status NimRTCEngine::send_video(
             // the codec decide — a hardware codec will report the failure
             // through its own error path.
             core::log::Logger::instance().warn(
-                "send_video: the source frame could not be staged into a "
+                "engine: the source frame could not be staged into a "
                 "codec-facing pixel buffer (the encoder receives no pixels)");
         }
 
@@ -2414,6 +2448,73 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         static_cast<std::uint32_t>(audio_bitrate_current_bps_ > 0
                                        ? audio_bitrate_current_bps_
                                        : 0);
+
+    // ---- Capture statistics (remote-desktop plan A11) --------------------
+    //
+    // The capture device's own counters, reported verbatim.  The device
+    // is the only party that knows how many frames it produced and how
+    // many its bounded queue had to drop, so the engine does not
+    // re-derive them — it asks.
+    if (video_capture_) {
+        const plugins::CaptureStats cs = video_capture_->stats();
+        out.video_capture_frames_captured  = cs.frames_captured;
+        out.video_capture_frames_dropped   = cs.frames_dropped;
+        out.video_capture_device_errors    = cs.device_errors;
+        out.video_capture_device_restarts  = cs.device_restarts;
+        out.video_capture_format_changes   = cs.format_changes;
+        out.video_capture_bytes_copied     = cs.bytes_copied;
+        out.video_capture_frames_zero_copy = cs.frames_zero_copy;
+        out.video_capture_frames_cpu_staged = cs.frames_cpu_staged;
+    }
+
+    // ---- The capture → engine pump (remote-desktop plan A10) ------------
+    out.video_capture_pumped_frames   = impl_->video_state.video_capture_pumped_frames;
+    out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
+    out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
+
+    // ---- Codec telemetry (remote-desktop plan B15) ------------------------
+    //
+    // The codec knows which backend it is, whether that backend is
+    // hardware, and how long its encodes take.  The engine reports the
+    // answers rather than guessing them from the plugin id.
+    if (video_codec_) {
+        out.video_codec_backend = std::string{video_codec_->backend_id()};
+        out.video_codec_hardware_accelerated = video_codec_->is_hardware_accelerated();
+
+        const plugins::VideoCodecStats cs = video_codec_->stats();
+        out.video_codec_frames_zero_copy = cs.frames_encoded_zero_copy;
+        out.video_codec_frames_staged   = cs.frames_encoded_staged;
+        out.video_codec_keyframes       = cs.keyframes_encoded;
+        out.video_codec_bytes_copied    = cs.bytes_copied;
+        out.video_codec_encode_latency_max_us = cs.encode_latency_us_max;
+        if (cs.frames_encoded > 0 && cs.encode_latency_us_total > 0) {
+            out.video_codec_encode_latency_avg_us =
+                cs.encode_latency_us_total / cs.frames_encoded;
+        }
+    }
+
+    // ---- Sink statistics (remote-desktop plan A11 / E8) ------------------
+    //
+    // The sink's counters are the renderer's own: how many frames it
+    // drew, how many it had to drop under back-pressure, and the rate
+    // the presentation clock actually achieved.
+    if (video_sink_) {
+        const plugins::VideoSinkStats ss = video_sink_->stats();
+        out.video_sink_frames_rendered        = ss.frames_rendered;
+        out.video_sink_frames_dropped         = ss.frames_dropped;
+        out.video_sink_frames_dropped_present = ss.frames_dropped_present;
+        out.video_sink_frames_presented        = ss.frames_presented;
+        out.video_sink_render_errors          = ss.render_errors;
+        out.video_sink_present_fps             = ss.present_fps;
+    }
+
+    // The outbound video bitrate: the encoded bytes over the last
+    // second, as measured by the video-quality sink's bitrate window.
+    if (impl_->video_state.video_stats.active()) {
+        out.video_tx_bitrate_bps =
+            impl_->video_state.video_stats.snapshot_tx().current_bitrate_bps;
+    }
+
     return out;
 }
 

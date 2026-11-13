@@ -156,6 +156,26 @@ struct NIMRTC_API_STABLE VideoCodecStats {
     std::uint64_t decode_errors = 0;
     /** Total frames skipped by the encoder (e.g. rate-limiting). */
     std::uint64_t frames_skipped = 0;
+    /** Frames encoded through the GPU zero-copy path (no CPU staging).
+     *
+     *  The counterpart of the engine's own `video_zero_copy_frames`
+     *  counter: this one is the codec's own statement that it consumed
+     *  a native handle (remote-desktop plan B15). */
+    std::uint64_t frames_encoded_zero_copy = 0;
+    /** Frames encoded through the CPU staging path. */
+    std::uint64_t frames_encoded_staged = 0;
+    /** Keyframes produced (IDR frames). */
+    std::uint64_t keyframes_encoded = 0;
+    /** Bytes copied CPU↔GPU inside the codec (0 on a pure hardware path). */
+    std::uint64_t bytes_copied = 0;
+    /** The sum of the per-frame encode durations, in microseconds.
+     *
+     *  The engine divides it by `frames_encoded` to get the mean encode
+     *  latency; the codec owns the measurement because only it knows
+     *  where the encode actually starts and ends. */
+    std::uint64_t encode_latency_us_total = 0;
+    /** The largest single encode duration seen, in microseconds. */
+    std::uint64_t encode_latency_us_max = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -319,6 +339,30 @@ public:
 
     /** RTP payload type this codec emits. */
     virtual std::uint8_t payload_type() const noexcept = 0;
+
+    // ---- Codec telemetry (remote-desktop plan B15) ------------------------
+    //
+    // The engine reports the codec's identity in its stats snapshot: which
+    // backend was selected, whether it runs on the CPU or on the GPU, and
+    // whether the frames actually took the zero-copy path.  The codec is
+    // the only party that knows the answer, so the engine asks.
+
+    /** The identifier of the backend this codec runs on.
+     *
+     *  A short, stable string: "openh264", "nvenc", "dav1d",
+     *  "stub_h264", ...  The engine reports it verbatim in
+     *  `Stats::video_codec_backend`, so a host can tell which encoder
+     *  produced the bitstream it is receiving.
+     *
+     *  Default = "unknown": a codec that does not name its backend. */
+    virtual std::string_view backend_id() const noexcept { return "unknown"; }
+
+    /** True iff this codec runs on a hardware accelerator.
+     *
+     *  Default = false (software).  A hardware codec overrides this to
+     *  true — *when it is actually open*, because a hardware backend
+     *  that failed to initialise falls back to software. */
+    virtual bool is_hardware_accelerated() const noexcept { return false; }
 };
 
 // ---------------------------------------------------------------------------

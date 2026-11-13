@@ -5,6 +5,7 @@
  * @note P1 (R2-Batch2).
  */
 
+#include <nimrtc/video_sink/d3d11_renderer.hpp>
 #include <nimrtc/video_sink/video_sink.hpp>
 
 #include <cassert>
@@ -237,10 +238,17 @@ void do_register_default_plugins() noexcept {
         Registrar() {
             static HeadlessPluginFactory s_headless{};
             static PinnedPluginFactory   s_pinned{};
+            // Remote-desktop plan E2: the Windows D3D11 / DXGI
+            // swap-chain renderer.  The factory exists on every platform
+            // (so a configuration that names "d3d11" resolves), but on a
+            // non-Windows build `open()` reports `kErrUnsupported`.
+            static D3D11RendererFactory   s_d3d11{};
             nimrtc::core::PluginRegistry::instance().register_video_sink(
                 s_headless.id(), &s_headless);
             nimrtc::core::PluginRegistry::instance().register_video_sink(
                 s_pinned.id(), &s_pinned);
+            nimrtc::core::PluginRegistry::instance().register_video_sink(
+                s_d3d11.id(), &s_d3d11);
         }
     } s_registrar;
     (void)s_registrar;

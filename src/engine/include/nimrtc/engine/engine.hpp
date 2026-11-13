@@ -380,6 +380,30 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  `plugins::CaptureConfig` and `plugins::CaptureCapabilities`. */
     plugins::CaptureConfig video_capture_config;
 
+    /** Drive the encoder from the capture device automatically
+     *  (remote-desktop plan A10 — the engine's internal pump).
+     *
+     *  When true (the default) *and* a capture device was resolved, the
+     *  engine pops frames from the device's bounded queue **on the tick
+     *  thread** and feeds them to the video encoder.  The host then
+     *  never has to call `send_video()` for the capture device's frames:
+     *  a capture plug-in plus an encoder produce an outbound RTP stream
+     *  on their own.
+     *
+     *  The pump keeps the engine's single-threaded-orchestrator contract
+     *  (RD-6): the capture *device* owns its own thread and fills the
+     *  queue; the *engine* only ever touches the codec from `tick()`.
+     *  That is why the codec is never called from a capture callback.
+     *
+     *  Set it to false to keep the explicit manual path: the host pulls
+     *  the frames itself (through `video_capture()`) and pushes them
+     *  through `send_video()`.  `send_video()` stays available either
+     *  way — the pump is an *additional* source, not a replacement.
+     *
+     *  The flag only matters when `video_capture_name` is non-empty:
+     *  with no capture device there is nothing to pump. */
+    bool video_capture_pump = true;
+
     /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
     std::string video_sink_name   = "headless";
 
@@ -2355,6 +2379,74 @@ public:
         // extended reports and a counter stuck at zero means the routing
         // is not wired.
         std::uint64_t xr_report_blocks      = 0;  // XR blocks routed to the consumer
+
+        // ---- Capture statistics (remote-desktop plan A11) ----------------
+        //
+        // The capture device's own counters, surfaced verbatim.  They
+        // answer "what did the device do": how many frames it produced,
+        // how many its bounded queue had to drop, how many of them
+        // reached the encoder as a native GPU surface (and therefore
+        // never crossed the PCI bus into host memory).
+        //
+        // `video_capture_bytes_copied` is the one a host reads first: on a
+        // working hardware path it stays at zero.
+        std::uint64_t video_capture_frames_captured = 0;
+        std::uint64_t video_capture_frames_dropped  = 0;
+        std::uint64_t video_capture_device_errors   = 0;
+        std::uint64_t video_capture_device_restarts = 0;
+        std::uint64_t video_capture_format_changes  = 0;
+        std::uint64_t video_capture_bytes_copied    = 0;
+        std::uint64_t video_capture_frames_zero_copy = 0;
+        std::uint64_t video_capture_frames_cpu_staged = 0;
+
+        // ---- The capture → engine pump (remote-desktop plan A10) --------
+        //
+        // The pump's own counters.  `video_capture_pumped_frames` moving
+        // is the proof that the automatic path works: a capture plug-in
+        // plus an encoder produce an outbound RTP stream with no
+        // `send_video()` call from the host.
+        std::uint64_t video_capture_pumped_frames   = 0;
+        std::uint64_t video_capture_pump_errors     = 0;
+        std::uint64_t video_capture_pumped_metadata = 0;
+
+        // ---- Codec telemetry (remote-desktop plan B15) ------------------
+        //
+        // The codec is the only party that knows which backend it runs
+        // on, whether that backend is a hardware accelerator, and how
+        // long the encodes take.  The engine reports those answers
+        // verbatim rather than re-deriving them.
+        /** The codec backend's id ("nvenc", "openh264", "stub_h264", ...).
+         *  "unknown" when the codec does not name its backend. */
+        std::string video_codec_backend = "unknown";
+        /** True iff the codec runs on a hardware accelerator. */
+        bool        video_codec_hardware_accelerated = false;
+        /** Frames the codec encoded through the GPU zero-copy path. */
+        std::uint64_t video_codec_frames_zero_copy = 0;
+        /** Frames the codec encoded through the CPU staging path. */
+        std::uint64_t video_codec_frames_staged = 0;
+        /** Keyframes (IDR) the codec produced. */
+        std::uint64_t video_codec_keyframes = 0;
+        /** Bytes the codec copied CPU↔GPU (0 on a pure hardware path). */
+        std::uint64_t video_codec_bytes_copied = 0;
+        /** The mean encode latency, in microseconds. */
+        std::uint64_t video_codec_encode_latency_avg_us = 0;
+        /** The largest single encode duration, in microseconds. */
+        std::uint64_t video_codec_encode_latency_max_us = 0;
+        /** The current outbound video bitrate, in bits per second.
+         *  Derived from the encoded byte count over the last second. */
+        std::uint32_t video_tx_bitrate_bps = 0;
+
+        // ---- Sink statistics (remote-desktop plan A11 / E8) -------------
+        //
+        // The sink's own counters.  `video_sink_frames_dropped_present`
+        // is the back-pressure number: the presenter had to drop frames
+        // because it could not keep up with the incoming cadence.
+        std::uint64_t video_sink_frames_rendered        = 0;
+        std::uint64_t video_sink_frames_dropped         = 0;
+        std::uint64_t video_sink_frames_dropped_present = 0;
+        std::uint64_t video_sink_frames_presented        = 0;
+        std::uint64_t video_sink_render_errors          = 0;
+        std::uint32_t video_sink_present_fps             = 0;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -2746,6 +2838,39 @@ private:
     plugins::Status render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
         std::int64_t capture_ts_us) noexcept;
+
+    // ---- Capture → engine pump (remote-desktop plan A10) ------------------
+    //
+    // The pump is the *automatic* counterpart of `send_video()`: it pops
+    // one frame from the capture device's bounded queue and runs it
+    // through the very same encode → packetize → enqueue path.
+    //
+    // RD-6: the pump runs **on the tick thread**, so the codec is only
+    // ever touched from one thread.  The capture device fills its queue
+    // from its own thread; the engine only ever *polls* it.
+
+    /** Pop one captured frame and feed it to the encoder.
+     *
+     *  Called from `tick()`.  A no-op when there is no capture device,
+     *  when the pump is disabled (`EngineConfig::video_capture_pump`),
+     *  or when the queue is empty (the common case — the device's
+     *  cadence is slower than the tick).
+     *
+     *  @return true when a frame was taken from the device and handed
+     *          to the encoder; false when there was nothing to do. */
+    bool pump_video_capture() noexcept;
+
+    /** Encode one staged frame and push it onto the wire.
+     *
+     *  The shared core of `send_video()` and of the capture pump: both
+     *  paths stage their pixels, encode them, and hand the result to
+     *  the sender.  Keeping one implementation means the manual path
+     *  and the automatic path cannot drift apart.
+     *
+     *  @param frame  The (already staged) frame to encode.
+     *  @return kOk when the frame was encoded and pushed. */
+    plugins::Status encode_and_send_video_frame(
+        const plugins::VideoSourceFrame& frame) noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------
     //

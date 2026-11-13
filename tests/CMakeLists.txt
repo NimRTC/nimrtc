@@ -1283,6 +1283,27 @@ endif()
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
 # ----------------------------------------------------------------------------
+# The capture → engine pump (remote-desktop plan A10).
+#
+# The pump is the engine's *automatic* video path: it pops frames from the
+# capture device's bounded queue and drives them through the encoder ON THE
+# TICK THREAD, so a capture plug-in plus an encoder produce an outbound RTP
+# stream without the host ever calling send_video().
+#
+# The test's capture device pushes from *its own* thread (the way a real
+# DXGI / PipeWire backend does), and the codec records the thread it was
+# called on — so the RD-6 invariant ("the codec is only ever touched from
+# the tick thread") is asserted, not assumed.
+#
+# It links the same set as the other engine tests, plus the capture module
+# (its registrar is referenced by the PAL Slice 2 default-registrar table).
+# ----------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_capture_pump test_engine_capture_pump.cpp)
+if(TARGET nimrtc::video_capture)
+  target_link_libraries(test_engine_capture_pump PRIVATE nimrtc::video_capture)
+endif()
+
+# ----------------------------------------------------------------------------
 # Architecture-remediation Phase 4.2 / D2 — the `assembly` disposition.
 #
 # The `assembly` module's Profile carries a `transport` section (strategy

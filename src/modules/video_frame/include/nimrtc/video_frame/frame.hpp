@@ -937,6 +937,46 @@ NIMRTC_API_STABLE void convert_i420_to_nv12(std::uint32_t width,
                           std::uint8_t* y_out, std::int32_t y_out_stride,
                           std::uint8_t* uv_out, std::int32_t uv_out_stride) noexcept;
 
+/**
+ * @brief Convert packed BGRA to I420 (BT.601 limited range).
+ *
+ * The desktop compositors produce BGRA natively (that is what the
+ * synthetic capture device produces too), and every video encoder wants
+ * planar 4:2:0 — so this is the conversion the capture → encode path
+ * needs on the CPU side.
+ *
+ * The chroma is *subsampled by point sampling*: the U and V of a 2×2
+ * block are taken from its top-left pixel.  That is the cheap and
+ * conventional choice for a screen-content path (the chroma of a
+ * desktop image is mostly flat), and it keeps the conversion
+ * branch-free.
+ *
+ * The luma is the standard BT.601 limited-range transform:
+ *
+ * ```
+ * Y  =  0.257 R + 0.504 G + 0.098 B + 16
+ * U  = -0.148 R - 0.291 G + 0.439 B + 128
+ * V  =  0.439 R - 0.368 G - 0.071 B + 128
+ * ```
+ *
+ * @param width       Picture width in pixels.
+ * @param height      Picture height in pixels.
+ * @param bgra_in     The packed BGRA source (4 bytes per pixel).
+ * @param bgra_stride Source row stride in bytes.
+ * @param y_out       Destination luma plane.
+ * @param y_out_stride Destination luma row stride in bytes.
+ * @param u_out       Destination U plane (width/2 x height/2).
+ * @param u_out_stride Destination U row stride in bytes.
+ * @param v_out       Destination V plane (width/2 x height/2).
+ * @param v_out_stride Destination V row stride in bytes.
+ */
+NIMRTC_API_STABLE void convert_bgra_to_i420(std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* bgra_in, std::int32_t bgra_stride,
+                          std::uint8_t* y_out, std::int32_t y_out_stride,
+                          std::uint8_t* u_out, std::int32_t u_out_stride,
+                          std::uint8_t* v_out, std::int32_t v_out_stride) noexcept;
+
 // ---------------------------------------------------------------------------
 // Test pattern
 // ---------------------------------------------------------------------------

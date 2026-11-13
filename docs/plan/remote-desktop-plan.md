@@ -457,7 +457,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 
 | Milestone | Theme | Release | Items | Exit criterion (the sentence that says "done") |
 |---|---|---|---|---|
-| **M1** | **See the real screen** | **v1.3.0** | A1–A8, A2b, A10, A11, B1–B4, B7, B10, B10a, B12, B13, B15, C1–C3, C5, K1, K2, K6–K8, K8b | Two native clients see each other's **real** desktop, in real pixels, at 1080p, over the network, with the picture actually encoded by a real codec — and the per-frame CPU budget of §B.6 is met. |
+| **M1** | **See the real screen** | **v1.3.0** | A1–A8, A2b, A10, A11, B2–B4, B7, B10, B10a, B12, B13, B15, C1–C3, C5, K1, K2, K6–K8, K8b (B1 codec-split explicitly out — separate item per Q-9) | Two native clients see each other's **real** desktop, in real pixels, at 1080p, over the network, with the picture actually encoded by a real codec — and the per-frame CPU budget of §B.6 is met. |
 | **M2** | **Talk and control** | **v1.4.0** | A9, E1–E9, F1–F6, G1, G1b (optional), G2–G7, I1–I6, C4, D5, K3, K4, K9, K10 | The session has **sound in both directions** (with working AEC), and the operator can **drive** the remote machine — mouse and keyboard — with the input bound to the frame the operator was looking at. |
 | **M3** | **Survive the network** | **v1.5.0** | D1–D4, B9, B14, E8, J1–J4, plus the video plan's T1 (RTX) / T2 | Under a synthetic lossy, jittery, rate-limited link the session **degrades predictably** (ladder steps down, then recovers) instead of stalling or collapsing, and the measured quality is better than a fixed-bitrate baseline. |
 | **M4** | **Multi-stream and screen-content quality** | **v1.6.0** | B5, B6, B8, B11, H1–H4, J5, J6 | The product ships the features a remote-desktop user actually pays for: **screen + camera concurrently**, **screen-content coding** (AV1/HEVC screen tools where available), a **low-bitrate fallback that stays legible**, and a measured **input-to-photon** latency. |
@@ -482,7 +482,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 
 | This plan | Existing plan | How they compose |
 |---|---|---|
-| B1 (encoder / decoder split) | video plan C2 / C3 | **Same item.** M1 delivers it; the video plan's v1.3.0 milestone N5 references this plan. |
+| B1 (encoder / decoder split) | video plan C2 / C3 | **Same item, separate landing.** Per Q-9 the split is no longer in M1: the bring-up proves the loop on the combined `IVideoCodec` first, then B1 lands as its own seam refactor. |
 | B2 (hardware-first selection) | video plan C12 / C13 / C14 | **Same item.** The registry and the selection policy already exist (`src/plugins/include/nimrtc/plugins/hw_video_backend.hpp`); this plan adds the real backends and the screen-content preference. |
 | B12 / B13 / B14 | video plan B5 / B8 / B7 | **Same items.** Landed in v1.2.0 (video plan Track B) — M1 depends on them, M3 hardens B14. |
 | D1 (the ladder) | video plan B2 / B3 / B4 | **Same item.** v1.2.0. M3 consumes it and adds the screen-specific entries. |
@@ -499,9 +499,9 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 
 | Step | Items | Ends when |
 |---|---|---|
-| **M1-a — Real codec** | B1, B3, B4, B12, B13 | A frame encoded by `openh264` survives the full pipeline and comes back as real pixels. The fake stub encoder is no longer the default path. |
+| **M1-a — Real codec (software in scope)** | B3, B4, B12, B13 (B1 split explicitly out — see Q-9) | A frame encoded by `openh264` survives the full pipeline and comes back as real pixels. The fake stub encoder is no longer the default path. **Decided 2026-11-13:** true software encode/decode (`openh264` / `dav1d`) is in scope for the bring-up — without it the CPU path on hardware-less CI machines can never produce pixels and the loop is unprovable. |
 | **M1-b — Capture seam** | A1, A2, A2b, A10, A11 | A third-party capture plug-in can be registered and driven by the engine; the engine pumps frames on the tick thread; the **portable** capture layer is complete and exercised by a synthetic device on every CI leg. |
-| **M1-c — Platform capture** | A3, A4, A5, A8, A6 | On each platform the engine captures a real screen into a `GpuBuffer`, with the cursor composited where the platform does not do it. |
+| **M1-c — Platform capture (Windows first)** | A3, A4, A5, A8, A6 | **Windows first (decided 2026-11-13):** DXGI Desktop Duplication + WGC land first and prove the zero-copy loop; macOS (ScreenCaptureKit) / Linux (Portal + PipeWire / X11) follow as thin adapters over the same portable layer. On each landed platform the engine captures a real screen into a `GpuBuffer`, with the cursor composited where the platform does not do it. |
 | **M1-d — Hardware encoders** | B2, B5 (encode half), B10, B10a, B15 | On a machine with a GPU the capture surface reaches the encoder without a CPU round-trip; the backend id is in the stats; and the **round-trip test proves the hardware path really encodes a decodable frame** (B10a) rather than only proving the backend was *selected*. |
 | **M1-e — Scaling / format** | C1, C2, C3, C5 | A 4K capture is scaled to the ladder's resolution in SIMD time; the format and colour range are consistent end to end. |
 | **M1-f — Screen content** | B7, A7 | The negotiated `fmtp` carries the content hint and the encoder changes its tuning accordingly. |
@@ -522,7 +522,7 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 |---|---|---|
 | **M2-a — Audio devices** | F1, F2, F3 | A real microphone feeds the engine and a real speaker plays the peer's voice; the playback position reaches the 3A. The device layer is **PortAudio**-backed, so one implementation covers Windows / macOS / Linux (RD-10). |
 | **M2-b — AEC reality** | F4, F5 | The loop delay is measured and configured; the residual echo is materially lower with 3A on than off; the 44.1 kHz device question is answered by the `libsamplerate` resampler (cross-platform, maintained). |
-| **M2-c — Rendering** | E1, E2, E3, E4, E7 | A decoded frame reaches the screen at the source cadence on every platform, via the GPU path where available. |
+| **M2-c — Rendering (native per platform)** | E1, E2, E3, E4, E7 | A decoded frame reaches the screen at the source cadence on every platform, via the GPU path where available. **Decided 2026-11-13:** ship native renderers (D3D11 swap-chain / Metal / Wayland-DMABUF + X11 fallback) paired with capture; no SDL-umbrella step; `render(const GpuBuffer&)` (E1) lands with them so the HW decode path never round-trips through the CPU. |
 | **M2-d — A/V sync** | E5 | A synthetic skew produces a documented, tested correction. |
 | **M2-e — Control transport** | G1, G2 (and G1b if browser interop is in scope) | The control path is on its own stack with its own budget; a NimRTC↔NimRTC control channel works over the DTLS app-data seam. |
 | **M2-f — Input codec** | G3, G4, G5, G7 | Every input event round-trips; pointer moves are coalesced; keys are lossless; the input carries the `ref_frame` id. |
@@ -696,6 +696,8 @@ A milestone is done when **all** of the following hold:
 | **Q-6** | Does M4's multi-stream require a public API change that breaks v1.x consumers? | **No.** The API change is additive: `send_video(stream_id, frame)` is a new overload; the existing single-stream entry point keeps its exact signature and semantics (ADR-015 Decision 2 — additive changes are a MINOR bump). |
 | **Q-7** | Should the platform-specific capture backends be replaced by GStreamer or a Rust capture library? | **Decided: no.** GStreamer is LGPL (RD-2 excludes it) and a Rust library would add a Rust toolchain to a C++20 engine while still not closing the Wayland cell. The plan writes the three platform backends (A3/A4/A5) but keeps them **thin adapters** over a portable capture layer (A2b) — the portable part is where the engineering goes. |
 | **Q-8** | What is the cross-platform rule for a vendored dependency that does not build everywhere? | **Decided (K8b):** a default-ON dependency must build on every CI leg it claims; otherwise it is behind a `NIMRTC_VENDORED_*` option that defaults OFF where it does not build, and its `NOTICE` entry states the platform matrix. No exception is granted by default — an exception needs an ADR amendment. |
+| **Q-9** | Is the `IVideoEncoder` / `IVideoDecoder` split (B1) part of the video bring-up (capture → codec → display), or a separate seam refactor? | **Decided 2026-11-13: separate item.** The bring-up keeps the combined `IVideoCodec` and proves the working loop first; the B1 split lands afterwards as its own seam refactor (same item, moved out of M1 — see M1-a). |
+| **Q-10** | Are dirty-rect incremental encode (B9) and the render clock (E5) part of the video bring-up, or follow-ups? | **Decided 2026-11-13: follow-ups.** They stay at their milestone homes (B9 → M3, E5 → M2 / M3 hardening); the first demonstrable loop is synthetic capture → HW encode → HW decode → native present, and B9 / E5 land after the Windows zero-copy loop is proven. |
 
 ---
 
@@ -704,7 +706,7 @@ A milestone is done when **all** of the following hold:
 | Track | Items | Milestone |
 |---|---|---|
 | A — Capture | A1, A2, A2b, A3, A4, A5, A6, A7, A8, A9, A10, A11 | M1 (A1–A8, A10, A11), M2 (A9) |
-| B — Codec | B1, B2, B3, B4, B5, B5a, B6, B7, B8, B9, B10, B10a, B11, B12, B13, B14, B15 | M1 (B1–B4, B7, B10, B10a, B12, B13, B15), M3 (B9, B14), M4 (B5, B5a, B6, B8, B11) |
+| B — Codec | B1, B2, B3, B4, B5, B5a, B6, B7, B8, B9, B10, B10a, B11, B12, B13, B14, B15 | M1 (B2–B4, B7, B10, B10a, B12, B13, B15), M3 (B9, B14), M4 (B5, B5a, B6, B8, B11); B1 separate per Q-9 |
 | C — Pixel | C1, C2, C3, C4, C5 | M1 (C1–C3, C5), M2 (C4) |
 | D — Rate control | D1, D2, D3, D4, D5 | M3 (D1–D4), M2 (D5) |
 | E — Rendering | E1, E2, E3, E4, E5, E6, E7, E8, E9 | M2 (E1–E7, E9), M3 (E8) |

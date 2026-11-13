@@ -63,6 +63,12 @@
 // base.hpp must be before include guard — see transport.hpp for rationale.
 #include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
+// The capture frame carries the same pixel-format / GPU-handle vocabulary
+// the codec seam uses, so the engine can hand a captured surface to a
+// hardware encoder without a translation layer.  `video_codec.hpp` is a
+// plugin-seam header (it re-exports `nimrtc::video_frame`'s types), so
+// including it here creates no concrete-module dependency.
+#include "nimrtc/plugins/video_codec.hpp"
 
 #ifndef NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
 #define NIMRTC_PLUGINS_VIDEO_CAPTURE_HPP
@@ -169,17 +175,14 @@ struct NIMRTC_API_STABLE CaptureFormat {
     std::string tag;
 
     /** True iff this format can be delivered without a CPU readback of
-     *  the captured surface. */
-    bool zero_copy = false;
-    /** True iff this format can be delivered without a CPU readback of
      *  the captured surface.
      *
      *  Per-format, and stricter than the device-wide
      *  `CaptureCapabilities::zero_copy`: a device may be able to do
      *  zero-copy in general while a particular format still needs a
      *  readback. */
+    bool zero_copy = false;
 
-    /** True iff this format carries per-frame dirty-rectangle metadata. */
     /** True iff this format carries per-frame dirty-rectangle metadata.
      *
      *  Requires `CaptureCapabilities::dirty_rects`. */
@@ -233,8 +236,6 @@ struct NIMRTC_API_STABLE CaptureDirtyRects {
  *
  * Queried *before* the first frame, so the engine can pick a ladder rung
  * and decide whether the zero-copy path is available on this machine.
- */
-struct NIMRTC_API_STABLE CaptureCapabilities {
  *
  * ## Frozen semantics (remote-desktop plan A1)
  *
@@ -259,19 +260,19 @@ struct NIMRTC_API_STABLE CaptureCapabilities {
  *     resolution.  0 means "unbounded".
  *
  * @see CaptureFormat for the per-format statements.
-    /** The device can deliver frames without a CPU readback. */
-    bool zero_copy = false;
-
-    /** The device reports per-frame dirty rectangles. */
-    bool dirty_rects = false;
+ */
+struct NIMRTC_API_STABLE CaptureCapabilities {
     /** The device can deliver frames without a CPU readback.
      *
      *  Device-wide.  A per-format request (`CaptureFormat::zero_copy`)
      *  additionally requires the *format* to carry the flag. */
+    bool zero_copy = false;
 
-    /** The device composites the pointer into the frame itself (so the
-     *  engine does not need a separate cursor layer). */
-    bool cursor_composited = false;
+    /** The device reports per-frame dirty rectangles.
+     *
+     *  Required by `CaptureFormat::has_dirty_rects`. */
+    bool dirty_rects = false;
+
     /** The device composites the pointer into the frame itself (so the
      *  engine does not need a separate cursor layer).
      *
@@ -279,24 +280,23 @@ struct NIMRTC_API_STABLE CaptureCapabilities {
      *  it is honoured only when this flag is true.  A device that
      *  cannot composite the pointer simply delivers frames without it —
      *  it is not an unsupported combination. */
+    bool cursor_composited = false;
 
-    /** The device can capture a sub-region rather than a whole surface. */
-    bool region_selection = false;
     /** The device can capture a sub-region rather than a whole surface.
      *
      *  Required by a non-zero `CaptureConfig::region`. */
+    bool region_selection = false;
 
     /** The device can enumerate itself (the list is not hard-coded). */
     bool enumeration = false;
 
-    /** Largest frame the device can deliver, in pixels (width * height). */
+    /** Largest frame the device can deliver, in pixels (width * height).
+     *  0 = unbounded. */
     std::uint64_t max_pixels = 0;
 
     /** Largest frame rate the device can deliver at full resolution.
      *  0 = unbounded. */
     std::uint32_t max_fps = 0;
-    /** Largest frame the device can deliver, in pixels (width * height).
-     *  0 = unbounded. */
 
     /** Backend identifier, e.g. "dxgi-desktop-dup", "screen-capture-kit",
      *  "x11", "pipewire", "synthetic". */
@@ -379,6 +379,15 @@ struct NIMRTC_API_STABLE CaptureStats {
     std::uint64_t format_changes = 0;
     /** Bytes copied CPU↔GPU (0 when the path was fully zero-copy). */
     std::uint64_t bytes_copied = 0;
+    /** Frames the device delivered as a native GPU surface.
+     *
+     *  The zero-copy counterpart of `frames_captured`: a frame counted
+     *  here never crossed the PCI bus into host memory.  A host that
+     *  wants to prove the hardware path is live reads this against
+     *  `bytes_copied` (remote-desktop plan B10). */
+    std::uint64_t frames_zero_copy = 0;
+    /** Frames the device delivered as host pixels (the CPU path). */
+    std::uint64_t frames_cpu_staged = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -421,6 +430,36 @@ struct NIMRTC_API_STABLE CaptureFrame {
     /** True iff this frame carries a GPU handle that a zero-copy
      *  encoder can consume directly. */
     bool has_gpu_handle = false;
+
+    // ---- Pixel format + GPU handle (remote-desktop plan A10 / B10) --------
+    //
+    // A capture device produces its picture in *its own* format — the
+    // desktop compositors produce BGRA, a camera produces NV12, a
+    // hardware zero-copy backend produces a native surface.  The frame
+    // therefore states which format the `pixels` pointer holds, and the
+    // engine converts only when it has to.
+    //
+    // `format` is `kUnknown` for a legacy capture backend that does not
+    // declare one; the engine then treats the frame as an I420 planar
+    // picture (the historical default).
+
+    /** The pixel format of the `pixels` buffer. */
+    VideoPixelFormat format = VideoPixelFormat::kUnknown;
+
+    /** The GPU backend that owns `gpu_handle` (kNone = CPU frame). */
+    GpuBackend gpu_backend = GpuBackend::kNone;
+
+    /** The native GPU resource (surface / texture). Null on the CPU
+     *  path.  The concrete type is determined by `gpu_backend`:
+     *  `ID3D11Texture2D` for Windows DXGI duplication, and so on.
+     *
+     *  The handle is **borrowed**: it stays valid until the next call to
+     *  `pop_frame()`, exactly like the `pixels` pointer. */
+    void* gpu_handle = nullptr;
+
+    /** Native row stride / pitch in bytes (0 when the backend has an
+     *  implicit layout). */
+    std::uint32_t gpu_pitch_bytes = 0;
 };
 
 /**

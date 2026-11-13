@@ -65,6 +65,7 @@
 #if defined(NIMRTC_PLUGINS_NVENC_ON)
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -159,6 +160,11 @@ private:
             init_status = NV_ENC_ERR_GENERIC;
             return;
         }
+        // The zero-copy path's entry points are *optional*: a driver that
+        // does not expose them still encodes perfectly well through the
+        // CPU staging path.  Their absence is only reported when the
+        // zero-copy path is actually taken (see
+        // `NvEncEncoder::supports_zero_copy_encode()`).
         NIMRTC_LOG_INFO("nvenc: DLL loaded, NvEncodeAPICreateInstance OK, "
                         "function table populated (SDK " << NVENCAPI_MAJOR_VERSION
                         << "." << NVENCAPI_MINOR_VERSION << ")");
@@ -734,7 +740,16 @@ public:
             force_keyframe_next_ = false;
         }
 
+        // The encode latency is measured around the driver's call: only
+        // the encoder knows where the encode actually starts and ends
+        // (remote-desktop plan B15).
+        const auto encode_start = std::chrono::steady_clock::now();
         s = lib.fn.nvEncEncodePicture(session_, &pic);
+        const auto encode_end = std::chrono::steady_clock::now();
+        const auto latency_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                encode_end - encode_start).count());
+
         if (s != NV_ENC_SUCCESS && s != NV_ENC_ERR_NEED_MORE_INPUT) {
             stats_.encode_errors++;
             NIMRTC_LOG_ERROR("nvenc: nvEncEncodePicture failed (status="
@@ -787,6 +802,14 @@ public:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += n_copy;
+        // The CPU staging path: the picture was copied into the driver's
+        // input buffer, so it counts as staged (not zero-copy).
+        stats_.frames_encoded_staged++;
+        if (is_keyframe) stats_.keyframes_encoded++;
+        stats_.encode_latency_us_total += latency_us;
+        if (latency_us > stats_.encode_latency_us_max) {
+            stats_.encode_latency_us_max = latency_us;
+        }
         frame_idx_++;
         return plugins::kOk;
     }
@@ -802,8 +825,217 @@ public:
         return plugins::kOk;
     }
 
-    bool supports_zero_copy_encode() const noexcept override { return false; }
+    // ---- The zero-copy path (remote-desktop plan B10) --------------------
+    //
+    // The encoder can consume a *native* D3D11 texture directly: the
+    // surface is registered with the driver, mapped to an encoder input
+    // pointer, and handed to `nvEncEncodePicture` as-is.  The picture
+    // never crosses the PCI bus into host memory, so `bytes_copied`
+    // stays at zero on this route.
+    //
+    // The driver's contract is narrow, and the encoder reports it
+    // honestly:
+    //
+    //   - the resource must be a **D3D11 texture** (the DirectX input
+    //     resource type);
+    //   - the texture must be **NV12** — the only format the driver
+    //     accepts for a registered DirectX input surface.  A BGRA
+    //     surface (what a DXGI Desktop Duplication capture produces)
+    //     is *not* acceptable, and converting it would need a video
+    //     processing shader that this module does not carry.  Such a
+    //     surface is **refused** with `kErrUnsupported`, and the engine
+    //     then takes the CPU staging path (the universal fallback);
+    //   - the geometry must match the session's — a resolution change
+    //     needs a fresh session, which the CPU path handles.
+    //
+    // A refusal is a *normal* outcome, not an error: the engine counts
+    // it as a zero-copy fallback and stages the pixels on the host.
+
+    bool supports_zero_copy_encode() const noexcept override {
+        // The zero-copy path needs an open session *and* the driver's
+        // resource-registration entry points.
+        return opened_ && session_ &&
+               NvEncLib::instance().fn.nvEncRegisterResource != nullptr &&
+               NvEncLib::instance().fn.nvEncMapInputResource != nullptr &&
+               NvEncLib::instance().fn.nvEncUnmapInputResource != nullptr &&
+               NvEncLib::instance().fn.nvEncUnregisterResource != nullptr;
+    }
+
     bool supports_zero_copy_decode() const noexcept override { return false; }
+
+    plugins::Status encode_zero_copy(
+            const plugins::GpuBuffer& gpu,
+            plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        if (!opened_ || !session_) return plugins::kErrNotReady;
+
+        // ---- The surface must be a D3D11 texture --------------------------
+        if (gpu.handle().backend != plugins::GpuBackend::kWindowsD3D11Texture) {
+            return plugins::kErrUnsupported;
+        }
+        auto* texture = static_cast<ID3D11Texture2D*>(gpu.handle().handle);
+        if (!texture) return plugins::kErrInvalidParam;
+
+        // ---- Its format must be one the driver accepts --------------------
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_NV12) {
+            // The driver accepts only NV12 for a registered DirectX input
+            // surface.  Anything else (BGRA, for instance) is refused
+            // here, and the caller falls back to the CPU staging path.
+            return plugins::kErrUnsupported;
+        }
+
+        // ---- Its geometry must match the session -------------------------
+        const std::uint32_t w = static_cast<std::uint32_t>(desc.Width);
+        const std::uint32_t h = static_cast<std::uint32_t>(desc.Height);
+        if (w == 0 || h == 0) return plugins::kErrInvalidParam;
+        if (w != width_ || h != height_) {
+            // A different size needs a fresh session (see `encode()`); the
+            // CPU path re-initialises it, so this path just refuses.
+            return plugins::kErrUnsupported;
+        }
+
+        auto& lib = NvEncLib::instance();
+
+        // ---- Register the surface with the driver ------------------------
+        //
+        // The registered handle lives exactly as long as the encode call:
+        // it is unregistered at the end of this function.  Registering
+        // per frame is what the driver's contract allows (the resource is
+        // *mapped* for the duration of the encode, and the registration
+        // is cheap compared to the encode itself).
+        NV_ENC_REGISTER_RESOURCE reg{};
+        reg.version          = NV_ENC_REGISTER_RESOURCE_VER;
+        reg.resourceType     = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+        reg.width            = w;
+        reg.height           = h;
+        reg.pitch            = 0;   // the driver derives it for DirectX
+        reg.subResourceIndex = 0;
+        reg.resourceToRegister = texture;
+        reg.bufferFormat     = NV_ENC_BUFFER_FORMAT_NV12;
+        reg.bufferUsage      = NV_ENC_INPUT_IMAGE;
+
+        NVENCSTATUS s = lib.fn.nvEncRegisterResource(session_, &reg);
+        if (s != NV_ENC_SUCCESS) {
+            stats_.encode_errors++;
+            NIMRTC_LOG_WARN("nvenc: nvEncRegisterResource failed (status="
+                            << unsigned(s) << ") — the CPU staging path will "
+                               "be used");
+            return plugins::kErrHardwareError;
+        }
+
+        // ---- Map it to an encoder input pointer --------------------------
+        NV_ENC_MAP_INPUT_RESOURCE map{};
+        map.version           = NV_ENC_MAP_INPUT_RESOURCE_VER;
+        map.registeredResource = reg.registeredResource;
+        s = lib.fn.nvEncMapInputResource(session_, &map);
+        if (s != NV_ENC_SUCCESS || !map.mappedResource) {
+            stats_.encode_errors++;
+            lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
+            NIMRTC_LOG_WARN("nvenc: nvEncMapInputResource failed (status="
+                            << unsigned(s) << ") — the CPU staging path will "
+                               "be used");
+            return plugins::kErrHardwareError;
+        }
+
+        // ---- Encode ------------------------------------------------------
+        //
+        // The mapped pointer is the `inputBuffer`; the driver also
+        // reports the format it mapped the surface as, and *that* is the
+        // format the picture parameters have to carry.
+        NV_ENC_PIC_PARAMS pic{};
+        pic.version         = NV_ENC_PIC_PARAMS_VER;
+        pic.inputBuffer     = map.mappedResource;
+        pic.bufferFmt       = map.mappedBufferFmt;
+        pic.pictureStruct   = NV_ENC_PIC_STRUCT_FRAME;
+        pic.outputBitstream = out_buf_.bitstreamBuffer;
+
+        if (force_keyframe_next_ || frame_idx_ == 0) {
+            pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR |
+                                NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+            force_keyframe_next_ = false;
+        }
+
+        const auto encode_start = std::chrono::steady_clock::now();
+        s = lib.fn.nvEncEncodePicture(session_, &pic);
+        const auto encode_end = std::chrono::steady_clock::now();
+        const auto latency_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                encode_end - encode_start).count());
+
+        if (s != NV_ENC_SUCCESS && s != NV_ENC_ERR_NEED_MORE_INPUT) {
+            stats_.encode_errors++;
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
+            NIMRTC_LOG_ERROR("nvenc: nvEncEncodePicture (zero-copy) failed "
+                             "(status=" << unsigned(s) << ")");
+            return plugins::kErrHardwareError;
+        }
+
+        // ---- Lock the output bitstream ------------------------------------
+        NV_ENC_LOCK_BITSTREAM lock_bs{};
+        lock_bs.version         = NV_ENC_LOCK_BITSTREAM_VER;
+        lock_bs.outputBitstream = out_buf_.bitstreamBuffer;
+        s = lib.fn.nvEncLockBitstream(session_, &lock_bs);
+        if (s != NV_ENC_SUCCESS || !lock_bs.bitstreamBufferPtr) {
+            stats_.encode_errors++;
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
+            return plugins::kErrInternal;
+        }
+
+        const std::size_t bs_bytes =
+            static_cast<std::size_t>(lock_bs.bitstreamSizeInBytes);
+        if (bs_bytes == 0) {
+            lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
+            stats_.frames_skipped++;
+            return plugins::kOk;
+        }
+
+        // The zero-copy path writes the bitstream into the caller's
+        // buffer through the same scratch the CPU path uses, so the two
+        // paths produce identical output framing.
+        std::uint8_t* output = out_scratch_.data();
+        const std::size_t capacity = out_scratch_.size();
+        if (bs_bytes > capacity) {
+            NIMRTC_LOG_WARN("nvenc: bitstream " << bs_bytes
+                           << " B exceeds output buffer " << capacity
+                           << " B — truncating");
+        }
+        const std::size_t n_copy = std::min(bs_bytes, capacity);
+        std::memcpy(output, lock_bs.bitstreamBufferPtr, n_copy);
+
+        const bool is_keyframe = (lock_bs.pictureType == NV_ENC_PIC_TYPE_IDR);
+
+        lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+        lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+        lib.fn.nvEncUnregisterResource(session_, reg.registeredResource);
+
+        encoded_out.codec        = desc_.kind;
+        encoded_out.payload      = core::ByteSpan{output, n_copy};
+        encoded_out.payload_type = cfg_.payload_type != 0 ? cfg_.payload_type
+                                                   : desc_.default_payload_type;
+        encoded_out.is_keyframe   = is_keyframe;
+        encoded_out.nalu_format   = plugins::NaluFormat::kAnnexBStartCode;
+        encoded_out.info.capture_ts_us = gpu.capture_ts_us();
+        encoded_out.info.frame_seq     = gpu.frame_seq();
+        encoded_out.info.rtp_timestamp = 0;
+
+        stats_.frames_encoded++;
+        stats_.bytes_encoded += n_copy;
+        // The zero-copy counters: the picture never crossed the PCI bus,
+        // so `bytes_copied` stays at zero.
+        stats_.frames_encoded_zero_copy++;
+        if (is_keyframe) stats_.keyframes_encoded++;
+        stats_.encode_latency_us_total += latency_us;
+        if (latency_us > stats_.encode_latency_us_max) {
+            stats_.encode_latency_us_max = latency_us;
+        }
+        frame_idx_++;
+        return plugins::kOk;
+    }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
 
@@ -848,6 +1080,19 @@ public:
     std::uint8_t payload_type() const noexcept override {
         return cfg_.payload_type != 0 ? cfg_.payload_type
                                       : desc_.default_payload_type;
+    }
+
+    // ---- Codec telemetry (remote-desktop plan B15) ------------------------
+    //
+    // The backend id is what a host reads to learn *which* encoder
+    // produced the bitstream it is receiving.
+    std::string_view backend_id() const noexcept override { return "nvenc"; }
+
+    bool is_hardware_accelerated() const noexcept override {
+        // True only when the session is actually open — a hardware
+        // backend that failed to initialise falls back to software, and
+        // a closed encoder is not accelerating anything.
+        return opened_ && session_ != nullptr;
     }
 
 private:
@@ -945,6 +1190,12 @@ private:
         width_     = w;
         height_    = h;
         frame_idx_ = 0;
+        // The zero-copy path's output scratch: the bitstream is copied
+        // into it, so it has to be at least as large as the bitstream
+        // buffer.  (It is reserved once here rather than per frame.)
+        if (out_scratch_.size() < kBsBufBytes) {
+            out_scratch_.resize(kBsBufBytes);
+        }
         // The first picture after a (re-)initialization must be an IDR
         // with inline SPS/PPS so the receiver can start decoding.
         force_keyframe_next_ = true;
@@ -1024,6 +1275,15 @@ private:
     uint32_t                 width_       = 0;
     uint32_t                 height_      = 0;
     uint32_t                 frame_idx_   = 0;
+    /** The zero-copy path's output scratch.
+     *
+     *  The zero-copy entry point has no caller-supplied output buffer
+     *  (the seam's signature is `encode_zero_copy(gpu, encoded_out)`),
+     *  so the encoder writes the bitstream into this member.  The payload
+     *  in `encoded_out` therefore points into it and stays valid until
+     *  the *next* zero-copy encode — which is the same lifetime the
+     *  CPU path's `impl_->scratch.video_enc_buf` has. */
+    std::vector<std::uint8_t> out_scratch_;
     plugins::VideoCodecStats stats_{};
 };
 

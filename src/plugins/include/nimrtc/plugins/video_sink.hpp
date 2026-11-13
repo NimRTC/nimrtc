@@ -122,6 +122,42 @@ struct NIMRTC_API_STABLE VideoSinkConfig {
     /** Human-readable sink identifier (e.g. "preview_window",
      *  "headless_recorder").  Used for logging. */
     std::string_view label;
+
+    // ---- Presentation (remote-desktop plan E2 / E5) -----------------------
+    //
+    // A *presentation* sink (a DXGI swap chain, a Metal layer, a
+    // Wayland surface) needs three things the CPU sinks do not: a target
+    // surface, a presentation cadence, and a way to be told "there is no
+    // display here" so it can run offscreen (in CI, in a test).
+
+    /** The native window / output surface to present into.
+     *
+     *  Backend-specific: on Windows this is an `HWND` (a native window
+     *  handle).  Null means "no window was given" — a presentation sink
+     *  then runs in its **offscreen** mode: it still runs its
+     *  presentation clock and still measures the frame rate, but it
+     *  renders into a texture instead of a swap chain.  That is what
+     *  makes the frame-rate assertion of plan E2 testable without a
+     *  physical display.
+     *
+     *  The handle is borrowed: the sink does not own it. */
+    void* native_window = nullptr;
+
+    /** The target presentation rate, in frames per second.
+     *
+     *  The presentation clock paces the presenter to this rate, so the
+     *  sink's frame rate matches the source cadence instead of running
+     *  as fast as the producer pushes.  0 means "derive it from the
+     *  incoming frames" (the sink measures the cadence it is offered).
+     */
+    std::uint32_t target_fps = 0;
+
+    /** Run without a visible output surface.
+     *
+     *  True forces the offscreen mode even when a native window was
+     *  supplied — useful for a headless CI leg that wants to exercise
+     *  the presenter's pacing and drop accounting. */
+    bool offscreen = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +170,27 @@ struct NIMRTC_API_STABLE VideoSinkStats {
     std::uint64_t format_conversions   = 0;   ///< I420→BGRA etc.
     std::uint64_t render_errors        = 0;
     std::uint64_t last_render_age_us   = 0;   ///< now - frame.capture_ts_us
+    /** Frames the sink accepted but the *presenter* had to drop because
+     *  it could not keep up with the incoming cadence.
+     *
+     *  The renderer-side counterpart of `frames_dropped`: a sink that
+     *  hands the frame to a presentation thread (a DXGI swap chain, a
+     *  Metal layer) drops here when the mailbox is already full, and the
+     *  count is what proves the back-pressure policy works
+     *  (remote-desktop plan E8). */
+    std::uint64_t frames_dropped_present = 0;
+    /** Frames the sink presented to a display surface. */
+    std::uint64_t frames_presented    = 0;
+    /** The number of frames the sink's presenter is holding right now
+     *  (the mailbox depth).  Bounded by design — the sink drops rather
+     *  than growing. */
+    std::uint64_t presenter_queue_depth = 0;
+    /** The measured presentation rate, in frames per second.
+     *
+     *  The renderer computes it from the presentation clock, so it
+     *  reflects what the *display* actually got rather than what the
+     *  producer offered. */
+    std::uint32_t present_fps         = 0;
 };
 
 // ---------------------------------------------------------------------------

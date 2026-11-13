@@ -142,17 +142,10 @@
 // included to avoid a PUBLIC link dependency on make_transport_instance().
 #include <nimrtc/transport/transport_stack.hpp>
 #include <nimrtc/transport/transport_plugin.hpp>
-// The H.264 codec module is *not* included here.  It used to be, behind
-// `NIMRTC_HAS_H264`, purely so its `register_default_plugins()` symbol
-// would be visible to the linker -- the engine uses no type from it.
-// ADR-025 Decision 1 called that include "a link-time registration
-// convenience, not a type dependency", and said it was scheduled for
-// removal when the engine's default-registrar table was split out of
-// `engine_impl.hpp` (remediation plan D1).  That split has landed:
-// the registrar table now lives in `src/core/src/pal_default_registrars.cpp`
-// and lists `nimrtc::h264::register_default_plugins` there, so the
-// engine does not need the header to pull the symbol in.  The engine
-// reaches the H.264 codec through the registry's video-codec slot.
+// The H.264 codec module is *not* included here: the engine uses no type
+// from it, and the registrar table lives in `pal_default_registrars.cpp`.
+// ADR-025 Decision 1 scheduled the removal; `tools/check_engine_layering.py`
+// now enforces it (the rationale is recorded there).
 
 // Concrete module headers — required by NimRTCEngine::Impl which lives in
 // this translation unit.  The public header (engine.hpp) does NOT include

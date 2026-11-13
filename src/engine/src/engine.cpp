@@ -77,6 +77,22 @@ NimRTCEngine::NimRTCEngine(EngineConfig config)
     // allocates (the old `std::map` + `std::deque` pair allocated twice
     // per sent frame).
     impl_->init_ref_frame_table();
+    // Phase 3: the outbound video scratch buffers are pre-sized to the
+    // MTU so that the *first* keyframe -- which is larger than an
+    // inter-frame -- does not have to grow them.  A keyframe's RTP
+    // packet is bigger than an inter-frame's, so a scratch that started
+    // empty would reallocate exactly once, on the first keyframe, and
+    // the benchmark would report a non-zero allocation count even
+    // though the steady state is allocation-free.
+    {
+        const std::size_t mtu = config_.video_sender_tuning.mtu;
+        // The SRTP auth tag is appended after the RTP payload, so the
+        // outbound buffer must hold the packet *plus* the tag.
+        constexpr std::size_t kSrtpTagHeadroom = 16;
+        const std::size_t outbound = mtu + kSrtpTagHeadroom;
+        impl_->video_rtp_scratch.reserve(outbound);
+        impl_->video_pkt_scratch.reserve(outbound);
+    }
 }
 
 

@@ -132,6 +132,31 @@ TEST(WgcCapture, ClosingIsIdempotent) {
     EXPECT_FALSE(dev.is_open());
 }
 
+TEST(WgcCapture, ClosingRightAfterOpeningDoesNotCrash) {
+    // The teardown has to survive being asked for *while the capture
+    // thread is still setting the capture up*.  `open()` returns as
+    // soon as the thread is started — the device, the frame pool and
+    // the session are created on that thread — so a host that opens
+    // and immediately closes (a probe, a failed negotiation, a test)
+    // tears the device down in the middle of its own setup.  That is
+    // the shape that used to crash, and it is the shape a CI agent
+    // hits on every run.
+    //
+    // The test is honest about the outcome: the point is not *what*
+    // `open()` reports on this host, it is that the process survives
+    // the open/close pair.
+    for (int i = 0; i < 8; ++i) {
+        CaptureConfig cfg;
+        WgcCapture dev(cfg);
+        const auto st = dev.open();
+        dev.close();
+        EXPECT_FALSE(dev.is_open());
+        EXPECT_TRUE(st == nimrtc::plugins::kOk ||
+                    st == nimrtc::plugins::kErrHardwareError ||
+                    st == nimrtc::plugins::kErrInvalidParam);
+    }
+}
+
 TEST(WgcCapture, AnUnknownDeviceIdIsRejected) {
     CaptureConfig cfg;
     cfg.device_id = "wgc:monitor:not-a-number";

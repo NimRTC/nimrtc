@@ -108,6 +108,19 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     compare against).
   - The diff runs on the **device's own pixels, before the format
     conversion**, so it sees the same bitmap the encoder will see.
+  - **All four backends without native damage information run it** — X11,
+    Windows Graphics Capture, the XDG Desktop Portal and
+    ScreenCaptureKit — so an unchanged frame is dropped *before it is
+    queued*, and a static desktop costs almost nothing.
+  - **Their capability flags now report `dirty_rects = true`.**  They
+    used to report `false`, on the grounds that "the platform does not
+    give us damage information" — but the flag is a statement about
+    *what the backend delivers*, and these backends do deliver the
+    metadata (they derive it).  A flag that says "no" while the frames
+    carry the metadata makes the consumer ignore metadata that is
+    present and correct.  The new test
+    `SyntheticCapture.TheDirtyRectFlagAgreesWithWhatTheFramesCarry`
+    pins the invariant for the reference device.
 
 - **The codec telemetry in the engine's stats snapshot (v1.3.0, Remote
   Desktop plan B15).**  The numbers that make a live session

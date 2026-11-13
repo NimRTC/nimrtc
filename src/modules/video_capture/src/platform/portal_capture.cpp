@@ -476,8 +476,10 @@ plugins::Status PortalCapture::open() noexcept {
     // needs a copy; the *zero-copy* hand-off (a DMABUF straight into
     // the encoder) is plan item B10.
     cfg_.format.zero_copy = false;
-    // PipeWire does not report per-frame damage to the client.
-    cfg_.format.has_dirty_rects = false;
+    // PipeWire does not report per-frame damage to the client, so the
+    // backend *computes* it from the portable pixel-diff.  The frames it
+    // delivers do carry the metadata, so the flag reports true.
+    cfg_.format.has_dirty_rects = true;
 
     description_ = cfg_.device_id;
 
@@ -538,7 +540,10 @@ plugins::CaptureCapabilities PortalCapture::capabilities() const noexcept {
     plugins::CaptureCapabilities c;
     c.backend = "portal-capture";
     c.zero_copy = false;
-    c.dirty_rects = false;
+    // The backend *delivers* per-frame dirty-rectangle metadata: the
+    // changed region comes from the portable pixel-diff, because
+    // PipeWire hands over a whole frame every time.
+    c.dirty_rects = true;
     // The portal can ask the compositor to draw the pointer into the
     // stream, but it is not guaranteed — so the cursor layer stays on.
     c.cursor_composited = false;
@@ -948,7 +953,7 @@ plugins::CaptureCapabilities PortalCapture::capabilities() const noexcept {
     // run gets the same answer on every platform.  What it cannot
     // promise on this host is the pixels — `open()` refuses.
     c.zero_copy = false;          // the frames arrive through PipeWire
-    c.dirty_rects = false;        // PipeWire reports no changed regions
+    c.dirty_rects = true;         // the changed region comes from the pixel-diff
     c.cursor_composited = false;  // the pointer is not guaranteed
     c.region_selection = true;    // the portal can grant a region
     c.enumeration = false;        // the portal owns the source list

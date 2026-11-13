@@ -86,7 +86,7 @@ ScreenCaptureKitCapture::capabilities() const noexcept {
     // backend, not of the host it runs on.  A query must not answer
     // differently depending on where it is asked from.
     c.zero_copy = false;
-    c.dirty_rects = false;
+    c.dirty_rects = true;
     c.cursor_composited = true;
     c.region_selection = true;
     c.enumeration = true;

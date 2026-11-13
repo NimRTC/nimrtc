@@ -313,8 +313,13 @@ plugins::Status X11Capture::open() noexcept {
     // the software path by definition.
     cfg_.format.zero_copy = false;
     // X11 has no per-frame damage information a client can read, so the
-    // backend reports the conservative "the whole frame changed".
-    cfg_.format.has_dirty_rects = false;
+    // backend *computes* it: the changed region comes from the portable
+    // pixel-diff (`DirtyRectDetector`), not from the server.  The flag
+    // therefore reports true -- the backend really does deliver
+    // per-frame dirty-rectangle metadata, it just derives it rather
+    // than reading it.  What the metadata costs is a CPU comparison of
+    // two frames, which is why the *pixel* path is still not zero-copy.
+    cfg_.format.has_dirty_rects = true;
 
     description_ = dev_name;
 
@@ -395,7 +400,7 @@ X11Capture::supported_formats(const std::string& device_id) const noexcept {
         f.fps    = d.max_fps;
         f.tag    = "bgra";
         f.zero_copy = false;
-        f.has_dirty_rects = false;
+        f.has_dirty_rects = true;
         out.push_back(std::move(f));
     }
     return out;
@@ -406,8 +411,10 @@ plugins::CaptureCapabilities X11Capture::capabilities() const noexcept {
     c.backend = "x11-capture";
     // The pixels are read back from the X server: not zero-copy.
     c.zero_copy = false;
-    // X11 offers no damage information to the client.
-    c.dirty_rects = false;
+    // The backend *delivers* per-frame dirty-rectangle metadata — the
+    // changed region comes from the portable pixel-diff, because X11
+    // itself exposes no damage information to the client.
+    c.dirty_rects = true;
     // XGetImage does NOT include the pointer — the cursor layer's job.
     c.cursor_composited = false;
     // The region is cropped out of the grabbed image.
@@ -689,7 +696,7 @@ plugins::CaptureCapabilities X11Capture::capabilities() const noexcept {
     // run gets the same answer on every platform.  What it cannot
     // promise on this host is the pixels — `open()` refuses.
     c.zero_copy = false;          // the pixels come back over a socket
-    c.dirty_rects = false;        // X11 offers no damage information
+    c.dirty_rects = true;         // the changed region comes from the pixel-diff
     c.cursor_composited = false;  // XGetImage does not draw the pointer
     c.region_selection = true;    // the region is cropped out of the grab
     c.enumeration = true;         // the screens come from the live server

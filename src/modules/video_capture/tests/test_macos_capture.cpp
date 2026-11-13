@@ -83,8 +83,9 @@ TEST(ScreenCaptureKit, TheCapabilitiesDescribeTheBackend) {
     // The frame arrives as an IOSurface-backed CVPixelBuffer; the seam
     // delivers CPU bytes, so the seam's path is not zero-copy.
     EXPECT_FALSE(caps.zero_copy);
-    // ScreenCaptureKit hands over a whole surface every time.
-    EXPECT_FALSE(caps.dirty_rects);
+    // The changed region comes from the portable pixel-diff, so the
+    // frames do carry the metadata.
+    EXPECT_TRUE(caps.dirty_rects);
     // This is the whole point of ScreenCaptureKit: the OS composites
     // the pointer into the frame, so the cursor layer is not needed on
     // this path.

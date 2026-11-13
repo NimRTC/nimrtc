@@ -384,10 +384,10 @@ plugins::Status WgcCapture::open() noexcept {
     cfg_.format.tag = "bgra";
     cfg_.format.zero_copy = false;
     // WGC does *not* report per-frame changed regions: the compositor
-    // hands over a whole surface every time.  The dirty metadata is
-    // therefore "the whole frame changed", which is the conservative
-    // answer the seam allows.
-    cfg_.format.has_dirty_rects = false;
+    // hands over a whole surface every time.  The backend therefore
+    // *computes* them, from the portable pixel-diff — so the frames it
+    // delivers do carry the metadata, and the flag reports true.
+    cfg_.format.has_dirty_rects = true;
 
     description_ = (state->window_ != nullptr) ? "window" : "display";
 
@@ -456,8 +456,8 @@ WgcCapture::supported_formats(const std::string& device_id) const noexcept {
         f.fps    = d.max_fps;
         f.tag    = "bgra";
         f.zero_copy = false;
-        // The compositor hands over a whole surface every time.
-        f.has_dirty_rects = false;
+        // The changed region comes from the portable pixel-diff.
+        f.has_dirty_rects = true;
         out.push_back(std::move(f));
     }
     return out;
@@ -469,8 +469,10 @@ WgcCapture::capabilities() const noexcept {
     // The frame arrives as a GPU texture, so the CPU path needs a
     // readback: this is not the zero-copy path.
     c.zero_copy = false;
-    // WGC does not report changed regions.
-    c.dirty_rects = false;
+    // The backend *delivers* per-frame dirty-rectangle metadata: the
+    // changed region comes from the portable pixel-diff, because WGC
+    // itself hands over a whole surface every time.
+    c.dirty_rects = true;
     // This is the whole point of WGC: the OS composites the pointer
     // into the frame, so the cursor layer is not needed on this path.
     c.cursor_composited = true;
@@ -994,7 +996,7 @@ plugins::CaptureCapabilities WgcCapture::capabilities() const noexcept {
     // backend, not of the host it runs on.  A query must not answer
     // differently depending on where it is asked from.
     c.zero_copy = false;
-    c.dirty_rects = false;
+    c.dirty_rects = true;
     c.cursor_composited = true;
     c.region_selection = true;
     c.enumeration = true;

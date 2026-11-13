@@ -327,6 +327,40 @@ TEST(SyntheticCapture, AMovingDesktopReportsADirtyRect) {
     }
 }
 
+TEST(SyntheticCapture, TheDirtyRectFlagAgreesWithWhatTheFramesCarry) {
+    // The capability flag is what a host reads to decide whether it can
+    // rely on the dirty-rect metadata.  A flag that says "false" while
+    // the frames carry the metadata is not merely conservative — it is
+    // wrong, and it makes the *consumer* ignore metadata that is
+    // present and correct.
+    //
+    // The synthetic device is the reference implementation of the
+    // mechanism the platform backends are written against, so this test
+    // states the invariant every backend has to satisfy.
+    CaptureConfig cfg{};
+    cfg.format.width  = 320;
+    cfg.format.height = 240;
+    SyntheticCapture cap{cfg};
+    ASSERT_EQ(cap.open(), nimrtc::plugins::kOk);
+
+    const auto caps = cap.capabilities();
+    ASSERT_TRUE(caps.dirty_rects);
+
+    // The negotiated format must agree with the capability.
+    EXPECT_TRUE(cap.config().format.has_dirty_rects);
+
+    // And the frames must actually carry the metadata the flag promises.
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+
+    CaptureFrame f{};
+    ASSERT_EQ(cap.pop_frame(f), nimrtc::plugins::kOk);
+    // A *moving* desktop produced a real rect, not the "everything
+    // changed" fallback.
+    EXPECT_FALSE(f.dirty.full_frame);
+    EXPECT_FALSE(f.dirty.rects.empty());
+}
+
 TEST(SyntheticCapture, TheRegionSelectsTheFrameSize) {
     CaptureConfig cfg{};
     cfg.format.width  = 1920;

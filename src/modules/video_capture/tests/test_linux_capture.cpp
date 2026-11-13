@@ -93,8 +93,11 @@ TEST(X11Capture, TheCapabilitiesDescribeTheBackend) {
     // The pixels come back from the X server over a socket: not the
     // zero-copy path.
     EXPECT_FALSE(caps.zero_copy);
-    // X11 gives the client no damage information.
-    EXPECT_FALSE(caps.dirty_rects);
+    // The backend *delivers* per-frame dirty rectangles — it computes
+    // them with the portable pixel-diff, because X11 itself exposes no
+    // damage information to the client.  The flag has to agree with
+    // what the frames actually carry.
+    EXPECT_TRUE(caps.dirty_rects);
     // XGetImage does NOT include the pointer — the cursor layer's job.
     EXPECT_FALSE(caps.cursor_composited);
     // The region is cropped out of the grabbed image.
@@ -348,7 +351,9 @@ TEST(PortalCapture, TheCapabilitiesDescribeTheBackend) {
     const auto caps = dev.capabilities();
     EXPECT_EQ(caps.backend, "portal-capture");
     EXPECT_FALSE(caps.zero_copy);
-    EXPECT_FALSE(caps.dirty_rects);
+    // The changed region comes from the portable pixel-diff, so the
+    // frames do carry the metadata.
+    EXPECT_TRUE(caps.dirty_rects);
     // The portal *can* ask the compositor to draw the pointer, but it
     // is not guaranteed — so the cursor layer stays on.
     EXPECT_FALSE(caps.cursor_composited);

@@ -442,8 +442,10 @@ plugins::Status ScreenCaptureKitCapture::open() noexcept {
     // the zero-copy handle, and it is the hardware encoder's half (B10).
     cfg_.format.zero_copy = false;
     // ScreenCaptureKit hands over a whole surface every time; it has no
-    // per-frame damage information a client can read.
-    cfg_.format.has_dirty_rects = false;
+    // per-frame damage information a client can read.  The backend
+    // therefore *computes* the changed region from the portable
+    // pixel-diff, so the frames it delivers do carry the metadata.
+    cfg_.format.has_dirty_rects = true;
 
     // The description is for diagnostics: a display has no title, so
     // its geometry stands in for one; a window has a title.
@@ -676,7 +678,7 @@ ScreenCaptureKitCapture::supported_formats(
         f.fps    = d.max_fps;
         f.tag    = "bgra";
         f.zero_copy = false;
-        f.has_dirty_rects = false;
+        f.has_dirty_rects = true;
         out.push_back(std::move(f));
     }
     return out;
@@ -689,8 +691,10 @@ ScreenCaptureKitCapture::capabilities() const noexcept {
     // delivers CPU bytes, so the *seam's* path is not zero-copy; the
     // CVPixelBufferRef is the handle the hardware path (B10) consumes.
     c.zero_copy = false;
+    // The backend *delivers* per-frame dirty-rectangle metadata: the
+    // changed region comes from the portable pixel-diff, because
     // ScreenCaptureKit hands over a whole surface every time.
-    c.dirty_rects = false;
+    c.dirty_rects = true;
     // The OS composites the pointer into the frame.
     c.cursor_composited = true;
     // The backend crops a region out of the readback itself.

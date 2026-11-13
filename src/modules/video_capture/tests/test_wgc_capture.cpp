@@ -85,8 +85,9 @@ TEST(WgcCapture, TheCapabilitiesDescribeTheBackend) {
     // The frame arrives as a GPU texture, so the CPU path needs a
     // readback: this is *not* the zero-copy path.
     EXPECT_FALSE(caps.zero_copy);
-    // WGC does not report changed regions.
-    EXPECT_FALSE(caps.dirty_rects);
+    // The changed region comes from the portable pixel-diff, so the
+    // frames do carry the metadata.
+    EXPECT_TRUE(caps.dirty_rects);
     // This is the whole point of WGC: the OS composites the pointer
     // into the frame, so the cursor layer is not needed on this path.
     EXPECT_TRUE(caps.cursor_composited);
@@ -170,8 +171,8 @@ TEST(WgcCapture, TheDeviceEnumeratesDisplaysAndWindows) {
         ASSERT_FALSE(formats.empty());
         // The BGRA format is what the compositor delivers.
         EXPECT_EQ(formats[0].tag, "bgra");
-        // The compositor hands over a whole surface every time.
-        EXPECT_FALSE(formats[0].has_dirty_rects);
+        // The changed region comes from the portable pixel-diff.
+        EXPECT_TRUE(formats[0].has_dirty_rects);
     }
 }
 

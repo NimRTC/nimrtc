@@ -66,6 +66,14 @@ if(APPLE)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework CoreGraphics"
+        # The Objective-C runtime itself.  The backend defines an
+        # Objective-C class (`NimRTCSCKStreamOutput`), and a class
+        # definition needs the runtime's metadata tables -- the
+        # `objc_empty_cache` hook and the `NSObject` base class among
+        # them.  Without it the *compile* succeeds and the *link* fails
+        # with undefined `_OBJC_CLASS_$_NSObject` and
+        # `_OBJC_METACLASS_$_NimRTCSCKStreamOutput`.
+        "-lobjc"
         )
     message(STATUS "  ScreenCaptureKit  : enabled (macOS)")
 else()

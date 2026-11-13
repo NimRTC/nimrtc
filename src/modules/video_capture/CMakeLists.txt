@@ -23,6 +23,7 @@ add_library(nimrtc_video_capture STATIC
     src/synthetic_capture.cpp
     src/capture_source_adapter.cpp
     src/cursor_compositor.cpp
+    src/dirty_rect_diff.cpp
     )
 
 # Remote-desktop plan A3: the Windows display-capture backend.  The

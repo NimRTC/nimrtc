@@ -263,11 +263,11 @@ void NimRTCEngine::pump_deliver_frame(
 
     const plugins::Status rc = send_video(staged);
     if (rc != plugins::kOk) {
-        ++impl_->video_capture_dropped;
+        ++impl_->video_state.video_capture_dropped;
         return;
     }
     ++capture_pump_.pumped;
-    ++impl_->video_capture_frames_pumped;
+    ++impl_->video_state.video_capture_frames_pumped;
 }
 
 void NimRTCEngine::pump_video_capture() noexcept {
@@ -293,7 +293,7 @@ void NimRTCEngine::pump_video_capture() noexcept {
     const plugins::CaptureStats dev_stats = video_capture_->stats();
     if (dev_stats.device_errors > capture_pump_.seen_device_errors) {
         capture_pump_.seen_device_errors = dev_stats.device_errors;
-        ++impl_->video_capture_device_errors;
+        ++impl_->video_state.video_capture_device_errors;
         core::log::Logger::instance().warn(
             "engine: the video capture device reported an error; "
             "reopening it");
@@ -312,7 +312,7 @@ void NimRTCEngine::pump_video_capture() noexcept {
             return;
         }
         ++capture_pump_.restarts;
-        ++impl_->video_capture_restarts;
+        ++impl_->video_state.video_capture_restarts;
 
         // The device was reopened, so its counters restarted from zero.
         // The pump's baselines must follow, or the next delta would be
@@ -352,7 +352,7 @@ void NimRTCEngine::pump_video_capture() noexcept {
 
     const plugins::CaptureStats after = video_capture_->stats();
     if (after.frames_captured >= capture_pump_.seen_frames_captured) {
-        impl_->video_capture_frames +=
+        impl_->video_state.video_capture_frames +=
             after.frames_captured - capture_pump_.seen_frames_captured;
         capture_pump_.seen_frames_captured = after.frames_captured;
     } else {
@@ -362,14 +362,14 @@ void NimRTCEngine::pump_video_capture() noexcept {
         capture_pump_.seen_frames_captured = after.frames_captured;
     }
     if (after.frames_dropped >= capture_pump_.seen_frames_dropped) {
-        impl_->video_capture_dropped +=
+        impl_->video_state.video_capture_dropped +=
             after.frames_dropped - capture_pump_.seen_frames_dropped;
         capture_pump_.seen_frames_dropped = after.frames_dropped;
     } else {
         capture_pump_.seen_frames_dropped = after.frames_dropped;
     }
     if (after.bytes_copied >= capture_pump_.seen_bytes_copied) {
-        impl_->video_capture_bytes_copied +=
+        impl_->video_state.video_capture_bytes_copied +=
             after.bytes_copied - capture_pump_.seen_bytes_copied;
         capture_pump_.seen_bytes_copied = after.bytes_copied;
     } else {
@@ -388,7 +388,7 @@ void NimRTCEngine::pump_video_capture() noexcept {
         capture_pump_.width  = now.format.width;
         capture_pump_.height = now.format.height;
         capture_pump_.tag    = now.format.tag;
-        ++impl_->video_capture_format_changes;
+        ++impl_->video_state.video_capture_format_changes;
         core::log::Logger::instance().warn(
             "engine: the video capture device renegotiated its format "
             "(now " + std::to_string(now.format.width) + "x"

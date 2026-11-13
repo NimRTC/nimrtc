@@ -941,7 +941,9 @@ TEST_F(AssemblyTest, RemoteDesktopProfileDeclaresScreenContent) {
 
     // The control plane must preempt the video stream.
     EXPECT_GT(p->scheduler.control_weight, p->scheduler.video_weight);
-=======
+}
+
+// =============================================================================
 // 8. The transport bridge (architecture remediation plan §4.2 / D2)
 //
 // `assembly::TransportSection` is the assembly-layer shape; the transport

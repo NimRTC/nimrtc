@@ -228,11 +228,16 @@ void NimRTCEngine::init_video_capture() noexcept {
 void NimRTCEngine::shutdown_video_capture() noexcept {
     capture_pump_ = CapturePumpState{};
     if (video_capture_source_) {
+        // The adapter drives the device's open/close lifecycle, so
+        // closing the adapter closes the device with it.  Closing the
+        // device a second time here would report a spurious close to
+        // the plug-in.
         video_capture_source_->close();
         video_capture_source_.reset();
     }
     if (!video_capture_) return;
-    video_capture_->close();
+    // The device was closed by the adapter above (or was never opened);
+    // the engine only drops its own reference to it.
     video_capture_.reset();
 }
 

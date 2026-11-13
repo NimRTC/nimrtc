@@ -111,6 +111,7 @@ decoration, so the self-test runs in CI.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -136,6 +137,71 @@ MODULE_DIR_RE = re.compile(r"^src/modules/([a-z0-9_]+)$")
 
 # The registrar table — the source-level plugin registration mechanism.
 REGISTRAR_TABLE = Path("src/core/src/pal_default_registrars.cpp")
+
+# Directory names that never hold the project's own build definitions.
+#
+# `third_party`  — vendored code is not part of the module graph.
+# `build`, `out` — the conventional CMake build-output directory names.
+# `.git`         — git's internals.
+#
+# The *general* rule, though, is "a directory that contains a
+# `CMakeCache.txt` is a CMake **build tree**, not a source tree", and
+# that is what the walker below keys on.  A build tree's
+# `CMakeFiles/CMakeScratch/TryCompile-*/CMakeLists.txt` files are
+# transient: a concurrent build creates and deletes them while the
+# checker is walking, and the checker then dies with `FileNotFoundError`
+# on a file it had just listed.  Pruning the whole build tree removes
+# the race at the root instead of papering over it with a try/except.
+PRUNED_DIR_NAMES = frozenset({
+    ".git",
+    "build",
+    "out",
+    "third_party",
+    "node_modules",
+})
+
+
+def _iter_source_cmake_files(root: Path) -> list[Path]:
+    """Return every `CMakeLists.txt` that belongs to a *source* tree.
+
+    A directory that carries a `CMakeCache.txt` is a CMake **build
+    tree** — the output of a configure run, not a source directory.
+    Its `CMakeFiles/CMakeScratch/TryCompile-*/CMakeLists.txt` files are
+    transient: a concurrent build creates and deletes them while the
+    checker walks the tree, and the checker then dies with
+    `FileNotFoundError` on a file it had just listed.
+
+    Pruning the whole build tree removes the race at its root rather
+    than papering over it with a `try/except` around the read.
+    """
+    out: list[Path] = []
+    root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        # Prune in place so os.walk does not descend.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in PRUNED_DIR_NAMES
+            and not (here / d / "CMakeCache.txt").is_file()
+        ]
+        if "CMakeLists.txt" in filenames:
+            out.append(here / "CMakeLists.txt")
+    out.sort()
+    return out
+
+
+def _read_text(path: Path) -> str:
+    """Read a text file, tolerating a file that vanished mid-scan.
+
+    A concurrent build (or a `git checkout` / branch switch) can remove a
+    file between the moment the checker lists it and the moment it reads
+    it.  A guard that dies on a race is a guard that gets disabled, so
+    a missing file reads as empty and the checker moves on.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError):
+        return ""
 
 
 def _command_bodies(text: str, command: str) -> list[str]:
@@ -237,7 +303,7 @@ def parse_cmake_graph(root: Path) -> tuple[dict[str, Module], dict[str, set[str]
     # ---- module targets ---------------------------------------------------
     for mod in modules.values():
         cm = mod.directory / "CMakeLists.txt"
-        txt = cm.read_text(encoding="utf-8", errors="replace")
+        txt = _read_text(cm)
         for body in _command_bodies(txt, "add_library"):
             m = ADD_LIBRARY_RE.match(body)
             if m:
@@ -251,13 +317,17 @@ def parse_cmake_graph(root: Path) -> tuple[dict[str, Module], dict[str, set[str]
     # The consumers that matter are the ones inside the project's own
     # build files.  `src/third_party/` is excluded — vendored code is not
     # part of the module graph.
-    cmake_files = [
-        cm for cm in sorted(root.rglob("CMakeLists.txt"))
-        if "third_party" not in cm.relative_to(root).parts
-    ]
+    #
+    # The walk prunes CMake **build trees** (a directory that carries a
+    # `CMakeCache.txt` is an output tree, not a source tree).  Without the
+    # prune, the walk also picks up `CMakeFiles/CMakeScratch/
+    # TryCompile-*/CMakeLists.txt`, which are transient: a concurrent
+    # build creates and deletes them while the checker walks, and the
+    # checker then dies on a file it had just listed.
+    cmake_files = list(_iter_source_cmake_files(root))
 
     for cm in cmake_files:
-        txt = cm.read_text(encoding="utf-8", errors="replace")
+        txt = _read_text(cm)
         for body in _command_bodies(txt, "target_link_libraries"):
             consumer = _first_arg(body)
             if not consumer or consumer.startswith("${"):
@@ -307,7 +377,7 @@ def find_registrar_users(root: Path, modules: dict[str, Module]) -> None:
     ]
 
     for path in sources:
-        txt = path.read_text(encoding="utf-8", errors="replace")
+        txt = _read_text(path)
         if "register_default_plugins" not in txt:
             continue
         for name, mod in modules.items():

@@ -46,6 +46,8 @@
 #include <cstdint>
 #include <string>
 
+#include <nimrtc/video_sdp_attributes/video_sdp_attributes.hpp>
+
 namespace nimrtc::engine::detail {
 
 /** The video codec and payload type the SDP exchange settled on.
@@ -86,6 +88,25 @@ struct VideoNegotiationResult {
      *  Empty when the codec carries no format parameters, or when nothing
      *  was negotiated. */
     std::string fmtp;
+
+    /** The peer's `a=fmtp:` body, *parsed* by the `video_sdp_attributes`
+     *  module.
+     *
+     *  `fmtp_valid` says whether the parse succeeded; when it is false
+     *  the peer sent something the module could not read, and
+     *  `fmtp_parsed` holds the default-constructed value.  The engine
+     *  keeps the raw body in `fmtp` either way — a malformed parameter
+     *  list must not cost the peer its video track, because RFC 3264
+     *  §6.1 makes the answer carry what was offered, not what we could
+     *  parse.
+     *
+     *  The parsed form is what the *sender* side consults to honour the
+     *  peer's packetization mode (RFC 6184 §6): a peer that asked for
+     *  `packetization-mode=0` receives single-NAL units only. */
+    nimrtc::video_sdp_attributes::ParsedFmtp fmtp_parsed;
+
+    /** True when `fmtp_parsed` holds a successfully parsed value. */
+    bool fmtp_valid = false;
 };
 
 } // namespace nimrtc::engine::detail

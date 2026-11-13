@@ -20,7 +20,9 @@
  * Thread-safe: counters are `std::atomic`; the caller is responsible
  * for serialising calls to each sink instance.
  *
- * @note P1. Standalone module; not yet wired into the engine.
+ * @note P1. Wired into the engine (v1.2 remediation D2): the engine drives
+ *       this sink from its receive pipeline (frame received → decoded →
+ *       rendered → dropped) and from its send path (the encoder's QP).
  */
 
 #pragma once
@@ -86,6 +88,21 @@ struct NIMRTC_API_STABLE VideoStreamStats {
     std::uint64_t frames_rendered      = 0;
     std::uint64_t frames_dropped_jb    = 0;  // dropped at jitter buffer
     std::uint64_t frames_dropped_decoder = 0; // dropped by decoder
+    /** Frames lost because a reference frame was lost.
+     *
+     *  This is counted from the RTCP feedback: a PLI or a FIR the peer
+     *  sends is the peer saying "a reference frame of yours never
+     *  arrived, so I cannot decode what follows".  It is tallied
+     *  separately from `frames_dropped_decoder` because the two need
+     *  completely different fixes — a dependency loss is a network
+     *  problem, a decoder drop is a bitstream problem.
+     *
+     *  Note the direction: this counter describes the stream the sink
+     *  is attached to.  On the *inbound* sink it counts the key-frame
+     *  requests we send (the peer lost our picture); on the *outbound*
+     *  sink it counts the key-frame requests we receive (the peer lost
+     *  our picture). */
+    std::uint64_t frames_dropped_dependency = 0;
     std::uint64_t keyframes_received    = 0;
 
     // Keyframe timing

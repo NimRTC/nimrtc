@@ -123,6 +123,12 @@
 #include <nimrtc/plugins/base.hpp>  // plugins::Addr
 #include <nimrtc/plugins/scheduler.hpp>  // plugins::IScheduler + types
 
+// The C ABI.  Included here because the C++ entry points at the bottom of
+// this header are forwarders to it, and because `SchedulerHandle` is an
+// alias of the C ABI's `NimrtcSchedHandle`.  The C header is pure C11 and
+// has no C++ dependencies of its own.
+#include <nimrtc/sched/sched_c.h>
+
 // Re-export plugin types under nimrtc::sched:: for backwards-compatibility.
 namespace nimrtc::sched {
     using NIMRTC_API_STABLE Priority           = plugins::Priority;
@@ -357,20 +363,39 @@ private:
 };
 
 // =============================================================================
-// C ABI wrapper — opaque handle + C linkage for FFI consumers
+// The S-family entry points — the C++ spelling of the C ABI
 // =============================================================================
 //
-// These five entry points are the **S-family (per-stream) interface for C
-// hosts** — the embedded / FFI consumers who cannot use the C++ API.  They
-// are not legacy leftovers: the per-stream priority family is a supported
-// capability (see the scope note at the top of this header), and these
-// wrappers are how a C host reaches it.
+// These entry points are the **S-family (per-stream) interface** — the
+// one public capability that expresses "prioritise this stream over that
+// one".  They are not legacy leftovers: the per-stream priority family
+// is a supported capability (see the scope note at the top of this
+// header).
+//
+// ## Two spellings, one implementation
+//
+// The functions below use C++ types and live in `namespace nimrtc::sched`.
+// The **same** operations are also available through a genuine `extern "C"`
+// ABI in `<nimrtc/sched/sched_c.h>`, which a C host or an FFI binding can
+// actually include and link against.
+//
+// The C++ functions here are thin forwarders to the C ABI, so there is
+// exactly one implementation and the two spellings cannot drift apart.
+//
+// (The C ABI was *not* always real: the entry points used to be plain
+// C++ functions with C++ signatures, so the linker emitted C++-mangled
+// symbols and no C translation unit could name their parameter types.
+// A C program could neither include the header nor link the library.
+// See `docs/plan/architecture-remediation-plan.md` §4.4 / item D5.)
 //
 // `sched_select_next_packet()` reports the **real** stream id and the
 // **real** bucket priority — not placeholders.
 
-/** Opaque handle to a Scheduler instance for the C ABI. */
-struct NIMRTC_API_STABLE SchedulerHandle;
+/** Opaque handle to a Scheduler instance.
+ *
+ *  The same object the C ABI hands out as `NimrtcSchedHandle`; the alias
+ *  keeps the C++ spelling (and its type identity) unchanged. */
+using NIMRTC_API_STABLE SchedulerHandle = ::NimrtcSchedHandle;
 
 /** Allocate a new Scheduler and return an opaque handle.
  *  Pass nullptr for `config` to use defaults. */
@@ -380,25 +405,27 @@ sched_create(const plugins::SchedulerConfig* config) noexcept;
 /** Destroy a SchedulerHandle returned by sched_create(). */
 NIMRTC_API_STABLE void sched_destroy(SchedulerHandle* h) noexcept;
 
-/** C wrapper for set_stream_priority. */
+/** Set the priority bucket of a stream. */
 NIMRTC_API_STABLE void sched_set_stream_priority(SchedulerHandle* h,
                                std::uint32_t stream_id,
                                StreamPriority level) noexcept;
 
-/** C wrapper for get_stream_priority. Returns Normal if not found. */
+/** Return the priority bucket of a stream.  Returns Normal if not found. */
 [[nodiscard]] NIMRTC_API_STABLE StreamPriority
 sched_get_stream_priority(const SchedulerHandle* h,
                           std::uint32_t stream_id) noexcept;
 
-/** C wrapper for enqueue_for_stream_owned.
- *  Pass nullptr for `data` and `len=0` to indicate an empty payload. */
+/** Enqueue one packet for a stream.
+ *  Pass nullptr for `data` and `len=0` to indicate an empty payload.
+ *  Pass nullptr for `dst` to reuse the most recent destination. */
 NIMRTC_API_STABLE void sched_enqueue_stream_owned(SchedulerHandle* h,
                                std::uint32_t stream_id,
                                const std::uint8_t* data,
                                std::size_t len,
                                const plugins::Addr* dst) noexcept;
 
-/** C wrapper for select_next_packet.
+/** Drain up to `max_packets` packets from the highest non-empty stream
+ *  bucket.
  *  Pass nullptr for `cb` to drain without a callback.
  *  Returns the number of packets drained. */
 [[nodiscard]] NIMRTC_API_STABLE int

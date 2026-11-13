@@ -63,7 +63,7 @@ void NimRTCEngine::note_inbound_audio_packet(std::uint32_t ssrc,
                                               std::int64_t arrival_us) noexcept {
     if (ssrc == 0) return;
 
-    Impl::AudioRxState& rx = impl_->audio_rx;
+    detail::AudioState::AudioRxState& rx = impl_->audio_state.audio_rx;
 
     // A different source is a different sequence space: everything we
     // counted so far belongs to the old stream (RFC 3550 A.1 — the
@@ -160,16 +160,16 @@ void NimRTCEngine::note_inbound_audio_packet(std::uint32_t ssrc,
 void NimRTCEngine::maybe_send_receiver_report() noexcept {
     if (!ice_t_ || !is_ice_connected()) return;
 
-    Impl::AudioRxState& rx = impl_->audio_rx;
+    detail::AudioState::AudioRxState& rx = impl_->audio_state.audio_rx;
     // No inbound audio yet: there is nothing to report about.
     if (rx.ssrc == 0) return;
 
     const auto now = core::SteadyClock::now();
     const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->rr_last_sent)
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->audio_state.rr_last_sent)
             .count();
     if (elapsed_ms < kReceiverReportPeriodMs) return;
-    impl_->rr_last_sent = now;
+    impl_->audio_state.rr_last_sent = now;
 
     // ---- The report block (RFC 3550 §6.4.1) ---------------------------
     //
@@ -230,15 +230,15 @@ void NimRTCEngine::maybe_send_receiver_report() noexcept {
     //
     // Our own RTCP SSRC identifies us as the reporter (RFC 3550 §6.1);
     // it is distinct from the media SSRCs, which identify the streams.
-    if (impl_->rtcp_sender_ssrc_ == 0) {
+    if (impl_->audio_state.rtcp_sender_ssrc_ == 0) {
         std::random_device rd;
         std::mt19937_64 mt(rd());
-        impl_->rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
-        if (impl_->rtcp_sender_ssrc_ == 0) impl_->rtcp_sender_ssrc_ = 1;
+        impl_->audio_state.rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
+        if (impl_->audio_state.rtcp_sender_ssrc_ == 0) impl_->audio_state.rtcp_sender_ssrc_ = 1;
     }
 
     rtp::RrBuilder rr;
-    rr.set_ssrc(impl_->rtcp_sender_ssrc_);
+    rr.set_ssrc(impl_->audio_state.rtcp_sender_ssrc_);
     rr.add_report_block(rb);
     const core::ByteBuffer rr_bytes = rr.build();
     if (rr_bytes.empty()) return;
@@ -249,7 +249,7 @@ void NimRTCEngine::maybe_send_receiver_report() noexcept {
     core::ByteSpan out(rr_bytes.data(), rr_bytes.size());
     std::vector<std::uint8_t> enc;
     if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(impl_->rtcp_sender_ssrc_,
+        auto* sess = impl_->srtp->get_session(impl_->audio_state.rtcp_sender_ssrc_,
                                               /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.
         auto r = sess->protect_rtcp(out);

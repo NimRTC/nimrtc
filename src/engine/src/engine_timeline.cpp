@@ -27,7 +27,7 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     // No audio has gone out yet — an SR with a zero RTP timestamp and a
     // zero packet count describes no media position, and would poison the
     // peer's extrapolation anchor. Wait for the first frame instead.
-    if (impl_->audio_packet_count == 0) return;
+    if (impl_->audio_state.audio_packet_count == 0) return;
 
     // RFC 3550 §6.4.1: the SR pairs the sender's wall-clock instant with
     // the RTP timestamp of the media it describes.
@@ -49,17 +49,17 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     // Falling back to "now" would only be correct if no packet had been
     // sent yet — but that case is already excluded above (a report with
     // a zero packet count describes no media position).
-    const std::int64_t send_unix_us = impl_->audio_last_send_unix_us;
+    const std::int64_t send_unix_us = impl_->audio_state.audio_last_send_unix_us;
     if (send_unix_us <= 0) return;
     const rtp::Ntp64 sr_ntp = rtp::ntp64_from(
         std::chrono::system_clock::time_point{
             std::chrono::microseconds{send_unix_us}});
     rtp::SrBuilder sr;
-    sr.set_ssrc(impl_->audio_ssrc)
+    sr.set_ssrc(impl_->audio_state.audio_ssrc)
       .set_ntp_timestamp(sr_ntp.value)
-      .set_rtp_timestamp(impl_->audio_rtp_timestamp)
-      .set_sender_packet_count(impl_->audio_packet_count)
-      .set_sender_octet_count(impl_->audio_octet_count);
+      .set_rtp_timestamp(impl_->audio_state.audio_rtp_timestamp)
+      .set_sender_packet_count(impl_->audio_state.audio_packet_count)
+      .set_sender_octet_count(impl_->audio_state.audio_octet_count);
     const core::ByteBuffer sr_bytes = sr.build();
     if (sr_bytes.empty()) return;
 
@@ -70,7 +70,7 @@ void NimRTCEngine::maybe_send_sender_report() noexcept {
     core::ByteSpan out(sr_bytes.data(), sr_bytes.size());
     std::vector<std::uint8_t> enc;
     if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
+        auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                               /*outgoing=*/true);
         if (!sess) return;   // SRTP installed but no keying yet — skip.
         auto r = sess->protect_rtcp(out);
@@ -111,7 +111,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // sending direction, so there is no element to look for. Walking the
     // block to discover that on every packet would be wasted work, so
     // skip straight out.
-    const std::uint16_t ext_id = impl_->remote_abs_send_time_id;
+    const std::uint16_t ext_id = impl_->timeline.remote_abs_send_time_id;
     if (ext_id == 0 || !pv.extension.has_value()) {
         return;
     }
@@ -141,7 +141,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // derived from the monotonic one through the origin sampled at
     // open(), so the two never disagree by more than the sampling jitter.
     const std::int64_t steady_us = detail::steady_now_us();
-    const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
+    const std::int64_t unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
 
     // The 7-argument overload records the (rtp_ts, ast) observation itself
     // and refines the SR-based estimate per ADR-017 §"Decision 2". The
@@ -159,7 +159,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // does at open() — so the value is captured and published rather than
     // discarded.
     std::int64_t skew_us = 0;
-    auto cap = impl_->sr_tracker.capture_ts_us_for(
+    auto cap = impl_->timeline.sr_tracker.capture_ts_us_for(
         pv.ssrc, pv.timestamp, ast24,
         /*has_abs_send_time=*/true,
         /*clock_rate_hz=*/0,
@@ -169,12 +169,12 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
         return;  // No SR for this SSRC yet, or the packet predates it.
     }
 
-    impl_->capture_ts_us_by_ssrc[pv.ssrc] = *cap;
-    impl_->arrival_us_by_ssrc[pv.ssrc]    = unix_us;
-    impl_->skew_us_by_ssrc[pv.ssrc]       = skew_us;
-    impl_->last_capture_us                = *cap;
-    impl_->last_arrival_us                = unix_us;
-    impl_->last_skew_us                   = skew_us;
+    impl_->timeline.capture_ts_us_by_ssrc[pv.ssrc] = *cap;
+    impl_->timeline.arrival_us_by_ssrc[pv.ssrc]    = unix_us;
+    impl_->timeline.skew_us_by_ssrc[pv.ssrc]       = skew_us;
+    impl_->timeline.last_capture_us                = *cap;
+    impl_->timeline.last_arrival_us                = unix_us;
+    impl_->timeline.last_skew_us                   = skew_us;
 }
 
 
@@ -215,13 +215,13 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             // number is only the fallback for a host that never
             // negotiated.
             const std::uint8_t negotiated_vpt =
-                impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+                impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
             const std::uint8_t local_video_pt =
-                impl_->video_payload_type != 0
-                    ? impl_->video_payload_type
+                impl_->video_state.video_payload_type != 0
+                    ? impl_->video_state.video_payload_type
                     : config_.video_receiver_tuning.payload_type;
-            auto rit = impl_->remote_clock_rate_hz.find(pv.payload_type);
-            if (rit != impl_->remote_clock_rate_hz.end()) {
+            auto rit = impl_->timeline.remote_clock_rate_hz.find(pv.payload_type);
+            if (rit != impl_->timeline.remote_clock_rate_hz.end()) {
                 clock_rate = rit->second;
             } else if (pv.payload_type == local_video_pt ||
                        (negotiated_vpt != 0 && pv.payload_type == negotiated_vpt)) {
@@ -231,8 +231,8 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             }
         }
         if (clock_rate != 0 &&
-            impl_->clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
-            impl_->sr_tracker.set_ssrc_clock_rate(pv.ssrc, clock_rate);
+            impl_->timeline.clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
+            impl_->timeline.sr_tracker.set_ssrc_clock_rate(pv.ssrc, clock_rate);
         }
 
         // The abs-send-time refinement only applies when the peer actually
@@ -264,7 +264,7 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // stream: RFC 4733 §2.1 puts the event packets in the audio
     // stream's sequence space, so skipping them in the bookkeeping
     // would report the key presses as lost audio.
-    if (impl_->pt_routing_active && negotiated_dtmf_pt_ != 0 &&
+    if (impl_->audio_state.pt_routing_active && negotiated_dtmf_pt_ != 0 &&
         pv.payload_type == negotiated_dtmf_pt_) {
         const auto dtmf_recv_ts_us = plugins::TimestampUs{
             static_cast<std::int64_t>(
@@ -293,9 +293,9 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     bool route_to_video = false;
     bool route_to_audio = false;
 
-    if (impl_->pt_routing_active) {
-        route_to_audio = impl_->negotiated_audio_pt != 0 &&
-                         pv.payload_type == impl_->negotiated_audio_pt;
+    if (impl_->audio_state.pt_routing_active) {
+        route_to_audio = impl_->audio_state.negotiated_audio_pt != 0 &&
+                         pv.payload_type == impl_->audio_state.negotiated_audio_pt;
         // Video: only the *negotiated* payload type may reach the video
         // pipeline.  The old rule — "any payload type the peer declared
         // on its video m-line" — let a peer send VP8 on a payload type
@@ -304,19 +304,19 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // applies, so a host that drives the engine without SDP is
         // unaffected.
         const std::uint8_t negotiated_vpt =
-            impl_->negotiated_video_pt.load(std::memory_order_relaxed);
-        route_to_video = video_receiver_ && !impl_->video_rx_disabled &&
+            impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
+        route_to_video = video_receiver_ && !impl_->video_state.video_rx_disabled &&
                          (negotiated_vpt != 0
                               ? pv.payload_type == negotiated_vpt
-                              : impl_->video_pt_routes.count(pv.payload_type) > 0);
+                              : impl_->video_state.video_pt_routes.count(pv.payload_type) > 0);
         if (!route_to_audio && !route_to_video) {
-            ++impl_->audio_pt_unknown_count;
+            ++impl_->audio_state.audio_pt_unknown_count;
             // Spec Part D: per-packet errors are counted but not
             // reported individually — the first occurrence and every
             // 50th one are.  Reporting each drop would flood the host
             // when a peer keeps sending a stream we never negotiated.
-            if (impl_->audio_pt_unknown_count == 1 ||
-                impl_->audio_pt_unknown_count %
+            if (impl_->audio_state.audio_pt_unknown_count == 1 ||
+                impl_->audio_state.audio_pt_unknown_count %
                     detail::kAudioPayloadTypeReportInterval == 0) {
                 if (on_error_) {
                     on_error_(core::kAudioPayloadTypeUnknown,
@@ -329,10 +329,10 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         }
     } else {
         const std::uint8_t negotiated_vpt =
-            impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+            impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
         const std::uint8_t local_video_pt =
-            impl_->video_payload_type != 0
-                ? impl_->video_payload_type
+            impl_->video_state.video_payload_type != 0
+                ? impl_->video_state.video_payload_type
                 : config_.video_receiver_tuning.payload_type;
         route_to_video = video_receiver_ &&
                          (pv.payload_type == local_video_pt ||
@@ -345,7 +345,7 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
         // Remember the peer's video SSRC: the NACK / PLI we send must
         // name the media source it is about (RFC 4585 §6.2.1).  The peer
         // picks its own SSRC, so it can only be learned from the wire.
-        impl_->remote_video_ssrc_ = pv.ssrc;
+        impl_->video_state.remote_video_ssrc_ = pv.ssrc;
 
         plugins::VideoRtpPacket vp;
         vp.ssrc          = pv.ssrc;
@@ -377,13 +377,13 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
     // path has no decoding at all").  What the host receives now is the
     // *decoded* signal, which is also what the 3A render reference must
     // be (spec A-10).
-    if (!audio_receiver_ || impl_->audio_rx_disabled) {
+    if (!audio_receiver_ || impl_->audio_state.audio_rx_disabled) {
         // The audio track is off: either the host disabled it
         // (`audio_receiver_name == ""`), the negotiation found nothing
         // decodable, or the pipeline could not be created (a hard error
         // that was already reported through `on_error_`).  The packets
         // are counted and dropped — they are never decoded.
-        ++impl_->audio_rx_dropped_packets;
+        ++impl_->audio_state.audio_rx_dropped_packets;
         return;
     }
 
@@ -420,41 +420,22 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 
 void NimRTCEngine::record_video_ref_frame(std::uint64_t ref_frame_id,
                                           std::int64_t capture_ts_us) noexcept {
-    bool found = false;
-    Impl::RefFrameSlot* slot = impl_->ref_frame_find(ref_frame_id, found);
-    if (found && slot) {
-        // Idempotent refresh: last-writer-wins, order unchanged.
-        slot->capture_ts_us = capture_ts_us;
-        return;
-    }
-
-    // The registry is bounded: at most `kRefFrameMapCap` live ids.  When
-    // the ring is at capacity the oldest id falls out, so the newest one
-    // can be recorded.
-    if (impl_->ref_frame_order_count >= Impl::kRefFrameMapCap) {
-        const std::uint64_t oldest = impl_->ref_frame_oldest();
-        impl_->ref_frame_drop_oldest();
-        impl_->ref_frame_erase(oldest);
-        // The probe path changed (a slot is free again), so look the
-        // insertion slot up again — the old pointer may be stale.
-        slot = impl_->ref_frame_find(ref_frame_id, found);
-    }
-    if (!slot) return;   // the table is full — nothing we can do
-
-    slot->id = ref_frame_id;
-    slot->capture_ts_us = capture_ts_us;
-    impl_->ref_frame_push(ref_frame_id);
+    // The table owns the eviction policy: it is bounded, so when the
+    // registry is full the oldest id falls out to make room for the
+    // newest one.  Recording an id that is already present refreshes it
+    // in place (last-writer-wins, insertion order unchanged).
+    impl_->video_state.ref_frames.record(ref_frame_id, capture_ts_us);
 }
 
 
 std::optional<std::int64_t> NimRTCEngine::ref_frame_to_capture_ts(
    std::uint64_t ref_frame_id) const noexcept {
     if (impl_ == nullptr) return std::nullopt;
-    bool found = false;
-    const Impl::RefFrameSlot* slot =
-        impl_->ref_frame_find(ref_frame_id, found);
-    if (!found || !slot) return std::nullopt;
-    return slot->capture_ts_us;
+    std::int64_t capture_ts_us = 0;
+    if (!impl_->video_state.ref_frames.lookup(ref_frame_id, capture_ts_us)) {
+        return std::nullopt;
+    }
+    return capture_ts_us;
 }
 
 
@@ -465,18 +446,7 @@ std::optional<std::uint64_t> NimRTCEngine::capture_ts_to_ref_frame(
     // several ids resolved to the *smallest* id.  The table is
     // unordered, so the smallest match is selected explicitly to keep
     // the observable behaviour identical.
-    std::uint64_t best = 0;
-    bool found = false;
-    for (const Impl::RefFrameSlot& slot : impl_->ref_frame_table) {
-        if (slot.id == Impl::kRefFrameEmptyId) continue;
-        if (slot.capture_ts_us != capture_ts_us) continue;
-        if (!found || slot.id < best) {
-            best = slot.id;
-            found = true;
-        }
-    }
-    if (!found) return std::nullopt;
-    return best;
+    return impl_->video_state.ref_frames.find_smallest_with_timestamp(capture_ts_us);
 }
 
 
@@ -518,24 +488,24 @@ std::optional<std::int64_t> NimRTCEngine::data_message_frame_age_us(
 // -----------------------------------------------------------------------------
 
 std::uint16_t NimRTCEngine::abs_send_time_ext_id() const noexcept {
-    return impl_->local_abs_send_time_id;
+    return impl_->timeline.local_abs_send_time_id;
 }
 
 
 std::uint16_t NimRTCEngine::remote_abs_send_time_ext_id() const noexcept {
-    return impl_->remote_abs_send_time_id;
+    return impl_->timeline.remote_abs_send_time_id;
 }
 
 
 std::optional<std::int64_t> NimRTCEngine::last_capture_ts_us() const noexcept {
-    return impl_->last_capture_us;
+    return impl_->timeline.last_capture_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept {
-    auto it = impl_->capture_ts_us_by_ssrc.find(ssrc);
-    if (it != impl_->capture_ts_us_by_ssrc.end()) {
+    auto it = impl_->timeline.capture_ts_us_by_ssrc.find(ssrc);
+    if (it != impl_->timeline.capture_ts_us_by_ssrc.end()) {
         return it->second;
     }
     return std::nullopt;
@@ -543,7 +513,7 @@ NimRTCEngine::capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept {
 
 
 std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept {
-    if (!impl_->last_capture_us || !impl_->last_arrival_us) {
+    if (!impl_->timeline.last_capture_us || !impl_->timeline.last_arrival_us) {
         return std::nullopt;
     }
     // arrival − capture, i.e. elapsed time between the sender's capture
@@ -555,20 +525,20 @@ std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept
     // The previous order (capture − arrival) reported the negation, so a
     // 4 s transit came back as −4 s — a number no consumer of a latency
     // metric can act on.
-    return *impl_->last_arrival_us - *impl_->last_capture_us;
+    return *impl_->timeline.last_arrival_us - *impl_->timeline.last_capture_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::last_sender_recv_skew_us() const noexcept {
-    return impl_->last_skew_us;
+    return impl_->timeline.last_skew_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::sender_recv_skew_us_for_ssrc(std::uint32_t ssrc) const noexcept {
-    auto it = impl_->skew_us_by_ssrc.find(ssrc);
-    if (it != impl_->skew_us_by_ssrc.end()) {
+    auto it = impl_->timeline.skew_us_by_ssrc.find(ssrc);
+    if (it != impl_->timeline.skew_us_by_ssrc.end()) {
         return it->second;
     }
     return std::nullopt;

@@ -16,7 +16,7 @@
  * class MyDecoder : public nimrtc::h264::Decoder { ... };
  * static nimrtc::plugins::SimpleVideoCodecFactory<MyCodec> factory{
  *     "h264_hw", "My HW H.264 codec"};
- * NIMRTC_REGISTER_VIDEO_CODEC("h264_hw", &factory);
+ * NIMRTC_REGISTER_VIDEO_CODEC(h264_hw, &factory);
  * @endcode
  */
 

@@ -12,14 +12,25 @@
  *     mean value (last_keyframe_ts_us is `std::atomic<int64_t>`). EMA updates
  *     are rare (one per keyframe) so even if the platform emulates
  *     atomic<double> with a lock, contention is negligible.
- *   - The bitrate sliding window is a small `std::deque` guarded by a mutex.
- *     Each `on_frame_received` appends one entry; `tick()` sweeps old entries
- *     and computes the EMA. The critical section is short (push / scan /
- *     pop_front), and tick is called at ~1 Hz so contention is minimal.
+ *   - The bitrate sliding window is a fixed-size **ring buffer** guarded by
+ *     a mutex.  Each `on_frame_received` appends one entry; `tick()` sweeps
+ *     old entries and computes the EMA.  The critical section is short
+ *     (push / scan / pop_front), and tick is called at ~1 Hz so contention
+ *     is minimal.
+ *
+ *     The window is a ring buffer rather than a `std::deque` because the
+ *     engine drives this sink from the **send** path (`send_video()`), and
+ *     the hot-path allocation gate (`hotpath_zero_allocs`) requires
+ *     `send_video()` to perform *zero* heap allocations per call.  A
+ *     `std::deque` allocates on every `push_back` (MSVC's deque grows one
+ *     element per block), so it put one allocation per frame back on the
+ *     hot path.  A ring buffer over a fixed `std::array` allocates once,
+ *     when the sink is created.
  *   - The freeze detector tracks last-rendered timestamp and last-tick
  *     counters in atomics. No mutex is needed for freeze state.
  *
- * @note P1. Standalone module; not yet wired into the engine.
+ * @note P1. Wired into the engine (v1.2 remediation D2): the engine drives
+ *       this sink from its receive pipeline and its send path.
  */
 
 #include <nimrtc/video_stats/video_stats.hpp>
@@ -27,8 +38,8 @@
 #include <nimrtc/core/log.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 
@@ -45,6 +56,74 @@ namespace {
 struct BitrateSample {
     std::int64_t  capture_ts_us = 0;
     std::uint32_t bytes         = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The bitrate sliding window — a fixed-size ring buffer.
+//
+// Why a ring buffer and not a `std::deque`:
+//
+//   The engine drives this sink from the *send* path (`send_video()`), and
+//   the hot-path allocation gate (`hotpath_zero_allocs`) requires
+//   `send_video()` to perform **zero** heap allocations per call.  A
+//   `std::deque` allocates on every `push_back` — MSVC's deque grows one
+//   element per block, so a 300-frame run allocated 306 times — which put
+//   one allocation per frame straight back onto the hot path.
+//
+//   A ring buffer over a fixed `std::array` allocates exactly once, when
+//   the sink is created, and never again.
+//
+// The capacity is chosen so the window can hold a full second of frames at
+// a comfortable frame rate.  1200 samples covers 40 fps for 30 seconds —
+// far more than the 1 s window needs — so the oldest entry is only ever
+// overwritten by a *newer* one, never by a stale one.
+//
+// Overflow policy: when the ring is full the *oldest* sample is dropped
+// (the newest wins).  A dropped sample makes the bitrate estimate
+// slightly low, which is the safe direction: it under-reports the load
+// rather than over-reports it.
+// ---------------------------------------------------------------------------
+class BitrateWindow {
+public:
+    void push(std::int64_t capture_ts_us, std::uint32_t bytes) noexcept {
+        slots_[head_] = BitrateSample{capture_ts_us, bytes};
+        head_ = (head_ + 1) % kCapacity;
+        if (count_ < kCapacity) {
+            ++count_;
+        } else {
+            // The ring is full: the slot we just wrote replaced the
+            // oldest sample, so the tail moves forward with the head.
+            tail_ = (tail_ + 1) % kCapacity;
+        }
+    }
+
+    /** Drop every sample older than `cutoff`.  Returns the total number of
+     *  bytes still inside the window. */
+    std::uint64_t prune_and_sum(std::int64_t cutoff) noexcept {
+        while (count_ > 0 && slots_[tail_].capture_ts_us < cutoff) {
+            tail_ = (tail_ + 1) % kCapacity;
+            --count_;
+        }
+        std::uint64_t total = 0;
+        for (std::size_t i = 0; i < count_; ++i) {
+            total += slots_[(tail_ + i) % kCapacity].bytes;
+        }
+        return total;
+    }
+
+    void clear() noexcept {
+        head_ = 0;
+        tail_ = 0;
+        count_ = 0;
+    }
+
+private:
+    static constexpr std::size_t kCapacity = 1200;
+
+    std::array<BitrateSample, kCapacity> slots_{};
+    std::size_t head_ = 0;  // next slot to write
+    std::size_t tail_ = 0;  // oldest live sample
+    std::size_t count_ = 0; // live samples
 };
 
 // ---------------------------------------------------------------------------
@@ -84,8 +163,7 @@ public:
         // Push into the bitrate sliding window.
         if (capture_ts_us >= 0 && frame_size_bytes > 0) {
             std::lock_guard<std::mutex> lk(bitrate_mutex_);
-            bitrate_window_.push_back(
-                BitrateSample{capture_ts_us, frame_size_bytes});
+            bitrate_window_.push(capture_ts_us, frame_size_bytes);
         }
 
         // QP sample (only if codec supplied a valid one).
@@ -161,11 +239,15 @@ public:
                                                   std::memory_order_relaxed);
                 break;
             case DropReason::kDependencyLost:
-                // Dependency-loss drops are not tallied separately from
-                // decoder-error drops in the spec; count them as decoder
-                // drops because that's where the upstream reports them.
+                // A dependency loss is *also* a decoder-side drop (the
+                // decoder cannot decode a frame whose reference frame
+                // is missing), so both counters move — but they are
+                // tallied separately so a host can tell "corrupt
+                // bitstream" from "lost reference frame".
                 frames_dropped_decoder_.fetch_add(1,
                                                   std::memory_order_relaxed);
+                frames_dropped_dependency_.fetch_add(1,
+                                                      std::memory_order_relaxed);
                 break;
         }
     }
@@ -174,11 +256,27 @@ public:
     // on_rtcp_feedback
     // -----------------------------------------------------------------------
     void on_rtcp_feedback(RtcpFeedbackKind kind) override {
-        // The base counters (PLI/FIR/NACK/REMB) are tracked only via the
-        // public VideoStreamStats fields we already expose: dropped-frames
-        // tally captures NACK-induced drops via on_frame_dropped. For
-        // observability of raw feedback events, we just log at debug level.
-        (void)kind;
+        switch (kind) {
+            case RtcpFeedbackKind::kPLI:
+            case RtcpFeedbackKind::kFIR:
+                // A key-frame request is the peer saying "I lost picture
+                // data".  That is a *dependency loss* on the stream the
+                // feedback is about: the peer cannot decode what follows
+                // because its reference frame is gone.  It is tallied
+                // separately from the decoder drops because the two need
+                // different fixes — a dependency loss is a network
+                // problem, a decoder drop is a bitstream problem.
+                frames_dropped_dependency_.fetch_add(1,
+                                                      std::memory_order_relaxed);
+                break;
+            case RtcpFeedbackKind::kNACK:
+            case RtcpFeedbackKind::kREMB:
+                // A NACK is a *packet*-level retransmission request: some
+                // packets were damaged on the wire.  It says nothing about
+                // a whole frame being lost, so it is not a frame drop.
+                break;
+        }
+        // For observability of raw feedback events we log at debug level.
         nimrtc::core::log::debug(
             "video_stats: rtcp feedback event received");
     }
@@ -243,15 +341,7 @@ public:
             const std::int64_t cutoff =
                 static_cast<std::int64_t>(now_us)
                 - static_cast<std::int64_t>(window_us);
-            while (!bitrate_window_.empty()
-                   && bitrate_window_.front().capture_ts_us < cutoff) {
-                bitrate_window_.pop_front();
-            }
-            std::uint64_t total = 0;
-            for (const auto& s : bitrate_window_) {
-                total += s.bytes;
-            }
-            return total;
+            return bitrate_window_.prune_and_sum(cutoff);
         }();
 
         // Instantaneous bps over the window. Avoid divide-by-zero when
@@ -295,6 +385,8 @@ public:
         s.frames_dropped_jb      = frames_dropped_jb_.load(
             std::memory_order_relaxed);
         s.frames_dropped_decoder = frames_dropped_decoder_.load(
+            std::memory_order_relaxed);
+        s.frames_dropped_dependency = frames_dropped_dependency_.load(
             std::memory_order_relaxed);
         s.keyframes_received     = keyframes_received_.load(
             std::memory_order_relaxed);
@@ -347,6 +439,7 @@ public:
         frames_rendered_.store(0, std::memory_order_relaxed);
         frames_dropped_jb_.store(0, std::memory_order_relaxed);
         frames_dropped_decoder_.store(0, std::memory_order_relaxed);
+        frames_dropped_dependency_.store(0, std::memory_order_relaxed);
         keyframes_received_.store(0, std::memory_order_relaxed);
         bytes_received_.store(0, std::memory_order_relaxed);
         qp_sum_.store(0, std::memory_order_relaxed);
@@ -443,6 +536,7 @@ private:
     std::atomic<std::uint64_t> frames_rendered_       {0};
     std::atomic<std::uint64_t> frames_dropped_jb_     {0};
     std::atomic<std::uint64_t> frames_dropped_decoder_{0};
+    std::atomic<std::uint64_t> frames_dropped_dependency_{0};
     std::atomic<std::uint64_t> keyframes_received_    {0};
     std::atomic<std::uint64_t> bytes_received_        {0};
     std::atomic<std::uint64_t> qp_sum_                {0};
@@ -465,8 +559,9 @@ private:
     std::atomic<std::uint64_t> rendered_at_last_tick_    {0};
 
     // Bitrate sliding window (small critical section per push / per tick).
+    // A fixed-size ring buffer, so the hot path never allocates.
     mutable std::mutex         bitrate_mutex_;
-    std::deque<BitrateSample>  bitrate_window_;
+    BitrateWindow              bitrate_window_;
 };
 
 } // namespace

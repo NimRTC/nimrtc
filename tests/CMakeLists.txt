@@ -1082,6 +1082,67 @@ nimrtc_add_engine_video_feedback_test(test_engine_video_feedback
                                        test_engine_video_feedback.cpp)
 endif()
 
+# ----------------------------------------------------------------------------
+# Phase 4.2 / D2 — the engine ↔ `video_stats` module wiring.
+#
+# The module owns the per-stream video quality counters (freeze detection,
+# QP accumulation, bitrate EMA, drop attribution).  This target covers the
+# *engine* half: the inbound path (received → decoded → rendered), the
+# outbound path (the encoder's output, where the QP lands) and the drop
+# attribution (a PLI from the peer is a dependency loss on OUR transmit
+# stream, not on the inbound one).
+#
+# The module itself is optional (`NIMRTC_MODULE_VIDEO_STATS`); the engine
+# compiles without it and simply reports zero quality counters, so the
+# test is gated on the same option.
+# ----------------------------------------------------------------------------
+function(nimrtc_add_engine_video_stats_test name source)
+    add_executable(${name} ${source})
+    if(WIN32)
+        target_link_libraries(${name} PRIVATE ws2_32)
+    endif()
+    target_link_libraries(${name} PRIVATE
+        nimrtc::engine
+        nimrtc::core
+        nimrtc::plugins
+        nimrtc::video_source
+        nimrtc::video_sink
+        nimrtc::video_pipeline
+        nimrtc::h264
+        # PAL Slice 2 (v0.10.2): the unified registrar table references
+        # `nimrtc::datachannel::register_default_plugins`, so the symbol
+        # must resolve here too (same rationale as the function above).
+        nimrtc::datachannel
+        GTest::gtest_main)
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/engine/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
+    endif()
+    nimrtc_apply_options(${name} LENIENT)
+    add_test(NAME ${name}
+        COMMAND $<TARGET_FILE:${name}>)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 30)
+    if(COMMAND gtest_discover_tests)
+        gtest_discover_tests(${name}
+            PROPERTIES TIMEOUT 30
+            DISCOVERY_TIMEOUT 10)
+    endif()
+    nimrtc_copy_wolfssl_certs(${name})
+endfunction()
+
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND
+   NIMRTC_MODULE_VIDEO_PIPELINE AND NIMRTC_MODULE_VIDEO_STATS)
+nimrtc_add_engine_video_stats_test(test_engine_video_stats
+                                    test_engine_video_stats.cpp)
+endif()
+
 # R3-Batch validation: video codec pipeline — encode/decode round-trip.
 function(nimrtc_add_engine_codec_test name source)
     add_executable(${name} ${source})
@@ -1258,6 +1319,87 @@ endif()
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
 # ----------------------------------------------------------------------------
+# Architecture-remediation Phase 4.2 / D2 — the `assembly` disposition.
+#
+# The `assembly` module's Profile carries a `transport` section (strategy
+# id + per-instance media p99 budget).  This test walks the whole chain
+# that the D2 change establishes:
+#
+#   Profile.transport ──(assembly::to_transport_input)──▶ ProfileTransportInput
+#            └────────▶ EngineConfig::transport_strategy_name
+#            └────────▶ EngineConfig::transport_media_max_p99_ms
+#                              │
+#                              ▼
+#              transport::requirements_from_profile_input()
+#                              │
+#                              ▼
+#              TransportRequirements::max_p99_ms
+#
+# It is the only place where the assembly module, the transport module
+# and the engine meet — the unit-level halves live next to their owners
+# (`src/modules/assembly/tests/test_assembly.cpp` and
+# `src/modules/transport/tests/test_transport_strategy.cpp`).
+#
+# `nimrtc::assembly` is linked here (and only here) because it is the
+# host-application-facing module: it is not part of the engine's own
+# composition, which is why the engine never includes its headers
+# (Layout Invariant 4).
+# ----------------------------------------------------------------------------
+add_executable(test_engine_transport_profile test_engine_transport_profile.cpp)
+if(WIN32)
+    target_link_libraries(test_engine_transport_profile PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_engine_transport_profile PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_engine_transport_profile PRIVATE atomic)
+endif()
+target_link_libraries(test_engine_transport_profile PRIVATE
+    nimrtc::engine
+    # `nimrtc::assembly_engine` carries the Profile → EngineConfig bridge
+    # (`engine_bridge.hpp`) and the transport-side adapter
+    # (`transport_bridge.hpp`) — the two headers this test includes.
+    nimrtc::assembly_engine
+    nimrtc::core
+    nimrtc::plugins
+    # The engine's open() → register_all_default_plugins() chain walks
+    # the unified kDefaultRegistrars[] table, so every module that owns
+    # a registrar entry must be linked (same rationale as
+    # `nimrtc_add_engine_test`).
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::transport
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    GTest::gtest_main)
+target_include_directories(test_engine_transport_profile PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/include")
+if(WIN32)
+    target_compile_definitions(test_engine_transport_profile PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_engine_transport_profile PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_engine_transport_profile LENIENT)
+add_test(NAME test_engine_transport_profile
+    COMMAND $<TARGET_FILE:test_engine_transport_profile>)
+set_tests_properties(test_engine_transport_profile PROPERTIES TIMEOUT 90)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_transport_profile
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+endif()
+nimrtc_copy_wolfssl_certs(test_engine_transport_profile)
+
+# ----------------------------------------------------------------------------
 # Architecture-remediation Phase 0.2 — registry consistency guard.
 #
 # The same module set as `nimrtc_add_engine_test` is required, because
@@ -1353,6 +1495,89 @@ nimrtc_copy_msquic_dll(test_registry_contract)
 nimrtc_copy_wolfssl_certs(test_registry_contract)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_registry_contract
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10
+        DISCOVERY_MODE PRE_TEST)
+endif()
+
+# ---------------------------------------------------------------------------
+# ADR-023 — the plugin id contract, enforced by a test rather than by prose.
+#
+# `docs/adr/ADR-023-plugin-id-naming-contract.md` Decision 7 requires the
+# grammar, the rejection behaviour and the macro spelling to be verified by
+# `tests/test_plugin_id_contract.cpp` instead of described in a Markdown
+# file.  A contract that only exists in prose is not a contract.
+#
+# The test needs the same link shape as `test_registry_contract` above:
+# it drives `register_all_default_plugins()` and then reads every
+# registry slot, so it must link every module that appears in the
+# unified `kDefaultRegistrars[]` table (the GNU ld archive-order
+# rationale is documented on that target).
+# ---------------------------------------------------------------------------
+add_executable(test_plugin_id_contract test_plugin_id_contract.cpp)
+if(WIN32)
+    target_link_libraries(test_plugin_id_contract PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_plugin_id_contract PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_plugin_id_contract PRIVATE atomic)
+endif()
+target_link_libraries(test_plugin_id_contract PRIVATE
+    # LINK-ORDER CRITICAL — see the note on `test_registry_contract`:
+    # `nimrtc_core_objects` holds `pal_default_registrars.cpp.o`, the
+    # unified `kDefaultRegistrars[]` table, and its object file must be
+    # pulled into the link BEFORE the module archives.
+    nimrtc_core_objects
+    nimrtc::core
+    nimrtc::transport
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::bwe
+    nimrtc::sched
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    GTest::gtest_main)
+# The remaining modules from the unified `kDefaultRegistrars[]` table.
+# They are gated behind `NIMRTC_MODULE_*` options, so each one is linked
+# only when it was actually built.
+foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
+              video_capture audio_rx dtmf srtp)
+    if(TARGET nimrtc::${_mod})
+        target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
+    endif()
+endforeach()
+target_include_directories(test_plugin_id_contract PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include")
+if(WIN32)
+    target_compile_definitions(test_plugin_id_contract PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_plugin_id_contract PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_plugin_id_contract LENIENT)
+add_test(NAME test_plugin_id_contract
+    COMMAND $<TARGET_FILE:test_plugin_id_contract>)
+set_tests_properties(test_plugin_id_contract PROPERTIES TIMEOUT 30)
+# The target links `nimrtc::web_transport`, whose msquic dependency is a
+# runtime DLL on Windows (see the note on `test_registry_contract`).
+nimrtc_copy_msquic_dll(test_plugin_id_contract)
+# The target links the DTLS seam (and thus the wolfSSL backend), which
+# resolves its certificate from disk at DTLS-session setup time.
+nimrtc_copy_wolfssl_certs(test_plugin_id_contract)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_plugin_id_contract
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10
         DISCOVERY_MODE PRE_TEST)
@@ -1892,5 +2117,42 @@ if(NIMRTC_BUILD_TESTS)
     set_tests_properties(hotpath_zero_allocs PROPERTIES
         TIMEOUT 300
         LABELS "performance;hotpath")
+endif()
+
+# ---------------------------------------------------------------------------
+# Architecture-remediation Phase 4.2e — dead-module guard.
+#
+# D2's principle: "either wire it in, or delete it."  A module with a
+# complete implementation, passing unit tests, and no path from the
+# composition root is the worst state — it manufactures the illusion
+# that a feature exists.
+#
+# `tools/check_dead_modules.py` reads the CMake dependency graph and the
+# plugin registrar table and fails when a module under `src/modules/`
+# has no non-test consumer reachable from the engine / the shipped
+# examples.
+#
+# The check is registered as a ctest case (rather than only as a CI step)
+# so that a developer sees it next to the other gates, and so that
+# `ctest` alone is enough to catch the regression.  It is skipped (not
+# failed) when no Python interpreter is available, because the check is
+# a build-graph audit, not a runtime behaviour — a missing interpreter
+# must not turn into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_dead_modules
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_dead_modules.py"
+                         --repo-root "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(test_dead_modules PROPERTIES
+            TIMEOUT 120
+            LABELS "architecture;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the dead-module guard "
+            "(tools/check_dead_modules.py).  CI runs it as a dedicated step.")
+    endif()
 endif()
 

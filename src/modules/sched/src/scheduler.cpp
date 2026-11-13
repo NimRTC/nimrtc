@@ -1391,80 +1391,13 @@ void Scheduler::undo_batch(std::size_t first_vetoed, bool s_family) noexcept {
     }
 }
 
-// ===============================================================================
-// C ABI wrapper implementations
-// ===============================================================================
-
-// SchedulerHandle is forward-declared in sched.hpp as an opaque type.
-// The full definition lives here so the C ABI functions can dereference
-// it without exposing Scheduler's internals through the header.
-struct SchedulerHandle {
-    std::unique_ptr<Scheduler> sched;
-    explicit SchedulerHandle(plugins::SchedulerConfig cfg)
-        : sched(std::make_unique<Scheduler>(cfg)) {}
-};
-
-SchedulerHandle* sched_create(const plugins::SchedulerConfig* config) noexcept {
-    try {
-        plugins::SchedulerConfig cfg = config ? *config : plugins::SchedulerConfig{};
-        return new SchedulerHandle(cfg);
-    } catch (...) {
-        return nullptr;
-    }
-}
-
-void sched_destroy(SchedulerHandle* h) noexcept {
-    delete h;
-}
-
-void sched_set_stream_priority(SchedulerHandle* h,
-                               std::uint32_t stream_id,
-                               StreamPriority level) noexcept {
-    if (!h) return;
-    h->sched->set_stream_priority(stream_id, level);
-}
-
-StreamPriority sched_get_stream_priority(const SchedulerHandle* h,
-                                        std::uint32_t stream_id) noexcept {
-    if (!h) return StreamPriority::Normal;
-    return h->sched->get_stream_priority(stream_id);
-}
-
-void sched_enqueue_stream_owned(SchedulerHandle* h,
-                                std::uint32_t stream_id,
-                                const std::uint8_t* data,
-                                std::size_t len,
-                                const plugins::Addr* dst) noexcept {
-    if (!h) return;
-    plugins::Addr addr = dst ? *dst : plugins::Addr{};
-    std::vector<std::uint8_t> buf;
-    if (data && len > 0) buf.assign(data, data + len);
-    h->sched->enqueue_for_stream_owned(stream_id, std::move(buf), addr);
-}
-
-int sched_select_next_packet(SchedulerHandle* h,
-                             int max_packets,
-                             void (*on_packet)(std::uint32_t stream_id,
-                                               StreamPriority level,
-                                               const std::uint8_t* data,
-                                               std::size_t len,
-                                               void* user_data),
-                             void* user_data) noexcept {
-    if (!h) return 0;
-    if (!on_packet) {
-        // Drain without a callback.
-        return h->sched->select_next_packet(max_packets, nullptr);
-    }
-    // The C function pointer is wrapped into the stream-aware callback,
-    // so the C ABI caller receives the real stream id and the real bucket
-    // priority — not placeholders.
-    return h->sched->select_next_packet(
-        max_packets,
-        [on_packet, user_data](std::uint32_t stream_id, StreamPriority level,
-                               core::ByteSpan span) -> bool {
-            on_packet(stream_id, level, span.data(), span.size(), user_data);
-            return true;
-        });
-}
+// The C ABI (and the C++ spellings that forward to it) live in
+// `scheduler_c.cpp`.  They used to live here; they were moved out so that
+// the `extern "C"` entry points sit in one translation unit that
+// includes the C header, and so that the handle definition has exactly
+// one home.
+//
+// See `src/modules/sched/src/scheduler_c.cpp` and
+// `<nimrtc/sched/sched_c.h>`.
 
 }  // namespace nimrtc::sched

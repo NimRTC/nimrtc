@@ -82,13 +82,13 @@ std::uint32_t NimRTCEngine::rtcp_reporter_ssrc() noexcept {
     // §6.1).  It is the *same* SSRC the receiver report uses: both
     // identify us as the party making the statement.  The media SSRCs
     // identify the streams, not the reporter.
-    if (impl_->rtcp_sender_ssrc_ == 0) {
+    if (impl_->audio_state.rtcp_sender_ssrc_ == 0) {
         std::random_device rd;
         std::mt19937_64 mt(rd());
-        impl_->rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
-        if (impl_->rtcp_sender_ssrc_ == 0) impl_->rtcp_sender_ssrc_ = 1;
+        impl_->audio_state.rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
+        if (impl_->audio_state.rtcp_sender_ssrc_ == 0) impl_->audio_state.rtcp_sender_ssrc_ = 1;
     }
-    return impl_->rtcp_sender_ssrc_;
+    return impl_->audio_state.rtcp_sender_ssrc_;
 }
 
 
@@ -169,20 +169,20 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
     //   * *our* "rcvr-rtt" declares that *we* are prepared to receive
     //     an initiator and to reply with a response — so it authorises
     //     us to send the DLRR.
-    const bool may_send_rrtr = impl_->peer_xr_rcvr_rtt;
-    const bool may_send_dlrr = impl_->local_xr_rcvr_rtt &&
-                               impl_->peer_rr_ssrc != 0;
-    const bool may_send_stat = impl_->peer_xr_stat_summary &&
-                               impl_->audio_rx.ssrc != 0;
+    const bool may_send_rrtr = impl_->xr.peer_xr_rcvr_rtt;
+    const bool may_send_dlrr = impl_->xr.local_xr_rcvr_rtt &&
+                               impl_->xr.peer_rr_ssrc != 0;
+    const bool may_send_stat = impl_->xr.peer_xr_stat_summary &&
+                               impl_->audio_state.audio_rx.ssrc != 0;
 
     if (!may_send_rrtr && !may_send_dlrr && !may_send_stat) return;
 
     const auto now = core::SteadyClock::now();
     const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->xr_last_sent)
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->xr.xr_last_sent)
             .count();
     if (elapsed_ms < kXrPeriodMs) return;
-    impl_->xr_last_sent = now;
+    impl_->xr.xr_last_sent = now;
 
     const std::uint32_t sender_ssrc = rtcp_reporter_ssrc();
 
@@ -217,14 +217,14 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
     // Time Report, which is exactly `peer_rr_ssrc`.
     if (may_send_dlrr) {
         rtp::XrDlrrSubReport sub;
-        sub.ssrc = impl_->peer_rr_ssrc;
+        sub.ssrc = impl_->xr.peer_rr_ssrc;
         // The middle 32 bits of the NTP timestamp from that report
         // (RFC 3611 §4.5 — the "last RR" field).
-        sub.last_rr = impl_->peer_rr_mid_32;
+        sub.last_rr = impl_->xr.peer_rr_mid_32;
         // The delay since that report, in 1/65536 s units.  Zero when
         // the report has just arrived (or the clock went backwards).
         const std::int64_t now_us = detail::steady_now_us();
-        const std::int64_t delta_us = now_us - impl_->peer_rr_recv_us;
+        const std::int64_t delta_us = now_us - impl_->xr.peer_rr_recv_us;
         if (delta_us > 0) {
             sub.dlrr = static_cast<std::uint32_t>(
                 (delta_us * 65536) / 1000000);
@@ -245,7 +245,7 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
     // numbers the peer sees in the summary are the same ones the
     // receiver report carries.
     if (may_send_stat) {
-        const Impl::AudioRxState& rx = impl_->audio_rx;
+        const detail::AudioState::AudioRxState& rx = impl_->audio_state.audio_rx;
 
         // The interval is the sequence space since the last summary
         // (RFC 3611 §4.6 — begin_seq / end_seq bracket the reported
@@ -277,7 +277,7 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
         // "loss" only gets the loss flag set, and the jitter group is
         // reported as absent (its fields MUST then be zero — RFC 3611
         // §4.6).
-        const std::string& flags = impl_->peer_xr_stat_summary_flags;
+        const std::string& flags = impl_->xr.peer_xr_stat_summary_flags;
         const bool want_loss   = flags.find("loss") != std::string::npos;
         const bool want_jitter = flags.find("jitt") != std::string::npos;
 
@@ -316,7 +316,7 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
 
     if (!send_rtcp_packet(sender_ssrc, packet)) return;
 
-    ++impl_->xr_reports_sent;
+    ++impl_->xr.xr_reports_sent;
 
     core::log::Logger::instance().debug(
         "engine[xr]: extended report sent (" +
@@ -341,7 +341,7 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
     // used."  So the peer's description must have carried the
     // "ccm tmmbr" parameter for a TMMBR to be legal at all — the
     // engine's own configuration is the other half of the intersection.
-    if (!impl_->peer_tmmbr_negotiated) return;
+    if (!impl_->xr.peer_tmmbr_negotiated) return;
 
     // The rate we report is the rate we are *using*.  A TMMBR that
     // announces a limit the sender does not obey is worse than no
@@ -371,9 +371,9 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
     //     every RTCP interval would be pure overhead.
     const auto now = core::SteadyClock::now();
     const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->tmmbr_last_sent)
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - impl_->xr.tmmbr_last_sent)
             .count();
-    const bool rate_changed = (target_bps != impl_->last_tmmbr_bps);
+    const bool rate_changed = (target_bps != impl_->xr.last_tmmbr_bps);
     const std::int64_t gate_ms = rate_changed ? kXrPeriodMs : kTmmbrRefreshMs;
     if (elapsed_ms < gate_ms) return;
 
@@ -383,10 +383,10 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
     // from the inbound RTP header.  Until we have seen a packet there
     // is no media source to name, and a tuple about an unknown source
     // would be meaningless to the peer.
-    if (impl_->audio_rx.ssrc == 0) return;
+    if (impl_->audio_state.audio_rx.ssrc == 0) return;
 
     rtp::TmmbrEntry entry;
-    entry.ssrc = impl_->audio_rx.ssrc;
+    entry.ssrc = impl_->audio_state.audio_rx.ssrc;
     entry.bitrate_bps = target_bps;
 
     // The feedback sender's SSRC is the engine's own RTCP SSRC: the
@@ -399,9 +399,9 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
 
     if (!send_rtcp_packet(feedback_ssrc, packet)) return;
 
-    impl_->tmmbr_last_sent = now;
-    impl_->last_tmmbr_bps  = target_bps;
-    ++impl_->tmmbr_sent;
+    impl_->xr.tmmbr_last_sent = now;
+    impl_->xr.last_tmmbr_bps  = target_bps;
+    ++impl_->xr.tmmbr_sent;
 
     core::log::Logger::instance().info(
         "engine[tmmbr]: TMMBR sent, limit=" + std::to_string(target_bps) + " bps");
@@ -413,7 +413,7 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
 // ---------------------------------------------------------------------------
 
 void NimRTCEngine::flush_tmmbn() noexcept {
-    if (!impl_->pending_tmmbn) return;
+    if (!impl_->xr.pending_tmmbn) return;
     if (!ice_t_ || !is_ice_connected()) return;
 
     // RFC 5104 §4.2.2.3: "The TMMBN acknowledgement SHOULD be sent as
@@ -431,7 +431,7 @@ void NimRTCEngine::flush_tmmbn() noexcept {
     // between (RFC 5104 §4.2.2.2) — so the pending flag is cleared
     // *before* the send, and a send failure does not leave a stale
     // pending flag behind.
-    impl_->pending_tmmbn = false;
+    impl_->xr.pending_tmmbn = false;
 
     // The bounding set: the tuple the peer asked for, owned by *us*.
     // RFC 5104 §4.2.2.1 — the TMMBN FCI entry gives the **owner** of
@@ -441,8 +441,8 @@ void NimRTCEngine::flush_tmmbn() noexcept {
     // receiver becomes the owner as soon as it has issued its first
     // TMMBR, so the owner is the TMMBR's sender SSRC.
     rtp::TmmbrEntry entry;
-    entry.ssrc = impl_->tmmbr_peer_ssrc;
-    entry.bitrate_bps = impl_->peer_tmmbr_limit_bps;
+    entry.ssrc = impl_->xr.tmmbr_peer_ssrc;
+    entry.bitrate_bps = impl_->xr.peer_tmmbr_limit_bps;
 
     const std::uint32_t feedback_ssrc = rtcp_reporter_ssrc();
 
@@ -451,11 +451,11 @@ void NimRTCEngine::flush_tmmbn() noexcept {
 
     if (!send_rtcp_packet(feedback_ssrc, packet)) return;
 
-    ++impl_->tmmbn_sent;
+    ++impl_->xr.tmmbn_sent;
 
     core::log::Logger::instance().info(
         "engine[tmmbr]: TMMBN sent, limit=" +
-        std::to_string(impl_->peer_tmmbr_limit_bps) + " bps");
+        std::to_string(impl_->xr.peer_tmmbr_limit_bps) + " bps");
 }
 
 
@@ -499,7 +499,7 @@ void NimRTCEngine::on_tmmbr_received(std::uint32_t sender_ssrc,
     // honour: the peer is asking some *other* sender to throttle.  The
     // engine only sends audio (and video), so a tuple about an unknown
     // SSRC is recorded but not applied.
-    if (media_ssrc != 0 && media_ssrc != impl_->audio_ssrc) {
+    if (media_ssrc != 0 && media_ssrc != impl_->audio_state.audio_ssrc) {
         core::log::Logger::instance().debug(
             "engine[tmmbr]: inbound TMMBR names a foreign media source; ignored");
         return;
@@ -510,20 +510,20 @@ void NimRTCEngine::on_tmmbr_received(std::uint32_t sender_ssrc,
         return;
     }
 
-    if (impl_->peer_tmmbr_limit_bps == 0 ||
-        bitrate_bps < impl_->peer_tmmbr_limit_bps) {
-        impl_->peer_tmmbr_limit_bps = bitrate_bps;
+    if (impl_->xr.peer_tmmbr_limit_bps == 0 ||
+        bitrate_bps < impl_->xr.peer_tmmbr_limit_bps) {
+        impl_->xr.peer_tmmbr_limit_bps = bitrate_bps;
     }
 
-    impl_->tmmbr_peer_ssrc = sender_ssrc;
-    ++impl_->tmmbr_received;
+    impl_->xr.tmmbr_peer_ssrc = sender_ssrc;
+    ++impl_->xr.tmmbr_received;
 
     // A TMMBN is owed for every TMMBR we receive (RFC 5104 §4.2.2.2).
-    impl_->pending_tmmbn = true;
+    impl_->xr.pending_tmmbn = true;
 
     core::log::Logger::instance().info(
         "engine[tmmbr]: inbound TMMBR, limit now " +
-        std::to_string(impl_->peer_tmmbr_limit_bps) + " bps");
+        std::to_string(impl_->xr.peer_tmmbr_limit_bps) + " bps");
 }
 
 
@@ -546,10 +546,10 @@ void NimRTCEngine::note_peer_reference_time(core::ByteSpan packet) noexcept {
     for (const rtp::XrBlock& block : xr.blocks) {
         if (block.type != rtp::XrBlockType::kReceiverReferenceTime) continue;
 
-        impl_->peer_rr_ssrc = xr.ssrc;
-        impl_->peer_rr_mid_32 =
+        impl_->xr.peer_rr_ssrc = xr.ssrc;
+        impl_->xr.peer_rr_mid_32 =
             rtp::Ntp64{block.receiver_reference_time.ntp_timestamp}.mid_32();
-        impl_->peer_rr_recv_us = detail::steady_now_us();
+        impl_->xr.peer_rr_recv_us = detail::steady_now_us();
         return;
     }
 }
@@ -559,23 +559,23 @@ void NimRTCEngine::note_peer_reference_time(core::ByteSpan packet) noexcept {
 // The observability accessors
 // ---------------------------------------------------------------------------
 std::uint32_t NimRTCEngine::peer_tmmbr_limit_bps() const noexcept {
-    return impl_->peer_tmmbr_limit_bps;
+    return impl_->xr.peer_tmmbr_limit_bps;
 }
 
 std::uint32_t NimRTCEngine::last_tmmbr_bps() const noexcept {
-    return impl_->last_tmmbr_bps;
+    return impl_->xr.last_tmmbr_bps;
 }
 
 std::uint64_t NimRTCEngine::tmmbr_sent_count() const noexcept {
-    return impl_->tmmbr_sent + impl_->tmmbn_sent;
+    return impl_->xr.tmmbr_sent + impl_->xr.tmmbn_sent;
 }
 
 std::uint64_t NimRTCEngine::tmmbr_received_count() const noexcept {
-    return impl_->tmmbr_received;
+    return impl_->xr.tmmbr_received;
 }
 
 std::uint64_t NimRTCEngine::xr_reports_sent_count() const noexcept {
-    return impl_->xr_reports_sent;
+    return impl_->xr.xr_reports_sent;
 }
 
 }  // namespace nimrtc::engine

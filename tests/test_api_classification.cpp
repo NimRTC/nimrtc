@@ -399,6 +399,37 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       SRTP backend family; mirrors the DTLS seam's
     //       dtls_plugin.hpp)
     //
+    // v1.2.0 bump: +0 public *headers* for the scheduler's real C ABI
+    //   (architecture remediation plan D5 / ADR-026) — the `extern "C"`
+    //   surface an embedded / FFI host can actually include and link:
+    //     - sched/sched_c.h (the pure-C11 S-family entry points)
+    //
+    //   NOTE: this sweep counts `.hpp` only (see collect_public_headers()),
+    //   and `sched_c.h` is a `.h` — so the count does NOT move.  The C
+    //   header is still a public, installed header, so it is covered by
+    //   the ADR-015 *symbol* freeze (scripts/api_freeze_scan.js walks
+    //   `.hpp` too — but the C header carries no C++ symbols, so it has
+    //   nothing to classify) and by the CI check that every installed
+    //   public header is C-clean.
+    //
+    // v1.2.0 bump: +2 public headers (137 -> 139) for the `assembly`
+    //   module's bridges (architecture remediation plan §4.2 / D2 — the
+    //   `assembly` disposition).  Until these existed the `assembly`
+    //   module was a complete implementation with a full test suite
+    //   that **nothing in the product ever called** — a Profile was
+    //   parsed, serialised and round-tripped, and then dropped on the
+    //   floor:
+    //     - assembly/engine_bridge.hpp (Profile -> EngineConfig — the
+    //       single authority for the mapping; the transport strategy id
+    //       and the per-instance media p99 budget now reach the engine)
+    //     - assembly/transport_bridge.hpp (TransportSection ->
+    //       ProfileTransportInput -> TransportRequirements — the adapter
+    //       between the assembly-layer shape and the transport-side
+    //       mirror; header-only, so it adds no link-time dependency)
+    //
+    // Bump this constant in the same PR that intentionally adds/removes
+    // a public header.
+    constexpr std::size_t kBaselineHeaderCount = 150;
     // Remote-desktop plan A6 / A10 / A3 bump: +4 public headers
     // (136 -> 140) for the capture layer's cursor seam, the shared
     // capture -> frame-stream adapter, and the Windows display-capture
@@ -458,7 +489,8 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // web_transport headers under src/modules/ (Phase 4 §4.1), which
     // relocated 33 headers without adding or removing any, so the
     // merged tree's count is main's count plus this branch's additions.
-    constexpr std::size_t kBaselineHeaderCount = 148;
+    constexpr std::size_t kBaselineHeaderCount = 150;
+
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -128,6 +128,87 @@ At `open()` the engine looks up each factory in the registry and calls `create()
 
 ---
 
+## Supplements (added v1.2.0)
+
+The sections above record the decision as it was taken in P0. Three
+things have changed since, and each is recorded by its own ADR; this
+section states what changed and points at the detail, so that ADR-001
+read on its own does not mislead.
+
+### Supplement A — the plugin ID naming contract
+
+The original decision specified that plugins are "registered by ID
+string" and that the engine "references plugins by string ID", but it
+did not specify **how an id is spelled**, **who validates it**, or
+**what the compatibility promise for an id is**.
+
+That gap was closed by
+[ADR-023](ADR-023-plugin-id-naming-contract.md), which fixes:
+
+- **The grammar.** A plugin id matches `^[a-z][a-z0-9_-]*$` — a
+  lowercase ASCII token, with underscores and hyphens allowed, that
+  is also a valid shell / JSON key. The hyphen is permitted because
+  the shipped transport-stack ids (`"webrtc-classic"`,
+  `"raw-udp-arq"`) use it.
+- **The prefix rule.** An id naming an in-tree implementation is
+  prefixed `nimrtc_`; an id naming a third-party implementation
+  carries the vendor's name and no `nimrtc_` prefix; an id naming a
+  conceptual role is bare.
+- **Third-party namespacing.** A third-party id is
+  `<namespace>_<implementation>`.
+- **Validation at registration.** A malformed id is refused where the
+  mistake was made, not later at `open()`.
+- **The deprecation cycle.** Renaming an id registers both the old
+  and the new id for at least one minor version.
+
+The registration macros also converge on **one spelling**: the id is a
+bare token that the macro stringifies. Passing a quoted literal is a
+compile error. (The two macro families previously disagreed, and the
+quoted-literal-in-a-stringifying-macro form registered an id that
+included the quote characters — a silent failure.)
+
+### Supplement B — which families are actually replaceable
+
+The original decision said "Users can replace any layer by
+implementing the interface and registering a factory." That is true
+of the *seam*, but two of the seams are **not** live, and the original
+text did not say so.
+
+- **RTP and SDP are not pluggable.** The interfaces
+  (`plugins/rtp.hpp`, `plugins/sdp.hpp`) still exist and are still
+  registered, but the engine uses the concrete `rtp::` / `sdp::`
+  implementations directly, and there is deliberately **no
+  `EngineConfig` knob** for them. Registering an RTP or SDP plugin
+  changes nothing. The rationale — the RTP builder sits on the
+  zero-allocation hot path, and the SDP layer is the contract every
+  other component is written against — is in
+  [ADR-025](ADR-025-sdp-rtp-not-pluggable.md).
+- **The `EngineConfig::rtp_name` and `EngineConfig::sdp_name` fields
+  described in the original snippet no longer exist.** They were
+  removed as part of closing those two fake knobs.
+
+The full per-family matrix — which families are fully replaceable,
+which have an in-tree fallback, which degrade silently, and how
+loudly each failure is reported — is in
+[`docs/plugin_author_guide.md` §4.4](../plugin_author_guide.md).
+
+### Supplement C — `EngineConfig` fields are `std::string`, not `std::string_view`
+
+The snippet above shows `std::string_view` fields and a `Config`
+type name. Both are historical:
+
+- The type is `nimrtc::engine::EngineConfig`, declared in
+  `src/engine/include/nimrtc/engine/engine.hpp`.
+- Every string field is a **`std::string`**. The `std::string_view`
+  shape was migrated away because it created a lifetime hazard at
+  every assignment site; the engine takes the config **by value** and
+  moves it, so it owns a copy of every string. This is an
+  **ABI-breaking** change in v1.2.0 (host recompilation required) and
+  is specified in
+  [ADR-024](ADR-024-engineconfig-string-ownership.md).
+
+---
+
 ## Alternatives Considered
 
 ### 1. Single monolithic transport

@@ -53,7 +53,7 @@ void NimRTCEngine::deliver_audio_frame_info(
     // wire: the frame itself does not carry it, and the pipeline
     // handles one stream per receiver.
     info.capture_time_us = audio_capture_time_us(impl_ != nullptr
-                                                      ? impl_->audio_rx.ssrc
+                                                      ? impl_->audio_state.audio_rx.ssrc
                                                       : 0,
                                                   frame.rtp_timestamp);
 
@@ -76,7 +76,7 @@ bool NimRTCEngine::remote_audio_format(AudioFormat* out) const noexcept {
     // The payload type we accepted.  0 means the negotiation did not
     // conclude an audio track (either no audio m-line, or the peer only
     // offered codecs we cannot decode — spec A-9).
-    const std::uint8_t pt = impl_->negotiated_audio_pt;
+    const std::uint8_t pt = impl_->audio_state.negotiated_audio_pt;
     if (pt == 0) return false;
 
     out->payload_type      = pt;

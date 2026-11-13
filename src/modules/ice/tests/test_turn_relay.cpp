@@ -149,8 +149,35 @@ bool can_bind_secondary_loopback() noexcept {
 // so a probe over a handful of candidates makes a collision
 // vanishingly unlikely.
 //
+// ## The protocol matters
+//
+// `type` selects the socket type the port is probed with, and it must
+// match the protocol the port will actually be **bound** with:
+//
+//   - the TURN control port is bound as a *UDP* socket;
+//   - the TURN-over-TCP control port (RFC 8656 section 12) is bound as
+//     a *TCP* socket;
+//   - the relay-port range is allocated as *UDP* sockets.
+//
+// Windows keeps a **separate exclusion range per protocol**.  A port
+// number can be free for UDP while sitting inside a TCP block reserved
+// for the hypervisor, and binding it as TCP then fails with WSAEACCES
+// (errno 10013).  The original version of this function always probed
+// as UDP, so the TURN-over-TCP listener inherited a UDP-checked port
+// number and the server failed to start:
+//
+//   [info]  UDP socket bound to 127.0.0.1:62962
+//   [warn]  TURN-over-TCP listener binding failed, errno=10013
+//   [error] TURN-over-TCP listener creation failed
+//
+// (62962 was free for UDP but inside the TCP exclusion block
+// 62635-63134 on that host.)  Probing with the socket type the port
+// will be bound with removes the mismatch entirely: the kernel's
+// ephemeral allocator then only ever returns a port that is bindable
+// for *that* protocol.
+//
 // Returns 0 when no bindable port was found.
-std::uint16_t find_bindable_udp_port() noexcept {
+std::uint16_t find_bindable_udp_port(int type = SOCK_DGRAM) noexcept {
 #ifdef _WIN32
     // The probe needs Winsock; the juice server brings it up later, so
     // bring it up here too (the extra WSAStartup is refcounted).
@@ -158,7 +185,7 @@ std::uint16_t find_bindable_udp_port() noexcept {
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
 #endif
     for (int attempt = 0; attempt < 16; ++attempt) {
-        const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        const int fd = socket(AF_INET, type, 0);
         if (fd < 0) return 0;
 
         sockaddr_in addr{};
@@ -286,8 +313,14 @@ public:
     // why a fixed window is not safe on Windows.  Each fixture therefore
     // gets its own ports, so two servers never share one.
     explicit TurnServerFixture(bool with_tcp = false)
-        : udp_port_(find_bindable_udp_port()),
-          tcp_port_(with_tcp ? find_bindable_udp_port() : 0),
+        : udp_port_(find_bindable_udp_port(SOCK_DGRAM)),
+          // The TURN-over-TCP control listener binds a *TCP* socket, so
+          // its port must be probed as TCP.  Windows keeps a separate
+          // exclusion range per protocol, and a UDP-probed port number
+          // can sit inside a TCP block reserved for the hypervisor —
+          // in which case the listener fails to bind with WSAEACCES
+          // (errno 10013) and the server refuses to start.
+          tcp_port_(with_tcp ? find_bindable_udp_port(SOCK_STREAM) : 0),
           relay_port_begin_(find_bindable_udp_port_run(kRelayPortCount)) {
         if (udp_port_ == 0 || relay_port_begin_ == 0) return;
 

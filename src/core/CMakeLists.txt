@@ -52,10 +52,21 @@
 #   nimrtc_registry       STATIC (new, added in v0.11.0)
 #        └─ src/plugin_registry.cpp
 #           Holds `PluginRegistry::instance()` and every
-#           `register_*()` method.  No external symbol references —
-#           clean archive on Linux/macOS, singleton unified on
-#           Windows.  See `src/core/src/plugin_registry.cpp` for the
-#           file header explaining the Windows DLL rationale.
+#           `register_*()` method.  See `src/core/src/plugin_registry.cpp`
+#           for the file header explaining the Windows DLL rationale.
+#
+#           The one external symbol it references is
+#           `nimrtc::core::log::Logger::instance()` — the ADR-023
+#           Decision 4 rejection diagnostic in `TypedRegistry::register_one`
+#           (registry.hpp) reports a malformed plugin id through the core
+#           logger.  That makes `nimrtc_registry` depend on `nimrtc_log`,
+#           and the dependency has to be *declared* below: a GNU-ld link
+#           resolves archives left to right, so the archive holding
+#           `Logger::instance()` must come after the one that references
+#           it.  Without the declaration the Linux link fails with
+#           "undefined reference to nimrtc::core::log::Logger::instance()"
+#           even though the symbol is in the binary.  (MSVC does not care
+#           about archive order, so this only showed up on Linux CI.)
 #
 # Both libraries are linked INTERFACEly by `nimrtc::core` below so
 # downstream consumers pick up the registry singleton automatically.
@@ -136,7 +147,30 @@ target_link_libraries(nimrtc_registry
         # `nimrtc_core_objects`.  Linking nimrtc_core_objects publicly
         # makes both .a / .lib archives transitively available to
         # consumers.
-        nimrtc_core_objects)
+        nimrtc_core_objects
+    PRIVATE
+        # ADR-023 Decision 4: `TypedRegistry::register_one` (registry.hpp)
+        # reports a malformed plugin id through
+        # `nimrtc::core::log::Logger::instance()`, so this archive now
+        # references a symbol defined in `nimrtc_log`.
+        #
+        # The dependency has to be *declared*, because a GNU-ld link
+        # resolves static archives left to right: the archive holding
+        # the definition has to come after the one that references it.
+        # Without this line, CMake put `libnimrtc_log.a` *before*
+        # `libnimrtc_registry.a` on the link line and every Linux target
+        # that linked the registry failed with "undefined reference to
+        # nimrtc::core::log::Logger::instance()" — a symbol that was
+        # present in the binary the whole time.  MSVC does not reorder
+        # archives the same way, so the breakage only showed up on the
+        # Linux CI jobs.
+        #
+        # PRIVATE is right: the logger is an implementation detail of
+        # this archive, not part of the public header surface.  For a
+        # STATIC library CMake still propagates it to consumers (as
+        # `$<LINK_ONLY:>`), which is exactly what puts `nimrtc_log` on
+        # their link line — after this archive — and fixes the order.
+        nimrtc_log)
 # PAL Slice 2 — `pal_default_registrars.cpp` preprocessor-guards some entries
 # behind NIMRTC_HAS_* macros that are PUBLIC-ly defined on the per-module
 # nimrtc_video_* / nimrtc_opus / nimrtc_h264 targets.  Because the .cpp is

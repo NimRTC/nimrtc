@@ -917,6 +917,94 @@ if (capture->zero_copy_to_gpu()) {
 }
 ```
 
+### 7.1 `GpuHandle` — the typed GPU handle (recommended over bare `void*`)
+
+上面的三个 `void*` 入口是**旧**表面。它们仍然是 `IHwVideo*` 抽象基类
+的一部分，但**视频帧路径**已经改用 `video_frame` 模块提供的类型化
+结构体，插件应当优先使用它。
+
+`GpuHandle` 定义在 `nimrtc/video_frame/frame.hpp`，并通过
+`nimrtc/plugins/video_codec.hpp` 以 `plugins::GpuHandle` 重导出：
+
+```cpp
+struct NIMRTC_API_STABLE GpuHandle {
+    GpuBackend       backend            = GpuBackend::kNone;
+    void*            handle             = nullptr;  // 类型由 backend 决定
+    std::uint32_t    native_pitch_bytes = 0;       // 显式 pitch（VAAPI/CUDA）
+    int              native_fd          = -1;      // DMA-BUF fd（Linux）
+};
+```
+
+与裸 `void*` 相比，它多带了三样东西：
+
+| 字段 | 为什么需要 |
+|---|---|
+| `backend` | 调用方**不需要**猜 handle 的平台类型——`GpuBackend::kVaapi` 就说明该 cast 成 `VASurfaceID`，`kD3D11` 就说明是 `ID3D11Texture2D*`。裸 `void*` 要求调用方自己知道。 |
+| `native_pitch_bytes` | VAAPI / CUDA 这类后端的行跨距不是隐式的；拿不到 pitch 就无法正确做零拷贝上传。 |
+| `native_fd` | 跨进程 / 跨 API 共享（Linux DRM PRIME、Android `AHardwareBuffer`）需要的 fd。 |
+
+在帧路径上，插件通过 `VideoFrame::has_gpu()` / `VideoFrame::gpu_buffer()`
+暴露 GPU 资源；`GpuBuffer` 由 `GpuBufferPool` 拥有（见 §7.2）。
+
+### 7.2 `GpuBufferPool` — 池化的 GPU buffer
+
+零拷贝路径的正确形态不是"每次造一个 surface"，而是**从池里取**。池
+的工厂函数由 backend 描述符提供：
+
+```cpp
+// src/plugins/include/nimrtc/plugins/hw_video_backend.hpp
+std::function<std::shared_ptr<GpuBufferPool>(VideoCodecConfig)> pool_factory;
+bool zero_copy_supported = false;
+```
+
+契约：
+
+- `pool_factory` 非空 ⇒ 该 backend 走 **GPU-first** 路径；引擎在启动时
+  只探测一次 `zero_copy_supported` / `pool_factory`。
+- `pool_factory` 为空 ⇒ 该 codec 被**强制**走 CPU-staging 路径，
+  即使它自己内部有 HW 加速。
+- `zero_copy_supported = false` 的 decoder（如软件解码器）由引擎回落到
+  `decode()` + CPU staging，并把 `decoded_callback` 接给显示 sink。
+
+### 7.3 `IVideoCodec::kind()` — 声明 codec family 的唯一权威
+
+`IVideoCodec::kind()` 返回 `VideoCodecKind`（= `video_frame::CodecKind`），
+告诉引擎**这个插件能处理哪个 codec family**。合约：
+
+- **实现了单一 family 的插件必须返回该 family。**
+  `VideoCodecKind::kUnknown` 只保留给真正不知道的场合（复合 / 预留
+  实现）。
+- **复合 codec 报告它所包装的 sub-codec 的 family。** 例如
+  `HwCompositeCodec`（NVENC 编码 + NVDEC 解码）虽然两向都有，仍是一个
+  `IVideoCodec`，`kind()` 返回 `kH264`。
+- **引擎先读 `kind()`，只有在 `kind()` 返回 `kUnknown` 时才回退去解析
+  plugin id。** 当两者**都**未知时，引擎以 `kEngineInvalidParam`
+  让 session 失败，而不是去协商一个自己描述不了的 codec family。
+
+这条很重要：`kind()` 是**引擎选择 depacketizer / packetizer 路径的
+依据**，不是从 plugin id 推断出来的。插件 id 是注册用的名字，**不是**
+协议语义。
+
+### 7.4 `HwBackend` 与 `GpuBackend` 的区别
+
+两个枚举容易混淆：
+
+| 枚举 | 含义 | 取值示例 |
+|---|---|---|
+| `plugins::HwBackend` | **实现来源**——是哪个平台/库提供的加速 | `Software`, `MediaCodec`, `VideoToolbox`, `Vaapi`, `Dxva`, `Nvenc`, `Nvdec`, `Qsv`, `Amf` |
+| `plugins::GpuBackend` | **GPU 资源类型**——handle 的实际类型 | `kNone`, `kAndroidNativeWindow`, `kAppleCFPixelBuffer`, `kWindowsD3D11Texture`, `kLinuxVaapiSurface`, `kNvidiaCudaArray`, `kVulkanImage` |
+
+`IHwVideoEncoder::backend()` 返回**前者**；`GpuHandle::backend` 返回
+**后者**。两者不是同一套命名空间——`HwBackend` 是**实现**的来源，
+`GpuBackend` 是**资源**的类型。一个 VAAPI encoder：
+`backend() == HwBackend::Vaapi`，而它交出的
+`GpuHandle::backend == GpuBackend::kLinuxVaapiSurface`。
+
+注意 `HwBackend` 与 `GpuBackend` 的取值**不一一对应**：一个
+`HwBackend::Nvenc` 的 encoder 可能交出 `GpuBackend::kWindowsD3D11Texture`
+（经由 D3D11 互操作）或 `kNvidiaCudaArray`（CUDA 原生）。所以**不要**
+拿一个枚举去推断另一个——用 `GpuHandle::backend` 决定怎么 cast handle。
+
 ---
 
 ## 8. Backend Selection Logic（应用作者视角）

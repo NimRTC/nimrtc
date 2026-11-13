@@ -38,12 +38,35 @@ Write an ADR when a decision:
 | [ADR-018](ADR-018-bandwidth-signal-policy.md) | Bandwidth signal policy — transport-cc preferred, loss/RTT fallback | v1.2.0 (M1) |
 | [ADR-021](ADR-021-codec-bundling-posture.md) | Codec bundling posture — permissive vendoring, direct vendor-SDK hardware | v1.3.0 (M1) |
 | [ADR-022](ADR-022-screen-content-as-content-type.md) | Screen content is a content type, not a camera | v1.3.0 (M1) |
+| [ADR-023](ADR-023-plugin-id-naming-contract.md) | Plugin ID naming contract — spelling, validation and change discipline | Phase 5 (v1.2.0) |
+| [ADR-024](ADR-024-engineconfig-string-ownership.md) | `EngineConfig` string ownership — the engine owns its strings | Phase 5 (v1.2.0) |
+| [ADR-025](ADR-025-sdp-rtp-not-pluggable.md) | SDP / RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden | Phase 4 (v1.2.0) |
+| [ADR-026](ADR-026-scheduler-c-abi.md) | The scheduler's C ABI — a real `extern "C"` surface | Phase 4 (v1.2.0) |
 
 ### Reserved numbers
 
 | Number | Reserved for | Source |
 |--------|--------------|--------|
 | 016 | "SFU 转发跳过 L2" BWE-interface ADR — only to be merged if the SFU track reopens in v1.x | `docs/plan/v1.0-plan.md` §12.5 |
+| 019 | Encoder ownership (D3) + ladder modes (D2) + configuration mapping (OD-3(a)) | `docs/plan/video-pipeline-v2-plan.md` §B.7.3 (G2) |
+| 020 | Codec plug-in architecture (R1), hardware-first selection (R2 / OD-2), no-bundled-codec posture (OD-1) | `docs/plan/video-pipeline-v2-plan.md` §B.7.3 (G3) |
+| 021 | Codec bundling posture — permissive vendoring, direct vendor-SDK hardware | `docs/plan/remote-desktop-plan.md` (K1) |
+| 022 | Screen content is a content type, not a camera | `docs/plan/remote-desktop-plan.md` (K2) |
+
+> **Why 019–022 are reserved, not free.** The Phase 4 / Phase 5 remediation
+> ADRs were originally written as ADR-019 … ADR-022 and were renumbered to
+> ADR-023 … ADR-026 on 2026-11-13: the numbers 019–022 were already claimed
+> by the video / remote-desktop track — `main`'s `video-pipeline-v2-plan.md`
+> and `remote-desktop-plan.md` assign them, and `feature/m1c-platform-capture`
+> carries committed `ADR-021-codec-bundling-posture.md` and
+> `ADR-022-screen-content-as-content-type.md`. Two ADRs with the same number
+> and different subjects is not a merge conflict, it is a governance failure:
+> a reader who follows "ADR-021" gets whichever file their branch happens
+> to have.
+>
+> The rule this establishes: **an ADR number is claimed the moment a plan
+> document assigns it**, not when the ADR file is written. Check this table
+> before drafting an ADR.
 
 ## Process
 

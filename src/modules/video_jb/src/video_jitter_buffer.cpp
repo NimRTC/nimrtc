@@ -153,6 +153,11 @@ inline bool is_fu_a(core::ByteSpan payload) noexcept {
     return type == 28;
 }
 
+// The Annex-B start code (ITU-T H.264 Annex B): four zero bytes followed
+// by a one.  See `skip_annex_b_start_code()` below for why the jitter
+// buffer knows about it.
+constexpr std::uint8_t kAnnexBStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+
 // ---------------------------------------------------------------------------
 // Reassemble a FU-A fragment into the frame's bitstream
 // ---------------------------------------------------------------------------
@@ -183,8 +188,18 @@ inline void append_fu_a_fragment(FrameBucket& bucket,
 
     if (end) {
         // Synthesize the original NAL header and append to frame bitstream.
-        std::uint8_t nalu_hdr = static_cast<std::uint8_t>(
+        //
+        // The reassembled NAL unit is re-framed in Annex-B: the start
+        // code goes before the synthesised NAL header.  This path is
+        // the fallback for the case where the receiver did not do the
+        // FU-A reassembly itself (`ReceiverConfig::expect_fu_a` false),
+        // and the frame it produces is handed to the decoder in the
+        // Annex-B framing that `NaluFormat::kAnnexBStartCode` promises.
+        const std::uint8_t nalu_hdr = static_cast<std::uint8_t>(
             (bucket.fu_a_nri << 5) | (static_cast<std::uint8_t>(bucket.fu_a_nalu_type) & 0x1F));
+        bucket.bitstream.insert(bucket.bitstream.end(),
+                                kAnnexBStartCode,
+                                kAnnexBStartCode + sizeof(kAnnexBStartCode));
         bucket.bitstream.push_back(nalu_hdr);
         bucket.bitstream.insert(bucket.bitstream.end(),
                                 bucket.fu_a_buf.begin(),
@@ -193,12 +208,38 @@ inline void append_fu_a_fragment(FrameBucket& bucket,
     }
 }
 
+/** Skip an Annex-B start code at the head of a payload, if present.
+ *
+ *  The Annex-B framing is `00 00 01 | nalu` (three-byte) or
+ *  `00 00 00 01 | nalu` (four-byte); ISO-IEC 14496-10 §7.4.1.2.4
+ *  requires the four-byte form for the *first* NAL unit of a stream and
+ *  allows the three-byte form afterwards, so both are accepted.
+ *
+ *  The jitter buffer is codec-agnostic — it does not parse NAL units —
+ *  but it does need to know where the first one starts when it looks
+ *  for the NAL unit type that marks a key frame. */
+inline std::size_t skip_annex_b_start_code(core::ByteSpan payload) noexcept {
+    if (payload.size() >= 4 && payload[0] == 0x00 && payload[1] == 0x00 &&
+        payload[2] == 0x00 && payload[3] == 0x01) {
+        return 4;
+    }
+    if (payload.size() >= 3 && payload[0] == 0x00 && payload[1] == 0x00 &&
+        payload[2] == 0x01) {
+        return 3;
+    }
+    return 0;
+}
+
 inline bool is_keyframe_payload(video_frame::CodecKind codec,
                                 core::ByteSpan payload) noexcept {
     switch (codec) {
         case video_frame::CodecKind::kH264: {
-            if (payload.empty()) return false;
-            const std::uint8_t type = payload[0] & 0x1F;
+            // The payload may be Annex-B framed (the receiver re-frames
+            // every NAL unit that way), so look at the first NAL unit's
+            // header rather than at the first byte of the payload.
+            const std::size_t off = skip_annex_b_start_code(payload);
+            if (off >= payload.size()) return false;
+            const std::uint8_t type = payload[off] & 0x1F;
             return type == 5 || type == 7 || type == 8;   // IDR / SPS / PPS
         }
         case video_frame::CodecKind::kVP8:
@@ -218,8 +259,10 @@ inline bool is_keyframe_payload(video_frame::CodecKind codec,
             // A key frame is signalled by an IRAP NAL unit: types 16..21
             // (BLA_W_LP..CRA_NUT), of which the IDR types 19 and 20
             // (IDR_W_RADL / IDR_N_LP) are the common ones.
-            if (payload.size() < 2) return false;
-            const std::uint8_t type = static_cast<std::uint8_t>((payload[0] >> 1) & 0x3F);
+            const std::size_t off = skip_annex_b_start_code(payload);
+            if (payload.size() < off + 2) return false;
+            const std::uint8_t type =
+                static_cast<std::uint8_t>((payload[off] >> 1) & 0x3F);
             // 16..21 = BLA/IDR/CRA IRAP pictures.
             if (type >= 16 && type <= 21) return true;
             // 32..34 = VPS/SPS/PPS parameter sets (the H.264 analogue).

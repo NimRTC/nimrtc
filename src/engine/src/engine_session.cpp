@@ -73,7 +73,7 @@ constexpr bool dir_receives(plugins::Direction dir) noexcept {
 // ---------------------------------------------------------------------------
 
 bool NimRTCEngine::resolve_session_model() noexcept {
-    if (impl_->session_model) return true;
+    if (impl_->session_state.session_model) return true;
     if (config_.session_name.empty()) return false;
 
     const auto* factory =
@@ -95,13 +95,13 @@ bool NimRTCEngine::resolve_session_model() noexcept {
             "' failed to create an instance");
         return false;
     }
-    impl_->session_model = std::move(model);
+    impl_->session_state.session_model = std::move(model);
     return true;
 }
 
 void NimRTCEngine::ensure_base_session_state() noexcept {
-    if (!impl_->session_model) return;
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return;
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     const auto transceivers = s.transceivers();
 
@@ -122,7 +122,7 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
     // transceiver instead of allocating a second one — the seeding has
     // to be idempotent, because it runs from `create_offer()` *and*
     // again after `open()` resolved the video plugins.
-    std::string audio_mid = impl_->base_audio_mid;
+    std::string audio_mid = impl_->session_state.base_audio_mid;
     if (!mid_alive(audio_mid)) {
         audio_mid.clear();
         for (const auto& t : transceivers) {
@@ -136,7 +136,7 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
                                              plugins::Direction::kSendRecv);
         }
     }
-    impl_->base_audio_mid = audio_mid;
+    impl_->session_state.base_audio_mid = audio_mid;
     if (audio_mid.empty()) return;
 
     // The engine's own audio track rides on it.
@@ -155,7 +155,7 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
     // Only when the video pipeline is actually there: an m-line we
     // cannot serve would be a lie.
     if (video_receiver_ || video_sender_) {
-        std::string video_mid = impl_->base_video_mid;
+        std::string video_mid = impl_->session_state.base_video_mid;
         if (!mid_alive(video_mid)) {
             video_mid.clear();
             for (const auto& t : transceivers) {
@@ -169,7 +169,7 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
                                                  plugins::Direction::kSendRecv);
             }
         }
-        impl_->base_video_mid = video_mid;
+        impl_->session_state.base_video_mid = video_mid;
 
         if (video_mid.empty()) return;
 
@@ -194,7 +194,7 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
              ? (resolved_dc_factory_id_ == "web_transport")
              : (config_.datachannel_backend == "web_transport"));
     if (!wt_backend && !config_.datachannel_name.empty()) {
-        std::string data_mid = impl_->base_data_mid;
+        std::string data_mid = impl_->session_state.base_data_mid;
         if (!mid_alive(data_mid)) {
             for (const auto& t : transceivers) {
                 if (t.kind == plugins::MediaKind::kData) {
@@ -207,13 +207,13 @@ void NimRTCEngine::ensure_base_session_state() noexcept {
                                                 plugins::Direction::kSendRecv);
             }
         }
-        impl_->base_data_mid = data_mid;
+        impl_->session_state.base_data_mid = data_mid;
     }
 }
 
 void NimRTCEngine::sync_transceiver_direction(std::string_view mid) noexcept {
-    if (!impl_->session_model) return;
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return;
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     bool can_send = false;
     bool can_recv = false;
@@ -244,8 +244,8 @@ void NimRTCEngine::sync_transceiver_direction(std::string_view mid) noexcept {
 
 std::string NimRTCEngine::bind_track_to_transceiver(std::string_view track_id,
                                                     plugins::MediaKind kind) {
-    if (!impl_->session_model) return {};
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return {};
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     // The track's own direction decides which slot(s) it fills: a
     // sendonly track fills the send slot, a recvonly track the receive
@@ -285,8 +285,8 @@ std::string NimRTCEngine::bind_track_to_transceiver(std::string_view track_id,
 // ---------------------------------------------------------------------------
 
 void NimRTCEngine::mirror_remote_media(const sdp::SessionDescription& remote) noexcept {
-    if (!impl_->session_model) return;
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return;
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     for (std::size_t index = 0; index < remote.media.size(); ++index) {
         const auto& rm = remote.media[index];
@@ -337,7 +337,7 @@ bool NimRTCEngine::add_track(std::string_view id,
     if (!resolve_session_model()) return false;
     if (id.empty()) return false;
 
-    plugins::ISession& s = *impl_->session_model;
+    plugins::ISession& s = *impl_->session_state.session_model;
     if (!s.add_track(std::string(id), kind, dir)) return false;
 
     const std::string mid = bind_track_to_transceiver(id, kind);
@@ -348,13 +348,13 @@ bool NimRTCEngine::add_track(std::string_view id,
         return false;
     }
     sync_transceiver_direction(mid);
-    impl_->session_dirty = true;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 bool NimRTCEngine::remove_track(std::string_view id) noexcept {
-    if (!impl_->session_model) return false;
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return false;
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     // Remember which transceiver carried the track so its direction can
     // be recomputed (OD-A: the m-line stays, it turns `inactive`).
@@ -368,14 +368,14 @@ bool NimRTCEngine::remove_track(std::string_view id) noexcept {
 
     if (!s.remove_track(id)) return false;
     if (!mid.empty()) sync_transceiver_direction(mid);
-    impl_->session_dirty = true;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 bool NimRTCEngine::set_track_direction(std::string_view id,
                                         plugins::Direction dir) noexcept {
-    if (!impl_->session_model) return false;
-    plugins::ISession& s = *impl_->session_model;
+    if (!impl_->session_state.session_model) return false;
+    plugins::ISession& s = *impl_->session_state.session_model;
 
     if (!s.set_track_direction(id, dir)) return false;
 
@@ -385,13 +385,13 @@ bool NimRTCEngine::set_track_direction(std::string_view id,
             break;
         }
     }
-    impl_->session_dirty = true;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 std::vector<plugins::TrackInfo> NimRTCEngine::tracks() const noexcept {
-    if (!impl_->session_model) return {};
-    return impl_->session_model->tracks();
+    if (!impl_->session_state.session_model) return {};
+    return impl_->session_state.session_model->tracks();
 }
 
 // ---------------------------------------------------------------------------
@@ -401,41 +401,41 @@ std::vector<plugins::TrackInfo> NimRTCEngine::tracks() const noexcept {
 std::string NimRTCEngine::add_transceiver(plugins::MediaKind kind,
                                            plugins::Direction dir) noexcept {
     if (!resolve_session_model()) return {};
-    const std::string mid = impl_->session_model->add_transceiver(kind, dir);
+    const std::string mid = impl_->session_state.session_model->add_transceiver(kind, dir);
     if (mid.empty()) return {};
-    impl_->session_dirty = true;
+    impl_->session_state.session_dirty = true;
     return mid;
 }
 
 bool NimRTCEngine::set_transceiver_direction(std::string_view mid,
                                               plugins::Direction dir) noexcept {
-    if (!impl_->session_model) return false;
-    if (!impl_->session_model->set_transceiver_direction(mid, dir)) return false;
-    impl_->session_dirty = true;
+    if (!impl_->session_state.session_model) return false;
+    if (!impl_->session_state.session_model->set_transceiver_direction(mid, dir)) return false;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 bool NimRTCEngine::stop_transceiver(std::string_view mid) noexcept {
-    if (!impl_->session_model) return false;
-    if (!impl_->session_model->stop_transceiver(mid)) return false;
-    impl_->session_dirty = true;
+    if (!impl_->session_state.session_model) return false;
+    if (!impl_->session_state.session_model->stop_transceiver(mid)) return false;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 bool NimRTCEngine::restart_transceiver(std::string_view mid) noexcept {
-    if (!impl_->session_model) return false;
-    if (!impl_->session_model->restart_transceiver(mid)) return false;
-    impl_->session_dirty = true;
+    if (!impl_->session_state.session_model) return false;
+    if (!impl_->session_state.session_model->restart_transceiver(mid)) return false;
+    impl_->session_state.session_dirty = true;
     return true;
 }
 
 std::vector<plugins::TransceiverInfo> NimRTCEngine::transceivers() const noexcept {
-    if (!impl_->session_model) return {};
-    return impl_->session_model->transceivers();
+    if (!impl_->session_state.session_model) return {};
+    return impl_->session_state.session_model->transceivers();
 }
 
 bool NimRTCEngine::needs_negotiation() const noexcept {
-    return impl_->session_dirty;
+    return impl_->session_state.session_dirty;
 }
 
 } // namespace nimrtc::engine

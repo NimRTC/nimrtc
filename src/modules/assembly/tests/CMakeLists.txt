@@ -49,6 +49,11 @@ target_link_libraries(test_assembly PRIVATE
     nimrtc::assembly
     nimrtc::core
     nimrtc::plugins
+    # The transport-side adapter (`nimrtc/assembly/transport_bridge.hpp`)
+    # needs the transport module's include path.  The adapter is
+    # header-only, so this link exists purely to propagate the include
+    # path — it pulls no transport *symbol* into this target.
+    nimrtc::transport
     GTest::gtest_main
     GTest::gtest)
 
@@ -72,5 +77,40 @@ add_test(NAME modules_assembly_tests COMMAND test_assembly)
 # Run tests from the build directory so that profile_path()'s fallback
 # ("."-relative path) resolves to ${CMAKE_BINARY_DIR}/profiles/.
 set_tests_properties(modules_assembly_tests PROPERTIES
+    TIMEOUT 30
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# -----------------------------------------------------------------------------
+# The Profile → EngineConfig bridge (architecture remediation plan §4.2 / D2)
+# -----------------------------------------------------------------------------
+#
+# A separate target because it links `nimrtc::assembly_engine` — the
+# INTERFACE target that carries the engine-facing half of the module.  The
+# plain `test_assembly` target above deliberately does NOT link the engine:
+# it exercises the Profile schema, the registry and the JSON loader, none
+# of which need the engine.
+#
+# The split is itself a test of the architecture: if the bridge forced the
+# engine into the core assembly target, this file could not exist.
+add_executable(test_assembly_bridge test_assembly_bridge.cpp)
+
+target_compile_definitions(test_assembly_bridge PRIVATE _CRT_SECURE_NO_WARNINGS)
+
+set_target_properties(test_assembly_bridge PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_assembly_bridge LENIENT)
+
+target_link_libraries(test_assembly_bridge PRIVATE
+    nimrtc::assembly_engine
+    nimrtc::core
+    nimrtc::plugins
+    nimrtc::transport
+    nimrtc::engine
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_assembly_bridge_tests COMMAND test_assembly_bridge)
+set_tests_properties(modules_assembly_bridge_tests PROPERTIES
     TIMEOUT 30
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

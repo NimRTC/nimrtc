@@ -116,10 +116,15 @@ bool DirtyRectDetector::compare(const std::uint8_t* pixels,
 
     const std::uint32_t step = stride_;
     for (std::uint32_t y = 0; y < height; y += step) {
+        // The row offset is computed in `std::size_t` throughout: the
+        // row stride is a signed `std::int32_t` and the row index is an
+        // unsigned `std::uint32_t`, so mixing them in the expression
+        // is a sign conversion the compiler has to warn about.
+        const std::size_t row = static_cast<std::size_t>(y);
         const std::uint8_t* new_row = pixels +
-            static_cast<std::size_t>(y) * row_stride;
+            row * static_cast<std::size_t>(row_stride);
         const std::uint8_t* old_row = previous_.data() +
-            static_cast<std::size_t>(y) * row_bytes;
+            row * row_bytes;
 
         bool row_changed = false;
         for (std::uint32_t x = 0; x < width; x += step) {

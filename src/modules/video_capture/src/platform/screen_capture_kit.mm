@@ -180,10 +180,17 @@ std::string utf8(NSString* s) {
  * list before it can return it.  The completion handler therefore
  * signals a semaphore that the caller waits on.
  *
- * The API changed in macOS 14 (`getShareableContentWithCompletionHandler:`
- * became `excludingDesktopWindows:onScreenWindowsOnly:completionHandler:`).
- * The old spelling still works, but it is deprecated, and a build with
- * `-Werror` would refuse it — so the new one is used where it exists.
+ * The API used here is
+ *
+ *     + (void)getShareableContentExcludingDesktopWindows:(BOOL)
+ *                            onScreenWindowsOnly:(BOOL)
+ *                              completionHandler:(void(^)(SCShareableContent*,
+ *                                                         NSError*));
+ *
+ * which is available since macOS 12.3 — the same floor as
+ * ScreenCaptureKit itself, so it needs no version branch.  (Its
+ * *Swift* spelling, `getExcludingDesktopWindows`, is not the
+ * Objective-C selector: writing that one is a compile error.)
  *
  * @param content    Receives the shareable content (null on failure).
  * @param error_text Receives the failure description (empty on success).
@@ -197,28 +204,15 @@ bool fetch_shareable_content(SCShareableContent*& content,
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block NSError* error = nil;
 
-    if (@available(macOS 14.0, *)) {
-        [SCShareableContent
-            getExcludingDesktopWindows:NO
-                      onScreenWindowsOnly:YES
-                     completionHandler:^(SCShareableContent* c,
-                                         NSError* e) {
-                content = c;
-                error = e;
-                dispatch_semaphore_signal(done);
-            }];
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        [SCShareableContent
-            getShareableContentWithCompletionHandler:^(SCShareableContent* c,
+    [SCShareableContent
+        getShareableContentExcludingDesktopWindows:NO
+                                 onScreenWindowsOnly:YES
+                                  completionHandler:^(SCShareableContent* c,
                                                       NSError* e) {
-                content = c;
-                error = e;
-                dispatch_semaphore_signal(done);
-            }];
-#pragma clang diagnostic pop
-    }
+        content = c;
+        error = e;
+        dispatch_semaphore_signal(done);
+    }];
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
@@ -369,14 +363,22 @@ plugins::Status ScreenCaptureKitCapture::open() noexcept {
                 return plugins::kErrInvalidParam;
             }
             const NSUInteger count = content.displays.count;
-            if (static_cast<std::size_t>(index) >= count) {
+            // `index` is a signed `long` (that is what `strtol` returns)
+            // and `content.displays` is indexed by an `NSUInteger`, so
+            // the subscript is spelled in the array's own index type.
+            // Casting at the subscript is what keeps the conversion
+            // explicit -- and keeps it out of a -Wsign-conversion
+            // warning, which the build treats as an error.
+            const NSUInteger display_index =
+                static_cast<NSUInteger>(index);
+            if (display_index >= count) {
                 core::log::Logger::instance().error(
                     "sck: display " + std::to_string(index) +
                     " does not exist (" + std::to_string(count) +
                     " displays)");
                 return plugins::kErrInvalidParam;
             }
-            state->display = content.displays[index];
+            state->display = content.displays[display_index];
         } else {
             core::log::Logger::instance().error(
                 "sck: '" + cfg_.device_id +
@@ -545,15 +547,16 @@ plugins::Status ScreenCaptureKitCapture::open() noexcept {
     // failed to start would otherwise surface as an empty queue instead
     // of as an error.  The completion handler therefore signals a
     // semaphore that `open()` waits on.
+    // `startCaptureWithCompletionHandler:` returns *void*: it reports
+    // the outcome through the handler's `NSError`, not through a
+    // return value.  (There is no BOOL to test here -- asking for one
+    // is a compile error, and the error is the only signal there is.)
     __block NSError* start_error = nil;
     dispatch_semaphore_t started = dispatch_semaphore_create(0);
-    if (![stream startCaptureWithCompletionHandler:^(NSError* e) {
-            start_error = e;
-            dispatch_semaphore_signal(started);
-        }]) {
-        core::log::Logger::instance().error("sck: startCapture failed");
-        return plugins::kErrHardwareError;
-    }
+    [stream startCaptureWithCompletionHandler:^(NSError* e) {
+        start_error = e;
+        dispatch_semaphore_signal(started);
+    }];
     dispatch_semaphore_wait(started, DISPATCH_TIME_FOREVER);
     if (start_error != nil) {
         core::log::Logger::instance().error(

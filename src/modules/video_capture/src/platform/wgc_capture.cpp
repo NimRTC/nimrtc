@@ -212,6 +212,93 @@ HWND window_from_id(const std::string& id) {
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
+// The shared apartment
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A COM apartment that outlives the objects it owns.
+ *
+ * WinRT needs an apartment, and *leaving* one is an ordered operation:
+ * every WinRT object created in the apartment has to be released
+ * *before* the apartment goes away, because the runtime may call back
+ * into the apartment to perform the release.  A release that happens
+ * after `CoUninitialize()` runs against a runtime the thread no longer
+ * has — undefined behaviour, which shows up as an access violation
+ * inside the COM machinery rather than as a clean error.
+ *
+ * The frame-arrival handler makes this hard, because of *when* it
+ * runs.  It runs on a WinRT thread-pool thread, which has no apartment
+ * of its own: it borrows the runtime the capture thread's apartment
+ * provides.  And the capture thread cannot know that every dispatched
+ * handler has *finished*: unsubscribing stops new events, but an
+ * invocation that was already dispatched still starts — possibly after
+ * the capture thread has already torn its apartment down.
+ *
+ * So the apartment is not owned by a thread at all.  It is owned by a
+ * *count*, and every party that might still touch a WinRT object holds
+ * a reference to it.  The apartment is torn down when the last
+ * reference goes, which is after the capture thread has finished *and*
+ * after every handler that might still run has finished.
+ *
+ * The capture thread initializes it; every handler takes a reference for
+ * the duration of its work; the last one out leaves the apartment.
+ */
+class SharedApartment {
+public:
+    /** Initialize the apartment.  Must be called on the thread that
+     *  will own it (the capture thread). */
+    void initialize() noexcept {
+        const HRESULT hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        initialized_ = SUCCEEDED(hr);
+    }
+
+    /** True iff the apartment was initialized successfully. */
+    [[nodiscard]] bool ok() const noexcept { return initialized_; }
+
+    /** Take a reference to the apartment.
+     *
+     *  The caller must hold one for as long as it might touch a WinRT
+     *  object, and it must not take one after the last reference has
+     *  been dropped.
+     *
+     *  @return true iff the reference was taken.  False means the
+     *          apartment is already gone, and the caller must not
+     *          touch any WinRT object. */
+    [[nodiscard]] bool acquire() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // The count cannot go below one: the capture thread's own
+        // reference is held until it releases the apartment, and a
+        // handler cannot be running after that.
+        if (count_.load(std::memory_order_relaxed) == 0) return false;
+        count_.fetch_add(1, std::memory_order_acq_rel);
+        return true;
+    }
+
+    /** Drop a reference.  The last one out tears the apartment down. */
+    void release() noexcept {
+        bool last = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (count_.load(std::memory_order_relaxed) == 0) return;
+            last = count_.fetch_sub(1, std::memory_order_acq_rel) == 1;
+        }
+        if (last && initialized_) {
+            ::CoUninitialize();
+            initialized_ = false;
+        }
+    }
+
+    SharedApartment() = default;
+    SharedApartment(const SharedApartment&)            = delete;
+    SharedApartment& operator=(const SharedApartment&) = delete;
+
+private:
+    std::mutex mutex_;
+    std::atomic<int> count_{1};
+    bool initialized_ = false;
+};
+
+// ---------------------------------------------------------------------------
 // The platform state (PIMPL)
 // ---------------------------------------------------------------------------
 
@@ -268,6 +355,20 @@ public:
      *  thread tears the pool down: the shared ownership keeps the pool
      *  alive for a handler that is already running. */
     std::shared_ptr<Direct3D11CaptureFramePool> pool_;
+
+    /** The apartment the WinRT objects live in.
+     *
+     *  It is *shared* rather than owned by the capture thread, because
+     *  a frame-arrival handler may still be running — or may still
+     *  start — after the capture thread has returned.  The handler
+     *  takes a reference for as long as it might touch a WinRT object,
+     *  and the apartment is torn down when the last reference goes.
+     *
+     *  Without this, a handler that was dispatched but had not yet
+     *  started would call into a WinRT runtime whose apartment the
+     *  capture thread had already left: an access violation rather than
+     *  a clean failure. */
+    SharedApartment apartment;
 
     /** The bounded frame queue the capture thread fills. */
     CaptureQueue queue_{2};
@@ -500,24 +601,36 @@ void WgcCapture::close() noexcept {
     if (state_) {
         // Ask the capture thread to stop and wait for it, so the WGC
         // objects are not released underneath it.
+        //
+        // The capture thread does the *whole* teardown: it owns the
+        // apartment, so it is the only thread that may release the
+        // WinRT objects.  This call therefore does not touch the pool,
+        // the session or the device -- it only asks the capture thread
+        // to stop and waits for it to finish.
         state_->stop_thread();
         // A frame-arrival handler may still be running on the WinRT
         // thread-pool thread.  Wait for it: it uses the D3D objects
-        // this call is about to release.
+        // the capture thread is about to release.
+        //
+        // The capture thread waits for the same counter *inside* the
+        // apartment, before it releases anything; this wait is the
+        // belt-and-braces half, for the case where the capture thread
+        // has already returned and a handler that had not yet started
+        // begins now.
         while (state_->in_flight_.load(std::memory_order_acquire) > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        // The handler mutex orders this reset against the handler's
-        // read of `pool_`.  (The in-flight wait above already
-        // guarantees that no handler is *inside* the critical section,
-        // but the lock makes the ordering explicit rather than relying
-        // on the counter alone.)
-        {
-            std::lock_guard<std::mutex> lock(state_->handler_mutex_);
-            state_->pool_.reset();
-        }
         //
-        // The D3D objects are deliberately *not* released here.
+        // The pool is deliberately *not* released here.
+        //
+        // The pool is a WinRT object, and a WinRT object has to be
+        // released inside a COM apartment.  This thread has no
+        // apartment, so releasing it here would be an access violation
+        // rather than a clean failure.  The capture thread releases it
+        // instead, on its own thread, inside its own apartment -- see
+        // the `ApartmentGuard` in `capture_loop`.
+        //
+        // The D3D objects are deliberately *not* released here either.
         //
         // A free-threaded frame pool may already have dispatched a
         // handler invocation to the thread pool at the moment the
@@ -601,8 +714,13 @@ void WgcCapture::capture_loop(
     // WinRT needs an apartment.  MTA is the right one here: the frame
     // arrives on a thread-pool thread, and the capture thread only
     // drives the session.
-    const HRESULT co_hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(co_hr)) {
+    //
+    // The apartment is *shared* rather than owned by this thread: a
+    // frame-arrival handler may still be running — or may still start —
+    // after this function returns, and it needs the apartment to be
+    // alive.  See `SharedApartment`.
+    state->apartment.initialize();
+    if (!state->apartment.ok()) {
         core::log::Logger::instance().error("wgc: CoInitializeEx failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
@@ -641,7 +759,11 @@ void WgcCapture::capture_loop(
                 std::lock_guard<std::mutex> lock(state->handler_mutex_);
                 state->pool_.reset();
             }
-            ::CoUninitialize();
+            // The apartment is *shared*: the capture thread's own
+            // reference goes, and the apartment is torn down only when
+            // the last handler that might still touch a WinRT object
+            // has let go of its reference.
+            if (state) state->apartment.release();
         }
     } apartment_guard{state};
 
@@ -936,6 +1058,32 @@ void WgcCapture::on_frame_arrived(
         std::atomic<int>* counter;
         ~InFlightGuard() { counter->fetch_sub(1, std::memory_order_acq_rel); }
     } guard{&state->in_flight_};
+
+    // Hold the apartment for as long as this handler might touch a
+    // WinRT object.
+    //
+    // The handler runs on a WinRT thread-pool thread, which has no
+    // apartment of its own: it borrows the runtime the capture thread's
+    // apartment provides.  Taking a reference *before* anything else
+    // means the apartment cannot be torn down while this handler is
+    // running -- and, just as importantly, it means the apartment
+    // cannot be torn down before this handler has even *started*, which
+    // is the window that used to crash: the capture thread unsubscribes,
+    // sees that no handler is running, and leaves the apartment, while a
+    // handler that had already been dispatched to the thread pool is
+    // only now waking up.
+    const bool apartment_held = state->apartment.acquire();
+    struct ApartmentGuard {
+        SharedApartment* apartment;
+        bool held;
+        ~ApartmentGuard() { if (held) apartment->release(); }
+    } apartment_guard{&state->apartment, apartment_held};
+
+    // The apartment is gone: the capture thread has already torn it
+    // down, so there is no runtime left to call into.  Touching the
+    // pool now would be an access violation rather than a clean
+    // failure, so the handler simply does nothing.
+    if (!apartment_held) return;
 
     // Only one handler at a time may use the readback buffers and the
     // dirty-rect detector: a free-threaded frame pool may raise

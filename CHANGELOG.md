@@ -1794,6 +1794,41 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The engine closed the capture device twice (remote-desktop plan
+  A1 / A10).**  `NimRTCEngine::shutdown_video_capture()` closed the
+  capture *adapter* and then closed the underlying capture *device* a
+  second time.  The adapter owns the device's open/close lifecycle, so
+  the second close reported a spurious close to the plug-in — and a
+  plug-in that counts closes (or that asserts it is not closed twice)
+  sees a lifecycle event that never happened.  The engine now closes
+  the adapter — which closes the device with it — and afterwards only
+  drops its own reference to the device.
+
+- **The seven platform capture entry points carried no stability marker,
+  so the API-freeze gate reddened CI.**  The new platform capture
+  headers (`dxgi_desktop_dup`, `portal_capture`, `screen_capture_kit`,
+  `wgc_capture`, `win_cursor_source`, `x11_capture`, `x11_cursor_source`)
+  declared their classes as `NIMRTC_API_STABLE`, but the free functions
+  at the bottom of those headers — the per-platform registration entry
+  points and the two cursor-source factories — had no marker at all.
+  ADR-015 "Verification" requires every namespace-scope symbol in a
+  public header to carry one, and `scripts/api_freeze_scan.js` exits
+  non-zero when one does not, so the `API freeze -- per-symbol
+  classification` CI job failed on the merge branch with 7 unclassified
+  symbols.  The markers match the rest of the module (`NIMRTC_API_STABLE`).
+
+- **`EngineVideoPlugins.source_can_produce_and_sink_can_render` was
+  scheduler-dependent.**  The test slept for a fixed 200 ms after
+  `start()` and then asserted that the video source had produced frames.
+  That window races against the producer thread's cold-start latency: on
+  a loaded host the thread can miss the whole window, and the test then
+  reports zero frames for a source that is working perfectly.  Measured
+  on a developer machine: 1 failure in 20 runs of the test in isolation,
+  and one failure in a parallel `ctest -j 8` run.  The test now polls
+  for the first frame with a 2 s deadline — the same guard the sibling
+  test in `src/modules/video_source/tests/test_video_source.cpp` already
+  used — and 30 consecutive isolated runs after the change pass.
+
 - **The TURN relay suite no longer depends on a fixed UDP port window
   (v1.2.0).**  The tests pinned the TURN server's ports (64000,
   64010-64031) and its relay-port ranges (64100-64499).  Windows

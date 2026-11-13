@@ -322,6 +322,24 @@ jobs:
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
 
+      # ADR-026: a `.h` under `src/**/include/` is a promise that a C
+      # host can include it.  `sched_c.h` is the first public header
+      # that promise is made about, and nothing checked it -- so adding
+      # one `#include <string>` would have turned a public C header into
+      # something no C compiler accepts, invisibly, until a consumer
+      # tried to build against it.
+      #
+      # The check compiles every such header as C11, in isolation, with
+      # a real C compiler.  `--require-compiler` makes a missing
+      # compiler a failure rather than a skip: on this runner there
+      # always is one, and a silently-skipped check is a check that
+      # stopped running.
+      - name: Check that the public headers are C-clean
+        run: python tools/check_c_clean_headers.py --require-compiler
+
+      - name: Self-test the C-clean guard
+        run: python tools/check_c_clean_headers.py --self-test
+
       # The offline release-signature verifier carries its own Ed25519
       # implementation.  A wrong curve equation or an inverted
       # verification equation makes it reject *valid* release

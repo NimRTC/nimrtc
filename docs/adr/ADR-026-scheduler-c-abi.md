@@ -212,9 +212,9 @@ id and priority, and that a NULL handle is tolerated everywhere.
 | Item | Where | Status |
 |---|---|---|
 | Extend the C ABI to the other seams (transport, DTLS, SRTP) | — | Not started — one seam first, to learn the shape |
-| A CI guard that a `.h` under `src/**/include/` is C-clean | Phase 5 | Pending |
+| A CI guard that a `.h` under `src/**/include/` is C-clean | Phase 5 | **Done** (`tools/check_c_clean_headers.py`, wired into `.github/workflows/ci.yml` with a `--self-test`; it compiles every public `.h` as C11, in isolation, with a real C compiler) |
 | ADR-023 / ADR-024 (plugin ID naming, `EngineConfig` string ownership) | §7.2 | **Done** (ADR-023 Decisions 4/5/7 landed in the Phase 4 branch; ADR-024's `std::string_view` → `std::string` migration is complete — `EngineConfig` has zero `string_view` members) |
-| The 8 documents in §7.1 | §7.1 | Pending |
+| The 8 documents in §7.1 | §7.1 | **Done** (all eight are synced — see the remediation plan §7.1 status column) |
 
 ## Alternatives considered
 

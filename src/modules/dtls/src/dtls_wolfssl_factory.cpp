@@ -3,7 +3,7 @@
  * @brief WolfsslDtlsFactory — default IDtlsSessionFactory (PAL Slice 4).
  *
  * Wraps the existing wolfSSL-backed `DtlsSessionWolfSSL` (defined in
- * src/modules/dtls/src/dtls_wolfssl_session.cpp) as the default DTLS
+ * src/modules/dtls/backends/wolfssl/src/dtls_wolfssl_session.cpp) as the default DTLS
  * backend under the seam ID "wolfssl".
  *
  * ## Why a thin factory

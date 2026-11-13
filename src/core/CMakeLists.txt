@@ -83,14 +83,14 @@ target_include_directories(nimrtc_core_objects
         # PUBLIC interface does not drag the optional modules in any
         # more.  A consumer that needs a seam type includes that seam's
         # header (and links that module) explicitly.
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/dtls/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/sctp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/transport/include>
         # v0.14.0 alpha.2 (ADR-014): the WebTransport factory type is
         # needed by the static_cast in `detail::Registrar::invoke()` for
         # `Category::kWebTransport`.
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/web_transport/include>
 )
 
 # ---------------------------------------------------------------------------
@@ -115,10 +115,10 @@ target_include_directories(nimrtc_registry
     PRIVATE
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/plugins/include>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/video_frame/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/dtls/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/sctp/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/raw_udp/include>
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/transport/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/dtls/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/sctp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/transport/include>
         # v0.14.0 alpha.2 (ADR-014): the new `register_web_transport`
         # method in plugin_registry.cpp takes a
         # `const web_transport::IWebTransportSessionFactory*`
@@ -126,7 +126,7 @@ target_include_directories(nimrtc_registry
         # site so the TypedRegistry<...> member template can
         # resolve.  Same pattern as the Slice 8 / PAL Slice 2
         # dtls/sctp/raw_udp/transport include paths above.
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/web_transport/include>)
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/modules/web_transport/include>)
 target_link_libraries(nimrtc_registry
     PUBLIC
         # `PluginRegistry::instance()` and the register_* bodies only

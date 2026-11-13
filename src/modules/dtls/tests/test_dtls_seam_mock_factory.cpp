@@ -1,5 +1,5 @@
 /**
- * @file src/dtls/tests/test_dtls_seam_mock_factory.cpp
+ * @file src/modules/dtls/tests/test_dtls_seam_mock_factory.cpp
  * @brief TPAL-4 (v0.11.0) — DTLS seam mock-factory test.
  *
  * Verifies the Slice 8 typed registry hook keeps working with a

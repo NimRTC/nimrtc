@@ -1,5 +1,5 @@
 /**
- * @file src/dtls/src/dtls_plugin.cpp
+ * @file src/modules/dtls/src/dtls_plugin.cpp
  * @brief register_default_plugins() implementation for the DTLS seam (PAL Slice 4).
  *
  * Mirrors src/modules/ice/src/ice.cpp's pattern:

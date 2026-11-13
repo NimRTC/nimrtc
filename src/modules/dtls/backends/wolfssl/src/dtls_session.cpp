@@ -1,5 +1,5 @@
 /**
- * @file src/modules/dtls/src/dtls_session.cpp
+ * @file src/modules/dtls/backends/wolfssl/src/dtls_session.cpp
  * @brief DtlsSession — thin pImpl wrapper that delegates to DtlsSessionWolfSSL.
  *
  * As of the Linux-adaptation refactor the original hand-written DTLS state

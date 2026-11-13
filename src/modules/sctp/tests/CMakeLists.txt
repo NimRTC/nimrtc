@@ -69,7 +69,7 @@ target_link_libraries(test_dcep PRIVATE
 # is PRIVATE on nimrtc_sctp). Expose the private path only to the test
 # target — production code does NOT see the SctpStubFactory type.
 target_include_directories(test_sctp_factory PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/sctp/src)
+    ${CMAKE_SOURCE_DIR}/src/modules/sctp/src)
 
 # NOTE: No top-level add_test() —see modules/audio3a/tests/CMakeLists.txt
 # for the rationale (CMake 4.0 multi-config conditional bug).

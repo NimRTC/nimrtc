@@ -84,9 +84,49 @@ if(NIMRTC_MODULE_SRTP)
     add_subdirectory(srtp)
 endif()
 
+# -----------------------------------------------------------------------------
+# Transport-layer seam families (Transport PAL Slices 4-8).
+#
+# These five modules used to live at the top level of `src/` (src/dtls/,
+# src/sctp/, src/raw_udp/, src/transport/, src/web_transport/).  The
+# v1.2 directory unification (architecture remediation plan §4.1 / Q5)
+# moved them under `src/modules/` — the include paths
+# (`<nimrtc/dtls/...>`, `<nimrtc/sctp/...>`, …) and the CMake target
+# names (`nimrtc::dtls_seam`, `nimrtc::sctp`, `nimrtc::raw_udp`,
+# `nimrtc::transport`, `nimrtc::web_transport`) are UNCHANGED, so no
+# downstream consumer needs a source change.
+#
+# ORDER MATTERS — the seam families have a strict dependency chain:
+#
+#   dtls      ──▶ (nothing above it needs a seam below)
+#   sctp      ──▶ datachannel (links nimrtc::sctp)
+#   raw_udp   ──▶ transport
+#   dtls_seam ──▶ transport (links nimrtc::dtls_seam)
+#   transport ──▶ the engine (links nimrtc::transport)
+#
+# `dtls` must therefore come before `transport`, and `sctp` before
+# `datachannel` (which is added further down in this file).
+# -----------------------------------------------------------------------------
 if(NIMRTC_MODULE_DTLS)
     add_subdirectory(dtls)
 endif()
+
+# The SCTP seam (Transport PAL Slice 5).  The usrsctp backend is built
+# into `nimrtc_sctp` but is NOT the default registration — the stub
+# factory (id="stub") is; see src/modules/sctp/CMakeLists.txt.
+add_subdirectory(sctp)
+
+# The raw-UDP bypass seam (Transport PAL Slice 6).
+add_subdirectory(raw_udp)
+
+# The transport-stack + selector (Transport PAL Slice 7).  Links
+# nimrtc::dtls_seam / nimrtc::sctp / nimrtc::raw_udp → must come after
+# the three of them.
+add_subdirectory(transport)
+
+# The WebTransport / QUIC seam (v0.14.0-beta.1, ADR-014).  Self-contained
+# (links only core + plugins + the vendored msquic).
+add_subdirectory(web_transport)
 
 if(NIMRTC_MODULE_OPUS)
     add_subdirectory(opus)
@@ -238,4 +278,4 @@ if(NIMRTC_BUILD_TESTS)
 endif()
 
 # Future modules:
-# if(NIMRTC_MODULE_DTLS) add_subdirectory(dtls) endif()
+# if(NIMRTC_MODULE_FOO) add_subdirectory(foo) endif()

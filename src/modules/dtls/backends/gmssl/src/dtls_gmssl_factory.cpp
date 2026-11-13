@@ -1,5 +1,5 @@
 /**
- * @file src/dtls/src/dtls_gmssl_factory.cpp
+ * @file src/modules/dtls/backends/gmssl/src/dtls_gmssl_factory.cpp
  * @brief GmSSLDtlsFactory — GMSSL-backed IDtlsSessionFactory (ADR-013).
  *
  * Mirrors the wolfSSL-backed `WolfsslDtlsFactory` (id = "wolfssl") for

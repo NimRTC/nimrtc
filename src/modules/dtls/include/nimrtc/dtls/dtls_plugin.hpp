@@ -50,7 +50,7 @@ namespace detail {
 /**
  * @brief Implementation of register_default_plugins.
  *
- * Defined in `src/dtls/src/dtls_plugin.cpp`.  Forces the .obj (with
+ * Defined in `src/modules/dtls/src/dtls_plugin.cpp`.  Forces the .obj (with
  * its static Registrar) into the consumer's link when
  * register_default_plugins() is called.  Mirrors the ICE pattern.
  */

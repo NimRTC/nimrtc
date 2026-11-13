@@ -53,7 +53,11 @@ src/
 │   ├── sdp/
 │   ├── jb/
 │   ├── bwe/
-│   ├── dtls/
+│   ├── dtls/     ← The DTLS module: the seam + the wolfSSL / GmSSL backends
+│   ├── sctp/     ← The SCTP seam family
+│   ├── raw_udp/  ← The raw-UDP bypass seam family
+│   ├── transport/← The transport-stack + selector seam family
+│   ├── web_transport/← The WebTransport / QUIC seam family
 │   ├── srtp/
 │   ├── ice/
 │   ├── opus/
@@ -64,65 +68,80 @@ src/
 │   ├── video_sink/
 │   ├── video_source/
 │   ├── video_pipeline/
-│   ├── … (see src/modules/CMakeLists.txt for the full list)
+│   │   … (see src/modules/CMakeLists.txt for the full list)
 ├── engine/       ← NimRTCEngine (wires plugins together; composition layer
 │                   only — no concrete module headers in its public API,
 │                   see Layout Invariant 4)
 ├── log/          ← Logger / Sink implementation (nimrtc_log STATIC — the only
 │                   compiled module in src/ besides the engine itself)
-├── dtls/         ← DTLS **seam** family (see "The seam-family directories"
-│                   below): the IDtlsSession / IDtlsSessionFactory interfaces,
-│                   the GmSSL backend, and the wolfSSL *factory*
-├── raw_udp/      ← Raw-UDP seam family: ISocketFactory + the ARQ transport
-├── sctp/         ← SCTP seam family: ISctpSocketFactory + the usrsctp socket
-├── transport/    ← Transport-stack seam family: ITransportStackFactory
-├── web_transport/← WebTransport seam family: the msquic-backed data plane
 └── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus, libjuice
                     + special-purpose helpers (googletest, nlohmann_json)
 ```
 
-#### The seam-family directories (`src/dtls/`, `src/raw_udp/`, `src/sctp/`, `src/transport/`, `src/web_transport/`)
+#### The transport-layer seam families (`src/modules/{dtls,sctp,raw_udp,transport,web_transport}/`)
 
-Five subsystems keep their code at the top level of `src/` instead of under
-`src/modules/<name>/`.  This is the historical PAL Slice layout, and it is
-**not** a violation of Layout Invariant 3: each of those directories is still
-self-contained (own `CMakeLists.txt` + `include/` + `src/` + `tests/`), it just
-does not use the `modules/` path prefix.
+Five subsystems expose a **replaceable seam** for one optional transport
+component.  Until the v1.2 directory unification they lived at the top level
+of `src/` (`src/dtls/`, `src/raw_udp/`, `src/sctp/`, `src/transport/`,
+`src/web_transport/`) — a historical PAL Slice layout.  They now sit under
+`src/modules/<name>/` like every other module: each directory is
+self-contained (own `CMakeLists.txt` + `include/` + `src/` + `tests/`).
 
-Each directory holds **the seam for one optional subsystem**: the abstract
-interface, the factory interface, and (where the subsystem needs a default
-implementation) that implementation.  The `src/modules/<name>/` tree holds the
-modules the engine always composes.
+**What the unification did and did not change:**
 
-**DTLS has code in two places — this is the one place where "which file is
-authoritative?" has a real answer:**
+* **Public include paths are unchanged**: `#include <nimrtc/dtls/...>`,
+  `<nimrtc/sctp/...>`, `<nimrtc/raw_udp/...>`, `<nimrtc/transport/...>`,
+  `<nimrtc/web_transport/...>` resolve exactly as before.
+* **CMake target names are unchanged**: `nimrtc::dtls`, `nimrtc::dtls_seam`,
+  `nimrtc::sctp`, `nimrtc::raw_udp`, `nimrtc::transport`,
+  `nimrtc::web_transport` (and the `nimrtc_*` archive names).
+* **Only the on-disk location changed.**  Consumers that `add_subdirectory()`
+  NimRTC and link the targets need no source change at all.
 
-| Path                          | Role                                                                     |
-|-------------------------------|--------------------------------------------------------------------------|
-| `src/dtls/`                   | The **seam**: `dtls_session_iface.hpp` (`IDtlsSession`), `dtls_session_factory.hpp` (`IDtlsSessionFactory`), `dtls_types.hpp`, the **GmSSL** backend, and the **wolfSSL factory** (`dtls_wolfssl_factory.cpp`).  This directory owns *how a backend is chosen and what the interface looks like*. |
-| `src/modules/dtls/`           | The **wolfSSL session implementation**: `dtls_wolfssl_session.cpp` (the handshake, the record layer, the PRF) and `dtls_prf.cpp`.  This directory owns *how one backend behaves*. |
+#### The DTLS module (`src/modules/dtls/`)
 
-So: **`src/modules/dtls/` holds the authoritative wolfSSL session
-implementation**, and **`src/dtls/` holds the authoritative seam plus the
-GmSSL alternative**.  A change to the DTLS *protocol behaviour* belongs in
-`src/modules/dtls/`; a change to the *interface* or to the *backend selection*
-belongs in `src/dtls/`.  Both trees are built and tested independently
-(`src/dtls/tests/` covers the factory/selection, `src/modules/dtls/tests/`
-covers the handshake reassembly).
+DTLS is the one subsystem that used to have code in **two** directories, which
+made "which file is authoritative?" a real question.  The unification resolved
+it — there is now **one** DTLS module, and the seam-vs-backend split is
+expressed at the *source* level instead of the *directory* level:
 
-Two facts that keep the two trees from looking like duplicated work:
+```
+src/modules/dtls/
+├── include/nimrtc/dtls/     ← the ONE public include root (9 headers):
+│                              dtls.hpp, dtls_types.hpp, dtls_session_iface.hpp,
+│                              dtls_session_factory.hpp, dtls_plugin.hpp,
+│                              dtls_wolfssl_session.hpp, dtls_gmssl_session.hpp,
+│                              dtls_prf.hpp, dtls_handshake_reassembler.hpp
+├── src/                     ← the SEAM: register_default_plugins() + the
+│                              backend factories (WolfsslDtlsFactory,
+│                              GmSSLDtlsFactory)
+├── backends/wolfssl/src/    ← the wolfSSL session implementation
+│                              (dtls_session.cpp, dtls_wolfssl_session.cpp,
+│                              dtls_prf.cpp)
+├── backends/gmssl/src/      ← the GmSSL session implementation (opt-in via
+│                              NIMRTC_ENABLE_DTLS_GMSSL=ON)
+└── tests/                   ← the module's unit tests
+```
+
+So: **`src/` owns *what the interface looks like* and *how a backend is
+chosen*; `backends/<name>/src/` owns *how one backend behaves*.**  A change to
+the DTLS *protocol behaviour* belongs in `backends/<name>/src/`; a change to
+the *interface* or to the *backend selection* belongs in `src/`.
+
+Two facts that keep this from looking like duplicated work:
 
 * **wolfSSL is the only DTLS provider in the shipped build.**  The original
-  hand-written DTLS state machine is gone; `src/modules/dtls/src/dtls_session.cpp`
-  is now a thin PIMPL forwarder that delegates every call to
-  `DtlsSessionWolfSSL` (defined in
-  `src/modules/dtls/src/dtls_wolfssl_session.cpp`).  The GmSSL backend under
-  `src/dtls/` is an **alternative provider behind the same seam**, not a
-  second copy of the protocol.
-* **`src/dtls/src/dtls_wolfssl_session_iface.hpp` is a re-export forwarder**,
-  not a second implementation: it pulls the concrete class in from
-  `src/modules/dtls/` so consumers of the seam can name it without knowing
-  which subtree it lives under.
+  hand-written DTLS state machine is gone;
+  `backends/wolfssl/src/dtls_session.cpp` is now a thin PIMPL forwarder that
+  delegates every call to `DtlsSessionWolfSSL` (defined in
+  `backends/wolfssl/src/dtls_wolfssl_session.cpp`).  The GmSSL backend is an
+  **alternative provider behind the same seam**, not a second copy of the
+  protocol.
+* **The seam and the backends share ONE public include root.**  A consumer
+  that wants the concrete `DtlsSessionWolfSSL` includes
+  `<nimrtc/dtls/dtls_wolfssl_session.hpp>`; a consumer that only wants the
+  seam includes `<nimrtc/dtls/dtls_session_iface.hpp>`.  Neither needs to
+  know which subtree the implementation lives under.
 
 ### `src/third_party/` layout
 
@@ -181,8 +200,8 @@ engine.
 | **The host** | 1 (the "engine thread") | host code | Calls `open()` / `tick()` / `send_audio()` / `send_video()` / `close()`.  The engine **never starts a thread of its own** — there is no `std::thread` anywhere under `src/engine/`.  All engine state is therefore owned by whichever thread calls `tick()`. |
 | **ICE** | 1 consent thread per transport | `src/modules/ice/src/ice.cpp` (`consent_thread_`) | Periodically checks consent freshness and, when consent lapses, tears the selected pair down.  It touches only the ICE transport's own state, which it guards with its own mutex. |
 | **video_source** | 1 cadence thread per source | `src/modules/video_source/src/video_source.cpp` (`thread_`) | Generates frames at the configured cadence when the source is a synthetic/test pattern.  The engine deliberately does **not** wire this thread into the encoder (the video codec is not thread-safe) — the host pulls frames from the source and pushes them via `send_video()`. |
-| **raw_udp (ARQ transport)** | 2 — a recv thread and a retransmit thread | `src/raw_udp/include/nimrtc/raw_udp/arq_raw_udp.hpp` | Only the ARQ raw-UDP transport has these; the plain UDP socket path does not.  The recv thread fills a queue; the retransmit thread re-sends unacknowledged frames. |
-| **usrsctp / SCTP** | 0 | `src/sctp/src/usrsctp_socket.cpp` | The `g_shared_udp_thread` global is **declared but never started** — usrsctp runs its own internal UDP listener.  Do not read that symbol as "a thread NimRTC starts". |
+| **raw_udp (ARQ transport)** | 2 — a recv thread and a retransmit thread | `src/modules/raw_udp/include/nimrtc/raw_udp/arq_raw_udp.hpp` | Only the ARQ raw-UDP transport has these; the plain UDP socket path does not.  The recv thread fills a queue; the retransmit thread re-sends unacknowledged frames. |
+| **usrsctp / SCTP** | 0 | `src/modules/sctp/src/usrsctp_socket.cpp` | The `g_shared_udp_thread` global is **declared but never started** — usrsctp runs its own internal UDP listener.  Do not read that symbol as "a thread NimRTC starts". |
 
 The WebTransport data plane is different again: it is handed to **msquic**,
 which runs its own thread pool.  NimRTC does not own or schedule those threads;

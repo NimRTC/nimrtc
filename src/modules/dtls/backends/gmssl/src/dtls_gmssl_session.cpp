@@ -1,5 +1,5 @@
 /**
- * @file src/dtls/src/dtls_gmssl_session.cpp
+ * @file src/modules/dtls/backends/gmssl/src/dtls_gmssl_session.cpp
  * @brief DtlsSessionGmSSL — GMSSL v3.x native-API DTLS 1.2 implementation.
  *
  * ## API basis

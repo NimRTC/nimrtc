@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// @file src/modules/dtls/src/dtls_prf.cpp
+// @file src/modules/dtls/backends/wolfssl/src/dtls_prf.cpp
 // @brief TLS 1.2 PRF (P_SHA-256, RFC 5246 §5) — wolfSSL HMAC-SHA-256 backed.
 //
 // Replaces the BCrypt-only stub that lived in

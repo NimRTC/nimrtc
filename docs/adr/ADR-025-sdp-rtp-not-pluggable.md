@@ -185,7 +185,7 @@ records the requirement; the concentration lands with D1.
 |---|---|---|
 | Concentrate the `rtp::` usage into `rtp_packetizer.cpp` | §4.3 / D1 | Pending (blocked on the engine split) |
 | Mark the residual SDP seam interface deprecated | §2.1 / Q2 | **Done** (`plugins/sdp.hpp`) |
-| Add a CI guard that flags new concrete-module includes in `src/engine/` | Phase 4 | Pending |
+| Add a CI guard that flags new concrete-module includes in `src/engine/` | Phase 4 | **Done** (`tools/check_engine_layering.py`, wired into `.github/workflows/ci.yml` with a `--self-test`) |
 
 ## Alternatives considered
 

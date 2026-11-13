@@ -310,6 +310,18 @@ jobs:
       - name: Self-test the dead-module guard
         run: python tools/check_dead_modules.py --self-test
 
+      # ADR-025: Layout Invariant 4 says the engine reaches a concrete
+      # module only through its `plugins::I*` seam, with a named,
+      # enumerated set of exemptions.  This check is what makes the
+      # invariant enforceable rather than aspirational -- a new
+      # concrete `#include` in src/engine/ is one line, and the coupling
+      # it creates is not.
+      - name: Check the engine's layering against ADR-025
+        run: python tools/check_engine_layering.py
+
+      - name: Self-test the engine-layering guard
+        run: python tools/check_engine_layering.py --self-test
+
       # The offline release-signature verifier carries its own Ed25519
       # implementation.  A wrong curve equation or an inverted
       # verification equation makes it reject *valid* release

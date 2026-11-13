@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -95,6 +96,35 @@ public:
      *  desktop's resolution changes. */
     UINT staging_width_  = 0;
     UINT staging_height_ = 0;
+
+    // ---- The zero-copy surface pool ---------------------------------------
+    //
+    // The duplication object *lends* its frame: the texture is only
+    // valid until `ReleaseFrame()`.  A consumer that wants the surface
+    // after that (the engine's tick thread, one tick later) needs a
+    // texture the producer owns.
+    //
+    // So the zero-copy path copies the acquired frame into one of these
+    // pooled textures with a *GPU-side* copy (`CopyResource`) — no CPU
+    // round trip, no readback — and lends that to the consumer.  The
+    // pool is small (one texture per queue slot) and the surfaces come
+    // back through the queue's release callback.
+    std::vector<ComPtr<ID3D11Texture2D>> surface_pool_;
+
+    /** The surfaces that are currently lent out, keyed by texture
+     *  pointer, so a release can find its way home. */
+    std::vector<ComPtr<ID3D11Texture2D>> surface_out_;
+
+    /** Guards the two surface vectors.  The capture thread takes a
+     *  surface; the consumer's thread returns one. */
+    std::mutex surface_mutex_;
+
+    /** True iff this device was opened on the zero-copy path. */
+    bool zero_copy_ = false;
+
+    /** The pool's texture size. */
+    UINT surface_width_  = 0;
+    UINT surface_height_ = 0;
 
     /** The output's mode, used to size the staging texture. */
     UINT out_width_  = 0;
@@ -372,7 +402,6 @@ plugins::Status DxgiDesktopDupCapture::open() noexcept {
         cfg_.format.fps = out_fps;
     }
     cfg_.format.tag = "bgra";
-    cfg_.format.zero_copy = false;
     cfg_.format.has_dirty_rects = true;
 
     // The output's place in the virtual desktop.  The pointer is
@@ -384,29 +413,117 @@ plugins::Status DxgiDesktopDupCapture::open() noexcept {
 
     description_ = devices[adapter_index].name;
 
+    // ---- The zero-copy path (remote-desktop plan B10) --------------------
+    //
+    // The host asked for the picture to reach the encoder as a GPU
+    // surface.  That is possible here: the duplication object already
+    // produces a D3D11 texture, and a GPU-side copy of it into a pooled
+    // texture is all it takes to have a surface that outlives the
+    // duplication frame.
+    //
+    // Two things have to line up for it to work, and both are checked
+    // rather than assumed:
+    //
+    //   - the *cursor* cannot be composited into a GPU surface (there
+    //     are no CPU pixels to draw into), so a host that wants both
+    //     has to choose;
+    //   - the region feature crops on the CPU, so a region forces the
+    //     CPU path.
+    const bool wants_zero_copy = cfg_.want_zero_copy;
+    const bool has_region =
+        cfg_.region.width != 0 && cfg_.region.height != 0;
+    const bool cursor_wanted = cfg_.want_cursor;
+
+    if (wants_zero_copy && has_region) {
+        core::log::Logger::instance().warn(
+            "dxgi-desktop-dup: a region crop needs CPU pixels, so the "
+            "zero-copy path is not available — falling back to the CPU "
+            "path");
+    }
+
+    const bool zero_copy = wants_zero_copy && !has_region;
+
+    if (zero_copy) {
+        // The pooled surfaces have the same layout the desktop
+        // compositor delivers, so the encoder can consume them without
+        // a conversion.
+        D3D11_TEXTURE2D_DESC sdesc{};
+        sdesc.Width            = state->out_width_;
+        sdesc.Height           = state->out_height_;
+        sdesc.MipLevels         = 1;
+        sdesc.ArraySize         = 1;
+        sdesc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sdesc.SampleDesc.Count = 1;
+        sdesc.Usage            = D3D11_USAGE_DEFAULT;
+        sdesc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+        // One surface per queue slot, plus one for the frame currently
+        // in flight: the queue holds `depth` frames and the consumer
+        // holds the one it popped.
+        const std::uint32_t slots =
+            (cfg_.queue_depth > 0 ? cfg_.queue_depth : 2u) + 1u;
+        state->surface_pool_.reserve(slots);
+        state->surface_out_.reserve(slots);
+        for (std::uint32_t i = 0; i < slots; ++i) {
+            ComPtr<ID3D11Texture2D> tex;
+            if (FAILED(state->device_->CreateTexture2D(&sdesc, nullptr, &tex))) {
+                core::log::Logger::instance().error(
+                    "dxgi-desktop-dup: could not create the zero-copy "
+                    "surface pool");
+                return plugins::kErrHardwareError;
+            }
+            state->surface_pool_.push_back(std::move(tex));
+        }
+        state->surface_width_  = sdesc.Width;
+        state->surface_height_ = sdesc.Height;
+        state->zero_copy_ = true;
+
+        // The surfaces come back through the queue when it retires
+        // them; the producer puts them back into the pool.
+        state->queue_.set_surface_release(
+            [this](const video_frame::GpuHandle& surface) {
+                release_surface(surface);
+            });
+
+        cfg_.format.zero_copy = true;
+        core::log::Logger::instance().info(
+            "dxgi-desktop-dup: the zero-copy path is active (the picture "
+            "reaches the encoder as a D3D11 surface)");
+        if (cursor_wanted) {
+            core::log::Logger::instance().warn(
+                "dxgi-desktop-dup: the zero-copy path cannot composite the "
+                "pointer — the captured picture will not carry it");
+        }
+    } else {
+        cfg_.format.zero_copy = false;
+    }
+
     // ---- Create the staging texture -------------------------------------
     //
-    // The readback goes through a CPU-readable staging texture.
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width            = state->out_width_;
-    desc.Height           = state->out_height_;
-    desc.MipLevels         = 1;
-    desc.ArraySize         = 1;
-    desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.Usage            = D3D11_USAGE_STAGING;
-    desc.BindFlags        = 0;
-    desc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
-    if (FAILED(state->device_->CreateTexture2D(&desc, nullptr,
-                                               &state->staging_))) {
-        return plugins::kErrHardwareError;
-    }
-    state->staging_width_  = desc.Width;
-    state->staging_height_ = desc.Height;
+    // The readback goes through a CPU-readable staging texture.  It is
+    // only needed on the CPU path.
+    if (!zero_copy) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width            = state->out_width_;
+        desc.Height           = state->out_height_;
+        desc.MipLevels         = 1;
+        desc.ArraySize         = 1;
+        desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage            = D3D11_USAGE_STAGING;
+        desc.BindFlags        = 0;
+        desc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
+        if (FAILED(state->device_->CreateTexture2D(&desc, nullptr,
+                                                   &state->staging_))) {
+            return plugins::kErrHardwareError;
+        }
+        state->staging_width_  = desc.Width;
+        state->staging_height_ = desc.Height;
 
-    const std::size_t bytes = static_cast<std::size_t>(state->out_width_) *
-                              static_cast<std::size_t>(state->out_height_) * 4u;
-    scratch_.assign(bytes, 0u);
+        const std::size_t bytes = static_cast<std::size_t>(state->out_width_) *
+                                  static_cast<std::size_t>(state->out_height_) * 4u;
+        scratch_.assign(bytes, 0u);
+    }
 
     // ---- Configure the queue --------------------------------------------
     state->queue_.set_drop_policy(cfg_.drop_policy);
@@ -429,6 +546,12 @@ void DxgiDesktopDupCapture::close() noexcept {
         // Ask the capture thread to stop and wait for it, so the DXGI
         // objects are not released underneath it.
         state_->stop_thread();
+        // The surfaces the queue still holds are released back to the
+        // pool before the pool itself goes away, so the queue does not
+        // hand out a dangling handle.
+        state_->queue_.clear();
+        state_->surface_pool_.clear();
+        state_->surface_out_.clear();
         state_->duplication_.Reset();
         state_->staging_.Reset();
         state_->context_.Reset();
@@ -441,6 +564,48 @@ void DxgiDesktopDupCapture::close() noexcept {
     scratch_.shrink_to_fit();
     region_scratch_.clear();
     region_scratch_.shrink_to_fit();
+}
+
+void* DxgiDesktopDupCapture::acquire_surface() noexcept {
+    if (!state_ || !state_->zero_copy_) return nullptr;
+
+    // The pool is shared between the capture thread (which takes a
+    // surface) and the consumer thread (which returns one), so the
+    // handoff is guarded by a small mutex of its own.
+    std::lock_guard<std::mutex> lock(state_->surface_mutex_);
+
+    if (state_->surface_pool_.empty()) return nullptr;
+    ComPtr<ID3D11Texture2D> tex = std::move(state_->surface_pool_.back());
+    state_->surface_pool_.pop_back();
+    state_->surface_out_.push_back(tex);
+    // The caller gets a raw pointer, so the pool's own reference is
+    // dropped here and the `surface_out_` entry keeps it alive.
+    return tex.Get();
+}
+
+void DxgiDesktopDupCapture::release_surface(
+        const video_frame::GpuHandle& surface) noexcept {
+    if (!state_ || !state_->zero_copy_) return;
+    if (surface.handle == nullptr) return;
+
+    std::lock_guard<std::mutex> lock(state_->surface_mutex_);
+
+    // Find the surface among the lent-out ones and put it back.
+    for (auto it = state_->surface_out_.begin();
+         it != state_->surface_out_.end(); ++it) {
+        if (it->Get() == surface.handle) {
+            state_->surface_pool_.push_back(std::move(*it));
+            state_->surface_out_.erase(it);
+            return;
+        }
+    }
+    // A surface the pool does not know about is a bug (a double
+    // release, or a handle from another device).  Dropping the
+    // reference is all that can be done; the texture is destroyed when
+    // the last reference goes.
+    if (auto* raw = static_cast<ID3D11Texture2D*>(surface.handle)) {
+        raw->Release();
+    }
 }
 
 std::vector<plugins::CaptureDevice>
@@ -475,8 +640,10 @@ plugins::CaptureCapabilities
 DxgiDesktopDupCapture::capabilities() const noexcept {
     plugins::CaptureCapabilities c;
     // The duplication API hands the frame over as a GPU texture, so the
-    // CPU path needs a readback: this is not the zero-copy path.
-    c.zero_copy = false;
+    // CPU path needs a readback.  The zero-copy path does not: the
+    // texture is copied on the GPU into a pooled surface and handed to
+    // the encoder directly (plan B10).
+    c.zero_copy = true;
     // DXGI reports the changed regions natively.
     c.dirty_rects = true;
     // Desktop Duplication does NOT composite the pointer — that is
@@ -622,7 +789,110 @@ void DxgiDesktopDupCapture::capture_loop() noexcept {
             continue;
         }
 
-        // ---- Read the texture back --------------------------------------
+        // ---- Collect the dirty rectangles --------------------------------
+        //
+        // DXGI reports them in the *output's* coordinate space.  They
+        // are clipped against the captured region, because the
+        // consumer's frame is the region, not the whole output.
+        plugins::CaptureDirtyRects dirty;
+        dirty.full_frame = false;
+        collect_dirty_rects(state_->duplication_.Get(), info, cfg_.region,
+                            cfg_.region.width != 0 && cfg_.region.height != 0,
+                            dirty);
+
+        // ====================================================================
+        // The zero-copy path (remote-desktop plan B10)
+        // ====================================================================
+        //
+        // The picture stays on the GPU: it is copied into a pooled
+        // texture with a GPU-side copy and handed to the consumer as a
+        // `GpuHandle`.  No pixel byte ever reaches the CPU, which is
+        // the whole point of the path.
+        if (state_->zero_copy_) {
+            void* surface = acquire_surface();
+            if (surface == nullptr) {
+                // The pool is exhausted: every surface is still lent
+                // out.  Drop the frame rather than stall the capture
+                // thread — the next frame will find a free surface.
+                state_->duplication_->ReleaseFrame();
+                frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            auto* dst = static_cast<ID3D11Texture2D*>(surface);
+            state_->context_->CopyResource(dst, texture.Get());
+
+            const std::int64_t ts = static_cast<std::int64_t>(
+                info.LastPresentTime.QuadPart / 1000);
+            const std::uint32_t seq = frame_index_++;
+
+            state_->duplication_->ReleaseFrame();
+
+            if (dirty.rects.empty()) {
+                // No change was reported: the frame is identical to the
+                // last one, so the consumer can skip it entirely.  The
+                // surface goes straight back to the pool.
+                release_surface(video_frame::GpuHandle{
+                    video_frame::GpuBackend::kWindowsD3D11Texture,
+                    surface,
+                    0,
+                    -1,
+                    state_->device_.Get()});
+                continue;
+            }
+
+            video_frame::GpuHandle handle{};
+            handle.backend = video_frame::GpuBackend::kWindowsD3D11Texture;
+            handle.handle  = surface;
+            handle.device  = state_->device_.Get();
+
+            const auto outcome = state_->queue_.push(
+                nullptr, 0, 0,
+                state_->out_width_, state_->out_height_, ts, seq, dirty,
+                handle);
+            switch (outcome) {
+                case CaptureQueue::PushResult::kQueued:
+                    frames_captured_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case CaptureQueue::PushResult::kDroppedOldest:
+                    frames_captured_.fetch_add(1, std::memory_order_relaxed);
+                    frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case CaptureQueue::PushResult::kRejected:
+                    // The frame was refused, so the surface goes back to
+                    // the pool right away.
+                    release_surface(handle);
+                    frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+            }
+
+            if (cb_) {
+                // The callback fires with a view of the frame that was
+                // just captured.  The surface is owned by the queue
+                // from here on, and it travels with the frame.
+                plugins::CaptureFrame view;
+                view.pixels = nullptr;
+                view.size = 0;
+                view.stride = 0;
+                view.width = state_->out_width_;
+                view.height = state_->out_height_;
+                view.capture_ts_us = ts;
+                view.frame_seq = seq;
+                view.dirty = dirty;
+                view.gpu_surface = handle;
+                view.has_gpu_handle = true;
+                cb_(view);
+            }
+            continue;
+        }
+
+        // ====================================================================
+        // The CPU path
+        // ====================================================================
+        //
+        // The picture is read back into the scratch buffer.  This is the
+        // one memcpy the CPU path needs, and it is why
+        // `bytes_copied` is non-zero here and zero on the path above.
         state_->context_->CopyResource(state_->staging_.Get(), texture.Get());
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -651,17 +921,6 @@ void DxgiDesktopDupCapture::capture_loop() noexcept {
             static_cast<std::uint64_t>(row_bytes) *
                 static_cast<std::uint64_t>(state_->out_height_),
             std::memory_order_relaxed);
-
-        // ---- Collect the dirty rectangles --------------------------------
-        //
-        // DXGI reports them in the *output's* coordinate space.  They
-        // are clipped against the captured region, because the
-        // consumer's frame is the region, not the whole output.
-        plugins::CaptureDirtyRects dirty;
-        dirty.full_frame = false;
-        collect_dirty_rects(state_->duplication_.Get(), info, cfg_.region,
-                            cfg_.region.width != 0 && cfg_.region.height != 0,
-                            dirty);
 
         state_->duplication_->ReleaseFrame();
 
@@ -816,7 +1075,7 @@ DxgiDesktopDupCapture::capabilities() const noexcept {
     // backend: the platform's capabilities are a property of the
     // backend, not of the host it runs on.  A query must not answer
     // differently depending on where it is asked from.
-    c.zero_copy = false;
+    c.zero_copy = true;
     c.dirty_rects = true;
     c.cursor_composited = false;
     c.region_selection = true;
@@ -827,6 +1086,11 @@ DxgiDesktopDupCapture::capabilities() const noexcept {
 }
 
 void DxgiDesktopDupCapture::capture_loop() noexcept {}
+
+void* DxgiDesktopDupCapture::acquire_surface() noexcept { return nullptr; }
+
+void DxgiDesktopDupCapture::release_surface(
+        const video_frame::GpuHandle&) noexcept {}
 
 plugins::Status DxgiDesktopDupCapture::pop_frame(
         plugins::CaptureFrame&) noexcept {

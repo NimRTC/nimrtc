@@ -271,3 +271,157 @@ TEST(CaptureSourceAdapter, ProducingWhileStoppedIsHarmless) {
     adapter.produce_one();
     EXPECT_FALSE(called);
 }
+
+// ---------------------------------------------------------------------------
+// The zero-copy path (remote-desktop plan B10)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief A capture device that delivers a GPU surface instead of pixels.
+ *
+ * This is what a platform backend looks like on the zero-copy path: the
+ * picture lives in GPU memory, so the frame carries a handle and *no*
+ * CPU bytes at all.
+ */
+class GpuSurfaceCapture final : public nimrtc::plugins::IVideoCapture {
+public:
+    explicit GpuSurfaceCapture(CaptureConfig cfg) : cfg_(std::move(cfg)) {}
+
+    const char* name() const noexcept override {
+        return "gpu-surface-capture";
+    }
+
+    nimrtc::plugins::Status open() noexcept override {
+        open_ = true;
+        cfg_.format.width  = 320;
+        cfg_.format.height = 240;
+        cfg_.format.tag    = "bgra";
+        cfg_.format.zero_copy = true;
+        return nimrtc::plugins::kOk;
+    }
+
+    void close() noexcept override { open_ = false; }
+
+    std::vector<nimrtc::plugins::CaptureDevice>
+    enumerate_devices() const noexcept override {
+        return {};
+    }
+
+    std::vector<nimrtc::plugins::CaptureFormat>
+    supported_formats(const std::string&) const noexcept override {
+        return {};
+    }
+
+    nimrtc::plugins::CaptureCapabilities
+    capabilities() const noexcept override {
+        nimrtc::plugins::CaptureCapabilities c;
+        c.zero_copy = true;
+        c.dirty_rects = true;
+        c.cursor_composited = false;
+        c.region_selection = false;
+        c.enumeration = false;
+        c.max_pixels = 0;
+        c.backend = "gpu-surface-capture";
+        return c;
+    }
+
+    bool is_open() const noexcept override { return open_; }
+
+    CaptureConfig config() const noexcept override { return cfg_; }
+
+    nimrtc::plugins::Status pop_frame(
+        nimrtc::plugins::CaptureFrame& out) noexcept override {
+        if (!open_) return nimrtc::plugins::kErrNotReady;
+        if (!has_frame_) return nimrtc::plugins::kErrNotReady;
+
+        has_frame_ = false;
+        out = nimrtc::plugins::CaptureFrame{};
+        out.width  = 320;
+        out.height = 240;
+        out.capture_ts_us = 1234;
+        out.frame_seq = 7;
+        out.dirty.full_frame = true;
+
+        nimrtc::video_frame::GpuHandle h;
+        h.backend = nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture;
+        h.handle  = reinterpret_cast<void*>(0xABCD);
+        h.device  = reinterpret_cast<void*>(0x1234);
+        out.gpu_surface = h;
+        out.has_gpu_handle = true;
+        return nimrtc::plugins::kOk;
+    }
+
+    void set_frame_callback(
+        nimrtc::plugins::CaptureFrameCallback cb) noexcept override {
+        cb_ = std::move(cb);
+    }
+
+    nimrtc::plugins::CaptureStats stats() const noexcept override {
+        return nimrtc::plugins::CaptureStats{};
+    }
+
+    /** Make one GPU frame available. */
+    void produce_gpu_frame() { has_frame_ = true; }
+
+private:
+    CaptureConfig cfg_;
+    nimrtc::plugins::CaptureFrameCallback cb_;
+    bool open_ = false;
+    bool has_frame_ = false;
+};
+
+} // anonymous namespace
+
+TEST(CaptureSourceAdapter, PublishesAGpuSurfaceAsIs) {
+    // The zero-copy frame has to reach the consumer *with its handle*,
+    // and with no CPU pixels invented for it.
+    GpuSurfaceCapture cap{CaptureConfig{}};
+    CaptureSourceAdapter adapter{&cap, VideoSourceConfig{}};
+
+    VideoSourceFrame published{};
+    bool called = false;
+    adapter.set_callback([&](const VideoSourceFrame& f) {
+        published = f;
+        called = true;
+    });
+
+    ASSERT_EQ(adapter.start(), nimrtc::plugins::kOk);
+    cap.produce_gpu_frame();
+    adapter.produce_one();
+
+    ASSERT_TRUE(called);
+    EXPECT_EQ(published.gpu_surface.backend,
+              nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture);
+    EXPECT_EQ(published.gpu_surface.handle, reinterpret_cast<void*>(0xABCD));
+    EXPECT_EQ(published.gpu_surface.device, reinterpret_cast<void*>(0x1234));
+    // The dimensions travel with the surface: the encoder needs them to
+    // register the texture.
+    EXPECT_EQ(published.width, 320u);
+    EXPECT_EQ(published.height, 240u);
+    EXPECT_EQ(published.capture_ts_us, 1234);
+    EXPECT_EQ(published.frame_seq, 7u);
+    // The adapter counts the frame as a zero-copy one.
+    EXPECT_EQ(adapter.zero_copy_frames(), 1u);
+}
+
+TEST(CaptureSourceAdapter, DoesNotInstallACursorLayerOnTheZeroCopyPath) {
+    // A GPU surface has no CPU pixels to blend the pointer into, so a
+    // cursor layer would make the adapter drop every frame.  The layer
+    // must not be installed at all.
+    GpuSurfaceCapture cap{CaptureConfig{}};
+    CaptureSourceAdapter adapter{&cap, VideoSourceConfig{}};
+
+    ASSERT_EQ(adapter.start(), nimrtc::plugins::kOk);
+    EXPECT_FALSE(adapter.cursor_layer_installed());
+    EXPECT_EQ(adapter.cursor_source(), nullptr);
+    EXPECT_EQ(adapter.cursor_compositor(), nullptr);
+
+    // And a GPU frame still gets through.
+    cap.produce_gpu_frame();
+    adapter.produce_one();
+    EXPECT_EQ(adapter.zero_copy_frames(), 1u);
+    EXPECT_EQ(adapter.stats().frames_dropped, 0u);
+}
+

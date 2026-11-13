@@ -36,7 +36,7 @@ function(nimrtc_add_dtls_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 

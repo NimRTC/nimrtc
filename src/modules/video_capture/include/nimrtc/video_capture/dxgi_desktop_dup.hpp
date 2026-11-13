@@ -123,6 +123,29 @@ public:
         return description_;
     }
 
+    // ---- The zero-copy path (remote-desktop plan B10) --------------------
+
+    /**
+     * @brief Take a free GPU surface from the pool.
+     *
+     * The zero-copy path copies the acquired desktop frame into a pooled
+     * D3D11 texture with a *GPU-side* copy, so the surface outlives the
+     * duplication frame and reaches the encoder without a CPU readback.
+     *
+     * @return The texture (an `ID3D11Texture2D*`), or null when the pool
+     *         is exhausted.  The caller owns it until it hands it over.
+     */
+    [[nodiscard]] void* acquire_surface() noexcept;
+
+    /**
+     * @brief Return a retired surface to the pool.
+     *
+     * Called by the frame queue when it retires a surface (evicted by
+     * the drop policy, or replaced by the next pop).  The producer may
+     * then reuse the texture.
+     */
+    void release_surface(const video_frame::GpuHandle& surface) noexcept;
+
 private:
     /** The capture thread's body: acquire, read back, queue. */
     void capture_loop() noexcept;

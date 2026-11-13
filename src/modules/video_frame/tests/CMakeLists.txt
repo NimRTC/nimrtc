@@ -44,5 +44,5 @@ set_tests_properties(modules_video_frame_tests_test_video_frame PROPERTIES TIMEO
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_video_frame
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

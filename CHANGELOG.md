@@ -17,6 +17,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The zero-copy capture → encode hand-off (v1.3.0, Remote Desktop plan
+  B10).**  Until now the zero-copy *seam* existed but nothing on Windows
+  ever produced a GPU handle, so `video_codec_zero_copy_frames` was
+  always zero.  The whole path is now live end to end, and the claim is
+  proved on real hardware rather than asserted.
+  - **`nvenc_encoder.cpp` grows `encode_zero_copy()`.**  It takes a
+    `video_frame::GpuHandle` that carries a D3D11 texture, registers
+    that texture with NVENC (`nvEncRegisterResource`) and encodes from
+    it.  Two constraints were found empirically on an RTX 3060 and are
+    honoured by the code: a resource may only be registered on the
+    device that created it (a session therefore **rebinds** to the
+    producer's device), and the session's device flags are otherwise
+    free to differ.
+  - **The DXGI backend publishes a GPU surface instead of a pixel
+    buffer.**  `DxgiDesktopDupCapture` keeps a pool of
+    `D3D11_USAGE_DEFAULT` textures; on a desktop presentation it does a
+    GPU-side `CopyResource` into a pooled texture and releases the
+    duplication frame **immediately**, so the picture never touches
+    system memory (`bytes_copied` stays at 0).  A sub-region selection
+    still forces the CPU path — the crop is a CPU-side operation — and
+    `CaptureConfig::want_zero_copy` opts in.
+  - **`CaptureQueue` carries the surface, and retires it.**  The queue
+    owns the `GpuHandle` and invokes the `SurfaceReleaseFn` callback
+    when a surface is dropped (overflow), cleared, or superseded by the
+    next `pop()`.  Without the retirement the D3D11 textures would leak
+    once per frame.
+  - **The cursor layer is skipped on the zero-copy path.**  Software
+    alpha blending needs CPU memory for the frame, which a GPU surface
+    does not have; blending on the CPU would have forced a readback and
+    defeated the whole path.
+  - **The proof is a hardware test**
+    (`src/modules/nvcodec/tests/test_nvcodec_zero_copy.cpp`).  It paints
+    a D3D11 texture with a pixel shader *on the GPU*, hands it to the
+    encoder through the public seam, and checks the **decoded** picture.
+    A silent fallback to a CPU staging copy would produce a different
+    colour and fail the comparison, so the negative ("the picture never
+    reached the CPU") is observable.  It also covers a surface from a
+    different device object and a surface whose size differs from the
+    encoder's.
+  - The capture-side unit tests cover the queue's surface propagation
+    and its three retirement paths, the adapter's pass-through of a GPU
+    surface, and the fact that no cursor layer is installed on the
+    zero-copy path.
+
 - **Colour-aware pixel conversion, and two real colour bugs it found
   (v1.3.0, Remote Desktop plan C3 / C5).**  The remote-desktop picture
   is screen content: full-range BT.709, sharp edges, flat panels.  The
@@ -1878,6 +1922,17 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   into a spurious failure.
 
 ### Tooling
+
+- **The gtest discovery timeout was too short for a loaded host.**
+  `gtest_discover_tests` re-runs each test binary to enumerate its
+  cases, and the probe had 10 seconds.  On a busy Windows machine a
+  single gtest binary can take well over 10 s just to start up and list
+  its cases, and CMake then aborted the **build** with "Process
+  terminated due to timeout" — even though the binary was perfectly
+  healthy.  The timeout is now 60 s across the tree (`cmake/NimRTCTest.cmake`
+  and every per-module test `CMakeLists.txt`), which is enough headroom
+  for the slowest binary here while still failing fast on a genuinely
+  hung executable.
 
 - **A CI leg that actually runs the sanitizers, and a gate that knows
   whose bug it found.** The project had sanitizer *options*

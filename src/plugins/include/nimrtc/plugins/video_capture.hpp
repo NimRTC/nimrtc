@@ -303,6 +303,30 @@ struct NIMRTC_API_STABLE CaptureConfig {
      *  `CaptureCapabilities::cursor_composited`. */
     bool want_cursor = true;
 
+    /**
+     * @brief Whether the caller wants the zero-copy path (plan B10).
+     *
+     * A zero-copy device hands the captured picture to the consumer as
+     * a **GPU surface** instead of CPU pixels: the hardware encoder
+     * takes the native handle directly, and no GPU→CPU readback happens.
+     *
+     * The request is a *request*, not a command: the device reports what
+     * it actually did through `CaptureFormat::zero_copy` and through the
+     * `gpu_surface` field of every frame it delivers.  A device that
+     * cannot do it (no hardware encoder on the other end, a cursor layer
+     * that needs CPU pixels, a backend without a GPU surface) falls
+     * back to the CPU path and says so.
+     *
+     * Two consequences a host must know about:
+     *
+     *   - the device can no longer composite the pointer into the frame
+     *     (there are no CPU pixels to draw into), so a host that wants
+     *     both has to pick one;
+     *   - the frames that arrive carry no pixel bytes, so a consumer
+     *     that does not support the zero-copy path cannot use them.
+     */
+    bool want_zero_copy = false;
+
     /** The captured surface's origin in the platform's *global* pointer
      *  coordinate space.
      *

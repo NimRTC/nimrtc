@@ -337,21 +337,33 @@ void CaptureSourceAdapter::install_cursor_layer() noexcept {
         // ScreenCaptureKit).  Drawing it again would double-draw it.
         const plugins::CaptureCapabilities caps = capture_->capabilities();
         if (!caps.cursor_composited && cfg.want_cursor) {
-            // The platform's own pointer reader.  A platform without
-            // one (macOS composites it itself, a build without the
-            // pointer libraries) yields nullptr, and there is then
-            // nothing to draw.
-            owned_cursor_source_ = make_platform_cursor_source();
-            if (owned_cursor_source_) {
-                // The drawing is the portable alpha blend, with the
-                // pinned fallback: when the platform cannot report a
-                // live pointer, the last known one stays on screen
-                // rather than vanishing.
-                owned_cursor_compositor_ =
-                    std::make_unique<AlphaCursorCompositor>(true);
-                cursor_source_ = owned_cursor_source_.get();
-                cursor_compositor_ = owned_cursor_compositor_.get();
-                cursor_layer_installed_ = true;
+            // The zero-copy path cannot draw the pointer: the picture
+            // lives in GPU memory and there are no CPU pixels to blend
+            // into.  Installing a cursor layer here would make the
+            // adapter *drop* every GPU frame (see `produce_one`), so
+            // the layer is not installed at all and the picture is
+            // delivered without a pointer.
+            if (cfg.format.zero_copy) {
+                NIMRTC_LOG_WARN("capture: the zero-copy path is active, so "
+                                "the pointer is not composited into the "
+                                "captured picture");
+            } else {
+                // The platform's own pointer reader.  A platform without
+                // one (macOS composites it itself, a build without the
+                // pointer libraries) yields nullptr, and there is then
+                // nothing to draw.
+                owned_cursor_source_ = make_platform_cursor_source();
+                if (owned_cursor_source_) {
+                    // The drawing is the portable alpha blend, with the
+                    // pinned fallback: when the platform cannot report a
+                    // live pointer, the last known one stays on screen
+                    // rather than vanishing.
+                    owned_cursor_compositor_ =
+                        std::make_unique<AlphaCursorCompositor>(true);
+                    cursor_source_ = owned_cursor_source_.get();
+                    cursor_compositor_ = owned_cursor_compositor_.get();
+                    cursor_layer_installed_ = true;
+                }
             }
         }
     }

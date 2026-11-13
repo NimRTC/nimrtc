@@ -41,7 +41,7 @@ function(nimrtc_add_core_api_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -87,7 +87,7 @@ function(nimrtc_add_web_transport_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -142,7 +142,7 @@ function(nimrtc_add_web_transport_dc_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10
+            DISCOVERY_TIMEOUT 60
             DISCOVERY_MODE PRE_TEST)
     endif()
 endfunction()
@@ -192,7 +192,7 @@ function(nimrtc_add_audio_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -263,7 +263,7 @@ function(nimrtc_add_web_transport_msquic_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 60
-            DISCOVERY_TIMEOUT 10
+            DISCOVERY_TIMEOUT 60
             DISCOVERY_MODE PRE_TEST)
     endif()
 endfunction()
@@ -775,7 +775,7 @@ function(nimrtc_add_engine_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 90
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -807,7 +807,7 @@ function(nimrtc_add_plugin_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -855,7 +855,7 @@ function(nimrtc_add_video_feedback_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -900,7 +900,7 @@ function(nimrtc_add_video_plugin_adapter_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -954,12 +954,12 @@ function(nimrtc_add_engine_video_test name source)
         if(ARGC GREATER 2 AND NOT "${ARGV2}" STREQUAL "")
             gtest_discover_tests(${name}
                 PROPERTIES TIMEOUT 30
-                DISCOVERY_TIMEOUT 10
+                DISCOVERY_TIMEOUT 60
                 DISCOVERY_MODE ${ARGV2})
         else()
             gtest_discover_tests(${name}
                 PROPERTIES TIMEOUT 30
-                DISCOVERY_TIMEOUT 10)
+                DISCOVERY_TIMEOUT 60)
         endif()
     endif()
 endfunction()
@@ -1041,7 +1041,7 @@ function(nimrtc_add_engine_video_feedback_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -1090,7 +1090,7 @@ function(nimrtc_add_engine_codec_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
     # test_engine_video_codec links nimrtc::engine → nimrtc::dtls and needs certs.
     nimrtc_copy_wolfssl_certs(${name})
@@ -1129,7 +1129,7 @@ function(nimrtc_add_hw_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -1572,5 +1572,5 @@ set_tests_properties(test_bandwidth_allocation PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_bandwidth_allocation
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

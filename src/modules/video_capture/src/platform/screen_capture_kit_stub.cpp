@@ -95,7 +95,19 @@ ScreenCaptureKitCapture::capabilities() const noexcept {
     return c;
 }
 
-void ScreenCaptureKitCapture::capture_loop() noexcept {}
+void ScreenCaptureKitCapture::capture_loop() noexcept {
+    // The stub has no ScreenCaptureKit to drive, so there is no sample
+    // to deliver and the loop is empty.  The frame counter is still
+    // *touched* here: it is written and read on this configuration, and
+    // a private field that no translation unit of the build reads is
+    // rejected by Clang's -Wunused-private-field under -Werror.
+    //
+    // `[[maybe_unused]]` is not an alternative: GCC ignores that
+    // attribute on a non-static data member and rejects the build
+    // under -Werror=attributes instead.
+    frame_index_ += 1;
+    (void)frame_index_;
+}
 
 void ScreenCaptureKitCapture::dispatch_sample(void*, void*) noexcept {}
 

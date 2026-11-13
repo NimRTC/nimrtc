@@ -151,9 +151,15 @@ TEST(WgcCapture, ClosingRightAfterOpeningDoesNotCrash) {
         const auto st = dev.open();
         dev.close();
         EXPECT_FALSE(dev.is_open());
+        // The *outcome* of `open()` depends on the host and on the
+        // machine, and the test says so rather than pretending
+        // otherwise: a Windows host with a capturable display opens, a
+        // headless one reports a hardware error, and a host without
+        // WGC at all reports that the backend is unsupported.
         EXPECT_TRUE(st == nimrtc::plugins::kOk ||
                     st == nimrtc::plugins::kErrHardwareError ||
-                    st == nimrtc::plugins::kErrInvalidParam);
+                    st == nimrtc::plugins::kErrInvalidParam ||
+                    st == nimrtc::plugins::kErrUnsupported);
     }
 }
 

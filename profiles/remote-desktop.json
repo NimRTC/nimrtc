@@ -1,0 +1,136 @@
+{
+  // ==========================================================================
+  // profiles/remote-desktop.json — remote-desktop session profile
+  // ==========================================================================
+  //
+  // Use case: an operator watches and controls a remote machine's
+  // desktop.  The picture is a *screen*, not a camera: flat regions,
+  // sharp edges, very little motion, and text the operator has to read.
+  //
+  // Design rationale (see docs/plan/remote-desktop-plan.md):
+  //   - transport.strategy = "teleop-ultra-low-latency": the media plane
+  //     and the control plane (keyboard / mouse) get *separate* stacks
+  //     with independent congestion control, so a saturated video path
+  //     cannot starve the input events (plan G2).
+  //   - datachannel_enabled = true: the control plane rides the
+  //     DataChannel until the side-stack is wired (plan G1).
+  //   - timeline_enabled = true: the `ref_frame` binding ("what the
+  //     operator saw when they clicked") is a product requirement.
+  //   - scheduler.control_weight = 20 (twice call.json's 10): input
+  //     events MUST preempt the video stream.
+  //   - The `video` block (profile schema v1.2) is the heart of it:
+  //       * codec_backend = "auto" — hardware first (plan B2).  A
+  //         software encode of a 4K desktop does not fit the CPU budget.
+  //       * codec_preference = ["av1", "h265", "h264"] — the
+  //         screen-content preference table (plan B8).  It is
+  //         configuration, not a hard-coded branch.
+  //       * content_type = "screen" — the encoder is told it is looking
+  //         at screen content, not at a camera (plan B7).
+  //       * resolution_floor = [1280, 720] — the ladder never crosses it
+  //         (plan D2).  The floor is *configuration* because the right
+  //         value depends on the machine class: 1080p on a
+  //         hardware-encoding box, 720p on a software-only one.
+  //       * ladder_mode = "quality" — screen content spends its budget on
+  //         legibility, not on frame rate.
+  //       * color_range = "full", color_matrix = "bt709" — what a
+  //         desktop compositor actually produces (plan C5).  Getting
+  //         this wrong looks like "the codec is broken".
+  //
+  // Override tips:
+  //   - On a software-only machine, lower resolution_floor to [1280, 720]
+  //     (already the default) — a 1080p floor would break the ladder.
+  //   - For a kiosk-style deployment with no input, set
+  //     datachannel_enabled = false and drop the control stack.
+  // ==========================================================================
+
+  "name": "remote-desktop",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  "audio3a_name": "webrtc_apm",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: the `ref_frame` binding answers "what did the operator see
+  // when they clicked", which is a product requirement for a remote
+  // desktop.
+  "timeline_enabled": true,
+  // Required: the control plane (keyboard / mouse) rides the DataChannel.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // 4 Mbps initial / 20 Mbps cap — a desktop picture is far more
+  // expensive than a talking head, and the operator is watching a
+  // document rather than a face.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 4000000,
+    "max_bitrate_bps": 20000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // LowLatency — the operator's cursor must feel connected to the
+  // picture.  30 ms initial delay keeps the motion-to-video latency
+  // under the perceptual threshold.
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 30,
+    "min_delay_ms": 5,
+    "max_delay_ms": 150
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority with control_weight = 20: the keyboard and mouse
+  // events preempt every other class, including the video stream.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 20,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // Media = raw-udp-arq (the media path does not need the browser's SCTP
+  // tax: both ends are native).  Control = raw-udp-arq on its *own*
+  // stack, with the tightest p99 budget in the strategy table — the
+  // input events must not queue behind the video.
+  "transport": {
+    "strategy": "teleop-ultra-low-latency",
+    "media":   { "stack": "raw-udp-arq", "max_p99_ms": 100 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  50,
+      "freq_hz":     200,
+      "reliability": "reliable_ordered",
+      "ttl_ms":      100
+    }
+  },
+
+  // ---- v1.2 video section --------------------------------------------------
+  // The screen-content shape of the stream.  See the header comment.
+  "video": {
+    "codec_name": "",
+    "codec_preference": ["av1", "h265", "h264"],
+    "codec_backend": "auto",
+    "content_type": "screen",
+    "ladder_mode": "quality",
+    "resolution_floor": [1280, 720],
+    "pixel_format": "i420",
+    "color_range": "full",
+    "color_matrix": "bt709"
+  }
+}

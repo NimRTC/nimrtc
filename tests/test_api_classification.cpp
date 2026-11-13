@@ -430,6 +430,15 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
     constexpr std::size_t kBaselineHeaderCount = 139;
+    //
+    // WP-A (remote-desktop plan A1 / E1) notes: this change adds **no**
+    // public header.  The GPU delivery path for decoded video extends
+    // the existing `plugins/video_sink.hpp` seam, and the frozen capture
+    // semantics extend the existing `plugins/video_capture.hpp` seam;
+    // the delivery-path rule itself lives in an engine-*private* header
+    // (`src/engine/src/video_render_path.hpp`), which is not installed
+    // and is not on the public surface.  The baseline therefore stays
+    // where it is — a change here would be a false signal.
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

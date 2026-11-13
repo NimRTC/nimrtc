@@ -17,6 +17,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The GPU delivery path for decoded video, and the frozen capture
+  semantics (v1.3, remote-desktop plan WP-A / A1 / E1).**  The video
+  plane had a CPU-only receive side: a decoded frame always reached the
+  sink as host pixels, even when the decoder could hand back a native
+  surface and the sink could present one.  That made the "zero-copy"
+  claim true for the *send* half of the pipeline and false for the
+  receive half.
+  - `plugins::IVideoSink` gains a **GPU-surface delivery path**:
+    `render(const GpuBuffer&)` and `render(const GpuBuffer&,
+    const VideoFrameInfo&)`, alongside the existing
+    `render(const VideoSourceFrame&)`.  The lifetime contract is the one
+    `IVideoCodec::decode_zero_copy()` already documents: the surface is
+    **borrowed** — the engine holds a reference across the `render()`
+    call and releases it afterwards, and a sink that keeps the surface
+    takes its own reference.
+  - Both `render()` overloads keep a **default implementation that
+    returns `kErrUnsupported`**, so a third-party sink that implements
+    only one side compiles unchanged.  The engine probes
+    `supports_gpu_render()` / `supports_cpu_render()` and routes to the
+    side that exists.
+  - The engine decides the route **once, at `open()` time**, from three
+    facts — the decoder's `supports_zero_copy_decode()`, the sink's
+    `supports_gpu_render()` and its `supports_cpu_render()`.  The rule
+    is a pure function (`src/engine/src/video_render_path.hpp`), so all
+    eight combinations are unit tested without an engine, a transport or
+    a clock.  A pair where **neither** path is possible is reported at
+    `open()` time as the new `kVideoSinkIncompatible` — a session that
+    opens cleanly and can never display anything is the failure mode
+    this replaces.
+  - `plugins::CaptureCapabilities` / `plugins::CaptureFormat` semantics
+    are **frozen**: `zero_copy`, `dirty_rects`, `region_selection`,
+    `max_pixels` and the new `max_fps` each have one meaning, and an
+    unsupported *combination* is refused at `open()` time with the new
+    `kVideoCaptureUnsupported` instead of on the first captured frame.
+    `want_cursor` stays a preference — it is honoured only when the
+    device can composite the pointer, never a reason to refuse a
+    session.
+  - New `EngineConfig::video_capture_config` carries the capture
+    request; `Stats::video_rx_gpu_frames` / `video_rx_cpu_frames` make
+    the delivery-path decision observable from the outside.
+  - Covered by `tests/test_video_render_path.cpp` (31 cases: the eight
+    path combinations, the single-sided-sink contract, and every
+    capture-capability violation class).
+
 - **Two guards that make the architecture's promises executable
   (v1.2.0, ADR-025 / ADR-026).**  Both invariants were stated in prose
   and checked by nobody, which is how an invariant stops meaning

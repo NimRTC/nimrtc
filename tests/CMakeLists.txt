@@ -1993,6 +1993,52 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # ---------------------------------------------------------------------------
+# WP-A (remote-desktop plan A1 / E1) — the decoded-frame delivery-path
+# rule and the frozen capture-capability semantics.
+#
+# Both rules are engine-private, header-only pure functions in
+# `src/engine/src/video_render_path.hpp`:
+#
+#   - `decide_video_render_path()` — GPU surface vs. CPU staging vs.
+#     incompatible, from (decoder zero-copy, sink GPU, sink CPU);
+#   - `check_capture_capabilities()` — whether a requested capture
+#     configuration is supported by the device's advertised
+#     capabilities.
+#
+# They are unit tested directly - no engine, no transport, no clock -
+# because that is the shape the rules have.  The test also pins the
+# graceful-sink contract: a third-party sink that implements only one of
+# the two delivery paths keeps working, and the rule routes it to the
+# side that exists.
+#
+# The test compiles the engine's *private* header directory into its
+# include path, exactly as `test_bandwidth_allocation` does.  That
+# directory is not installed and is not on the public surface
+# (constraint L4).
+# ---------------------------------------------------------------------------
+add_executable(test_video_render_path test_video_render_path.cpp)
+target_link_libraries(test_video_render_path PRIVATE
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main)
+target_include_directories(test_video_render_path PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/engine/src")
+if(WIN32)
+    target_compile_definitions(test_video_render_path PRIVATE _WIN32_WINNT=0x0601)
+endif()
+nimrtc_apply_options(test_video_render_path LENIENT)
+add_test(NAME test_video_render_path
+    COMMAND $<TARGET_FILE:test_video_render_path>)
+set_tests_properties(test_video_render_path PROPERTIES TIMEOUT 30)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_video_render_path
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# ---------------------------------------------------------------------------
 # Architecture-remediation Phase 0.3 — the hot-path performance baseline.
 #
 # Phase 3 ("消除热路径上的分配与拷贝") needs a number to compare against,

@@ -221,15 +221,37 @@ TEST(HwSeam, IsHwAcceleratedHelperHandlesNull) {
 // ---------------------------------------------------------------------------
 // Registry-level capability introspection (R3-Batch)
 // ---------------------------------------------------------------------------
+//
+// The invariant these checks enforce is **self-consistency**, not
+// "everything is software": a plugin either reports
+// `is_hardware_accelerated() == false` *and* the backend name
+// "software", or it reports `true` *and* a concrete backend name.
+//
+// The blanket "every registered plugin is software" form this test used
+// to assert stopped being true once a hardware renderer joined the
+// registry (the Windows D3D11 sink of remote-desktop plan E2) — that
+// sink *is* a hardware renderer, and it says so.  Asserting the weaker
+// invariant keeps the check meaningful for every plugin, hardware or
+// not, and does not have to be rewritten each time a hardware plugin
+// lands.
 
 namespace {
+
+/** True iff the plugin's two capability statements agree with each
+ *  other: software means "not accelerated" *and* the backend name
+ *  "software"; hardware means "accelerated" *and* a named backend. */
+template <class P>
+bool capability_is_self_consistent(P* p) {
+    const bool accelerated = p->is_hardware_accelerated();
+    const bool software_name = (p->hardware_backend() == "software");
+    return accelerated != software_name;
+}
 
 bool check_video_source_plugin(nimrtc::core::PluginRegistry& reg,
                                std::string_view id) {
     auto* p = reg.get_video_source(id)->create(np::VideoSourceConfig{});
     if (!p) return false;
-    bool ok = !p->is_hardware_accelerated()
-           && p->hardware_backend() == "software";
+    bool ok = capability_is_self_consistent(p);
     delete p;
     return ok;
 }
@@ -238,8 +260,7 @@ bool check_video_sink_plugin(nimrtc::core::PluginRegistry& reg,
                              std::string_view id) {
     auto* p = reg.get_video_sink(id)->create(np::VideoSinkConfig{});
     if (!p) return false;
-    bool ok = !p->is_hardware_accelerated()
-           && p->hardware_backend() == "software";
+    bool ok = capability_is_self_consistent(p);
     delete p;
     return ok;
 }
@@ -248,8 +269,7 @@ bool check_video_receiver_plugin(nimrtc::core::PluginRegistry& reg,
                                  std::string_view id) {
     auto* p = reg.get_video_receiver(id)->create(np::VideoReceiverConfig{});
     if (!p) return false;
-    bool ok = !p->is_hardware_accelerated()
-           && p->hardware_backend() == "software";
+    bool ok = capability_is_self_consistent(p);
     delete p;
     return ok;
 }
@@ -258,25 +278,24 @@ bool check_video_sender_plugin(nimrtc::core::PluginRegistry& reg,
                                std::string_view id) {
     auto* p = reg.get_video_sender(id)->create(np::VideoSenderConfig{});
     if (!p) return false;
-    bool ok = !p->is_hardware_accelerated()
-           && p->hardware_backend() == "software";
+    bool ok = capability_is_self_consistent(p);
     delete p;
     return ok;
 }
 
 }  // namespace
 
-TEST(HwSeam, RegistryPluginsAllReportSoftware) {
+TEST(HwSeam, RegistryPluginsReportConsistentCapabilities) {
     nimrtc::video_source::register_default_plugins();
     nimrtc::video_sink::register_default_plugins();
     nimrtc::video_pipeline::register_default_plugins();
     auto& reg = nimrtc::core::PluginRegistry::instance();
 
     for (std::string_view id : reg.list_video_sources()) {
-        EXPECT_TRUE(check_video_source_plugin(reg, id));
+        EXPECT_TRUE(check_video_source_plugin(reg, id)) << "video source: " << id;
     }
     for (std::string_view id : reg.list_video_sinks()) {
-        EXPECT_TRUE(check_video_sink_plugin(reg, id));
+        EXPECT_TRUE(check_video_sink_plugin(reg, id)) << "video sink: " << id;
     }
     for (std::string_view id : reg.list_video_receivers()) {
         EXPECT_TRUE(check_video_receiver_plugin(reg, id));

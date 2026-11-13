@@ -30,6 +30,44 @@
  * decoder and remain valid only for the duration of the `render()` call.
  * The sink MUST finish reading (or copy out) before returning.
  *
+ * ## The two delivery paths (remote-desktop plan E1)
+ *
+ * A sink may implement **either** delivery path, or both:
+ *
+ *   - the **CPU path**: `render(const VideoSourceFrame&)` — the decoded
+ *     pixels arrive as host pointers;
+ *   - the **GPU path**: `render(const GpuBuffer&)` — the decoded picture
+ *     arrives as a native surface handle (D3D11 texture, CVPixelBuffer,
+ *     VASurface, ...) and never touches host memory.
+ *
+ * The GPU path is the *preferred* one on a hardware decode path (RD-4):
+ * the decoder hands back a GPU surface and the sink presents it without
+ * a readback.  The CPU path remains the universal fallback: it is what a
+ * software decoder produces, and what a software renderer consumes.
+ *
+ * Both `render()` overloads have a default implementation that returns
+ * `kErrUnsupported`, so a third-party sink that implements only one side
+ * compiles unchanged — the engine probes the sink's capabilities
+ * (`supports_gpu_render()` / `supports_cpu_render()`) and routes to the
+ * side that exists.
+ *
+ * @note Overriding one `render()` overload in a derived class hides the
+ *       others *for calls made on the derived type* (the usual C++
+ *       name-hiding rule).  The engine always calls through
+ *       `IVideoSink&`, where the virtual dispatch is unaffected.  A sink
+ *       that wants to call the other overload on itself adds
+ *       `using IVideoSink::render;` to its class body.
+ *
+ * ### The GPU path's lifetime contract
+ *
+ * The `GpuBuffer` handed to `render(const GpuBuffer&)` is **borrowed**:
+ * the engine holds a reference on the surface across the call and
+ * releases it when `render()` returns.  A sink that needs to keep the
+ * surface past the call MUST take its own reference
+ * (`GpuBuffer::acquire_ref()`) and release it later
+ * (`GpuBuffer::release_ref()`) — the same contract
+ * `IVideoCodec::decode_zero_copy()` documents on the decode side.
+ *
  * @note P1 (R2). Interface is stable; binary layout TBD P3.
  */
 
@@ -39,6 +77,12 @@
 // Reuse VideoPixelFormat / VideoSourceFrame from the source plugin header
 // (so the decoder→sink handoff doesn't need a translation layer).
 #include "nimrtc/plugins/video_source.hpp"
+// The GPU delivery path hands the sink a `GpuBuffer` — the same
+// type the codec seam uses for `encode_zero_copy()` /
+// `decode_zero_copy()`.  It is re-exported from `video_codec.hpp`,
+// which `video_source.hpp` already includes; the explicit include
+// here states the dependency instead of relying on the transitive one.
+#include "nimrtc/plugins/video_codec.hpp"
 
 #ifndef NIMRTC_PLUGINS_VIDEO_SINK_HPP
 #define NIMRTC_PLUGINS_VIDEO_SINK_HPP
@@ -113,10 +157,76 @@ struct NIMRTC_API_STABLE VideoFrameInfo {
  */
 class NIMRTC_API_STABLE IVideoSink : public IPlugin {
 public:
-    /** Render one decoded frame synchronously. Must return before the next
-     *  frame can be delivered. Return kOk on success.
-     *  @param frame  Decoded pixel descriptor (see VideoSourceFrame). */
-    virtual Status render(const VideoSourceFrame& frame) noexcept = 0;
+    /** Render one decoded frame from **host memory**.
+     *
+     *  The default implementation returns `kErrUnsupported`: a sink that
+     *  only implements the GPU path does not have to stub this one out.
+     *  A sink that overrides it MUST finish reading (or copy out) the
+     *  pixels before returning — the `plane_*` pointers are borrowed
+     *  for the duration of the call.
+     *
+     *  @param frame  Decoded pixel descriptor (see VideoSourceFrame).
+     *  @return kOk on success; error code on failure. */
+    virtual Status render(const VideoSourceFrame& frame) noexcept {
+        (void)frame;
+        return kErrUnsupported;
+    }
+
+    /** Render one decoded frame from a **GPU surface**.
+     *
+     *  The GPU path: the decoded picture never leaves video memory.  The
+     *  surface is **borrowed** — the caller holds a reference on it for
+     *  the duration of the call and releases it afterwards.  A sink that
+     *  wants to keep the surface past the call takes its own reference
+     *  (`GpuBuffer::acquire_ref()`).
+     *
+     *  The default implementation returns `kErrUnsupported`: a sink that
+     *  only implements the CPU path does not have to stub this one out.
+     *
+     *  @param surface  The decoded surface (see GpuBuffer).
+     *  @return kOk on success; error code on failure. */
+    virtual Status render(const GpuBuffer& surface) noexcept {
+        (void)surface;
+        return kErrUnsupported;
+    }
+
+    /** Render one decoded GPU surface **with its timeline metadata**.
+     *
+     *  The default implementation forwards to `render(surface)` and
+     *  ignores the metadata, so a sink that implements only the
+     *  one-argument GPU path keeps working unchanged.  A sink that
+     *  needs the capture timestamp (a renderer that paces frames, a
+     *  recorder that timestamps its samples) overrides this one.
+     *
+     *  @param surface  The decoded surface (see GpuBuffer).
+     *  @param info     Timeline metadata for this frame.
+     *  @return kOk on success; error code on failure. */
+    virtual Status render(const GpuBuffer& surface,
+                          const VideoFrameInfo& info) noexcept {
+        (void)info;
+        return render(surface);
+    }
+
+    /** True iff this sink can consume a **GPU surface**.
+     *
+     *  The engine routes the decode output to the GPU path only when
+     *  the sink says it can take a surface *and* the decoder says it
+     *  can produce one (`IVideoCodec::supports_zero_copy_decode()`).
+     *  Default = false (the sink implements the CPU path only).
+     *
+     *  A sink that overrides `render(const GpuBuffer&)` MUST also
+     *  override this to return true — otherwise the engine never
+     *  reaches its GPU implementation. */
+    virtual bool supports_gpu_render() const noexcept { return false; }
+
+    /** True iff this sink can consume **host-memory** frames.
+     *
+     *  Default = true: the CPU path is the historical contract and a
+     *  sink that does not say otherwise keeps receiving CPU frames.
+     *  A GPU-only sink overrides this to return false, which lets the
+     *  engine report the incompatibility at `open()` time instead of
+     *  failing on the first frame. */
+    virtual bool supports_cpu_render() const noexcept { return true; }
 
     /** Snapshot of sink statistics (frames rendered, drops, errors). */
     virtual VideoSinkStats stats() const noexcept = 0;

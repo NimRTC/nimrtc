@@ -134,6 +134,24 @@ struct NIMRTC_API_STABLE CaptureDevice {
  * choice is not free-form: a remote desktop wants the largest format the
  * device offers *without* a CPU round-trip (zero-copy), and a camera
  * wants the format that matches the encoder.
+ *
+ * ## Frozen semantics (remote-desktop plan A1)
+ *
+ * The meaning of every field is fixed, and an unsupported *combination*
+ * is detected before the first frame is captured:
+ *
+ *   - `zero_copy` means "this format can be delivered without a CPU
+ *     readback of the captured surface".  It is a **per-format** fact.
+ *     It requires the device-wide `CaptureCapabilities::zero_copy` to
+ *     be true as well — the stricter of the two wins.
+ *   - `has_dirty_rects` means "this format carries per-frame
+ *     dirty-rectangle metadata".  It requires
+ *     `CaptureCapabilities::dirty_rects`.
+ *   - `tag` is an opaque platform format tag.  The engine never
+ *     interprets it; it compares the format for equality against the
+ *     device's own list and hands it back to the device in `open()`.
+ *
+ * @see CaptureCapabilities for the device-wide statements.
  */
 struct NIMRTC_API_STABLE CaptureFormat {
     /** Width in pixels. */
@@ -153,8 +171,18 @@ struct NIMRTC_API_STABLE CaptureFormat {
     /** True iff this format can be delivered without a CPU readback of
      *  the captured surface. */
     bool zero_copy = false;
+    /** True iff this format can be delivered without a CPU readback of
+     *  the captured surface.
+     *
+     *  Per-format, and stricter than the device-wide
+     *  `CaptureCapabilities::zero_copy`: a device may be able to do
+     *  zero-copy in general while a particular format still needs a
+     *  readback. */
 
     /** True iff this format carries per-frame dirty-rectangle metadata. */
+    /** True iff this format carries per-frame dirty-rectangle metadata.
+     *
+     *  Requires `CaptureCapabilities::dirty_rects`. */
     bool has_dirty_rects = false;
 };
 
@@ -207,24 +235,68 @@ struct NIMRTC_API_STABLE CaptureDirtyRects {
  * and decide whether the zero-copy path is available on this machine.
  */
 struct NIMRTC_API_STABLE CaptureCapabilities {
+ *
+ * ## Frozen semantics (remote-desktop plan A1)
+ *
+ * Every field is a **device-wide** statement, and every one of them is
+ * checkable against a request *before* the first frame is captured:
+ *
+ *   - `zero_copy` — the device can deliver frames without a CPU
+ *     readback.  It is the precondition for
+ *     `CaptureFormat::zero_copy`; a request that asks for a zero-copy
+ *     format on a device that cannot do zero-copy is refused at
+ *     `open()` time.
+ *   - `dirty_rects` — the device reports per-frame dirty rectangles.
+ *     It is the precondition for `CaptureFormat::has_dirty_rects`.
+ *   - `region_selection` — the device can capture a sub-region.  It is
+ *     the precondition for a non-zero `CaptureConfig::region`.
+ *   - `cursor_composited` — the device composites the pointer into the
+ *     frame itself.  `CaptureConfig::want_cursor` is honoured only when
+ *     this is true (it is a preference, not a requirement).
+ *   - `max_pixels` — the largest frame the device can deliver, in
+ *     pixels (`width * height`).  0 means "unbounded".
+ *   - `max_fps` — the largest frame rate the device can deliver at full
+ *     resolution.  0 means "unbounded".
+ *
+ * @see CaptureFormat for the per-format statements.
     /** The device can deliver frames without a CPU readback. */
     bool zero_copy = false;
 
     /** The device reports per-frame dirty rectangles. */
     bool dirty_rects = false;
+    /** The device can deliver frames without a CPU readback.
+     *
+     *  Device-wide.  A per-format request (`CaptureFormat::zero_copy`)
+     *  additionally requires the *format* to carry the flag. */
 
     /** The device composites the pointer into the frame itself (so the
      *  engine does not need a separate cursor layer). */
     bool cursor_composited = false;
+    /** The device composites the pointer into the frame itself (so the
+     *  engine does not need a separate cursor layer).
+     *
+     *  Best-effort: `CaptureConfig::want_cursor` is a *preference*, and
+     *  it is honoured only when this flag is true.  A device that
+     *  cannot composite the pointer simply delivers frames without it —
+     *  it is not an unsupported combination. */
 
     /** The device can capture a sub-region rather than a whole surface. */
     bool region_selection = false;
+    /** The device can capture a sub-region rather than a whole surface.
+     *
+     *  Required by a non-zero `CaptureConfig::region`. */
 
     /** The device can enumerate itself (the list is not hard-coded). */
     bool enumeration = false;
 
     /** Largest frame the device can deliver, in pixels (width * height). */
     std::uint64_t max_pixels = 0;
+
+    /** Largest frame rate the device can deliver at full resolution.
+     *  0 = unbounded. */
+    std::uint32_t max_fps = 0;
+    /** Largest frame the device can deliver, in pixels (width * height).
+     *  0 = unbounded. */
 
     /** Backend identifier, e.g. "dxgi-desktop-dup", "screen-capture-kit",
      *  "x11", "pipewire", "synthetic". */

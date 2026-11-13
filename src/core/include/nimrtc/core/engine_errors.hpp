@@ -142,6 +142,38 @@ inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCodecUnsupported = 0x1A32
  *  condition is visible instead of silently truncating the stream. */
 inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoEncodeFailed = 0x1A33;
 
+/** The decoded-video delivery path cannot be established (remote-desktop
+ *  plan E1).
+ *
+ *  Reported at `open()` time when neither delivery path is possible:
+ *  the sink cannot consume host-memory frames
+ *  (`IVideoSink::supports_cpu_render()` is false) *and* the GPU path is
+ *  unavailable — either because the decoder cannot produce a surface
+ *  (`IVideoCodec::supports_zero_copy_decode()` is false) or because the
+ *  sink cannot consume one (`IVideoSink::supports_gpu_render()` is
+ *  false).
+ *
+ *  This is a *configuration* condition, not a per-frame anomaly: the
+ *  session is fine, but nothing can ever be displayed on it.  Reporting
+ *  it up front is the whole point — otherwise the session looks healthy
+ *  and shows nothing at all. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoSinkIncompatible = 0x1A34;
+
+/** The requested capture configuration is not supported by the device
+ *  (remote-desktop plan A1 — the frozen `CaptureCapabilities` /
+ *  `CaptureFormat` semantics).
+ *
+ *  Reported at `open()` time when the requested combination is refused
+ *  by the device's advertised capabilities: a zero-copy format on a
+ *  device that cannot do zero-copy, dirty-rect metadata the device does
+ *  not produce, a sub-region the device cannot select, or a size or frame
+ *  rate above the device's maximum.
+ *
+ *  The condition is detected *before* the first frame is captured, so
+ *  the failure is a clear diagnostic instead of a mysterious absence of
+ *  frames. */
+inline constexpr NIMRTC_API_STABLE std::uint32_t kVideoCaptureUnsupported = 0x1A50;
+
 // ---------------------------------------------------------------------------
 // Audio pipeline — 0x1A40..0x1A4F (v1.2.0)
 // ---------------------------------------------------------------------------

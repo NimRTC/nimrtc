@@ -366,6 +366,20 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  @see `plugins/video_capture.hpp`. */
     std::string video_capture_name;
 
+    /** The capture request handed to the capture-device plugin.
+     *
+     *  Empty by default (the device picks its own defaults: the primary
+     *  display, its best format).  When the host fills it in, the
+     *  engine checks the request against the device's advertised
+     *  `CaptureCapabilities` **at `open()` time** and reports
+     *  `kVideoCaptureUnsupported` when the combination is impossible —
+     *  so a bad request is a clear diagnostic instead of a session that
+     *  never produces a frame.
+     *
+     *  The frozen semantics of every field are documented in
+     *  `plugins::CaptureConfig` and `plugins::CaptureCapabilities`. */
+    plugins::CaptureConfig video_capture_config;
+
     /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
     std::string video_sink_name   = "headless";
 
@@ -2189,6 +2203,18 @@ public:
         // support the zero-copy entry point, or it failed).
         std::uint64_t video_zero_copy_frames    = 0;
         std::uint64_t video_zero_copy_fallbacks = 0;
+        // ---- Video receive-side delivery path (remote-desktop plan E1) ---
+        //
+        // Which route a decoded frame took from the decoder to the sink.
+        // `video_rx_gpu_frames` counts the frames that reached the sink
+        // as a native GPU surface (no host copy); `video_rx_cpu_frames`
+        // counts the frames that were staged to host memory first.
+        //
+        // The two make the decision observable: a host that expects the
+        // GPU path can see whether it is actually being taken, and a
+        // session that renders nothing shows up as zero on both.
+        std::uint64_t video_rx_gpu_frames = 0;
+        std::uint64_t video_rx_cpu_frames = 0;
         // ---- Video quality statistics (Phase 4.2 / D2, additive) ---------
         //
         // The counters above say "how much media moved".  The ones below
@@ -2702,6 +2728,24 @@ private:
      *          `on_error_`. */
     uint32_t init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
+
+    /** Decode one inbound frame into a GPU surface and hand it to the
+     *  sink (remote-desktop plan E1 — the GPU delivery path).
+     *
+     *  The lifetime contract is the one `IVideoCodec::decode_zero_copy()`
+     *  documents: the decoder acquires one reference on the output
+     *  surface, so the engine takes *another* one before holding the
+     *  surface across the `render()` call and releases it afterwards.
+     *
+     *  @param enc         The assembled encoded frame.
+     *  @param capture_ts_us  The frame's capture timestamp (for the
+     *                        sink's timeline metadata).
+     *  @return kOk when the frame reached the sink; an error code when
+     *          the GPU path could not deliver it (the caller then falls
+     *          back to the CPU staging path). */
+    plugins::Status render_decoded_gpu_frame(
+        const plugins::EncodedVideoFrame& enc,
+        std::int64_t capture_ts_us) noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------
     //

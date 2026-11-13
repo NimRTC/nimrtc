@@ -36,6 +36,7 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 
 #include <nimrtc/plugins/video_pipeline.hpp>
@@ -44,6 +45,7 @@
 #include "engine_ref_frame_table.hpp"
 #include "video_codec_config.hpp"
 #include "video_negotiation.hpp"
+#include "video_render_path.hpp"
 #include "video_stats_bridge.hpp"
 
 namespace nimrtc::engine::detail {
@@ -72,6 +74,36 @@ struct VideoState {
     // the path is actually being taken.
     std::uint64_t video_zero_copy_frames    = 0;
     std::uint64_t video_zero_copy_fallbacks = 0;
+
+    // ---- Video receive-side delivery path (remote-desktop plan E1) -------
+    //
+    // Which route a decoded frame takes from the decoder to the sink.
+    // Decided ONCE, at `open()` time, from the decoder's
+    // `supports_zero_copy_decode()` and the sink's
+    // `supports_gpu_render()` / `supports_cpu_render()` — see
+    // `src/engine/src/video_render_path.hpp` for the rule and for why
+    // it lives in a pure, unit-tested function.
+    //
+    // `kGpuSurface` means the decoder hands back a native surface and
+    // the sink presents it (no host copy).  `kCpuStaging` is the
+    // universal fallback.  `kIncompatible` means neither path is
+    // possible — the engine reports `kVideoSinkIncompatible` at
+    // `open()` time and the receive pipeline renders nothing.
+    detail::VideoRenderPath video_render_path = detail::VideoRenderPath::kCpuStaging;
+
+    /** The decoder's zero-copy decode output pool, when the GPU path is
+     *  in use.  The engine acquires a surface from it per frame and
+     *  hands it to the sink.  Null when the GPU path is not in use. */
+    std::shared_ptr<plugins::GpuBufferPool> video_decode_pool;
+
+    /** The receive-side zero-copy counters.  `video_rx_gpu_frames` counts
+     *  the frames that reached the sink as a GPU surface;
+     *  `video_rx_cpu_frames` counts the frames that were staged to host
+     *  memory first.  The two make the decision observable from the
+     *  outside — a host that expects the GPU path can see whether it is
+     *  actually being taken. */
+    std::uint64_t video_rx_gpu_frames = 0;
+    std::uint64_t video_rx_cpu_frames = 0;
 
     // ---- Video send pipeline state -------------------------------------
     // Tracks whether the next encoded frame is a keyframe (forced by

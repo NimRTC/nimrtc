@@ -550,15 +550,77 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // turning a device into a frame stream is an adapter's job, and the
     // automatic capture → encoder pump is remote-desktop plan item A10.
     if (!config_.video_capture_name.empty() && !video_capture_) {
+        // The capture request comes from the host (`EngineConfig::
+        // video_capture_config`).  It is handed to the device verbatim:
+        // the device owns the negotiation, and the engine must not
+        // second-guess which display or which size the host meant.
+        //
+        // One exception: `EngineConfig::video_zero_copy` asks the *send*
+        // path to avoid a host copy, which only makes sense if the
+        // capture side can deliver a GPU surface too.  When the host
+        // left the format's `zero_copy` flag alone and asked for
+        // zero-copy, the request says so — and a device that cannot do
+        // it is reported at `open()` time, which is exactly what the
+        // check below is for.
+        plugins::CaptureConfig capture_cfg = config_.video_capture_config;
+        if (capture_cfg.format.zero_copy == false && config_.video_zero_copy) {
+            capture_cfg.format.zero_copy = true;
+        }
+
         (void)pal::make_plugin<&pal::resolve_video_capture>(
             config_.video_capture_name,
             video_capture_,
-            plugins::CaptureConfig{},                  // default config
+            std::move(capture_cfg),
             {.err_open_failed = core::kVideoCaptureOpenFailed,
              .err_missing = core::kVideoCapturePluginMissing,
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+    }
+
+    // ---- The capture request vs. the device's capabilities ---------------
+    //
+    // The frozen `CaptureCapabilities` / `CaptureFormat` semantics
+    // (remote-desktop plan A1) are checked HERE, at `open()` time.  An
+    // unsupported combination — a zero-copy format on a device that
+    // cannot do zero-copy, dirty-rect metadata the device does not
+    // produce, a size above the device's maximum — is a *configuration*
+    // condition, and reporting it up front is the whole point: the
+    // alternative is a session that opens cleanly and never produces a
+    // frame, which is indistinguishable from a broken peer.
+    if (video_capture_) {
+        const plugins::CaptureCapabilities caps = video_capture_->capabilities();
+        // The *request* is what is checked — not the negotiated result.
+        // The negotiated format is by construction within the device's
+        // capabilities (the device would have refused otherwise); the
+        // request is what can be wrong.
+        const plugins::CaptureConfig& requested = config_.video_capture_config;
+
+        std::vector<plugins::CaptureFormat> offered;
+        if (!requested.device_id.empty()) {
+            offered = video_capture_->supported_formats(requested.device_id);
+        }
+
+        // The zero-copy request derived from `EngineConfig::video_zero_copy`
+        // has to be part of what is checked, so the check sees the same
+        // request the device was given.
+        plugins::CaptureConfig effective = requested;
+        if (!effective.format.zero_copy && config_.video_zero_copy) {
+            effective.format.zero_copy = true;
+        }
+
+        const detail::CaptureCapabilityCheck check =
+            detail::check_capture_capabilities(caps, effective, offered);
+        if (!check.ok()) {
+            const std::string msg =
+                std::string{"engine: the capture device '"} +
+                config_.video_capture_name +
+                "' does not support the requested configuration (" +
+                std::string{detail::capture_violation_name(check.violation)} +
+                "); the request is refused before the first frame.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoCaptureUnsupported, msg);
+        }
     }
 
     // ---- Video Sink --------------------------------------------------------
@@ -729,6 +791,81 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+    }
+
+    // ---- The decoded-frame delivery path (remote-desktop plan E1) --------
+    //
+    // The sink may implement the CPU path, the GPU path, or both.  The
+    // engine decides **once**, here at `open()` time, which route a
+    // decoded frame takes:
+    //
+    //   GPU path  — the decoder produces a native surface and the sink
+    //               presents it (no host copy).  Requires *both* the
+    //               decoder's `supports_zero_copy_decode()` and the
+    //               sink's `supports_gpu_render()`.
+    //   CPU path  — the decoder writes host pixels.  The universal
+    //               fallback; requires the sink's
+    //               `supports_cpu_render()`.
+    //
+    // The rule itself lives in `video_render_path.hpp` as a pure
+    // function, so every combination is unit-tested without an engine.
+    //
+    // An *incompatible* pair — a sink that can take neither — is
+    // reported here, at `open()` time, as `kVideoSinkIncompatible`.
+    // Reporting it later (on the first frame) would mean a session that
+    // looks healthy and displays nothing at all.
+    //
+    // This block sits *after* the codec was created: the decoder's
+    // capability is one of the three inputs.
+    {
+        detail::VideoRenderPathInputs inputs;
+        inputs.decoder_zero_copy =
+            video_codec_ && video_codec_->supports_zero_copy_decode();
+        inputs.sink_gpu_render = video_sink_ && video_sink_->supports_gpu_render();
+        inputs.sink_cpu_render = video_sink_ && video_sink_->supports_cpu_render();
+
+        const detail::VideoRenderPath path =
+            detail::decide_video_render_path(inputs);
+        impl_->video_state.video_render_path = path;
+
+        if (path == detail::VideoRenderPath::kIncompatible) {
+            const std::string msg =
+                std::string{"engine: the video sink '"} +
+                config_.video_sink_name +
+                "' cannot accept the decoded frames this session produces: "
+                "it accepts neither host-memory frames "
+                "(supports_cpu_render() == false) nor GPU surfaces "
+                "(supports_gpu_render() == false), and the codec "
+                "'" + config_.video_codec_name +
+                "' does not report zero-copy decode support.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoSinkIncompatible, msg);
+        } else if (path == detail::VideoRenderPath::kGpuSurface) {
+            // The GPU path needs a surface to decode into.  The codec
+            // owns that pool (`output_pool()`), and the contract says it
+            // is pre-allocated in the steady state.  A codec that
+            // claims zero-copy decode support but publishes no pool
+            // cannot actually deliver a surface — the path is
+            // downgraded to the CPU staging path rather than failing
+            // on every frame.
+            impl_->video_state.video_decode_pool = video_codec_->output_pool();
+            if (impl_->video_state.video_decode_pool) {
+                core::log::Logger::instance().info(
+                    "engine: the decoded-frame delivery path is the GPU "
+                    "surface path (no host copy)");
+            } else {
+                impl_->video_state.video_render_path =
+                    detail::VideoRenderPath::kCpuStaging;
+                core::log::Logger::instance().warn(
+                    "engine: the codec reports zero-copy decode support but "
+                    "publishes no output pool — the decoded-frame delivery "
+                    "path falls back to the CPU staging path");
+            }
+        } else {
+            core::log::Logger::instance().info(
+                "engine: the decoded-frame delivery path is the CPU "
+                "staging path");
+        }
     }
 
     // ========================================================================
@@ -945,6 +1082,38 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // Decode + render if the codec and sink are available.
                 if (!video_codec_ || !video_sink_) return;
 
+                // ---- The delivery path (remote-desktop plan E1) --------------
+                //
+                // Two routes, decided at `open()` time (see
+                // `video_render_path.hpp`):
+                //
+                //   GPU path — the decoder fills a native surface and the
+                //             sink presents it.  No host copy.
+                //   CPU path — the decoder writes host pixels.
+                //
+                // The GPU branch is attempted first; when it cannot run
+                // (no pool, no surface, the decoder refuses) the frame
+                // falls back to the CPU path, which is the universal
+                // fallback every codec implements.
+                if (impl_->video_state.video_render_path ==
+                    detail::VideoRenderPath::kGpuSurface) {
+                    const plugins::Status gpu_rc = render_decoded_gpu_frame(
+                        enc, static_cast<std::int64_t>(enc.info.capture_ts_us));
+                    if (gpu_rc == plugins::kOk) {
+                        ++impl_->video_state.video_rx_gpu_frames;
+                        impl_->video_state.video_stats.on_frame_decoded(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        impl_->video_state.video_stats.on_frame_rendered(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us));
+                        return;
+                    }
+                    // The GPU path could not deliver this frame.  Fall
+                    // through to the CPU path, which is exactly what the
+                    // fallback is for — but count the miss so the host
+                    // can see that the GPU path is not working.
+                    ++impl_->video_state.video_zero_copy_fallbacks;
+                }
+
                 // ---- Resolve the decoded geometry ------------------------------
                 //
                 // The decode buffers must match the *actual* geometry of
@@ -1052,10 +1221,64 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
                 }
+                ++impl_->video_state.video_rx_cpu_frames;
             });
     }
 
     return plugins::kOk;
+}
+
+
+plugins::Status NimRTCEngine::render_decoded_gpu_frame(
+        const plugins::EncodedVideoFrame& enc,
+        std::int64_t capture_ts_us) noexcept {
+    if (!video_codec_ || !video_sink_) return plugins::kErrNotReady;
+
+    // The surface comes from the codec's own output pool — the codec
+    // knows the native geometry and the backend-specific allocation
+    // (D3D11 texture, VA surface, ...).  Without a pool there is
+    // nowhere to decode into.
+    const std::shared_ptr<plugins::GpuBufferPool>& pool =
+        impl_->video_state.video_decode_pool;
+    if (!pool) return plugins::kErrUnsupported;
+
+    const plugins::VideoCodecConfig codec_cfg = video_codec_->config();
+    const std::uint32_t w = codec_cfg.width;
+    const std::uint32_t h = codec_cfg.height;
+    if (w == 0 || h == 0) return plugins::kErrUnsupported;
+
+    plugins::GpuBuffer* surface = pool->acquire(w, h, codec_cfg.pixel_format);
+    if (!surface) return plugins::kErrHardwareError;
+
+    // The decoder acquires one reference on the surface it fills (see
+    // `IVideoCodec::decode_zero_copy()`), and the engine needs one of
+    // its own to hold the surface across the `render()` call.  So the
+    // count goes: 1 (the pool's) → 2 (the decoder's) → 3 (the engine's).
+    // The engine releases its own reference when the frame is done.
+    surface->acquire_ref();
+
+    const plugins::Status decode_rc =
+        video_codec_->decode_zero_copy(enc, *surface);
+    if (decode_rc != plugins::kOk) {
+        surface->release_ref();   // the engine's reference
+        surface->release_ref();   // the pool's reference
+        return decode_rc;
+    }
+
+    // The timeline metadata travels with the frame so a sink that paces
+    // or timestamps its output has what it needs.
+    plugins::VideoFrameInfo info{};
+    info.capture_ts_us = capture_ts_us;
+    info.frame_seq     = enc.info.frame_seq;
+    info.rtp_timestamp = enc.info.rtp_timestamp;
+
+    const plugins::Status render_rc = video_sink_->render(*surface, info);
+
+    // The engine's reference goes away; the decoder's stays until the
+    // next decode (that is the documented contract).
+    surface->release_ref();
+
+    return render_rc;
 }
 
 
@@ -2086,6 +2309,9 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // Phase 3 / C3: the zero-copy path counters.
     out.video_zero_copy_frames    = impl_->video_state.video_zero_copy_frames;
     out.video_zero_copy_fallbacks = impl_->video_state.video_zero_copy_fallbacks;
+    // Remote-desktop plan E1: the receive-side delivery-path counters.
+    out.video_rx_gpu_frames       = impl_->video_state.video_rx_gpu_frames;
+    out.video_rx_cpu_frames       = impl_->video_state.video_rx_cpu_frames;
 
     // ---- Video quality statistics (Phase 4.2 / D2) ----------------------
     //

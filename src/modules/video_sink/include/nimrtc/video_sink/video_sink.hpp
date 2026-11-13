@@ -61,8 +61,19 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    //
+    // The headless sink drops the pixels either way, so it accepts both
+    // delivery paths.  Saying so is what lets the engine take the GPU
+    // path when the decoder can produce a surface.
+    bool supports_gpu_render() const noexcept override { return true; }
+    bool supports_cpu_render() const noexcept override { return true; }
 
 private:
     plugins::VideoSinkConfig cfg_;
@@ -91,8 +102,15 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    bool supports_gpu_render() const noexcept override { return true; }
+    bool supports_cpu_render() const noexcept override { return true; }
 
 private:
     plugins::VideoSinkConfig cfg_;
@@ -143,8 +161,23 @@ public:
 
     // ---- plugins::IVideoSink -----------------------------------------------
     plugins::Status render(const plugins::VideoSourceFrame& frame) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface) noexcept override;
+    plugins::Status render(const plugins::GpuBuffer& surface,
+                           const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+
+    // ---- Capability probes ------------------------------------------------
+    //
+    // The adapter forwards the probes to the sink it wraps: the adapter
+    // is what the engine sees, so a GPU-only concrete sink must be
+    // reported as GPU-capable through the adapter too.
+    bool supports_gpu_render() const noexcept override {
+        return concrete_ && concrete_->supports_gpu_render();
+    }
+    bool supports_cpu_render() const noexcept override {
+        return concrete_ && concrete_->supports_cpu_render();
+    }
 
 private:
     std::unique_ptr<plugins::IVideoSink> concrete_;

@@ -44,6 +44,19 @@ plugins::Status HeadlessSink::render(const plugins::VideoSourceFrame& /*frame*/)
     return plugins::kOk;
 }
 
+plugins::Status HeadlessSink::render(const plugins::GpuBuffer& /*surface*/) noexcept {
+    // The headless sink drops the pixels either way, so a GPU surface is
+    // accepted exactly like a CPU frame.
+    if (!opened_.load(std::memory_order_acquire)) return plugins::kErrNotReady;
+    frames_rendered_.fetch_add(1, std::memory_order_relaxed);
+    return plugins::kOk;
+}
+
+plugins::Status HeadlessSink::render(const plugins::GpuBuffer& surface,
+                                     const plugins::VideoFrameInfo& /*info*/) noexcept {
+    return render(surface);
+}
+
 plugins::VideoSinkStats HeadlessSink::stats() const noexcept {
     plugins::VideoSinkStats s;
     s.frames_rendered = frames_rendered_.load(std::memory_order_relaxed);
@@ -87,6 +100,29 @@ plugins::Status PinnedSink::render(const plugins::VideoSourceFrame& frame) noexc
         return plugins::kErrCorrupt;
     }
     last_capture_ts_us_ = frame.capture_ts_us;
+    frames_rendered_.fetch_add(1, std::memory_order_relaxed);
+    return plugins::kOk;
+}
+
+plugins::Status PinnedSink::render(const plugins::GpuBuffer& /*surface*/) noexcept {
+    // Without the timeline metadata there is no capture timestamp to
+    // check the ordering against, so the GPU path without metadata only
+    // counts the frame.
+    if (!opened_.load(std::memory_order_acquire)) return plugins::kErrNotReady;
+    frames_rendered_.fetch_add(1, std::memory_order_relaxed);
+    return plugins::kOk;
+}
+
+plugins::Status PinnedSink::render(const plugins::GpuBuffer& /*surface*/,
+                                   const plugins::VideoFrameInfo& info) noexcept {
+    if (!opened_.load(std::memory_order_acquire)) return plugins::kErrNotReady;
+    // The same strictly-increasing capture_ts invariant as the CPU path.
+    if (last_capture_ts_us_ >= 0
+        && info.capture_ts_us <= static_cast<plugins::TimestampUs>(last_capture_ts_us_)) {
+        render_errors_.fetch_add(1, std::memory_order_relaxed);
+        return plugins::kErrCorrupt;
+    }
+    last_capture_ts_us_ = info.capture_ts_us;
     frames_rendered_.fetch_add(1, std::memory_order_relaxed);
     return plugins::kOk;
 }
@@ -139,6 +175,15 @@ void PluginAdapter::close() noexcept {
 
 plugins::Status PluginAdapter::render(const plugins::VideoSourceFrame& frame) noexcept {
     return concrete_ ? concrete_->render(frame) : plugins::kErrNotReady;
+}
+
+plugins::Status PluginAdapter::render(const plugins::GpuBuffer& surface) noexcept {
+    return concrete_ ? concrete_->render(surface) : plugins::kErrNotReady;
+}
+
+plugins::Status PluginAdapter::render(const plugins::GpuBuffer& surface,
+                                      const plugins::VideoFrameInfo& info) noexcept {
+    return concrete_ ? concrete_->render(surface, info) : plugins::kErrNotReady;
 }
 
 plugins::VideoSinkStats PluginAdapter::stats() const noexcept {

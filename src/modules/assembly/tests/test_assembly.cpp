@@ -874,12 +874,19 @@ TEST_F(AssemblyTest, TransportBridgeResolvesEveryBuiltInProfile) {
 
         nimrtc::assembly::TransportSection section;
         section.strategy = std::string{c.name};
-        const auto req =
-            nimrtc::assembly::to_transport_requirements(
-                nimrtc::assembly::Profile{
-                    .name      = "bridge_test",
-                    .transport = section,
-                });
+
+        // NOTE: the Profile is built by assignment rather than by a
+        // designated initialiser.  `Profile` has ~20 members, and a
+        // designated initialiser that names only two of them trips
+        // GCC's `-Werror=missing-field-initializers` (the aggregate is
+        // then value-initialised for the rest, but the warning fires
+        // anyway).  MSVC has no equivalent warning, so this only shows
+        // up on the GCC / Clang CI legs.
+        nimrtc::assembly::Profile profile;
+        profile.name      = "bridge_test";
+        profile.transport = section;
+
+        const auto req = nimrtc::assembly::to_transport_requirements(profile);
 
         EXPECT_EQ(req.needs_browser_interop, c.canonical.needs_browser_interop);
         EXPECT_EQ(req.needs_high_freq_control, c.canonical.needs_high_freq_control);

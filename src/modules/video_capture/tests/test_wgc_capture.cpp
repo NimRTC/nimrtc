@@ -205,9 +205,12 @@ TEST(WgcCapture, ARealDeviceProducesFrames) {
             EXPECT_GT(f.size, 0u);
             EXPECT_GT(f.width, 0u);
             EXPECT_GT(f.height, 0u);
-            // WGC does not report changed regions, so the whole frame
-            // is the changed region.
-            EXPECT_TRUE(f.dirty.full_frame);
+            // The changed region comes from the portable pixel-diff, so
+            // the frame carries *either* a full-frame flag *or* a
+            // bounding box — never neither.  (The first frame is
+            // always full-frame; a later frame that differs from its
+            // predecessor reports the box.)
+            EXPECT_TRUE(f.dirty.full_frame || !f.dirty.rects.empty());
 
             // The frame must not be black.  A black frame means the
             // readback silently failed, and a black frame that looks

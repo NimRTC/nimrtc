@@ -609,6 +609,42 @@ void WgcCapture::capture_loop(
         return;
     }
 
+    // ---- The apartment guard ----------------------------------------------
+    //
+    // WinRT needs an apartment, and leaving one is an *ordered* operation:
+    // every WinRT object this thread created has to be released *before*
+    // the apartment goes away.  A WinRT object releases its reference to
+    // the runtime when it is destroyed, and the runtime may call back
+    // into the apartment to do it -- so a release that happens after
+    // `CoUninitialize()` runs against a runtime the thread no longer
+    // has.  That is undefined behaviour, and it shows up as an access
+    // violation inside the COM machinery rather than as a clean error.
+    //
+    // The guard makes the ordering *unconditional*.  It is declared
+    // here, before any WinRT object exists, and its destructor runs
+    // when the function returns -- which is *after* the frame has
+    // unwound and destroyed every local WinRT smart pointer.  So the
+    // apartment is always left last, on every path, including the error
+    // paths below.
+    //
+    // The guard also drops the state's reference to the frame pool.
+    // The pool was created *here*, and the local `pool` handle is
+    // destroyed before the guard runs, so the state is the only thing
+    // still holding it: resetting it inside the guard is what makes the
+    // last reference to the pool go away *inside* the apartment.  The
+    // reset is taken under the handler mutex, so it cannot race with a
+    // frame-arrival handler that is copying the same `shared_ptr`.
+    struct ApartmentGuard {
+        std::shared_ptr<WgcCaptureState> state;
+        ~ApartmentGuard() {
+            if (state) {
+                std::lock_guard<std::mutex> lock(state->handler_mutex_);
+                state->pool_.reset();
+            }
+            ::CoUninitialize();
+        }
+    } apartment_guard{state};
+
     // ---- The D3D11 device --------------------------------------------------
     //
     // Created *without* D3D11_CREATE_DEVICE_SINGLETHREADED: the
@@ -636,7 +672,6 @@ void WgcCapture::capture_loop(
         core::log::Logger::instance().error("wgc: D3D11CreateDevice failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -648,7 +683,6 @@ void WgcCapture::capture_loop(
         dxgi_device == nullptr) {
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -661,7 +695,6 @@ void WgcCapture::capture_loop(
             "wgc: CreateDirect3D11DeviceFromDXGIDevice failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -693,7 +726,6 @@ void WgcCapture::capture_loop(
             "Windows may not support free-threaded capture)");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
     {
@@ -723,7 +755,6 @@ void WgcCapture::capture_loop(
             "wgc: the GraphicsCaptureItem factory is not available");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -746,7 +777,6 @@ void WgcCapture::capture_loop(
             "have granted the capture capability)");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -759,7 +789,6 @@ void WgcCapture::capture_loop(
             "wgc: the capture session could not be created");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -801,7 +830,6 @@ void WgcCapture::capture_loop(
                 "wgc: the staging texture could not be created");
             state->device_errors.fetch_add(1, std::memory_order_relaxed);
             state->running_.store(false, std::memory_order_release);
-            ::CoUninitialize();
             return;
         }
         state->staging_width_  = desc.Width;
@@ -829,7 +857,6 @@ void WgcCapture::capture_loop(
             "wgc: the FrameArrived subscription failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -841,7 +868,6 @@ void WgcCapture::capture_loop(
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
         pool->FrameArrived(token);
         state->running_.store(false, std::memory_order_release);
-        ::CoUninitialize();
         return;
     }
 
@@ -855,18 +881,47 @@ void WgcCapture::capture_loop(
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
+    // ---- Stop the handlers, then wait for them ------------------------------
+    //
+    // Unsubscribing is what guarantees that *no new* handler can start
+    // after this point: `close()` therefore only has to wait for the
+    // handlers that are already running.
+    //
+    // The order is: unsubscribe first, *then* wait.  A handler that
+    // starts in the window between the two sees `running_ == false` and
+    // returns without touching anything — but the wait must come after
+    // the unsubscribe, or a handler could start *after* the wait
+    // returned and then run against objects this thread is about to
+    // release.
+    pool->FrameArrived(token);
+
+    // Wait for the running handlers to finish.
+    //
+    // This is the step that makes the teardown below safe.  A
+    // frame-arrival handler runs on a WinRT thread-pool thread, which
+    // has **no COM apartment of its own**: it borrows the runtime this
+    // thread's apartment provides.  So the handlers must be *done*
+    // before this thread releases the WinRT objects and leaves the
+    // apartment — a handler that is still running when the apartment
+    // goes away touches a runtime that is no longer there, which is an
+    // access violation inside the COM machinery rather than a clean
+    // error.
+    //
+    // (`close()` waits for the same counter too, but it does so *after*
+    // joining this thread — which is too late, because by then the
+    // apartment has already been torn down.  The wait has to happen
+    // here, inside the apartment's lifetime.)
+    while (state->in_flight_.load(std::memory_order_acquire) > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     // ---- Tear down ------------------------------------------------------------------
     try {
         session.Close();
     } catch (const winrt::hresult_error&) {
         // Best effort.
     }
-    // Unsubscribing here is what guarantees that *no new* handler can
-    // start after this point: `close()` therefore only has to wait for
-    // the handlers that are already running.
-    pool->FrameArrived(token);
 
-    ::CoUninitialize();
 }
 
 void WgcCapture::on_frame_arrived(
@@ -1059,17 +1114,39 @@ void WgcCapture::on_frame_arrived(
         return;
     }
 
+    // The captured-frame counter is bumped *before* the frame is queued.
+    //
+    // The order matters, and it is not a detail: the queue hands the
+    // frame to a consumer that may be running on another thread, and
+    // that consumer's very next act is often to read `stats()`.  If the
+    // counter were bumped *after* the push, the consumer could pop the
+    // frame, read a counter that still says zero, and conclude that the
+    // device had captured nothing — while a frame was sitting in its
+    // hand.  Bumping first makes the counter a *lower bound* on the
+    // frames that exist, which is the only ordering a reader can rely
+    // on.
+    //
+    // The count is *not* rolled back if the queue refuses the frame.
+    // The counter counts the frames the device produced, and a frame
+    // the queue refuses was still produced: the queue is what refused
+    // to deliver it, and that refusal is already reported separately
+    // in `frames_dropped`.  A decrement would make the counter go
+    // backwards, which would break every reader that treats it as a
+    // monotonic count.
+    state->frames_captured.fetch_add(1, std::memory_order_relaxed);
+
     const auto outcome = state->queue_.push(
         pixels, frame_bytes, stride, frame_w, frame_h, ts, seq, dirty);
     switch (outcome) {
         case CaptureQueue::PushResult::kQueued:
-            state->frames_captured.fetch_add(1, std::memory_order_relaxed);
             break;
         case CaptureQueue::PushResult::kDroppedOldest:
-            state->frames_captured.fetch_add(1, std::memory_order_relaxed);
             state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
             break;
         case CaptureQueue::PushResult::kRejected:
+            // The queue refused the frame, so it was never delivered.
+            // The device still captured it, so `frames_captured` keeps
+            // it; the refusal shows up in `frames_dropped`.
             state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
             break;
     }

@@ -2326,6 +2326,39 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (MSVC's C mode has no variable-length arrays) and is left alone -- and
   both build scripts run it before the configure.
 
+- **The video receive path now reconstructs the Annex-B start codes
+  (v1.2.0, architecture remediation plan §4.5).**
+  RFC 6184 §5.1 carries **bare** NAL units in the RTP payload — the
+  start code is never on the wire — but the frame contract
+  `video_frame::NaluFormat::kAnnexBStartCode` promises the decoder sees
+  `00 00 00 01 | nalu  00 00 00 01 | nalu ...`.  The receiver handed
+  the decoder a buffer with **no** start codes at all, so the H.264
+  bitstream parser (`h264::BitstreamParser`, which scans for `00 00 01`)
+  found no NAL unit, no SPS and no IDR slice: every inbound frame failed
+  to decode, and the engine counted it as a decoder drop.
+
+  The start code is now inserted at the one place that knows where a NAL
+  unit begins and ends — the receiver:
+
+  | Path | Where | What |
+  |------|-------|------|
+  | single NAL unit | `video_pipeline.cpp` `handle_payload()` | one start code before the NAL unit |
+  | STAP-A (H.264) | `video_pipeline.cpp` | one start code before **each** unpacked NAL unit |
+  | AP (H.265) | `video_pipeline.cpp` | one start code before **each** unpacked NAL unit |
+  | FU-A (H.264) | `video_pipeline.cpp` `flush_fua()` | one start code before the synthesised NAL header |
+  | FU (H.265) | `video_pipeline.cpp` `flush_fu_h265()` | one start code before the synthesised two-byte header |
+  | FU-A fallback | `video_jitter_buffer.cpp` `append_fu_a_fragment()` | one start code before the synthesised NAL header |
+
+  The jitter buffer stays codec-agnostic: it only concatenates the
+  packets of one picture, so a picture made of several NAL units now
+  arrives as `start|nalu start|nalu ...` — one start code per NAL unit.
+  Its key-frame detector was taught to skip a leading 3- or 4-byte start
+  code before peeking the NAL type, so a re-framed SPS / PPS / IDR is
+  still recognised as a key frame.
+
+  The engine's `VideoFrameCallback` now receives the Annex-B bitstream;
+  the callback's documentation says so.
+
 ## [1.1.0] - 2026-11-07
 
 ### Status: Release candidate

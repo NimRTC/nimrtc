@@ -1,6 +1,6 @@
 # NimRTC 架构缺陷彻底整改计划
 
-> 状态：**Phase 0 / 1 / 2 / 3 已完成**（决策已拍板，见 §0.0）；Phase 4（结构重构）与 Phase 5（文档与 ADR 同步）待执行
+> 状态：**Phase 0 / 1 / 2 / 3 已完成**（决策已拍板，见 §0.0）；Phase 4（结构重构）进行中（§4.1 已落地），Phase 5（文档与 ADR 同步）待执行
 > 制定日期：2026-11-12
 > 基线：`split/6-h265-av1` @ `origin/split/6-h265-av1`（ahead 1）
 > 范围：插件化契约完整性、性能热路径、结构分层、文档与代码一致性
@@ -16,7 +16,7 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | ⬜ | 五个 seam 目录并入 `src/modules/`、`engine_impl.hpp` 拆分、死模块接线或删除 |
+> | 4 | 结构重构（D1-D6、Q5） | 🔄 | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；余下 D1 引擎拆分、D2 死模块处置、D5/D6 |
 > | 5 | 文档与 ADR 同步 | ⬜ | ADR-015 / ADR-017 与本次整改的同步 |
 >
 > Phase 3 的验收（§3.5）现状：
@@ -28,6 +28,16 @@
 > - `tick()` p99 耗时相比基线下降 ≥ 30 % —— ✅ 基线 0.3 us → 0.2 us（-33 %）
 > - 调度器在满载下的 `drain_with()` 不阻塞 `enqueue()` —— ✅ 基准第三段
 >   （生产者 p99 即锁竞争足迹），并由 Phase 1.6 的锁外 I/O 修复保证
+>
+> Phase 4 §4.1（目录统一，Q5）现状：
+>
+> - `src/{dtls,raw_udp,sctp,transport,web_transport}/` 全部并入
+>   `src/modules/` —— ✅ 旧目录已不存在
+> - include 路径不变 —— ✅ `engine_impl.hpp` 的 include 行与 `main` 逐字节相同
+> - CMake target 名不变 —— ✅ `nimrtc::{dtls,dtls_seam,sctp,raw_udp,transport,web_transport}`
+> - DTLS 双实现归一 —— ✅ seam 头 + wolfSSL / GmSSL 两个后端同在
+>   `src/modules/dtls/`
+> - 全量 `ctest` —— ✅ 1411 / 1411（Windows MSVC Release）
 
 ---
 
@@ -633,6 +643,39 @@ Test-Path src/dtls, src/sctp, src/raw_udp, src/transport, src/web_transport   # 
 - 提交 B：DTLS 内部整合（seam + GmSSL + wolfSSL 归到一个模块目录）
 
 两次之间每步都跑全量 `ctest`。
+
+#### 4.1 执行结果（2026-11-13）
+
+| 验收项 | 结果 |
+|---|---|
+| 旧目录 `src/{dtls,raw_udp,sctp,transport,web_transport}/` | ✅ 全部不存在 |
+| include 路径未变 | ✅ `engine_impl.hpp` 的 include 行与 `main` 逐字节相同；`nimrtc/<family>/...` 拼写保留 |
+| CMake target 名未变 | ✅ `nimrtc::{dtls,dtls_seam,sctp,raw_udp,transport,web_transport}` 与 `nimrtc_*` 归档名 |
+| DTLS 归一（D3） | ✅ `src/modules/dtls/{include,src,backends/gmssl,tests}/` —— seam 头 + wolfSSL + GmSSL 同处一个模块 |
+| `ARCHITECTURE.md` 同步 | ✅ 目录树更新；"seam-family 目录"整段辩护删除 |
+| 全量 `ctest` | ✅ 1411 / 1411（Windows MSVC Release） |
+
+最终形态：
+
+```
+src/modules/
+├── dtls/                    ← 统一的 DTLS 模块
+│   ├── include/nimrtc/dtls/ ← seam 头（IDtlsSession / IDtlsSessionFactory / 类型）
+│   ├── src/                 ← wolfSSL 会话实现
+│   ├── backends/gmssl/      ← GmSSL 后端
+│   └── tests/
+├── raw_udp/                 ← 原 src/raw_udp/
+├── sctp/                    ← 原 src/sctp/
+├── transport/               ← 原 src/transport/
+└── web_transport/           ← 原 src/web_transport/
+```
+
+**剩余风险已排除**：
+- `nimrtc_core_objects` 的 OBJECT 库机制未受影响 —— `src/core/CMakeLists.txt` 只是把五处
+  `${CMAKE_SOURCE_DIR}/src/<family>/include` 改成 `src/modules/<family>/include`，
+  依赖方向不变（core → 模块头文件，模块 → `nimrtc::core`），无环。
+- `if(EXISTS ...)` 守卫：五个 seam 目录是**无条件** `add_subdirectory`（它们不是可选模块），
+  守卫只用于 `h265` / `av1` / `video_*` 等可选模块，路径未受影响。
 
 ### 4.2 修 D2：死模块处置
 

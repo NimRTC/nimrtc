@@ -182,9 +182,28 @@ bool X11CursorSource::has_live_cursor() const noexcept {
     return false;
 }
 
-void X11CursorSource::set_screen_origin(std::int32_t, std::int32_t) noexcept {}
+void X11CursorSource::set_screen_origin(std::int32_t x,
+                                        std::int32_t y) noexcept {
+    // The portable stub records the origin exactly as the X11
+    // implementation does.  There is no pointer to report here, but
+    // the field must be *written and read* on this configuration, or
+    // the compiler is right that it is unused and Clang's
+    // -Wunused-private-field (with -Werror) fails the build.
+    // `[[maybe_unused]]` is not an alternative: GCC ignores that
+    // attribute on a non-static data member and rejects the build
+    // under -Werror=attributes instead.
+    std::lock_guard<std::mutex> lock(mutex_);
+    origin_x_ = x;
+    origin_y_ = y;
+}
 
 CursorState X11CursorSource::query() noexcept {
+    // The origin is read back here so that the field is read on this
+    // configuration as well as written: a field that is only ever
+    // written is still unused as far as the compiler is concerned.
+    std::lock_guard<std::mutex> lock(mutex_);
+    (void)origin_x_;
+    (void)origin_y_;
     return CursorState{};
 }
 

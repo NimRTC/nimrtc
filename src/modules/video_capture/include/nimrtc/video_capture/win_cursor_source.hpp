@@ -126,21 +126,30 @@ private:
     // non-Windows build the class exists (so a host can refer to it
     // portably) but never reads them — and Clang's
     // -Wunused-private-field rejects a private field that no
-    // translation unit of the build reads, with -Werror on.  The
-    // attribute says "this field is unused *on this configuration*",
-    // which is exactly what is true.
+    // translation unit of the build reads, with -Werror on.
+    //
+    // The attribute is *not* the fix, and using it here would be a
+    // portability bug of its own: GCC ignores `[[maybe_unused]]` on a
+    // non-static data member and says so under -Werror=attributes, so
+    // the same header that silences Clang breaks the GCC build.  The
+    // fix is that the portable stub *uses* the fields — it records the
+    // origin exactly as the Windows implementation does, and reads it
+    // back when it reports "no pointer".  A field that is written and
+    // read is never unused, on any compiler, and the portable stub
+    // then behaves the way it should: it remembers where the display
+    // is.
     //
     // (The X11 source has the same shape and the same fix.)
 
     /** The cursor handle the cached bitmap came from (nullptr: none). */
-    [[maybe_unused]] void* cached_cursor_ = nullptr;
+    void* cached_cursor_ = nullptr;
 
     /** The cached bitmap. */
     Bitmap cached_{};
 
     /** The captured display's origin in the virtual desktop. */
-    [[maybe_unused]] std::int32_t origin_x_ = 0;
-    [[maybe_unused]] std::int32_t origin_y_ = 0;
+    std::int32_t origin_x_ = 0;
+    std::int32_t origin_y_ = 0;
 };
 
 /**

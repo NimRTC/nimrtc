@@ -125,10 +125,17 @@ private:
      *  Only the *X11* implementation of `set_screen_origin()` writes it,
      *  so on a build without X11 (macOS, Windows) the field is never
      *  read.  Clang's -Wunused-private-field rejects that with
-     *  -Werror on, so the field says so explicitly.
+     *  -Werror on.
+     *
+     *  The fix is *not* `[[maybe_unused]]`: GCC ignores that attribute
+     *  on a non-static data member and rejects the build under
+     *  -Werror=attributes instead, so the same header that silences
+     *  Clang breaks the GCC build.  The portable stub writes and reads
+     *  the field instead -- a field that is written *and* read is
+     *  never unused, on any compiler.
      */
-    [[maybe_unused]] std::int32_t origin_x_ = 0;
-    [[maybe_unused]] std::int32_t origin_y_ = 0;
+    std::int32_t origin_x_ = 0;
+    std::int32_t origin_y_ = 0;
 };
 
 /**

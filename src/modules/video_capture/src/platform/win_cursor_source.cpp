@@ -284,7 +284,20 @@ CursorState WinCursorSource::query() noexcept {
 
 #else // !NIMRTC_WIN_CURSOR
 
-void WinCursorSource::set_display_origin(std::int32_t, std::int32_t) noexcept {}
+void WinCursorSource::set_display_origin(std::int32_t x,
+                                         std::int32_t y) noexcept {
+    // The portable stub records the origin exactly as the Windows
+    // implementation does.  It is not needed to report a pointer --
+    // there is none here -- but the field must be *written and read*
+    // on this configuration, or the compiler is right that it is
+    // unused, and Clang's -Wunused-private-field (with -Werror) fails
+    // the build.  `[[maybe_unused]]` is not an alternative: GCC
+    // ignores that attribute on a non-static data member and rejects
+    // the build under -Werror=attributes instead.
+    std::lock_guard<std::mutex> lock(mutex_);
+    origin_x_ = x;
+    origin_y_ = y;
+}
 
 void WinCursorSource::extract(void*, Bitmap&) noexcept {}
 
@@ -292,6 +305,14 @@ CursorState WinCursorSource::query() noexcept {
     // There is no pointer to read on a platform that has none.  The
     // class exists so a host can refer to it portably; it simply has
     // nothing to report.
+    //
+    // The origin is read back here so that the field is read on this
+    // configuration as well as written: a field that is only ever
+    // written is still unused as far as the compiler is concerned.
+    std::lock_guard<std::mutex> lock(mutex_);
+    (void)origin_x_;
+    (void)origin_y_;
+    (void)cached_cursor_;
     return CursorState{};
 }
 

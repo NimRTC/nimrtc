@@ -72,6 +72,13 @@ src/
 ├── engine/       ← NimRTCEngine (wires plugins together; composition layer
 │                   only — no concrete module headers in its public API,
 │                   see Layout Invariant 4)
+│   └── src/     ← The engine's private internals.  `engine_impl.hpp` holds
+│                   the `Impl` state; the per-feature state lives in named
+│                   collaborator headers next to it (`engine_audio_state.hpp`,
+│                   `engine_video_state.hpp`, `engine_session_state.hpp`,
+│                   `engine_scratch.hpp`, `engine_timeline_state.hpp`,
+│                   `engine_xr_state.hpp`, `engine_ref_frame_table.hpp`).
+│                   None of these are installed.
 ├── log/          ← Logger / Sink implementation (nimrtc_log STATIC — the only
 │                   compiled module in src/ besides the engine itself)
 └── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus, libjuice
@@ -256,9 +263,18 @@ it only hands the transport over and receives callbacks.
 4. **`src/engine/` wires plugins together.** Applications link `nimrtc::engine`,
    not individual modules. The engine's public header (`engine.hpp`)
    deliberately does **not** include any concrete module header — all
-   concrete state lives in a PIMPL `Impl` defined inside `engine.cpp`.
-   Consumers who need concrete types (e.g. `nimrtc::dtls::DtlsSession`)
+   concrete state lives in a PIMPL `Impl` defined in the private
+   `src/engine/src/engine_impl.hpp` (shared by the engine translation
+   units). Consumers who need concrete types (e.g. `nimrtc::dtls::DtlsSession`)
    include those headers themselves; they aren't dragged in transitively.
+
+   The `Impl` state itself is grouped by concern (architecture remediation
+   plan §4.3 / D1): a member that only one feature reads or writes belongs
+   to that feature's collaborator, not to `Impl`.  The collaborators
+   (`detail::AudioState`, `detail::VideoState`, `detail::SessionState`,
+   `detail::ScratchBuffers`, `detail::TimelineState`, `detail::XrState`,
+   `detail::RefFrameTable`) live in private headers under `src/engine/src/`
+   and are not installed.
 
    **The exception (ADR-021).** The engine's *internal* implementation files
    (`engine_impl.hpp` and the `engine_*.cpp` translation units) may include
@@ -285,9 +301,12 @@ it only hands the transport over and receives callbacks.
    mechanically checkable — "does `src/engine/` include anything outside that
    list and the `plugins::` seams?" is a question with a finite answer.
 
-   The `rtp::` usage is expected to be concentrated into a single file
-   (`src/engine/src/rtp_packetizer.cpp`) as the Phase 4 engine split (D1)
-   lands; until then it spans several engine translation units.
+   The `rtp::` usage is still spread across several engine translation
+   units.  Concentrating it into a single file
+   (`src/engine/src/rtp_packetizer.cpp`) is the *behaviour* half of the
+   engine split: it moves the packet construction out of the engine, so it
+   is a separate reviewable change, not part of the state split that
+   Phase 4.3 landed.
 
    See `docs/adr/ADR-021-sdp-rtp-not-pluggable.md` for the full rationale,
    the alternatives that were rejected, and the follow-up work.

@@ -1,6 +1,6 @@
 # NimRTC 架构缺陷彻底整改计划
 
-> 状态：**Phase 0 / 1 / 2 / 3 已完成**（决策已拍板，见 §0.0）；Phase 4（结构重构）进行中（§4.1 已落地），Phase 5（文档与 ADR 同步）待执行
+> 状态：**Phase 0 / 1 / 2 / 3 / 4 / 5 已完成**（决策已拍板，见 §0.0）；D1 引擎拆分的**行为**部分（把 RTP 打包 / RTCP 处理搬出引擎）作为独立的后续 PR
 > 制定日期：2026-11-12
 > 基线：`split/6-h265-av1` @ `origin/split/6-h265-av1`（ahead 1）
 > 范围：插件化契约完整性、性能热路径、结构分层、文档与代码一致性
@@ -16,7 +16,7 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | 🔄 | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-021 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；余下 D1 引擎拆分 |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-021 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者 |
 > | 5 | 文档与 ADR 同步 | ✅ | ADR-019 / 020 / 021 / 022 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
@@ -871,6 +871,38 @@ TURN-over-TCP 端口按 TCP 探测、relay 端口区间按 UDP 探测。这样�
 
 **风险控制**：分 6 次独立 PR，每次搬一个协作者，每次跑全量测试。
 
+#### 4.3 执行结果（2026-11-13）
+
+**结果：`engine_impl.hpp` 从 1076 行降到 393 行 —— 达标（目标 < 400）。**
+
+拆分方式与计划草案不同，说明如下。
+
+**做了什么**：把 `engine_impl.hpp` 里"只被一个功能读写的成员"按关注点搬进
+具名协作者，协作者放在 `src/engine/src/` 内部头里，`Impl` 只持有它们的成员：
+
+| 协作者 | 头文件 | 行数 | 装什么 |
+|---|---|---|---|
+| `detail::AudioState` | `engine_audio_state.hpp` | 349 | 音频收发状态、RTCP RR 需要的 `AudioRxState`、DTMF 收发状态 |
+| `detail::VideoState` | `engine_video_state.hpp` | 231 | 视频收发状态、协商结果、质量计数器 |
+| `detail::SessionState` | `engine_session_state.hpp` | 201 | 会话模型 / transceiver / mid |
+| `detail::ScratchBuffers` | `engine_scratch.hpp` | 127 | 全部可复用的 scratch buffer |
+| `detail::TimelineState` | `engine_timeline_state.hpp` | — | ADR-017 时间线 |
+| `detail::XrState` | `engine_xr_state.hpp` | — | RTCP XR / TMMBR |
+| `detail::RefFrameTable` | `engine_ref_frame_table.hpp` | — | 参考帧时间线表 |
+
+**没做什么（与计划草案的差异）**：计划里点的
+`VideoPipeline` / `AudioPipeline` / `RtpPacketizer` / `RtcpProcessor` /
+`TransportManager` 这几个类**没有**引入。原因是它们每一个都要把一段**行为**
+从引擎里搬出去 —— 那是一次行为改动，需要各自的评审；只搬**状态**是纯机械改动，
+可以独立评审、风险可控。所以本次只做了"把头的三类内容分开"这一半，
+留给后续 PR 逐个搬行为。
+
+**验证**：全量 `ctest` **1434 / 1434 通过**（0 失败），构建零 error 零 warning。
+
+**遗留**：`src/engine/src/engine_impl.hpp` 仍是 393 行 —— 达标了，但
+`Impl` 本身仍持有"跨功能"的散装成员（RTCP 计数器、pacing demand 列表、
+SR 状态等）。真正把这些成员也归位，需要先有上面那几个行为协作者。
+
 ### 4.4 修 D5：C ABI **保留**（Q1 决策的连带修正）
 
 > **决策修正**：1.6 改为"保留 `select_next_packet`"后，S-family 的 C ABI 入口**不再删除**。
@@ -1075,10 +1107,18 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿
-- `engine_impl.hpp` 行数 < 400
-- 无死模块（每个模块或被引擎加载，或被删除）
-- `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致
+- `ctest` 全绿 —— ✅ **1434 / 1434**（Windows MSVC Release）
+- `engine_impl.hpp` 行数 < 400 —— ✅ **393**
+- 无死模块（每个模块或被引擎加载，或被删除）—— ✅
+  `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
+- `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅
+  §4.5 / D6 已收窄到 ADR-021 的具名清单；D1 落地后补记了引擎内部协作者
+  的结构与"`rtp::` 集中化属于**行为**部分，尚未开始"
+
+> **未纳入本计划验收的一项**：D1 的**行为**部分（`VideoPipeline` /
+> `AudioPipeline` / `RtpPacketizer` / `RtcpProcessor` / `TransportManager`）。
+> 每搬一个都要把一段行为移出引擎，属于需要独立评审的行为改动；
+> 本计划只做了"把头的三类内容分开"的状态部分。
 
 ---
 

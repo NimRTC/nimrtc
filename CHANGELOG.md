@@ -911,6 +911,38 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`engine_impl.hpp` is no longer a 1000-line god header (v1.2.0,
+  architecture remediation plan §4.3 / D1).**
+  The header fell from **1076 lines to 393** — the plan's target was
+  under 400.  What is left in it is the engine's *own* composition: the
+  SDP parser / munger, the DTLS handle, the SRTP context, the transport
+  session, and the handful of counters that do not belong to any one
+  feature.  Everything else moved into a named collaborator next to the
+  header:
+
+  | collaborator | header | what it holds |
+  |---|---|---|
+  | `detail::AudioState` | `engine_audio_state.hpp` | audio send/receive state, the `AudioRxState` the RTCP receiver report needs, the DTMF state |
+  | `detail::VideoState` | `engine_video_state.hpp` | video send/receive state, the negotiation result, the quality counters |
+  | `detail::SessionState` | `engine_session_state.hpp` | the session model, the transceivers, the mids |
+  | `detail::ScratchBuffers` | `engine_scratch.hpp` | every reusable scratch buffer |
+
+  The rule the split follows is simple: *a member that only one feature
+  reads or writes belongs to that feature's collaborator, not to
+  `Impl`.*  All of them are private headers under `src/engine/src/` — no
+  public API was added, and the public `engine.hpp` is untouched.
+
+  This is the **state half** of the plan's proposal, deliberately.  The
+  plan also proposes behaviour collaborators (`VideoPipeline`,
+  `AudioPipeline`, `RtpPacketizer`, `RtcpProcessor`,
+  `TransportManager`); each of those moves a coherent slice of
+  *behaviour* out of the engine, which is a behavioural change and needs
+  its own review.  Splitting state first keeps the two kinds of change
+  separately reviewable.
+
+  Verified with a full build (zero errors, zero warnings) and the whole
+  `ctest` suite: **1434 / 1434 passing**.
+
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,
   architecture remediation plan §7.1 / §7.2, ADR-019 / ADR-020).**
@@ -938,7 +970,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     costs a plugin author an afternoon.  Both now take a bare token.
     (The one exception is a **hyphenated** id, which the tokenising
     form cannot express: `#webrtc-classic` does not lex as one token.
-    Those use the literal-taking form.)
+    Those are registered through the registry directly.)
   - **ADR-020 records that `EngineConfig` owns its strings.** The
     `std::string_view` → `std::string` migration is complete in the
     code, but the docs still described the old shape and taught the

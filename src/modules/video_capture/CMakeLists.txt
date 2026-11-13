@@ -66,6 +66,11 @@ if(APPLE)
         "-framework CoreMedia"
         "-framework CoreVideo"
         "-framework CoreGraphics"
+        # Foundation.  It is the framework the Objective-C runtime is
+        # built on, and the backend uses it directly: the `@[]` array
+        # literal in the content filter, and `NSString` for the
+        # device's description.
+        "-framework Foundation"
         # The Objective-C runtime itself.  The backend defines an
         # Objective-C class (`NimRTCSCKStreamOutput`), and a class
         # definition needs the runtime's metadata tables -- the

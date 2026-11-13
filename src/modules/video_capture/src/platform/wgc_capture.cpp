@@ -234,57 +234,105 @@ HWND window_from_id(const std::string& id) {
  * invocation that was already dispatched still starts — possibly after
  * the capture thread has already torn its apartment down.
  *
- * So the apartment is not owned by a thread at all.  It is owned by a
- * *count*, and every party that might still touch a WinRT object holds
- * a reference to it.  The apartment is torn down when the last
- * reference goes, which is after the capture thread has finished *and*
- * after every handler that might still run has finished.
+ * So the apartment outlives the capture thread, and the *count* here
+ * is what says when it may go.  The capture thread holds one reference
+ * for as long as it lives; every handler that might still touch a
+ * WinRT object holds one too.  The apartment is torn down when the
+ * last reference goes.
  *
- * The capture thread initializes it; every handler takes a reference for
- * the duration of its work; the last one out leaves the apartment.
+ * ## The apartment is always left by the thread that entered it
+ *
+ * `CoUninitialize` has to be called on the thread that called
+ * `CoInitializeEx`.  A handler runs on a WinRT thread-pool thread,
+ * which never entered an apartment of its own, so a handler can never
+ * be the one to leave it.
+ *
+ * That is why the count and the teardown are separated: `release()`
+ * only *marks* the apartment as ready to go, and the thread that
+ * entered it does the leaving.  The capture thread waits for the
+ * count to reach zero before it returns — and it is the capture thread
+ * that calls `CoUninitialize`.
+ *
+ * A handler that finds the apartment already gone does nothing at all:
+ * there is no runtime left to call into, and touching the pool would be
+ * the very crash this fixes.
  */
 class SharedApartment {
 public:
-    /** Initialize the apartment.  Must be called on the thread that
-     *  will own it (the capture thread). */
+    /** Enter the apartment.  Must be called on the thread that will
+     *  own it (the capture thread). */
     void initialize() noexcept {
         const HRESULT hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         initialized_ = SUCCEEDED(hr);
     }
 
-    /** True iff the apartment was initialized successfully. */
+    /** True iff the apartment was entered successfully. */
     [[nodiscard]] bool ok() const noexcept { return initialized_; }
 
     /** Take a reference to the apartment.
      *
      *  The caller must hold one for as long as it might touch a WinRT
-     *  object, and it must not take one after the last reference has
-     *  been dropped.
+     *  object.
      *
      *  @return true iff the reference was taken.  False means the
      *          apartment is already gone, and the caller must not
      *          touch any WinRT object. */
     [[nodiscard]] bool acquire() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
-        // The count cannot go below one: the capture thread's own
-        // reference is held until it releases the apartment, and a
-        // handler cannot be running after that.
-        if (count_.load(std::memory_order_relaxed) == 0) return false;
+        if (closing_ || count_.load(std::memory_order_relaxed) == 0) {
+            return false;
+        }
         count_.fetch_add(1, std::memory_order_acq_rel);
         return true;
     }
 
-    /** Drop a reference.  The last one out tears the apartment down. */
-    void release() noexcept {
-        bool last = false;
+    /** Stop handing out references and wait for the ones already
+     *  handed out to be given back.
+     *
+     *  Called by the thread that entered the apartment, before it
+     *  leaves.  After this returns, no new reference can be taken --
+     *  which is what closes the window in which a handler that was
+     *  dispatched but had not yet started could touch an apartment
+     *  that was on its way out.
+     *
+     *  The caller gives up its *own* reference as part of this: the
+     *  thread that entered the apartment is one of the parties that
+     *  might still touch a WinRT object, and it cannot keep its
+     *  reference while waiting for the others to go. */
+    void quiesce() noexcept {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (count_.load(std::memory_order_relaxed) == 0) return;
-            last = count_.fetch_sub(1, std::memory_order_acq_rel) == 1;
+            closing_ = true;
+            if (count_.load(std::memory_order_relaxed) > 0) {
+                count_.fetch_sub(1, std::memory_order_acq_rel);
+            }
         }
-        if (last && initialized_) {
-            ::CoUninitialize();
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (count_.load(std::memory_order_relaxed) == 0) return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    /** Drop a reference.
+     *
+     *  This does *not* leave the apartment: only the thread that
+     *  entered it may do that.  It merely says that one fewer party
+     *  might still touch a WinRT object. */
+    void release() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (count_.load(std::memory_order_relaxed) == 0) return;
+        count_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    /** Leave the apartment.  Must be called on the thread that called
+     *  `initialize()`. */
+    void leave() noexcept {
+        if (initialized_) {
             initialized_ = false;
+            ::CoUninitialize();
         }
     }
 
@@ -296,6 +344,7 @@ private:
     std::mutex mutex_;
     std::atomic<int> count_{1};
     bool initialized_ = false;
+    bool closing_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -756,14 +805,25 @@ void WgcCapture::capture_loop(
         std::shared_ptr<WgcCaptureState> state;
         ~ApartmentGuard() {
             if (state) {
+                // The pool is a WinRT object, so the last reference to
+                // it has to go while the apartment is still alive.  The
+                // local `pool` handle was destroyed before this guard
+                // ran, so the state is the only thing still holding it.
                 std::lock_guard<std::mutex> lock(state->handler_mutex_);
                 state->pool_.reset();
             }
-            // The apartment is *shared*: the capture thread's own
-            // reference goes, and the apartment is torn down only when
-            // the last handler that might still touch a WinRT object
-            // has let go of its reference.
-            if (state) state->apartment.release();
+            if (state) {
+                // Wait for every handler that might still touch a
+                // WinRT object to finish, and only then leave the
+                // apartment.
+                //
+                // The wait is here, and not in `close()`, because only
+                // this thread may leave the apartment: `CoUninitialize`
+                // has to be called by the thread that called
+                // `CoInitializeEx`, and this is that thread.
+                state->apartment.quiesce();
+                state->apartment.leave();
+            }
         }
     } apartment_guard{state};
 

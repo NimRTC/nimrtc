@@ -116,7 +116,7 @@ std::unique_ptr<IDtlsSession> dtls = factory->create();
 ```cpp
 // 在 your_gmssl_backend.cpp
 class GmsslDtlsFactory : public dtls::IDtlsSessionFactory { /* ... */ };
-NIMRTC_REGISTER_DTLS_SESSION("gmssl", &GmsslDtlsFactory::singleton());
+NIMRTC_REGISTER_DTLS_SESSION(gmssl, &GmsslDtlsFactory::singleton());
 ```
 
 ```cpp

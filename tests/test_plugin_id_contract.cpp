@@ -61,6 +61,7 @@
 #include "nimrtc/core/log.hpp"
 #include "nimrtc/core/plugin_id.hpp"
 #include "nimrtc/core/registry.hpp"
+#include "nimrtc/plugins/datachannel.hpp"
 
 namespace {
 
@@ -199,6 +200,29 @@ public:
 private:
     std::string id_;
 };
+
+/// A factory that satisfies `plugins::IDataChannelFactory` and nothing else.
+///
+/// The macro test below needs *something* to hand to
+/// `NIMRTC_REGISTER_DATACHANNEL`, and the DataChannel slot is the one
+/// with a documented removal helper, so the probe stays in this slot.
+class ProbeDataChannelFactory final : public nimrtc::plugins::IDataChannelFactory {
+public:
+    std::string_view id() const noexcept override { return "contract_probe_macro"; }
+    std::string_view display_name() const noexcept override {
+        return "contract probe";
+    }
+    nimrtc::plugins::IDataChannel* create() const override { return nullptr; }
+};
+
+const ProbeDataChannelFactory kProbeDataChannelFactory;
+
+// The macro form of the same registration: a **bare token**, which the
+// macro stringifies itself.  If the macro stopped stringifying — or if
+// the guard stopped rejecting a quoted literal — this id would either
+// come out as `"contract_probe_macro"` (with the quotes *in* the id) or
+// the file would not compile at all.
+NIMRTC_REGISTER_DATACHANNEL(contract_probe_macro, &kProbeDataChannelFactory);
 
 } // namespace
 
@@ -398,10 +422,100 @@ TEST(PluginIdContract, AWellFormedIdStillRegisters) {
 //
 // (verified on GCC 11 and Clang; the assertion is in the macro body, so
 // it fires wherever the macro is expanded.)
+//
+// The **macro** spelling guard (ADR-023 Decision 5) has the same
+// shape — a `static_assert` in the macro body — and the same
+// verification story.  The good spelling compiles (right here), and
+// the bad spellings do not:
+//
+//     $ cat > /tmp/bad_quoted.cpp <<'EOF'
+//     #include <nimrtc/core/registry.hpp>
+//     NIMRTC_REGISTER_DATACHANNEL("quoted_literal", &factory);
+//     EOF
+//     $ cl /std:c++20 /c -Isrc/core/include /Isrc/plugins/include bad_quoted.cpp
+//     error C2338: static assertion failed: 'NIMRTC_REGISTER_*: the plugin id
+//     must be a bare identifier token matching ^[a-z][a-z0-9_-]*$ ...
+//
+// The same holds for a bare token that violates the grammar
+// (`NIMRTC_REGISTER_DATACHANNEL(Uppercase, &factory)`), and the good
+// spelling (`NIMRTC_REGISTER_DATACHANNEL(good_token, &factory)`)
+// compiles clean.  Verified on MSVC 19.43 (VS 2022 Community).
 // ---------------------------------------------------------------------------
 
 TEST(PluginIdContract, TheCompileTimeGateAcceptsAWellFormedLiteral) {
     constexpr auto id = NIMRTC_PLUGIN_ID("contract_probe_literal");
     EXPECT_EQ(std::string_view("contract_probe_literal"),
               std::string_view{id.value});
+}
+
+// ---------------------------------------------------------------------------
+// 7. The macro spelling guard (ADR-023 Decision 5).
+//
+// Decision 5 closes the two-flavour inconsistency: every
+// `NIMRTC_REGISTER_<FAMILY>` macro takes the id as a **bare identifier
+// token** and stringifies it itself.  Two failure modes follow from
+// that, and both are checked here.
+//
+//   * The legacy macros already stringified, so a quoted literal used to
+//     register under an id that *included the quote characters* — a
+//     registration that succeeded and never resolved.  The guard turns
+//     that into a compile error.
+//   * The audio-seam macros took the literal as-is, so the same quoted
+//     literal was fine there and wrong everywhere else.  One spelling
+//     for all the macros means the two families cannot drift apart.
+//
+// The guard itself is a `static_assert`, so the "a quoted literal does
+// not compile" half cannot be expressed as a run-time assertion.  What
+// *is* expressible is the half that matters most in practice: the
+// macro stringifies a bare token correctly, and the guard's predicate
+// tells a bare token from a quoted one.
+// ---------------------------------------------------------------------------
+
+TEST(PluginIdContract, TheSpellingGuardTellsABareTokenFromAQuotedOne) {
+    // A bare token — the spelling the macros accept.
+    EXPECT_TRUE(detail::is_bare_plugin_id_token("opus"));
+    EXPECT_TRUE(detail::is_bare_plugin_id_token("webrtc_classic"));
+    EXPECT_TRUE(detail::is_bare_plugin_id_token("a"));
+
+    // A quoted literal stringifies to a spelling whose first character
+    // is the quote itself.  This is the shape that used to register
+    // under the id `"\"opus\""`.
+    EXPECT_FALSE(detail::is_bare_plugin_id_token("\"opus\""));
+    EXPECT_FALSE(detail::is_bare_plugin_id_token("'opus'"));
+
+    // An empty spelling is not a token at all.
+    EXPECT_FALSE(detail::is_bare_plugin_id_token(""));
+}
+
+TEST(PluginIdContract, TheRegistrationGuardRejectsAMalformedToken) {
+    // The guard the macros actually call combines the two questions:
+    // "is the spelling a bare token?" and "does it satisfy the
+    // grammar?".  A token that the grammar rejects must fail it, so
+    // that the compile-time error fires at the callsite rather than the
+    // runtime rejection surfacing as a log line at static-init time.
+    EXPECT_TRUE(detail::is_valid_registration_token("opus"));
+    EXPECT_TRUE(detail::is_valid_registration_token("nimrtc_audio_rx"));
+
+    EXPECT_FALSE(detail::is_valid_registration_token("\"opus\""));
+    EXPECT_FALSE(detail::is_valid_registration_token("Opus"));
+    EXPECT_FALSE(detail::is_valid_registration_token("0opus"));
+    EXPECT_FALSE(detail::is_valid_registration_token("opus codec"));
+    EXPECT_FALSE(detail::is_valid_registration_token(""));
+}
+
+TEST(PluginIdContract, TheMacroRegistersUnderTheStringifiedBareToken) {
+    // `NIMRTC_REGISTER_DATACHANNEL(contract_probe_macro, ...)` at the
+    // top of this file registers under the id "contract_probe_macro".
+    // If the macro had stopped stringifying, the id would carry the
+    // token's *spelling* rather than its value, and this assertion
+    // would fail.
+    PluginRegistry& reg = PluginRegistry::instance();
+    EXPECT_TRUE(Contains(reg.list_datachannels(), "contract_probe_macro"))
+        << "The registration macro did not register under the stringified "
+           "bare token.";
+
+    // And the guard did not smuggle the quotes into the id: the id with
+    // the quotes is a *different* id, and it must not be present.
+    EXPECT_FALSE(Contains(reg.list_datachannels(), "\"contract_probe_macro\""))
+        << "The registration macro put the quote characters into the id.";
 }

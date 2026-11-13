@@ -143,6 +143,14 @@ The two audio-seam macros now take the id literal as-is; the legacy
 `NIMRTC_REGISTER_*` family (which stringifies a bare identifier token)
 is left untouched, and the difference is documented at each macro.
 
+> **Superseded (2026-11-13, ADR-023 Decision 5).**  The two-flavour split
+> described above was itself the defect: the audio-seam macros took a
+> literal while the rest took a token, so the same quoted literal was
+> correct in one family and silently wrong in the other.  All the
+> `NIMRTC_REGISTER_*` macros now take a **bare identifier token** and
+> stringify it themselves, and a quoted literal is a **compile error**
+> everywhere.  The audio-seam macros' literal form is gone.
+
 **After WP-2 (the Opus-side decoder) — 2026-11-07.**  The Opus module
 now publishes a `plugins::IAudioDecoder` under the id `"opus"` in the
 registry's audio-decoder category, next to the codec plugin that uses

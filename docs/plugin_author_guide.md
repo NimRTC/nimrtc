@@ -150,13 +150,15 @@ that becomes the `id` string and a pointer to the factory. As long as
 `my_plugin_init.cpp` is linked into the final binary, the registry
 will see your factory on process start.
 
-**The id is a bare token, not a quoted literal.** The macro
+**The id is a bare token, not a quoted literal.** Every
+`NIMRTC_REGISTER_*` macro takes the id as a bare identifier token and
 stringifies it for you, so `NIMRTC_REGISTER_<FAMILY>(myid, &f)`
 registers under `"myid"`. Writing `NIMRTC_REGISTER_<FAMILY>("myid", &f)`
 registers under an id that *includes the quote characters* — the
 registration succeeds and the lookup never matches. A quoted literal
-is rejected at compile time; see §8.1 for the full naming contract,
-including the `nimrtc_` prefix rule and the namespacing requirement
+is rejected at compile time; so is a token that violates the id
+grammar. See §8.1 for the full naming contract, including the
+`nimrtc_` prefix rule and the namespacing requirement
 for third-party plugins.
 
 There is also `core::register_all_default_plugins()` that registers
@@ -647,13 +649,23 @@ NIMRTC_REGISTER_DTLS_SESSION(mybackend, &g_factory);         // -> "mybackend"
 NIMRTC_REGISTER_AUDIO_DECODER(opus, &g_opus_decoder_factory);  // -> "opus"
 ```
 
-Passing a **quoted literal** to a tokenising macro is rejected at
+Every `NIMRTC_REGISTER_*` macro takes the token and stringifies it —
+there is one spelling, not two. (Before v1.2.0 the audio-seam macros
+took a string literal while the rest took a token; the inconsistency
+was closed by ADR-023 Decision 5.)
+
+Passing a **quoted literal** to a registration macro is rejected at
 compile time. This is not pedantry: a quoted literal passed to a
 stringifying macro registers under an id that *includes the quote
 characters* — the registration succeeds, and the lookup never
 matches. That failure is silent, and it is the single most common
 way a plugin author ends up debugging "my plugin registers but the
 engine never picks it up".
+
+A **malformed bare token** is rejected at compile time too: the macro
+checks the token against the grammar above, so `NIMRTC_REGISTER_<FAMILY>(Opus, &f)`
+does not compile. (The grammar permits the hyphen, but a hyphenated
+id cannot be spelled as a bare token — see below.)
 
 **Hyphenated ids** are the one case the tokenising form cannot
 express, because `#my-id` does not lex as a single token. Those go

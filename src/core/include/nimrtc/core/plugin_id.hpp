@@ -117,6 +117,72 @@ constexpr bool is_valid_plugin_id(std::string_view id) noexcept {
 }
 
 /**
+ * @brief True when @p spelling is a **bare identifier token**, and when it
+ *        also satisfies the ADR-023 grammar.
+ *
+ * ADR-023 Decision 5 requires the `NIMRTC_REGISTER_*` macros to take the
+ * id as a bare token and stringify it themselves.  The reason is that the
+ * legacy macros *already* stringify, so a caller who writes
+ *
+ * @code
+ * NIMRTC_REGISTER_DTLS_SESSION("mybackend", &f);
+ * @endcode
+ *
+ * gets an id of `"\"mybackend\""` — the quote characters are part of the
+ * id.  The registration succeeds and the id never resolves: a silent
+ * failure that looks exactly like a working registration.  The
+ * audio-seam macros had the opposite hazard (a bare token failed to
+ * compile, which is the better failure) and the two families were not
+ * interchangeable.  One spelling closes the gap.
+ *
+ * The check is spelled on the *stringified* argument rather than on the
+ * argument itself, because a macro cannot ask "is this token a bare
+ * identifier?" — but it can ask "does the text of this token start with
+ * a quote?", because after stringification a quoted literal is
+ * distinguishable from a bare token by its first character.
+ *
+ * The grammar is checked on the same spelling, which means a macro
+ * call also gets the compile-time grammar gate for free: a bare token
+ * that violates `^[a-z][a-z0-9_-]*$` (an uppercase first letter, say)
+ * is a compile error rather than an id the registry will later reject.
+ *
+ * The one id shape this cannot express is a hyphenated one: `#my-id`
+ * does not lex as a single token, so a plugin with a hyphenated id must
+ * call `core::PluginRegistry::register_<family>("my-id", &f)` directly.
+ * See ADR-023 Decision 5.
+ */
+constexpr bool is_bare_plugin_id_token(std::string_view spelling) noexcept {
+    if (spelling.empty()) return false;
+    // A quoted literal stringifies to a spelling whose first character
+    // is the quote itself.
+    if (spelling.front() == '"' || spelling.front() == '\'') return false;
+    return true;
+}
+
+/**
+ * @brief True when @p spelling is a valid **registration token**: a bare
+ *        identifier token that also satisfies the ADR-023 grammar.
+ *
+ * This is the predicate the `NIMRTC_REGISTER_*` macros' `static_assert`
+ * calls (ADR-023 Decision 5).  It combines the two independent questions:
+ *
+ *   * is the spelling a bare token, or is it a quoted literal?  A quoted
+ *     literal would stringify to an id that *includes the quote
+ *     characters* -- a registration that succeeds and never resolves;
+ *   * does the spelling satisfy the grammar?  A token that does not
+ *     would register under an id the registry (ADR-023 Decision 4)
+ *     rejects, so the mistake would surface as a runtime log line at
+ *     static-init time rather than as a compile error at the callsite.
+ *
+ * Keeping both in one predicate means the macro and the test in
+ * `tests/test_plugin_id_contract.cpp` agree on one definition, rather
+ * than on two that have to be kept in step.
+ */
+constexpr bool is_valid_registration_token(std::string_view spelling) noexcept {
+    return is_bare_plugin_id_token(spelling) && is_valid_plugin_id(spelling);
+}
+
+/**
  * @brief Why a plugin id was rejected (ADR-023 Decision 4).
  *
  * The registry-side validation reports *what* is wrong with the id, not

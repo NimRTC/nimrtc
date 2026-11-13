@@ -294,6 +294,37 @@ remain supported — they are how the in-tree default registrars work
 — but a third-party plugin that calls the registry directly takes
 responsibility for the grammar itself.
 
+#### Implementation note — what the guard checks
+
+The `static_assert` cannot ask "is this token a bare identifier?", but
+it can ask about the *text* of the token, which is what
+stringification gives it.  A quoted literal's text begins with a
+quote; a bare token's does not.  That is the whole of the
+quoted-literal check.
+
+The guard checks the grammar as well, not just the quoting.  A token
+that is bare but malformed (`Opus`, `0opus`) would register under an id
+that the registry rejects, so the mistake would surface as a runtime
+log line at static-init time rather than as a compile error at the
+callsite.  The macro therefore asserts on
+`detail::is_valid_registration_token(spelling)`, which combines the
+two questions — "is the spelling a bare token?" and "does it satisfy
+the grammar?" — so that the macro and
+`tests/test_plugin_id_contract.cpp` agree on one definition.
+
+The grammar permits the hyphen but a hyphenated id cannot be spelled as
+a bare token, so a hyphenated token is unreachable from the macro
+path; the direct registry call remains the way to publish one.
+
+**Status: implemented.** All 28 `NIMRTC_REGISTER_*` macros take the
+token and stringify it; the four audio/session/dtmf macros that took a
+literal now take a token too, which is a source-level breaking change
+for out-of-tree callers of those four (see the Consequences section).
+The in-tree callers were updated in the same change.  The quoted-literal
+and malformed-token rejections are verified out of band with `g++` and
+`cl` (the probes are reproduced in the comment block of
+`tests/test_plugin_id_contract.cpp`).
+
 ### Decision 6 — The compatibility promise for an id
 
 An id, once published, is a **stable public string** for the lifetime

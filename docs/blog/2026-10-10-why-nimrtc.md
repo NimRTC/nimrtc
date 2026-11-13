@@ -137,7 +137,7 @@ If you want to register GMSSL tomorrow:
 ```cpp
 // in your_gmssl_backend.cpp
 class GmsslDtlsFactory : public dtls::IDtlsSessionFactory { /* ... */ };
-NIMRTC_REGISTER_DTLS_SESSION("gmssl", &GmsslDtlsFactory::singleton());
+NIMRTC_REGISTER_DTLS_SESSION(gmssl, &GmsslDtlsFactory::singleton());
 ```
 
 ```cpp

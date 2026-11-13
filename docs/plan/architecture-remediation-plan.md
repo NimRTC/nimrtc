@@ -17,7 +17,7 @@
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
 > | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
-> | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 020 / 021 / 022 已落地；§7.1 的 8 份必改文档全部同步完成 |
+> | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 024 / 025 / 026 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
 >
@@ -1139,7 +1139,8 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿 —— ✅ **1436 / 1436**（Windows MSVC Release）
+- `ctest` 全绿 —— ✅ **1453 / 1453**（Windows MSVC Release，2026-11-13 复验；
+  §4.5.1 落地后的数字是 1436 / 1436，本轮因 ADR-023 的契约测试新增而增长）
 - `engine_impl.hpp` 行数 < 400 —— ✅ **393**
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
@@ -1186,6 +1187,42 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 - `ADR-026-scheduler-c-abi.md` —— 调度器的 C ABI：把"只在注释里存在的 C ABI"变成真的
   `extern "C"` 表面（§4.4 / D5）—— ✅ **已落地**
 
+### 7.2.1 ADR-023 的落地过程（2026-11-13）
+
+ADR-023 把"插件 id 怎么拼、怎么校验、怎么改"从散文变成契约，分三步落地。
+
+**第一步（Decision 1 / 4 / 7 / 9）—— 语法与注册时校验。**
+注册表现在按 ADR-023 的语法（`^[a-z][a-z0-9_-]*$`）校验每一个 id：
+不合法的 id **不注册**，并产生一条日志，说出**是哪个 id**、**被交给哪个族**、
+**为什么非法**。诊断走 core logger 而不抛异常——注册发生在 static-init 期，
+从静态初始化函数里抛出会在 `main` 之前终止进程，而那条消息不会提到任何插件。
+契约由 `tests/test_plugin_id_contract.cpp` 强制，而不是由散文描述。
+
+**第二步（Decision 5）—— 注册宏只接受一种拼写。**
+注册表此前有两套宏风格：旧族自己 `#id` 字符串化，于是
+`NIMRTC_REGISTER_DTLS_SESSION("x", &f)` 注册出来的 id 是 `"\"x\""`——
+**带引号字符**的 id；注册**成功**，而查找**永远不匹配**。音频 seam 那一族则是
+字面量直传，裸 token 编译不过。两族不能互换，而指南没说哪族是哪族。
+
+现在所有宏一律取**裸标识符 token** 并自己字符串化，引号字面量是**编译错误**
+（宏体里的 `static_assert`）。守卫由全部宏共用，两族无法再各自漂移；同一个守卫
+顺带把 ADR-023 的语法检查带到宏调用点上，于是
+`NIMRTC_REGISTER_DTLS_SESSION(Opus, &f)` 也编译不过，而不是注册一个随后会被
+注册表拒绝的 id。
+
+唯一无法用宏表达的形状是**带连字符的 id**（`#my-id` 不是单个 token）：
+这类插件直接调 `PluginRegistry::register_<family>("my-id", &f)`——ADR-023
+Decision 8 明写了这条路径，所以它是文档化路径而不是陷阱。
+
+**第三步 —— 验收。**
+
+- ✅ 编译期守卫已用 MSVC 19.43 实测：`("quoted_literal", &f)` 与 `(Uppercase, &f)`
+  各自触发 `error C2338: static assertion failed`，`(good_token, &f)` 干净编译
+- ✅ `tests/test_plugin_id_contract.cpp`：14 个测试全绿（含"宏注册出的 id 是
+  字符串化后的裸 token，而不是带引号的拼写"）
+- ✅ `tests/test_audio_seams.cpp` 的两个音频 seam 注册点已改为裸 token
+- ✅ 全量 `ctest`：**1453 / 1453** 通过（Windows MSVC Release，0 失败）
+
 ### 7.3 版本策略
 
 按 ADR-015：
@@ -1195,6 +1232,9 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 - Phase 1.6 的 `IScheduler` 新增虚函数（**带默认实现**）→ additive，不破坏现有实现 → MINOR
 - Phase 4.1 的目录搬家：**include 路径与 CMake target 名均不变** → **对下游用户零破坏**，不需要版本过渡；仅在 CHANGELOG 声明"源码目录位置变化，非公开用法受影响"
 - Phase 4.5 的 L4 约束改写 → 文档变更，无 API 影响
+- ADR-023 Decision 5（注册宏统一为裸 token）—— 对**树外**调用方是**源码级破坏**
+  （只有向音频 seam 宏传字符串字面量的调用方受影响）→ 归入同一个 v1.2.0 的
+  迁移说明；树内调用点在同一改动里更新完毕
 
 ---
 

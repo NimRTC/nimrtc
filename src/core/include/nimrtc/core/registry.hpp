@@ -913,12 +913,46 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// The id guard shared by every registration macro (ADR-023 Decision 5).
+//
+// The registration macros all take the id as a **bare identifier token**
+// and stringify it themselves.  The guard makes the two mistakes that a
+// tokenising macro can be handed into compile errors instead of silent
+// failures:
+//
+//   * a quoted literal -- `NIMRTC_REGISTER_DTLS_SESSION("x", &f)` would
+//     otherwise register under the id `"\"x\""`, quote characters
+//     included: a registration that succeeds and never resolves;
+//   * a malformed token -- `NIMRTC_REGISTER_DTLS_SESSION(Opus, &f)` would
+//     otherwise register under an id the grammar rejects, and the
+//     rejection would surface as a runtime log line at static-init time
+//     rather than at the callsite.
+//
+// The argument is the *stringified* spelling, so the check sees the token
+// as text and can tell a quoted literal from a bare token by its first
+// character.
+//
+// A hyphenated id cannot go through a macro at all -- `#my-id` does not
+// lex as a single token.  Such a plugin calls
+// `core::PluginRegistry::register_<family>("my-id", &f)` directly.
+// ---------------------------------------------------------------------------
+#define NIMRTC_DETAIL_REGISTER_ID_GUARD(spelling)                          \
+    static_assert(                                                         \
+        ::nimrtc::core::detail::is_valid_registration_token(spelling),     \
+        "NIMRTC_REGISTER_*: the plugin id must be a bare identifier token " \
+        "matching ^[a-z][a-z0-9_-]*$ -- e.g. "                             \
+        "NIMRTC_REGISTER_DTLS_SESSION(mybackend, &factory) -- not a quoted "\
+        "string literal. See "                                             \
+        "docs/adr/ADR-023-plugin-id-naming-contract.md.");
+
+// ---------------------------------------------------------------------------
 // Registration macros (convenience, no linking magic)
 // ---------------------------------------------------------------------------
 
 /** Register a transport plugin by ID and factory pointer.
  *  Call at static-init time (global scope). */
 #define NIMRTC_REGISTER_TRANSPORT(id, factory_ptr)                       \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_transport_){                              \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -930,6 +964,7 @@ private:
  *  so the registry exposes the ICE-specific surface (state, credentials,
  *  gathering, remote SDP). */
 #define NIMRTC_REGISTER_ICE_TRANSPORT(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_ice_transport_){                          \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -938,6 +973,7 @@ private:
 
 /** Register an RTP plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_RTP(id, factory_ptr)                             \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_rtp_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -946,6 +982,7 @@ private:
 
 /** Register an SDP plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_SDP(id, factory_ptr)                             \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_sdp_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -954,6 +991,7 @@ private:
 
 /** Register a JB plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_JB(id, factory_ptr)                             \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_jb_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -962,6 +1000,7 @@ private:
 
 /** Register an audio 3A plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_AUDIO3A(id, factory_ptr)                        \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_audio3a_){                               \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -970,6 +1009,7 @@ private:
 
 /** Register a codec plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_CODEC(id, factory_ptr)                           \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_codec_){                                 \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -979,67 +1019,72 @@ private:
 /** Register an audio decoder plugin by ID and factory pointer.
  *  v1.2.0 (audio pipeline) -- the codec-side seam.
  *
- *  @param id         A string literal, e.g. "opus". Unlike the legacy
- *                    NIMRTC_REGISTER_* family (which stringifies a bare
- *                    identifier token), the two audio-seam macros take the
- *                    literal as-is -- the audio pipeline documents its
- *                    plugin ids as string literals everywhere else.
+ *  @param id         A bare identifier token, e.g. `opus`.  ADR-023
+ *                    Decision 5 unified every `NIMRTC_REGISTER_*` macro on
+ *                    the token-and-stringify spelling: the macro turns
+ *                    `opus` into the id `"opus"`.  A quoted literal is a
+ *                    compile error, not a silent mis-registration.
  *  @param factory_ptr A pointer to a static IAudioDecoderFactory.
  *
- *  Usage: NIMRTC_REGISTER_AUDIO_DECODER("opus", &g_opus_decoder_factory); */
+ *  Usage: NIMRTC_REGISTER_AUDIO_DECODER(opus, &g_opus_decoder_factory); */
 #define NIMRTC_REGISTER_AUDIO_DECODER(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_audio_decoder_){                          \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kAudioDecoder,   \
-            id, factory_ptr }
+            #id, factory_ptr }
 
 /** Register an audio receiver pipeline plugin by ID and factory pointer.
  *  v1.2.0 (audio pipeline) -- the pipeline-side seam.
  *
- *  @param id         A string literal, e.g. "nimrtc_audio_rx".
+ *  @param id         A bare identifier token, e.g. `nimrtc_audio_rx`.
  *  @param factory_ptr A pointer to a static IAudioReceiverFactory.
  *
- *  Usage: NIMRTC_REGISTER_AUDIO_RECEIVER("nimrtc_audio_rx", &g_factory); */
+ *  Usage: NIMRTC_REGISTER_AUDIO_RECEIVER(nimrtc_audio_rx, &g_factory); */
 #define NIMRTC_REGISTER_AUDIO_RECEIVER(id, factory_ptr)                  \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_audio_receiver_){                        \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kAudioReceiver,  \
-            id, factory_ptr }
+            #id, factory_ptr }
 
 /** Register a session-model plugin by ID and factory pointer.
  *  v1.2.0 (session capability plan, N1 / T1) — typed slot for
  *  `plugins::ISessionFactory*`.
  *
- *  @param id         A string literal, e.g. "session".
+ *  @param id         A bare identifier token, e.g. `session`.
  *  @param factory_ptr A pointer to a static ISessionFactory.
  *
- *  Usage: NIMRTC_REGISTER_SESSION("session", &g_factory); */
+ *  Usage: NIMRTC_REGISTER_SESSION(session, &g_factory); */
 #define NIMRTC_REGISTER_SESSION(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_session_){                             \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kSession,     \
-            id, factory_ptr }
+            #id, factory_ptr }
 
 /** Register an RFC 4733 (telephone-event) codec by ID and factory pointer.
  *  v1.2.0 (session capability plan, D1 / D2) — typed slot for
  *  `plugins::IDtmfCodecFactory*`.
  *
- *  @param id         A string literal, e.g. "dtmf".
+ *  @param id         A bare identifier token, e.g. `dtmf`.
  *  @param factory_ptr A pointer to a static IDtmfCodecFactory.
  *
- *  Usage: NIMRTC_REGISTER_DTMF("dtmf", &g_factory); */
+ *  Usage: NIMRTC_REGISTER_DTMF(dtmf, &g_factory); */
 #define NIMRTC_REGISTER_DTMF(id, factory_ptr)                       \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                        \
         NIMRTC_UNIQUE_NAME(_reg_dtmf_){                              \
             ::nimrtc::core::PluginRegistry::instance(),              \
             ::nimrtc::core::detail::Registrar::Category::kDtmf,      \
-            id, factory_ptr }
+            #id, factory_ptr }
 
 /** Register a video codec plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_CODEC(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_codec_){                           \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1048,6 +1093,7 @@ private:
 
 /** Register a video source plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_SOURCE(id, factory_ptr)                    \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_source_){                          \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1057,6 +1103,7 @@ private:
 /** Register a capture-device plugin by ID and factory pointer
  *  (remote-desktop plan A1). */
 #define NIMRTC_REGISTER_VIDEO_CAPTURE(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_capture_){                         \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1065,6 +1112,7 @@ private:
 
 /** Register a video sink plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_SINK(id, factory_ptr)                      \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_sink_){                            \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1073,6 +1121,7 @@ private:
 
 /** Register a video receiver pipeline plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_RECEIVER(id, factory_ptr)                  \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_receiver_){                        \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1081,6 +1130,7 @@ private:
 
 /** Register a video sender pipeline plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_SENDER(id, factory_ptr)                    \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_video_sender_){                          \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1089,6 +1139,7 @@ private:
 
 /** Register a BWE (bandwidth estimator) plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_BWE(id, factory_ptr)                            \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_bwe_){                                   \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1097,6 +1148,7 @@ private:
 
 /** Register a sending-scheduler plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_SCHEDULER(id, factory_ptr)                      \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_scheduler_){                             \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1106,6 +1158,7 @@ private:
 /** Register a network-feedback collector plugin by ID and factory pointer.
  *  v1.2.0 M1 (F2) — typed slot for `plugins::INetFeedbackFactory*`. */
 #define NIMRTC_REGISTER_NET_FEEDBACK(id, factory_ptr)                  \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_net_feedback_){                         \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1116,6 +1169,7 @@ private:
  *  v1.2.0 (session capability plan X1) — typed slot for
  *  `plugins::IXrReportFactory*`. */
 #define NIMRTC_REGISTER_XR_REPORT(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_xr_report_){                            \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1127,6 +1181,7 @@ private:
  *  hooks above; see `register_datachannel()` for the canonical
  *  rationale. */
 #define NIMRTC_REGISTER_DATACHANNEL(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_datachannel_){                           \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1137,6 +1192,7 @@ private:
  *  Transport PAL Slice 4 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::dtls::IDtlsSessionFactory*`. */
 #define NIMRTC_REGISTER_DTLS_SESSION(id, factory_ptr)                    \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_dtls_session_){                           \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1147,6 +1203,7 @@ private:
  *  Transport PAL Slice 5 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::sctp::ISctpSocketFactory*`. */
 #define NIMRTC_REGISTER_SCTP_SOCKET(id, factory_ptr)                     \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_sctp_socket_){                            \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1157,6 +1214,7 @@ private:
  *  Transport PAL Slice 6 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::raw_udp::IRawUdpFactory*`. */
 #define NIMRTC_REGISTER_RAW_UDP_DATAGRAM(id, factory_ptr)                \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_raw_udp_datagram_){                       \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1170,6 +1228,7 @@ private:
  *  composition (gated on Slice 7.5's `WebRtcClassicStackFactory`
  *  landing ??see `docs/plan/transport-selection.md` ?6.5). */
 #define NIMRTC_REGISTER_TRANSPORT_STACK(id, factory_ptr)                 \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_transport_stack_){                       \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1182,8 +1241,9 @@ private:
  *  alpha.2 cut, no factory is auto-registered (the slot exists but
  *  `list_web_transports()` returns an empty vector); the msquic
  *  factory lands in beta.1 via
- *  `NIMRTC_REGISTER_WEB_TRANSPORT("msquic", &factory)`. */
+ *  `NIMRTC_REGISTER_WEB_TRANSPORT(msquic, &factory)`. */
 #define NIMRTC_REGISTER_WEB_TRANSPORT(id, factory_ptr)                  \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_web_transport_){                        \
             ::nimrtc::core::PluginRegistry::instance(),                \
@@ -1197,6 +1257,7 @@ private:
  *  registers under its own id and is selected through
  *  `EngineConfig::srtp_backend_name`. */
 #define NIMRTC_REGISTER_SRTP_BACKEND(id, factory_ptr)                  \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
     static ::nimrtc::core::detail::Registrar                          \
         NIMRTC_UNIQUE_NAME(_reg_srtp_backend_){                        \
             ::nimrtc::core::PluginRegistry::instance(),                \

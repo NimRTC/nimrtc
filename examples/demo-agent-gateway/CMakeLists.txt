@@ -10,8 +10,13 @@ endif()
 add_executable(demo-agent-gateway demo-agent-gateway.cpp)
 nimrtc_apply_options(demo-agent-gateway)
 # See examples/CMakeLists.txt for the PAL Slice 2 datachannel link rationale.
+#
+# `nimrtc::assembly_engine` carries the Profile → EngineConfig bridge
+# (architecture remediation plan §4.2 / D2).  The demo drives the engine
+# from a `Profile` through that bridge, which is what makes the `assembly`
+# module a *live* part of the product rather than a schema nobody reads.
 target_link_libraries(demo-agent-gateway PRIVATE
-    nimrtc::assembly
+    nimrtc::assembly_engine
     nimrtc::engine
     nimrtc::datachannel)
 

@@ -111,7 +111,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // sending direction, so there is no element to look for. Walking the
     // block to discover that on every packet would be wasted work, so
     // skip straight out.
-    const std::uint16_t ext_id = impl_->remote_abs_send_time_id;
+    const std::uint16_t ext_id = impl_->timeline.remote_abs_send_time_id;
     if (ext_id == 0 || !pv.extension.has_value()) {
         return;
     }
@@ -141,7 +141,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // derived from the monotonic one through the origin sampled at
     // open(), so the two never disagree by more than the sampling jitter.
     const std::int64_t steady_us = detail::steady_now_us();
-    const std::int64_t unix_us = impl_->boot_epoch_offset_us + steady_us;
+    const std::int64_t unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
 
     // The 7-argument overload records the (rtp_ts, ast) observation itself
     // and refines the SR-based estimate per ADR-017 §"Decision 2". The
@@ -159,7 +159,7 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
     // does at open() — so the value is captured and published rather than
     // discarded.
     std::int64_t skew_us = 0;
-    auto cap = impl_->sr_tracker.capture_ts_us_for(
+    auto cap = impl_->timeline.sr_tracker.capture_ts_us_for(
         pv.ssrc, pv.timestamp, ast24,
         /*has_abs_send_time=*/true,
         /*clock_rate_hz=*/0,
@@ -169,12 +169,12 @@ void NimRTCEngine::observe_timeline(const rtp::PacketView& pv) noexcept {
         return;  // No SR for this SSRC yet, or the packet predates it.
     }
 
-    impl_->capture_ts_us_by_ssrc[pv.ssrc] = *cap;
-    impl_->arrival_us_by_ssrc[pv.ssrc]    = unix_us;
-    impl_->skew_us_by_ssrc[pv.ssrc]       = skew_us;
-    impl_->last_capture_us                = *cap;
-    impl_->last_arrival_us                = unix_us;
-    impl_->last_skew_us                   = skew_us;
+    impl_->timeline.capture_ts_us_by_ssrc[pv.ssrc] = *cap;
+    impl_->timeline.arrival_us_by_ssrc[pv.ssrc]    = unix_us;
+    impl_->timeline.skew_us_by_ssrc[pv.ssrc]       = skew_us;
+    impl_->timeline.last_capture_us                = *cap;
+    impl_->timeline.last_arrival_us                = unix_us;
+    impl_->timeline.last_skew_us                   = skew_us;
 }
 
 
@@ -220,8 +220,8 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
                 impl_->video_payload_type != 0
                     ? impl_->video_payload_type
                     : config_.video_receiver_tuning.payload_type;
-            auto rit = impl_->remote_clock_rate_hz.find(pv.payload_type);
-            if (rit != impl_->remote_clock_rate_hz.end()) {
+            auto rit = impl_->timeline.remote_clock_rate_hz.find(pv.payload_type);
+            if (rit != impl_->timeline.remote_clock_rate_hz.end()) {
                 clock_rate = rit->second;
             } else if (pv.payload_type == local_video_pt ||
                        (negotiated_vpt != 0 && pv.payload_type == negotiated_vpt)) {
@@ -231,8 +231,8 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
             }
         }
         if (clock_rate != 0 &&
-            impl_->clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
-            impl_->sr_tracker.set_ssrc_clock_rate(pv.ssrc, clock_rate);
+            impl_->timeline.clock_rate_pinned_ssrcs.insert(pv.ssrc).second) {
+            impl_->timeline.sr_tracker.set_ssrc_clock_rate(pv.ssrc, clock_rate);
         }
 
         // The abs-send-time refinement only applies when the peer actually
@@ -420,41 +420,22 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 
 void NimRTCEngine::record_video_ref_frame(std::uint64_t ref_frame_id,
                                           std::int64_t capture_ts_us) noexcept {
-    bool found = false;
-    Impl::RefFrameSlot* slot = impl_->ref_frame_find(ref_frame_id, found);
-    if (found && slot) {
-        // Idempotent refresh: last-writer-wins, order unchanged.
-        slot->capture_ts_us = capture_ts_us;
-        return;
-    }
-
-    // The registry is bounded: at most `kRefFrameMapCap` live ids.  When
-    // the ring is at capacity the oldest id falls out, so the newest one
-    // can be recorded.
-    if (impl_->ref_frame_order_count >= Impl::kRefFrameMapCap) {
-        const std::uint64_t oldest = impl_->ref_frame_oldest();
-        impl_->ref_frame_drop_oldest();
-        impl_->ref_frame_erase(oldest);
-        // The probe path changed (a slot is free again), so look the
-        // insertion slot up again — the old pointer may be stale.
-        slot = impl_->ref_frame_find(ref_frame_id, found);
-    }
-    if (!slot) return;   // the table is full — nothing we can do
-
-    slot->id = ref_frame_id;
-    slot->capture_ts_us = capture_ts_us;
-    impl_->ref_frame_push(ref_frame_id);
+    // The table owns the eviction policy: it is bounded, so when the
+    // registry is full the oldest id falls out to make room for the
+    // newest one.  Recording an id that is already present refreshes it
+    // in place (last-writer-wins, insertion order unchanged).
+    impl_->ref_frames.record(ref_frame_id, capture_ts_us);
 }
 
 
 std::optional<std::int64_t> NimRTCEngine::ref_frame_to_capture_ts(
    std::uint64_t ref_frame_id) const noexcept {
     if (impl_ == nullptr) return std::nullopt;
-    bool found = false;
-    const Impl::RefFrameSlot* slot =
-        impl_->ref_frame_find(ref_frame_id, found);
-    if (!found || !slot) return std::nullopt;
-    return slot->capture_ts_us;
+    std::int64_t capture_ts_us = 0;
+    if (!impl_->ref_frames.lookup(ref_frame_id, capture_ts_us)) {
+        return std::nullopt;
+    }
+    return capture_ts_us;
 }
 
 
@@ -465,18 +446,7 @@ std::optional<std::uint64_t> NimRTCEngine::capture_ts_to_ref_frame(
     // several ids resolved to the *smallest* id.  The table is
     // unordered, so the smallest match is selected explicitly to keep
     // the observable behaviour identical.
-    std::uint64_t best = 0;
-    bool found = false;
-    for (const Impl::RefFrameSlot& slot : impl_->ref_frame_table) {
-        if (slot.id == Impl::kRefFrameEmptyId) continue;
-        if (slot.capture_ts_us != capture_ts_us) continue;
-        if (!found || slot.id < best) {
-            best = slot.id;
-            found = true;
-        }
-    }
-    if (!found) return std::nullopt;
-    return best;
+    return impl_->ref_frames.find_smallest_with_timestamp(capture_ts_us);
 }
 
 
@@ -518,24 +488,24 @@ std::optional<std::int64_t> NimRTCEngine::data_message_frame_age_us(
 // -----------------------------------------------------------------------------
 
 std::uint16_t NimRTCEngine::abs_send_time_ext_id() const noexcept {
-    return impl_->local_abs_send_time_id;
+    return impl_->timeline.local_abs_send_time_id;
 }
 
 
 std::uint16_t NimRTCEngine::remote_abs_send_time_ext_id() const noexcept {
-    return impl_->remote_abs_send_time_id;
+    return impl_->timeline.remote_abs_send_time_id;
 }
 
 
 std::optional<std::int64_t> NimRTCEngine::last_capture_ts_us() const noexcept {
-    return impl_->last_capture_us;
+    return impl_->timeline.last_capture_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept {
-    auto it = impl_->capture_ts_us_by_ssrc.find(ssrc);
-    if (it != impl_->capture_ts_us_by_ssrc.end()) {
+    auto it = impl_->timeline.capture_ts_us_by_ssrc.find(ssrc);
+    if (it != impl_->timeline.capture_ts_us_by_ssrc.end()) {
         return it->second;
     }
     return std::nullopt;
@@ -543,7 +513,7 @@ NimRTCEngine::capture_ts_us_for_ssrc(std::uint32_t ssrc) const noexcept {
 
 
 std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept {
-    if (!impl_->last_capture_us || !impl_->last_arrival_us) {
+    if (!impl_->timeline.last_capture_us || !impl_->timeline.last_arrival_us) {
         return std::nullopt;
     }
     // arrival − capture, i.e. elapsed time between the sender's capture
@@ -555,20 +525,20 @@ std::optional<std::int64_t> NimRTCEngine::last_one_way_delay_us() const noexcept
     // The previous order (capture − arrival) reported the negation, so a
     // 4 s transit came back as −4 s — a number no consumer of a latency
     // metric can act on.
-    return *impl_->last_arrival_us - *impl_->last_capture_us;
+    return *impl_->timeline.last_arrival_us - *impl_->timeline.last_capture_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::last_sender_recv_skew_us() const noexcept {
-    return impl_->last_skew_us;
+    return impl_->timeline.last_skew_us;
 }
 
 std::optional<std::int64_t>
 
 NimRTCEngine::sender_recv_skew_us_for_ssrc(std::uint32_t ssrc) const noexcept {
-    auto it = impl_->skew_us_by_ssrc.find(ssrc);
-    if (it != impl_->skew_us_by_ssrc.end()) {
+    auto it = impl_->timeline.skew_us_by_ssrc.find(ssrc);
+    if (it != impl_->timeline.skew_us_by_ssrc.end()) {
         return it->second;
     }
     return std::nullopt;

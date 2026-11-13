@@ -445,7 +445,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         // declares that we are prepared to receive a Receiver Reference
         // Time Report and to answer it with a DLRR.  The flag authorises
         // the DLRR half of the exchange.
-        impl_->local_xr_rcvr_rtt = true;
+        impl_->xr.local_xr_rcvr_rtt = true;
     }
 
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
@@ -470,7 +470,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         ast.direction = sdp::Direction::SendRecv;
         ast.uri       = std::string(rtp::kAbsSendTimeUri);
         audio.extmap.push_back(ast);
-        impl_->local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
+        impl_->timeline.local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
     }
 
     // a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
@@ -568,6 +568,10 @@ std::string NimRTCEngine::create_offer() noexcept {
 
         // a=fmtp:<vpt> <codec-specific parameters>
         //
+        // The body is *built* by the `video_sdp_attributes` module — the
+        // single authority on what each codec family's format parameters
+        // are and how they are spelled (see `detail::default_fmtp_of`).
+        //
         // H.264 (RFC 6184 §8.2): profile-level-id + packetization-mode,
         // plus the synthetic SPS/PPS the H.264 stub encoder emits
         // (Baseline profile, level 3.1).
@@ -580,13 +584,14 @@ std::string NimRTCEngine::create_offer() noexcept {
         //
         // The body is derived from the same codec family as the
         // `a=rtpmap:` line above, so the two cannot disagree.
-        if (video_codec_) {
-            video.fmtp[vpt] =
-                std::string(detail::default_fmtp_of(family, /*with_sprop=*/true));
-        } else {
-            video.fmtp[vpt] =
-                std::string(detail::default_fmtp_of(family, /*with_sprop=*/false));
-        }
+        //
+        // The `sprop-parameter-sets` are advertised only when there is a
+        // codec instance behind the pipeline: without one, the engine has
+        // no encoder whose parameter sets it could be describing, and
+        // advertising a synthetic pair would describe a stream nothing
+        // produces.
+        video.fmtp[vpt] = detail::default_fmtp_of(
+            family, /*with_sprop=*/video_codec_ != nullptr);
 
         // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
         // NACK + Picture Loss Indication are the two feedbacks Chrome's
@@ -868,14 +873,14 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // the tracker per SSRC instead of assuming "video ⇒ 90 kHz", which
     // happens to be right for every standardised video codec but is a
     // guess rather than a reading of the wire.
-    impl_->remote_clock_rate_hz.clear();
+    impl_->timeline.remote_clock_rate_hz.clear();
     for (const auto& m : remote.media) {
         for (const auto& [fmt, map] : m.rtpmap) {
             std::uint8_t pt = 0;
             if (!detail::parse_payload_type(fmt, pt)) continue;
             if (map.clock_rate == 0) continue;
             auto [it, inserted] =
-                impl_->remote_clock_rate_hz.emplace(pt, map.clock_rate);
+                impl_->timeline.remote_clock_rate_hz.emplace(pt, map.clock_rate);
             if (!inserted && it->second != map.clock_rate) {
                 // The same payload type declared with two different
                 // rates across m-sections.  The RTP layer does not
@@ -904,11 +909,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         {9, 8000},    // G722
     };
     for (const auto& sr : kStaticRates) {
-        impl_->remote_clock_rate_hz.emplace(sr.pt, sr.hz);
+        impl_->timeline.remote_clock_rate_hz.emplace(sr.pt, sr.hz);
     }
-    if (!impl_->remote_clock_rate_hz.empty()) {
+    if (!impl_->timeline.remote_clock_rate_hz.empty()) {
         std::string rates;
-        for (const auto& [pt, rate] : impl_->remote_clock_rate_hz) {
+        for (const auto& [pt, rate] : impl_->timeline.remote_clock_rate_hz) {
             if (!rates.empty()) rates += ", ";
             rates += std::to_string(pt) + "→" + std::to_string(rate) + "Hz";
         }
@@ -973,10 +978,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // the blocks (RFC 3611 §5.2 — whoever writes the parameter is
     // asking the other party to send them).
     {
-        impl_->peer_xr_rcvr_rtt = false;
-        impl_->peer_xr_stat_summary = false;
-        impl_->peer_xr_stat_summary_flags.clear();
-        impl_->peer_tmmbr_negotiated = false;
+        impl_->xr.peer_xr_rcvr_rtt = false;
+        impl_->xr.peer_xr_stat_summary = false;
+        impl_->xr.peer_xr_stat_summary_flags.clear();
+        impl_->xr.peer_tmmbr_negotiated = false;
 
         const bool want_tmmbr =
             config_.tmmbr_enabled && !config_.disable_tmmbr;
@@ -1000,31 +1005,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             if (has_xr) {
                 const std::string& xr =
                     m.rtcp_xr_present ? m.rtcp_xr : remote.rtcp_xr;
-                impl_->peer_xr_rcvr_rtt =
+                impl_->xr.peer_xr_rcvr_rtt =
                     detail::rtcp_xr_has_format(xr, "rcvr-rtt");
-                impl_->peer_xr_stat_summary =
+                impl_->xr.peer_xr_stat_summary =
                     detail::rtcp_xr_has_format(xr, "stat-summary");
                 // The field indicators the peer asked for, narrowed to the
                 // ones the engine produces (RFC 3611 §5.1 — the list says
                 // which fields SHOULD be included in the blocks we send).
-                impl_->peer_xr_stat_summary_flags =
+                impl_->xr.peer_xr_stat_summary_flags =
                     detail::rtcp_xr_stat_summary_supported(xr);
             }
 
             for (const std::string& entry : m.rtcp_fb) {
                 if (detail::rtcp_fb_has_ccm_param(entry, "tmmbr")) {
-                    impl_->peer_tmmbr_negotiated = want_tmmbr;
+                    impl_->xr.peer_tmmbr_negotiated = want_tmmbr;
                 }
             }
         }
 
         core::log::Logger::instance().info(
             std::string("engine[xr]: negotiated — rcvr-rtt=") +
-            (impl_->peer_xr_rcvr_rtt ? "yes" : "no") +
+            (impl_->xr.peer_xr_rcvr_rtt ? "yes" : "no") +
             ", stat-summary=" +
-            (impl_->peer_xr_stat_summary ? "yes" : "no") +
+            (impl_->xr.peer_xr_stat_summary ? "yes" : "no") +
             ", tmmbr=" +
-            (impl_->peer_tmmbr_negotiated ? "yes" : "no"));
+            (impl_->xr.peer_tmmbr_negotiated ? "yes" : "no"));
     }
 
     // ---- Negotiated payload-type routing (B-4) --------------------------
@@ -1309,6 +1314,33 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             auto fit = remote_video->fmtp.find(std::to_string(chosen));
             if (fit != remote_video->fmtp.end()) {
                 impl_->negotiated_video.fmtp = fit->second;
+
+                // ---- Parse the peer's format parameters --------------------
+                //
+                // The raw body is *also* parsed by the `video_sdp_attributes`
+                // module — the single authority on what each codec family's
+                // format parameters mean.  The parsed form is what the
+                // packetizer consults to honour the peer's declared
+                // packetization mode (RFC 6184 §6).
+                //
+                // A parse failure is NOT fatal: the raw body is kept (the
+                // answer must echo what was offered — RFC 3264 §6.1), and
+                // the engine falls back to its own packetization mode.  The
+                // failure is logged, because it means the peer and we may
+                // disagree about the bitstream layout.
+                const auto kind = detail::sdp_attr_kind_of(
+                    detail::codec_family_from_sdp_encoding(chosen_encoding));
+                auto fmtp_parsed = nimrtc::video_sdp_attributes::parse_fmtp(
+                    kind, impl_->negotiated_video.fmtp);
+                if (fmtp_parsed.ok()) {
+                    impl_->negotiated_video.fmtp_parsed = fmtp_parsed.value();
+                    impl_->negotiated_video.fmtp_valid   = true;
+                } else {
+                    core::log::Logger::instance().warn(
+                        "engine[video]: the peer's a=fmtp: body could not be "
+                        "parsed (" + fmtp_parsed.error().message() +
+                        ") — the engine keeps its own packetization mode");
+                }
             }
             impl_->negotiated_video_pt.store(chosen, std::memory_order_relaxed);
             core::log::Logger::instance().info(
@@ -1554,8 +1586,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     em.direction == sdp::Direction::SendOnly;
                 if (!peer_sends) continue;
                 if (em.id <= 0 || em.id > 255) continue;
-                if (impl_->remote_abs_send_time_id == 0) {
-                    impl_->remote_abs_send_time_id =
+                if (impl_->timeline.remote_abs_send_time_id == 0) {
+                    impl_->timeline.remote_abs_send_time_id =
                         static_cast<std::uint16_t>(em.id);
                     core::log::Logger::instance().info(
                         "engine[timeline]: peer advertised abs-send-time "
@@ -1563,7 +1595,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 }
                 break;
             }
-            if (impl_->remote_abs_send_time_id != 0) break;
+            if (impl_->timeline.remote_abs_send_time_id != 0) break;
         }
     }
 
@@ -1698,7 +1730,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         ans.rtcp_xr_present = true;
         if (config_.rtcp_xr_enabled) {
             ans.rtcp_xr = build_xr_answer(remote.rtcp_xr,
-                                          &impl_->local_xr_rcvr_rtt);
+                                          &impl_->xr.local_xr_rcvr_rtt);
         }
         // Otherwise the attribute is present but empty: RFC 3611 §5.2 —
         // "If a participant receives an SDP offer and understands the
@@ -1930,7 +1962,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     // (RFC 3611 §5.2).  The flag authorises the DLRR half
                     // of the exchange.
                     am.rtcp_xr = build_xr_answer(rm.rtcp_xr,
-                                                 &impl_->local_xr_rcvr_rtt);
+                                                 &impl_->xr.local_xr_rcvr_rtt);
                 }
                 // Otherwise the attribute is present but empty: RFC 3611
                 // §5.2 — "If a participant receives an SDP offer and
@@ -2079,10 +2111,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         if (config_.timeline_enabled &&
             rm.type != sdp::MediaType::Application) {
             const std::uint16_t answer_id =
-                impl_->local_abs_send_time_id != 0
-                    ? impl_->local_abs_send_time_id
+                impl_->timeline.local_abs_send_time_id != 0
+                    ? impl_->timeline.local_abs_send_time_id
                     : rtp::kAbsSendTimeDefaultLocalId;
-            impl_->local_abs_send_time_id = answer_id;
+            impl_->timeline.local_abs_send_time_id = answer_id;
             sdp::MediaDescription::ExtMap ast;
             ast.id        = static_cast<int>(answer_id);
             ast.direction = sdp::Direction::SendRecv;

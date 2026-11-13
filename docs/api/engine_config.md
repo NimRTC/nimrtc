@@ -83,11 +83,21 @@ EngineConfig
 
 ## 2. Plugin selection fields
 
-Each field is a `std::string_view` (or `std::string` for fields that
-may be left empty to mean "default"). The string is a stable id
-registered via `core::PluginRegistry::register_<family>()` or
-`NIMRTC_REGISTER_<FAMILY>(name, &factory)`. For guidance on
-implementing your own plugin see `docs/plugin_author_guide.md`.
+Every plugin-selection field is a **`std::string`** — the engine
+**copies** the string, so the id may be a temporary, a runtime
+lookup, or a `std::string` you own; none of them can dangle. (This
+changed from `std::string_view` in v1.2.0 — see
+[ADR-020](../adr/ADR-020-engineconfig-string-ownership.md) and
+the [migration note](#20-migration-note-stdstringview--stdstring).)
+
+The string is a stable id registered via
+`core::PluginRegistry::register_<family>()` or
+`NIMRTC_REGISTER_<FAMILY>(name, &factory)`. Ids must match
+`^[a-z][a-z0-9_-]*$` — see
+[ADR-019](../adr/ADR-019-plugin-id-naming-contract.md) for the
+naming contract (in-tree ids are prefixed `nimrtc_`; third-party ids
+carry the plugin's own namespace). For guidance on implementing your
+own plugin see `docs/plugin_author_guide.md`.
 
 If a configured id is not registered when `open()` runs, the engine
 reports it. **How loudly depends on the family:**
@@ -321,16 +331,24 @@ with a TMMBN (RFC 5104 section 4.2.2.2).  See
 
 ### 2.5 Video plugins
 
-The video plugins are resolved but **not yet threaded into the
-RTP/DTLS/SRTP pipeline** in v0.12.0 (P1.1 future work). Callers
-drive them through the accessors
-(`engine.video_receiver()->push_rtp(pkt, now_us)`).
+The video plugins are resolved through the registry and **are**
+threaded into the RTP/DTLS/SRTP pipeline: `send_video()` encodes via
+`IVideoCodec`, hands the encoded frame to `IVideoSender`, and the
+sender's packet callback assembles the RTP header, applies SRTP
+protection and enqueues onto the scheduler. Inbound RTP is pushed
+into `IVideoReceiver` by the engine.
+
+The plugins can also be driven directly through the accessors
+(`engine.video_receiver()->push_rtp(pkt, now_us)`) — useful for tests
+and for hosts that want to bypass the engine's capture path.
 
 ```cpp
-std::string_view video_source_name     = "memory";
-std::string_view video_sink_name       = "headless";
-std::string_view video_receiver_name   = "reference";
-std::string_view video_sender_name     = "reference";
+std::string video_source_name     = "memory";
+std::string video_sink_name       = "headless";
+std::string video_receiver_name   = "reference";
+std::string video_sender_name     = "reference";
+std::string video_codec_name      = "h264";      // "" = no video codec
+std::string video_capture_name    = "";          // "" = capture disabled
 ```
 
 To select HW backends:
@@ -340,6 +358,10 @@ cfg.video_source_name     = "v4l2";          // Linux
 cfg.video_sender_name     = "mediacodec";    // Android NDK
 cfg.video_receiver_name   = "videotoolbox";  // Apple
 ```
+
+See `docs/hw_plugin_seam.md` for the HW backend contract
+(`IHwVideoEncoder` / `IHwVideoDecoder` / `IHwVideoCapture` and the
+GPU surface handle they carry).
 
 ### 2.6 DataChannel
 
@@ -507,8 +529,62 @@ modes. See [`docs/guides/datachannel.md` §4](../guides/datachannel.md).
 std::string video_codec_name = "h264";   // IVideoCodec plugin id
 ```
 
-Empty = no video codec. The codec is only consumed when the video
-pipeline is active (currently not threaded end-to-end).
+Empty = no video codec. The codec is consumed by the video send path
+(`send_video()` encodes through `IVideoCodec` before handing the
+frame to `IVideoSender`).
+
+---
+
+## 2.0 Migration note: `std::string_view` → `std::string`
+
+**v1.2.0 changed every string field of `EngineConfig` from
+`std::string_view` to `std::string`.** This is an **ABI-breaking**
+change: the two types have different sizes and alignments, so the
+struct's layout changes and a host compiled against the old header
+passes a differently-shaped object to the new constructor. Hosts must
+be **recompiled**.
+
+Why: the `std::string_view` shape created a lifetime hazard at every
+assignment site. A host that assigned a `std::string` it owned was
+obliged to keep that string alive for the engine's lifetime, or to
+take a `.c_str()` and produce a view the engine read later — a
+dangling view waiting to happen. The engine copied the config anyway
+(it takes it **by value** and moves it), so the saving was illusory.
+
+What changes for a host:
+
+```cpp
+// Before (v1.2.0 and earlier) — the engine held a view into `backend_name`.
+std::string backend_name = lookup_backend();
+cfg.dtls_name = backend_name;          // worked, but `backend_name` had
+                                       // to outlive the engine
+
+// Now — the engine owns a copy.
+cfg.dtls_name = backend_name;          // safe; `backend_name` may die here
+```
+
+- Assigning from a `const char*` literal is **unchanged** and still
+  works.
+- Assigning from a `std::string` is **unchanged** and now safe.
+- The `.c_str()` workaround is **no longer needed** and should be
+  removed — it was the hazard, not the fix.
+- Aggregate initialisation (`EngineConfig{ .dtls_name = "gmssl" }`)
+  is unaffected.
+
+The engine owns its copy of the config: `NimRTCEngine` takes
+`EngineConfig` **by value** and moves it, so the caller's original may
+be destroyed or mutated immediately after the constructor returns.
+
+`engine.config()` returns a `const EngineConfig&` aliasing the
+engine's own copy — valid only while the engine lives. To outlive the
+engine, copy it:
+
+```cpp
+nimrtc::engine::EngineConfig snapshot = engine.config();   // copy
+```
+
+See [ADR-020](../adr/ADR-020-engineconfig-string-ownership.md) for
+the full rationale.
 
 ---
 

@@ -73,10 +73,9 @@ NimRTCEngine::NimRTCEngine(EngineConfig config)
                             ? config_.audio_ssrc
                             : next_random_audio_ssrc();
     // Phase 3: the ref-frame registry is a fixed-size open-addressed
-    // table.  It is sized once here so that recording a frame never
-    // allocates (the old `std::map` + `std::deque` pair allocated twice
-    // per sent frame).
-    impl_->init_ref_frame_table();
+    // table.  It is sized once (in the table's own constructor) so that
+    // recording a frame never allocates (the old `std::map` +
+    // `std::deque` pair allocated twice per sent frame).
     // Phase 3: the outbound video scratch buffers are pre-sized to the
     // MTU so that the *first* keyframe -- which is larger than an
     // inter-frame -- does not have to grow them.  A keyframe's RTP
@@ -125,6 +124,14 @@ NimRTCEngine::transport_strategy_session() const noexcept {
     if (!impl_) return {std::string_view{}, std::string_view{}};
     return {std::string_view{impl_->resolved_media_factory_id},
             std::string_view{impl_->resolved_control_factory_id}};
+}
+
+// The resolved media-plane p99 budget.  `init_transport_strategy()`
+// stores it after applying the per-instance override in
+// `cfg.transport_media_max_p99_ms`; before open() it is empty.
+std::optional<int> NimRTCEngine::transport_media_max_p99_ms() const noexcept {
+    if (!impl_) return std::nullopt;
+    return impl_->resolved_media_max_p99_ms;
 }
 
 
@@ -321,12 +328,12 @@ uint32_t NimRTCEngine::open() noexcept {
         const std::int64_t system_us =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 system_now.time_since_epoch()).count();
-        impl_->boot_epoch_offset_us = system_us - steady_us;
+        impl_->timeline.boot_epoch_offset_us = system_us - steady_us;
         // The same instant expressed as an NTP64 (RFC 5905): the wall
         // clock that corresponds to a monotonic reading of zero.
-        impl_->monotonic_origin_ntp64 = rtp::ntp64_from(
+        impl_->timeline.monotonic_origin_ntp64 = rtp::ntp64_from(
             std::chrono::system_clock::time_point{
-                std::chrono::microseconds{impl_->boot_epoch_offset_us}});
+                std::chrono::microseconds{impl_->timeline.boot_epoch_offset_us}});
         // Re-derive the offset *from the NTP64* so that the offset and
         // the origin denote exactly the same instant.
         //
@@ -339,13 +346,13 @@ uint32_t NimRTCEngine::open() noexcept {
         // adds the monotonic reading to `unix_us(origin)`, so the engine's
         // own instants have to be built on that same basis: take the
         // offset from the origin, not the other way round.
-        impl_->boot_epoch_offset_us = std::chrono::duration_cast<
+        impl_->timeline.boot_epoch_offset_us = std::chrono::duration_cast<
             std::chrono::microseconds>(
-            rtp::system_clock_from_ntp64(impl_->monotonic_origin_ntp64)
+            rtp::system_clock_from_ntp64(impl_->timeline.monotonic_origin_ntp64)
                 .time_since_epoch())
                                            .count();
-        impl_->sr_tracker.set_monotonic_origin(
-            impl_->monotonic_origin_ntp64);
+        impl_->timeline.sr_tracker.set_monotonic_origin(
+            impl_->timeline.monotonic_origin_ntp64);
         impl_->sr_last_sent = steady_now;   // first SR fires one period in
         if (config_.timeline_enabled) {
             core::log::Logger::instance().info(

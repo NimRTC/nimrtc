@@ -509,6 +509,19 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // blocks).  Splitting the function into two phases ensures that by
     // the time any callback fires, every plugin slot is already filled.
 
+    // ---- Video quality statistics sink (Phase 4.2 / D2) ------------------
+    //
+    // The sink is the *single* owner of the per-stream quality counters
+    // (frames, bytes, bitrate EMA, freeze detection, QP accumulation,
+    // drop attribution).  Before this wiring the module was a complete,
+    // tested implementation that no engine ever loaded — the worst state
+    // a module can be in ("the feature exists, so it must work").
+    //
+    // The sink is created here (not in the constructor) so a session
+    // that never touches video does not pay for it, and so a re-open()
+    // starts from a clean slate.
+    impl_->video_stats.ensure_created();
+
     // ---- Our RTCP feedback SSRC (v1.1 Q3) ---------------------------------
     //
     // RFC 3550 §6.1 identifies the sender of an RTCP packet by its SSRC.
@@ -785,13 +798,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             core::SteadyClock::now().time_since_epoch()).count();
                     impl_->video_last_send_unix_us =
-                        impl_->boot_epoch_offset_us + steady_us;
-                    if (impl_->local_abs_send_time_id != 0) {
+                        impl_->timeline.boot_epoch_offset_us + steady_us;
+                    if (impl_->timeline.local_abs_send_time_id != 0) {
                         const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
                             std::chrono::microseconds{steady_us},
-                            impl_->monotonic_origin_ntp64);
+                            impl_->timeline.monotonic_origin_ntp64);
                         pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                             impl_->local_abs_send_time_id);
+                                             impl_->timeline.local_abs_send_time_id);
                     }
                 }
 
@@ -907,6 +920,16 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                    plugins::TimestampUs /*now_us*/) {
                 // v1.1 V1: one assembled receiver frame (pre-decode).
                 ++impl_->video_frames_received;
+                // Phase 4.2 / D2: the video-quality statistics sink.  The
+                // frame has arrived but not been decoded yet, so this is
+                // the "received" event: it carries the frame's size (for
+                // the bitrate window), the keyframe flag (for the
+                // inter-keyframe EMA) and the QP (for the quality sum).
+                impl_->video_stats.on_frame_received(
+                    static_cast<std::int64_t>(enc.info.capture_ts_us),
+                    static_cast<std::uint32_t>(enc.payload.size()),
+                    enc.is_keyframe,
+                    static_cast<int>(enc.qp));
                 // v1.1 T1: record the inbound ref_frame mapping too, so a
                 // host holding a frame_seq from either direction resolves.
                 record_video_ref_frame(
@@ -959,8 +982,18 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // Decode with no caller-supplied buffers: the codec
                 // allocates (and knows) the native geometry.
                 if (video_codec_->decode(enc, raw_out, nullptr) != plugins::kOk) {
+                    // The decoder refused the frame.  That is a
+                    // decoder-side drop (Phase 4.2 / D2), and it is
+                    // counted as such so a host can see a stream that
+                    // arrives but never decodes.
+                    impl_->video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kDecoderError);
                     return;
                 }
+
+                // Phase 4.2 / D2: the frame decoded successfully.
+                impl_->video_stats.on_frame_decoded(
+                    static_cast<std::int64_t>(enc.info.capture_ts_us));
 
                 const std::shared_ptr<video_frame::VideoFrameBuffer> cpu_buf =
                     raw_out.cpu_buffer();
@@ -1008,7 +1041,17 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
 
-                video_sink_->render(sink_frame);
+                const plugins::Status render_rc = video_sink_->render(sink_frame);
+                // Phase 4.2 / D2: the frame reached the sink.  This is
+                // the "rendered" event — the freeze detector in the
+                // stats sink measures the gap between two of these.
+                if (render_rc == plugins::kOk) {
+                    impl_->video_stats.on_frame_rendered(
+                        static_cast<std::int64_t>(enc.info.capture_ts_us));
+                } else {
+                    impl_->video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kDecoderError);
+                }
             });
     }
 
@@ -1027,6 +1070,11 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
+    // The video-quality statistics sink (Phase 4.2 / D2) is *not* a
+    // plugin — it has no open()/close().  Resetting it here clears the
+    // per-session counters so a re-open() does not report the previous
+    // session's freezes and drops.
+    impl_->video_stats.reset();
     // The capture device (remote-desktop plan A1) is a *device*: it may
     // own an OS handle (a DXGI duplication, a PipeWire stream), so it
     // has to be closed explicitly rather than merely dropped.
@@ -1224,13 +1272,13 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // `boot_epoch_offset_us` is the wall clock at monotonic zero, so
         // the sum is this packet's send instant on the Unix timeline —
         // the same basis the abs-send-time encoder uses.
-        impl_->audio_last_send_unix_us = impl_->boot_epoch_offset_us + steady_us;
-        if (impl_->local_abs_send_time_id != 0) {
+        impl_->audio_last_send_unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
+        if (impl_->timeline.local_abs_send_time_id != 0) {
             const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
                 std::chrono::microseconds{steady_us},
-                impl_->monotonic_origin_ntp64);
+                impl_->timeline.monotonic_origin_ntp64);
             pb.set_abs_send_time(rtp::AbsSendTime{ast24},
-                                 impl_->local_abs_send_time_id);
+                                 impl_->timeline.local_abs_send_time_id);
         }
     }
 
@@ -1511,6 +1559,16 @@ plugins::Status NimRTCEngine::send_video(
         impl_->video_keyframe_pending_.store(true, std::memory_order_release);
     }
 
+    // Phase 4.2 / D2: record the encoded frame in the *outbound* quality
+    // statistics.  The QP is the encoder's own quality signal — it says
+    // how much detail the encoder had to drop to hit the bitrate — so it
+    // belongs to the outbound stream, not to the inbound one.
+    impl_->video_stats.on_frame_encoded(
+        static_cast<std::int64_t>(encoded.info.capture_ts_us),
+        static_cast<std::uint32_t>(encoded.payload.size()),
+        encoded.is_keyframe,
+        static_cast<int>(encoded.qp));
+
     // Packetize (the sender's packet callback handles RTP header assembly
     // + SRTP protect + scheduler enqueue).
     const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
@@ -1609,7 +1667,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                     // (ADR-017 §"Decision 4").  Passing a wall-clock reading
                     // here would double-count the epoch and make the skew
                     // meaningless.
-                    impl_->sr_tracker.on_sender_report(sr.value(),
+                    impl_->timeline.sr_tracker.on_sender_report(sr.value(),
                                                       detail::steady_now_us());
                 }
                 break;
@@ -1642,6 +1700,16 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                     handle_inbound_tmmbr(blk.packet);
                     break;
                 }
+                // Phase 4.2 / D2: a NACK (RFC 4585 §6.2.1) is the peer
+                // asking us to retransmit packets it lost.  The feedback
+                // describes the **outbound** stream (what we sent), so it
+                // is recorded on the outbound sink — the inbound sink
+                // would say the *peer's* receive quality is bad, which is
+                // not what a NACK tells us.
+                if (blk.fmt == 1) {
+                    impl_->video_stats.on_rtcp_feedback_tx(
+                        detail::VideoFeedbackKind::kNACK);
+                }
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
@@ -1655,6 +1723,20 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // The collector decides what it understands — the payload
                 // type and the FMT are handed over so it can tell a REMB
                 // from a PLI and a transport-cc from a NACK.
+                //
+                // Phase 4.2 / D2: a PLI (FMT 1) or a FIR (FMT 4) is the
+                // peer saying "I lost picture data, send me a key frame".
+                // It describes the **outbound** stream (what we sent), so
+                // it is recorded on the outbound sink: the peer could not
+                // decode our stream because a reference frame was lost on
+                // the way to it.
+                if (blk.fmt == 1) {   // PLI — RFC 4585 §6.3.1
+                    impl_->video_stats.on_rtcp_feedback_tx(
+                        detail::VideoFeedbackKind::kPLI);
+                } else if (blk.fmt == 4) {   // FIR — RFC 5104 §4.3.1
+                    impl_->video_stats.on_rtcp_feedback_tx(
+                        detail::VideoFeedbackKind::kFIR);
+                }
                 if (net_feedback_) {
                     net_feedback_->on_rtcp_block(blk.payload_type, blk.fmt,
                                                  blk.packet, now);
@@ -1696,6 +1778,23 @@ void NimRTCEngine::queue_video_feedback(
     // v1.1 V1: outbound feedback queued (NACK seqs + keyframe requests).
     impl_->video_nack_seqs_queued += report.missing_seqs.size();
     if (report.want_keyframe) ++impl_->video_keyframes_q;
+
+    // Phase 4.2 / D2: record the feedback we are about to send.  A NACK
+    // means the *peer* lost picture data on the **inbound** stream (the
+    // one it receives from us) — so it is recorded on the inbound sink,
+    // where the freeze / drop counters live: the peer's loss is a loss
+    // *in the stream we sent*, which is our inbound direction.
+    //
+    // A key-frame request means the peer is already resynchronising
+    // because a reference frame never arrived.
+    if (!report.missing_seqs.empty()) {
+        impl_->video_stats.on_rtcp_feedback(
+            detail::VideoFeedbackKind::kNACK);
+    }
+    if (report.want_keyframe) {
+        impl_->video_stats.on_rtcp_feedback(
+            detail::VideoFeedbackKind::kPLI);
+    }
 
     // Merge into the pending report: two gaps detected back to back must
     // not cost two round trips, and a NACK list plus a key-frame request
@@ -1815,7 +1914,7 @@ void NimRTCEngine::maybe_update_audio_bitrate() noexcept {
     // engine would encode above the ceiling it promised in the TMMBN.
     //
     // A limit of 0 means "no limit" (the peer has not sent a TMMBR).
-    const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+    const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
 
     // ---- Rate limit: one step per `audio_bitrate_update_interval_ms` ----
     const auto now = std::chrono::steady_clock::now();
@@ -1987,6 +2086,43 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // Phase 3 / C3: the zero-copy path counters.
     out.video_zero_copy_frames    = impl_->video_zero_copy_frames;
     out.video_zero_copy_fallbacks = impl_->video_zero_copy_fallbacks;
+
+    // ---- Video quality statistics (Phase 4.2 / D2) ----------------------
+    //
+    // The numbers come from the `nimrtc::video_stats` sinks — the module
+    // that owns the freeze detection, the QP accumulation, the bitrate
+    // window and the drop attribution.  The engine does not re-derive
+    // them: the module is the single authority, exactly as the SDP
+    // attributes module became the single authority for `a=fmtp:`.
+    //
+    // The two directions are kept apart (Chrome's `inbound-rtp` /
+    // `outbound-rtp` split): the freeze count and the drop attribution
+    // describe what the *peer* sent us, the QP describes what *we* sent.
+    if (impl_->video_stats.active()) {
+        const auto rx = impl_->video_stats.snapshot_rx();
+        out.video_freeze_count    = rx.freeze_count;
+        out.video_freeze_total_ms = rx.freeze_total_ms;
+        out.video_last_freeze_ms  = rx.last_freeze_ms;
+        out.video_keyframe_interval_avg_ms = rx.keyframe_interval_avg_ms;
+        out.video_frames_dropped_jb = rx.frames_dropped_jb;
+        out.video_frames_dropped_decoder = rx.frames_dropped_decoder;
+        out.video_frames_dropped_dependency = rx.frames_dropped_dependency;
+        out.video_current_bitrate_bps = rx.current_bitrate_bps;
+        out.video_avg_bitrate_bps    = rx.avg_bitrate_bps;
+        out.video_bytes_received   = rx.bytes_received;
+        out.video_frames_decoded   = rx.frames_decoded;
+        out.video_frames_rendered  = rx.frames_rendered;
+
+        const auto tx = impl_->video_stats.snapshot_tx();
+        out.video_qp_sum           = tx.qp_sum;
+        out.video_qp_count         = tx.qp_count;
+        out.video_tx_frames_encoded = tx.frames_received;
+        out.video_tx_bytes_encoded  = tx.bytes_received;
+        // The dependency losses the *peer* reported about our stream
+        // (a PLI / FIR it sent us): our transmit side lost a reference
+        // frame, so the peer could not decode what followed.
+        out.video_tx_frames_dropped_dependency = tx.frames_dropped_dependency;
+    }
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.

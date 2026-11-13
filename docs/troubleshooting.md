@@ -139,21 +139,43 @@ nimrtc::core::Result<void> open() noexcept override { /* ... */ }
 Both must be implemented or the build fails (multiple
 `override`-matchable candidates collide).
 
-### 2.3 "use of deleted function" when constructing EngineConfig
+### 2.3 Migrating `EngineConfig` from `std::string_view` to `std::string`
 
-`EngineConfig` uses `std::string_view` for plugin ids. Assigning
-from a `const char*` is fine; from an `std::string`, you must take
-`.c_str()` or rely on the `std::string_view` constructor:
+**v1.2.0 changed every string field of `EngineConfig` from
+`std::string_view` to `std::string`.** Hosts must be **recompiled** —
+the struct's layout changed, so a stale object file passes a
+differently-shaped struct to the new constructor.
+
+What changed for the host:
 
 ```cpp
-cfg.dtls_name = "gmssl";                                  // OK
-cfg.dtls_name = std::string{"gmssl"};                    // OK (implicit conversion)
-cfg.dtls_name = std::string_view{"gmssl"};               // OK
-cfg.dtls_name = "gmssl"sv;                               // OK (string_view literal)
+cfg.dtls_name = "gmssl";                          // OK, unchanged
+cfg.dtls_name = std::string{"gmssl"};             // OK, and now safe
+cfg.dtls_name = std::string_view{"gmssl"};        // OK
+cfg.dtls_name = "gmssl"sv;                        // OK
+cfg.dtls_name = some_std_string.c_str();          // NO LONGER NEEDED
 ```
 
-`dtls_name` is `std::string` (not `string_view`) because empty
-means "default"; length is significant.
+The `.c_str()` workaround was the hazard, not the fix: it produced a
+view into a string the engine read *later*, so the string had to
+outlive the engine. `std::string` fields copy, so the temporary can
+die immediately.
+
+```cpp
+// Before — `backend_name` had to stay alive as long as the engine.
+std::string backend_name = lookup_backend();
+cfg.dtls_name = backend_name.c_str();
+
+// Now — the engine owns a copy; `backend_name` may die here.
+cfg.dtls_name = backend_name;
+```
+
+If you hit "use of deleted function" or a size-mismatch assertion,
+you are linking a header that predates v1.2.0 — rebuild the host, do
+not just relink.
+
+See [`docs/api/engine_config.md` §2.0](api/engine_config.md) and
+[ADR-020](adr/ADR-020-engineconfig-string-ownership.md).
 
 ---
 
@@ -300,6 +322,66 @@ std::cerr << "\n";
 If your id is missing: the static-init order is wrong; make sure
 the `.cpp` containing `NIMRTC_REGISTER_*` is linked into your
 binary (forget `#ifdef` in some platform configurations).
+
+### 3.7a I configured a plugin but it has no effect
+
+This is the failure mode that does **not** announce itself. There are
+four distinct causes, and they are checked in this order because the
+earlier ones are more common.
+
+**1. The field is not the field you think it is.** `EngineConfig` has
+several near-miss names: `transport_name` (the ICE-aware transport
+plugin) vs `transport_stack_name` (the stack factory);
+`datachannel_backend` (the family selector) vs `datachannel_name`
+(the legacy factory slot) vs `web_transport_name` (the session
+factory behind the WebTransport backend). Setting `web_transport_name`
+does nothing if `datachannel_backend` is `""`. Print the config
+before `open()` and compare against
+[`docs/api/engine_config.md`](api/engine_config.md) §1.
+
+**2. The family degrades silently.** Some families are *logged only*
+— the engine logs a warning and continues without the component, and
+`on_error()` does **not** fire. BWE, scheduler, net-feedback, XR
+report, the session model, DTMF, audio 3A and the audio codec are all
+in this bucket. **Read the engine's warning log.** A feature that is
+"inert" without any error is the defining symptom of this class:
+check the log before suspecting your plugin.
+
+```cpp
+// The log is where the answer is. Enable warnings in your build.
+```
+
+**3. The plugin resolved, but the engine does not use it for what you
+expected.** The engine resolves each family at `open()` time and
+stores the instance. If you are calling the plugin's API directly
+(e.g. `engine.video_receiver()->push_rtp(...)`) but expected the
+engine to route inbound media to it, check that the corresponding
+media path is actually active — e.g. a video pipeline that is not
+receiving RTP because no track was added.
+
+**4. The id was registered under a different spelling than the one
+you configured.** The registration macros stringify the id
+themselves, and the two macro families historically disagreed about
+whether the argument was a bare token or a quoted literal. Passing a
+quoted literal to a macro that stringifies registers under an id that
+*includes the quote characters* — the registration succeeds and the
+lookup never matches. Ids must match `^[a-z][a-z0-9_-]*$`; see
+[ADR-019](adr/ADR-019-plugin-id-naming-contract.md).
+
+Quick triage, in order:
+
+```cpp
+auto& reg = nimrtc::core::PluginRegistry::instance();
+// 1. Is my id registered at all?
+for (auto id : reg.list_audio3a()) std::cerr << std::string(id) << " ";
+std::cerr << "\n";
+// 2. Does it resolve to a factory?
+std::cerr << (reg.get_audio3a(cfg.audio3a_name) ? "resolved" : "MISSING") << "\n";
+```
+
+If (1) lists your id and (2) says "resolved", the plugin is installed
+and the problem is in usage — go to cause 3. If (2) says "MISSING",
+the id in the config does not match the registered id — go to cause 4.
 
 ### 3.8 Build is green but engine.open() returns non-zero
 

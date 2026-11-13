@@ -150,6 +150,15 @@ that becomes the `id` string and a pointer to the factory. As long as
 `my_plugin_init.cpp` is linked into the final binary, the registry
 will see your factory on process start.
 
+**The id is a bare token, not a quoted literal.** The macro
+stringifies it for you, so `NIMRTC_REGISTER_<FAMILY>(myid, &f)`
+registers under `"myid"`. Writing `NIMRTC_REGISTER_<FAMILY>("myid", &f)`
+registers under an id that *includes the quote characters* — the
+registration succeeds and the lookup never matches. A quoted literal
+is rejected at compile time; see §8.1 for the full naming contract,
+including the `nimrtc_` prefix rule and the namespacing requirement
+for third-party plugins.
+
 There is also `core::register_all_default_plugins()` that registers
 the built-in plugins (WolfSSL DTLS, WebRTC APM audio3a, Opus codec,
 libjuice ICE, …). Call it once at startup **before** the first
@@ -254,6 +263,45 @@ that registering it changes nothing.
 | Generic transport | `plugins/transport.hpp` | — (none) | `NIMRTC_REGISTER_TRANSPORT` | n/a | The engine resolves the **ICE-typed** slot (`get_ice_transport`) through the transport stack, not the generic `ITransport` slot. The generic slot exists so a consumer can pick the weakest typed view. |
 | RTP | `plugins/rtp.hpp` | — (none) | `NIMRTC_REGISTER_RTP` | n/a | **Deprecated.** The engine uses the concrete `rtp::` implementation. See §4.2. |
 | SDP | `plugins/sdp.hpp` | — (none) | `NIMRTC_REGISTER_SDP` | n/a | **Deprecated.** The engine uses the concrete `sdp::` implementation. See §4.2. |
+
+### 4.4 The replaceability matrix — what can you actually swap?
+
+The catalogue above lists *every* family that has a seam. This table
+answers the narrower question a plugin author actually has: **if I
+implement this interface, does the engine use my implementation, or
+does it keep using the in-tree one?**
+
+There are exactly three answers, and they are worth distinguishing
+before you invest the work.
+
+| Answer | What it means | Families | What you must do |
+|---|---|---|---|
+| **Fully replaceable** | The engine resolves your plugin and calls *only* your implementation. Your plugin is the whole feature. | ICE transport, transport stack, DTLS, SCTP socket, SRTP backend, DataChannel backend, WebTransport session factory | Implement the interface, register, set the config field. Nothing else. |
+| **Replaceable, but with an in-tree default fallback** | Your plugin is used when it resolves; when it does not, the engine substitutes the in-tree implementation. | Audio 3A (falls back to `NullAudio3A`) | Implement the interface, register, set the config field — and be aware that the engine will *not* tell you loudly when your plugin was skipped. |
+| **Not replaceable** | The interface exists, but the engine uses the concrete in-tree implementation directly. Registering a plugin changes nothing. | **RTP**, **SDP** | Fork the module. There is no config knob, by decision (ADR-021): the RTP builder is on the zero-allocation hot path and the SDP layer is the contract every other component is written against. |
+
+Two families sit between the first two columns and are worth calling
+out, because they are the ones most often misread:
+
+- **The "reported, non-fatal" families** (audio/video codecs, video
+  source/sink/receiver/sender, video capture, audio decoder, audio
+  receiver, jitter buffer) *do* use your implementation when it
+  resolves — but a failure to resolve is **not** fatal, and the
+  feature is left inert. "The engine ignored my plugin" and "the
+  engine used my plugin and it failed" have the *same* symptom from
+  the outside, so check `on_error()` before assuming your plugin was
+  skipped.
+- **The "logged only" families** (BWE, scheduler, net-feedback, XR
+  report, session model, DTMF, audio codec, WebTransport session
+  factory) also use your implementation when it resolves. The
+  difference is that a failure to resolve is *logged and nothing
+  else* — no `on_error()`, no return code. If your plugin appears to
+  be ignored entirely, **read the engine's warning log**: that log
+  line is the only signal you will get.
+
+The practical test for any family: **read the `Failure` column of
+the catalogue in §4.** `hard` means you cannot miss it. `reported`
+means you will be told once. `logged` means you have to go looking.
 
 ---
 
@@ -485,6 +533,71 @@ your own, the conventional tests are:
 
 For per-module test patterns, see `tests/README.md` (to be written).
 
+### 7.1 How to report your plugin ID
+
+Your plugin's id is a **public string** — it appears in host config
+files, in log lines, and in Profile JSON files (ADR-010). Once
+published it is part of the engine's public surface, so the way you
+report it matters to the people who will configure it.
+
+**In your README**, state the id in a way that can be copied
+verbatim, together with the family it belongs to and the config field
+that selects it:
+
+```markdown
+## `acme_h264` — AV1-capable H.264 encoder
+
+| | |
+|---|---|
+| **Plugin family** | Video codec (`plugins/video_codec.hpp`) |
+| **Config field** | `EngineConfig::video_codec_name` |
+| **Registered id** | `acme_h264` |
+| **Interface** | `nimrtc::plugins::IVideoCodec` |
+| **Registration** | `NIMRTC_REGISTER_VIDEO_CODEC(acme_h264, &g_factory)` |
+
+Select it with:
+
+```cpp
+cfg.video_codec_name = "acme_h264";
+```
+```
+
+**The four things a reader needs**, and without which the id cannot
+be used:
+
+1. **The id string itself**, exactly as registered — including the
+   namespace prefix. `acme_h264`, not `AcmeH264` and not `h264`.
+2. **The family**, so the reader knows which registry slot it is in
+   and which interface to implement. Two families can legitimately
+   share an id string; the family disambiguates.
+3. **The config field** that selects it. The id alone is not enough —
+   the reader has to know where to put it.
+4. **The registration line**, so the reader can see that the id is
+   tokenised (not quoted) and can reproduce the call.
+
+**Also report the id's spelling rules**, if your plugin is one of a
+set that users are expected to choose between. A host that ships
+several plugins of the same family needs to know the ordering and
+constraints — for example, that exactly one plugin may claim a given
+role, and what happens when two are configured.
+
+**Do not** describe the id with a placeholder that is not the real
+string. `cfg.video_codec_name = "<your-id>"` teaches the reader
+nothing they can use, and `<your-id>` is not a legal id under the
+grammar in §8.1 — so a reader who copies it gets a registration
+failure rather than a working config.
+
+**Do not** document the id in only one place. If the plugin has a
+README, a doc page under `docs/`, and an example, all three must
+carry the same string. The id is a config key; a doc that disagrees
+with the code is a bug that only shows up on someone else's machine.
+
+**When you rename**, the rename is a breaking change to the public
+config surface. Register both the old and the new id for at least one
+minor version, log the old id at `Warn` when it is selected, and say
+so in the README — including the version in which the old id will be
+removed. See §8.1.
+
 ---
 
 ## 8. Versioning and ABI
@@ -492,7 +605,11 @@ For per-module test patterns, see `tests/README.md` (to be written).
 - **Plugin id string** — once published, stable for the lifetime of
   the engine. Adding a new id is non-breaking; renaming requires a
   deprecation cycle (run both ids under a `register_<family>` shim
-  for at least one minor version).
+  for at least one minor version). The full naming contract — the
+  legal grammar, the `nimrtc_` prefix rule, third-party namespacing,
+  and the deprecation cycle — is
+  [ADR-019](adr/ADR-019-plugin-id-naming-contract.md); the summary is
+  in §8.1 below.
 - **Interface methods** — pure-virtual methods are not ABI-stable;
   adding a method is a breaking change for any plugin author. We
   bump the v0.x version that introduces the change and update the
@@ -506,6 +623,110 @@ For pre-1.0, we do **not** promise ABI stability. The plugin author
 must support against a pinned engine version (see
 `docs/zh/architecture.md` §12 "before 1.0 everything is
 experimental").
+
+### 8.1 The plugin ID naming contract
+
+**The grammar.** A plugin id must match:
+
+```
+^[a-z][a-z0-9_-]*$
+```
+
+Starts with a lowercase ASCII letter; continues with lowercase
+letters, digits, underscores and hyphens; nothing else. (The hyphen
+is permitted because the in-tree transport-stack ids —
+`"webrtc-classic"`, `"raw-udp-arq"` — already use it, and those are
+published config values.)
+
+Because the grammar accepts exactly the set of valid C++ identifiers
+**plus the hyphen**, the id you pass to a registration macro is
+usually a **bare token** and the macro stringifies it:
+
+```cpp
+NIMRTC_REGISTER_DTLS_SESSION(mybackend, &g_factory);         // -> "mybackend"
+NIMRTC_REGISTER_AUDIO_DECODER(opus, &g_opus_decoder_factory);  // -> "opus"
+```
+
+Passing a **quoted literal** to a tokenising macro is rejected at
+compile time. This is not pedantry: a quoted literal passed to a
+stringifying macro registers under an id that *includes the quote
+characters* — the registration succeeds, and the lookup never
+matches. That failure is silent, and it is the single most common
+way a plugin author ends up debugging "my plugin registers but the
+engine never picks it up".
+
+**Hyphenated ids** are the one case where the literal form is
+required, because `#my-id` does not lex as a single token:
+
+```cpp
+NIMRTC_REGISTER_TRANSPORT_STACK("webrtc-classic", &g_factory);
+```
+
+The full naming contract — the legal grammar, the `nimrtc_` prefix
+rule, third-party namespacing, and the deprecation cycle — is
+[ADR-019](adr/ADR-019-plugin-id-naming-contract.md); the summary is
+in §8.1 below.
+
+**The prefix rule.** The prefix is a claim about *ownership*, and it
+tells a reader of a config file who provided the component:
+
+| Id looks like | Means | Example |
+|---|---|---|
+| `nimrtc_…` | An **in-tree** implementation | `nimrtc_audio_rx`, `nimrtc_net_feedback`, `nimrtc_xr` |
+| A **vendor / library name** | A third-party or third-party-shaped implementation | `wolfssl`, `gmssl`, `libsrtp`, `msquic` |
+| A **conceptual role** | An algorithm or a role, not an implementation | `opus`, `aimd`, `adaptive`, `strict_priority`, `memory`, `headless`, `web_transport`, `ice` |
+
+**A third-party plugin must not use the `nimrtc_` prefix** — that name
+belongs to the project, and claiming it is a false statement about
+who maintains the component.
+
+**Third-party namespacing.** A third-party id must be qualified by
+your own namespace, so two vendors shipping an "opus" codec cannot
+collide in the same registry slot:
+
+```
+<your_namespace>_<implementation>
+```
+
+for example `acme_h264`, `contoso_3a`, `vendorx_capture`.
+
+**Validation.** Ids are validated against the grammar at
+**registration** time, so a malformed id is refused where the mistake
+was made — not later at `open()`, where the host is being told
+something else went wrong. A rejected id does not disturb the other
+entries in the same slot.
+
+The **recommended** way to get a *compile-time* error instead of a
+runtime one is to wrap your factory's id in `NIMRTC_PLUGIN_ID`:
+
+```cpp
+#include <nimrtc/core/plugin_id.hpp>
+
+std::string_view MyBackendFactory::id() const noexcept {
+    return NIMRTC_PLUGIN_ID("acme_h264");   // checked at compile time
+}
+```
+
+Note the **quotes**: `NIMRTC_PLUGIN_ID` wraps a *string literal*, not
+a bare token — its argument is handed to a `const char*` parameter.
+(The registration macros are the opposite: they take a bare token
+and stringify it. See §8.1.)
+
+`NIMRTC_PLUGIN_ID` also makes the id greppable — `git grep
+'NIMRTC_PLUGIN_ID('` lists every id in the tree — and gives each
+callsite a distinct type, so two plugins that accidentally pick the
+same id are visible in review rather than silently overwriting each
+other at runtime. The macro is in
+`nimrtc/core/plugin_id.hpp`; the in-tree factories all use it.
+
+**Changing an id.** Adding an id is additive. Renaming or removing
+one is a breaking change to the public config surface and requires a
+deprecation cycle: register **both** the old and the new id for at
+least one minor version, and log the old id at `Warn` when it is
+selected. A deprecation cycle is observable — "both ids resolve to
+the same factory" is an assertion a test can make.
+
+Full rationale and alternatives: [ADR-019](adr/ADR-019-plugin-id-naming-contract.md).
 
 ---
 

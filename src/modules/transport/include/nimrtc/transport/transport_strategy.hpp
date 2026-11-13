@@ -175,6 +175,18 @@ inline constexpr std::string_view kStrategyNames[kStrategyCount] = {
 //     — i.e. a one-line adapter near the call site (or a private helper
 //     in the engine) maps between the two shapes.
 //
+//     **That adapter now exists** — it lives in the *assembly* module,
+//     because assembly is the higher-level layer (see
+//     `docs/plan/transport-strategies.md` §8: "transport depends on no
+//     module above PAL Slice 2, assembly depends on transport"):
+//
+//         #include <nimrtc/assembly/transport_bridge.hpp>
+//         auto req = nimrtc::assembly::to_transport_requirements(profile);
+//
+//     See `src/modules/assembly/include/nimrtc/assembly/transport_bridge.hpp`
+//     for the field-by-field mapping and the lifetime contract (the
+//     mirror holds `string_view`s that borrow from the Profile).
+//
 // Field mapping (Profile v1.1 JSON key → ProfileTransportInput field):
 //   - `transport.strategy`            → `strategy`
 //   - `transport.media.max_p99_ms`    → `media_max_p99_ms`

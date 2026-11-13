@@ -36,6 +36,10 @@ Write an ADR when a decision:
 | [ADR-015](ADR-015-api-stability-policy.md) | NimRTC API Stability Policy | P2 |
 | [ADR-017](ADR-017-cross-end-timeline.md) | Cross-end frame timeline — WebRTC abs-send-time + RTCP-SR anchoring | P2 |
 | [ADR-018](ADR-018-bandwidth-signal-policy.md) | Bandwidth signal policy — transport-cc preferred, loss/RTT fallback | v1.2.0 (M1) |
+| [ADR-019](ADR-019-plugin-id-naming-contract.md) | Plugin ID naming contract — spelling, validation and change discipline | Phase 5 (v1.2.0) |
+| [ADR-020](ADR-020-engineconfig-string-ownership.md) | `EngineConfig` string ownership — the engine owns its strings | Phase 5 (v1.2.0) |
+| [ADR-021](ADR-021-sdp-rtp-not-pluggable.md) | SDP / RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden | Phase 4 (v1.2.0) |
+| [ADR-022](ADR-022-scheduler-c-abi.md) | The scheduler's C ABI — a real `extern "C"` surface | Phase 4 (v1.2.0) |
 
 ### Reserved numbers
 

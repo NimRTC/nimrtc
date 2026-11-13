@@ -23,6 +23,7 @@
 add_library(nimrtc_sched STATIC
     src/scheduler.cpp
     src/scheduler_plugin.cpp
+    src/scheduler_c.cpp
     )
 
 # STRICT_CONVERSIONS: the scheduler converts byte counts to BWE credit

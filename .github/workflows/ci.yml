@@ -294,6 +294,22 @@ jobs:
       - name: Check the plugin catalogue against the code
         run: python tools/check_doc_contract.py
 
+      # Architecture-remediation D2: "either wire it in, or delete it."
+      # A module under src/modules/ with a complete implementation and
+      # passing tests, but no path from the composition root, is the
+      # worst state -- it manufactures the illusion that a feature
+      # exists.  The check reads the CMake dependency graph and the
+      # plugin registrar table; it needs no build.
+      - name: Check for dead modules
+        run: python tools/check_dead_modules.py
+
+      # The guard above is only worth having if it can fail.  The
+      # self-test builds a synthetic module tree and asserts that the
+      # checker still distinguishes live / dead / orphan /
+      # benchmark-only modules.
+      - name: Self-test the dead-module guard
+        run: python tools/check_dead_modules.py --self-test
+
       # The offline release-signature verifier carries its own Ed25519
       # implementation.  A wrong curve equation or an inverted
       # verification equation makes it reject *valid* release

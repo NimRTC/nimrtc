@@ -113,6 +113,84 @@ cfg.dtls_name = "mybackend";   // matches the id you registered
 The engine will resolve `mybackend` and dispatch every DTLS call to
 your factory — no source change elsewhere.
 
+### 2.4 The contract tests your backend must pass
+
+A DTLS backend is not "working" because the handshake completed once.
+It is working because it satisfies the seam contract, and the
+contract is **tested**. A new backend must pass the seam tests in
+`src/modules/dtls/tests/` before it is considered supported:
+
+| Test file | What it asserts | Why it exists |
+|---|---|---|
+| `test_dtls_factory.cpp` | `factory->create()` returns a usable `IDtlsSession`; the concrete session **inherits** the interface; `factory->id()` returns the id the engine will look up; `register_default_plugins()` is **idempotent** | The factory contract. A backend that creates a session which does not actually implement `IDtlsSession` compiles but fails at the first virtual call — usually in a release build, at a customer site. The inheritance check catches it at test time. |
+| `test_dtls_seam_mock_factory.cpp` | A **mock** factory registered under a test id resolves through the registry exactly like a real one; ids resolve to the right factory; per-id registration is independent | The registry contract. It proves the *seam* works, independent of any crypto library — so a backend-specific bug is never confused with a plumbing bug. |
+| `test_dtls_handshake_reassembler.cpp` | DTLS records are reassembled correctly across fragmented reads | The record layer. A backend that hands the engine partial records produces a handshake that stalls at `HelloSent` — the classic symptom. |
+
+**The in-process round-trip** (`test_dtls_gmssl_tlcp` for the GMSSL
+backend; the equivalent for a custom backend) is the fourth
+requirement, and it is the one that exercises the *whole* path:
+
+```
+[OK] DTLS Connected (RFC 6347 §4.2.4 final)
+[OK] SRTP keying material 60 bytes exported
+[OK] on_handshake_complete fired with kOk
+[OK] cipher = ECDHE-ECDSA-AES128-GCM-SHA256  (default western suite)
+[OK] stats.errors == 0
+```
+
+Note the **`60 bytes exported`** line in particular. A backend that
+handshakes successfully but cannot export SRTP keying material is the
+single most common DTLS failure, because the symptom is not "DTLS is
+broken" but "DTLS is Connected and there is no inbound audio". If
+your backend's `export_srtp_key_material()` returns zero bytes, the
+handshake still looks fine — which is why the assertion has to be
+explicit.
+
+**Minimum bar for a new backend:**
+
+1. `test_dtls_factory.cpp` passes against your factory — including
+   the inheritance assertion and the `id()` assertion.
+2. `test_dtls_seam_mock_factory.cpp` passes (your change must not
+   break the seam for other backends).
+3. `test_dtls_handshake_reassembler.cpp` passes (your change must not
+   break record reassembly).
+4. An in-process Client+Server round trip completes the handshake,
+   exports 60 bytes of SRTP keying material, fires
+   `on_handshake_complete` with `kOk`, and reports `stats.errors == 0`.
+5. The loopback-p2p smoke test reaches ICE Connected + DTLS
+   Connected + SRTP key installation within ~5 s.
+
+**Two things the tests will not catch for you**, and which you must
+verify yourself against a real peer:
+
+- **The cipher suite.** The default is
+  `ECDHE-ECDSA-AES128-GCM-SHA256` / `AES256-GCM-SHA384`. If your
+  backend supports only a subset, the round-trip still passes (both
+  peers are your backend) but browser interop fails. Match the suite
+  before testing against Chrome.
+- **The fingerprint format.** `set_peer_fingerprint` takes the **raw
+  32-byte SHA-256 digest** from the SDP `a=fingerprint` attribute — the
+  WebRTC convention, *not* the SPKI hash from RFC 7250. Getting this
+  wrong produces a handshake that fails with no useful diagnostic.
+
+### 2.5 The id you register under
+
+The id is a public config key: it appears in host config files and in
+log lines, and once published it is stable for the lifetime of the
+major version. It must match the grammar `^[a-z][a-z0-9_-]*$`, and a
+third-party backend must carry its own namespace — `acme_dtls`, not
+`dtls`. The full contract is
+[ADR-019](../adr/ADR-019-plugin-id-naming-contract.md); the
+practical rules are in
+[plugin_author_guide.md](../plugin_author_guide.md) §8.1.
+
+```cpp
+// The id is a bare token — the macro stringifies it.
+// A quoted literal would register under an id that includes the
+// quote characters, and the lookup would never match.
+NIMRTC_REGISTER_DTLS_SESSION(acme_dtls, &g_factory);
+```
+
 ---
 
 ## 3. What doesn't change

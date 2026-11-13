@@ -32,19 +32,54 @@ namespace {
 
 using namespace nimrtc::rtp;
 
-// Round-trip "now" through NTP64 — error budget 1 ms (more than enough
-// for the 100 µs-or-so cost of the round trip).
+// Round-trip "now" through NTP64.
+//
+// The conversion is *exact* to within the NTP fraction's quantisation
+// (1e6 / 2^32 ≈ 0.23 µs).  What the test must therefore verify is that
+// the back-converted instant lands inside the wall-clock window the
+// conversion was asked to represent.
+//
+// It must NOT be verified against a fixed absolute slack: the original
+// version asserted "the skew is at most 50 ms", which actually measured
+// the thread's *scheduling delay* rather than the conversion's
+// accuracy.  Under a parallel ctest run (`ctest -j 4`) on a loaded CI
+// runner, the thread can be descheduled for far longer than 50 ms
+// between the two clock reads — the fixed bound failed with a 115 ms
+// skew while the round-trip itself was still sub-microsecond accurate.
+//
+// The window-based assertions below measure the thing the test is
+// about, and stay honest on a loaded machine.
 TEST(Ntp64, RoundTripNow) {
+    // The wall-clock window the conversion has to land in.  `before` is
+    // taken *before* the NTP64 is captured and `after` *after* it is
+    // converted back, so the back-converted instant must lie inside
+    // [before, after] (up to the quantisation error).  This is what
+    // makes the test measure the *round-trip accuracy* rather than the
+    // thread's scheduling delay.
+    const auto before = std::chrono::system_clock::now();
     const Ntp64 a = ntp64_from_system_clock();
     const auto  t  = system_clock_from_ntp64(a);
-    // Sleep a few ms and convert back; the back-converted value should
-    // *not* exceed "now" by more than ~10 ms (test latency).
+    const auto after  = std::chrono::system_clock::now();
+
+    // `t` must not be in the past of `before` (beyond the ~0.23 µs NTP
+    // quantisation error), and must not be in the future of `after`.
+    const auto early = std::chrono::duration_cast<std::chrono::microseconds>(
+        t - before).count();
+    const auto late  = std::chrono::duration_cast<std::chrono::microseconds>(
+        after - t).count();
+
+    // 1 ms is far more than the conversion's real error (sub-µs); it
+    // only absorbs the clock reads' own cost.
+    EXPECT_GE(early, -1'000);
+    EXPECT_GE(late, -1'000);
+
+    // And the round-trip must not lose more than 1 ms of the interval
+    // it was asked to represent.
     std::this_thread::sleep_for(std::chrono::milliseconds(3));
     const auto  now = std::chrono::system_clock::now();
     const auto  skew = std::chrono::duration_cast<std::chrono::microseconds>(
         now - t).count();
     EXPECT_GE(skew, 0);
-    EXPECT_LE(skew, 50'000);   // 50 ms test-runner slack
 }
 
 // Upper 32 bits are seconds since 1900.

@@ -306,10 +306,21 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         } else {
             try {
                 // requirements_from_profile_input() throws on unknown names.
-                // The base call below has no per-instance overrides — it
-                // returns the strategy's canonical TransportRequirements.
+                //
+                // The per-instance media p99 override (if the host set
+                // one) is applied on top of the strategy's canonical
+                // requirements.  This is the field that carries a
+                // Profile's `transport.media.max_p99_ms` into the
+                // engine (architecture remediation plan §4.2 / D2):
+                //   Profile.transport.media.max_p99_ms
+                //     → assembly::to_transport_input(profile)
+                //     → cfg.transport_media_max_p99_ms
+                //     → here.
+                // Before this wiring the value was parsed, JSON
+                // round-tripped and then silently dropped.
                 ProfileTransportInput in;
                 in.strategy = config_.transport_strategy_name;
+                in.media_max_p99_ms = config_.transport_media_max_p99_ms;
                 req = requirements_from_profile_input(in);
                 resolved_name = config_.transport_strategy_name.empty()
                     ? std::string_view{"browser-call"}
@@ -323,6 +334,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
             }
         }
         impl_->resolved_strategy_name = resolved_name;
+        impl_->resolved_media_max_p99_ms = req.max_p99_ms;
 
         // ---- The per-stack backend selection (from EngineConfig) --------
         //
@@ -990,7 +1002,7 @@ int NimRTCEngine::tick() noexcept {
     // more than the peer allows.  The tightest of the two wins.
     if (bwe_ && scheduler_) {
         std::uint32_t target_bps = bwe_->estimate().target_bitrate_bps;
-        const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+        const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
         if (peer_limit > 0 && (target_bps == 0 || target_bps > peer_limit)) {
             target_bps = peer_limit;
         }
@@ -1054,6 +1066,50 @@ int NimRTCEngine::tick() noexcept {
                     core::SteadyClock::now().time_since_epoch()).count())});
     }
 
+    // ---- Drive the video-quality statistics (Phase 4.2 / D2) -------------
+    //
+    // The statistics sink needs a periodic tick for two reasons:
+    //
+    //   1. the bitrate window is swept and the EMA updated (a one-second
+    //      window, so the figure means "the last second");
+    //   2. the freeze detector notices that nothing has been rendered
+    //      for longer than the threshold — a freeze that never ends
+    //      (the peer stopped sending) is invisible without a tick,
+    //      because there is no *gap* between two rendered frames to
+    //      measure.
+    //
+    // The jitter-buffer drop attribution is polled here too: the
+    // receiver plugin exposes *cumulative* counters, so the engine
+    // compares two snapshots and feeds the difference in as
+    // `kJitterBufferTimeout` drops.
+    if (impl_->video_stats.active()) {
+        const std::int64_t now_us = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count());
+
+        // ---- Jitter-buffer drop attribution ----------------------------
+        //
+        // `frames_incomplete` counts the frames that never assembled
+        // because their packets were lost (or arrived too late).  The
+        // difference between two snapshots is the number of drops since
+        // the last tick.
+        if (video_receiver_) {
+            const std::uint64_t incomplete_now =
+                video_receiver_->stats().frames_incomplete;
+            if (incomplete_now > impl_->video_jb_incomplete_frames_prev) {
+                const std::uint64_t delta =
+                    incomplete_now - impl_->video_jb_incomplete_frames_prev;
+                for (std::uint64_t i = 0; i < delta; ++i) {
+                    impl_->video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kJitterBufferTimeout);
+                }
+            }
+            impl_->video_jb_incomplete_frames_prev = incomplete_now;
+        }
+
+        impl_->video_stats.tick(now_us);
+    }
+
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.
@@ -1109,7 +1165,7 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     // knows what it can receive, and the TMMBN we send is a promise
     // that the limit is in force.
     std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
-    const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+    const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
     if (peer_limit > 0 && (estimate == 0 || estimate > peer_limit)) {
         estimate = peer_limit;
     }

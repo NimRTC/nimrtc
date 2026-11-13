@@ -9,10 +9,13 @@
  *   4. on_frame_dropped increments the right counter per reason.
  *   5. Freeze detection: gap > threshold → freeze_count / freeze_total_ms.
  *   6. Current bitrate ≈ total_bytes * 8 over a 1-second window.
- *   7. RTCP feedback is a no-op for stats; on_qp_sample updates QP stats.
+ *   7. RTCP feedback: a key-frame request is a dependency loss; a NACK is
+ *      not.  on_qp_sample updates the QP stats.
  *   8. reset() clears all state.
  *   9. tick() with no activity is a no-op.
  *  10. Multi-threaded on_frame_received is race-free (counters exact).
+ *  11. The bitrate window does not allocate on the hot path (the
+ *      `hotpath_zero_allocs` gate depends on it).
  */
 
 #include <gtest/gtest.h>
@@ -102,6 +105,7 @@ TEST(VideoStats, FrameDroppedPerReason) {
     auto s = sink->snapshot();
     EXPECT_EQ(s.frames_dropped_jb,      2u);
     EXPECT_EQ(s.frames_dropped_decoder, 2u);   // decoder + dependency both tally here
+    EXPECT_EQ(s.frames_dropped_dependency, 1u); // the dependency loss, on its own
 }
 
 // -----------------------------------------------------------------------------
@@ -188,16 +192,26 @@ TEST(VideoStats, CurrentBitrateApproximation) {
 }
 
 // -----------------------------------------------------------------------------
-// 7. RTCP feedback is a no-op for stats; on_qp_sample updates QP stats.
+// 7. RTCP feedback: a key-frame request is a dependency loss; a NACK is
+//    not.  on_qp_sample updates the QP stats.
 // -----------------------------------------------------------------------------
-TEST(VideoStats, RtcpFeedbackNoOpAndQpAccumulation) {
+TEST(VideoStats, RtcpFeedbackCountsDependencyLossAndQpAccumulation) {
     auto sink = vs::create_stats_sink({});
 
-    // Each kind of RTCP feedback must not crash and must not move stats.
+    // A PLI or a FIR is the peer saying "a reference frame of yours
+    // never arrived" — that is a dependency loss.
     EXPECT_NO_THROW(sink->on_rtcp_feedback(vs::RtcpFeedbackKind::kPLI));
     EXPECT_NO_THROW(sink->on_rtcp_feedback(vs::RtcpFeedbackKind::kFIR));
+
+    // A NACK is a *packet*-level retransmission request and a REMB is a
+    // bandwidth report: neither is a frame drop.
     EXPECT_NO_THROW(sink->on_rtcp_feedback(vs::RtcpFeedbackKind::kNACK));
     EXPECT_NO_THROW(sink->on_rtcp_feedback(vs::RtcpFeedbackKind::kREMB));
+
+    auto after_feedback = sink->snapshot();
+    EXPECT_EQ(after_feedback.frames_dropped_dependency, 2u);
+    EXPECT_EQ(after_feedback.frames_dropped_decoder,    0u);
+    EXPECT_EQ(after_feedback.frames_dropped_jb,         0u);
 
     // QP samples: 20, 25, 30 → sum=75, count=3, average=25.
     sink->on_qp_sample(20);

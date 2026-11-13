@@ -94,6 +94,44 @@ table references it: the registration *is* the consumption. The
 still distinguishes each shape, so the guard cannot silently degrade into
 a no-op.
 
+## The engine-layering guard
+
+| Script | Purpose |
+|--------|---------|
+| `check_engine_layering.py` | ADR-025 Layout Invariant 4: the engine reaches a concrete module only through its `plugins::I*` seam, with a named set of exemptions. The check scans `src/engine/` for concrete-module includes and fails when a module outside the ADR-025 Decision 1 table appears. Wired into CI as the `docs / markdown links` job. |
+
+```
+python tools/check_engine_layering.py --verbose
+python tools/check_engine_layering.py --self-test
+```
+
+The exemption list lives in the script, one commented entry per module,
+so widening it is a visible act rather than an accident — an exemption
+that grows silently is how the invariant stopped meaning anything in the
+first place.
+
+## The C-clean header guard
+
+| Script | Purpose |
+|--------|---------|
+| `check_c_clean_headers.py` | ADR-026: a `.h` under `src/**/include/` is a promise that a C host can include it. The check compiles every such header as C11, in isolation, with a real C compiler. Wired into CI as the `docs / markdown links` job. |
+
+```
+python tools/check_c_clean_headers.py --verbose
+python tools/check_c_clean_headers.py --self-test
+python tools/check_c_clean_headers.py --require-compiler
+```
+
+Isolation is the point: a header that only compiles because some *other*
+header was included first is exactly the header that breaks a C consumer
+who includes it first. Each header is probed by its public name — the
+path below its module's `include/` root — so the check tests the include
+contract rather than the file system.
+
+The scope is the extension: `.h` is C-consumable, `.hpp` is C++-only. A
+header that was always C++-only opts out by being renamed; a header that
+was always meant to be C cannot drift.
+
 ## CI sanitizer gate
 
 `linux-sanitizers` in `.github/workflows/ci.yml` runs the test suite under

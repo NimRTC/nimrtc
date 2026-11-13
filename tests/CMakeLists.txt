@@ -1574,6 +1574,22 @@ nimrtc_add_engine_test(test_engine_audio_loopback test_engine_audio_loopback.cpp
 nimrtc_add_engine_test(test_engine_audio_send test_engine_audio_send.cpp)
 
 # ---------------------------------------------------------------------------
+# The audio send path's allocation budget (remediation Phase 3 §3.5).
+#
+# The plan asks for "音频路径 per-packet 堆分配次数 = 0".  The metric is
+# per *packet*, not per call: the host may hand the engine an arbitrary
+# block size and the engine accumulates samples until it has a whole
+# 20 ms frame.
+#
+# The measurement needs the global operator new replaced, which is only
+# safe in a binary that does not link a sanitizer runtime.  The video
+# side of the same criterion lives in the `hotpath_zero_allocs` ctest
+# case (the benchmark binary owns that probe), so the two probes never
+# meet in one process.
+# ---------------------------------------------------------------------------
+nimrtc_add_engine_test(test_engine_audio_alloc test_engine_audio_alloc.cpp)
+
+# ---------------------------------------------------------------------------
 # The BWE-linked audio bitrate adaptation.
 #
 # The engine lowers the audio encoder's bitrate when the bandwidth
@@ -1811,8 +1827,35 @@ endif()
 set_target_properties(bench_engine_hotpath PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
 nimrtc_apply_options(bench_engine_hotpath LENIENT)
-# It is NOT registered with ctest (see the comment above), but it is
-# built by default so `tools/benchmark_hotpath.py` can find it.  The
-# wolfSSL certs are copied because the engine links the DTLS seam.
+# The wolfSSL certs are copied because the engine links the DTLS seam.
 nimrtc_copy_wolfssl_certs(bench_engine_hotpath)
+
+# ---------------------------------------------------------------------------
+# The zero-allocation regression gate.
+#
+# The benchmark itself is NOT a ctest case (see the comment above): the
+# timing numbers are machine-dependent.  The *allocation* count is not —
+# it is exact, and the engine runs no background threads in the "shell"
+# profile, so every allocation counted during the measured region belongs
+# to the `send_video()` call itself.
+#
+# Architecture-remediation Phase 3 §3.5 requires `send_video()` at
+# 1080p30 to perform **zero** heap allocations per call.  This case turns
+# that requirement into a gate: `--assert-zero-allocs` makes the process
+# exit non-zero when the count is not zero.
+#
+# The frame count is small on purpose: 300 frames at 1080p is a couple of
+# seconds, and the allocation count does not depend on how many frames are
+# measured.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    add_test(NAME hotpath_zero_allocs
+             COMMAND bench_engine_hotpath
+                     --width 1920 --height 1080
+                     --frames 300 --warmup 60
+                     --assert-zero-allocs)
+    set_tests_properties(hotpath_zero_allocs PROPERTIES
+        TIMEOUT 300
+        LABELS "performance;hotpath")
+endif()
 

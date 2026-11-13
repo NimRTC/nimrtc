@@ -213,6 +213,25 @@ public:
     /// not be used until `adopt_storage()` is called on it.
     [[nodiscard]] std::vector<std::uint8_t> release_storage() noexcept;
 
+    // ---- Phase 3: the pooling path reuses the *object* too ---------------
+    //
+    // The pool used to hand out a fresh `VideoFrameBuffer` (plus a fresh
+    // `OwnedFrameControl`) for every frame: two heap allocations per
+    // frame, on top of the storage.  The pool now parks the whole
+    // buffer — storage *and* control block — and hands it back out
+    // unchanged, so the steady state allocates nothing at all.
+    //
+    // These are internal to the pool and the module's own .cpp file;
+    // they are not part of the public ABI.
+
+    /** Re-arm this buffer for a new frame: adopt the given layout and
+     *  reset the control block's metadata.
+     *
+     *  The storage is kept as-is (it was allocated for a layout of at
+     *  least this size); only the metadata is reset, because a recycled
+     *  buffer is a new frame. */
+    void rearm(VideoFrameLayout layout) noexcept;
+
     /** Wrap an externally-owned block (no ownership transfer; we hold a
      *  control block that does NOT free data). Used by decoders that
      *  produce from a fixed pool. */
@@ -357,18 +376,25 @@ private:
 // ~3 MB allocation and a ~3 MB memset every 33 ms, on top of the copy the
 // staging itself does.
 //
-// The pool recycles the storage instead: `acquire()` hands out a buffer
-// whose storage came from the pool, and the storage goes back to the pool
-// when the last reference to the buffer dies.
+// The pool recycles the *whole buffer* instead: `acquire()` hands out a
+// buffer whose object, pixel storage and control block all came from the
+// pool, and the buffer goes back to the pool when the last reference to
+// it dies.
 //
-// ## Why the storage comes back
+// ## Why the buffer comes back
 //
 // `VideoFrameBuffer` owns its storage, so the pool cannot simply keep a
-// `std::vector` and hand it out twice.  The pool therefore hands the
-// buffer a *custom deleter* that returns the storage to the pool rather
-// than freeing it.  The buffer itself is created through the
-// adopt-an-already-allocated-storage constructor, so the handoff costs
-// no copy and no allocation.
+// `std::vector` and hand it out twice.  The pool parks the buffer's
+// *owner* `shared_ptr` and hands the caller an **aliasing** `shared_ptr`
+// that shares the owner's control block:
+//
+//     std::shared_ptr<VideoFrameBuffer>(owner, owner.get())
+//
+// The alias therefore carries **no** control-block allocation of its own
+// — which is the whole point, because a `shared_ptr` that owns its
+// object is one heap allocation per frame.  The caller releasing the
+// alias drops the owner's `use_count()` back to one, and the buffer is
+// reusable on the next `acquire()`.
 //
 // ## Thread safety
 //
@@ -377,24 +403,25 @@ private:
 
 class NIMRTC_API_STABLE VideoFrameBufferPool {
 public:
-    VideoFrameBufferPool() = default;
-    ~VideoFrameBufferPool() = default;
+    VideoFrameBufferPool();
+    ~VideoFrameBufferPool();
 
     VideoFrameBufferPool(const VideoFrameBufferPool&) = delete;
     VideoFrameBufferPool& operator=(const VideoFrameBufferPool&) = delete;
 
     /// Acquire a buffer for the given layout.
     ///
-    /// The returned buffer owns its storage; the storage returns to this
-    /// pool when the last reference to the buffer is dropped.  The
-    /// buffer's *contents* are undefined — the caller is expected to
-    /// overwrite the planes it cares about.
+    /// The returned buffer owns its storage; the buffer returns to this
+    /// pool when the last reference to it is dropped.  The buffer's
+    /// *contents* are undefined — the caller is expected to overwrite
+    /// the planes it cares about.
     ///
     /// A layout whose `buffer_size` is 0 yields nullptr.
     [[nodiscard]] std::shared_ptr<VideoFrameBuffer>
     acquire(VideoFrameLayout layout);
 
-    /// Number of buffers currently parked in the pool (idle).
+    /// Number of buffers currently parked in the pool *and* available for
+    /// reuse (the caller has released them).
     [[nodiscard]] std::size_t idle() const noexcept;
 
     /// Number of buffers currently handed out.
@@ -407,19 +434,14 @@ public:
     [[nodiscard]] std::size_t total_allocations() const noexcept;
 
 private:
-    /// The pool's mutable state, shared with the buffers it handed out.
+    /// The pool's mutable state.
     ///
-    /// The state is a `shared_ptr` so a buffer that outlives the pool
-    /// still has somewhere valid to return its storage — the deleter
-    /// holds a reference to it.  Without this the deleter would
-    /// dereference a dangling pool pointer.
-    struct State {
-        std::vector<std::vector<std::uint8_t>> idle;
-        std::size_t in_flight = 0;
-        std::size_t total_allocations = 0;
-    };
+    /// The pool's buffers are parked in the *state*, not in the pool
+    /// object, so a buffer that outlives the pool still finds a valid
+    /// home for itself when the caller releases it.
+    struct State;
 
-    std::shared_ptr<State> state_ = std::make_shared<State>();
+    std::shared_ptr<State> state_;
 };
 
 // ---------------------------------------------------------------------------

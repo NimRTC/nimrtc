@@ -160,7 +160,22 @@ public:
      *  @param view  Packet payload (header+data) to send.
      *  @param addr  Destination address. Empty = last-used address.
      *  @return kOk on queuing success; error code on failure.
-     *  @note Thread-safe. */
+     *
+     *  @note Thread-safe.
+     *
+     *  ## Buffer lifetime
+     *
+     *  The `view` is **borrowed**, not owned: the transport must copy the
+     *  bytes it needs before it returns, and must not retain the pointer
+     *  after the call.  The engine relies on this — on the "transport"
+     *  profile (no scheduler) it hands the same scratch buffer to every
+     *  `send()` call, so a transport that kept the pointer would see it
+     *  overwritten by the next packet.
+     *
+     *  A transport that *must* queue the bytes for a later write (a
+     *  dedicated writer thread, for example) has to copy them into its
+     *  own buffer first; the copy happens inside `send()`, on the
+     *  caller's thread. */
     virtual NIMRTC_API_STABLE Status send(BufferView view,
                                    Addr dst_addr = {}) noexcept = 0;
 

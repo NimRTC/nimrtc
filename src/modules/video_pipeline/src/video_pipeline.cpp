@@ -98,14 +98,26 @@ inline std::int32_t seq_delta(std::uint16_t newer, std::uint16_t older) noexcept
 
 // ---------------------------------------------------------------------------
 // Annex B NALU parser (for the sender).
+//
+// The NAL units are returned as **spans into the input buffer**, not as
+// copies.  The caller owns the bitstream for the duration of the
+// packetization (the engine's `video_enc_buf` lives across the whole
+// `push_frame()` call), so a copy is pure waste — and on the hot path
+// it is the dominant cost: a 1080p key frame is tens of kilobytes
+// copied once per frame, on top of the per-NAL heap allocations the
+// copy itself needed.
+//
+// The parser fills a caller-owned vector so the *vector* can also be
+// reused across frames (see `VideoSender::Impl::nalus`).
 // ---------------------------------------------------------------------------
 
 /** Extract NAL units from an Annex B bitstream.
  *  Accepts 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
- *  Each returned vector includes the 1-byte NAL header (no start code). */
-std::vector<std::vector<std::uint8_t>> parse_annex_b(core::ByteSpan bs) noexcept {
-    std::vector<std::vector<std::uint8_t>> out;
-    if (bs.empty()) return out;
+ *  Each returned span includes the 1-byte NAL header (no start code). */
+void parse_annex_b(core::ByteSpan bs,
+                   std::vector<core::ByteSpan>& out) noexcept {
+    out.clear();
+    if (bs.empty()) return;
 
     auto find_next_start = [&](std::size_t from) -> std::size_t {
         for (std::size_t j = from; j + 2 < bs.size(); ++j) {
@@ -124,7 +136,7 @@ std::vector<std::vector<std::uint8_t>> parse_annex_b(core::ByteSpan bs) noexcept
     // Find first start code.
     std::size_t start = find_next_start4(0);
     if (start == bs.size()) start = find_next_start(0);
-    if (start == bs.size()) return out;
+    if (start == bs.size()) return;
 
     // Skip the start code prefix (3 or 4 bytes).
     std::size_t prefix_len =
@@ -137,10 +149,7 @@ std::vector<std::vector<std::uint8_t>> parse_annex_b(core::ByteSpan bs) noexcept
         std::size_t next  = (next4 < next3) ? next4 : next3;
         std::size_t end   = (next == bs.size()) ? bs.size() : next;
         if (end > cursor) {
-            std::vector<std::uint8_t> nalu(
-                bs.begin() + static_cast<std::ptrdiff_t>(cursor),
-                bs.begin() + static_cast<std::ptrdiff_t>(end));
-            if (!nalu.empty()) out.push_back(std::move(nalu));
+            out.push_back(core::ByteSpan{bs.data() + cursor, end - cursor});
         }
         if (next == bs.size()) break;
         // Skip start code (3 or 4 bytes).
@@ -148,13 +157,14 @@ std::vector<std::vector<std::uint8_t>> parse_annex_b(core::ByteSpan bs) noexcept
             (next + 3 < bs.size() && bs[next + 3] == 1) ? 4 : 3;
         cursor = next + prefix_len;
     }
-    return out;
 }
 
 /** Extract NAL units from a length-prefixed bitstream (RFC 6184 Annex B /
- *  MP4-style framing).  Each NAL is prefixed by a 4-byte big-endian length. */
-std::vector<std::vector<std::uint8_t>> parse_length_prefixed(core::ByteSpan bs) noexcept {
-    std::vector<std::vector<std::uint8_t>> out;
+ *  MP4-style framing).  Each NAL is prefixed by a 4-byte big-endian length.
+ *  As with `parse_annex_b`, the NAL units are spans into the input. */
+void parse_length_prefixed(core::ByteSpan bs,
+                           std::vector<core::ByteSpan>& out) noexcept {
+    out.clear();
     std::size_t cursor = 0;
     while (cursor + 4 <= bs.size()) {
         const std::uint32_t len =
@@ -164,13 +174,9 @@ std::vector<std::vector<std::uint8_t>> parse_length_prefixed(core::ByteSpan bs) 
              static_cast<std::uint32_t>(bs[cursor + 3]);
         cursor += 4;
         if (len == 0 || cursor + len > bs.size()) break;
-        std::vector<std::uint8_t> nalu(
-            bs.begin() + static_cast<std::ptrdiff_t>(cursor),
-            bs.begin() + static_cast<std::ptrdiff_t>(cursor + len));
-        out.push_back(std::move(nalu));
+        out.push_back(core::ByteSpan{bs.data() + cursor, len});
         cursor += len;
     }
-    return out;
 }
 
 } // namespace
@@ -647,6 +653,12 @@ struct VideoSender::Impl {
     SenderStats             stats{};
     SenderPacketCallback    packet_cb;
 
+    /// The maximum number of NAL units the packetizer works with in one
+    /// frame.  The scratch vectors are reserved to this size once, so
+    /// that a frame with an unusual number of NAL units does not grow
+    /// them (which would be a heap allocation on the send path).
+    static constexpr std::size_t kMaxScratchNalus = 64;
+
     std::uint16_t next_seq = 0;
     bool          keyframe_pending = false;
 
@@ -659,6 +671,10 @@ struct VideoSender::Impl {
     // sent packets in a small ring buffer (bounded by
     // `cfg.retransmit_cache_packets`) so a NACK can be answered without
     // re-encoding the frame.
+    //
+    // Phase 3: the slot's payload vector is pre-sized to the MTU when the
+    // ring is built, so caching a packet is a memcpy into an already
+    // allocated buffer instead of a fresh allocation per packet.
     struct CachedPacket {
         std::uint16_t           seq      = 0;
         std::uint32_t           rtp_ts   = 0;
@@ -668,9 +684,66 @@ struct VideoSender::Impl {
     std::vector<CachedPacket>  rtx_cache;   // ring buffer, oldest first
     std::size_t               rtx_head = 0; // next slot to overwrite
 
+    // ---- Reusable packetization scratch (Phase 3 / C-class) ---------------
+    //
+    // The sender used to build a fresh set of vectors for every frame:
+    // the NAL unit list, the "does this NAL need FU-A" flags, the FU-A
+    // fragment groups, the STAP-A group, the STAP-A span list and the
+    // STAP-A output buffer.  On a 30 fps video path that is a steady
+    // stream of short-lived heap allocations — the last thing a real-time
+    // path should have.
+    //
+    // All of them are now members whose capacity is kept across frames.
+    // The vectors are *cleared*, not destroyed, so the storage stays.
+    //
+    // The NAL units are **spans into the source bitstream**, not copies:
+    // the caller owns the bitstream for the whole `push_frame()` call, so
+    // copying tens of kilobytes per frame bought nothing.
+
+    /// The NAL units of the frame being packetized (spans into the source).
+    std::vector<core::ByteSpan> nalus;
+
+    /// Per-NAL flag: true when the NAL is too large for one packet and
+    /// must be FU-A fragmented.
+    std::vector<bool> use_fua;
+
+    /// The NAL units of the current STAP-A / AP aggregation group.
+    std::vector<core::ByteSpan> group;
+
+    /// The FU-A / FU fragment buffer.  One fragment is built at a time:
+    /// `emit()` copies the payload into its own scratch before firing
+    /// the callback, so the buffer is free to be overwritten by the next
+    /// fragment.
+    std::vector<std::uint8_t> fua_buf;
+
+    /// The STAP-A / AP output buffer, sized to the MTU.
+    std::vector<std::uint8_t> group_out;
+
+    /// The H.265 AP aggregation group (typed NAL units).
+    std::vector<video_payload::h265::Nalu> ap_group;
+
     explicit Impl(SenderConfig c) : cfg(std::move(c)) {
         next_seq = cfg.initial_seq;
         rtx_cache.resize(cfg.retransmit_cache_packets);
+        // Pre-size every retransmission slot to the MTU so caching a packet
+        // is a memcpy into an existing buffer, not a fresh allocation.
+        // Without this the RTX ring allocated one buffer per outgoing
+        // packet — a per-frame allocation on the hot path.
+        for (CachedPacket& slot : rtx_cache) {
+            slot.payload.reserve(cfg.mtu);
+        }
+        // Reserve the packetization scratch vectors up-front.  Their
+        // sizes depend on the *content* of the frame (how many NAL units
+        // it has), so without a reservation the first frame that carries
+        // more NAL units than any before it grows the vector — a
+        // one-off allocation that shows up as a per-frame allocation in
+        // the benchmark whenever the payload happens to contain a
+        // start-code-like byte sequence.
+        nalus.reserve(kMaxScratchNalus);
+        group.reserve(kMaxScratchNalus);
+        use_fua.reserve(kMaxScratchNalus);
+        ap_group.reserve(kMaxScratchNalus);
+        scratch.reserve(cfg.mtu);
     }
 
     void emit(core::ByteSpan payload,
@@ -710,9 +783,19 @@ struct VideoSender::Impl {
         return nullptr;
     }
 
-    /** H.264 packetization: emit one frame's worth of NALUs. */
-    core::Result<void> emit_h264(std::vector<std::vector<std::uint8_t>> nalus,
-                                 std::uint32_t rtp_ts) noexcept {
+    /** H.264 packetization: emit one frame's worth of NALUs.
+     *
+     *  The NAL units are the `nalus` member (spans into the source
+     *  bitstream, parsed by `parse_annex_b()`); every temporary this
+     *  function used to build is now a reusable member, so the steady
+     *  state performs **no** heap allocation.
+     *
+     *  The FU-A fragments are built lazily, one at a time, into a single
+     *  reusable buffer: `emit()` copies the payload into its own scratch
+     *  before firing the callback, so the fragment buffer is free to be
+     *  overwritten by the next fragment.
+     */
+    core::Result<void> emit_h264(std::uint32_t rtp_ts) noexcept {
         if (cfg.packetization_mode == PacketizationMode::kInterleaved) {
             return core::Result<void>::fail(
                 core::ErrorCode::NotImplemented,
@@ -721,23 +804,19 @@ struct VideoSender::Impl {
         }
 
         // Decide which NALUs to FU-A-packetize (oversized) and which to
-        // consider for STAP-A aggregation.
-        std::vector<bool> use_fua(nalus.size(), false);
-        // large_fragments[i] = vector of FU-A fragment payloads for nalu i
-        // (only populated when use_fua[i] is true).
-        //
-        // The vector is *sized* to nalus.size() and indexed by the NAL
-        // unit's own index — a `push_back` would shift every entry and
-        // make `large_fragments[i]` read past the end for the common
-        // "SPS + PPS + one oversized IDR" shape (three NAL units, one
-        // fragment group).
-        std::vector<std::vector<std::vector<std::uint8_t>>> large_fragments(
-            nalus.size());
-
+        // consider for STAP-A aggregation.  Only the *size* matters here,
+        // so no fragment is built yet.
+        use_fua.assign(nalus.size(), false);
         for (std::size_t i = 0; i < nalus.size(); ++i) {
-            const auto& n = nalus[i];
-            if (n.size() > cfg.mtu) {
-                use_fua[i] = true;
+            use_fua[i] = nalus[i].size() > cfg.mtu;
+        }
+
+        // Walk through nalus; for each, either emit FU-A fragments OR
+        // try to bundle with neighbouring small NALUs into a STAP-A.
+        std::size_t i = 0;
+        while (i < nalus.size()) {
+            if (use_fua[i]) {
+                const core::ByteSpan n = nalus[i];
                 const std::uint8_t nalu_type = n.empty() ? 0 : (n[0] & kNaluTypeMask);
                 const std::uint8_t nri       = n.empty() ? 0 : ((n[0] & kNriMask) >> 5);
                 const std::size_t  body_size = n.size() > 1 ? n.size() - 1 : 0;
@@ -745,7 +824,6 @@ struct VideoSender::Impl {
                                                        ? cfg.mtu - 2
                                                        : 0;
                 std::size_t offset = 0;
-                std::vector<std::vector<std::uint8_t>> fragments;
                 while (offset < body_size) {
                     const std::size_t remaining = body_size - offset;
                     const std::size_t this_len = remaining > max_body_per_frag
@@ -755,39 +833,24 @@ struct VideoSender::Impl {
                     const bool end   = (offset + this_len == body_size);
                     const core::ByteSpan body_slice{
                         n.data() + 1 + offset, this_len};
-                    std::vector<std::uint8_t> frag(cfg.mtu);
+                    if (fua_buf.size() < cfg.mtu) fua_buf.resize(cfg.mtu);
                     const std::size_t wrote = build_fu_a(
                         static_cast<NaluType>(nalu_type),
                         body_slice,
                         start,
                         end,
-                        core::MutableByteSpan{frag.data(), frag.size()});
+                        core::MutableByteSpan{fua_buf.data(), fua_buf.size()});
                     if (wrote == 0) return core::Result<void>::fail(
                         core::ErrorCode::InternalError,
                         "video_pipeline: build_fu_a failed");
-                    frag.resize(wrote);
                     // Patch the NRI on the indicator byte (build_fu_a
                     // defaults to NRI=0).  Indicator layout:
                     //   F(1) NRI(2) Type(5) — type must stay 28.
-                    frag[0] = static_cast<std::uint8_t>(
-                        (frag[0] & ~kNriMask) | ((nri & 0x03) << 5));
-                    fragments.push_back(std::move(frag));
+                    fua_buf[0] = static_cast<std::uint8_t>(
+                        (fua_buf[0] & ~kNriMask) | ((nri & 0x03) << 5));
+                    emit(core::ByteSpan{fua_buf.data(), wrote},
+                         rtp_ts, /*marker=*/end);
                     offset += this_len;
-                }
-                large_fragments[i] = std::move(fragments);
-            }
-        }
-
-        // Walk through nalus; for each, either emit FU-A fragments OR
-        // try to bundle with neighbouring small NALUs into a STAP-A.
-        std::size_t i = 0;
-        while (i < nalus.size()) {
-            if (use_fua[i]) {
-                const auto& frags = large_fragments[i];
-                for (std::size_t k = 0; k < frags.size(); ++k) {
-                    const bool is_last = (k + 1 == frags.size());
-                    emit(core::ByteSpan{frags[k].data(), frags[k].size()},
-                         rtp_ts, /*marker=*/is_last);
                 }
                 stats.fua_frames_packetized++;
                 ++i;
@@ -797,7 +860,7 @@ struct VideoSender::Impl {
             // Try STAP-A aggregation starting at i: pack as many small
             // NALUs as fit within mtu - 1 (STAP-A header) - 2*N (lengths).
             std::size_t budget = cfg.mtu > 1 ? cfg.mtu - 1 : 0;
-            std::vector<std::vector<std::uint8_t>> group;
+            group.clear();
             std::size_t j = i;
             while (j < nalus.size() && !use_fua[j]) {
                 if (budget < 2 + nalus[j].size()) {
@@ -820,26 +883,19 @@ struct VideoSender::Impl {
 
             if (group.size() >= 2) {
                 // Emit a STAP-A packet.
-                std::vector<core::ByteSpan> nalu_spans;
-                nalu_spans.reserve(group.size());
-                for (auto& g : group) {
-                    nalu_spans.push_back(core::ByteSpan{g.data(), g.size()});
-                }
-                std::vector<std::uint8_t> out(cfg.mtu);
+                if (group_out.size() < cfg.mtu) group_out.resize(cfg.mtu);
                 const std::size_t wrote = build_stap_a(
-                    nalu_spans.data(), nalu_spans.size(),
-                    core::MutableByteSpan{out.data(), out.size()});
+                    group.data(), group.size(),
+                    core::MutableByteSpan{group_out.data(), group_out.size()});
                 if (wrote == 0) {
                     // STAP-A build failed (e.g. too big).  Fall back to
                     // single NALUs one by one.
                     for (auto& g : group) {
-                        emit(core::ByteSpan{g.data(), g.size()},
-                             rtp_ts, /*marker=*/false);
+                        emit(g, rtp_ts, /*marker=*/false);
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
-                    out.resize(wrote);
-                    emit(core::ByteSpan{out.data(), out.size()},
+                    emit(core::ByteSpan{group_out.data(), wrote},
                          rtp_ts, /*marker=*/true);
                     stats.stapa_frames_packetized++;
                 }
@@ -849,8 +905,7 @@ struct VideoSender::Impl {
 
             // group.size() == 1: emit single NALU.
             if (group.size() == 1) {
-                emit(core::ByteSpan{group[0].data(), group[0].size()},
-                     rtp_ts, /*marker=*/true);
+                emit(group[0], rtp_ts, /*marker=*/true);
                 stats.single_nal_frames_packetized++;
                 i = j;
                 continue;
@@ -883,8 +938,7 @@ struct VideoSender::Impl {
     // The AP packet does *not* carry a DONL field here: NimRTC does not
     // negotiate `sprop-max-don-diff`, so the field is absent.
     // ---------------------------------------------------------------------
-    core::Result<void> emit_h265(std::vector<std::vector<std::uint8_t>> nalus,
-                                 std::uint32_t rtp_ts) noexcept {
+    core::Result<void> emit_h265(std::uint32_t rtp_ts) noexcept {
         if (cfg.packetization_mode == PacketizationMode::kInterleaved) {
             return core::Result<void>::fail(
                 core::ErrorCode::NotImplemented,
@@ -897,68 +951,57 @@ struct VideoSender::Impl {
         // + one-byte FU header) on top of the fragment payload, and the
         // fragment payload is the original NAL unit minus its two-byte
         // header.
-        std::vector<bool> use_fu(nalus.size(), false);
-        std::vector<std::vector<std::vector<std::uint8_t>>> fu_fragments(
-            nalus.size());
-
+        //
+        // Only the *size* decides, so the fragments themselves are built
+        // lazily, one at a time, during the walk below.
+        use_fua.assign(nalus.size(), false);
         for (std::size_t i = 0; i < nalus.size(); ++i) {
-            const auto& n = nalus[i];
-            if (n.size() <= cfg.mtu) continue;
-
-            use_fu[i] = true;
-            // The layer id / temporal id come from the original NAL unit
-            // header (RFC 7798 §1.1.4).
-            const auto hdr = video_payload::h265::parse_nalu_header(
-                core::ByteSpan{n.data(), n.size()});
-            const std::uint8_t layer_id = hdr ? hdr->layer_id : 0;
-            const std::uint8_t tid      = hdr ? hdr->tid : 1;
-            const auto nalu_type = hdr
-                ? hdr->type
-                : static_cast<H265NaluType>((n[0] >> 1) & kH265TypeMask);
-
-            const std::size_t body_size = n.size() > 2 ? n.size() - 2 : 0;
-            const std::size_t max_body = cfg.mtu > 3 ? cfg.mtu - 3 : 0;
-            if (max_body == 0) {
-                return core::Result<void>::fail(
-                    core::ErrorCode::InvalidArgument,
-                    "video_pipeline: H.265 MTU too small for a FU fragment");
-            }
-
-            std::size_t offset = 0;
-            std::vector<std::vector<std::uint8_t>> fragments;
-            while (offset < body_size) {
-                const std::size_t remaining = body_size - offset;
-                const std::size_t this_len = remaining > max_body ? max_body
-                                                                  : remaining;
-                const bool start = (offset == 0);
-                const bool end   = (offset + this_len == body_size);
-                const core::ByteSpan body_slice{
-                    n.data() + 2 + offset, this_len};
-                std::vector<std::uint8_t> frag(cfg.mtu);
-                const std::size_t wrote = build_fu(
-                    nalu_type, layer_id, tid, body_slice, start, end,
-                    core::MutableByteSpan{frag.data(), frag.size()});
-                if (wrote == 0) {
-                    return core::Result<void>::fail(
-                        core::ErrorCode::InternalError,
-                        "video_pipeline: build_fu failed");
-                }
-                frag.resize(wrote);
-                fragments.push_back(std::move(frag));
-                offset += this_len;
-            }
-            fu_fragments[i] = std::move(fragments);
+            use_fua[i] = nalus[i].size() > cfg.mtu;
         }
 
         // ---- Walk the NAL units ----
         std::size_t i = 0;
         while (i < nalus.size()) {
-            if (use_fu[i]) {
-                const auto& frags = fu_fragments[i];
-                for (std::size_t k = 0; k < frags.size(); ++k) {
-                    const bool is_last = (k + 1 == frags.size());
-                    emit(core::ByteSpan{frags[k].data(), frags[k].size()},
-                         rtp_ts, /*marker=*/is_last);
+            if (use_fua[i]) {
+                const core::ByteSpan n = nalus[i];
+                // The layer id / temporal id come from the original NAL
+                // unit header (RFC 7798 §1.1.4).
+                const auto hdr = video_payload::h265::parse_nalu_header(n);
+                const std::uint8_t layer_id = hdr ? hdr->layer_id : 0;
+                const std::uint8_t tid      = hdr ? hdr->tid : 1;
+                const auto nalu_type = hdr
+                    ? hdr->type
+                    : static_cast<H265NaluType>((n[0] >> 1) & kH265TypeMask);
+
+                const std::size_t body_size = n.size() > 2 ? n.size() - 2 : 0;
+                const std::size_t max_body = cfg.mtu > 3 ? cfg.mtu - 3 : 0;
+                if (max_body == 0) {
+                    return core::Result<void>::fail(
+                        core::ErrorCode::InvalidArgument,
+                        "video_pipeline: H.265 MTU too small for a FU fragment");
+                }
+
+                std::size_t offset = 0;
+                while (offset < body_size) {
+                    const std::size_t remaining = body_size - offset;
+                    const std::size_t this_len = remaining > max_body ? max_body
+                                                                      : remaining;
+                    const bool start = (offset == 0);
+                    const bool end   = (offset + this_len == body_size);
+                    const core::ByteSpan body_slice{
+                        n.data() + 2 + offset, this_len};
+                    if (fua_buf.size() < cfg.mtu) fua_buf.resize(cfg.mtu);
+                    const std::size_t wrote = build_fu(
+                        nalu_type, layer_id, tid, body_slice, start, end,
+                        core::MutableByteSpan{fua_buf.data(), fua_buf.size()});
+                    if (wrote == 0) {
+                        return core::Result<void>::fail(
+                            core::ErrorCode::InternalError,
+                            "video_pipeline: build_fu failed");
+                    }
+                    emit(core::ByteSpan{fua_buf.data(), wrote},
+                         rtp_ts, /*marker=*/end);
+                    offset += this_len;
                 }
                 stats.fua_frames_packetized++;
                 ++i;
@@ -970,34 +1013,31 @@ struct VideoSender::Impl {
             // An AP packet costs 2 bytes of payload header, plus 2 bytes
             // of length prefix per aggregated NAL unit.
             std::size_t budget = cfg.mtu > 2 ? cfg.mtu - 2 : 0;
-            std::vector<video_payload::h265::Nalu> group;
+            ap_group.clear();
             std::size_t j = i;
-            while (j < nalus.size() && !use_fu[j]) {
+            while (j < nalus.size() && !use_fua[j]) {
                 const std::size_t cost = 2 + nalus[j].size();
                 if (cost > budget) break;
                 budget -= cost;
                 video_payload::h265::Nalu n;
-                n.type = video_payload::h265::peek_nalu_type(
-                    core::ByteSpan{nalus[j].data(), nalus[j].size()});
-                n.data = core::ByteSpan{nalus[j].data(), nalus[j].size()};
-                group.push_back(n);
+                n.type = video_payload::h265::peek_nalu_type(nalus[j]);
+                n.data = nalus[j];
+                ap_group.push_back(n);
                 ++j;
             }
 
-            if (group.size() >= 2) {
-                std::vector<std::uint8_t> out(cfg.mtu);
+            if (ap_group.size() >= 2) {
+                if (group_out.size() < cfg.mtu) group_out.resize(cfg.mtu);
                 const std::size_t wrote = build_ap(
-                    group, /*layer_id=*/0, /*tid=*/1,
-                    core::MutableByteSpan{out.data(), out.size()});
+                    ap_group, /*layer_id=*/0, /*tid=*/1,
+                    core::MutableByteSpan{group_out.data(), group_out.size()});
                 if (wrote == 0) {
-                    for (const auto& g : group) {
-                        emit(core::ByteSpan{g.data.data(), g.data.size()},
-                             rtp_ts, /*marker=*/false);
+                    for (const auto& g : ap_group) {
+                        emit(g.data, rtp_ts, /*marker=*/false);
                         stats.single_nal_frames_packetized++;
                     }
                 } else {
-                    out.resize(wrote);
-                    emit(core::ByteSpan{out.data(), out.size()},
+                    emit(core::ByteSpan{group_out.data(), wrote},
                          rtp_ts, /*marker=*/true);
                     stats.stapa_frames_packetized++;
                 }
@@ -1005,9 +1045,8 @@ struct VideoSender::Impl {
                 continue;
             }
 
-            if (group.size() == 1) {
-                emit(core::ByteSpan{group[0].data.data(), group[0].data.size()},
-                     rtp_ts, /*marker=*/true);
+            if (ap_group.size() == 1) {
+                emit(ap_group[0].data, rtp_ts, /*marker=*/true);
                 stats.single_nal_frames_packetized++;
                 i = j;
                 continue;
@@ -1088,48 +1127,46 @@ core::Result<void> VideoSender::push_frame(video_frame::EncodedVideoFrame frame,
 
     switch (frame.codec) {
         case video_frame::CodecKind::kH264: {
-            std::vector<std::vector<std::uint8_t>> nalus;
             switch (frame.nalu_format) {
                 case video_frame::NaluFormat::kAnnexBStartCode:
-                    nalus = parse_annex_b(frame.payload);
+                    parse_annex_b(frame.payload, s.nalus);
                     break;
                 case video_frame::NaluFormat::kLengthPrefixed:
-                    nalus = parse_length_prefixed(frame.payload);
+                    parse_length_prefixed(frame.payload, s.nalus);
                     break;
                 default:
                     return core::Result<void>::fail(
                         core::ErrorCode::InvalidArgument,
                         "video_pipeline: H.264 frame nalu_format unsupported");
             }
-            if (nalus.empty()) {
+            if (s.nalus.empty()) {
                 return core::Result<void>::fail(
                     core::ErrorCode::InvalidArgument,
                     "video_pipeline: H.264 frame contained zero NAL units");
             }
-            return s.emit_h264(std::move(nalus), rtp_timestamp);
+            return s.emit_h264(rtp_timestamp);
         }
         case video_frame::CodecKind::kH265: {
             // H.265 uses the same Annex-B / length-prefixed framing as
             // H.264 — only the NAL unit header differs (two bytes).
-            std::vector<std::vector<std::uint8_t>> nalus;
             switch (frame.nalu_format) {
                 case video_frame::NaluFormat::kAnnexBStartCode:
-                    nalus = parse_annex_b(frame.payload);
+                    parse_annex_b(frame.payload, s.nalus);
                     break;
                 case video_frame::NaluFormat::kLengthPrefixed:
-                    nalus = parse_length_prefixed(frame.payload);
+                    parse_length_prefixed(frame.payload, s.nalus);
                     break;
                 default:
                     return core::Result<void>::fail(
                         core::ErrorCode::InvalidArgument,
                         "video_pipeline: H.265 frame nalu_format unsupported");
             }
-            if (nalus.empty()) {
+            if (s.nalus.empty()) {
                 return core::Result<void>::fail(
                     core::ErrorCode::InvalidArgument,
                     "video_pipeline: H.265 frame contained zero NAL units");
             }
-            return s.emit_h265(std::move(nalus), rtp_timestamp);
+            return s.emit_h265(rtp_timestamp);
         }
         case video_frame::CodecKind::kAV1:
             return s.emit_av1(frame.payload, rtp_timestamp, frame.is_keyframe);

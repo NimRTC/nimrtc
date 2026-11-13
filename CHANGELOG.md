@@ -1106,10 +1106,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
     3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
     I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
-    storage: the pool hands out a `shared_ptr<VideoFrameBuffer>` whose
-    custom deleter extracts the storage via `release_storage()` and
-    parks it in the idle list when the last reference drops.  The steady
-    state performs no allocation and no full-frame memset.
+    whole buffer -- its pixel storage *and* its control block.  The pool
+    parks the buffer and hands out an **aliasing** `shared_ptr` that
+    shares the parked buffer's control block, so recycling a frame
+    allocates neither a new control block nor new pixel memory; the
+    steady state performs no allocation and no full-frame memset.
   - **C3 -- the GPU zero-copy video send path is open.**
     `send_video()` always staged the frame into a CPU I420 buffer before
     handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
@@ -1166,6 +1167,101 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     ~22 allocations per frame are in the encode / packetise path (the
     codec's own output buffer and the RTP packet vector), not in the
     frame staging.
+
+- **`send_video()` is now allocation-free end to end (v1.2.0,
+  remediation Phase 3 §3.5).**  The C class above removed the *volume*
+  of allocator traffic, but the allocation *count* was still 22 per
+  frame.  This change drives it to **zero** — the number the plan's
+  §3.5 acceptance criterion asks for.
+  - **The video frame pool recycles the buffer object, not just its
+    storage.**  The pool used to hand out a fresh `shared_ptr` per
+    frame, and a `shared_ptr` that owns its object carries a
+    heap-allocated control block.  The pool now parks the buffer and
+    hands out an **aliasing** `shared_ptr` that shares the parked
+    buffer's control block (`shared_ptr<T>(owner, owner.get())`), so
+    recycling a frame allocates neither a control block nor pixel
+    memory.  A buffer is reusable once the caller has released its
+    alias, which is visible as the owner's `use_count()` dropping back
+    to one.
+  - **The packetizer works on spans, not copies.**  `parse_annex_b()`
+    and `parse_length_prefixed()` returned a
+    `std::vector<std::vector<std::uint8_t>>` -- one heap allocation
+    per NAL unit, per frame, plus a copy of every NAL's bytes.  The
+    caller owns the bitstream for the whole `push_frame()` call, so
+    the NAL units are now **spans into the source**, parsed into a
+    reusable vector.  The FU-A fragment buffer, the STAP-A output
+    buffer, the aggregation group and the FU-A flags are reusable
+    members as well, pre-reserved so a frame with an unusual number of
+    NAL units does not grow them.
+  - **The retransmission ring is pre-sized.**  Each cached slot is
+    reserved to the MTU when the ring is built, so caching a packet is
+    a memcpy into an existing buffer instead of a fresh allocation per
+    outgoing packet.
+  - **The ref-frame registry is a fixed-size table.**  It was a
+    `std::map` plus a `std::deque` -- two heap allocations per sent
+    frame (a map node and a deque block), forever.  It is now an
+    open-addressed table with backward-shift deletion plus a
+    fixed-size insertion ring, both allocated once at construction.
+    The timestamp→id lookup selects the lowest matching id explicitly,
+    so the observable behaviour is identical to the `std::map`'s.
+  - **The outbound packet buffer is reused on the no-scheduler path.**
+    With a scheduler the packet comes from the scheduler's pool; on
+    the "transport" profile the engine wrote straight to ICE and
+    allocated a fresh vector per packet.  It now uses the engine's own
+    scratch buffer.  This relies on `ITransport::send()` treating its
+    `BufferView` as **borrowed** -- the transport must copy the bytes
+    it needs before returning -- which is now written down explicitly
+    in the seam's documentation.
+  - **The measurement is a gate, not a claim.**  The benchmark gained
+    an `--assert-zero-allocs` flag, and the ctest case
+    `hotpath_zero_allocs` runs it at 1080p.  The count is exact rather
+    than a threshold: the engine runs no background threads in the
+    benchmark's profile, so every allocation counted during the
+    measured region belongs to the `send_video()` call itself.  A
+    regression that reintroduces a per-frame allocation fails the
+    build.
+
+    Measured after this change, over 300 frames per resolution:
+
+    | resolution | allocations/frame | bytes/frame |
+    | --- | --- | --- |
+    | 1920x1080 | **0.000000** | **0.000000** |
+    | 1280x720 | **0.000000** | **0.000000** |
+    | 854x480 | **0.000000** | **0.000000** |
+
+    The §3.5 criterion "`send_video()` 1080p30 的 per-call 堆分配次数 =
+    0" is met.
+
+- **The audio send path has a zero per-packet allocation budget too
+  (remediation Phase 3 §3.5).**  The plan's second allocation
+  criterion -- "音频路径 per-packet 堆分配次数 = 0" -- now has a gate of
+  its own, in `tests/test_engine_audio_alloc.cpp`.
+  - The metric is **per packet**, not per call: the host may hand the
+    engine an arbitrary block size, and the engine accumulates samples
+    until it has a whole 20 ms frame.
+  - The audio path is unreachable without a completed DTLS handshake
+    (otherwise the engine would put plaintext RTP on the wire), so the
+    test drives the engine through a fake ICE transport and a fake DTLS
+    session, the same pair `tests/test_engine_audio_send.cpp` uses.
+  - The fake transport only *counts* the bytes it is handed.  A fake
+    that copied them would allocate once per packet and land right in
+    the measured region, so the test would have been measuring the fake
+    rather than the engine.
+  - The criterion is asserted as "the allocation count does not grow
+    with the packet count" (a 50-packet run and a 250-packet run must
+    cost the same), not as "every single call allocates nothing".  The
+    engine's periodic work -- the RTCP sender report, the SRTP context
+    rollover -- may allocate on *some* calls; what must not happen is
+    one allocation per packet, forever.
+  - The probe lives in its own binary on purpose: replacing the global
+    `operator new` collides with a sanitizer runtime's own definition,
+    so the video side of the same criterion stays in the benchmark
+    binary (`hotpath_zero_allocs`) and the audio side is here.
+
+    The remaining §3.5 items -- the `tick()` p99 reduction and the
+    scheduler's drain / enqueue non-blocking property -- are covered by
+    the Phase 0.3 benchmark's other two sections and are tracked
+    separately.
 
 ### Fixed
 

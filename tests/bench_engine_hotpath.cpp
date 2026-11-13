@@ -605,6 +605,10 @@ struct Options {
     int packets = 20000;
     int packet_bytes = 1200;
     int drain_batch = 32;
+    /// When set, the process exits non-zero if `send_video()` allocated
+    /// anything at all.  This turns the allocation metric into a
+    /// regression gate (the ctest case `hotpath_zero_allocs` uses it).
+    bool assert_zero_allocs = false;
 };
 
 }  // namespace
@@ -627,11 +631,13 @@ int main(int argc, char** argv) {
         else if (a == "--packets")  next(opt.packets);
         else if (a == "--packet-bytes") next(opt.packet_bytes);
         else if (a == "--drain-batch")  next(opt.drain_batch);
+        else if (a == "--assert-zero-allocs") opt.assert_zero_allocs = true;
         else if (a == "--help" || a == "-h") {
             std::printf(
                 "usage: bench_engine_hotpath [--width N] [--height N] [--frames N]\n"
                 "                          [--warmup N] [--ticks N] [--packets N]\n"
-                "                          [--packet-bytes N] [--drain-batch N]\n");
+                "                          [--packet-bytes N] [--drain-batch N]\n"
+                "                          [--assert-zero-allocs]\n");
             return 0;
         }
     }
@@ -690,5 +696,37 @@ int main(int argc, char** argv) {
     j.end_object();
 
     std::printf("%s\n", out.c_str());
+
+    // ---- The zero-allocation regression gate ---------------------------
+    //
+    // Architecture-remediation Phase 3 §3.5 asks for `send_video()` at
+    // 1080p30 to perform **zero** heap allocations per call.  The
+    // benchmark is the measurement; this flag turns it into a gate.
+    //
+    // The count is exact, not a threshold: the engine runs no background
+    // threads in this profile, so every allocation counted during the
+    // measured region belongs to the `send_video()` call itself.
+    if (opt.assert_zero_allocs) {
+        if (!NIMRTC_BENCH_ALLOC_PROBE) {
+            std::fprintf(stderr,
+                         "bench: the allocation probe is unavailable in this "
+                         "build (sanitizer runtime) - cannot assert\n");
+            return 2;
+        }
+        if (sv.alloc_per_frame != 0.0) {
+            std::fprintf(stderr,
+                         "FAIL: send_video() allocated %.6f times per frame "
+                         "(%.0f allocations over %lld frames) - the "
+                         "hot-path allocation budget is zero\n",
+                         sv.alloc_per_frame,
+                         sv.alloc_per_frame * static_cast<double>(sv.frames),
+                         static_cast<long long>(sv.frames));
+            return 1;
+        }
+        std::fprintf(stderr,
+                     "OK: send_video() performed zero heap allocations over "
+                     "%lld frames\n",
+                     static_cast<long long>(sv.frames));
+    }
     return 0;
 }

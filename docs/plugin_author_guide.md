@@ -655,12 +655,17 @@ matches. That failure is silent, and it is the single most common
 way a plugin author ends up debugging "my plugin registers but the
 engine never picks it up".
 
-**Hyphenated ids** are the one case where the literal form is
-required, because `#my-id` does not lex as a single token:
+**Hyphenated ids** are the one case the tokenising form cannot
+express, because `#my-id` does not lex as a single token. Those go
+through the registry directly:
 
 ```cpp
-NIMRTC_REGISTER_TRANSPORT_STACK("webrtc-classic", &g_factory);
+core::PluginRegistry::instance().register_transport_stack("webrtc-classic", &g_factory);
 ```
+
+That is exactly what the in-tree transport module does — its
+registrars call `register_transport_stack(f->id(), &f)` with the
+hyphenated ids `"webrtc-classic"` and `"raw-udp-arq"`.
 
 The full naming contract — the legal grammar, the `nimrtc_` prefix
 rule, third-party namespacing, and the deprecation cycle — is

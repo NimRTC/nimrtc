@@ -259,26 +259,31 @@ the same change.
 **The one exception: hyphenated ids.** Decision 1 permits the hyphen,
 and the `#id` stringification form cannot produce one — `#my-id` does
 not lex as a single token. A plugin whose id contains a hyphen must
-therefore use the **literal-taking** form:
+therefore **not** go through a registration macro at all; it calls the
+registry directly:
 
 ```cpp
-// The literal form: the macro passes the string through as-is.
-NIMRTC_REGISTER_TRANSPORT_STACK("webrtc-classic", &g_factory);
+// The direct form: the id is passed through as-is.
+core::PluginRegistry::instance().register_transport_stack("webrtc-classic", &g_factory);
 ```
+
+This is exactly what the in-tree transport module does today — see
+`src/modules/transport/src/transport_plugin.cpp`, whose registrars call
+`register_transport_stack(std::string_view{f->id()}, f)` with the
+hyphenated ids `"webrtc-classic"` and `"raw-udp-arq"`. No in-tree code
+uses `NIMRTC_REGISTER_TRANSPORT_STACK` at all.
 
 So the resolution of the original two-flavour inconsistency is not
 "one spelling wins" but **"one spelling per capability"**: the
 tokenising form is the default and the only form that can produce a
-duplicate-token check, and the literal form remains available
-specifically for ids the tokenising form cannot express. The
-in-tree hyphenated ids (`"webrtc-classic"`, `"raw-udp-arq"`) are
-registered by the transport module's own registrar, which calls
-`register_transport_stack("<id>", &f)` directly and is unaffected.
+duplicate-token check, and a hyphenated id — which the tokenising form
+cannot express — is registered through the registry directly, which is
+the same path the in-tree default registrars use.
 
 What the two-flavour inconsistency did **not** have was a *rule*; this
-ADR supplies the rule (token by default, literal only where the token
-form cannot express the id) and, critically, the compile-time
-`static_assert` that makes the quoted-literal mistake in a
+ADR supplies the rule (token by default, direct registry call where
+the token form cannot express the id) and, critically, the
+compile-time `static_assert` that makes the quoted-literal mistake in a
 tokenising macro an **error** instead of a silent unmatchable
 registration.
 
@@ -319,8 +324,10 @@ change), which asserts:
 1. Every id registered by the in-tree default registrars satisfies the
    Decision 1 grammar. This is the regression test that keeps the
    in-tree ids honest as modules are added.
-2. A malformed id (empty, leading digit, uppercase, hyphen, embedded
-   space, non-ASCII) is rejected by the registry.
+2. A malformed id (empty, leading digit, uppercase, embedded space,
+   non-ASCII) is rejected by the registry. The hyphen is **not** in
+   this list — Decision 1 permits it, and the shipped
+   `"webrtc-classic"` / `"raw-udp-arq"` ids must keep registering.
 3. A rejected id does not remove or shadow a previously-registered id
    in the same slot.
 4. The registration macros reject a quoted-literal id at compile time
@@ -390,7 +397,7 @@ The result is two layers, each catching what the other cannot:
 
 | Layer | Catches | Diagnostic |
 |---|---|---|
-| `NIMRTC_PLUGIN_ID` — compile-time | spelling: empty, uppercase, leading digit, hyphen, non-ASCII | compile error, at the callsite |
+| `NIMRTC_PLUGIN_ID` — compile-time | spelling: empty, uppercase, leading digit, non-ASCII, or any character outside the grammar | compile error, at the callsite |
 | `PluginRegistry::register_one` — runtime | ids that bypass the macro (direct registry calls, runtime-computed ids) | log, at registration |
 
 A plugin author who uses `NIMRTC_PLUGIN_ID` (or the registration

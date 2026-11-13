@@ -462,12 +462,39 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 | **M3** | **Survive the network** | **v1.5.0** | D1–D4, B9, B14, E8, J1–J4, plus the video plan's T1 (RTX) / T2 | Under a synthetic lossy, jittery, rate-limited link the session **degrades predictably** (ladder steps down, then recovers) instead of stalling or collapsing, and the measured quality is better than a fixed-bitrate baseline. |
 | **M4** | **Multi-stream and screen-content quality** | **v1.6.0** | B5, B6, B8, B11, H1–H4, J5, J6 | The product ships the features a remote-desktop user actually pays for: **screen + camera concurrently**, **screen-content coding** (AV1/HEVC screen tools where available), a **low-bitrate fallback that stays legible**, and a measured **input-to-photon** latency. |
 
+### Where the plan stands — 2026-11-14
+
+The honest answer to "is the plan done?" is **no**.  The *substance* of
+M1 is largely in the tree, but the *measurement* half of M1 — which is
+what the exit criterion is written in terms of — has not been built,
+and M2 / M3 / M4 have barely started.
+
+| Track | State | Landed |
+|---|---|---|
+| **A — capture** | ~70% | The `IVideoCapture` seam (A1), the portable layer + synthetic device (A2 / A2b), the Windows DXGI + WGC backends (A3 — including the native `GetFrameDirtyRects` and the WGC cursor compositing), the region selection (A8 — in the portable layer), the engine pump (A10), the capture stats (A11). **Open:** A4 (macOS), A5 (Linux), A6 (the *compositing* cursor layer for the DXGI path, which does not composite the cursor itself — WGC does it natively), A7 (dirty rects for the non-Windows paths — DXGI supplies them natively, the others need the pixel-diff fallback). |
+| **B — codecs** | ~65% | The real software codecs (B3 / B4), the encoder parameter authority (B12), the resolution-change restart (B13), the content hint (B7 / C5), the zero-copy NVENC path (B10), the hardware round-trip proof (B10a), the codec telemetry (B15). **Open:** B1 (the encoder / decoder split — the combined `IVideoCodec` is still the only seam), B2 (the `codec_backend` override — the backend *is* selected by priority and reported, but there is no `auto` / `hardware` / `software` config switch), B5a (VideoToolbox), the non-NVIDIA HEVC / AV1 entries, B14 (the keyframe-storm limiter — `take_keyframe_requests()` is consumed but `FirCoalescer` is not wired to it). |
+| **C — pixels** | ~60% | libyuv vendored (C1), the SIMD scaler (C2), the colour-range work (C5). **Open:** C3 (format normalisation — the canonical format and the conversion count are not reported). |
+| **D — rate control** | ~0% | **Nothing.** `src/modules/video_bitrate_control/` does not exist, so D1–D5 (the ladder, the screen floor, the keyframe-cost budget, the bitrate reaching the encoder, the per-stream shares) are all open. |
+| **E — rendering** | ~25% | The `render(const GpuBuffer&)` path (E1) and the Windows D3D11 renderer (E2). **Open:** E3 (macOS), E4 (Linux), E5 (the render clock / A-V sync), E6 (input echo), E7 (scale-to-fit), E8 (back-pressure), E9 (the frame-accurate "what the operator saw"). |
+| **F — audio devices** | 0% | **Nothing.** No `IAudioSource` / `IAudioSink` seam, no `src/modules/audio_device/`, no PortAudio, no resampler. |
+| **G — control plane** | ~15% | The `ref_frame` machinery the binding needs (G5's substrate). **Open:** G1–G4, G6, G7 — including `src/modules/rd_input/`, which does not exist. |
+| **H — multi-stream** | 0% | **Nothing.** The engine still holds exactly one of each video plugin. |
+| **I — signalling** | 0% | **Nothing.** No `examples/remote-desktop/`, no `docs/guides/remote-desktop.md`, no `profiles/remote-desktop.json`. |
+| **J — observability** | ~15% | `tools/benchmark_weaknet.py` exists (the substrate for J4). **Open:** J1 (per-stage CPU timing — **the blocking item for M1**), J2, J3, J5, J6. |
+| **K — governance** | ~85% | ADR-021 / ADR-022 (K1 / K2), the API bookkeeping (K6), the CMake option hygiene (K7), the vendor pinning (K8 / K8b), the CHANGELOG discipline (K10). **Open:** K3 / K4 (the `remote-desktop` profile and the v1.2 schema), K5 (the plugin author guide), K9 (the README feature tables). |
+
+**The one-line summary:** the *engineering* of M1 is mostly done; the
+*evidence* of M1 is not.  The two rows of the exit criterion that are
+still unmeasured — the per-frame CPU budget and the sustained 1080p
+capture rate — both need **J1** (per-stage CPU-time instrumentation)
+and **J5** (the capture / encode benchmark).  Until those exist, "M1 is
+done" would be a claim the tree cannot support.
+
 ### Why this order
 
 - **M1 before everything.** Nothing else can be evaluated on a fake picture.
   The codec layer is the blocker: the pipeline is already wired, but the
-  encoder produces synthetic bytes and the decoder produces no pixels.
-- **M2 before M3.** Audio and control are what make it a *call* rather than
+  encoder produces synthetic bytes and the decoder produces no pixels.- **M2 before M3.** Audio and control are what make it a *call* rather than
   a one-way stream, and they are independent of the rate controller. They
   also carry the hard engineering (device layers, AEC alignment) that has
   the longest tail.
@@ -515,6 +542,37 @@ Legend for landing sites: `P` = `src/plugins/`, `M` = `src/modules/<name>/`,
 | CPU time per frame (capture → encode → packetize) | within §B.6's budget on the hardware path; within 2× of it on the software path |
 | End-to-end picture correctness | the displayed picture matches the captured screen within the codec's tolerance (a pixel-diff test on a synthetic pattern) |
 | Zero-copy | on the hardware path, the encoder receives the native handle; **zero** CPU readbacks of the captured surface |
+
+### M1 status — measured 2026-11-14
+
+| Metric | Status | Evidence |
+|---|---|---|
+| End-to-end picture correctness | ✅ **met** | `tests/test_engine_video_e2e_loopback.cpp` — 1080p, two engines, real OpenH264 encode → real STAP-A / FU-A → real RTP round trip → real decode; **MAE 1.02**, **Pearson r 0.998**. The negative control (a flat grey frame must fail both thresholds; the decoded frame must not be byte-identical to the source) is part of the test. |
+| Zero-copy | ⚠️ **partially met** | The NVENC path takes a D3D11 surface with `bytes_copied == 0` (`src/modules/h264/src/nvenc_encoder.cpp`), and the round trip is proven for every codec the driver offers (`src/modules/nvcodec/tests/test_nvcodec_roundtrip.cpp`). **But the DXGI / WGC capture → NVENC encode hand-off on a *real* screen is not yet proven end to end** — the capture backends and the encoder round trip are each proven, but not *together*. |
+| Capture rate at 1080p | ❌ **not measured** | No capture-rate benchmark exists yet. `tools/` has no capture benchmark (J5 is not started). |
+| CPU time per frame | ❌ **not measured** | The per-stage timing instrumentation (J1) is not started, so §B.6's budget is not checked by anything. |
+
+**What M1 still needs** — the honest gap is **measurement**, not more plumbing:
+
+1. **J1 — the per-stage CPU-time instrumentation.** Nothing today measures
+   capture → convert → scale → encode → packetize, so the §B.6 budget is
+   unenforced. This is the single blocking item: without it the two rows
+   above stay unmeasured.
+2. **J5 — the capture / encode benchmark.** The evidence RD-1's
+   "hardware-first" claim rests on.
+3. **A real-screen end-to-end run** — the DXGI / WGC capture feeding the
+   NVENC encoder and the decoded frame landing in the D3D11 renderer, on
+   an actual desktop, with the per-frame budget checked.
+4. **C3 — format normalisation.** The capture path may deliver BGRA /
+   NV12 / I420; the canonical format and the conversion count are not
+   yet reported in the stats (the plan's row C3 is still open).
+
+**Not started at all** (so M1 is **not** done): **B1** (the
+`IVideoEncoder` / `IVideoDecoder` split — the combined `IVideoCodec` is
+still the only seam), **B5a** (the VideoToolbox backend — macOS still
+has no hardware codec), and **D1** (the `video_bitrate_control` ladder —
+the module does not exist, so the screen-specific ladder in D2 / D3 has
+nothing to sit on).
 
 ## B.3 M2 — "Talk and control" (v1.4.0)
 

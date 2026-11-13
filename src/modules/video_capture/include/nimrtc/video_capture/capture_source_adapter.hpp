@@ -1,0 +1,411 @@
+/**
+ * @file nimrtc/video_capture/capture_source_adapter.hpp
+ * @brief The shared "capture device -> frame stream" adapter.
+ *
+ * The capture seam (`plugins::IVideoCapture`) describes a *device*: it
+ * enumerates, negotiates a format and delivers frames into a bounded
+ * queue.  The engine's video path, however, speaks `plugins::IVideoSource`
+ * -- a plain stream of `VideoSourceFrame`s.
+ *
+ * This adapter is the bridge between the two, and it is deliberately
+ * *shared*: every platform backend (Windows DXGI, macOS
+ * ScreenCaptureKit, Linux PipeWire / X11) produces the same thing, so
+ * they all feed the same adapter, and the engine never learns a platform
+ * API (Layout Invariant 4).
+ *
+ * @code
+ *   IVideoCapture  --device-->  CaptureSourceAdapter  --frames-->  IVideoSource
+ *   (platform)                    (this file)                       (engine)
+ * @endcode
+ *
+ * ## What the adapter does
+ *
+ *   1. Opens / closes the capture device in step with `start()` / `stop()`.
+ *   2. Pops one frame from the capture's bounded queue per
+ *      `produce_one()` call.
+ *   3. Converts the capture's pixel format into the format the source
+ *      was configured with (the encoders want I420; the desktop
+ *      compositors deliver BGRA).
+ *   4. Republishes the frame through the ordinary
+ *      `VideoSourceFrameCallback`, carrying the capture timestamp and
+ *      the frame sequence number.
+ *
+ * ## Format negotiation
+ *
+ * The capture device's `CaptureFormat::tag` is an opaque platform tag.
+ * The adapter understands the tags the *portable* layer defines --
+ * "bgra", "rgba", "nv12", "i420" -- and refuses anything else with
+ * `kErrInvalidParam`, because guessing a pixel layout from an unknown
+ * tag would produce garbage pixels rather than an error.  A platform
+ * backend that delivers a different layout translates it in its own
+ * adapter (that is what "a platform backend is a thin adapter over the
+ * portable layer" means).
+ *
+ * ## The zero-copy caveat
+ *
+ * A capture frame may carry a GPU handle (`CaptureFrame::has_gpu_handle`)
+ * instead of CPU pixels.  The adapter cannot expose a GPU handle through
+ * `VideoSourceFrame` -- that struct is CPU-only -- so it passes such a
+ * frame through *unchanged* only when the output format already matches
+ * the capture's own format, and otherwise drops it (counting it as a
+ * drop).  The hardware zero-copy path (capture surface -> encoder
+ * without a CPU round-trip) is the platform backends' job (plan A3 /
+ * A4 / A5); this adapter is the portable CPU path.
+ *
+ * @note Remote-desktop plan A2 / A2b.
+ */
+
+#pragma once
+
+// Stability classification: NIMRTC_API_STABLE (visual marker;
+// see ADR-015 / docs/plan/v0.13-plan.md).
+#include <nimrtc/core/api_version.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <nimrtc/plugins/video_capture.hpp>
+#include <nimrtc/plugins/video_source.hpp>
+#include <nimrtc/video_capture/cursor_compositor.hpp>
+
+namespace nimrtc::video_capture {
+
+// ---------------------------------------------------------------------------
+// Capture pixel formats
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The pixel layouts the portable capture layer understands.
+ *
+ * A capture backend reports its layout through
+ * `CaptureFormat::tag`; the adapter maps the tag onto this enum.
+ */
+enum class NIMRTC_API_STABLE CapturePixelFormat : std::uint8_t {
+    kUnknown = 0,
+    kBGRA,   ///< 32-bit BGRA -- what every desktop compositor produces
+    kRGBA,   ///< 32-bit RGBA
+    kNV12,   ///< YUV 4:2:0 semi-planar
+    kI420,   ///< YUV 4:2:0 planar
+};
+
+/** Map a capture format tag onto a `CapturePixelFormat`.
+ *
+ *  @return `CapturePixelFormat::kUnknown` for a tag the portable layer
+ *          does not know.  The adapter treats that as an error rather
+ *          than guessing a layout.
+ */
+NIMRTC_API_STABLE CapturePixelFormat capture_pixel_format_from_tag(
+    std::string_view tag) noexcept;
+
+/** Human-readable pixel-format name (for logging). */
+NIMRTC_API_STABLE std::string_view capture_pixel_format_name(
+    CapturePixelFormat f) noexcept;
+
+// ---------------------------------------------------------------------------
+// CaptureSourceAdapter
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Presents a capture device as an `IVideoSource`.
+ *
+ * The adapter does **not** own the capture device: the caller keeps it
+ * alive for at least as long as the adapter is used.  This keeps the
+ * ownership rule obvious -- a device is expensive and a host may want to
+ * share one device between two adapters (a full-resolution stream and a
+ * thumbnail stream, plan H3).
+ *
+ * Thread safety: the capture seam requires `start()` / `stop()` /
+ * `produce_one()` to be serialized externally; the adapter inherits
+ * that rule.
+ */
+class NIMRTC_API_STABLE CaptureSourceAdapter final
+    : public plugins::IVideoSource {
+public:
+    /**
+     * @param capture The capture device to drive.  Not owned.
+     * @param cfg     The source configuration.  `cfg.format` is the
+     *                *output* pixel format the frames are converted to;
+     *                `cfg.width` / `cfg.height` are filled in from the
+     *                device's negotiated format when they are zero.
+     */
+    CaptureSourceAdapter(plugins::IVideoCapture* capture,
+                         plugins::VideoSourceConfig cfg) noexcept;
+
+    ~CaptureSourceAdapter() override;
+
+    CaptureSourceAdapter(const CaptureSourceAdapter&)            = delete;
+    CaptureSourceAdapter& operator=(const CaptureSourceAdapter&) = delete;
+
+    // ---- IPlugin ----------------------------------------------------------
+
+    /** The adapter's plugin name. */
+    const char* name() const noexcept override {
+        return "nimrtc::video_capture::CaptureSourceAdapter";
+    }
+
+    /** Opens the capture device.
+     *
+     *  This is the `IPlugin` open phase; it is the same operation as
+     *  `start()`, and the two are kept in step: `open()` is what the
+     *  engine's plugin lifecycle calls, `start()` is what the source
+     *  seam calls.
+     */
+    plugins::Status open() noexcept override { return start(); }
+
+    /** Closes the capture device.  Idempotent. */
+    void close() noexcept override { stop(); }
+
+    // ---- IVideoSource ------------------------------------------------------
+
+    /** Opens the capture device.  @return kErrInvalidParam when the
+     *  device negotiates a format the adapter cannot interpret. */
+    plugins::Status start() noexcept override;
+
+    /** Closes the capture device.  Idempotent. */
+    void stop() noexcept override;
+
+    [[nodiscard]] bool running() const noexcept override {
+        return running_;
+    }
+
+    /** Pops one frame from the capture queue and republishes it.
+     *
+     *  The callback fires synchronously, before this method returns.
+     *  When the capture queue is empty the call is a no-op -- the
+     *  engine's tick loop must not be parked by a quiet device.
+     */
+    void produce_one() noexcept override;
+
+    /** The source configuration, with the negotiated dimensions folded in. */
+    [[nodiscard]] plugins::VideoSourceConfig config() const noexcept override {
+        return cfg_;
+    }
+
+    /** A capture device's content is its own; this is a no-op. */
+    void set_pattern(plugins::VideoSourcePattern p) noexcept override {
+        (void)p;
+    }
+
+    void set_callback(plugins::VideoSourceFrameCallback cb) noexcept override {
+        cb_ = std::move(cb);
+    }
+
+    [[nodiscard]] Stats stats() const noexcept override;
+
+    /** True iff the capture device reports a zero-copy path. */
+    [[nodiscard]] bool is_hardware_accelerated() const noexcept override;
+
+    /** The capture backend's identifier, e.g. "synthetic", "dxgi-desktop-dup". */
+    [[nodiscard]] std::string_view hardware_backend() const noexcept override;
+
+    // ---- Capture-specific --------------------------------------------------
+
+    /** The capture device this adapter drives. */
+    [[nodiscard]] plugins::IVideoCapture* capture() const noexcept {
+        return capture_;
+    }
+
+    /** The changed region(s) reported with the last delivered frame.
+     *
+     *  This is the dirty-rect metadata the encoder needs to skip the
+     *  unchanged part of a static desktop (plan A7).  It is valid until
+     *  the next `produce_one()`.
+     */
+    [[nodiscard]] const plugins::CaptureDirtyRects& last_dirty() const noexcept {
+        return last_dirty_;
+    }
+
+    // ---- Cursor compositing (remote-desktop plan A6) ---------------------
+
+    /**
+     * Install a cursor source and a compositor.
+     *
+     *  The adapter draws the pointer into the captured frame when the
+     *  *device* does not do it itself -- DXGI Desktop Duplication hands
+     *  over a raw desktop texture with no pointer in it, and X11's
+     *  `XGetImage` is the same.  A backend that composites the cursor
+     *  itself (WGC, ScreenCaptureKit) installs a compositor whose
+     *  `should_composite()` is false, or installs none at all.
+     *
+     *  Neither object is owned: the caller keeps them alive for at
+     *  least as long as the adapter is used.
+     *
+     *  The compositing only applies to a **packed** output (BGRA): the
+     *  pointer is drawn with alpha blending, which needs the pixels'
+     *  alpha channel, and a planar YUV frame has none.
+     */
+    void set_cursor(ICursorSource* source,
+                    ICursorCompositor* compositor) noexcept {
+        cursor_source_ = source;
+        cursor_compositor_ = compositor;
+        // A host-installed cursor survives `stop()` and is never
+        // replaced by the adapter's own automatic layer.
+        host_installed_cursor_ = (source != nullptr) || (compositor != nullptr);
+    }
+
+    /** The installed cursor source (null when none). */
+    [[nodiscard]] ICursorSource* cursor_source() const noexcept {
+        return cursor_source_;
+    }
+
+    /** The installed cursor compositor (null when none). */
+    [[nodiscard]] ICursorCompositor* cursor_compositor() const noexcept {
+        return cursor_compositor_;
+    }
+
+    /** How many frames the cursor was drawn into. */
+    [[nodiscard]] std::uint64_t cursor_frames_composited() const noexcept {
+        return cursor_frames_;
+    }
+
+    /** How many frames were published without a CPU readback (the
+     *  zero-copy path, remote-desktop plan B10). */
+    [[nodiscard]] std::uint64_t zero_copy_frames() const noexcept {
+        return zero_copy_frames_;
+    }
+
+    /**
+     * @brief Whether the adapter draws the pointer itself.
+     *
+     * True when the adapter installed its own cursor layer at
+     * `start()` — which it does exactly when the *device* does not
+     * composite the pointer into the frame itself.
+     *
+     * A host that wants to own the cursor (a remote-desktop agent that
+     * already tracks the pointer) can install its own source and
+     * compositor through `set_cursor()`; that overrides the automatic
+     * choice.
+     */
+    [[nodiscard]] bool cursor_layer_installed() const noexcept {
+        return cursor_layer_installed_;
+    }
+
+private:
+    /** Convert the popped frame into the output format.  @return false when
+     *  the frame cannot be represented in the output format (in which case
+     *  it is counted as a drop). */
+    bool convert(const plugins::CaptureFrame& in) noexcept;
+
+    /**
+     * Publish a frame whose picture lives in GPU memory.
+     *
+     * The frame's CPU planes stay empty; the *surface* travels with the
+     * published frame (as `VideoSourceFrame::gpu_surface`), so the
+     * encoder can consume the native handle without a readback.
+     *
+     * @return false when the frame cannot be described (no dimensions or
+     *         an unknown pixel format), in which case the caller drops
+     *         it.
+     */
+    bool publish_gpu_surface(const plugins::CaptureFrame& in) noexcept;
+
+    /**
+     * Install the automatic cursor layer (plan A6).
+     *
+     * Done exactly when the device does **not** composite the pointer
+     * into the frame itself and the caller asked for a pointer.  A
+     * host-installed cursor wins over it.
+     */
+    void install_cursor_layer() noexcept;
+
+    /** Draw the pointer into the captured frame, if a compositor is
+     *  installed and the device's layout allows it.
+     *
+     *  The drawing happens on the *device's* pixels, before the
+     *  format conversion: alpha blending needs a packed 32-bit
+     *  layout, and the device delivers one (BGRA), while the output
+     *  is usually planar I420 — which has no alpha to blend into.
+     *
+     *  A frame that points into the *device's* buffer is copied into
+     *  the adapter's scratch buffer first -- the device owns its
+     *  pixels and may recycle them the moment the callback returns,
+     *  so the adapter must not write into them.  The copy is what the
+     *  conversion then reads, so the pointer becomes part of the
+     *  published picture.
+     *
+     *  @return true iff the frame was modified. */
+    bool composite_cursor(plugins::CaptureFrame& in) noexcept;
+
+    plugins::IVideoCapture* capture_ = nullptr;
+    plugins::VideoSourceConfig cfg_{};
+    plugins::VideoSourceFrameCallback cb_;
+
+    /** The pixel format the device negotiated. */
+    CapturePixelFormat device_format_ = CapturePixelFormat::kUnknown;
+
+    /** The capture backend's identifier, cached at `start()`.  A
+     *  `string_view` into `capabilities().backend` would dangle, because
+     *  `capabilities()` returns by value. */
+    std::string backend_;
+
+    /** Scratch buffer for the converted frame. */
+    std::vector<std::uint8_t> scratch_;
+
+    /** Scratch buffer for the cursor's copy of the device's pixels.
+     *  Separate from `scratch_` because the two have different
+     *  lifetimes: the cursor's copy holds the *device's* layout (so
+     *  the conversion can read it), while `scratch_` holds the
+     *  *output* layout. */
+    std::vector<std::uint8_t> cursor_scratch_;
+
+    /** True while `cursor_scratch_` holds this frame's copy. */
+    bool cursor_scratch_ready_ = false;
+
+    /** The frame handed to the callback.  Its plane pointers point into
+     *  `scratch_` (or into the capture's own buffer when no conversion
+     *  was needed). */
+    plugins::VideoSourceFrame out_{};
+
+    /** The cursor source and compositor (plan A6).  Not owned. */
+    ICursorSource* cursor_source_ = nullptr;
+    ICursorCompositor* cursor_compositor_ = nullptr;
+
+    /** The adapter's *own* cursor layer, installed at `start()` when
+     *  the device does not composite the pointer itself.  Owned (the
+     *  source and the compositor are heap objects), unlike the two
+     *  borrowed pointers above. */
+    std::unique_ptr<ICursorSource> owned_cursor_source_;
+    std::unique_ptr<ICursorCompositor> owned_cursor_compositor_;
+
+    /** True once the adapter has installed its own cursor layer. */
+    bool cursor_layer_installed_ = false;
+
+    /** True once the *host* installed a cursor source or compositor
+     *  through `set_cursor()`.  Such an installation wins over the
+     *  adapter's automatic one and survives `stop()`. */
+    bool host_installed_cursor_ = false;
+
+    /** How many frames the cursor was drawn into. */
+    std::uint64_t cursor_frames_ = 0;
+
+    /** How many frames were published on the zero-copy (GPU surface)
+     *  path — i.e. without a CPU readback. */
+    std::uint64_t zero_copy_frames_ = 0;
+
+    /** The base pointer of the frame that was popped from the device.
+     *  The adapter compares it against the output frame's own pointer to
+     *  know whether the output points into the *device's* pixels (which
+     *  must not be written into) or into its own scratch buffer. */
+    const std::uint8_t* in_pixels_base_ = nullptr;
+
+    plugins::CaptureDirtyRects last_dirty_{};
+
+    /** The colour description the *device* stated for the frame being
+     *  processed (resolved: an unspecified range / matrix becomes the
+     *  desktop default). */
+    video_frame::ColorDescription source_color_{};
+
+    /** The colour description of the *published* frame.  It differs from
+     *  `source_color_` only for a packed-RGB output, where the luma /
+     *  chroma scaling does not exist. */
+    video_frame::ColorDescription out_color_{};
+
+    std::uint64_t produced_ = 0;
+    std::uint64_t dropped_  = 0;
+    bool running_ = false;
+};
+
+} // namespace nimrtc::video_capture

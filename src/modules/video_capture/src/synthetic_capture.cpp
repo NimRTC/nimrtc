@@ -18,6 +18,11 @@
 #include <cstring>
 
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/video_capture/dxgi_desktop_dup.hpp>
+#include <nimrtc/video_capture/portal_capture.hpp>
+#include <nimrtc/video_capture/screen_capture_kit.hpp>
+#include <nimrtc/video_capture/wgc_capture.hpp>
+#include <nimrtc/video_capture/x11_capture.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -26,6 +31,10 @@ namespace {
 // The synthetic device offers exactly one device.
 constexpr const char* kDeviceId   = "synthetic:0";
 constexpr const char* kDeviceName = "Synthetic display";
+
+// The pixel layout the synthetic device delivers: 8-bit BGRA, the
+// format every desktop compositor produces natively.
+constexpr const char* kPixelTag = "bgra";
 
 // The highlight box that moves across the frame.  Its size is a fraction
 // of the frame so the dirty rect is meaningful at any resolution.
@@ -122,6 +131,21 @@ plugins::Status SyntheticCapture::open() noexcept {
         cfg_.format.height = cfg_.region.height;
     }
 
+    // The negotiated format names the pixel layout the device will
+    // deliver.  The synthetic device produces BGRA -- the format every
+    // desktop compositor hands over natively -- and the tag is what
+    // tells the consumer (the capture -> frame-stream adapter) how to
+    // read the bytes.  A caller that asked for a specific layout is
+    // told the truth instead of being silently given a different one.
+    if (cfg_.format.tag.empty()) {
+        cfg_.format.tag = kPixelTag;
+    } else if (cfg_.format.tag != kPixelTag) {
+        // The synthetic device cannot deliver another layout.
+        return plugins::kErrInvalidParam;
+    }
+    cfg_.format.zero_copy     = false;
+    cfg_.format.has_dirty_rects = true;
+
     const std::size_t bytes = static_cast<std::size_t>(cfg_.format.width) *
                               static_cast<std::size_t>(cfg_.format.height) * 4u;
     scratch_.assign(bytes, 0u);
@@ -164,7 +188,7 @@ SyntheticCapture::supported_formats(const std::string& device_id) const noexcept
         f.width  = s[0];
         f.height = s[1];
         f.fps    = 30;
-        f.tag    = "bgra";
+        f.tag    = kPixelTag;
         f.zero_copy = false;   // a synthetic device has no GPU surface
         f.has_dirty_rects = true;
         out.push_back(std::move(f));
@@ -310,6 +334,31 @@ void register_default_plugins() noexcept {
     registered = true;
     core::PluginRegistry::instance().register_video_capture(
         kSyntheticFactory.id(), &kSyntheticFactory);
+
+    // Remote-desktop plan A3: the Windows display-capture backend
+    // registers itself under "dxgi_desktop".  On a non-Windows host
+    // the call is a no-op — there is no DXGI to talk to, and a host
+    // that asks for "dxgi_desktop" there gets the engine's "capture
+    // plugin missing" error rather than a silent no-op device.
+    register_dxgi_desktop_dup();
+
+    // Remote-desktop plan A3: the Windows Graphics Capture backend
+    // registers itself under "wgc".  It is the *window* capture path
+    // and the one that composites the pointer into the frame.
+    register_wgc_capture();
+
+    // Remote-desktop plan A5: the two Linux backends.  Both register
+    // themselves only where their platform libraries exist:
+    //   - "x11"        — the XGetImage fallback (X11 + Xfixes),
+    //   - "xdg_portal" — the Wayland path (GIO + PipeWire).
+    register_x11_capture();
+    register_portal_capture();
+
+    // Remote-desktop plan A4: the macOS backend.  It registers itself
+    // only on macOS — everywhere else there is no ScreenCaptureKit to
+    // talk to, and a host that asks for "sck" there gets the engine's
+    // "capture plugin missing" error rather than a silent no-op device.
+    register_screen_capture_kit();
 }
 
 } // namespace nimrtc::video_capture

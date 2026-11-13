@@ -697,6 +697,30 @@ struct NimRTCEngine::Impl {
     // the path is actually being taken.
     std::uint64_t video_zero_copy_frames    = 0;
     std::uint64_t video_zero_copy_fallbacks = 0;
+    // ---- Video capture counters (remote-desktop plan A11) ----------------
+    // The capture device owns the detailed bookkeeping (the seam's
+    // `CaptureStats`); the engine republishes the numbers a host
+    // watching a live session needs.  All cumulative since open().
+    std::uint64_t video_capture_frames        = 0;  // frames captured by the device
+    std::uint64_t video_capture_frames_pumped = 0;  // frames handed to the encoder
+    std::uint64_t video_capture_dropped       = 0;  // queue-overflow drops
+    std::uint64_t video_capture_device_errors = 0;  // device-lost / read errors
+    std::uint64_t video_capture_restarts      = 0;  // times the device was reopened
+    std::uint64_t video_capture_format_changes = 0; // negotiated format changed
+    std::uint64_t video_capture_bytes_copied  = 0;  // CPU<->GPU bytes (0 = zero-copy)
+    // ---- Zero-copy counters (remote-desktop plan B10) --------------------
+    // `video_zero_copy_frames` counts the frames that reached the encoder
+    // as a native GPU surface (no CPU readback); `video_zero_copy_rejected`
+    // counts the ones the selected encoder could not consume.
+    std::uint64_t video_zero_copy_rejected = 0;
+    // The number of frames that went through the CPU staging path (the
+    // complement of `video_zero_copy_frames`).
+    std::uint64_t video_staged_frames       = 0;
+    // ---- Codec telemetry counters (remote-desktop plan B15) -------------
+    // The codec's own `VideoCodecStats` carries the authoritative numbers;
+    // these track the engine-side failures the codec cannot see (a frame
+    // that never reached it).
+    std::uint64_t video_codec_errors = 0;
     nimrtc::dtls::DtlsState last_dtls_state     = nimrtc::dtls::DtlsState::Closed;
 
     // ---- Network feedback loop (v1.2.0 M1, F2/F6) ----------------------

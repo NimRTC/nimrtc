@@ -87,6 +87,130 @@ inline bool is_planar_yuv_420(PixelFormat f) noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// Colour description (remote-desktop plan C5)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The luma/chroma range of the picture.
+ *
+ * Screen content is normally **full range** BT.709 (a desktop's
+ * background is black, not 16); camera content is normally **limited
+ * range** BT.601.  Getting this wrong produces a washed-out or crushed
+ * picture that looks like "the codec is broken" — the encoder and the
+ * renderer have to agree, and both have to be told.
+ *
+ * This is the canonical definition; `plugins::ColorRange` re-exports it
+ * (see `src/plugins/include/nimrtc/plugins/video_codec.hpp`).
+ */
+enum class NIMRTC_API_STABLE ColorRange : std::uint8_t {
+    /** Not stated — the codec's default applies. */
+    kUnspecified = 0,
+    /** Limited range (Y 16..235, C 16..240) — the studio convention,
+     *  what a camera produces. */
+    kLimited     = 1,
+    /** Full range (Y 0..255, C 0..255) — what a desktop compositor
+     *  produces. */
+    kFull        = 2,
+};
+
+/**
+ * @brief The YUV↔RGB matrix of the picture.
+ *
+ * BT.601 and BT.709 differ in their chroma siting and coefficients, and
+ * the difference is visible on saturated colours — a red button is
+ * noticeably wrong under the wrong matrix.
+ *
+ * This is the canonical definition; `plugins::ColorMatrix` re-exports it.
+ */
+enum class NIMRTC_API_STABLE ColorMatrix : std::uint8_t {
+    /** Not stated — the codec's default applies. */
+    kUnspecified = 0,
+    /** BT.601 (7.5% luma pedestal) — camera content, and the default for
+     *  resolutions below 576 lines. */
+    kBT601       = 1,
+    /** BT.709 — HD content, and what a modern desktop emits. */
+    kBT709       = 2,
+    /** BT.2020 — very wide gamut; HDR and UHD production. */
+    kBT2020      = 3,
+};
+
+/** Human-readable colour-range name (for logs and SDP). */
+NIMRTC_API_STABLE inline std::string_view color_range_name(ColorRange r) noexcept {
+    switch (r) {
+        case ColorRange::kLimited: return "limited";
+        case ColorRange::kFull:    return "full";
+        default:                   return "unspecified";
+    }
+}
+
+/** Human-readable colour-matrix name (for logs and SDP). */
+NIMRTC_API_STABLE inline std::string_view color_matrix_name(ColorMatrix m) noexcept {
+    switch (m) {
+        case ColorMatrix::kBT601:  return "bt601";
+        case ColorMatrix::kBT709:  return "bt709";
+        case ColorMatrix::kBT2020: return "bt2020";
+        default:                   return "unspecified";
+    }
+}
+
+/**
+ * @brief The colour description of a picture: range *and* matrix.
+ *
+ * The two travel together because they describe one thing: how the
+ * luma and chroma values are scaled and interpreted.  A frame carries
+ * one, and the encoder and the renderer both honour it.
+ */
+struct NIMRTC_API_STABLE ColorDescription {
+    ColorRange  range  = ColorRange::kUnspecified;
+    ColorMatrix matrix = ColorMatrix::kUnspecified;
+
+    [[nodiscard]] bool is_known() const noexcept {
+        return range != ColorRange::kUnspecified ||
+               matrix != ColorMatrix::kUnspecified;
+    }
+
+    /** True iff the two descriptions agree on everything they state. */
+    [[nodiscard]] bool agrees_with(const ColorDescription& other) const noexcept {
+        if (range != ColorRange::kUnspecified &&
+            other.range != ColorRange::kUnspecified &&
+            range != other.range) {
+            return false;
+        }
+        if (matrix != ColorMatrix::kUnspecified &&
+            other.matrix != ColorMatrix::kUnspecified &&
+            matrix != other.matrix) {
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool operator==(const ColorDescription&) const noexcept = default;
+};
+
+/**
+ * @brief The effective colour description of a picture.
+ *
+ * Every field that is `kUnspecified` is filled in with the *desktop
+ * default*: **full range** and **BT.709**.  That is what a modern
+ * desktop compositor produces, and it is the remote-desktop case this
+ * module was built for.  A camera path that wants the studio
+ * convention states it explicitly.
+ *
+ * The resolution is deliberately *per field*: a source that knows its
+ * matrix but not its range still gets the right range.
+ */
+NIMRTC_API_STABLE inline ColorDescription resolve_color_description(
+        ColorDescription d) noexcept {
+    if (d.range == ColorRange::kUnspecified) {
+        d.range = ColorRange::kFull;
+    }
+    if (d.matrix == ColorMatrix::kUnspecified) {
+        d.matrix = ColorMatrix::kBT709;
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------------------
 // Layout — strides / plane offsets for a given (format, width, height)
 // ---------------------------------------------------------------------------
 
@@ -498,8 +622,25 @@ struct NIMRTC_API_STABLE GpuHandle {
     /** DMA-buf fd for cross-process / cross-API sharing (Linux only,
      *  Android AHardwareBuffer). -1 if not applicable. */
     int native_fd = -1;
+    /** The GPU *device* that owns `handle`.
+     *
+     *  A surface is meaningless without the device it lives on: an
+     *  `ID3D11Texture2D*` may only be used with the `ID3D11Device` that
+     *  created it (or with a device opened from a shared handle), a
+     *  `VASurfaceID` only with its `VADisplay`.
+     *
+     *  The zero-copy path (remote-desktop plan B10) needs this token
+     *  because the *producer* (the capture device) and the *consumer*
+     *  (the hardware encoder) must agree on one device: an encoder
+     *  session is opened against a specific device, and a surface
+     *  registered with it has to come from that same device.
+     *
+     *  Type per `backend`: `ID3D11Device*` for
+     *  `kWindowsD3D11Texture`, `VADisplay` for `kLinuxVaapiSurface`.
+     *  Null when the backend does not need it (CUDA arrays are
+     *  self-describing). */
+    void* device = nullptr;
 };
-
 /** Human-readable GpuBackend name (for logging). */
 NIMRTC_API_STABLE inline std::string_view gpu_backend_name(GpuBackend b) noexcept {
     switch (b) {
@@ -743,6 +884,18 @@ struct NIMRTC_API_STABLE VideoFrameInfo {
     /** NTP↔RTP mapping at capture (mid-32 bits of NTP, from latest SR).
      *  Used to reconstruct absolute capture time on the receiver. */
     std::uint32_t ntp_mid_32      = 0;
+
+    /** The colour description of the picture (remote-desktop plan C5).
+     *
+     *  The encoder and the renderer both have to agree on it: a
+     *  full-range BT.709 desktop decoded as limited-range BT.601 looks
+     *  washed out, and a limited-range camera picture decoded as
+     *  full-range looks crushed.  Carrying it on the frame is what
+     *  makes the agreement structural rather than a convention.
+     *
+     *  `kUnspecified` on both fields means "nobody said" — the codec's
+     *  own default applies. */
+    ColorDescription color{};
 };
 
 // ---------------------------------------------------------------------------
@@ -920,6 +1073,85 @@ NIMRTC_API_STABLE void convert_i420_to_nv12(std::uint32_t width,
                           const std::uint8_t* v_plane, std::int32_t v_stride,
                           std::uint8_t* y_out, std::int32_t y_out_stride,
                           std::uint8_t* uv_out, std::int32_t uv_out_stride) noexcept;
+
+// ---------------------------------------------------------------------------
+// Colour-aware conversions (remote-desktop plan C3 / C5)
+// ---------------------------------------------------------------------------
+//
+// The functions above are the *mechanical* layout conversions (I420 ↔
+// NV12).  They do not touch the pixel values, so the colour description
+// is irrelevant for them.
+//
+// The functions below *do* change the pixel values — they convert
+// between a packed RGB layout and a planar YUV layout — and therefore
+// they must know the colour description, because the YUV encoding of a
+// colour depends on both the matrix (BT.601 vs BT.709) and the range
+// (limited vs full).  Getting either wrong produces a picture that
+// looks like "the codec is broken" (washed-out blacks, crushed
+// highlights, wrong-looking saturated colours).
+//
+// The *canonical* format of the video path is I420.  The capture path
+// delivers BGRA (every desktop compositor's native layout).  So the
+// conversion that matters is BGRA → I420, and it must be told the
+// source's colour description.
+// ---------------------------------------------------------------------------
+
+/** Convert a packed BGRA buffer into planar I420 with an explicit colour
+ *  description.
+ *
+ *  @param color  The colour description of the *source* picture.  An
+ *                unspecified range or matrix is resolved to the desktop
+ *                default (full range, BT.709) by
+ *                `resolve_color_description()`.
+ *  @param out_color  Receives the colour description of the *output*
+ *                YUV picture.  It is the same description: the
+ *                conversion preserves the range and the matrix, it only
+ *                changes the layout.
+ *
+ *  The luma and chroma planes are filled with the standard studio
+ *  scaling of the chosen range (limited: Y 16..235, C 16..240; full:
+ *  Y 0..255, C 0..255).
+ */
+NIMRTC_API_STABLE void convert_bgra_to_i420_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* src,
+                          std::int32_t src_stride,
+                          ColorDescription color,
+                          std::uint8_t* y_plane, std::int32_t y_stride,
+                          std::uint8_t* u_plane, std::int32_t u_stride,
+                          std::uint8_t* v_plane, std::int32_t v_stride,
+                          ColorDescription* out_color = nullptr) noexcept;
+
+/** Convert a packed BGRA buffer into semi-planar NV12 with an explicit
+ *  colour description.  See `convert_bgra_to_i420_color()`. */
+NIMRTC_API_STABLE void convert_bgra_to_nv12_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* src,
+                          std::int32_t src_stride,
+                          ColorDescription color,
+                          std::uint8_t* y_plane, std::int32_t y_stride,
+                          std::uint8_t* uv_plane, std::int32_t uv_stride,
+                          ColorDescription* out_color = nullptr) noexcept;
+
+/** Convert planar I420 into a packed BGRA buffer with an explicit colour
+ *  description.
+ *
+ *  This is the *renderer* side of C5: the decoder hands the sink an I420
+ *  picture plus the colour description the encoder used, and the sink
+ *  has to undo exactly that.  Using the wrong description here is what
+ *  makes a correctly-encoded screen look wrong on the monitor.
+ */
+NIMRTC_API_STABLE void convert_i420_to_bgra_color(
+                          std::uint32_t width,
+                          std::uint32_t height,
+                          const std::uint8_t* y_plane, std::int32_t y_stride,
+                          const std::uint8_t* u_plane, std::int32_t u_stride,
+                          const std::uint8_t* v_plane, std::int32_t v_stride,
+                          ColorDescription color,
+                          std::uint8_t* bgra_out,
+                          std::int32_t bgra_stride) noexcept;
 
 // ---------------------------------------------------------------------------
 // Test pattern

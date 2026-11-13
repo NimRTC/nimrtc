@@ -48,7 +48,7 @@ set_tests_properties(modules_h264_tests_test_h264_codec PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_h264_codec
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -86,5 +86,5 @@ set_tests_properties(modules_h264_tests_test_hw_backends PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_hw_backends
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

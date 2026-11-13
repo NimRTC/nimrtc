@@ -1027,6 +1027,22 @@ int NimRTCEngine::tick() noexcept {
     // tick produces goes out in the same tick.
     pump_dtmf_tx();
 
+    // ---- Pump the video capture device (remote-desktop plan A10) --------
+    //
+    // The pump pops one frame from the capture device's bounded queue
+    // and drives the encoder with it.  It runs *here*, on the engine's
+    // tick thread, for two reasons:
+    //
+    //   1. RD-6 — the codec and the sender are not thread-safe, and the
+    //      tick thread is the only thread allowed to touch them.  A
+    //      capture plug-in may own a thread; the engine does not.
+    //   2. It runs *before* the scheduler drain below, so the RTP
+    //      packets the frame produces go out in the same tick.
+    //
+    // The pump never blocks: an empty capture queue is simply "nothing
+    // to do this tick".
+    pump_video_capture();
+
     // ---- Drain the scheduler (if enabled) ---------------------------------
     // The scheduler holds outbound packets (audio / video / control) and
     // dispatches them in priority order.  drain_with() invokes our callback

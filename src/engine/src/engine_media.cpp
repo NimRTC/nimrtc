@@ -522,7 +522,11 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         if (impl_->video_feedback_ssrc_ == 0) impl_->video_feedback_ssrc_ = 1;
     }
 
-    // ---- Video Capture device (remote-desktop plan A1) --------------------
+    // The capture *device* is created at the very end of this function,
+    // by `init_video_capture()` (remote-desktop plan A10).  It cannot be
+    // created here: the device is turned into a frame stream by the
+    // capture module's shared adapter, and that adapter needs the codec
+    // and the sender to already exist.
     //
     // The capture seam is *optional*: an empty video_capture_name means
     // "the host feeds frames itself", which is the normal case.  A
@@ -531,22 +535,6 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // is reported as an error rather than silently downgraded to "no
     // capture device".  Silently ignoring it would turn a typo into a
     // session that quietly never produces a frame.
-    //
-    // Note that the capture device is NOT wired into the encoder here.
-    // The engine hands the device to the host through video_capture();
-    // turning a device into a frame stream is an adapter's job, and the
-    // automatic capture → encoder pump is remote-desktop plan item A10.
-    if (!config_.video_capture_name.empty() && !video_capture_) {
-        (void)pal::make_plugin<&pal::resolve_video_capture>(
-            config_.video_capture_name,
-            video_capture_,
-            plugins::CaptureConfig{},                  // default config
-            {.err_open_failed = core::kVideoCaptureOpenFailed,
-             .err_missing = core::kVideoCapturePluginMissing,
-             .open_fail_mode = pal::PluginFailureMode::Error,
-             .missing_mode = pal::PluginFailureMode::Error,
-             .on_error = on_error_});
-    }
 
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
@@ -611,6 +599,19 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         cfg.codec = detail::codec_kind_of(codec_family);
         cfg.payload_type = config_.video_receiver_tuning.payload_type;
         cfg.name = config_.video_codec_name;
+        // The backend policy (plan B2) travels with the config because
+        // the *selection* happens inside the codec module, which owns
+        // the backend table.  The engine is the one that knows the
+        // host's intent.
+        cfg.backend_policy = config_.video_codec_backend;
+        // The content hint and the colour description (plan B7 / C5)
+        // ride along so the encoder can be tuned for screen content
+        // from the very first frame — a screen encoder that starts with
+        // camera tuning and switches later wastes the first seconds of
+        // the session.
+        cfg.content_hint = config_.video_content_hint;
+        cfg.color_range  = config_.video_color_range;
+        cfg.color_matrix = config_.video_color_matrix;
         (void)pal::make_plugin<&pal::resolve_video_codec>(
             config_.video_codec_name,
             video_codec_,
@@ -620,6 +621,21 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+
+        // A `hardware` policy that could not be honoured is a *hard*
+        // error (plan B2): the host said "hardware only", and a silent
+        // software fallback would show up much later as a CPU
+        // saturation the host never asked for.
+        if (video_codec_ == nullptr &&
+            config_.video_codec_backend == plugins::CodecBackend::kHardware) {
+            const std::string msg =
+                std::string{"engine: the video codec policy is 'hardware', "
+                            "but no hardware encoder is available for '"}
+                + config_.video_codec_name
+                + "' (the software path was NOT used)";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoCodecOpenFailed, msg);
+        }
     }
 
     // The instantiated codec is the authority on the codec family.  A
@@ -1012,6 +1028,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             });
     }
 
+    // ---- Video capture device (remote-desktop plan A10) ----------------
+    //
+    // The capture device is set up *last*, because the pump drives the
+    // codec and the sender: the device must not be able to deliver a
+    // frame before those two exist.
+    init_video_capture();
+
     return plugins::kOk;
 }
 
@@ -1022,15 +1045,20 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
         p.reset();
     };
     stop_video();   // stop video source if running
+    // Remote-desktop plan A10: close the capture device *before* the
+    // codec and the sender, so the pump cannot be mid-encode when the
+    // encoder disappears.
+    // The capture device (remote-desktop plan A1) is a *device*: it may
+    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
+    // has to be closed explicitly rather than merely dropped.
+    // `shutdown_video_capture()` closes it (through the adapter that
+    // drives its lifecycle), so it is not closed a second time here.
+    shutdown_video_capture();
     close_all(video_source_);
     close_all(video_sink_);
     close_all(video_receiver_);
     close_all(video_sender_);
     close_all(video_codec_);
-    // The capture device (remote-desktop plan A1) is a *device*: it may
-    // own an OS handle (a DXGI duplication, a PipeWire stream), so it
-    // has to be closed explicitly rather than merely dropped.
-    close_all(video_capture_);
 }
 
 
@@ -1361,8 +1389,14 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
 
 plugins::Status NimRTCEngine::start_video() noexcept {
     if (!is_open()) return plugins::kErrNotReady;
+    // Remote-desktop plan A10: the capture device is opened with the
+    // rest of the video plugins (at open() time), so there is nothing
+    // to start here — the pump drives it from the tick thread.
     if (video_source_) {
         video_source_->start();
+        return plugins::kOk;
+    }
+    if (video_capture_source_) {
         return plugins::kOk;
     }
     return plugins::kErrNotReady;
@@ -1373,6 +1407,9 @@ void NimRTCEngine::stop_video() noexcept {
     if (video_source_) {
         video_source_->stop();
     }
+    // The capture device stays open: stopping the source does not mean
+    // "stop the screen capture".  The device is closed when the engine
+    // shuts its video plugins down (see shutdown_video_plugins()).
 }
 
 
@@ -1381,81 +1418,139 @@ plugins::Status NimRTCEngine::send_video(
     if (!is_open()) return plugins::kErrNotReady;
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
 
-    // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
+    // ---- The GPU surface the frame carries -------------------------------
+    //
+    // Two producers can hand the engine a picture that lives in GPU
+    // memory, and they spell it differently:
+    //
+    //   - the *capture seam* (remote-desktop plan B10) fills in
+    //     `VideoSourceFrame::gpu_surface`, a full
+    //     `video_frame::GpuHandle` that also carries the **device** the
+    //     surface belongs to.  That is a promise: the picture is in GPU
+    //     memory and there is no CPU copy to fall back to.
+    //
+    //   - a Phase-3 / C3 source fills in the flat `gpu_backend` /
+    //     `gpu_handle` / `gpu_pitch_bytes` fields.  Those carry no
+    //     device token, and the host opts into them explicitly through
+    //     `EngineConfig::video_zero_copy`.
+    //
+    // The engine normalises both into one `GpuHandle` so the rest of the
+    // path has a single shape, but keeps the two *contracts* distinct.
+    video_frame::GpuHandle surface{};
+    bool surface_is_capture_contract = false;
+    if (frame.gpu_surface.backend != video_frame::GpuBackend::kNone &&
+        frame.gpu_surface.handle != nullptr) {
+        surface = frame.gpu_surface;
+        surface_is_capture_contract = true;
+    } else if (frame.has_gpu_handle()) {
+        surface.backend           = frame.gpu_backend;
+        surface.handle            = frame.gpu_handle;
+        surface.native_pitch_bytes = frame.gpu_pitch_bytes;
+        surface.native_fd         = -1;
+        // `device` stays null: the flat fields cannot carry it.
+    }
+
+    const bool frame_has_gpu =
+        surface.backend != video_frame::GpuBackend::kNone &&
+        surface.handle != nullptr;
+    const bool has_cpu_pixels  = frame.plane_y != nullptr;
+    const bool zero_copy_capable = video_codec_->supports_zero_copy_encode();
+
+    // Translate plugins::VideoSourceFrame -> plugins::VideoFrame for the codec.
     //
     // The source frame is a *view* into the producer's own storage, valid
     // only for this call; the codec seam wants a refcounted buffer that
     // stays alive across `encode()`.  So the engine stages its own copy
     // (see `stage_source_frame` above).  A software codec may ignore the
-    // pixels, but a hardware encoder (NVENC) *must* have them — with a
+    // pixels, but a hardware encoder (NVENC) *must* have them -- with a
     // null buffer it rejects the frame with kErrInvalidParam.
     plugins::VideoFrame raw{};
     raw.info.capture_ts_us = frame.capture_ts_us;
     raw.info.frame_seq     = frame.frame_seq;
     raw.info.rtp_timestamp = frame.rtp_timestamp;
-
-    // ---- Phase 3 / C3: the GPU zero-copy path -----------------------------
-    //
-    // A hardware capture source hands the engine a *native* GPU handle
-    // rather than CPU pixels (`VideoSourceFrame::gpu_handle`).  When the
-    // host opted in (`EngineConfig::video_zero_copy`) and the codec can
-    // consume a handle directly, the engine passes the handle straight
-    // through — no staging copy, no de-interleave, no 3 MB memcpy per
-    // frame.
-    //
-    // The zero-copy branch is only taken when ALL of the following hold:
-    //
-    //   1. the host enabled `EngineConfig::video_zero_copy`;
-    //   2. the source frame carries a live GPU handle;
-    //   3. the codec reports `supports_zero_copy_encode()`.
-    //
-    // Otherwise the CPU staging path runs exactly as before, so the flag
-    // is always safe to turn on.  The counters make the decision
-    // observable from the outside.
-    const bool zero_copy_requested = config_.video_zero_copy;
-    const bool zero_copy_capable    = video_codec_->supports_zero_copy_encode();
-    const bool frame_has_gpu       = frame.has_gpu_handle();
+    // The colour description travels with the picture (plan C5): the
+    // encoder and the renderer both have to agree on how the luma and
+    // the chroma are scaled, or the picture looks broken.
+    raw.info.color = frame.color;
 
     plugins::EncodedVideoFrame encoded{};
     bool encoded_ok = false;
 
-    if (zero_copy_requested && zero_copy_capable && frame_has_gpu) {
-        // Wrap the borrowed handle in a `GpuBuffer` so the codec seam can
-        // take it.  The wrapper does NOT own the surface — the source
-        // keeps it alive for the duration of this call, which is exactly
-        // the lifetime contract `encode_zero_copy()` documents ("the
-        // caller keeps the GpuBuffer alive until the encoder returns").
-        video_frame::GpuHandle handle{};
-        handle.backend           = frame.gpu_backend;
-        handle.handle            = frame.gpu_handle;
-        handle.native_pitch_bytes = frame.gpu_pitch_bytes;
-        handle.native_fd         = -1;
+    // ---- The GPU zero-copy path ------------------------------------------
+    //
+    // A frame whose picture lives in GPU memory can go straight to the
+    // hardware encoder: no readback, no colour conversion, no copy.  That
+    // is the path that makes a 4K screen capture fit inside the CPU
+    // budget (plan B.6): the expensive part (a CPU->GPU->CPU round trip
+    // per frame) disappears entirely.
+    //
+    // The handle is *borrowed* from the producer: it is valid for the
+    // duration of this call, which is exactly the lifetime the codec
+    // seam documents for `encode_zero_copy`.
+    if (frame_has_gpu) {
+        // The capture seam's own contract is unconditional: the device
+        // negotiated a zero-copy surface, so the engine must not quietly
+        // stage the frame through the CPU behind the host's back.  The
+        // flat Phase-3 handle, on the other hand, is an *opt-in*
+        // optimisation the host turns on with
+        // `EngineConfig::video_zero_copy`.
+        const bool want_zero_copy =
+            surface_is_capture_contract ? true : config_.video_zero_copy;
 
-        video_frame::GpuBuffer gpu(handle,
-                                   frame.width,
-                                   frame.height,
-                                   frame.format);
+        if (want_zero_copy && zero_copy_capable) {
+            // Wrap the borrowed handle in a `GpuBuffer` so the codec seam
+            // can take it.  The wrapper does NOT own the surface -- the
+            // source keeps it alive for the duration of this call, which
+            // is exactly the lifetime contract `encode_zero_copy()`
+            // documents ("the caller keeps the GpuBuffer alive until the
+            // encoder returns").
+            video_frame::GpuBuffer gpu(surface,
+                                       frame.width,
+                                       frame.height,
+                                       frame.format);
 
-        const plugins::Status zc_rc =
-            video_codec_->encode_zero_copy(gpu, encoded);
-        if (zc_rc == plugins::kOk) {
-            encoded_ok = true;
-            ++impl_->video_zero_copy_frames;
-        } else {
-            // The codec refused the handle (wrong backend, surface busy,
-            // driver error, ...).  Fall through to the CPU path *only* if
-            // the source also gave us CPU pixels — otherwise there is
-            // nothing to stage and the frame is simply lost.
+            const plugins::Status zc_rc =
+                video_codec_->encode_zero_copy(gpu, encoded);
+            if (zc_rc == plugins::kOk) {
+                encoded_ok = true;
+                ++impl_->video_zero_copy_frames;
+            } else {
+                // The codec refused the handle (wrong backend, surface
+                // busy, driver error, ...).
+                ++impl_->video_codec_errors;
+                if (surface_is_capture_contract && !has_cpu_pixels) {
+                    // There is nothing to fall back *to*: the picture is
+                    // in GPU memory and the encoder cannot consume it.
+                    // The honest answer is a clear error.
+                    ++impl_->video_zero_copy_rejected;
+                    core::log::Logger::instance().warn(
+                        "send_video: the zero-copy encode failed and the "
+                        "frame carries no CPU pixels -- the frame is dropped");
+                    return zc_rc;
+                }
+                ++impl_->video_zero_copy_fallbacks;
+                core::log::Logger::instance().warn(
+                    "send_video: the zero-copy encode failed -- falling back "
+                    "to the CPU staging path");
+            }
+        } else if (want_zero_copy && !zero_copy_capable) {
+            // The host asked for zero-copy but the codec cannot consume a
+            // handle.  Count the missed opportunity so the host can see
+            // that the flag alone does not buy anything with this codec.
+            if (surface_is_capture_contract && !has_cpu_pixels) {
+                // The capture device promised a zero-copy surface and the
+                // encoder cannot take it: there is no CPU picture to
+                // fall back to, so the frame is dropped -- loudly.
+                ++impl_->video_zero_copy_rejected;
+                core::log::Logger::instance().warn(
+                    "send_video: the frame carries a GPU surface but the "
+                    "selected encoder does not support zero-copy -- the "
+                    "frame is dropped (use a CPU capture or a hardware "
+                    "encoder)");
+                return plugins::kErrUnsupported;
+            }
             ++impl_->video_zero_copy_fallbacks;
-            core::log::Logger::instance().warn(
-                "send_video: the zero-copy encode failed — falling back "
-                "to the CPU staging path");
         }
-    } else if (zero_copy_requested && frame_has_gpu && !zero_copy_capable) {
-        // The host asked for zero-copy but the codec cannot consume a
-        // handle.  Count the missed opportunity so the host can see that
-        // the flag alone does not buy anything with this codec.
-        ++impl_->video_zero_copy_fallbacks;
     }
 
     if (!encoded_ok) {
@@ -1467,18 +1562,18 @@ plugins::Status NimRTCEngine::send_video(
             // The frame cannot be staged (no planes, zero dimensions, or a
             // packed source format).  Software codecs can still encode a
             // synthetic frame without pixels, so we only *warn* here and let
-            // the codec decide — a hardware codec will report the failure
+            // the codec decide -- a hardware codec will report the failure
             // through its own error path.
             core::log::Logger::instance().warn(
                 "send_video: the source frame could not be staged into a "
                 "codec-facing pixel buffer (the encoder receives no pixels)");
         }
 
-        // Encode — reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
+        // Encode -- reuse Impl::video_enc_buf (P0#4).  Reserve a typical IDR
         // size on first use; subsequent calls within the same capacity reuse
         // the storage and only pay the per-byte conversion cost inside the
         // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
-        // — when that happens we resize and pay one reallocation.
+        // -- when that happens we resize and pay one reallocation.
         constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
         if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
             impl_->video_enc_buf.reserve(kInitialVideoEncCap);
@@ -1487,6 +1582,7 @@ plugins::Status NimRTCEngine::send_video(
                                                  impl_->video_enc_buf.data(),
                                                  impl_->video_enc_buf.capacity(),
                                                  encoded);
+        ++impl_->video_staged_frames;
         if (enc_rc != plugins::kOk) {
             // Codec may need a larger buffer than reserved (e.g. very high
             // bitrate IDR).  Resize to the codec's expected capacity and retry
@@ -1987,6 +2083,48 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // Phase 3 / C3: the zero-copy path counters.
     out.video_zero_copy_frames    = impl_->video_zero_copy_frames;
     out.video_zero_copy_fallbacks = impl_->video_zero_copy_fallbacks;
+
+    // Remote-desktop plan A11: the capture counters.  They are zero
+    // when no capture device is configured, so a host that never
+    // configured one sees no change in its telemetry.
+    out.video_capture_frames         = impl_->video_capture_frames;
+    out.video_capture_frames_pumped  = impl_->video_capture_frames_pumped;
+    out.video_capture_dropped        = impl_->video_capture_dropped;
+    out.video_capture_device_errors  = impl_->video_capture_device_errors;
+    out.video_capture_restarts       = impl_->video_capture_restarts;
+    out.video_capture_format_changes = impl_->video_capture_format_changes;
+    out.video_capture_bytes_copied   = impl_->video_capture_bytes_copied;
+
+    // ---- Codec telemetry (remote-desktop plan B15) ------------------------
+    //
+    // The codec owns the detailed bookkeeping; the engine republishes
+    // the snapshot rather than keeping a second copy that could drift.
+    //
+    // The *engine-side* numbers (how many frames went through the
+    // zero-copy path, how many were staged through the CPU) are the
+    // engine's own, because only the engine knows which path a frame
+    // took.
+    if (video_codec_) {
+        const plugins::VideoCodecStats cs = video_codec_->stats();
+        out.video_codec_backend_id     = cs.backend_id;
+        out.video_codec_hardware       = cs.hardware;
+        out.video_codec_bitrate_bps    = cs.configured_bitrate_bps;
+        out.video_codec_actual_bps     = cs.actual_bitrate_bps;
+        out.video_codec_encode_latency_us = cs.avg_encode_latency_us;
+        out.video_codec_frames_encoded = cs.frames_encoded;
+        out.video_codec_bytes_encoded  = cs.bytes_encoded;
+        out.video_codec_encode_errors  = cs.encode_errors + impl_->video_codec_errors;
+    } else {
+        out.video_codec_encode_errors  = impl_->video_codec_errors;
+    }
+    // The zero-copy flag says what the *last* frame did; the counters
+    // say how many of each kind there were.
+    out.video_codec_zero_copy        = impl_->video_zero_copy_frames > 0 &&
+                                        (impl_->video_zero_copy_frames >=
+                                         impl_->video_staged_frames);
+    out.video_codec_zero_copy_frames = impl_->video_zero_copy_frames;
+    out.video_codec_staged_frames    = impl_->video_staged_frames;
+
     // v1.2.0 M1: the feedback loop's own counters.  `bwe_feedback_samples`
     // staying at zero means the loop is not closed — the estimator is
     // never fed, so the bandwidth target never moves.

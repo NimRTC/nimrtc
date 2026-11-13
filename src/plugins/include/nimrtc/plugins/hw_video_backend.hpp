@@ -209,6 +209,32 @@ public:
                                               std::string_view preferred_id
                                                   = std::string_view{}) const noexcept;
 
+    /// Select an encoder under an explicit backend policy (plan B2).
+    ///
+    /// `CodecBackend::kAuto` behaves exactly like `select_encoder()`:
+    /// the highest-priority *available* backend wins, and the software
+    /// path is the fallback.
+    ///
+    /// `CodecBackend::kHardware` **excludes** the software backends: if
+    /// no hardware encoder for this codec is available, the selection
+    /// fails (returns nullptr) rather than silently producing a
+    /// software stream.  That is the whole point of the override — a
+    /// host that demands hardware must be told when the demand cannot be
+    /// met, instead of getting a soft stream that looks fine until the
+    /// CPU saturates.
+    ///
+    /// `CodecBackend::kSoftware` does the opposite: only the software
+    /// backends are eligible, so the selection is reproducible across
+    /// machines (which is what a test needs).
+    const VideoEncoderBackend* select_encoder(VideoCodecKind kind,
+                                              std::string_view preferred_id,
+                                              CodecBackend policy) const noexcept;
+
+    /// Same semantics for decoders.
+    const VideoDecoderBackend* select_decoder(VideoCodecKind kind,
+                                              std::string_view preferred_id,
+                                              CodecBackend policy) const noexcept;
+
     /// Snapshot of all registered encoder backends, sorted by priority desc.
     std::vector<const VideoEncoderBackend*> list_encoders(
         std::optional<VideoCodecKind> kind_filter = std::nullopt) const noexcept;

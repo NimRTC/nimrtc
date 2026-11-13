@@ -41,5 +41,5 @@ set_tests_properties(video_stats_tests PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_video_stats
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

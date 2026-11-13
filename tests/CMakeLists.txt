@@ -41,7 +41,7 @@ function(nimrtc_add_core_api_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -108,7 +108,7 @@ function(nimrtc_add_web_transport_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -163,7 +163,7 @@ function(nimrtc_add_web_transport_dc_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10
+            DISCOVERY_TIMEOUT 60
             DISCOVERY_MODE PRE_TEST)
     endif()
 endfunction()
@@ -213,7 +213,7 @@ function(nimrtc_add_audio_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -284,7 +284,7 @@ function(nimrtc_add_web_transport_msquic_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 60
-            DISCOVERY_TIMEOUT 10
+            DISCOVERY_TIMEOUT 60
             DISCOVERY_MODE PRE_TEST)
     endif()
 endfunction()
@@ -795,7 +795,7 @@ function(nimrtc_add_engine_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 90
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
     # Linking nimrtc::engine pulls in nimrtc::dtls (via the unified
     # kDefaultRegistrars[] table), and the wolfSSL backend resolves its
@@ -833,7 +833,7 @@ function(nimrtc_add_plugin_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -881,7 +881,7 @@ function(nimrtc_add_video_feedback_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -926,7 +926,7 @@ function(nimrtc_add_video_plugin_adapter_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -971,9 +971,22 @@ function(nimrtc_add_engine_video_test name source)
         COMMAND $<TARGET_FILE:${name}>)
     set_tests_properties(${name} PROPERTIES TIMEOUT 30)
     if(COMMAND gtest_discover_tests)
-        gtest_discover_tests(${name}
-            PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+        # The optional third argument selects the gtest discovery mode.
+        # "PRE_TEST" defers the .exe invocation (needed to enumerate the
+        # GTest cases) to ctest-time, so it runs *after* a POST_BUILD
+        # DLL copy.  Without it the discovery probe fails with
+        # STATUS_DLL_NOT_FOUND (0xc0000135) on Windows when the test
+        # links a module with a runtime DLL (msquic).
+        if(ARGC GREATER 2 AND NOT "${ARGV2}" STREQUAL "")
+            gtest_discover_tests(${name}
+                PROPERTIES TIMEOUT 30
+                DISCOVERY_TIMEOUT 60
+                DISCOVERY_MODE ${ARGV2})
+        else()
+            gtest_discover_tests(${name}
+                PROPERTIES TIMEOUT 30
+                DISCOVERY_TIMEOUT 60)
+        endif()
     endif()
     # Links nimrtc::engine → nimrtc::dtls; the wolfSSL backend resolves
     # its certificate from disk at DTLS-session setup time.
@@ -987,6 +1000,29 @@ endfunction()
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
 nimrtc_add_engine_video_test(test_engine_video_plugins
                               test_engine_video_plugins.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# Remote-desktop plan A10 / A11 — the capture -> engine pump.
+#
+# The test drives `tick()` and never `send_video()`, and asserts that the
+# encoder was only ever touched from the engine's tick thread.  It needs
+# the capture module linked, because the engine's pump reaches the
+# capture device through the module's shared adapter (Layout Invariant 4
+# keeps the *public* engine header free of concrete module headers, but
+# the pump itself is a real dependency).
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_SOURCE
+   AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE)
+nimrtc_add_engine_video_test(test_engine_capture_pump
+                              test_engine_capture_pump.cpp
+                              PRE_TEST)
+target_link_libraries(test_engine_capture_pump PRIVATE nimrtc::video_capture)
+# The engine links the WebTransport / QUIC seam, so the test binary needs
+# msquic.dll next to it on Windows.  The POST_BUILD copy below runs after
+# the link, and PRE_TEST discovery (passed above) defers the gtest case
+# enumeration to ctest-time — after that copy.
+nimrtc_copy_msquic_dll(test_engine_capture_pump)
 endif()
 
 # ----------------------------------------------------------------------------
@@ -1034,7 +1070,7 @@ function(nimrtc_add_engine_video_feedback_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
     # Links nimrtc::engine → nimrtc::dtls; the wolfSSL backend resolves
     # its certificate from disk at DTLS-session setup time.
@@ -1086,7 +1122,7 @@ function(nimrtc_add_engine_codec_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
     # test_engine_video_codec links nimrtc::engine → nimrtc::dtls and needs certs.
     nimrtc_copy_wolfssl_certs(${name})
@@ -1125,7 +1161,7 @@ function(nimrtc_add_hw_seam_test name source)
     if(COMMAND gtest_discover_tests)
         gtest_discover_tests(${name}
             PROPERTIES TIMEOUT 30
-            DISCOVERY_TIMEOUT 10)
+            DISCOVERY_TIMEOUT 60)
     endif()
 endfunction()
 
@@ -1764,7 +1800,7 @@ set_tests_properties(test_bandwidth_allocation PROPERTIES TIMEOUT 30)
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_bandwidth_allocation
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # ---------------------------------------------------------------------------

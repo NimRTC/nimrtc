@@ -217,6 +217,160 @@ TEST(CaptureQueue, ClearDiscardsEverything) {
 }
 
 // ---------------------------------------------------------------------------
+// The GPU surface (remote-desktop plan B10)
+// ---------------------------------------------------------------------------
+//
+// A zero-copy frame carries no pixels: it carries a *handle* to a
+// picture that lives in GPU memory.  The handle has to survive the
+// trip through the queue, and the queue has to hand it back to the
+// producer when it retires it — otherwise the producer runs out of
+// surfaces (or worse, hands the same texture out twice).
+//
+// These tests use a fake handle (an integer cast to a pointer) because
+// the queue is platform-neutral: it never dereferences the handle.
+
+namespace {
+
+/** A fake GPU surface handle.  The queue never dereferences it. */
+nimrtc::video_frame::GpuHandle fake_surface(std::uintptr_t id) {
+    nimrtc::video_frame::GpuHandle h;
+    h.backend = nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture;
+    h.handle  = reinterpret_cast<void*>(id);
+    h.device  = reinterpret_cast<void*>(0xD0DE);
+    return h;
+}
+
+} // anonymous namespace
+
+TEST(CaptureQueue, CarriesTheGpuSurfaceThroughTheQueue) {
+    CaptureQueue q(2);
+    const auto surface = fake_surface(1);
+
+    ASSERT_EQ(q.push(nullptr, 0, 0, 1920, 1080, 42, 3, {}, surface),
+              CaptureQueue::PushResult::kQueued);
+
+    CaptureFrame f{};
+    ASSERT_TRUE(q.pop(f));
+    EXPECT_TRUE(f.has_gpu_handle);
+    EXPECT_EQ(f.gpu_surface.backend,
+              nimrtc::video_frame::GpuBackend::kWindowsD3D11Texture);
+    EXPECT_EQ(f.gpu_surface.handle, surface.handle);
+    EXPECT_EQ(f.gpu_surface.device, surface.device);
+    // A GPU frame has no CPU pixels.
+    EXPECT_EQ(f.pixels, nullptr);
+    EXPECT_EQ(f.size, 0u);
+    // The dimensions still travel with it: the encoder needs them.
+    EXPECT_EQ(f.width, 1920u);
+    EXPECT_EQ(f.height, 1080u);
+    EXPECT_EQ(f.frame_seq, 3u);
+}
+
+TEST(CaptureQueue, PeekCarriesTheGpuSurfaceToo) {
+    CaptureQueue q(2);
+    const auto surface = fake_surface(2);
+    ASSERT_EQ(q.push(nullptr, 0, 0, 640, 480, 0, 1, {}, surface),
+              CaptureQueue::PushResult::kQueued);
+
+    CaptureFrame peeked{};
+    ASSERT_TRUE(q.peek(peeked));
+    EXPECT_TRUE(peeked.has_gpu_handle);
+    EXPECT_EQ(peeked.gpu_surface.handle, surface.handle);
+}
+
+TEST(CaptureQueue, RetiresTheSurfaceWhenTheNextFrameIsPopped) {
+    // The consumer is done with a surface once it has popped the *next*
+    // frame — that is the moment the previous one can be reused.
+    CaptureQueue q(2);
+    std::vector<void*> released;
+    q.set_surface_release([&released](const nimrtc::video_frame::GpuHandle& h) {
+        released.push_back(h.handle);
+    });
+
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 1, {}, fake_surface(0xA1)),
+              CaptureQueue::PushResult::kQueued);
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 2, {}, fake_surface(0xA2)),
+              CaptureQueue::PushResult::kQueued);
+
+    CaptureFrame f{};
+    ASSERT_TRUE(q.pop(f));
+    // The first pop retires nothing: the frame it handed out is still
+    // the consumer's.
+    EXPECT_TRUE(released.empty());
+
+    // The second pop replaces it, so the first surface comes back.
+    ASSERT_TRUE(q.pop(f));
+    ASSERT_EQ(released.size(), 1u);
+    EXPECT_EQ(released[0], reinterpret_cast<void*>(0xA1));
+}
+
+TEST(CaptureQueue, RetiresTheSurfaceWhenTheOverflowDropsTheOldest) {
+    CaptureQueue q(1);
+    std::vector<void*> released;
+    q.set_surface_release([&released](const nimrtc::video_frame::GpuHandle& h) {
+        released.push_back(h.handle);
+    });
+
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 1, {}, fake_surface(0xB1)),
+              CaptureQueue::PushResult::kQueued);
+    // The queue is full, so the oldest frame (and its surface) goes.
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 2, {}, fake_surface(0xB2)),
+              CaptureQueue::PushResult::kDroppedOldest);
+    ASSERT_EQ(released.size(), 1u);
+    EXPECT_EQ(released[0], reinterpret_cast<void*>(0xB1));
+}
+
+TEST(CaptureQueue, ClearRetiresTheSurfaces) {
+    CaptureQueue q(4);
+    std::vector<void*> released;
+    q.set_surface_release([&released](const nimrtc::video_frame::GpuHandle& h) {
+        released.push_back(h.handle);
+    });
+
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 1, {}, fake_surface(0xC1)),
+              CaptureQueue::PushResult::kQueued);
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 2, {}, fake_surface(0xC2)),
+              CaptureQueue::PushResult::kQueued);
+
+    q.clear();
+    EXPECT_EQ(q.size(), 0u);
+    ASSERT_EQ(released.size(), 2u);
+}
+
+TEST(CaptureQueue, ARejectedFrameRetiresItsSurface) {
+    // The "drop newest" policy refuses the arrival, so the surface that
+    // came with it has to go straight back — otherwise it leaks.
+    CaptureQueue q(1);
+    q.set_drop_policy(CaptureDropPolicy::kDropNewest);
+    std::vector<void*> released;
+    q.set_surface_release([&released](const nimrtc::video_frame::GpuHandle& h) {
+        released.push_back(h.handle);
+    });
+
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 1, {}, fake_surface(0xD1)),
+              CaptureQueue::PushResult::kQueued);
+    ASSERT_EQ(q.push(nullptr, 0, 0, 16, 16, 0, 2, {}, fake_surface(0xD2)),
+              CaptureQueue::PushResult::kRejected);
+    // The refused frame never entered the queue, so *its* surface was
+    // never owned by the queue either: the producer keeps it.  The
+    // queued frame's surface is untouched.
+    EXPECT_TRUE(released.empty());
+}
+
+TEST(CaptureQueue, ACpuFrameCarriesNoSurface) {
+    // The CPU path must not accidentally look like a zero-copy frame.
+    CaptureQueue q(2);
+    const std::uint8_t pixels[4] = {1, 2, 3, 4};
+    ASSERT_EQ(q.push(pixels, sizeof(pixels), 4, 1, 1, 0, 1, {}),
+              CaptureQueue::PushResult::kQueued);
+
+    CaptureFrame f{};
+    ASSERT_TRUE(q.pop(f));
+    EXPECT_FALSE(f.has_gpu_handle);
+    EXPECT_EQ(f.gpu_surface.backend, nimrtc::video_frame::GpuBackend::kNone);
+    EXPECT_EQ(f.gpu_surface.handle, nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // The synthetic device
 // ---------------------------------------------------------------------------
 
@@ -325,6 +479,40 @@ TEST(SyntheticCapture, AMovingDesktopReportsADirtyRect) {
         EXPECT_LT(r.x + r.width, 320u + 1u);
         EXPECT_LT(r.y + r.height, 240u + 1u);
     }
+}
+
+TEST(SyntheticCapture, TheDirtyRectFlagAgreesWithWhatTheFramesCarry) {
+    // The capability flag is what a host reads to decide whether it can
+    // rely on the dirty-rect metadata.  A flag that says "false" while
+    // the frames carry the metadata is not merely conservative — it is
+    // wrong, and it makes the *consumer* ignore metadata that is
+    // present and correct.
+    //
+    // The synthetic device is the reference implementation of the
+    // mechanism the platform backends are written against, so this test
+    // states the invariant every backend has to satisfy.
+    CaptureConfig cfg{};
+    cfg.format.width  = 320;
+    cfg.format.height = 240;
+    SyntheticCapture cap{cfg};
+    ASSERT_EQ(cap.open(), nimrtc::plugins::kOk);
+
+    const auto caps = cap.capabilities();
+    ASSERT_TRUE(caps.dirty_rects);
+
+    // The negotiated format must agree with the capability.
+    EXPECT_TRUE(cap.config().format.has_dirty_rects);
+
+    // And the frames must actually carry the metadata the flag promises.
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+
+    CaptureFrame f{};
+    ASSERT_EQ(cap.pop_frame(f), nimrtc::plugins::kOk);
+    // A *moving* desktop produced a real rect, not the "everything
+    // changed" fallback.
+    EXPECT_FALSE(f.dirty.full_frame);
+    EXPECT_FALSE(f.dirty.rects.empty());
 }
 
 TEST(SyntheticCapture, TheRegionSelectsTheFrameSize) {

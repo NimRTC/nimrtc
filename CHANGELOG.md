@@ -17,6 +17,34 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Two guards that make the architecture's promises executable
+  (v1.2.0, ADR-025 / ADR-026).**  Both invariants were stated in prose
+  and checked by nobody, which is how an invariant stops meaning
+  anything.
+
+  | Guard | Invariant |
+  |-------|-----------|
+  | `tools/check_engine_layering.py` | ADR-025 Layout Invariant 4 — the engine reaches a concrete module only through its `plugins::I*` seam, with a named set of exemptions |
+  | `tools/check_c_clean_headers.py` | ADR-026 — a `.h` under `src/**/include/` is a promise that a C host can include it |
+
+  The layering guard scans `src/engine/` for concrete-module includes and
+  fails when a module outside the ADR-025 Decision 1 table appears.  The
+  exemption list lives in the script, one commented entry per module, so
+  widening it is a visible act rather than an accident.
+
+  The C-clean guard compiles every public `.h` as C11, in isolation, with
+  a real C compiler.  Isolation is the point: a header that only compiles
+  because some *other* header was included first is exactly the header
+  that breaks a C consumer who includes it first.  The scope is the
+  extension — `.h` is C-consumable, `.hpp` is C++-only — so a header
+  that was always C++-only opts out by being renamed, and a header that
+  was always meant to be C cannot drift.
+
+  Both guards ship with a `--self-test` that builds a synthetic tree and
+  asserts the checker still tells right from wrong, because a guard that
+  cannot fail is a decoration.  Both run as CI steps in the
+  `docs / markdown links` job, alongside `check_dead_modules.py`.
+
 - **A dead-module guard that makes "either wire it in, or delete it"
   executable (v1.2.0, architecture remediation plan §4.2e / D2).**
   `tools/check_dead_modules.py` reads the CMake dependency graph and the

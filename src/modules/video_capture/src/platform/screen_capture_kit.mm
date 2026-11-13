@@ -195,8 +195,32 @@ std::string utf8(NSString* s) {
  * of the content inside the handler, and the copies are what the
  * callers work with.  A copy of an `NSArray` is an immutable
  * snapshot, so it stays valid for as long as we hold it.
+ *
+ * ## Why the copies are released
+ *
+ * A copy is *ours*, and this file is compiled without ARC, so nothing
+ * would release it.  The holder therefore releases both arrays when it
+ * goes out of scope: without that, every enumeration would leak two
+ * arrays, and a long-running host that enumerates periodically would
+ * grow without bound.
  */
-struct ShareableContent {
+class ShareableContent {
+public:
+    ShareableContent() = default;
+
+    ~ShareableContent() {
+        // `release` is only right for an object this code owns, which
+        // is exactly what a `-copy` gives: the copy has a reference
+        // count of one, and that reference is ours to give back.
+        [displays release];
+        [windows release];
+        displays = nil;
+        windows = nil;
+    }
+
+    ShareableContent(const ShareableContent&)            = delete;
+    ShareableContent& operator=(const ShareableContent&) = delete;
+
     /** The displays, copied out of the content while it was alive. */
     NSArray<SCDisplay*>* displays = nil;
 
@@ -232,21 +256,38 @@ struct ShareableContent {
  */
 bool fetch_shareable_content(ShareableContent& out,
                              std::string& error_text) {
-    out.displays = nil;
-    out.windows = nil;
     error_text.clear();
 
+    // The result is written by the completion handler and read by the
+    // caller *after* the semaphore says it is done.  The caller is
+    // blocked in `dispatch_semaphore_wait` while the handler runs, so
+    // this stack frame is alive for as long as the handler may touch
+    // it.  That is why a plain local is enough -- and why nothing has
+    // to be retained across the boundary.
+    //
+    // The error is copied to text *inside* the handler as well: an
+    // `NSError` is autoreleased, exactly like the content, so reading
+    // its description afterwards would be the same use-after-free the
+    // content's arrays used to be.
+    struct Result {
+        NSArray<SCDisplay*>* displays = nil;
+        NSArray<SCWindow*>* windows = nil;
+        std::string error_text;
+        bool has_error = false;
+    } result;
+
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    __block NSError* error = nil;
-    __block NSArray<SCDisplay*>* displays = nil;
-    __block NSArray<SCWindow*>* windows = nil;
+    Result* r = &result;
 
     [SCShareableContent
         getShareableContentExcludingDesktopWindows:NO
                                  onScreenWindowsOnly:YES
                                   completionHandler:^(SCShareableContent* c,
                                                       NSError* e) {
-        error = e;
+        if (e != nil) {
+            r->has_error = true;
+            r->error_text = utf8(e.localizedDescription);
+        }
         if (c != nil) {
             // The copy happens *here*, while the content is still
             // alive: the arrays are the content's own data, and a copy
@@ -254,22 +295,22 @@ bool fetch_shareable_content(ShareableContent& out,
             // Reading them here and copying them out is what keeps the
             // caller from touching freed memory once the handler has
             // returned.
-            displays = [c.displays copy];
-            windows = [c.windows copy];
+            r->displays = [c.displays copy];
+            r->windows = [c.windows copy];
         }
         dispatch_semaphore_signal(done);
     }];
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
-    if (displays == nil && windows == nil) {
-        error_text = error != nil ? utf8(error.localizedDescription)
+    if (r->displays == nil && r->windows == nil) {
+        error_text = r->has_error ? r->error_text
                                   : std::string("no error reported");
         return false;
     }
 
-    out.displays = displays;
-    out.windows = windows;
+    out.displays = r->displays;
+    out.windows = r->windows;
     return true;
 }
 

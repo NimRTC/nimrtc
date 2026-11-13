@@ -21,8 +21,6 @@
 #include <nimrtc/video_capture/wgc_capture.hpp>
 
 #include <algorithm>
-#include <cstdarg>
-#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -77,20 +75,6 @@ constexpr int kPoolBufferCount = 2;
 /** The class name of the WGC capture item's activation factory. */
 constexpr wchar_t kCaptureItemClass[] =
     L"Windows.Graphics.Capture.GraphicsCaptureItem";
-
-// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
-// A breadcrumb trail to stderr.  The CI agent's segfault gives no
-// stack, so the trail is what says which step the crash happened in.
-void wgc_trace(const char* fmt, ...) {
-    char buf[256];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    fprintf(stderr, "[wgc-trace] %s\n", buf);
-    fflush(stderr);
-}
-// ==== END TEMPORARY CI DIAGNOSTIC ========================================
 
 /** Convert a wide string to a narrow one (best effort — the display
  *  name is a diagnostic, not an identity). */
@@ -505,13 +489,17 @@ public:
     ~WgcCaptureState() {
         // The state is destroyed only once the last `shared_ptr` to it
         // is gone: the device has dropped its reference and every
-        // frame-arrival handler has finished.  Releasing the D3D
-        // objects here is therefore safe.
-        wgc_trace("~WgcCaptureState: stop_thread");
+        // frame-arrival handler has finished.
         stop_thread();
-        wgc_trace("~WgcCaptureState: release_d3d");
-        release_d3d();
-        wgc_trace("~WgcCaptureState: done");
+        // The D3D objects are *not* released here.  They were created
+        // inside the capture thread's COM apartment, and an
+        // `ID3D11DeviceContext` is an apartment-bound object: releasing
+        // it from a thread that never entered the apartment is
+        // undefined behaviour.  The corruption does not show up where
+        // it happens -- it shows up in the *next* session, as an access
+        // violation inside the OS call that creates the frame pool.
+        // The capture thread releases them, inside the apartment it
+        // owns; see the `ApartmentGuard` in `capture_loop`.
     }
 
     void stop_thread() noexcept {
@@ -519,7 +507,20 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
+    /**
+     * @brief Release the D3D objects.
+     *
+     * Called by the capture thread, inside the apartment that created
+     * them.  An `ID3D11DeviceContext` is apartment-bound, so releasing
+     * it from anywhere else is undefined behaviour -- and the damage
+     * shows up somewhere else entirely (in the *next* session's frame
+     * pool creation), which is what makes it so hard to diagnose.
+     *
+     * The handler mutex is held while the pointers are dropped, so a
+     * frame-arrival handler cannot be reading them while they go.
+     */
     void release_d3d() noexcept {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
         if (staging_ != nullptr) {
             staging_->Release();
             staging_ = nullptr;
@@ -676,7 +677,6 @@ void WgcCapture::close() noexcept {
         // the session or the device -- it only asks the capture thread
         // to stop and waits for it to finish.
         state_->stop_thread();
-        wgc_trace("close: thread joined");
         // A frame-arrival handler may still be running on the WinRT
         // thread-pool thread.  Wait for it: it uses the D3D objects
         // the capture thread is about to release.
@@ -689,7 +689,6 @@ void WgcCapture::close() noexcept {
         while (state_->in_flight_.load(std::memory_order_acquire) > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        wgc_trace("close: in_flight drained");
         //
         // The pool is deliberately *not* released here.
         //
@@ -790,7 +789,6 @@ void WgcCapture::capture_loop(
     // after this function returns, and it needs the apartment to be
     // alive.  See `SharedApartment`.
     state->apartment.initialize();
-    wgc_trace("capture_loop: apartment initialized ok=%d", (int)state->apartment.ok());
     if (!state->apartment.ok()) {
         core::log::Logger::instance().error("wgc: CoInitializeEx failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
@@ -816,18 +814,28 @@ void WgcCapture::capture_loop(
     // apartment is always left last, on every path, including the error
     // paths below.
     //
-    // The guard also drops the state's reference to the frame pool.
+    // The guard also drops the state's references to the frame pool
+    // and to the D3D objects.
+    //
     // The pool was created *here*, and the local `pool` handle is
     // destroyed before the guard runs, so the state is the only thing
     // still holding it: resetting it inside the guard is what makes the
     // last reference to the pool go away *inside* the apartment.  The
     // reset is taken under the handler mutex, so it cannot race with a
     // frame-arrival handler that is copying the same `shared_ptr`.
+    //
+    // The D3D objects are released here for the same reason, and it
+    // matters even more: an `ID3D11DeviceContext` is apartment-bound,
+    // so releasing it from a thread that never entered the apartment
+    // is undefined behaviour.  The corruption does not show up where
+    // it happens -- it shows up in the *next* session, as an access
+    // violation inside the OS call that creates the frame pool.  So
+    // the objects are released here, on the thread that created them,
+    // inside the apartment that created them.
     struct ApartmentGuard {
         std::shared_ptr<WgcCaptureState> state;
         ~ApartmentGuard() {
             if (state) {
-                wgc_trace("ApartmentGuard: resetting pool");
                 // The pool is a WinRT object, so the last reference to
                 // it has to go while the apartment is still alive.  The
                 // local `pool` handle was destroyed before this guard
@@ -836,7 +844,6 @@ void WgcCapture::capture_loop(
                 state->pool_.reset();
             }
             if (state) {
-                wgc_trace("ApartmentGuard: quiescing");
                 // Wait for every handler that might still touch a
                 // WinRT object to finish, and only then leave the
                 // apartment.
@@ -846,9 +853,11 @@ void WgcCapture::capture_loop(
                 // has to be called by the thread that called
                 // `CoInitializeEx`, and this is that thread.
                 state->apartment.quiesce();
-                wgc_trace("ApartmentGuard: leaving");
+                // The D3D objects go while the apartment is still
+                // alive, and after every handler has finished: a
+                // handler that is still running uses them.
+                state->release_d3d();
                 state->apartment.leave();
-                wgc_trace("ApartmentGuard: left");
             }
         }
     } apartment_guard{state};
@@ -1102,7 +1111,6 @@ void WgcCapture::capture_loop(
     // returned and then run against objects this thread is about to
     // release.
     pool->FrameArrived(token);
-    wgc_trace("teardown: unsubscribed, waiting for in_flight");
 
     // Wait for the running handlers to finish.
     //
@@ -1125,13 +1133,11 @@ void WgcCapture::capture_loop(
     }
 
     // ---- Tear down ------------------------------------------------------------------
-    wgc_trace("teardown: closing session");
     try {
         session.Close();
     } catch (const winrt::hresult_error&) {
         // Best effort.
     }
-    wgc_trace("teardown: session closed, returning from capture_loop");
 
 }
 
@@ -1162,9 +1168,6 @@ void WgcCapture::on_frame_arrived(
     // handler that had already been dispatched to the thread pool is
     // only now waking up.
     const bool apartment_held = state->apartment.acquire();
-    wgc_trace("handler: entered, in_flight=%d held=%d",
-              (int)state->in_flight_.load(std::memory_order_relaxed),
-              (int)apartment_held);
     struct ApartmentGuard {
         SharedApartment* apartment;
         bool held;
@@ -1176,7 +1179,6 @@ void WgcCapture::on_frame_arrived(
     // pool now would be an access violation rather than a clean
     // failure, so the handler simply does nothing.
     if (!apartment_held) return;
-    wgc_trace("handler: working");
 
     // Only one handler at a time may use the readback buffers and the
     // dirty-rect detector: a free-threaded frame pool may raise

@@ -478,6 +478,50 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** IVideoCodec plugin id. Default = "h264". */
     std::string video_codec_name = "h264";
 
+    // ---- Video encoder backend policy (remote-desktop plan B2 / RD-1) -----
+    //
+    // Hardware-first is the default: the engine picks a hardware encoder
+    // whenever one exists for the requested codec, and the software path
+    // is the fallback.  This field is the *override* for the two cases
+    // the default cannot serve:
+    //
+    //   - `plugins::CodecBackend::kHardware` — the host must have
+    //     hardware (a fanless box whose CPU budget does not allow a
+    //     software encode).  When no hardware encoder is available the
+    //     engine **fails at open()** rather than silently producing a
+    //     software stream.
+    //   - `plugins::CodecBackend::kSoftware` — the host wants a
+    //     reproducible encoder (a test, a machine where the GPU driver
+    //     is unreliable).  No hardware encoder is ever selected.
+    //
+    // The selected backend is reported in the stats snapshot
+    // (`Stats::video_codec_backend_id` and `Stats::video_codec_hardware`).
+    plugins::CodecBackend video_codec_backend = plugins::CodecBackend::kAuto;
+
+    // ---- Video content type (remote-desktop plan B7 / RD-3) --------------
+    //
+    // What kind of picture the encoder is looking at.  A screen capture
+    // is *not* a camera pointed at a monitor: it has flat regions, sharp
+    // edges and very little motion, and a camera-style encoder spends
+    // most of its bitrate on noise nobody looks at.
+    //
+    // The hint drives the encoder's tuning (intra block copy, palette /
+    // text mode, a higher quantiser on flat regions) and is signalled in
+    // the SDP (`a=content-hint:`), so the receiver knows what to expect.
+    //
+    // `kUnspecified` (the default) sends no hint and lets the codec use
+    // its own default tuning.
+    plugins::ContentHint video_content_hint = plugins::ContentHint::kUnspecified;
+
+    // ---- Video colour description (remote-desktop plan C5) ---------------
+    //
+    // Screen content is normally full-range BT.709; camera content is
+    // normally limited-range BT.601.  Getting this wrong produces a
+    // washed-out or crushed picture that looks like "the codec is
+    // broken", so both the encoder and the renderer are told.
+    plugins::ColorRange video_color_range = plugins::ColorRange::kUnspecified;
+    plugins::ColorMatrix video_color_matrix = plugins::ColorMatrix::kUnspecified;
+
     // ---- DataChannel selection (ADR-001: resolved via PluginRegistry) ----
     //
     // The engine resolves the data-channel factory at open() (via init_modules_once()).
@@ -2030,6 +2074,27 @@ public:
         std::uint64_t video_capture_restarts    = 0;  // times the device was reopened
         std::uint64_t video_capture_format_changes = 0;  // negotiated format changed
         std::uint64_t video_capture_bytes_copied = 0;  // CPU<->GPU bytes (0 = zero-copy)
+        // ---- Codec telemetry (remote-desktop plan B15, additive) ---------
+        //
+        // The numbers that make a live session *explainable*: which
+        // encoder is actually running, whether it is hardware or
+        // software, whether the frames took the zero-copy path, and
+        // what it actually produced.
+        //
+        // They are republished from the codec's own `VideoCodecStats`
+        // snapshot, so the engine does not keep a second copy of the
+        // bookkeeping that could drift.
+        std::string video_codec_backend_id;          // e.g. "nvenc", "h264"
+        bool        video_codec_hardware   = false;  // a hardware encoder
+        bool        video_codec_zero_copy  = false;  // the last frame skipped the CPU
+        std::uint32_t video_codec_bitrate_bps = 0;   // the bitrate it was asked for
+        std::uint32_t video_codec_actual_bps = 0;    // the bitrate it produced
+        std::uint32_t video_codec_encode_latency_us = 0;  // average encode latency
+        std::uint64_t video_codec_frames_encoded = 0;
+        std::uint64_t video_codec_bytes_encoded  = 0;
+        std::uint64_t video_codec_encode_errors  = 0;
+        std::uint64_t video_codec_zero_copy_frames = 0;  // frames that skipped the CPU
+        std::uint64_t video_codec_staged_frames   = 0;  // frames staged through the CPU
         // ---- Audio counters (WP-5, additive) -------------------------
         // Cumulative since open().  `audio_encode_errors` is the
         // "never silently dropped" counter: every PCM block that could

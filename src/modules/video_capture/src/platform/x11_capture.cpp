@@ -587,12 +587,22 @@ void X11Capture::capture_loop() noexcept {
         bytes_copied_.fetch_add(static_cast<std::uint64_t>(frame_bytes),
                                 std::memory_order_relaxed);
 
-        // ---- Queue ---------------------------------------------------------------
+        // ---- The changed region ------------------------------------------------
         //
-        // X11 gives the client no damage information, so the honest
-        // answer is "the whole frame changed".
+        // X11 gives the client no damage information, so the region is
+        // computed by comparing the frame with the previous one
+        // (remote-desktop plan A7).  A static desktop then produces an
+        // *empty* changed region, and the consumer can skip the frame
+        // entirely — which is what makes a static screen cheap.
         plugins::CaptureDirtyRects dirty;
-        dirty.full_frame = true;
+        const bool identical = dirty_detector_.compare(
+            pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
+        if (identical) {
+            // Nothing changed: the frame is not worth queueing.  The
+            // capture thread simply waits for the next one.
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            continue;
+        }
 
         const std::int64_t ts = static_cast<std::int64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(

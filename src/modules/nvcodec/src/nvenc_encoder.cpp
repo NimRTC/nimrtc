@@ -65,6 +65,7 @@
 #if defined(NIMRTC_PLUGINS_NVENC_ON)
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -538,6 +539,18 @@ public:
             return plugins::kErrHardwareError;
         }
 
+        // ---- Telemetry (remote-desktop plan B15) ---------------------------
+        //
+        // The static facts about this encoder are known here: it *is* a
+        // hardware encoder, its backend identifier is the driver's, and
+        // the bitrate it was configured with is the one the host asked
+        // for.  The dynamic numbers (frames, bytes, latency) accumulate
+        // in `encode()`.
+        stats_.backend_id            = "nvenc";
+        stats_.hardware              = true;
+        stats_.configured_bitrate_bps = cfg_.bitrate_bps;
+        session_start_ = std::chrono::steady_clock::now();
+
         opened_ = true;
         return plugins::kOk;
     }
@@ -566,6 +579,7 @@ public:
                          std::uint8_t* output,
                          std::size_t   output_capacity,
                          plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        const auto t0 = std::chrono::steady_clock::now();
         if (broken_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is broken"); return plugins::kErrHardwareError; }
         if (!opened_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is not open"); return plugins::kErrNotReady; }
         if (!output || output_capacity == 0) {
@@ -787,6 +801,24 @@ public:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += n_copy;
+        stats_.keyframes_encoded += is_keyframe ? 1u : 0u;
+        stats_.staged_frames++;
+        stats_.zero_copy = false;
+        // The encode latency is the wall-clock cost of the whole call:
+        // the CPU staging (the I420 -> NV12 conversion) plus the
+        // driver's own encode.  It is the number a host needs to
+        // decide whether the encoder can keep up with the capture
+        // cadence.
+        {
+            const auto elapsed = std::chrono::steady_clock::now() - t0;
+            const auto us = std::chrono::duration_cast<
+                std::chrono::microseconds>(elapsed).count();
+            encode_latency_accum_us_ += static_cast<std::uint64_t>(
+                us < 0 ? 0 : us);
+            encode_latency_samples_++;
+            stats_.avg_encode_latency_us = static_cast<std::uint32_t>(
+                encode_latency_accum_us_ / encode_latency_samples_);
+        }
         frame_idx_++;
         return plugins::kOk;
     }
@@ -844,7 +876,22 @@ public:
         return apply_bitrate(bitrate, gop);
     }
 
-    plugins::VideoCodecStats stats() const noexcept override { return stats_; }
+    plugins::VideoCodecStats stats() const noexcept override {
+        plugins::VideoCodecStats s = stats_;
+        // The *actual* bitrate is derived from what the encoder produced
+        // over the time it has been running.  It is 0 until the session
+        // has been up long enough for the number to mean anything.
+        if (session_start_.time_since_epoch().count() != 0) {
+            const auto elapsed = std::chrono::steady_clock::now() - session_start_;
+            const auto secs = std::chrono::duration_cast<
+                std::chrono::milliseconds>(elapsed).count();
+            if (secs > 0) {
+                s.actual_bitrate_bps = static_cast<std::uint32_t>(
+                    (s.bytes_encoded * 8u * 1000u) / static_cast<std::uint64_t>(secs));
+            }
+        }
+        return s;
+    }
     std::uint8_t payload_type() const noexcept override {
         return cfg_.payload_type != 0 ? cfg_.payload_type
                                       : desc_.default_payload_type;
@@ -1025,6 +1072,18 @@ private:
     uint32_t                 height_      = 0;
     uint32_t                 frame_idx_   = 0;
     plugins::VideoCodecStats stats_{};
+
+    // ---- Telemetry accumulators (remote-desktop plan B15) -----------------
+    //
+    // The *average* encode latency is an accumulated sum divided by a
+    // sample count, because the codec reports the average and not the
+    // distribution.
+    std::uint64_t encode_latency_accum_us_ = 0;
+    std::uint64_t encode_latency_samples_  = 0;
+
+    // The bitrate the encoder actually produced is derived from the
+    // bytes it emitted over the wall-clock time it ran for.
+    std::chrono::steady_clock::time_point session_start_{};
 };
 
 // ---------------------------------------------------------------------------

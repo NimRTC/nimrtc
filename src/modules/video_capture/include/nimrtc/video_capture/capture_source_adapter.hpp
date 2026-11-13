@@ -261,6 +261,12 @@ public:
         return cursor_frames_;
     }
 
+    /** How many frames were published without a CPU readback (the
+     *  zero-copy path, remote-desktop plan B10). */
+    [[nodiscard]] std::uint64_t zero_copy_frames() const noexcept {
+        return zero_copy_frames_;
+    }
+
     /**
      * @brief Whether the adapter draws the pointer itself.
      *
@@ -282,6 +288,19 @@ private:
      *  the frame cannot be represented in the output format (in which case
      *  it is counted as a drop). */
     bool convert(const plugins::CaptureFrame& in) noexcept;
+
+    /**
+     * Publish a frame whose picture lives in GPU memory.
+     *
+     * The frame's CPU planes stay empty; the *surface* travels with the
+     * published frame (as `VideoSourceFrame::gpu_surface`), so the
+     * encoder can consume the native handle without a readback.
+     *
+     * @return false when the frame cannot be described (no dimensions or
+     *         an unknown pixel format), in which case the caller drops
+     *         it.
+     */
+    bool publish_gpu_surface(const plugins::CaptureFrame& in) noexcept;
 
     /**
      * Install the automatic cursor layer (plan A6).
@@ -362,6 +381,10 @@ private:
     /** How many frames the cursor was drawn into. */
     std::uint64_t cursor_frames_ = 0;
 
+    /** How many frames were published on the zero-copy (GPU surface)
+     *  path — i.e. without a CPU readback. */
+    std::uint64_t zero_copy_frames_ = 0;
+
     /** The base pointer of the frame that was popped from the device.
      *  The adapter compares it against the output frame's own pointer to
      *  know whether the output points into the *device's* pixels (which
@@ -369,6 +392,16 @@ private:
     const std::uint8_t* in_pixels_base_ = nullptr;
 
     plugins::CaptureDirtyRects last_dirty_{};
+
+    /** The colour description the *device* stated for the frame being
+     *  processed (resolved: an unspecified range / matrix becomes the
+     *  desktop default). */
+    video_frame::ColorDescription source_color_{};
+
+    /** The colour description of the *published* frame.  It differs from
+     *  `source_color_` only for a packed-RGB output, where the luma /
+     *  chroma scaling does not exist. */
+    video_frame::ColorDescription out_color_{};
 
     std::uint64_t produced_ = 0;
     std::uint64_t dropped_  = 0;

@@ -828,11 +828,18 @@ void ScreenCaptureKitCapture::dispatch_sample(
     // ---- The dirty rect ------------------------------------------------------------
     //
     // ScreenCaptureKit has no per-frame damage information a client can
-    // read, so the honest answer is "the whole frame changed".  The
-    // pixel-diff model (plan A7) can narrow it later.
+    // read, so the changed region is computed by comparing the frame
+    // with the previous one (remote-desktop plan A7).  An unchanged
+    // frame is not worth queuing at all.
     plugins::CaptureDirtyRects dirty;
-    dirty.full_frame = true;
-    dirty.rects.clear();
+    {
+        const bool identical = self->dirty_detector_.compare(
+            self->scratch_.data(), needed, static_cast<std::int32_t>(row_bytes),
+            rw, rh, 4, dirty);
+        if (identical) {
+            return;
+        }
+    }
 
     // ---- Push ------------------------------------------------------------------------
     const std::uint32_t seq = self->frame_index_++;

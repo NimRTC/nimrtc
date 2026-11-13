@@ -84,6 +84,7 @@
 #include <vector>
 
 #include <nimrtc/plugins/video_capture.hpp>
+#include <nimrtc/video_capture/dirty_rect_diff.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -194,6 +195,11 @@ private:
 
     /** The pixel buffer the sample handler fills (the captured region). */
     std::vector<std::uint8_t> scratch_;
+
+    /** The changed-region detector (remote-desktop plan A7).
+     *  ScreenCaptureKit reports no damage, so the region is computed by
+     *  comparing the frame with the previous one. */
+    DirtyRectDetector dirty_detector_{4};
 
     /** The human-readable description of the captured display. */
     std::string description_;

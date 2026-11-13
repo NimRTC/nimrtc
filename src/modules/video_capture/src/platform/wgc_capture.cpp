@@ -847,10 +847,11 @@ void WgcCapture::on_frame_arrived() noexcept {
     // ---- The dirty rectangles ------------------------------------------------------
     //
     // WGC does not report them: the compositor hands over a whole
-    // surface every time.  "The whole frame changed" is the
-    // conservative answer the seam allows.
+    // surface every time.  The changed region is therefore computed
+    // by comparing the frame with the previous one (remote-desktop
+    // plan A7) — which is done *after* the region crop, because the
+    // consumer's frame is the region.
     plugins::CaptureDirtyRects dirty;
-    dirty.full_frame = true;
 
     // ---- Crop to the requested region ------------------------------------------------
     const bool has_region = cfg_.region.width != 0 && cfg_.region.height != 0;
@@ -892,6 +893,16 @@ void WgcCapture::on_frame_arrived() noexcept {
     const std::uint32_t seq = frame_index_++;
     const std::size_t frame_bytes = static_cast<std::size_t>(stride) *
                                    static_cast<std::size_t>(frame_h);
+
+    // An unchanged frame is not worth queuing: the consumer would
+    // encode the same picture again and spend the user's bandwidth on
+    // it (plan A7).
+    const bool identical = dirty_detector_.compare(
+        pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
+    if (identical) {
+        return;
+    }
+
     const auto outcome = state_->queue_.push(
         pixels, frame_bytes, stride, frame_w, frame_h, ts, seq, dirty);
     switch (outcome) {

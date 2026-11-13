@@ -69,6 +69,7 @@
 #include <vector>
 
 #include <nimrtc/plugins/video_capture.hpp>
+#include <nimrtc/video_capture/dirty_rect_diff.hpp>
 
 namespace nimrtc::video_capture {
 
@@ -204,6 +205,11 @@ private:
 
     /** The cropped buffer, used when a sub-region was requested. */
     std::vector<std::uint8_t> region_scratch_;
+
+    /** The changed-region detector (remote-desktop plan A7).  PipeWire
+     *  reports no damage, so the region is computed by comparing the
+     *  frame with the previous one. */
+    DirtyRectDetector dirty_detector_{4};
 
     /** The human-readable description of the captured source. */
     std::string description_;

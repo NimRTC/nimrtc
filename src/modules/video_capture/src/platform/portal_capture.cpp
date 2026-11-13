@@ -813,9 +813,11 @@ void PortalCapture::on_frame(const std::uint8_t* src,
                              std::memory_order_relaxed);
 
     // The dirty rectangles: PipeWire does not report damage to
-    // the client, so the conservative full-frame answer is used.
+    // the client, so the region is computed by comparing the frame
+    // with the previous one (remote-desktop plan A7).  The comparison
+    // happens *after* the region crop, because the consumer's frame is
+    // the region, not the whole stream.
     plugins::CaptureDirtyRects dirty;
-    dirty.full_frame = true;
 
     // The region crop, exactly as the X11 and DXGI backends do it.
     const bool has_region =
@@ -857,6 +859,18 @@ void PortalCapture::on_frame(const std::uint8_t* src,
     const std::uint32_t seq = frame_index_++;
     const std::size_t frame_bytes =
         static_cast<std::size_t>(stride) * static_cast<std::size_t>(frame_h);
+
+    // ---- The changed region (remote-desktop plan A7) ----------------------
+    //
+    // An unchanged frame is not worth queuing: the consumer would
+    // encode the same picture again and spend the user's bandwidth on
+    // it.  A static desktop therefore costs (almost) nothing.
+    const bool identical = dirty_detector_.compare(
+        pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
+    if (identical) {
+        return;
+    }
+
     const auto outcome = state_->queue_.push(
         pixels, frame_bytes, stride, frame_w, frame_h, ts, seq, dirty);
     switch (outcome) {

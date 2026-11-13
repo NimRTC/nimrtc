@@ -404,7 +404,12 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     missing_markers=0.
     // Bump this constant in the same PR that intentionally adds/removes
     // a public header.
-    constexpr std::size_t kBaselineHeaderCount = 145;
+    //
+    // v1.3.0 (M1, remote-desktop): +2 headers — the GPU device registry
+    // (src/core/include/nimrtc/core/gpu_device_registry.hpp) and the
+    // portable dirty-rect detector
+    // (src/modules/video_capture/include/nimrtc/video_capture/dirty_rect_diff.hpp).
+    constexpr std::size_t kBaselineHeaderCount = 147;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

@@ -159,6 +159,18 @@ plugins::VideoCodecStats HwCompositeCodec::stats() const noexcept {
         out.bytes_encoded  = s.bytes_encoded;
         out.encode_errors  = s.encode_errors;
         out.frames_skipped += s.frames_skipped;
+        // Remote-desktop plan B15: the telemetry fields travel with the
+        // encoder's snapshot — they describe the *outbound* stream.
+        out.backend_id             = s.backend_id;
+        out.hardware               = s.hardware;
+        out.zero_copy              = s.zero_copy;
+        out.configured_bitrate_bps = s.configured_bitrate_bps;
+        out.actual_bitrate_bps     = s.actual_bitrate_bps;
+        out.avg_encode_latency_us  = s.avg_encode_latency_us;
+        out.keyframes_encoded      = s.keyframes_encoded;
+        out.zero_copy_frames       = s.zero_copy_frames;
+        out.staged_frames          = s.staged_frames;
+        out.queue_drops            = s.queue_drops;
     }
     if (decoder_) {
         const auto s = decoder_->stats();

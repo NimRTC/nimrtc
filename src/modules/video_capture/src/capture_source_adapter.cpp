@@ -12,6 +12,7 @@
 // acceptance criteria this implements.
 // ----------------------------------------------------------------------------
 
+#include <nimrtc/core/log.hpp>
 #include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 #include <algorithm>
@@ -378,6 +379,52 @@ void CaptureSourceAdapter::produce_one() noexcept {
     last_dirty_ = in.dirty;
     in_pixels_base_ = in.pixels;
 
+    // The device states the colour description of what it produces
+    // (full-range BT.709 for a desktop compositor, limited-range BT.601
+    // for a camera).  The conversion below uses it, so the encoder
+    // receives a picture whose luma / chroma scaling it can trust.
+    source_color_ = video_frame::resolve_color_description(in.color);
+
+    // ---- Zero-copy passthrough (remote-desktop plan B10) --------------------
+    //
+    // A frame whose picture lives in GPU memory has no CPU pixels to
+    // convert: the *surface* is the picture.  Such a frame is published
+    // as-is (the handle travels with it) so the encoder can consume the
+    // native surface directly.
+    //
+    // The one thing the adapter cannot do on this path is draw the
+    // pointer: alpha blending needs the CPU pixels, and a GPU surface
+    // has none.  A device that does not composite the pointer itself
+    // (DXGI) therefore forces the *CPU* path for that frame -- but a
+    // cursor layer is optional, and a host that wants the zero-copy
+    // path simply leaves it uninstalled or installs a device that
+    // composites the pointer.
+    if (in.gpu_surface.backend != video_frame::GpuBackend::kNone &&
+        in.gpu_surface.handle != nullptr) {
+        const bool can_draw_cursor =
+            cursor_source_ != nullptr && cursor_compositor_ != nullptr;
+        if (!can_draw_cursor || !cursor_compositor_->should_composite()) {
+            if (publish_gpu_surface(in)) {
+                ++produced_;
+                ++zero_copy_frames_;
+                if (cb_) cb_(out_);
+                return;
+            }
+            // A surface the adapter cannot describe (no dimensions, or
+            // a format it does not know) falls through to the CPU
+            // path, which will drop it if there are no pixels either.
+            ++dropped_;
+            return;
+        }
+        // The pointer has to be drawn and the picture is on the GPU:
+        // there is no CPU copy to draw into, so the frame is dropped
+        // rather than published with a missing pointer.
+        NIMRTC_LOG_WARN("capture: a GPU frame was dropped because the "
+                        "cursor layer must draw into CPU pixels");
+        ++dropped_;
+        return;
+    }
+
     // The cursor is drawn into the *device's* pixels, before the
     // format conversion.
     //
@@ -401,6 +448,37 @@ void CaptureSourceAdapter::produce_one() noexcept {
         ++cursor_frames_;
     }
     if (cb_) cb_(out_);
+}
+
+bool CaptureSourceAdapter::publish_gpu_surface(
+        const plugins::CaptureFrame& in) noexcept {
+    if (in.width == 0 || in.height == 0) return false;
+
+    out_ = {};
+    out_.width  = in.width;
+    out_.height = in.height;
+    out_.format = to_plugin_format(device_format_);
+    if (out_.format == plugins::VideoPixelFormat::kUnknown) {
+        // The GPU path carries the picture in its native layout, so the
+        // *device's* tag is only used for the metadata.  A device with
+        // an unknown tag cannot describe its surface, and the encoder
+        // would have nothing to work with.
+        return false;
+    }
+    out_.stride_y = in.stride;
+    out_.buffer_size = in.size;
+    out_.capture_ts_us = in.capture_ts_us;
+    out_.frame_seq = in.frame_seq;
+    // The GPU surface carries the device's native pixels, so the device's
+    // own colour description travels with it unchanged.
+    out_.color = source_color_;
+
+    // The GPU handle is *borrowed* from the device: it stays valid
+    // until the device's next frame.  The consumer (the encoder) uses
+    // it within the callback, which is exactly the lifetime the seam
+    // documents.
+    out_.gpu_surface = in.gpu_surface;
+    return true;
 }
 
 bool CaptureSourceAdapter::composite_cursor(
@@ -503,6 +581,13 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
         out_.buffer_size = in.size;
         out_.capture_ts_us = in.capture_ts_us;
         out_.frame_seq = in.frame_seq;
+        // No pixel values change, so the description travels unchanged.
+        // (A packed RGB output carries no luma / chroma scaling, so it
+        // does not travel at all.)
+        out_.color = (want == plugins::VideoPixelFormat::kBGRA ||
+                      want == plugins::VideoPixelFormat::kRGBA)
+                   ? video_frame::ColorDescription{}
+                   : source_color_;
 
         if (is_planar_i420(want)) {
             // The capture reports one stride; the chroma planes of a
@@ -537,17 +622,26 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
     switch (device_format_) {
         case CapturePixelFormat::kBGRA:
             if (want == plugins::VideoPixelFormat::kI420) {
-                bgra_to_i420(w, h, in.pixels, src_stride,
-                             y_plane, layout.strides[0],
-                             u_plane, layout.strides[1],
-                             v_plane, layout.strides[2]);
+                video_frame::convert_bgra_to_i420_color(
+                    w, h, in.pixels, src_stride,
+                    source_color_,
+                    y_plane, layout.strides[0],
+                    u_plane, layout.strides[1],
+                    v_plane, layout.strides[2],
+                    &out_color_);
             } else if (want == plugins::VideoPixelFormat::kNV12) {
-                bgra_to_nv12(w, h, in.pixels, src_stride,
-                             y_plane, layout.strides[0],
-                             u_plane, layout.strides[1]);
+                video_frame::convert_bgra_to_nv12_color(
+                    w, h, in.pixels, src_stride,
+                    source_color_,
+                    y_plane, layout.strides[0],
+                    u_plane, layout.strides[1],
+                    &out_color_);
             } else if (want == plugins::VideoPixelFormat::kRGBA) {
                 bgra_to_rgba(w, h, in.pixels, src_stride,
                              y_plane, layout.strides[0]);
+                // A packed RGB output carries no luma/chroma scaling, so
+                // the description does not travel with it.
+                out_color_ = video_frame::ColorDescription{};
             } else {
                 return false;
             }
@@ -563,6 +657,9 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
                              y_plane, layout.strides[0],
                              u_plane, layout.strides[1],
                              v_plane, layout.strides[2]);
+                // A layout conversion does not change the pixel values,
+                // so the description travels unchanged.
+                out_color_ = source_color_;
             } else {
                 return false;
             }
@@ -585,6 +682,7 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
                     in.pixels + y_bytes + u_bytes, chroma_stride,
                     y_plane, layout.strides[0],
                     u_plane, layout.strides[1]);
+                out_color_ = source_color_;
             } else {
                 return false;
             }
@@ -603,6 +701,7 @@ bool CaptureSourceAdapter::convert(const plugins::CaptureFrame& in) noexcept {
     out_.buffer_size = layout.buffer_size;
     out_.capture_ts_us = in.capture_ts_us;
     out_.frame_seq = in.frame_seq;
+    out_.color = out_color_;
 
     if (is_planar_i420(want)) {
         out_.stride_u = layout.strides[1];

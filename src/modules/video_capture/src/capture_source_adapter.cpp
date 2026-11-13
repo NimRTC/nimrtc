@@ -238,18 +238,40 @@ void CaptureSourceAdapter::install_cursor_layer() noexcept {
                 // one (macOS composites it itself, a build without the
                 // pointer libraries) yields nullptr, and there is then
                 // nothing to draw.
+                //
+                // A null source is replaced by the *null* source -- the
+                // one that reports "no pointer" -- rather than being
+                // left as a null pointer.  The distinction matters:
+                //
+                //  - The layer is *installed* either way, so the adapter's
+                //    "is there a cursor layer?" answer is a property of
+                //    the *policy* (does this device composite the
+                //    pointer itself?), not of the *platform*.  A host
+                //    that installs its own cursor later, or a test that
+                //    inspects the wiring, sees the same answer on every
+                //    platform.
+                //  - The null source reports no pointer, so nothing is
+                //    ever drawn: the picture is simply the device's own.
+                //
+                // Leaving the source null instead would make the
+                // *absence of a pointer library* look like *the device
+                // composites the pointer itself*, which is a different
+                // thing entirely -- and it would make the layer's
+                // presence depend on how the build was configured.
                 owned_cursor_source_ = make_platform_cursor_source();
-                if (owned_cursor_source_) {
-                    // The drawing is the portable alpha blend, with the
-                    // pinned fallback: when the platform cannot report a
-                    // live pointer, the last known one stays on screen
-                    // rather than vanishing.
-                    owned_cursor_compositor_ =
-                        std::make_unique<AlphaCursorCompositor>(true);
-                    cursor_source_ = owned_cursor_source_.get();
-                    cursor_compositor_ = owned_cursor_compositor_.get();
-                    cursor_layer_installed_ = true;
+                if (!owned_cursor_source_) {
+                    owned_cursor_source_ = std::make_unique<NullCursorSource>();
                 }
+
+                // The drawing is the portable alpha blend, with the
+                // pinned fallback: when the platform cannot report a
+                // live pointer, the last known one stays on screen
+                // rather than vanishing.
+                owned_cursor_compositor_ =
+                    std::make_unique<AlphaCursorCompositor>(true);
+                cursor_source_ = owned_cursor_source_.get();
+                cursor_compositor_ = owned_cursor_compositor_.get();
+                cursor_layer_installed_ = true;
             }
         }
     }
@@ -299,9 +321,16 @@ void CaptureSourceAdapter::produce_one() noexcept {
     // composites the pointer.
     if (in.gpu_surface.backend != video_frame::GpuBackend::kNone &&
         in.gpu_surface.handle != nullptr) {
-        const bool can_draw_cursor =
-            cursor_source_ != nullptr && cursor_compositor_ != nullptr;
-        if (!can_draw_cursor || !cursor_compositor_->should_composite()) {
+        // A pointer is only "to be drawn" if there *is* a pointer to
+        // draw.  The null source reports no pointer, so it must not
+        // force the CPU path: a GPU frame on a platform without a
+        // pointer library is still perfectly publishable.
+        const bool cursor_to_draw =
+            cursor_source_ != nullptr &&
+            cursor_source_->has_live_cursor() &&
+            cursor_compositor_ != nullptr &&
+            cursor_compositor_->should_composite();
+        if (!cursor_to_draw) {
             if (publish_gpu_surface(in)) {
                 ++produced_;
                 ++zero_copy_frames_;
@@ -628,6 +657,18 @@ bool CaptureSourceAdapter::is_hardware_accelerated() const noexcept {
 std::string_view CaptureSourceAdapter::hardware_backend() const noexcept {
     if (backend_.empty()) return "software";
     return backend_;
+}
+
+// ---------------------------------------------------------------------------
+// The shared factory helper
+// ---------------------------------------------------------------------------
+
+plugins::IVideoSource* make_capture_source(
+    plugins::IVideoCapture* capture,
+    plugins::VideoSourceConfig cfg) noexcept {
+    if (capture == nullptr) return nullptr;
+    // The adapter does not own the device: the caller keeps it alive.
+    return new CaptureSourceAdapter(capture, std::move(cfg));
 }
 
 } // namespace nimrtc::video_capture

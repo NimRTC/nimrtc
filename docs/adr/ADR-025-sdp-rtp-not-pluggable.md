@@ -1,8 +1,8 @@
-# ADR-021: SDP and RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden
+# ADR-025: SDP and RTP are not pluggable — and the engine's concrete includes are enumerated, not hidden
 
 | | |
 |---|---|
-| Number | 021 |
+| Number | 025 |
 | Status | **Accepted** |
 | Date | 2026-11-13 |
 | Phase | Phase 4 (v1.2.0) — structure remediation |

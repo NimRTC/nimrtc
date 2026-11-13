@@ -180,7 +180,7 @@ log lines, and once published it is stable for the lifetime of the
 major version. It must match the grammar `^[a-z][a-z0-9_-]*$`, and a
 third-party backend must carry its own namespace — `acme_dtls`, not
 `dtls`. The full contract is
-[ADR-019](../adr/ADR-019-plugin-id-naming-contract.md); the
+[ADR-023](../adr/ADR-023-plugin-id-naming-contract.md); the
 practical rules are in
 [plugin_author_guide.md](../plugin_author_guide.md) §8.1.
 

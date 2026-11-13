@@ -23,7 +23,7 @@
 #       runtime the Profile configures — so the dependency arrow points
 #       assembly -> engine (configuration above runtime), never the other
 #       way round.  The engine never includes `assembly.hpp`, so Layout
-#       Invariant 4 / ADR-021 is untouched.
+#       Invariant 4 / ADR-025 is untouched.
 #
 # NOTE: `nimrtc::transport` is deliberately NOT a dependency of this
 # target.  `include/nimrtc/assembly/transport_bridge.hpp` needs the
@@ -90,7 +90,7 @@ add_library(nimrtc::assembly ALIAS nimrtc_assembly)
 #     not be forced to link the ICE / DTLS / SRTP stack.
 #   - The dependency direction stays honest: the engine is the runtime the
 #     Profile configures, so the arrow points assembly -> engine.  The
-#     engine never includes `assembly.hpp` (Layout Invariant 4 / ADR-021).
+#     engine never includes `assembly.hpp` (Layout Invariant 4 / ADR-025).
 #
 # Note on CMake ordering: `src/modules/` is added BEFORE `src/engine/` in
 # the root CMakeLists.txt, so `nimrtc::engine` is a forward reference here.

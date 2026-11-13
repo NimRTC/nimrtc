@@ -39,7 +39,7 @@
  *     `ISDP` interface does not express.
  *
  * Therefore `EngineConfig` has **no** `rtp_name` / `sdp_name` knob —
- * a knob that is never read is a lie.  See ADR-021.
+ * a knob that is never read is a lie.  See ADR-025.
  *
  * Open() calls `core::register_all_default_plugins()` first, so callers
  * normally do not need to do anything to populate the registry.

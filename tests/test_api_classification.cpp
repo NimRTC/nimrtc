@@ -400,7 +400,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //       dtls_plugin.hpp)
     //
     // v1.2.0 bump: +0 public *headers* for the scheduler's real C ABI
-    //   (architecture remediation plan D5 / ADR-022) — the `extern "C"`
+    //   (architecture remediation plan D5 / ADR-026) — the `extern "C"`
     //   surface an embedded / FFI host can actually include and link:
     //     - sched/sched_c.h (the pure-C11 S-family entry points)
     //

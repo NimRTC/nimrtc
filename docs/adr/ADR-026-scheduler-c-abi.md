@@ -1,14 +1,14 @@
-# ADR-022: The scheduler's C ABI — a real `extern "C"` surface
+# ADR-026: The scheduler's C ABI — a real `extern "C"` surface
 
 | | |
 |---|---|
-| Number | 022 |
+| Number | 026 |
 | Status | **Accepted** |
 | Date | 2026-11-13 |
 | Phase | Architecture remediation, Phase 4 §4.4 (item D5) |
 | Bound to | v1.2.0 |
 | Supersedes | — |
-| Related | `docs/plan/architecture-remediation-plan.md` §4.4 (D5), [ADR-015](ADR-015-api-stability-policy.md) (the stability / ABI policy), [ADR-021](ADR-021-sdp-rtp-not-pluggable.md), `src/modules/sched/include/nimrtc/sched/sched_c.h`, `src/modules/sched/include/nimrtc/sched/sched.hpp` |
+| Related | `docs/plan/architecture-remediation-plan.md` §4.4 (D5), [ADR-015](ADR-015-api-stability-policy.md) (the stability / ABI policy), [ADR-025](ADR-025-sdp-rtp-not-pluggable.md), `src/modules/sched/include/nimrtc/sched/sched_c.h`, `src/modules/sched/include/nimrtc/sched/sched.hpp` |
 
 ## Context
 
@@ -213,7 +213,7 @@ id and priority, and that a NULL handle is tolerated everywhere.
 |---|---|---|
 | Extend the C ABI to the other seams (transport, DTLS, SRTP) | — | Not started — one seam first, to learn the shape |
 | A CI guard that a `.h` under `src/**/include/` is C-clean | Phase 5 | Pending |
-| ADR-019 / ADR-020 (plugin ID naming, `EngineConfig` string ownership) | §7.2 | Pending |
+| ADR-023 / ADR-024 (plugin ID naming, `EngineConfig` string ownership) | §7.2 | Pending |
 | The 8 documents in §7.1 | §7.1 | Pending |
 
 ## Alternatives considered
@@ -272,7 +272,7 @@ a C translation unit. Linkage alone does not make a C ABI.
 - **The D1 engine split** (remediation plan §4.3) — the engine's `Impl`
   is 1791 lines against a <400-line target.
 - **The L4 exception for RTP / SDP** — that is
-  [ADR-021](ADR-021-sdp-rtp-not-pluggable.md)'s subject.
+  [ADR-025](ADR-025-sdp-rtp-not-pluggable.md)'s subject.
 
 ## References
 
@@ -281,7 +281,7 @@ a C translation unit. Linkage alone does not make a C ABI.
 - [`docs/adr/ADR-015-api-stability-policy.md`](ADR-015-api-stability-policy.md) —
   the stability classification and ABI-commitment policy that makes the
   six `sched_*` symbols un-removable without a MAJOR bump.
-- [`docs/adr/ADR-021-sdp-rtp-not-pluggable.md`](ADR-021-sdp-rtp-not-pluggable.md) —
+- [`docs/adr/ADR-025-sdp-rtp-not-pluggable.md`](ADR-025-sdp-rtp-not-pluggable.md) —
   the sibling Phase 4 ADR: how a *not*-pluggable module is handled
   honestly.
 - [`src/modules/sched/include/nimrtc/sched/sched_c.h`](../../src/modules/sched/include/nimrtc/sched/sched_c.h)

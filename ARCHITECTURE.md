@@ -276,7 +276,7 @@ it only hands the transport over and receives callbacks.
    `detail::RefFrameTable`) live in private headers under `src/engine/src/`
    and are not installed.
 
-   **The exception (ADR-021).** The engine's *internal* implementation files
+   **The exception (ADR-025).** The engine's *internal* implementation files
    (`engine_impl.hpp` and the `engine_*.cpp` translation units) may include
    the concrete headers of exactly these modules, and link their libs PRIVATE:
 
@@ -308,7 +308,7 @@ it only hands the transport over and receives callbacks.
    is a separate reviewable change, not part of the state split that
    Phase 4.3 landed.
 
-   See `docs/adr/ADR-021-sdp-rtp-not-pluggable.md` for the full rationale,
+   See `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` for the full rationale,
    the alternatives that were rejected, and the follow-up work.
 
 5. **`src/third_party/` is the only place vendor code lives.** Nothing may

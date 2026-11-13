@@ -1,4 +1,4 @@
-﻿# engine/CMakeLists.txt
+# engine/CMakeLists.txt
 # =============================================================================
 # NimRTCEngine — the top-level composition layer.
 #
@@ -214,7 +214,7 @@ endif()
 #
 # The engine still reaches the module through its *header* (not through a
 # plugin seam) — the format parameters are not replaceable, exactly like
-# RTP and SDP (see ADR-021 / the L4 exception in AGENTS.md).
+# RTP and SDP (see ADR-025 / the L4 exception in AGENTS.md).
 if(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sdp_attributes)
 endif()
@@ -228,7 +228,7 @@ endif()
 # Like the SDP-attributes module above, this is a *helper* rather than a
 # replaceable plugin: the counters it keeps have no wire representation and
 # no alternative implementation could disagree with them.  The engine
-# reaches it through its header (the same L4 exception ADR-021 records for
+# reaches it through its header (the same L4 exception ADR-025 records for
 # RTP / SDP).
 if(NIMRTC_MODULE_VIDEO_STATS)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_stats)

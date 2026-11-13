@@ -11,7 +11,7 @@ NimRTC 是一个 **原生 C++20 WebRTC 替代实现**，面向 AI Agent 和嵌�
 **L2** `src/plugins/` 只包含抽象接口和工厂接口，不包含任何实现
 **L3** 每个模块自包含于 `src/modules/<name>/`，有独立的 CMakeLists.txt + include/ + src/ + tests/
 **L4** `src/engine/` 只做插件编排，不直接包含任何具体模块头文件
-> **L4 的唯一例外清单（ADR-021）**：`src/engine/` 的**内部实现文件**
+> **L4 的唯一例外清单（ADR-025）**：`src/engine/` 的**内部实现文件**
 > （`engine_impl.hpp` 与 `engine_*.cpp`）可以 include 以下具体模块的头文件，
 > 并以 PRIVATE 方式链接它们：
 >
@@ -19,7 +19,7 @@ NimRTC 是一个 **原生 C++20 WebRTC 替代实现**，面向 AI Agent 和嵌�
 >
 > 其中 `sdp::` 与 `rtp::` **不可替换**——SDP 是所有组件共同依赖的契约文档，
 > RTP 打包器位于 Phase 3 §3.5 确立的零分配热路径上。
-> 详见 `docs/adr/ADR-021-sdp-rtp-not-pluggable.md`。
+> 详见 `docs/adr/ADR-025-sdp-rtp-not-pluggable.md`。
 >
 > **清单之外的任何具体模块**（编解码器 `h264`/`h265`/`av1`、`video_pipeline`、
 > 抖动缓冲、BWE、pacing、scheduler …）仍然必须通过 `plugins::I*` 接缝访问，

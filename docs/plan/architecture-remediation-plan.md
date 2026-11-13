@@ -16,8 +16,8 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-021 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
-> | 5 | 文档与 ADR 同步 | ✅ | ADR-019 / 020 / 021 / 022 已落地；§7.1 的 8 份必改文档全部同步完成 |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
+> | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 020 / 021 / 022 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
 >
@@ -766,7 +766,7 @@ src/modules/
 | `video_stats` | 接到 `Engine::Stats` 统计面（冻结计数 / QP / 丢帧归因） | `engine_video_stats` 相关改动 |
 | `assembly` | 新增 `Profile → EngineConfig` 桥接；`assembly` 链接 `engine`（方向 `assembly → engine`，L4 不变） | `nimrtc/assembly/engine_bridge.hpp` + `nimrtc_assembly_engine` INTERFACE target + `test_assembly_bridge`（18/18 通过） |
 
-`assembly` 桥接的架构要点（ADR-021 / L4）：
+`assembly` 桥接的架构要点（ADR-025 / L4）：
 
 - `assembly` 是**场景配置层**，位于运行时引擎**之上**；`src/engine/` 不得直接 include
   `assembly.hpp`（L4）。依赖方向是 `assembly → engine`：配置层产出运行时配置。
@@ -1004,7 +1004,7 @@ int32_t           nimrtc_sched_select_next_packet(NimrtcSchedHandle*, int32_t,
 **执行**：**修改 L4 约束本身**，明确豁免 RTP/SDP，把"不 include 具体模块头"的适用范围收窄到"可替换的那些模块"。这比强行抽象更诚实。L4 改写后的措辞草案：
 
 > **L4** `src/engine/` 只做插件编排，不直接包含任何具体模块头文件。
-> **L4 例外（ADR-021）**：`src/engine/` 允许直接使用 `rtp::` 与 `sdp::` 的具体实现 —— 这两个模块**不可替换**（见 ADR-021）。其 `rtp::` 用法必须集中在 `src/engine/src/rtp_packetizer.cpp` 一个文件内。
+> **L4 例外（ADR-025）**：`src/engine/` 允许直接使用 `rtp::` 与 `sdp::` 的具体实现 —— 这两个模块**不可替换**（见 ADR-025）。其 `rtp::` 用法必须集中在 `src/engine/src/rtp_packetizer.cpp` 一个文件内。
 
 **注意**：DTLS 目录合并后，`src/dtls/` → `src/modules/dtls/`，`engine_impl.hpp` 的 `#include <nimrtc/dtls/dtls.hpp>` **include 路径不变**（4.1 的关键设计），这一行不需要改。
 
@@ -1041,7 +1041,7 @@ int32_t           nimrtc_sched_select_next_packet(NimrtcSchedHandle*, int32_t,
 **最终措辞**（已落到 `AGENTS.md` L4 与 `ARCHITECTURE.md` Layout Invariant 4）：
 
 > **L4** `src/engine/` 只做插件编排，不直接包含任何具体模块头文件。
-> **L4 的唯一例外清单（ADR-021）**：`src/engine/` 的**内部实现文件**
+> **L4 的唯一例外清单（ADR-025）**：`src/engine/` 的**内部实现文件**
 > （`engine_impl.hpp` 与 `engine_*.cpp`）可以 include 以下具体模块的头文件，
 > 并以 PRIVATE 方式链接它们：
 >
@@ -1049,7 +1049,7 @@ int32_t           nimrtc_sched_select_next_packet(NimrtcSchedHandle*, int32_t,
 >
 > 其中 `sdp::` 与 `rtp::` **不可替换**（SDP 是所有组件共同依赖的契约文档；
 > RTP 打包器位于 Phase 3 §3.5 确立的零分配热路径上）。
-> 详见 `docs/adr/ADR-021-sdp-rtp-not-pluggable.md`。
+> 详见 `docs/adr/ADR-025-sdp-rtp-not-pluggable.md`。
 >
 > **清单之外的任何具体模块**（编解码器 `h264`/`h265`/`av1`、`video_pipeline`、
 > 抖动缓冲、BWE、pacing、scheduler …）仍然必须通过 `plugins::I*` 接缝访问。
@@ -1060,10 +1060,10 @@ reviewer 忽略它。把豁免清单**逐项列名**之后，L4 才变成可机�
 
 **新增产物**：
 
-- `docs/adr/ADR-021-sdp-rtp-not-pluggable.md` —— 决策、理由、被否决的备选方案、后续工作
+- `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` —— 决策、理由、被否决的备选方案、后续工作
 - `AGENTS.md` L4 —— 改写为带清单的措辞
 - `ARCHITECTURE.md` Layout Invariant 4 —— 同步为同一措辞 + 豁免表
-- `docs/adr/README.md` —— 登记 ADR-021
+- `docs/adr/README.md` —— 登记 ADR-025
 
 **遗留**（随 D1 一起落地）：
 
@@ -1144,7 +1144,7 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
 - `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅
-  §4.5 / D6 已收窄到 ADR-021 的具名清单；D1 落地后补记了引擎内部协作者
+  §4.5 / D6 已收窄到 ADR-025 的具名清单；D1 落地后补记了引擎内部协作者
   的结构与"`rtp::` 集中化属于**行为**部分，尚未开始"
 
 > **未纳入本计划验收的一项**：D1 的**行为**部分（`VideoPipeline` /
@@ -1171,10 +1171,19 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 7.2 新增 ADR
 
-- `ADR-019-plugin-id-naming-contract.md` —— 插件 ID 的命名规则与校验方式 —— ✅ **已落地**
-- `ADR-020-engineconfig-string-ownership.md` —— 配置字段的字符串所有权与生命周期 —— ✅ **已落地**
-- `ADR-021-sdp-rtp-not-pluggable.md` —— SDP/RTP 为何不走插件接口（若 2.1 选 A）—— ✅ **已落地**
-- `ADR-022-scheduler-c-abi.md` —— 调度器的 C ABI：把"只在注释里存在的 C ABI"变成真的
+> **编号：023–026（2026-11-13 改号）.** 这四份 ADR 最初写成 ADR-019 … ADR-022，
+> 但 019–022 已被视频 / 远程桌面轨道占用：`main` 的 `video-pipeline-v2-plan.md`
+> 与 `remote-desktop-plan.md` 已经分配了这些编号，`feature/m1c-platform-capture`
+> 分支上更是已有实际提交的 `ADR-021-codec-bundling-posture.md` 与
+> `ADR-022-screen-content-as-content-type.md`。同名不同主题的两个 ADR 不是
+> 合并冲突，而是治理失效——读者顺着"ADR-021"找到的是哪个文件，取决于他在
+> 哪个分支上。因此本轨道的四份 ADR 顺延为 **ADR-023 … ADR-026**。
+> 详见 `docs/adr/README.md` 的"Reserved numbers"。
+
+- `ADR-023-plugin-id-naming-contract.md` —— 插件 ID 的命名规则与校验方式 —— ✅ **已落地**
+- `ADR-024-engineconfig-string-ownership.md` —— 配置字段的字符串所有权与生命周期 —— ✅ **已落地**
+- `ADR-025-sdp-rtp-not-pluggable.md` —— SDP/RTP 为何不走插件接口（若 2.1 选 A）—— ✅ **已落地**
+- `ADR-026-scheduler-c-abi.md` —— 调度器的 C ABI：把"只在注释里存在的 C ABI"变成真的
   `extern "C"` 表面（§4.4 / D5）—— ✅ **已落地**
 
 ### 7.3 版本策略
@@ -1198,7 +1207,7 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 | Q3 | `ISrtpSessionBackend` 接线还是删除？ | **接线** —— SRTP 后端可替换 | §2.5 / §4.5 |
 | Q4 | `CapabilitySelector` 接线还是删除？ | **接线** —— Selector 真正决定 media/control stack | §2.6 |
 | Q5 | 目录统一是否要做？ | **做，一次做彻底** —— 5 个 seam 目录并入 `src/modules/`，**include 路径与 target 名不变** | §4.1 |
-| Q6 | 调度器的六个 `sched_*` 入口是不是"C ABI"？ | **不是** —— 无 `extern "C"`、C++ 类型、C++ mangled 符号。**不是改标签，而是补一个真的 `extern "C"` 表面**（`sched_c.h`），C++ 入口转为转发器 | §4.4 / ADR-022 |
+| Q6 | 调度器的六个 `sched_*` 入口是不是"C ABI"？ | **不是** —— 无 `extern "C"`、C++ 类型、C++ mangled 符号。**不是改标签，而是补一个真的 `extern "C"` 表面**（`sched_c.h`），C++ 入口转为转发器 | §4.4 / ADR-026 |
 
 **决策变更对工作量的影响**：
 - Q1 从"删除"改为"保留 + 补齐" → **Phase 1/3 各增约 1 天**（S-family 流控实现 + 双路径共享记账）
@@ -1322,9 +1331,9 @@ docs/api/engine_config.md
 docs/api/engine_api.md
 docs/hw_plugin_seam.md
 docs/troubleshooting.md
-docs/adr/ADR-019-plugin-id-naming-contract.md      (新增)
-docs/adr/ADR-020-engineconfig-string-ownership.md  (新增)
-docs/adr/ADR-021-sdp-rtp-not-pluggable.md          (新增, 条件)
+docs/adr/ADR-023-plugin-id-naming-contract.md      (新增)
+docs/adr/ADR-024-engineconfig-string-ownership.md  (新增)
+docs/adr/ADR-025-sdp-rtp-not-pluggable.md          (新增, 条件)
 docs/adr/ADR-001-plugin-system.md                   (补充)
 ARCHITECTURE.md
 AGENTS.md

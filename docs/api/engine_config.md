@@ -87,14 +87,14 @@ Every plugin-selection field is a **`std::string`** — the engine
 **copies** the string, so the id may be a temporary, a runtime
 lookup, or a `std::string` you own; none of them can dangle. (This
 changed from `std::string_view` in v1.2.0 — see
-[ADR-020](../adr/ADR-020-engineconfig-string-ownership.md) and
+[ADR-024](../adr/ADR-024-engineconfig-string-ownership.md) and
 the [migration note](#20-migration-note-stdstringview--stdstring).)
 
 The string is a stable id registered via
 `core::PluginRegistry::register_<family>()` or
 `NIMRTC_REGISTER_<FAMILY>(name, &factory)`. Ids must match
 `^[a-z][a-z0-9_-]*$` — see
-[ADR-019](../adr/ADR-019-plugin-id-naming-contract.md) for the
+[ADR-023](../adr/ADR-023-plugin-id-naming-contract.md) for the
 naming contract (in-tree ids are prefixed `nimrtc_`; third-party ids
 carry the plugin's own namespace). For guidance on implementing your
 own plugin see `docs/plugin_author_guide.md`.
@@ -583,7 +583,7 @@ engine, copy it:
 nimrtc::engine::EngineConfig snapshot = engine.config();   // copy
 ```
 
-See [ADR-020](../adr/ADR-020-engineconfig-string-ownership.md) for
+See [ADR-024](../adr/ADR-024-engineconfig-string-ownership.md) for
 the full rationale.
 
 ---

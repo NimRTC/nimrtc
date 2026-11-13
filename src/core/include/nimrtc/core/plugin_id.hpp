@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nimrtc/core/plugin_id.hpp
  * @brief NIMRTC_PLUGIN_ID — compile-time-unique plugin id literal wrapper (PAL Slice 3).
  *
@@ -30,7 +30,7 @@
  *   (b) Adding a new module forces a new callsite → a new entry in the
  *       grep, visible in code review.
  *   (c) A `static_assert` in the constructor validates that the literal
- *       matches the ADR-019 grammar `^[a-z][a-z0-9_-]*$` (catches
+ *       matches the ADR-023 grammar `^[a-z][a-z0-9_-]*$` (catches
  *       `NIMRTC_PLUGIN_ID("")`, an uppercase id, a leading digit, a
  *       space, and any non-ASCII byte).
  *
@@ -88,7 +88,7 @@
 namespace nimrtc::core::detail {
 
 /**
- * @brief The plugin id grammar (ADR-019 Decision 1).
+ * @brief The plugin id grammar (ADR-023 Decision 1).
  *
  *     ^[a-z][a-z0-9_-]*$
  *
@@ -116,7 +116,7 @@ constexpr bool is_valid_plugin_id(std::string_view id) noexcept {
 }
 
 /**
- * @brief The compile-time grammar check (ADR-019 Decision 9).
+ * @brief The compile-time grammar check (ADR-023 Decision 9).
  *
  * The check has to run in a **constant expression**, and it has to run
  * on the *literal* at the callsite — not on a runtime string.  Two
@@ -177,7 +177,7 @@ struct NIMRTC_API_STABLE PluginIdTag {
  * @def NIMRTC_PLUGIN_ID(x)
  * @brief Wrap a plugin id literal in a compile-time-unique
  *        `PluginIdTag<__LINE__>` wrapper, and check it against the
- *        ADR-019 grammar at compile time.
+ *        ADR-023 grammar at compile time.
  *
  * Use this at every plugin factory's `id()` return statement (and at
  * any other site that names a plugin id literal) so the callsite is
@@ -201,7 +201,7 @@ struct NIMRTC_API_STABLE PluginIdTag {
                 "NIMRTC_PLUGIN_ID: the plugin id must match "      \
                 "^[a-z][a-z0-9_-]*$ (a lowercase ASCII letter, "   \
                 "then lowercase letters, digits, underscores and "  \
-                "hyphens). See docs/adr/ADR-019-plugin-id-naming-"  \
+                "hyphens). See docs/adr/ADR-023-plugin-id-naming-"  \
                 "contract.md.");                                   \
             return _p;                                             \
         }())

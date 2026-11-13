@@ -1,8 +1,8 @@
-# ADR-020: `EngineConfig` string ownership — the engine owns its strings, and the `std::string_view` migration is complete
+# ADR-024: `EngineConfig` string ownership — the engine owns its strings, and the `std::string_view` migration is complete
 
 | | |
 |---|---|
-| Number | 020 |
+| Number | 024 |
 | Status | **Accepted** |
 | Date | 2026-11-13 |
 | Phase | Phase 5 (v1.2.0) — documentation & ADR sync |
@@ -234,7 +234,7 @@ reason and had simply not been executed for this file.
 
 - No change to the engine's *resolution* semantics. Which plugin a
   field selects, and what happens when an id is unknown, are governed
-  by ADR-019 and by the failure-mode table in
+  by ADR-023 and by the failure-mode table in
   `docs/plugin_author_guide.md` §4.1 — not by this ADR.
 - `EngineConfig`'s non-string fields (the tuning structs, the numeric
   knobs) are unaffected.
@@ -278,7 +278,7 @@ in need of copying.
   (this ADR), §7.3 (version strategy).
 - `docs/adr/ADR-015-api-stability-policy.md` — the MINOR-bump policy
   this ADR's migration note implements.
-- `docs/adr/ADR-019-plugin-id-naming-contract.md` — the companion
+- `docs/adr/ADR-023-plugin-id-naming-contract.md` — the companion
   decision on how a plugin id is spelled.
 - `docs/api/engine_config.md` — the field reference this ADR corrects.
 - `docs/troubleshooting.md` §2.3 — the migration entry this ADR

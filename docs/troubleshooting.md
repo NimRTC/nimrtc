@@ -175,7 +175,7 @@ you are linking a header that predates v1.2.0 — rebuild the host, do
 not just relink.
 
 See [`docs/api/engine_config.md` §2.0](api/engine_config.md) and
-[ADR-020](adr/ADR-020-engineconfig-string-ownership.md).
+[ADR-024](adr/ADR-024-engineconfig-string-ownership.md).
 
 ---
 
@@ -366,7 +366,7 @@ whether the argument was a bare token or a quoted literal. Passing a
 quoted literal to a macro that stringifies registers under an id that
 *includes the quote characters* — the registration succeeds and the
 lookup never matches. Ids must match `^[a-z][a-z0-9_-]*$`; see
-[ADR-019](adr/ADR-019-plugin-id-naming-contract.md).
+[ADR-023](adr/ADR-023-plugin-id-naming-contract.md).
 
 Quick triage, in order:
 

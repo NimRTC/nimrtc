@@ -143,7 +143,7 @@ did not specify **how an id is spelled**, **who validates it**, or
 **what the compatibility promise for an id is**.
 
 That gap was closed by
-[ADR-019](ADR-019-plugin-id-naming-contract.md), which fixes:
+[ADR-023](ADR-023-plugin-id-naming-contract.md), which fixes:
 
 - **The grammar.** A plugin id matches `^[a-z][a-z0-9_-]*$` — a
   lowercase ASCII token, with underscores and hyphens allowed, that
@@ -182,7 +182,7 @@ text did not say so.
   changes nothing. The rationale — the RTP builder sits on the
   zero-allocation hot path, and the SDP layer is the contract every
   other component is written against — is in
-  [ADR-021](ADR-021-sdp-rtp-not-pluggable.md).
+  [ADR-025](ADR-025-sdp-rtp-not-pluggable.md).
 - **The `EngineConfig::rtp_name` and `EngineConfig::sdp_name` fields
   described in the original snippet no longer exist.** They were
   removed as part of closing those two fake knobs.
@@ -205,7 +205,7 @@ type name. Both are historical:
   moves it, so it owns a copy of every string. This is an
   **ABI-breaking** change in v1.2.0 (host recompilation required) and
   is specified in
-  [ADR-020](ADR-020-engineconfig-string-ownership.md).
+  [ADR-024](ADR-024-engineconfig-string-ownership.md).
 
 ---
 

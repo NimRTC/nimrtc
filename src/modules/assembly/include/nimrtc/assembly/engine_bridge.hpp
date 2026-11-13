@@ -20,7 +20,7 @@
  *     engine instance should be.  The engine is the **runtime** — it *is*
  *     the engine instance.  Configuration sits above runtime, so the
  *     dependency arrow points `assembly → engine`.
- *   - Layout Invariant 4 (ADR-021) constrains what the **engine** may
+ *   - Layout Invariant 4 (ADR-025) constrains what the **engine** may
  *     include: the engine never includes `assembly.hpp`.  This header
  *     therefore never appears in an engine translation unit, and the
  *     engine's public header stays free of every concrete module include.
@@ -29,9 +29,9 @@
  *     depends on `assembly`.
  *
  * The alternative — putting the bridge in `src/engine/` — would have
- * required adding `assembly` to the ADR-021 exception list, i.e. making
+ * required adding `assembly` to the ADR-025 exception list, i.e. making
  * the *runtime* depend on the *configuration schema*.  That is the
- * inversion ADR-021 was written to prevent.
+ * inversion ADR-025 was written to prevent.
  *
  * ## Why a separate target
  *

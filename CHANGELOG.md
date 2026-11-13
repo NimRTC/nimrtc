@@ -945,10 +945,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,
-  architecture remediation plan §7.1 / §7.2, ADR-019 / ADR-020).**
+  architecture remediation plan §7.1 / §7.2, ADR-023 / ADR-024).**
   Two decisions were closed and the documentation drift they exposed
   was fixed in the same pass.
-  - **ADR-019 fixes how a plugin id is spelled, validated and
+  - **ADR-023 fixes how a plugin id is spelled, validated and
     changed.** A plugin id must match `^[a-z][a-z0-9_-]*$` — a
     lowercase ASCII token that is simultaneously a valid shell / JSON
     key.  (The hyphen is permitted because the shipped transport-stack
@@ -971,7 +971,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (The one exception is a **hyphenated** id, which the tokenising
     form cannot express: `#webrtc-classic` does not lex as one token.
     Those are registered through the registry directly.)
-  - **ADR-020 records that `EngineConfig` owns its strings.** The
+  - **ADR-024 records that `EngineConfig` owns its strings.** The
     `std::string_view` → `std::string` migration is complete in the
     code, but the docs still described the old shape and taught the
     `.c_str()` workaround for the dangling-view hazard the migration
@@ -1042,11 +1042,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     everything that can throw.  Nothing propagates across the C boundary.
 
 - **Layout Invariant 4 is now enforceable (v1.2.0, architecture
-  remediation plan §4.5 / D6, ADR-021).**  L4 said the engine "does not
+  remediation plan §4.5 / D6, ADR-025).**  L4 said the engine "does not
   directly include any concrete module header".  It had not been true for
   a long time, and it was violated on every screen — which means it had no
   reviewing power at all, and only taught reviewers to ignore it.
-  - **ADR-021** (`docs/adr/ADR-021-sdp-rtp-not-pluggable.md`) records the
+  - **ADR-025** (`docs/adr/ADR-025-sdp-rtp-not-pluggable.md`) records the
     decision: SDP and RTP are **not** pluggable.  The SDP layer is the
     contract document every other component is written against, and the
     RTP packet builder sits on the zero-allocation hot path that Phase 3

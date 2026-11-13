@@ -1,8 +1,8 @@
-# ADR-019: Plugin ID naming contract — how a plugin id is spelled, validated, and changed
+# ADR-023: Plugin ID naming contract — how a plugin id is spelled, validated, and changed
 
 | | |
 |---|---|
-| Number | 019 |
+| Number | 023 |
 | Status | **Accepted** |
 | Date | 2026-11-13 |
 | Phase | Phase 5 (v1.2.0) — documentation & ADR sync |

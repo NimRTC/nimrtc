@@ -278,7 +278,7 @@ before you invest the work.
 |---|---|---|---|
 | **Fully replaceable** | The engine resolves your plugin and calls *only* your implementation. Your plugin is the whole feature. | ICE transport, transport stack, DTLS, SCTP socket, SRTP backend, DataChannel backend, WebTransport session factory | Implement the interface, register, set the config field. Nothing else. |
 | **Replaceable, but with an in-tree default fallback** | Your plugin is used when it resolves; when it does not, the engine substitutes the in-tree implementation. | Audio 3A (falls back to `NullAudio3A`) | Implement the interface, register, set the config field — and be aware that the engine will *not* tell you loudly when your plugin was skipped. |
-| **Not replaceable** | The interface exists, but the engine uses the concrete in-tree implementation directly. Registering a plugin changes nothing. | **RTP**, **SDP** | Fork the module. There is no config knob, by decision (ADR-021): the RTP builder is on the zero-allocation hot path and the SDP layer is the contract every other component is written against. |
+| **Not replaceable** | The interface exists, but the engine uses the concrete in-tree implementation directly. Registering a plugin changes nothing. | **RTP**, **SDP** | Fork the module. There is no config knob, by decision (ADR-025): the RTP builder is on the zero-allocation hot path and the SDP layer is the contract every other component is written against. |
 
 Two families sit between the first two columns and are worth calling
 out, because they are the ones most often misread:
@@ -608,7 +608,7 @@ removed. See §8.1.
   for at least one minor version). The full naming contract — the
   legal grammar, the `nimrtc_` prefix rule, third-party namespacing,
   and the deprecation cycle — is
-  [ADR-019](adr/ADR-019-plugin-id-naming-contract.md); the summary is
+  [ADR-023](adr/ADR-023-plugin-id-naming-contract.md); the summary is
   in §8.1 below.
 - **Interface methods** — pure-virtual methods are not ABI-stable;
   adding a method is a breaking change for any plugin author. We
@@ -669,7 +669,7 @@ hyphenated ids `"webrtc-classic"` and `"raw-udp-arq"`.
 
 The full naming contract — the legal grammar, the `nimrtc_` prefix
 rule, third-party namespacing, and the deprecation cycle — is
-[ADR-019](adr/ADR-019-plugin-id-naming-contract.md); the summary is
+[ADR-023](adr/ADR-023-plugin-id-naming-contract.md); the summary is
 in §8.1 below.
 
 **The prefix rule.** The prefix is a claim about *ownership*, and it
@@ -731,7 +731,7 @@ least one minor version, and log the old id at `Warn` when it is
 selected. A deprecation cycle is observable — "both ids resolve to
 the same factory" is an assertion a test can make.
 
-Full rationale and alternatives: [ADR-019](adr/ADR-019-plugin-id-naming-contract.md).
+Full rationale and alternatives: [ADR-023](adr/ADR-023-plugin-id-naming-contract.md).
 
 ---
 

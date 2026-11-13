@@ -132,6 +132,7 @@ private:
  * extension — there is no pointer to read there, and a null source says
  * exactly that.
  */
-[[nodiscard]] std::unique_ptr<ICursorSource> make_x11_cursor_source();
+[[nodiscard]] NIMRTC_API_STABLE std::unique_ptr<ICursorSource>
+make_x11_cursor_source();
 
 } // namespace nimrtc::video_capture

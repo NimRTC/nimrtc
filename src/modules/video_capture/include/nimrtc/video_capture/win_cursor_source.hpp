@@ -138,6 +138,7 @@ private:
  * Returns nullptr on a non-Windows host — there is no pointer to read
  * there, and a null source says exactly that.
  */
-[[nodiscard]] std::unique_ptr<ICursorSource> make_win_cursor_source();
+[[nodiscard]] NIMRTC_API_STABLE std::unique_ptr<ICursorSource>
+make_win_cursor_source();
 
 } // namespace nimrtc::video_capture

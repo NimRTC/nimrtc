@@ -197,6 +197,6 @@ public:
  * so that the *platform* file owns the platform's registration and the
  * portable file stays portable.
  */
-void register_x11_capture() noexcept;
+NIMRTC_API_STABLE void register_x11_capture() noexcept;
 
 } // namespace nimrtc::video_capture

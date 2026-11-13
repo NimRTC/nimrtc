@@ -250,6 +250,6 @@ public:
  * file owns the platform's registration and the portable file stays
  * portable.
  */
-void register_screen_capture_kit() noexcept;
+NIMRTC_API_STABLE void register_screen_capture_kit() noexcept;
 
 } // namespace nimrtc::video_capture

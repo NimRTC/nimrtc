@@ -215,6 +215,6 @@ public:
  * file owns the platform's registration and the portable file stays
  * portable.
  */
-void register_dxgi_desktop_dup() noexcept;
+NIMRTC_API_STABLE void register_dxgi_desktop_dup() noexcept;
 
 } // namespace nimrtc::video_capture

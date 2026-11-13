@@ -2359,6 +2359,130 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The engine's `VideoFrameCallback` now receives the Annex-B bitstream;
   the callback's documentation says so.
 
+- **Every `NIMRTC_REGISTER_*` macro now accepts exactly one spelling**
+  (v1.2.0, ADR-023 Decision 5) — **source-breaking** for out-of-tree
+  callers that passed a string literal to the audio-seam macros.
+  The registry had two macro flavours.  The legacy family stringified
+  its argument (`#id`), so a caller who wrote
+
+  ```cpp
+  NIMRTC_REGISTER_DTLS_SESSION("mybackend", &factory);
+  ```
+
+  registered under the id `"\"mybackend\""` — quote characters
+  included.  The registration *succeeded* and the id never resolved: a
+  silent failure that looks exactly like a working registration.  The
+  audio-seam family took the literal as-is, so a bare token there was a
+  compile error — the better failure, but the two families were not
+  interchangeable, and the guide did not say which was which.
+
+  All the macros now take the id as a **bare identifier token** and
+  stringify it themselves:
+
+  ```cpp
+  NIMRTC_REGISTER_DTLS_SESSION(mybackend, &factory);         // -> "mybackend"
+  NIMRTC_REGISTER_AUDIO_DECODER(opus, &g_opus_decoder_factory); // -> "opus"
+  ```
+
+  A quoted literal is now a **compile error**, enforced by a
+  `static_assert` in the macro body that rejects a token whose spelling
+  starts with a quote — the guard is shared by every macro, so the two
+  families cannot drift apart again.  The same guard also applies the
+  ADR-023 grammar to the token, which means a macro call gets the
+  compile-time grammar check for free:
+  `NIMRTC_REGISTER_DTLS_SESSION(Opus, &f)` no longer compiles, instead
+  of registering an id the registry would have rejected at static-init
+  time.
+
+  The one id shape a macro cannot express is a hyphenated one
+  (`#my-id` does not lex as a single token).  Such a plugin calls
+  `core::PluginRegistry::register_<family>("my-id", &f)` directly —
+  ADR-023 Decision 8 says so explicitly, so it is a documented path
+  rather than a trap.
+
+- **A malformed plugin id is now rejected at registration time, with a
+  diagnostic that names it** (v1.2.0, ADR-023 Decision 4).
+  `TypedRegistry::register_one` accepted anything — including the empty
+  string — and the first sign of trouble was the engine's *lookup* at
+  `open()` time, by which point the host had already written a config
+  field that would never match anything.
+
+  The registry now validates every id against the ADR-023 grammar
+  (`^[a-z][a-z0-9_-]*$`).  A malformed id is **not** registered and
+  produces a log line naming the offending id, the family it was offered
+  to, and the reason:
+
+  ```
+  [error] nimrtc::core::PluginRegistry: rejected a video-sink plugin id
+  "Bad Id": the id contains a character outside [a-z0-9_-]. A plugin id
+  must match ^[a-z][a-z0-9_-]*$ (see
+  docs/adr/ADR-023-plugin-id-naming-contract.md).
+  ```
+
+  The rest of the registry is unaffected — one bad plugin does not poison
+  the other families, and it does not remove or shadow an id that was
+  already registered in the same slot.  The diagnostic goes to the core
+  logger rather than to an exception, because registration happens at
+  static-init time and a throw from a static initialiser would terminate
+  the process before `main` with a message that names no plugin.
+
+  The duplicate-id behaviour is unchanged: a duplicate is still a
+  late-binding overwrite, not an error.
+
+  The contract is now enforced by `tests/test_plugin_id_contract.cpp`
+  (ADR-023 Decision 7): every id the in-tree registrars publish satisfies
+  the grammar, every malformed shape is rejected, the diagnostic names
+  the id and the family, and a rejected id does not poison the slot.
+  14 new tests.
+
+- **The dead-module guard no longer dies on a concurrent build**
+  (v1.2.0, architecture remediation plan §4.2e).
+  `tools/check_dead_modules.py` walked the **whole repository** for
+  `CMakeLists.txt`.  That walk also descends into CMake **build-output**
+  trees, whose `CMakeFiles/CMakeScratch/TryCompile-*/CMakeLists.txt`
+  files are transient: a concurrent build creates and deletes them while
+  the guard is walking, and the guard then dies on a file it had just
+  listed:
+
+  ```
+  FileNotFoundError: [Errno 2] No such file or directory:
+    'D:\\MyOpen\\NimRTC\\build\\wt-merge-build\\CMakeFiles\\CMakeScratch\\
+     TryCompile-7876vm\\CMakeLists.txt'
+  ```
+
+  A guard that dies on a race is a guard that gets disabled, so the walk
+  now **prunes every CMake build tree** — a directory that carries a
+  `CMakeCache.txt` is an output tree, not a source tree — and a file that
+  still vanishes mid-scan reads as empty instead of killing the run.
+  The module count and the verdict are unchanged: 36 / 36 modules
+  `[ok]`, and the `--self-test` still distinguishes
+  live / dead / orphan / benchmark-only.
+
+- **The ICE consent-freshness test no longer fails when the runner
+  steals the CPU** (v1.2.0).
+  `IceConsentFreshness.T1_NormalPeerTrafficNeverFires` simulates the
+  peer with a *thread* that notifies every 40 ms, against a 200 ms
+  consent timeout.  On a busy runner the OS can deschedule that thread
+  for longer than the timeout — at which point the tracker fires
+  **correctly** (no binding was seen for longer than the timeout) and
+  the assertion fails for a reason that has nothing to do with the
+  tracker:
+
+  ```
+  test_consent_freshness.cpp:126: error: Expected equality of these values:
+    lost_count.load()  Which is: 1  0
+  consent_lost should not have fired while peer is active
+  ```
+
+  The scenario now measures its **own validity**: the peer thread
+  records the largest gap between two consecutive notifications, and a
+  gap that reaches the consent timeout means the premise ("the peer was
+  active") was violated — so the attempt is retried, and a run that
+  never gets a clean window is *skipped* rather than failed.  This is
+  the same treatment T3 already had.  The tracker is still fully
+  exercised: T2 asserts the timer *does* fire when the peer stops and T3
+  asserts the re-arm window.
+
 ## [1.1.0] - 2026-11-07
 
 ### Status: Release candidate

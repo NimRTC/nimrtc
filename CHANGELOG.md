@@ -17,6 +17,121 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Colour-aware pixel conversion, and two real colour bugs it found
+  (v1.3.0, Remote Desktop plan C3 / C5).**  The remote-desktop picture
+  is screen content: full-range BT.709, sharp edges, flat panels.  The
+  conversion path did not know that, and it turned out to be *wrong* in
+  two ways that only a round-trip test could see.
+  - The canonical definitions are `video_frame::ColorRange`,
+    `video_frame::ColorMatrix` and `video_frame::ColorDescription`
+    (`src/modules/video_frame/include/nimrtc/video_frame/frame.hpp`),
+    re-exported as `plugins::ColorRange` / `plugins::ColorMatrix` /
+    `plugins::ColorDescription` so the plugin layer keeps its
+    vocabulary without pulling the frame module in directly.
+  - `convert_bgra_to_i420_color()`, `convert_bgra_to_nv12_color()` and
+    `convert_i420_to_bgra_color()` implement the ITU-R BT.601 / BT.709 /
+    BT.2020 matrices with the limited- and full-range scalings in
+    fixed point.  The forward path **averages the 2×2 chroma block**
+    rather than point-sampling it.
+  - **The inverse green-channel coefficient carried a spurious factor of
+    two.**  The code folded `2*(1-Kr)` (which already carries a 2) into
+    a second explicit 2, so `G` was corrected twice as hard as it
+    should be and every saturated colour came back hue-shifted.
+  - **The limited-range chroma gain was above one** (1.373× instead of
+    the studio 224/255 ≈ 0.878×).  Limited range *compresses* the
+    chroma; a gain above one pushed saturated colours past 0/255, where
+    they were **clamped** and lost their hue entirely — pure green came
+    back grey.  The BT.601 inverse coefficients (1.596027 / 2.017232)
+    require exactly the 224/255 factor.
+  - The description is carried end to end — `CaptureFrame` →
+    `VideoSourceFrame` → `VideoFrameInfo` → the encoder's parameter set
+    — and `resolve_color_description()` fills the unstated fields with
+    the desktop default (full range, BT.709).
+  - The unit test (`src/modules/video_frame/tests/test_video_frame_color.cpp`)
+    pins the round trip for **every** range / matrix pair, asserts the
+    limited range *compresses* the chroma, and asserts the two matrices
+    really do disagree on a saturated picture.
+
+- **The encoder's backend policy — "auto", "hardware" or "software"
+  (v1.3.0, Remote Desktop plan B2).**  Hardware-first is the default;
+  the policy exists for the two cases the default cannot serve.
+  - `plugins::CodecBackend` (`kAuto` / `kHardware` / `kSoftware`) in
+    `src/plugins/include/nimrtc/plugins/video_codec.hpp`, carried on
+    `VideoCodecConfig` and exposed on the engine as
+    `EngineConfig::video_codec_backend`.
+  - `kHardware` **fails at `open()`** when no hardware encoder exists
+    for the requested codec, rather than silently producing a software
+    stream that the host's CPU budget cannot carry.  `kSoftware` never
+    selects a hardware encoder, which is what makes the software path
+    *reproducible* in a test.
+  - The selected backend is **reported in the stats**, so "it fell back
+    to software" is visible rather than inferred from a CPU spike.
+
+- **The content type as a first-class concept (v1.3.0, Remote Desktop
+  plan B7 / K2).**  A screen capture is not a camera pointed at a
+  monitor.
+  - `plugins::ContentHint` (`kUnspecified` / `kMotion` / `kDetail` /
+    `kText`) in the codec seam, mirrored by
+    `assembly::VideoContentType` in the scenario-assembly layer.
+  - The mapping is **screen content → `ContentHint::kDetail`** (ADR-022):
+    a screen has fine detail and needs to be sharp, but it has no
+    camera-style motion, so it is not `kMotion`.
+  - `content_hint_sdp_value()` gives the SDP attribute value, and the
+    empty string for `kUnspecified` so the attribute is *omitted*
+    rather than sent empty.
+
+- **The `remote-desktop` scenario profile and profile schema v1.2
+  (v1.3.0, Remote Desktop plan K3 / K4).**
+  - `profiles/remote-desktop.json` plus
+    `assembly::kProfileRemoteDesktop`.  The profile's `video` block
+    declares the codec, the **codec preference** (`av1` > `h265` >
+    `h264` — configuration, not a hard-coded branch), the screen content
+    type, the ladder mode (`quality`), the **resolution floor**
+    (1280×720) and the full-range BT.709 colour description.
+  - `profiles/schema/profile-v1.2.json` (JSON Schema draft 2020-12).
+    The `video` block is **additive**: a profile that does not carry one
+    behaves exactly as before, and every v1.1 profile loads unchanged.
+  - The profile round-trips through the assembly serialiser byte-for-byte
+    like the existing ones.
+
+- **The dirty-rect detector for the backends that do not supply their
+  own (v1.3.0, Remote Desktop plan A7).**  DXGI reports dirty rectangles
+  natively; macOS and Linux do not, so they get a conservative bounding
+  box from a pixel-diff.
+  - `DirtyRectDetector` (`src/modules/video_capture/`) keeps the
+    previous frame and produces, per frame, the **bounding box of the
+    changed region** plus a `full_frame` flag and an `identical` flag.
+  - The three outcomes are the ones a caller can act on: *nothing
+    changed* (skip the encode), *something changed* (encode the
+    bounding box), *no previous frame yet* (the first frame is always a
+    full frame, and `identical` is false because there is nothing to
+    compare against).
+  - The diff runs on the **device's own pixels, before the format
+    conversion**, so it sees the same bitmap the encoder will see.
+
+- **The codec telemetry in the engine's stats snapshot (v1.3.0, Remote
+  Desktop plan B15).**  The numbers that make a live session
+  *explainable*: which encoder is actually running, whether it is
+  hardware or software, whether the frames took the zero-copy path, and
+  what it actually produced.
+  - `Engine::Stats` gains `video_codec_backend_id`,
+    `video_codec_hardware`, `video_codec_zero_copy`,
+    `video_codec_bitrate_bps` (configured) vs `video_codec_actual_bps`
+    (produced), `video_codec_encode_latency_us` (average),
+    `video_codec_frames_encoded`, `video_codec_bytes_encoded`,
+    `video_codec_encode_errors`, and the two counters that make the
+    zero-copy claim *measurable* — `video_codec_zero_copy_frames` and
+    `video_codec_staged_frames`.
+  - The numbers are **republished from the codec's own snapshot** rather
+    than re-counted by the engine, so there is no second copy of the
+    bookkeeping that could drift out of step with what the encoder did.
+
+- **The GPU device registry (v1.3.0, Remote Desktop plan B10).**
+  `src/core/include/nimrtc/core/gpu_device_registry.hpp` gives the
+  zero-copy path a single place to answer "which GPU device does this
+  handle belong to", so the capture seam and the encoder can agree on
+  the device without either of them knowing about the other's backend.
+
 - **The cursor layer is wired up — the pointer now actually reaches the
   captured frame (v1.3.0, Remote Desktop plan A6).**  The layer, both
   platform sources and the compositing maths were already in place, but

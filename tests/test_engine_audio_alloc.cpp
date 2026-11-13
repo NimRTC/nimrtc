@@ -396,8 +396,16 @@ public:
 // ---------------------------------------------------------------------------
 
 /** One 20 ms frame of mono PCM at 48 kHz — exactly one RTP packet's
- *  worth of samples. */
+ *  worth of samples.
+ *
+ *  The constant is only used inside the `#else` branch of the two
+ *  gates below, so under a sanitizer build (where the probe is compiled
+ *  out) it would be an unused const — and clang's
+ *  `-Wunused-const-variable` is an error in this build.  Guarding the
+ *  definition keeps both compilers quiet in both configurations. */
+#if NIMRTC_AUDIO_ALLOC_PROBE
 constexpr std::size_t kFrameSamples = 48000 / 50;
+#endif
 
 class EngineAudioAlloc : public ::testing::Test {
 protected:

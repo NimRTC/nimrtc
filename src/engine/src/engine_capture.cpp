@@ -54,7 +54,7 @@ std::int64_t NimRTCEngine::audio_capture_time_us(
     // observation.  The tracker must not record an observation here
     // (the observation is recorded by `observe_timeline()`, on the
     // packet path, where the element was actually parsed).
-    auto cap = impl_->sr_tracker.capture_ts_us_for(
+    auto cap = impl_->timeline.sr_tracker.capture_ts_us_for(
         ssrc,
         rtp_timestamp,
         /*abs_send_time_24=*/0,

@@ -39,7 +39,7 @@
  *     `ISDP` interface does not express.
  *
  * Therefore `EngineConfig` has **no** `rtp_name` / `sdp_name` knob —
- * a knob that is never read is a lie.  See ADR-021.
+ * a knob that is never read is a lie.  See ADR-025.
  *
  * Open() calls `core::register_all_default_plugins()` first, so callers
  * normally do not need to do anything to populate the registry.
@@ -1055,12 +1055,59 @@ struct NIMRTC_API_STABLE EngineConfig {
     // Set it to false to restore the pre-v1.2.0 behaviour, where the
     // scheduler only had the aggregate session budget.
     bool media_pacing_enabled = true;
+
+    // ---- Transport p99 budget override (architecture remediation plan
+    //      §4.2 / D2 — `assembly` disposition) ---------------------------
+    //
+    // Per-instance media-plane p99 budget, in milliseconds.  When set it
+    // OVERRIDES the strategy's default budget (e.g. "agent-gateway"
+    // defaults to 100 ms; setting this to 60 asks for 60 ms).
+    //
+    // This field exists because the Profile v1.1 `transport` block
+    // carries `transport.media.max_p99_ms`, and the transport-side
+    // mirror (`nimrtc::ProfileTransportInput::media_max_p99_ms`)
+    // already knows how to apply it — but nothing carried it from the
+    // Profile into the engine.  The per-instance value was therefore
+    // parsed, serialised, round-tripped through the JSON, and then
+    // silently dropped: the worst kind of "it works" (the knob existed
+    // but did nothing).
+    //
+    // The wiring now is:
+    //   Profile.transport.media.max_p99_ms
+    //     → assembly::to_transport_input(profile).media_max_p99_ms
+    //     → this field
+    //     → transport::requirements_from_profile_input()
+    //     → TransportRequirements::max_p99_ms
+    //
+    // `std::nullopt` (the default) means "use the strategy's default
+    // budget" — i.e. behave exactly as before this field existed.
+    //
+    // The budget is still only *recorded*, not enforced: the Selector
+    // hands it to `transport::validate_p99_budget()`, which is
+    // record-only unless the host opts into enforcement (see
+    // `docs/plan/transport-strategies.md` §6 #4).
+    //
+    // @see `EngineConfig::transport_strategy_name`.
+    std::optional<int> transport_media_max_p99_ms;
 };
 // ---------------------------------------------------------------------------
 // Public callbacks
 // ---------------------------------------------------------------------------
 
 using NIMRTC_API_STABLE AudioFrameCallback = std::function<void(const float* pcm, size_t num_samples)>;
+
+/** Called for every inbound video frame, before decoding.
+ *
+ *  @param nal   The frame's Annex-B bitstream: `00 00 00 01 | nalu`
+ *               `00 00 00 01 | nalu` ...  (one start code per NAL unit).
+ *               For the non-Annex-B codecs (VP8 / VP9 / AV1) this is the
+ *               codec's own payload framing.
+ *  @param len   Length of @p nal in bytes.
+ *  @param keyframe  True if the frame is a key frame.
+ *
+ *  The RTP wire format carries *bare* NAL units (RFC 6184 §5.1); the
+ *  receiver reconstructs the Annex-B start codes before handing the frame
+ *  over, so the buffer can be fed to a decoder as-is. */
 using NIMRTC_API_STABLE VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
 using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
 using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* state)>;
@@ -1234,7 +1281,8 @@ public:
     }
 
     /** Install the video-frame callback.  Fires on the engine thread
-     *  when the video pipeline decodes a complete frame (raw NAL).
+     *  when the video pipeline assembles a complete frame (Annex-B
+     *  framed NAL units, before decode).
      *  Pass an empty std::function to clear. */
     NIMRTC_API_STABLE void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
 
@@ -1536,8 +1584,8 @@ public:
     // Inbound: ICE recv → on_transport_recv → handle_rtp (PT demux)
     //   → video_receiver_ (FU-A depacketize) → video_codec_ (decode)
     //   → video_sink_ (render).  The on_video_frame_ callback fires on
-    //   the raw NAL level (before decode) for users who want to do their
-    //   own rendering.
+    //   the Annex-B NAL level (before decode) for users who want to do
+    //   their own rendering.
     //
     // Both paths require `open()` to have been called first.
     //
@@ -1952,6 +2000,23 @@ public:
     };
     NIMRTC_API_STABLE TransportSessionView transport_strategy_session() const noexcept;
 
+    /** The media-plane p99 budget (ms) the engine resolved for the
+     *  selected strategy, after applying the per-instance override in
+     *  `cfg.transport_media_max_p99_ms`.
+     *
+     *  Empty before open() succeeds, and empty when the strategy has no
+     *  budget at all (no strategy currently does, but the field is
+     *  `std::optional` on the requirements side).
+     *
+     *  The budget is **recorded, not enforced** — see
+     *  `docs/plan/transport-strategies.md` §6 #4 and
+     *  `nimrtc/transport/strategy_validator.hpp` for the opt-in
+     *  enforcement path.
+     *
+     *  @see `EngineConfig::transport_media_max_p99_ms`. */
+    NIMRTC_API_STABLE std::optional<int>
+        transport_media_max_p99_ms() const noexcept;
+
     // ---- Video plugin accessors (R3-Batch) ----
     //
     // The engine resolves all 4 video plugins from core::PluginRegistry
@@ -2124,6 +2189,84 @@ public:
         // support the zero-copy entry point, or it failed).
         std::uint64_t video_zero_copy_frames    = 0;
         std::uint64_t video_zero_copy_fallbacks = 0;
+        // ---- Video quality statistics (Phase 4.2 / D2, additive) ---------
+        //
+        // The counters above say "how much media moved".  The ones below
+        // say "how good it was" — they are produced by the
+        // `nimrtc::video_stats` module, which the engine drives from the
+        // receive pipeline (frame received → decoded → rendered), the
+        // jitter buffer (drops) and the feedback path (NACK / PLI).
+        //
+        // A host that wants Chrome's `inbound-rtp` quality figures reads
+        // them here; without this wiring the module's full implementation
+        // would be unreachable (see the D2 disposition in
+        // `docs/plan/architecture-remediation-plan.md` §4.2).
+        //
+        // All values are cumulative since open().
+        /** Number of freezes detected (a gap > `freeze_threshold_ms`
+         *  between two rendered frames). */
+        std::uint64_t video_freeze_count       = 0;
+        /** Total frozen time in milliseconds (sum of the freeze gaps). */
+        std::uint64_t video_freeze_total_ms    = 0;
+        /** Duration of the most recent freeze in milliseconds. */
+        std::uint64_t video_last_freeze_ms      = 0;
+        /** Running mean of the inter-keyframe distance, in milliseconds
+         *  (EMA).  Zero when fewer than two keyframes were seen. */
+        double        video_keyframe_interval_avg_ms = 0.0;
+        /** Sum of the per-frame QP samples (0 = best quality).
+         *
+         *  These are the *outbound* samples — the QP the encoder chose
+         *  for the frames we sent.  The average QP is
+         *  `video_qp_sum / video_qp_count`. */
+        std::uint64_t video_qp_sum              = 0;
+        /** Number of per-frame QP samples (i.e. frames with a known QP).
+         *
+         *  Zero means the codec does not report a QP — not that the
+         *  quality was perfect. */
+        std::uint64_t video_qp_count            = 0;
+        /** Frames dropped at the jitter buffer (never assembled). */
+        std::uint64_t video_frames_dropped_jb   = 0;
+        /** Frames dropped by the decoder (corrupt / undecodable). */
+        std::uint64_t video_frames_dropped_decoder = 0;
+        /** Frames dropped because a reference frame was lost.  This is a
+         *  subset of `video_frames_dropped_decoder`. */
+        std::uint64_t video_frames_dropped_dependency = 0;
+        /** The current inbound video bitrate, in bits per second (EMA over
+         *  a one-second window). */
+        std::uint32_t video_current_bitrate_bps = 0;
+        /** The session-average inbound video bitrate, in bits per second. */
+        std::uint32_t video_avg_bitrate_bps    = 0;
+        /** Bytes of encoded video received since open(). */
+        std::uint64_t video_bytes_received      = 0;
+        /** Frames successfully decoded by the codec. */
+        std::uint64_t video_frames_decoded      = 0;
+        /** Frames handed to the video sink (rendered). */
+        std::uint64_t video_frames_rendered     = 0;
+        // ---- Outbound quality statistics (additive) --------------------
+        //
+        // The QP is the *encoder's* own quality signal: it says how much
+        // detail the encoder had to throw away to hit the bitrate.  It
+        // describes what WE sent, so it lives apart from the inbound
+        // counters above (Chrome's `outbound-rtp` split).
+        //
+        // `video_qp_sum` / `video_qp_count` are the outbound values; the
+        // average QP is `qp_sum / qp_count` (0 when no sample was taken,
+        // i.e. when the codec does not report a QP).
+        std::uint64_t video_tx_frames_encoded   = 0;
+        std::uint64_t video_tx_bytes_encoded    = 0;
+        /** Dependency losses the *peer* reported about our stream.
+         *
+         *  A PLI / FIR the peer sends is the peer saying "a reference
+         *  frame of yours never arrived, so I cannot decode what
+         *  follows".  This is our *transmit* side losing a reference
+         *  frame — the counterpart of the inbound
+         *  `video_frames_dropped_dependency`.
+         *
+         *  It is counted here rather than as an inbound drop because the
+         *  two describe opposite directions: the inbound counter says
+         *  "we could not decode what the peer sent", this one says "the
+         *  peer could not decode what we sent". */
+        std::uint64_t video_tx_frames_dropped_dependency = 0;
         // ---- Audio counters (WP-5, additive) -------------------------
         // Cumulative since open().  `audio_encode_errors` is the
         // "never silently dropped" counter: every PCM block that could

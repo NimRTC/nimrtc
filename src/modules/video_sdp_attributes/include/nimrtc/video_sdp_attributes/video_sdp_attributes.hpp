@@ -33,7 +33,9 @@
  *   2. Builds the matching `a=fmtp:<pt> <params>` string for SDP emission.
  *   3. Helps with `a=rtpmap:<pt> <name>/<clock>` matching the codec kind.
  *
- * @note P1. Standalone module; not yet wired into the engine.
+ * @note P1. Wired into the engine (v1.2 remediation D2): the engine builds
+ *       and parses the `a=fmtp:` body through this module, so the format
+ *       parameters have exactly one authority.
  */
 
 #pragma once

@@ -98,36 +98,98 @@ bool WaitFor(Pred pred, std::chrono::milliseconds budget,
 // -----------------------------------------------------------------------------
 
 TEST(IceConsentFreshness, T1_NormalPeerTrafficNeverFires) {
-    IceConfig cfg = MakeConfig();
-    IceTransport t{cfg};
-    ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
+    // The test simulates the peer with a *thread* that notifies every
+    // 40 ms.  That thread is subject to the OS scheduler, and a busy
+    // runner can deschedule it for longer than the consent timeout — in
+    // which case the tracker fires *correctly* (no binding was seen for
+    // longer than the timeout) and the assertion below fails for a reason
+    // that has nothing to do with the tracker.
+    //
+    // The failure looks like this (observed on a loaded Windows CI
+    // runner, 2026-11-13):
+    //
+    //   test_consent_freshness.cpp:126: error: Expected equality of these
+    //     values:  lost_count.load()  Which is: 1  0
+    //   consent_lost should not have fired while peer is active
+    //
+    // So the scenario measures its *own* validity: the peer thread
+    // records the largest gap between two consecutive notifications.  A
+    // gap that reaches the consent timeout means the runner stole the
+    // CPU, the "peer was active" premise was violated, and the attempt
+    // proves nothing — so the attempt is retried, and a run that never
+    // gets a clean window is skipped rather than failed.
+    //
+    // The tracker is still fully exercised: T2 asserts that the timer
+    // *does* fire when the peer stops, and T3 asserts the re-arm window.
+    // T1's job is only to prove the negative, and a negative proof needs
+    // a valid premise.
+    constexpr int         kMaxAttempts = 3;
+    constexpr std::int64_t kPeerGapMs   = 40;
 
-    std::atomic<int> lost_count{0};
-    t.set_on_consent_lost([&] { ++lost_count; });
+    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+        IceConfig cfg = MakeConfig();
+        IceTransport t{cfg};
+        ASSERT_EQ(t.open(), nimrtc::plugins::kOk);
 
-    // Arm the tracker so the timer math is independent of libjuice state.
-    t.force_consent_armed_for_testing();
+        std::atomic<int> lost_count{0};
+        t.set_on_consent_lost([&] { ++lost_count; });
 
-    // Pretend the peer keeps sending STUN Binding requests: wake up every
-    // 40 ms (well under the 200 ms timeout) and notify.
-    std::atomic<bool> stop{false};
-    std::thread peer([&] {
-        while (!stop.load(std::memory_order_acquire)) {
-            t.notify_binding_received();
-            std::this_thread::sleep_for(40ms);
+        // Arm the tracker so the timer math is independent of libjuice state.
+        t.force_consent_armed_for_testing();
+
+        // Pretend the peer keeps sending STUN Binding requests: wake up
+        // every 40 ms (well under the 200 ms timeout) and notify.  The
+        // thread also tracks its own worst gap between two notifications.
+        std::atomic<bool> stop{false};
+        std::atomic<std::int64_t> max_gap_us{0};
+        std::thread peer([&] {
+            auto prev = std::chrono::steady_clock::now();
+            while (!stop.load(std::memory_order_acquire)) {
+                t.notify_binding_received();
+                const auto now = std::chrono::steady_clock::now();
+                const auto gap = std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - prev);
+                prev = now;
+                std::int64_t seen = max_gap_us.load(std::memory_order_relaxed);
+                while (gap.count() > seen &&
+                       !max_gap_us.compare_exchange_weak(
+                           seen, gap.count(), std::memory_order_relaxed)) {
+                    // retry with the fresh `seen`
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPeerGapMs));
+            }
+        });
+
+        // Run for 3× the timeout. The callback must not have fired.
+        std::this_thread::sleep_for(3 * kConsentTimeoutMs * 1ms);
+        stop.store(true, std::memory_order_release);
+        peer.join();
+
+        const std::int64_t worst_gap_ms =
+            max_gap_us.load(std::memory_order_relaxed) / 1000;
+
+        if (worst_gap_ms >= kConsentTimeoutMs) {
+            // The runner descheduled the "peer" thread for longer than
+            // the consent timeout: the scenario's premise is broken, so
+            // this attempt says nothing about the tracker.
+            t.close();
+            if (attempt == kMaxAttempts) {
+                GTEST_SKIP() << "the runner descheduled the simulated peer for "
+                             << worst_gap_ms << "ms (consent timeout is "
+                             << kConsentTimeoutMs
+                             << "ms); the scenario cannot be evaluated here";
+            }
+            continue;
         }
-    });
 
-    // Run for 3× the timeout. The callback must not have fired.
-    std::this_thread::sleep_for(3 * kConsentTimeoutMs * 1ms);
-    stop.store(true, std::memory_order_release);
-    peer.join();
+        EXPECT_EQ(lost_count.load(), 0)
+            << "consent_lost should not have fired while peer is active "
+               "(worst peer gap was " << worst_gap_ms << "ms)";
+        EXPECT_FALSE(t.consent_lost_pending());
 
-    EXPECT_EQ(lost_count.load(), 0)
-        << "consent_lost should not have fired while peer is active";
-    EXPECT_FALSE(t.consent_lost_pending());
-
-    t.close();
+        t.close();
+        return;
+    }
 }
 
 // -----------------------------------------------------------------------------

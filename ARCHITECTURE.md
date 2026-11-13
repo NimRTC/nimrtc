@@ -72,6 +72,13 @@ src/
 ├── engine/       ← NimRTCEngine (wires plugins together; composition layer
 │                   only — no concrete module headers in its public API,
 │                   see Layout Invariant 4)
+│   └── src/     ← The engine's private internals.  `engine_impl.hpp` holds
+│                   the `Impl` state; the per-feature state lives in named
+│                   collaborator headers next to it (`engine_audio_state.hpp`,
+│                   `engine_video_state.hpp`, `engine_session_state.hpp`,
+│                   `engine_scratch.hpp`, `engine_timeline_state.hpp`,
+│                   `engine_xr_state.hpp`, `engine_ref_frame_table.hpp`).
+│                   None of these are installed.
 ├── log/          ← Logger / Sink implementation (nimrtc_log STATIC — the only
 │                   compiled module in src/ besides the engine itself)
 └── third_party/ ← Vendored upstream: mbedTLS, libsrtp, libopus, libjuice
@@ -256,12 +263,53 @@ it only hands the transport over and receives callbacks.
 4. **`src/engine/` wires plugins together.** Applications link `nimrtc::engine`,
    not individual modules. The engine's public header (`engine.hpp`)
    deliberately does **not** include any concrete module header — all
-   concrete state lives in a PIMPL `Impl` defined inside `engine.cpp`.
-   `engine.cpp` itself includes concrete module headers (ice/rtp/dtls/srtp/…)
-   and links the module libs PRIVATE — that is the composition layer doing
-   its job, not a leak into consumers. Consumers who need concrete types
-   (e.g. `nimrtc::dtls::DtlsSession`) include those headers themselves;
-   they aren't dragged in transitively.
+   concrete state lives in a PIMPL `Impl` defined in the private
+   `src/engine/src/engine_impl.hpp` (shared by the engine translation
+   units). Consumers who need concrete types (e.g. `nimrtc::dtls::DtlsSession`)
+   include those headers themselves; they aren't dragged in transitively.
+
+   The `Impl` state itself is grouped by concern (architecture remediation
+   plan §4.3 / D1): a member that only one feature reads or writes belongs
+   to that feature's collaborator, not to `Impl`.  The collaborators
+   (`detail::AudioState`, `detail::VideoState`, `detail::SessionState`,
+   `detail::ScratchBuffers`, `detail::TimelineState`, `detail::XrState`,
+   `detail::RefFrameTable`) live in private headers under `src/engine/src/`
+   and are not installed.
+
+   **The exception (ADR-025).** The engine's *internal* implementation files
+   (`engine_impl.hpp` and the `engine_*.cpp` translation units) may include
+   the concrete headers of exactly these modules, and link their libs PRIVATE:
+
+   | Module | Why |
+   |---|---|
+   | `sdp` | The session description is the contract every other component is written against |
+   | `rtp` | The packet builder sits on the zero-allocation hot path that Phase 3 §3.5 established |
+   | `ice` | The ICE transport's concrete state and role enums |
+   | `dtls` | The DTLS session's address / role / state types |
+   | `srtp` | The SRTP context's crypto-suite enum |
+   | `audio3a` | The 3A pipeline's config and frame types |
+   | `transport` | The transport-stack / selector / strategy types |
+   | `web_transport` | The WebTransport session's config and factory types |
+
+   **Every other concrete module** — the codec modules (`h264` / `h265` /
+   `av1`), the video pipeline, the jitter buffers, the BWE implementations,
+   the pacing module, the scheduler — is reached through its `plugins::I*`
+   seam, and the engine does **not** include its header.
+
+   This scoping is deliberate: an invariant that is violated everywhere has no
+   reviewing power. With the exception narrowed to a named list, L4 becomes
+   mechanically checkable — "does `src/engine/` include anything outside that
+   list and the `plugins::` seams?" is a question with a finite answer.
+
+   The `rtp::` usage is still spread across several engine translation
+   units.  Concentrating it into a single file
+   (`src/engine/src/rtp_packetizer.cpp`) is the *behaviour* half of the
+   engine split: it moves the packet construction out of the engine, so it
+   is a separate reviewable change, not part of the state split that
+   Phase 4.3 landed.
+
+   See `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` for the full rationale,
+   the alternatives that were rejected, and the follow-up work.
 
 5. **`src/third_party/` is the only place vendor code lives.** Nothing may
    link system-installed crypto / DTLS / SRTP libraries — `NIMRTC_VENDORED`

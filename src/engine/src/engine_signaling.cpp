@@ -236,7 +236,7 @@ std::string NimRTCEngine::create_offer() noexcept {
     // peer's answer (RFC 3264 §5.1: the answer echoes the offer's session
     // id).  Without it the offerer would treat the answer as a fresh offer
     // and keep its default DTLS role.
-    impl_->local_session_id = sdp.origin_session_id;
+    impl_->session_state.local_session_id = sdp.origin_session_id;
 
     // Helper: append ICE candidates stripped of any prefix the libjuice
     // collector added (the munger re-emits "a=candidate:" itself).
@@ -360,7 +360,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         char ssrc_line[96];
         std::snprintf(ssrc_line, sizeof(ssrc_line),
                       "%u cname:nimrtc-audio",
-                      static_cast<unsigned>(impl_->audio_ssrc));
+                      static_cast<unsigned>(impl_->audio_state.audio_ssrc));
         audio.extra_attrs.emplace_back("ssrc", ssrc_line);
     }
 
@@ -445,7 +445,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         // declares that we are prepared to receive a Receiver Reference
         // Time Report and to answer it with a DLRR.  The flag authorises
         // the DLRR half of the exchange.
-        impl_->local_xr_rcvr_rtt = true;
+        impl_->xr.local_xr_rcvr_rtt = true;
     }
 
     // ---- Cross-end timeline extmap (ADR-017) ------------------------------
@@ -470,7 +470,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         ast.direction = sdp::Direction::SendRecv;
         ast.uri       = std::string(rtp::kAbsSendTimeUri);
         audio.extmap.push_back(ast);
-        impl_->local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
+        impl_->timeline.local_abs_send_time_id = rtp::kAbsSendTimeDefaultLocalId;
     }
 
     // a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
@@ -490,7 +490,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         al.direction = sdp::Direction::SendRecv;
         al.uri       = std::string(detail::kAudioLevelExtUri);
         audio.extmap.push_back(al);
-        impl_->local_audio_level_ext_id = detail::kAudioLevelDefaultLocalId;
+        impl_->audio_state.local_audio_level_ext_id = detail::kAudioLevelDefaultLocalId;
     }
 
     push_candidates_into(audio);
@@ -524,8 +524,8 @@ std::string NimRTCEngine::create_offer() noexcept {
         // AV1 → 45) and the host's explicit choice, so the SDP, the
         // RTP header and the receive pipeline all agree.
         const std::string vpt =
-            std::to_string(impl_->video_payload_type != 0
-                               ? impl_->video_payload_type
+            std::to_string(impl_->video_state.video_payload_type != 0
+                               ? impl_->video_state.video_payload_type
                                : config_.video_sender_tuning.payload_type);
         video.formats         = {vpt};
         video.direction       = dir;
@@ -547,7 +547,7 @@ std::string NimRTCEngine::create_offer() noexcept {
         // The encoding name comes from the codec family the session
         // actually uses, so the offer cannot claim H.264 while the
         // pipeline emits H.265.
-        const detail::VideoCodecFamily family = impl_->video_codec_family;
+        const detail::VideoCodecFamily family = impl_->video_state.video_codec_family;
         sdp::MediaDescription::RtpMap video_map;
         video_map.encoding   = std::string(detail::sdp_encoding_of(family));
         video_map.clock_rate = 90000;
@@ -568,6 +568,10 @@ std::string NimRTCEngine::create_offer() noexcept {
 
         // a=fmtp:<vpt> <codec-specific parameters>
         //
+        // The body is *built* by the `video_sdp_attributes` module — the
+        // single authority on what each codec family's format parameters
+        // are and how they are spelled (see `detail::default_fmtp_of`).
+        //
         // H.264 (RFC 6184 §8.2): profile-level-id + packetization-mode,
         // plus the synthetic SPS/PPS the H.264 stub encoder emits
         // (Baseline profile, level 3.1).
@@ -580,13 +584,14 @@ std::string NimRTCEngine::create_offer() noexcept {
         //
         // The body is derived from the same codec family as the
         // `a=rtpmap:` line above, so the two cannot disagree.
-        if (video_codec_) {
-            video.fmtp[vpt] =
-                std::string(detail::default_fmtp_of(family, /*with_sprop=*/true));
-        } else {
-            video.fmtp[vpt] =
-                std::string(detail::default_fmtp_of(family, /*with_sprop=*/false));
-        }
+        //
+        // The `sprop-parameter-sets` are advertised only when there is a
+        // codec instance behind the pipeline: without one, the engine has
+        // no encoder whose parameter sets it could be describing, and
+        // advertising a synthetic pair would describe a stream nothing
+        // produces.
+        video.fmtp[vpt] = detail::default_fmtp_of(
+            family, /*with_sprop=*/video_codec_ != nullptr);
 
         // a=rtcp-fb:<vpt> nack pli  (RFC 4585 §6.2.1 + WebRTC §5.2)
         // NACK + Picture Loss Indication are the two feedbacks Chrome's
@@ -720,8 +725,8 @@ std::string NimRTCEngine::create_offer() noexcept {
     };
     std::vector<MediaPlanEntry> media_plan;
 
-    if (impl_->session_model) {
-        for (const auto& t : impl_->session_model->transceivers()) {
+    if (impl_->session_state.session_model) {
+        for (const auto& t : impl_->session_state.session_model->transceivers()) {
             sdp::MediaType type = sdp::MediaType::Audio;
             if (t.kind == plugins::MediaKind::kVideo) {
                 type = sdp::MediaType::Video;
@@ -802,14 +807,14 @@ std::string NimRTCEngine::create_offer() noexcept {
     // The session changed → the offer we just produced is the new
     // baseline, so the "needs renegotiation" flag goes back to false
     // (N2).
-    impl_->session_dirty = false;
+    impl_->session_state.session_dirty = false;
 
     auto sdp_str = impl_->sdp_munger->to_sdp(sdp);
     if (!sdp_str) {
         if (on_error_) on_error_(core::kEngineSdpCorrupt, "SDP munger failed");
         return {};
     }
-    impl_->local_sdp = std::move(sdp);
+    impl_->session_state.local_sdp = std::move(sdp);
     return sdp_str.value();
 }
 
@@ -849,8 +854,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // answer committed it to — and two NimRTC engines could therefore
     // never complete a DTLS handshake (both ended up as servers).
     const bool remote_is_answer =
-        !impl_->local_session_id.empty() &&
-        remote.origin_session_id == impl_->local_session_id;
+        !impl_->session_state.local_session_id.empty() &&
+        remote.origin_session_id == impl_->session_state.local_session_id;
     core::log::Logger::instance().info(
         std::string("process_remote_sdp: remote description is an ")
         + (remote_is_answer ? "ANSWER" : "OFFER")
@@ -868,14 +873,14 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // the tracker per SSRC instead of assuming "video ⇒ 90 kHz", which
     // happens to be right for every standardised video codec but is a
     // guess rather than a reading of the wire.
-    impl_->remote_clock_rate_hz.clear();
+    impl_->timeline.remote_clock_rate_hz.clear();
     for (const auto& m : remote.media) {
         for (const auto& [fmt, map] : m.rtpmap) {
             std::uint8_t pt = 0;
             if (!detail::parse_payload_type(fmt, pt)) continue;
             if (map.clock_rate == 0) continue;
             auto [it, inserted] =
-                impl_->remote_clock_rate_hz.emplace(pt, map.clock_rate);
+                impl_->timeline.remote_clock_rate_hz.emplace(pt, map.clock_rate);
             if (!inserted && it->second != map.clock_rate) {
                 // The same payload type declared with two different
                 // rates across m-sections.  The RTP layer does not
@@ -904,11 +909,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         {9, 8000},    // G722
     };
     for (const auto& sr : kStaticRates) {
-        impl_->remote_clock_rate_hz.emplace(sr.pt, sr.hz);
+        impl_->timeline.remote_clock_rate_hz.emplace(sr.pt, sr.hz);
     }
-    if (!impl_->remote_clock_rate_hz.empty()) {
+    if (!impl_->timeline.remote_clock_rate_hz.empty()) {
         std::string rates;
-        for (const auto& [pt, rate] : impl_->remote_clock_rate_hz) {
+        for (const auto& [pt, rate] : impl_->timeline.remote_clock_rate_hz) {
             if (!rates.empty()) rates += ", ";
             rates += std::to_string(pt) + "→" + std::to_string(rate) + "Hz";
         }
@@ -973,10 +978,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // the blocks (RFC 3611 §5.2 — whoever writes the parameter is
     // asking the other party to send them).
     {
-        impl_->peer_xr_rcvr_rtt = false;
-        impl_->peer_xr_stat_summary = false;
-        impl_->peer_xr_stat_summary_flags.clear();
-        impl_->peer_tmmbr_negotiated = false;
+        impl_->xr.peer_xr_rcvr_rtt = false;
+        impl_->xr.peer_xr_stat_summary = false;
+        impl_->xr.peer_xr_stat_summary_flags.clear();
+        impl_->xr.peer_tmmbr_negotiated = false;
 
         const bool want_tmmbr =
             config_.tmmbr_enabled && !config_.disable_tmmbr;
@@ -1000,31 +1005,31 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             if (has_xr) {
                 const std::string& xr =
                     m.rtcp_xr_present ? m.rtcp_xr : remote.rtcp_xr;
-                impl_->peer_xr_rcvr_rtt =
+                impl_->xr.peer_xr_rcvr_rtt =
                     detail::rtcp_xr_has_format(xr, "rcvr-rtt");
-                impl_->peer_xr_stat_summary =
+                impl_->xr.peer_xr_stat_summary =
                     detail::rtcp_xr_has_format(xr, "stat-summary");
                 // The field indicators the peer asked for, narrowed to the
                 // ones the engine produces (RFC 3611 §5.1 — the list says
                 // which fields SHOULD be included in the blocks we send).
-                impl_->peer_xr_stat_summary_flags =
+                impl_->xr.peer_xr_stat_summary_flags =
                     detail::rtcp_xr_stat_summary_supported(xr);
             }
 
             for (const std::string& entry : m.rtcp_fb) {
                 if (detail::rtcp_fb_has_ccm_param(entry, "tmmbr")) {
-                    impl_->peer_tmmbr_negotiated = want_tmmbr;
+                    impl_->xr.peer_tmmbr_negotiated = want_tmmbr;
                 }
             }
         }
 
         core::log::Logger::instance().info(
             std::string("engine[xr]: negotiated — rcvr-rtt=") +
-            (impl_->peer_xr_rcvr_rtt ? "yes" : "no") +
+            (impl_->xr.peer_xr_rcvr_rtt ? "yes" : "no") +
             ", stat-summary=" +
-            (impl_->peer_xr_stat_summary ? "yes" : "no") +
+            (impl_->xr.peer_xr_stat_summary ? "yes" : "no") +
             ", tmmbr=" +
-            (impl_->peer_tmmbr_negotiated ? "yes" : "no"));
+            (impl_->xr.peer_tmmbr_negotiated ? "yes" : "no"));
     }
 
     // ---- Negotiated payload-type routing (B-4) --------------------------
@@ -1042,14 +1047,14 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // meaningful within the m-section that declared it (RFC 3550
     // §5.14: the payload type is scoped to the RTP session, and an
     // m-line that is rejected contributes no RTP session at all).
-    impl_->audio_pt_routes.clear();
-    impl_->video_pt_routes.clear();
-    impl_->negotiated_audio_pt = 0;
-    impl_->negotiated_opus_fmtp = detail::OpusFmtpParams{};
-    impl_->negotiated_opus_fmtp_text.clear();
-    impl_->audio_rx_disabled = false;
-    impl_->audio_codec_unsupported_reported = false;
-    impl_->pt_routing_active = true;
+    impl_->audio_state.audio_pt_routes.clear();
+    impl_->video_state.video_pt_routes.clear();
+    impl_->audio_state.negotiated_audio_pt = 0;
+    impl_->audio_state.negotiated_opus_fmtp = detail::OpusFmtpParams{};
+    impl_->audio_state.negotiated_opus_fmtp_text.clear();
+    impl_->audio_state.audio_rx_disabled = false;
+    impl_->audio_state.audio_codec_unsupported_reported = false;
+    impl_->audio_state.pt_routing_active = true;
 
     // ---- Negotiated telephone-event payload type (RFC 4733 §2.3.2) ----
     //
@@ -1120,8 +1125,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             continue;
         }
         auto& table = (m.type == sdp::MediaType::Audio)
-                          ? impl_->audio_pt_routes
-                          : impl_->video_pt_routes;
+                          ? impl_->audio_state.audio_pt_routes
+                          : impl_->video_state.video_pt_routes;
         for (const auto& fmt : m.formats) {
             std::uint8_t pt = 0;
             if (!detail::parse_payload_type(fmt, pt)) continue;
@@ -1163,23 +1168,23 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // the answer and our own offer stay in sync; otherwise the first
     // offered payload type we can decode wins (the table is ordered by
     // payload type, so the choice is deterministic).
-    if (!impl_->audio_pt_routes.empty()) {
+    if (!impl_->audio_state.audio_pt_routes.empty()) {
         const std::uint8_t preferred = config_.audio_codec.payload_type;
         std::uint8_t chosen = 0;
-        for (const auto& [pt, route] : impl_->audio_pt_routes) {
+        for (const auto& [pt, route] : impl_->audio_state.audio_pt_routes) {
             if (!audio_encoding_decodable(route.encoding)) continue;
             if (chosen == 0) chosen = pt;
             if (pt == preferred) { chosen = pt; break; }
         }
-        impl_->negotiated_audio_pt = chosen;
+        impl_->audio_state.negotiated_audio_pt = chosen;
 
         if (chosen == 0) {
             // The peer offered audio, but nothing in it is decodable
             // here.  This is a configuration condition, not a per-packet
             // anomaly, so it is reported once and disables the track.
-            impl_->audio_rx_disabled = true;
-            if (!impl_->audio_codec_unsupported_reported && on_error_) {
-                impl_->audio_codec_unsupported_reported = true;
+            impl_->audio_state.audio_rx_disabled = true;
+            if (!impl_->audio_state.audio_codec_unsupported_reported && on_error_) {
+                impl_->audio_state.audio_codec_unsupported_reported = true;
                 on_error_(core::kAudioCodecUnsupported,
                           "the peer offered an audio codec NimRTC cannot "
                           "decode — the audio track is disabled");
@@ -1188,7 +1193,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             core::log::Logger::instance().info(
                 "engine[audio]: negotiated inbound payload type " +
                 std::to_string(chosen) + " (encoding " +
-                impl_->audio_pt_routes[chosen].encoding + ")");
+                impl_->audio_state.audio_pt_routes[chosen].encoding + ")");
         }
 
         // The `a=fmtp:` parameters of the selected payload type are
@@ -1196,16 +1201,16 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // are meaningful to us; another encoding's parameters are
         // ignored rather than rejected (RFC 3264 §6.1: a peer that
         // sends a parameter we do not know must still be negotiable).
-        const std::string selected = std::to_string(impl_->negotiated_audio_pt);
+        const std::string selected = std::to_string(impl_->audio_state.negotiated_audio_pt);
         for (const auto& m : remote.media) {
             if (m.type != sdp::MediaType::Audio) continue;
             auto fit = m.fmtp.find(selected);
             if (fit == m.fmtp.end()) break;
-            if (impl_->audio_pt_routes[impl_->negotiated_audio_pt].encoding ==
+            if (impl_->audio_state.audio_pt_routes[impl_->audio_state.negotiated_audio_pt].encoding ==
                 "opus") {
-                impl_->negotiated_opus_fmtp = detail::parse_opus_fmtp(fit->second);
-                impl_->negotiated_opus_fmtp_text =
-                    detail::build_negotiated_opus_fmtp(impl_->negotiated_opus_fmtp);
+                impl_->audio_state.negotiated_opus_fmtp = detail::parse_opus_fmtp(fit->second);
+                impl_->audio_state.negotiated_opus_fmtp_text =
+                    detail::build_negotiated_opus_fmtp(impl_->audio_state.negotiated_opus_fmtp);
             }
             break;
         }
@@ -1226,10 +1231,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // that appears in *both* descriptions.  Everything downstream — the
     // answer's format list, the outbound RTP header, the inbound demux
     // — then uses that one number.
-    impl_->negotiated_video = detail::VideoNegotiationResult{};
-    impl_->negotiated_video_pt.store(0, std::memory_order_relaxed);
-    impl_->video_rx_disabled = false;
-    impl_->video_codec_unsupported_reported = false;
+    impl_->video_state.negotiated_video = detail::VideoNegotiationResult{};
+    impl_->video_state.negotiated_video_pt.store(0, std::memory_order_relaxed);
+    impl_->video_state.video_rx_disabled = false;
+    impl_->video_state.video_codec_unsupported_reported = false;
 
     // The video codec this session uses.  The engine holds *one* video
     // codec (the plugin named by `EngineConfig::video_codec_name`),
@@ -1244,7 +1249,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // The codec also has to be *present*: without a video codec plug-in
     // the engine cannot decode a single frame, so an H.264 offer is no
     // more decodable than a VP9 one.
-    const detail::VideoCodecFamily our_family = impl_->video_codec_family;
+    const detail::VideoCodecFamily our_family = impl_->video_state.video_codec_family;
     const auto video_encoding_decodable = [this, our_family](const std::string& enc) {
         if (video_codec_ == nullptr) return false;
         const detail::VideoCodecFamily peer_family =
@@ -1271,8 +1276,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         //   * when the peer offers several supported payload types, this
         //     one wins, so the outbound path keeps a stable number.
         const std::uint8_t our_video_pt =
-            impl_->video_payload_type != 0
-                ? impl_->video_payload_type
+            impl_->video_state.video_payload_type != 0
+                ? impl_->video_state.video_payload_type
                 : config_.video_sender_tuning.payload_type;
 
         std::uint8_t chosen = 0;
@@ -1302,15 +1307,42 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         }
 
         if (chosen != 0) {
-            impl_->negotiated_video.valid         = true;
-            impl_->negotiated_video.payload_type  = chosen;
-            impl_->negotiated_video.encoding       = chosen_encoding;
-            impl_->negotiated_video.clock_rate    = chosen_clock_rate;
+            impl_->video_state.negotiated_video.valid         = true;
+            impl_->video_state.negotiated_video.payload_type  = chosen;
+            impl_->video_state.negotiated_video.encoding       = chosen_encoding;
+            impl_->video_state.negotiated_video.clock_rate    = chosen_clock_rate;
             auto fit = remote_video->fmtp.find(std::to_string(chosen));
             if (fit != remote_video->fmtp.end()) {
-                impl_->negotiated_video.fmtp = fit->second;
+                impl_->video_state.negotiated_video.fmtp = fit->second;
+
+                // ---- Parse the peer's format parameters --------------------
+                //
+                // The raw body is *also* parsed by the `video_sdp_attributes`
+                // module — the single authority on what each codec family's
+                // format parameters mean.  The parsed form is what the
+                // packetizer consults to honour the peer's declared
+                // packetization mode (RFC 6184 §6).
+                //
+                // A parse failure is NOT fatal: the raw body is kept (the
+                // answer must echo what was offered — RFC 3264 §6.1), and
+                // the engine falls back to its own packetization mode.  The
+                // failure is logged, because it means the peer and we may
+                // disagree about the bitstream layout.
+                const auto kind = detail::sdp_attr_kind_of(
+                    detail::codec_family_from_sdp_encoding(chosen_encoding));
+                auto fmtp_parsed = nimrtc::video_sdp_attributes::parse_fmtp(
+                    kind, impl_->video_state.negotiated_video.fmtp);
+                if (fmtp_parsed.ok()) {
+                    impl_->video_state.negotiated_video.fmtp_parsed = fmtp_parsed.value();
+                    impl_->video_state.negotiated_video.fmtp_valid   = true;
+                } else {
+                    core::log::Logger::instance().warn(
+                        "engine[video]: the peer's a=fmtp: body could not be "
+                        "parsed (" + fmtp_parsed.error().message() +
+                        ") — the engine keeps its own packetization mode");
+                }
             }
-            impl_->negotiated_video_pt.store(chosen, std::memory_order_relaxed);
+            impl_->video_state.negotiated_video_pt.store(chosen, std::memory_order_relaxed);
             core::log::Logger::instance().info(
                 "engine[video]: negotiated payload type " +
                 std::to_string(chosen) + " (encoding " + chosen_encoding + ")");
@@ -1318,10 +1350,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // The peer offered video, but nothing in it is decodable
             // here.  This is a configuration condition, not a per-packet
             // anomaly, so it is reported once and disables the track.
-            impl_->negotiated_video.codec_unsupported = true;
-            impl_->video_rx_disabled = true;
-            if (!impl_->video_codec_unsupported_reported && on_error_) {
-                impl_->video_codec_unsupported_reported = true;
+            impl_->video_state.negotiated_video.codec_unsupported = true;
+            impl_->video_state.video_rx_disabled = true;
+            if (!impl_->video_state.video_codec_unsupported_reported && on_error_) {
+                impl_->video_state.video_codec_unsupported_reported = true;
                 on_error_(core::kVideoCodecUnsupported,
                           "the peer offered a video codec NimRTC cannot "
                           "decode — the video track is disabled");
@@ -1342,11 +1374,11 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             if (em.uri != detail::kAudioLevelExtUri) continue;
             if (em.direction == sdp::Direction::Inactive) continue;
             if (em.id <= 0 || em.id > 255) continue;
-            impl_->remote_audio_level_ext_id = em.id;
+            impl_->audio_state.remote_audio_level_ext_id = em.id;
             if (!remote_is_answer) {
                 // We are the answerer: the answer echoes the offered id,
                 // and our own outbound packets use the same one.
-                impl_->local_audio_level_ext_id = em.id;
+                impl_->audio_state.local_audio_level_ext_id = em.id;
             }
             break;
         }
@@ -1498,8 +1530,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             local_setup_attr = "passive";
         }
         d->set_role(desired_role);
-        impl_->dtls_is_client  = (desired_role == nimrtc::dtls::DtlsRole::Client);
-        impl_->dtls_local_setup = local_setup_attr;
+        impl_->session_state.dtls_is_client  = (desired_role == nimrtc::dtls::DtlsRole::Client);
+        impl_->session_state.dtls_local_setup = local_setup_attr;
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: dtls role resolved peer_setup='")
             + peer_setup + "' local_setup='" + local_setup_attr
@@ -1554,8 +1586,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     em.direction == sdp::Direction::SendOnly;
                 if (!peer_sends) continue;
                 if (em.id <= 0 || em.id > 255) continue;
-                if (impl_->remote_abs_send_time_id == 0) {
-                    impl_->remote_abs_send_time_id =
+                if (impl_->timeline.remote_abs_send_time_id == 0) {
+                    impl_->timeline.remote_abs_send_time_id =
                         static_cast<std::uint16_t>(em.id);
                     core::log::Logger::instance().info(
                         "engine[timeline]: peer advertised abs-send-time "
@@ -1563,7 +1595,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 }
                 break;
             }
-            if (impl_->remote_abs_send_time_id != 0) break;
+            if (impl_->timeline.remote_abs_send_time_id != 0) break;
         }
     }
 
@@ -1579,10 +1611,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         core::log::Logger::instance().info(
             "process_remote_sdp: answer applied — no answer generated "
             "(dtls role=" +
-            std::string(impl_->dtls_is_client ? "Client" : "Server") + ")");
+            std::string(impl_->session_state.dtls_is_client ? "Client" : "Server") + ")");
         // The peer's answer closes the current negotiation round, so the
         // session is no longer "dirty" (N2).
-        impl_->session_dirty = false;
+        impl_->session_state.session_dirty = false;
         return std::string{};
     }
 
@@ -1602,7 +1634,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
     // ones) keeps its identity; only its direction is refreshed, and
     // only from what the peer *offered* — our own capability is
     // intersected with it when the answer is built.
-    if (impl_->session_model) {
+    if (impl_->session_state.session_model) {
         for (const auto& rm : remote.media) {
             if (rm.type != sdp::MediaType::Audio &&
                 rm.type != sdp::MediaType::Video &&
@@ -1622,7 +1654,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
 
             // Does a transceiver already own that mid?
             bool found = false;
-            for (const auto& t : impl_->session_model->transceivers()) {
+            for (const auto& t : impl_->session_state.session_model->transceivers()) {
                 if (t.mid == mid) { found = true; break; }
             }
             if (!found) {
@@ -1638,7 +1670,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                         ? plugins::Direction::kSendOnly
                         : peer_can;
                 const std::string created =
-                    impl_->session_model->add_transceiver_at(mid, kind, ours);
+                    impl_->session_state.session_model->add_transceiver_at(mid, kind, ours);
                 if (created.empty()) continue;
             }
             // An existing transceiver keeps *our* direction — the peer's
@@ -1698,7 +1730,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         ans.rtcp_xr_present = true;
         if (config_.rtcp_xr_enabled) {
             ans.rtcp_xr = build_xr_answer(remote.rtcp_xr,
-                                          &impl_->local_xr_rcvr_rtt);
+                                          &impl_->xr.local_xr_rcvr_rtt);
         }
         // Otherwise the attribute is present but empty: RFC 3611 §5.2 —
         // "If a participant receives an SDP offer and understands the
@@ -1757,8 +1789,8 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // The mid is matched against the transceiver list, so a
         // transceiver the peer did not offer is simply not found and
         // the historical behaviour stands.
-        if (impl_->session_model && !am.mid.empty()) {
-            for (const auto& t : impl_->session_model->transceivers()) {
+        if (impl_->session_state.session_model && !am.mid.empty()) {
+            for (const auto& t : impl_->session_state.session_model->transceivers()) {
                 if (t.mid != am.mid) continue;
                 // Our own capability, intersected with the peer's.
                 const plugins::Direction ours = t.direction;
@@ -1776,9 +1808,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             (rm.type == sdp::MediaType::Application) ? "" : "rtcp-mux";
         am.ice_ufrag = local_ufrag();
         am.ice_pwd   = local_password();
-        am.dtls_setup = impl_->dtls_local_setup.empty()
+        am.dtls_setup = impl_->session_state.dtls_local_setup.empty()
                             ? "active"
-                            : impl_->dtls_local_setup;
+                            : impl_->session_state.dtls_local_setup;
         core::log::Logger::instance().info(
             std::string("process_remote_sdp: answer SDP setup='") + am.dtls_setup +
             "' (peer wanted '" + rm.dtls_setup + "')");
@@ -1802,9 +1834,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // accept — a payload type we merely *could* accept but did
             // not select would leave the peer free to send on a codec
             // we never agreed to decode.
-            if (impl_->negotiated_audio_pt != 0) {
+            if (impl_->audio_state.negotiated_audio_pt != 0) {
                 const std::string selected =
-                    std::to_string(impl_->negotiated_audio_pt);
+                    std::to_string(impl_->audio_state.negotiated_audio_pt);
                 am.formats = {selected};
 
                 // Only the selected payload type's own `a=rtpmap:` line
@@ -1819,9 +1851,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                 // the peer will not embed the redundancy the decoder
                 // needs to recover a lost frame (B-8).
                 const std::string negotiated =
-                    impl_->negotiated_opus_fmtp_text.empty()
+                    impl_->audio_state.negotiated_opus_fmtp_text.empty()
                         ? detail::build_local_opus_fmtp(config_.pcm_channels)
-                        : impl_->negotiated_opus_fmtp_text;
+                        : impl_->audio_state.negotiated_opus_fmtp_text;
                 if (!negotiated.empty()) am.fmtp[selected] = negotiated;
 
                 // ---- The telephone-event payload type (RFC 4733 §2.3.2) --
@@ -1858,7 +1890,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             char audio_ssrc_line[96];
             std::snprintf(audio_ssrc_line, sizeof(audio_ssrc_line),
                           "%u cname:nimrtc-audio",
-                          static_cast<unsigned>(impl_->audio_ssrc));
+                          static_cast<unsigned>(impl_->audio_state.audio_ssrc));
             am.extra_attrs.emplace_back("ssrc", audio_ssrc_line);
             am.extra_attrs.emplace_back("ptime",
                                          std::to_string(config_.audio_ptime_ms));
@@ -1885,14 +1917,14 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // is switched off, and the "tmmbr" parameter disappears
             // from the negotiated set (which is what binds the engine
             // out of sending one).
-            if (impl_->negotiated_audio_pt != 0) {
+            if (impl_->audio_state.negotiated_audio_pt != 0) {
                 const bool want_tmmbr =
                     config_.tmmbr_enabled && !config_.disable_tmmbr;
                 for (const std::string& entry : rm.rtcp_fb) {
                     const std::string types =
                         detail::filter_rtcp_fb_types(entry, want_tmmbr);
                     if (types.empty()) continue;
-                    am.rtcp_fb.push_back(std::to_string(impl_->negotiated_audio_pt) +
+                    am.rtcp_fb.push_back(std::to_string(impl_->audio_state.negotiated_audio_pt) +
                                          " " + types);
                 }
             }
@@ -1930,7 +1962,7 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
                     // (RFC 3611 §5.2).  The flag authorises the DLRR half
                     // of the exchange.
                     am.rtcp_xr = build_xr_answer(rm.rtcp_xr,
-                                                 &impl_->local_xr_rcvr_rtt);
+                                                 &impl_->xr.local_xr_rcvr_rtt);
                 }
                 // Otherwise the attribute is present but empty: RFC 3611
                 // §5.2 — "If a participant receives an SDP offer and
@@ -1949,10 +1981,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
             // the one we advertised ourselves (we are the offerer).
             {
                 sdp::MediaDescription::ExtMap al;
-                al.id = impl_->local_audio_level_ext_id != 0
-                            ? impl_->local_audio_level_ext_id
+                al.id = impl_->audio_state.local_audio_level_ext_id != 0
+                            ? impl_->audio_state.local_audio_level_ext_id
                             : detail::kAudioLevelDefaultLocalId;
-                impl_->local_audio_level_ext_id = al.id;
+                impl_->audio_state.local_audio_level_ext_id = al.id;
                 al.direction = sdp::Direction::SendRecv;
                 al.uri       = std::string(detail::kAudioLevelExtUri);
                 am.extmap.push_back(al);
@@ -1968,9 +2000,9 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         // the subset that was actually negotiated, which is what
         // `negotiated_video` holds.
         if (rm.type == sdp::MediaType::Video) {
-            if (impl_->negotiated_video.valid) {
+            if (impl_->video_state.negotiated_video.valid) {
                 const std::string selected =
-                    std::to_string(impl_->negotiated_video.payload_type);
+                    std::to_string(impl_->video_state.negotiated_video.payload_type);
                 am.formats = {selected};
 
                 // Only the negotiated payload type's own `a=rtpmap:`
@@ -2079,10 +2111,10 @@ NimRTCEngine::process_remote_sdp(std::string_view remote_sdp) noexcept {
         if (config_.timeline_enabled &&
             rm.type != sdp::MediaType::Application) {
             const std::uint16_t answer_id =
-                impl_->local_abs_send_time_id != 0
-                    ? impl_->local_abs_send_time_id
+                impl_->timeline.local_abs_send_time_id != 0
+                    ? impl_->timeline.local_abs_send_time_id
                     : rtp::kAbsSendTimeDefaultLocalId;
-            impl_->local_abs_send_time_id = answer_id;
+            impl_->timeline.local_abs_send_time_id = answer_id;
             sdp::MediaDescription::ExtMap ast;
             ast.id        = static_cast<int>(answer_id);
             ast.direction = sdp::Direction::SendRecv;

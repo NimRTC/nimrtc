@@ -25,14 +25,30 @@
  * engine is the only place that sees all four representations at once —
  * and per Layout Invariant 4 the engine may not include a concrete codec
  * module's header, so the mapping cannot live in `modules/h265` either.
+ *
+ * ## The `a=fmtp:` body is NOT here
+ *
+ * The *values* of the format parameters (which profile, which level,
+ * whether the parameter sets are advertised) belong to the codec-family
+ * semantics, and those live in exactly one place: the
+ * `nimrtc::video_sdp_attributes` module (`parse_fmtp` / `build_*_fmtp`).
+ * This file only decides *which* codec family is in play and hands that
+ * to the module.  Before the v1.2 remediation (D2) the engine carried a
+ * second, hand-written copy of the same table — `default_fmtp_of()`
+ * below — and the two could disagree: the module knew how to *parse*
+ * `sprop-parameter-sets` while the engine hand-assembled the very same
+ * string, so a fix to one never reached the other.  There is now exactly
+ * one authority.
  */
 
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/video_sdp_attributes/video_sdp_attributes.hpp>
 
 namespace nimrtc::engine::detail {
 
@@ -220,6 +236,11 @@ inline std::uint8_t resolve_payload_type(VideoCodecFamily family,
 
 /** The `a=fmtp:` body the engine advertises for a codec family.
  *
+ *  The *construction* of the body belongs to the `video_sdp_attributes`
+ *  module — it is the single authority on what each codec family's
+ *  format parameters are and how they are spelled.  This function only
+ *  decides *which* family is in play and hands it over.
+ *
  *  H.264's body mirrors the synthetic SPS/PPS the H.264 stub encoder
  *  emits (Baseline profile, level 3.1).  H.265's body names the HEVC
  *  profile / level / tier and the temporal-dependency mode, and
@@ -234,16 +255,29 @@ inline std::uint8_t resolve_payload_type(VideoCodecFamily family,
  *                    (the stub encoder advertises them; a hardware
  *                    encoder would override them).
  */
-inline std::string_view default_fmtp_of(VideoCodecFamily family,
-                                        bool with_sprop) noexcept {
+inline std::string default_fmtp_of(VideoCodecFamily family,
+                                   bool with_sprop) {
+    namespace vsa = nimrtc::video_sdp_attributes;
+
     switch (family) {
-        case VideoCodecFamily::kH264:
-            return with_sprop
-                ? "profile-level-id=42E01F;packetization-mode=1;"
-                  "level-asymmetry-allowed=1;"
-                  "sprop-parameter-sets=Z0LAHtkA,aM4G4g=="
-                : "profile-level-id=42E01F;packetization-mode=1";
-        case VideoCodecFamily::kH265:
+        case VideoCodecFamily::kH264: {
+            vsa::H264Fmtp cfg;
+            // Baseline profile, level 3.1 (RFC 6184 §8.2) — the profile
+            // the H.264 stub encoder produces.
+            cfg.profile_level_id = "42E01F";
+            // RFC 6184 §6: mode 1 (single NAL + STAP-A + FU-A) is the
+            // only mode a WebRTC endpoint may use.
+            cfg.packetization_mode = vsa::PacketizationMode::kNonInterleaved;
+            cfg.level_asymmetry_allowed = true;
+            if (with_sprop) {
+                // The synthetic SPS / PPS the H.264 stub encoder emits.
+                cfg.sprop_sps = "Z0LAHtkA";
+                cfg.sprop_pps = "aM4G4g==";
+            }
+            return vsa::build_h264_fmtp(cfg);
+        }
+        case VideoCodecFamily::kH265: {
+            vsa::H265Fmtp cfg;
             // RFC 7798 §4.2: `level-id` carries HEVC's `general_level_idc`
             // verbatim — 93 is level 3.1 (the RFC's own default when the
             // parameter is absent).  profile-id=1 is Main, tier-flag=0 is
@@ -253,13 +287,42 @@ inline std::string_view default_fmtp_of(VideoCodecFamily family,
             // and "SRST" is what a single-temporal-layer WebRTC stream
             // uses.  NimRTC advertises level 3.1 to match the 640x480@30
             // default geometry.
-            return "profile-id=1;level-id=93;tier-flag=0;tx-mode=SRST";
-        case VideoCodecFamily::kAV1:
+            cfg.profile_id = 1;
+            cfg.level_id   = 93;
+            cfg.tier_flag  = 0;
+            cfg.tx_mode    = "SRST";
+            // The parameter sets are deliberately NOT advertised: the
+            // WebRTC HEVC profile forbids sprop-* in the SDP (they travel
+            // in-band, inside the stream).
+            return vsa::build_h265_fmtp(cfg);
+        }
+        case VideoCodecFamily::kAV1: {
+            vsa::Av1Fmtp cfg;
             // draft-ietf-payload-av1 §7 / Chrome Unified Plan:
             // profile=0 (Main), level-idx=5 (level 3.1), tier=0.
-            return "profile=0;level-idx=5;tier=0";
+            cfg.profile   = 0;
+            cfg.level_idx = 5;
+            cfg.tier      = 0;
+            return vsa::build_av1_fmtp(cfg);
+        }
         default:
             return {};
+    }
+}
+
+/** The codec kind the `video_sdp_attributes` module parses/builds for a
+ *  family.  The module works in `video_frame::CodecKind` terms; the
+ *  engine works in `VideoCodecFamily` terms.  The two enumerations have
+ *  the same members, but the conversion is explicit so the two never
+ *  drift. */
+inline nimrtc::video_frame::CodecKind sdp_attr_kind_of(
+        VideoCodecFamily family) noexcept {
+    namespace vsa = nimrtc::video_sdp_attributes;
+    switch (family) {
+        case VideoCodecFamily::kH264: return vsa::CodecKind::kH264;
+        case VideoCodecFamily::kH265: return vsa::CodecKind::kH265;
+        case VideoCodecFamily::kAV1:  return vsa::CodecKind::kAV1;
+        default:                      return vsa::CodecKind::kUnknown;
     }
 }
 

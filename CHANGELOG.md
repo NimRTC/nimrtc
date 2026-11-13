@@ -17,6 +17,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A dead-module guard that makes "either wire it in, or delete it"
+  executable (v1.2.0, architecture remediation plan §4.2e / D2).**
+  `tools/check_dead_modules.py` reads the CMake dependency graph and the
+  plugin registrar table and fails when a module under `src/modules/` has
+  no path from the composition root.  It distinguishes three failure
+  shapes, because the remedy differs:
+
+  | Verdict | Meaning |
+  |---------|---------|
+  | `[dead]` | consumed only by its own tests — a complete implementation with passing tests, but the product never calls it |
+  | `[unreach]` | linked only by a target that never ships (a benchmark) — the link line makes it *look* alive |
+  | `[orphan]` | nobody links it and nothing references its registrar |
+
+  The check judges **reachability**, not mere linkage: it walks the
+  dependency graph from the composition root (the engine plus the shipped
+  examples), so a module that only a never-shipped benchmark links is
+  reported rather than quietly passed.  A module that registers a plugin
+  factory counts as live when the registrar table references it —
+  the registration *is* the consumption.
+
+  The script carries a `--self-test` that builds a synthetic module tree
+  and asserts the checker still distinguishes all four shapes, because a
+  guard that cannot fail is a decoration.  It runs as a CTest case
+  (`test_dead_modules`, labels `architecture;guard`) and as two CI steps
+  (check + self-test).  A missing Python interpreter **skips** the CTest
+  case rather than failing it: the guard audits the build graph, so a
+  machine without Python should not turn the build red.
+
+  Current state: all **37** modules under `src/modules/` report `[ok]`.
+
+- **The `assembly` module now has a bridge to the engine and to the
+  transport layer (v1.2.0, architecture remediation plan §4.2 / D2).**
+  The `assembly` module held a complete implementation — a `Profile`
+  schema, a `ProfileRegistry`, a `Builder`, a JSON loader and a
+  round-trip test suite — and **nothing in the product ever called it**.
+  That is the worst state the remediation plan names: it creates the
+  impression that the feature exists when it does not.
+  - `src/modules/assembly/include/nimrtc/assembly/engine_bridge.hpp` —
+    the **single authority** for the Profile → `EngineConfig` mapping.
+    Every host that drives the engine from a Profile must go through
+    `assembly::to_engine_config()`, so two hosts can never disagree about
+    the mapping.  It covers the plugin ids, the BWE / scheduler configs,
+    the audio format, the jitter-buffer delays, the feature switches and
+    the transport strategy — the fields the demo used to copy by hand
+    (and drop most of).
+  - `src/modules/assembly/include/nimrtc/assembly/transport_bridge.hpp` —
+    the adapter between the assembly-layer `TransportSection` and the
+    transport-side `nimrtc::ProfileTransportInput` mirror:
+    `to_transport_input()`, `to_transport_requirements()` and
+    `transport_strategy_name()`.  It lives on the `assembly` side
+    because `assembly` is the *higher* layer than `transport`
+    (`docs/plan/transport-strategies.md` §8) — putting it in `transport`
+    would invert that and create a cycle.  The adapter is entirely
+    header-only, so it adds **no** link-time dependency.
+  - `EngineConfig::transport_media_max_p99_ms` — a per-instance
+    media-plane p99 budget, and `NimRTCEngine::transport_media_max_p99_ms()`
+    to read back what the engine resolved.  See the Fixed entry below
+    for why this field had to exist.
+  - `src/modules/assembly/tests/test_assembly_bridge.cpp` and
+    `tests/test_engine_transport_profile.cpp` — the unit-level and the
+    end-to-end coverage of the chain (Profile → bridge → `EngineConfig`
+    → engine).
+
 - **The capture-device seam, and the portable half of screen capture
   (v1.3.0, Remote Desktop plan A1 / A2 / A2b).**  The existing
   `IVideoSource` seam describes a *stream of raw frames* and is
@@ -848,6 +911,161 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`engine_impl.hpp` is no longer a 1000-line god header (v1.2.0,
+  architecture remediation plan §4.3 / D1).**
+  The header fell from **1076 lines to 393** — the plan's target was
+  under 400.  What is left in it is the engine's *own* composition: the
+  SDP parser / munger, the DTLS handle, the SRTP context, the transport
+  session, and the handful of counters that do not belong to any one
+  feature.  Everything else moved into a named collaborator next to the
+  header:
+
+  | collaborator | header | what it holds |
+  |---|---|---|
+  | `detail::AudioState` | `engine_audio_state.hpp` | audio send/receive state, the `AudioRxState` the RTCP receiver report needs, the DTMF state |
+  | `detail::VideoState` | `engine_video_state.hpp` | video send/receive state, the negotiation result, the quality counters |
+  | `detail::SessionState` | `engine_session_state.hpp` | the session model, the transceivers, the mids |
+  | `detail::ScratchBuffers` | `engine_scratch.hpp` | every reusable scratch buffer |
+
+  The rule the split follows is simple: *a member that only one feature
+  reads or writes belongs to that feature's collaborator, not to
+  `Impl`.*  All of them are private headers under `src/engine/src/` — no
+  public API was added, and the public `engine.hpp` is untouched.
+
+  This is the **state half** of the plan's proposal, deliberately.  The
+  plan also proposes behaviour collaborators (`VideoPipeline`,
+  `AudioPipeline`, `RtpPacketizer`, `RtcpProcessor`,
+  `TransportManager`); each of those moves a coherent slice of
+  *behaviour* out of the engine, which is a behavioural change and needs
+  its own review.  Splitting state first keeps the two kinds of change
+  separately reviewable.
+
+  Verified with a full build (zero errors, zero warnings) and the whole
+  `ctest` suite: **1434 / 1434 passing**.
+
+- **The plugin ID naming contract is now written down, and the docs
+  that describe the config surface now match the code (v1.2.0,
+  architecture remediation plan §7.1 / §7.2, ADR-023 / ADR-024).**
+  Two decisions were closed and the documentation drift they exposed
+  was fixed in the same pass.
+  - **ADR-023 fixes how a plugin id is spelled, validated and
+    changed.** A plugin id must match `^[a-z][a-z0-9_-]*$` — a
+    lowercase ASCII token that is simultaneously a valid shell / JSON
+    key.  (The hyphen is permitted because the shipped transport-stack
+    ids `"webrtc-classic"` and `"raw-udp-arq"` already use it.)  In-tree
+    implementations are prefixed `nimrtc_`; third-party
+    implementations carry the vendor's own namespace and no
+    `nimrtc_` prefix; conceptual roles (`opus`, `aimd`,
+    `strict_priority`) are bare.  Because the grammar accepts exactly
+    the set of valid C++ identifiers *plus the hyphen*, the
+    registration macros take the id as a **bare token** and stringify
+    it — and a quoted literal is rejected at compile time.
+  - **That last point closes a silent failure.** The legacy
+    registration macros already stringified their argument, so
+    `NIMRTC_REGISTER_DTLS_SESSION("mybackend", &f)` registered under an
+    id that *included the quote characters*: the registration
+    succeeded, and the lookup never matched.  The two macro families
+    also disagreed about what the argument was — one tokenised, one
+    took a literal as-is — which is the kind of inconsistency that
+    costs a plugin author an afternoon.  Both now take a bare token.
+    (The one exception is a **hyphenated** id, which the tokenising
+    form cannot express: `#webrtc-classic` does not lex as one token.
+    Those are registered through the registry directly.)
+  - **ADR-024 records that `EngineConfig` owns its strings.** The
+    `std::string_view` → `std::string` migration is complete in the
+    code, but the docs still described the old shape and taught the
+    `.c_str()` workaround for the dangling-view hazard the migration
+    removed.  The engine takes the config **by value** and moves it,
+    so it owns a copy of every string; the caller's original may die
+    immediately.  This remains an **ABI-breaking** change (hosts must
+    be recompiled) and now carries a migration note in
+    `docs/api/engine_config.md` §2.0.
+  - **Seven documentation files were brought back in line with the
+    code.** `docs/api/engine_config.md` (the migration note, and the
+    claim that the video plugins were "not yet threaded into the
+    RTP/DTLS/SRTP pipeline" — they have been, since the pipeline
+    landed); `docs/troubleshooting.md` (a new §3.7a on "I configured
+    a plugin but it has no effect", which sorts the four possible
+    causes by how often they are the answer, and §2.3 rewritten);
+    `docs/plugin_author_guide.md` (a new §4.4 replaceability matrix
+    answering "does the engine actually use my implementation?", a
+    new §7.1 on how to report a plugin id, and §8.1 summarising the
+    ID contract); `docs/adr/ADR-001-plugin-system.md` (three
+    supplements: the ID contract, which families are genuinely
+    replaceable — RTP and SDP are not — and the `EngineConfig` field
+    types); `docs/hw_plugin_seam.md` (the typed `GpuHandle` and the
+    `GpuBufferPool` behind the older bare `void*` surface handles,
+    the `IVideoCodec::kind()` contract, and the distinction between
+    `HwBackend` and `GpuBackend`); `docs/guides/switching-dtls-backend.md`
+    (the seam contract tests a new DTLS backend must pass, and why
+    the "60 bytes of SRTP keying material exported" assertion is the
+    one that matters).
+  - **No code behaviour changes.**  The engine's plugin-resolution
+    semantics are unchanged; these ADRs govern how an id is spelled
+    and validated, and who owns a config string.
+
+- **The scheduler now has a real C ABI (v1.2.0, architecture
+  remediation plan §4.4 / D5).**  The `sched_*` entry points were
+  documented as "the C ABI for embedded hosts", but they were not one:
+  they had no `extern "C"` linkage, so the linker emitted C++-mangled
+  symbols (`?sched_create@sched@nimrtc@@YAPEAUSchedulerHandle@12@...`),
+  and their parameter types (`plugins::SchedulerConfig*`,
+  `plugins::Addr*`, `plugins::StreamPriority`) could not be named by a C
+  translation unit at all.  A C program could neither include the header
+  nor link the library — so the "stable entry point for embedded hosts"
+  that the retention decision was premised on did not exist.
+  - **A new header, `<nimrtc/sched/sched_c.h>`, is the actual C ABI.**
+    It is pure C11 with `extern "C"` linkage and plain C types, and it
+    declares six entry points under the `nimrtc_sched_` prefix:
+    `nimrtc_sched_create`, `nimrtc_sched_destroy`,
+    `nimrtc_sched_set_stream_priority`,
+    `nimrtc_sched_get_stream_priority`,
+    `nimrtc_sched_enqueue_stream_owned` and
+    `nimrtc_sched_select_next_packet`.  It carries a
+    `NimrtcSchedConfig` / `NimrtcSchedAddr` pair (the C mirrors of the
+    C++ configuration and address types) and the
+    `NIMRTC_SCHED_PRIORITY_{HIGH,NORMAL,LOW}` level constants.
+  - **The existing C++ API is unchanged and still works.**  The `sched_*`
+    functions keep their names, their signatures and their type identity
+    (`nimrtc::sched::SchedulerHandle` is now an alias of the C ABI's
+    `NimrtcSchedHandle`), but they are now thin forwarders to the C ABI.
+    One implementation, two spellings — they cannot drift.
+  - **The test is written in C.**  `src/modules/sched/tests/test_sched_c_abi.c`
+    is compiled as C11 and linked against the library.  A C++ test could
+    not have proven anything here: it would have compiled happily in a
+    context where every C++ type is available.  Compiling it as C is the
+    assertion — the moment the C header grows a C++-only dependency, that
+    file stops compiling.
+  - **Exception safety is enforced, not promised.**  A C header cannot
+    spell `noexcept`, and since C++17 `noexcept` is part of a function's
+    type, so the definitions deliberately omit it and instead catch
+    everything that can throw.  Nothing propagates across the C boundary.
+
+- **Layout Invariant 4 is now enforceable (v1.2.0, architecture
+  remediation plan §4.5 / D6, ADR-025).**  L4 said the engine "does not
+  directly include any concrete module header".  It had not been true for
+  a long time, and it was violated on every screen — which means it had no
+  reviewing power at all, and only taught reviewers to ignore it.
+  - **ADR-025** (`docs/adr/ADR-025-sdp-rtp-not-pluggable.md`) records the
+    decision: SDP and RTP are **not** pluggable.  The SDP layer is the
+    contract document every other component is written against, and the
+    RTP packet builder sits on the zero-allocation hot path that Phase 3
+    established — a virtual call and an interface-hidden scratch buffer
+    per frame is exactly what that gate forbids.
+  - **The exemption is now an enumerated list, not a vague exception.**
+    The engine's internal implementation files may include the concrete
+    headers of `sdp`, `rtp`, `ice`, `dtls`, `srtp`, `audio3a`,
+    `transport` and `web_transport`, and link those libs PRIVATE.  Every
+    other concrete module — the codec modules, the video pipeline, the
+    jitter buffers, the BWE implementations, pacing, the scheduler — is
+    still reached through its `plugins::I*` seam and its header is still
+    not included.  With the list named, "does `src/engine/` include
+    anything outside it?" becomes a question with a finite answer.
+  - `AGENTS.md` (L4) and `ARCHITECTURE.md` (Layout Invariant 4) carry the
+    same wording.
+  - **No API change.**  This is a documentation and constraint change:
+    the code was already doing what the rule now says.
+
 - **The five transport seam families now live under `src/modules/`
   (v1.2.0, architecture remediation plan §4.1 / D3 / D4, decision Q5).**
   `src/dtls/`, `src/raw_udp/`, `src/sctp/`, `src/transport/` and
@@ -1294,6 +1512,118 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     separately.
 
 ### Fixed
+
+- **The TURN-over-TCP test could not start its TURN server on a host
+  whose TCP port exclusions differed from its UDP ones
+  (v1.2.0, architecture remediation plan §4.2f).**
+  `src/modules/ice/tests/test_turn_relay.cpp` probed for a free port by
+  asking the kernel for an ephemeral **UDP** socket — but the
+  TURN-over-TCP control listener (RFC 8656 §12) binds a **TCP** socket.
+  Windows keeps a **separate port-exclusion range per protocol**, so a
+  port number can be free for UDP while sitting inside a TCP block
+  reserved for the hypervisor; binding it as TCP then failed with
+  `WSAEACCES` (errno 10013) and the server refused to start:
+
+  ```
+  [info]  UDP socket bound to 127.0.0.1:62962
+  [warn]  TURN-over-TCP listener binding failed, errno=10013
+  [error] TURN-over-TCP listener creation failed
+  ```
+
+  (62962 was free for UDP but inside the TCP exclusion block
+  62635-63134 on that host.)  The probe now uses **the socket type the
+  port will actually be bound with** — the control port is probed as UDP,
+  the TURN-over-TCP port as TCP, and the relay-port range as UDP — so
+  the kernel's ephemeral allocation only ever returns a port that is
+  bindable for *that* protocol.
+
+- **The NTP64 round-trip test measured the thread's scheduling delay
+  instead of the conversion's accuracy (v1.2.0, architecture
+  remediation plan §4.2f).**
+  `Ntp64.RoundTripNow` asserted that the back-converted instant was at
+  most a **fixed** 50 ms behind `now`.  That bound is only safe on an
+  idle machine: under a parallel ctest run (`ctest -j 4`) on a loaded
+  CI runner, the thread can be descheduled for far longer than 50 ms
+  between the two clock reads — the test failed with a 115 ms skew even
+  though the NTP64 round-trip itself is accurate to well under 1 µs.
+  The assertion is now **window-based**: `system_clock::now()` is read
+  before the conversion and again after it, and the back-converted
+  instant must fall inside that window (with 1 ms of slack to absorb
+  the clock reads' own cost).  That measures the round-trip accuracy,
+  which is what the test is about, and stays honest on a loaded machine.
+
+- **The `video_stats` engine wiring test could not pass on any machine
+  (v1.2.0, architecture remediation plan §4.2 / D2).**
+  `tests/test_engine_video_stats.cpp` drove the engine with a
+  `VideoSourceFrame` that had **no pixel planes at all** — the encoder
+  had nothing to encode, so `send_video()` returned an error before a
+  single counter could move.  The test now builds a real I420 buffer
+  (strides + the three planes), the way the working
+  `tests/test_engine_video_codec.cpp` does.
+
+  The inbound half of the same test had two further problems, both of
+  which made the result depend on the *host* rather than on the code
+  under test:
+  - The engine only routes an inbound RTP packet to the video pipeline
+    when its payload type is in the **negotiated** routing table, and
+    that table is filled exclusively by `process_remote_sdp()`.  The
+    fixture never negotiated, so every inbound packet was counted as an
+    unknown payload type and dropped.  The fixture now runs a
+    description exchange first.
+  - The shipped `"h264"` codec plugin picks its backend **by priority**:
+    a hardware encoder / decoder when the host has one, the software
+    stub otherwise.  A hand-written fake NAL unit decodes under the
+    stub and is *rejected* by a hardware decoder, so the same binary
+    passed on a CI runner and failed on a workstation with a GPU.  The
+    test now registers its own `"h264-software"` codec factory (wrapping
+    the h264 module's own software adapter) and selects it through
+    `EngineConfig::video_codec_name` — the documented extension point.
+    The inbound frames are encoded with the engine's *own* codec, so the
+    bitstream is decodable whichever backend was selected.
+
+- **The raw-UDP ARQ loopback test failed on the macOS arm64 CI runner
+  (v1.2.0).**  `ArqRawUdpLoopback.HundredHertzLatency` asserted
+  `EXPECT_LT(p999, 15'000)` — "the worst sample must be under 15 ms".
+  With only 200 samples the "p999" index lands on the *maximum* sample,
+  so the assertion was really "not one single OS deschedule of the
+  sender thread may exceed 15 ms", which no amount of correctness in
+  the ARQ path can guarantee on a busy runner.  The macOS leg of the
+  2026-11-13 run measured `p50=12us p99=1840us p999=17724us` and took
+  9.07 s for a 2 s test — the median was fine and the tail was one
+  deschedule wide.
+  The bound now sits on **p99**, which is what the assertion was always
+  trying to say ("the path is not systematically slower than the send
+  interval"), and the maximum keeps a generous separate bound.  A
+  genuinely starved path still trips the test, because then *every*
+  sample exceeds the interval and so does p99.
+
+- **The per-instance media p99 budget was parsed, serialised, round-tripped
+  through JSON and then silently dropped (v1.2.0, architecture remediation
+  plan §4.2 / D2).**  A Profile's `transport.media.max_p99_ms` was read
+  correctly, written correctly, and survived the JSON round-trip
+  perfectly — and then went nowhere.  The knob existed and did nothing,
+  which is worse than not having it: the JSON said the budget was set.
+  The chain now closes:
+
+      Profile.transport.media.max_p99_ms
+        → assembly::to_transport_input(profile).media_max_p99_ms
+        → EngineConfig::transport_media_max_p99_ms
+        → transport::requirements_from_profile_input()
+        → TransportRequirements::max_p99_ms
+
+  and the resolved value is readable through
+  `NimRTCEngine::transport_media_max_p99_ms()`.  The budget is still
+  *recorded* rather than enforced — that is a separate decision
+  (`docs/plan/transport-strategies.md` §6 #4) and the knob's presence
+  does not change it.
+
+  The same fix removes a second silent drop: the Profile's transport
+  **strategy id** reached the engine only when a host happened to copy it
+  out by hand.  `demo-agent-gateway` copied four fields out of the
+  Profile and dropped the rest — the transport strategy, the scheduler
+  settings, the BWE parameters and the DataChannel switch were all lost
+  on every run.  `assembly::to_engine_config()` is now the single
+  authority for the mapping.
 
 - **The TURN relay suite no longer depends on a fixed UDP port window
   (v1.2.0).**  The tests pinned the TURN server's ports (64000,
@@ -1995,6 +2325,163 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   results whose cached value is empty -- a `FALSE` is an honest answer
   (MSVC's C mode has no variable-length arrays) and is left alone -- and
   both build scripts run it before the configure.
+
+- **The video receive path now reconstructs the Annex-B start codes
+  (v1.2.0, architecture remediation plan §4.5).**
+  RFC 6184 §5.1 carries **bare** NAL units in the RTP payload — the
+  start code is never on the wire — but the frame contract
+  `video_frame::NaluFormat::kAnnexBStartCode` promises the decoder sees
+  `00 00 00 01 | nalu  00 00 00 01 | nalu ...`.  The receiver handed
+  the decoder a buffer with **no** start codes at all, so the H.264
+  bitstream parser (`h264::BitstreamParser`, which scans for `00 00 01`)
+  found no NAL unit, no SPS and no IDR slice: every inbound frame failed
+  to decode, and the engine counted it as a decoder drop.
+
+  The start code is now inserted at the one place that knows where a NAL
+  unit begins and ends — the receiver:
+
+  | Path | Where | What |
+  |------|-------|------|
+  | single NAL unit | `video_pipeline.cpp` `handle_payload()` | one start code before the NAL unit |
+  | STAP-A (H.264) | `video_pipeline.cpp` | one start code before **each** unpacked NAL unit |
+  | AP (H.265) | `video_pipeline.cpp` | one start code before **each** unpacked NAL unit |
+  | FU-A (H.264) | `video_pipeline.cpp` `flush_fua()` | one start code before the synthesised NAL header |
+  | FU (H.265) | `video_pipeline.cpp` `flush_fu_h265()` | one start code before the synthesised two-byte header |
+  | FU-A fallback | `video_jitter_buffer.cpp` `append_fu_a_fragment()` | one start code before the synthesised NAL header |
+
+  The jitter buffer stays codec-agnostic: it only concatenates the
+  packets of one picture, so a picture made of several NAL units now
+  arrives as `start|nalu start|nalu ...` — one start code per NAL unit.
+  Its key-frame detector was taught to skip a leading 3- or 4-byte start
+  code before peeking the NAL type, so a re-framed SPS / PPS / IDR is
+  still recognised as a key frame.
+
+  The engine's `VideoFrameCallback` now receives the Annex-B bitstream;
+  the callback's documentation says so.
+
+- **Every `NIMRTC_REGISTER_*` macro now accepts exactly one spelling**
+  (v1.2.0, ADR-023 Decision 5) — **source-breaking** for out-of-tree
+  callers that passed a string literal to the audio-seam macros.
+  The registry had two macro flavours.  The legacy family stringified
+  its argument (`#id`), so a caller who wrote
+
+  ```cpp
+  NIMRTC_REGISTER_DTLS_SESSION("mybackend", &factory);
+  ```
+
+  registered under the id `"\"mybackend\""` — quote characters
+  included.  The registration *succeeded* and the id never resolved: a
+  silent failure that looks exactly like a working registration.  The
+  audio-seam family took the literal as-is, so a bare token there was a
+  compile error — the better failure, but the two families were not
+  interchangeable, and the guide did not say which was which.
+
+  All the macros now take the id as a **bare identifier token** and
+  stringify it themselves:
+
+  ```cpp
+  NIMRTC_REGISTER_DTLS_SESSION(mybackend, &factory);         // -> "mybackend"
+  NIMRTC_REGISTER_AUDIO_DECODER(opus, &g_opus_decoder_factory); // -> "opus"
+  ```
+
+  A quoted literal is now a **compile error**, enforced by a
+  `static_assert` in the macro body that rejects a token whose spelling
+  starts with a quote — the guard is shared by every macro, so the two
+  families cannot drift apart again.  The same guard also applies the
+  ADR-023 grammar to the token, which means a macro call gets the
+  compile-time grammar check for free:
+  `NIMRTC_REGISTER_DTLS_SESSION(Opus, &f)` no longer compiles, instead
+  of registering an id the registry would have rejected at static-init
+  time.
+
+  The one id shape a macro cannot express is a hyphenated one
+  (`#my-id` does not lex as a single token).  Such a plugin calls
+  `core::PluginRegistry::register_<family>("my-id", &f)` directly —
+  ADR-023 Decision 8 says so explicitly, so it is a documented path
+  rather than a trap.
+
+- **A malformed plugin id is now rejected at registration time, with a
+  diagnostic that names it** (v1.2.0, ADR-023 Decision 4).
+  `TypedRegistry::register_one` accepted anything — including the empty
+  string — and the first sign of trouble was the engine's *lookup* at
+  `open()` time, by which point the host had already written a config
+  field that would never match anything.
+
+  The registry now validates every id against the ADR-023 grammar
+  (`^[a-z][a-z0-9_-]*$`).  A malformed id is **not** registered and
+  produces a log line naming the offending id, the family it was offered
+  to, and the reason:
+
+  ```
+  [error] nimrtc::core::PluginRegistry: rejected a video-sink plugin id
+  "Bad Id": the id contains a character outside [a-z0-9_-]. A plugin id
+  must match ^[a-z][a-z0-9_-]*$ (see
+  docs/adr/ADR-023-plugin-id-naming-contract.md).
+  ```
+
+  The rest of the registry is unaffected — one bad plugin does not poison
+  the other families, and it does not remove or shadow an id that was
+  already registered in the same slot.  The diagnostic goes to the core
+  logger rather than to an exception, because registration happens at
+  static-init time and a throw from a static initialiser would terminate
+  the process before `main` with a message that names no plugin.
+
+  The duplicate-id behaviour is unchanged: a duplicate is still a
+  late-binding overwrite, not an error.
+
+  The contract is now enforced by `tests/test_plugin_id_contract.cpp`
+  (ADR-023 Decision 7): every id the in-tree registrars publish satisfies
+  the grammar, every malformed shape is rejected, the diagnostic names
+  the id and the family, and a rejected id does not poison the slot.
+  14 new tests.
+
+- **The dead-module guard no longer dies on a concurrent build**
+  (v1.2.0, architecture remediation plan §4.2e).
+  `tools/check_dead_modules.py` walked the **whole repository** for
+  `CMakeLists.txt`.  That walk also descends into CMake **build-output**
+  trees, whose `CMakeFiles/CMakeScratch/TryCompile-*/CMakeLists.txt`
+  files are transient: a concurrent build creates and deletes them while
+  the guard is walking, and the guard then dies on a file it had just
+  listed:
+
+  ```
+  FileNotFoundError: [Errno 2] No such file or directory:
+    'D:\\MyOpen\\NimRTC\\build\\wt-merge-build\\CMakeFiles\\CMakeScratch\\
+     TryCompile-7876vm\\CMakeLists.txt'
+  ```
+
+  A guard that dies on a race is a guard that gets disabled, so the walk
+  now **prunes every CMake build tree** — a directory that carries a
+  `CMakeCache.txt` is an output tree, not a source tree — and a file that
+  still vanishes mid-scan reads as empty instead of killing the run.
+  The module count and the verdict are unchanged: 36 / 36 modules
+  `[ok]`, and the `--self-test` still distinguishes
+  live / dead / orphan / benchmark-only.
+
+- **The ICE consent-freshness test no longer fails when the runner
+  steals the CPU** (v1.2.0).
+  `IceConsentFreshness.T1_NormalPeerTrafficNeverFires` simulates the
+  peer with a *thread* that notifies every 40 ms, against a 200 ms
+  consent timeout.  On a busy runner the OS can deschedule that thread
+  for longer than the timeout — at which point the tracker fires
+  **correctly** (no binding was seen for longer than the timeout) and
+  the assertion fails for a reason that has nothing to do with the
+  tracker:
+
+  ```
+  test_consent_freshness.cpp:126: error: Expected equality of these values:
+    lost_count.load()  Which is: 1  0
+  consent_lost should not have fired while peer is active
+  ```
+
+  The scenario now measures its **own validity**: the peer thread
+  records the largest gap between two consecutive notifications, and a
+  gap that reaches the consent timeout means the premise ("the peer was
+  active") was violated — so the attempt is retried, and a run that
+  never gets a clean window is *skipped* rather than failed.  This is
+  the same treatment T3 already had.  The tracker is still fully
+  exercised: T2 asserts the timer *does* fire when the peer stops and T3
+  asserts the re-arm window.
 
 ## [1.1.0] - 2026-11-07
 

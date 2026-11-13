@@ -881,6 +881,22 @@ struct NIMRTC_API_STABLE EncodedVideoFrame {
     core::ByteSpan    payload;                 ///< codec bitstream
     bool              is_keyframe   = false;
     std::uint8_t      payload_type  = 0;
+
+    /** The frame's quantisation parameter (Q/P), or -1 when the codec did
+     *  not report one.
+     *
+     *  The QP is the codec's quality signal: 0 is the best quality (and
+     *  the largest frame), 51 (H.264) / 63 (AV1) is the worst.  A host
+     *  that wants to know "how good is the picture the peer is sending"
+     *  reads this — it is the only per-frame quality number the bitstream
+     *  carries, and it is what the `video_stats` module accumulates into
+     *  its QP sum / count.
+     *
+     *  The value is a *hint*: a codec that cannot report a QP leaves it
+     *  at -1, and a consumer must treat -1 as "unknown" rather than
+     *  "quality 0". */
+    std::int8_t       qp            = -1;
+
     VideoFrameInfo    info;
 };
 

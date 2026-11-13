@@ -132,12 +132,16 @@ public:
 };
 
 // A statically registered decoder -- exercises NIMRTC_REGISTER_AUDIO_DECODER.
+//
+// ADR-023 Decision 5: the macro takes a bare identifier token and
+// stringifies it, so the id is "static_audio_decoder".  Passing the
+// quoted literal here would be a compile error.
 const FakeDecoderFactory kStaticDecoderFactory;
-NIMRTC_REGISTER_AUDIO_DECODER("static_audio_decoder", &kStaticDecoderFactory);
+NIMRTC_REGISTER_AUDIO_DECODER(static_audio_decoder, &kStaticDecoderFactory);
 
 // A statically registered receiver -- exercises NIMRTC_REGISTER_AUDIO_RECEIVER.
 const FakeReceiverFactory kStaticReceiverFactory;
-NIMRTC_REGISTER_AUDIO_RECEIVER("static_audio_receiver", &kStaticReceiverFactory);
+NIMRTC_REGISTER_AUDIO_RECEIVER(static_audio_receiver, &kStaticReceiverFactory);
 
 // ---------------------------------------------------------------------------
 // Contract defaults

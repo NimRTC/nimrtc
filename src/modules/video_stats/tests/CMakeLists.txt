@@ -43,3 +43,23 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# The allocation probe replaces the global `operator new` / `operator
+# delete`, so it lives in its own binary — the general-purpose module
+# tests above must not have their allocations counted.
+add_executable(test_video_stats_alloc test_video_stats_alloc.cpp)
+
+set_target_properties(test_video_stats_alloc PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_video_stats_alloc LENIENT)
+
+target_link_libraries(test_video_stats_alloc PRIVATE
+    nimrtc::video_stats
+    nimrtc::core
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME video_stats_alloc_tests
+         COMMAND test_video_stats_alloc)
+set_tests_properties(video_stats_alloc_tests PROPERTIES TIMEOUT 30)

@@ -69,14 +69,13 @@ NimRTCEngine::NimRTCEngine(EngineConfig config)
     // A-6: the audio SSRC belongs to this engine.  An explicit value
     // (a test that wants a reproducible stream) wins; otherwise one is
     // drawn so that two engines in the same process never collide.
-    impl_->audio_ssrc = config_.audio_ssrc != 0
+    impl_->audio_state.audio_ssrc = config_.audio_ssrc != 0
                             ? config_.audio_ssrc
                             : next_random_audio_ssrc();
     // Phase 3: the ref-frame registry is a fixed-size open-addressed
-    // table.  It is sized once here so that recording a frame never
-    // allocates (the old `std::map` + `std::deque` pair allocated twice
-    // per sent frame).
-    impl_->init_ref_frame_table();
+    // table.  It is sized once (in the table's own constructor) so that
+    // recording a frame never allocates (the old `std::map` +
+    // `std::deque` pair allocated twice per sent frame).
     // Phase 3: the outbound video scratch buffers are pre-sized to the
     // MTU so that the *first* keyframe -- which is larger than an
     // inter-frame -- does not have to grow them.  A keyframe's RTP
@@ -90,8 +89,8 @@ NimRTCEngine::NimRTCEngine(EngineConfig config)
         // outbound buffer must hold the packet *plus* the tag.
         constexpr std::size_t kSrtpTagHeadroom = 16;
         const std::size_t outbound = mtu + kSrtpTagHeadroom;
-        impl_->video_rtp_scratch.reserve(outbound);
-        impl_->video_pkt_scratch.reserve(outbound);
+        impl_->scratch.video_rtp_scratch.reserve(outbound);
+        impl_->scratch.video_pkt_scratch.reserve(outbound);
     }
 }
 
@@ -115,7 +114,7 @@ NimRTCEngine::~NimRTCEngine() {
 // wrote into `impl_`, and hand them back as string_views / a view struct.
 // ---------------------------------------------------------------------------
 std::string_view NimRTCEngine::transport_strategy_name() const noexcept {
-    return impl_ ? std::string_view{impl_->resolved_strategy_name}
+    return impl_ ? std::string_view{impl_->session_state.resolved_strategy_name}
                  : std::string_view{};
 }
 
@@ -123,8 +122,16 @@ NimRTCEngine::TransportSessionView
 
 NimRTCEngine::transport_strategy_session() const noexcept {
     if (!impl_) return {std::string_view{}, std::string_view{}};
-    return {std::string_view{impl_->resolved_media_factory_id},
-            std::string_view{impl_->resolved_control_factory_id}};
+    return {std::string_view{impl_->session_state.resolved_media_factory_id},
+            std::string_view{impl_->session_state.resolved_control_factory_id}};
+}
+
+// The resolved media-plane p99 budget.  `init_transport_strategy()`
+// stores it after applying the per-instance override in
+// `cfg.transport_media_max_p99_ms`; before open() it is empty.
+std::optional<int> NimRTCEngine::transport_media_max_p99_ms() const noexcept {
+    if (!impl_) return std::nullopt;
+    return impl_->session_state.resolved_media_max_p99_ms;
 }
 
 
@@ -214,7 +221,7 @@ uint32_t NimRTCEngine::open() noexcept {
     // uses it) and is left alone.
     if (config_.pcm_sample_rate_hz != 0 &&
         config_.pcm_sample_rate_hz != config_.audio_codec.clock_rate) {
-        impl_->last_open_rc = core::kAudioClockMismatch;
+        impl_->session_state.last_open_rc = core::kAudioClockMismatch;
         core::log::Logger::instance().error(
             std::string("open(): pcm_sample_rate_hz=") +
             std::to_string(config_.pcm_sample_rate_hz) +
@@ -255,7 +262,7 @@ uint32_t NimRTCEngine::open() noexcept {
         // Guard: if `make_transport_instance()` returned a null media_stack
         // (unknown factory), `init_modules_once()` already returned an error
         // and we would not reach here. This is a belt-and-suspenders check.
-        impl_->last_open_rc = core::kEngineInternal;
+        impl_->session_state.last_open_rc = core::kEngineInternal;
         if (on_error_) on_error_(core::kEngineInternal,
             "open(): ice_t_ is null (make_transport_instance returned null media_stack)");
         return core::kEngineInternal;
@@ -266,7 +273,7 @@ uint32_t NimRTCEngine::open() noexcept {
         char err[64];
         std::snprintf(err, sizeof(err), "transport open failed rc=%d",
                       static_cast<int>(ice_open_rc));
-        impl_->last_open_rc = core::kEngineInternal;
+        impl_->session_state.last_open_rc = core::kEngineInternal;
         core::log::Logger::instance().error(std::string(err));
         if (on_error_) on_error_(core::kEngineInternal, err);
         ice_t_ = nullptr;  // raw pointer — null after failure
@@ -321,12 +328,12 @@ uint32_t NimRTCEngine::open() noexcept {
         const std::int64_t system_us =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 system_now.time_since_epoch()).count();
-        impl_->boot_epoch_offset_us = system_us - steady_us;
+        impl_->timeline.boot_epoch_offset_us = system_us - steady_us;
         // The same instant expressed as an NTP64 (RFC 5905): the wall
         // clock that corresponds to a monotonic reading of zero.
-        impl_->monotonic_origin_ntp64 = rtp::ntp64_from(
+        impl_->timeline.monotonic_origin_ntp64 = rtp::ntp64_from(
             std::chrono::system_clock::time_point{
-                std::chrono::microseconds{impl_->boot_epoch_offset_us}});
+                std::chrono::microseconds{impl_->timeline.boot_epoch_offset_us}});
         // Re-derive the offset *from the NTP64* so that the offset and
         // the origin denote exactly the same instant.
         //
@@ -339,13 +346,13 @@ uint32_t NimRTCEngine::open() noexcept {
         // adds the monotonic reading to `unix_us(origin)`, so the engine's
         // own instants have to be built on that same basis: take the
         // offset from the origin, not the other way round.
-        impl_->boot_epoch_offset_us = std::chrono::duration_cast<
+        impl_->timeline.boot_epoch_offset_us = std::chrono::duration_cast<
             std::chrono::microseconds>(
-            rtp::system_clock_from_ntp64(impl_->monotonic_origin_ntp64)
+            rtp::system_clock_from_ntp64(impl_->timeline.monotonic_origin_ntp64)
                 .time_since_epoch())
                                            .count();
-        impl_->sr_tracker.set_monotonic_origin(
-            impl_->monotonic_origin_ntp64);
+        impl_->timeline.sr_tracker.set_monotonic_origin(
+            impl_->timeline.monotonic_origin_ntp64);
         impl_->sr_last_sent = steady_now;   // first SR fires one period in
         if (config_.timeline_enabled) {
             core::log::Logger::instance().info(
@@ -402,15 +409,15 @@ void NimRTCEngine::close() noexcept {
     // Channels hold a non-owning pointer into wt_session — close it here
     // so no QUIC worker outlives the engine. Callers must destroy their
     // channels before close() returns (same contract as ice_t_).
-    if (impl_->wt_session) {
+    if (impl_->session_state.wt_session) {
         try {
-            impl_->wt_session->close();
+            impl_->session_state.wt_session->close();
         } catch (...) {
         }
-        impl_->wt_session.reset();
+        impl_->session_state.wt_session.reset();
     }
     // weak_ptr reset (no implicit nullptr conversion in C++20)
-    impl_->datachannel_transport_cookie.reset();
+    impl_->session_state.datachannel_transport_cookie.reset();
     state_ = State::kClosed;
     if (on_state_change_) on_state_change_("closed");
 }
@@ -484,7 +491,7 @@ NimRTCEngine::create_data_channel(
     // callbacks internally). Both open() overloads run: open(cfg) caches
     // the channel config, open() arms the stream/datagram path.
     if (resolved_dc_factory_id_ == "web_transport") {
-        if (!impl_->wt_session) {
+        if (!impl_->session_state.wt_session) {
             // Case D forward-stall guard: interop answerer has empty
             // web_transport_peer_host (no QUIC peer configured). Creating a
             // client QUIC session with an empty hostname would enter
@@ -521,7 +528,7 @@ NimRTCEngine::create_data_channel(
                     "create_data_channel(): WebTransport session factory->create() failed");
                 return nullptr;
             }
-            impl_->wt_session =
+            impl_->session_state.wt_session =
                 std::shared_ptr<web_transport::IWebTransportSession>(std::move(sess));
             core::log::Logger::instance().info(
                 std::string("engine: WebTransport session created (factory '")
@@ -535,7 +542,7 @@ NimRTCEngine::create_data_channel(
         std::unique_ptr<plugins::IDataChannel> wch;
         if (wtf) {
             try {
-                wch = wtf->create_data_channel(*impl_->wt_session);
+                wch = wtf->create_data_channel(*impl_->session_state.wt_session);
             } catch (...) {
                 wch.reset();
             }
@@ -664,7 +671,7 @@ NimRTCEngine::create_data_channel(
     // until the v1.x wiring PR lands.  v0.11.0 satisfies the
     // data-plane DoD gate via the §7 fallback (in-process
     // `test_datachannel_engine` 5/5 PASS), made permanent.
-    impl_->datachannel_transport_cookie = impl_->dtls;
+    impl_->session_state.datachannel_transport_cookie = impl_->dtls;
 
     return ch;
 }
@@ -844,7 +851,7 @@ bool NimRTCEngine::srtp_installed() const noexcept {
 
 
 uint32_t NimRTCEngine::last_open_rc() const noexcept {
-    return impl_->last_open_rc;
+    return impl_->session_state.last_open_rc;
 }
 
 }  // namespace nimrtc::engine

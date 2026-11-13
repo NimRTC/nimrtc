@@ -20,3 +20,29 @@ nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_sched_priority_dc.cpp
 # the S-family flow control (shared BWE credit + per-class pacing).
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_scheduler_flow_control.cpp
     DEPS nimrtc::sched)
+
+# -----------------------------------------------------------------------------
+# The C ABI, exercised from C.
+#
+# This one is NOT built with nimrtc_add_test(): that helper builds a
+# GoogleTest executable, and a GoogleTest executable is C++.  The point of
+# this test is that it is compiled as **C11**, so that the C ABI header is
+# proven to be includable — and the symbols linkable — from a C
+# translation unit.  A C++ test could not prove either.
+#
+# It therefore does not use GoogleTest; it is a plain main() that returns
+# non-zero on the first failed check.
+# -----------------------------------------------------------------------------
+add_executable(test_sched_c_abi ${CMAKE_CURRENT_SOURCE_DIR}/test_sched_c_abi.c)
+target_link_libraries(test_sched_c_abi PRIVATE nimrtc::sched)
+target_include_directories(test_sched_c_abi PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/modules/sched/include")
+set_target_properties(test_sched_c_abi PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_sched_c_abi LENIENT)
+add_test(NAME modules_sched_test_sched_c_abi
+    COMMAND $<TARGET_FILE:test_sched_c_abi>)
+set_tests_properties(modules_sched_test_sched_c_abi PROPERTIES TIMEOUT 30)

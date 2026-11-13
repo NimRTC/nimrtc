@@ -1496,7 +1496,7 @@ void WebTransportMsQuicSession::close() noexcept {
 // ===========================================================================
 //
 // Produces WebTransportMsQuicSession instances under the seam id
-// "msquic".  Registered via NIMRTC_REGISTER_WEB_TRANSPORT("msquic", ...)
+// "msquic".  Registered via NIMRTC_REGISTER_WEB_TRANSPORT(msquic, ...)
 // in web_transport_plugin.cpp.
 //
 // Thread safety: create() is safe to call concurrently — each call

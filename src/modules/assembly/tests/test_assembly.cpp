@@ -21,18 +21,27 @@
 //   4. JSON round-trip
 //      - Serialise each built-in profile, deserialise, compare fields
 //      - Profile round-trips byte-for-byte for all built-in profiles
+//   5. The transport bridge (architecture remediation plan §4.2 / D2)
+//      - to_transport_input() copies all seven transport-relevant fields
+//      - to_transport_requirements() resolves each built-in profile's
+//        strategy to the canonical TransportRequirements
+//      - the per-instance media p99 override survives the bridge
+//      - an unknown strategy name throws std::invalid_argument
 // =============================================================================
 
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 #include <gtest/gtest.h>
 
 #include <nimrtc/assembly/assembly.hpp>
 #include <nimrtc/assembly/profiles.hpp>
+#include <nimrtc/assembly/transport_bridge.hpp>
+#include <nimrtc/transport/transport_strategy.hpp>
 
 namespace fs = std::filesystem;
 
@@ -769,5 +778,216 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
         EXPECT_EQ(p->transport.control.enabled, e.expected_control_enabled)
             << "Profile '" << e.profile_name
             << "' should have control.enabled=" << e.expected_control_enabled;
+    }
+}
+
+// =============================================================================
+// 7. The transport bridge (architecture remediation plan §4.2 / D2)
+//
+// `assembly::TransportSection` is the assembly-layer shape; the transport
+// layer consumes the mirror `nimrtc::ProfileTransportInput`.  The bridge
+// (`nimrtc/assembly/transport_bridge.hpp`) is the adapter between them.
+//
+// These tests pin the three properties the bridge must have:
+//
+//   1. It copies every transport-relevant field (a field that is added to
+//      one side and forgotten on the other is a silent data loss).
+//   2. It resolves each built-in profile's strategy to the canonical
+//      `TransportRequirements` of that strategy.
+//   3. It surfaces an unknown strategy name as `std::invalid_argument`
+//      rather than a silently-wrong default.
+// =============================================================================
+
+namespace {
+
+// The five canonical strategy requirements, keyed by strategy id.  These
+// are the transport module's own constants — the bridge must not invent
+// its own defaults.
+struct StrategyCase {
+    std::string_view name;
+    const nimrtc::TransportRequirements& canonical;
+};
+
+const StrategyCase kStrategyCases[] = {
+    {"browser-call",              nimrtc::kStrategyBrowserCall},
+    {"teleop-ultra-low-latency",  nimrtc::kStrategyTeleopUltraLowLatency},
+    {"agent-gateway",             nimrtc::kStrategyAgentGateway},
+    {"sfu-relay",                 nimrtc::kStrategySfuRelay},
+    {"cross-network-peer",        nimrtc::kStrategyCrossNetworkPeer},
+};
+
+}  // namespace
+
+TEST_F(AssemblyTest, TransportBridgeCopiesEveryField) {
+    nimrtc::assembly::TransportSection section;
+    section.strategy = "agent-gateway";
+    section.media.stack = "webrtc-classic";
+    section.media.max_p99_ms = 175;
+    section.control.enabled = true;
+    section.control.stack = "raw-udp-arq";
+    section.control.max_p99_ms = 42;
+    section.control.freq_hz = 250;
+    section.control.reliability = "partial_reliable";
+    section.control.ttl_ms = 33;
+
+    const auto in = nimrtc::assembly::to_transport_input(section);
+
+    EXPECT_EQ(in.strategy, "agent-gateway");
+    ASSERT_TRUE(in.media_max_p99_ms.has_value());
+    EXPECT_EQ(*in.media_max_p99_ms, 175);
+    EXPECT_TRUE(in.control_enabled);
+    ASSERT_TRUE(in.control_max_p99_ms.has_value());
+    EXPECT_EQ(*in.control_max_p99_ms, 42);
+    ASSERT_TRUE(in.control_freq_hz.has_value());
+    EXPECT_EQ(*in.control_freq_hz, 250);
+    EXPECT_EQ(in.control_reliability, "partial_reliable");
+    ASSERT_TRUE(in.control_ttl_ms.has_value());
+    EXPECT_EQ(*in.control_ttl_ms, 33);
+}
+
+TEST_F(AssemblyTest, TransportBridgeCopiesEmptySectionVerbatim) {
+    // A v1.0 profile (no `transport` block) must map to an input that
+    // resolves to the engine default — not to something that throws.
+    const nimrtc::assembly::TransportSection section;
+
+    const auto in = nimrtc::assembly::to_transport_input(section);
+    EXPECT_EQ(in.strategy, "");
+    EXPECT_FALSE(in.media_max_p99_ms.has_value());
+    EXPECT_FALSE(in.control_enabled);
+    EXPECT_FALSE(in.control_max_p99_ms.has_value());
+    EXPECT_FALSE(in.control_freq_hz.has_value());
+    EXPECT_EQ(in.control_reliability, "");
+    EXPECT_FALSE(in.control_ttl_ms.has_value());
+
+    const auto req = nimrtc::requirements_from_profile_input(in);
+    EXPECT_EQ(req.needs_browser_interop,
+              nimrtc::kStrategyBrowserCall.needs_browser_interop);
+    EXPECT_EQ(req.needs_high_freq_control,
+              nimrtc::kStrategyBrowserCall.needs_high_freq_control);
+}
+
+TEST_F(AssemblyTest, TransportBridgeResolvesEveryBuiltInProfile) {
+    // Every built-in profile must survive the bridge and land on the
+    // canonical requirements of the strategy it names.
+    for (const auto& c : kStrategyCases) {
+        SCOPED_TRACE("Strategy: " + std::string{c.name});
+
+        nimrtc::assembly::TransportSection section;
+        section.strategy = std::string{c.name};
+
+        // NOTE: the Profile is built by assignment rather than by a
+        // designated initialiser.  `Profile` has ~20 members, and a
+        // designated initialiser that names only two of them trips
+        // GCC's `-Werror=missing-field-initializers` (the aggregate is
+        // then value-initialised for the rest, but the warning fires
+        // anyway).  MSVC has no equivalent warning, so this only shows
+        // up on the GCC / Clang CI legs.
+        nimrtc::assembly::Profile profile;
+        profile.name      = "bridge_test";
+        profile.transport = section;
+
+        const auto req = nimrtc::assembly::to_transport_requirements(profile);
+
+        EXPECT_EQ(req.needs_browser_interop, c.canonical.needs_browser_interop);
+        EXPECT_EQ(req.needs_high_freq_control, c.canonical.needs_high_freq_control);
+        ASSERT_TRUE(req.max_p99_ms.has_value());
+        EXPECT_EQ(*req.max_p99_ms, *c.canonical.max_p99_ms);
+    }
+}
+
+TEST_F(AssemblyTest, TransportBridgeAppliesMediaP99Override) {
+    // The per-instance `transport.media.max_p99_ms` is the value that
+    // used to be parsed, serialised, JSON round-tripped and then
+    // silently dropped.  It must survive the bridge.
+    nimrtc::assembly::Profile profile;
+    profile.name = "override_test";
+    profile.transport.strategy = "agent-gateway";
+    profile.transport.media.max_p99_ms = 60;
+
+    const auto req = nimrtc::assembly::to_transport_requirements(profile);
+    ASSERT_TRUE(req.max_p99_ms.has_value());
+    EXPECT_EQ(*req.max_p99_ms, 60);
+    // The capability flags must still come from the strategy.
+    EXPECT_EQ(req.needs_browser_interop,
+              nimrtc::kStrategyAgentGateway.needs_browser_interop);
+    EXPECT_EQ(req.needs_high_freq_control,
+              nimrtc::kStrategyAgentGateway.needs_high_freq_control);
+}
+
+TEST_F(AssemblyTest, TransportBridgeUnknownStrategyThrows) {
+    // The bridge delegates validation to `strategy_by_name()`, so an
+    // unknown id must surface as `std::invalid_argument` — never as a
+    // silently-wrong default.
+    nimrtc::assembly::Profile profile;
+    profile.name = "bogus";
+    profile.transport.strategy = "webrtc-quic-call";
+
+    EXPECT_THROW(nimrtc::assembly::to_transport_requirements(profile),
+                 std::invalid_argument);
+}
+
+TEST_F(AssemblyTest, TransportBridgeStrategyNameAccessor) {
+    // The accessor the host uses to fill `EngineConfig::
+    // transport_strategy_name`.
+    EXPECT_EQ(nimrtc::assembly::transport_strategy_name(
+                  nimrtc::assembly::kProfileTeleop),
+              "teleop-ultra-low-latency");
+    EXPECT_EQ(nimrtc::assembly::transport_strategy_name(
+                  nimrtc::assembly::kProfileAgentGateway),
+              "agent-gateway");
+}
+
+TEST_F(AssemblyTest, TransportBridgeProfileOverloadMatchesSectionOverload) {
+    // The Profile overload must be exactly the section overload applied
+    // to `profile.transport`.
+    for (std::string_view name : {"call", "live", "transport", "agent", "teleop",
+                                  "relay", "relay-agent", "agent-gateway",
+                                  "agent-low-latency"}) {
+        SCOPED_TRACE("Profile: " + std::string{name});
+        const auto* p = nimrtc::assembly::ProfileRegistry::instance()
+                            .find(name);
+        ASSERT_NE(p, nullptr);
+
+        const auto via_profile = nimrtc::assembly::to_transport_input(*p);
+        const auto via_section =
+            nimrtc::assembly::to_transport_input(p->transport);
+
+        EXPECT_EQ(via_profile.strategy,            via_section.strategy);
+        EXPECT_EQ(via_profile.media_max_p99_ms,    via_section.media_max_p99_ms);
+        EXPECT_EQ(via_profile.control_enabled,     via_section.control_enabled);
+        EXPECT_EQ(via_profile.control_max_p99_ms,  via_section.control_max_p99_ms);
+        EXPECT_EQ(via_profile.control_freq_hz,     via_section.control_freq_hz);
+        EXPECT_EQ(via_profile.control_reliability, via_section.control_reliability);
+        EXPECT_EQ(via_profile.control_ttl_ms,      via_section.control_ttl_ms);
+    }
+}
+
+TEST_F(AssemblyTest, TransportBridgeSurvivesJsonRoundTrip) {
+    // The full chain the host actually walks: load a Profile from JSON,
+    // bridge it to the transport layer, and confirm the strategy and the
+    // per-instance budget both made it.
+    for (std::string_view name : {"call", "live", "transport", "agent", "teleop",
+                                  "relay", "relay-agent", "agent-gateway",
+                                  "agent-low-latency"}) {
+        SCOPED_TRACE("Profile: " + std::string{name});
+        const std::string path = profile_path(name);
+        if (!fs::exists(path)) {
+            GTEST_SKIP() << "Profile JSON not found at: " << path;
+        }
+
+        const auto p = nimrtc::assembly::profile_from_json_file(path);
+        const auto in = nimrtc::assembly::to_transport_input(p);
+
+        // The strategy must be one of the five canonical ids.
+        bool known = false;
+        for (const auto& c : kStrategyCases) {
+            if (in.strategy == c.name) { known = true; break; }
+        }
+        EXPECT_TRUE(known)
+            << "Profile '" << name << "' declares strategy '" << in.strategy
+            << "' which is not one of the five canonical ids";
+
+        // The requirements must resolve without throwing.
+        EXPECT_NO_THROW(nimrtc::assembly::to_transport_requirements(p));
     }
 }

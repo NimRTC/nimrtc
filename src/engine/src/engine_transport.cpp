@@ -306,23 +306,35 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         } else {
             try {
                 // requirements_from_profile_input() throws on unknown names.
-                // The base call below has no per-instance overrides — it
-                // returns the strategy's canonical TransportRequirements.
+                //
+                // The per-instance media p99 override (if the host set
+                // one) is applied on top of the strategy's canonical
+                // requirements.  This is the field that carries a
+                // Profile's `transport.media.max_p99_ms` into the
+                // engine (architecture remediation plan §4.2 / D2):
+                //   Profile.transport.media.max_p99_ms
+                //     → assembly::to_transport_input(profile)
+                //     → cfg.transport_media_max_p99_ms
+                //     → here.
+                // Before this wiring the value was parsed, JSON
+                // round-tripped and then silently dropped.
                 ProfileTransportInput in;
                 in.strategy = config_.transport_strategy_name;
+                in.media_max_p99_ms = config_.transport_media_max_p99_ms;
                 req = requirements_from_profile_input(in);
                 resolved_name = config_.transport_strategy_name.empty()
                     ? std::string_view{"browser-call"}
                     : config_.transport_strategy_name;
             } catch (const std::invalid_argument& e) {
-                impl_->last_open_rc = core::kEngineInvalidParam;
+                impl_->session_state.last_open_rc = core::kEngineInvalidParam;
                 const std::string msg = std::string{"transport_strategy_name: "} + e.what();
                 core::log::Logger::instance().error(msg);
                 if (on_error_) on_error_(core::kEngineInvalidParam, msg);
                 return core::kEngineInvalidParam;
             }
         }
-        impl_->resolved_strategy_name = resolved_name;
+        impl_->session_state.resolved_strategy_name = resolved_name;
+        impl_->session_state.resolved_media_max_p99_ms = req.max_p99_ms;
 
         // ---- The per-stack backend selection (from EngineConfig) --------
         //
@@ -396,10 +408,10 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
         // (The "shell" sentinel never reaches this branch: it sets an
         // explicit "default" media override, so its trace is non-empty.)
         if (trace.media_factory_id.empty()) {
-            impl_->last_open_rc = core::kEngineInvalidParam;
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
             const std::string msg =
                 std::string{"engine: transport strategy '"} +
-                impl_->resolved_strategy_name +
+                impl_->session_state.resolved_strategy_name +
                 "' did not resolve a media stack (the §5.3 rule set "
                 "produced no factory id). The webrtc-quic stack "
                 "(Slice 7.x 二期) is not implemented yet.";
@@ -407,8 +419,8 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
             if (on_error_) on_error_(core::kEngineInvalidParam, msg);
             return core::kEngineInvalidParam;
         }
-        impl_->resolved_media_factory_id = trace.media_factory_id;
-        impl_->resolved_control_factory_id = trace.control_factory_id;
+        impl_->session_state.resolved_media_factory_id = trace.media_factory_id;
+        impl_->session_state.resolved_control_factory_id = trace.control_factory_id;
 
         // The Selector built the stacks; the engine owns them from here.
         impl_->session = std::move(session);
@@ -422,11 +434,11 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 
         core::log::Logger::instance().info(
             std::string{"transport: strategy '"} +
-            impl_->resolved_strategy_name +
+            impl_->session_state.resolved_strategy_name +
             "' resolved — media_factory_id='" +
-            impl_->resolved_media_factory_id +
+            impl_->session_state.resolved_media_factory_id +
             "', control_factory_id='" +
-            impl_->resolved_control_factory_id + "'");
+            impl_->session_state.resolved_control_factory_id + "'");
     }
     return 0;
 }
@@ -454,7 +466,7 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 // stacks exist, and the engine does not second-guess it.
 //
 // The §5.3 factory ids (webrtc-classic / raw-udp-arq) are stored in
-// impl_->resolved_media_factory_id / control_factory_id.
+// impl_->session_state.resolved_media_factory_id / control_factory_id.
 //
 // Rule 2 caveat (teleop-ultra-low-latency):
 //   §5.3 Rule 2 maps "no browser interop + high-freq control" to
@@ -464,10 +476,10 @@ uint32_t NimRTCEngine::init_transport_strategy() noexcept {
 uint32_t NimRTCEngine::init_transport_session() noexcept {
     {
         if (!impl_->session.media_stack) {
-            impl_->last_open_rc = core::kEngineInternal;
+            impl_->session_state.last_open_rc = core::kEngineInternal;
             const std::string msg =
                 std::string{"engine: media stack factory '"} +
-                impl_->resolved_media_factory_id +
+                impl_->session_state.resolved_media_factory_id +
                 "' not registered or returned null (did "
                 "nimrtc::transport::register_default_plugins() run "
                 "before engine construction?).";
@@ -498,9 +510,9 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         if (!impl_->dtls.lock()) {
             core::log::Logger::instance().warn(
                 std::string{"engine: strategy '"} +
-                impl_->resolved_strategy_name +
+                impl_->session_state.resolved_strategy_name +
                 "' uses media_factory_id='" +
-                impl_->resolved_media_factory_id +
+                impl_->session_state.resolved_media_factory_id +
                 "' with no DTLS (Rule 2 — raw-udp-arq media). "
                 "Audio pipeline uses null-encoder; "
                 "DTLS-dependent features (SRTP, DataChannel) inactive.");
@@ -509,9 +521,9 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
         core::log::Logger::instance().info(
             std::string{"engine: TransportSession built — "
                         "media='"} +
-            impl_->resolved_media_factory_id +
+            impl_->session_state.resolved_media_factory_id +
             "', control='" +
-            impl_->resolved_control_factory_id +
+            impl_->session_state.resolved_control_factory_id +
             "'");
     }
 
@@ -709,7 +721,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
                         "default) for the WebTransport/QUIC data plane, or "
                         "\"\" to disable the data plane.");
         core::log::Logger::instance().error(msg);
-        impl_->last_open_rc = core::kEngineInternal;
+        impl_->session_state.last_open_rc = core::kEngineInternal;
         if (on_error_) on_error_(core::kEngineInternal, msg);
         resolved_dc_factory_id_.clear();   // force nullptr path in create_data_channel
         return core::kEngineInternal;
@@ -775,7 +787,7 @@ uint32_t NimRTCEngine::init_datachannel_registry() noexcept {
         + "' is not recognised (valid: \"web_transport\", \"\"; "
           "see docs/plan/v0.14-plan.md §2.1 / docs/plan/v1.0-plan.md §2.1.1)";
     core::log::Logger::instance().error(msg);
-    impl_->last_open_rc = core::kEngineInternal;
+    impl_->session_state.last_open_rc = core::kEngineInternal;
     if (on_error_) on_error_(core::kEngineInternal, msg);
     resolved_dc_factory_id_.clear();   // force nullptr path in create_data_channel
     return core::kEngineInternal;
@@ -833,7 +845,7 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
     if (!config_.srtp_backend_name.empty()) {
         const auto* factory = pal::resolve_srtp_backend(config_.srtp_backend_name);
         if (!factory) {
-            impl_->last_open_rc = core::kEngineInvalidParam;
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
             const std::string msg =
                 std::string{"engine: SRTP crypto backend '"} +
                 config_.srtp_backend_name +
@@ -862,7 +874,7 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
     if (auto* d = impl_->dtls.lock().get()) {
         auto open_rc = d->open();
         if (!open_rc.ok()) {
-            impl_->last_open_rc = core::kDtlsOpenFailed;
+            impl_->session_state.last_open_rc = core::kDtlsOpenFailed;
             core::log::Logger::instance().error(
                 std::string("engine: dtls_->open() failed: ") +
                 open_rc.error().message());
@@ -871,8 +883,8 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
             return core::kDtlsOpenFailed;
         }
         core::log::Logger::instance().debug("engine: dtls_->open() returned ok");
-    } else if (impl_->resolved_media_factory_id == "raw-udp-arq" ||
-               impl_->resolved_media_factory_id == "default") {
+    } else if (impl_->session_state.resolved_media_factory_id == "raw-udp-arq" ||
+               impl_->session_state.resolved_media_factory_id == "default") {
         // No-DTLS-by-design media stack:
         //   - "raw-udp-arq"  — Rule 2 strategy (teleop-ultra-low-latency).
         //     Strategically chosen for high-freq control without browser
@@ -888,7 +900,7 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
         // without DTLS.
         core::log::Logger::instance().debug(
             "engine: dtls_->open() skipped — media stack id='" +
-            impl_->resolved_media_factory_id +
+            impl_->session_state.resolved_media_factory_id +
             "' has no DTLS in its media path by design");
     } else {
         // Media stack requires DTLS (webrtc-classic) but dtls_ is
@@ -900,12 +912,12 @@ uint32_t NimRTCEngine::init_dtls_handshake() noexcept {
         // not a silent degradation.  The error code matches the
         // pre-Slice-8 "transport plugin not found" path that the
         // test pins.
-        impl_->last_open_rc = core::kEngineInternal;
+        impl_->session_state.last_open_rc = core::kEngineInternal;
         const std::string msg =
             std::string{"engine: DTLS plugin '"} +
             config_.dtls_name +
             "' not registered (required by media stack '" +
-            impl_->resolved_media_factory_id +
+            impl_->session_state.resolved_media_factory_id +
             "' — no DTLS in the resolved stack). Check "
             "nimrtc::dtls::register_default_plugins() ran before "
             "engine construction.";
@@ -931,11 +943,11 @@ int NimRTCEngine::tick() noexcept {
     // ---- WebTransport session state poll (v0.15.0 product route) --------
     // ` wt_session` is created lazily by create_data_channel(); poll it
     // here and surface kConnected/kFailed transitions via on_data_state_.
-    if (impl_->wt_session) {
-        const auto st = impl_->wt_session->state();
+    if (impl_->session_state.wt_session) {
+        const auto st = impl_->session_state.wt_session->state();
         const auto cur = static_cast<std::uint8_t>(st);
-        if (cur != impl_->wt_last_state) {
-            impl_->wt_last_state = cur;
+        if (cur != impl_->session_state.wt_last_state) {
+            impl_->session_state.wt_last_state = cur;
             // WebTransportState: 0=kConnecting 1=kConnected 2=kClosing
             // 3=kClosed 4=kFailed (see web_transport_state.hpp).
             if (cur == 1) {
@@ -953,7 +965,7 @@ int NimRTCEngine::tick() noexcept {
         // priority order (lower priority value first).  A message that
         // the transport refused is retried here, and a message whose
         // per-message TTL expired is dropped (WP-D1).
-        impl_->wt_session->flush_outbound();
+        impl_->session_state.wt_session->flush_outbound();
     }
 
     // ---- Re-evaluate the signal policy (v1.2.0 M2, F5) -----------------
@@ -990,7 +1002,7 @@ int NimRTCEngine::tick() noexcept {
     // more than the peer allows.  The tightest of the two wins.
     if (bwe_ && scheduler_) {
         std::uint32_t target_bps = bwe_->estimate().target_bitrate_bps;
-        const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+        const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
         if (peer_limit > 0 && (target_bps == 0 || target_bps > peer_limit)) {
             target_bps = peer_limit;
         }
@@ -1054,6 +1066,50 @@ int NimRTCEngine::tick() noexcept {
                     core::SteadyClock::now().time_since_epoch()).count())});
     }
 
+    // ---- Drive the video-quality statistics (Phase 4.2 / D2) -------------
+    //
+    // The statistics sink needs a periodic tick for two reasons:
+    //
+    //   1. the bitrate window is swept and the EMA updated (a one-second
+    //      window, so the figure means "the last second");
+    //   2. the freeze detector notices that nothing has been rendered
+    //      for longer than the threshold — a freeze that never ends
+    //      (the peer stopped sending) is invisible without a tick,
+    //      because there is no *gap* between two rendered frames to
+    //      measure.
+    //
+    // The jitter-buffer drop attribution is polled here too: the
+    // receiver plugin exposes *cumulative* counters, so the engine
+    // compares two snapshots and feeds the difference in as
+    // `kJitterBufferTimeout` drops.
+    if (impl_->video_state.video_stats.active()) {
+        const std::int64_t now_us = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                core::SteadyClock::now().time_since_epoch()).count());
+
+        // ---- Jitter-buffer drop attribution ----------------------------
+        //
+        // `frames_incomplete` counts the frames that never assembled
+        // because their packets were lost (or arrived too late).  The
+        // difference between two snapshots is the number of drops since
+        // the last tick.
+        if (video_receiver_) {
+            const std::uint64_t incomplete_now =
+                video_receiver_->stats().frames_incomplete;
+            if (incomplete_now > impl_->video_state.video_jb_incomplete_frames_prev) {
+                const std::uint64_t delta =
+                    incomplete_now - impl_->video_state.video_jb_incomplete_frames_prev;
+                for (std::uint64_t i = 0; i < delta; ++i) {
+                    impl_->video_state.video_stats.on_frame_dropped(
+                        detail::VideoDropReason::kJitterBufferTimeout);
+                }
+            }
+            impl_->video_state.video_jb_incomplete_frames_prev = incomplete_now;
+        }
+
+        impl_->video_state.video_stats.tick(now_us);
+    }
+
     // Only drain DTLS outbound once ICE has selected a candidate pair;
     // otherwise libjuice drops the UDP datagram ("Send while ICE is not
     // connected") and the handshake never starts.
@@ -1109,7 +1165,7 @@ void NimRTCEngine::update_pacing_rates() noexcept {
     // knows what it can receive, and the TMMBN we send is a promise
     // that the limit is in force.
     std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
-    const std::uint32_t peer_limit = impl_->peer_tmmbr_limit_bps;
+    const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
     if (peer_limit > 0 && (estimate == 0 || estimate > peer_limit)) {
         estimate = peer_limit;
     }
@@ -1210,9 +1266,9 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
     // tick()); impl_/ice_t_ lifetime is guaranteed by is_open() gate.
     if (!ice_t_ || !impl_) return;
     const plugins::IceState cur = ice_t_->state();
-    if (cur == impl_->last_ice_state) return;
-    const plugins::IceState prev = impl_->last_ice_state;
-    impl_->last_ice_state = cur;
+    if (cur == impl_->session_state.last_ice_state) return;
+    const plugins::IceState prev = impl_->session_state.last_ice_state;
+    impl_->session_state.last_ice_state = cur;
     const auto name = [](plugins::IceState s) {
         switch (s) {
             case plugins::IceState::Disconnected: return "disconnected";
@@ -1229,10 +1285,10 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
     const bool prev_up = (prev == plugins::IceState::Connected ||
                           prev == plugins::IceState::Completed);
     if (cur_up && !prev_up) {
-        if (!impl_->ice_connected_once) {
-            impl_->ice_connected_once = true;
-        } else if (impl_->ice_rehandshake_armed) {
-            impl_->ice_rehandshake_armed = false;
+        if (!impl_->session_state.ice_connected_once) {
+            impl_->session_state.ice_connected_once = true;
+        } else if (impl_->session_state.ice_rehandshake_armed) {
+            impl_->session_state.ice_rehandshake_armed = false;
             auto d = impl_->dtls.lock();
             if (d && d->state() == dtls::DtlsState::Connected) {
                 core::log::Logger::instance().info(
@@ -1255,8 +1311,8 @@ void NimRTCEngine::poll_ice_flap_for_rehandshake() noexcept {
         }
         return;
     }
-    if (!cur_up && impl_->ice_connected_once) {
-        impl_->ice_rehandshake_armed = true;
+    if (!cur_up && impl_->session_state.ice_connected_once) {
+        impl_->session_state.ice_rehandshake_armed = true;
         core::log::Logger::instance().info(
             std::string("engine[ice]: connected->") + name(cur) +
             ", arming DTLS rehandshake on next reconnect");
@@ -1542,7 +1598,7 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     log.info("  - salt_len       = " + std::to_string(km->client_master_salt.size()));
     log.info("  - lifetime       = " + std::to_string(km->lifetime));
     log.info("  - dtls role      = " +
-             std::string(impl_->dtls_is_client ? "Client" : "Server"));
+             std::string(impl_->session_state.dtls_is_client ? "Client" : "Server"));
 
     // The keying material is a set of fixed-size std::array members, so
     // the four views below are *spans into the optional's storage* — the
@@ -1550,19 +1606,19 @@ void NimRTCEngine::maybe_install_srtp_keys() noexcept {
     // two arrays would yield a prvalue copy whose lifetime the span
     // cannot extend; binding each branch explicitly avoids that.)
     const std::span<const std::uint8_t> own_key =
-        impl_->dtls_is_client
+        impl_->session_state.dtls_is_client
             ? std::span<const std::uint8_t>(km->client_master_key)
             : std::span<const std::uint8_t>(km->server_master_key);
     const std::span<const std::uint8_t> own_salt =
-        impl_->dtls_is_client
+        impl_->session_state.dtls_is_client
             ? std::span<const std::uint8_t>(km->client_master_salt)
             : std::span<const std::uint8_t>(km->server_master_salt);
     const std::span<const std::uint8_t> peer_key =
-        impl_->dtls_is_client
+        impl_->session_state.dtls_is_client
             ? std::span<const std::uint8_t>(km->server_master_key)
             : std::span<const std::uint8_t>(km->client_master_key);
     const std::span<const std::uint8_t> peer_salt =
-        impl_->dtls_is_client
+        impl_->session_state.dtls_is_client
             ? std::span<const std::uint8_t>(km->server_master_salt)
             : std::span<const std::uint8_t>(km->client_master_salt);
 

@@ -46,7 +46,9 @@
 #include <thread>
 #include <vector>
 
+#include <nimrtc/assembly/engine_bridge.hpp>
 #include <nimrtc/assembly/profiles.hpp>
+#include <nimrtc/assembly/transport_bridge.hpp>
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/engine/engine.hpp>
 
@@ -152,7 +154,35 @@ int run_demo(double seconds) {
     std::fprintf(stderr, "  - jb_delay: %d ms\n",
                  int(profile.jitter_buffer.initial_delay_ms));
 
-    // ---- Engine config (audio3a off on engine — we drive it ourselves) -
+    // ---- Bridge the Profile's transport section to the engine ----------
+    //
+    // `assembly::to_transport_input()` is the adapter between the
+    // assembly-layer `TransportSection` and the transport-side
+    // `nimrtc::ProfileTransportInput` mirror (architecture remediation
+    // plan §4.2 / D2).  Without this step the Profile's transport
+    // section was parsed and then dropped on the floor — the engine
+    // never learned which strategy the profile asked for.
+    //
+    // This is the *same* adapter `to_engine_config()` uses internally,
+    // so the value printed here and the value the engine receives are
+    // guaranteed to be the same one.
+    const auto transport_input = assembly::to_transport_input(profile);
+    std::fprintf(stderr, "  - strategy: %.*s\n",
+                 int(transport_input.strategy.size()),
+                 transport_input.strategy.data());
+    if (transport_input.media_max_p99_ms.has_value()) {
+        std::fprintf(stderr, "  - media p99 budget: %d ms\n",
+                     *transport_input.media_max_p99_ms);
+    }
+
+    // ---- Engine config --------------------------------------------------
+    //
+    // The Profile → EngineConfig bridge is the single authority for the
+    // mapping (architecture remediation plan §4.2 / D2).  Before the
+    // bridge existed this demo hand-copied four fields out of the Profile
+    // and dropped the rest — the transport strategy, the scheduler
+    // settings, the BWE parameters and the DataChannel switch were all
+    // silently lost.
     //
     // The local port range stays at 0 (the default): the OS assigns an
     // ephemeral port.  A pinned range would fail outright on a Windows
@@ -160,11 +190,13 @@ int run_demo(double seconds) {
     // returns WSAEACCES / errno 10013), and it would collide with any
     // other session on the same host.
     EngineConfig cfg;
-    cfg.local_bind_address    = "127.0.0.1";
-    cfg.pcm_sample_rate_hz    = profile.audio_sample_rate_hz;
-    cfg.pcm_channels          = profile.audio_channels;
-    cfg.audio3a_name          = "";  // demo drives audio3a via registry instance
-    cfg.jb_initial_delay_ms   = int(profile.jitter_buffer.initial_delay_ms);
+    cfg.local_bind_address = "127.0.0.1";
+    cfg.audio3a_name       = "";  // demo drives audio3a via registry instance
+    cfg = assembly::to_engine_config(profile, cfg);
+    std::fprintf(stderr, "[Engine] transport strategy: %s\n",
+                 cfg.transport_strategy_name.c_str());
+    std::fprintf(stderr, "[Engine] scheduler plugin:  %s\n",
+                 cfg.scheduler_name.c_str());
 
     NimRTCEngine engine(cfg);
     uint32_t rc = engine.open();

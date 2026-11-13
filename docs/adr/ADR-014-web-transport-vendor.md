@@ -61,7 +61,7 @@ v0.14.0-beta.1.**
    ids in the existing typed registry hooks). The
    `nimrtc::web_transport::register_default_plugins()` entry point
    publishes `WebTransportMsQuicSessionFactory` via
-   `NIMRTC_REGISTER_WEB_TRANSPORT("msquic", &factory)`. The
+   `NIMRTC_REGISTER_WEB_TRANSPORT(msquic, &factory)`. The
    `IDataChannel` typed slot registers a parallel
    `WebTransportDataChannelFactory` with id `"web_transport"`.
 

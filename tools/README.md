@@ -69,6 +69,31 @@ looking for a seam that exists but is undocumented. The check is a text
 check rather than a C++ reflection check, which keeps it cheap enough to
 run on every push.
 
+## The dead-module guard
+
+| Script | Purpose |
+|--------|---------|
+| `check_dead_modules.py` | Architecture-remediation D2: "either wire it in, or delete it." A module under `src/modules/` with a complete implementation and passing tests, but no path from the composition root, is the worst state — it manufactures the illusion that a feature exists. The check reads the CMake dependency graph and the plugin registrar table. Wired into CI and into CTest as `test_dead_modules`. |
+
+```
+python tools/check_dead_modules.py --verbose
+python tools/check_dead_modules.py --self-test
+```
+
+Three failure shapes are reported separately, because the remedy differs:
+
+| Verdict | Meaning | Remedy |
+|---------|---------|--------|
+| `[dead]` | consumed only by its own tests — a complete implementation the product never calls | wire it in, or delete it |
+| `[unreach]` | linked only by a target that never ships (a benchmark) — the link line makes it look alive | wire it in, or delete it |
+| `[orphan]` | nobody links it and nothing references its registrar | wire it in, or delete it |
+
+A module that registers a plugin factory counts as live when the registrar
+table references it: the registration *is* the consumption. The
+`--self-test` builds a synthetic module tree and asserts that the checker
+still distinguishes each shape, so the guard cannot silently degrade into
+a no-op.
+
 ## CI sanitizer gate
 
 `linux-sanitizers` in `.github/workflows/ci.yml` runs the test suite under

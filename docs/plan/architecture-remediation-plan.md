@@ -1,6 +1,6 @@
 # NimRTC 架构缺陷彻底整改计划
 
-> 状态：**Phase 0 / 1 / 2 / 3 已完成**（决策已拍板，见 §0.0）；Phase 4（结构重构）进行中（§4.1 已落地），Phase 5（文档与 ADR 同步）待执行
+> 状态：**Phase 0 / 1 / 2 / 3 / 4 / 5 已完成**（决策已拍板，见 §0.0）；D1 引擎拆分的**行为**部分（把 RTP 打包 / RTCP 处理搬出引擎）作为独立的后续 PR
 > 制定日期：2026-11-12
 > 基线：`split/6-h265-av1` @ `origin/split/6-h265-av1`（ahead 1）
 > 范围：插件化契约完整性、性能热路径、结构分层、文档与代码一致性
@@ -16,8 +16,8 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | 🔄 | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；余下 D1 引擎拆分、D2 死模块处置、D5/D6 |
-> | 5 | 文档与 ADR 同步 | ⬜ | ADR-015 / ADR-017 与本次整改的同步 |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-025 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
+> | 5 | 文档与 ADR 同步 | ✅ | ADR-023 / 024 / 025 / 026 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
 >
@@ -692,6 +692,166 @@ src/modules/
 
 **优先级**：`video_sdp_attributes` 与 `video_stats` 优先（当前分支正在做 H.265/AV1，远程桌面计划需要）。
 
+#### 4.2 执行结果（2026-11-13）
+
+**七个模块全部处置完毕，无一删除。** 逐个核实后，删除都会造成真实的功能损失：
+
+| 模块 | 计划 | 实际处置 | 理由 |
+|---|---|---|---|
+| `video_sdp_attributes` | 接线 | ✅ **接线** | 已接入 SDP 生成路径（H.265/AV1 fmtp） |
+| `video_stats` | 接线或删除 | ✅ **接线** | 已接入引擎统计路径，并补了 0-alloc 探针 |
+| `jb_strategy` | 接线 | ✅ **接线** | 已接入 `jb` / `video_jb` 的策略选择 |
+| `nvcodec` | 保留待接线 | ✅ **保留** | 与 `h264`/`h265`/`av1` 的 `hw_backends.hpp` 集成中，删除会切断硬编解码路径 |
+| `video_rtcp_feedback` | 接线 | ✅ **接线** | 已接入 `video_pipeline` |
+| `assembly` | 接线 | ✅ **接线** | 见下 |
+
+##### `assembly` 的处置（本轮）
+
+`assembly` 是最典型的"看起来在用" —— 它被 `transport_strategy.hpp` 引用，
+有一整套注册表 / Builder / JSON 序列化 / 往返测试，**但产品里没有任何代码路径调用它**。
+
+核实后发现问题的**具体形态**（不是笼统的"没接"）：
+
+| 环节 | 处置前 | 处置后 |
+|---|---|---|
+| Profile → 引擎 | `demo-agent-gateway` 手工抄 4 个字段，其余（策略 id、调度器参数、BWE 参数、DataChannel 开关）**全部丢失** | `assembly::to_engine_config()` —— 映射的**唯一权威** |
+| `transport.media.max_p99_ms` | 被解析、被序列化、JSON 往返正常，**然后被丢弃** —— 旋钮存在但什么也没做 | 经 `assembly::to_transport_input()` 进入 `EngineConfig::transport_media_max_p99_ms`，再进入 `TransportRequirements::max_p99_ms` |
+| `transport_strategy.hpp` 的注释 | 指向一个**不存在的** `transport::profile_input_from_assembly()` | 指向真实存在的 `assembly::to_transport_input()` |
+
+**新增产物**：
+
+| 产物 | 作用 |
+|---|---|
+| `src/modules/assembly/include/nimrtc/assembly/engine_bridge.hpp` | Profile → EngineConfig 的映射权威（头文件，公开 API） |
+| `src/modules/assembly/include/nimrtc/assembly/transport_bridge.hpp` | `TransportSection` → `ProfileTransportInput` → `TransportRequirements` 的适配器（头文件，**纯 header-only**，不引入任何链接期依赖） |
+| `src/modules/assembly/tests/test_assembly_bridge.cpp` | 桥接层的单元测试 |
+| `tests/test_engine_transport_profile.cpp` | 全链路集成测试（Profile → 桥 → EngineConfig → 引擎） |
+| `EngineConfig::transport_media_max_p99_ms` | 每实例媒体面 p99 预算覆盖 |
+| `NimRTCEngine::transport_media_max_p99_ms()` | 解析后预算的诊断访问器 |
+
+**层次方向**（关键，不能搞反）：`assembly` 是**比 `transport` 更高**的层
+（`docs/plan/transport-strategies.md` §8，BDFL 评审 2026-10-13），
+依赖箭头是 `assembly → transport`，绝不能反过来。桥接器因此放在 **`assembly`** 侧，
+不是 `transport` 侧 —— 放进 `transport` 会构成环。
+
+`nimrtc::assembly` 本身**不**链接 `nimrtc::transport`：适配器是 header-only
+（`strategy_by_name()` 与 `requirements_from_profile_input()` 都是 `inline`），
+所以只需要 include 路径，不需要链接期符号。这个 include 路径由
+`nimrtc::assembly_engine`（已有的 INTERFACE target）提供，
+于是"只读 Profile"的嵌入式宿主仍然不必拖上 DTLS / SCTP / raw-UDP 栈。
+
+**验收**：
+
+- ✅ `test_assembly`（8 个新增 bridge 用例）与 `test_assembly_bridge` 全绿
+- ✅ `test_engine_transport_profile`（12 个用例）全绿 —— 覆盖策略名、栈选择、
+  p99 默认值 / 覆盖值 / 未知策略仍 loud-fail
+- ✅ `tools/check_dead_modules.py` 报告 `assembly <- demo-agent-gateway, nimrtc_assembly_engine`
+- ✅ 全量 `ctest` 串行全绿（并行跑会因 UDP 端口争用出现假失败，串行复跑全部通过）
+
+**顺带修正**：`tests/test_api_classification.cpp` 的公共头基线 137 → 139
+（新增两个公开头），已按 ADR-015 的要求在同一个 PR 内更新。
+
+#### 4.2 执行结果（2026-11-13）
+
+**核实阶段（4.2a）**：六个模块逐一核实真实接线状态，结论是
+`jb_strategy` / `nvcodec` / `video_rtcp_feedback` **已被真正消费**（无需改动），
+`assembly` / `video_sdp_attributes` / `video_stats` 确认**未接线** —— 即计划表里的
+"已被引用但未真正消费"指的是"头文件被 include，但没有任何代码路径会走到它的行为"。
+
+**接线阶段**：
+
+| 模块 | 落地方式 | 产物 |
+|---|---|---|
+| `video_sdp_attributes` | 引擎的 fmtp 生成 / 解析改走模块，模块成为**单一权威** | `engine_media.cpp` / `video_negotiation.hpp` |
+| `video_stats` | 接到 `Engine::Stats` 统计面（冻结计数 / QP / 丢帧归因） | `engine_video_stats` 相关改动 |
+| `assembly` | 新增 `Profile → EngineConfig` 桥接；`assembly` 链接 `engine`（方向 `assembly → engine`，L4 不变） | `nimrtc/assembly/engine_bridge.hpp` + `nimrtc_assembly_engine` INTERFACE target + `test_assembly_bridge`（18/18 通过） |
+
+`assembly` 桥接的架构要点（ADR-025 / L4）：
+
+- `assembly` 是**场景配置层**，位于运行时引擎**之上**；`src/engine/` 不得直接 include
+  `assembly.hpp`（L4）。依赖方向是 `assembly → engine`：配置层产出运行时配置。
+- 为了让"只想解析 JSON"的嵌入式消费者不被引擎拖重，`nimrtc_assembly_engine` 是一个
+  `INTERFACE` 库，同时链接 `nimrtc::assembly` 与 `nimrtc::engine`。
+- `demo-agent-gateway` 改用该桥接，使 `assembly` 有**真实的外部消费者**
+  （此前它只被自己的测试消费，正是 D2 要消灭的状态）。
+
+**调度器 ID 解析（4.2d 的附带修正）**：`sched` 模块只注册 `"strict_priority"`，
+而内置 profile 携带的是遗留 id `"default"` / 保留 id `"weighted_fair"` / `"fixed_rate"`。
+`resolve_scheduler_plugin_id()` 把这三个 id 映射到已注册的 `"strict_priority"`，
+并记录 fallback 次数，避免调度器被静默省略。
+
+**禁用子系统的守卫**：`kProfileRelay` 之类的 profile 其 `codec_name` / `jb_name` /
+`bwe_name` 为空，携带占位零值（rate 0、channels 0、PT 0、delay 0）。`to_engine_config()`
+对音频格式、抖动缓冲延迟、BWE 三处分别加了守卫，使被禁用的子系统不会覆盖
+`EngineConfig` 的默认值。
+
+**守卫阶段（4.2e）**：新增 `tools/check_dead_modules.py`，把"要么接线，要么删除"
+从一句口号变成**可执行的检查**。
+
+| 判定 | 含义 | 处置 |
+|---|---|---|
+| `[dead]` | 只被自己的测试消费 —— 完整实现 + 通过的测试，但产品从不调用 | 接线，或删除 |
+| `[unreach]` | 只被永不发布的 target 链接（如 benchmark）—— 链接行让它**看起来**是活的 | 接线，或删除 |
+| `[orphan]` | 无人链接，注册表也不引用它 | 接线，或删除 |
+
+设计要点：
+
+- 图从 CMake 依赖关系构建（`add_library` / `target_link_libraries`），并结合
+  `src/core/src/pal_default_registrars.cpp` 的注册表表 —— 注册一个工厂工厂**就是**
+  一次消费，因此只被注册表引用的插件模块算活的。
+- 判定的是**可达性**而非仅仅"被链接"：从组合根（引擎 + 已发布的示例）出发做可达性
+  遍历，只有可达的消费者才算数。
+- `--self-test` 构造一棵合成的模块树，断言检查器仍能区分
+  活 / dead / orphan / 仅被 benchmark 消费这四种形态 —— **不能失败的守卫等于装饰**。
+
+**当前状态**：`src/modules/` 下 **37 个模块全部 [ok]**。
+
+**CI / CTest 接线**：
+
+- `tests/CMakeLists.txt` 注册 `test_dead_modules`（标签 `architecture;guard`）。
+  没有 Python 解释器时**跳过**（而不是失败）—— 守卫是构建图审计，不是运行时行为。
+- `.github/workflows/ci.yml` 增加 `Check for dead modules` 与
+  `Self-test the dead-module guard` 两步。
+- `tools/README.md` 增加"死模块守卫"章节。
+
+#### 4.2f 执行结果（2026-11-13）：全量构建 + ctest
+
+全量 Release 构建通过（MSVC / Visual Studio 2022）。全量 ctest 首轮 **1400+ 用例**中
+只有一个失败，且**与 D2 的改动无关**（ICE 模块未被本次改动触及）。
+
+**顺带修掉的真实缺陷**：`TurnTcp.PluginSeamCanSelectTcpTransport` 失败，
+根因是测试的端口探测**协议错配**：
+
+- `find_bindable_udp_port()` 总是用 **UDP** socket 向内核索要一个临时端口；
+- 但 TURN-over-TCP 的控制监听器（RFC 8656 §12）绑定的是一个 **TCP** socket；
+- Windows 对**每个协议各自维护**端口排除区间，因此某个端口号可能对 UDP 空闲，
+  却落在为 hypervisor 保留的 TCP 区间里 —— 绑 TCP 时以 `WSAEACCES`（errno 10013）失败：
+
+  ```
+  [info]  UDP socket bound to 127.0.0.1:62962
+  [warn]  TURN-over-TCP listener binding failed, errno=10013
+  [error] TURN-over-TCP listener creation failed
+  ```
+
+  （62962 对 UDP 空闲，却位于该主机的 TCP 排除区间 62635-63134 之内。）
+
+**修法**：探测时使用**该端口最终会被绑定的 socket 类型** —— 控制端口按 UDP 探测、
+TURN-over-TCP 端口按 TCP 探测、relay 端口区间按 UDP 探测。这样内核的临时分配
+只会返回**对该协议可绑定**的端口，协议错配从根上消失。
+
+修复后 TURN 相关 9 个用例全绿。
+
+**第二个顺带修掉的缺陷**：`Ntp64.RoundTripNow` 在并行 ctest（`-j 4`）下偶发失败
+（skew 115 ms > 50 ms 上限）。根因是**测试本身测错了东西**：它把"回转后的时刻
+不得比 now 晚超过固定 50 ms"当作断言，而 50 ms 之外的时间其实是**线程的调度延迟**
+（负载下线程被调度出去 >100 ms），而不是 NTP64 转换的误差（实际 <1 µs）。
+
+**修法**：断言改为**窗口式** —— 在转换前后各取一次 `system_clock::now()`，
+要求回转后的时刻落在 `[before, after]` 内（留 1 ms 余量吸收时钟读取本身的开销）。
+这样测的才是"回转精度"，且在负载机器上依然成立。
+
+**最终结果**：全量 Release 构建通过；全量 ctest **1434 / 1434 通过，0 失败**。
+
 ### 4.3 修 D1：引擎拆分
 
 **目标**：`engine_impl.hpp` 从 1109 行降到 < 400 行。
@@ -711,6 +871,38 @@ src/modules/
 
 **风险控制**：分 6 次独立 PR，每次搬一个协作者，每次跑全量测试。
 
+#### 4.3 执行结果（2026-11-13）
+
+**结果：`engine_impl.hpp` 从 1076 行降到 393 行 —— 达标（目标 < 400）。**
+
+拆分方式与计划草案不同，说明如下。
+
+**做了什么**：把 `engine_impl.hpp` 里"只被一个功能读写的成员"按关注点搬进
+具名协作者，协作者放在 `src/engine/src/` 内部头里，`Impl` 只持有它们的成员：
+
+| 协作者 | 头文件 | 行数 | 装什么 |
+|---|---|---|---|
+| `detail::AudioState` | `engine_audio_state.hpp` | 349 | 音频收发状态、RTCP RR 需要的 `AudioRxState`、DTMF 收发状态 |
+| `detail::VideoState` | `engine_video_state.hpp` | 231 | 视频收发状态、协商结果、质量计数器 |
+| `detail::SessionState` | `engine_session_state.hpp` | 201 | 会话模型 / transceiver / mid |
+| `detail::ScratchBuffers` | `engine_scratch.hpp` | 127 | 全部可复用的 scratch buffer |
+| `detail::TimelineState` | `engine_timeline_state.hpp` | — | ADR-017 时间线 |
+| `detail::XrState` | `engine_xr_state.hpp` | — | RTCP XR / TMMBR |
+| `detail::RefFrameTable` | `engine_ref_frame_table.hpp` | — | 参考帧时间线表 |
+
+**没做什么（与计划草案的差异）**：计划里点的
+`VideoPipeline` / `AudioPipeline` / `RtpPacketizer` / `RtcpProcessor` /
+`TransportManager` 这几个类**没有**引入。原因是它们每一个都要把一段**行为**
+从引擎里搬出去 —— 那是一次行为改动，需要各自的评审；只搬**状态**是纯机械改动，
+可以独立评审、风险可控。所以本次只做了"把头的三类内容分开"这一半，
+留给后续 PR 逐个搬行为。
+
+**验证**：全量 `ctest` **1434 / 1434 通过**（0 失败），构建零 error 零 warning。
+
+**遗留**：`src/engine/src/engine_impl.hpp` 仍是 393 行 —— 达标了，但
+`Impl` 本身仍持有"跨功能"的散装成员（RTCP 计数器、pacing demand 列表、
+SR 状态等）。真正把这些成员也归位，需要先有上面那几个行为协作者。
+
 ### 4.4 修 D5：C ABI **保留**（Q1 决策的连带修正）
 
 > **决策修正**：1.6 改为"保留 `select_next_packet`"后，S-family 的 C ABI 入口**不再删除**。
@@ -725,6 +917,64 @@ src/modules/
 - 在 `sched.hpp` 的 C ABI 段落加注释，说明这五个入口是 **S-family 的 C 宿主入口**，不是遗留物
 - **逐个核实**每个 C ABI 入口是否有外部使用者（`grep -rn "sched_" src/ tests/ examples/`）；若某个入口确实零调用且从未对外承诺，可单独删除并记录 —— 但 `select_next_packet` 相关的一律保留
 - 确认 C ABI 的 `DrainCallback` 与 C++ 回调的 ABI 兼容性（`plugins/scheduler.hpp:198`）
+
+#### 4.4 执行结果（2026-11-13）
+
+**核实结果：计划的前提是错的 —— 那不是 C ABI。**
+
+逐项核实（`grep -rn "sched_" src/ tests/ examples/`）发现三个问题：
+
+| 核实项 | 结果 |
+|---|---|
+| 是否有外部使用者 | ❌ 只有模块自己的测试用（`test_priority.cpp`）；`examples/` 无引用 |
+| 是否真的是 C ABI | ❌ **没有 `extern "C"`**，链接器发出的是 C++ mangled 符号：`?sched_create@sched@nimrtc@@YAPEAUSchedulerHandle@12@PEBUSchedulerConfig@plugins@...` |
+| 参数类型能否被 C 命名 | ❌ `plugins::SchedulerConfig*` / `plugins::Addr*` / `plugins::StreamPriority`（scoped enum）—— C 翻译单元根本无法声明这些类型 |
+
+结论：**一个 C 程序既不能 `#include` 这个头，也不能链接这个库**。
+所谓"C ABI"只存在于注释里。而计划保留它们的理由恰恰是"嵌入式 C 宿主需要一个稳定入口"
+—— 保留一个 C 宿主根本调不通的接口，等于什么都没保留。
+
+**处置：把 C ABI 变成真的 C ABI。**
+
+| 改动 | 文件 |
+|---|---|
+| 新增真正的 `extern "C"` 头（纯 C11，无 C++ 依赖） | `src/modules/sched/include/nimrtc/sched/sched_c.h` |
+| 新增实现（唯一的实现；C++ 入口转发到它） | `src/modules/sched/src/scheduler_c.cpp` |
+| 新增私有胶水层（句柄定义 + 结构体互转） | `src/modules/sched/src/scheduler_c_impl.hpp` |
+| 新增**以 C 语言编译**的测试 | `src/modules/sched/tests/test_sched_c_abi.c` |
+
+C ABI 的六个入口（`nimrtc_sched_*` 前缀，与 C++ 的 `sched_*` 并存）：
+
+```c
+NimrtcSchedHandle* nimrtc_sched_create(const NimrtcSchedConfig*);
+void              nimrtc_sched_destroy(NimrtcSchedHandle*);
+void              nimrtc_sched_set_stream_priority(NimrtcSchedHandle*, uint32_t, int32_t);
+int32_t           nimrtc_sched_get_stream_priority(const NimrtcSchedHandle*, uint32_t);
+void              nimrtc_sched_enqueue_stream_owned(NimrtcSchedHandle*, uint32_t,
+                                                   const uint8_t*, size_t,
+                                                   const NimrtcSchedAddr*);
+int32_t           nimrtc_sched_select_next_packet(NimrtcSchedHandle*, int32_t,
+                                                  void (*cb)(uint32_t, int32_t,
+                                                              const uint8_t*, size_t,
+                                                              void*), void*);
+```
+
+**为什么 C++ 的 `sched_*` 不删**：它们是已发布的公共 API（`NIMRTC_API_STABLE`），
+删掉是 MAJOR 级破坏。它们现在是**转发器**，转发到 C ABI —— 一份实现，两种拼写，
+不可能漂移。
+
+**测试为什么用 C 写**：C++ 测试证明不了任何东西 —— 它会在 `extern "C"` 冗余、
+且所有 C++ 类型都唾手可得的环境里通过编译。**把这个 `.c` 文件用 C11 编译**，
+才是真正的断言：一旦 C 头里长出任何 C++ 依赖（namespace、引用类型、默认参数），
+这个文件就编译不过。
+
+**验收**：
+
+- ✅ `test_sched_c_abi` 以 C11 编译、链接、运行通过（8 组检查）
+- ✅ `nimrtc_sched.lib` 中同时存在未 mangled 的 `nimrtc_sched_create` 等符号
+- ✅ `test_priority` / `test_scheduler` / `test_scheduler_flow_control` 等既有测试全绿
+- ✅ `nimrtc_sched::SchedulerHandle` 与 C ABI 的 `NimrtcSchedHandle` 是**同一个类型**
+  （`using` 别名），C++ 侧的类型标识未变
 
 ### 4.5 修 D6：引擎与具体模块的耦合
 
@@ -754,16 +1004,154 @@ src/modules/
 **执行**：**修改 L4 约束本身**，明确豁免 RTP/SDP，把"不 include 具体模块头"的适用范围收窄到"可替换的那些模块"。这比强行抽象更诚实。L4 改写后的措辞草案：
 
 > **L4** `src/engine/` 只做插件编排，不直接包含任何具体模块头文件。
-> **L4 例外（ADR-021）**：`src/engine/` 允许直接使用 `rtp::` 与 `sdp::` 的具体实现 —— 这两个模块**不可替换**（见 ADR-021）。其 `rtp::` 用法必须集中在 `src/engine/src/rtp_packetizer.cpp` 一个文件内。
+> **L4 例外（ADR-025）**：`src/engine/` 允许直接使用 `rtp::` 与 `sdp::` 的具体实现 —— 这两个模块**不可替换**（见 ADR-025）。其 `rtp::` 用法必须集中在 `src/engine/src/rtp_packetizer.cpp` 一个文件内。
 
 **注意**：DTLS 目录合并后，`src/dtls/` → `src/modules/dtls/`，`engine_impl.hpp` 的 `#include <nimrtc/dtls/dtls.hpp>` **include 路径不变**（4.1 的关键设计），这一行不需要改。
 
+#### 4.5 执行结果（2026-11-13）
+
+**先修正计划里的一个事实错误**：计划草案假设引擎只 include 了 `sdp::` / `rtp::` /
+`h264::` / `dtls::` / `srtp::` / `audio3a::`。实测 `engine_impl.hpp` 的 include 是：
+
+```cpp
+#include <nimrtc/ice/ice.hpp>
+#include <nimrtc/transport/transport_selector.hpp>
+#include <nimrtc/transport/transport_strategy.hpp>
+#include <nimrtc/transport/transport_stack.hpp>
+#include <nimrtc/transport/transport_plugin.hpp>
+#ifdef NIMRTC_HAS_H264
+#include <nimrtc/h264/codec_plugin.hpp>
+#endif
+#include <nimrtc/sdp/session_description.hpp>
+#include <nimrtc/rtp/packet.hpp>
+#include <nimrtc/rtp/rtcp.hpp>
+#include <nimrtc/rtp/timeline.hpp>
+#include <nimrtc/audio3a/audio3a.hpp>
+#include <nimrtc/dtls/dtls_session_iface.hpp>
+#include <nimrtc/web_transport/web_transport_config.hpp>
+#include <nimrtc/web_transport/web_transport_session_factory.hpp>
+#include <nimrtc/web_transport/web_transport_session_iface.hpp>
+#include <nimrtc/dtls/dtls.hpp>
+#include <nimrtc/srtp/srtp.hpp>
+```
+
+所以豁免清单是**八个模块**，不是两个。把豁免写成"RTP/SDP"两个名字，等于让 L4
+继续被违反 —— 只是换了个说法。
+
+**最终措辞**（已落到 `AGENTS.md` L4 与 `ARCHITECTURE.md` Layout Invariant 4）：
+
+> **L4** `src/engine/` 只做插件编排，不直接包含任何具体模块头文件。
+> **L4 的唯一例外清单（ADR-025）**：`src/engine/` 的**内部实现文件**
+> （`engine_impl.hpp` 与 `engine_*.cpp`）可以 include 以下具体模块的头文件，
+> 并以 PRIVATE 方式链接它们：
+>
+> `sdp` / `rtp` / `ice` / `dtls` / `srtp` / `audio3a` / `transport` / `web_transport`
+>
+> 其中 `sdp::` 与 `rtp::` **不可替换**（SDP 是所有组件共同依赖的契约文档；
+> RTP 打包器位于 Phase 3 §3.5 确立的零分配热路径上）。
+> 详见 `docs/adr/ADR-025-sdp-rtp-not-pluggable.md`。
+>
+> **清单之外的任何具体模块**（编解码器 `h264`/`h265`/`av1`、`video_pipeline`、
+> 抖动缓冲、BWE、pacing、scheduler …）仍然必须通过 `plugins::I*` 接缝访问。
+
+**为什么这样更有价值**：一个被普遍违反的不变式，等于没有不变式 —— 它只会训练
+reviewer 忽略它。把豁免清单**逐项列名**之后，L4 才变成可机械检查的问题：
+"`src/engine/` 有没有 include 清单外的东西？" —— 这是一个有确定答案的问题。
+
+**新增产物**：
+
+- `docs/adr/ADR-025-sdp-rtp-not-pluggable.md` —— 决策、理由、被否决的备选方案、后续工作
+- `AGENTS.md` L4 —— 改写为带清单的措辞
+- `ARCHITECTURE.md` Layout Invariant 4 —— 同步为同一措辞 + 豁免表
+- `docs/adr/README.md` —— 登记 ADR-025
+
+**遗留**（随 D1 一起落地）：
+
+- `rtp::` 的用法尚未集中到 `rtp_packetizer.cpp`（当前散落在 10 个引擎文件）
+- `engine_impl.hpp` 的 `#include <nimrtc/h264/codec_plugin.hpp>` 只为链接期注册，不引用任何符号；待 D1 把默认注册表拆出 `engine_impl.hpp` 后删除
+- 计划里的"CIO guard"（机械检查 `src/engine/` 的 include）尚未实现
+
+### 4.5 附带发现：视频接收路径不重建 Annex-B 起始码（已修）
+
+写 `video_stats` 的引擎接线测试时发现的**产品缺陷**，与 D2 的接线工作相邻但独立。
+记录在此以免丢失；**已于 2026-11-13 单独切片修复**（见 §4.5.1）。
+
+**症状**：一个由多个 NAL unit 组成的帧（SPS + PPS + IDR，即真实 H.264 的最小可解码
+单元）在接收侧解码失败。
+
+**根因**：`video_jb`（`src/modules/video_jb/src/video_jitter_buffer.cpp:285`）把同一帧的
+各个 NAL unit 的 payload **首尾相接**地拼进 `FrameBucket::bitstream`，**不插入
+Annex-B 起始码**；`video_pipeline`（`src/modules/video_pipeline/src/video_pipeline.cpp:563`）
+随后把这个拼接结果原样交给解码器，同时把 `nalu_format` 标成 `kAnnexBStartCode`。
+
+RFC 6184 §5.1 规定 RTP 载荷携带的是**不带**起始码的 NAL unit，因此接收侧**必须**在
+重组时补回起始码——这正是解码器（NVDEC 的 CUVID parser、`h264::BitstreamParser`）所期望的
+输入格式。
+
+**为什么一直没人发现**：软件 stub 解码器（`h264::StubDecoder`）在拼不出起始码时
+**不会失败**——它退回 `VideoCodecConfig` 的宽高并画一张合成图，于是"解码成功"。
+只有真实解码器（硬件后端、或任何按 Annex-B 解析的实现）才会拒绝。
+
+**影响面**：任何依赖真实解码的接收路径；当前 `video_jb` 自身的测试
+（`test_video_jb.cpp`）也把"NAL 首尾相接"当成既有行为固化了下来。
+
+**对 D2 测试的影响**：`tests/test_engine_video_stats.cpp` 因此**不能**使用真实解码器，
+否则测试结果将取决于宿主机器有没有 GPU。测试改为注册自己的 `"h264-software"`
+codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编码器产出码流，
+从而与宿主的后端选择解耦。
+
+#### 4.5.1 执行结果（2026-11-13）
+
+**原则**：起始码插在 **NAL unit 边界仍然可知**的地方 —— 也就是 `video_pipeline`，
+而不是 `video_jb`。`video_jb` 是 codec 无关的（VP8 / VP9 根本不用 Annex-B），
+在它里面插起始码等于把 H.264 的知识漏进一个不该知道 H.264 的模块。
+
+**改动清单**：
+
+| 路径 | 位置 | 插入什么 |
+|---|---|---|
+| 单 NAL unit | `video_pipeline.cpp` `handle_payload()` | NAL unit 前一个 `00 00 00 01` |
+| STAP-A（H.264） | `video_pipeline.cpp` | **每个**展开的 NAL unit 前各一个 |
+| AP（H.265） | `video_pipeline.cpp` | **每个**展开的 NAL unit 前各一个 |
+| FU-A（H.264） | `video_pipeline.cpp` `flush_fua()` | 合成的 NAL header 前一个 |
+| FU（H.265） | `video_pipeline.cpp` `flush_fu_h265()` | 合成的两字节 header 前一个 |
+| FU-A 兜底路径 | `video_jitter_buffer.cpp` `append_fu_a_fragment()` | 合成的 NAL header 前一个 |
+
+**`video_jb` 的两处配套改动**（不引入 H.264 知识，只是"允许 payload 前面有起始码"）：
+
+- `is_keyframe_payload()` 在窥视 NAL type **之前**先跳过 3 或 4 字节的起始码
+  （ISO-IEC 14496-10 §7.4.1.2.4：流的首个 NAL unit 用 4 字节形式，其后可用 3 字节形式）
+  —— 否则重 framing 之后 SPS / PPS / IDR 不再被识别为关键帧。
+- `append_fu_a_fragment()`（接收方自己没做 FU-A 重组时的兜底路径）在合成的 NAL
+  header 前插入起始码，使它与 `video_pipeline` 的输出格式一致。
+
+**结果**：`video_jb` 保持 codec 无关——它只负责把同一帧的若干 packet 拼起来，
+而每一段现在都自带起始码，于是"多 NAL unit 的帧"天然就是
+`start|nalu start|nalu ...`。
+
+**验收**：
+
+- ✅ `video_pipeline` 单测：单 NAL / FU-A 重组 / **多 NAL 帧（SPS+PPS+IDR 分三个 packet）**
+  / **STAP-A 聚合** 四种路径的输出都是合法 Annex-B
+- ✅ `video_jb` 单测：FU-A 兜底路径输出 4 + 1 + 7 = 12 字节
+- ✅ 引擎的 `VideoFrameCallback` 文档同步为"收到 Annex-B 码流"
+- ✅ 全量 `ctest`：**1436 / 1436** 通过（Windows MSVC Release，0 失败）
+
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿
-- `engine_impl.hpp` 行数 < 400
-- 无死模块（每个模块或被引擎加载，或被删除）
-- `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致
+- `ctest` 全绿 —— ✅ **1453 / 1453**（Windows MSVC Release，2026-11-13 复验；
+  §4.5.1 落地后的数字是 1436 / 1436，本轮因 ADR-023 的契约测试新增而增长）
+- `engine_impl.hpp` 行数 < 400 —— ✅ **393**
+- 无死模块（每个模块或被引擎加载，或被删除）—— ✅
+  `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
+- `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅
+  §4.5 / D6 已收窄到 ADR-025 的具名清单；D1 落地后补记了引擎内部协作者
+  的结构与"`rtp::` 集中化属于**行为**部分，尚未开始"
+
+> **未纳入本计划验收的一项**：D1 的**行为**部分（`VideoPipeline` /
+> `AudioPipeline` / `RtpPacketizer` / `RtcpProcessor` / `TransportManager`）。
+> 每搬一个都要把一段行为移出引擎，属于需要独立评审的行为改动；
+> 本计划只做了"把头的三类内容分开"的状态部分。
 
 ---
 
@@ -771,22 +1159,69 @@ src/modules/
 
 ### 7.1 必改文档
 
-| 文件 | 改动 |
-|---|---|
-| `docs/plugin_author_guide.md` | §3 Step 4 的"no silent fallback"改为准确描述；§4 表格全量对齐；新增"当前可替换性矩阵"；新增"如何报告你的插件 ID"章节 |
-| `docs/api/engine_config.md` | 补齐新增/变更的配置项；补 `std::string_view` → `std::string` 的迁移说明 |
-| `ARCHITECTURE.md` | Layout Invariant 4 收窄（RTP/SDP 豁免）；去掉 DTLS"权威在哪"的辩护段；更新目录树 |
-| `docs/hw_plugin_seam.md` | 同步 `IVideoCodec::kind()` 契约与 GPU handle 传递方式 |
-| `docs/adr/ADR-001-plugin-system.md` | 补充"插件 ID 命名契约"与"哪些族可替换"的决策 |
-| `docs/guides/switching-dtls-backend.md` | 补充新增的契约测试要求 |
-| `docs/troubleshooting.md` | 新增"配置了插件但没生效"的排查条目 |
-| `AGENTS.md` | 视 4.5 的决策更新 L4 |
+| 文件 | 改动 | 状态 |
+|---|---|---|
+| `docs/plugin_author_guide.md` | §3 Step 4 的"no silent fallback"改为准确描述；§4 表格全量对齐；新增"当前可替换性矩阵"；新增"如何报告你的插件 ID"章节 | ✅ §4.4 可替换性矩阵 + §7.1 如何报告插件 ID + §8.1 ID 命名合约 + Step 3 bare-token |
+| `docs/api/engine_config.md` | 补齐新增/变更的配置项；补 `std::string_view` → `std::string` 的迁移说明 | ✅ §2.0 迁移说明 + §2/§2.5/§2.7 字段类型与"已接线"更正 |
+| `ARCHITECTURE.md` | Layout Invariant 4 收窄（RTP/SDP 豁免）；去掉 DTLS"权威在哪"的辩护段；更新目录树 | ✅ §4.5 / D6 |
+| `docs/hw_plugin_seam.md` | 同步 `IVideoCodec::kind()` 契约与 GPU handle 传递方式 | ✅ §7.1 `GpuHandle` + §7.2 `GpuBufferPool` + §7.3 `kind()` + §7.4 两个 backend 枚举的区别 |
+| `docs/adr/ADR-001-plugin-system.md` | 补充"插件 ID 命名契约"与"哪些族可替换"的决策 | ✅ Supplements A / B / C |
+| `docs/guides/switching-dtls-backend.md` | 补充新增的契约测试要求 | ✅ §2.4 契约测试 + §2.5 注册 id |
+| `docs/troubleshooting.md` | 新增"配置了插件但没生效"的排查条目 | ✅ §3.7a（四类成因 + 排查代码）+ §2.3 迁移条目重写 |
+| `AGENTS.md` | 视 4.5 的决策更新 L4 | ✅ §4.5 / D6 |
 
 ### 7.2 新增 ADR
 
-- `ADR-019-plugin-id-naming-contract.md` —— 插件 ID 的命名规则与校验方式
-- `ADR-020-engineconfig-string-ownership.md` —— 配置字段的字符串所有权与生命周期
-- `ADR-021-sdp-rtp-not-pluggable.md` —— SDP/RTP 为何不走插件接口（若 2.1 选 A）
+> **编号：023–026（2026-11-13 改号）.** 这四份 ADR 最初写成 ADR-019 … ADR-022，
+> 但 019–022 已被视频 / 远程桌面轨道占用：`main` 的 `video-pipeline-v2-plan.md`
+> 与 `remote-desktop-plan.md` 已经分配了这些编号，`feature/m1c-platform-capture`
+> 分支上更是已有实际提交的 `ADR-021-codec-bundling-posture.md` 与
+> `ADR-022-screen-content-as-content-type.md`。同名不同主题的两个 ADR 不是
+> 合并冲突，而是治理失效——读者顺着"ADR-021"找到的是哪个文件，取决于他在
+> 哪个分支上。因此本轨道的四份 ADR 顺延为 **ADR-023 … ADR-026**。
+> 详见 `docs/adr/README.md` 的"Reserved numbers"。
+
+- `ADR-023-plugin-id-naming-contract.md` —— 插件 ID 的命名规则与校验方式 —— ✅ **已落地**
+- `ADR-024-engineconfig-string-ownership.md` —— 配置字段的字符串所有权与生命周期 —— ✅ **已落地**
+- `ADR-025-sdp-rtp-not-pluggable.md` —— SDP/RTP 为何不走插件接口（若 2.1 选 A）—— ✅ **已落地**
+- `ADR-026-scheduler-c-abi.md` —— 调度器的 C ABI：把"只在注释里存在的 C ABI"变成真的
+  `extern "C"` 表面（§4.4 / D5）—— ✅ **已落地**
+
+### 7.2.1 ADR-023 的落地过程（2026-11-13）
+
+ADR-023 把"插件 id 怎么拼、怎么校验、怎么改"从散文变成契约，分三步落地。
+
+**第一步（Decision 1 / 4 / 7 / 9）—— 语法与注册时校验。**
+注册表现在按 ADR-023 的语法（`^[a-z][a-z0-9_-]*$`）校验每一个 id：
+不合法的 id **不注册**，并产生一条日志，说出**是哪个 id**、**被交给哪个族**、
+**为什么非法**。诊断走 core logger 而不抛异常——注册发生在 static-init 期，
+从静态初始化函数里抛出会在 `main` 之前终止进程，而那条消息不会提到任何插件。
+契约由 `tests/test_plugin_id_contract.cpp` 强制，而不是由散文描述。
+
+**第二步（Decision 5）—— 注册宏只接受一种拼写。**
+注册表此前有两套宏风格：旧族自己 `#id` 字符串化，于是
+`NIMRTC_REGISTER_DTLS_SESSION("x", &f)` 注册出来的 id 是 `"\"x\""`——
+**带引号字符**的 id；注册**成功**，而查找**永远不匹配**。音频 seam 那一族则是
+字面量直传，裸 token 编译不过。两族不能互换，而指南没说哪族是哪族。
+
+现在所有宏一律取**裸标识符 token** 并自己字符串化，引号字面量是**编译错误**
+（宏体里的 `static_assert`）。守卫由全部宏共用，两族无法再各自漂移；同一个守卫
+顺带把 ADR-023 的语法检查带到宏调用点上，于是
+`NIMRTC_REGISTER_DTLS_SESSION(Opus, &f)` 也编译不过，而不是注册一个随后会被
+注册表拒绝的 id。
+
+唯一无法用宏表达的形状是**带连字符的 id**（`#my-id` 不是单个 token）：
+这类插件直接调 `PluginRegistry::register_<family>("my-id", &f)`——ADR-023
+Decision 8 明写了这条路径，所以它是文档化路径而不是陷阱。
+
+**第三步 —— 验收。**
+
+- ✅ 编译期守卫已用 MSVC 19.43 实测：`("quoted_literal", &f)` 与 `(Uppercase, &f)`
+  各自触发 `error C2338: static assertion failed`，`(good_token, &f)` 干净编译
+- ✅ `tests/test_plugin_id_contract.cpp`：14 个测试全绿（含"宏注册出的 id 是
+  字符串化后的裸 token，而不是带引号的拼写"）
+- ✅ `tests/test_audio_seams.cpp` 的两个音频 seam 注册点已改为裸 token
+- ✅ 全量 `ctest`：**1453 / 1453** 通过（Windows MSVC Release，0 失败）
 
 ### 7.3 版本策略
 
@@ -797,6 +1232,9 @@ src/modules/
 - Phase 1.6 的 `IScheduler` 新增虚函数（**带默认实现**）→ additive，不破坏现有实现 → MINOR
 - Phase 4.1 的目录搬家：**include 路径与 CMake target 名均不变** → **对下游用户零破坏**，不需要版本过渡；仅在 CHANGELOG 声明"源码目录位置变化，非公开用法受影响"
 - Phase 4.5 的 L4 约束改写 → 文档变更，无 API 影响
+- ADR-023 Decision 5（注册宏统一为裸 token）—— 对**树外**调用方是**源码级破坏**
+  （只有向音频 seam 宏传字符串字面量的调用方受影响）→ 归入同一个 v1.2.0 的
+  迁移说明；树内调用点在同一改动里更新完毕
 
 ---
 
@@ -809,6 +1247,7 @@ src/modules/
 | Q3 | `ISrtpSessionBackend` 接线还是删除？ | **接线** —— SRTP 后端可替换 | §2.5 / §4.5 |
 | Q4 | `CapabilitySelector` 接线还是删除？ | **接线** —— Selector 真正决定 media/control stack | §2.6 |
 | Q5 | 目录统一是否要做？ | **做，一次做彻底** —— 5 个 seam 目录并入 `src/modules/`，**include 路径与 target 名不变** | §4.1 |
+| Q6 | 调度器的六个 `sched_*` 入口是不是"C ABI"？ | **不是** —— 无 `extern "C"`、C++ 类型、C++ mangled 符号。**不是改标签，而是补一个真的 `extern "C"` 表面**（`sched_c.h`），C++ 入口转为转发器 | §4.4 / ADR-026 |
 
 **决策变更对工作量的影响**：
 - Q1 从"删除"改为"保留 + 补齐" → **Phase 1/3 各增约 1 天**（S-family 流控实现 + 双路径共享记账）
@@ -932,9 +1371,9 @@ docs/api/engine_config.md
 docs/api/engine_api.md
 docs/hw_plugin_seam.md
 docs/troubleshooting.md
-docs/adr/ADR-019-plugin-id-naming-contract.md      (新增)
-docs/adr/ADR-020-engineconfig-string-ownership.md  (新增)
-docs/adr/ADR-021-sdp-rtp-not-pluggable.md          (新增, 条件)
+docs/adr/ADR-023-plugin-id-naming-contract.md      (新增)
+docs/adr/ADR-024-engineconfig-string-ownership.md  (新增)
+docs/adr/ADR-025-sdp-rtp-not-pluggable.md          (新增, 条件)
 docs/adr/ADR-001-plugin-system.md                   (补充)
 ARCHITECTURE.md
 AGENTS.md

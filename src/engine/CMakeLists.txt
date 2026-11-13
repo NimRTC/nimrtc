@@ -1,4 +1,4 @@
-﻿# engine/CMakeLists.txt
+# engine/CMakeLists.txt
 # =============================================================================
 # NimRTCEngine — the top-level composition layer.
 #
@@ -201,6 +201,40 @@ if(NIMRTC_MODULE_VIDEO_SINK)
 endif()
 if(NIMRTC_MODULE_VIDEO_PIPELINE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_pipeline)
+endif()
+
+# The codec-specific SDP attribute module (architecture remediation plan
+# D2 / Phase 4.2).  The engine builds and parses the `a=fmtp:` body for
+# each video codec family through this module, so the format parameters
+# have exactly ONE authority — the module that also *parses* them.
+#
+# Before this dependency existed the engine carried a second, hand-written
+# copy of the same table (`engine/src/video_codec_config.hpp`), which could
+# disagree with the module's parser: a fix to one never reached the other.
+#
+# The engine still reaches the module through its *header* (not through a
+# plugin seam) — the format parameters are not replaceable, exactly like
+# RTP and SDP (see ADR-025 / the L4 exception in AGENTS.md).
+if(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_sdp_attributes)
+endif()
+
+# The video-quality statistics module (architecture remediation plan D2 /
+# Phase 4.2).  The engine drives the `IVideoStatsSink` from the receive
+# pipeline (frame received → decoded → rendered), the jitter buffer (drops)
+# and the feedback path (NACK / PLI), and exposes the resulting snapshot
+# through `Engine::Stats`.
+#
+# Like the SDP-attributes module above, this is a *helper* rather than a
+# replaceable plugin: the counters it keeps have no wire representation and
+# no alternative implementation could disagree with them.  The engine
+# reaches it through its header (the same L4 exception ADR-025 records for
+# RTP / SDP).
+if(NIMRTC_MODULE_VIDEO_STATS)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_stats)
+    # The bridge (`src/engine/src/video_stats_bridge.hpp`) compiles the real
+    # sink when this is defined, and compiles to no-ops when it is not.
+    target_compile_definitions(nimrtc_engine PRIVATE NIMRTC_HAS_VIDEO_STATS=1)
 endif()
 if(NIMRTC_MODULE_H264)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::h264)

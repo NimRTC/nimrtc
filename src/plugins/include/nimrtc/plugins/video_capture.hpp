@@ -63,6 +63,12 @@
 // base.hpp must be before include guard — see transport.hpp for rationale.
 #include <nimrtc/core/api_version.hpp>
 #include "nimrtc/plugins/base.hpp"
+// `IVideoSource` / `VideoSourceConfig` are the *source* seam the capture
+// device is presented through.  A capture plug-in does not have to know
+// about them -- but the *factory* does, because the factory is what
+// hands the engine a source it can drive (see
+// `IVideoCaptureFactory::create_source`).
+#include "nimrtc/plugins/video_source.hpp"
 // `GpuHandle` is the zero-copy currency (plan B10).  It lives in the
 // video_frame module, which `nimrtc::plugins` already re-exports
 // (see video_codec.hpp) — but video_capture.hpp must not depend on
@@ -544,6 +550,36 @@ public:
     /** Create a capture instance. The returned instance is in
      *  kConstructed state; the caller calls `open()`. */
     [[nodiscard]] virtual IVideoCapture* create(CaptureConfig cfg) const = 0;
+
+    /**
+     * @brief Create the *source* that presents @p device as a frame stream.
+     *
+     * The engine's video path speaks `IVideoSource` — a plain stream of
+     * `VideoSourceFrame`s — while a capture device is a *device*: it
+     * enumerates, negotiates a format and fills a bounded queue.  The
+     * piece that bridges the two is a *concrete* adapter, and it lives
+     * in the capture module.
+     *
+     * The engine must not name that adapter: it reaches it through this
+     * seam instead.  That keeps the engine free of any concrete
+     * module include (ADR-025's Layering Invariant 4) while still
+     * letting the capture module own the conversion from the device's
+     * layout into the source's layout.
+     *
+     * The returned source does **not** own @p device: the caller keeps
+     * the device alive for at least as long as the source is used, so
+     * that one device can back more than one stream.
+     *
+     * @param device The device to present.  Must not be null.
+     * @param cfg    The source configuration.  `cfg.format` is the
+     *               *output* pixel format; the adapter fills the
+     *               dimensions in from the device's negotiated format.
+     * @return A new source, or null when one could not be created.  The
+     *         caller owns it.
+     */
+    [[nodiscard]] virtual IVideoSource* create_source(
+        IVideoCapture* device,
+        VideoSourceConfig cfg) const = 0;
 };
 
 } // namespace nimrtc::plugins

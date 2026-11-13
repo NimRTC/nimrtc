@@ -60,6 +60,7 @@
 #include <nimrtc/engine/engine.hpp>
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/video_capture/capture_source_adapter.hpp>
 
 namespace {
 
@@ -267,6 +268,12 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         last_ = c;
         return c;
+    }
+
+    np::IVideoSource* create_source(np::IVideoCapture* device,
+                                    np::VideoSourceConfig cfg) const override {
+        return nimrtc::video_capture::make_capture_source(device,
+                                                           std::move(cfg));
     }
 
     /** The device the engine created (the last one). */

@@ -57,10 +57,6 @@
 
 #include "engine_impl.hpp"
 
-#ifdef NIMRTC_HAS_VIDEO_CAPTURE
-#include <nimrtc/video_capture/capture_source_adapter.hpp>
-#endif
-
 #include <utility>
 
 namespace nimrtc::engine {
@@ -127,13 +123,29 @@ void NimRTCEngine::init_video_capture() noexcept {
     // alive across a reopen, which an owning adapter could not survive.
     // The engine holds the adapter through the *source* seam, so the
     // engine's own members never mention a concrete capture type.
+    //
+    // The adapter itself is a *concrete* type that lives in the capture
+    // module, so the engine cannot name it (ADR-025's Layering
+    // Invariant 4: the engine includes no concrete module header
+    // outside an enumerated list).  It reaches it through the factory
+    // seam instead — `create_source()` is the capture module's own
+    // answer to "present this device as a frame stream".
     plugins::VideoSourceConfig src_cfg{};
     src_cfg.format = kCaptureOutputFormat;
     src_cfg.ssrc   = config_.video_sender_tuning.ssrc;
 
-    auto* adapter = new video_capture::CaptureSourceAdapter(
-        video_capture_.get(), src_cfg);
-    video_capture_source_.reset(adapter);
+    plugins::IVideoSource* source =
+        factory->create_source(video_capture_.get(), src_cfg);
+    if (source == nullptr) {
+        const std::string msg =
+            std::string{"engine: video capture plugin '"}
+                + config_.video_capture_name
+                + "' could not create a source for its device";
+        core::log::Logger::instance().error(msg);
+        if (on_error_) on_error_(core::kVideoCapturePluginMissing, msg);
+        return;
+    }
+    video_capture_source_.reset(source);
 
     // The adapter's callback is the pump's delivery path.  It fires
     // synchronously inside `produce_one()`, which the pump calls from

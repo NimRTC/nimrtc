@@ -408,4 +408,32 @@ private:
     bool running_ = false;
 };
 
+// ---------------------------------------------------------------------------
+// The shared factory helper
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Create the source that presents @p capture as a frame stream.
+ *
+ * Every capture backend presents its device through the *same* adapter,
+ * so the factory seam (`plugins::IVideoCaptureFactory::create_source`)
+ * has a single implementation to point at.  A backend that needs a
+ * different presentation can override `create_source()` in its own
+ * factory.
+ *
+ * The returned source does **not** own @p capture: the caller keeps the
+ * device alive for at least as long as the source is used, so that one
+ * device can back more than one stream.
+ *
+ * @param capture The device to present.  Must not be null.
+ * @param cfg    The source configuration.  `cfg.format` is the *output*
+ *               pixel format; the adapter fills the dimensions in from
+ *               the device's negotiated format.
+ * @return A new source, or null when @p capture is null.  The caller
+ *         owns it.
+ */
+[[nodiscard]] NIMRTC_API_STABLE plugins::IVideoSource* make_capture_source(
+    plugins::IVideoCapture* capture,
+    plugins::VideoSourceConfig cfg) noexcept;
+
 } // namespace nimrtc::video_capture

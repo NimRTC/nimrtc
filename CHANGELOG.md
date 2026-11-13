@@ -1581,6 +1581,22 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     The inbound frames are encoded with the engine's *own* codec, so the
     bitstream is decodable whichever backend was selected.
 
+- **The raw-UDP ARQ loopback test failed on the macOS arm64 CI runner
+  (v1.2.0).**  `ArqRawUdpLoopback.HundredHertzLatency` asserted
+  `EXPECT_LT(p999, 15'000)` — "the worst sample must be under 15 ms".
+  With only 200 samples the "p999" index lands on the *maximum* sample,
+  so the assertion was really "not one single OS deschedule of the
+  sender thread may exceed 15 ms", which no amount of correctness in
+  the ARQ path can guarantee on a busy runner.  The macOS leg of the
+  2026-11-13 run measured `p50=12us p99=1840us p999=17724us` and took
+  9.07 s for a 2 s test — the median was fine and the tail was one
+  deschedule wide.
+  The bound now sits on **p99**, which is what the assertion was always
+  trying to say ("the path is not systematically slower than the send
+  interval"), and the maximum keeps a generous separate bound.  A
+  genuinely starved path still trips the test, because then *every*
+  sample exceeds the interval and so does p99.
+
 - **The per-instance media p99 budget was parsed, serialised, round-tripped
   through JSON and then silently dropped (v1.2.0, architecture remediation
   plan §4.2 / D2).**  A Profile's `transport.media.max_p99_ms` was read

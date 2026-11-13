@@ -197,12 +197,12 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
     //
     // The first packet goes out right away, so the peer learns about the
     // key press without waiting for the next tick.
-    Impl::DtmfTxEvent ev;
+    detail::AudioState::DtmfTxEvent ev;
     ev.code        = event_code;
     ev.duration_ms = duration_ms;
     ev.start       = core::SteadyClock::now();
     ev.next_send   = ev.start;
-    impl_->dtmf_tx_queue.push_back(ev);
+    impl_->audio_state.dtmf_tx_queue.push_back(ev);
 
     pump_dtmf_tx();
     return true;
@@ -213,14 +213,14 @@ bool NimRTCEngine::send_dtmf(std::uint8_t event_code,
 // ---------------------------------------------------------------------------
 
 void NimRTCEngine::pump_dtmf_tx() noexcept {
-    if (impl_->dtmf_tx_queue.empty()) return;
+    if (impl_->audio_state.dtmf_tx_queue.empty()) return;
 
     const auto now = core::SteadyClock::now();
 
     // The queue holds the events in order and a host may press the next
     // key before the previous event closed, so only the front event is
     // in progress.
-    Impl::DtmfTxEvent ev = impl_->dtmf_tx_queue.front();
+    detail::AudioState::DtmfTxEvent ev = impl_->audio_state.dtmf_tx_queue.front();
     if (now < ev.next_send) return;
 
     // How long the key has been held, in milliseconds.  The duration
@@ -257,18 +257,18 @@ void NimRTCEngine::pump_dtmf_tx() noexcept {
         core::log::Logger::instance().warn(
             "engine[dtmf]: the event packet could not be sent — the event "
             "was dropped");
-        impl_->dtmf_tx_queue.pop_front();
+        impl_->audio_state.dtmf_tx_queue.pop_front();
         return;
     }
 
     if (last) {
-        impl_->dtmf_tx_queue.pop_front();
+        impl_->audio_state.dtmf_tx_queue.pop_front();
         return;
     }
 
     // The next repeat goes out one interval later.
     ev.next_send = now + std::chrono::milliseconds(kDtmfPacketIntervalMs);
-    impl_->dtmf_tx_queue.front() = ev;
+    impl_->audio_state.dtmf_tx_queue.front() = ev;
 }
 
 bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
@@ -296,9 +296,9 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     // audio clock for a DTMF event would leave a gap in the media
     // timeline.
     rtp::PacketBuilder pb;
-    pb.set_ssrc(impl_->audio_ssrc)
-      .set_seq(impl_->audio_seq++)
-      .set_timestamp(impl_->audio_ts)
+    pb.set_ssrc(impl_->audio_state.audio_ssrc)
+      .set_seq(impl_->audio_state.audio_seq++)
+      .set_timestamp(impl_->audio_state.audio_ts)
       .set_payload_type(negotiated_dtmf_pt_)
       .set_marker(marker);
 
@@ -309,18 +309,18 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
     // Serialise into the DTMF scratch (Phase 3 / C4) — see the note on
     // `Impl::dtmf_rtp_scratch` for why this is not the audio scratch.
     const std::size_t pkt_size = pb.compute_size();
-    if (impl_->dtmf_rtp_scratch.size() < pkt_size) {
-        impl_->dtmf_rtp_scratch.resize(pkt_size);
+    if (impl_->scratch.dtmf_rtp_scratch.size() < pkt_size) {
+        impl_->scratch.dtmf_rtp_scratch.resize(pkt_size);
     }
     const std::size_t pkt_written =
-        pb.build_into(impl_->dtmf_rtp_scratch.data(),
-                      impl_->dtmf_rtp_scratch.size());
+        pb.build_into(impl_->scratch.dtmf_rtp_scratch.data(),
+                      impl_->scratch.dtmf_rtp_scratch.size());
     if (pkt_written == 0) {
         core::log::Logger::instance().error(
             "engine[dtmf]: the RTP packet could not be built");
         return false;
     }
-    const core::ByteSpan pkt_span(impl_->dtmf_rtp_scratch.data(), pkt_written);
+    const core::ByteSpan pkt_span(impl_->scratch.dtmf_rtp_scratch.data(), pkt_written);
 
     // --- Protect and send ----------------------------------------------
     //
@@ -334,11 +334,11 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
 
     const core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
     if (impl_->srtp_installed && impl_->srtp) {
-        auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
+        auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                /*outgoing=*/true);
         if (!sess) return false;
-        auto enc = sess->protect_rtp(out_payload, impl_->audio_ssrc,
-                                     impl_->audio_ts);
+        auto enc = sess->protect_rtp(out_payload, impl_->audio_state.audio_ssrc,
+                                     impl_->audio_state.audio_ts);
         if (!enc) return false;
         send_buf.assign(enc.value().data(),
                         enc.value().data() + enc.value().size());
@@ -347,9 +347,9 @@ bool NimRTCEngine::emit_dtmf_packet(std::uint8_t code,
                         out_payload.data() + out_payload.size());
     }
 
-    ++impl_->audio_packet_count;
-    impl_->audio_octet_count += static_cast<std::uint32_t>(payload.size());
-    ++impl_->dtmf_packets_sent;
+    ++impl_->audio_state.audio_packet_count;
+    impl_->audio_state.audio_octet_count += static_cast<std::uint32_t>(payload.size());
+    ++impl_->audio_state.dtmf_packets_sent;
 
     if (scheduler_) {
         scheduler_->enqueue_owned(plugins::Priority::kAudio,
@@ -377,11 +377,11 @@ void NimRTCEngine::handle_dtmf_payload(std::uint32_t ssrc,
     if (!dtmf_codec_ || !dtmf_codec_->decode(payload_view, event)) {
         // A malformed telephone-event payload is a peer bug or an
         // attack.  It is counted and dropped — never guessed at.
-        ++impl_->dtmf_packets_malformed;
+        ++impl_->audio_state.dtmf_packets_malformed;
         return;
     }
 
-    ++impl_->dtmf_packets_received;
+    ++impl_->audio_state.dtmf_packets_received;
 
     // --- Accumulate the duration (RFC 4733 §2.5.1.2) ------------------
     //
@@ -392,7 +392,7 @@ void NimRTCEngine::handle_dtmf_payload(std::uint32_t ssrc,
     //
     // The accumulator is per-SSRC, so two telephone-event streams do
     // not mix their durations.
-    auto& acc = impl_->dtmf_rx_by_ssrc[ssrc];
+    auto& acc = impl_->audio_state.dtmf_rx_by_ssrc[ssrc];
 
     if (!acc.active) {
         // A new event begins here (RFC 4733 §2.2.2: the marker bit
@@ -417,7 +417,7 @@ void NimRTCEngine::handle_dtmf_payload(std::uint32_t ssrc,
         finished.code        = acc.code;
         finished.duration_ms = acc.duration_ms;
         finished.end         = true;
-        ++impl_->dtmf_events_delivered;
+        ++impl_->audio_state.dtmf_events_delivered;
         if (on_dtmf_) on_dtmf_(finished);
 
         acc.active      = true;
@@ -435,7 +435,7 @@ void NimRTCEngine::handle_dtmf_payload(std::uint32_t ssrc,
     completed.duration_ms = acc.duration_ms;
     completed.end         = true;
 
-    ++impl_->dtmf_events_delivered;
+    ++impl_->audio_state.dtmf_events_delivered;
     if (on_dtmf_) on_dtmf_(completed);
 }
 

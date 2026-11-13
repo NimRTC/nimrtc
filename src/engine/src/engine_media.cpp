@@ -304,7 +304,7 @@ void NimRTCEngine::init_audio_modules() noexcept {
 
         if (!want_decoder || !want_receiver) {
             // Explicitly disabled by the host — no error, no pipeline.
-            impl_->audio_rx_disabled = true;
+            impl_->audio_state.audio_rx_disabled = true;
             core::log::Logger::instance().info(
                 "engine[audio]: the audio receive pipeline is disabled by "
                 "configuration (decoder=" +
@@ -321,7 +321,7 @@ void NimRTCEngine::init_audio_modules() noexcept {
         // host really installed.
         auto& reg = core::PluginRegistry::instance();
         if (reg.get_audio_decoder(config_.audio_decoder_name) == nullptr) {
-            impl_->audio_rx_disabled = true;
+            impl_->audio_state.audio_rx_disabled = true;
             if (on_error_) {
                 on_error_(core::kAudioDecoderMissing,
                           "the audio decoder plugin '" +
@@ -401,7 +401,7 @@ void NimRTCEngine::init_audio_modules() noexcept {
         if (!created || !audio_receiver_) {
             // `make_plugin` already reported the hard error exactly
             // once; the audio track stays off.
-            impl_->audio_rx_disabled = true;
+            impl_->audio_state.audio_rx_disabled = true;
             audio_receiver_.reset();
         }
     }
@@ -434,10 +434,10 @@ void NimRTCEngine::on_audio_frame_decoded(const plugins::AudioOutputFrame& frame
     const std::uint8_t channels = frame.channels != 0 ? frame.channels : 1;
     const std::size_t total_floats = samples_per_ch * channels;
 
-    ++impl_->audio_frames_received;
-    impl_->audio_samples_received += samples_per_ch;
-    if (frame.concealed)     ++impl_->audio_frames_concealed;
-    if (frame.fec_recovered) ++impl_->audio_frames_fec_recovered;
+    ++impl_->audio_state.audio_frames_received;
+    impl_->audio_state.audio_samples_received += samples_per_ch;
+    if (frame.concealed)     ++impl_->audio_state.audio_frames_concealed;
+    if (frame.fec_recovered) ++impl_->audio_state.audio_frames_fec_recovered;
 
     // AEC reference path.
     //
@@ -520,7 +520,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // The sink is created here (not in the constructor) so a session
     // that never touches video does not pay for it, and so a re-open()
     // starts from a clean slate.
-    impl_->video_stats.ensure_created();
+    impl_->video_state.video_stats.ensure_created();
 
     // ---- Our RTCP feedback SSRC (v1.1 Q3) ---------------------------------
     //
@@ -528,11 +528,11 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // The feedback we emit (NACK / PLI) is sent by *us* as the receiver of
     // the media, so it needs an SSRC of its own — distinct from the media
     // SSRCs, which identify the streams rather than the reporter.
-    if (impl_->video_feedback_ssrc_ == 0) {
+    if (impl_->video_state.video_feedback_ssrc_ == 0) {
         std::random_device rd;
         std::mt19937_64 mt(rd());
-        impl_->video_feedback_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
-        if (impl_->video_feedback_ssrc_ == 0) impl_->video_feedback_ssrc_ = 1;
+        impl_->video_state.video_feedback_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
+        if (impl_->video_state.video_feedback_ssrc_ == 0) impl_->video_state.video_feedback_ssrc_ = 1;
     }
 
     // ---- Video Capture device (remote-desktop plan A1) --------------------
@@ -668,7 +668,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 "name cannot be derived.";
             core::log::Logger::instance().error(msg);
             if (on_error_) on_error_(core::kEngineInvalidParam, msg);
-            impl_->last_open_rc = core::kEngineInvalidParam;
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
             // Leave the video plugins down: the engine cannot describe
             // this codec, so advertising a video m-line would be a lie.
             shutdown_video_plugins();
@@ -681,8 +681,8 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     const std::uint8_t video_pt = detail::resolve_payload_type(
         codec_family, config_.video_sender_tuning.payload_type);
 
-    impl_->video_codec_family = codec_family;
-    impl_->video_payload_type  = video_pt;
+    impl_->video_state.video_codec_family = codec_family;
+    impl_->video_state.video_payload_type  = video_pt;
 
     // ---- Video Receiver ----------------------------------------------------
     if (!video_receiver_) {
@@ -738,7 +738,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
     // ---- Video send pipeline: source → codec → sender → RTP+SRTP → scheduler
     //
     // Tracking state: the codec's force_keyframe() causes the NEXT encoded
-    // frame to be a keyframe. We track it in impl_->video_keyframe_pending_
+    // frame to be a keyframe. We track it in impl_->video_state.video_keyframe_pending_
     // (atomic bool) so it survives across send_video() calls.
     //
     // The video_source frame callback is NOT wired to the encode path
@@ -772,10 +772,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // the fallback, which keeps a host that drives the
                 // engine without SDP working.
                 const std::uint8_t negotiated_pt =
-                    impl_->negotiated_video_pt.load(std::memory_order_relaxed);
+                    impl_->video_state.negotiated_video_pt.load(std::memory_order_relaxed);
                 const std::uint8_t local_pt =
-                    impl_->video_payload_type != 0
-                        ? impl_->video_payload_type
+                    impl_->video_state.video_payload_type != 0
+                        ? impl_->video_state.video_payload_type
                         : config_.video_sender_tuning.payload_type;
                 const std::uint8_t pt = negotiated_pt != 0 ? negotiated_pt : local_pt;
 
@@ -797,7 +797,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                     const std::int64_t steady_us =
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             core::SteadyClock::now().time_since_epoch()).count();
-                    impl_->video_last_send_unix_us =
+                    impl_->video_state.video_last_send_unix_us =
                         impl_->timeline.boot_epoch_offset_us + steady_us;
                     if (impl_->timeline.local_abs_send_time_id != 0) {
                         const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
@@ -818,12 +818,12 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // scheduler's pooled outbound buffer — so it never escapes
                 // this callback.
                 const std::size_t built_size = pb.compute_size();
-                if (impl_->video_rtp_scratch.size() < built_size) {
-                    impl_->video_rtp_scratch.resize(built_size);
+                if (impl_->scratch.video_rtp_scratch.size() < built_size) {
+                    impl_->scratch.video_rtp_scratch.resize(built_size);
                 }
                 const std::size_t built_written =
-                    pb.build_into(impl_->video_rtp_scratch.data(),
-                                  impl_->video_rtp_scratch.size());
+                    pb.build_into(impl_->scratch.video_rtp_scratch.data(),
+                                  impl_->scratch.video_rtp_scratch.size());
                 if (built_written == 0) {
                     if (on_error_) {
                         on_error_(core::kVideoEncodeFailed,
@@ -846,14 +846,14 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // escape the call), so the engine's own scratch buffer
                 // can hold it.
                 std::vector<std::uint8_t>& rtp_pkt = scheduler_
-                    ? impl_->video_pkt_pooled
-                    : impl_->video_pkt_scratch;
+                    ? impl_->scratch.video_pkt_pooled
+                    : impl_->scratch.video_pkt_scratch;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
                         built_written + kSrtpAuthTagBytes);
                 }
-                rtp_pkt.assign(impl_->video_rtp_scratch.begin(),
-                               impl_->video_rtp_scratch.begin() +
+                rtp_pkt.assign(impl_->scratch.video_rtp_scratch.begin(),
+                               impl_->scratch.video_rtp_scratch.begin() +
                                    static_cast<std::ptrdiff_t>(built_written));
 
                 // ---- SRTP protect (if DTLS is connected) ----------------------
@@ -874,14 +874,14 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
                 // ---- Enqueue to scheduler (move, P0#3) or send directly -------
                 plugins::Priority prio = plugins::Priority::kVideo;
-                if (marker && impl_->video_keyframe_pending_.load(std::memory_order_acquire)) {
+                if (marker && impl_->video_state.video_keyframe_pending_.load(std::memory_order_acquire)) {
                     prio = plugins::Priority::kVideoKeyframe;
-                    impl_->video_keyframe_pending_.store(false, std::memory_order_release);
+                    impl_->video_state.video_keyframe_pending_.store(false, std::memory_order_release);
                 }
 
                 // v1.1 V1: count emitted RTP packets/bytes (post-protect size).
-                ++impl_->video_packets_sent;
-                impl_->video_bytes_sent += rtp_pkt.size();
+                ++impl_->video_state.video_packets_sent;
+                impl_->video_state.video_bytes_sent += rtp_pkt.size();
 
                 if (scheduler_) {
                     scheduler_->enqueue_owned(prio,
@@ -919,13 +919,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
             [this](const plugins::EncodedVideoFrame& enc,
                    plugins::TimestampUs /*now_us*/) {
                 // v1.1 V1: one assembled receiver frame (pre-decode).
-                ++impl_->video_frames_received;
+                ++impl_->video_state.video_frames_received;
                 // Phase 4.2 / D2: the video-quality statistics sink.  The
                 // frame has arrived but not been decoded yet, so this is
                 // the "received" event: it carries the frame's size (for
                 // the bitrate window), the keyframe flag (for the
                 // inter-keyframe EMA) and the QP (for the quality sum).
-                impl_->video_stats.on_frame_received(
+                impl_->video_state.video_stats.on_frame_received(
                     static_cast<std::int64_t>(enc.info.capture_ts_us),
                     static_cast<std::uint32_t>(enc.payload.size()),
                     enc.is_keyframe,
@@ -986,13 +986,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                     // decoder-side drop (Phase 4.2 / D2), and it is
                     // counted as such so a host can see a stream that
                     // arrives but never decodes.
-                    impl_->video_stats.on_frame_dropped(
+                    impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
                     return;
                 }
 
                 // Phase 4.2 / D2: the frame decoded successfully.
-                impl_->video_stats.on_frame_decoded(
+                impl_->video_state.video_stats.on_frame_decoded(
                     static_cast<std::int64_t>(enc.info.capture_ts_us));
 
                 const std::shared_ptr<video_frame::VideoFrameBuffer> cpu_buf =
@@ -1046,10 +1046,10 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // the "rendered" event — the freeze detector in the
                 // stats sink measures the gap between two of these.
                 if (render_rc == plugins::kOk) {
-                    impl_->video_stats.on_frame_rendered(
+                    impl_->video_state.video_stats.on_frame_rendered(
                         static_cast<std::int64_t>(enc.info.capture_ts_us));
                 } else {
-                    impl_->video_stats.on_frame_dropped(
+                    impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
                 }
             });
@@ -1074,7 +1074,7 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     // plugin — it has no open()/close().  Resetting it here clears the
     // per-session counters so a re-open() does not report the previous
     // session's freezes and drops.
-    impl_->video_stats.reset();
+    impl_->video_state.video_stats.reset();
     // The capture device (remote-desktop plan A1) is a *device*: it may
     // own an OS handle (a DXGI duplication, a PipeWire stream), so it
     // has to be closed explicitly rather than merely dropped.
@@ -1092,12 +1092,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // rate, fires `on_error`").  A host whose PCM never reaches the
     // wire has to be able to see *why*.
     auto report_error = [&](std::uint32_t code, const char* msg) {
-        ++impl_->audio_encode_errors;
+        ++impl_->audio_state.audio_encode_errors;
         const auto now = std::chrono::steady_clock::now();
-        if (impl_->audio_last_error_report ==
+        if (impl_->audio_state.audio_last_error_report ==
                 std::chrono::steady_clock::time_point{} ||
-            now - impl_->audio_last_error_report >= std::chrono::seconds(1)) {
-            impl_->audio_last_error_report = now;
+            now - impl_->audio_state.audio_last_error_report >= std::chrono::seconds(1)) {
+            impl_->audio_state.audio_last_error_report = now;
             if (on_error_) on_error_(code, msg);
         }
     };
@@ -1131,12 +1131,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     const std::size_t channels =
         static_cast<std::size_t>(std::max<std::uint8_t>(1, config_.pcm_channels));
     const std::size_t total_floats = num_samples * channels;
-    if (impl_->audio_pcm_buf.size() < total_floats) {
-        impl_->audio_pcm_buf.resize(total_floats);
+    if (impl_->scratch.audio_pcm_buf.size() < total_floats) {
+        impl_->scratch.audio_pcm_buf.resize(total_floats);
     }
-    std::memcpy(impl_->audio_pcm_buf.data(), pcm_samples,
+    std::memcpy(impl_->scratch.audio_pcm_buf.data(), pcm_samples,
                 total_floats * sizeof(float));
-    float* pcm = impl_->audio_pcm_buf.data();
+    float* pcm = impl_->scratch.audio_pcm_buf.data();
 
     // 3A — prefer plugin adapter; fall back to concrete NullAudio3A.
     if (audio3a_plugin_) {
@@ -1177,8 +1177,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // encoded, so the wire format does not depend on how the host
     // chunks its capture.  The residual stays in the accumulator across
     // calls; a partial frame is never encoded.
-    impl_->audio_accum.insert(impl_->audio_accum.end(), pcm, pcm + total_floats);
-    impl_->audio_samples_in += num_samples;
+    impl_->audio_state.audio_accum.insert(impl_->audio_state.audio_accum.end(), pcm, pcm + total_floats);
+    impl_->audio_state.audio_samples_in += num_samples;
 
     // ---- Emit one RTP packet per frame --------------------------------
     auto emit_frame = [&](const float* frame_pcm) -> std::uint32_t {
@@ -1193,14 +1193,14 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         //
         // Reuse Impl::audio_codec_pkt (P0#4) — capacity grows monotonically.
         const std::size_t needed = frame_samples * sizeof(float) + 64;
-        if (impl_->audio_codec_pkt.size() < needed) {
-            impl_->audio_codec_pkt.resize(needed);
+        if (impl_->scratch.audio_codec_pkt.size() < needed) {
+            impl_->scratch.audio_codec_pkt.resize(needed);
         }
         std::size_t codec_len = 0;
         if (codec_plugin_) {
             codec_len = codec_plugin_->encode(frame_pcm, frame_samples,
-                                             impl_->audio_codec_pkt.data(),
-                                             impl_->audio_codec_pkt.size());
+                                             impl_->scratch.audio_codec_pkt.data(),
+                                             impl_->scratch.audio_codec_pkt.size());
             if (codec_len == 0) {
                 // A-8: the frame is lost, but never silently.  The counter
                 // grows, the host is told (throttled), and the media clock
@@ -1222,8 +1222,8 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
             // The frame is lost, but never silently: the sequence number
             // leaves a gap and the media clock keeps running, so the peer
             // sees a *loss* rather than a hole in the timeline (A-8).
-            ++impl_->audio_seq;                       // gap in the sequence
-            impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
+            ++impl_->audio_state.audio_seq;                       // gap in the sequence
+            impl_->audio_state.audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;
         }
 
@@ -1235,14 +1235,14 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // must see that number on the wire.  Before a negotiation has
         // happened the configured one is used.
         const std::uint8_t outbound_pt =
-            impl_->negotiated_audio_pt != 0
-                ? impl_->negotiated_audio_pt
+            impl_->audio_state.negotiated_audio_pt != 0
+                ? impl_->audio_state.negotiated_audio_pt
                 : config_.audio_codec.payload_type;
 
         rtp::PacketBuilder pb;
-        pb.set_ssrc(impl_->audio_ssrc)
-          .set_seq(impl_->audio_seq++)
-          .set_timestamp(impl_->audio_ts)
+        pb.set_ssrc(impl_->audio_state.audio_ssrc)
+          .set_seq(impl_->audio_state.audio_seq++)
+          .set_timestamp(impl_->audio_state.audio_ts)
           .set_payload_type(outbound_pt)
           .set_marker(false);
 
@@ -1272,7 +1272,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // `boot_epoch_offset_us` is the wall clock at monotonic zero, so
         // the sum is this packet's send instant on the Unix timeline —
         // the same basis the abs-send-time encoder uses.
-        impl_->audio_last_send_unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
+        impl_->audio_state.audio_last_send_unix_us = impl_->timeline.boot_epoch_offset_us + steady_us;
         if (impl_->timeline.local_abs_send_time_id != 0) {
             const std::uint32_t ast24 = rtp::encode_abs_send_time_24(
                 std::chrono::microseconds{steady_us},
@@ -1282,7 +1282,7 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         }
     }
 
-        pb.set_payload(core::ByteSpan(impl_->audio_codec_pkt.data(), codec_len));
+        pb.set_payload(core::ByteSpan(impl_->scratch.audio_codec_pkt.data(), codec_len));
 
         // ---- Serialise into the reusable scratch (Phase 3 / C4) --------------
         //
@@ -1291,35 +1291,35 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // scratch instead, so the steady-state send path performs no heap
         // allocation for the RTP header + payload copy.
         const std::size_t pkt_size = pb.compute_size();
-        if (impl_->audio_rtp_scratch.size() < pkt_size) {
-            impl_->audio_rtp_scratch.resize(pkt_size);
+        if (impl_->scratch.audio_rtp_scratch.size() < pkt_size) {
+            impl_->scratch.audio_rtp_scratch.resize(pkt_size);
         }
         const std::size_t pkt_written =
-            pb.build_into(impl_->audio_rtp_scratch.data(),
-                          impl_->audio_rtp_scratch.size());
+            pb.build_into(impl_->scratch.audio_rtp_scratch.data(),
+                          impl_->scratch.audio_rtp_scratch.size());
         if (pkt_written == 0) {
             report_error(core::kAudioEncodeFailed,
                          "send_audio: the RTP packet could not be built");
-            impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
+            impl_->audio_state.audio_ts += static_cast<std::uint32_t>(frame_samples);
             return 0;
         }
-        core::ByteSpan pkt_span(impl_->audio_rtp_scratch.data(), pkt_written);
+        core::ByteSpan pkt_span(impl_->scratch.audio_rtp_scratch.data(), pkt_written);
 
         // Count for the Sender Report body (RFC 3550 §6.4.1 sender info). The
         // RTP timestamp is sampled *before* SRTP so the SR and the media packet
         // it anchors describe the same media position; the octet count is the
         // payload length, which is what the peer subtracts to check.
-        const std::uint32_t cur_ts = impl_->audio_ts;
-        ++impl_->audio_packet_count;
-        impl_->audio_octet_count += static_cast<std::uint32_t>(codec_len);
-        impl_->audio_rtp_timestamp = cur_ts;
-        ++impl_->audio_frames_sent;
-        impl_->audio_bytes_sent += pkt_span.size();
+        const std::uint32_t cur_ts = impl_->audio_state.audio_ts;
+        ++impl_->audio_state.audio_packet_count;
+        impl_->audio_state.audio_octet_count += static_cast<std::uint32_t>(codec_len);
+        impl_->audio_state.audio_rtp_timestamp = cur_ts;
+        ++impl_->audio_state.audio_frames_sent;
+        impl_->audio_state.audio_bytes_sent += pkt_span.size();
 
         // The media clock advances by the frame duration whether or not the
         // packet reaches the wire (A-7): a dropped frame leaves a gap in
         // the sequence number, never a gap in the timeline.
-        impl_->audio_ts += static_cast<std::uint32_t>(frame_samples);
+        impl_->audio_state.audio_ts += static_cast<std::uint32_t>(frame_samples);
 
         // SRTP protect (or pass-through when not yet keyed).
         //
@@ -1337,21 +1337,21 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // the call).  Before this the no-scheduler path allocated a fresh
         // vector per packet.
         std::vector<std::uint8_t>& send_buf = scheduler_
-            ? impl_->audio_pkt_pooled
-            : impl_->audio_pkt_scratch;
+            ? impl_->scratch.audio_pkt_pooled
+            : impl_->scratch.audio_pkt_scratch;
         if (scheduler_) {
             send_buf = scheduler_->acquire_packet_buffer(
                 pkt_span.size() + kSrtpAuthTagBytes);
         }
         core::ByteSpan out_payload(pkt_span.data(), pkt_span.size());
         if (impl_->srtp_installed && impl_->srtp) {
-            auto* sess = impl_->srtp->get_session(impl_->audio_ssrc,
+            auto* sess = impl_->srtp->get_session(impl_->audio_state.audio_ssrc,
                                                    /*outgoing=*/true);
             if (!sess) {
                 // SRTP installed but no session for this SSRC — drop.
                 return 0;
             }
-            auto enc = sess->protect_rtp(out_payload, impl_->audio_ssrc, cur_ts);
+            auto enc = sess->protect_rtp(out_payload, impl_->audio_state.audio_ssrc, cur_ts);
             if (!enc) return 0;
             send_buf.assign(enc.value().data(),
                             enc.value().data() + enc.value().size());
@@ -1381,9 +1381,9 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     // packet.  A partial frame stays behind for the next call.
     std::uint32_t rc = 0;
     std::size_t emitted_frames = 0;
-    std::size_t available = impl_->audio_accum.size() / channels;
+    std::size_t available = impl_->audio_state.audio_accum.size() / channels;
     while (available >= frame_samples) {
-        const float* frame_pcm = impl_->audio_accum.data() +
+        const float* frame_pcm = impl_->audio_state.audio_accum.data() +
                                  emitted_frames * frame_samples * channels;
         const std::uint32_t frame_rc = emit_frame(frame_pcm);
         emitted_frames += frame_samples;
@@ -1397,12 +1397,12 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
     }
 
     if (emitted_frames > 0) {
-        impl_->audio_accum.erase(
-            impl_->audio_accum.begin(),
-            impl_->audio_accum.begin() +
+        impl_->audio_state.audio_accum.erase(
+            impl_->audio_state.audio_accum.begin(),
+            impl_->audio_state.audio_accum.begin() +
                 static_cast<std::ptrdiff_t>(emitted_frames * channels));
     }
-    impl_->audio_accum_frames = impl_->audio_accum.size() / channels;
+    impl_->audio_state.audio_accum_frames = impl_->audio_state.audio_accum.size() / channels;
     return rc;
 }
 
@@ -1488,13 +1488,13 @@ plugins::Status NimRTCEngine::send_video(
             video_codec_->encode_zero_copy(gpu, encoded);
         if (zc_rc == plugins::kOk) {
             encoded_ok = true;
-            ++impl_->video_zero_copy_frames;
+            ++impl_->video_state.video_zero_copy_frames;
         } else {
             // The codec refused the handle (wrong backend, surface busy,
             // driver error, ...).  Fall through to the CPU path *only* if
             // the source also gave us CPU pixels — otherwise there is
             // nothing to stage and the frame is simply lost.
-            ++impl_->video_zero_copy_fallbacks;
+            ++impl_->video_state.video_zero_copy_fallbacks;
             core::log::Logger::instance().warn(
                 "send_video: the zero-copy encode failed — falling back "
                 "to the CPU staging path");
@@ -1503,14 +1503,14 @@ plugins::Status NimRTCEngine::send_video(
         // The host asked for zero-copy but the codec cannot consume a
         // handle.  Count the missed opportunity so the host can see that
         // the flag alone does not buy anything with this codec.
-        ++impl_->video_zero_copy_fallbacks;
+        ++impl_->video_state.video_zero_copy_fallbacks;
     }
 
     if (!encoded_ok) {
         // The codec-facing pixel format comes from the codec's own config
         // (I420 for every backend today).
         const auto codec_fmt = video_codec_->config().pixel_format;
-        raw.buffer = stage_source_frame(frame, codec_fmt, impl_->video_frame_pool);
+        raw.buffer = stage_source_frame(frame, codec_fmt, impl_->scratch.video_frame_pool);
         if (!raw.buffer) {
             // The frame cannot be staged (no planes, zero dimensions, or a
             // packed source format).  Software codecs can still encode a
@@ -1528,25 +1528,25 @@ plugins::Status NimRTCEngine::send_video(
         // codec.  H.264 frames can spike above 64 KiB (high-bitrate 1080p60)
         // — when that happens we resize and pay one reallocation.
         constexpr std::size_t kInitialVideoEncCap = 64 * 1024;
-        if (impl_->video_enc_buf.capacity() < kInitialVideoEncCap) {
-            impl_->video_enc_buf.reserve(kInitialVideoEncCap);
+        if (impl_->scratch.video_enc_buf.capacity() < kInitialVideoEncCap) {
+            impl_->scratch.video_enc_buf.reserve(kInitialVideoEncCap);
         }
         const auto enc_rc = video_codec_->encode(raw,
-                                                 impl_->video_enc_buf.data(),
-                                                 impl_->video_enc_buf.capacity(),
+                                                 impl_->scratch.video_enc_buf.data(),
+                                                 impl_->scratch.video_enc_buf.capacity(),
                                                  encoded);
         if (enc_rc != plugins::kOk) {
             // Codec may need a larger buffer than reserved (e.g. very high
             // bitrate IDR).  Resize to the codec's expected capacity and retry
             // exactly once to avoid an unbounded loop on a misbehaving codec.
             const std::size_t needed = encoded.payload.size();
-            if (needed == 0 || needed > impl_->video_enc_buf.capacity() * 4) {
+            if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
                 return plugins::kErrInternal;  // give up on pathological sizes
             }
-            impl_->video_enc_buf.reserve(needed);
+            impl_->scratch.video_enc_buf.reserve(needed);
             if (video_codec_->encode(raw,
-                                     impl_->video_enc_buf.data(),
-                                     impl_->video_enc_buf.capacity(),
+                                     impl_->scratch.video_enc_buf.data(),
+                                     impl_->scratch.video_enc_buf.capacity(),
                                      encoded) != plugins::kOk) {
                 return plugins::kErrInternal;
             }
@@ -1556,14 +1556,14 @@ plugins::Status NimRTCEngine::send_video(
     // Mark keyframe so the sender packet callback gives it kVideoKeyframe
     // priority (consumed on the marker=true packet).
     if (encoded.is_keyframe) {
-        impl_->video_keyframe_pending_.store(true, std::memory_order_release);
+        impl_->video_state.video_keyframe_pending_.store(true, std::memory_order_release);
     }
 
     // Phase 4.2 / D2: record the encoded frame in the *outbound* quality
     // statistics.  The QP is the encoder's own quality signal — it says
     // how much detail the encoder had to drop to hit the bitrate — so it
     // belongs to the outbound stream, not to the inbound one.
-    impl_->video_stats.on_frame_encoded(
+    impl_->video_state.video_stats.on_frame_encoded(
         static_cast<std::int64_t>(encoded.info.capture_ts_us),
         static_cast<std::uint32_t>(encoded.payload.size()),
         encoded.is_keyframe,
@@ -1574,7 +1574,7 @@ plugins::Status NimRTCEngine::send_video(
     const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
     if (push_rc == plugins::kOk) {
         // v1.1 V1: one encoded frame accepted by the sender pipeline.
-        ++impl_->video_frames_sent;
+        ++impl_->video_state.video_frames_sent;
         // v1.1 T1: record the outbound ref_frame mapping (id == frame_seq).
         record_video_ref_frame(static_cast<std::uint64_t>(frame.frame_seq),
                                static_cast<std::int64_t>(frame.capture_ts_us));
@@ -1599,12 +1599,12 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
         const int actions = video_sender_->apply_feedback_rtcp(view);
         // v1.1 V1: inbound feedback actions (retransmissions + keyframe reqs).
         if (actions > 0) {
-            impl_->video_feedback_applied += static_cast<std::uint64_t>(actions);
+            impl_->video_state.video_feedback_applied += static_cast<std::uint64_t>(actions);
         }
         const std::uint32_t keyframe_requests =
             video_sender_->take_keyframe_requests();
         if (keyframe_requests > 0) {
-            impl_->video_keyframes_applied += keyframe_requests;
+            impl_->video_state.video_keyframes_applied += keyframe_requests;
             if (video_codec_) {
                 (void)video_codec_->force_keyframe();
             }
@@ -1634,8 +1634,8 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
     const core::ByteSpan compound(view.data(), view.size());
     // Phase 3 / C6: demultiplex into the engine's reusable vector, so
     // the receive path performs no heap allocation per RTCP datagram.
-    rtp::demux_rtcp(compound, impl_->rtcp_blocks_scratch);
-    const std::vector<rtp::RtcpBlock>& blocks = impl_->rtcp_blocks_scratch;
+    rtp::demux_rtcp(compound, impl_->scratch.rtcp_blocks_scratch);
+    const std::vector<rtp::RtcpBlock>& blocks = impl_->scratch.rtcp_blocks_scratch;
     const core::TimePoint now = core::SteadyClock::now();
 
     for (const rtp::RtcpBlock& blk : blocks) {
@@ -1651,10 +1651,10 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                     // whether or not the cross-end timeline is enabled —
                     // the peer's report is a fact about the wire, not about
                     // our feature set.
-                    if (sr.value().ssrc == impl_->audio_rx.ssrc) {
-                        impl_->audio_rx.last_sr_lsr =
+                    if (sr.value().ssrc == impl_->audio_state.audio_rx.ssrc) {
+                        impl_->audio_state.audio_rx.last_sr_lsr =
                             rtp::Ntp64{sr.value().ntp_timestamp}.mid_32();
-                        impl_->audio_rx.last_sr_recv_us = detail::steady_now_us();
+                        impl_->audio_state.audio_rx.last_sr_recv_us = detail::steady_now_us();
                     }
 
                     if (!config_.timeline_enabled) {
@@ -1707,7 +1707,7 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // would say the *peer's* receive quality is bad, which is
                 // not what a NACK tells us.
                 if (blk.fmt == 1) {
-                    impl_->video_stats.on_rtcp_feedback_tx(
+                    impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kNACK);
                 }
                 if (net_feedback_) {
@@ -1731,10 +1731,10 @@ void NimRTCEngine::handle_rtcp(plugins::BufferView view) noexcept {
                 // decode our stream because a reference frame was lost on
                 // the way to it.
                 if (blk.fmt == 1) {   // PLI — RFC 4585 §6.3.1
-                    impl_->video_stats.on_rtcp_feedback_tx(
+                    impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kPLI);
                 } else if (blk.fmt == 4) {   // FIR — RFC 5104 §4.3.1
-                    impl_->video_stats.on_rtcp_feedback_tx(
+                    impl_->video_state.video_stats.on_rtcp_feedback_tx(
                         detail::VideoFeedbackKind::kFIR);
                 }
                 if (net_feedback_) {
@@ -1776,8 +1776,8 @@ void NimRTCEngine::queue_video_feedback(
     if (report.missing_seqs.empty() && !report.want_keyframe) return;
 
     // v1.1 V1: outbound feedback queued (NACK seqs + keyframe requests).
-    impl_->video_nack_seqs_queued += report.missing_seqs.size();
-    if (report.want_keyframe) ++impl_->video_keyframes_q;
+    impl_->video_state.video_nack_seqs_queued += report.missing_seqs.size();
+    if (report.want_keyframe) ++impl_->video_state.video_keyframes_q;
 
     // Phase 4.2 / D2: record the feedback we are about to send.  A NACK
     // means the *peer* lost picture data on the **inbound** stream (the
@@ -1788,38 +1788,38 @@ void NimRTCEngine::queue_video_feedback(
     // A key-frame request means the peer is already resynchronising
     // because a reference frame never arrived.
     if (!report.missing_seqs.empty()) {
-        impl_->video_stats.on_rtcp_feedback(
+        impl_->video_state.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kNACK);
     }
     if (report.want_keyframe) {
-        impl_->video_stats.on_rtcp_feedback(
+        impl_->video_state.video_stats.on_rtcp_feedback(
             detail::VideoFeedbackKind::kPLI);
     }
 
     // Merge into the pending report: two gaps detected back to back must
     // not cost two round trips, and a NACK list plus a key-frame request
     // belong in the same feedback packet anyway.
-    if (!impl_->has_pending_video_feedback_) {
-        impl_->pending_video_feedback_ = report;
-        impl_->has_pending_video_feedback_ = true;
+    if (!impl_->video_state.has_pending_video_feedback_) {
+        impl_->video_state.pending_video_feedback_ = report;
+        impl_->video_state.has_pending_video_feedback_ = true;
         return;
     }
-    impl_->pending_video_feedback_.missing_seqs.insert(
-        impl_->pending_video_feedback_.missing_seqs.end(),
+    impl_->video_state.pending_video_feedback_.missing_seqs.insert(
+        impl_->video_state.pending_video_feedback_.missing_seqs.end(),
         report.missing_seqs.begin(), report.missing_seqs.end());
-    impl_->pending_video_feedback_.want_keyframe =
-        impl_->pending_video_feedback_.want_keyframe || report.want_keyframe;
+    impl_->video_state.pending_video_feedback_.want_keyframe =
+        impl_->video_state.pending_video_feedback_.want_keyframe || report.want_keyframe;
 }
 
 
 void NimRTCEngine::flush_video_feedback() noexcept {
-    if (!impl_->has_pending_video_feedback_) return;
+    if (!impl_->video_state.has_pending_video_feedback_) return;
     // Take the report out of the queue *before* sending: a send failure
     // must not make the engine retry the same report forever.
     const plugins::VideoFeedbackReport report =
-        impl_->pending_video_feedback_;
-    impl_->pending_video_feedback_ = plugins::VideoFeedbackReport{};
-    impl_->has_pending_video_feedback_ = false;
+        impl_->video_state.pending_video_feedback_;
+    impl_->video_state.pending_video_feedback_ = plugins::VideoFeedbackReport{};
+    impl_->video_state.has_pending_video_feedback_ = false;
 
     if (!video_receiver_) return;
     if (!ice_t_ || !is_ice_connected()) return;
@@ -1833,8 +1833,8 @@ void NimRTCEngine::flush_video_feedback() noexcept {
     std::vector<std::uint8_t> buf(needed);
     const std::size_t written = video_receiver_->build_feedback_rtcp(
         report,
-        impl_->video_feedback_ssrc_,   // we are the feedback sender
-        impl_->remote_video_ssrc_,     // the peer's video stream is the media source
+        impl_->video_state.video_feedback_ssrc_,   // we are the feedback sender
+        impl_->video_state.remote_video_ssrc_,     // the peer's video stream is the media source
         core::MutableByteSpan{buf.data(), buf.size()});
     if (written == 0 || written > buf.size()) return;
 
@@ -2075,17 +2075,17 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     Stats out;
     out.srtp_drops = impl_->srtp_stats_drop;
     // v1.1 V1: cumulative video counters (additive; zero when unused).
-    out.video_frames_sent       = impl_->video_frames_sent;
-    out.video_packets_sent      = impl_->video_packets_sent;
-    out.video_bytes_sent        = impl_->video_bytes_sent;
-    out.video_frames_received   = impl_->video_frames_received;
-    out.video_nack_seqs_queued  = impl_->video_nack_seqs_queued;
-    out.video_keyframes_q       = impl_->video_keyframes_q;
-    out.video_feedback_applied  = impl_->video_feedback_applied;
-    out.video_keyframes_applied = impl_->video_keyframes_applied;
+    out.video_frames_sent       = impl_->video_state.video_frames_sent;
+    out.video_packets_sent      = impl_->video_state.video_packets_sent;
+    out.video_bytes_sent        = impl_->video_state.video_bytes_sent;
+    out.video_frames_received   = impl_->video_state.video_frames_received;
+    out.video_nack_seqs_queued  = impl_->video_state.video_nack_seqs_queued;
+    out.video_keyframes_q       = impl_->video_state.video_keyframes_q;
+    out.video_feedback_applied  = impl_->video_state.video_feedback_applied;
+    out.video_keyframes_applied = impl_->video_state.video_keyframes_applied;
     // Phase 3 / C3: the zero-copy path counters.
-    out.video_zero_copy_frames    = impl_->video_zero_copy_frames;
-    out.video_zero_copy_fallbacks = impl_->video_zero_copy_fallbacks;
+    out.video_zero_copy_frames    = impl_->video_state.video_zero_copy_frames;
+    out.video_zero_copy_fallbacks = impl_->video_state.video_zero_copy_fallbacks;
 
     // ---- Video quality statistics (Phase 4.2 / D2) ----------------------
     //
@@ -2098,8 +2098,8 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // The two directions are kept apart (Chrome's `inbound-rtp` /
     // `outbound-rtp` split): the freeze count and the drop attribution
     // describe what the *peer* sent us, the QP describes what *we* sent.
-    if (impl_->video_stats.active()) {
-        const auto rx = impl_->video_stats.snapshot_rx();
+    if (impl_->video_state.video_stats.active()) {
+        const auto rx = impl_->video_state.video_stats.snapshot_rx();
         out.video_freeze_count    = rx.freeze_count;
         out.video_freeze_total_ms = rx.freeze_total_ms;
         out.video_last_freeze_ms  = rx.last_freeze_ms;
@@ -2113,7 +2113,7 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
         out.video_frames_decoded   = rx.frames_decoded;
         out.video_frames_rendered  = rx.frames_rendered;
 
-        const auto tx = impl_->video_stats.snapshot_tx();
+        const auto tx = impl_->video_state.video_stats.snapshot_tx();
         out.video_qp_sum           = tx.qp_sum;
         out.video_qp_count         = tx.qp_count;
         out.video_tx_frames_encoded = tx.frames_received;
@@ -2136,11 +2136,11 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // WP-5: the audio send counters.  `audio_encode_errors` is the one
     // that matters to a host: it counts the PCM that was accepted and
     // then could not be encoded, which used to disappear silently.
-    out.audio_frames_sent     = impl_->audio_frames_sent;
-    out.audio_bytes_sent      = impl_->audio_bytes_sent;
-    out.audio_encode_errors   = impl_->audio_encode_errors;
-    out.audio_samples_in      = impl_->audio_samples_in;
-    out.audio_samples_pending = impl_->audio_accum_frames;
+    out.audio_frames_sent     = impl_->audio_state.audio_frames_sent;
+    out.audio_bytes_sent      = impl_->audio_state.audio_bytes_sent;
+    out.audio_encode_errors   = impl_->audio_state.audio_encode_errors;
+    out.audio_samples_in      = impl_->audio_state.audio_samples_in;
+    out.audio_samples_pending = impl_->audio_state.audio_accum_frames;
 
     // ---- Audio receive counters (v1.2.0, audio pipeline WP-8) ---------
     //
@@ -2152,11 +2152,11 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // party that knows which slots were concealed and how deep the
     // jitter buffer was — so the numbers come from there and are not
     // re-derived here (spec B-13).
-    out.audio_packets_sent         = impl_->audio_packet_count;
-    out.audio_frames_received      = impl_->audio_frames_received;
-    out.audio_samples_received     = impl_->audio_samples_received;
-    out.audio_concealed_frames     = impl_->audio_frames_concealed;
-    out.audio_fec_recovered_frames = impl_->audio_frames_fec_recovered;
+    out.audio_packets_sent         = impl_->audio_state.audio_packet_count;
+    out.audio_frames_received      = impl_->audio_state.audio_frames_received;
+    out.audio_samples_received     = impl_->audio_state.audio_samples_received;
+    out.audio_concealed_frames     = impl_->audio_state.audio_frames_concealed;
+    out.audio_fec_recovered_frames = impl_->audio_state.audio_frames_fec_recovered;
 
     if (audio_receiver_) {
         const auto rx = audio_receiver_->stats();
@@ -2175,10 +2175,10 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // peer never negotiated one — the state in which a received
     // telephone-event payload counts as an unknown audio payload type
     // (decision D4).
-    out.dtmf_packets_sent      = impl_->dtmf_packets_sent;
-    out.dtmf_packets_received  = impl_->dtmf_packets_received;
-    out.dtmf_packets_malformed = impl_->dtmf_packets_malformed;
-    out.dtmf_events_delivered  = impl_->dtmf_events_delivered;
+    out.dtmf_packets_sent      = impl_->audio_state.dtmf_packets_sent;
+    out.dtmf_packets_received  = impl_->audio_state.dtmf_packets_received;
+    out.dtmf_packets_malformed = impl_->audio_state.dtmf_packets_malformed;
+    out.dtmf_events_delivered  = impl_->audio_state.dtmf_events_delivered;
     out.dtmf_payload_type      = negotiated_dtmf_pt_;
 
     // The bitrate the outbound audio encoder currently runs at — the

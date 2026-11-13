@@ -82,13 +82,13 @@ std::uint32_t NimRTCEngine::rtcp_reporter_ssrc() noexcept {
     // §6.1).  It is the *same* SSRC the receiver report uses: both
     // identify us as the party making the statement.  The media SSRCs
     // identify the streams, not the reporter.
-    if (impl_->rtcp_sender_ssrc_ == 0) {
+    if (impl_->audio_state.rtcp_sender_ssrc_ == 0) {
         std::random_device rd;
         std::mt19937_64 mt(rd());
-        impl_->rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
-        if (impl_->rtcp_sender_ssrc_ == 0) impl_->rtcp_sender_ssrc_ = 1;
+        impl_->audio_state.rtcp_sender_ssrc_ = static_cast<std::uint32_t>(mt() & 0xFFFFFFFFu);
+        if (impl_->audio_state.rtcp_sender_ssrc_ == 0) impl_->audio_state.rtcp_sender_ssrc_ = 1;
     }
-    return impl_->rtcp_sender_ssrc_;
+    return impl_->audio_state.rtcp_sender_ssrc_;
 }
 
 
@@ -173,7 +173,7 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
     const bool may_send_dlrr = impl_->xr.local_xr_rcvr_rtt &&
                                impl_->xr.peer_rr_ssrc != 0;
     const bool may_send_stat = impl_->xr.peer_xr_stat_summary &&
-                               impl_->audio_rx.ssrc != 0;
+                               impl_->audio_state.audio_rx.ssrc != 0;
 
     if (!may_send_rrtr && !may_send_dlrr && !may_send_stat) return;
 
@@ -245,7 +245,7 @@ void NimRTCEngine::maybe_send_extended_report() noexcept {
     // numbers the peer sees in the summary are the same ones the
     // receiver report carries.
     if (may_send_stat) {
-        const Impl::AudioRxState& rx = impl_->audio_rx;
+        const detail::AudioState::AudioRxState& rx = impl_->audio_state.audio_rx;
 
         // The interval is the sequence space since the last summary
         // (RFC 3611 §4.6 — begin_seq / end_seq bracket the reported
@@ -383,10 +383,10 @@ void NimRTCEngine::maybe_send_tmmbr() noexcept {
     // from the inbound RTP header.  Until we have seen a packet there
     // is no media source to name, and a tuple about an unknown source
     // would be meaningless to the peer.
-    if (impl_->audio_rx.ssrc == 0) return;
+    if (impl_->audio_state.audio_rx.ssrc == 0) return;
 
     rtp::TmmbrEntry entry;
-    entry.ssrc = impl_->audio_rx.ssrc;
+    entry.ssrc = impl_->audio_state.audio_rx.ssrc;
     entry.bitrate_bps = target_bps;
 
     // The feedback sender's SSRC is the engine's own RTCP SSRC: the
@@ -499,7 +499,7 @@ void NimRTCEngine::on_tmmbr_received(std::uint32_t sender_ssrc,
     // honour: the peer is asking some *other* sender to throttle.  The
     // engine only sends audio (and video), so a tuple about an unknown
     // SSRC is recorded but not applied.
-    if (media_ssrc != 0 && media_ssrc != impl_->audio_ssrc) {
+    if (media_ssrc != 0 && media_ssrc != impl_->audio_state.audio_ssrc) {
         core::log::Logger::instance().debug(
             "engine[tmmbr]: inbound TMMBR names a foreign media source; ignored");
         return;

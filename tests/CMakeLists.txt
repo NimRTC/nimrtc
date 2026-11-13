@@ -1465,6 +1465,89 @@ if(COMMAND gtest_discover_tests)
 endif()
 
 # ---------------------------------------------------------------------------
+# ADR-023 — the plugin id contract, enforced by a test rather than by prose.
+#
+# `docs/adr/ADR-023-plugin-id-naming-contract.md` Decision 7 requires the
+# grammar, the rejection behaviour and the macro spelling to be verified by
+# `tests/test_plugin_id_contract.cpp` instead of described in a Markdown
+# file.  A contract that only exists in prose is not a contract.
+#
+# The test needs the same link shape as `test_registry_contract` above:
+# it drives `register_all_default_plugins()` and then reads every
+# registry slot, so it must link every module that appears in the
+# unified `kDefaultRegistrars[]` table (the GNU ld archive-order
+# rationale is documented on that target).
+# ---------------------------------------------------------------------------
+add_executable(test_plugin_id_contract test_plugin_id_contract.cpp)
+if(WIN32)
+    target_link_libraries(test_plugin_id_contract PRIVATE ws2_32)
+elseif(APPLE)
+    target_link_libraries(test_plugin_id_contract PRIVATE c++ pthread)
+else()
+    target_link_libraries(test_plugin_id_contract PRIVATE atomic)
+endif()
+target_link_libraries(test_plugin_id_contract PRIVATE
+    # LINK-ORDER CRITICAL — see the note on `test_registry_contract`:
+    # `nimrtc_core_objects` holds `pal_default_registrars.cpp.o`, the
+    # unified `kDefaultRegistrars[]` table, and its object file must be
+    # pulled into the link BEFORE the module archives.
+    nimrtc_core_objects
+    nimrtc::core
+    nimrtc::transport
+    nimrtc::ice
+    nimrtc::rtp
+    nimrtc::sdp
+    nimrtc::jb
+    nimrtc::audio3a
+    nimrtc::bwe
+    nimrtc::sched
+    nimrtc::dtls_seam
+    nimrtc::sctp
+    nimrtc::raw_udp
+    nimrtc::datachannel
+    nimrtc::net_feedback
+    nimrtc::web_transport
+    nimrtc::session
+    GTest::gtest_main)
+# The remaining modules from the unified `kDefaultRegistrars[]` table.
+# They are gated behind `NIMRTC_MODULE_*` options, so each one is linked
+# only when it was actually built.
+foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
+              video_capture audio_rx dtmf srtp)
+    if(TARGET nimrtc::${_mod})
+        target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
+    endif()
+endforeach()
+target_include_directories(test_plugin_id_contract PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/core/include"
+    "${CMAKE_SOURCE_DIR}/src/plugins/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include")
+if(WIN32)
+    target_compile_definitions(test_plugin_id_contract PRIVATE _WIN32_WINNT=0x0601)
+endif()
+set_target_properties(test_plugin_id_contract PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+nimrtc_apply_options(test_plugin_id_contract LENIENT)
+add_test(NAME test_plugin_id_contract
+    COMMAND $<TARGET_FILE:test_plugin_id_contract>)
+set_tests_properties(test_plugin_id_contract PROPERTIES TIMEOUT 30)
+# The target links `nimrtc::web_transport`, whose msquic dependency is a
+# runtime DLL on Windows (see the note on `test_registry_contract`).
+nimrtc_copy_msquic_dll(test_plugin_id_contract)
+# The target links the DTLS seam (and thus the wolfSSL backend), which
+# resolves its certificate from disk at DTLS-session setup time.
+nimrtc_copy_wolfssl_certs(test_plugin_id_contract)
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_plugin_id_contract
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10
+        DISCOVERY_MODE PRE_TEST)
+endif()
+
+# ---------------------------------------------------------------------------
 # TPAL-4 cleanup (v0.11.0) — DTLS seam engine-routing regression test.
 #
 # Verifies that engine.cpp routes DTLS through the PAL Slice 4 seam

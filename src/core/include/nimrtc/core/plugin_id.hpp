@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nimrtc/core/plugin_id.hpp
  * @brief NIMRTC_PLUGIN_ID — compile-time-unique plugin id literal wrapper (PAL Slice 3).
  *
@@ -82,6 +82,7 @@
 // see ADR-015 / docs/plan/v0.13-plan.md). Per-symbol sweep is
 // a v0.13.x follow-up.
 
+#include <cstdint>
 #include <string_view>
 #include <nimrtc/core/api_version.hpp>
 
@@ -113,6 +114,60 @@ constexpr bool is_valid_plugin_id(std::string_view id) noexcept {
         if (!ok) return false;
     }
     return true;
+}
+
+/**
+ * @brief Why a plugin id was rejected (ADR-023 Decision 4).
+ *
+ * The registry-side validation reports *what* is wrong with the id, not
+ * just *that* something is wrong: "it does not match the grammar" sends
+ * the reader back to the grammar, while "it starts with a digit" or "it
+ * contains a space" tells the reader what to fix.
+ *
+ * The reason is deliberately coarse — it names the *class* of defect,
+ * not the exact byte offset — because the fix is always the same (use
+ * a lowercase id), and a precise offset on a static-init diagnostic is
+ * noise.
+ */
+enum class PluginIdError : std::uint8_t {
+    /// The id satisfies the grammar.
+    kNone,
+    /// The id is empty.
+    kEmpty,
+    /// The first character is not a lowercase ASCII letter.
+    kBadFirstCharacter,
+    /// A character outside the grammar appears somewhere in the id.
+    kBadCharacter,
+};
+
+/// @brief Classify why @p id fails the grammar (ADR-023 Decision 4).
+constexpr PluginIdError classify_plugin_id(std::string_view id) noexcept {
+    if (id.empty()) return PluginIdError::kEmpty;
+    const char first = id[0];
+    if (first < 'a' || first > 'z') return PluginIdError::kBadFirstCharacter;
+    for (std::size_t i = 1; i < id.size(); ++i) {
+        const char c = id[i];
+        const bool ok = (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') ||
+                        c == '_' || c == '-';
+        if (!ok) return PluginIdError::kBadCharacter;
+    }
+    return PluginIdError::kNone;
+}
+
+/// @brief A human-readable description of @p error.
+constexpr const char* describe_plugin_id_error(PluginIdError error) noexcept {
+    switch (error) {
+        case PluginIdError::kNone:
+            return "the id matches the grammar";
+        case PluginIdError::kEmpty:
+            return "the id is empty";
+        case PluginIdError::kBadFirstCharacter:
+            return "the id does not start with a lowercase ASCII letter";
+        case PluginIdError::kBadCharacter:
+            return "the id contains a character outside [a-z0-9_-]";
+    }
+    return "the id does not match the grammar";
 }
 
 /**

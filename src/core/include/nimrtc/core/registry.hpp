@@ -72,6 +72,9 @@
 #include <nimrtc/core/nimrtc_export.h>   // NIMRTC_API ??see header for
                                           // Windows DLL boundary rationale.
 #include <nimrtc/core/api_version.hpp>    // NIMRTC_API_STABLE
+#include <nimrtc/core/log.hpp>            // ADR-023 Decision 4: the
+                                          // registration-time diagnostic.
+#include <nimrtc/core/plugin_id.hpp>      // ADR-023: the id grammar.
 
 // Forward declarations of plugin interfaces ??no full definitions needed here,
 // just the factory type names. Full definitions are in the respective headers.
@@ -279,8 +282,46 @@ class NIMRTC_API_STABLE TypedRegistry {
     std::vector<std::pair<std::string, const T*>> entries_;
     mutable std::mutex mutex_;
 
+    // The family's name, used only in the rejection diagnostic
+    // (ADR-023 Decision 4).  "the id is bad" is not actionable; "the
+    // audio-decoder id is bad" is.
+    const char* family_;
+
 public:
+    /// @param family  The family's name, used in the registration-time
+    ///                 diagnostic (ADR-023 Decision 4).  A short, stable
+    ///                 slug such as "audio-decoder".
+    explicit TypedRegistry(const char* family) noexcept : family_(family) {}
+
+    /// Register @p factory under @p id.
+    ///
+    /// The id is validated against the ADR-023 grammar
+    /// (`^[a-z][a-z0-9_-]*$`).  A malformed id is **not** registered and
+    /// produces a diagnostic that names the offending id, the family and
+    /// the reason (ADR-023 Decision 4).  The rest of the registry is
+    /// unaffected: one bad plugin does not poison the other families.
+    ///
+    /// Registration happens at static-init time, so the diagnostic goes
+    /// to the core logger rather than to an exception — a throw from a
+    /// static initialiser terminates the process before `main`, with a
+    /// message that names no plugin.
+    ///
+    /// The overwrite-on-duplicate behaviour is unchanged: a duplicate id
+    /// is a late-binding overwrite, not an error.  A duplicate is
+    /// therefore *not* caught by the validation — the overwrite itself
+    /// is the diagnostic.
     void register_one(std::string_view id, const T* factory) {
+        if (const auto error = detail::classify_plugin_id(id);
+            error != detail::PluginIdError::kNone) {
+            log::Logger::instance().error(
+                std::string("nimrtc::core::PluginRegistry: rejected a ") +
+                (family_ != nullptr ? family_ : "plugin") +
+                " plugin id \"" + std::string(id) + "\": " +
+                detail::describe_plugin_id_error(error) +
+                ". A plugin id must match ^[a-z][a-z0-9_-]*$ "
+                "(see docs/adr/ADR-023-plugin-id-naming-contract.md).");
+            return;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [k, v] : entries_) {
             if (k == id) {
@@ -806,53 +847,57 @@ public:
     }
 
 private:
-    TypedRegistry<plugins::ITransportFactory>    transport_;
-    TypedRegistry<plugins::IICETransportFactory> ice_transport_;
-    TypedRegistry<plugins::IRTPFactory>          rtp_;
-    TypedRegistry<plugins::ISDPFactory>          sdp_;
-    TypedRegistry<plugins::IJBFactory>           jb_;
-    TypedRegistry<plugins::IAudio3AFactory>      audio3a_;
-    TypedRegistry<plugins::ICodecFactory>        codec_;
-    TypedRegistry<plugins::IAudioDecoderFactory> audio_decoder_;
-    TypedRegistry<plugins::IAudioReceiverFactory> audio_receiver_;
+    // Each slot names its family, so the registration-time rejection
+    // diagnostic can say *which* family rejected the id (ADR-023
+    // Decision 4).  The family slug matches the `register_<family>()`
+    // method name that fills the slot.
+    TypedRegistry<plugins::ITransportFactory>    transport_{"transport"};
+    TypedRegistry<plugins::IICETransportFactory> ice_transport_{"ice-transport"};
+    TypedRegistry<plugins::IRTPFactory>          rtp_{"rtp"};
+    TypedRegistry<plugins::ISDPFactory>          sdp_{"sdp"};
+    TypedRegistry<plugins::IJBFactory>           jb_{"jb"};
+    TypedRegistry<plugins::IAudio3AFactory>      audio3a_{"audio3a"};
+    TypedRegistry<plugins::ICodecFactory>        codec_{"codec"};
+    TypedRegistry<plugins::IAudioDecoderFactory> audio_decoder_{"audio-decoder"};
+    TypedRegistry<plugins::IAudioReceiverFactory> audio_receiver_{"audio-receiver"};
     // v1.2.0 (session capability plan N1 / T1): the session-model
     // slot.  The built-in model registers under "session".
-    TypedRegistry<plugins::ISessionFactory>     session_;
+    TypedRegistry<plugins::ISessionFactory>     session_{"session"};
     // v1.2.0 (session capability plan D1 / D2): the RFC 4733
     // (telephone-event) slot.  The built-in codec registers under
     // "dtmf".
-    TypedRegistry<plugins::IDtmfCodecFactory>    dtmf_;
-    TypedRegistry<plugins::IVideoCodecFactory>   video_codec_;
-    TypedRegistry<plugins::IVideoSourceFactory>  video_source_;
+    TypedRegistry<plugins::IDtmfCodecFactory>    dtmf_{"dtmf"};
+    TypedRegistry<plugins::IVideoCodecFactory>   video_codec_{"video-codec"};
+    TypedRegistry<plugins::IVideoSourceFactory>  video_source_{"video-source"};
     // Remote-desktop plan A1: the capture-*device* seam.  Distinct from
     // the source seam above: a source produces frames, a capture produces
     // frames *from a device*, with enumeration, negotiation, region
     // selection and dirty-rect metadata.
-    TypedRegistry<plugins::IVideoCaptureFactory> video_capture_;
-    TypedRegistry<plugins::IVideoSinkFactory>    video_sink_;
-    TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_;
-    TypedRegistry<plugins::IVideoSenderFactory>   video_sender_;
-    TypedRegistry<plugins::IBweFactory>           bwe_;
-    TypedRegistry<plugins::ISchedulerFactory>     scheduler_;
+    TypedRegistry<plugins::IVideoCaptureFactory> video_capture_{"video-capture"};
+    TypedRegistry<plugins::IVideoSinkFactory>    video_sink_{"video-sink"};
+    TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_{"video-receiver"};
+    TypedRegistry<plugins::IVideoSenderFactory>   video_sender_{"video-sender"};
+    TypedRegistry<plugins::IBweFactory>           bwe_{"bwe"};
+    TypedRegistry<plugins::ISchedulerFactory>     scheduler_{"scheduler"};
     // v1.2.0 M1 (F2): typed factory slot for the network-feedback
     // collector seam.  The built-in collector registers under
     // "nimrtc_net_feedback".
-    TypedRegistry<plugins::INetFeedbackFactory>    net_feedback_;
+    TypedRegistry<plugins::INetFeedbackFactory>    net_feedback_{"net-feedback"};
     // v1.2.0 (session capability plan X1): typed factory slot for the
     // RTCP Extended Report consumer seam.  The built-in consumer
     // registers under "nimrtc_xr".
-    TypedRegistry<plugins::IXrReportFactory>       xr_report_;
+    TypedRegistry<plugins::IXrReportFactory>       xr_report_{"xr-report"};
     // DataChannel P2 typed slot — see register_datachannel() above for
     // the rationale.
-    TypedRegistry<plugins::IDataChannelFactory>   datachannel_;
+    TypedRegistry<plugins::IDataChannelFactory>   datachannel_{"datachannel"};
     // Transport PAL Slice 8 (v0.10.2) ??typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
     // `register_default_plugins()` publishes a single factory into
     // its matching slot via the `register_*` public methods above.
-    TypedRegistry<dtls::IDtlsSessionFactory>       dtls_session_;
-    TypedRegistry<sctp::ISctpSocketFactory>        sctp_socket_;
-    TypedRegistry<raw_udp::IRawUdpFactory>         raw_udp_;
-    TypedRegistry<ITransportStackFactory>          transport_stack_;
+    TypedRegistry<dtls::IDtlsSessionFactory>       dtls_session_{"dtls-session"};
+    TypedRegistry<sctp::ISctpSocketFactory>        sctp_socket_{"sctp-socket"};
+    TypedRegistry<raw_udp::IRawUdpFactory>         raw_udp_{"raw-udp"};
+    TypedRegistry<ITransportStackFactory>          transport_stack_{"transport-stack"};
     // v0.14.0 alpha.2 (ADR-014): typed factory slot for the
     // WebTransport / QUIC seam.  Empty at the alpha.2 cut; the
     // msquic factory lands in beta.1 and is published via
@@ -861,10 +906,10 @@ private:
     // `EngineConfig::datachannel_backend` at any point in the
     // cycle.
     TypedRegistry<web_transport::IWebTransportSessionFactory>
-                                                web_transport_;
+                                                web_transport_{"web-transport"};
     // v1.2.0 (remediation plan B7 / Q3): the SRTP crypto backend slot.
     // The built-in libsrtp adapter registers under "libsrtp".
-    TypedRegistry<plugins::ISrtpBackendFactory>  srtp_backend_;
+    TypedRegistry<plugins::ISrtpBackendFactory>  srtp_backend_{"srtp-backend"};
 };
 
 // ---------------------------------------------------------------------------

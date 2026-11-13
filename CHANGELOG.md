@@ -1829,6 +1829,73 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test in `src/modules/video_source/tests/test_video_source.cpp` already
   used — and 30 consecutive isolated runs after the change pass.
 
+- **The Windows Graphics Capture backend used the D3D objects after they
+  had been freed (remote-desktop plan A3).**  `WgcCapture` owns a
+  *free-threaded* frame pool, so `FrameArrived` is raised on a WinRT
+  thread-pool thread — a thread the device does not own.  The device
+  kept that thread's inputs (the scratch buffer, the dirty-rect
+  detector, the configuration) on *itself*, and `close()` released the
+  D3D objects as soon as the in-flight counter reached zero.  Two
+  consequences, both of them crashes:
+  - A handler that was *already dispatched* to the thread pool but had
+    not started yet still started after `close()` returned, and read the
+    released device, context and staging texture.  Unsubscribing stops
+    new events, but it does not cancel an invocation that is already in
+    flight.
+  - Two handlers running at the same time (which a free-threaded pool
+    is allowed to do) both read back into the same scratch buffer and
+    both mutated the same dirty-rect detector.
+
+  The capture state is now owned by a `shared_ptr` that every handler
+  holds, so it — and every buffer, counter and configuration the
+  handler touches — outlives the device that created it.  The D3D
+  objects are released by the state's destructor, that is, after the
+  last handler has finished, and a handler that starts after the
+  capture was stopped returns without doing any work.  The handlers are
+  serialised against each other, and the capture thread publishes the
+  device, the context, the pool and the staging texture under the same
+  lock, so there is no unordered access left.  Measured on a developer
+  machine: `WgcCapture.OpeningOnANonWindowsHostReportsUnsupported`
+  (which opens *and* closes the device) segfaulted 1 run in 20 before
+  the fix and 0 in 50 after it, in both the Debug and the Release
+  build.
+
+- **`Profile::video` had no default member initializer, so the build
+  failed on every GCC platform.**  The `video` block was added to
+  `assembly::Profile` for the profile schema v1.2, but the member was
+  declared as a bare `VideoSection video;`.  A designated initialiser
+  that omits it — which is every one of the nine built-in scenario
+  profiles except `remote-desktop` — is a *missing field initializer*
+  under GCC's `-Wmissing-field-initializers`, and the build promotes
+  that warning to an error:
+
+      src/modules/assembly/include/nimrtc/assembly/profiles.hpp:177:1:
+      error: missing initializer for member
+      'nimrtc::assembly::Profile::video' [-Werror=missing-field-initializers]
+
+  The member now carries an explicit `= {}` default member
+  initializer.  GCC treats a member with a default member initializer
+  as *not* missing, so the nine profiles compile clean again, and the
+  semantics are unchanged: an omitted `video` block still yields the
+  default (camera-like) section.  This unblocked the `linux-gcc`
+  (x86_64 and aarch64) and `linux-sanitizers` CI legs.
+
+- **Two dead BGRA converters reddened the Clang builds.**  The capture
+  adapter carried its own `bgra_to_i420` and `bgra_to_nv12` helpers in
+  an anonymous namespace, but nothing called them: the adapter uses
+  the canonical `video_frame::convert_bgra_to_i420_color` and
+  `convert_bgra_to_nv12_color`, which additionally carry the colour
+  description.  Clang reports the unused ones, and the build promotes
+  that to an error:
+
+      src/modules/video_capture/src/capture_source_adapter.cpp:58:6:
+      error: unused function 'bgra_to_i420' [-Werror,-Wunused-function]
+
+  The two superseded copies are removed.  `bgra_to_rgba` stays: the
+  packed-RGBA output has no canonical equivalent.  This unblocked the
+  `linux-fuzz`, `linux-sanitizers / tsan.clang` and `macos-clang`
+  CI legs.
+
 - **The TURN relay suite no longer depends on a fixed UDP port window
   (v1.2.0).**  The tests pinned the TURN server's ports (64000,
   64010-64031) and its relay-port ranges (64100-64499).  Windows

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -222,6 +223,20 @@ HWND window_from_id(const std::string& id) {
  *
  * The WinRT objects are held here rather than in the public header, so
  * the C++/WinRT types never leak into it.
+ *
+ * ## Why the state is shared
+ *
+ * The frame-arrival handler runs on a WinRT thread-pool thread, and it
+ * can still be running while the owner tears the device down.  The
+ * handler therefore holds its own `shared_ptr` to this object, which
+ * keeps the object — and every buffer, counter and callback the handler
+ * touches — alive for exactly as long as the handler needs it.  If the
+ * state were owned by a bare pointer, the handler would read freed
+ * memory the moment `close()` released it.
+ *
+ * For the same reason *everything the handler touches lives here* and
+ * not on the owning device: the owning device may be destroyed while
+ * the handler is still running, and the handler must not depend on it.
  */
 class WgcCaptureState {
 public:
@@ -268,7 +283,64 @@ public:
      *  released. */
     std::atomic<int> in_flight_{0};
 
+    /** Serialises the frame-arrival handlers against each other *and*
+     * against the teardown.
+     *
+     * A free-threaded frame pool may raise `FrameArrived` on more than
+     * one thread-pool thread at the same time, and the handler owns
+     * exclusive use of the readback buffers and of the dirty-rect
+     * detector while it runs.  Without this lock two handlers would
+     * read back into the same buffer and corrupt each other's frame.
+     *
+     * It also orders the handler's read of `pool_` against the
+     * teardown's reset of it: copying a `shared_ptr` while another
+     * thread assigns to it is a data race, and a torn pointer is a
+     * crash. */
+    std::mutex handler_mutex_;
+
+    // ---- Everything the frame-arrival handler touches --------------------
+    //
+    // The handler runs on a thread the device does not own, so it may
+    // still be running when the device is destroyed.  Every piece of
+    // state it reads or writes therefore belongs to *this* object,
+    // which the handler keeps alive through its own `shared_ptr`.
+
+    /** The negotiated configuration.  The handler needs the region and
+     *  the cursor preference. */
+    plugins::CaptureConfig cfg;
+
+    /** The delivery callback.  Guarded by `cb_mutex_` so that it can
+     *  be installed while the capture is already running. */
+    plugins::CaptureFrameCallback cb;
+    std::mutex cb_mutex_;
+
+    /** The pixel buffer the readback fills (the whole surface). */
+    std::vector<std::uint8_t> scratch;
+
+    /** The cropped buffer, used when a sub-region was requested. */
+    std::vector<std::uint8_t> region_scratch;
+
+    /** The changed-region detector (remote-desktop plan A7).  WGC reports
+     *  no damage, so the region is computed by comparing the frame with
+     *  the previous one. */
+    DirtyRectDetector dirty_detector{4};
+
+    /** The frame sequence counter.  Only the frame-arrival thread
+     *  touches it. */
+    std::atomic<std::uint32_t> frame_index{0};
+
+    /** The counters.  They are written by the frame-arrival thread and
+     *  read by the engine's tick thread, so they are atomic. */
+    std::atomic<std::uint64_t> frames_captured{0};
+    std::atomic<std::uint64_t> frames_dropped{0};
+    std::atomic<std::uint64_t> device_errors{0};
+    std::atomic<std::uint64_t> bytes_copied{0};
+
     ~WgcCaptureState() {
+        // The state is destroyed only once the last `shared_ptr` to it
+        // is gone: the device has dropped its reference and every
+        // frame-arrival handler has finished.  Releasing the D3D
+        // objects here is therefore safe.
         stop_thread();
         release_d3d();
     }
@@ -317,7 +389,7 @@ plugins::Status WgcCapture::open() noexcept {
     // WGC has no enumeration of its own: a capture item is created for a
     // monitor handle or a window handle.  The ids below are the ones
     // `enumerate_devices()` produces.
-    auto state = std::make_unique<WgcCaptureState>();
+    auto state = std::make_shared<WgcCaptureState>();
 
     if (!cfg_.device_id.empty()) {
         HWND window = window_from_id(cfg_.device_id);
@@ -395,15 +467,28 @@ plugins::Status WgcCapture::open() noexcept {
     state->queue_.set_drop_policy(cfg_.drop_policy);
     if (cfg_.queue_depth > 0) state->queue_.set_depth(cfg_.queue_depth);
 
+    // The negotiated configuration and the delivery callback belong to
+    // the *state*, because the frame-arrival handler reads them from
+    // the thread-pool thread — a thread that must not depend on the
+    // owning device, which may be gone by then.
+    state->cfg = cfg_;
+    {
+        std::lock_guard<std::mutex> lock(state->cb_mutex_);
+        state->cb = cb_;
+    }
+
     const std::size_t bytes = static_cast<std::size_t>(state->source_width_) *
                               static_cast<std::size_t>(state->source_height_) *
                               4u;
-    scratch_.assign(bytes, 0u);
+    state->scratch.assign(bytes, 0u);
 
-    frame_index_ = 0;
+    state->frame_index.store(0, std::memory_order_relaxed);
     state_ = std::move(state);
     state_->running_.store(true, std::memory_order_release);
-    state_->thread_ = std::thread([this]() { capture_loop(); });
+    // The capture thread and the frame-arrival handler both keep the
+    // state alive on their own; the device holds a reference only so
+    // that it can shut them down.
+    state_->thread_ = std::thread([s = state_]() { capture_loop(s); });
 
     open_ = true;
     return plugins::kOk;
@@ -422,14 +507,38 @@ void WgcCapture::close() noexcept {
         while (state_->in_flight_.load(std::memory_order_acquire) > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        state_->pool_.reset();
-        state_->release_d3d();
+        // The handler mutex orders this reset against the handler's
+        // read of `pool_`.  (The in-flight wait above already
+        // guarantees that no handler is *inside* the critical section,
+        // but the lock makes the ordering explicit rather than relying
+        // on the counter alone.)
+        {
+            std::lock_guard<std::mutex> lock(state_->handler_mutex_);
+            state_->pool_.reset();
+        }
+        //
+        // The D3D objects are deliberately *not* released here.
+        //
+        // A free-threaded frame pool may already have dispatched a
+        // handler invocation to the thread pool at the moment the
+        // capture thread unsubscribes: unsubscribing stops new
+        // events, but an invocation that was already dispatched still
+        // starts — and it starts *after* this point.  Releasing the
+        // device here would leave that late handler reading freed
+        // memory.
+        //
+        // The objects belong to the state, and every handler holds a
+        // `shared_ptr` to it, so they are released when the state is
+        // destroyed — that is, after the last handler has finished.
     }
     state_.reset();
-    scratch_.clear();
-    scratch_.shrink_to_fit();
-    region_scratch_.clear();
-    region_scratch_.shrink_to_fit();
+}
+
+void WgcCapture::set_frame_callback(plugins::CaptureFrameCallback cb) noexcept {
+    cb_ = std::move(cb);
+    if (!state_) return;
+    std::lock_guard<std::mutex> lock(state_->cb_mutex_);
+    state_->cb = cb_;
 }
 
 std::vector<plugins::CaptureDevice>
@@ -485,8 +594,9 @@ WgcCapture::capabilities() const noexcept {
     return c;
 }
 
-void WgcCapture::capture_loop() noexcept {
-    if (!state_) return;
+void WgcCapture::capture_loop(
+        std::shared_ptr<WgcCaptureState> state) noexcept {
+    if (!state) return;
 
     // WinRT needs an apartment.  MTA is the right one here: the frame
     // arrives on a thread-pool thread, and the capture thread only
@@ -494,8 +604,8 @@ void WgcCapture::capture_loop() noexcept {
     const HRESULT co_hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(co_hr)) {
         core::log::Logger::instance().error("wgc: CoInitializeEx failed");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         return;
     }
 
@@ -508,27 +618,36 @@ void WgcCapture::capture_loop() noexcept {
                                         D3D_FEATURE_LEVEL_11_0,
                                         D3D_FEATURE_LEVEL_10_1,
                                         D3D_FEATURE_LEVEL_10_0};
-    const HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
-        static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
-        D3D11_SDK_VERSION, &state_->device_, nullptr, &state_->context_);
-    if (FAILED(hr) || state_->device_ == nullptr) {
+    HRESULT hr = E_FAIL;
+    {
+        // The pointers are published under the handler mutex, so that
+        // the handler cannot read them while they are being written.
+        // The device creation itself is *not* done under the lock: it
+        // is slow, and no handler can be running yet (the frame pool
+        // does not exist yet, so no frame can have arrived).
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
+            static_cast<UINT>(sizeof(levels) / sizeof(levels[0])),
+            D3D11_SDK_VERSION, &state->device_, nullptr, &state->context_);
+    }
+    if (FAILED(hr) || state->device_ == nullptr) {
         core::log::Logger::instance().error("wgc: D3D11CreateDevice failed");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
 
     // ---- The WinRT Direct3D11 device ---------------------------------------
     IDXGIDevice* dxgi_device = nullptr;
-    if (FAILED(state_->device_->QueryInterface(
+    if (FAILED(state->device_->QueryInterface(
             __uuidof(IDXGIDevice),
             reinterpret_cast<void**>(&dxgi_device))) ||
         dxgi_device == nullptr) {
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -540,8 +659,8 @@ void WgcCapture::capture_loop() noexcept {
     if (FAILED(dev_hr) || raw_device == nullptr) {
         core::log::Logger::instance().error(
             "wgc: CreateDirect3D11DeviceFromDXGIDevice failed");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -557,8 +676,8 @@ void WgcCapture::capture_loop() noexcept {
     // host.  Its cost is that the FrameArrived event is raised on a
     // thread-pool thread — which the multithreaded D3D11 device above
     // already accommodates.
-    const UINT src_w = state_->source_width_;
-    const UINT src_h = state_->source_height_;
+    const UINT src_w = state->source_width_;
+    const UINT src_h = state->source_height_;
 
     std::shared_ptr<Direct3D11CaptureFramePool> pool;
     try {
@@ -572,12 +691,18 @@ void WgcCapture::capture_loop() noexcept {
         core::log::Logger::instance().error(
             "wgc: the frame pool could not be created (this build of "
             "Windows may not support free-threaded capture)");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
-    state_->pool_ = pool;
+    {
+        // Publish the pool under the handler mutex: the handler reads
+        // it, and copying a `shared_ptr` while another thread assigns
+        // to it is a data race.
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        state->pool_ = pool;
+    }
 
     // ---- The capture item --------------------------------------------------
     //
@@ -596,21 +721,21 @@ void WgcCapture::capture_loop() noexcept {
     if (FAILED(factory_hr) || interop == nullptr) {
         core::log::Logger::instance().error(
             "wgc: the GraphicsCaptureItem factory is not available");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
 
     GraphicsCaptureItem item = nullptr;
     HRESULT item_hr = E_FAIL;
-    if (state_->window_ != nullptr) {
+    if (state->window_ != nullptr) {
         item_hr = interop->CreateForWindow(
-            state_->window_, winrt::guid_of<GraphicsCaptureItem>(),
+            state->window_, winrt::guid_of<GraphicsCaptureItem>(),
             winrt::put_abi(item));
     } else {
         item_hr = interop->CreateForMonitor(
-            state_->monitor_, winrt::guid_of<GraphicsCaptureItem>(),
+            state->monitor_, winrt::guid_of<GraphicsCaptureItem>(),
             winrt::put_abi(item));
     }
     interop->Release();
@@ -619,8 +744,8 @@ void WgcCapture::capture_loop() noexcept {
         core::log::Logger::instance().error(
             "wgc: the capture item could not be created (the user may not "
             "have granted the capture capability)");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -632,8 +757,8 @@ void WgcCapture::capture_loop() noexcept {
     } catch (const winrt::hresult_error&) {
         core::log::Logger::instance().error(
             "wgc: the capture session could not be created");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -641,7 +766,7 @@ void WgcCapture::capture_loop() noexcept {
     // The pointer is composited by the OS into the captured surface —
     // this is the reason to choose WGC over DXGI.
     try {
-        session.IsCursorCaptureEnabled(cfg_.want_cursor);
+        session.IsCursorCaptureEnabled(state->cfg.want_cursor);
     } catch (const winrt::hresult_error&) {
         // The interface is optional; an older Windows simply keeps the
         // default (cursor off).
@@ -669,26 +794,32 @@ void WgcCapture::capture_loop() noexcept {
         desc.Usage            = D3D11_USAGE_STAGING;
         desc.BindFlags        = 0;
         desc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
-        if (FAILED(state_->device_->CreateTexture2D(&desc, nullptr,
-                                                    &state_->staging_))) {
+        std::lock_guard<std::mutex> lock(state->handler_mutex_);
+        if (FAILED(state->device_->CreateTexture2D(&desc, nullptr,
+                                                    &state->staging_))) {
             core::log::Logger::instance().error(
                 "wgc: the staging texture could not be created");
-            device_errors_.fetch_add(1, std::memory_order_relaxed);
-            state_->running_.store(false, std::memory_order_release);
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
+            state->running_.store(false, std::memory_order_release);
             ::CoUninitialize();
             return;
         }
-        state_->staging_width_  = desc.Width;
-        state_->staging_height_ = desc.Height;
+        state->staging_width_  = desc.Width;
+        state->staging_height_ = desc.Height;
     }
 
     // ---- The frame subscription ----------------------------------------------
     //
     // The handler runs on a WinRT thread-pool thread.  It does the
     // readback and the push; it must not block.
-    auto handler = [this](Direct3D11CaptureFramePool const&,
-                           winrt::Windows::Foundation::IInspectable const&) {
-        on_frame_arrived();
+    //
+    // The handler captures the *state*, never the owning device: it may
+    // still be running when the device is destroyed, and it must not
+    // touch freed memory.  The state it captures keeps itself alive for
+    // as long as the handler runs.
+    auto handler = [state](Direct3D11CaptureFramePool const&,
+                            winrt::Windows::Foundation::IInspectable const&) {
+        WgcCapture::on_frame_arrived(state);
     };
     winrt::event_token token{};
     try {
@@ -696,8 +827,8 @@ void WgcCapture::capture_loop() noexcept {
     } catch (const winrt::hresult_error&) {
         core::log::Logger::instance().error(
             "wgc: the FrameArrived subscription failed");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
-        state_->running_.store(false, std::memory_order_release);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -707,9 +838,9 @@ void WgcCapture::capture_loop() noexcept {
         session.StartCapture();
     } catch (const winrt::hresult_error&) {
         core::log::Logger::instance().error("wgc: StartCapture failed");
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
         pool->FrameArrived(token);
-        state_->running_.store(false, std::memory_order_release);
+        state->running_.store(false, std::memory_order_release);
         ::CoUninitialize();
         return;
     }
@@ -720,7 +851,7 @@ void WgcCapture::capture_loop() noexcept {
     // frames arrive on the thread-pool thread.  It waits here so that
     // `close()` can join it and the objects stay alive for as long as
     // the session runs.
-    while (state_->running_.load(std::memory_order_acquire)) {
+    while (state->running_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
@@ -730,32 +861,53 @@ void WgcCapture::capture_loop() noexcept {
     } catch (const winrt::hresult_error&) {
         // Best effort.
     }
+    // Unsubscribing here is what guarantees that *no new* handler can
+    // start after this point: `close()` therefore only has to wait for
+    // the handlers that are already running.
     pool->FrameArrived(token);
 
     ::CoUninitialize();
 }
 
-void WgcCapture::on_frame_arrived() noexcept {
-    if (!state_) return;
+void WgcCapture::on_frame_arrived(
+        const std::shared_ptr<WgcCaptureState>& state) noexcept {
+    if (!state) return;
 
-    // Keep the pool alive for the duration of this handler, even if the
-    // capture thread tears it down concurrently.
-    std::shared_ptr<Direct3D11CaptureFramePool> pool = state_->pool_;
-    if (!pool) return;
-
-    state_->in_flight_.fetch_add(1, std::memory_order_acq_rel);
+    // The in-flight counter is incremented *before* any other access to
+    // the state, so that `close()` cannot conclude that no handler is
+    // running while this one is about to touch the D3D objects.
+    state->in_flight_.fetch_add(1, std::memory_order_acq_rel);
     struct InFlightGuard {
         std::atomic<int>* counter;
         ~InFlightGuard() { counter->fetch_sub(1, std::memory_order_acq_rel); }
-    } guard{&state_->in_flight_};
+    } guard{&state->in_flight_};
 
-    if (!state_->device_ || !state_->context_) return;
+    // Only one handler at a time may use the readback buffers and the
+    // dirty-rect detector: a free-threaded frame pool may raise
+    // `FrameArrived` on several thread-pool threads at once.  The lock
+    // also orders the read of `pool_` below against the teardown's
+    // reset of it.
+    std::lock_guard<std::mutex> handler_lock(state->handler_mutex_);
+
+    // The capture is being torn down: do not start any work.  This is
+    // checked *after* the in-flight counter was raised, so that
+    // `close()` — which clears `running_` and then waits for the
+    // in-flight count to reach zero — cannot conclude that no handler
+    // is running while this one is still inside the critical section.
+    if (!state->running_.load(std::memory_order_acquire)) return;
+
+    // Keep the pool alive for the duration of this handler, even if the
+    // capture thread tears it down concurrently.
+    std::shared_ptr<Direct3D11CaptureFramePool> pool = state->pool_;
+    if (!pool) return;
+
+    if (!state->device_ || !state->context_) return;
 
     Direct3D11CaptureFrame frame = nullptr;
     try {
         frame = pool->TryGetNextFrame();
     } catch (const winrt::hresult_error&) {
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (!frame) return;
@@ -771,7 +923,7 @@ void WgcCapture::on_frame_arrived() noexcept {
                          IDirect3DDxgiInterfaceAccess),
             reinterpret_cast<void**>(&access));
         if (FAILED(qi) || access == nullptr) {
-            device_errors_.fetch_add(1, std::memory_order_relaxed);
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         const HRESULT gi = access->GetInterface(
@@ -779,7 +931,7 @@ void WgcCapture::on_frame_arrived() noexcept {
             reinterpret_cast<void**>(&texture));
         access->Release();
         if (FAILED(gi) || texture == nullptr) {
-            device_errors_.fetch_add(1, std::memory_order_relaxed);
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
             return;
         }
     }
@@ -792,8 +944,8 @@ void WgcCapture::on_frame_arrived() noexcept {
     // The staging texture is sized for the *source*; if the compositor
     // handed over a differently sized surface (a window that was
     // resized), the staging texture has to follow.
-    if (desc.Width != state_->staging_width_ ||
-        desc.Height != state_->staging_height_) {
+    if (desc.Width != state->staging_width_ ||
+        desc.Height != state->staging_height_) {
         D3D11_TEXTURE2D_DESC sdesc{};
         sdesc.Width            = desc.Width;
         sdesc.Height           = desc.Height;
@@ -805,26 +957,26 @@ void WgcCapture::on_frame_arrived() noexcept {
         sdesc.BindFlags        = 0;
         sdesc.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
         ID3D11Texture2D* fresh = nullptr;
-        if (FAILED(state_->device_->CreateTexture2D(&sdesc, nullptr,
+        if (FAILED(state->device_->CreateTexture2D(&sdesc, nullptr,
                                                     &fresh))) {
             texture->Release();
-            device_errors_.fetch_add(1, std::memory_order_relaxed);
+            state->device_errors.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        if (state_->staging_ != nullptr) state_->staging_->Release();
-        state_->staging_ = fresh;
-        state_->staging_width_  = desc.Width;
-        state_->staging_height_ = desc.Height;
+        if (state->staging_ != nullptr) state->staging_->Release();
+        state->staging_ = fresh;
+        state->staging_width_  = desc.Width;
+        state->staging_height_ = desc.Height;
     }
 
-    state_->context_->CopyResource(state_->staging_, texture);
+    state->context_->CopyResource(state->staging_, texture);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    const HRESULT map_hr = state_->context_->Map(
-        state_->staging_, 0, D3D11_MAP_READ, 0, &mapped);
+    const HRESULT map_hr = state->context_->Map(
+        state->staging_, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(map_hr)) {
         texture->Release();
-        device_errors_.fetch_add(1, std::memory_order_relaxed);
+        state->device_errors.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -833,18 +985,18 @@ void WgcCapture::on_frame_arrived() noexcept {
     const std::size_t row_bytes = static_cast<std::size_t>(desc.Width) * 4u;
     const std::size_t needed =
         row_bytes * static_cast<std::size_t>(desc.Height);
-    if (scratch_.size() < needed) scratch_.assign(needed, 0u);
+    if (state->scratch.size() < needed) state->scratch.assign(needed, 0u);
     for (UINT row = 0; row < desc.Height; ++row) {
-        std::memcpy(scratch_.data() +
+        std::memcpy(state->scratch.data() +
                         static_cast<std::size_t>(row) * row_bytes,
                     static_cast<const std::uint8_t*>(mapped.pData) +
                         static_cast<std::size_t>(row) * mapped.RowPitch,
                     row_bytes);
     }
-    state_->context_->Unmap(state_->staging_, 0);
+    state->context_->Unmap(state->staging_, 0);
     texture->Release();
-    bytes_copied_.fetch_add(static_cast<std::uint64_t>(needed),
-                             std::memory_order_relaxed);
+    state->bytes_copied.fetch_add(static_cast<std::uint64_t>(needed),
+                                  std::memory_order_relaxed);
 
     // ---- The dirty rectangles ------------------------------------------------------
     //
@@ -856,35 +1008,37 @@ void WgcCapture::on_frame_arrived() noexcept {
     plugins::CaptureDirtyRects dirty;
 
     // ---- Crop to the requested region ------------------------------------------------
-    const bool has_region = cfg_.region.width != 0 && cfg_.region.height != 0;
-    const std::uint8_t* pixels = scratch_.data();
+    const bool has_region = state->cfg.region.width != 0 &&
+                            state->cfg.region.height != 0;
+    const std::uint8_t* pixels = state->scratch.data();
     std::uint32_t frame_w = desc.Width;
     std::uint32_t frame_h = desc.Height;
     std::int32_t stride = static_cast<std::int32_t>(row_bytes);
 
     if (has_region) {
-        const std::uint32_t rx = std::min(cfg_.region.x, desc.Width);
-        const std::uint32_t ry = std::min(cfg_.region.y, desc.Height);
-        const std::uint32_t rw = std::min(cfg_.region.width, desc.Width - rx);
+        const std::uint32_t rx = std::min(state->cfg.region.x, desc.Width);
+        const std::uint32_t ry = std::min(state->cfg.region.y, desc.Height);
+        const std::uint32_t rw =
+            std::min(state->cfg.region.width, desc.Width - rx);
         const std::uint32_t rh =
-            std::min(cfg_.region.height, desc.Height - ry);
+            std::min(state->cfg.region.height, desc.Height - ry);
         if (rw == 0 || rh == 0) return;
 
         const std::size_t region_row = static_cast<std::size_t>(rw) * 4u;
         const std::size_t region_bytes =
             region_row * static_cast<std::size_t>(rh);
-        if (region_scratch_.size() != region_bytes) {
-            region_scratch_.assign(region_bytes, 0u);
+        if (state->region_scratch.size() != region_bytes) {
+            state->region_scratch.assign(region_bytes, 0u);
         }
         for (std::uint32_t row = 0; row < rh; ++row) {
-            std::memcpy(region_scratch_.data() +
+            std::memcpy(state->region_scratch.data() +
                             static_cast<std::size_t>(row) * region_row,
-                        scratch_.data() +
+                        state->scratch.data() +
                             (static_cast<std::size_t>(ry + row) * desc.Width +
                              rx) * 4u,
                         region_row);
         }
-        pixels = region_scratch_.data();
+        pixels = state->region_scratch.data();
         frame_w = rw;
         frame_h = rh;
         stride = static_cast<std::int32_t>(region_row);
@@ -892,35 +1046,43 @@ void WgcCapture::on_frame_arrived() noexcept {
 
     // ---- Queue the frame ---------------------------------------------------------------
     const std::int64_t ts = static_cast<std::int64_t>(::GetTickCount64() * 1000);
-    const std::uint32_t seq = frame_index_++;
+    const std::uint32_t seq = state->frame_index.fetch_add(1);
     const std::size_t frame_bytes = static_cast<std::size_t>(stride) *
                                    static_cast<std::size_t>(frame_h);
 
     // An unchanged frame is not worth queuing: the consumer would
     // encode the same picture again and spend the user's bandwidth on
     // it (plan A7).
-    const bool identical = dirty_detector_.compare(
+    const bool identical = state->dirty_detector.compare(
         pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
     if (identical) {
         return;
     }
 
-    const auto outcome = state_->queue_.push(
+    const auto outcome = state->queue_.push(
         pixels, frame_bytes, stride, frame_w, frame_h, ts, seq, dirty);
     switch (outcome) {
         case CaptureQueue::PushResult::kQueued:
-            frames_captured_.fetch_add(1, std::memory_order_relaxed);
+            state->frames_captured.fetch_add(1, std::memory_order_relaxed);
             break;
         case CaptureQueue::PushResult::kDroppedOldest:
-            frames_captured_.fetch_add(1, std::memory_order_relaxed);
-            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+            state->frames_captured.fetch_add(1, std::memory_order_relaxed);
+            state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
             break;
         case CaptureQueue::PushResult::kRejected:
-            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+            state->frames_dropped.fetch_add(1, std::memory_order_relaxed);
             break;
     }
 
-    if (cb_) {
+    // The callback is copied out under its lock: the consumer may
+    // replace it at any moment, and the handler must not call a
+    // half-installed one.
+    plugins::CaptureFrameCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(state->cb_mutex_);
+        cb = state->cb;
+    }
+    if (cb) {
         plugins::CaptureFrame view;
         view.pixels = pixels;
         view.size = frame_bytes;
@@ -931,7 +1093,7 @@ void WgcCapture::on_frame_arrived() noexcept {
         view.frame_seq = seq;
         view.dirty = dirty;
         view.has_gpu_handle = false;
-        cb_(view);
+        cb(view);
     }
 }
 
@@ -947,10 +1109,11 @@ plugins::Status WgcCapture::pop_frame(plugins::CaptureFrame& out) noexcept {
 
 plugins::CaptureStats WgcCapture::stats() const noexcept {
     plugins::CaptureStats s;
-    s.frames_captured = frames_captured_.load(std::memory_order_relaxed);
-    s.frames_dropped  = frames_dropped_.load(std::memory_order_relaxed);
-    s.device_errors   = device_errors_.load(std::memory_order_relaxed);
-    s.bytes_copied    = bytes_copied_.load(std::memory_order_relaxed);
+    if (!state_) return s;
+    s.frames_captured = state_->frames_captured.load(std::memory_order_relaxed);
+    s.frames_dropped  = state_->frames_dropped.load(std::memory_order_relaxed);
+    s.device_errors   = state_->device_errors.load(std::memory_order_relaxed);
+    s.bytes_copied    = state_->bytes_copied.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -961,6 +1124,11 @@ plugins::CaptureStats WgcCapture::stats() const noexcept {
 // ---------------------------------------------------------------------------
 
 class WgcCaptureState {};
+
+void WgcCapture::set_frame_callback(
+        plugins::CaptureFrameCallback cb) noexcept {
+    cb_ = std::move(cb);
+}
 
 WgcCapture::WgcCapture(plugins::CaptureConfig cfg) noexcept
     : cfg_(std::move(cfg)) {}
@@ -1005,9 +1173,11 @@ plugins::CaptureCapabilities WgcCapture::capabilities() const noexcept {
     return c;
 }
 
-void WgcCapture::capture_loop() noexcept {}
+void WgcCapture::capture_loop(
+        std::shared_ptr<WgcCaptureState>) noexcept {}
 
-void WgcCapture::on_frame_arrived() noexcept {}
+void WgcCapture::on_frame_arrived(
+        const std::shared_ptr<WgcCaptureState>&) noexcept {}
 
 plugins::Status WgcCapture::pop_frame(plugins::CaptureFrame&) noexcept {
     return plugins::kErrUnsupported;

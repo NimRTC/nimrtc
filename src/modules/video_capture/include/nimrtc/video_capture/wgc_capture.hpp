@@ -134,9 +134,20 @@ public:
 
     plugins::Status pop_frame(plugins::CaptureFrame& out) noexcept override;
 
-    void set_frame_callback(plugins::CaptureFrameCallback cb) noexcept override {
-        cb_ = std::move(cb);
-    }
+    /**
+     * @brief Install the frame-delivery callback.
+     *
+     * The callback runs on the capture thread (the WinRT thread-pool
+     * thread for WGC), *not* on the caller's thread.  It must not
+     * block, and it must not call back into the device.
+     *
+     * The callback may be installed before or after `open()`: when the
+     * device is already running, the callback is handed to the live
+     * capture state under its lock, so a frame that arrives
+     * concurrently sees either the old callback or the new one — never
+     * a half-installed one.
+     */
+    void set_frame_callback(plugins::CaptureFrameCallback cb) noexcept override;
 
     [[nodiscard]] plugins::CaptureStats stats() const noexcept override;
 
@@ -152,42 +163,41 @@ public:
     }
 
 private:
-    /** The capture thread's body: create, start, wait, tear down. */
-    void capture_loop() noexcept;
+    /** The capture thread's body: create, start, wait, tear down.
+     *
+     * The state is passed in rather than read from the member: the
+     * thread must not depend on the owning device, which may be
+     * destroyed while the thread is still running.  It is *static* for
+     * the same reason — it touches nothing but the state. */
+    static void capture_loop(
+        std::shared_ptr<class WgcCaptureState> state) noexcept;
 
-    /** Handle the frame that just arrived (on the WinRT thread). */
-    void on_frame_arrived() noexcept;
+    /** Handle the frame that just arrived (on the WinRT thread).
+     *
+     * The state is passed in for the same reason as above: the handler
+     * may outlive the owning device.  It is *static* for the same
+     * reason — it must not touch the device at all. */
+    static void on_frame_arrived(
+        const std::shared_ptr<class WgcCaptureState>& state) noexcept;
 
     plugins::CaptureConfig cfg_;
+
+    /** The delivery callback.  Copied into the live capture state
+     *  whenever the state exists, so that the capture thread never
+     *  touches the owning device. */
     plugins::CaptureFrameCallback cb_;
-
-    /** The counters.  They are written by the frame-arrival thread and
-     *  read by the engine's tick thread, so they are atomic. */
-    std::atomic<std::uint64_t> frames_captured_{0};
-    std::atomic<std::uint64_t> frames_dropped_{0};
-    std::atomic<std::uint64_t> device_errors_{0};
-    std::atomic<std::uint64_t> bytes_copied_{0};
-
-    /** The pixel buffer the readback fills (the whole surface). */
-    std::vector<std::uint8_t> scratch_;
-
-    /** The cropped buffer, used when a sub-region was requested. */
-    std::vector<std::uint8_t> region_scratch_;
-
-    /** The changed-region detector (remote-desktop plan A7).  WGC reports
-     *  no damage, so the region is computed by comparing the frame with
-     *  the previous one. */
-    DirtyRectDetector dirty_detector_{4};
 
     /** The human-readable description of the captured item. */
     std::string description_;
 
-    /** The WGC objects and the capture thread. */
-    std::unique_ptr<class WgcCaptureState> state_;
+    /** The WGC objects and the capture thread.
+     *
+     * Shared, not unique: the frame-arrival handler runs on a thread
+     * the device does not own and may outlive the device itself, so it
+     * takes its own reference and keeps the state — and everything it
+     * touches — alive for as long as it needs it. */
+    std::shared_ptr<class WgcCaptureState> state_;
 
-    /** The frame sequence counter.  Only the frame-arrival thread
-     *  touches it. */
-    std::uint32_t frame_index_ = 0;
     bool open_ = false;
 };
 

@@ -429,13 +429,20 @@ struct NIMRTC_API_STABLE Profile {
     /// the section keeps its defaults (which describe a camera-like
     /// picture with no resolution floor). The block is additive on top
     /// of v1.1 — see ADR-021 / the remote-desktop plan.
-    VideoSection video;
+    ///
+    /// @note The explicit `= {}` is load-bearing: it gives the member a
+    ///       default member initializer, so that a designated
+    ///       initialiser that omits it (every built-in profile except
+    ///       `remote-desktop`) is *not* a missing-field-initialiser
+    ///       under GCC's `-Wmissing-field-initializers`, which the build
+    ///       promotes to an error.
+    VideoSection video = {};
 };
 
 // ---------------------------------------------------------------------------
 // ProfileRegistry — global singleton for named profile lookups
 // ---------------------------------------------------------------------------
-class ProfileRegistry {
+class NIMRTC_API_STABLE ProfileRegistry {
 public:
     /// Returns the singleton instance.
     static ProfileRegistry& instance();
@@ -470,7 +477,7 @@ private:
 //       .override_bwe({ .initial_bitrate_bps = 500'000 })
 //       .build();
 //
-class Builder {
+class NIMRTC_API_STABLE Builder {
 public:
     /// Load a named profile from the registry (mutates internal state).
     /// Returns *this for chaining. Logs a warning if the name is not found.
@@ -508,9 +515,9 @@ private:
 /// Load a Profile from a JSON file located at the given absolute path.
 /// Throws nlohmann::json::parse_error on malformed JSON.
 /// Empty/null plugin-name fields are converted to empty strings.
-Profile profile_from_json_file(const std::string& file_path);
+NIMRTC_API_STABLE Profile profile_from_json_file(const std::string& file_path);
 
 /// Serialise a Profile to a JSON string. Empty plugin names appear as "".
-std::string profile_to_json_string(const Profile& p);
+NIMRTC_API_STABLE std::string profile_to_json_string(const Profile& p);
 
 }  // namespace nimrtc::assembly

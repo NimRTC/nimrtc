@@ -52,6 +52,7 @@ function sanitize(src) {
     let i = 0;
     const n = src.length;
     let state = 'code';
+    const isDigit = (c) => c >= '0' && c <= '9';
     while (i < n) {
         const c = src[i];
         const c2 = src.substr(i, 2);
@@ -59,7 +60,30 @@ function sanitize(src) {
             if (c2 === '//') { state = 'line'; out += '  '; i += 2; continue; }
             if (c2 === '/*') { state = 'block'; out += '  '; i += 2; continue; }
             if (c === '"') { state = 'str'; out += ' '; i += 1; continue; }
-            if (c === "'") { state = 'chr'; out += ' '; i += 1; continue; }
+            if (c === "'") {
+                // A C++14 *digit separator* (`48'000`, `1'000'000`) is not
+                // a character literal.  Treating it as one opens a
+                // "character literal" that runs until the next apostrophe
+                // in the file — which swallows real code and makes the
+                // scanner mis-split every declaration that follows.
+                //
+                // The separator is recognised by its neighbours: a digit
+                // before it and a digit after it.  A real character
+                // literal (`'a'`, `'\n'`) has a non-digit after the
+                // opening quote, or is a digit *character* (`'0'`), which
+                // has the closing quote right after the digit.
+                const prev = i > 0 ? src[i - 1] : '';
+                const next = i + 1 < n ? src[i + 1] : '';
+                if (isDigit(prev) && isDigit(next)) {
+                    out += ' ';
+                    i += 1;
+                    continue;
+                }
+                state = 'chr';
+                out += ' ';
+                i += 1;
+                continue;
+            }
             out += c; i += 1; continue;
         }
         if (state === 'line') {

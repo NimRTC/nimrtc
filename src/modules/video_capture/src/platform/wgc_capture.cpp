@@ -428,6 +428,21 @@ public:
     /** Set to false to ask the capture thread to stop. */
     std::atomic<bool> running_{false};
 
+    /**
+     * @brief True iff the capture is still supposed to run.
+     *
+     * The capture thread checks this between the *slow* steps of its
+     * setup.  `open()` returns as soon as the thread is started, so a
+     * host that opens and immediately closes tears the device down
+     * while the setup is still running.  Without this check the thread
+     * would carry on and create the capture session, subscribe to the
+     * frame event and start the capture against a device that is
+     * already being torn down.
+     */
+    [[nodiscard]] bool still_running() const noexcept {
+        return running_.load(std::memory_order_acquire);
+    }
+
     /** The number of frame-arrival handlers currently running.  The
      *  teardown waits for it to reach zero before the D3D objects are
      *  released. */
@@ -836,14 +851,6 @@ void WgcCapture::capture_loop(
         std::shared_ptr<WgcCaptureState> state;
         ~ApartmentGuard() {
             if (state) {
-                // The pool is a WinRT object, so the last reference to
-                // it has to go while the apartment is still alive.  The
-                // local `pool` handle was destroyed before this guard
-                // ran, so the state is the only thing still holding it.
-                std::lock_guard<std::mutex> lock(state->handler_mutex_);
-                state->pool_.reset();
-            }
-            if (state) {
                 // Wait for every handler that might still touch a
                 // WinRT object to finish, and only then leave the
                 // apartment.
@@ -852,11 +859,34 @@ void WgcCapture::capture_loop(
                 // this thread may leave the apartment: `CoUninitialize`
                 // has to be called by the thread that called
                 // `CoInitializeEx`, and this is that thread.
+                //
+                // The wait comes *first*: a handler that is running
+                // right now may be reading the frame pool, and the
+                // pool must not be released underneath it.
                 state->apartment.quiesce();
+            }
+            if (state) {
+                // The pool is a WinRT object, so the last reference to
+                // it has to go while the apartment is still alive.  The
+                // local `pool` handle was destroyed before this guard
+                // ran, so the state is the only thing still holding it.
+                //
+                // The reset is taken under the handler mutex, so it
+                // cannot race with a frame-arrival handler that is
+                // copying the same `shared_ptr`.
+                std::lock_guard<std::mutex> lock(state->handler_mutex_);
+                state->pool_.reset();
+            }
+            if (state) {
                 // The D3D objects go while the apartment is still
                 // alive, and after every handler has finished: a
                 // handler that is still running uses them.
                 state->release_d3d();
+            }
+            if (state) {
+                // Only now -- with every handler finished, the pool
+                // released and the device gone -- may the apartment go
+                // away.
                 state->apartment.leave();
             }
         }
@@ -891,6 +921,15 @@ void WgcCapture::capture_loop(
         state->running_.store(false, std::memory_order_release);
         return;
     }
+
+    // ---- The teardown may have started while the device was created ----
+    //
+    // `D3D11CreateDevice` is slow, and `close()` may have run on the
+    // calling thread while it was in progress.  Carrying on would
+    // create the capture session, subscribe to the frame event and
+    // start the capture against a device that is already being torn
+    // down -- which is the race this check closes.
+    if (!state->still_running()) return;
 
     // ---- The WinRT Direct3D11 device ---------------------------------------
     IDXGIDevice* dxgi_device = nullptr;
@@ -952,6 +991,14 @@ void WgcCapture::capture_loop(
         std::lock_guard<std::mutex> lock(state->handler_mutex_);
         state->pool_ = pool;
     }
+
+    // ---- The teardown may have started while the pool was created ----
+    //
+    // Creating the pool is slow, and `close()` may have run on the
+    // calling thread while it was in progress.  The pool is a WinRT
+    // object, and publishing it now -- against a device that is being
+    // torn down -- is what the check prevents.
+    if (!state->still_running()) return;
 
     // ---- The capture item --------------------------------------------------
     //
@@ -1112,6 +1159,27 @@ void WgcCapture::capture_loop(
     // release.
     pool->FrameArrived(token);
 
+    // ---- Stop the session -------------------------------------------------
+    //
+    // The session is closed *before* the handlers are waited for, and
+    // that order matters.
+    //
+    // A running session keeps the compositor delivering frames, and
+    // every one of them dispatches a handler.  So the wait below would
+    // never finish while the session is still running: a handler that
+    // is dispatched between the unsubscribe and the wait would keep
+    // the in-flight count above zero for as long as the compositor
+    // had something to deliver.
+    //
+    // Closing the session first stops the delivery, so the wait is
+    // waiting for the handlers that are *already* running -- which is
+    // what it is for.
+    try {
+        session.Close();
+    } catch (const winrt::hresult_error&) {
+        // Best effort.
+    }
+
     // Wait for the running handlers to finish.
     //
     // This is the step that makes the teardown below safe.  A
@@ -1131,14 +1199,6 @@ void WgcCapture::capture_loop(
     while (state->in_flight_.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-
-    // ---- Tear down ------------------------------------------------------------------
-    try {
-        session.Close();
-    } catch (const winrt::hresult_error&) {
-        // Best effort.
-    }
-
 }
 
 void WgcCapture::on_frame_arrived(

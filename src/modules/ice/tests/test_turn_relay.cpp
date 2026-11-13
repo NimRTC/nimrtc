@@ -129,6 +129,115 @@ bool can_bind_secondary_loopback() noexcept {
     return ok;
 }
 
+// Find a UDP port on the loopback interface that this process can bind.
+//
+// Why this exists:
+//
+// The TURN *server* and its relay-port range need fixed ports, because
+// the client has to know where to reach the server.  Hard-coding those
+// ports is what made this suite flaky: Windows reserves whole blocks of
+// UDP ports for the hypervisor (Hyper-V / HNS), the reservations move
+// between VM allocations, and a bind inside a reserved block fails with
+// WSAEACCES (errno 10013).  Every fixed window this file has used has
+// eventually been caught by one (60000-60999, then the 63000s, then the
+// 64000s) — the last one bit the Phase 3 CI run on 2026-11-13.
+//
+// The kernel's *ephemeral* allocation never picks a reserved port, so
+// asking it for a free port and reading the port back is the robust
+// answer.  The race window (the port is free now, but something else
+// could take it before the server binds) is tiny and the range is wide,
+// so a probe over a handful of candidates makes a collision
+// vanishingly unlikely.
+//
+// Returns 0 when no bindable port was found.
+std::uint16_t find_bindable_udp_port() noexcept {
+#ifdef _WIN32
+    // The probe needs Winsock; the juice server brings it up later, so
+    // bring it up here too (the extra WSAStartup is refcounted).
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+#endif
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) return 0;
+
+        sockaddr_in addr{};
+        addr.sin_family      = AF_INET;
+        addr.sin_port        = 0;   // let the kernel pick
+        addr.sin_addr.s_addr = htonl(0x7F000001); // 127.0.0.1
+
+        if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+            sockaddr_in bound{};
+#ifdef _WIN32
+            int len = static_cast<int>(sizeof(bound));
+#else
+            socklen_t len = sizeof(bound);
+#endif
+            if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &len) == 0) {
+                const auto port = ntohs(bound.sin_port);
+#ifdef _WIN32
+                closesocket(fd);
+#else
+                ::close(fd);
+#endif
+                if (port != 0) return port;
+                continue;
+            }
+        }
+#ifdef _WIN32
+        closesocket(fd);
+#else
+        ::close(fd);
+#endif
+    }
+    return 0;
+}
+
+// Find a range of consecutive bindable UDP ports, for the TURN server's
+// relay-port range.  libjuice allocates a relay candidate from this
+// range, so every port in it has to be bindable — the hypervisor
+// reservation blocks are contiguous, so a run of free ports is found by
+// probing a single candidate and checking that the *whole* run binds.
+//
+// `count` ports are probed; the range that starts at the returned port
+// is `count` wide.  Returns 0 when no such run was found.
+std::uint16_t find_bindable_udp_port_run(std::uint16_t count) noexcept {
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const std::uint16_t first = find_bindable_udp_port();
+        if (first == 0) return 0;
+        // A range that wraps past 65535 cannot be expressed.
+        if (static_cast<std::uint32_t>(first) + count > 0xFFFF) continue;
+
+        bool all_free = true;
+        for (std::uint16_t i = 0; i < count && all_free; ++i) {
+            const std::uint16_t port = static_cast<std::uint16_t>(first + i);
+#ifdef _WIN32
+            const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) { all_free = false; break; }
+            sockaddr_in addr{};
+            addr.sin_family      = AF_INET;
+            addr.sin_port        = htons(port);
+            addr.sin_addr.s_addr = htonl(0x7F000001);
+            all_free = ::bind(fd, reinterpret_cast<sockaddr *>(&addr),
+                              sizeof(addr)) == 0;
+            closesocket(fd);
+#else
+            const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) { all_free = false; break; }
+            sockaddr_in addr{};
+            addr.sin_family      = AF_INET;
+            addr.sin_port        = htons(port);
+            addr.sin_addr.s_addr = htonl(0x7F000001);
+            all_free = ::bind(fd, reinterpret_cast<sockaddr *>(&addr),
+                              sizeof(addr)) == 0;
+            ::close(fd);
+#endif
+        }
+        if (all_free) return first;
+    }
+    return 0;
+}
+
 // The TURN *client* agents do not use a fixed port window: they let the
 // OS assign an ephemeral port.
 //
@@ -139,33 +248,16 @@ bool can_bind_secondary_loopback() noexcept {
 // caught by one (60000-60999, then the 63000s, then the 64000s).  The
 // kernel's ephemeral allocation never picks a reserved port.
 //
-// The TURN *server* and its relay-port range below still need fixed
-// ports: the client has to know where to reach the server, and the
-// server allocates relay candidates from its own range.  Those are
-// listed here so the two never collide.
-constexpr std::uint16_t kTurnServerPort  = 64000;
-// One UDP/TCP port pair per test.  CI runs ctest with -j 2, so two
-// tests that each stand up a TURN server on the same port race for
-// it: the TCP listener fails to bind (EADDRINUSE) and the UDP socket
-// silently shares the port, which lets one test's client talk to the
-// other test's server.  Every port the suite binds has to be disjoint
-// from the others.
-constexpr std::uint16_t kTurnUdpPortA    = 64010;
-constexpr std::uint16_t kTurnUdpPortB    = 64020;
-constexpr std::uint16_t kTurnUdpPortC    = 64030;
-constexpr std::uint16_t kTurnTcpPortA    = 64011;
-constexpr std::uint16_t kTurnTcpPortB    = 64021;
-constexpr std::uint16_t kTurnTcpPortC    = 64031;
-// The relay port range is exclusive per server too: each allocation
-// takes one port out of the range.
-constexpr std::uint16_t kRelayPortBegin  = 64100;
-constexpr std::uint16_t kRelayPortEnd    = 64199;
-constexpr std::uint16_t kRelayPortBegin2 = 64200;
-constexpr std::uint16_t kRelayPortEnd2   = 64299;
-constexpr std::uint16_t kRelayPortBeginB = 64300;
-constexpr std::uint16_t kRelayPortEndB   = 64399;
-constexpr std::uint16_t kRelayPortBeginC = 64400;
-constexpr std::uint16_t kRelayPortEndC   = 64499;
+// The TURN *server* binds a port and a relay-port range of its own; the
+// client has to know where to reach the server, and the server allocates
+// relay candidates from its own range.  Both are probed for bindability
+// at runtime (see `find_bindable_udp_port` above) rather than hard-coded,
+// so the suite no longer depends on a window the host may have reserved.
+//
+// The number of relay ports each server needs is small — the tests make
+// at most two allocations — so the range is narrow and the probe is
+// quick.
+constexpr std::uint16_t kRelayPortCount = 8;
 // The client agents let the OS assign their local UDP port (see the
 // comment above), so they need no port constants at all.  The
 // `make_agent_config()` helper takes no port arguments for that reason.
@@ -186,16 +278,19 @@ constexpr const char* kTurnPass = "nimrtc-turn-password";
 // -----------------------------------------------------------------------------
 class TurnServerFixture {
 public:
-    // `tcp_port` is non-zero to also stand up the TURN-over-TCP listener
-    // (RFC 8656 section 12).  Zero means "UDP only".
+    // `with_tcp` also stands up the TURN-over-TCP listener
+    // (RFC 8656 section 12); otherwise the server is UDP-only.
     //
-    // Every port the server binds has to be unique across the suite:
-    // CI runs ctest with -j 2, so two servers on the same TCP port race
-    // for it, and two servers on the same UDP port would silently share
-    // it.
-    TurnServerFixture(std::uint16_t udp_port, std::uint16_t tcp_port = 0,
-                      std::uint16_t relay_port_begin = kRelayPortBegin,
-                      std::uint16_t relay_port_end = kRelayPortEnd) {
+    // Every port the server binds is probed for bindability at runtime
+    // rather than hard-coded — see `find_bindable_udp_port` above for
+    // why a fixed window is not safe on Windows.  Each fixture therefore
+    // gets its own ports, so two servers never share one.
+    explicit TurnServerFixture(bool with_tcp = false)
+        : udp_port_(find_bindable_udp_port()),
+          tcp_port_(with_tcp ? find_bindable_udp_port() : 0),
+          relay_port_begin_(find_bindable_udp_port_run(kRelayPortCount)) {
+        if (udp_port_ == 0 || relay_port_begin_ == 0) return;
+
         juice_server_credentials_t creds{};
         creds.username           = kTurnUser;
         creds.password           = kTurnPass;
@@ -207,10 +302,11 @@ public:
         cfg.max_allocations       = 16;
         cfg.max_peers             = 8;
         cfg.bind_address          = "127.0.0.1";
-        cfg.port                  = udp_port;
-        cfg.tcp_port              = tcp_port;
-        cfg.relay_port_range_begin = relay_port_begin;
-        cfg.relay_port_range_end   = relay_port_end;
+        cfg.port                  = udp_port_;
+        cfg.tcp_port              = tcp_port_;
+        cfg.relay_port_range_begin = relay_port_begin_;
+        cfg.relay_port_range_end   = static_cast<std::uint16_t>(
+            relay_port_begin_ + kRelayPortCount - 1);
         cfg.realm                 = "nimrtc";
 
         server_ = juice_server_create(&cfg);
@@ -225,12 +321,20 @@ public:
 
     bool ok() const noexcept { return server_ != nullptr; }
 
+    /// The UDP port the server listens on.
     std::uint16_t port() const noexcept {
         return server_ ? juice_server_get_port(server_) : 0;
     }
 
+    /// The TCP port the TURN-over-TCP control listener listens on, or 0
+    /// when this fixture is UDP-only.
+    std::uint16_t tcp_port() const noexcept { return tcp_port_; }
+
 private:
-    juice_server_t* server_ = nullptr;
+    juice_server_t*   server_           = nullptr;
+    std::uint16_t     udp_port_         = 0;
+    std::uint16_t     tcp_port_         = 0;
+    std::uint16_t     relay_port_begin_ = 0;
 };
 
 // Find the relay candidate among the gathered local candidates.
@@ -342,6 +446,12 @@ std::string host_address_of(const IceTransport& t) {
 // The concurrency-mode resolution (the root cause)
 // -----------------------------------------------------------------------------
 
+// The mode-resolution tests below never dial the TURN server — they only
+// *configure* one and check how the transport reacts — so the port is a
+// placeholder.  It has to be a real-looking number, but nothing listens
+// on it and nothing connects to it.
+constexpr std::uint16_t kUndialledTurnPort = 3478;  // the IANA TURN port
+
 TEST(TurnRelay, ConfiguredTurnServerLeavesMuxMode) {
     IceConfig cfg = make_agent_config();
     // The default mode is MUX.
@@ -354,7 +464,7 @@ TEST(TurnRelay, ConfiguredTurnServerLeavesMuxMode) {
 
     TurnServer ts;
     ts.host = "127.0.0.1";
-    ts.port = kTurnServerPort;
+    ts.port = kUndialledTurnPort;
     ts.username = kTurnUser;
     ts.password = kTurnPass;
     t.add_turn_server(ts);
@@ -374,7 +484,7 @@ TEST(TurnRelay, ExplicitMuxModeIsHonoured) {
     IceTransport t{cfg};
     TurnServer ts;
     ts.host = "127.0.0.1";
-    ts.port = kTurnServerPort;
+    ts.port = kUndialledTurnPort;
     ts.username = kTurnUser;
     ts.password = kTurnPass;
     t.add_turn_server(ts);
@@ -391,7 +501,7 @@ TEST(TurnRelay, ExplicitMuxModeIsHonoured) {
 TEST(TurnRelay, RelayCandidateIsGathered) {
     if (is_wsl2()) GTEST_SKIP() << "WSL2 UDP loopback is unreliable; skipping";
 
-    TurnServerFixture server(kTurnServerPort);
+    TurnServerFixture server;
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     IceTransport t{make_agent_config()};
@@ -496,12 +606,11 @@ TEST(TurnTcp, PluginSeamCanSelectTcpTransport) {
 
     // And the plugin-seam overload must actually reach the TURN server
     // over TCP: the relay candidate it produces is the observable proof.
-    TurnServerFixture server(kTurnUdpPortA, kTurnTcpPortA,
-                             kRelayPortBegin2, kRelayPortEnd2);
+    TurnServerFixture server(true);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     nimrtc::plugins::IICETransport* plugin = &t;
-    plugin->add_turn_server_with_transport("127.0.0.1", kTurnTcpPortA, kTurnUser, kTurnPass,
+    plugin->add_turn_server_with_transport("127.0.0.1", server.tcp_port(), kTurnUser, kTurnPass,
                                            nimrtc::plugins::TurnTransport::Tcp);
 
     ASSERT_EQ(t.open(), 0u) << "open() failed";
@@ -523,14 +632,13 @@ TEST(TurnTcp, RelayCandidateIsGatheredOverTcp) {
 
     // The server listens on the TCP port as well, so the client can
     // reach it over a TCP control connection.
-    TurnServerFixture server(kTurnUdpPortB, kTurnTcpPortB,
-                             kRelayPortBeginB, kRelayPortEndB);
+    TurnServerFixture server(true);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     IceTransport t{make_agent_config()};
     TurnServer ts;
     ts.host = "127.0.0.1";
-    ts.port = kTurnTcpPortB;
+    ts.port = server.tcp_port();
     ts.username = kTurnUser;
     ts.password = kTurnPass;
     ts.transport = TurnTransport::Tcp;
@@ -625,8 +733,7 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
 
     // The server listens on both UDP and TCP; the clients use the TCP
     // control connection.
-    TurnServerFixture server(kTurnUdpPortC, kTurnTcpPortC,
-                             kRelayPortBeginC, kRelayPortEndC);
+    TurnServerFixture server(true);
     ASSERT_TRUE(server.ok()) << "the in-tree TURN server did not start";
 
     // Pinned credentials: the two agents need to agree on them before the
@@ -676,7 +783,7 @@ TEST(TurnTcp, DataPathRelaysOverTcpControlConnection) {
     for (const auto& t : {TurnTransport::Tcp}) {
         TurnServer ts;
         ts.host = "127.0.0.1";
-        ts.port = kTurnTcpPortC;
+        ts.port = server.tcp_port();
         ts.username = kTurnUser;
         ts.password = kTurnPass;
         ts.transport = t;

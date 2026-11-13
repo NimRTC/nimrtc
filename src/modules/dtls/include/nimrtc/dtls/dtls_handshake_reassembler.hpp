@@ -1,7 +1,7 @@
 // dtls_handshake_reassembler.hpp
 //
 // DTLS Handshake-layer fragment reassembler — see
-// src/modules/dtls/src/dtls_wolfssl_session.cpp for context.
+// src/modules/dtls/backends/wolfssl/src/dtls_wolfssl_session.cpp for context.
 //
 // ## Why this exists
 //

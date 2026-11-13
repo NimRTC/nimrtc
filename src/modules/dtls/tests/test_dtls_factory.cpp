@@ -1,5 +1,5 @@
 /**
- * @file src/dtls/tests/test_dtls_factory.cpp
+ * @file src/modules/dtls/tests/test_dtls_factory.cpp
  * @brief PAL Slice 4 — DTLS seam factory smoke test.
  *
  * Verifies the four invariants the Slice 4 DoD requires:

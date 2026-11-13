@@ -700,7 +700,7 @@ struct DtlsSessionWolfSSL::Impl {
         // validity.  The actual MITM check happens in
         // verify_peer_spki() via the SDP `a=fingerprint` hash.
         //
-        // See src/modules/dtls/src/dtls_wolfssl_session.cpp
+        // See src/modules/dtls/backends/wolfssl/src/dtls_wolfssl_session.cpp
         // `verify_peer_spki()` for the post-handshake pin check.
         wolfSSL_CTX_set_verify(ctx,
                                WOLFSSL_VERIFY_PEER |

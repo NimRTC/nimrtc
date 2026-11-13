@@ -848,6 +848,36 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The five transport seam families now live under `src/modules/`
+  (v1.2.0, architecture remediation plan §4.1 / D3 / D4, decision Q5).**
+  `src/dtls/`, `src/raw_udp/`, `src/sctp/`, `src/transport/` and
+  `src/web_transport/` used to sit at the top level of `src/`, a
+  historical PAL Slice layout that `ARCHITECTURE.md` had to defend with
+  a whole paragraph.  Every module directory is now under
+  `src/modules/<name>/`, and that paragraph is gone.
+  - **The public include paths are unchanged.**  `#include
+    <nimrtc/dtls/...>`, `<nimrtc/sctp/...>`, `<nimrtc/raw_udp/...>`,
+    `<nimrtc/transport/...>` and `<nimrtc/web_transport/...>` resolve
+    exactly as before: the seam headers kept their `nimrtc/<family>/`
+    spelling and moved with their directory.
+  - **The CMake target names are unchanged.**  `nimrtc::dtls`,
+    `nimrtc::dtls_seam`, `nimrtc::sctp`, `nimrtc::raw_udp`,
+    `nimrtc::transport` and `nimrtc::web_transport`, along with the
+    `nimrtc_*` archive names.  A target name is a downstream link
+    contract, so it must not move.  A consumer that
+    `add_subdirectory()`s NimRTC and links those targets needs no source
+    change at all; only a consumer that referenced the *source path*
+    (`add_subdirectory(nimrtc/src/dtls)`) does, which was never a public
+    usage.
+  - **DTLS is one module instead of two directories (D3).**  The seam
+    headers, the wolfSSL session implementation and the GmSSL backend
+    are now under `src/modules/dtls/` — `include/nimrtc/dtls/` (the
+    seam), `src/` (wolfSSL), `backends/gmssl/` (GmSSL), `tests/`.  The
+    question "which file is authoritative for DTLS?" used to need a
+    paragraph of prose; now the answer is the ordinary one.
+  - The five families are added from `src/modules/CMakeLists.txt` in
+    dependency order (`dtls` before `transport`, `sctp` before
+    `datachannel`) instead of from the top-level `CMakeLists.txt`.
 - **The plugin contract is now explicit — the engine says which families it
   can actually replace, and what happens when one is missing (v1.2.0,
   architecture remediation plan §2).**  The plugin system had three
@@ -1265,6 +1295,32 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The TURN relay suite no longer depends on a fixed UDP port window
+  (v1.2.0).**  The tests pinned the TURN server's ports (64000,
+  64010-64031) and its relay-port ranges (64100-64499).  Windows
+  reserves whole blocks of UDP ports for the hypervisor, the
+  reservations move between VM allocations, and a bind inside a
+  reserved block fails with `WSAEACCES` (errno 10013).  Every fixed
+  window the file has used has eventually been caught by one — 60000-60999,
+  then the 63000s, then the 64000s — and the last one broke a CI run on
+  2026-11-13:
+
+      [warn]  udp.c:158: UDP socket binding failed on port 64030, errno=10013
+      [error] udp.c:217: UDP socket opening failed
+      [fatal] server.c:127: Server socket opening failed
+
+  The client agents were already on OS-assigned ephemeral ports for
+  exactly this reason; the *server* was left behind, because it needs a
+  port the client can be told about.  That is not actually a constraint:
+  the server's port can be probed for bindability at runtime and then
+  read back.  Each fixture now binds a port the kernel picks (which
+  never lands in a reserved block) and a relay-port range that has been
+  probed for bindability *as a whole* — libjuice allocates a relay
+  candidate from that range, so every port in it has to be bindable, and
+  the hypervisor reservations are contiguous, so a run of free ports is
+  found by checking that the entire run binds.  The two mode-resolution
+  tests never dial the server — they only *configure* one — so they now
+  use the IANA TURN port as a placeholder.
 - **`EngineConfig::video_capture_name` was a knob the engine never read
   (remote-desktop plan A1; remediation Phase 2 §2.2).**  The capture
   seam was fully built — the `IVideoCapture` interface, the registry

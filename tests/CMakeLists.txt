@@ -98,7 +98,7 @@ function(nimrtc_add_web_transport_seam_test name source)
         GTest::gtest_main)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
-        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+        "${CMAKE_SOURCE_DIR}/src/modules/web_transport/include")
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
@@ -147,7 +147,7 @@ function(nimrtc_add_web_transport_dc_test name source)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
-        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+        "${CMAKE_SOURCE_DIR}/src/modules/web_transport/include")
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
     endif()
@@ -263,7 +263,7 @@ function(nimrtc_add_web_transport_msquic_test name source)
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
-        "${CMAKE_SOURCE_DIR}/src/web_transport/include")
+        "${CMAKE_SOURCE_DIR}/src/modules/web_transport/include")
     # The server seam needs the WebTransport TLS material (build directory).
     # Compiling the binary directory in lets the test probe for it no matter
     # which working directory ctest starts the case from.
@@ -452,7 +452,7 @@ if(NIMRTC_ENABLE_DTLS_GMSSL)
         nimrtc_link_gmssl(${name})
         target_include_directories(${name} PRIVATE
             "${CMAKE_SOURCE_DIR}/src/core/include"
-            "${CMAKE_SOURCE_DIR}/src/dtls/include")
+            "${CMAKE_SOURCE_DIR}/src/modules/dtls/include")
         if(WIN32)
             target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
         endif()
@@ -533,7 +533,7 @@ function(add_arq_e2e_test name source)
         "${CMAKE_SOURCE_DIR}/src/core/include"
         "${CMAKE_SOURCE_DIR}/src/plugins/include"
         "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
-        "${CMAKE_SOURCE_DIR}/src/raw_udp/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include"
         "${CMAKE_SOURCE_DIR}/src/modules/srtp/include")
     if(WIN32)
         target_compile_definitions(${name} PRIVATE _WIN32_WINNT=0x0601)
@@ -561,9 +561,8 @@ add_executable(test_dtls_replay_chrome_hello
 target_include_directories(test_dtls_replay_chrome_hello PRIVATE
     "${CMAKE_SOURCE_DIR}/src/core/include"
     "${CMAKE_SOURCE_DIR}/src/plugins/include"
-    "${CMAKE_SOURCE_DIR}/src/dtls/include"
     "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
-    "${CMAKE_SOURCE_DIR}/src/raw_udp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include"
     "${CMAKE_SOURCE_DIR}/src/modules/srtp/include")
 target_link_libraries(test_dtls_replay_chrome_hello PRIVATE
     nimrtc::dtls_seam)
@@ -1296,10 +1295,10 @@ endforeach()
 target_include_directories(test_registry_contract PRIVATE
     "${CMAKE_SOURCE_DIR}/src/core/include"
     "${CMAKE_SOURCE_DIR}/src/plugins/include"
-    "${CMAKE_SOURCE_DIR}/src/transport/include"
-    "${CMAKE_SOURCE_DIR}/src/dtls/include"
-    "${CMAKE_SOURCE_DIR}/src/sctp/include"
-    "${CMAKE_SOURCE_DIR}/src/raw_udp/include")
+    "${CMAKE_SOURCE_DIR}/src/modules/transport/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/dtls/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/sctp/include"
+    "${CMAKE_SOURCE_DIR}/src/modules/raw_udp/include")
 if(WIN32)
     target_compile_definitions(test_registry_contract PRIVATE _WIN32_WINNT=0x0601)
 endif()

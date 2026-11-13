@@ -103,6 +103,17 @@ option(NIMRTC_MODULE_AUDIO3A "Build audio 3A module"                  ON)
 option(NIMRTC_MODULE_ICE  "Build ICE module"                         ON)
 option(NIMRTC_MODULE_SRTP "Build SRTP module"                        ON)
 option(NIMRTC_MODULE_DTLS "Build DTLS module"                        ON)
+# v1.1 X1 (ADR-013): the GmSSL-backed DTLS factory (id="gmssl").
+# Declared HERE (not in src/modules/dtls/CMakeLists.txt) so the cache
+# variable exists before src/third_party is added — the vendored GmSSL
+# wrapper (src/third_party/gmssl/CMakeLists.txt) reads it to decide
+# whether to build the upstream static library or an empty stub.
+option(NIMRTC_ENABLE_DTLS_GMSSL
+       "Build the GMSSL-backed DTLS factory (id=gmssl). Uses the vendored submodule at src/third_party/gmssl/src (pin v3.2.0); set NIMRTC_GMSSL_USE_SYSTEM=ON to use a system install ($ENV{GMSSL_ROOT}) instead. When OFF (default) only the wolfSSL backend is built."
+       OFF)
+option(NIMRTC_GMSSL_USE_SYSTEM
+       "Link GMSSL from the system install ($ENV{GMSSL_ROOT}) instead of the vendored submodule. Requires NIMRTC_ENABLE_DTLS_GMSSL=ON to take effect."
+       OFF)
 option(NIMRTC_MODULE_OPUS "Build Opus codec module"                   ON)
 option(NIMRTC_MODULE_AUDIO_RX "Build audio receive pipeline module"  ON)
 option(NIMRTC_MODULE_SCHED "Build unified sending scheduler module"  ON)
@@ -268,11 +279,12 @@ endif()
 add_subdirectory(src/log)      # Logger implementation (nimrtc_log) — before core
 add_subdirectory(src/core)     # Header-only: bytes / error / time / log header
 add_subdirectory(src/plugins)  # Interface definitions (header-only)
-add_subdirectory(src/sctp)     # SCTP seam (Transport PAL Slice 5; SEAM ONLY in v0.10)
-add_subdirectory(src/dtls)     # DTLS seam (Transport PAL Slice 4; v0.11.0)
-add_subdirectory(src/raw_udp)  # Raw-UDP bypass seam (Transport PAL Slice 6; v0.11.0)
-add_subdirectory(src/transport) # Transport stack + Selector (Transport PAL Slice 7; v0.11.0)
-add_subdirectory(src/web_transport) # WebTransport / QUIC seam (v0.14.0-beta.1, ADR-014)
+# The five transport-layer seam families (DTLS / SCTP / raw_udp /
+# transport-stack / WebTransport) live under src/modules/ since the
+# v1.2 directory unification (architecture remediation plan §4.1 / Q5).
+# They are added from src/modules/CMakeLists.txt in dependency order —
+# NOT from the top level — so that every module directory sits under
+# one root (Layout Invariant 3).
 add_subdirectory(src/modules)  # Concrete module implementations
 
 # nlohmann_json 3.11.3 (used by the assembly module for JSON profile loading).

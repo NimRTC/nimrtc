@@ -100,6 +100,50 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       shortcut) — the *network* part of the criterion is covered by the
       transport-level work packages.
 
+- **The SIMD scaler (v1.3, remote-desktop plan C1 / C2).**  A capture
+  surface arrives at whatever resolution the display has; the encoder
+  wants the ladder's resolution.  The tree could only do that with the
+  hand-written scalar converters in `video_frame`, which are too slow for
+  a 4K desktop.
+  - **libyuv v0.0.0** (`lemenkov/libyuv`, BSD-3-Clause — the maintained
+    fork of Chromium's libyuv) is vendored under
+    `src/third_party/libyuv/` as a git submodule pinned at
+    `209763ad77fed3df2d57503d3ef40761e9473649` and built from source
+    through a hand-written CMake wrapper (upstream ships a GYP build).
+    The wrapper re-exports upstream's static `yuv` archive as
+    `nimrtc_vendor_libyuv` (alias `nimrtc::vendor::libyuv`), suppresses
+    upstream's `install()` rules so they cannot pollute NimRTC's
+    install set, and disables upstream's `cpuid` / `yuvconvert` tools.
+    New switch `NIMRTC_VENDORED_LIBYUV` (default ON).  There is **no
+    system fallback** (AGENTS.md L5), so switching the vendored build off
+    simply leaves the scaler reporting "unavailable".
+  - New public header `src/modules/video_frame/include/nimrtc/video_frame/scaler.hpp`
+    (`NIMRTC_API_STABLE`): `ScaleFilter` (`kPoint` / `kLinear` /
+    `kBilinear` / `kBox` — `kBox` is the *display* path, `kBilinear` the
+    *encode* path) and `VideoFrameScaler` with `scale_i420()`,
+    `scale_to_buffer()` (pool-aware), `bgra_to_i420()` and
+    `i420_to_bgra()`.  With libyuv absent the module still compiles and
+    every call returns `core::ErrorCode::NotImplemented`.
+  - **libyuv names its packed formats by *word* order, not memory
+    order.**  NimRTC's `PixelFormat::kBGRA` is memory order B,G,R,A,
+    which is libyuv's *`ARGB`* (word `0xAARRGGBB`); libyuv's own `BGRA`
+    is memory order A,R,G,B.  Calling `BGRAToI420` / `I420ToBGRA`
+    compiles and runs but silently produces the wrong colours — the
+    implementation calls `ARGBToI420` / `I420ToARGB`, and a saturated-red
+    test case pins the mapping so a swap cannot regress silently.
+  - The existing hand-written scalar converters stay in the tree as the
+    portable reference; the scaler is the SIMD path alongside them.
+  - Covered by `src/modules/video_frame/tests/test_video_frame_scaler.cpp`
+    (13 cases: down- and up-scaling, the pool path, invalid arguments,
+    a solid-colour source surviving both directions without banding,
+    chroma scaling, all four filter modes, a BGRA↔I420 round trip, and
+    an OpenH264 encode/decode round trip) plus a 1080p benchmark that
+    *records* ns/pixel (**1.2 – 4.2 ns/pixel** for 1920×1080 → 1280×720)
+    without asserting a threshold — a perf gate would be flaky on CI.
+    With `NIMRTC_VENDORED_LIBYUV=OFF` the module still compiles, the
+    scaler reports "unavailable" and every call returns a clean
+    `NotImplemented`.
+
 - **The Windows rendering and engine pump (v1.3, remote-desktop plan
   WP-C / A10 / A11 / E2 / E8 / B10 / B15).**  The capture → encode →
   present loop could not be closed on Windows: there was no native

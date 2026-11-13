@@ -440,7 +440,13 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   backends (remote-desktop plan A3) -- the DXGI Desktop Duplication
     //   + WGC thin adapters over the portable capture layer:
     //     - video_capture/windows_capture.hpp (WindowsCapture device)
-    constexpr std::size_t kBaselineHeaderCount = 141;
+    //
+    // Track C bump: +1 public header (141 -> 142) for the libyuv-backed
+    //   scaler (remote-desktop plan C2) -- the SIMD I420 scaling and
+    //   BGRA <-> I420 conversion the capture -> encode and display paths
+    //   use:
+    //     - video_frame/scaler.hpp (VideoFrameScaler / ScaleFilter)
+    constexpr std::size_t kBaselineHeaderCount = 142;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

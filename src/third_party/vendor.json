@@ -157,6 +157,17 @@
       "build": "sources compiled directly via src/third_party/dav1d/CMakeLists.txt wrapper into STATIC nimrtc_vendor_dav1d — active only when NIMRTC_PLUGINS_DAV1D=ON (default OFF)",
       "notes": "Real software AV1 decoder (remote-desktop plan WP-B, CPU bring-up baseline). Backs src/modules/av1/src/dav1d_decoder.cpp, which reports backend_id() == \"dav1d\"; the AV1 stub stays the fallback and reports \"software-stub\". Upstream ships a Meson build, so the wrapper compiles the upstream sources directly with CMake and reproduces the three things a naive source list would miss: (1) the generated config.h platform description, (2) the generated vcs_version.h, (3) the per-bitdepth instantiation of the templated DSP sources (*_tmpl.c) — here the 8-bit one only, in a separate OBJECT library so -DBITDEPTH=8 does not leak into the non-templated sources. Portable C path only (HAVE_ASM=0): upstream's x86 fast paths are NASM and its ARM ones are GAS, neither of which is guaranteed on a NimRTC build host. No system codec library is linked (L5).",
       "size_estimate": "~5 MB / 360 files"
+    },
+    {
+      "name": "libyuv",
+      "upstream_url": "https://github.com/lemenkov/libyuv.git",
+      "upstream_version": "master (LIBYUV_VERSION 1982)",
+      "commit_sha": "209763ad77fed3df2d57503d3ef40761e9473649",
+      "submodule_path": "src/third_party/libyuv/src",
+      "license": "BSD-3-Clause",
+      "build": "add_subdirectory(src) — see src/third_party/libyuv/CMakeLists.txt (upstream CMake, static `yuv` target re-exported as nimrtc_vendor_libyuv) — active whenever NIMRTC_VENDORED_LIBYUV=ON (default ON)",
+      "notes": "YUV/RGB scale + convert library (remote-desktop plan C1, Track C 'Pixel'). The cross-platform default the plan names under RD-10: one implementation covers every platform NimRTC ships, with SSSE3 + AVX2 on x86-64 and NEON / SVE2 / SME on arm64. BSD-3-Clause, so it clears the RD-2 licence filter. Upstream ships its own CMakeLists.txt, so the wrapper adds it with BUILD_SHARED_LIBS=OFF, UNIT_TEST=OFF and LIBYUV_DISABLE_JPEG=ON; the upstream static `yuv` archive is re-exported as nimrtc_vendor_libyuv (alias nimrtc::vendor::libyuv) with the upstream include dir as a SYSTEM include. Platform matrix (K8b): Windows (MSVC, x86-64, SSSE3/AVX2), macOS (arm64, NEON), Linux x86-64 (SSSE3/AVX2), Linux aarch64 (NEON/SVE2/SME), Android (arm64/x86, NEON/SSSE3), iOS (arm64, NEON). No system library is linked (L5): the whole point is that every platform gets the SAME scale output (the plan's 'same-result check').",
+      "size_estimate": "~4 MB / 200 files"
     }
   ],
 

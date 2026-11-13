@@ -65,6 +65,26 @@ _nimrtc_vendor_add_if_populated(webrtc_audio_processing)
 _nimrtc_vendor_add_if_populated(usrsctp)
 
 # -----------------------------------------------------------------------------
+# Remote-desktop plan Track C — libyuv (YUV / RGB scale + convert).
+#
+# libyuv ships its OWN CMakeLists.txt, so the wrapper next to `src/` is
+# added EXPLICITLY rather than through the helper above (the helper looks
+# for `src/CMakeLists.txt`, which libyuv does not have — its root is the
+# submodule root).  The wrapper creates the target unconditionally — as an
+# empty INTERFACE stub when the submodule is absent or the vendored switch
+# is off — so the option can be flipped without a CMake error; the scaler
+# then reports "not available" and the capture → encode path falls back to
+# the module's hand-written scalar converters.
+#
+# libyuv is DEFAULT ON: it is the cross-platform scale / colour library the
+# remote-desktop plan names as the default (RD-10), and it builds on every
+# platform NimRTC ships (Windows / macOS / Linux / Android / iOS).
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libyuv/CMakeLists.txt")
+    add_subdirectory(libyuv)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan WP-B — real software codecs.
 #
 #   openh264 : Cisco's BSD-2-Clause H.264 encoder + decoder.  Built from

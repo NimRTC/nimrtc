@@ -132,3 +132,14 @@
 	# Pinned: v1.5.1 (42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa) — see src/third_party/vendor.json
 	# Real software AV1 decoder (decode only); opt-in via NIMRTC_PLUGINS_DAV1D=ON.
 	branch = 1.5.1
+[submodule "src/third_party/libyuv/src"]
+	path = src/third_party/libyuv/src
+	url = https://github.com/lemenkov/libyuv.git
+	# Pinned: 209763ad77fed3df2d57503d3ef40761e9473649 (see src/third_party/vendor.json)
+	# YUV/RGB scale + convert library (remote-desktop plan C1); BSD-3-Clause.
+	# Upstream ships its own CMakeLists.txt, so the wrapper at
+	# src/third_party/libyuv/CMakeLists.txt adds it with
+	# UNIT_TEST=OFF / LIBYUV_DISABLE_JPEG=ON and re-exports the
+	# static `yuv` archive as nimrtc_vendor_libyuv.
+	# Default ON via NIMRTC_VENDORED_LIBYUV=ON.
+	branch = master

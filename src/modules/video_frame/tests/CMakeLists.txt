@@ -43,3 +43,46 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 30
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# test_video_frame_scaler — remote-desktop plan C2 (the libyuv-backed
+# VideoFrameScaler).
+#
+# The scaler itself lives in nimrtc_video_frame, so this target needs no
+# extra link dependency.  The OpenH264 encode/decode round-trip case is
+# compiled in ONLY when the real software H.264 backend is part of the
+# build (NIMRTC_PLUGINS_OPENH264=ON and the vendored source tree is
+# present); otherwise the case is skipped at runtime with GTEST_SKIP().
+# -----------------------------------------------------------------------------
+add_executable(test_video_frame_scaler test_video_frame_scaler.cpp)
+
+set_target_properties(test_video_frame_scaler PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_video_frame_scaler LENIENT)
+
+target_link_libraries(test_video_frame_scaler PRIVATE
+    nimrtc::video_frame
+    nimrtc::core
+    GTest::gtest_main
+    GTest::gtest)
+
+if(NIMRTC_PLUGINS_OPENH264 AND NIMRTC_VENDORED_OPENH264 AND
+   EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/openh264/src/codec/api/wels/codec_api.h")
+    target_link_libraries(test_video_frame_scaler PRIVATE
+        nimrtc::h264
+        nimrtc::video_payload
+        nimrtc::plugins)
+    target_compile_definitions(test_video_frame_scaler PRIVATE
+        NIMRTC_TEST_WITH_OPENH264=1)
+endif()
+
+add_test(NAME modules_video_frame_tests_test_video_frame_scaler
+         COMMAND test_video_frame_scaler)
+set_tests_properties(modules_video_frame_tests_test_video_frame_scaler PROPERTIES TIMEOUT 120)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_video_frame_scaler
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 10)
+endif()

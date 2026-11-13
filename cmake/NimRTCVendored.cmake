@@ -33,6 +33,11 @@ option(NIMRTC_VENDORED_WOLFSSL      "Use vendored wolfSSL (default ON)"  ON)
 option(NIMRTC_VENDORED_WEBRTC_APM   "Use vendored WebRTC APM (default ON)" ON)
 option(NIMRTC_VENDORED_OPENH264     "Use vendored OpenH264 (default ON)"  ON)
 option(NIMRTC_VENDORED_DAV1D        "Use vendored dav1d (default ON)"     ON)
+# Remote-desktop plan C1 — libyuv (YUV/RGB scale + convert, BSD-3-Clause).
+# Default ON: it is the cross-platform scale / colour library the plan
+# names as the default (RD-10) and it builds on every platform NimRTC
+# ships (Windows / macOS / Linux / Android / iOS).
+option(NIMRTC_VENDORED_LIBYUV       "Use vendored libyuv (default ON)"    ON)
 
 # -----------------------------------------------------------------------------
 # Public target names (primary)
@@ -46,6 +51,8 @@ set(NIMRTC_VENDOR_LIBS
     # Remote-desktop plan WP-B — real software codecs.
     nimrtc_vendor_openh264
     nimrtc_vendor_dav1d
+    # Remote-desktop plan Track C — libyuv (YUV / RGB scale + convert).
+    nimrtc_vendor_libyuv
     # P1+
     # nimrtc_vendor_libvpx
     # P2+
@@ -341,5 +348,38 @@ function(nimrtc_link_vendor_dav1d target)
     else()
         message(STATUS "  dav1d             : vendored source tree not populated — "
                        "the software-stub backend stays in charge")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track C — libyuv.
+#
+# libyuv has NO system fallback for the same reason openh264 / dav1d do not:
+# L5 forbids linking a system codec, and the whole point of the vendored
+# copy is that every platform NimRTC ships gets the SAME SIMD scale and
+# colour code (the remote-desktop plan's "same-result check", RD-10).
+#
+# When the vendored switch is off, or the submodule is absent, the module
+# that consumes it compiles its "unavailable" path instead: the scaler
+# reports available() == false and every call returns a clean error.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_libyuv target)
+    if(TARGET nimrtc_vendor_libyuv)
+        # The vendor target carries NIMRTC_USE_LIBYUV=1 (real library) or
+        # NIMRTC_USE_LIBYUV=0 (the "unavailable" stub) as an INTERFACE
+        # definition, so linking it is what flips the module's
+        # "unavailable" compile-time path on or off.
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_libyuv)
+    endif()
+
+    if(NIMRTC_VENDORED_LIBYUV AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/libyuv/src/include/libyuv/scale.h")
+        # Nothing to report — the SIMD backend is in.
+    elseif(NIMRTC_VENDORED_LIBYUV)
+        message(STATUS "  libyuv            : vendored source tree not populated — "
+                       "the video_frame scaler reports 'unavailable'")
+    else()
+        message(STATUS "  libyuv            : NIMRTC_VENDORED_LIBYUV=OFF — "
+                       "the video_frame scaler reports 'unavailable'")
     endif()
 endfunction()

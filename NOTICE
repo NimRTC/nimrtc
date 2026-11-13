@@ -108,6 +108,36 @@ dav1d contributors (dav1d).
               encoder, so AV1 *encoding* stays with the stub / NVENC.
 
 ============================================================
+Pixel scaling / colour conversion
+============================================================
+
+This product includes software developed by the LibYuv Project Authors
+(libyuv).
+  - Source:   https://github.com/lemenkov/libyuv
+               (a maintained fork of the original
+                chromium.googlesource.com/external/libyuv)
+  - Version:  master @ 209763ad77fed3df2d57503d3ef40761e9473649
+              (LIBYUV_VERSION 1982; vendored at src/third_party/libyuv/;
+               pinned SHA in src/third_party/SOURCE_VERSIONS)
+  - License:  BSD-3-Clause
+  - Scope:    runtime, statically linked (NIMRTC_VENDORED_LIBYUV=ON, the
+              default).  Built from source.  Serves as the SIMD YUV/RGB
+              scale + convert backend behind
+              `nimrtc::video_frame::VideoFrameScaler` (the remote-desktop
+              plan's Track C "Pixel" work item).
+  - Platforms (cross-platform vendoring policy K8b):
+              Windows (MSVC)  — x86-64, SSSE3 + AVX2
+              macOS           — arm64, NEON
+              Linux x86-64    — SSSE3 + AVX2
+              Linux aarch64   — NEON / SVE2 / SME
+              Android         — arm64 / x86, NEON / SSSE3
+              iOS             — arm64, NEON
+              The library is built from the same source on every platform,
+              so the scale output is identical across platforms (the
+              plan's "same-result check").  No prebuilt binary is linked
+              or shipped.
+
+============================================================
 SCTP (P2)
 ============================================================
 

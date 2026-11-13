@@ -20,6 +20,12 @@ target_link_libraries(test_video_capture
         GTest::gtest_main
     )
 
+# The temporary CI crash handler in test_wgc_capture.cpp walks the
+# stack of a faulting thread, which needs the symbol helper library.
+if(WIN32)
+    target_link_libraries(test_video_capture PRIVATE dbghelp)
+endif()
+
 # LENIENT: the harness is test code, so warnings are reported but not
 # fatal.  It also pulls in /utf-8 on MSVC, which the sources need --
 # the comments carry typographic dashes and the default CP936 code page

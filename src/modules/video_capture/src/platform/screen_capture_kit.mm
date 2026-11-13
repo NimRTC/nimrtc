@@ -172,6 +172,39 @@ std::string utf8(NSString* s) {
 }
 
 /**
+ * @brief The shareable content, and the displays and windows in it.
+ *
+ * ## Why the content is *copied*, not retained
+ *
+ * `SCShareableContent` is handed to the completion handler as an
+ * autoreleased object, and this file is compiled *without* ARC (the
+ * backend has no business imposing an ownership model on the host's
+ * build).  Under manual retain/release an autoreleased object is only
+ * guaranteed to live until the enclosing autorelease pool drains — and
+ * the pool that drains is the one the completion handler's queue owns,
+ * which is long gone by the time `dispatch_semaphore_wait` returns.
+ *
+ * Accessing `content.displays` after that point is a use-after-free:
+ * the XPC reply that backs the array is gone, and the property access
+ * dereferences freed memory.  On macOS 14 and later that shows up as
+ * `EXC_BAD_ACCESS` inside `objc_msgSend` — a segfault in a library that
+ * did nothing wrong.
+ *
+ * The fix is to take *our own* reference to the data while the
+ * completion handler's scope is still alive: the arrays are copied out
+ * of the content inside the handler, and the copies are what the
+ * callers work with.  A copy of an `NSArray` is an immutable
+ * snapshot, so it stays valid for as long as we hold it.
+ */
+struct ShareableContent {
+    /** The displays, copied out of the content while it was alive. */
+    NSArray<SCDisplay*>* displays = nil;
+
+    /** The windows, copied out of the content while it was alive. */
+    NSArray<SCWindow*>* windows = nil;
+};
+
+/**
  * @brief Fetch the shareable content, synchronously.
  *
  * `SCShareableContent` is fetched asynchronously, but both callers need
@@ -192,35 +225,51 @@ std::string utf8(NSString* s) {
  * *Swift* spelling, `getExcludingDesktopWindows`, is not the
  * Objective-C selector: writing that one is a compile error.)
  *
- * @param content    Receives the shareable content (null on failure).
+ * @param out     Receives the displays and the windows (empty on
+ *                failure).
  * @param error_text Receives the failure description (empty on success).
  * @return true iff the content was fetched.
  */
-bool fetch_shareable_content(SCShareableContent*& content,
-                              std::string& error_text) {
-    content = nil;
+bool fetch_shareable_content(ShareableContent& out,
+                             std::string& error_text) {
+    out.displays = nil;
+    out.windows = nil;
     error_text.clear();
 
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block NSError* error = nil;
+    __block NSArray<SCDisplay*>* displays = nil;
+    __block NSArray<SCWindow*>* windows = nil;
 
     [SCShareableContent
         getShareableContentExcludingDesktopWindows:NO
                                  onScreenWindowsOnly:YES
                                   completionHandler:^(SCShareableContent* c,
                                                       NSError* e) {
-        content = c;
         error = e;
+        if (c != nil) {
+            // The copy happens *here*, while the content is still
+            // alive: the arrays are the content's own data, and a copy
+            // is an immutable snapshot that outlives the content.
+            // Reading them here and copying them out is what keeps the
+            // caller from touching freed memory once the handler has
+            // returned.
+            displays = [c.displays copy];
+            windows = [c.windows copy];
+        }
         dispatch_semaphore_signal(done);
     }];
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
-    if (content == nil) {
+    if (displays == nil && windows == nil) {
         error_text = error != nil ? utf8(error.localizedDescription)
                                   : std::string("no error reported");
         return false;
     }
+
+    out.displays = displays;
+    out.windows = windows;
     return true;
 }
 
@@ -319,10 +368,10 @@ plugins::Status ScreenCaptureKitCapture::open() noexcept {
     // ---- Resolve the device ------------------------------------------------
     //
     // The shareable content is fetched asynchronously, but the call is
-    // wrapped in a semaphore so that `open()` stays synchronous 鈥?the
+    // wrapped in a semaphore so that `open()` stays synchronous — the
     // seam's contract is that `open()` either succeeds or fails, and
     // the engine reads the negotiated format right after it returns.
-    SCShareableContent* content = nil;
+    ShareableContent content;
     std::string content_error;
     if (!fetch_shareable_content(content, content_error)) {
         core::log::Logger::instance().error(
@@ -617,7 +666,7 @@ ScreenCaptureKitCapture::enumerate_devices() const noexcept {
     // list, and `has_permission()` tells the host why.
     if (!preflight_permission()) return devices;
 
-    SCShareableContent* content = nil;
+    ShareableContent content;
     std::string content_error;
     if (!fetch_shareable_content(content, content_error)) {
         return devices;

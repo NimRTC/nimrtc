@@ -57,6 +57,17 @@
  * the *device* describes its own output through `CaptureFormat`, and the
  * adapter translates.
  *
+ * ## Screen content is a content type, not a camera
+ *
+ * `CaptureDeviceKind` distinguishes a screen from a camera at the
+ * *device* level, and `CaptureDirtyRects` reports what changed in each
+ * frame.  Both are part of the screen-content contract: the engine
+ * needs to know that it is looking at screen content to enable
+ * screen-content coding, region-of-interest, dirty-rectangle
+ * incremental update and cursor compositing.
+ *
+ * @see docs/adr/ADR-022-screen-content-as-content-type.md
+ *
  * @note Remote-desktop plan A1 (M1-b). Interface is stable.
  */
 

@@ -435,7 +435,12 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   track's Windows leg, the first concrete `plugins::IVideoSink`
     //   that consumes the GPU delivery path added alongside it:
     //     - video_sink/d3d11_renderer.hpp (the DXGI swap-chain sink)
-    constexpr std::size_t kBaselineHeaderCount = 140;
+    //
+    // WP-C bump: +1 public header (140 -> 141) for the Windows capture
+    //   backends (remote-desktop plan A3) -- the DXGI Desktop Duplication
+    //   + WGC thin adapters over the portable capture layer:
+    //     - video_capture/windows_capture.hpp (WindowsCapture device)
+    constexpr std::size_t kBaselineHeaderCount = 141;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

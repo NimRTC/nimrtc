@@ -19,6 +19,12 @@
 
 #include <nimrtc/core/registry.hpp>
 
+#ifdef _WIN32
+// The Windows capture backends register themselves alongside the
+// synthetic device, so a host that asks for "windows-dxgi" finds it.
+#include <nimrtc/video_capture/windows_capture.hpp>
+#endif
+
 namespace nimrtc::video_capture {
 
 namespace {
@@ -310,6 +316,12 @@ void register_default_plugins() noexcept {
     registered = true;
     core::PluginRegistry::instance().register_video_capture(
         kSyntheticFactory.id(), &kSyntheticFactory);
+#ifdef _WIN32
+    // Remote-desktop plan A3: the Windows backends (DXGI Desktop
+    // Duplication + Windows Graphics Capture) land next to the
+    // synthetic device, so the engine can pick one by name.
+    register_windows_capture_plugins();
+#endif
 }
 
 } // namespace nimrtc::video_capture

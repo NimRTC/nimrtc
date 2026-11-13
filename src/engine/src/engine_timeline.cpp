@@ -420,38 +420,63 @@ void NimRTCEngine::handle_rtp(const rtp::PacketView& pv) noexcept {
 
 void NimRTCEngine::record_video_ref_frame(std::uint64_t ref_frame_id,
                                           std::int64_t capture_ts_us) noexcept {
-    auto it = impl_->ref_frame_to_ts.find(ref_frame_id);
-    if (it != impl_->ref_frame_to_ts.end()) {
+    bool found = false;
+    Impl::RefFrameSlot* slot = impl_->ref_frame_find(ref_frame_id, found);
+    if (found && slot) {
         // Idempotent refresh: last-writer-wins, order unchanged.
-        it->second = capture_ts_us;
+        slot->capture_ts_us = capture_ts_us;
         return;
     }
-    impl_->ref_frame_to_ts.emplace(ref_frame_id, capture_ts_us);
-    impl_->ref_frame_order.push_back(ref_frame_id);
-    while (impl_->ref_frame_order.size() > Impl::kRefFrameMapCap) {
-        const std::uint64_t oldest = impl_->ref_frame_order.front();
-        impl_->ref_frame_order.pop_front();
-        impl_->ref_frame_to_ts.erase(oldest);
+
+    // The registry is bounded: at most `kRefFrameMapCap` live ids.  When
+    // the ring is at capacity the oldest id falls out, so the newest one
+    // can be recorded.
+    if (impl_->ref_frame_order_count >= Impl::kRefFrameMapCap) {
+        const std::uint64_t oldest = impl_->ref_frame_oldest();
+        impl_->ref_frame_drop_oldest();
+        impl_->ref_frame_erase(oldest);
+        // The probe path changed (a slot is free again), so look the
+        // insertion slot up again — the old pointer may be stale.
+        slot = impl_->ref_frame_find(ref_frame_id, found);
     }
+    if (!slot) return;   // the table is full — nothing we can do
+
+    slot->id = ref_frame_id;
+    slot->capture_ts_us = capture_ts_us;
+    impl_->ref_frame_push(ref_frame_id);
 }
 
 
 std::optional<std::int64_t> NimRTCEngine::ref_frame_to_capture_ts(
-    std::uint64_t ref_frame_id) const noexcept {
+   std::uint64_t ref_frame_id) const noexcept {
     if (impl_ == nullptr) return std::nullopt;
-    const auto it = impl_->ref_frame_to_ts.find(ref_frame_id);
-    if (it == impl_->ref_frame_to_ts.end()) return std::nullopt;
-    return it->second;
+    bool found = false;
+    const Impl::RefFrameSlot* slot =
+        impl_->ref_frame_find(ref_frame_id, found);
+    if (!found || !slot) return std::nullopt;
+    return slot->capture_ts_us;
 }
 
 
 std::optional<std::uint64_t> NimRTCEngine::capture_ts_to_ref_frame(
     std::int64_t capture_ts_us) const noexcept {
     if (impl_ == nullptr) return std::nullopt;
-    for (const auto& [id, ts] : impl_->ref_frame_to_ts) {
-        if (ts == capture_ts_us) return id;
+    // The registry used to be a `std::map`, so a timestamp shared by
+    // several ids resolved to the *smallest* id.  The table is
+    // unordered, so the smallest match is selected explicitly to keep
+    // the observable behaviour identical.
+    std::uint64_t best = 0;
+    bool found = false;
+    for (const Impl::RefFrameSlot& slot : impl_->ref_frame_table) {
+        if (slot.id == Impl::kRefFrameEmptyId) continue;
+        if (slot.capture_ts_us != capture_ts_us) continue;
+        if (!found || slot.id < best) {
+            best = slot.id;
+            found = true;
+        }
     }
-    return std::nullopt;
+    if (!found) return std::nullopt;
+    return best;
 }
 
 

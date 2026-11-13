@@ -213,6 +213,23 @@ void VideoFrameBuffer::adopt_storage(std::vector<std::uint8_t>&& storage,
     ctrl_ = std::make_shared<OwnedFrameControl>(layout);
 }
 
+void VideoFrameBuffer::rearm(VideoFrameLayout layout) noexcept {
+    layout_ = layout;
+    if (!ctrl_) {
+        ctrl_ = std::make_shared<OwnedFrameControl>(layout);
+        return;
+    }
+    // The control block is reused too — only the metadata is reset,
+    // because a recycled buffer is a new frame.
+    ctrl_->capacity       = layout.buffer_size;
+    ctrl_->width          = layout.width;
+    ctrl_->height         = layout.height;
+    ctrl_->format         = layout.format;
+    ctrl_->capture_ts_us  = 0;
+    ctrl_->frame_seq      = 0;
+    ctrl_->ref_count.store(1, std::memory_order_release);
+}
+
 std::vector<std::uint8_t> VideoFrameBuffer::release_storage() noexcept {
     std::vector<std::uint8_t> out;
     out.swap(storage_);
@@ -225,62 +242,110 @@ std::vector<std::uint8_t> VideoFrameBuffer::release_storage() noexcept {
 // VideoFrameBufferPool
 // ---------------------------------------------------------------------------
 
+// The pool hands out `std::shared_ptr<VideoFrameBuffer>` values.  A
+// `shared_ptr` that owns its object carries a heap-allocated *control
+// block*, so building one per frame is one allocation per frame — exactly
+// what the pool exists to eliminate.
+//
+// The trick is to let the pool keep the control block alive and hand out
+// *aliases* of it.  `std::shared_ptr<VideoFrameBuffer>(owner, raw)` shares
+// the owner's control block (so no allocation happens) while pointing at
+// the pooled buffer object.  The pool parks the owner; an entry is
+// reusable once the caller's alias is gone, which is visible as
+// `owner.use_count() == 1`.
+//
+// The buffer object, its pixel storage and its `FrameBufferControl` all
+// live inside the owner's control block, so recycling the owner recycles
+// all three.
+
+/// The pooled buffer.  It is the *object* the pool's control block owns,
+/// so the buffer's storage and control block are recycled together with
+/// it.
+struct PooledBuffer : public VideoFrameBuffer {
+    explicit PooledBuffer(VideoFrameLayout layout)
+        : VideoFrameBuffer(layout) {}
+};
+
+/// A parked buffer.  `owner` keeps the buffer object (and therefore its
+/// storage and its `FrameBufferControl`) alive.
+struct PooledBufferEntry {
+    std::shared_ptr<PooledBuffer> owner;
+};
+
+struct VideoFrameBufferPool::State {
+    /// The parked buffers.  An entry is reusable when its owner has no
+    /// other reference — i.e. `owner.use_count() == 1`.
+    std::vector<PooledBufferEntry> idle;
+
+    /// Total number of buffers this pool has ever created.
+    std::size_t total_allocations = 0;
+};
+
+VideoFrameBufferPool::VideoFrameBufferPool()
+    : state_(std::make_shared<State>()) {}
+
+VideoFrameBufferPool::~VideoFrameBufferPool() = default;
+
 std::shared_ptr<VideoFrameBuffer>
 VideoFrameBufferPool::acquire(VideoFrameLayout layout) {
     if (layout.buffer_size == 0) return nullptr;
 
     auto state = state_;
 
-    // Find a parked storage block that is big enough.  The pool keeps
-    // the blocks it has handed back, but a caller may ask for a bigger
-    // layout than last time (a resolution change), so the search is
-    // for "at least this big" rather than "exactly this big".
-    std::size_t chosen = state->idle.size();
+    // ---- 1. Find a parked buffer that is free and big enough -----------
+    //
+    // "Free" means the caller has released its alias, so the pool holds
+    // the only reference left.  "Big enough" is checked against the
+    // storage the buffer was allocated with — a resolution change must
+    // not be served from a too-small block.
     for (std::size_t i = 0; i < state->idle.size(); ++i) {
-        if (state->idle[i].size() >= layout.buffer_size) {
-            chosen = i;
-            break;
-        }
+        PooledBufferEntry& entry = state->idle[i];
+        if (entry.owner.use_count() != 1) continue;             // still in use
+        if (entry.owner->size() < layout.buffer_size) continue;  // too small
+
+        // Re-arm it: the object, its storage and its control block all
+        // survive — nothing is allocated.  The entry stays parked so the
+        // next `acquire()` can find it again.
+        entry.owner->rearm(layout);
+        // The alias shares the owner's control block, so no control
+        // block is allocated here.
+        return std::shared_ptr<VideoFrameBuffer>(entry.owner,
+                                                 entry.owner.get());
     }
 
-    std::vector<std::uint8_t> storage;
-    if (chosen != state->idle.size()) {
-        storage = std::move(state->idle[chosen]);
-        state->idle.erase(state->idle.begin() +
-                          static_cast<std::ptrdiff_t>(chosen));
-    } else {
-        // Nothing big enough is parked -- allocate.  The memset that
-        // `resize` performs happens once per *allocation*, and the pool
-        // means it happens once per pool lifetime rather than once per
-        // frame (at 1080p that is a ~3 MB memset per frame).
-        storage.resize(layout.buffer_size);
-        ++state->total_allocations;
-    }
-    ++state->in_flight;
+    // ---- 2. Nothing reusable -- create a new buffer --------------------
+    //
+    // The memset that `resize` performs happens once per *allocation*,
+    // and the pool means it happens once per buffer rather than once per
+    // frame (at 1080p that is a ~3 MB memset per frame).
+    auto owner = std::make_shared<PooledBuffer>(layout);
+    ++state->total_allocations;
 
-    // The buffer's storage comes back to the pool when the last
-    // reference dies.  The deleter holds a reference to the shared
-    // state, so a buffer that outlives the pool still returns its
-    // storage somewhere valid.
-    auto buf = std::shared_ptr<VideoFrameBuffer>(
-        new VideoFrameBuffer(std::move(storage), layout),
-        [state](VideoFrameBuffer* b) {
-            auto back = b->release_storage();
-            if (state->in_flight > 0) --state->in_flight;
-            if (back.capacity() != 0) {
-                state->idle.push_back(std::move(back));
-            }
-            delete b;
-        });
-    return buf;
+    // Park it so a later `acquire()` can find it.  The pool keeps the
+    // owner alive; the caller's alias is the only extra reference.
+    state->idle.push_back(PooledBufferEntry{owner});
+    return std::shared_ptr<VideoFrameBuffer>(owner, owner.get());
 }
 
 std::size_t VideoFrameBufferPool::idle() const noexcept {
-    return state_->idle.size();
+    // "Idle" means *available for reuse* — a parked buffer the caller has
+    // already released.  A parked buffer that is still handed out is
+    // counted by `in_flight()` instead, so the two always add up to the
+    // number of buffers the pool has created.
+    std::size_t n = 0;
+    for (const PooledBufferEntry& entry : state_->idle) {
+        if (entry.owner.use_count() == 1) ++n;
+    }
+    return n;
 }
 
 std::size_t VideoFrameBufferPool::in_flight() const noexcept {
-    return state_->in_flight;
+    // A parked buffer is "in flight" while the caller still holds it.
+    std::size_t n = 0;
+    for (const PooledBufferEntry& entry : state_->idle) {
+        if (entry.owner.use_count() > 1) ++n;
+    }
+    return n;
 }
 
 std::size_t VideoFrameBufferPool::total_allocations() const noexcept {

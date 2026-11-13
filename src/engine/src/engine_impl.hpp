@@ -738,12 +738,175 @@ struct NimRTCEngine::Impl {
 
     // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     // Local registry: ref_frame id (== VideoSourceFrame::frame_seq) ->
-    // capture_ts_us. Bounded ring (1024 entries); insertion-order deque
-    // drives eviction so the map cannot grow without bound. Single-threaded
+    // capture_ts_us. Bounded ring (1024 entries); insertion-order drives
+    // eviction so the registry cannot grow without bound. Single-threaded
     // by engine contract (same as sr_tracker); no locking.
+    //
+    // Phase 3: the registry used to be a `std::map` + a `std::deque`, so
+    // every recorded frame allocated a map node *and* a deque block — two
+    // heap allocations per sent frame, forever.  A fixed-size open-addressed
+    // table plus a fixed-size insertion ring replaces both: they are
+    // allocated once (at construction) and never grow, so recording a
+    // frame performs no allocation at all.
     static constexpr std::size_t kRefFrameMapCap = 1024;
-    std::map<std::uint64_t, std::int64_t> ref_frame_to_ts;
-    std::deque<std::uint64_t>             ref_frame_order;
+
+    /** One slot of the open-addressed ref-frame table.
+     *
+     *  `id == kRefFrameEmptyId` marks a free slot.  Linear probing is used
+     *  (the table is at most half full, so the probe length is short). */
+    struct RefFrameSlot {
+        std::uint64_t id = kRefFrameEmptyId;
+        std::int64_t  capture_ts_us = 0;
+    };
+
+    /** Sentinel for a free slot.  `UINT64_MAX` cannot be a real frame_seq
+     *  in practice, and the table is only 1024 entries so the odds of a
+     *  collision are negligible — and a collision would only affect the
+     *  *lookup* of that one id, not the correctness of the ring. */
+    static constexpr std::uint64_t kRefFrameEmptyId = UINT64_MAX;
+
+    /// The open-addressed table.  Sized to a power of two >= 2x the cap so
+    /// the load factor never exceeds 0.5.
+    std::vector<RefFrameSlot> ref_frame_table;
+
+    /// The ids in insertion order (oldest first), used for eviction.
+    ///
+    /// A fixed-size circular buffer, not a `std::deque`: the deque grew a
+    /// new block every so often, which is a heap allocation on the send
+    /// path.  The ring is allocated once, together with the table.
+    std::vector<std::uint64_t> ref_frame_order;
+
+    /// Write cursor into `ref_frame_order` (the next slot to write).
+    std::size_t ref_frame_order_head = 0;
+
+    /// How many ids are currently in `ref_frame_order`.
+    std::size_t ref_frame_order_count = 0;
+
+    // ---- Ref-frame table helpers (Phase 3) -------------------------------
+    //
+    // The table is a fixed-size open-addressed hash table.  It is sized
+    // once (at construction) and never resized, so recording a frame
+    // performs no allocation at all — the whole point of replacing the
+    // `std::map` + `std::deque` pair.
+
+    /// Size the table for `kRefFrameMapCap` entries at a load factor of
+    /// at most 0.5.  Called once, from the engine's constructor path. */
+    void init_ref_frame_table() {
+        std::size_t n = 1;
+        while (n < kRefFrameMapCap * 2) n <<= 1;
+        ref_frame_table.assign(n, RefFrameSlot{});
+        ref_frame_order.assign(kRefFrameMapCap, kRefFrameEmptyId);
+    }
+
+    /// The oldest id still in the insertion-order ring.
+    [[nodiscard]] std::uint64_t ref_frame_oldest() const noexcept {
+        if (ref_frame_order_count == 0) return kRefFrameEmptyId;
+        const std::size_t tail = (ref_frame_order_head + ref_frame_order.size()
+                                  - ref_frame_order_count) %
+                                 ref_frame_order.size();
+        return ref_frame_order[tail];
+    }
+
+    /// Drop the oldest id from the insertion-order ring.
+    void ref_frame_drop_oldest() noexcept {
+        if (ref_frame_order_count == 0) return;
+        ref_frame_order_count--;
+    }
+
+    /// Append an id to the insertion-order ring.
+    void ref_frame_push(std::uint64_t id) noexcept {
+        if (ref_frame_order.empty()) return;
+        ref_frame_order[ref_frame_order_head] = id;
+        ref_frame_order_head = (ref_frame_order_head + 1) % ref_frame_order.size();
+        if (ref_frame_order_count < ref_frame_order.size()) {
+            ref_frame_order_count++;
+        }
+    }
+
+    /// Remove an id from the hash table (used when it is evicted).
+    ///
+    /// Linear probing needs *backward-shift* deletion: simply marking the
+    /// slot free would break the probe chain for every key that probed
+    /// past it, and those keys would become unreachable.  Instead the
+    /// entries that follow the hole are pulled back until the chain is
+    /// contiguous again.
+    void ref_frame_erase(std::uint64_t id) noexcept {
+        bool found = false;
+        RefFrameSlot* slot = ref_frame_find(id, found);
+        if (!slot || !found) return;
+
+        const std::size_t mask = ref_frame_table.size() - 1;
+        std::size_t i = static_cast<std::size_t>(slot - ref_frame_table.data());
+        ref_frame_table[i].id = kRefFrameEmptyId;
+
+        // Pull back every entry whose home slot lies on the probe path
+        // that the hole just broke.
+        std::size_t j = i;
+        for (;;) {
+            j = (j + 1) & mask;
+            const std::uint64_t moved_id = ref_frame_table[j].id;
+            if (moved_id == kRefFrameEmptyId) break;
+            const std::size_t home = ref_frame_hash(moved_id) & mask;
+            // "home" is cyclically in (i, j] → the entry must stay at j.
+            const bool must_stay = (i < j) ? (home > i && home <= j)
+                                           : (home > i || home <= j);
+            if (!must_stay) {
+                ref_frame_table[i] = ref_frame_table[j];
+                ref_frame_table[j].id = kRefFrameEmptyId;
+                i = j;
+            }
+        }
+    }
+
+    /// The hash of a frame id.  A 64-bit mix (splitmix64 finaliser) so
+    /// sequential frame ids spread evenly over the table.
+    [[nodiscard]] static std::size_t ref_frame_hash(std::uint64_t id) noexcept {
+        std::uint64_t z = id + 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z = z ^ (z >> 31);
+        return static_cast<std::size_t>(z);
+    }
+
+    /// Find the slot holding `id`, or the first free slot on the probe
+    /// path (which is where the id would be inserted).  `found` reports
+    /// whether the id was actually present.
+    [[nodiscard]] RefFrameSlot* ref_frame_find(std::uint64_t id,
+                                                bool& found) noexcept {
+        found = false;
+        if (ref_frame_table.empty()) return nullptr;
+        const std::size_t mask = ref_frame_table.size() - 1;
+        std::size_t i = ref_frame_hash(id) & mask;
+        for (std::size_t probe = 0; probe <= mask; ++probe) {
+            RefFrameSlot& slot = ref_frame_table[i];
+            if (slot.id == id) {
+                found = true;
+                return &slot;
+            }
+            if (slot.id == kRefFrameEmptyId) return &slot;
+            i = (i + 1) & mask;
+        }
+        return nullptr;
+    }
+
+    /// The const overload, for the read-only accessors.
+    [[nodiscard]] const RefFrameSlot* ref_frame_find(std::uint64_t id,
+                                                      bool& found) const noexcept {
+        found = false;
+        if (ref_frame_table.empty()) return nullptr;
+        const std::size_t mask = ref_frame_table.size() - 1;
+        std::size_t i = ref_frame_hash(id) & mask;
+        for (std::size_t probe = 0; probe <= mask; ++probe) {
+            const RefFrameSlot& slot = ref_frame_table[i];
+            if (slot.id == id) {
+                found = true;
+                return &slot;
+            }
+            if (slot.id == kRefFrameEmptyId) return nullptr;
+            i = (i + 1) & mask;
+        }
+        return nullptr;
+    }
 
     // ---- ICE flap -> DTLS rehandshake (v1.1 Dtls2, additive) ------------------
     // Tracks ICE state across tick() to detect NAT rebinding:
@@ -910,6 +1073,23 @@ struct NimRTCEngine::Impl {
     // call that filled it.
     std::vector<std::uint8_t> audio_rtp_scratch;
     std::vector<std::uint8_t> video_rtp_scratch;
+
+    // ---- Outbound packet buffers (Phase 3) ------------------------------
+    //
+    // When the engine has a scheduler, the outbound packet buffer comes
+    // from the scheduler's pool (`video_pkt_pooled`) and is handed back
+    // with `enqueue_owned()`.  When there is NO scheduler (the "transport"
+    // profile — the engine writes straight to ICE), the packet is built
+    // in the engine's own scratch buffer and handed to the transport's
+    // `send()`, which writes it out synchronously — the bytes do not
+    // escape the call, so a reusable buffer is safe.
+    //
+    // Before this, the no-scheduler path allocated a fresh vector per
+    // outbound packet: one heap allocation per frame, forever.
+    std::vector<std::uint8_t> video_pkt_pooled;
+    std::vector<std::uint8_t> video_pkt_scratch;
+    std::vector<std::uint8_t> audio_pkt_pooled;
+    std::vector<std::uint8_t> audio_pkt_scratch;
 
     /// Scratch for the DTMF (RFC 4733) packet.
     ///

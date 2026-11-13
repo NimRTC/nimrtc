@@ -824,7 +824,17 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 // hardening, 2026-11-09): it is handed back to the pool
                 // once the packet has been drained and dispatched, so the
                 // steady-state send path performs no heap allocation.
-                std::vector<std::uint8_t> rtp_pkt;
+                //
+                // Phase 3: when there is NO scheduler (the "transport"
+                // profile, where the engine writes straight to ICE) the
+                // packet used to be built in a fresh local vector — one
+                // heap allocation per packet, forever.  The transport
+                // `send()` is a synchronous write (the bytes do not
+                // escape the call), so the engine's own scratch buffer
+                // can hold it.
+                std::vector<std::uint8_t>& rtp_pkt = scheduler_
+                    ? impl_->video_pkt_pooled
+                    : impl_->video_pkt_scratch;
                 if (scheduler_) {
                     rtp_pkt = scheduler_->acquire_packet_buffer(
                         built_written + kSrtpAuthTagBytes);
@@ -1272,7 +1282,15 @@ uint32_t NimRTCEngine::send_audio(const float* pcm_samples, std::size_t num_samp
         // so every single packet allocated a fresh buffer and the
         // previous one was freed on drain.  With the pool the steady-state
         // send path performs no heap allocation.
-        std::vector<std::uint8_t> send_buf;
+        //
+        // Phase 3: without a scheduler the engine writes straight to ICE,
+        // so the packet is built in the engine's own scratch buffer
+        // (`send()` writes it out synchronously — the bytes do not escape
+        // the call).  Before this the no-scheduler path allocated a fresh
+        // vector per packet.
+        std::vector<std::uint8_t>& send_buf = scheduler_
+            ? impl_->audio_pkt_pooled
+            : impl_->audio_pkt_scratch;
         if (scheduler_) {
             send_buf = scheduler_->acquire_packet_buffer(
                 pkt_span.size() + kSrtpAuthTagBytes);

@@ -72,6 +72,11 @@ NimRTCEngine::NimRTCEngine(EngineConfig config)
     impl_->audio_ssrc = config_.audio_ssrc != 0
                             ? config_.audio_ssrc
                             : next_random_audio_ssrc();
+    // Phase 3: the ref-frame registry is a fixed-size open-addressed
+    // table.  It is sized once here so that recording a frame never
+    // allocates (the old `std::map` + `std::deque` pair allocated twice
+    // per sent frame).
+    impl_->init_ref_frame_table();
 }
 
 

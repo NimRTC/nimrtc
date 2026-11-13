@@ -1095,6 +1095,19 @@ struct NIMRTC_API_STABLE EngineConfig {
 // ---------------------------------------------------------------------------
 
 using NIMRTC_API_STABLE AudioFrameCallback = std::function<void(const float* pcm, size_t num_samples)>;
+
+/** Called for every inbound video frame, before decoding.
+ *
+ *  @param nal   The frame's Annex-B bitstream: `00 00 00 01 | nalu`
+ *               `00 00 00 01 | nalu` ...  (one start code per NAL unit).
+ *               For the non-Annex-B codecs (VP8 / VP9 / AV1) this is the
+ *               codec's own payload framing.
+ *  @param len   Length of @p nal in bytes.
+ *  @param keyframe  True if the frame is a key frame.
+ *
+ *  The RTP wire format carries *bare* NAL units (RFC 6184 §5.1); the
+ *  receiver reconstructs the Annex-B start codes before handing the frame
+ *  over, so the buffer can be fed to a decoder as-is. */
 using NIMRTC_API_STABLE VideoFrameCallback = std::function<void(const uint8_t* nal, size_t len, bool keyframe)>;
 using NIMRTC_API_STABLE EngineErrorCallback = std::function<void(uint32_t err, std::string_view msg)>;
 using NIMRTC_API_STABLE EngineStateCallback = std::function<void(const char* state)>;
@@ -1268,7 +1281,8 @@ public:
     }
 
     /** Install the video-frame callback.  Fires on the engine thread
-     *  when the video pipeline decodes a complete frame (raw NAL).
+     *  when the video pipeline assembles a complete frame (Annex-B
+     *  framed NAL units, before decode).
      *  Pass an empty std::function to clear. */
     NIMRTC_API_STABLE void set_on_video_frame(VideoFrameCallback cb) noexcept { on_video_frame_ = std::move(cb); }
 
@@ -1570,8 +1584,8 @@ public:
     // Inbound: ICE recv → on_transport_recv → handle_rtp (PT demux)
     //   → video_receiver_ (FU-A depacketize) → video_codec_ (decode)
     //   → video_sink_ (render).  The on_video_frame_ callback fires on
-    //   the raw NAL level (before decode) for users who want to do their
-    //   own rendering.
+    //   the Annex-B NAL level (before decode) for users who want to do
+    //   their own rendering.
     //
     // Both paths require `open()` to have been called first.
     //

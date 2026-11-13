@@ -78,6 +78,26 @@ constexpr std::uint8_t kNriMask      = 0x60;
 constexpr std::uint8_t kFuAType      = 28;
 constexpr std::uint8_t kStapAType    = 24;
 
+// The Annex-B start code (ITU-T H.264 Annex B / ISO-IEC 14496-10 §7.4.1.2.4):
+// four zero bytes followed by a one.
+//
+// RFC 6184 §5.1 carries *bare* NAL units in the RTP payload — the start
+// code is not on the wire.  The receiver therefore has to put it back,
+// because the decoder consumes the Annex-B framing that
+// `video_frame::NaluFormat::kAnnexBStartCode` promises:
+//
+//     00 00 00 01 [nalu] 00 00 00 01 [nalu] ...
+//
+// The receiver is the only place that knows where one NAL unit ends and
+// the next begins: the single-NAL packet format carries exactly one NAL
+// unit, STAP-A carries several, and FU-A carries a fragment that the
+// receiver reassembles.  The jitter buffer below it only concatenates.
+//
+// So the start code is inserted *here*, at the point where the NAL
+// boundary is still known, and never in `video_jb` — that module is
+// codec-agnostic (VP8 / VP9 carry no NAL units at all).
+constexpr std::uint8_t kAnnexBStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+
 // H.265 (RFC 7798): the NAL unit type is 6 bits wide and the payload
 // header is two bytes long.
 constexpr std::uint8_t kH265TypeMask = 0x3F;
@@ -209,6 +229,12 @@ struct VideoReceiver::Impl {
     // Marker bit to apply when we flush the reassembled NALU.
     bool          fua_end_marker  = false;
 
+    /// Scratch for the Annex-B re-framing of a single NAL unit packet.
+    ///
+    /// The jitter buffer copies the payload it is given, so the scratch
+    /// is only alive for the duration of the `insert()` call.
+    std::vector<std::uint8_t> annex_b_scratch;
+
     // ---- H.265 (RFC 7798) FU reassembly state ---------------------------
     //
     // H.265's FU packet carries a *two-byte* payload header and a
@@ -310,8 +336,13 @@ struct VideoReceiver::Impl {
             // middle/end fragment arrived without a start — drop silently.
             return;
         }
+        // The reassembled NAL unit is re-framed in Annex-B: the start
+        // code goes *before* the synthesised NAL header, so the bitstream
+        // the decoder sees is `00 00 00 01 | nalu`.
         std::vector<std::uint8_t> nalu;
-        nalu.reserve(1 + body.size());
+        nalu.reserve(sizeof(kAnnexBStartCode) + 1 + body.size());
+        nalu.insert(nalu.end(), kAnnexBStartCode,
+                    kAnnexBStartCode + sizeof(kAnnexBStartCode));
         const std::uint8_t hdr = static_cast<std::uint8_t>(
             ((nri & 0x03) << 5) | (nalu_type & kNaluTypeMask));
         nalu.push_back(hdr);
@@ -345,7 +376,9 @@ struct VideoReceiver::Impl {
             return;
         }
         std::vector<std::uint8_t> nalu;
-        nalu.reserve(2 + fu_h265_buf.size());
+        nalu.reserve(sizeof(kAnnexBStartCode) + 2 + fu_h265_buf.size());
+        nalu.insert(nalu.end(), kAnnexBStartCode,
+                    kAnnexBStartCode + sizeof(kAnnexBStartCode));
 
         // The two-byte NAL unit header (RFC 7798 §1.1.4):
         //   byte 0: F(1) | Type(6) | LayerId MSB(1)
@@ -418,9 +451,14 @@ struct VideoReceiver::Impl {
                 stats.stap_a_packets_seen++;
                 auto stap = parse_stap_a(payload);
                 if (!stap.parsed_ok || stap.nalus.empty()) return;
-                // Concatenate all NALUs (without start code) into one payload.
+                // Re-frame every NAL unit in Annex-B.  STAP-A carries
+                // several NAL units in one packet, and each of them needs
+                // its own start code — the decoder reads the boundaries
+                // off the start codes, not off a length.
                 std::vector<std::uint8_t> concat;
                 for (const auto& n : stap.nalus) {
+                    concat.insert(concat.end(), kAnnexBStartCode,
+                                  kAnnexBStartCode + sizeof(kAnnexBStartCode));
                     concat.insert(concat.end(), n.data.begin(), n.data.end());
                 }
                 video_jb::InboundPacket pkt{};
@@ -486,6 +524,8 @@ struct VideoReceiver::Impl {
                 }
                 std::vector<std::uint8_t> concat;
                 for (const auto& n : nalus) {
+                    concat.insert(concat.end(), kAnnexBStartCode,
+                                  kAnnexBStartCode + sizeof(kAnnexBStartCode));
                     concat.insert(concat.end(), n.data.begin(), n.data.end());
                 }
                 video_jb::InboundPacket pkt{};
@@ -526,7 +566,53 @@ struct VideoReceiver::Impl {
             return;
         }
 
-        // Generic: VP8, VP9, or H.264 Single NALU.
+        // Generic: VP8, VP9, or a single NAL unit of H.264 / H.265.
+        //
+        // For the Annex-B codecs the single NAL unit still needs its
+        // start code, because the frame the jitter buffer assembles is
+        // the concatenation of the packets of one picture — and the
+        // decoder reads the NAL boundaries off the start codes.
+        //
+        // The exception is an FU-A fragment: the receiver did not
+        // reassemble it (`ReceiverConfig::expect_fu_a` false), so the
+        // jitter buffer does the reassembly itself and puts the start
+        // code on the reassembled NAL unit.  Prepending one here would
+        // hide the FU indicator from the jitter buffer, which detects
+        // the fragment by its NAL unit type.
+        if (cfg.codec == video_frame::CodecKind::kH264 ||
+            cfg.codec == video_frame::CodecKind::kH265) {
+            const bool is_fu_fragment =
+                (cfg.codec == video_frame::CodecKind::kH264 &&
+                 peek_nalu_type(payload) == static_cast<NaluType>(kFuAType)) ||
+                (cfg.codec == video_frame::CodecKind::kH265 &&
+                 video_payload::h265::peek_payload_type(payload) ==
+                     static_cast<H265NaluType>(kH265FuType));
+
+            if (!is_fu_fragment) {
+                annex_b_scratch.clear();
+                annex_b_scratch.insert(annex_b_scratch.end(), kAnnexBStartCode,
+                                       kAnnexBStartCode + sizeof(kAnnexBStartCode));
+                annex_b_scratch.insert(annex_b_scratch.end(),
+                                       payload.begin(), payload.end());
+            }
+
+            video_jb::InboundPacket pkt{};
+            pkt.ssrc          = cfg.ssrc;
+            pkt.seq           = highest_seq;
+            pkt.rtp_timestamp = rtp_ts;
+            pkt.arrival_us    = arrival_us;
+            pkt.marker        = marker;
+            pkt.payload_type  = cfg.payload_type;
+            pkt.codec         = cfg.codec;
+            pkt.payload       = is_fu_fragment
+                                   ? payload
+                                   : core::ByteSpan{annex_b_scratch.data(),
+                                                    annex_b_scratch.size()};
+            jb->insert(pkt);
+            return;
+        }
+
+        // VP8 / VP9: the raw payload, no NAL framing.
         video_jb::InboundPacket pkt{};
         pkt.ssrc          = cfg.ssrc;
         pkt.seq           = highest_seq;

@@ -16,7 +16,7 @@
 > | 1 | 正确性（A1-A12） | ✅ | transport 空指针契约、注册表键生命周期、视频 RTP 统一、分辨率可配置、调度器锁外 I/O、S-family 流控 |
 > | 2 | 插件契约补全（B1-B10、Q3/Q4） | ✅ | `ISrtpSessionBackend` 接线、`CapabilitySelector` 接线、配置项 / 宏名显式化、契约测试 |
 > | 3 | 性能（C1-C7） | ✅ | 帧缓冲池化、GPU 零拷贝路径、逐包分配消除、`hotpath_zero_allocs` 与音频分配门禁 |
-> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-021 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者 |
+> | 4 | 结构重构（D1-D6、Q5） | ✅ | §4.1 已完成：五个 seam 目录并入 `src/modules/`（include 路径与 target 名均不变）；§4.4（D5）已完成：调度器 C ABI 变为真正的 `extern "C"`，并有以 C 语言编译的测试；§4.5（D6）已完成：ADR-021 + L4 收窄；§4.2（D2）已完成：七个死模块全部接线（`assembly` 获得 Profile → EngineConfig / TransportRequirements 的桥接）+ 死模块守卫（`tools/check_dead_modules.py`，37/37 模块通过）；§4.3（D1）已完成：引擎拆分的状态部分——`engine_impl.hpp` 1076 → 393 行，状态按关注点分入 7 个具名协作者；§4.5.1 已完成：视频接收路径重建 Annex-B 起始码（单 NAL / STAP-A / AP / FU-A / FU 五条路径） |
 > | 5 | 文档与 ADR 同步 | ✅ | ADR-019 / 020 / 021 / 022 已落地；§7.1 的 8 份必改文档全部同步完成 |
 >
 > Phase 3 的验收（§3.5）现状：
@@ -1071,10 +1071,10 @@ reviewer 忽略它。把豁免清单**逐项列名**之后，L4 才变成可机�
 - `engine_impl.hpp` 的 `#include <nimrtc/h264/codec_plugin.hpp>` 只为链接期注册，不引用任何符号；待 D1 把默认注册表拆出 `engine_impl.hpp` 后删除
 - 计划里的"CIO guard"（机械检查 `src/engine/` 的 include）尚未实现
 
-### 4.5 附带发现（未修）：视频接收路径不重建 Annex-B 起始码
+### 4.5 附带发现：视频接收路径不重建 Annex-B 起始码（已修）
 
-写 `video_stats` 的引擎接线测试时发现的**产品缺陷**，与 D2 的接线工作相邻但独立，
-因此**不在本轮修复**，记录在此以免丢失。
+写 `video_stats` 的引擎接线测试时发现的**产品缺陷**，与 D2 的接线工作相邻但独立。
+记录在此以免丢失；**已于 2026-11-13 单独切片修复**（见 §4.5.1）。
 
 **症状**：一个由多个 NAL unit 组成的帧（SPS + PPS + IDR，即真实 H.264 的最小可解码
 单元）在接收侧解码失败。
@@ -1095,19 +1095,51 @@ RFC 6184 §5.1 规定 RTP 载荷携带的是**不带**起始码的 NAL unit，�
 **影响面**：任何依赖真实解码的接收路径；当前 `video_jb` 自身的测试
 （`test_video_jb.cpp`）也把"NAL 首尾相接"当成既有行为固化了下来。
 
-**修复方向（待单独切片）**：在 NAL unit 的边界仍然可知的地方重建起始码——即
-`video_pipeline` 的 `handle_payload()`（它知道每个 payload 是一个完整 NAL unit，
-包括 STAP-A 展开与 FU-A 重组后的那一个），而不是在 `video_jb` 里——`video_jb` 是
-codec 无关的，VP8 / VP9 不用 Annex-B。相应的 `video_jb` 测试期望需要同步更新。
-
 **对 D2 测试的影响**：`tests/test_engine_video_stats.cpp` 因此**不能**使用真实解码器，
 否则测试结果将取决于宿主机器有没有 GPU。测试改为注册自己的 `"h264-software"`
 codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编码器产出码流，
 从而与宿主的后端选择解耦。
 
+#### 4.5.1 执行结果（2026-11-13）
+
+**原则**：起始码插在 **NAL unit 边界仍然可知**的地方 —— 也就是 `video_pipeline`，
+而不是 `video_jb`。`video_jb` 是 codec 无关的（VP8 / VP9 根本不用 Annex-B），
+在它里面插起始码等于把 H.264 的知识漏进一个不该知道 H.264 的模块。
+
+**改动清单**：
+
+| 路径 | 位置 | 插入什么 |
+|---|---|---|
+| 单 NAL unit | `video_pipeline.cpp` `handle_payload()` | NAL unit 前一个 `00 00 00 01` |
+| STAP-A（H.264） | `video_pipeline.cpp` | **每个**展开的 NAL unit 前各一个 |
+| AP（H.265） | `video_pipeline.cpp` | **每个**展开的 NAL unit 前各一个 |
+| FU-A（H.264） | `video_pipeline.cpp` `flush_fua()` | 合成的 NAL header 前一个 |
+| FU（H.265） | `video_pipeline.cpp` `flush_fu_h265()` | 合成的两字节 header 前一个 |
+| FU-A 兜底路径 | `video_jitter_buffer.cpp` `append_fu_a_fragment()` | 合成的 NAL header 前一个 |
+
+**`video_jb` 的两处配套改动**（不引入 H.264 知识，只是"允许 payload 前面有起始码"）：
+
+- `is_keyframe_payload()` 在窥视 NAL type **之前**先跳过 3 或 4 字节的起始码
+  （ISO-IEC 14496-10 §7.4.1.2.4：流的首个 NAL unit 用 4 字节形式，其后可用 3 字节形式）
+  —— 否则重 framing 之后 SPS / PPS / IDR 不再被识别为关键帧。
+- `append_fu_a_fragment()`（接收方自己没做 FU-A 重组时的兜底路径）在合成的 NAL
+  header 前插入起始码，使它与 `video_pipeline` 的输出格式一致。
+
+**结果**：`video_jb` 保持 codec 无关——它只负责把同一帧的若干 packet 拼起来，
+而每一段现在都自带起始码，于是"多 NAL unit 的帧"天然就是
+`start|nalu start|nalu ...`。
+
+**验收**：
+
+- ✅ `video_pipeline` 单测：单 NAL / FU-A 重组 / **多 NAL 帧（SPS+PPS+IDR 分三个 packet）**
+  / **STAP-A 聚合** 四种路径的输出都是合法 Annex-B
+- ✅ `video_jb` 单测：FU-A 兜底路径输出 4 + 1 + 7 = 12 字节
+- ✅ 引擎的 `VideoFrameCallback` 文档同步为"收到 Annex-B 码流"
+- ✅ 全量 `ctest`：**1436 / 1436** 通过（Windows MSVC Release，0 失败）
+
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿 —— ✅ **1434 / 1434**（Windows MSVC Release）
+- `ctest` 全绿 —— ✅ **1436 / 1436**（Windows MSVC Release）
 - `engine_impl.hpp` 行数 < 400 —— ✅ **393**
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过

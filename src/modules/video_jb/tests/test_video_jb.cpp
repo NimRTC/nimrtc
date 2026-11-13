@@ -132,10 +132,15 @@ TEST(VideoJb, FuAReassembly) {
 
     auto f = jb->pop_frame();
     ASSERT_NE(f, nullptr);
-    // Should reassemble to 1 (synthesized NAL header) + 7 (body) = 8 bytes.
-    ASSERT_EQ(f->bitstream.size(), 8u);
-    EXPECT_EQ(f->bitstream[0] & 0x1F, 5);   // NAL type IDR
-    EXPECT_EQ(std::memcmp(f->bitstream.data() + 1, body, 7), 0);
+    // The jitter buffer re-frames the reassembled NAL unit in Annex-B:
+    // 4 (start code) + 1 (synthesized NAL header) + 7 (body) = 12 bytes.
+    ASSERT_EQ(f->bitstream.size(), 12u);
+    EXPECT_EQ(f->bitstream[0], 0x00);
+    EXPECT_EQ(f->bitstream[1], 0x00);
+    EXPECT_EQ(f->bitstream[2], 0x00);
+    EXPECT_EQ(f->bitstream[3], 0x01);
+    EXPECT_EQ(f->bitstream[4] & 0x1F, 5);   // NAL type IDR
+    EXPECT_EQ(std::memcmp(f->bitstream.data() + 5, body, 7), 0);
     EXPECT_TRUE(f->is_keyframe);
 }
 

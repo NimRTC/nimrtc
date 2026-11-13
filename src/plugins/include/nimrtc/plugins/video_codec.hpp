@@ -138,6 +138,167 @@ struct NIMRTC_API_STABLE VideoCodecConfig {
 };
 
 // ---------------------------------------------------------------------------
+// Colour description (remote-desktop plan C5)
+// ---------------------------------------------------------------------------
+
+/** The range of the luma and chroma values (ITU-T H.273 "video_full_range"
+ *  / "video_range").
+ *
+ *  This is not a cosmetic detail: getting it wrong produces a picture
+ *  that looks washed out or crushed, and the usual reaction is "the
+ *  codec is broken".  A desktop compositor delivers **full range**
+ *  (the whole 0..255 code range carries signal); a camera in the
+ *  default BT.601 studio setup delivers **limited range** (16..235).
+ *  Conflating the two shifts the picture by a visible amount. */
+enum class NIMRTC_API_STABLE VideoColorRange : std::uint8_t {
+    kUnknown = 0,   ///< not stated — the consumer picks the default
+    kLimited = 1,   ///< 16..235 luma, 16..240 chroma (studio / camera)
+    kFull    = 2,   ///< 0..255 luma and chroma (desktop / screen content)
+};
+
+/** The matrix that maps RGB to YUV (ITU-T H.273 matrix_coefficients). */
+enum class NIMRTC_API_STABLE VideoColorMatrix : std::uint8_t {
+    kUnknown = 0,
+    kBt601   = 1,   ///< BT.601 — the classic camera matrix
+    kBt709   = 2,   ///< BT.709 — HD / screen content
+    kBt2020  = 3,   ///< BT.2020 non-constant luminance — UHD
+};
+
+/** The colour description of a video stream.
+ *
+ *  The description travels with the picture from the capture device, to
+ *  the encoder, to the wire, and to the renderer.  The point is that
+ *  the **encoder and the renderer agree**: if the encoder codes a
+ *  full-range picture and the renderer interprets it as limited, the
+ *  contrast is wrong in a way that is very hard to diagnose from the
+ *  symptoms.
+ *
+ *  `kUnknown` is the honest default and means "nobody said". */
+struct NIMRTC_API_STABLE VideoColorDescription {
+    /** The luma / chroma range. */
+    VideoColorRange range = VideoColorRange::kUnknown;
+
+    /** The RGB↔YUV matrix. */
+    VideoColorMatrix matrix = VideoColorMatrix::kUnknown;
+
+    /** True iff anything was stated at all. */
+    [[nodiscard]] bool known() const noexcept {
+        return range != VideoColorRange::kUnknown ||
+               matrix != VideoColorMatrix::kUnknown;
+    }
+
+    /** True iff the two descriptions agree on everything that was
+     *  stated on both sides.  Two `kUnknown` halves compare equal. */
+    [[nodiscard]] bool agrees_with(const VideoColorDescription& other) const noexcept {
+        if (range != VideoColorRange::kUnknown &&
+            other.range != VideoColorRange::kUnknown &&
+            range != other.range) {
+            return false;
+        }
+        if (matrix != VideoColorMatrix::kUnknown &&
+            other.matrix != VideoColorMatrix::kUnknown &&
+            matrix != other.matrix) {
+            return false;
+        }
+        return true;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Encoder parameter set (remote-desktop plan B12)
+// ---------------------------------------------------------------------------
+
+/** The *one* parameter set the engine computes and pushes to the encoder.
+ *
+ *  ## Why this struct exists
+ *
+ *  The encoder is a **passive** component: it does not know about the
+ *  bandwidth estimator, the rate controller, the feedback stream, or the
+ *  resolution ladder.  Everything it needs to know about the stream it
+ *  is coding arrives through this one struct, pushed by the engine
+ *  through `IVideoCodec::set_params()`.
+ *
+ *  Before this struct the encoder learned its parameters implicitly, at
+ *  `open()` time, through `VideoCodecConfig` — and then the only live
+ *  update path was `update_config()`, which took a whole *config* and
+ *  was used for one thing only (the bitrate).  That left three gaps:
+ *
+ *    - a resolution change could not be expressed (the geometry lives in
+ *      `VideoCodecConfig`, but the encoder was never told to re-init);
+ *    - a quality target (QP) had no home;
+ *    - the content hint (screen vs camera) had no home.
+ *
+ *  ## The contract
+ *
+ *  The engine computes the whole set in **one** place and pushes it.  A
+ *  codec never derives a parameter from a neighbouring field, and never
+ *  asks a rate controller for one.  The struct is therefore the complete
+ *  description of "what the encoder should be producing right now".
+ */
+struct NIMRTC_API_STABLE VideoEncoderParams {
+    /** Target width in pixels.  A change means a parameter-set change
+     *  (B13): the encoder must restart and emit the new SPS / PPS (or
+     *  VPS / AV1 sequence header) with the next frame. */
+    std::uint32_t width = 0;
+
+    /** Target height in pixels.  See `width`. */
+    std::uint32_t height = 0;
+
+    /** Target frame rate in frames per second. */
+    std::uint32_t fps = 30;
+
+    /** Target bitrate in bits per second (0 = the codec's own default). */
+    std::uint32_t bitrate_bps = 0;
+
+    /** Maximum number of frames between two IDR frames.
+     *
+     *  A keyframe *request* from the peer overrides this for one frame
+     *  (`IVideoCodec::force_keyframe()`); this is the steady-state
+     *  interval. */
+    std::uint32_t keyframe_interval = 60;
+
+    /** Quality target (quantiser).  0 = best quality, 51 = worst for
+     *  H.264; the exact range is codec-family specific.  255 means
+     *  "unset" — the codec uses its own rate-control default. */
+    std::uint8_t qp = 255;
+
+    /** The pixel format the encoder expects as input. */
+    VideoPixelFormat pixel_format = VideoPixelFormat::kI420;
+
+    /** The content hint — screen content and camera content want
+     *  different coding tools (remote-desktop plan B7 / RD-3).
+     *
+     *  `kUnspecified` means "the engine has no opinion", which is the
+     *  correct value for a camera stream. */
+    enum class ContentHint : std::uint8_t {
+        kUnspecified = 0,  ///< no opinion (camera content)
+        kMotion     = 1,  ///< camera-like: spend the budget on motion
+        kDetail     = 2,  ///< screen content: preserve fine detail / text
+        kText       = 3,  ///< screen content dominated by text
+    };
+
+    /** The content hint for this stream. */
+    ContentHint content_hint = ContentHint::kUnspecified;
+
+    /** The colour description of the stream (remote-desktop plan C5).
+     *
+     *  The encoder honours it: a full-range picture must not be coded
+     *  as if it were limited, and the matrix must match the one the
+     *  pixels were produced with.  `known() == false` means "nobody
+     *  said", which is the correct value when the source does not
+     *  know. */
+    VideoColorDescription color;
+
+    /** True iff `qp` carries a meaningful value (i.e. != 255). */
+    [[nodiscard]] bool has_qp() const noexcept { return qp != 255; }
+
+    /** True iff the geometry is set (non-zero width and height). */
+    [[nodiscard]] bool has_geometry() const noexcept {
+        return width != 0 && height != 0;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Codec statistics
 // ---------------------------------------------------------------------------
 
@@ -333,6 +494,69 @@ public:
 
     /** Update configuration live (e.g. adaptive bitrate change). */
     virtual Status update_config(VideoCodecConfig cfg) noexcept = 0;
+
+    /** Push the encoder's parameter set (remote-desktop plan B12).
+     *
+     *  This is the **single** entry point through which the engine
+     *  describes the stream the encoder is supposed to be producing.
+     *  The encoder is passive: it has no access to the bandwidth
+     *  estimator, to the rate controller, or to the feedback stream —
+     *  it only ever learns what it needs from this call.
+     *
+     *  The default implementation forwards the fields that the legacy
+     *  `VideoCodecConfig` already carried (geometry, fps, bitrate,
+     *  keyframe interval, pixel format) to `update_config()`, so a
+     *  third-party codec that only implements `update_config()` keeps
+     *  working unchanged.  A codec that wants the extra knobs (QP,
+     *  content hint) or wants to handle a geometry change itself
+     *  overrides this.
+     *
+     *  ## The geometry contract (B13)
+     *
+     *  When `params.width` / `params.height` differ from the codec's
+     *  current geometry, the parameter set changed, and the *next*
+     *  encoded frame must carry the new parameter set (SPS / PPS, or
+     *  VPS, or the AV1 sequence header) so the peer can decode it
+     *  without a keyframe request.  The default implementation cannot
+     *  promise that (it does not know the codec's internals), so a
+     *  codec that can restart must override this method.
+     *
+     *  @param params  The complete parameter set for the stream.
+     *  @return kOk on success; an error code when the codec rejects the
+     *          parameters (e.g. a geometry the codec cannot handle). */
+    virtual Status set_params(const VideoEncoderParams& params) noexcept {
+        VideoCodecConfig cfg = config();
+        if (params.has_geometry()) {
+            cfg.width  = params.width;
+            cfg.height = params.height;
+        }
+        if (params.fps != 0)            cfg.fps = params.fps;
+        if (params.bitrate_bps != 0)    cfg.bitrate_bps = params.bitrate_bps;
+        if (params.keyframe_interval != 0) {
+            cfg.keyframe_interval = params.keyframe_interval;
+        }
+        cfg.pixel_format = params.pixel_format;
+        return update_config(cfg);
+    }
+
+    /** The encoder's current parameter set (remote-desktop plan B12).
+     *
+     *  The default implementation derives it from `config()`, so a codec
+     *  that does not override `set_params()` still reports something
+     *  coherent.  A codec that overrides `set_params()` should override
+     *  this too, so the reported parameters match what was actually
+     *  applied. */
+    virtual VideoEncoderParams params() const noexcept {
+        const VideoCodecConfig cfg = config();
+        VideoEncoderParams p;
+        p.width            = cfg.width;
+        p.height           = cfg.height;
+        p.fps              = cfg.fps;
+        p.bitrate_bps      = cfg.bitrate_bps;
+        p.keyframe_interval = cfg.keyframe_interval;
+        p.pixel_format     = cfg.pixel_format;
+        return p;
+    }
 
     /** Snapshot of codec statistics. */
     virtual VideoCodecStats stats() const noexcept = 0;

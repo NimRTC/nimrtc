@@ -416,3 +416,208 @@ TEST(Openh264Software, TheFactorySelectsTheRealSoftwareCodec) {
     codec->close();
     codec.reset();
 }
+
+// ---------------------------------------------------------------------------
+// The encoder parameter set (remote-desktop plan B12 / B13)
+// ---------------------------------------------------------------------------
+
+TEST(Openh264Software, SetParamsAppliesTheGeometry) {
+    // B12: `set_params()` is the one entry point through which the
+    // engine describes the stream.  A geometry change has to reach the
+    // encoder — the encoder is configured for one geometry, so a
+    // parameter set that names a different one and is silently ignored
+    // would produce a picture at the wrong size.
+    const plugins::VideoDecoderBackend* be = openh264_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width  = kWidth;
+    cfg.height = kHeight;
+    auto codec = be->create(cfg);
+    ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(codec->open(), plugins::kOk);
+
+    plugins::VideoEncoderParams params;
+    params.width             = 640;
+    params.height            = 480;
+    params.fps               = 25;
+    params.bitrate_bps       = 1'500'000;
+    params.keyframe_interval = 30;
+    params.pixel_format      = plugins::VideoPixelFormat::kI420;
+
+    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+
+    const plugins::VideoEncoderParams now = codec->params();
+    EXPECT_EQ(now.width, 640u);
+    EXPECT_EQ(now.height, 480u);
+    EXPECT_EQ(now.fps, 25u);
+    EXPECT_EQ(now.bitrate_bps, 1'500'000u);
+    EXPECT_EQ(now.keyframe_interval, 30u);
+
+    codec->close();
+    codec.reset();
+}
+
+TEST(Openh264Software, SetParamsRestartsAndEmitsTheNewParameterSets) {
+    // B13: a geometry change is a *parameter-set change*.  The peer's
+    // decoder holds parameter sets that describe the old geometry, so
+    // the new ones must travel with the new frame — the peer decodes it
+    // without asking for a keyframe.
+    //
+    // The observable consequences are:
+    //   1. the encoder follows the new geometry;
+    //   2. the next frame is an IDR (a freshly initialised encoder
+    //      starts with one), and an IDR carries the SPS / PPS.
+    const plugins::VideoDecoderBackend* be = openh264_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width  = kWidth;
+    cfg.height = kHeight;
+    cfg.bitrate_bps = 2000000;
+    auto codec = be->create(cfg);
+    ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(codec->open(), plugins::kOk);
+
+    // ---- The first frame, at the original geometry -----------------------
+    std::vector<std::uint8_t> bitstream(512 * 1024);
+    plugins::EncodedVideoFrame encoded;
+    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+                            bitstream.data(), bitstream.size(), encoded),
+              plugins::kOk);
+    ASSERT_TRUE(encoded.is_keyframe);
+
+    // ---- The geometry changes ---------------------------------------------
+    constexpr std::uint32_t kNewWidth  = 640;
+    constexpr std::uint32_t kNewHeight = 480;
+
+    plugins::VideoEncoderParams params;
+    params.width        = kNewWidth;
+    params.height       = kNewHeight;
+    params.fps          = 30;
+    params.bitrate_bps  = 2000000;
+    params.pixel_format = plugins::VideoPixelFormat::kI420;
+    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+
+    const plugins::VideoEncoderParams now = codec->params();
+    EXPECT_EQ(now.width, kNewWidth);
+    EXPECT_EQ(now.height, kNewHeight);
+
+    // ---- The next frame must carry the NEW parameter sets -----------------
+    ASSERT_EQ(codec->encode(make_source_frame(kNewWidth, kNewHeight),
+                            bitstream.data(), bitstream.size(), encoded),
+              plugins::kOk);
+    EXPECT_TRUE(encoded.is_keyframe)
+        << "the frame after a geometry change must be an IDR: that is what "
+           "carries the new parameter sets to the peer";
+
+    // The picture really is at the new size: the decoder must produce
+    // a frame of the new geometry, not the old one.
+    std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kNewWidth) * kNewHeight);
+    std::vector<std::uint8_t> dec_u(static_cast<std::size_t>(kNewWidth / 2) * (kNewHeight / 2));
+    std::vector<std::uint8_t> dec_v(static_cast<std::size_t>(kNewWidth / 2) * (kNewHeight / 2));
+    std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
+
+    plugins::VideoFrame decoded;
+    ASSERT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+    EXPECT_EQ(decoded.width(), kNewWidth);
+    EXPECT_EQ(decoded.height(), kNewHeight);
+
+    codec->close();
+    codec.reset();
+}
+
+TEST(Openh264Software, SetParamsRejectsAnImpossibleGeometry) {
+    // A contradictory geometry cannot be encoded, and the codec must say
+    // so rather than silently keeping the old one — the engine treats a
+    // rejection as "keep the previous parameters" and needs to be able
+    // to tell the two apart.
+    const plugins::VideoDecoderBackend* be = openh264_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width  = kWidth;
+    cfg.height = kHeight;
+    auto codec = be->create(cfg);
+    ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(codec->open(), plugins::kOk);
+
+    // "480 rows, no width" — half a geometry is a contradiction.
+    plugins::VideoEncoderParams half;
+    half.width  = 0;
+    half.height = 480;
+    EXPECT_NE(codec->set_params(half), plugins::kOk);
+
+    // The previous parameters survive the rejection.
+    EXPECT_EQ(codec->params().width, kWidth);
+    EXPECT_EQ(codec->params().height, kHeight);
+
+    codec->close();
+    codec.reset();
+}
+
+TEST(Openh264Software, SetParamsWithoutAGeometryKeepsTheGeometry) {
+    // A parameter set that leaves the geometry out entirely is a
+    // legitimate partial update: the caller only wants to change, say,
+    // the bitrate.  The geometry must survive it.
+    const plugins::VideoDecoderBackend* be = openh264_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width  = kWidth;
+    cfg.height = kHeight;
+    auto codec = be->create(cfg);
+    ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(codec->open(), plugins::kOk);
+
+    plugins::VideoEncoderParams partial;
+    partial.bitrate_bps = 3'000'000;
+    ASSERT_EQ(codec->set_params(partial), plugins::kOk);
+
+    EXPECT_EQ(codec->params().width, kWidth);
+    EXPECT_EQ(codec->params().height, kHeight);
+    EXPECT_EQ(codec->params().bitrate_bps, 3'000'000u);
+
+    codec->close();
+    codec.reset();
+}
+
+TEST(Openh264Software, SetParamsKeepsTheDecoderAlive) {
+    // The decoder takes its geometry from the bitstream's own parameter
+    // sets, so it must survive a geometry change on the encoder side.
+    const plugins::VideoDecoderBackend* be = openh264_backend();
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width  = kWidth;
+    cfg.height = kHeight;
+    cfg.bitrate_bps = 2000000;
+    auto codec = be->create(cfg);
+    ASSERT_NE(codec, nullptr);
+    ASSERT_EQ(codec->open(), plugins::kOk);
+
+    std::vector<std::uint8_t> bitstream(512 * 1024);
+    plugins::EncodedVideoFrame encoded;
+    ASSERT_EQ(codec->encode(make_source_frame(kWidth, kHeight),
+                            bitstream.data(), bitstream.size(), encoded),
+              plugins::kOk);
+
+    // Change the geometry *after* a frame was produced.
+    plugins::VideoEncoderParams params;
+    params.width  = 320;
+    params.height = 240;
+    params.bitrate_bps = 2000000;
+    ASSERT_EQ(codec->set_params(params), plugins::kOk);
+
+    // The old frame still decodes — the decoder was not re-initialised.
+    std::vector<std::uint8_t> dec_y(static_cast<std::size_t>(kWidth) * kHeight);
+    std::vector<std::uint8_t> dec_u(static_cast<std::size_t>(kWidth / 2) * (kHeight / 2));
+    std::vector<std::uint8_t> dec_v(static_cast<std::size_t>(kWidth / 2) * (kHeight / 2));
+    std::uint8_t* buffers[3] = {dec_y.data(), dec_u.data(), dec_v.data()};
+
+    plugins::VideoFrame decoded;
+    EXPECT_EQ(codec->decode(encoded, decoded, buffers), plugins::kOk);
+
+    codec->close();
+    codec.reset();
+}

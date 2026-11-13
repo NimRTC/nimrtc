@@ -1220,6 +1220,16 @@ nimrtc_add_engine_codec_test(test_engine_video_zero_copy
                               test_engine_video_zero_copy.cpp)
 endif()
 
+# The encoder's parameter set on the engine side (remote-desktop plan
+# B12 / B13 / C5 / B7).  The test needs the video pipeline (receiver /
+# sender "reference") so it reuses `nimrtc_add_engine_codec_test`'s
+# link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+nimrtc_add_engine_codec_test(test_engine_video_params
+                              test_engine_video_params.cpp)
+endif()
+
 # ----------------------------------------------------------------------------
 # The capture-*device* seam wiring (remote-desktop plan A1; architecture
 # remediation plan Phase 2 §2.2).

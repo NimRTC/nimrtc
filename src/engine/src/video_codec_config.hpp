@@ -234,8 +234,31 @@ inline std::uint8_t resolve_payload_type(VideoCodecFamily family,
     return configured;
 }
 
-/** The `a=fmtp:` body the engine advertises for a codec family.
+/** The content hint's SDP spelling (remote-desktop plan B7).
  *
+ *  RFC 8692 §3 defines exactly three values, and both the media-level
+ *  `a=content-hint:` attribute and the `x-google-content-hint` fmtp
+ *  parameter use them.  The mapping lives here — once — so the two
+ *  spellings cannot drift apart.
+ *
+ *  `kUnspecified` maps to the empty string: "no opinion", which means
+ *  the attribute is not emitted at all.  An `a=content-hint` line with
+ *  no value is not a thing RFC 8692 defines.
+ *
+ *  @param hint  The engine's content hint.
+ *  @return "motion", "detail", "text", or "" (no opinion). */
+inline std::string_view sdp_content_hint_of(
+        plugins::VideoEncoderParams::ContentHint hint) noexcept {
+    switch (hint) {
+        case plugins::VideoEncoderParams::ContentHint::kMotion: return "motion";
+        case plugins::VideoEncoderParams::ContentHint::kDetail: return "detail";
+        case plugins::VideoEncoderParams::ContentHint::kText:   return "text";
+        case plugins::VideoEncoderParams::ContentHint::kUnspecified: return {};
+    }
+    return {};
+}
+
+/** The `a=fmtp:` body the engine advertises for a codec family.
  *  The *construction* of the body belongs to the `video_sdp_attributes`
  *  module — it is the single authority on what each codec family's
  *  format parameters are and how they are spelled.  This function only
@@ -256,7 +279,8 @@ inline std::uint8_t resolve_payload_type(VideoCodecFamily family,
  *                    encoder would override them).
  */
 inline std::string default_fmtp_of(VideoCodecFamily family,
-                                   bool with_sprop) {
+                                   bool with_sprop,
+                                   std::string_view content_hint = {}) {
     namespace vsa = nimrtc::video_sdp_attributes;
 
     switch (family) {
@@ -273,6 +297,13 @@ inline std::string default_fmtp_of(VideoCodecFamily family,
                 // The synthetic SPS / PPS the H.264 stub encoder emits.
                 cfg.sprop_sps = "Z0LAHtkA";
                 cfg.sprop_pps = "aM4G4g==";
+            }
+            // The content hint (remote-desktop plan B7).  The three
+            // values are the ones RFC 8692 §3 defines, so the fmtp
+            // spelling and the media-level `a=content-hint:` attribute
+            // carry the same information.
+            if (!content_hint.empty()) {
+                cfg.x_google_content_hint = std::string(content_hint);
             }
             return vsa::build_h264_fmtp(cfg);
         }

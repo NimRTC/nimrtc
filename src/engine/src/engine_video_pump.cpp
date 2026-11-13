@@ -104,6 +104,11 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     frame.capture_ts_us  = captured.capture_ts_us;
     frame.frame_seq      = captured.frame_seq;
     frame.rtp_timestamp  = rtp_timestamp;
+    // The colour description travels with the picture (plan C5): the
+    // device knows whether it produced full-range (desktop) or
+    // limited-range (camera) pixels, and the encoder must code it that
+    // way.
+    frame.color          = captured.color;
 
     if (captured.has_gpu_handle && captured.gpu_handle != nullptr) {
         // The zero-copy path: the device produced a native surface and

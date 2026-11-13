@@ -488,6 +488,27 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  @see `plugins::IVideoCodec::encode_zero_copy` */
     bool video_zero_copy = false;
 
+    /** The content hint for the outbound video stream (remote-desktop
+     *  plan B7 / RD-3).
+     *
+     *  A screen capture and a camera want different coding: screen
+     *  content is flat and text-heavy (the bitrate belongs on sharp
+     *  edges), camera content is continuous motion (the bitrate belongs
+     *  on the motion vectors).  The hint tells the encoder which kind
+     *  of picture it is looking at.
+     *
+     *  The default is `kUnspecified` — "the engine has no opinion" —
+     *  which is the right value for a camera stream and preserves the
+     *  existing behaviour exactly.
+     *
+     *  The hint is also what the SDP's `a=content-hint` attribute is
+     *  derived from, so the peer knows what to expect before the first
+     *  frame arrives.
+     *
+     *  @see `plugins::VideoEncoderParams::ContentHint` */
+    plugins::VideoEncoderParams::ContentHint video_content_hint =
+        plugins::VideoEncoderParams::ContentHint::kUnspecified;
+
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
     // BWE controls outbound pacing and adapts to network congestion.
@@ -2870,6 +2891,24 @@ private:
      *  @param frame  The (already staged) frame to encode.
      *  @return kOk when the frame was encoded and pushed. */
     plugins::Status encode_and_send_video_frame(
+        const plugins::VideoSourceFrame& frame) noexcept;
+
+    /** Recompute the encoder's parameter set and push it to the codec
+     *  (remote-desktop plan B12 / B13).
+     *
+     *  Called at the top of `encode_and_send_video_frame()`, before the
+     *  frame is encoded.  It is a no-op in the steady state: the
+     *  parameters are recomputed, compared with the ones in force, and
+     *  only pushed when something actually changed.
+     *
+     *  A **geometry** change is special: it is a parameter-set change,
+     *  so the encoder must restart and emit the new SPS / PPS (or VPS,
+     *  or AV1 sequence header) with the next frame — the peer decodes
+     *  it without a keyframe request.
+     *
+     *  @param frame  The frame about to be encoded (its geometry is the
+     *                authority on what is being sent). */
+    void apply_video_encoder_params(
         const plugins::VideoSourceFrame& frame) noexcept;
 
     // ---- Session model helpers (v1.2.0, session capability plan) --------

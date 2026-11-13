@@ -89,6 +89,20 @@ struct NIMRTC_API_STABLE H264Fmtp {
     std::optional<std::uint32_t>     max_dpb;      // kbits
     std::optional<bool>              level_asymmetry_allowed;
 
+    /** The content hint (remote-desktop plan B7).
+     *
+     *  `x-google-content-hint` is the de-facto way a WebRTC endpoint
+     *  tells its peer what kind of picture it is sending: "text" for a
+     *  screen dominated by text, "detail" for a screen with fine detail
+     *  that must survive, "motion" for a camera.  Chrome emits it and
+     *  Chrome honours it, and the plan's B7 acceptance criterion names
+     *  it explicitly.
+     *
+     *  RFC 8692's `a=content-hint` media-level attribute is the
+     *  standard spelling of the same idea; the engine emits that one on
+     *  the m-line.  Both carry the same three values. */
+    std::optional<std::string>       x_google_content_hint;
+
     /** Whether at least one field was populated. */
     [[nodiscard]] bool has_any() const noexcept;
 };

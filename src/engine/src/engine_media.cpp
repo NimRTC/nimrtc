@@ -12,6 +12,10 @@
 // is the session's *reserved* stream.
 #include "bandwidth_allocation.hpp"
 
+// Remote-desktop plan B12 / B13: the ONE place the engine computes the
+// encoder's parameter set.
+#include "engine_video_params.hpp"
+
 namespace nimrtc::engine {
 
 namespace {
@@ -1681,10 +1685,137 @@ plugins::Status NimRTCEngine::send_video(
 }
 
 
-plugins::Status NimRTCEngine::encode_and_send_video_frame(
+// ---------------------------------------------------------------------------
+// The encoder's parameter set (remote-desktop plan B12 / B13)
+// ---------------------------------------------------------------------------
+//
+// The engine computes the parameters in one place (see
+// `engine_video_params.hpp`) and pushes them to the codec here.  This
+// function is the *only* place the engine talks to the codec about
+// "what should you be producing" — the bitrate controller, the ladder
+// and the capture pump all reach the codec through it.
+//
+// The push is skipped in the steady state: the parameters are recomputed
+// and compared with the ones in force, and only a real difference
+// triggers a `set_params()` call.  That keeps the per-frame cost at two
+// integer compares.
+
+void NimRTCEngine::apply_video_encoder_params(
+    const plugins::VideoSourceFrame& frame) noexcept {
+    if (!video_codec_) return;
+
+    auto& vstate = impl_->video_state;
+
+    // ---- The inputs -------------------------------------------------------
+    //
+    // The *configured* geometry is the starting point.  But the frame in
+    // hand is the authority on what is actually being sent: the ladder
+    // may have stepped the resolution down, or the capture device may
+    // have renegotiated.  When the frame disagrees with the
+    // configuration, the frame wins — it is what the peer will receive.
+    detail::VideoEncoderParamInputs in;
+    in.width  = config_.video_width;
+    in.height = config_.video_height;
+    in.fps    = config_.video_fps;
+    // The bitrate comes from the codec's own configuration: the engine
+    // does not run a video rate controller yet (the ladder / BWE work is
+    // plan item D1–D4, in M3), so the codec's current value *is* the
+    // value in force.  Reading it back keeps this function from
+    // clobbering a bitrate the host set on the codec directly.
+    in.bitrate_bps = video_codec_->config().bitrate_bps;
+    in.keyframe_interval = 60;
+    in.pixel_format = video_codec_->config().pixel_format;
+    in.content_hint = config_.video_content_hint;
+    // The colour description comes from the *frame*: the picture's own
+    // colour description is what the encoder has to code (plan C5).
+    in.color = frame.color;
+
+    if (frame.width != 0 && frame.height != 0) {
+        in.width  = frame.width;
+        in.height = frame.height;
+    }
+
+    const plugins::VideoEncoderParams wanted =
+        detail::compute_video_encoder_params(in);
+
+    // ---- Has anything changed? --------------------------------------------
+    //
+    // Before the first push there is nothing to compare against, so the
+    // parameters are pushed unconditionally.  The codec was already
+    // configured with the same geometry at `open()` time, so this is a
+    // no-op for the codec — but it establishes the baseline the
+    // comparison uses.
+    if (vstate.video_encoder_params_set &&
+        vstate.video_encoder_params.width  == wanted.width  &&
+        vstate.video_encoder_params.height == wanted.height &&
+        vstate.video_encoder_params.fps == wanted.fps &&
+        vstate.video_encoder_params.bitrate_bps == wanted.bitrate_bps &&
+        vstate.video_encoder_params.keyframe_interval == wanted.keyframe_interval &&
+        vstate.video_encoder_params.pixel_format == wanted.pixel_format &&
+        vstate.video_encoder_params.content_hint == wanted.content_hint &&
+        vstate.video_encoder_params.qp == wanted.qp &&
+        vstate.video_encoder_params.color.range == wanted.color.range &&
+        vstate.video_encoder_params.color.matrix == wanted.color.matrix) {
+        return;
+    }
+
+    // ---- A geometry change is a parameter-set change (B13) ----------------
+    //
+    // The peer cannot decode a frame whose geometry its parameter sets
+    // do not describe.  The encoder must therefore restart and emit the
+    // new parameter set with the next frame — no PLI round-trip.
+    const bool restart =
+        vstate.video_encoder_params_set &&
+        detail::video_params_need_restart(vstate.video_encoder_params, wanted);
+
+    const plugins::Status rc = video_codec_->set_params(wanted);
+    if (rc != plugins::kOk) {
+        core::log::Logger::instance().warn(
+            "engine: the video codec rejected the parameter set "
+            "(the encoder keeps its previous parameters)");
+        return;
+    }
+
+    vstate.video_encoder_params     = wanted;
+    vstate.video_encoder_params_set = true;
+
+    if (restart) {
+        ++vstate.video_encoder_restarts;
+        core::log::Logger::instance().info(
+            "engine: the video geometry changed to " +
+            std::to_string(wanted.width) + "x" +
+            std::to_string(wanted.height) +
+            " — the encoder restarted and the new parameter set travels "
+            "with the next frame");
+    }
+}
+
+
+    plugins::Status NimRTCEngine::encode_and_send_video_frame(
     const plugins::VideoSourceFrame& frame) noexcept {
     if (!is_open()) return plugins::kErrNotReady;
     if (!video_codec_ || !video_sender_) return plugins::kErrNotReady;
+
+    // ---- The parameter set (remote-desktop plan B12 / B13) ---------------
+    //
+    // The engine computes the encoder's parameters in ONE place and
+    // pushes them here, before the frame is encoded.  Two things can
+    // make the parameters change:
+    //
+    //   1. the host changed the configuration (rare — the ladder and
+    //      the bitrate controller both go through this path);
+    //   2. the *geometry* of the frame changed (the ladder stepped
+    //      down, or the capture device renegotiated).
+    //
+    // Case 2 is the one that matters for correctness (B13): a geometry
+    // change is a parameter-set change, so the encoder must restart and
+    // emit the new SPS / PPS with this frame.  Without it the peer's
+    // decoder is looking at a frame whose size its parameter sets do
+    // not describe, and the picture breaks until the next PLI.
+    //
+    // The check is cheap (two integer compares) and happens on the tick
+    // thread, so it costs nothing in the steady state.
+    apply_video_encoder_params(frame);
 
     // Translate plugins::VideoSourceFrame → plugins::VideoFrame for the codec.
     //

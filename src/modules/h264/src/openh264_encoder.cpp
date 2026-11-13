@@ -447,12 +447,11 @@ public:
         // The bitrate is the only parameter OpenH264 can change live
         // without a full re-init; a geometry change needs a re-init, which
         // the caller has to request by closing and reopening the codec.
-        cfg_.bitrate_bps = cfg.bitrate_bps;
-        cfg_.fps         = cfg.fps;
-        if (encoder_ && cfg.bitrate_bps > 0) {
+        cfg_ = std::move(cfg);
+        if (encoder_ && cfg_.bitrate_bps > 0) {
             SBitrateInfo info{};
             info.iLayer   = SPATIAL_LAYER_ALL;
-            info.iBitrate = static_cast<int>(cfg.bitrate_bps);
+            info.iBitrate = static_cast<int>(cfg_.bitrate_bps);
             const int rv = encoder_->SetOption(ENCODER_OPTION_BITRATE, &info);
             if (rv != cmResultSuccess) {
                 core::log::Logger::instance().warn(
@@ -460,6 +459,95 @@ public:
             }
         }
         return plugins::kOk;
+    }
+
+    // ---- The parameter set (remote-desktop plan B12 / B13) -----------------
+
+    plugins::Status set_params(
+            const plugins::VideoEncoderParams& params) noexcept override {
+        // A parameter set may leave the geometry out entirely (the
+        // caller only wants to change, say, the bitrate).  But it may
+        // not state *half* a geometry: "480 rows, no width" is a
+        // contradiction, and quietly ignoring it would leave the
+        // encoder coding at a size the caller did not ask for.
+        if ((params.width == 0) != (params.height == 0)) {
+            return plugins::kErrInvalidParam;
+        }
+
+        // The live knobs first: they survive a restart, and applying
+        // them before the restart means the re-created encoder is
+        // configured with the new values from the start.
+        plugins::VideoCodecConfig cfg = cfg_;
+        if (params.fps != 0)            cfg.fps = params.fps;
+        if (params.bitrate_bps != 0)    cfg.bitrate_bps = params.bitrate_bps;
+        if (params.keyframe_interval != 0) {
+            cfg.keyframe_interval = params.keyframe_interval;
+        }
+        cfg.pixel_format = params.pixel_format;
+
+        if (!params.has_geometry()) {
+            // A partial update: the geometry stays, the live knobs move.
+            return update_config(cfg);
+        }
+
+        // OpenH264 needs *even* dimensions for 4:2:0 chroma.
+        const std::uint32_t new_w = params.width  & ~1u;
+        const std::uint32_t new_h = params.height & ~1u;
+        if (new_w == 0 || new_h == 0) {
+            return plugins::kErrInvalidParam;
+        }
+        cfg.width  = new_w;
+        cfg.height = new_h;
+
+        if (new_w != width_ || new_h != height_) {
+            // ---- A geometry change is a parameter-set change (B13) -------
+            //
+            // The peer's decoder is holding parameter sets that describe
+            // the *old* geometry.  The new ones have to travel with the
+            // new frame, or the peer cannot decode it until it asks for a
+            // keyframe (and, on a plain H.264 stream, may not even then).
+            //
+            // OpenH264 emits the SPS / PPS with every IDR, and a
+            // freshly initialised encoder starts with an IDR — so
+            // re-creating the encoder is exactly the mechanism that
+            // puts the new parameter set on the wire with the next
+            // frame.
+            //
+            // The *decoder* needs no re-init: it takes its geometry from
+            // the bitstream's own parameter sets, so it must survive.
+            close_encoder();
+            width_  = new_w;
+            height_ = new_h;
+            cfg_    = cfg;
+            const plugins::Status s = open_encoder();
+            if (s != plugins::kOk) {
+                stats_.encode_errors++;
+                return s;
+            }
+            core::log::Logger::instance().info(
+                "openh264: re-configured the encoder for " +
+                std::to_string(width_) + "x" + std::to_string(height_) +
+                " — the new SPS / PPS travel with the next frame");
+            return plugins::kOk;
+        }
+
+        // The geometry did not change — apply the live knobs only.
+        cfg_.bitrate_bps      = cfg.bitrate_bps;
+        cfg_.fps              = cfg.fps;
+        cfg_.keyframe_interval = cfg.keyframe_interval;
+        cfg_.pixel_format     = cfg.pixel_format;
+        return update_config(cfg_);
+    }
+
+    plugins::VideoEncoderParams params() const noexcept override {
+        plugins::VideoEncoderParams p;
+        p.width             = width_;
+        p.height            = height_;
+        p.fps               = cfg_.fps;
+        p.bitrate_bps       = cfg_.bitrate_bps;
+        p.keyframe_interval = cfg_.keyframe_interval;
+        p.pixel_format      = cfg_.pixel_format;
+        return p;
     }
 
     plugins::VideoCodecStats stats() const noexcept override { return stats_; }

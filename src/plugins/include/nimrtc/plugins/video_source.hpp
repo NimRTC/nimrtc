@@ -212,6 +212,20 @@ struct NIMRTC_API_STABLE VideoSourceFrame {
 
     /** RTP timestamp (32-bit, media clock). */
     std::uint32_t rtp_timestamp = 0;
+
+    /** The colour description of the picture (remote-desktop plan C5).
+     *
+     *  A desktop compositor delivers **full-range** pixels; a camera in
+     *  the default studio setup delivers **limited-range** ones.  The
+     *  two must not be conflated: the difference is a visible shift in
+     *  contrast, and it looks exactly like a broken codec.
+     *
+     *  The description travels with the frame so the encoder can code it
+     *  correctly and the renderer can interpret it the same way.  The
+     *  default (`known() == false`) means "the source does not say".
+     *
+     *  @see `plugins::VideoColorDescription` */
+    VideoColorDescription color;
 };
 
 // ---------------------------------------------------------------------------

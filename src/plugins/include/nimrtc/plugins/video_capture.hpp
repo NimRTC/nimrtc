@@ -471,6 +471,21 @@ struct NIMRTC_API_STABLE CaptureFrame {
     /** Native row stride / pitch in bytes (0 when the backend has an
      *  implicit layout). */
     std::uint32_t gpu_pitch_bytes = 0;
+
+    /** The colour description of the captured picture
+     *  (remote-desktop plan C5).
+     *
+     *  A desktop compositor delivers **full-range** pixels; a camera in
+     *  the default studio setup delivers **limited-range** ones.  The
+     *  device knows which it is producing, and saying so is what lets
+     *  the encoder code the picture correctly and the renderer interpret
+     *  it the same way.  Getting it wrong shifts the contrast, and the
+     *  symptom looks like a broken codec.
+     *
+     *  The default (`known() == false`) means "the device does not
+     *  say" — which is honest and harmless: the consumer then falls
+     *  back to its own default. */
+    VideoColorDescription color;
 };
 
 /**

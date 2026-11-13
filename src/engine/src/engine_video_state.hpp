@@ -289,6 +289,30 @@ struct VideoState {
     /** The RTP timestamp (90 kHz) the media clock's origin is anchored
      *  at. */
     std::uint32_t capture_rtp_base_ts = 0;
+
+    // ---- The encoder's parameter set (remote-desktop plan B12 / B13) -----
+    //
+    // The engine computes the parameter set in one place (see
+    // `engine_video_params.hpp`) and pushes it through
+    // `IVideoCodec::set_params()`.  These two fields are the memory of
+    // that: what the encoder was last told, and what geometry it was
+    // last told about.
+    //
+    // The geometry matters separately because a *geometry* change is a
+    // parameter-set change (B13): the encoder must restart and emit the
+    // new SPS / PPS with the next frame, so the peer decodes it without
+    // asking for a keyframe.
+    /** The parameter set currently in force (the last one the codec
+     *  accepted). */
+    plugins::VideoEncoderParams video_encoder_params{};
+
+    /** True once the engine has pushed a parameter set to the codec. */
+    bool video_encoder_params_set = false;
+
+    /** The number of times the engine had to restart the encoder because
+     *  the geometry changed.  A non-zero value means the ladder (or the
+     *  capture device) changed resolution mid-session. */
+    std::uint64_t video_encoder_restarts = 0;
 };
 
 }  // namespace nimrtc::engine::detail

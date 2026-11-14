@@ -27,6 +27,12 @@ option(NIMRTC_BUILD_BRIDGE_TESTS
        "Build Chrome↔NimRTC interop bridge (tests/wolfssl_dtls/bridge/)"
        OFF)
 option(NIMRTC_VENDORED         "Use vendored third-party libraries" ON)
+# Remote-desktop plan Track F (F5) — libsamplerate (BSD-2-Clause) provides
+# the audio sample-rate conversion behind audio_device::Resampler.  Turning
+# it OFF selects the pure-C++ linear-interpolation fallback; no system
+# samplerate is ever linked (AGENTS.md L5).
+option(NIMRTC_VENDORED_LIBSAMPLERATE
+       "Use vendored libsamplerate for audio resampling" ON)
 option(NIMRTC_ASAN             "Enable AddressSanitizer"           OFF)
 option(NIMRTC_UBSAN            "Enable UndefinedBehaviorSanitizer" OFF)
 option(NIMRTC_TSAN             "Enable ThreadSanitizer"            OFF)
@@ -137,6 +143,11 @@ option(NIMRTC_MODULE_NVCODEC       "Build shared NVIDIA codec module (NVENC / NV
 # codec families from one copy of the driver code.
 option(NIMRTC_MODULE_H265          "Build H.265 module (codec plugin + hardware backend table)" ON)
 option(NIMRTC_MODULE_AV1           "Build AV1 module (codec plugin + hardware backend table)" ON)
+# The VP9 codec module (remote-desktop plan B11).  It carries the
+# *optional* software VP9 encoder (the vendored libvpx), which is
+# option-gated and defaults OFF.  The module itself is always built —
+# it ships the stub decoder and the backend table.
+option(NIMRTC_MODULE_VP9           "Build VP9 module (stub decoder + optional libvpx encoder)" ON)
 # Video R2:
 option(NIMRTC_MODULE_VIDEO_SDP_ATTRIBUTES
        "Build video SDP attribute module (H.264/VP8/VP9 fmtp parsing)" ON)
@@ -253,6 +264,26 @@ if(NIMRTC_TSAN)
     nimrtc_enable_sanitizer(thread)
 endif()
 
+# -----------------------------------------------------------------------------
+# CTest enablement.
+#
+# `include(CTest)` must run BEFORE the vendored third-party subdirectories
+# are added: several upstream projects force `BUILD_TESTING` off in their
+# own cache scope (SVT-AV1's wrapper does it with `set(... CACHE ... FORCE)`),
+# and `include(CTest)` reads `BUILD_TESTING` to decide whether to call
+# `enable_testing()`.  When it ran after them, the top-level
+# CTestTestfile.cmake was never written and `ctest` reported
+# "No tests were found" in that build tree — even though every test
+# binary had been built.
+#
+# `include(CTest)` also defines the `BUILD_TESTING` option (default ON), so
+# it is declared here explicitly with NimRTC's own switch as the default.
+# -----------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    option(BUILD_TESTING "Build the unit tests" ON)
+    include(CTest)              # wires up enable_testing() + ctest discovery
+endif()
+
 # HW codec plugin SDK detection (NVENC/AMF/QSV/DXVA/VA-API/NVDEC).
 # Silent when the relevant NIMRTC_PLUGINS_<NAME>=OFF; otherwise probes
 # standard install paths and reports "not found" without failing the build.
@@ -328,7 +359,6 @@ add_subdirectory(src/engine)   # Composition layer (wires plugins together)
 
 # Tests
 if(NIMRTC_BUILD_TESTS)
-    include(CTest)              # wires up enable_testing() + ctest discovery
     add_subdirectory(tests)
 
     # Post-configure hook: rewrite every CTestTestfile.cmake so plain

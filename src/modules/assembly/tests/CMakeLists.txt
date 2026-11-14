@@ -81,6 +81,40 @@ set_tests_properties(modules_assembly_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # -----------------------------------------------------------------------------
+# The Profile JSON schema (v1.2) conformance test.
+# -----------------------------------------------------------------------------
+#
+# A separate target because it validates the shipped `profiles/*.json`
+# files against `profiles/schema/profile-v1.2.json` — it needs the JSON
+# parser (nlohmann_json) and the **source tree** (the schema lives in a
+# subdirectory the copy step above does not mirror), but neither the
+# assembly module's own symbols nor the engine.
+#
+# `NIMRTC_SOURCE_ROOT` is injected so the test locates `profiles/` without
+# hardcoding a path (the same mechanism `tests/test_api_classification.cpp`
+# uses).
+add_executable(test_profile_schema test_profile_schema.cpp)
+
+target_compile_definitions(test_profile_schema PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    NIMRTC_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+
+set_target_properties(test_profile_schema PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_profile_schema LENIENT)
+
+target_link_libraries(test_profile_schema PRIVATE
+    nlohmann_json::nlohmann_json
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_assembly_profile_schema_tests COMMAND test_profile_schema)
+set_tests_properties(modules_assembly_profile_schema_tests PROPERTIES
+    TIMEOUT 30
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# -----------------------------------------------------------------------------
 # The Profile → EngineConfig bridge (architecture remediation plan §4.2 / D2)
 # -----------------------------------------------------------------------------
 #

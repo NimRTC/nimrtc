@@ -108,6 +108,79 @@ dav1d contributors (dav1d).
               encoder, so AV1 *encoding* stays with the stub / NVENC.
 
 ============================================================
+Software AV1 / VP9 encoders (optional)
+============================================================
+
+This product includes software developed by the Alliance for Open Media
+and the SVT-AV1 contributors (SVT-AV1).
+  - Source:   https://github.com/AOMediaCodec/SVT-AV1
+  - Version:  v4.3.0 @ e3d63405f9ba8219913a7276c2c47d10e5d022fe
+              (vendored at src/third_party/svt-av1/; pinned SHA in
+               src/third_party/SOURCE_VERSIONS)
+  - License:  BSD-2-Clause Clear PLUS the Alliance for Open Media Patent
+              License 1.0.  The BSD text is in
+              src/third_party/svt-av1/src/LICENSE.md and the patent
+              licence in src/third_party/svt-av1/src/PATENTS.md; both are
+              reproduced in the vendored tree verbatim.
+  - Scope:    runtime, statically linked (NIMRTC_VENDORED_SVT_AV1=ON,
+              which defaults OFF).  Built from source.  Serves as the
+              optional software AV1 *encoder* (backend id "svt_av1"),
+              which carries the screen-content coding tools (intra block
+              copy) the remote-desktop plan needs.
+  - Note:     unlike the BSD-only entries above, this dependency ships
+              under a *patent* licence as well.  The AOM Patent License
+              1.0 grants a royalty-free patent licence for the
+              standardised AV1 bitstream; it does not apply to the
+              pre-standard patents that the Apache-2.0 alternative
+              covers, and it terminates if a patent suit is brought
+              against the licensee.  That is why the option defaults OFF.
+  - Platforms (cross-platform vendoring policy K8b):
+              Windows (MSVC, x86-64) — NASM is not guaranteed on the
+                NimRTC CI image; the wrapper sets upstream's
+                COMPILE_C_ONLY=ON and builds the portable C path, so the
+                build degrades the speed and never the build (the plan's
+                R-11 rule).
+              Windows (MSVC, arm64) — NASM is x86-only; portable C path.
+              macOS (arm64 / x86-64) — NASM via Homebrew is the fast path;
+                the portable C path is the fallback.
+              Linux x86-64 — NASM is the fast path when present; the
+                portable C path is the fallback.
+              Linux aarch64 — NASM never applies; portable C path only.
+              The SAME sources build on every platform, so the encoder
+              output is identical; only the speed differs.  No prebuilt
+              binary is linked or shipped.
+
+This product includes software developed by the WebM Project and the
+libvpx contributors (libvpx).
+  - Source:   https://github.com/webmproject/libvpx
+  - Version:  v1.17.0 @ 6df3ec34557879fff673706f4a1d9fbd0f3a6f0e
+              (vendored at src/third_party/libvpx/; pinned SHA in
+               src/third_party/SOURCE_VERSIONS)
+  - License:  BSD-3-Clause  (the notice is embedded verbatim in the
+              upstream source files; the full text is in
+              src/third_party/libvpx/src/LICENSE)
+  - Scope:    runtime, statically linked (NIMRTC_VENDORED_LIBVPX=ON,
+              which defaults OFF).  Built from source.  Serves as the
+              optional software VP9 encoder (backend id "libvpx").
+  - Note:     upstream's `rtcd.pl` dispatch-table generators need a perl
+              interpreter, which a stock Windows build host does not
+              carry.  The wrapper probes for perl and, when it is
+              absent, degrades to an empty interface target — so the
+              build still configures and the VP9 row is simply absent
+              from the registry (the plan's R-11 rule).
+  - Platforms (cross-platform vendoring policy K8b):
+              Windows (MSVC, x86-64 / arm64) — portable C path.
+              macOS (arm64 / x86-64) — portable C path.
+              Linux x86-64 — portable C path (links libm).
+              Linux aarch64 — portable C path (links libm).
+              The wrapper deliberately compiles the portable C path only
+              (the upstream assembly is NASM on x86 and GAS on ARM,
+              neither of which is guaranteed on a build host), so the
+              SAME sources build on every platform and the output is
+              bit-comparable across them.  No prebuilt binary is linked
+              or shipped.
+
+============================================================
 Pixel scaling / colour conversion
 ============================================================
 
@@ -169,6 +242,45 @@ This product includes software developed by the PortAudio contributors
   - Note:     ASIO, WDM-KS and JACK are deliberately NOT built — the
               Steinberg ASIO SDK may not be redistributed, and neither
               libjack nor the KS driver is a NimRTC dependency.
+
+============================================================
+Sample-rate conversion
+============================================================
+
+This product includes software developed by the libsamplerate
+contributors (Secret Rabbit Code).
+  - Source:   https://github.com/libsndfile/libsamplerate
+  - Version:  master @ 0844c208f683527c08ea8a80acc13b398aa9c8bf
+              (0.2.2-20-g0844c208; vendored at
+               src/third_party/libsamplerate/; pinned SHA in
+               src/third_party/vendor.json)
+  - License:  BSD-2-Clause  (the full text is in
+                   src/third_party/libsamplerate/src/COPYING; the
+                   copyright notice is embedded verbatim at the top of
+                   every upstream source file)
+  - Scope:    runtime, statically linked
+              (NIMRTC_VENDORED_LIBSAMPLERATE=ON, the default).  Built
+              from source.  Serves as the sample-rate converter behind
+              `nimrtc::audio_device::Resampler` (the remote-desktop
+              plan's Track F "Resampler" work item, F5).
+  - Platforms (cross-platform vendoring policy K8b):
+              Windows (MSVC)  — x86-64
+              macOS           — arm64 / x86-64
+              Linux x86-64    — links libm
+              Linux aarch64   — links libm
+              libsamplerate is pure C99 over <math.h> with NO
+              platform-specific code, so the SAME four upstream
+              translation units build on every platform and the
+              resampler's output is bit-comparable across them.  The
+              x86-64 builds select upstream's SSE2 lrint fast path
+              automatically.
+  - Note:     The "best" sinc converter is deliberately NOT built —
+              its coefficient table is a ~9 MB array of doubles that
+              costs a great deal of compile time for a converter a
+              remote desktop never selects.  The "fast" and "medium"
+              converters are built.  No system samplerate library is
+              ever linked (L5): with the vendored switch off the
+              module uses its pure-C++ linear-interpolation fallback.
 
 ============================================================
 SCTP (P2)

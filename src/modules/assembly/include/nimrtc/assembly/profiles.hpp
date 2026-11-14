@@ -28,9 +28,15 @@
 //   relay-agent    — relay + AI-Agent hybrid: relay path no-3A, Agent side 3A on
 //   agent-gateway — server-side Agent media gateway with PCM tap surface
 //   agent-low-latency — Agent SDK's tightest-latency variant (20 ms JB)
+//   remote-desktop — remote-desktop scene: screen content + separate control stack
 //
 // v1.1 (v0.12.0): each kProfile* carries a `transport` section that
 // names the use-case strategy per `docs/plan/transport-strategies.md` §2.
+//
+// v1.2 (v1.4.0): each kProfile* may carry the four additive video-scene
+// keys (`video_codec_preference`, `video_resolution_floor`,
+// `video_ladder_mode`, `video_content_type`) per
+// `profiles/schema/profile-v1.2.json`.
 // =============================================================================
 
 #include <nimrtc/core/api_version.hpp>
@@ -105,6 +111,32 @@ inline TransportSection ts_cross_network_peer() {
     t.media.stack = "webrtc-classic";
     t.media.max_p99_ms = 150;
     t.control.enabled = false;
+    return t;
+}
+
+// Remote-desktop scene (v1.2): media on "webrtc-classic" (browser
+// interop on the operator side), control on a **separate** "raw-udp-arq"
+// stack with its own p99 budget, so a saturated video path cannot starve
+// the mouse / keyboard stream (RD-5 / G2).
+//
+// The declared strategy id is "agent-gateway" because that is the
+// canonical strategy whose requirements have exactly this shape
+// (browser interop + high-frequency control → media on webrtc-classic,
+// control on a separate raw-udp-arq stack — transport-strategies.md §2.3,
+// the Selector's §5.3 rule 1b).  The control-plane numbers are the
+// remote-desktop ones: 200 Hz input events, p99 ≤ 50 ms, and a 100 ms
+// TTL for the partial-reliable fallback.
+inline TransportSection ts_remote_desktop() {
+    TransportSection t;
+    t.strategy = "agent-gateway";
+    t.media.stack = "webrtc-classic";
+    t.media.max_p99_ms = 200;
+    t.control.enabled = true;
+    t.control.stack = "raw-udp-arq";
+    t.control.max_p99_ms = 50;
+    t.control.freq_hz = 200;
+    t.control.reliability = "reliable_ordered";
+    t.control.ttl_ms = 100;
     return t;
 }
 
@@ -584,6 +616,97 @@ inline const Profile kProfileAgentLowLatency = Profile{
     .audio_channels      = 1,
     .audio_payload_type  = 111,
     .transport           = detail::ts_agent_gateway(60),  // tighter than agent.json
+};
+
+// ---------------------------------------------------------------------------
+// kProfileRemoteDesktop — remote-desktop scene (v1.2)
+// ---------------------------------------------------------------------------
+// Design notes (matches profiles/remote-desktop.json):
+//   - video_content_type = "screen": a screen capture is NOT "a camera
+//     with a huge resolution" — the content type selects the
+//     screen-coding tools and the content hint (ADR-022, RD-3).
+//   - video_codec_preference = "h264": the screen-content codec
+//     preference. A preference, not a requirement — the negotiated codec
+//     is the one both peers support (remote-desktop plan B8).
+//   - video_resolution_floor = "720p": the ladder never steps below
+//     720p. A remote-desktop user reads text; dropping to 480p destroys
+//     the product. The floor is per-scene configuration, not a
+//     hard-coded ladder constant (remote-desktop plan D2).
+//   - video_ladder_mode = "smoothness": smoothness-first adaptation —
+//     a late-but-fresh frame beats a sharp-but-stale one while the
+//     operator drags a window (video-pipeline-v2-plan §B.7.3 / OD-3(a)).
+//   - video_stream_weights: the declared per-stream bandwidth shares
+//     (remote-desktop plan D5). The screen gets 3, a camera thumbnail 1:
+//     the picture the operator reads must survive the link, the
+//     thumbnail need not. The declaration is a *starting* weight —
+//     NimRTCEngine::set_video_stream_weight() overrides it.
+//   - timeline_enabled = true: the input ↔ frame binding (G5) and the
+//     per-frame latency measurement (J1 / J5) need frame timestamps.
+//   - datachannel_enabled = true: out-of-band session data.
+//   - audio3a_name = "webrtc_apm": the operator may talk back and the
+//     remote machine's audio may come back, so AEC matters.
+//   - transport: media on "webrtc-classic" (browser interop on the
+//     operator side), control on a **separate** "raw-udp-arq" stack with
+//     its own p99 budget — a saturated video path cannot starve the
+//     mouse / keyboard stream (RD-5 / G2). The declared strategy id is
+//     "agent-gateway" because that is the canonical strategy whose
+//     requirements have exactly this shape (browser interop +
+//     high-frequency control → media on webrtc-classic, control on a
+//     separate raw-udp-arq stack; transport-strategies.md §2.3, the
+//     Selector's §5.3 rule 1b).
+// ---------------------------------------------------------------------------
+inline const Profile kProfileRemoteDesktop = Profile{
+    .name                 = "remote-desktop",
+    .transport_name       = "ice",
+    .sdp_name             = "webrtc",
+    .rtp_name             = "webrtc",
+    .jb_name              = "adaptive",
+    .audio3a_name         = "webrtc_apm",
+    .codec_name           = "opus",
+    .bwe_name             = "aimd",
+    .scheduler_name       = "default",
+    .timeline_enabled     = true,
+    .datachannel_enabled  = true,
+    .scheduler            = {
+        .enabled  = true,
+        .strategy = SchedulerConfig::Strategy::kStrictPriority,
+        .control_weight     = 10,
+        .audio_weight       = 8,
+        .video_weight       = 4,
+        .best_effort_weight = 1,
+    },
+    .bwe = {
+        .impl   = "aimd",
+        .params = {
+            .initial_bitrate_bps = 2'000'000,
+            .max_bitrate_bps     = 20'000'000,
+        },
+    },
+    .jitter_buffer = {
+        .impl           = "adaptive",
+        .mode           = JitterBufferConfig::Mode::kLowLatency,
+        .initial_delay_ms = 30,
+        .min_delay_ms   = 5,
+        .max_delay_ms   = 150,
+    },
+    .audio_sample_rate_hz = 48'000,
+    .audio_channels      = 1,
+    .audio_payload_type  = 111,
+    .transport           = detail::ts_remote_desktop(),
+    // v1.2 additive: video scene configuration.
+    .video_codec_preference = "h264",
+    .video_resolution_floor = "720p",
+    .video_ladder_mode      = "smoothness",
+    .video_content_type     = "screen",
+    // v1.2 additive: the declared per-stream bandwidth shares (plan D5).
+    // The screen is the picture the operator reads, so it gets the
+    // larger share; a camera thumbnail is a convenience and takes the
+    // smaller one.  A weight of 3 : 1 gives the screen three quarters
+    // of the elastic pool once the reserved audio has taken its share.
+    .video_stream_weights = {
+        {"default", 3},
+        {"camera",  1},
+    },
 };
 
 }  // namespace nimrtc::assembly

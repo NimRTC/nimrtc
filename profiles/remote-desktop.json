@@ -1,0 +1,186 @@
+{
+  // ==========================================================================
+  // profiles/remote-desktop.json — remote-desktop profile
+  // ==========================================================================
+  //
+  // Use case: an operator drives a remote machine's desktop. The media
+  // plane carries the remote screen (video) and the optional talk-back
+  // audio; the control plane carries mouse / keyboard events.
+  //
+  // Design rationale (remote-desktop plan K3; see also
+  // docs/plan/remote-desktop-plan.md §0 RD-3 / RD-5 and §D):
+  //   - video_content_type = "screen": a screen capture is NOT "a camera
+  //     with a huge resolution". The content type selects the
+  //     screen-coding tools (intra block copy, palette / text mode) and
+  //     the content hint — see ADR-022 (screen content as a content
+  //     type).
+  //   - video_codec_preference = "h264": the screen-content codec
+  //     preference. It is a *preference*, not a requirement — the
+  //     negotiated codec is the one both peers support. H.264 is the
+  //     only screen-aware codec with a permissive licence that is
+  //     guaranteed to be present on every platform today (ADR-021).
+  //   - video_resolution_floor = "720p": the ladder never steps below
+  //     720p. A remote-desktop user reads text; dropping to 480p
+  //     destroys the product. The floor is per-scene configuration
+  //     rather than a hard-coded ladder constant (D2) — a
+  //     hardware-encoding machine may override it to "1080p".
+  //   - video_ladder_mode = "smoothness": smoothness-first adaptation.
+  //     A late-but-fresh frame is worth more than a sharp-but-stale one
+  //     when the operator is dragging a window. The per-profile ladder
+  //     mode table lives in docs/plan/video-pipeline-v2-plan.md §B.7.3
+  //     (OD-3(a)); the engine default is quality-first.
+  //   - video_stream_weights: the declared per-stream bandwidth shares
+  //     (remote-desktop plan D5). The screen is the picture the operator
+  //     reads, so it gets the larger share; a camera thumbnail is a
+  //     convenience and takes the smaller one.  The declaration is a
+  //     *starting* weight — NimRTCEngine::set_video_stream_weight()
+  //     overrides it.  The rule that divides the pool lives in exactly
+  //     one place (src/engine/src/bandwidth_allocation.hpp) and is the
+  //     same rule the audio path uses.
+  //   - timeline_enabled = true: per-frame timestamps are required for
+  //     the input ↔ frame binding (the "click happened on the frame
+  //     you were looking at" promise, G5) and for the latency budget
+  //     measurement (J1 / J5).
+  //   - datachannel_enabled = true: the DataChannel carries the
+  //     out-of-band session data (clipboard, pairing state, session
+  //     metadata).
+  //   - audio3a_name = "webrtc_apm": the operator may talk back and the
+  //     remote machine's own audio may come back, so AEC matters. An
+  //     operator on a headset can override this to "" to save CPU.
+  //   - codec_name = "opus": the audio codec stays Opus — it is
+  //     mandatory at the wire for browser interop.
+  //
+  // Transport (RD-5 / G2): the media plane rides "webrtc-classic" (so a
+  // browser can be the operator side) while the **control plane gets its
+  // own stack** — "raw-udp-arq" with its own ICE selected pair, its own
+  // congestion window and its own p99 budget. A saturated 15 Mbps video
+  // path can therefore not starve the mouse / keyboard stream. The
+  // declared strategy id is "agent-gateway" because that is the
+  // canonical strategy whose requirements are exactly this shape
+  // (browser interop + high-frequency control → media on
+  // webrtc-classic, control on a separate raw-udp-arq stack — see
+  // transport-strategies.md §2.3 and the Selector's §5.3 rule 1b).
+  // See docs/plan/transport-strategies.md §2.
+  //
+  // Comparison with the other profiles:
+  //   - teleop.json: same "separate control stack" shape, but its media
+  //     plane is raw-udp-arq (no browser interop) and its ladder mode is
+  //     not screen-specific.
+  //   - agent-gateway.json: same strategy shape, but the media is a
+  //     camera and the consumer is an ASR pipeline, not a human reading
+  //     text.
+  //
+  // Override tips:
+  //   - On a machine with a hardware encoder, raise the floor to
+  //     "1080p" (D2) and the preference to "h265" (B8).
+  //   - On a software-only machine, lower the floor to "360p" and keep
+  //     the ladder in "quality" mode (§B.6's software-path rule).
+  // ==========================================================================
+
+  "name": "remote-desktop",
+
+  // ---- Plugin name bindings ------------------------------------------------
+  "transport_name": "ice",
+  "sdp_name": "webrtc",
+  "rtp_name": "webrtc",
+  "jb_name": "adaptive",
+  // WebRTC APM — the operator's talk-back and the remote machine's audio
+  // need echo cancellation.
+  "audio3a_name": "webrtc_apm",
+  "codec_name": "opus",
+  "bwe_name": "aimd",
+  "scheduler_name": "default",
+
+  // ---- Feature flags -------------------------------------------------------
+  // Required: the input ↔ frame binding (G5) and the per-frame latency
+  // budget measurement (J1 / J5) both need frame-level timestamps.
+  "timeline_enabled": true,
+  // Required: the session's out-of-band data (clipboard, pairing state,
+  // session metadata) rides on DC.
+  "datachannel_enabled": true,
+
+  // ---- Audio format --------------------------------------------------------
+  "audio_sample_rate_hz": 48000,
+  "audio_channels": 1,
+  "audio_payload_type": 111,
+
+  // ---- BWE sub-config -------------------------------------------------------
+  // 2 Mbps initial / 20 Mbps cap — the screen is the dominant consumer;
+  // BWE must be aggressive enough to recover from a transient loss
+  // without dropping control events.
+  "bwe": {
+    "impl": "aimd",
+    "initial_bitrate_bps": 2000000,
+    "max_bitrate_bps": 20000000
+  },
+
+  // ---- JitterBuffer sub-config ----------------------------------------------
+  // LowLatency — 30 ms initial delay: the operator is interacting with
+  // the remote desktop, so every millisecond of buffer is visible.
+  "jitter_buffer": {
+    "impl": "adaptive",
+    "mode": "low_latency",
+    "initial_delay_ms": 30,
+    "min_delay_ms": 5,
+    "max_delay_ms": 150
+  },
+
+  // ---- Scheduler sub-config -------------------------------------------------
+  // StrictPriority with the standard weights — the control plane (input
+  // events) must preempt audio and video.
+  "scheduler": {
+    "enabled": true,
+    "strategy": "strict_priority",
+    "control_weight": 10,
+    "audio_weight": 8,
+    "video_weight": 4,
+    "best_effort_weight": 1
+  },
+
+  // ---- v1.2 additive: video scene configuration ---------------------------
+  // Screen-content codec preference. See the header comment above.
+  "video_codec_preference": "h264",
+  // The ladder's resolution floor — the ladder never steps below it.
+  "video_resolution_floor": "720p",
+  // Smoothness-first adaptation (video-pipeline-v2-plan §B.7.3).
+  "video_ladder_mode": "smoothness",
+  // The content type of the video source.
+  "video_content_type": "screen",
+
+  // ---- v1.2 additive: the declared per-stream bandwidth shares ------------
+  // Remote-desktop plan D5: the session's bandwidth estimate is divided
+  // between the video streams by weight.  The rule itself lives in one
+  // place and is shared with the audio path.
+  //
+  // The screen gets 3 and the camera thumbnail 1: the picture the
+  // operator reads must survive the link, the thumbnail need not.  The
+  // declaration is a *starting* weight — the runtime override
+  // (NimRTCEngine::set_video_stream_weight()) always wins.
+  //
+  // The map is declarative, not constructive: a declaration for a stream
+  // the session never creates is inert, not an error.
+  "video_stream_weights": {
+    "default": 3,
+    "camera":  1
+  },
+
+  // ---- v1.1 transport strategy --------------------------------------------
+  // Media = webrtc-classic (browser interop on the operator side);
+  // control = raw-udp-arq on its own stack, with its own ICE selected
+  // pair and its own p99 budget (200 Hz input events, p99 ≤ 50 ms,
+  // reliable_ordered with a 100 ms TTL for the partial-reliable
+  // fallback). The media path cannot starve the control path.
+  // See docs/plan/transport-strategies.md §2.3.
+  "transport": {
+    "strategy": "agent-gateway",
+    "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+    "control": {
+      "enabled":     true,
+      "stack":       "raw-udp-arq",
+      "max_p99_ms":  50,
+      "freq_hz":     200,
+      "reliability": "reliable_ordered",
+      "ttl_ms":      100
+    }
+  }
+}

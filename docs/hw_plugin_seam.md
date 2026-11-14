@@ -1132,12 +1132,22 @@ against `nimrtc::nvcodec` and call its codec-parameterised entry points.
 |------------|-------------------------------|-----------------|------------------------------|----------|
 | NVENC      | `src/modules/nvcodec/src/nvenc_encoder.cpp` | Win + Linux | NVIDIA Video Codec SDK  | 450      |
 | NVDEC      | `src/modules/nvcodec/src/nvdec_decoder.cpp` | Win + Linux | NVIDIA Video Codec SDK (CUVID) | 430      |
+| MediaCodec | (seam only)                   | Android         | NDK `AMediaCodec` (not implemented) | 420 |
+| VideoToolbox | `src/modules/nvcodec/src/videotoolbox_encoder.cpp` / `videotoolbox_decoder.cpp` | macOS | VideoToolbox / CoreMedia | 400      |
 | AMF        | `amf_encoder.cpp`             | Windows only    | AMD AMF SDK                  | 380      |
 | VA-API     | `vaapi_encoder.cpp`           | Linux only      | libva + libva-drm            | 360      |
 | QSV        | `qsv_encoder.cpp`             | Win + Linux     | Intel libvpl / oneVPL        | 340      |
 | DXVA       | `dxva_decoder.cpp`            | Windows only    | Windows SDK d3d11 + MF       | 320      |
 | OpenH264   | `openh264_encoder.cpp`        | Win + Linux     | libopenh264                  | 50       |
 | Stub       | `codec_plugin.cpp`            | all             | (none)                       | 0        |
+
+The H.264, H.265 and AV1 tables each register their own rows in this
+ladder.  The rows are registered on **every** platform — the seam id
+and the `HwBackend` kind stay stable — and it is the row's `available()`
+probe (plus the `unavailable_reason` string) that decides usability.
+A row that exists but whose silicon cannot serve the codec reports
+`available() == false` **with a non-empty reason**; it never silently
+falls back.
 
 ### 11.2 CMake flags
 

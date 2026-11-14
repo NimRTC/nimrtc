@@ -43,6 +43,29 @@ option(NIMRTC_VENDORED_LIBYUV       "Use vendored libyuv (default ON)"    ON)
 # module, and it replaces the WASAPI + CoreAudio + ALSA/PulseAudio triple
 # that RD-10 forbids hand-writing.
 option(NIMRTC_VENDORED_PORTAUDIO    "Use vendored PortAudio (default ON)"  ON)
+# Remote-desktop plan Track F (F5) — libsamplerate (BSD-2-Clause, the
+# sample-rate converter).  Default ON: the plan's Q-1 decision puts the
+# resampler IN scope (a 44.1 kHz capture device is the common case), and
+# libsamplerate is the maintained, cross-platform implementation the plan
+# names.  OFF compiles the module's pure-C++ linear-interpolation
+# fallback; no system samplerate is ever linked (L5).
+option(NIMRTC_VENDORED_LIBSAMPLERATE
+       "Use vendored libsamplerate (default ON)"  ON)
+# Remote-desktop plan B11 — the OPTIONAL software AV1 / VP9 encoders.
+#
+# Both are OFF by default: they are heavy builds (svt-av1 needs NASM on
+# Windows x86-64, libvpx needs a hand-rolled configure step), and neither
+# is on the default path — the hardware encoders (Track B5 / B5a / B6) are.
+# With the option OFF the build still configures, the plug-in is simply
+# absent from the backend registry, and the AV1 / VP9 rows fall through to
+# the software stub.
+#
+# No system codec library is ever linked in their place (L5): OFF means
+# "not available", not "use the system copy".
+option(NIMRTC_VENDORED_SVT_AV1
+       "Use vendored SVT-AV1 software AV1 encoder (default OFF)"  OFF)
+option(NIMRTC_VENDORED_LIBVPX
+       "Use vendored libvpx software VP8/VP9 encoder (default OFF)"  OFF)
 
 # -----------------------------------------------------------------------------
 # Public target names (primary)
@@ -60,9 +83,12 @@ set(NIMRTC_VENDOR_LIBS
     nimrtc_vendor_libyuv
     # Remote-desktop plan Track F (F2) — PortAudio (cross-platform audio I/O).
     nimrtc_vendor_portaudio
+    # Remote-desktop plan Track F (F5) — libsamplerate (sample-rate conversion).
+    nimrtc_vendor_libsamplerate
+    # Remote-desktop plan B11 — the optional software AV1 / VP9 encoders.
+    nimrtc_vendor_svt_av1
+    nimrtc_vendor_libvpx
     # P1+
-    # nimrtc_vendor_libvpx
-    # P2+
     # nimrtc_vendor_usrsctp
 )
 
@@ -422,5 +448,99 @@ function(nimrtc_link_vendor_portaudio target)
     else()
         message(STATUS "  PortAudio          : NIMRTC_VENDORED_PORTAUDIO=OFF — "
                        "the audio-device module has no PortAudio backend")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F (F5) — libsamplerate.
+#
+# libsamplerate has NO system fallback: L5 forbids bypassing a vendored
+# dependency with a system library, and the whole point of the vendored
+# copy is that the SAME four upstream translation units build on every
+# platform (Windows / macOS / Linux / aarch64), so the resampler's output
+# is bit-comparable across them.
+#
+# When the vendored switch is off, or the submodule is absent, the audio
+# device module compiles its pure-C++ linear-interpolation fallback
+# instead: `resampler_backend()` then reports "linear" rather than the
+# module pretending it has a band-limited converter.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_libsamplerate target)
+    if(TARGET nimrtc_vendor_libsamplerate)
+        # The vendor target carries NIMRTC_HAS_LIBSAMPLERATE=1 (real
+        # library) or NIMRTC_HAS_LIBSAMPLERATE=0 (the "unavailable"
+        # stub) as an INTERFACE definition, so linking it is what flips
+        # the module's backend on or off.
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_libsamplerate)
+    endif()
+
+    if(NIMRTC_VENDORED_LIBSAMPLERATE AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/libsamplerate/src/src/samplerate.c")
+        # Nothing to report — the libsamplerate backend is in.
+    elseif(NIMRTC_VENDORED_LIBSAMPLERATE)
+        message(STATUS "  libsamplerate     : vendored source tree not populated — "
+                       "the audio-device resampler falls back to linear interpolation")
+    else()
+        message(STATUS "  libsamplerate     : NIMRTC_VENDORED_LIBSAMPLERATE=OFF — "
+                       "the audio-device resampler falls back to linear interpolation")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan B11 — SVT-AV1 (the optional software AV1 encoder).
+#
+# SVT-AV1 has NO system fallback: L5 forbids bypassing a vendored dependency
+# with a system library, and the plan's point of vendoring it is that its
+# *screen-content mode* (intra block copy, `--scm`) is the feature a remote
+# control needs — a system libaom would not carry it.
+#
+# The option is OFF by default because the build is heavy and because
+# upstream's x86-64 fast paths need NASM on Windows (see the R-11 note in
+# the wrapper: the build degrades to the portable C path when NASM is
+# absent, and never fails because of it).
+#
+# When the switch is off, or the submodule is absent, the AV1 module
+# compiles its "unavailable" path: the `svt_av1` row is simply NOT
+# registered, and the AV1 encoder falls through to the hardware rows or
+# to the software stub.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_svt_av1 target)
+    if(TARGET nimrtc_vendor_svt_av1)
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_svt_av1)
+    endif()
+
+    if(NIMRTC_VENDORED_SVT_AV1 AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/svt-av1/src/Source/API/EbSvtAv1Enc.h")
+        # Nothing to report — the SVT-AV1 encoder is in.
+    elseif(NIMRTC_VENDORED_SVT_AV1)
+        message(STATUS "  SVT-AV1           : vendored source tree not populated — "
+                       "the software AV1 encoder is absent from the registry")
+    else()
+        message(STATUS "  SVT-AV1           : NIMRTC_VENDORED_SVT_AV1=OFF — "
+                       "the software AV1 encoder is absent from the registry")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan B11 — libvpx (the optional software VP8 / VP9 codec).
+#
+# Same shape as SVT-AV1: no system fallback (L5), option OFF by default.
+# libvpx upstream ships a hand-rolled `configure` script rather than a
+# CMake project, so the wrapper compiles the upstream sources directly.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_libvpx target)
+    if(TARGET nimrtc_vendor_libvpx)
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_libvpx)
+    endif()
+
+    if(NIMRTC_VENDORED_LIBVPX AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/libvpx/src/vpx/vpx_encoder.h")
+        # Nothing to report — the libvpx encoder is in.
+    elseif(NIMRTC_VENDORED_LIBVPX)
+        message(STATUS "  libvpx            : vendored source tree not populated — "
+                       "the software VP9 encoder is absent from the registry")
+    else()
+        message(STATUS "  libvpx            : NIMRTC_VENDORED_LIBVPX=OFF — "
+                       "the software VP9 encoder is absent from the registry")
     endif()
 endfunction()

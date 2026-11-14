@@ -75,13 +75,15 @@ TEST_F(AssemblyTest, AllBuiltinProfilesRegistered) {
     auto& reg = nimrtc::assembly::ProfileRegistry::instance();
     auto names = reg.all_names();
 
-    // Expected: 9 built-in profiles (6 v1.0 + 3 v1.1 from PROFILE-1).
-    EXPECT_EQ(names.size(), 9u);
+    // Expected: 10 built-in profiles (6 v1.0 + 3 v1.1 from PROFILE-1
+    // + 1 v1.2 remote-desktop scene profile).
+    EXPECT_EQ(names.size(), 10u);
 
     // Each known name must be present.
     for (std::string_view expected :
          {"call", "live", "transport", "agent", "teleop", "relay",
-          "relay-agent", "agent-gateway", "agent-low-latency"}) {
+          "relay-agent", "agent-gateway", "agent-low-latency",
+          "remote-desktop"}) {
         EXPECT_NE(std::find(names.begin(), names.end(), std::string{expected}),
                   names.end())
             << "Profile '" << expected << "' should be registered";
@@ -385,11 +387,19 @@ static void expect_profiles_equal(
     EXPECT_EQ(a.transport.control.freq_hz, b.transport.control.freq_hz);
     EXPECT_EQ(a.transport.control.reliability, b.transport.control.reliability);
     EXPECT_EQ(a.transport.control.ttl_ms, b.transport.control.ttl_ms);
+
+    // v1.2 additive: the video-scene keys.
+    EXPECT_EQ(a.video_codec_preference, b.video_codec_preference);
+    EXPECT_EQ(a.video_resolution_floor, b.video_resolution_floor);
+    EXPECT_EQ(a.video_ladder_mode,      b.video_ladder_mode);
+    EXPECT_EQ(a.video_content_type,     b.video_content_type);
+    EXPECT_EQ(a.video_stream_weights,   b.video_stream_weights);
 }
 
 TEST_F(AssemblyTest, JsonRoundTripBuiltInProfiles) {
     for (std::string_view name : {"call", "live", "transport", "agent", "teleop", "relay",
-                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "relay-agent", "agent-gateway", "agent-low-latency",
+                                  "remote-desktop"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
 
         const nimrtc::assembly::Profile* original =
@@ -447,7 +457,8 @@ TEST_F(AssemblyTest, JsonProfileFileExists) {
     // Verify JSON files exist in the build directory.
     for (std::string_view name : {"call", "live", "transport", "agent",
                                   "teleop", "relay",
-                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "relay-agent", "agent-gateway", "agent-low-latency",
+                                  "remote-desktop"}) {
         std::string path = profile_path(name);
         EXPECT_TRUE(fs::exists(path))
             << "Profile JSON not found at: " << path;
@@ -457,7 +468,8 @@ TEST_F(AssemblyTest, JsonProfileFileExists) {
 TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
     for (std::string_view name : {"call", "live", "transport", "agent",
                                   "teleop", "relay",
-                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "relay-agent", "agent-gateway", "agent-low-latency",
+                                  "remote-desktop"}) {
         std::string path = profile_path(name);
         if (!fs::exists(path)) {
             // Skip if build directory is not set up yet.
@@ -482,7 +494,8 @@ TEST_F(AssemblyTest, JsonProfileFileParsesWithoutThrowing) {
 TEST_F(AssemblyTest, JsonFileMatchesBuiltinConstant) {
     for (std::string_view name : {"call", "live", "transport", "agent",
                                   "teleop", "relay",
-                                  "relay-agent", "agent-gateway", "agent-low-latency"}) {
+                                  "relay-agent", "agent-gateway", "agent-low-latency",
+                                  "remote-desktop"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
 
         std::string path = profile_path(name);
@@ -766,6 +779,7 @@ TEST_F(AssemblyTest, BuiltInProfileTransportStrategy) {
         {"teleop",                "teleop-ultra-low-latency", true },
         {"relay",                 "sfu-relay",                false},
         {"relay-agent",           "sfu-relay",                true },  // composite
+        {"remote-desktop",        "agent-gateway",            true },
     };
     for (const auto& e : expected) {
         SCOPED_TRACE("Profile: " + std::string{e.profile_name});
@@ -942,7 +956,7 @@ TEST_F(AssemblyTest, TransportBridgeProfileOverloadMatchesSectionOverload) {
     // to `profile.transport`.
     for (std::string_view name : {"call", "live", "transport", "agent", "teleop",
                                   "relay", "relay-agent", "agent-gateway",
-                                  "agent-low-latency"}) {
+                                  "agent-low-latency", "remote-desktop"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
         const auto* p = nimrtc::assembly::ProfileRegistry::instance()
                             .find(name);
@@ -968,7 +982,7 @@ TEST_F(AssemblyTest, TransportBridgeSurvivesJsonRoundTrip) {
     // per-instance budget both made it.
     for (std::string_view name : {"call", "live", "transport", "agent", "teleop",
                                   "relay", "relay-agent", "agent-gateway",
-                                  "agent-low-latency"}) {
+                                  "agent-low-latency", "remote-desktop"}) {
         SCOPED_TRACE("Profile: " + std::string{name});
         const std::string path = profile_path(name);
         if (!fs::exists(path)) {
@@ -990,4 +1004,266 @@ TEST_F(AssemblyTest, TransportBridgeSurvivesJsonRoundTrip) {
         // The requirements must resolve without throwing.
         EXPECT_NO_THROW(nimrtc::assembly::to_transport_requirements(p));
     }
+}
+
+// =============================================================================
+// 8. v1.2 additive: the video-scene keys
+// =============================================================================
+//
+// The v1.2 schema (profiles/schema/profile-v1.2.json) adds four optional
+// top-level keys to the Profile:
+//
+//   video_codec_preference | video_resolution_floor
+//   video_ladder_mode      | video_content_type
+//
+// The contract is the same one the v1.1 `transport` block follows: a v1.1
+// profile that does not declare the keys must still load, with the engine
+// defaults in place.  These tests pin both halves of that contract.
+TEST_F(AssemblyTest, ProfileVideoSceneDefaults) {
+    // The engine's own defaults, for a Profile that never went through the
+    // JSON loader.  `video_ladder_mode` defaults to "quality"
+    // (quality-first) — see video-pipeline-v2-plan.md §B.7.3 (OD-3(a)):
+    // the engine default, when no profile is loaded, is quality-first.
+    const nimrtc::assembly::Profile p;
+    EXPECT_EQ(p.video_codec_preference, "h264");
+    EXPECT_EQ(p.video_resolution_floor, "720p");
+    EXPECT_EQ(p.video_ladder_mode, "quality");
+    EXPECT_EQ(p.video_content_type, "camera");
+}
+
+TEST_F(AssemblyTest, ProfileRemoteDesktopVideoScene) {
+    // K3 — the remote-desktop scene profile declares the screen-content
+    // configuration: a screen-content codec preference, a 720p resolution
+    // floor, the smoothness-first ladder mode, and the "screen" content
+    // type.
+    const auto& p = nimrtc::assembly::kProfileRemoteDesktop;
+    EXPECT_EQ(p.name, "remote-desktop");
+    EXPECT_EQ(p.video_ladder_mode, "smoothness");
+    EXPECT_EQ(p.video_resolution_floor, "720p");
+    EXPECT_EQ(p.video_content_type, "screen");
+    EXPECT_EQ(p.video_codec_preference, "h264");
+
+    // The rest of the scene description.
+    EXPECT_TRUE(p.timeline_enabled);
+    EXPECT_TRUE(p.datachannel_enabled);
+    EXPECT_EQ(p.audio3a_name, "webrtc_apm");
+    EXPECT_EQ(p.codec_name, "opus");
+    EXPECT_EQ(p.bwe_name, "aimd");
+    EXPECT_EQ(p.scheduler_name, "default");
+    EXPECT_EQ(p.jitter_buffer.mode,
+              nimrtc::assembly::JitterBufferConfig::Mode::kLowLatency);
+
+    // Transport: media on webrtc-classic, control on a SEPARATE
+    // raw-udp-arq stack (RD-5 / G2) — the video path must not be able to
+    // starve the mouse / keyboard stream.
+    EXPECT_TRUE(p.transport.control.enabled);
+    EXPECT_EQ(p.transport.media.stack, "webrtc-classic");
+    EXPECT_EQ(p.transport.control.stack, "raw-udp-arq");
+    ASSERT_TRUE(p.transport.control.max_p99_ms.has_value());
+    EXPECT_EQ(*p.transport.control.max_p99_ms, 50);
+    ASSERT_TRUE(p.transport.control.freq_hz.has_value());
+    EXPECT_EQ(*p.transport.control.freq_hz, 200);
+}
+
+TEST_F(AssemblyTest, ProfileRemoteDesktopIsRegistered) {
+    const auto* p =
+        nimrtc::assembly::ProfileRegistry::instance().find("remote-desktop");
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(p->name, "remote-desktop");
+    EXPECT_EQ(p->video_ladder_mode, "smoothness");
+}
+
+TEST_F(AssemblyTest, V11ProfileStillParsesWithV12Defaults) {
+    // The schema change is strictly ADDITIVE: a v1.1 profile — e.g. the
+    // shipped profiles/call.json, which carries no video-scene key at
+    // all — must still load, and must yield the engine defaults
+    // ("quality" ladder mode).  This is the backward-compatibility half of
+    // the K4 acceptance criterion.
+    const std::string path = profile_path("call");
+    if (!fs::exists(path)) {
+        GTEST_SKIP() << "Profile JSON not found at: " << path;
+    }
+
+    const auto p = nimrtc::assembly::profile_from_json_file(path);
+    EXPECT_EQ(p.name, "call");
+    EXPECT_EQ(p.video_ladder_mode, "quality");
+    EXPECT_EQ(p.video_codec_preference, "h264");
+    EXPECT_EQ(p.video_resolution_floor, "720p");
+    EXPECT_EQ(p.video_content_type, "camera");
+}
+
+TEST_F(AssemblyTest, V11ProfileJsonWithoutVideoKeysParsesToDefaults) {
+    // Same contract, but with a synthetic v1.1 payload so the test does not
+    // depend on the shipped files.  The video-scene block is entirely
+    // absent.
+    std::string json_str = R"({
+      "name": "legacy_v11",
+      "transport_name": "ice",
+      "jb_name": "adaptive",
+      "transport": {
+        "strategy": "browser-call",
+        "media":   { "stack": "webrtc-classic", "max_p99_ms": 200 },
+        "control": { "enabled": false }
+      }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_legacy_v11.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+
+    const auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.name, "legacy_v11");
+    EXPECT_EQ(p.video_ladder_mode, "quality");
+    EXPECT_EQ(p.video_codec_preference, "h264");
+    EXPECT_EQ(p.video_resolution_floor, "720p");
+    EXPECT_EQ(p.video_content_type, "camera");
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, RemoteDesktopProfileJsonRoundTripsByteForByte) {
+    // The K3 acceptance criterion: "the profile round-trips through the
+    // assembly serialiser exactly like the existing profiles (the
+    // byte-for-byte JSON test covers it)".
+    //
+    // The shipped JSON file carries comments and formatting, so the
+    // byte-for-byte comparison is against the *canonical* serialisation
+    // of the parsed profile: parse the file -> serialise -> parse again
+    // must produce byte-identical JSON, and the second parse must equal
+    // the C++ constant field-for-field.
+    const std::string path = profile_path("remote-desktop");
+    if (!fs::exists(path)) {
+        GTEST_SKIP() << "Profile JSON not found at: " << path;
+    }
+
+    const auto from_json = nimrtc::assembly::profile_from_json_file(path);
+    const std::string serialised = nimrtc::assembly::profile_to_json_string(from_json);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_rd_canonical.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << serialised;
+    }
+
+    // Serialise the reparsed profile again — the two strings must be
+    // byte-identical.
+    const auto reparsed = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(nimrtc::assembly::profile_to_json_string(reparsed), serialised);
+
+    // And the parsed profile must equal the C++ constant field-for-field.
+    const auto* cxx_constant =
+        nimrtc::assembly::ProfileRegistry::instance().find("remote-desktop");
+    ASSERT_NE(cxx_constant, nullptr);
+    expect_profiles_equal(*cxx_constant, from_json);
+
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, VideoSceneKeysSurviveJsonRoundTrip) {
+    // The serialiser always emits the four keys, so the round-trip of a
+    // profile that carries non-default values must preserve them exactly.
+    nimrtc::assembly::Profile p;
+    p.name = "video_scene_rt";
+    p.video_codec_preference = "av1";
+    p.video_resolution_floor = "1080p";
+    p.video_ladder_mode      = "smoothness";
+    p.video_content_type     = "screen";
+
+    const std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_NE(s.find("\"video_codec_preference\": \"av1\""), std::string::npos);
+    EXPECT_NE(s.find("\"video_resolution_floor\": \"1080p\""), std::string::npos);
+    EXPECT_NE(s.find("\"video_ladder_mode\": \"smoothness\""), std::string::npos);
+    EXPECT_NE(s.find("\"video_content_type\": \"screen\""), std::string::npos);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_video_scene.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << s;
+    }
+    const auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    expect_profiles_equal(p, loaded);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, ProfileVideoStreamWeightsDefaultToEmpty) {
+    // A profile that does not declare any shares loads with an empty
+    // map, which means "every stream splits the pool evenly" (the
+    // engine's default weight is 1).  The schema change is additive.
+    const nimrtc::assembly::Profile p;
+    EXPECT_TRUE(p.video_stream_weights.empty());
+}
+
+TEST_F(AssemblyTest, RemoteDesktopProfileDeclaresTheStreamShares) {
+    // D5 — "the remote-desktop profile declares the shares".
+    const auto& p = nimrtc::assembly::kProfileRemoteDesktop;
+    ASSERT_EQ(p.video_stream_weights.count("default"), 1u);
+    ASSERT_EQ(p.video_stream_weights.count("camera"), 1u);
+    EXPECT_EQ(p.video_stream_weights.at("default"), 3u);
+    EXPECT_EQ(p.video_stream_weights.at("camera"), 1u);
+}
+
+TEST_F(AssemblyTest, VideoStreamWeightsSurviveJsonRoundTrip) {
+    // The declaration is a v1.2 additive key: it must survive the
+    // serialiser and the loader unchanged.
+    nimrtc::assembly::Profile p;
+    p.name = "weights_rt";
+    p.video_stream_weights = {{"default", 3}, {"camera", 1}, {"thumb", 0}};
+
+    const std::string s = nimrtc::assembly::profile_to_json_string(p);
+    EXPECT_NE(s.find("video_stream_weights"), std::string::npos);
+
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_weights.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << s;
+    }
+    const auto loaded = nimrtc::assembly::profile_from_json_file(tmp.string());
+    expect_profiles_equal(p, loaded);
+    fs::remove(tmp);
+}
+
+TEST_F(AssemblyTest, TheShippedRemoteDesktopJsonDeclaresTheShares) {
+    // The shipped file and the C++ constant must agree — they are two
+    // spellings of the same scene.
+    const std::string path = profile_path("remote-desktop");
+    if (!fs::exists(path)) {
+        GTEST_SKIP() << "Profile JSON not found at: " << path;
+    }
+
+    const auto p = nimrtc::assembly::profile_from_json_file(path);
+    ASSERT_EQ(p.video_stream_weights.count("default"), 1u);
+    ASSERT_EQ(p.video_stream_weights.count("camera"), 1u);
+    EXPECT_EQ(p.video_stream_weights.at("default"), 3u);
+    EXPECT_EQ(p.video_stream_weights.at("camera"), 1u);
+}
+
+TEST_F(AssemblyTest, AMalformedStreamWeightIsSkippedNotFatal) {
+    // The schema is the validator (it rejects the profile outright); the
+    // loader is the tolerant reader.  A malformed *entry* must not make
+    // an otherwise-valid profile unusable — it is skipped.
+    std::string json_str = R"({
+      "name": "weights_malformed",
+      "video_stream_weights": {
+        "default": 3,
+        "camera": "not-a-number",
+        "thumb": -1,
+        "": 5
+      }
+    })";
+    fs::path tmp = fs::temp_directory_path() / "nimrtc_test_weights_bad.json";
+    {
+        std::ofstream ofs{tmp, std::ios::binary};
+        ASSERT_TRUE(ofs.is_open());
+        ofs << json_str;
+    }
+
+    const auto p = nimrtc::assembly::profile_from_json_file(tmp.string());
+    EXPECT_EQ(p.name, "weights_malformed");
+    ASSERT_EQ(p.video_stream_weights.size(), 1u);
+    EXPECT_EQ(p.video_stream_weights.at("default"), 3u);
+    fs::remove(tmp);
 }

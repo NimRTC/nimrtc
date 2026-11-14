@@ -165,6 +165,99 @@ resolve_scheduler_plugin_id(std::string_view impl, bool* substituted = nullptr) 
 }
 
 // ---------------------------------------------------------------------------
+// The v1.2 video-scene vocabulary — Profile strings → engine values
+// ---------------------------------------------------------------------------
+//
+// The Profile schema (v1.2) names four scene properties with *strings*:
+//
+//   video_codec_preference | video_resolution_floor
+//   video_ladder_mode      | video_content_type
+//
+// and the engine wants *typed* values:
+//
+//   EngineConfig::video_codec_name              (a plugin id)
+//   EngineConfig::video_resolution_floor_height (a pixel count)
+//   EngineConfig::video_ladder_mode             (a VideoLadderMode enum)
+//   EngineConfig::video_content_hint            (a ContentHint enum)
+//
+// These four functions are the single authority for the translation.  They
+// live here, next to `to_engine_config()`, because a string→enum mapping
+// that lives anywhere else is a mapping that can drift from the one the
+// bridge uses — the failure mode this file exists to prevent.
+//
+// ## Why the mapping cannot be a table lookup
+//
+// The schema's enum lists the *vocabulary*; the engine's vocabulary is a
+// *different* set of names:
+//
+//   - the ladder mode's names are the same ("quality" / "smoothness"),
+//   - the resolution floor's names are picture heights ("720p"), which
+//     the engine wants as an integer,
+//   - the content type's names are scene kinds ("camera" / "screen"),
+//     which the engine wants as a codec content hint, and
+//   - the codec preference's names are plugin ids ("h264"), but the
+//     engine's *default* id is also "h264" and an empty id means "no
+//     video codec at all".
+//
+// A value the schema allows but the engine cannot express is **not** an
+// error: it falls back to the engine default, and the reason is stated
+// in the comment.  The schema is the validator; this file is the
+// translator.
+
+// Resolve a Profile ladder-mode name onto the engine's enum.
+//
+// The names are identical to the enum's ("quality" / "smoothness"), so
+// this is a spelling check.  An unrecognised name falls back to
+// `kQuality` — the engine's documented default (see
+// `EngineConfig::video_ladder_mode`).
+NIMRTC_API_STABLE inline plugins::VideoLadderMode
+video_ladder_mode_of(std::string_view name) noexcept {
+    if (name == "smoothness") return plugins::VideoLadderMode::kSmoothness;
+    if (name == "quality")    return plugins::VideoLadderMode::kQuality;
+    return plugins::VideoLadderMode::kQuality;
+}
+
+// Resolve a Profile resolution-floor name onto a picture height.
+//
+// The names are the conventional picture heights: "360p" → 360,
+// "480p" → 480, "720p" → 720, "1080p" → 1080, "1440p" → 1440,
+// "2160p" → 2160.
+//
+// An unrecognised name returns 0, which the engine reads as "no floor"
+// (`EngineConfig::video_resolution_floor_height`).  That is the honest
+// reading: a floor the engine cannot resolve is not a floor.
+NIMRTC_API_STABLE inline std::uint32_t
+video_resolution_floor_height_of(std::string_view name) noexcept {
+    if (name == "360p")  return 360;
+    if (name == "480p")  return 480;
+    if (name == "720p")  return 720;
+    if (name == "1080p") return 1080;
+    if (name == "1440p") return 1440;
+    if (name == "2160p") return 2160;
+    return 0;
+}
+
+// Resolve a Profile content-type name onto the engine's content hint.
+//
+// ADR-022 is the rule this follows: a screen capture is **not** "a camera
+// with a huge resolution", so the content type selects the screen-coding
+// tools.  The engine expresses that as a codec content hint:
+//
+//   - "camera" → `kUnspecified` — the engine has no opinion, which is
+//     the correct value for camera content;
+//   - "screen" → `kText` — a remote desktop is dominated by text, and
+//     "text" is the hint that asks the encoder to preserve it.
+//
+// An unrecognised name returns `kUnspecified` — the engine default.
+NIMRTC_API_STABLE inline plugins::VideoEncoderParams::ContentHint
+video_content_hint_of(std::string_view content_type) noexcept {
+    if (content_type == "screen") {
+        return plugins::VideoEncoderParams::ContentHint::kText;
+    }
+    return plugins::VideoEncoderParams::ContentHint::kUnspecified;
+}
+
+// ---------------------------------------------------------------------------
 // to_engine_config — Profile → EngineConfig
 // ---------------------------------------------------------------------------
 //
@@ -194,6 +287,11 @@ resolve_scheduler_plugin_id(std::string_view impl, bool* substituted = nullptr) 
 //   Profile::jitter_buffer.max_delay_ms     → EngineConfig::jb_max_delay_ms
 //   Profile::transport.strategy             → EngineConfig::transport_strategy_name
 //   Profile::transport.media.max_p99_ms     → EngineConfig::transport_media_max_p99_ms
+//   Profile::video_codec_preference  → EngineConfig::video_codec_name
+//   Profile::video_resolution_floor  → EngineConfig::video_resolution_floor_height
+//   Profile::video_ladder_mode       → EngineConfig::video_ladder_mode
+//   Profile::video_content_type      → EngineConfig::video_content_hint
+//   Profile::video_stream_weights    → EngineConfig::video_stream_weights
 //
 // ## The two overrides
 //
@@ -347,6 +445,51 @@ to_engine_config(const Profile& profile, engine::EngineConfig cfg) {
         cfg.transport_strategy_name    = std::string{in.strategy};
         cfg.transport_media_max_p99_ms = in.media_max_p99_ms;
     }
+
+    // ---- Video scene (profile schema v1.2) --------------------------------
+    //
+    // The four v1.2 video-scene keys used to be parsed, serialised and
+    // JSON-round-tripped — and then **silently dropped**, because nothing
+    // carried them from the Profile to the `EngineConfig`.  That is the
+    // exact failure mode this file was written to end: a Profile that
+    // says "screen content, 720p floor, smoothness ladder" produced an
+    // engine that knew none of it, so the remote-desktop scene ran with
+    // the camera defaults (no content hint, no floor, quality ladder).
+    //
+    // The four copies are guarded by the *meaning* of the value, not by a
+    // plugin id:
+    //
+    //   - `video_codec_preference` names the **codec plugin**.  An empty
+    //     value means "no video codec" (the engine's own meaning of an
+    //     empty `video_codec_name`), so an empty preference must not
+    //     clobber a codec the host configured.  A non-empty preference
+    //     *is* the plugin id — the vocabulary is the plugin ids.
+    //   - `video_resolution_floor` is a picture height.  0 means "no
+    //     floor", which is the engine's own default, so the copy is
+    //     always safe.
+    //   - `video_ladder_mode` and `video_content_type` are always
+    //     copied: their defaults are the engine's defaults, so a
+    //     Profile that does not mention them leaves the engine where it
+    //     already was.
+    if (!profile.video_codec_preference.empty()) {
+        cfg.video_codec_name = profile.video_codec_preference;
+    }
+    cfg.video_resolution_floor_height =
+        video_resolution_floor_height_of(profile.video_resolution_floor);
+    cfg.video_ladder_mode = video_ladder_mode_of(profile.video_ladder_mode);
+    cfg.video_content_hint = video_content_hint_of(profile.video_content_type);
+
+    // The declared per-stream shares (remote-desktop plan D5) are copied
+    // verbatim: the map *is* the declaration, and the engine applies it
+    // to the default stream at open() and to an extra stream when that
+    // stream is created.
+    //
+    // The copy is unconditional (an empty map is the engine's own "every
+    // stream splits the pool evenly" default).  The bridge does **not**
+    // second-guess a declaration: the engine owns the rules (it refuses
+    // to mute the default stream, for instance), and a bridge that
+    // duplicated those rules would be a second place for them to drift.
+    cfg.video_stream_weights = profile.video_stream_weights;
 
     return cfg;
 }

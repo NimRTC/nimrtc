@@ -1,0 +1,811 @@
+{
+  "schema": 1,
+  "benchmark": "capture_encode",
+  "generated_at": "2026-11-14T02:56:12Z",
+  "plan": "docs/plan/remote-desktop-plan.md",
+  "plan_item": "J5",
+  "budget_section": "B.6",
+  "binary": "build\\j5-hw\\tests\\bench_capture_encode.exe",
+  "frames": 120,
+  "warmup": 30,
+  "machine": {
+    "os": "Windows",
+    "os_release": "10",
+    "os_version": "10.0.26100",
+    "machine": "AMD64",
+    "python": "3.9.1",
+    "cpu_model": "12th Gen Intel(R) Core(TM) i5-12400F",
+    "cpu_cores_physical": 6,
+    "cpu_cores_logical": 12,
+    "gpus": [
+      {
+        "vendor": "nvidia",
+        "name": "NVIDIA GeForce RTX 3060",
+        "driver_version": "616.92",
+        "memory_total_mib": 12288
+      },
+      {
+        "vendor": "unknown",
+        "name": "Virtual Desktop Monitor",
+        "driver_version": null,
+        "memory_total_mib": null
+      },
+      {
+        "vendor": "unknown",
+        "name": "Todesk Virtual Display Adapter",
+        "driver_version": null,
+        "memory_total_mib": null
+      }
+    ],
+    "gpu_encoder_present": true
+  },
+  "hardware_backend_available": true,
+  "headline": {
+    "budget_resolution": "1920x1080",
+    "hardware_backend_available": true,
+    "capture_at_1080p": {
+      "device": "synthetic",
+      "fps": 257.000369,
+      "fps_per_megapixel": 123.939221,
+      "produce_mean_us": 3890.9075,
+      "pop_mean_us": 320.533333
+    },
+    "hardware_vs_software": {
+      "hardware": {
+        "measured": true,
+        "backend": "nvenc",
+        "hardware_accelerated": true,
+        "encode_ms_per_frame": 3.059,
+        "encode_mean_us": 3059.0,
+        "encode_p95_us": 3350.0,
+        "stage_us": {
+          "capture": 323.0,
+          "convert": 3946.0,
+          "encode": 3059.0,
+          "packetize": 7.0,
+          "total": 7335.0
+        },
+        "total_us": 7335.0,
+        "total_p95_us": 9174.0
+      },
+      "software": {
+        "measured": true,
+        "backend": "openh264",
+        "hardware_accelerated": false,
+        "encode_ms_per_frame": 22.078,
+        "encode_mean_us": 22078.0,
+        "encode_p95_us": 41396.0,
+        "stage_us": {
+          "capture": 340.0,
+          "convert": 4625.0,
+          "encode": 22078.0,
+          "packetize": 8.0,
+          "total": 27051.0
+        },
+        "total_us": 27051.0,
+        "total_p95_us": 49701.0
+      },
+      "encode_speedup": 7.217391304347826,
+      "total_speedup": 3.6879345603271982
+    }
+  },
+  "capture": [
+    {
+      "backend": "synthetic",
+      "width": 640,
+      "height": 480,
+      "frames": 120,
+      "seconds": 0.063327,
+      "fps": 1894.911373,
+      "megapixels": 0.3072,
+      "fps_per_megapixel": 6168.331294,
+      "produce_mean_us": 527.670833,
+      "pop_mean_us": 47.731667,
+      "frame_mean_us": 575.4025
+    },
+    {
+      "backend": "synthetic",
+      "width": 1280,
+      "height": 720,
+      "frames": 120,
+      "seconds": 0.194627,
+      "fps": 616.565576,
+      "megapixels": 0.9216,
+      "fps_per_megapixel": 669.016467,
+      "produce_mean_us": 1621.79,
+      "pop_mean_us": 138.369167,
+      "frame_mean_us": 1760.159167
+    },
+    {
+      "backend": "synthetic",
+      "width": 1920,
+      "height": 1080,
+      "frames": 120,
+      "seconds": 0.466925,
+      "fps": 257.000369,
+      "megapixels": 2.0736,
+      "fps_per_megapixel": 123.939221,
+      "produce_mean_us": 3890.9075,
+      "pop_mean_us": 320.533333,
+      "frame_mean_us": 4211.440833
+    }
+  ],
+  "pipeline": [
+    {
+      "backend_preference": "auto",
+      "width": 640,
+      "height": 480,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 0.196399,
+      "frames_per_second": 763.752898,
+      "megapixels": 0.3072,
+      "stage_us": {
+        "capture": 52.0,
+        "convert": 524.0,
+        "encode": 582.0,
+        "packetize": 3.0,
+        "total": 1161.0
+      },
+      "encode_p95_us": 671.0,
+      "encode_max_us": 1014.0,
+      "total_p95_us": 1384.0,
+      "encode_ms_per_frame": 0.582,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 54.0,
+      "codec_encode_latency_max_us": 106.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "auto",
+      "width": 1280,
+      "height": 720,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 0.557658,
+      "frames_per_second": 268.982305,
+      "megapixels": 0.9216,
+      "stage_us": {
+        "capture": 145.0,
+        "convert": 1648.0,
+        "encode": 1419.0,
+        "packetize": 4.0,
+        "total": 3216.0
+      },
+      "encode_p95_us": 1658.0,
+      "encode_max_us": 1834.0,
+      "total_p95_us": 4166.0,
+      "encode_ms_per_frame": 1.419,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 99.0,
+      "codec_encode_latency_max_us": 220.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "auto",
+      "width": 1920,
+      "height": 1080,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 1.294515,
+      "frames_per_second": 115.873477,
+      "megapixels": 2.0736,
+      "stage_us": {
+        "capture": 320.0,
+        "convert": 3745.0,
+        "encode": 2998.0,
+        "packetize": 6.0,
+        "total": 7069.0
+      },
+      "encode_p95_us": 3275.0,
+      "encode_max_us": 3603.0,
+      "total_p95_us": 8527.0,
+      "encode_ms_per_frame": 2.998,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 148.0,
+      "codec_encode_latency_max_us": 278.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "hardware",
+      "width": 640,
+      "height": 480,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 0.199868,
+      "frames_per_second": 750.496078,
+      "megapixels": 0.3072,
+      "stage_us": {
+        "capture": 54.0,
+        "convert": 521.0,
+        "encode": 578.0,
+        "packetize": 3.0,
+        "total": 1156.0
+      },
+      "encode_p95_us": 712.0,
+      "encode_max_us": 894.0,
+      "total_p95_us": 1500.0,
+      "encode_ms_per_frame": 0.578,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 61.0,
+      "codec_encode_latency_max_us": 370.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "hardware",
+      "width": 1280,
+      "height": 720,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 0.596311,
+      "frames_per_second": 251.54655,
+      "megapixels": 0.9216,
+      "stage_us": {
+        "capture": 150.0,
+        "convert": 1708.0,
+        "encode": 1443.0,
+        "packetize": 5.0,
+        "total": 3306.0
+      },
+      "encode_p95_us": 1656.0,
+      "encode_max_us": 1822.0,
+      "total_p95_us": 4271.0,
+      "encode_ms_per_frame": 1.443,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 117.0,
+      "codec_encode_latency_max_us": 560.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "hardware",
+      "width": 1920,
+      "height": 1080,
+      "opened": true,
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "frames": 150,
+      "seconds": 1.315064,
+      "frames_per_second": 114.062916,
+      "megapixels": 2.0736,
+      "stage_us": {
+        "capture": 323.0,
+        "convert": 3946.0,
+        "encode": 3059.0,
+        "packetize": 7.0,
+        "total": 7335.0
+      },
+      "encode_p95_us": 3350.0,
+      "encode_max_us": 3567.0,
+      "total_p95_us": 9174.0,
+      "encode_ms_per_frame": 3.059,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 158.0,
+      "codec_encode_latency_max_us": 382.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "software",
+      "width": 640,
+      "height": 480,
+      "opened": true,
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "frames": 150,
+      "seconds": 0.512329,
+      "frames_per_second": 292.78033,
+      "megapixels": 0.3072,
+      "stage_us": {
+        "capture": 59.0,
+        "convert": 532.0,
+        "encode": 3222.0,
+        "packetize": 3.0,
+        "total": 3816.0
+      },
+      "encode_p95_us": 4659.0,
+      "encode_max_us": 9060.0,
+      "total_p95_us": 5389.0,
+      "encode_ms_per_frame": 3.222,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 0.0,
+      "codec_encode_latency_max_us": 0.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "software",
+      "width": 1280,
+      "height": 720,
+      "opened": true,
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "frames": 150,
+      "seconds": 1.516868,
+      "frames_per_second": 98.887959,
+      "megapixels": 0.9216,
+      "stage_us": {
+        "capture": 153.0,
+        "convert": 1673.0,
+        "encode": 9116.0,
+        "packetize": 6.0,
+        "total": 10948.0
+      },
+      "encode_p95_us": 12801.0,
+      "encode_max_us": 18548.0,
+      "total_p95_us": 15461.0,
+      "encode_ms_per_frame": 9.116,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 0.0,
+      "codec_encode_latency_max_us": 0.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    },
+    {
+      "backend_preference": "software",
+      "width": 1920,
+      "height": 1080,
+      "opened": true,
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "frames": 150,
+      "seconds": 3.207993,
+      "frames_per_second": 46.758211,
+      "megapixels": 2.0736,
+      "stage_us": {
+        "capture": 340.0,
+        "convert": 4625.0,
+        "encode": 22078.0,
+        "packetize": 8.0,
+        "total": 27051.0
+      },
+      "encode_p95_us": 41396.0,
+      "encode_max_us": 51612.0,
+      "total_p95_us": 49701.0,
+      "encode_ms_per_frame": 22.078,
+      "stage_samples": {
+        "capture": 150,
+        "convert": 150,
+        "encode": 150,
+        "packetize": 150
+      },
+      "codec_encode_latency_avg_us": 0.0,
+      "codec_encode_latency_max_us": 0.0,
+      "codec_frames_encoded": 150,
+      "format_conversions": 150,
+      "format_copies": 0
+    }
+  ],
+  "budget_check": [
+    {
+      "backend_preference": "auto",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 640,
+      "height": 480,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 52.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 524.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 582.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 3.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 1161.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 1384.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "auto",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 1280,
+      "height": 720,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 145.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 1648.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 1419.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 4.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 3216.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 4166.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "auto",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 1920,
+      "height": 1080,
+      "is_budget_resolution": true,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 320.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 3745.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 2998.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 6.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 7069.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 8527.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "hardware",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 640,
+      "height": 480,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 54.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 521.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 578.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 3.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 1156.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 1500.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "hardware",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 1280,
+      "height": 720,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 150.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 1708.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 1443.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 5.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 3306.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 4271.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "hardware",
+      "backend_class": "hardware",
+      "backend": "nvenc",
+      "hardware_accelerated": true,
+      "width": 1920,
+      "height": 1080,
+      "is_budget_resolution": true,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 323.0,
+          "budget_us": 1500.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 3946.0,
+          "budget_us": 0.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 3059.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 7.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 7335.0,
+        "budget_us": 8000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 9174.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "software",
+      "backend_class": "software",
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "width": 640,
+      "height": 480,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 59.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 532.0,
+          "budget_us": 2000.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 3222.0,
+          "budget_us": 45000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 3.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 3816.0,
+        "budget_us": 55000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 5389.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "software",
+      "backend_class": "software",
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "width": 1280,
+      "height": 720,
+      "is_budget_resolution": false,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 153.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 1673.0,
+          "budget_us": 2000.0,
+          "over_budget": false
+        },
+        "encode": {
+          "measured_us": 9116.0,
+          "budget_us": 45000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 6.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 10948.0,
+        "budget_us": 55000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 15461.0,
+      "over_budget_stages": [],
+      "status": "within_budget"
+    },
+    {
+      "backend_preference": "software",
+      "backend_class": "software",
+      "backend": "openh264",
+      "hardware_accelerated": false,
+      "width": 1920,
+      "height": 1080,
+      "is_budget_resolution": true,
+      "opened": true,
+      "stage_us": {
+        "capture": {
+          "measured_us": 340.0,
+          "budget_us": 4000.0,
+          "over_budget": false
+        },
+        "convert": {
+          "measured_us": 4625.0,
+          "budget_us": 2000.0,
+          "over_budget": true
+        },
+        "encode": {
+          "measured_us": 22078.0,
+          "budget_us": 45000.0,
+          "over_budget": false
+        },
+        "packetize": {
+          "measured_us": 8.0,
+          "budget_us": 500.0,
+          "over_budget": false
+        }
+      },
+      "total_us": {
+        "measured_us": 27051.0,
+        "budget_us": 55000.0,
+        "over_budget": false
+      },
+      "total_p95_us": 49701.0,
+      "over_budget_stages": [
+        "convert"
+      ],
+      "status": "over_budget"
+    }
+  ],
+  "notes": [
+    "The capture numbers are the portable synthetic capture device (src/modules/video_capture) driven directly: they are the portable layer's cost, not a platform capture backend's.",
+    "The per-stage numbers are the engine's own J1 instrumentation (Stats::video_stage_capture / _convert / _encode / _packetize), measured around the real capture -> convert -> encode -> packetize chain.",
+    "The budget check compares the 1080p numbers against the plan's \u00a7B.6 table. It is a report, not a gate: \u00a7B.6 is written for a 4-core x86-64 @ 3 GHz reference machine.",
+    "The hardware path's convert budget is zero in \u00a7B.6 because the conversion is folded into the capture path there. This machine has no zero-copy capture device, so the convert cost is real and is reported rather than judged."
+  ]
+}

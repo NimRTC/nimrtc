@@ -37,6 +37,9 @@ ProfileRegistry::ProfileRegistry() {
     profiles_.emplace(std::string{kProfileAgentGateway.name},     kProfileAgentGateway);
     profiles_.emplace(std::string{kProfileRelayAgent.name},       kProfileRelayAgent);
     profiles_.emplace(std::string{kProfileAgentLowLatency.name},  kProfileAgentLowLatency);
+    // v1.2 (v1.4.0) — the remote-desktop scene profile.  See
+    // docs/plan/remote-desktop-plan.md K3.
+    profiles_.emplace(std::string{kProfileRemoteDesktop.name},    kProfileRemoteDesktop);
 }
 
 ProfileRegistry& ProfileRegistry::instance() {
@@ -326,6 +329,49 @@ Profile profile_from_json_file(const std::string& file_path) {
     // -- v1.1 transport section (additive) ------------------------------------
     p.transport = transport_from_json(root);
 
+    // -- v1.2 video scene configuration (additive) ---------------------------
+    //
+    // All four keys are OPTIONAL in the schema: a v1.1 profile that does
+    // not declare them loads with the engine defaults below, which is the
+    // same "optional block, absent → defaults" contract the v1.1
+    // `transport` block follows.  `root.value()` returns the supplied
+    // default when the key is missing or null.
+    p.video_codec_preference =
+        json_to_string(root.value("video_codec_preference", "h264"));
+    p.video_resolution_floor =
+        json_to_string(root.value("video_resolution_floor", "720p"));
+    p.video_ladder_mode =
+        json_to_string(root.value("video_ladder_mode", "quality"));
+    p.video_content_type =
+        json_to_string(root.value("video_content_type", "camera"));
+
+    // -- v1.2 additive: the declared per-stream bandwidth shares ------------
+    //
+    // The block is OPTIONAL: a profile that does not declare it loads with
+    // an empty map, which means "every stream splits the pool evenly"
+    // (the engine's default weight is 1).
+    //
+    // The shape is `{ "<stream_id>": <weight>, ... }` — an object whose
+    // values are non-negative integers.  A malformed entry (a non-integer
+    // value, a negative one) is **skipped** rather than failing the whole
+    // load: a weight is a hint about the split, and a bad hint must not
+    // make an otherwise-valid profile unusable.  The schema is the
+    // validator (it rejects the profile outright); the loader is the
+    // tolerant reader.
+    p.video_stream_weights.clear();
+    if (root.contains("video_stream_weights") &&
+        root["video_stream_weights"].is_object()) {
+        for (const auto& entry : root["video_stream_weights"].items()) {
+            if (!entry.key().empty() && entry.value().is_number_integer()) {
+                const auto weight = entry.value().get<std::int64_t>();
+                if (weight >= 0) {
+                    p.video_stream_weights[entry.key()] =
+                        static_cast<std::uint32_t>(weight);
+                }
+            }
+        }
+    }
+
     return p;
 }
 
@@ -432,6 +478,29 @@ std::string profile_to_json_string(const Profile& p) {
             t["control"]["ttl_ms"] = *p.transport.control.ttl_ms;
         }
         root["transport"] = std::move(t);
+    }
+
+    // v1.2 additive video-scene keys.  Always emitted so the key set is
+    // self-documenting and the round-trip is symmetric with the parser
+    // (which fills the same defaults for a v1.1 profile that omits
+    // them).  A v1.1 profile therefore parses to the same values the
+    // serialiser writes — the schema change stays strictly additive.
+    root["video_codec_preference"] = std::string{p.video_codec_preference};
+    root["video_resolution_floor"] = std::string{p.video_resolution_floor};
+    root["video_ladder_mode"]      = std::string{p.video_ladder_mode};
+    root["video_content_type"]     = std::string{p.video_content_type};
+
+    // v1.2 additive: the declared per-stream bandwidth shares.  Emitted
+    // only when the profile actually declares one, so a v1.1 profile
+    // still round-trips byte-identically (the block is absent, not
+    // empty).  The key order is the map's own order (std::map is
+    // ordered), so the output is deterministic.
+    if (!p.video_stream_weights.empty()) {
+        json w = json::object();
+        for (const auto& [id, weight] : p.video_stream_weights) {
+            w[id] = weight;
+        }
+        root["video_stream_weights"] = std::move(w);
     }
 
     return root.dump(/*indent=*/2);

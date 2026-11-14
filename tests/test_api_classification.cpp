@@ -483,7 +483,62 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - video_sink/egl_renderer.hpp, video_sink/metal_renderer.hpp,
     //     video_sink/presenter_core.hpp, video_sink/scale_to_fit.hpp
     //     (the presentation sinks -- remote-desktop plan E2 / E5)
-    constexpr std::size_t kBaselineHeaderCount = 163;
+    //
+    // Track K bump: +4 public headers (163 -> 167):
+    //   - audio_device/playback_progress.hpp (the playback progress
+    //     callback surface for the audio device module)
+    //   - audio_device/aec_delay.hpp (the AEC delay estimator surface)
+    //   - video_pipeline/keyframe_limiter.hpp (the keyframe limiter)
+    //   - video_rtcp_feedback/video_rtcp_feedback.hpp (the region-refresh
+    //     RTCP APP packet surface)
+    //
+    // Track L bump: +1 public header (167 -> 168):
+    //   - video_pipeline/incremental_encode.hpp (the dirty-rect incremental
+    //     encode controller / driver -- remote-desktop plan B9)
+    //
+    // Track F bump: +1 public header (the explicit sample-rate
+    //   converter -- remote-desktop plan F5):
+    //   - audio_device/resampler.hpp
+    //
+    // Track F bump: +2 public headers (the system-audio (loopback)
+    //   capture device and the two-source mixer -- remote-desktop plan
+    //   F6):
+    //   - audio_device/system_audio.hpp (the system-audio loopback
+    //     source: the factory, the device identity, the synthetic
+    //     CI-testable device)
+    //   - audio_device/mixer.hpp (the two-source mixer: the mix /
+    //     separate configuration and the deterministic saturating
+    //     add)
+    //
+    // Track A6/A9 bump: the three headers this track added are already
+    //   counted in the 180 total above (they landed before the Track
+    //   F bump that set it):
+    //   - video_capture/cursor_compositor.hpp (the portable cursor
+    //     compositing core -- remote-desktop plan A6)
+    //   - video_capture/cursor_source.hpp (the platform cursor source
+    //     seam and the pinned fallback -- remote-desktop plan A6)
+    //   - video_capture/camera_capture.hpp (the portable camera capture
+    //     layer and the synthetic camera -- remote-desktop plan A9)
+    //
+    // Concurrent bump: +2 public headers (180 -> 182) landed while
+    // this track was in flight -- the control-channel seam headers
+    // (`plugins/control_channel.hpp` and
+    // `rd_input/control_channel.hpp`), added by the track that owns
+    // the remote-desktop control channel.
+    //
+    // Video plan B11 bump: +3 public headers (182 -> 185) for the
+    // optional VP9 codec module (`src/modules/vp9/`, the remote-desktop
+    // plan B11 / video plan C6 leg), which carries the vendored libvpx
+    // software VP9 encoder / decoder and its HW-backend table:
+    //   - vp9/codec_plugin.hpp (the VP9 plugin factory)
+    //   - vp9/decoder.hpp (the VP9 software decoder)
+    //   - vp9/hw_backends.hpp (the VP9 HW backend ids)
+    //
+    // The baseline above is the total on disk.  Several track bumps
+    // landed concurrently (Track J / K / L / F), so the per-track
+    // ranges above do not simply add up to it -- the total is what the
+    // walker measures and what this constant must match.
+    constexpr std::size_t kBaselineHeaderCount = 185;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

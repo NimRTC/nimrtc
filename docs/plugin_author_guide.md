@@ -239,12 +239,14 @@ by an empty config knob.
 | Video source | `plugins/video_source.hpp`                       | `video_source_name`         | `NIMRTC_REGISTER_VIDEO_SOURCE` | reported | `memory` default. HW guide: §6.3. |
 | Video capture| `plugins/video_capture.hpp`                      | `video_capture_name`        | `NIMRTC_REGISTER_VIDEO_CAPTURE`| reported | Empty = disabled. The capture *device* seam; a source is derived from it by an adapter. |
 | Video sink   | `plugins/video_sink.hpp`                         | `video_sink_name`           | `NIMRTC_REGISTER_VIDEO_SINK`   | reported | `headless`, `pinned`. |
+| Video rate ctrl | `plugins/video_bitrate_controller.hpp`         | `video_bitrate_controller_name` | `NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER` | reported | The video rate controller (remote-desktop plan D1). Empty = no ladder: the encoder keeps the bitrate it was configured with. |
 | Video rx     | `plugins/video_pipeline.hpp` (`IVideoReceiver`)  | `video_receiver_name`       | `NIMRTC_REGISTER_VIDEO_RECEIVER` | reported | — |
 | Video tx     | `plugins/video_pipeline.hpp` (`IVideoSender`)    | `video_sender_name`         | `NIMRTC_REGISTER_VIDEO_SENDER` | reported | — |
 | BWE          | `plugins/bwe.hpp`                                | `bwe_name`                  | `NIMRTC_REGISTER_BWE`          | logged | `aimd`. |
 | Scheduler    | `plugins/scheduler.hpp`                          | `scheduler_name`            | `NIMRTC_REGISTER_SCHEDULER`    | logged | `strict_priority`. |
 | Net feedback | `plugins/net_feedback.hpp`                       | `net_feedback_name`         | `NIMRTC_REGISTER_NET_FEEDBACK` | logged | The receiver-side collector that feeds the BWE estimator. |
 | XR report    | `plugins/xr_report.hpp`                          | `xr_report_name`            | `NIMRTC_REGISTER_XR_REPORT`    | logged | The RFC 3611 extended-report consumer. |
+| Control channel | `plugins/control_channel.hpp`                 | `control_channel_name`      | `NIMRTC_REGISTER_CONTROL_CHANNEL` | hard | Empty = no control plane (`send_control_message()` reports `kErrNotReady`). The built-in implementation registers under `"control-channel"`. An unknown id is a hard error at `open()` — the engine never falls back silently. |
 
 **Not pluggable today** (see §4.2): the RTP layer
 (`plugins/rtp.hpp`) and the SDP layer (`plugins/sdp.hpp`). The

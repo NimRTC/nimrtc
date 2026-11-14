@@ -332,6 +332,59 @@ Chrome 的兼容面不是 RFC 文档，而是 **Chrome 的实际行为**。ICE t
 
 > **P1 体验可用 ≠ P3 生产质量**：P1 交付是"能打电话"，P3 交付是"在 30% 丢包 / 弱网下画面不崩、控制不丢"。社区不要把 P1 当生产指标看待，文档与 README 一律标注 experimental（呼应 §11.1）。
 
+### 6.1 视频侧实际交付的编解码器与设备（诚实清单）
+
+> **本节是"文档不得越界"的锚点**（remote-desktop plan K9 / RD-9）：下面每一行都只写
+> 树里真实存在的东西。**任何一行都不得暗示树里并不存在的捆绑编解码器或设备后端。**
+
+**视频编解码器** —— 一条缝（`plugins::IVideoEncoder` / `plugins::IVideoDecoder`），
+两类后端（硬件 / 软件），由 `EngineConfig::video_codec_backend`（`auto` / `hardware` /
+`software`）选择：
+
+| 编解码器 | 软件路径 | 硬件路径 | 捆绑情况 |
+|---|---|---|---|
+| H.264 | **OpenH264**（vendored，`NIMRTC_PLUGINS_OPENH264=ON`，默认 OFF） | **NVENC**（`NIMRTC_PLUGINS_NVENC=ON`）；另有 AMF / QSV / VA-API 编码器与 DXVA 解码器（同样 opt-in，且需厂商 SDK） | 捆绑 OpenH264（BSD-2-Clause）；**不捆绑** x264 / x265 |
+| H.265 / HEVC | **无真实软件编解码器** —— 只有合成 stub | **NVENC / NVDEC** | 不捆绑任何 H.265 软件编解码器 |
+| AV1 | **dav1d 解码器**（vendored，`NIMRTC_PLUGINS_DAV1D=ON`，默认 OFF）；**无真实软件编码器** | **NVENC / NVDEC** | 捆绑 dav1d（BSD-2-Clause，解码侧）；不捆绑 libaom / rav1e / SVT-AV1 |
+| VP8 / VP9 | **无** | **无** | 只有 RTP packetizer（`src/modules/video_payload/`），**没有**编解码器 |
+| G.711 | **无编解码器插件** | — | 只是**路由表条目**（`engine/src/audio_routing.hpp`），不编也不解 |
+
+**音频编解码器**：Opus（vendored `libopus`，RFC 7587）；G.711 走**路由**而非编解码器插件。
+
+**采集设备**（`plugins::IVideoCapture` 的工厂 id）：
+
+| 平台 | 已交付的采集后端 |
+|---|---|
+| Windows | `windows-dxgi`（DXGI Desktop Duplication）、`windows-wgc`（Windows Graphics Capture）、`synthetic` |
+| Linux | `linux-pipewire`（XDG Desktop Portal / Wayland）、`linux-x11`、`synthetic` |
+| macOS | `macos-screencapturekit`、`synthetic` |
+| 全平台 | `synthetic` —— 确定性测试设备，CI 在所有平台上跑它 |
+
+**渲染器**（`plugins::IVideoSink` 的工厂 id）：`headless`、`pinned`（全平台）、
+`d3d11`（Windows）、`metal`（macOS）、`egl`（Linux）。三个硬件渲染器的工厂在**所有**平台
+注册，配置里点名能解析上，但在非对应平台上 `open()` 返回 `kErrUnsupported`。
+
+**音频设备**（`plugins::IAudioSource` / `plugins::IAudioSink`）：`portaudio`
+（Windows WASAPI / MME / DSound / ASIO、macOS Core Audio、Linux ALSA / JACK / PulseAudio）
+与 `synthetic`。二者都**不走 `core::PluginRegistry`**，而是经
+`nimrtc::audio_device::source_factory(id)` / `sink_factory(id)` 解析。
+
+**码率控制**：`plugins::IVideoBitrateController` seam + `video-bitrate-control` 模块
+（分辨率 / 帧率 / 码率阶梯、分辨率下限、关键帧开销预算）。**编码器是被动的**——引擎把
+控制器给出的档位换算成 `VideoEncoderParams` 再推给编码器；编码器不查 BWE，也不查控制器。
+
+**像素格式与缩放**：`src/modules/video_frame/` 提供标量转换；同模块的 `scaler.hpp` 是
+**libyuv** SIMD 路径（vendored，`NIMRTC_VENDORED_LIBYUV=ON`，默认 ON），
+关掉后模块照常编译、缩放器报告"不可用"。
+
+**许可口径**：捆绑的编解码器只有 OpenH264（BSD-2-Clause）、dav1d（BSD-2-Clause）与
+Opus（BSD-3-Clause）；许可与平台覆盖矩阵见 [ADR-021](../adr/ADR-021-codec-bundling-posture.md)
+与 `NOTICE`。
+
+> **写插件的人**：采集 / 编解码 / 渲染 / 音频设备 / 码率控制这几道缝的实操指南在
+> [`docs/guides/plugin-author-guide.md`](../guides/plugin-author-guide.md)；
+> 硬件后端那道缝在 [`docs/hw_plugin_seam.md`](../hw_plugin_seam.md)。
+
 ---
 
 ## 7. 服务端与 SFU（P2）

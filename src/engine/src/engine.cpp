@@ -195,6 +195,16 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // list and the track API reports "no session".
     resolve_session_model();
 
+    // ---- The remote-desktop control channel (plan G1 / G2) -------------
+    //
+    // The channel is resolved through the registry's control-channel
+    // slot (`EngineConfig::control_channel_name`), so the engine never
+    // includes a concrete module's header (Layout Invariant 4).  It is
+    // resolved *after* the transport session exists, because the
+    // transport selection (the DTLS app-data seam vs. the control
+    // stack's raw-UDP path) depends on it.
+    if (const uint32_t rc = resolve_control_channel(); rc != 0) return rc;
+
     return 0;
 }
 

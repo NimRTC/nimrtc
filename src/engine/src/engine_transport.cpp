@@ -525,6 +525,63 @@ uint32_t NimRTCEngine::init_transport_session() noexcept {
             "', control='" +
             impl_->session_state.resolved_control_factory_id +
             "'");
+
+        // ---- The control stack's raw-UDP receive path (plan G2) -----------
+        //
+        // The plan's G2 row: "`TransportSession` owns a `media_stack`
+        // **and** a `control_stack`, and `ITransportStack::raw_control()`
+        // returns the raw-UDP datagram path — but the engine never uses
+        // `raw_control()` (no reference in `src/engine/`), so the
+        // control stack is built and idle."
+        //
+        // This is the wiring that stops it being idle: the control
+        // stack's datagram path delivers into the control channel, so
+        // the control plane has its own ICE-selected pair and its own
+        // congestion-control domain (plan G2's acceptance criterion).
+        //
+        // The stack is **lazily initialised**: `RawUdpArqStack::start()`
+        // is what opens the ARQ session (and therefore what makes
+        // `raw_control()` non-null), and `has_control_path()` reports
+        // `raw_control_ != nullptr`.  So the stack has to be started
+        // *before* the path is queried — otherwise the G2 path is dead
+        // code and every session silently falls back to the DTLS
+        // app-data seam.
+        //
+        // The stack is started only when the host asked for a control
+        // plane that may ride it (`kRawUdp` or `kAuto`).  The stack
+        // opens a real UDP socket, and a session that does not want a
+        // control plane must not pay for one (the same reason
+        // `control_channel_name` defaults to empty).
+        if (impl_->session.control_stack) {
+            const bool wants_raw_control =
+                config_.control_channel_transport ==
+                    plugins::ControlChannelTransport::kRawUdp ||
+                config_.control_channel_transport ==
+                    plugins::ControlChannelTransport::kAuto;
+
+            if (wants_raw_control) {
+                impl_->session.control_stack->start();
+                core::log::Logger::instance().info(
+                    "engine[control]: the control stack was started (plan "
+                    "G2 — the control plane gets its own transport)");
+            }
+
+            if (impl_->session.control_stack->has_control_path()) {
+                impl_->session.control_stack->on_control(
+                    [this](plugins::BufferView view) {
+                        on_control_bytes(std::span<const std::uint8_t>(
+                            view.data(), view.size()));
+                    });
+                core::log::Logger::instance().info(
+                    "engine[control]: the control stack's raw-UDP path is "
+                    "wired to the remote-desktop control channel (plan G2)");
+            } else if (wants_raw_control) {
+                core::log::Logger::instance().warn(
+                    "engine[control]: the control stack was started but "
+                    "exposes no control path — the control plane cannot "
+                    "use the raw-UDP transport");
+            }
+        }
     }
 
     // ---- Apply pre-open ICE configuration ---------------------------------
@@ -1011,6 +1068,36 @@ int NimRTCEngine::tick() noexcept {
         }
     }
 
+    // ---- The per-stream bandwidth split (remote-desktop plan D5) ---------
+    //
+    // The session budget is divided between the reserved audio and the
+    // elastic video streams, and each video stream's target is written
+    // back to its own state.
+    //
+    // This runs *before* the pacing update and the rate-control update,
+    // because both of them consume the split: the pacer needs the class
+    // rates, and the rate controllers need each stream's own share.  By
+    // computing the split once, in one place, the number the pacer uses
+    // and the number a stream's controller is handed are one number by
+    // construction rather than by coincidence.
+    //
+    // The split does **not** depend on the pacer: it is a property of the
+    // link budget, so it is computed even when there is no scheduler (or
+    // when media pacing is disabled).  That independence is what makes
+    // the D5 acceptance criterion — "with two video streams and one
+    // audio stream the allocation is the documented split" — true in
+    // *every* configuration, not only the paced one.
+    if (bwe_) {
+        std::uint32_t budget = bwe_->estimate().target_bitrate_bps;
+        const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
+        if (peer_limit > 0 && (budget == 0 || budget > peer_limit)) {
+            budget = peer_limit;
+        }
+        if (budget > 0) {
+            compute_video_stream_shares(budget);
+        }
+    }
+
     // ---- Split the estimate between the traffic classes (v1.2.0 M3, P2) -
     // The aggregate budget above is the *ceiling*; the per-class buckets
     // are the *distribution*.  Without them a saturated video stream eats
@@ -1026,6 +1113,54 @@ int NimRTCEngine::tick() noexcept {
     // recovers.  The controller is rate-limited, so this is a no-op
     // between two steps (see maybe_update_audio_bitrate()).
     maybe_update_audio_bitrate();
+
+    // ---- BWE-linked video rate control (remote-desktop plan D1 / D4) -----
+    //
+    // The video rate controller watches the same estimate the audio
+    // path does, but it also owns the ladder: the resolution, the frame
+    // rate and the bitrate the encoder is asked to produce.  The
+    // controller's decision reaches the encoder through
+    // `apply_video_encoder_params()`, so this call only has to hand it
+    // the link's opinion.
+    //
+    // Remote-desktop plan D5 / H1: the controller is handed the
+    // stream's **share** of the estimate, not the whole session
+    // estimate — `IVideoBitrateController::on_bandwidth_estimate()`
+    // says so explicitly ("the engine has already applied the
+    // per-stream share rule before calling this").
+    //
+    // The split was computed by `compute_video_stream_shares()` earlier
+    // in this tick — the *same* function the pacer uses, so the number
+    // the controller sees and the number the pacer uses are one number
+    // by construction.
+    //
+    // Until the split has a value (no estimate yet), the raw estimate
+    // is used, so a session that has not heard from the network yet
+    // still adapts.
+    if (bwe_) {
+        const std::uint32_t estimate = bwe_->estimate().target_bitrate_bps;
+        if (estimate > 0) {
+            const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
+            const std::uint32_t budget =
+                (peer_limit > 0 && estimate > peer_limit) ? peer_limit
+                                                          : estimate;
+
+            const std::uint32_t default_share =
+                impl_->video_state.video_streams.default_share_bps;
+            if (video_bitrate_controller_) {
+                video_bitrate_controller_->on_bandwidth_estimate(
+                    default_share > 0 ? default_share : budget);
+            }
+            // The extra streams each have their **own** controller, and
+            // each is handed **its own** share — two streams can sit on
+            // different rungs of the ladder at the same time.
+            for (auto& stream : impl_->video_state.video_streams.streams) {
+                if (!stream->controller) continue;
+                stream->controller->on_bandwidth_estimate(
+                    stream->share_bps > 0 ? stream->share_bps : budget);
+            }
+        }
+    }
 
     // ---- Emit the pending DTMF events (v1.2.0, RFC 4733 §2.5) ---------
     //
@@ -1165,6 +1300,20 @@ int NimRTCEngine::tick() noexcept {
         maybe_send_tmmbr();
         flush_tmmbn();
     }
+
+    // ---- The remote-desktop control channel (plan G1 / G2 / G6) ---------
+    //
+    // The control path is flushed *outside* the ICE-connected gate: the
+    // G2 path (a separate control stack with its own ICE pair) has its
+    // own connectivity, and the G1 path's DTLS session may already be
+    // Connected while ICE has not yet reported it.
+    //
+    // The inbound messages are drained here too, so the host's callback
+    // runs on the engine's thread — never on the ARQ thread, and never
+    // under the channel lock.
+    flush_control_channel();
+    drain_control_messages();
+
     return ice_t_->recv();
 }
 
@@ -1193,54 +1342,18 @@ void NimRTCEngine::update_pacing_rates() noexcept {
         return;
     }
 
-    // ---- The demands ---------------------------------------------------
+    // ---- The split ----------------------------------------------------
     //
-    // The audio is the *reserved* stream (it takes its share first and
-    // keeps a hard floor); the video is the *elastic* one (it shares
-    // what the audio left).  The split rule itself lives in
-    // `bandwidth_allocation.hpp` (v1.2.0, video plan F8) and is the very
-    // same rule the audio bitrate adaptation uses — one rule, not two.
-    std::vector<detail::BandwidthDemand>& demands = impl_->pacing_demands_;
-    demands.clear();
-
-    const int audio_ceiling = resolve_audio_bitrate_ceiling();
-    int audio_floor = config_.audio_min_bitrate_bps > 0
-                          ? config_.audio_min_bitrate_bps
-                          : 1000;
-    // The peer's TMMBR limit wins over the local floor here too — the
-    // same "peer-wins" rule the audio encoder adaptation uses (OD-E
-    // decision 3).  Without it the reserved demand would claim more
-    // than the (peer-limited) estimate, the session would report a
-    // deficit, and the elastic video stream would be starved by a
-    // promise the engine is about to break anyway.
-    int audio_cap = audio_ceiling;
-    if (peer_limit > 0) {
-        if (audio_floor > static_cast<int>(peer_limit)) {
-            audio_floor = static_cast<int>(peer_limit);
-        }
-        if (audio_cap <= 0 || audio_cap > static_cast<int>(peer_limit)) {
-            audio_cap = static_cast<int>(peer_limit);
-        }
-    }
-    demands.push_back(detail::reserved_audio_demand(
-        config_.audio_bwe_share,
-        static_cast<std::uint32_t>(audio_floor),
-        static_cast<std::uint32_t>(audio_cap > 0 ? audio_cap : 0)));
-
-    // The video's ceiling is what its encoder is configured to produce:
-    // the video may not be paced faster than it encodes, and a video
-    // that cannot use its whole share does not hold it hostage.
-    std::uint32_t video_ceiling = 0;
-    if (video_codec_) video_ceiling = video_codec_->config().bitrate_bps;
-    detail::BandwidthDemand video_demand;
-    video_demand.reserved   = false;
-    video_demand.weight      = 1;
-    video_demand.ceiling_bps = video_ceiling;
-    demands.push_back(video_demand);
-
-    const detail::BandwidthAllocation alloc =
-        detail::allocate_bandwidth(estimate, demands);
-    if (alloc.targets.size() != 2) return;
+    // The rule itself lives in `bandwidth_allocation.hpp` (v1.2.0, video
+    // plan F8) and is the very same rule the audio bitrate adaptation
+    // uses — one rule, not two.
+    //
+    // The split was already computed by `tick()` — in
+    // `compute_video_stream_shares()`, the one function that owns it.
+    // The pacer reads the result rather than recomputing it, so the
+    // class rates and the per-stream shares can never disagree.
+    const detail::BandwidthAllocation& alloc = impl_->pacing_allocation_;
+    if (alloc.targets.empty()) return;
 
     // ---- The class rates ------------------------------------------------
     //
@@ -1266,15 +1379,187 @@ void NimRTCEngine::update_pacing_rates() noexcept {
         audio_rate = peer_limit;
     }
 
-    // The video class runs at its share of what the audio left, capped
-    // by what the encoder produces.
-    std::uint32_t video_rate = alloc.targets[1];
-    if (video_ceiling > 0 && video_rate > video_ceiling) video_rate = video_ceiling;
+    // The video class runs at the sum of the streams' shares of what the
+    // audio left, capped by what the encoders produce.  The class rate
+    // is the *sum* because the scheduler paces the whole video class as
+    // one queue; the per-stream share is what the individual stream's
+    // rate controller (plan D) and the per-stream statistics (H4) use.
+    std::uint32_t video_rate = 0;
+    for (std::size_t i = 1; i < alloc.targets.size(); ++i) {
+        video_rate += alloc.targets[i];
+    }
+    const std::uint32_t video_ceiling_total = impl_->video_ceiling_total_bps;
+    if (video_ceiling_total > 0 && video_rate > video_ceiling_total) {
+        video_rate = video_ceiling_total;
+    }
 
     // The scheduler ignores an unchanged rate, so pushing the same
     // numbers every tick costs a comparison, not a reconfiguration.
     scheduler_->set_pacing_rate(plugins::PacedClass::kAudio, audio_rate);
     scheduler_->set_pacing_rate(plugins::PacedClass::kVideo, video_rate);
+}
+
+// ---------------------------------------------------------------------------
+// compute_video_stream_shares() — the D5 split
+// ---------------------------------------------------------------------------
+//
+// The session's bandwidth estimate is divided between the reserved audio
+// and the elastic video streams, and each video stream's target is
+// written back to its own state (`VideoStream::share_bps`, and
+// `VideoStreamSet::default_share_bps` for the default stream).
+//
+// ## Why this is a separate function
+//
+// The split used to live *inside* `update_pacing_rates()`, which meant
+// it only ran when the pacer ran — and the pacer only runs when there
+// is a scheduler **and** media pacing is enabled.  But the split's
+// consumers are the *rate controllers* (`IVideoBitrateController`), and
+// those work with or without a scheduler.
+//
+// So with the scheduler disabled (or with pacing off) the per-stream
+// shares were never computed, every stream's controller was handed the
+// *whole* session estimate, and the streams competed for the same
+// budget.  The plan's D5 acceptance criterion — "with two video streams
+// and one audio stream the allocation is the documented split" — was
+// therefore only true for the paced configuration.
+//
+// Extracting the split makes it unconditional: the pacer and the rate
+// controllers read the *same* numbers, because there is only one
+// computation.
+//
+// ## The index mapping
+//
+// The demand list is laid out as:
+//
+//   [0]              the reserved audio
+//   [1]              the default video stream
+//   [2 + i]          the extra video streams, in the order they
+//                    appear in `video_streams.streams`
+//
+// so the extra stream at index *i* takes `targets[2 + i]` and the
+// default stream takes `targets[1]`.
+//
+// The write-back used to start the extra streams at `targets[1]`, which
+// handed every extra stream the *default* stream's share and pushed the
+// last extra stream past the end of the vector (its share silently kept
+// its previous value).  With one extra stream the numbers happened to be
+// interchangeable — the elastic split gives equal weights — so the bug
+// was invisible; with two extra streams the first one got the default's
+// target, the second got the first extra's target, and the third got
+// nothing at all.
+
+void NimRTCEngine::compute_video_stream_shares(
+    std::uint32_t estimate) noexcept {
+    detail::BandwidthAllocation& alloc = impl_->pacing_allocation_;
+    alloc.targets.clear();
+    if (estimate == 0) return;
+
+    // ---- The demands ---------------------------------------------------
+    //
+    // The audio is the *reserved* stream (it takes its share first and
+    // keeps a hard floor); the video is the *elastic* one (it shares
+    // what the audio left).  The split rule itself lives in
+    // `bandwidth_allocation.hpp` (v1.2.0, video plan F8) and is the very
+    // same rule the audio bitrate adaptation uses — one rule, not two.
+    std::vector<detail::BandwidthDemand>& demands = impl_->pacing_demands_;
+    demands.clear();
+
+    const int audio_ceiling = resolve_audio_bitrate_ceiling();
+    int audio_floor = config_.audio_min_bitrate_bps > 0
+                          ? config_.audio_min_bitrate_bps
+                          : 1000;
+    // The peer's TMMBR limit wins over the local floor here too — the
+    // same "peer-wins" rule the audio encoder adaptation uses (OD-E
+    // decision 3).  Without it the reserved demand would claim more
+    // than the (peer-limited) estimate, the session would report a
+    // deficit, and the elastic video stream would be starved by a
+    // promise the engine is about to break anyway.
+    int audio_cap = audio_ceiling;
+    const std::uint32_t peer_limit = impl_->xr.peer_tmmbr_limit_bps;
+    if (peer_limit > 0) {
+        if (audio_floor > static_cast<int>(peer_limit)) {
+            audio_floor = static_cast<int>(peer_limit);
+        }
+        if (audio_cap <= 0 || audio_cap > static_cast<int>(peer_limit)) {
+            audio_cap = static_cast<int>(peer_limit);
+        }
+    }
+    demands.push_back(detail::reserved_audio_demand(
+        config_.audio_bwe_share,
+        static_cast<std::uint32_t>(audio_floor),
+        static_cast<std::uint32_t>(audio_cap > 0 ? audio_cap : 0)));
+
+    // The video's ceiling is what its encoder is configured to produce:
+    // the video may not be paced faster than it encodes, and a video
+    // that cannot use its whole share does not hold it hostage.
+    //
+    // Remote-desktop plan H1: there is now **one demand per active
+    // video stream** — the default stream plus every extra one.  The
+    // rule (`allocate_bandwidth`) was already designed for that (it
+    // takes a demand *list* and returns a parallel target list), so the
+    // multi-stream case needs no new arithmetic: the elastic pool is
+    // split between the streams by their weights, and each stream's
+    // share is written back to its own state (`VideoStream::share_bps`)
+    // so the per-stream statistics (H4) and the per-stream rate
+    // controller (plan D) see the same number the pacer uses.
+    const std::size_t video_demands = 1u + impl_->video_state.video_streams.streams.size();
+    demands.reserve(1u + video_demands);
+
+    std::uint32_t video_ceiling_total = 0;
+    {
+        std::uint32_t default_ceiling = 0;
+        if (video_codec_) default_ceiling = video_codec_->config().bitrate_bps;
+
+        detail::BandwidthDemand video_demand;
+        video_demand.reserved   = false;
+        video_demand.weight      = impl_->video_state.video_streams.default_weight;
+        video_demand.ceiling_bps = default_ceiling;
+        demands.push_back(video_demand);
+        video_ceiling_total += default_ceiling;
+
+        for (const auto& stream : impl_->video_state.video_streams.streams) {
+            detail::BandwidthDemand d;
+            d.reserved   = false;
+            d.weight      = stream->weight;
+            d.ceiling_bps = stream->codec ? stream->codec->config().bitrate_bps : 0u;
+            demands.push_back(d);
+            video_ceiling_total += d.ceiling_bps;
+        }
+    }
+
+    // The total ceiling, for the pacer's class rate.
+    impl_->video_ceiling_total_bps = video_ceiling_total;
+
+    alloc = detail::allocate_bandwidth(estimate, demands);
+    if (alloc.targets.size() != demands.size()) {
+        alloc.targets.clear();
+        return;
+    }
+
+    // ---- The write-back -------------------------------------------------
+    //
+    // Each stream keeps the share the rule gave it, so the number the
+    // pacer uses and the number the stream's own controller sees are the
+    // same one.  The default stream's share lives in the set (its plugin
+    // instances are the engine's own members).
+    {
+        const auto& streams = impl_->video_state.video_streams;
+        for (std::size_t i = 0; i < streams.streams.size(); ++i) {
+            const std::size_t idx = 2 + i;
+            if (idx < alloc.targets.size()) {
+                streams.streams[i]->share_bps = alloc.targets[idx];
+            } else {
+                // No target for this stream (the demand list and the
+                // stream list disagree): the share is *unknown*, not
+                // zero — the controller falls back to the raw estimate.
+                streams.streams[i]->share_bps = 0;
+            }
+        }
+        if (alloc.targets.size() > 1) {
+            impl_->video_state.video_streams.default_share_bps =
+                alloc.targets[1];
+        }
+    }
 }
 
 
@@ -1548,6 +1833,21 @@ int NimRTCEngine::drain_dtls() noexcept {
             "calling maybe_install_srtp_keys()");
         maybe_install_srtp_keys();
     }
+
+    // ---- The control channel's inbound path (plan G1) --------------------
+    //
+    // The DTLS session's application-data seam carries the remote
+    // desktop's control messages (plan G1).  The record layer keeps
+    // record boundaries intact, so each element of the returned vector
+    // is one decrypted record's payload — the control channel's own
+    // framing (a magic byte, a version and a varint length) turns
+    // those records back into whole messages.
+    auto app_data = d->take_app_data();
+    for (const auto& record : app_data) {
+        on_control_bytes(std::span<const std::uint8_t>(record.data(),
+                                                        record.size()));
+    }
+
     return sent;
 }
 

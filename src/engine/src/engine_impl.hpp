@@ -38,6 +38,9 @@
  *   | `detail::TimelineState`         | `engine_timeline_state.hpp`   |
  *   | `detail::XrState`               | `engine_xr_state.hpp`         |
  *   | `detail::RefFrameTable`         | `engine_ref_frame_table.hpp`  |
+ *   | `detail::RenderState`           | `engine_render_state.hpp`     |
+ *   | `detail::ControlChannelInbox`   | `engine_control_inbox.hpp`    |
+ *   | `detail::ControlChannelSeam`    | `engine_control_seam.hpp`     |
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -87,8 +90,11 @@
 #include "audio_routing.hpp"
 #include "bandwidth_allocation.hpp"
 #include "engine_audio_state.hpp"
+#include "engine_control_inbox.hpp"
+#include "engine_control_seam.hpp"
 #include "engine_rtcp_helpers.hpp"
 #include "engine_ref_frame_table.hpp"
+#include "engine_render_state.hpp"
 #include "engine_scratch.hpp"
 #include "engine_sdp_helpers.hpp"
 #include "engine_session_state.hpp"
@@ -110,6 +116,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -258,34 +265,10 @@ struct NimRTCEngine::Impl {
     // the media `ITransportStack` (see `Impl::session` below, built by
     // `make_transport_instance()` in `init_modules_once()`).
     //
-    // Why a weak_ptr (not `unique_ptr<IDtlsSession>` or raw pointer)?
-    //   - Pre-Slice-7.6 PR3 (v0.12.0), the engine built DTLS itself
-    //     via `reg.get_dtls_session("wolfssl")` and stored it in a
-    //     `unique_ptr`. The Slice 7.6 refactor moves that construction
-    //     into `WebRtcClassicStackFactory` (the "webrtc-classic" stack
-    //     factory), which produces a `WebRtcClassicStack` that owns
-    //     the DTLS session. The engine no longer builds DTLS
-    //     independently — the stack's factory does, and the engine
-    //     reaches the resulting session through the stack's
-    //     `dtls_weak()` accessor.
-    //   - Storing a `unique_ptr<dtls>` AND a stack-owned DTLS
-    //     session would double-free on destruction.  Storing a raw
-    //     pointer is safe (no ownership) but introduces the UAF class:
-    //     if the engine dereferences the pointer after the stack dies,
-    //     it reads freed memory.  weak_ptr resolves both: the stack
-    //     keeps ownership via its internal `shared_ptr`, and the
-    //     engine's `weak_ptr.lock()` returns nullptr once the stack
-    //     releases that shared_ptr (i.e. on `close()`).
-    //
-    // Lifetime: `impl_->session.media_stack` is destroyed in
-    // `delete impl_` (which `~NimRTCEngine` runs before its own
-    // members are destroyed).
-    //
-    // v0.12.0 P0: is_open() guards prevent post-close UAF on the API
-    // surface.  v0.13.0 (this change): changed to weak_ptr so
-    // .lock() returns nullptr automatically after close(), eliminating
-    // the UAF class entirely.  All callers now use:
-    //   if (auto* d = impl_->dtls.lock().get()) { d->X(); }
+    // It is a weak_ptr: storing an owning `unique_ptr` here would
+    // double-free on destruction, and a raw pointer would be a
+    // use-after-free once the stack dies.  `lock()` returns nullptr
+    // after `close()`, so there is no post-close dereference.
     std::weak_ptr<nimrtc::dtls::IDtlsSession>  dtls;
     std::unique_ptr<srtp::SrtpContext> srtp;
 
@@ -300,17 +283,14 @@ struct NimRTCEngine::Impl {
     // the field).
     //
     // For the 4 browser-interop strategies (browser-call, agent-gateway,
-    // sfu-relay, cross-network-peer):
-    //   - `session.media_stack`  → WebRtcClassicStack (owns ICE / DTLS / RTP / SCTP)
-    //   - `session.control_stack` → null (browser-call / sfu-relay / cross-network-peer)
-    //                              RawUdpArqStack (agent-gateway — high-freq control)
+    // sfu-relay, cross-network-peer) the media stack is a
+    // WebRtcClassicStack (owning ICE / DTLS / RTP / SCTP) and the
+    // control stack is null — except for agent-gateway, which gets a
+    // RawUdpArqStack for its high-frequency control traffic.
     //
-    // For teleop-ultra-low-latency (§5.3 Rule 2):
-    //   - `session.media_stack`  → RawUdpArqStack (no DTLS — not browser-interop)
-    //   - `session.control_stack` → RawUdpArqStack
-    //   - `impl_->dtls` = nullptr (no DTLS in media path for this strategy)
-    //   - Audio pipeline falls back to null-encoder; ICE/DTLS work via
-    //     the control stack's raw-UDP ARQ
+    // For teleop-ultra-low-latency (§5.3 Rule 2) both stacks are
+    // RawUdpArqStack, `impl_->dtls` is nullptr (no DTLS in the media
+    // path), and the audio pipeline falls back to a null encoder.
     TransportSession session;
 
     // ---- The DTLS / SRTP install state --------------------------------
@@ -364,6 +344,21 @@ struct NimRTCEngine::Impl {
     // contents are rewritten (never reallocated) on each tick.
     std::vector<detail::BandwidthDemand> pacing_demands_;
 
+    /** The result of the last D5 split (the per-stream bandwidth
+     *  shares).
+     *
+     *  The allocation lives here rather than being returned by value, so
+     *  the *private* split helper does not have to expose the private
+     *  `BandwidthAllocation` type through the public header.  The
+     *  pacer and the rate-control path read the same object, which is
+     *  what makes their numbers agree by construction. */
+    detail::BandwidthAllocation pacing_allocation_;
+
+    /** The sum of the video streams' encoder ceilings, in bits per
+     *  second.  The video *class* rate is capped by it: the video may
+     *  not be paced faster than it encodes. */
+    std::uint32_t video_ceiling_total_bps = 0;
+
     // ---- The feature-scoped state --------------------------------------
     //
     // Every member that belongs to exactly one feature lives in the
@@ -372,6 +367,32 @@ struct NimRTCEngine::Impl {
     detail::VideoState   video_state;
     detail::SessionState session_state;
     detail::ScratchBuffers scratch;
+
+    // ---- The receive-side render state (remote-desktop plan E5 / E6 / E7
+    // / E9) -------------------------------------------------------
+    //
+    // The render clock (E5), the input-echo state (E6), the presentation
+    // configuration (E7) and the displayed-frame record (E9) are one
+    // feature — the receive / presentation plane — so they live in one
+    // collaborator rather than as loose members here.  See
+    // `engine_render_state.hpp`.
+    detail::RenderState render;
+
+    // ---- The remote-desktop control channel (plan G1 / G2 / G6) ---------
+    //
+    // The channel's framing and outbound queue live in the `rd_input`
+    // module, reached through the `plugins::IControlChannel` seam; the
+    // engine owns the transport it rides on.  See
+    // `engine_control_seam.hpp`.
+
+    // The channel's engine-side inbox: the lock that guards the control
+    // path and the queue of messages that arrived but have not been
+    // delivered to the host yet.  See `engine_control_inbox.hpp`.
+    detail::ControlChannelInbox control_inbox;
+    // The control channel itself, resolved through the
+    // `plugins::IControlChannel` seam (the framing lives in the
+    // `rd_input` module — see `engine_control_seam.hpp`).
+    detail::ControlChannelSeam control_seam;
 
     // ---- Cross-end timeline (ADR-017) ---------------------------------
     //
@@ -388,7 +409,6 @@ struct NimRTCEngine::Impl {
     // (RFC 3550 §6.4.1 sender info).  Video is folded into the same SR via
     // report blocks only when a video sender is active; the audio stream is
     // the SR's own media source because it is always the first one out.
-    std::chrono::steady_clock::time_point sr_last_sent{};
-};
+    std::chrono::steady_clock::time_point sr_last_sent{};};
 
 }  // namespace nimrtc::engine

@@ -43,11 +43,13 @@
 
 #include "audio_routing.hpp"
 #include "engine_ref_frame_table.hpp"
+#include "engine_render_state.hpp"
 #include "engine_stage_timing.hpp"
 #include "video_codec_config.hpp"
 #include "video_negotiation.hpp"
 #include "video_render_path.hpp"
 #include "video_stats_bridge.hpp"
+#include "video_stream_set.hpp"
 
 namespace nimrtc::engine::detail {
 
@@ -347,6 +349,27 @@ struct VideoState {
     // each stage of the pipeline.  The accumulator lives here so it is
     // reset with the rest of the session state.
     StageTimings stage_timings{};
+
+    // ---- The video stream set (remote-desktop plan H1 / H2) -------------
+    //
+    // The set owns the *extra* video streams — everything except the
+    // default one, whose plugin instances stay in the engine's own
+    // members (`video_codec_`, `video_sender_`, ...; see the plan's R-3
+    // row: the refactor is incremental and revertible).
+    //
+    // It is the single view the iteration, the statistics (plan H4) and
+    // the inbound routing use, so a host that never touches the
+    // multi-stream API sees exactly the behaviour it saw before.
+    VideoStreamSet video_streams;
+
+    // ---- The receive / presentation plane (remote-desktop plan E5-E9) ---
+    //
+    // The render clock (E5), the displayed-frame record (E9), the
+    // presentation configuration (E7) and the input-echo decision (E6)
+    // are one concern: what the *viewer* sees and how it is driven.
+    // They live in a named collaborator so this header stays a state
+    // list rather than a catch-all.
+    RenderState render;
 };
 
 }  // namespace nimrtc::engine::detail

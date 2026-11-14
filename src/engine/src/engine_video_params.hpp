@@ -39,8 +39,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include <nimrtc/plugins/video_codec.hpp>
+#include <nimrtc/video_frame/roi.hpp>
 
 namespace nimrtc::engine::detail {
 
@@ -74,6 +76,25 @@ struct VideoEncoderParamInputs {
      *  the description always belongs to the pixels actually being
      *  coded. */
     plugins::VideoColorDescription color;
+
+    /** The region of higher fidelity (remote-desktop plan C4), already
+     *  scaled into the **output** resolution.
+     *
+     *  The engine keeps the ROI in capture coordinates and rescales it
+     *  with the ladder (see `nimrtc::video_pipeline::RoiScaler`); this
+     *  field carries the *scaled* rectangle, because the encoder never
+     *  needs to know the capture resolution. */
+    std::optional<plugins::VideoRegion> roi;
+
+    /** The capture resolution the ROI's source rectangle is expressed
+     *  in.  The engine scales the ROI from this resolution into the
+     *  output resolution. */
+    std::uint32_t capture_width = 0;
+    std::uint32_t capture_height = 0;
+
+    /** The smallest ROI (in output pixels) worth asking for.  Zero
+     *  disables the floor. */
+    std::uint32_t roi_min_size = 0;
 };
 
 /** Compute the encoder's parameter set.
@@ -96,6 +117,32 @@ inline plugins::VideoEncoderParams compute_video_encoder_params(
     p.pixel_format      = in.pixel_format;
     p.content_hint      = in.content_hint;
     p.color             = in.color;
+
+    // The ROI (plan C4): the source rectangle is in capture pixels, and
+    // the encoder wants output pixels.  The scaling rule itself lives in
+    // `nimrtc::video_frame` (the exempt module), so the engine and the
+    // encoder-side policy (`video_pipeline::RoiScaler`) cannot disagree
+    // about it.
+    if (in.roi.has_value() && !in.roi->empty()
+        && in.capture_width != 0 && in.capture_height != 0) {
+        const auto scaled = video_frame::scale_region(in.roi->x,
+                                                      in.roi->y,
+                                                      in.roi->width,
+                                                      in.roi->height,
+                                                      in.capture_width,
+                                                      in.capture_height,
+                                                      p.width,
+                                                      p.height,
+                                                      in.roi_min_size);
+        if (scaled.has_value()) {
+            plugins::VideoRegion out;
+            out.x = scaled->x;
+            out.y = scaled->y;
+            out.width = scaled->width;
+            out.height = scaled->height;
+            p.roi = out;
+        }
+    }
     // The QP stays unset (255): the engine does not impose a quality
     // target of its own.  The bitrate is the constraint, and the codec's
     // rate control decides the quantiser.  A host that wants a fixed QP

@@ -50,6 +50,29 @@ add_library(nimrtc_engine STATIC
     # host ever calling send_video().  RD-6: no new thread — the
     # capture device owns its own, the engine only polls it.
     src/engine_video_pump.cpp
+    # Remote-desktop plan G1 / G2 / G6: the remote-desktop control
+    # channel.  This TU owns the channel's engine-side plumbing — the
+    # registry resolution (the seam), the transport selection (the DTLS
+    # app-data seam vs. the control stack's raw-UDP path), the outbound
+    # flush and the inbound delivery.  The channel itself is a private
+    # collaborator (`engine_control_seam.hpp`).
+    src/engine_control.cpp
+    src/engine_control_seam.cpp
+    # Remote-desktop plan E5 / E6 / E7 / E9: the receive-side render
+    # state — the render clock (E5), the input echo (E6), the
+    # presentation (E7) and the displayed-frame record (E9).
+    src/engine_render_state.cpp
+    # The render clock's *rule* (plan E5).  It lives in its own
+    # translation unit so the engine's internal headers stay free of a
+    # second implementation of it — the same pattern as
+    # `video_render_path.hpp` and `bandwidth_allocation.hpp`.
+    src/video_sync_controller.cpp
+    # Remote-desktop plan H1 / H2 / H4: the multi-stream video plane.
+    # The default stream keeps the engine's own plugin members; every
+    # extra stream owns its own codec / sender / receiver / sink /
+    # source, resolved through the registry by id (H2).  The per-stream
+    # statistics are filled here (H4).
+    src/engine_video_streams.cpp
 )
 
 nimrtc_apply_options(nimrtc_engine)
@@ -210,6 +233,27 @@ if(NIMRTC_MODULE_VIDEO_PIPELINE)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_pipeline)
 endif()
 
+# Remote-desktop plan D1: the video rate controller module.  The engine
+# resolves the controller through the registry's video-bitrate-controller
+# slot and pushes its level into the encoder's parameter set (D4), but the
+# *registration* itself lives in the module — the engine only names the
+# plugin id.  The link is PRIVATE for the same linker-strip reason as the
+# video_source / video_capture entries above.
+if(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::video_bitrate_control)
+endif()
+
+# Remote-desktop plan Track G (G3 / G4 / G7): the remote-desktop input
+# module.  The engine never includes its header (the event vocabulary
+# belongs to the module; the engine's echo seam uses plain engine types
+# — Layout Invariant 4 / ADR-025).  The link exists so the module's
+# registrar entry point (in `kDefaultRegistrars[]`) resolves at link
+# time (same pattern as the video_source / video_capture entries
+# above).
+if(NIMRTC_MODULE_RD_INPUT)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::rd_input)
+endif()
+
 # The codec-specific SDP attribute module (architecture remediation plan
 # D2 / Phase 4.2).  The engine builds and parses the `a=fmtp:` body for
 # each video codec family through this module, so the format parameters
@@ -254,6 +298,13 @@ if(NIMRTC_MODULE_H265)
 endif()
 if(NIMRTC_MODULE_AV1)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::av1)
+endif()
+# Remote-desktop plan B11: the VP9 codec module.  Same seam as the
+# H.264 / H.265 / AV1 modules above — the engine reaches it through the
+# registry's video-codec slot, so the link is what makes the *symbol*
+# available.
+if(NIMRTC_MODULE_VP9)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::vp9)
 endif()
 
 # The video pixel storage (nimrtc::video_frame) — send_video() stages the

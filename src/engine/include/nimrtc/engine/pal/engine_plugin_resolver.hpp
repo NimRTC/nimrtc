@@ -158,6 +158,19 @@ resolve_video_capture(std::string_view id) noexcept {
     return nimrtc::core::PluginRegistry::instance().get_video_capture(id);
 }
 
+/** Resolve an `IVideoBitrateControllerFactory` by plugin id. Returns
+ *  nullptr if not registered.
+ *
+ *  Used by the engine to satisfy
+ *  `EngineConfig::video_bitrate_controller_name` (empty = no
+ *  controller) — the resolution / frame-rate / bitrate ladder of the
+ *  remote-desktop plan D1 / D2 / D3 / D4. */
+[[nodiscard]] inline const plugins::IVideoBitrateControllerFactory*
+resolve_video_bitrate_controller(std::string_view id) noexcept {
+    return nimrtc::core::PluginRegistry::instance()
+        .get_video_bitrate_controller(id);
+}
+
 /** Resolve an `IVideoReceiverFactory` by plugin id. Returns nullptr if not registered. */
 [[nodiscard]] inline const plugins::IVideoReceiverFactory*
 resolve_video_receiver(std::string_view id) noexcept {

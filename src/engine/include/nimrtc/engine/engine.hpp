@@ -80,6 +80,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <nimrtc/core/api_version.hpp>
 #include <nimrtc/core/bytes.hpp>          // core::ByteSpan (the DTMF receive seam)
@@ -109,9 +110,15 @@
 #include <nimrtc/plugins/video_capture.hpp>
 #include <nimrtc/plugins/video_source.hpp>
 #include <nimrtc/plugins/video_sink.hpp>
+// Remote-desktop plan D1: the video rate-controller seam.
+#include <nimrtc/plugins/video_bitrate_controller.hpp>
 #include <nimrtc/plugins/video_pipeline.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 #include <nimrtc/plugins/datachannel.hpp>
+// Remote-desktop plan G1: the control-channel seam.  The engine drives
+// the control plane through this interface and never includes the
+// `rd_input` module's headers (Layout Invariant 4 / ADR-025).
+#include <nimrtc/plugins/control_channel.hpp>
 #include <nimrtc/plugins/xr_report.hpp>        // v1.2.0 (session plan X1) — RTCP XR seam
 
 // Forward declarations of concrete module types — full definitions live
@@ -137,6 +144,15 @@ namespace nimrtc::opus   { class NIMRTC_API_STABLE Encoder; class Decoder; }
 namespace nimrtc::plugins {
 class NIMRTC_API_STABLE IVideoCodec;
 }
+
+// Forward declaration of the engine-internal per-stream state.  The
+// definition lives in the PRIVATE header `src/engine/src/video_stream_set.hpp`
+// (remote-desktop plan H1 / H2); the public header only needs the name so
+// that a private helper can take a pointer to it (Layout Invariant 4 — the
+// public header includes no engine-internal header).
+namespace nimrtc::engine::detail {
+struct VideoStream;
+} // namespace nimrtc::engine::detail
 
 namespace nimrtc::engine {
 
@@ -252,6 +268,83 @@ struct NIMRTC_API_STABLE EngineConfig {
     // `open()` returns non-zero — the engine does NOT silently fall
     // back to "wolfssl" (that would mask integrator typos).
     std::string dtls_name;
+
+    // ---- The remote-desktop control channel (plan G1 / G2) --------------
+    //
+    // The control plane — the operator's mouse moves, key presses and the
+    // liveness heartbeat — needs a path of its own, because a control
+    // message that sits behind a 15 Mbps video stream is a control
+    // message that arrives too late to be useful.
+    //
+    // The plan names two paths:
+    //
+    //   - **G1** — a NimRTC-native control channel over the DTLS
+    //     application-data seam.  The DTLS session already exposes
+    //     `send_app_data()` / `take_app_data()`, and the record layer
+    //     keeps the record boundaries intact, so the channel costs no
+    //     transport work at all.  This is the interim path, and it is
+    //     the default.
+    //   - **G2** — the same channel riding the transport session's
+    //     **control stack**, so the control plane has its own
+    //     ICE-selected pair and therefore its own congestion-control
+    //     domain.
+    //
+    // The channel itself is resolved through the registry's
+    // control-channel slot, so the engine never includes a concrete
+    // module's header (Layout Invariant 4 / ADR-025).  The built-in
+    // implementation lives in `src/modules/rd_input/` and registers
+    // under the id `"control-channel"`.
+
+    /** The control-channel plugin id (plan G1).
+     *
+     *  The id names the *factory* the engine resolves through
+     *  `core::PluginRegistry::get_control_channel(...)`.  The built-in
+     *  implementation registers under `"control-channel"`.
+     *
+     *  Empty means "no control channel": the control plane is disabled
+     *  and `send_control_message()` reports `kErrNotReady`.  It is empty
+     *  by default, so a session that does not want a control plane does
+     *  not pay for one.
+     *
+     *  An unknown id is a hard error at `open()` time — the engine does
+     *  not silently fall back to another backend (a typo'd id would
+     *  otherwise mask an integrator error). */
+    std::string control_channel_name;
+
+    /** The transport the control channel rides (plan G1 / G2).
+     *
+     *  - `kDtlsAppData` — the media stack's DTLS application-data seam
+     *    (plan G1).  The default: it needs no extra transport work and
+     *    it is measurably lower-latency than the DataChannel path,
+     *    because the payload does not go through a QUIC stream's
+     *    framing and flow control.
+     *  - `kRawUdp` — the control stack's raw-UDP datagram path (plan
+     *    G2).  Used when the profile asked for a **separate control
+     *    stack**: the control plane then has its own ICE-selected pair
+     *    and therefore its own congestion-control domain, so a saturated
+     *    video path cannot starve it.  The raw-UDP path is **not**
+     *    encrypted by DTLS — it is a raw datagram path — so it is only
+     *    used when the host explicitly asked for it.
+     *  - `kDataChannel` — a DataChannel (plan G3's transport).  The
+     *    browser-interoperable path; it needs the DTLS-SCTP association
+     *    that plan G1b describes, so it is not the default and is
+     *    currently honoured only when a host wires one up itself.
+     *  - `kAuto` — let the engine pick: the raw-UDP control path when
+     *    the session has one, the DTLS app-data seam otherwise.
+     *
+     *  A transport the session cannot provide is a hard error at
+     *  `open()` time, not a silent downgrade: a host that asked for
+     *  G2's separate domain must be told when it did not get one. */
+    plugins::ControlChannelTransport control_channel_transport =
+        plugins::ControlChannelTransport::kDtlsAppData;
+
+    /** The largest control message the engine will send or accept, in
+     *  bytes.  0 = the default (64 KiB).
+     *
+     *  A message over the limit is refused on the send side and rejected
+     *  on the receive side — never truncated.  A truncated input event is
+     *  a *wrong* input event, which is worse than a missing one. */
+    std::size_t control_channel_max_message_bytes = 0;
 
     // ---- Transport config (forwarded to ITransport::open) ----
 
@@ -407,6 +500,38 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** IVideoSink plugin id (e.g. "headless", "pinned", or HW renderer id). */
     std::string video_sink_name   = "headless";
 
+    /** IVideoBitrateController plugin id (remote-desktop plan D1).
+     *
+     *  The video rate controller owns the resolution / frame-rate /
+     *  bitrate ladder.  The engine resolves it through the registry's
+     *  video-bitrate-controller slot and pushes its level into the
+     *  encoder's parameter set (plan D4).
+     *
+     *  Empty means "no controller": the encoder keeps the bitrate it
+     *  was configured with, which is the pre-D4 behaviour. */
+    std::string video_bitrate_controller_name;
+
+    /** The ladder mode (remote-desktop plan D2 / D4).
+     *
+     *  `kQuality` holds the resolution and gives up bitrate first;
+     *  `kSmoothness` holds the frame rate and gives up resolution
+     *  first.  A remote-desktop profile selects the mode through
+     *  configuration. */
+    plugins::VideoLadderMode video_ladder_mode = plugins::VideoLadderMode::kQuality;
+
+    /** The resolution floor for the screen-content legibility
+     *  (remote-desktop plan D2), in pixels.  720 = "720p", 1080 =
+     *  "1080p".  0 means "no floor".
+     *
+     *  The floor is *not* hard-coded: a hardware-encoding machine
+     *  resolves a 1080p floor, a software-only one a 720p floor, and
+     *  the profile states which. */
+    std::uint32_t video_resolution_floor_height = 0;
+
+    /** The bitrate the ladder starts from (the top rung), in bits per
+     *  second. */
+    std::uint32_t video_start_bitrate_bps = 0;
+
     /** IVideoReceiver plugin id (e.g. "reference"). */
     std::string video_receiver_name = "reference";
 
@@ -508,6 +633,22 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  @see `plugins::VideoEncoderParams::ContentHint` */
     plugins::VideoEncoderParams::ContentHint video_content_hint =
         plugins::VideoEncoderParams::ContentHint::kUnspecified;
+
+    /** The region of higher fidelity (remote-desktop plan C4).
+     *
+     *  The rectangle is in **capture pixels** — the same coordinates the
+     *  capture device produces.  The engine rescales it whenever the
+     *  rate controller's ladder (plan D2) changes the encoder's
+     *  resolution, so the ROI survives a ladder step; the encoder only
+     *  ever sees the rectangle in output pixels.
+     *
+     *  `std::nullopt` means "no ROI" — the whole frame is coded at one
+     *  quality, which is the correct value for camera content.
+     *
+     *  ADR-022 is explicit that the ROI is *not* the capture region:
+     *  the capture region says *what* to capture, the ROI says *where to
+     *  spend the bits*. */
+    std::optional<plugins::VideoRegion> video_roi;
 
     // ---- BWE plugin selection (ADR-001: resolved via PluginRegistry) --------
     //
@@ -633,6 +774,32 @@ struct NIMRTC_API_STABLE EngineConfig {
      * see what it actually got.
      */
     std::string video_codec_backend = "auto";
+
+    /**
+     * @brief The declared per-stream bandwidth shares (plan D5).
+     *
+     *  The session's bandwidth estimate is divided between the video
+     *  streams by *weight*.  The rule itself lives in exactly one place
+     *  (`src/engine/src/bandwidth_allocation.hpp`) and is the very same
+     *  rule the audio path uses — one rule, not two.
+     *
+     *  The key is the stream's stable id ("default", "screen", "camera",
+     *  ...) — the same id `add_video_stream()` takes — and the value is
+     *  the stream's relative weight.  A weight of 0 means "this stream
+     *  takes nothing from the pool"; the default weight is 1 (an even
+     *  split).
+     *
+     *  The map is **declarative, not constructive**: a declaration for a
+     *  stream the session never creates is inert, not an error.  A
+     *  declaration for the *default* stream is honoured at `open()`; a
+     *  declaration for an extra stream is honoured when that stream is
+     *  created.
+     *
+     *  The runtime override (`set_video_stream_weight()`) always wins
+     *  over the declaration: the declaration is the *default* the session
+     *  starts from, not a lock.
+     */
+    std::map<std::string, std::uint32_t> video_stream_weights;
 
     // ---- DataChannel selection (ADR-001: resolved via PluginRegistry) ----
     //
@@ -1274,6 +1441,227 @@ using NIMRTC_API_STABLE AudioFrameInfoCallback =
     std::function<void(const AudioFrameInfo& info)>;
 
 // ---------------------------------------------------------------------------
+// Per-stream video statistics (remote-desktop plan H4)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One video stream's entry in the statistics snapshot.
+ *
+ * The plan's H4 row asks that "the stats snapshot returns a **list** of
+ * per-stream entries, each with its own bitrate / ladder level /
+ * keyframe rate / backend id", and the acceptance criterion is "one
+ * stats call returns one entry per active stream".
+ *
+ * The flat `Stats::video_*` fields still exist and describe the
+ * **default** stream, so the single-stream call sites and their tests
+ * keep working unchanged (the plan's R-3 row: the change is additive
+ * and revertible).
+ *
+ * @see Stats::video_streams
+ */
+struct NIMRTC_API_STABLE VideoStreamStats {
+    /** The stable stream id ("default", "screen", "camera", ...). */
+    std::string stream_id;
+
+    /** The RTP SSRC of the stream's (primary) encoding. */
+    std::uint32_t ssrc = 0;
+
+    /** The RTP payload type of the stream's encoding. */
+    std::uint8_t payload_type = 0;
+
+    /** The SDP mid of the m-line that carries the stream.
+     *
+     *  Empty when the stream has not been signalled yet. */
+    std::string mid;
+
+    /** The plugin id of the stream's codec ("h264", "av1", ...). */
+    std::string codec_name;
+
+    /** The identifier of the backend the stream's codec runs on
+     *  ("nvenc", "openh264", "stub_h264", ...). */
+    std::string backend_id;
+
+    /** The stream's current outbound bitrate, in bits per second. */
+    std::uint32_t bitrate_bps = 0;
+
+    /** The rung of the resolution ladder the stream's rate controller
+     *  currently sits on (0 = the best rung). */
+    std::uint32_t ladder_level = 0;
+
+    /** The stream's share of the session bandwidth budget, in bits per
+     *  second (remote-desktop plan D5 / H4).
+     *
+     *  The number the split rule gave this stream — the same number the
+     *  stream's own rate controller is handed, and the same number the
+     *  pacer uses for the video class.  0 means "not computed yet" (no
+     *  bandwidth estimate, or pacing disabled). */
+    std::uint32_t bandwidth_share_bps = 0;
+
+    /** The stream's weight in the bandwidth split (plan D5).
+     *
+     *  The relative claim the stream has on the elastic pool.  The
+     *  default is 1 (an even split). */
+    std::uint32_t bandwidth_weight = 1;
+
+    /** The stream's keyframe rate, in keyframes per second. */
+    std::uint32_t keyframe_rate_hz = 0;
+
+    /** The frames the host pushed through this stream. */
+    std::uint64_t frames_sent = 0;
+
+    /** The frames this stream received (assembled by its receiver). */
+    std::uint64_t frames_received = 0;
+
+    /** The frames this stream's encoder produced. */
+    std::uint64_t frames_encoded = 0;
+
+    /** The RTP packets this stream emitted. */
+    std::uint64_t packets_sent = 0;
+
+    /** The RTP bytes this stream emitted (header + payload). */
+    std::uint64_t bytes_sent = 0;
+
+    /** The keyframes this stream emitted. */
+    std::uint64_t keyframes_sent = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The render / presentation plane (remote-desktop plan E5 / E6 / E7 / E9)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief How the decoded picture is fitted into the viewer's window.
+ *
+ * Remote-desktop plan E7 ("full-screen / scale-to-fit"): the viewer
+ * scales the decoded picture to its window **honouring the aspect
+ * ratio**, so a 16:9 desktop shown in a 4:3 window is letterboxed
+ * rather than stretched.
+ *
+ * The three modes:
+ *
+ *   - `kLetterbox` — fit the whole picture *inside* the window, keeping
+ *     the aspect ratio.  The result is smaller than the window in one
+ *     dimension and centred in the other; the uncovered area is black.
+ *   - `kCrop` — fill the whole window, keeping the aspect ratio.  The
+ *     overflow on one axis is cropped away.
+ *   - `kStretch` — fill the whole window, ignoring the aspect ratio.  The
+ *     picture is distorted; the mode exists because some hosts want it,
+ *     not because it is correct.
+ */
+enum class NIMRTC_API_STABLE VideoAspectPolicy : std::uint8_t {
+    /** Fit inside the window, preserving the aspect ratio. */
+    kLetterbox = 0,
+    /** Fill the window, preserving the aspect ratio (overflow cropped). */
+    kCrop      = 1,
+    /** Fill the window, ignoring the aspect ratio (the picture is
+     *  distorted). */
+    kStretch   = 2,
+};
+
+/**
+ * @brief What the operator was looking at (remote-desktop plan E9).
+ *
+ * The engine records, per **displayed** frame, the capture timestamp and
+ * the `ref_frame` id it resolves to.  That is what lets a host answer
+ * "the user clicked on what they were looking at": the click names a
+ * `ref_frame` id, the engine resolves the id to the capture instant of
+ * the frame that was on the screen, and the host can act on *that*
+ * picture rather than on "whatever is on the screen now".
+ *
+ * The product promise: **the click happened on the frame the operator was
+ * looking at** — not on a frame that was captured later and happens to
+ * be on the screen by the time the click is processed.
+ *
+ * The timestamps are on the ADR-017 cross-end timeline (the peer's clock,
+ * reconstructed from the Sender Report / abs-send-time seam), so the
+ * value is comparable with the sender's own capture instants and with
+ * the engine's `ref_frame_to_capture_ts()` mapping.
+ *
+ * @see docs/adr/ADR-017-cross-end-timeline.md
+ */
+struct NIMRTC_API_STABLE DisplayedFrameInfo {
+    /** The frame's capture timestamp, in microseconds on the ADR-017
+     *  timeline (the peer's clock).  0 when the pipeline did not carry
+     *  one. */
+    std::int64_t  capture_ts_us  = 0;
+
+    /** The `ref_frame` id the capture timestamp resolves to.
+     *
+     *  0 when the id is unknown — see `has_ref_frame`. */
+    std::uint64_t ref_frame_id   = 0;
+
+    /** The frame's per-SSRC sequence number. */
+    std::uint32_t frame_seq      = 0;
+
+    /** The local monotonic instant at which the frame was handed to the
+     *  sink, in microseconds. */
+    std::int64_t  rendered_at_us = 0;
+
+    /** True when `ref_frame_id` resolves to a known frame. */
+    bool          has_ref_frame  = false;
+};
+
+/**
+ * @brief One echoed cursor movement (remote-desktop plan E6).
+ *
+ * The engine's input-echo seam is expressed with **plain engine types**
+ * on purpose: the event vocabulary belongs to the `rd_input` module, and
+ * the engine may not include a concrete module header (Layout
+ * Invariant 4 / ADR-025).  So the seam carries the three things a
+ * cursor echo needs — a position and a timestamp — and the G-track
+ * wiring turns *that* into the module's own event encoding.
+ */
+struct NIMRTC_API_STABLE InputEchoEvent {
+    /** The cursor's horizontal position, in the host's own coordinate
+     *  space (pixels). */
+    double x = 0.0;
+
+    /** The cursor's vertical position, in the host's own coordinate space
+     *  (pixels). */
+    double y = 0.0;
+
+    /** The instant the movement happened, in microseconds on the
+     *  engine's monotonic clock.  It is what the age budget is measured
+     *  against. */
+    std::int64_t timestamp_us = 0;
+};
+
+/** The callback that receives an accepted echo. */
+using NIMRTC_API_STABLE InputEchoCallback =
+    std::function<void(const InputEchoEvent& event)>;
+
+/**
+ * @brief The render clock's counters (remote-desktop plan E5).
+ *
+ * These are the numbers that make the render clock *observable*: a
+ * session in which the picture and the sound drift apart shows up here
+ * as a rising `frames_dropped_sync` / `frames_delayed` count, and the
+ * `last_skew_ms` says in which direction they drifted.
+ */
+struct NIMRTC_API_STABLE VideoSyncStats {
+    /** The frames the render clock presented unchanged (the skew was
+     *  inside the tolerance band). */
+    std::uint64_t frames_presented = 0;
+
+    /** The frames the render clock dropped (the video was *ahead* of the
+     *  audio, so showing them would have put the picture before the
+     *  sound it belongs to). */
+    std::uint64_t frames_dropped_sync = 0;
+
+    /** The frames the render clock held back (the video was *behind* the
+     *  audio). */
+    std::uint64_t frames_delayed = 0;
+
+    /** The summed hold time, in microseconds. */
+    std::int64_t total_delay_us = 0;
+
+    /** The most recent skew the render clock saw, in milliseconds.
+     *  Positive means the video was behind the audio; negative means it
+     *  was ahead. */
+    double last_skew_ms = 0.0;
+};
+
+// ---------------------------------------------------------------------------
 // NimRTCEngine
 // ---------------------------------------------------------------------------
 
@@ -1697,6 +2085,194 @@ public:
      *  UNSTABLE: part of the video API surface (see start_video()). */
     NIMRTC_API_UNSTABLE
     plugins::Status send_video(const plugins::VideoSourceFrame& frame) noexcept;
+
+    // ---- Multi-stream video (remote-desktop plan H1 / H2) ----------------
+    //
+    // The engine's single-video-slot model became a **stream set** keyed
+    // by a stable stream id.  The API below is **additive**: the
+    // single-stream call sites above keep working unchanged, and a host
+    // that moves to the multi-stream API does not change behaviour — the
+    // legacy path *is* the stream with the id `"default"`.
+    //
+    // Each stream owns its own encoder, sender, receiver, decoder and
+    // sink, resolved through the registry by id, so two streams can use
+    // different codecs in the same session (plan H2).
+    //
+    // The default stream id is the string `"default"`.
+
+    /** The id of the session's default (single) video stream.
+     *
+     *  The legacy `send_video(frame)` path pushes frames into this
+     *  stream, and the flat `Stats::video_*` fields describe it. */
+    NIMRTC_API_STABLE static constexpr std::string_view kDefaultVideoStreamId =
+        "default";
+
+    /**
+     * @brief Push one raw frame through the pipeline of a named stream.
+     *
+     *  The multi-stream counterpart of `send_video(frame)`: the frame is
+     *  encoded by *that stream's* codec and packetized by *that stream's*
+     *  sender, so the frame leaves the engine with the stream's own SSRC
+     *  and payload type.
+     *
+     *  @param stream_id  The stream's stable id.  `"default"` is the
+     *                    legacy single-stream path.
+     *  @param frame      Raw frame (must remain valid for the call).
+     *  @return `kOk` when the frame was encoded and pushed; `kErrNotReady`
+     *          when the engine is closed or the stream has no codec;
+     *          `kErrInvalidParam` when the stream id is unknown.
+     */
+    NIMRTC_API_STABLE
+    plugins::Status send_video(std::string_view stream_id,
+                                const plugins::VideoSourceFrame& frame) noexcept;
+
+    /**
+     * @brief Create a new video stream.
+     *
+     *  The stream gets its own codec, sender, receiver and sink, each
+     *  resolved through the registry by the corresponding name.  The
+     *  stream's SSRC and payload type are allocated so that it is
+     *  independent of every other stream.
+     *
+     *  @param stream_id  The stream's stable id.  Must not be empty and
+     *                    must not already exist.
+     *  @param codec_name The plugin id of the stream's codec.  Empty
+     *                    means "the session's configured codec"
+     *                    (`EngineConfig::video_codec_name`).
+     *  @return true when the stream was created.
+     */
+    NIMRTC_API_STABLE
+    bool add_video_stream(std::string_view stream_id,
+                          std::string_view codec_name = {}) noexcept;
+
+    /**
+     * @brief Destroy a video stream.
+     *
+     *  The stream's plugins are closed and released, and the stream
+     *  disappears from the statistics snapshot.  The default stream
+     *  cannot be removed: it *is* the legacy single-stream path.
+     *
+     *  @param stream_id  The stream's stable id.
+     *  @return true when a stream was removed.
+     */
+    NIMRTC_API_STABLE
+    bool remove_video_stream(std::string_view stream_id) noexcept;
+
+    /**
+     * @brief The ids of the active video streams.
+     *
+     *  The default stream comes first, followed by the extra streams in
+     *  creation order.
+     */
+    NIMRTC_API_STABLE
+    std::vector<std::string> video_stream_ids() const noexcept;
+
+    /**
+     * @brief Set a video stream's weight in the bandwidth split.
+     *
+     * Remote-desktop plan D5: the session's bandwidth estimate is
+     * divided between the video streams by *weight*, and the rule lives
+     * in one place (`src/engine/src/bandwidth_allocation.hpp`) and is
+     * shared with the audio path — one rule, not two.
+     *
+     * A weight of 0 means "this stream takes nothing from the pool" (it
+     * is neither starved nor does it dilute the other streams' shares).
+     * The default weight is 1, so an unconfigured session splits the
+     * pool evenly.
+     *
+     * The screen stream of a remote-desktop session is the one that
+     * deserves the larger share: the picture the operator reads must
+     * survive the link, and the thumbnail does not.
+     *
+     * @param stream_id  The stream's stable id.
+     * @param weight     The stream's relative weight.  0 = no share.
+     * @return true when the weight was applied.  False when the id names
+     *         no active stream, or when the weight is 0 for the
+     *         *default* stream (which must always keep a share — it is
+     *         the session's primary video path).
+     */
+    NIMRTC_API_STABLE
+    bool set_video_stream_weight(std::string_view stream_id,
+                                 std::uint32_t weight) noexcept;
+
+    /**
+     * @brief A video stream's weight in the bandwidth split.
+     *
+     * @param stream_id  The stream's stable id.
+     * @return The stream's weight, or 0 when the id names no active
+     *         stream (a weight of 0 also means "no share", so the two
+     *         cases are indistinguishable here — use
+     *         `video_stream_ids()` to test for existence).
+     */
+    NIMRTC_API_STABLE
+    std::uint32_t video_stream_weight(std::string_view stream_id) const noexcept;
+
+    /**
+     * @brief A video stream's share of the session bandwidth budget.
+     *
+     * Remote-desktop plan D5 / H4: the number the stream's own rate
+     * controller is handed, and the number the per-stream statistics
+     * report.  It is the *same* number the pacer uses — the split rule
+     * is applied once and the result is written back to each stream.
+     *
+     * @param stream_id  The stream's stable id.
+     * @return The stream's share in bits per second.  0 when the id
+     *         names no active stream, or when the split has not been
+     *         computed yet (no bandwidth estimate, or pacing disabled).
+     */
+    NIMRTC_API_STABLE
+    std::uint32_t video_stream_share_bps(std::string_view stream_id) const noexcept;
+
+    /**
+     * @brief Replace a stream's codec.
+     *
+     *  The stream's codec plugin is recreated with the given plugin id
+     *  (an empty id means "the session's configured codec").  The
+     *  stream's encoder and decoder are therefore replaced too.
+     *
+     *  @param stream_id   The stream's stable id.
+     *  @param codec_name  The plugin id of the new codec.
+     *  @return `kOk` on success; `kErrInvalidParam` when the stream is
+     *          unknown or the codec is not registered; `kErrNotReady`
+     *          when the engine is closed.
+     */
+    NIMRTC_API_STABLE
+    plugins::Status set_video_codec(std::string_view stream_id,
+                                    std::string_view codec_name) noexcept;
+
+    /**
+     * @brief Replace a stream's frame source.
+     *
+     *  The stream's source plugin is replaced by one created from the
+     *  given plugin id.  The default stream's source is the engine's
+     *  own member, so this affects it too.
+     *
+     *  @param stream_id   The stream's stable id.
+     *  @param source_name The plugin id of the new source.
+     *  @return `kOk` on success; `kErrInvalidParam` when the stream is
+     *          unknown or the source is not registered; `kErrNotReady`
+     *          when the engine is closed.
+     */
+    NIMRTC_API_STABLE
+    plugins::Status set_video_source(std::string_view stream_id,
+                                     std::string_view source_name) noexcept;
+
+    /**
+     * @brief Replace a stream's decoded-frame sink.
+     *
+     *  The stream's sink plugin is replaced by one created from the
+     *  given plugin id.  The default stream's sink is the engine's own
+     *  member, so this affects it too.
+     *
+     *  @param stream_id  The stream's stable id.
+     *  @param sink_name  The plugin id of the new sink.
+     *  @return `kOk` on success; `kErrInvalidParam` when the stream is
+     *          unknown or the sink is not registered; `kErrNotReady`
+     *          when the engine is closed.
+     */
+    NIMRTC_API_STABLE
+    plugins::Status set_video_sink(std::string_view stream_id,
+                                   std::string_view sink_name) noexcept;
 
     // ---- Ref-frame timeline map (v1.1 T1/T2, UNSTABLE) -------------------
     //
@@ -2169,6 +2745,387 @@ public:
     /** Replace the video source at runtime. Same semantics as set_video_sink. */
     NIMRTC_API_STABLE void set_video_source(std::unique_ptr<plugins::IVideoSource> source) noexcept;
 
+    // ---- The render / presentation plane (remote-desktop plan E5-E9) ------
+    //
+    // Four features live here, and they are one concern: **what the
+    // viewer sees, and how it is driven**.
+    //
+    //   - **E5** — the render clock: the observed A/V skew (the ADR-017
+    //     timeline) becomes an explicit align / drop / delay decision.
+    //   - **E6** — the input echo: the operator's own cursor movement
+    //     echoed back to the viewer, switchable and bounded.
+    //   - **E7** — the scale-to-fit presentation: the target size and the
+    //     aspect policy, resolved into the sink's configuration.
+    //   - **E9** — the frame-accurate "what the operator saw": the
+    //     capture timestamp and the `ref_frame` id of the last frame
+    //     the engine handed to the sink.
+
+    /**
+     * @brief Configure the render clock's tolerance band (plan E5).
+     *
+     * The band is the whole policy: a skew whose magnitude is at or
+     * below it means the picture and the sound already agree, so the
+     * frame is presented unchanged.  Beyond it the frame is dropped
+     * (the video is ahead) or held back (the video is behind).
+     *
+     * @param tolerance_ms  The band, in milliseconds.  0 = every frame
+     *                     is synchronised exactly, which in practice
+     *                     means "always correct".
+     * @param max_delay_ms The cap on a single hold, in milliseconds.
+     *                     The hold is **always** bounded: a frame held
+     *                     longer than this is not "aligned" any more,
+     *                     it is simply late.  0 = use the default cap
+     *                     (200 ms).
+     */
+    NIMRTC_API_STABLE void set_video_sync_tolerance(
+        std::int32_t tolerance_ms,
+        std::int32_t max_delay_ms = 0) noexcept;
+
+    /**
+     * @brief The render clock's counters (plan E5).
+     *
+     * The counters describe the *video half* of the A/V-sync contract.
+     * They are cumulative since the last `open()`.
+     */
+    NIMRTC_API_STABLE VideoSyncStats video_sync_stats() const noexcept;
+
+    /**
+     * @brief The frame the operator was looking at (plan E9).
+     *
+     * The engine records, per displayed frame, the capture timestamp and
+     * the `ref_frame` id it resolves to.  A host that receives a click
+     * naming a `ref_frame` id can therefore answer "the user clicked on
+     * what they were looking at" — the frame was on the screen at the
+     * moment of the click, and this is its identity.
+     *
+     * Empty when nothing has been displayed yet.
+     *
+     * @see DisplayedFrameInfo
+     * @see displayed_frame_for_ref_frame()
+     */
+    NIMRTC_API_STABLE
+    std::optional<DisplayedFrameInfo> last_displayed_frame() const noexcept;
+
+    /**
+     * @brief The displayed frame for a given `ref_frame` id (plan E9).
+     *
+     * The **reverse** lookup the product needs: given the id the
+     * operator's click named, return the frame that was displayed at
+     * that moment — its capture timestamp and its own frame id.
+     *
+     * The engine keeps a bounded history of the displayed frames, so a
+     * click that names a frame which is a little behind the current one
+     * still resolves.  Empty when the id is unknown or has fallen out
+     * of the history.
+     *
+     * @see last_displayed_frame()
+     */
+    NIMRTC_API_STABLE
+    std::optional<DisplayedFrameInfo>
+    displayed_frame_for_ref_frame(std::uint64_t ref_frame_id) const noexcept;
+
+    /**
+     * @brief Switch the input echo on or off (plan E6).
+     *
+     * The operator's own cursor movement is echoed back to the viewer.
+     * It is **off by default**: the echo is a *product* decision, not a
+     * codec feature, and a session that does not want it must not pay
+     * for it.
+     *
+     * Switching it on does not by itself put anything on the wire —
+     * see `set_input_echo_callback()` for what is wired and what is
+     * not.
+     */
+    NIMRTC_API_STABLE void set_input_echo_enabled(bool enabled) noexcept;
+
+    /** Whether the input echo is enabled. */
+    NIMRTC_API_STABLE bool input_echo_enabled() const noexcept;
+
+    /**
+     * @brief The input echo's bounds (plan E6).
+     *
+     * @param max_age_us  The maximum age an echoed event may have, in
+     *                    microseconds.  An event older than this is
+     *                    *stale* — the viewer has already moved on, and
+     *                    echoing it would drag the viewer's cursor back
+     *                    to where it was.  0 = no age limit.
+     * @param max_rate_hz  The maximum number of echoes per second.  0 =
+     *                     no limit.  The limit exists because an
+     *                     unbounded echo is an unbounded message rate,
+     *                     which is exactly the wrong thing to do on a
+     *                     congested link.
+     */
+    NIMRTC_API_STABLE void set_input_echo_limits(
+        std::int64_t max_age_us,
+        std::uint32_t max_rate_hz) noexcept;
+
+    /**
+     * @brief Install the callback that receives an accepted echo.
+     *
+     * ### What is wired, and what is not
+     *
+     * **Wired:** the *decision*.  The engine applies the switch, the age
+     * budget and the rate limit, and hands the accepted event to this
+     * callback.  The callback runs on the engine's thread.
+     *
+     * **Not wired:** the *transport*.  The G-track (plan G3) owns the
+     * `rd_input` event encoding and the control-channel framing; the
+     * engine deliberately does not encode the event (the event
+     * vocabulary belongs to the `rd_input` module, and the engine may
+     * not include a concrete module header — Layout Invariant 4).  So
+     * the callback receives a **plain** `InputEchoEvent` — a position
+     * and a timestamp — and whoever installed it decides how to put it
+     * on the wire.
+     */
+    NIMRTC_API_STABLE void set_input_echo_callback(InputEchoCallback cb) noexcept;
+
+    /**
+     * @brief Feed one candidate cursor movement to the echo path (plan E6).
+     *
+     * The engine applies the switch, the age budget and the rate limit,
+     * and hands the event to the callback installed with
+     * `set_input_echo_callback()` when it is accepted.
+     *
+     * The caller passes "now" so the decision is deterministic (and
+     * testable) — the engine does not read a clock for it.
+     *
+     * @return `true` when the event was echoed.
+     */
+    NIMRTC_API_STABLE bool submit_input_echo(
+        const InputEchoEvent& event,
+        std::int64_t now_us) noexcept;
+
+    /**
+     * @brief The input echo's counters (plan E6).
+     */
+    NIMRTC_API_STABLE struct InputEchoStats {
+        /** The events that were echoed. */
+        std::uint64_t echoed = 0;
+        /** The candidates dropped because they were stale. */
+        std::uint64_t suppressed_stale = 0;
+        /** The candidates dropped because the rate limit was reached. */
+        std::uint64_t suppressed_rate = 0;
+    } input_echo_stats() const noexcept;
+
+    /**
+     * @brief Configure the presentation geometry (plan E7).
+     *
+     * The engine resolves the request into the sink's configuration:
+     * `width` / `height` become the sink's target size and the policy
+     * becomes the sink's `scale_mode`.  A sink therefore never has to
+     * guess how the picture is fitted into the window.
+     *
+     * The call is effective for a sink created *after* it; a sink that
+     * already exists keeps the configuration it was created with (the
+     * sink seam has no reconfigure method — see `IVideoSink`).
+     *
+     * @param width   The target width in pixels.  0 = the frame's native
+     *                width.
+     * @param height  The target height in pixels.  0 = the frame's native
+     *                height.
+     * @param policy  How the picture is fitted into the target.
+     */
+    NIMRTC_API_STABLE void set_video_presentation(
+        std::uint32_t width,
+        std::uint32_t height,
+        VideoAspectPolicy policy = VideoAspectPolicy::kLetterbox) noexcept;
+
+    /** The current presentation policy. */
+    NIMRTC_API_STABLE VideoAspectPolicy video_aspect_policy() const noexcept;
+
+    // ---- The remote-desktop control channel (plan G1 / G2 / G6) -----------
+    //
+    // A NimRTC-native control channel for the remote-desktop product:
+    // the keyboard / mouse / cursor-echo traffic that must not be
+    // starved by the video stream.
+    //
+    // The channel has **two** possible transports, and the engine picks
+    // the one the session is configured for:
+    //
+    //   - **G1 — the DTLS application-data seam.**  The default.  The
+    //     DTLS session already exposes `send_app_data()` /
+    //     `take_app_data()`, and the record layer keeps record
+    //     boundaries intact, so the control channel costs no transport
+    //     work at all.  It is also *lower latency* than the DataChannel
+    //     path, because the payload does not go through a QUIC stream's
+    //     framing and flow control.
+    //   - **G2 — the control stack's raw-UDP path.**  Used when the
+    //     profile asked for a **separate control stack** (the
+    //     `teleop-ultra-low-latency` strategy shape): the control
+    //     plane then has its own ICE-selected pair and therefore its
+    //     own congestion-control domain, so a saturated video path
+    //     cannot starve it.
+    //
+    // The payload is **opaque to the engine**: it frames the messages
+    // and moves them, and the host decides what they mean.  A
+    // remote-desktop host typically sends the `rd_input` event batch
+    // (plan G3) — the engine does not depend on that module.
+    //
+    // ### The framing
+    //
+    // The channel frames every message itself: a magic byte, a format
+    // version and a varint length, then the payload.  The DTLS
+    // app-data seam preserves *record* boundaries but not *message*
+    // boundaries, so the framing is what makes a message that was
+    // split by the record layer arrive whole — and what keeps several
+    // messages in one record apart.  The framing lives in the
+    // control-channel implementation (the `rd_input` module), reached
+    // through the `plugins::IControlChannel` seam; the engine does not
+    // own a second copy of it.
+    //
+    // ### Threading
+    //
+    // `send_control_message()` may be called from any thread; the
+    // inbound callback runs on the engine's thread (inside `tick()`'s
+    // receive path), so it should enqueue rather than process.
+
+    /**
+     * @brief Send one control message.
+     *
+     * The message is queued and put on the wire by the next `tick()`.
+     *
+     * @param payload  The message bytes.  Must not be empty and must not
+     *                 exceed the configured maximum (64 KiB by default).
+     * @return `kOk` when the message was queued; `kErrInvalidParam`
+     *         when it was empty or too long; `kErrNotReady` when the
+     *         engine is closed; `kErrBufferTooSmall` when the outbound
+     *         queue is full (the peer is not draining the control path).
+     */
+    NIMRTC_API_STABLE plugins::Status send_control_message(
+        std::span<const std::uint8_t> payload) noexcept;
+
+    /**
+     * @brief Install the callback that receives inbound control messages.
+     *
+     * The callback fires on the engine's thread with one **whole**
+     * message.  The bytes are valid only for the duration of the call.
+     */
+    NIMRTC_API_STABLE void set_on_control_message(
+        std::function<void(std::span<const std::uint8_t>)> cb) noexcept;
+
+    /**
+     * @brief The control channel's counters.
+     *
+     * The counters are what make the control path *observable*: a
+     * non-zero `messages_dropped` says the peer is not draining the
+     * control path (the operator's clicks are being lost), and
+     * `oversized_received` says a peer sent something the channel
+     * refused.
+     */
+    NIMRTC_API_STABLE struct ControlChannelStats {
+        /** The messages the engine sent. */
+        std::uint64_t messages_sent = 0;
+        /** The messages the engine received and delivered. */
+        std::uint64_t messages_received = 0;
+        /** The bytes the engine sent. */
+        std::uint64_t bytes_sent = 0;
+        /** The bytes the engine received. */
+        std::uint64_t bytes_received = 0;
+        /** The outbound messages the queue refused (the queue was full). */
+        std::uint64_t messages_dropped = 0;
+        /** The inbound messages that exceeded the length limit. */
+        std::uint64_t oversized_received = 0;
+        /** The inbound frames that could not be parsed. */
+        std::uint64_t malformed_received = 0;
+        /** The heartbeats the engine received. */
+        std::uint64_t heartbeats_received = 0;
+        /** The heartbeats the engine sent. */
+        std::uint64_t heartbeats_sent = 0;
+    } control_channel_stats() const noexcept;
+
+    /**
+     * @brief The instant the last heartbeat arrived, in microseconds on
+     *        the engine's monotonic clock.
+     *
+     * Empty when no heartbeat has arrived yet.  The dead-man watchdog
+     * (plan G6) consumes this: when the heartbeat stops, the remote
+     * side enters the configured safe state.
+     */
+    NIMRTC_API_STABLE std::optional<std::int64_t>
+        last_control_heartbeat_us() const noexcept;
+
+    /**
+     * @brief Send one heartbeat on the control channel.
+     *
+     * The heartbeat is a one-byte message; the peer's watchdog counts
+     * its arrival.  Sending it is a no-op when the channel is not
+     * usable yet (the engine is closed, the queue is full).
+     *
+     * @return `kOk` when the heartbeat was queued.
+     */
+    NIMRTC_API_STABLE plugins::Status send_control_heartbeat() noexcept;
+
+    /**
+     * @brief The `ref_frame` id of the frame the operator was last shown
+     *        (remote-desktop plan **G5**).
+     *
+     * This is the id an outgoing input event should carry: it names the
+     * frame that was on the operator's screen when the input was
+     * generated, which is what makes the promise *"the click happened on
+     * the frame the operator was looking at"* checkable on the far side.
+     *
+     * The value is the id of the last **displayed** frame (plan E9), so
+     * it resolves through `displayed_frame_for_ref_frame()` on the
+     * receiving side.  It is empty when nothing has been displayed yet
+     * — an input event with no frame reference is legal on the wire, so
+     * this is not an error.
+     *
+     * A host binds its input events to frames with the input module's
+     * `RefFrameBinder`, whose provider is a one-liner over this
+     * accessor:
+     *
+     * @code
+     * rd_input::RefFrameBinder binder{
+     *     [&engine] { return engine.last_displayed_ref_frame_id(); }};
+     * @endcode
+     *
+     * @see displayed_frame_for_ref_frame() — the reverse lookup.
+     */
+    NIMRTC_API_STABLE std::optional<std::uint64_t>
+        last_displayed_ref_frame_id() const noexcept;
+
+    /**
+     * @brief The transport the control channel actually rides
+     *        (remote-desktop plan **G1** / **G2**).
+     *
+     * The value is resolved once, when the channel is created, and
+     * never changes afterwards — the channel's transport is a property
+     * of the session, not of the moment.
+     *
+     *   - `kDtlsAppData` — the media stack's DTLS application-data seam
+     *     (plan G1);
+     *   - `kRawUdp` — the **control stack's** raw-UDP path, which has
+     *     its own ICE-selected pair and therefore its own
+     *     congestion-control domain (plan G2);
+     *   - `kDataChannel` — a DataChannel (the plan's G3 transport; not
+     *     wired by the engine);
+     *   - `kAuto` — the host asked the engine to choose; the *resolved*
+     *     value is reported instead.
+     *
+     * When the session has no usable control transport at all, the
+     * value is `kAuto` only if the host asked for it; otherwise the
+     * engine refuses to open, because a silent downgrade would make the
+     * product promise false.
+     */
+    NIMRTC_API_STABLE plugins::ControlChannelTransport
+        control_channel_transport() const noexcept;
+
+    // ---- The render / presentation plane (remote-desktop plan E5-E9) ------
+    //
+    // The public surface of the receive / presentation plane lives
+    // above, with the rest of the session-level configuration:
+    //
+    //   - `set_video_sync_tolerance()` / `video_sync_stats()` — E5;
+    //   - `last_displayed_frame()` / `displayed_frame_for_ref_frame()`
+    //     — E9;
+    //   - `set_input_echo_enabled()` / `set_input_echo_limits()` /
+    //     `set_input_echo_callback()` / `submit_input_echo()` /
+    //     `input_echo_stats()` — E6;
+    //   - `set_video_presentation()` / `video_aspect_policy()` — E7.
+    //
+    // The *state* behind them lives in the `detail::RenderState`
+    // collaborator (see `src/engine/src/engine_render_state.hpp`).
+
     // ---- BWE / Scheduler accessors (ADR-001: resolved via PluginRegistry) ----
     //
     // These plugins are created at open() time via
@@ -2241,6 +3198,26 @@ public:
 
     NIMRTC_API_UNSTABLE plugins::IVideoCodec* video_codec() noexcept { return video_codec_.get(); }
     NIMRTC_API_UNSTABLE const plugins::IVideoCodec* video_codec() const noexcept { return video_codec_.get(); }
+
+    /** The video rate controller (remote-desktop plan D1).
+     *
+     *  Returns nullptr when `EngineConfig::video_bitrate_controller_name`
+     *  was empty (the normal case: no ladder, the encoder keeps the
+     *  bitrate it was configured with).
+     *
+     *  The accessor exists so a host can *drive* the controller — for
+     *  example to feed it a bandwidth estimate from its own transport,
+     *  or to override the level through `set_level()`.  The engine
+     *  reads the controller's level on every frame and pushes it into
+     *  the encoder's parameter set (plan D4). */
+    NIMRTC_API_STABLE plugins::IVideoBitrateController*
+    video_bitrate_controller() noexcept {
+        return video_bitrate_controller_.get();
+    }
+    NIMRTC_API_STABLE const plugins::IVideoBitrateController*
+    video_bitrate_controller() const noexcept {
+        return video_bitrate_controller_.get();
+    }
 
     // ---- Audio3A plugin accessor (for PCM tap setup in demos/tests) ----
     /** Returns the IAudio3A plugin instance (or nullptr if not created).
@@ -2529,6 +3506,28 @@ public:
         std::uint64_t video_sink_render_errors          = 0;
         std::uint32_t video_sink_present_fps             = 0;
 
+        // ---- The render clock (remote-desktop plan E5) ---------------------
+        //
+        // The *video half* of the A/V-sync contract: what the render
+        // clock decided about each decoded frame, and the skew it based
+        // the decision on.  A rising `frames_dropped_sync` means the
+        // picture was arriving ahead of the sound; a rising
+        // `frames_delayed` means it was arriving behind.
+        VideoSyncStats video_sync{};
+
+        // ---- The per-stream video entries (remote-desktop plan H4) --------
+        //
+        // One entry per **active** video stream — the default stream
+        // included — each with its own bitrate, ladder level, keyframe
+        // rate, backend id and frame counts (plan H4's acceptance
+        // criterion: "one stats call returns one entry per active
+        // stream").
+        //
+        // The flat `video_*` fields above describe the **default** stream,
+        // so the single-stream call sites and their tests keep working
+        // unchanged.
+        std::vector<VideoStreamStats> video_streams;
+
         // ---- The per-stage CPU-time instrumentation (plan J1) ------------
         //
         // The plan's exit measurement is written in terms of time, so the
@@ -2674,6 +3673,11 @@ private:
     // when `EngineConfig::video_capture_name` names a registered factory;
     // null otherwise (the normal case — the host feeds frames itself).
     std::unique_ptr<plugins::IVideoCapture>     video_capture_;
+    // Remote-desktop plan D1: the video rate controller.  Present only
+    // when `EngineConfig::video_bitrate_controller_name` names a
+    // registered factory; null otherwise (the normal case — the encoder
+    // keeps the bitrate it was configured with).
+    std::unique_ptr<plugins::IVideoBitrateController> video_bitrate_controller_;
 
     // ---- BWE / Scheduler plugins (ADR-001: resolved via PluginRegistry) ----
     // Created in init_bwe_scheduler() (called from pre_open/open).
@@ -2766,6 +3770,24 @@ private:
     // increasing per engine, starting at 1.
     std::uint32_t next_data_channel_id_ = 1;
 
+    // ---- The remote-desktop control channel (plan G1 / G2 / G6) -----------
+    //
+    // The channel lives in `Impl` (it is engine state, not public
+    // surface), but the *callback* the host installs is a public
+    // surface, so it is stored here.
+    std::function<void(std::span<const std::uint8_t>)> on_control_message_;
+
+    // ---- The input echo (remote-desktop plan E6) -------------------------
+    //
+    // The *decision* lives in `detail::InputEchoController` (engine
+    // state); the *callback* is a public surface, so it is stored here.
+    //
+    // The engine does not encode the echoed event: the event vocabulary
+    // belongs to the `rd_input` module, and the engine may not include
+    // a concrete module header (Layout Invariant 4 / ADR-025).  So the
+    // callback receives a plain `InputEchoEvent`.
+    InputEchoCallback on_input_echo_;
+
     // ---- DataChannel factory dispatch (v0.14.0-rc.1, DC-1 v1.0.0 headline) -
     //
     // Resolved at `init_modules_once()` time by dispatching on
@@ -2808,6 +3830,19 @@ private:
      *  @param ssrc          The inbound audio source.
      *  @param rtp_timestamp The RTP timestamp of the frame. */
     std::int64_t audio_capture_time_us(std::uint32_t ssrc,
+                                       std::uint32_t rtp_timestamp) const noexcept;
+    /** The peer's capture instant of an inbound **video** frame, in Unix
+     *  microseconds (remote-desktop plan E5).
+     *
+     *  The video half of the A/V comparison: the same ADR-017
+     *  reconstruction the audio half uses, applied to the peer's video
+     *  source.  Returns 0 when the instant is not reconstructible (no
+     *  Sender Report for this SSRC, or the timeline seam is off) — the
+     *  value is never faked (spec O-9).
+     *
+     *  @param ssrc          The inbound video source.
+     *  @param rtp_timestamp The RTP timestamp of the frame. */
+    std::int64_t video_capture_time_us(std::uint32_t ssrc,
                                        std::uint32_t rtp_timestamp) const noexcept;
     /** An inbound audio RTP packet arrived (v1.2.0, audio pipeline WP-8,
      *  spec B-12).
@@ -2948,6 +3983,18 @@ private:
      *  Each class is then paced at its own share, so a saturated video
      *  stream cannot starve the audio. */
     void update_pacing_rates() noexcept;
+    /** The D5 split: divide the session budget between the reserved
+     *  audio and the elastic video streams, and write each video
+     *  stream's target back to its own state.
+     *
+     *  The rule lives in `bandwidth_allocation.hpp` — the very same rule
+     *  the audio path uses (one rule, not two).  This function is called
+     *  from *both* the pacing path and the rate-control path, so the
+     *  share the pacer uses and the share a stream's rate controller is
+     *  handed are one number by construction.
+     *
+     *  @param estimate  The session budget in bits per second. */
+    void compute_video_stream_shares(std::uint32_t estimate) noexcept;
     /** The configured audio encoder ceiling, in bits per second:
      *  `Config::audio_bitrate_bps` when set, otherwise the codec
      *  default for the channel count (32 kbps mono / 64 kbps stereo). */
@@ -2966,6 +4013,79 @@ private:
     uint32_t init_video_plugins() noexcept;
     void shutdown_video_plugins() noexcept;
 
+    // ---- The multi-stream video plane (remote-desktop plan H1 / H2 / H4) --
+    //
+    // The helpers below implement the additive multi-stream API.  They
+    // live in `engine_video_streams.cpp`; the per-stream state lives in
+    // the `detail::VideoStreamSet` collaborator (`video_stream_set.hpp`),
+    // so this header stays a thin declaration surface.
+    //
+    // The **default** stream keeps using the engine's own plugin members
+    // (`video_codec_`, `video_sender_`, ...); the extra streams own their
+    // own instances.  The set tracks every stream, so the iteration, the
+    // statistics and the routing have a single view.
+
+    /** Find a stream by id (nullptr when there is none).
+     *
+     *  The default stream is reported as the engine's own members, so
+     *  the caller gets a *view* of the default stream rather than a
+     *  `VideoStream`.  The helper therefore returns a `VideoStream` by
+     *  value-ish through the out-parameter. */
+    struct StreamView {
+        std::string id;
+        std::uint32_t ssrc = 0;
+        std::uint8_t payload_type = 0;
+        std::string mid;
+        std::string codec_name;
+        std::string backend_id;
+        plugins::IVideoCodec* codec = nullptr;
+        plugins::IVideoSender* sender = nullptr;
+        plugins::IVideoReceiver* receiver = nullptr;
+        plugins::IVideoSink* sink = nullptr;
+        plugins::IVideoSource* source = nullptr;
+        plugins::IVideoBitrateController* controller = nullptr;
+    };
+
+    /** Build the view of a stream (the default one or an extra one). */
+    bool stream_view(std::string_view stream_id, StreamView& out) const noexcept;
+
+    /** Wire an extra stream's sender to the engine's RTP send path.
+     *
+     *  Every stream owns its own packetizer, so every stream needs its
+     *  own packet callback: the RTP header carries *this* stream's SSRC
+     *  and payload type, and the SRTP session is the one for that SSRC.
+     *  The default stream's callback lives in `engine_media.cpp` (it
+     *  carries the pre-H1 behaviour verbatim); this one is the same
+     *  shape for the extra streams.
+     *
+     *  It is also called when a stream's codec is replaced (H2): the
+     *  packetizer is codec-aware, so a family change means the sender
+     *  has to be rebuilt and rewired. */
+    void wire_stream_sender(detail::VideoStream* stream) noexcept;
+
+    /** Wire the **default** stream's sender to the engine's RTP send path.
+     *
+     *  The default stream keeps the pre-H1 behaviour verbatim, so its
+     *  packet callback lives in its own method (`engine_media.cpp`).
+     *  It is re-called when the default stream's codec is replaced (H2):
+     *  the packetizer is codec-aware, so a family change means the
+     *  sender has to be rebuilt and rewired. */
+    void wire_default_sender() noexcept;
+
+    /** Encode one frame and push it through the given stream's sender. */
+    plugins::Status encode_and_send_video_frame_for(
+        const plugins::VideoSourceFrame& frame,
+        const StreamView& stream) noexcept;
+
+    /** Fill the per-stream statistics entries (plan H4). */
+    void append_video_stream_stats(std::vector<VideoStreamStats>& out) const noexcept;
+
+    /** Close and release every extra stream's plugins. */
+    void shutdown_extra_video_streams() noexcept;
+
+    /** The default stream's view (the engine's own plugin members). */
+    StreamView default_stream_view() const noexcept;
+
     /** Decode one inbound frame into a GPU surface and hand it to the
      *  sink (remote-desktop plan E1 — the GPU delivery path).
      *
@@ -2983,6 +4103,44 @@ private:
     plugins::Status render_decoded_gpu_frame(
         const plugins::EncodedVideoFrame& enc,
         std::int64_t capture_ts_us) noexcept;
+
+    // ---- The receive-side render state (remote-desktop plan E5 / E6 /
+    // E7 / E9) ---------------------------------------------------
+
+    /** Ask the render clock what to do with one decoded frame
+     *  (remote-desktop plan E5).
+     *
+     *  The skew the clock consumes is the one the ADR-017 timeline
+     *  already produced (`last_sender_recv_skew_us()`) — the engine
+     *  does not derive a second one (RD-9).
+     *
+     *  @param capture_ts_us  The frame's capture timestamp (the peer's
+     *                        clock), carried through for the record.
+     *  @param delay_us       Set to the hold time the clock asked for,
+     *                        in microseconds.  Zero for a present.
+     *  @return false when the clock said to **drop** the frame (the
+     *          video was ahead of the audio); true otherwise. */
+    bool apply_render_sync(std::int64_t capture_ts_us,
+                           std::int64_t* delay_us) noexcept;
+
+    /** Record one displayed frame (remote-desktop plan E9).
+     *
+     *  Called right after the frame reached the sink, so the record
+     *  answers "what was on the screen when the operator clicked?".
+     *
+     *  @param capture_ts_us  The frame's capture timestamp.
+     *  @param frame_seq      The frame's per-SSRC sequence number.
+     */
+    void note_displayed_frame(std::int64_t capture_ts_us,
+                              std::uint32_t frame_seq) noexcept;
+
+    /** Resolve the presentation configuration into a sink
+     *  configuration (remote-desktop plan E7).
+     *
+     *  The target size and the aspect policy are applied only when the
+     *  host configured a presentation; otherwise the sink keeps its
+     *  defaults. */
+    plugins::VideoSinkConfig resolve_sink_config() const noexcept;
 
     // ---- Capture → engine pump (remote-desktop plan A10) ------------------
     //
@@ -3158,6 +4316,76 @@ private:
      *  @param payload  The four-byte telephone-event header. */
     void handle_dtmf_payload(std::uint32_t ssrc,
                              core::ByteSpan payload) noexcept;
+
+    // ---- The remote-desktop control channel (plan G1 / G2) ----------------
+    //
+    // The engine-side plumbing around the seam-resolved
+    // `plugins::IControlChannel`.  The channel itself lives in `Impl`;
+    // these are the things the engine does with it.
+
+    /**
+     * @brief Resolve the control channel through the registry seam.
+     *
+     * Called once, from `init_modules_once()`.  A no-op when
+     * `EngineConfig::control_channel_name` is empty (the default — no
+     * control plane).
+     *
+     * An unknown factory id, or a transport the session cannot
+     * provide, is a **hard error**: the engine does not silently
+     * downgrade (a host that asked for G2's separate congestion-control
+     * domain must be told when it did not get one).
+     */
+    uint32_t resolve_control_channel() noexcept;
+
+    /**
+     * @brief Put the channel's queued messages on the wire.
+     *
+     *  Called from `tick()`.  The transport is chosen by the session's
+     *  configuration:
+     *
+     *    - the **control stack's raw-UDP path** (plan G2) when the
+     *      profile asked for a separate control stack;
+     *    - the **DTLS application-data seam** (plan G1) otherwise.
+     *
+     *  A transport that cannot take the bytes yet leaves the message
+     *  queued, so nothing is lost. */
+    void flush_control_channel() noexcept;
+
+    /**
+     * @brief Hand one framed message to the transport.
+     *
+     *  The **sink** the control channel writes through: the DTLS
+     *  app-data seam or the control stack's raw-UDP path.
+     */
+    plugins::Status send_control_bytes(core::ByteSpan bytes) noexcept;
+
+    /** Feed the bytes that arrived on the control path into the
+     *  channel.
+     *
+     *  Called from the transport's receive path (or from `tick()` for
+     *  the DTLS path, which is drained there). */
+    void on_control_bytes(std::span<const std::uint8_t> bytes) noexcept;
+
+    /** Deliver the control messages that have arrived to the host.
+     *
+     *  Called from `tick()`, on the engine's thread.  The messages are
+     *  queued by the receive path (which may run on the ARQ thread)
+     *  and delivered here, so the host's callback always runs on the
+     *  engine's thread and never under a lock. */
+    void drain_control_messages() noexcept;
+
+    /** The transport the control channel uses, or nullptr when there is
+     *  none (the engine is closed, or the session has no usable
+     *  control path).
+     *
+     *  The two shapes are different enough that the engine cannot
+     *  abstract over them behind one interface: the raw-UDP path
+     *  *sends to a peer endpoint*, while the DTLS path *encrypts into
+     *  the session's outbound record queue*.  So the engine asks which
+     *  one it has and branches. */
+    enum class ControlTransport { kNone, kDtlsAppData, kRawControl };
+
+    [[nodiscard]] ControlTransport control_transport() const noexcept;
 
     /** Emit the queued DTMF events (RFC 4733 §2.5).
      *

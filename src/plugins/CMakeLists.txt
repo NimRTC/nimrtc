@@ -32,6 +32,16 @@ target_include_directories(nimrtc_plugins
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# The project-wide options (including MSVC's `/utf-8`) must be applied
+# here too.  Without the `/utf-8` flag the compiler reads the source
+# files in the *system* code page, so a file that carries UTF-8 em-dashes
+# produces C4819 ("the file contains a character that cannot be
+# represented in the current code page") — and, worse, the characters
+# that survive are mojibake.
+if(COMMAND nimrtc_apply_options)
+    nimrtc_apply_options(nimrtc_plugins LENIENT)
+endif()
+
 # plugins/base.hpp includes <nimrtc/core/bytes.hpp> to unify buffer types
 # with the core layer (see plugins/base.hpp for rationale).
 target_link_libraries(nimrtc_plugins

@@ -106,6 +106,91 @@ inline NIMRTC_API_STABLE std::string_view gpu_backend_name(GpuBackend b) noexcep
 using NIMRTC_API_STABLE VideoFrame       = video_frame::VideoFrame;
 using NIMRTC_API_STABLE EncodedVideoFrame = video_frame::EncodedVideoFrame;
 
+// ---------------------------------------------------------------------------
+// Codec backend selection (remote-desktop plan B2)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Which class of codec backend the engine should use.
+ *
+ * ## Why this is a separate knob from `video_codec_name`
+ *
+ * `video_codec_name` names a *codec* ("h264", "vp9", ...).  This names
+ * a *class of implementation* for that codec.  The two are orthogonal:
+ * "H.264" can be encoded by NVENC, by VA-API, by VideoToolbox or by
+ * OpenH264, and a host may want to pin the choice.
+ *
+ * ## The three values
+ *
+ * - `kAuto` — pick the best available backend: hardware first, then
+ *   software.  This is the default, and it is what the plan's
+ *   "hardware-first" claim means.  The choice is reported in the stats,
+ *   so a host can see which backend was actually used.
+ * - `kHardware` — **only** hardware backends are eligible.  When none
+ *   is available the selection **fails** rather than silently falling
+ *   back to software: a host that asked for hardware and got software
+ *   has a 1080p30 frame budget it cannot meet, and the failure must be
+ *   loud.
+ * - `kSoftware` — **only** software backends are eligible.  This is the
+ *   explicit override, and it is what the plan's acceptance criterion
+ *   ("an explicit `software` override really does use software") needs.
+ *
+ * ## The reporting rule
+ *
+ * Whatever the selection, the engine reports the outcome:
+ * `Stats::video_codec_backend` names the backend and
+ * `Stats::video_codec_hardware_accelerated` says whether it is hardware.
+ * A machine with no hardware encoder running in `kAuto` mode therefore
+ * "still runs (software path) and *says so* in the stats".
+ */
+enum class NIMRTC_API_STABLE VideoCodecBackendPreference : std::uint8_t {
+    kAuto = 0,      ///< hardware first, software as the fallback
+    kHardware = 1,  ///< hardware only — fail rather than fall back
+    kSoftware = 2,  ///< software only — the explicit override
+};
+
+/**
+ * @brief Parse a backend preference from its configuration string.
+ *
+ * Accepts "auto" (the default), "hardware" and "software", case
+ * insensitively.  An empty string means "auto".
+ *
+ * @return The preference, and whether the string was understood.
+ */
+inline NIMRTC_API_STABLE bool parse_video_codec_backend_preference(
+        std::string_view text, VideoCodecBackendPreference& out) noexcept {
+    if (text.empty() || text == "auto") {
+        out = VideoCodecBackendPreference::kAuto;
+        return true;
+    }
+    if (text == "hardware" || text == "hw") {
+        out = VideoCodecBackendPreference::kHardware;
+        return true;
+    }
+    if (text == "software" || text == "sw") {
+        out = VideoCodecBackendPreference::kSoftware;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief The configuration-string spelling of a backend preference.
+ */
+inline NIMRTC_API_STABLE std::string_view video_codec_backend_preference_name(
+        VideoCodecBackendPreference pref) noexcept {
+    switch (pref) {
+        case VideoCodecBackendPreference::kHardware: return "hardware";
+        case VideoCodecBackendPreference::kSoftware: return "software";
+        case VideoCodecBackendPreference::kAuto:     break;
+    }
+    return "auto";
+}
+
+// ---------------------------------------------------------------------------
+// Video codec configuration
+// ---------------------------------------------------------------------------
+
 /** Video codec configuration (passed at open() time). Mirrors the
  *  concrete module's `EncoderConfig` / `DecoderConfig`. */
 struct NIMRTC_API_STABLE VideoCodecConfig {
@@ -135,6 +220,18 @@ struct NIMRTC_API_STABLE VideoCodecConfig {
 
     /** Human-readable codec name (e.g. "h264"). */
     std::string_view name;
+
+    /**
+     * @brief Which class of backend to use (remote-desktop plan B2).
+     *
+     * The engine fills this from `EngineConfig::video_codec_backend` and
+     * the module's backend selector honours it.  `kAuto` (the default)
+     * is "hardware first, software as the fallback"; `kHardware` and
+     * `kSoftware` restrict the selection to one class and *fail* rather
+     * than fall back.
+     */
+    VideoCodecBackendPreference backend_preference =
+        VideoCodecBackendPreference::kAuto;
 };
 
 // ---------------------------------------------------------------------------

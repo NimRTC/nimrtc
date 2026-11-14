@@ -222,13 +222,13 @@ void register_default_video_backends() noexcept {
 const plugins::VideoEncoderBackend*
 select_encoder_backend(const plugins::VideoCodecConfig& cfg) noexcept {
     return plugins::HwVideoBackendRegistry::instance().select_encoder(
-        plugins::VideoCodecKind::kAV1, cfg.name);
+        plugins::VideoCodecKind::kAV1, cfg.name, cfg.backend_preference);
 }
 
 const plugins::VideoDecoderBackend*
 select_decoder_backend(const plugins::VideoCodecConfig& cfg) noexcept {
     return plugins::HwVideoBackendRegistry::instance().select_decoder(
-        plugins::VideoCodecKind::kAV1, cfg.name);
+        plugins::VideoCodecKind::kAV1, cfg.name, cfg.backend_preference);
 }
 
 } // namespace nimrtc::av1

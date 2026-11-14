@@ -200,14 +200,26 @@ public:
     /// Select an encoder matching the codec kind and (optionally) preferred id.
     /// Returns nullptr ONLY if no backends are registered at all — a built-in
     /// "stub" backend is always present as ultimate fallback.
+    ///
+    /// The `preference` is the plan's B2 knob.  In `kHardware` /
+    /// `kSoftware` mode the ineligible backends are *not* eligible, and
+    /// the selection returns nullptr rather than handing back one of
+    /// them — a host that asked for hardware must not silently get
+    /// software.
     const VideoEncoderBackend* select_encoder(VideoCodecKind kind,
                                               std::string_view preferred_id
-                                                  = std::string_view{}) const noexcept;
+                                                  = std::string_view{},
+                                              VideoCodecBackendPreference preference
+                                                  = VideoCodecBackendPreference::kAuto)
+        const noexcept;
 
     /// Same semantics for decoders.
     const VideoDecoderBackend* select_decoder(VideoCodecKind kind,
                                               std::string_view preferred_id
-                                                  = std::string_view{}) const noexcept;
+                                                  = std::string_view{},
+                                              VideoCodecBackendPreference preference
+                                                  = VideoCodecBackendPreference::kAuto)
+        const noexcept;
 
     /// Snapshot of all registered encoder backends, sorted by priority desc.
     std::vector<const VideoEncoderBackend*> list_encoders(
@@ -219,6 +231,23 @@ public:
 
     /// Force-clear all registered backends. Test-only.
     void clear_for_tests() noexcept;
+
+    /**
+     * @brief Force-clear the backends of one codec family. Test-only.
+     *
+     * `clear_for_tests()` empties the *whole* registry, and the modules
+     * register their backends exactly once (the registrar is guarded by
+     * a one-shot flag) — so a test that calls it permanently removes the
+     * real backends for the rest of the process, and any later test that
+     * opens a real engine breaks.
+     *
+     * This overload is the surgical version: it removes only the
+     * backends of one codec family, which lets a test install its own
+     * fakes without touching the backends other tests need.
+     *
+     * @param kind  The codec family to clear.
+     */
+    void clear_for_kind_for_tests(VideoCodecKind kind) noexcept;
 
 private:
     HwVideoBackendRegistry() = default;

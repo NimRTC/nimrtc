@@ -612,6 +612,28 @@ struct NIMRTC_API_STABLE EngineConfig {
     /** IVideoCodec plugin id. Default = "h264". */
     std::string video_codec_name = "h264";
 
+    /**
+     * @brief Which class of codec backend to use (remote-desktop plan B2).
+     *
+     * One of:
+     *
+     *   - `"auto"`     — hardware first, software as the fallback
+     *     (the default; this is what "hardware-first" means).
+     *   - `"hardware"` — hardware backends only.  When none is
+     *     available the engine **fails to open** with a clear error
+     *     rather than silently falling back to software.
+     *   - `"software"` — software backends only.  The explicit
+     *     override, for a host that must not touch the GPU.
+     *
+     * The empty string means `"auto"`.
+     *
+     * Whichever backend is selected, the engine reports it in
+     * `Stats::video_codec_backend` and
+     * `Stats::video_codec_hardware_accelerated`, so a host can always
+     * see what it actually got.
+     */
+    std::string video_codec_backend = "auto";
+
     // ---- DataChannel selection (ADR-001: resolved via PluginRegistry) ----
     //
     // The engine resolves the data-channel factory at open() (via init_modules_once()).
@@ -2467,6 +2489,18 @@ public:
         std::string video_codec_backend = "unknown";
         /** True iff the codec runs on a hardware accelerator. */
         bool        video_codec_hardware_accelerated = false;
+        /**
+         * @brief The backend class the host asked for (plan B2).
+         *
+         * "auto" / "hardware" / "software" — the value of
+         * `EngineConfig::video_codec_backend`.
+         *
+         * Read this together with `video_codec_backend`: a host that
+         * asked for "hardware" and got "openh264_h264" has a problem
+         * the engine would otherwise hide, and this field makes the
+         * mismatch visible without parsing a log.
+         */
+        std::string video_codec_backend_preference = "auto";
         /** Frames the codec encoded through the GPU zero-copy path. */
         std::uint64_t video_codec_frames_zero_copy = 0;
         /** Frames the codec encoded through the CPU staging path. */

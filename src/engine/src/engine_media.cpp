@@ -738,7 +738,34 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         cfg.codec = detail::codec_kind_of(codec_family);
         cfg.payload_type = config_.video_receiver_tuning.payload_type;
         cfg.name = config_.video_codec_name;
-        (void)pal::make_plugin<&pal::resolve_video_codec>(
+
+        // ---- The backend preference (remote-desktop plan B2) --------------
+        //
+        // `EngineConfig::video_codec_backend` says which *class* of
+        // backend to use: hardware only, software only, or (the
+        // default) "hardware first, software as the fallback".
+        //
+        // An unrecognised spelling is an error rather than a silent
+        // fallback: a host that wrote "hardwre" and got software would
+        // have a 1080p30 budget it cannot meet, and would not know why.
+        plugins::VideoCodecBackendPreference backend_pref =
+            plugins::VideoCodecBackendPreference::kAuto;
+        if (!plugins::parse_video_codec_backend_preference(
+                config_.video_codec_backend, backend_pref)) {
+            const std::string msg =
+                std::string{"engine: the video codec backend preference '"} +
+                config_.video_codec_backend +
+                "' is not one of 'auto', 'hardware', 'software'";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kEngineInvalidParam, msg);
+            impl_->session_state.last_open_rc = core::kEngineInvalidParam;
+            shutdown_video_plugins();
+            return core::kEngineInvalidParam;
+        }
+        cfg.backend_preference = backend_pref;
+        impl_->video_state.video_codec_backend_preference = backend_pref;
+
+        const bool codec_created = pal::make_plugin<&pal::resolve_video_codec>(
             config_.video_codec_name,
             video_codec_,
             std::move(cfg),
@@ -747,6 +774,28 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
              .open_fail_mode = pal::PluginFailureMode::Error,
              .missing_mode = pal::PluginFailureMode::Error,
              .on_error = on_error_});
+
+        // Plan B2: the codec could not be created.  When the host pinned
+        // a backend class, the reason is almost always "no backend of
+        // that class exists here" — and that deserves its own message,
+        // because the generic "plugin missing" wording sends the reader
+        // looking for a *registration* problem that does not exist.
+        if (!codec_created && !video_codec_ &&
+            backend_pref != plugins::VideoCodecBackendPreference::kAuto) {
+            const std::string msg =
+                std::string{"engine: the video codec backend class '"} +
+                std::string{plugins::video_codec_backend_preference_name(
+                    backend_pref)} +
+                "' is not available on this machine (the codec plugin '" +
+                config_.video_codec_name +
+                "' could not satisfy it). Use 'auto' to fall back to "
+                "software automatically.";
+            core::log::Logger::instance().error(msg);
+            if (on_error_) on_error_(core::kVideoCodecPluginMissing, msg);
+            impl_->session_state.last_open_rc = core::kVideoCodecPluginMissing;
+            shutdown_video_plugins();
+            return core::kVideoCodecPluginMissing;
+        }
     }
 
     // The instantiated codec is the authority on the codec family.  A
@@ -2756,6 +2805,9 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     if (video_codec_) {
         out.video_codec_backend = std::string{video_codec_->backend_id()};
         out.video_codec_hardware_accelerated = video_codec_->is_hardware_accelerated();
+        out.video_codec_backend_preference =
+            std::string{plugins::video_codec_backend_preference_name(
+                impl_->video_state.video_codec_backend_preference)};
 
         const plugins::VideoCodecStats cs = video_codec_->stats();
         out.video_codec_frames_zero_copy = cs.frames_encoded_zero_copy;

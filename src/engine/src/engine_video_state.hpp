@@ -301,6 +301,14 @@ struct VideoState {
     plugins::VideoPixelFormat video_format_source =
         plugins::VideoPixelFormat::kUnknown;
 
+    // ---- The backend preference (remote-desktop plan B2) ----------------
+    //
+    // The class of backend the host asked for.  The engine reports it in
+    // the stats next to the backend it actually got, so a mismatch is
+    // visible without reading a log.
+    plugins::VideoCodecBackendPreference video_codec_backend_preference =
+        plugins::VideoCodecBackendPreference::kAuto;
+
     /** The capture timestamp (microseconds) the media clock's origin is
      *  anchored at. */
     std::int64_t capture_rtp_base_us = 0;
@@ -327,7 +335,6 @@ struct VideoState {
 
     /** True once the engine has pushed a parameter set to the codec. */
     bool video_encoder_params_set = false;
-
     /** The number of times the engine had to restart the encoder because
      *  the geometry changed.  A non-zero value means the ladder (or the
      *  capture device) changed resolution mid-session. */

@@ -1322,6 +1322,23 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
 endif()
 
 # ----------------------------------------------------------------------------
+# The `codec_backend` selector (remote-desktop plan B2).
+#
+# B2's acceptance criterion: "On a machine with no hardware encoder the
+# pipeline still runs (software path) and *says so* in the stats; on a
+# machine with one, the hardware path is selected and reported; an
+# explicit `software` override really does use software."
+#
+# The selection policy is driven directly against the registry (that is
+# where it lives), and the reporting is driven through the engine (that
+# is where the host reads the answer).
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_H264)
+  nimrtc_add_engine_codec_test(test_engine_video_codec_backend
+                              test_engine_video_codec_backend.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
 # The per-stage CPU-time instrumentation (remote-desktop plan J1) and the
 # format normalisation counters (plan C3).
 #

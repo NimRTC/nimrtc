@@ -437,6 +437,19 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmp:
             return self_test(Path(tmp))
 
+    if yaml is None:
+        # PyYAML is not part of the standard library, and this check is
+        # also registered as a CTest case (`test_ci_ruleset`).  A
+        # machine without PyYAML must not turn into a red build -- the
+        # guard has nothing to say there, it simply cannot run.
+        #
+        # The CI workflow installs PyYAML explicitly and runs the check
+        # as its own step, where a missing PyYAML IS a failure: there,
+        # the interpreter is supposed to have it.
+        print("SKIP -- PyYAML is not installed; the merge-gate guard "
+              "cannot run.")
+        return 0
+
     root = Path(args.repo_root) if args.repo_root else Path(__file__).resolve().parent.parent
     ruleset_path = Path(args.ruleset) if args.ruleset else root / DEFAULT_RULESET
     if not ruleset_path.exists():

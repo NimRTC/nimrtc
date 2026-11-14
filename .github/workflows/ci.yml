@@ -288,6 +288,15 @@ jobs:
         with:
           submodules: recursive
 
+      # PyYAML is not part of the standard library, and the merge-gate
+      # guard below parses the workflow files with it.  The runner image
+      # usually has it, but "usually" is not a dependency contract --
+      # and the guard is worthless if it silently skips.  Installing it
+      # explicitly turns "the runner happened to have it" into "the
+      # guard runs".
+      - name: Install PyYAML
+        run: python -m pip install --upgrade pyyaml
+
       - name: Check Markdown links and anchors
         run: python tools/check_md_links.py
 

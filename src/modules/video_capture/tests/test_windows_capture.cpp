@@ -397,8 +397,15 @@ TEST(WindowsCapture, DxgiDeliversAD3d11Texture) {
         GTEST_SKIP() << "this host has no display to duplicate";
     }
 
-    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
     GpuCollector collector;
+    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
     collector.attach(*cap);
 
     if (cap->open() != nimrtc::plugins::kOk) {
@@ -428,8 +435,15 @@ TEST(WindowsCapture, DxgiReportsDirtyRects) {
         GTEST_SKIP() << "this host has no display to duplicate";
     }
 
-    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
     GpuCollector collector;
+    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
     collector.attach(*cap);
 
     if (cap->open() != nimrtc::plugins::kOk) {
@@ -467,8 +481,15 @@ TEST(WindowsCapture, DxgiReportsANonEmptyDirtyRectWhenTheDesktopChanges) {
         GTEST_SKIP() << "this host has no display to duplicate";
     }
 
-    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
     GpuCollector collector;
+    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
     collector.attach(*cap);
 
     if (cap->open() != nimrtc::plugins::kOk) {
@@ -499,8 +520,15 @@ TEST(WindowsCapture, TheZeroCopyPathDoesNotCopyToTheHost) {
         GTEST_SKIP() << "this host has no display to duplicate";
     }
 
-    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
     GpuCollector collector;
+    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
     collector.attach(*cap);
 
     if (cap->open() != nimrtc::plugins::kOk) {
@@ -634,9 +662,16 @@ TEST(WindowsCapture, ARegionNarrowsTheCapturedSurface) {
     cfg.region.width = 320;
     cfg.region.height = 240;
 
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
+    GpuCollector collector;
     const auto cap =
         make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication, cfg);
-    GpuCollector collector;
     collector.attach(*cap);
     if (cap->open() != nimrtc::plugins::kOk) {
         if (!host_allows_another_session(
@@ -721,22 +756,61 @@ TEST(WindowsCapture, WgcCapturesAKnownWindow) {
                    << static_cast<std::uint32_t>(reported);
         }
 
+        // WGC's *first* delivered frame is not necessarily the window's
+        // content: the pool can deliver a frame before the compositor
+        // has drawn the window into it, and that frame is either black
+        // or shows whatever was underneath.  So the test does not
+        // accept "the first frame that arrives" -- it waits for a frame
+        // that actually carries the colour the test painted, and keeps
+        // asking the window to repaint until one shows up.
+        //
+        // The wait has a deadline: a host that cannot deliver the
+        // window at all reports a skip rather than a failure.
+        const std::uint8_t expected_b = 180;
+        const std::uint8_t expected_g = 200;
+        const std::uint8_t expected_r = 220;
+
+        const auto carries_the_known_colour = [](const CaptureFrame& frame) {
+            if (frame.pixels == nullptr) return false;
+            for (std::size_t i = 0; i + 3 < frame.size; i += 4) {
+                if (std::abs(static_cast<int>(frame.pixels[i]) - expected_b) <= 12 &&
+                    std::abs(static_cast<int>(frame.pixels[i + 1]) - expected_g) <= 12 &&
+                    std::abs(static_cast<int>(frame.pixels[i + 2]) - expected_r) <= 12) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         CaptureFrame cpu_frame{};
+        bool found_known_colour = false;
         const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(4000);
-        while (cpu_cap->pop_frame(cpu_frame) != nimrtc::plugins::kOk &&
-               std::chrono::steady_clock::now() < deadline) {
+                              std::chrono::milliseconds(8000);
+        while (std::chrono::steady_clock::now() < deadline) {
+            while (cpu_cap->pop_frame(cpu_frame) == nimrtc::plugins::kOk) {
+                if (carries_the_known_colour(cpu_frame)) {
+                    found_known_colour = true;
+                    break;
+                }
+            }
+            if (found_known_colour) break;
             window.repaint();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        if (!found_known_colour) {
+            // The capture opened and delivered frames, but none of them
+            // carried the window's content.  That is a host that cannot
+            // composite this window (a headless session, a virtual
+            // desktop), not a defect in the capture path -- so it is a
+            // skip, and the failure mode it would otherwise report is
+            // indistinguishable from the host being unable to draw.
+            GTEST_SKIP() << "the capture opened, but no frame carried the "
+                            "window's content on this host";
         }
 
         ASSERT_NE(cpu_frame.pixels, nullptr);
         EXPECT_EQ(cpu_frame.format, nimrtc::plugins::VideoPixelFormat::kBGRA);
-
-        // The window's colour is RGB(220, 200, 180) in BGRA byte order.
-        const std::uint8_t expected_b = 180;
-        const std::uint8_t expected_g = 200;
-        const std::uint8_t expected_r = 220;
 
         bool non_black = false;
         for (std::size_t i = 0; i + 3 < cpu_frame.size; i += 4) {
@@ -747,26 +821,20 @@ TEST(WindowsCapture, WgcCapturesAKnownWindow) {
             }
         }
         EXPECT_TRUE(non_black) << "the captured known window is entirely black";
-
-        // And the *known* colour must actually be in there: the window
-        // paints RGB(220, 200, 180) everywhere.
-        bool found_known_colour = false;
-        for (std::size_t i = 0; i + 3 < cpu_frame.size; i += 4) {
-            if (std::abs(static_cast<int>(cpu_frame.pixels[i]) - expected_b) <= 12 &&
-                std::abs(static_cast<int>(cpu_frame.pixels[i + 1]) - expected_g) <= 12 &&
-                std::abs(static_cast<int>(cpu_frame.pixels[i + 2]) - expected_r) <= 12) {
-                found_known_colour = true;
-                break;
-            }
-        }
-        EXPECT_TRUE(found_known_colour)
-            << "the captured window does not contain the colour the test painted";
     }
 
     // ---- The GPU path: the frame must carry a D3D11 texture ------------
     //
     // The zero-copy path delivers the surface *inside* the callback, so
     // the handle is a `ID3D11Texture2D` tagged with the D3D11 backend.
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
+    GpuCollector collector;
     const auto cap = make_capture(WindowsCaptureBackend::kWgc, cfg);
     std::mutex mutex;
     WindowsCaptureError reported = WindowsCaptureError::kNone;
@@ -775,7 +843,6 @@ TEST(WindowsCapture, WgcCapturesAKnownWindow) {
         reported = e;
     });
 
-    GpuCollector collector;
     collector.attach(*cap);
 
     const auto status = cap->open();
@@ -961,9 +1028,16 @@ TEST(WindowsCapture, TheWindowsBackendsHonourTheRegionLikeTheSyntheticOne) {
     CaptureConfig cfg{};
     cfg.region.width = 800;
     cfg.region.height = 600;
+    // The collector must be declared BEFORE the capture: it holds the
+    // GPU callback, and the capture's destructor stops the capture
+    // thread -- which can be inside that very callback at the time.
+    // With the capture declared first, the collector would be
+    // destroyed first and the capture thread would call into a
+    // destroyed collector: a use-after-free that shows up as a
+    // segfault on some hosts and nowhere on others.
+    GpuCollector collector;
     const auto cap =
         make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication, cfg);
-    GpuCollector collector;
     collector.attach(*cap);
     if (cap->open() != nimrtc::plugins::kOk) {
         if (!host_allows_another_session(

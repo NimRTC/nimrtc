@@ -21,6 +21,8 @@
 #include <nimrtc/video_capture/wgc_capture.hpp>
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -36,6 +38,7 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
+#  include <dbghelp.h>
 #  include <inspectable.h>
 #  include <roapi.h>
 #  include <winstring.h>
@@ -75,6 +78,69 @@ constexpr int kPoolBufferCount = 2;
 /** The class name of the WGC capture item's activation factory. */
 constexpr wchar_t kCaptureItemClass[] =
     L"Windows.Graphics.Capture.GraphicsCaptureItem";
+
+// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
+// A breadcrumb trail to stderr.  The CI agent's segfault gives no
+// stack, so the trail is what says which step the crash happened in.
+void wgc_trace(const char* fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "[wgc-trace] %s\n", buf);
+    fflush(stderr);
+}
+// ==== END TEMPORARY CI DIAGNOSTIC ========================================
+
+// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
+// A vectored exception handler that prints the faulting thread's stack.
+// The CI agent's segfault gives no stack of its own, so this is what
+// says where the fault happened.
+LONG WINAPI wgc_vectored_handler(EXCEPTION_POINTERS* ep) {
+    if (ep == nullptr || ep->ExceptionRecord == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION &&
+        code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    wgc_trace("FAULT: code=0x%08lX addr=%p",
+              static_cast<unsigned long>(code),
+              ep->ExceptionRecord->ExceptionInformation[1]);
+    HANDLE process = ::GetCurrentProcess();
+    HANDLE thread  = ::GetCurrentThread();
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_FULL;
+    ::RtlCaptureContext(&ctx);
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode   = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+    while (::StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame,
+                         &ctx, nullptr,
+                         ::SymFunctionTableAccess64, ::SymGetModuleBase64,
+                         nullptr)) {
+        if (frame.AddrPC.Offset == 0) break;
+        DWORD64 disp = 0;
+        char sym_buf[sizeof(SYMBOL_INFO) + 256] = {0};
+        PSYMBOL_INFO psi = reinterpret_cast<PSYMBOL_INFO>(sym_buf);
+        psi->SizeOfStruct = sizeof(SYMBOL_INFO);
+        psi->MaxNameLen = 255;
+        const bool ok = ::SymFromAddr(process, frame.AddrPC.Offset, &disp,
+                                      psi) != FALSE;
+        wgc_trace("  frame %p %s", reinterpret_cast<void*>(frame.AddrPC.Offset),
+                  ok ? psi->Name : "<no symbol>");
+    }
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+// ==== END TEMPORARY CI DIAGNOSTIC ========================================
 
 /** Convert a wide string to a narrow one (best effort — the display
  *  name is a diagnostic, not an identity). */
@@ -692,6 +758,7 @@ void WgcCapture::close() noexcept {
         // the session or the device -- it only asks the capture thread
         // to stop and waits for it to finish.
         state_->stop_thread();
+        wgc_trace("close: capture thread joined");
         // A frame-arrival handler may still be running on the WinRT
         // thread-pool thread.  Wait for it: it uses the D3D objects
         // the capture thread is about to release.
@@ -795,6 +862,12 @@ void WgcCapture::capture_loop(
         std::shared_ptr<WgcCaptureState> state) noexcept {
     if (!state) return;
 
+    // ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =================
+    static PVOID s_handler = ::AddVectoredContinueHandler(
+        1, &wgc_vectored_handler);
+    (void)s_handler;
+    // ==== END TEMPORARY CI DIAGNOSTIC ====================================
+
     // WinRT needs an apartment.  MTA is the right one here: the frame
     // arrives on a thread-pool thread, and the capture thread only
     // drives the session.
@@ -864,6 +937,7 @@ void WgcCapture::capture_loop(
                 // right now may be reading the frame pool, and the
                 // pool must not be released underneath it.
                 state->apartment.quiesce();
+                wgc_trace("ApartmentGuard: quiesced");
             }
             if (state) {
                 // The pool is a WinRT object, so the last reference to
@@ -876,18 +950,21 @@ void WgcCapture::capture_loop(
                 // copying the same `shared_ptr`.
                 std::lock_guard<std::mutex> lock(state->handler_mutex_);
                 state->pool_.reset();
+                wgc_trace("ApartmentGuard: pool reset");
             }
             if (state) {
                 // The D3D objects go while the apartment is still
                 // alive, and after every handler has finished: a
                 // handler that is still running uses them.
                 state->release_d3d();
+                wgc_trace("ApartmentGuard: d3d released");
             }
             if (state) {
                 // Only now -- with every handler finished, the pool
                 // released and the device gone -- may the apartment go
                 // away.
                 state->apartment.leave();
+                wgc_trace("ApartmentGuard: apartment left");
             }
         }
     } apartment_guard{state};
@@ -1179,6 +1256,7 @@ void WgcCapture::capture_loop(
     } catch (const winrt::hresult_error&) {
         // Best effort.
     }
+    wgc_trace("teardown: session closed");
 
     // Wait for the running handlers to finish.
     //
@@ -1199,6 +1277,7 @@ void WgcCapture::capture_loop(
     while (state->in_flight_.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    wgc_trace("teardown: in_flight drained, returning from capture_loop");
 }
 
 void WgcCapture::on_frame_arrived(
@@ -1228,6 +1307,7 @@ void WgcCapture::on_frame_arrived(
     // handler that had already been dispatched to the thread pool is
     // only now waking up.
     const bool apartment_held = state->apartment.acquire();
+    wgc_trace("handler: entered held=%d", (int)apartment_held);
     struct ApartmentGuard {
         SharedApartment* apartment;
         bool held;
@@ -1296,6 +1376,8 @@ void WgcCapture::on_frame_arrived(
 
     D3D11_TEXTURE2D_DESC desc{};
     texture->GetDesc(&desc);
+    wgc_trace("handler: got texture %ux%u staging=%ux%u", desc.Width,
+              desc.Height, state->staging_width_, state->staging_height_);
 
     // ---- The readback ------------------------------------------------------------
     //
@@ -1355,6 +1437,7 @@ void WgcCapture::on_frame_arrived(
     texture->Release();
     state->bytes_copied.fetch_add(static_cast<std::uint64_t>(needed),
                                   std::memory_order_relaxed);
+    wgc_trace("handler: readback done %ux%u", desc.Width, desc.Height);
 
     // ---- The dirty rectangles ------------------------------------------------------
     //
@@ -1400,6 +1483,8 @@ void WgcCapture::on_frame_arrived(
         frame_w = rw;
         frame_h = rh;
         stride = static_cast<std::int32_t>(region_row);
+        wgc_trace("handler: region cropped %ux%u -> %ux%u stride=%d",
+                  desc.Width, desc.Height, rw, rh, (int)stride);
     }
 
     // ---- Queue the frame ---------------------------------------------------------------
@@ -1413,6 +1498,8 @@ void WgcCapture::on_frame_arrived(
     // it (plan A7).
     const bool identical = state->dirty_detector.compare(
         pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
+    wgc_trace("handler: diff done identical=%d frame_bytes=%llu",
+              (int)identical, (unsigned long long)frame_bytes);
     if (identical) {
         return;
     }

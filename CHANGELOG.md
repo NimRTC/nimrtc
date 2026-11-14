@@ -40,6 +40,45 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   therefore carries `rd_input` in its new `PENDING_WIRING` list, which
   names the work item that removes the waiver.
 
+- **The remote-desktop QoE module (v1.4, remote-desktop plan J3 / J6).**
+  The remote-desktop product is judged on *feel* — latency, sharpness,
+  responsiveness — but the project had no way to *measure* those: the
+  engine's `Stats` carries the per-stream counters and the per-stage
+  timings, not the experience metrics the plan's item J3 asks for, and
+  nothing measured the input-to-photon latency at all.
+
+  The new self-contained module `src/modules/rd_qoe/` carries the
+  measurement primitives:
+
+  | Piece | What it does |
+  |-------|--------------|
+  | `nimrtc/rd_qoe/qoe_metrics.hpp` — `QoeCollector` | The observer: the freeze count / total duration / longest freeze, the **viewer's** frame rate, the **end-to-end** latency percentiles (render timestamp − capture timestamp), the **input-to-photon** percentiles (J6: the operator's input event → the frame that reflects it being displayed), the sharpness proxy and the freeze ratio.  It is **fed** by the host — it never pulls from the engine — so it stays decoupled and unit-testable. |
+  | `PercentileEstimator` | A **bounded** percentile estimator: a fixed-capacity reservoir (default 1024 samples) plus a running max / min / mean.  A remote-desktop session runs for hours, so an unbounded sample list would be a leak; the bound and the accuracy trade-off (the percentiles describe the *recent* window) are documented on the class. |
+  | `SharpnessEstimator` | A **sharpness proxy** — the mean absolute Laplacian of the luma plane.  It is cheap, needs no reference picture, and is monotone in the right direction (higher = sharper); it is a proxy, not a reference-based metric, and it compares pictures of the same resolution against each other. |
+
+  The module is **a module, not a seam**: it depends on `nimrtc::core`
+  only, registers no plugin, and adds nothing to `src/plugins/`.  It is
+  built by default (`NIMRTC_MODULE_RD_QOE`, default ON) and installs as
+  `nimrtc_rd_qoe` / `nimrtc::rd_qoe`.  The engine wiring — pushing the
+  presented-frame events and the input-to-photon pairing into the
+  collector — is a separate, engine-level item, so
+  `tools/check_dead_modules.py` carries `rd_qoe` in its `PENDING_WIRING`
+  list.
+
+- **The remote-desktop weak-network benchmark (v1.4, remote-desktop plan
+  J4 / J6).**  A throughput number says nothing about the feel, so the
+  new tool `tools/benchmark_remote_desktop.py` reports the **response
+  curve** instead: the ladder level vs. time, the delivered fps vs. time,
+  the cumulative freeze count vs. time, and the latency percentiles vs.
+  time, over a four-phase link profile (20 Mbps → 3 Mbps → 1 Mbps →
+  20 Mbps).  The run is **deterministic** (seeded RNG), so the committed
+  artifact
+  ([`docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json`](docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json))
+  doubles as a regression baseline.  The tool reuses the transport-floor
+  tiers of `tools/benchmark_weaknet.py` and the machine description of
+  `tools/benchmark_capture_encode.py`; it needs no network and has a
+  `--dry-run` mode.
+
 - **The real software codecs (v1.3, remote-desktop plan WP-B / B3).**  The
   CPU bring-up baseline carried no codec: the H.264 and AV1 plug-ins
   delegated to *stubs* that emitted synthetic bitstreams and painted

@@ -32,6 +32,27 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+// The C++/WinRT projection decides between `<coroutine>` and the
+// deprecated `<experimental/coroutine>` by testing `__cpp_lib_coroutine`
+// -- and the deprecated header hard-`#error`s under /std:c++20, which is
+// what this project builds with.
+//
+// `__cpp_lib_coroutine` is defined by `<yvals_core.h>`, which every
+// standard-library header pulls in -- but only once one has been
+// included.  The projection's own `winrt/base.h` does include the
+// standard library *before* the test, so the test normally wins.  It
+// loses when the projection header is reached through a Windows SDK
+// header (`windows.ui.composition.h`, `windows.graphics.capture.h`)
+// rather than through `winrt/base.h` itself: those headers open with
+// `windows.h`, and the SDK's copy of the projection can be reached
+// before any standard-library header has been included.
+//
+// Including `<coroutine>` first settles it by construction: the header
+// includes `<yvals_core.h>` and so defines `__cpp_lib_coroutine`
+// itself, whatever the SDK's projection does.
+#include <coroutine>
+
+#include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>

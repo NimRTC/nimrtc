@@ -464,7 +464,26 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - audio_device/audio_device.hpp (the module's public API)
     //     - audio_device/ring_buffer.hpp (the shared PCM ring buffer)
     //     - audio_device/synthetic_device.hpp (the CI-testable backend)
-    constexpr std::size_t kBaselineHeaderCount = 152;
+    //
+    // Track D bump: +4 public headers (152 -> 156) for the video rate
+    //   controller (remote-desktop plan D1 / D2 / D3 / D4) -- the seam
+    //   the engine resolves the ladder through and the module that owns
+    //   the ladder policy:
+    //     - plugins/video_bitrate_controller.hpp (the seam + factory)
+    //     - video_bitrate_control/controller.hpp (the controller)
+    //     - video_bitrate_control/factory.hpp (the plugin factory)
+    //     - video_bitrate_control/ladder.hpp (the ladder itself)
+    //
+    // Track J bump: +7 public headers (156 -> 163):
+    //   - rd_qoe/qoe_metrics.hpp (the QoE metrics module's public API --
+    //     the percentile estimator, the sharpness estimator and the
+    //     collector; remote-desktop plan J3 / J6)
+    //   - video_capture/unix_capture.hpp, video_capture/unix_capture_core.hpp
+    //     (the Unix capture backends -- remote-desktop plan A3 / A4)
+    //   - video_sink/egl_renderer.hpp, video_sink/metal_renderer.hpp,
+    //     video_sink/presenter_core.hpp, video_sink/scale_to_fit.hpp
+    //     (the presentation sinks -- remote-desktop plan E2 / E5)
+    constexpr std::size_t kBaselineHeaderCount = 163;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

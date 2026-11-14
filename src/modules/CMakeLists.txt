@@ -279,6 +279,31 @@ if(NIMRTC_MODULE_RD_INPUT)
 endif()
 
 # -----------------------------------------------------------------------------
+# Remote-desktop plan Track D — the video rate controller (D1 / D2 / D3 / D4).
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seam it
+# implements) and on nothing else.  The engine wiring — resolving the
+# controller through the registry and pushing its level into the encoder's
+# parameter set — lives in the engine.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+    add_subdirectory(video_bitrate_control)
+endif()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track J — the QoE metrics module (J3 / J6).
+#
+# Self-contained: it depends on nimrtc::core only, and it registers no
+# plugin (the collector is *fed* by the host — it never pulls from the
+# engine — so there is no `plugins::I*` seam and nothing in src/plugins/).
+# The engine wiring — pushing the presented-frame events into the
+# collector — is a separate item and does not live here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_QOE)
+    add_subdirectory(rd_qoe)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan Track F — the audio-device module (F1's seams are in
 # src/plugins/; this is their implementation).
 #

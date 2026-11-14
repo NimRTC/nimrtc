@@ -467,6 +467,38 @@ Track A baselines are transport-floor numbers, not engine glass-to-glass claims.
 
 See [`tools/benchmark_size.py`](tools/benchmark_size.py), [`tools/benchmark_latency.py`](tools/benchmark_latency.py), [`tools/benchmark_dc.py`](tools/benchmark_dc.py), [`tools/benchmark_weaknet.py`](tools/benchmark_weaknet.py), and [`tools/benchmark_weaknet_netem.sh`](tools/benchmark_weaknet_netem.sh) for the measurement tools.
 
+### Capture / encode budget (remote-desktop plan J5)
+
+The remote-desktop plan's §B.6 makes the per-frame CPU budget an acceptance criterion, so the numbers are measured rather than asserted. [`tools/benchmark_capture_encode.py`](tools/benchmark_capture_encode.py) drives the real engine (the portable synthetic capture device → colour conversion → H.264 encode → RTP packetize) and reads the engine's own per-stage instrumentation. The committed artifact is [`docs/benchmarks/capture_encode_windows_x86_64.json`](docs/benchmarks/capture_encode_windows_x86_64.json).
+
+Measured on the reference machine (Windows 10 x86_64, 12th Gen Intel Core i5-12400F, 6C/12T, NVIDIA GeForce RTX 3060), 1080p30:
+
+| Path | Backend | capture | convert | encode | packetize | **total** | §B.6 total budget |
+|---|---|---|---|---|---|---|---|
+| Hardware | `nvenc` | 0.32 ms | 3.95 ms | **3.06 ms** | 0.01 ms | **7.34 ms** | ≤ 8 ms |
+| Software | `openh264` | 0.34 ms | 4.63 ms | **22.08 ms** | 0.01 ms | **27.05 ms** | ≤ 55 ms |
+
+The hardware encoder is **~7.2× cheaper per frame** than the software fallback on the same machine — the evidence for the plan's hardware-first default. Capture rate on the portable device at 1080p: **~257 fps (124 fps/megapixel)**.
+
+> Reproduce with `cmake --build <build-dir> --target bench_capture_encode` then `python tools/benchmark_capture_encode.py --build-dir <build-dir> --out <path>`. The hardware row needs a build with `-DNIMRTC_PLUGINS_NVENC=ON` (and `-DNIMRTC_PLUGINS_NVDEC=ON`); without it the harness records that no hardware encoder was available rather than a fabricated number. The checked-in JSON is one local sample, not a pass/fail threshold — the software path's `convert` stage exceeds the §B.6 line on this machine because the synthetic device delivers packed BGRA on the CPU path (no zero-copy capture device), and that is reported, not hidden.
+
+### Remote-desktop response curve (remote-desktop plan J4 / J6)
+
+A remote-desktop session is judged on *feel*, not on throughput, so the weak-network benchmark reports the **response curve** rather than a throughput number: the ladder level vs. time, the delivered fps vs. time, the cumulative freeze count vs. time, and the latency percentiles vs. time. [`tools/benchmark_remote_desktop.py`](tools/benchmark_remote_desktop.py) runs a deterministic (seeded) synthetic remote-desktop scenario — a 30 fps source, the plan's monotone bitrate ladder, a rate-limited link with loss and jitter, a bounded transmit queue, a decoder and a display — and writes the committed artifact [`docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json`](docs/benchmarks/remote_desktop_weaknet_windows_x86_64.json).
+
+The scenario walks the link through four phases (20 Mbps → 3 Mbps → 1 Mbps → 20 Mbps) and the curve shows the ladder's reaction:
+
+| Phase | Capacity | Delivered fps | Ladder level | Latency p50 | Freezes (cumulative) |
+|---|---|---|---|---|---|
+| clean | 20 Mbps | ~28.5 | 2 → 4 | ~22 ms | 0 |
+| congested | 3 Mbps | ~23.5 | 4 → 1 | ~179 ms | 8 |
+| collapse | 1 Mbps | ~10.8 | 1 → 0 | ~231 ms | 40 |
+| recovery | 20 Mbps | ~26.2 | 0 → 4 | ~29 ms | 41 |
+
+The ladder steps down under congestion and climbs back when the link frees up, the freezes accumulate while the link is collapsing, and the input-to-photon latency (J6 — the operator's input event to the frame that reflects it) is reported alongside: p50 ~56 ms, p95 ~452 ms over the whole run.
+
+> Reproduce with `python tools/benchmark_remote_desktop.py` (add `--dry-run` to print the summary without writing the artifact). The run is **deterministic** — the RNG is seeded, so re-running produces the same numbers and the committed artifact doubles as a regression baseline. These are the numbers of a *model*, not of a real session; the artifact's `notes` say so. The QoE metrics themselves live in the self-contained `src/modules/rd_qoe/` module (the freeze accounting, the sharpness proxy, the bounded end-to-end latency percentiles, the viewer's frame rate, and the input-to-photon pairing).
+
 ---
 
 ## Plugin Architecture

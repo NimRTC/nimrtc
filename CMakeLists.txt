@@ -164,6 +164,20 @@ option(NIMRTC_MODULE_RD_INPUT
 # and the synthetic device the module's tests run on.
 option(NIMRTC_MODULE_AUDIO_DEVICE
        "Build audio device module (PortAudio capture/playback + synthetic device)" ON)
+# Remote-desktop plan D1 / D2 / D3 / D4: the video rate controller — the
+# resolution / frame-rate / bitrate ladder, the resolution floor and the
+# keyframe-cost budget.  A module implementing the `IVideoBitrateController`
+# seam; the engine drives it and pushes the resulting level into the
+# encoder's parameter set.
+option(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL
+       "Build video bitrate control module (the resolution / fps / bitrate ladder)" ON)
+# Remote-desktop plan Track J (J3 / J6): the QoE metrics module — the
+# freeze accounting, the sharpness proxy, the end-to-end latency
+# percentiles and the input-to-photon measurement.  A module, not a seam:
+# the collector is *fed* by the host and never pulls from the engine, so
+# it stays decoupled and unit-testable.
+option(NIMRTC_MODULE_RD_QOE
+       "Build remote-desktop QoE module (freeze / sharpness / latency / input-to-photon metrics)" ON)
 
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a

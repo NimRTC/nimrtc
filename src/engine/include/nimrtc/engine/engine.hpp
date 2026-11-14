@@ -2430,6 +2430,32 @@ public:
         std::uint64_t video_capture_pump_errors     = 0;
         std::uint64_t video_capture_pumped_metadata = 0;
 
+        // ---- Format normalisation (remote-desktop plan C3) --------------
+        //
+        // The capture path may deliver BGRA / NV12 / I420; the encoder
+        // path wants one canonical format.  The engine does the
+        // conversion (once, on the platform side) and reports what it
+        // did, so a host can see whether the conversion is costing
+        // anything.
+        //
+        // `video_format_conversions` counts the frames that needed a
+        // *colour-space* conversion (BGRA → I420, NV12 → I420).  A frame
+        // that was already in the canonical format does not count — it
+        // was a plain copy, not a conversion.  On the zero-copy path
+        // this counter stays at zero, because no conversion happens.
+        std::uint64_t video_format_conversions = 0;
+        /** The frames that were copied without a colour conversion. */
+        std::uint64_t video_format_copies = 0;
+        /** The frames that reached the encoder as a native GPU surface
+         *  (so no format work happened at all). */
+        std::uint64_t video_format_zero_copy = 0;
+        /** The canonical format the encoder is fed (e.g. "i420"). */
+        std::string video_format_canonical = "unknown";
+        /** The format the capture device most recently delivered
+         *  (e.g. "bgra").  A host compares it with the canonical format
+         *  to see whether a conversion is happening. */
+        std::string video_format_source = "unknown";
+
         // ---- Codec telemetry (remote-desktop plan B15) ------------------
         //
         // The codec is the only party that knows which backend it runs
@@ -2468,6 +2494,70 @@ public:
         std::uint64_t video_sink_frames_presented        = 0;
         std::uint64_t video_sink_render_errors          = 0;
         std::uint32_t video_sink_present_fps             = 0;
+
+        // ---- The per-stage CPU-time instrumentation (plan J1) ------------
+        //
+        // The plan's exit measurement is written in terms of time, so the
+        // engine measures each stage of the pipeline and reports it here.
+        // A host (or a benchmark) reads the means to check the frame
+        // budget, and the p95s to see the *worst* frames — a session can
+        // have a good mean and a terrible p95, and only the p95 tells
+        // you the session stutters.
+        //
+        // All the durations are in **microseconds**.  A stage that never
+        // ran reports a sample count of zero and a mean of zero — which
+        // is the *correct* reading, not a missing value: on the zero-copy
+        // path the conversion stage does not exist, and the budget wants
+        // to see that.
+        struct NIMRTC_API_STABLE StageTiming {
+            /** The number of samples collected for this stage. */
+            std::uint64_t samples = 0;
+            /** The mean duration, in microseconds. */
+            std::uint64_t mean_us = 0;
+            /** The 95th percentile of the recent samples, in microseconds. */
+            std::uint64_t p95_us = 0;
+            /** The largest single sample, in microseconds. */
+            std::uint64_t max_us = 0;
+            /** The total time spent in this stage, in microseconds. */
+            std::uint64_t total_us = 0;
+        };
+
+        /** The time spent popping the frame from the capture device. */
+        StageTiming video_stage_capture{};
+        /** The time spent converting the picture (colour / format / scale). */
+        StageTiming video_stage_convert{};
+        /** The time spent inside the codec's encode call. */
+        StageTiming video_stage_encode{};
+        /** The time spent packetizing (RTP header, STAP-A / FU-A, SRTP). */
+        StageTiming video_stage_packetize{};
+        /** The time spent inside the codec's decode call. */
+        StageTiming video_stage_decode{};
+        /** The time spent in the sink's render call. */
+        StageTiming video_stage_render{};
+
+        /**
+         * @brief The summed cost of the outbound path, in microseconds.
+         *
+         * This is the number §B.6's budget is written against: the
+         * capture → convert → encode → packetize chain.  It is the sum
+         * of the four stage means above, so a host can compare it with
+         * the budget directly:
+         *
+         * ```
+         * const auto s = engine.stats();
+         * const auto frame_cost_us =
+         *     s.video_stage_capture.mean_us + s.video_stage_convert.mean_us +
+         *     s.video_stage_encode.mean_us  + s.video_stage_packetize.mean_us;
+         * ```
+         *
+         * The p95 variant (`video_stage_total_p95_us`) sums the p95s
+         * instead — an upper bound on the *typical* worst frame, which is
+         * the number to compare with the frame interval (33 333 µs at
+         * 30 fps).
+         */
+        std::uint64_t video_stage_total_us = 0;
+        /** The summed p95 of the four outbound stages, in microseconds. */
+        std::uint64_t video_stage_total_p95_us = 0;
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *

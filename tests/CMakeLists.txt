@@ -1317,8 +1317,83 @@ endif()
 # link set.
 if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
    AND NIMRTC_MODULE_H264)
-nimrtc_add_engine_codec_test(test_engine_video_params
+  nimrtc_add_engine_codec_test(test_engine_video_params
                               test_engine_video_params.cpp)
+endif()
+
+# ----------------------------------------------------------------------------
+# The per-stage CPU-time instrumentation (remote-desktop plan J1) and the
+# format normalisation counters (plan C3).
+#
+# §B.6's budget is written in terms of *time* ("CPU time per frame
+# (capture → encode → packetize)"), and C3 asks for the conversion count
+# to be in the stats.  Neither existed, so neither was checked by
+# anything.  This test asserts that the stage counters move when the
+# pipeline runs, that the means are individually plausible, and that the
+# format counters tell "a colour conversion happened" from "the frame
+# was already canonical" apart.
+#
+# It needs the capture module (the device the pump drives), so it reuses
+# the e2e loopback target's link set.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_video_stage_timing test_engine_video_stage_timing.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_video_stage_timing PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_video_stage_timing PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_video_stage_timing PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_video_stage_timing PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_video_stage_timing PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_video_stage_timing PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_video_stage_timing PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_video_stage_timing LENIENT)
+  add_test(NAME test_engine_video_stage_timing
+      COMMAND $<TARGET_FILE:test_engine_video_stage_timing>)
+  set_tests_properties(test_engine_video_stage_timing PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_video_stage_timing
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_video_stage_timing)
 endif()
 
 # ----------------------------------------------------------------------------

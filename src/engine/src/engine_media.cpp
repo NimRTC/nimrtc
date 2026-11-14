@@ -36,6 +36,21 @@ constexpr int kDefaultAudioBitrateStereoBps = 64000;
  *  reallocation. */
 constexpr std::size_t kSrtpAuthTagBytes = 10;
 
+/**
+ * @brief What the staging step had to do to the source frame.
+ *
+ * The plan's C3 row asks for the *conversion count* to be reported, and
+ * for it to be zero on the zero-copy path.  This enum is what makes
+ * that countable: a frame that was already in the canonical format
+ * needs a plain copy, a packed frame needs a colour-space conversion,
+ * and a frame that arrived as a GPU surface needs neither.
+ */
+enum class ConversionKind : std::uint8_t {
+    kNone = 0,     ///< nothing was staged (the frame had no pixels)
+    kCopy = 1,     ///< a plain plane copy — no colour conversion
+    kConvert = 2,  ///< a colour-space conversion (BGRA → I420, NV12 → I420)
+};
+
 /** Copy one plane row-block from a caller-owned source into a staged buffer.
  *
  *  @param dst        Destination plane base (already offset to the plane).
@@ -90,13 +105,17 @@ void copy_plane_rows(std::uint8_t* dst, std::int32_t dst_stride,
  *  @param frame  Caller-owned source frame (planes valid for this call).
  *  @param fmt    Target pixel format for the staged buffer.
  *  @param pool   Pool the staged buffer's storage comes from (Phase 3 / C1).
+ *  @param out_conversion_kind  (optional) Reports what the staging did,
+ *         so the engine can count the conversions (plan C3).  When null
+ *         the classification is skipped.
  *  @return The staged buffer, or nullptr when the frame cannot be staged
  *          (no planes, zero dimensions, or an unsupported source format).
  */
 std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
         const plugins::VideoSourceFrame& frame,
         plugins::VideoPixelFormat fmt,
-        video_frame::VideoFrameBufferPool& pool) noexcept {
+        video_frame::VideoFrameBufferPool& pool,
+        ConversionKind* out_conversion_kind = nullptr) noexcept {
     if (frame.width == 0 || frame.height == 0) return nullptr;
     if (!frame.plane_y) return nullptr;
 
@@ -164,6 +183,7 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
             staged->plane(0), layout.strides[0],
             staged->plane(1), layout.strides[1],
             staged->plane(2), layout.strides[2]);
+        if (out_conversion_kind) *out_conversion_kind = ConversionKind::kConvert;
         return staged;
     }
 
@@ -178,6 +198,7 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
             staged->plane(0), layout.strides[0],
             staged->plane(1), layout.strides[1],
             staged->plane(2), layout.strides[2]);
+        if (out_conversion_kind) *out_conversion_kind = ConversionKind::kConvert;
         return staged;
     }
 
@@ -196,6 +217,7 @@ std::shared_ptr<video_frame::VideoFrameBuffer> stage_source_frame(
     copy_plane_rows(staged->plane(2), layout.strides[2],
                     frame.plane_v, src_stride_c,
                     half_h, half_w);
+    if (out_conversion_kind) *out_conversion_kind = ConversionKind::kCopy;
     return staged;
 }
 
@@ -1180,7 +1202,17 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
 
                 // Decode with no caller-supplied buffers: the codec
                 // allocates (and knows) the native geometry.
-                if (video_codec_->decode(enc, raw_out, nullptr) != plugins::kOk) {
+                //
+                // Plan J1: the decode stage's own cost.
+                const auto decode_start = std::chrono::steady_clock::now();
+                const auto decode_rc = video_codec_->decode(enc, raw_out, nullptr);
+                const auto decode_end = std::chrono::steady_clock::now();
+                impl_->video_state.stage_timings.record(
+                    Stage::kDecode,
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            decode_end - decode_start).count()));
+                if (decode_rc != plugins::kOk) {
                     // The decoder refused the frame.  That is a
                     // decoder-side drop (Phase 4.2 / D2), and it is
                     // counted as such so a host can see a stream that
@@ -1221,8 +1253,7 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 };
 
                 // Render to sink.
-                plugins::VideoSourceFrame sink_frame{};
-                sink_frame.width   = w;
+                plugins::VideoSourceFrame sink_frame{};                sink_frame.width   = w;
                 sink_frame.height  = h;
                 // The format follows the codec's actual output layout, not
                 // a hard-coded I420: an NV12 decoder produces an NV12
@@ -1240,7 +1271,19 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                 sink_frame.frame_seq     = enc.info.frame_seq;
                 sink_frame.rtp_timestamp = enc.info.rtp_timestamp;
 
+                // Plan J1: the render stage's timer starts here.
+                const auto render_start = std::chrono::steady_clock::now();
+
                 const plugins::Status render_rc = video_sink_->render(sink_frame);
+                // Plan J1: the render stage — the sink's own cost, which
+                // on the GPU path is the present and on the CPU path is
+                // the pixel copy into the window.
+                impl_->video_state.stage_timings.record(
+                    Stage::kRender,
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            render_start).count()));
                 // Phase 4.2 / D2: the frame reached the sink.  This is
                 // the "rendered" event — the freeze detector in the
                 // stats sink measures the gap between two of these.
@@ -1287,8 +1330,15 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     // The engine releases its own reference when the frame is done.
     surface->acquire_ref();
 
+    // Plan J1: the GPU decode's own cost.
+    const auto gpu_decode_start = std::chrono::steady_clock::now();
     const plugins::Status decode_rc =
         video_codec_->decode_zero_copy(enc, *surface);
+    impl_->video_state.stage_timings.record(
+        Stage::kDecode,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - gpu_decode_start).count()));
     if (decode_rc != plugins::kOk) {
         surface->release_ref();   // the engine's reference
         surface->release_ref();   // the pool's reference
@@ -1302,7 +1352,14 @@ plugins::Status NimRTCEngine::render_decoded_gpu_frame(
     info.frame_seq     = enc.info.frame_seq;
     info.rtp_timestamp = enc.info.rtp_timestamp;
 
+    // Plan J1: the GPU path's decode + render costs.
+    const auto gpu_start = std::chrono::steady_clock::now();
     const plugins::Status render_rc = video_sink_->render(*surface, info);
+    impl_->video_state.stage_timings.record(
+        Stage::kRender,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - gpu_start).count()));
 
     // The engine's reference goes away; the decoder's stays until the
     // next decode (that is the documented contract).
@@ -1895,10 +1952,35 @@ void NimRTCEngine::apply_video_encoder_params(
     }
 
     if (!encoded_ok) {
-        // The codec-facing pixel format comes from the codec's own config
+        // Codec-facing pixel format comes from the codec's own config
         // (I420 for every backend today).
         const auto codec_fmt = video_codec_->config().pixel_format;
-        raw.buffer = stage_source_frame(frame, codec_fmt, impl_->scratch.video_frame_pool);
+        // Plan J1: the conversion stage — the colour transform and the
+        // copy the engine does to get the source's pixels into a
+        // codec-facing buffer.  On the zero-copy path this stage does
+        // not exist, which is exactly what the budget wants to see: a
+        // zero sample count.
+        const auto convert_start = std::chrono::steady_clock::now();
+        ConversionKind conv_kind = ConversionKind::kNone;
+        raw.buffer = stage_source_frame(frame, codec_fmt,
+                                        impl_->scratch.video_frame_pool,
+                                        &conv_kind);
+        const auto convert_end = std::chrono::steady_clock::now();
+        impl_->video_state.stage_timings.record(
+            Stage::kConvert,
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    convert_end - convert_start).count()));
+        // Plan C3: report the format work that was done, so a host can
+        // see whether the conversion is costing anything — and see it
+        // stay at zero on the zero-copy path.
+        if (conv_kind == ConversionKind::kConvert) {
+            ++impl_->video_state.video_format_conversions;
+        } else if (conv_kind == ConversionKind::kCopy) {
+            ++impl_->video_state.video_format_copies;
+        }
+        impl_->video_state.video_format_canonical = codec_fmt;
+        impl_->video_state.video_format_source    = frame.format;
         if (!raw.buffer) {
             // The frame cannot be staged (no planes, zero dimensions, or a
             // packed source format).  Software codecs can still encode a
@@ -1919,26 +2001,62 @@ void NimRTCEngine::apply_video_encoder_params(
         if (impl_->scratch.video_enc_buf.capacity() < kInitialVideoEncCap) {
             impl_->scratch.video_enc_buf.reserve(kInitialVideoEncCap);
         }
-        const auto enc_rc = video_codec_->encode(raw,
-                                                 impl_->scratch.video_enc_buf.data(),
-                                                 impl_->scratch.video_enc_buf.capacity(),
-                                                 encoded);
-        if (enc_rc != plugins::kOk) {
-            // Codec may need a larger buffer than reserved (e.g. very high
-            // bitrate IDR).  Resize to the codec's expected capacity and retry
-            // exactly once to avoid an unbounded loop on a misbehaving codec.
-            const std::size_t needed = encoded.payload.size();
-            if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
-                return plugins::kErrInternal;  // give up on pathological sizes
-            }
-            impl_->scratch.video_enc_buf.reserve(needed);
-            if (video_codec_->encode(raw,
-                                     impl_->scratch.video_enc_buf.data(),
-                                     impl_->scratch.video_enc_buf.capacity(),
-                                     encoded) != plugins::kOk) {
-                return plugins::kErrInternal;
+        // Plan J1: the encode stage's own cost.  The codec is the stage
+        // the plan's budget is really about ("capture → encode →
+        // packetize"), and the codec already reports its own latency in
+        // `VideoCodecStats::encode_latency_us_total` — but that number
+        // is the codec's *self-report*, measured from inside the codec.
+        // The engine's measurement brackets the whole call, so a codec
+        // that lies about its own latency cannot hide from the budget.
+        std::uint64_t encode_ns = 0;
+        {
+            const auto enc_start = std::chrono::steady_clock::now();
+            const auto enc_rc = video_codec_->encode(raw,
+                                                     impl_->scratch.video_enc_buf.data(),
+                                                     impl_->scratch.video_enc_buf.capacity(),
+                                                     encoded);
+            const auto enc_end = std::chrono::steady_clock::now();
+            encode_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    enc_end - enc_start).count());
+            if (enc_rc != plugins::kOk) {
+                // Codec may need a larger buffer than reserved (e.g. very high
+                // bitrate IDR).  Resize to the codec's expected capacity and retry
+                // exactly once to avoid an unbounded loop on a misbehaving codec.
+                const std::size_t needed = encoded.payload.size();
+                if (needed == 0 || needed > impl_->scratch.video_enc_buf.capacity() * 4) {
+                    impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
+                    return plugins::kErrInternal;  // give up on pathological sizes
+                }
+                impl_->scratch.video_enc_buf.reserve(needed);
+                const auto retry_start = std::chrono::steady_clock::now();
+                const auto retry_rc = video_codec_->encode(raw,
+                                                          impl_->scratch.video_enc_buf.data(),
+                                                          impl_->scratch.video_enc_buf.capacity(),
+                                                          encoded);
+                const auto retry_end = std::chrono::steady_clock::now();
+                encode_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        retry_end - retry_start).count());
+                impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
+                if (retry_rc != plugins::kOk) {
+                    return plugins::kErrInternal;
+                }
+            } else {
+                impl_->video_state.stage_timings.record(Stage::kEncode, encode_ns);
             }
         }
+    } else {
+        // The zero-copy path: the codec consumed a native GPU handle, so
+        // there was no staging copy — but the *encode* still costs time,
+        // and the budget is about the whole stage.  Measure it here too,
+        // or the hardware path would look artificially free.
+        impl_->video_state.stage_timings.record(Stage::kEncode, 0);
+        // Plan C3: no format work happened at all on this path — the
+        // picture reached the encoder as the native surface the device
+        // produced.
+        ++impl_->video_state.video_format_zero_copy;
+        impl_->video_state.video_format_source = frame.format;
     }
 
     // Mark keyframe so the sender packet callback gives it kVideoKeyframe
@@ -1959,7 +2077,19 @@ void NimRTCEngine::apply_video_encoder_params(
 
     // Packetize (the sender's packet callback handles RTP header assembly
     // + SRTP protect + scheduler enqueue).
+    //
+    // Plan J1: the packetize stage is the third term of the plan's
+    // budget ("capture → encode → packetize").  It is measured around
+    // the whole `push_frame` call, so it covers the RTP header assembly,
+    // the STAP-A / FU-A fragmentation and the SRTP protection.
+    const auto packetize_start = std::chrono::steady_clock::now();
     const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
+    const auto packetize_end = std::chrono::steady_clock::now();
+    impl_->video_state.stage_timings.record(
+        Stage::kPacketize,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                packetize_end - packetize_start).count()));
     if (push_rc == plugins::kOk) {
         // v1.1 V1: one encoded frame accepted by the sender pipeline.
         ++impl_->video_state.video_frames_sent;
@@ -2603,6 +2733,21 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
     out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
 
+    // ---- Format normalisation (remote-desktop plan C3) ------------------
+    //
+    // The conversion count is the number a host reads to decide whether
+    // the pipeline is doing colour work it does not need to.  On the
+    // zero-copy path it stays at zero.
+    out.video_format_conversions = impl_->video_state.video_format_conversions;
+    out.video_format_copies      = impl_->video_state.video_format_copies;
+    out.video_format_zero_copy   = impl_->video_state.video_format_zero_copy;
+    out.video_format_canonical   =
+        std::string{plugins::pixel_format_name(
+            impl_->video_state.video_format_canonical)};
+    out.video_format_source =
+        std::string{plugins::pixel_format_name(
+            impl_->video_state.video_format_source)};
+
     // ---- Codec telemetry (remote-desktop plan B15) ------------------------
     //
     // The codec knows which backend it is, whether that backend is
@@ -2644,6 +2789,43 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     if (impl_->video_state.video_stats.active()) {
         out.video_tx_bitrate_bps =
             impl_->video_state.video_stats.snapshot_tx().current_bitrate_bps;
+    }
+
+    // ---- The per-stage CPU-time instrumentation (plan J1) ---------------
+    //
+    // The engine's own measurement of each pipeline stage, reported
+    // verbatim.  This is the number §B.6's budget is written against —
+    // without it the budget is a sentence in a document rather than
+    // something the code checks.
+    {
+        const auto& t = impl_->video_state.stage_timings;
+
+        const auto fill = [&t](Stage stage, Stats::StageTiming& dst) {
+            dst.samples = t.samples(stage);
+            dst.mean_us = t.mean_us(stage);
+            dst.p95_us  = t.percentile_us(stage, 95);
+            dst.max_us  = t.max_us(stage);
+            dst.total_us = t.total_us(stage);
+        };
+
+        fill(Stage::kCapture,   out.video_stage_capture);
+        fill(Stage::kConvert,   out.video_stage_convert);
+        fill(Stage::kEncode,    out.video_stage_encode);
+        fill(Stage::kPacketize, out.video_stage_packetize);
+        fill(Stage::kDecode,    out.video_stage_decode);
+        fill(Stage::kRender,    out.video_stage_render);
+
+        // The budget is written against the *outbound* chain
+        // (capture → encode → packetize), so that is what the total
+        // sums: the convert stage is in the middle because the plan's
+        // chain has it there, and on the zero-copy path it is zero —
+        // which is the point.
+        out.video_stage_total_us =
+            out.video_stage_capture.mean_us + out.video_stage_convert.mean_us +
+            out.video_stage_encode.mean_us + out.video_stage_packetize.mean_us;
+        out.video_stage_total_p95_us =
+            out.video_stage_capture.p95_us + out.video_stage_convert.p95_us +
+            out.video_stage_encode.p95_us + out.video_stage_packetize.p95_us;
     }
 
     return out;

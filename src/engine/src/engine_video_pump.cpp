@@ -65,7 +65,19 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     // never blocks, so an empty queue is the normal case and costs
     // nothing.
     plugins::CaptureFrame captured{};
-    if (video_capture_->pop_frame(captured) != plugins::kOk) {
+    // Plan J1: the capture stage — the cost of popping the frame from
+    // the device's bounded queue.  On a device with its own producer
+    // thread this is the queue handoff, not the desktop duplication
+    // itself; the device's own cost is in the capture plugin's stats.
+    const auto capture_start = std::chrono::steady_clock::now();
+    const auto pop_rc = video_capture_->pop_frame(captured);
+    const auto capture_end = std::chrono::steady_clock::now();
+    impl_->video_state.stage_timings.record(
+        Stage::kCapture,
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                capture_end - capture_start).count()));
+    if (pop_rc != plugins::kOk) {
         return false;
     }
 

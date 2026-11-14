@@ -43,6 +43,7 @@
 
 #include "audio_routing.hpp"
 #include "engine_ref_frame_table.hpp"
+#include "engine_stage_timing.hpp"
 #include "video_codec_config.hpp"
 #include "video_negotiation.hpp"
 #include "video_render_path.hpp"
@@ -282,6 +283,24 @@ struct VideoState {
     /** True once the pump has established its media-clock origin. */
     bool capture_rtp_base_valid = false;
 
+    // ---- The format normalisation counters (remote-desktop plan C3) -----
+    //
+    // The capture path may deliver BGRA / NV12 / I420; the encoder path
+    // wants one canonical format.  The engine does the conversion and
+    // counts what it did, so a host can see the cost.
+    /** Frames that needed a colour-space conversion (BGRA → I420, ...). */
+    std::uint64_t video_format_conversions = 0;
+    /** Frames that were copied without a colour conversion. */
+    std::uint64_t video_format_copies = 0;
+    /** Frames that reached the encoder as a native GPU surface. */
+    std::uint64_t video_format_zero_copy = 0;
+    /** The canonical format the encoder is fed. */
+    plugins::VideoPixelFormat video_format_canonical =
+        plugins::VideoPixelFormat::kUnknown;
+    /** The format the capture device most recently delivered. */
+    plugins::VideoPixelFormat video_format_source =
+        plugins::VideoPixelFormat::kUnknown;
+
     /** The capture timestamp (microseconds) the media clock's origin is
      *  anchored at. */
     std::int64_t capture_rtp_base_us = 0;
@@ -313,6 +332,14 @@ struct VideoState {
      *  the geometry changed.  A non-zero value means the ladder (or the
      *  capture device) changed resolution mid-session. */
     std::uint64_t video_encoder_restarts = 0;
+
+    // ---- The per-stage CPU-time instrumentation (plan J1) -----------------
+    //
+    // The plan's exit measurement is written in terms of time ("CPU time
+    // per frame (capture → encode → packetize)"), so the engine measures
+    // each stage of the pipeline.  The accumulator lives here so it is
+    // reset with the rest of the session state.
+    StageTimings stage_timings{};
 };
 
 }  // namespace nimrtc::engine::detail

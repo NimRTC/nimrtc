@@ -103,9 +103,6 @@ if(WIN32)
         # helpers (WindowsCreateString) and the C++/WinRT projection's
         # runtime support all live in windowsapp.lib.
         windowsapp
-        # dbghelp is linked only for the temporary CI diagnostic that
-        # prints the faulting thread's stack.
-        dbghelp
         )
 endif()
 

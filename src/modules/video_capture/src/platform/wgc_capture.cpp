@@ -21,8 +21,6 @@
 #include <nimrtc/video_capture/wgc_capture.hpp>
 
 #include <algorithm>
-#include <cstdarg>
-#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -38,7 +36,6 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
-#  include <dbghelp.h>
 #  include <inspectable.h>
 #  include <roapi.h>
 #  include <winstring.h>
@@ -79,105 +76,71 @@ constexpr int kPoolBufferCount = 2;
 constexpr wchar_t kCaptureItemClass[] =
     L"Windows.Graphics.Capture.GraphicsCaptureItem";
 
-// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
-// A breadcrumb trail to stderr.  The CI agent's segfault gives no
-// stack, so the trail is what says which step the crash happened in.
-//
-// The trail is written with the raw Win32 call rather than with
-// `fprintf`: the CRT's stream lock can be held by the faulting thread
-// at the moment it faults, and a `fprintf` from the exception handler
-// would then deadlock instead of printing.
-void wgc_trace(const char* fmt, ...) {
-    char body[512];
-    va_list ap;
-    va_start(ap, fmt);
-    const int n = _vsnprintf_s(body, sizeof(body), _TRUNCATE, fmt, ap);
-    va_end(ap);
-    if (n < 0) return;
-    char buf[560];
-    int total = _snprintf_s(buf, sizeof(buf), _TRUNCATE, "[wgc-trace] %s\n",
-                            body);
-    if (total < 0) return;
-    const HANDLE err = ::GetStdHandle(STD_ERROR_HANDLE);
-    if (err == INVALID_HANDLE_VALUE || err == nullptr) return;
-    DWORD written = 0;
-    ::WriteFile(err, buf, static_cast<DWORD>(total), &written, nullptr);
-}
-// ==== END TEMPORARY CI DIAGNOSTIC ========================================
+/** The class name of the WGC frame pool's activation factory. */
+constexpr wchar_t kFramePoolClass[] =
+    L"Windows.Graphics.Capture.Direct3D11CaptureFramePool";
 
-// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
-// A vectored exception handler that prints the faulting thread's stack.
-// The CI agent's segfault gives no stack of its own, so this is what
-// says where the fault happened.
-LONG WINAPI wgc_vectored_handler(EXCEPTION_POINTERS* ep) {
-    if (ep == nullptr || ep->ExceptionRecord == nullptr) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    const DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code != EXCEPTION_ACCESS_VIOLATION &&
-        code != EXCEPTION_STACK_OVERFLOW &&
-        code != EXCEPTION_ILLEGAL_INSTRUCTION) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    wgc_trace("FAULT: code=0x%08lX addr=%p",
-              static_cast<unsigned long>(code),
-              reinterpret_cast<void*>(
-                  static_cast<std::uintptr_t>(
-                      ep->ExceptionRecord->ExceptionInformation[1])));
-    HANDLE process = ::GetCurrentProcess();
-    HANDLE thread  = ::GetCurrentThread();
-    CONTEXT ctx{};
-    ctx.ContextFlags = CONTEXT_FULL;
-    ::RtlCaptureContext(&ctx);
-    STACKFRAME64 frame{};
-    frame.AddrPC.Offset = ctx.Rip;
-    frame.AddrPC.Mode   = AddrModeFlat;
-    frame.AddrFrame.Offset = ctx.Rbp;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = ctx.Rsp;
-    frame.AddrStack.Mode = AddrModeFlat;
-    while (::StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame,
-                         &ctx, nullptr,
-                         ::SymFunctionTableAccess64, ::SymGetModuleBase64,
-                         nullptr)) {
-        if (frame.AddrPC.Offset == 0) break;
-        DWORD64 disp = 0;
-        char sym_buf[sizeof(SYMBOL_INFO) + 256] = {0};
-        PSYMBOL_INFO psi = reinterpret_cast<PSYMBOL_INFO>(sym_buf);
-        psi->SizeOfStruct = sizeof(SYMBOL_INFO);
-        psi->MaxNameLen = 255;
-        const bool ok = ::SymFromAddr(process, frame.AddrPC.Offset, &disp,
-                                      psi) != FALSE;
-        wgc_trace("  frame %p %s", reinterpret_cast<void*>(frame.AddrPC.Offset),
-                  ok ? psi->Name : "<no symbol>");
-    }
-    fflush(stderr);
-    return EXCEPTION_CONTINUE_SEARCH;
+/**
+ * @brief The WGC frame pool's activation factory, fetched fresh.
+ *
+ * The C++/WinRT projection's `CreateFreeThreaded` goes through a
+ * *process-global* cache of the activation factory
+ * (`winrt::impl::factory_cache_entry`).  That cache outlives every
+ * apartment: it is a static in the process, not in the apartment.
+ *
+ * The capture thread, on the other hand, enters and leaves an apartment
+ * *per session*, and leaving it unloads the module that hosts the
+ * factory (`GraphicsCapture.dll`).  The cached pointer then dangles,
+ * and the *next* session's `CreateFreeThreaded` calls through it and
+ * dies with an access violation -- an access violation in the *second*
+ * session, in a call that has nothing wrong with it.
+ *
+ * So the factory is fetched by hand here, once per session, and the
+ * projection's cache is never consulted.  A fresh lookup costs one
+ * `RoGetActivationFactory` call per session, and buys a backend that
+ * can be opened and closed as often as the host likes.
+ */
+winrt::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2
+fetch_frame_pool_statics() {
+    using Statics2 =
+        winrt::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2;
+    return winrt::get_activation_factory<Statics2>(kFramePoolClass);
 }
-// ==== END TEMPORARY CI DIAGNOSTIC ========================================
 
-// ==== TEMPORARY CI DIAGNOSTIC (remove before merge) =====================
-// The handler is installed before `main` runs, so that it is already
-// in place when the fault happens -- the fault may well happen before
-// any capture has even been opened.
-struct DiagnosticInstaller {
-    DiagnosticInstaller() noexcept {
-        ::SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS |
-                        SYMOPT_LOAD_LINES);
-        ::SymInitialize(::GetCurrentProcess(), nullptr, TRUE);
-        handler_ = ::AddVectoredExceptionHandler(1, &wgc_vectored_handler);
-        wgc_trace("diagnostic: handler installed ptr=%p", handler_);
-    }
-    ~DiagnosticInstaller() noexcept {
-        if (handler_ != nullptr) {
-            ::RemoveVectoredExceptionHandler(handler_);
+/**
+ * @brief Keep the WGC capture module loaded for the life of the process.
+ *
+ * The capture thread enters and leaves a COM apartment per session, and
+ * leaving an apartment unloads the modules that the apartment brought
+ * in -- including `GraphicsCapture.dll`.  That module starts a worker
+ * thread of its own, and the worker does not necessarily stop when the
+ * apartment goes: the teardown of the two races, and the loser is a
+ * callback that runs against an unloaded module.
+ *
+ * The upstream Windows capture samples hit exactly this (see
+ * robmikh/Win32CaptureSample#99: "Crash on RoUninitialize ... unless
+ * first sleeping for a while"), and the fix they landed on is to hold
+ * the module loaded.
+ *
+ * So the module is loaded once, here, and never released.  A library
+ * that pins a system module for its own lifetime is a small thing to
+ * ask; the alternative is a process that dies with an access violation
+ * the second time a host opens a capture.
+ */
+void pin_capture_module() {
+    static const HMODULE pinned = [] {
+        // The name differs between the Windows releases: the capture
+        // stack lives in `GraphicsCapture.dll` on the modern ones and
+        // in `Windows.Graphics.Capture.dll` on the older ones.  Either
+        // one being loaded is enough to keep the capture code mapped.
+        HMODULE module = ::LoadLibraryW(L"GraphicsCapture.dll");
+        if (module == nullptr) {
+            module = ::LoadLibraryW(L"Windows.Graphics.Capture.dll");
         }
-        ::SymCleanup(::GetCurrentProcess());
-    }
-    PVOID handler_ = nullptr;
-};
-const DiagnosticInstaller g_diagnostic_installer;
-// ==== END TEMPORARY CI DIAGNOSTIC ========================================
+        return module;
+    }();
+    (void)pinned;
+}
 
 /** Convert a wide string to a narrow one (best effort ??the display
  *  name is a diagnostic, not an identity). */
@@ -605,7 +568,6 @@ public:
     std::atomic<std::uint64_t> bytes_copied{0};
 
     ~WgcCaptureState() {
-        wgc_trace("~WgcCaptureState: stop_thread");
         // The state is destroyed only once the last `shared_ptr` to it
         // is gone: the device has dropped its reference and every
         // frame-arrival handler has finished.
@@ -672,8 +634,6 @@ bool WgcCapture::available() noexcept {
 
 plugins::Status WgcCapture::open() noexcept {
     if (open_) return plugins::kOk;
-    wgc_trace("open: entered region=%ux%u+%u+%u", cfg_.region.width,
-              cfg_.region.height, cfg_.region.x, cfg_.region.y);
 
     // ---- Resolve the device ------------------------------------------------
     //
@@ -739,7 +699,6 @@ plugins::Status WgcCapture::open() noexcept {
     if (state->source_width_ == 0 || state->source_height_ == 0) {
         return plugins::kErrInvalidParam;
     }
-    wgc_trace("open: source=%ux%u", state->source_width_, state->source_height_);
 
     // ---- Negotiate the format ----------------------------------------------
     cfg_.format.width  = state->source_width_;
@@ -799,7 +758,6 @@ void WgcCapture::close() noexcept {
         // the session or the device -- it only asks the capture thread
         // to stop and waits for it to finish.
         state_->stop_thread();
-        wgc_trace("close: capture thread joined");
         // A frame-arrival handler may still be running on the WinRT
         // thread-pool thread.  Wait for it: it uses the D3D objects
         // the capture thread is about to release.
@@ -910,9 +868,13 @@ void WgcCapture::capture_loop(
     // The apartment is *shared* rather than owned by this thread: a
     // frame-arrival handler may still be running ??or may still start ??    // after this function returns, and it needs the apartment to be
     // alive.  See `SharedApartment`.
+    //
+    // The capture module is pinned before the apartment is entered, so
+    // that it is already mapped when the apartment is left again.
+    // See `pin_capture_module`.
+    pin_capture_module();
+
     state->apartment.initialize();
-    wgc_trace("capture_loop: apartment initialized ok=%d",
-              (int)state->apartment.ok());
     if (!state->apartment.ok()) {
         core::log::Logger::instance().error("wgc: CoInitializeEx failed");
         state->device_errors.fetch_add(1, std::memory_order_relaxed);
@@ -973,7 +935,6 @@ void WgcCapture::capture_loop(
                 // right now may be reading the frame pool, and the
                 // pool must not be released underneath it.
                 state->apartment.quiesce();
-                wgc_trace("ApartmentGuard: quiesced");
             }
             if (state) {
                 // The pool is a WinRT object, so the last reference to
@@ -986,21 +947,18 @@ void WgcCapture::capture_loop(
                 // copying the same `shared_ptr`.
                 std::lock_guard<std::mutex> lock(state->handler_mutex_);
                 state->pool_.reset();
-                wgc_trace("ApartmentGuard: pool reset");
             }
             if (state) {
                 // The D3D objects go while the apartment is still
                 // alive, and after every handler has finished: a
                 // handler that is still running uses them.
                 state->release_d3d();
-                wgc_trace("ApartmentGuard: d3d released");
             }
             if (state) {
                 // Only now -- with every handler finished, the pool
                 // released and the device gone -- may the apartment go
                 // away.
                 state->apartment.leave();
-                wgc_trace("ApartmentGuard: apartment left");
             }
         }
     } apartment_guard{state};
@@ -1045,7 +1003,6 @@ void WgcCapture::capture_loop(
     if (!state->still_running()) return;
 
     // ---- The WinRT Direct3D11 device ---------------------------------------
-    wgc_trace("capture_loop: device created");
     IDXGIDevice* dxgi_device = nullptr;
     if (FAILED(state->device_->QueryInterface(
             __uuidof(IDXGIDevice),
@@ -1071,7 +1028,6 @@ void WgcCapture::capture_loop(
     winrt::Windows::Foundation::IInspectable inspectable(
         raw_device, winrt::take_ownership_from_abi);
     auto rt_device = inspectable.as<IDirect3DDevice>();
-    wgc_trace("capture_loop: rt_device obtained");
 
     // ---- The frame pool ----------------------------------------------------
     //
@@ -1085,8 +1041,15 @@ void WgcCapture::capture_loop(
 
     std::shared_ptr<Direct3D11CaptureFramePool> pool;
     try {
+        // The factory is fetched by hand rather than through the
+        // projection's `CreateFreeThreaded`, because the projection
+        // caches the factory in a process-global static that outlives
+        // this thread's apartment -- and leaving the apartment unloads
+        // the module that hosts the factory.  See
+        // `fetch_frame_pool_statics`.
+        auto statics = fetch_frame_pool_statics();
         pool = std::make_shared<Direct3D11CaptureFramePool>(
-            Direct3D11CaptureFramePool::CreateFreeThreaded(
+            statics.CreateFreeThreaded(
                 rt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 kPoolBufferCount,
                 winrt::Windows::Graphics::SizeInt32{
@@ -1114,7 +1077,6 @@ void WgcCapture::capture_loop(
     // object, and publishing it now -- against a device that is being
     // torn down -- is what the check prevents.
     if (!state->still_running()) return;
-    wgc_trace("capture_loop: pool created %ux%u", src_w, src_h);
 
     // ---- The capture item --------------------------------------------------
     //
@@ -1161,7 +1123,6 @@ void WgcCapture::capture_loop(
     }
 
     // ---- The session --------------------------------------------------------
-    wgc_trace("capture_loop: capture item created");
     GraphicsCaptureSession session = nullptr;
     try {
         session = pool->CreateCaptureSession(item);
@@ -1217,7 +1178,6 @@ void WgcCapture::capture_loop(
     }
 
     // ---- The frame subscription ----------------------------------------------
-    wgc_trace("capture_loop: session created, staging done");
     //
     // The handler runs on a WinRT thread-pool thread.  It does the
     // readback and the push; it must not block.
@@ -1251,7 +1211,6 @@ void WgcCapture::capture_loop(
         state->running_.store(false, std::memory_order_release);
         return;
     }
-    wgc_trace("capture_loop: capture started");
 
     // ---- Wait --------------------------------------------------------------------
     //
@@ -1297,7 +1256,6 @@ void WgcCapture::capture_loop(
     } catch (const winrt::hresult_error&) {
         // Best effort.
     }
-    wgc_trace("teardown: session closed");
 
     // Wait for the running handlers to finish.
     //
@@ -1318,7 +1276,6 @@ void WgcCapture::capture_loop(
     while (state->in_flight_.load(std::memory_order_acquire) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    wgc_trace("teardown: in_flight drained, returning from capture_loop");
 }
 
 void WgcCapture::on_frame_arrived(
@@ -1348,7 +1305,6 @@ void WgcCapture::on_frame_arrived(
     // handler that had already been dispatched to the thread pool is
     // only now waking up.
     const bool apartment_held = state->apartment.acquire();
-    wgc_trace("handler: entered held=%d", (int)apartment_held);
     struct ApartmentGuard {
         SharedApartment* apartment;
         bool held;
@@ -1417,8 +1373,6 @@ void WgcCapture::on_frame_arrived(
 
     D3D11_TEXTURE2D_DESC desc{};
     texture->GetDesc(&desc);
-    wgc_trace("handler: got texture %ux%u staging=%ux%u", desc.Width,
-              desc.Height, state->staging_width_, state->staging_height_);
 
     // ---- The readback ------------------------------------------------------------
     //
@@ -1478,7 +1432,6 @@ void WgcCapture::on_frame_arrived(
     texture->Release();
     state->bytes_copied.fetch_add(static_cast<std::uint64_t>(needed),
                                   std::memory_order_relaxed);
-    wgc_trace("handler: readback done %ux%u", desc.Width, desc.Height);
 
     // ---- The dirty rectangles ------------------------------------------------------
     //
@@ -1524,8 +1477,6 @@ void WgcCapture::on_frame_arrived(
         frame_w = rw;
         frame_h = rh;
         stride = static_cast<std::int32_t>(region_row);
-        wgc_trace("handler: region cropped %ux%u -> %ux%u stride=%d",
-                  desc.Width, desc.Height, rw, rh, (int)stride);
     }
 
     // ---- Queue the frame ---------------------------------------------------------------
@@ -1539,8 +1490,6 @@ void WgcCapture::on_frame_arrived(
     // it (plan A7).
     const bool identical = state->dirty_detector.compare(
         pixels, frame_bytes, stride, frame_w, frame_h, 4, dirty);
-    wgc_trace("handler: diff done identical=%d frame_bytes=%llu",
-              (int)identical, (unsigned long long)frame_bytes);
     if (identical) {
         return;
     }

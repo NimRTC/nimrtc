@@ -95,6 +95,23 @@ struct NIMRTC_API_STABLE VideoEncoderBackend {
     /// check whether the HW/driver/library is reachable on this device.
     std::function<bool(const VideoCodecConfig&)> available;
 
+    /// Optional human-readable reason why this backend is *not* available.
+    ///
+    /// The remote-desktop plan's B5 / B6 acceptance is "unsupported
+    /// combinations are **explicitly reported**, not silently ignored" — a
+    /// backend that exists in the table but not in the silicon (or whose
+    /// body is not implemented, or whose platform SDK is absent) must be
+    /// able to say *why*.
+    ///
+    /// When this is set and `available()` returns false, the caller may
+    /// invoke it to obtain the reason.  When it is empty (the default),
+    /// the backend simply reports "not available" without elaboration.
+    ///
+    /// The probe is allowed to consult `cfg` — a backend may be
+    /// unavailable for *this* configuration (e.g. a resolution the
+    /// hardware cannot do) rather than on this host at all.
+    std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
+
     /// Factory function — must return a fully-constructed (but not yet
     /// `open()`-ed) IVideoCodec instance. Selector owns lifetime.
     std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
@@ -149,6 +166,11 @@ struct NIMRTC_API_STABLE VideoDecoderBackend {
     std::function<std::shared_ptr<GpuBufferPool>(VideoCodecConfig)> pool_factory;
 
     std::function<bool(const VideoCodecConfig&)> available;
+
+    /// Mirrors `VideoEncoderBackend::unavailable_reason` — the optional
+    /// human-readable explanation of why this decoder is not usable.
+    std::function<std::string(const VideoCodecConfig&)> unavailable_reason;
+
     std::function<std::unique_ptr<IVideoCodec>(VideoCodecConfig)> create;
 };
 

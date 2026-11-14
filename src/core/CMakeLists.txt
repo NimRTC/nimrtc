@@ -194,8 +194,20 @@ endif()
 if(NIMRTC_MODULE_VIDEO_SINK)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_SINK=1)
 endif()
+# Remote-desktop plan D1: the video rate controller module's registrar entry
+# materialises only when the module is built.  Same shape as the
+# video_source / video_capture entries above.
+if(NIMRTC_MODULE_VIDEO_BITRATE_CONTROL)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_BITRATE_CONTROL=1)
+endif()
 if(NIMRTC_MODULE_VIDEO_PIPELINE)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VIDEO_PIPELINE=1)
+endif()
+# Remote-desktop plan Track G (G1 / G2): the remote-desktop input
+# module's registrar entry materialises only when the module is built.
+# Same shape as the video_source / video_capture entries above.
+if(NIMRTC_MODULE_RD_INPUT)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_RD_INPUT=1)
 endif()
 if(NIMRTC_MODULE_OPUS)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_OPUS=1)
@@ -213,6 +225,12 @@ endif()
 # H.265 entry above.
 if(NIMRTC_MODULE_AV1)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_AV1=1)
+endif()
+# Remote-desktop plan B11 — the VP9 codec module.  Same shape as the
+# AV1 entry above: the registrar entry materialises only when the module
+# is built.
+if(NIMRTC_MODULE_VP9)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_VP9=1)
 endif()
 # v1.2.0 (audio pipeline): the audio receive-pipeline module's own
 # visibility macro is set by the module itself (src/modules/audio_rx/

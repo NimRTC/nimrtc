@@ -162,6 +162,12 @@ void PluginRegistry::register_video_sink(std::string_view id,
     video_sink_.register_one(id, f);
 }
 
+void PluginRegistry::register_video_bitrate_controller(
+        std::string_view id,
+        const plugins::IVideoBitrateControllerFactory* f) {
+    video_bitrate_controller_.register_one(id, f);
+}
+
 void PluginRegistry::register_video_receiver(std::string_view id,
                                              const plugins::IVideoReceiverFactory* f) {
     video_receiver_.register_one(id, f);
@@ -203,6 +209,16 @@ void PluginRegistry::register_xr_report(
 void PluginRegistry::register_datachannel(std::string_view id,
                                           const plugins::IDataChannelFactory* f) {
     datachannel_.register_one(id, f);
+}
+
+// Remote-desktop plan G1: the control-channel slot.  The built-in
+// channel lives in `src/modules/rd_input/` and registers under
+// "control-channel"; the engine resolves it through
+// `EngineConfig::control_channel_name`.
+void PluginRegistry::register_control_channel(
+        std::string_view id,
+        const plugins::IControlChannelFactory* f) {
+    control_channel_.register_one(id, f);
 }
 
 void PluginRegistry::register_dtls_session(std::string_view id,

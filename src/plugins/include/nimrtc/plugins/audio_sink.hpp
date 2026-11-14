@@ -193,6 +193,32 @@ public:
      */
     virtual void set_on_playback_progress(AudioPlaybackCallback cb) noexcept = 0;
 
+    /**
+     * The number of frames *queued* for playback but not yet consumed.
+     *
+     * Additive (remote-desktop plan F3).  A host that drives the AEC
+     * reference needs to know how far behind the loudspeaker is: a
+     * large backlog means the reference the 3A sees is stale by that
+     * much, and the measured loop delay must include it.
+     *
+     * A sink that cannot report a backlog (a device that plays what it
+     * is given, synchronously) returns 0.
+     */
+    [[nodiscard]] virtual std::size_t queued_frames() const noexcept {
+        return 0;
+    }
+
+    /**
+     * The monotonic instant (microseconds) at which the device consumed
+     * its most recent block.
+     *
+     * Additive (remote-desktop plan F3).  0 when nothing has been
+     * played yet.
+     */
+    [[nodiscard]] virtual std::int64_t last_playback_us() const noexcept {
+        return 0;
+    }
+
     /** Counters. */
     [[nodiscard]] virtual AudioDeviceStats stats() const noexcept = 0;
 };

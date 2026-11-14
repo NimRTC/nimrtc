@@ -43,7 +43,36 @@ if(EXISTS "${_src_dir}/CMakeLists.txt")
     set(OPUS_ASSERTIONS "$<$<CONFIG:Debug>:OFF>$<$<NOT:$<CONFIG:Debug>>:ON>"
         CACHE BOOL "" FORCE)
 
+    # Upstream libopus registers its *own* test suite whenever the global
+    # BUILD_TESTING cache entry is ON — it ignores OPUS_BUILD_TESTING for
+    # that decision:
+    #
+    #     if(OPUS_BUILD_TESTING OR BUILD_TESTING)
+    #       set(OPUS_BUILD_TESTING ON)
+    #       set(BUILD_TESTING ON)
+    #     endif()
+    #     ...
+    #     if(BUILD_TESTING AND NOT BUILD_SHARED_LIBS)
+    #       add_test(NAME test_opus_decode ...)
+    #
+    # The add_test() calls therefore land in our ctest run even though we
+    # only want the library.  The test executables live in an
+    # EXCLUDE_FROM_ALL subdirectory, so they are never built and the
+    # tests fail with "executable not found".
+    #
+    # Shadow the cache entry with a normal (directory-scope) OFF for the
+    # duration of the add_subdirectory() call.  A normal variable takes
+    # precedence over the cache in that scope, so upstream sees
+    # BUILD_TESTING=OFF and skips the whole test block.  The original
+    # cache value is restored afterwards so the rest of the NimRTC tree
+    # still builds its own tests.
+    set(_nimrtc_saved_build_testing "${BUILD_TESTING}")
+    set(BUILD_TESTING OFF)
+
     add_subdirectory(${_src_dir} _nimrtc_libopus_build EXCLUDE_FROM_ALL)
+
+    set(BUILD_TESTING "${_nimrtc_saved_build_testing}")
+    unset(_nimrtc_saved_build_testing)
 
     # Upstream picks the runtime through the *variable*
     # CMAKE_MSVC_RUNTIME_LIBRARY, set in its own directory scope, so it

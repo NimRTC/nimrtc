@@ -416,6 +416,15 @@ struct NIMRTC_API_STABLE VideoSenderStats {
     /** NACKs that could not be answered (the packet had already left the
      *  retransmission cache) (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    /** Key-frame requests the limiter was offered. */
+    std::uint64_t keyframe_requests             = 0;
+    /** Key-frame requests the limiter granted (a key frame was produced). */
+    std::uint64_t keyframes_granted             = 0;
+    /** Key-frame requests the limiter deferred (held back, not dropped). */
+    std::uint64_t keyframes_deferred            = 0;
+    /** Key-frame requests the limiter rejected (the budget was spent). */
+    std::uint64_t keyframes_rejected            = 0;
 };
 
 /** Per-packet callback: invoked for each emitted RTP packet payload.

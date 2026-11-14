@@ -41,6 +41,7 @@
 // Stability classification: NIMRTC_API_STABLE (visual marker;
 // see ADR-015 / docs/plan/v0.13-plan.md).
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>

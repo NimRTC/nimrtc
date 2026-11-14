@@ -101,6 +101,39 @@ namespace nimrtc::plugins {
 // Configuration
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Scale mode
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief How a source picture is fitted into the target rectangle.
+ *
+ * Remote-desktop plan E7: the viewer scales the decoded picture to its
+ * window **honouring the aspect ratio**, so a 16:9 desktop shown in a
+ * 4:3 window is letterboxed rather than stretched.
+ *
+ * The three modes:
+ *
+ *   - `kLetterbox` — fit the whole source *inside* the target, keeping
+ *     the aspect ratio.  The result is smaller than the target in one
+ *     dimension and centred in the other; the uncovered area is black.
+ *   - `kCrop` — fill the whole target, keeping the aspect ratio.  The
+ *     overflow on one axis is cropped away.
+ *   - `kStretch` — fill the whole target, ignoring the aspect ratio.
+ *     The picture is distorted; the mode exists because some hosts want
+ *     it, not because it is correct.
+ */
+enum class NIMRTC_API_STABLE VideoScaleMode : std::uint8_t {
+    /** Fit inside the target, preserving the aspect ratio (bars on the
+     *  short axis). */
+    kLetterbox = 0,
+    /** Fill the target, preserving the aspect ratio (overflow cropped). */
+    kCrop      = 1,
+    /** Fill the target, ignoring the aspect ratio (the picture is
+     *  distorted). */
+    kStretch   = 2,
+};
+
 /** Per-sink configuration. */
 struct NIMRTC_API_STABLE VideoSinkConfig {
     /** Target render width. 0 = use frame's native width. */
@@ -122,6 +155,13 @@ struct NIMRTC_API_STABLE VideoSinkConfig {
     /** Human-readable sink identifier (e.g. "preview_window",
      *  "headless_recorder").  Used for logging. */
     std::string_view label;
+
+    /** How the source picture is fitted into `width` x `height`.
+     *
+     *  Remote-desktop plan E7: the engine resolves a "fit the picture
+     *  into the window, preserving the aspect ratio" request into this
+     *  configuration, so a sink never has to guess the policy. */
+    VideoScaleMode scale_mode = VideoScaleMode::kLetterbox;
 
     // ---- Presentation (remote-desktop plan E2 / E5) -----------------------
     //
@@ -290,6 +330,37 @@ public:
 
     /** Current sink configuration (for diagnostics / logs). */
     virtual VideoSinkConfig config() const noexcept = 0;
+
+    /** Replace the sink's configuration while it is live.
+     *
+     *  Remote-desktop plan E7: the presentation geometry (the target
+     *  size and the aspect policy) is a *runtime* property — a viewer
+     *  resizes the window, and the picture must follow.  Without this
+     *  seam the engine could only pass the presentation to a sink at
+     *  creation time, so a resize would need the whole video pipeline
+     *  to be torn down and rebuilt.
+     *
+     *  The default implementation accepts the call and does nothing, so
+     *  a sink that does not care about the configuration (a headless
+     *  counter, a recorder that stores the native frames) keeps working
+     *  unchanged.  A sink that *does* care — a presentation renderer,
+     *  which has to resize its swap chain or its drawable — overrides
+     *  this.
+     *
+     *  Thread safety: the engine calls this from its own thread while
+     *  the sink may be presenting on its presenter thread, so an
+     *  implementation must make the swap safe (a mutex, or an atomic
+     *  pointer to an immutable configuration).
+     *
+     *  @param cfg  The new configuration.  The sink keeps it, and
+     *              `config()` reports it afterwards.
+     *  @return kOk on success; an error code when the configuration
+     *          cannot be applied (e.g. a target the renderer cannot
+     *          create). */
+    virtual Status set_config(VideoSinkConfig cfg) noexcept {
+        (void)cfg;
+        return kOk;
+    }
 
     // ---- Most-recently-rendered-frame query (ADR-017, v1.0.0) ----
     // Default = nullptr (sink doesn't track frame metadata).

@@ -90,11 +90,24 @@ class NIMRTC_API_STABLE IVideoCodecFactory;
 class NIMRTC_API_STABLE IVideoSourceFactory;
 class NIMRTC_API_STABLE IVideoCaptureFactory;
 class NIMRTC_API_STABLE IVideoSinkFactory;
+// Remote-desktop plan D1: the video rate controller seam.  The
+// controller owns the resolution / frame-rate / bitrate ladder; the
+// engine drives it and pushes the resulting level into the encoder's
+// parameter set.  Forward-declared like the other factory types so the
+// registry's TypedRegistry<> field can reference it without pulling
+// the seam header into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IVideoBitrateControllerFactory;
 class NIMRTC_API_STABLE IVideoReceiverFactory;
 class NIMRTC_API_STABLE IVideoSenderFactory;
 class NIMRTC_API_STABLE IBweFactory;
 class NIMRTC_API_STABLE ISchedulerFactory;
 class NIMRTC_API_STABLE IDataChannelFactory;
+// Remote-desktop plan G1: the control-channel seam.  The engine drives
+// the control plane through this interface and never includes the
+// `rd_input` module's headers (Layout Invariant 4).  Forward-declared
+// like the other factory types so the registry's TypedRegistry<> field
+// can reference it without pulling the seam header into core.
+class NIMRTC_API_STABLE IControlChannelFactory;
 // v1.2.0 M1 (F2): the receiver-side network-feedback collector seam.
 // Forward-declared like the other factory types so the registry's
 // TypedRegistry<> field can reference it without pulling the seam header
@@ -185,6 +198,11 @@ namespace h265    { void register_default_plugins() noexcept; }
 #ifdef NIMRTC_HAS_AV1
 namespace av1     { void register_default_plugins() noexcept; }
 #endif
+// Remote-desktop plan B11: the VP9 codec module (stub decoder + the
+// optional vendored libvpx encoder).
+#ifdef NIMRTC_HAS_VP9
+namespace vp9     { void register_default_plugins() noexcept; }
+#endif
 #ifdef NIMRTC_HAS_VIDEO_SOURCE
 namespace video_source    { void register_default_plugins() noexcept; }
 #endif
@@ -192,8 +210,19 @@ namespace video_source    { void register_default_plugins() noexcept; }
 #ifdef NIMRTC_HAS_VIDEO_CAPTURE
 namespace video_capture   { void register_default_plugins() noexcept; }
 #endif
+// Remote-desktop plan D1: the video rate controller module.
+#ifdef NIMRTC_HAS_VIDEO_BITRATE_CONTROL
+namespace video_bitrate_control { void register_default_plugins() noexcept; }
+#endif
 #ifdef NIMRTC_HAS_VIDEO_PIPELINE
 namespace video_pipeline  { void register_default_plugins() noexcept; }
+#endif
+// Remote-desktop plan Track G (G1 / G2): the remote-desktop input
+// module.  Its entry point populates the registry's control-channel
+// slot (register_control_channel) so `core::register_all_default_plugins()`
+// can wire the built-in control channel through the unified table.
+#ifdef NIMRTC_HAS_RD_INPUT
+namespace rd_input        { void register_default_plugins() noexcept; }
 #endif
 #ifdef NIMRTC_HAS_VIDEO_SINK
 namespace video_sink      { void register_default_plugins() noexcept; }
@@ -567,6 +596,15 @@ public:
     // -- Video Codec --------------------------------------------------------
     void register_video_codec(std::string_view id,
                               const plugins::IVideoCodecFactory* f);
+    /// Remove a video-codec factory by id.  Returns true if a matching
+    /// entry was removed.  Test-only helper; the production path always
+    /// registers through static-init registration and never removes a
+    /// factory at runtime.  It exists so a TU-scope fake codec (the
+    /// remote-desktop plan B1 split-seam tests register one) does not
+    /// leak into later tests in the same process.
+    bool unregister_video_codec(std::string_view id) {
+        return video_codec_.unregister_one(id);
+    }
     [[nodiscard]] const plugins::IVideoCodecFactory*
     get_video_codec(std::string_view id) const {
         return video_codec_.get(id);
@@ -606,6 +644,32 @@ public:
     }
     [[nodiscard]] std::vector<std::string> list_video_sinks() const {
         return video_sink_.list_ids();
+    }
+
+    // -- Video bitrate controller (remote-desktop plan D1) ---------------
+    //
+    // Typed slot for `plugins::IVideoBitrateControllerFactory*` — the
+    // video rate controller that owns the resolution / frame-rate /
+    // bitrate ladder.  The built-in implementation lives in
+    // `src/modules/video_bitrate_control/` and registers under the id
+    // "video-bitrate-control"; the engine resolves it through
+    // `EngineConfig::video_bitrate_controller_name`.
+    void register_video_bitrate_controller(
+        std::string_view id,
+        const plugins::IVideoBitrateControllerFactory* f);
+    /// Remove a video-bitrate-controller factory by id.  Returns true if
+    /// a matching entry was removed.  Test-only helper; the production
+    /// path always registers through static-init registration.
+    bool unregister_video_bitrate_controller(std::string_view id) {
+        return video_bitrate_controller_.unregister_one(id);
+    }
+    [[nodiscard]] const plugins::IVideoBitrateControllerFactory*
+    get_video_bitrate_controller(std::string_view id) const {
+        return video_bitrate_controller_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string>
+    list_video_bitrate_controllers() const {
+        return video_bitrate_controller_.list_ids();
     }
 
     // -- Video Receiver -----------------------------------------------------
@@ -715,6 +779,35 @@ public:
     }
     [[nodiscard]] std::vector<std::string> list_datachannels() const {
         return datachannel_.list_ids();
+    }
+
+    // -- Control channel (remote-desktop plan G1 / G2) ------------------
+    //
+    // Typed slot for `plugins::IControlChannelFactory*` — the
+    // NimRTC-native control channel the engine drives for the
+    // remote-desktop control plane.  The channel is **message
+    // oriented**: the engine hands it a whole message and it hands
+    // back whole messages; the framing that makes that true over a
+    // byte transport lives in the implementation (the `rd_input`
+    // module's `ControlChannel`).
+    //
+    // The built-in implementation lives in `src/modules/rd_input/` and
+    // registers under the id "control-channel"; the engine resolves it
+    // through `EngineConfig::control_channel_name`.
+    void register_control_channel(std::string_view id,
+                                  const plugins::IControlChannelFactory* f);
+    /// Remove a control-channel factory by id.  Returns true if a
+    /// matching entry was removed.  Test-only helper; the production
+    /// path always registers through static-init registration.
+    bool unregister_control_channel(std::string_view id) {
+        return control_channel_.unregister_one(id);
+    }
+    [[nodiscard]] const plugins::IControlChannelFactory*
+    get_control_channel(std::string_view id) const {
+        return control_channel_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_control_channels() const {
+        return control_channel_.list_ids();
     }
 
     // -- DTLS session (Transport PAL Slice 4 / Slice 8 hook) --------------
@@ -875,6 +968,10 @@ private:
     // selection and dirty-rect metadata.
     TypedRegistry<plugins::IVideoCaptureFactory> video_capture_{"video-capture"};
     TypedRegistry<plugins::IVideoSinkFactory>    video_sink_{"video-sink"};
+    // Remote-desktop plan D1: the video rate controller slot.  The
+    // built-in ladder controller registers under "video-bitrate-control".
+    TypedRegistry<plugins::IVideoBitrateControllerFactory>
+                                              video_bitrate_controller_{"video-bitrate-controller"};
     TypedRegistry<plugins::IVideoReceiverFactory> video_receiver_{"video-receiver"};
     TypedRegistry<plugins::IVideoSenderFactory>   video_sender_{"video-sender"};
     TypedRegistry<plugins::IBweFactory>           bwe_{"bwe"};
@@ -890,6 +987,10 @@ private:
     // DataChannel P2 typed slot — see register_datachannel() above for
     // the rationale.
     TypedRegistry<plugins::IDataChannelFactory>   datachannel_{"datachannel"};
+    // Remote-desktop plan G1: the control-channel slot.  The built-in
+    // channel registers under "control-channel"; the engine resolves it
+    // through `EngineConfig::control_channel_name`.
+    TypedRegistry<plugins::IControlChannelFactory> control_channel_{"control-channel"};
     // Transport PAL Slice 8 (v0.10.2) ??typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
     // `register_default_plugins()` publishes a single factory into
@@ -1119,6 +1220,16 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kVideoSink,      \
             #id, factory_ptr }
 
+/** Register a video rate-controller plugin by ID and factory pointer
+ *  (remote-desktop plan D1). */
+#define NIMRTC_REGISTER_VIDEO_BITRATE_CONTROLLER(id, factory_ptr)        \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_video_bitrate_controller_){             \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kVideoBitrateController, \
+            #id, factory_ptr }
+
 /** Register a video receiver pipeline plugin by ID and factory pointer. */
 #define NIMRTC_REGISTER_VIDEO_RECEIVER(id, factory_ptr)                  \
     NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
@@ -1186,6 +1297,19 @@ private:
         NIMRTC_UNIQUE_NAME(_reg_datachannel_){                           \
             ::nimrtc::core::PluginRegistry::instance(),                \
             ::nimrtc::core::detail::Registrar::Category::kDataChannel,   \
+            #id, factory_ptr }
+
+/** Register a control-channel plugin by ID and factory pointer.
+ *  Remote-desktop plan G1 — typed slot for
+ *  `plugins::IControlChannelFactory*`.
+ *
+ *  Usage: NIMRTC_REGISTER_CONTROL_CHANNEL(control_channel, &factory); */
+#define NIMRTC_REGISTER_CONTROL_CHANNEL(id, factory_ptr)                \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_control_channel_){                     \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kControlChannel, \
             #id, factory_ptr }
 
 /** Register a DTLS session-factory plugin by ID and factory pointer.
@@ -1312,6 +1436,11 @@ public:
         // own category because a telephone-event payload is not audio.
         kDtmf,
         kVideoSource, kVideoSink, kVideoReceiver, kVideoSender,
+        // Remote-desktop plan D1: the video rate controller seam.  It
+        // has its own category because the controller is not a codec,
+        // a source or a sink: it decides what the encoder should be
+        // producing.
+        kVideoBitrateController,
         // Remote-desktop plan A1: the capture-device seam.  It has its
         // own category because a capture device is not a frame source:
         // it enumerates devices and negotiates a format.
@@ -1325,6 +1454,9 @@ public:
         kXrReport,
         // P2: DataChannel typed factory slot ??see register_datachannel().
         kDataChannel,
+        // Remote-desktop plan G1: the control-channel typed factory slot
+        // — see register_control_channel().
+        kControlChannel,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
         // DTLS / SCTP / raw_udp / transport-stack seams. See the
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
@@ -1403,6 +1535,10 @@ public:
                 reg.register_video_sink(id,
                     static_cast<const plugins::IVideoSinkFactory*>(factory));
                 break;
+            case Category::kVideoBitrateController:
+                reg.register_video_bitrate_controller(id,
+                    static_cast<const plugins::IVideoBitrateControllerFactory*>(factory));
+                break;
             case Category::kVideoReceiver:
                 reg.register_video_receiver(id,
                     static_cast<const plugins::IVideoReceiverFactory*>(factory));
@@ -1430,6 +1566,10 @@ public:
             case Category::kDataChannel:
                 reg.register_datachannel(id,
                     static_cast<const plugins::IDataChannelFactory*>(factory));
+                break;
+            case Category::kControlChannel:
+                reg.register_control_channel(id,
+                    static_cast<const plugins::IControlChannelFactory*>(factory));
                 break;
             case Category::kDtlsSession:
                 reg.register_dtls_session(id,

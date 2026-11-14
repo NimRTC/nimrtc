@@ -98,6 +98,12 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     // the H.265 entry above.
     &nimrtc::av1::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_VP9
+    // Remote-desktop plan B11: the VP9 codec module.  It registers the
+    // "vp9" codec factory and populates the VP9 backend table (the
+    // optional vendored libvpx row plus the stub).
+    &nimrtc::vp9::register_default_plugins,
+#endif
     &nimrtc::ice::register_default_plugins,
     &nimrtc::jb::register_default_plugins,
 #ifdef NIMRTC_HAS_NET_FEEDBACK
@@ -138,6 +144,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
 #ifdef NIMRTC_HAS_VIDEO_PIPELINE
     &nimrtc::video_pipeline::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_RD_INPUT
+    // Remote-desktop plan Track G (G1 / G2): the remote-desktop input
+    // module.  Its entry point populates the registry's control-channel
+    // slot (register_control_channel) under the id "control-channel", so
+    // the engine can resolve the control channel through the seam
+    // without naming a concrete module (Layout Invariant 4).
+    &nimrtc::rd_input::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_VIDEO_SINK
     &nimrtc::video_sink::register_default_plugins,
 #endif
@@ -151,6 +165,15 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     // backend through the seam without naming a concrete module
     // (Layout Invariant 4).
     &nimrtc::video_capture::register_default_plugins,
+#endif
+#ifdef NIMRTC_HAS_VIDEO_BITRATE_CONTROL
+    // Remote-desktop plan D1: the video rate controller.  Its entry
+    // populates the registry's video-bitrate-controller slot
+    // (register_video_bitrate_controller) under the id
+    // "video-bitrate-control", so the engine can resolve the ladder
+    // through the seam without naming a concrete module
+    // (Layout Invariant 4).
+    &nimrtc::video_bitrate_control::register_default_plugins,
 #endif
     // Transport PAL Slice 8 (v0.10.2): DTLS / SCTP / raw_udp /
     // transport-stack default-plugins entries. These mirror the

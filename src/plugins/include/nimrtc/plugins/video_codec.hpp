@@ -55,10 +55,15 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <optional>
 #include <string_view>
 
 #include <nimrtc/core/bytes.hpp>
 #include <nimrtc/video_frame/frame.hpp>  // VideoFrame / EncodedVideoFrame — single source of truth
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace nimrtc::plugins {
 
@@ -305,6 +310,25 @@ struct NIMRTC_API_STABLE VideoColorDescription {
 // Encoder parameter set (remote-desktop plan B12)
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief A rectangle in *source* pixels.
+ *
+ * The unit is the pixel of the **captured** surface, before any scaling
+ * the pipeline may apply — the same convention `plugins::CaptureRegion`
+ * uses, so a capture rectangle can be handed to the encoder unchanged.
+ */
+struct NIMRTC_API_STABLE VideoRegion {
+    std::uint32_t x      = 0;
+    std::uint32_t y      = 0;
+    std::uint32_t width  = 0;
+    std::uint32_t height = 0;
+
+    /** True iff the rectangle covers no pixels at all. */
+    [[nodiscard]] bool empty() const noexcept {
+        return width == 0 || height == 0;
+    }
+};
+
 /** The *one* parameter set the engine computes and pushes to the encoder.
  *
  *  ## Why this struct exists
@@ -386,12 +410,110 @@ struct NIMRTC_API_STABLE VideoEncoderParams {
      *  know. */
     VideoColorDescription color;
 
+    /**
+     * @brief The region of higher fidelity (remote-desktop plan C4).
+     *
+     * The ROI is the sub-rectangle the encoder should code at higher
+     * fidelity — the cursor, the region the operator is looking at, the
+     * window being dragged.  ADR-022 is explicit that the ROI is *not*
+     * the capture region: the capture region says *what* to capture, the
+     * ROI says *where to spend the bits*.
+     *
+     * The rectangle is in **output (encoder) pixels** — the engine scales
+     * the capture-space ROI when it computes the parameter set, so the
+     * encoder never has to know the capture resolution.  That is what
+     * makes the ROI survive a ladder resolution change: the engine
+     * rescales it, the encoder just sees the rectangle it must honour.
+     *
+     * `std::nullopt` means "no ROI" — the encoder codes the whole frame
+     * at one quality, which is the correct value for camera content and
+     * for a screen whose whole picture matters equally.
+     */
+    std::optional<VideoRegion> roi;
+
     /** True iff `qp` carries a meaningful value (i.e. != 255). */
     [[nodiscard]] bool has_qp() const noexcept { return qp != 255; }
 
     /** True iff the geometry is set (non-zero width and height). */
     [[nodiscard]] bool has_geometry() const noexcept {
         return width != 0 && height != 0;
+    }
+
+    /** True iff a region of higher fidelity was requested. */
+    [[nodiscard]] bool has_roi() const noexcept { return roi.has_value(); }
+};
+
+// ---------------------------------------------------------------------------
+// Incremental (dirty-rect) encode — remote-desktop plan B9
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief How the changed region must be signalled to the peer.
+ *
+ * The sender has to tell the peer *which* region changed, otherwise the
+ * peer cannot invalidate it.  Two honest options exist:
+ *
+ *  - `kRegionRefresh` — a region-scoped refresh notification (the
+ *    NimRTC RTCP "region refresh" message; see
+ *    `nimrtc::video_rtcp_feedback::build_region_refresh`).  The peer
+ *    learns the region and refreshes exactly that area.
+ *  - `kFullKeyframe` — the codec cannot express a region, so the sender
+ *    falls back to a full key frame and says so.
+ */
+enum class NIMRTC_API_STABLE VideoRegionSignalling : std::uint8_t {
+    kNone          = 0,  ///< do not signal the region
+    kRegionRefresh = 1,  ///< signal the region (region-refresh message)
+    kFullKeyframe  = 2,  ///< fall back to a full key frame
+};
+
+/**
+ * @brief An opt-in request to encode only the changed region of a frame.
+ *
+ * ## What this is for
+ *
+ * Remote-desktop plan **B9**: "the encoder encodes only the changed
+ * region and signals the region to the peer (a region-invalidation /
+ * loss-region refresh mechanism)".
+ *
+ * This is a **screen-content-specific optimisation** and is explicitly
+ * *not* part of the generic video path: the request is inert until a
+ * host asks for it, and the encoder-side capability query
+ * (`IVideoEncoder::supports_incremental_encode()`) says whether the
+ * codec can honour it at all.
+ *
+ * ## The contract
+ *
+ *  - `enabled == false` means "no incremental request" — the encoder
+ *    codes the whole frame, exactly as before.  This is the default, so
+ *    a codec that ignores the request entirely behaves unchanged.
+ *  - `full_frame == true` means "everything changed" — the request
+ *    carries no information and the encoder must code the whole frame.
+ *  - `regions` lists the changed areas, in source pixels.
+ *  - `allow_skip_unchanged` says whether the encoder may *skip* the
+ *    unchanged area (true) or must still code it (false — some codecs
+ *    can code a region without skipping the rest, which is a
+ *    different, cheaper win).
+ *  - `signalling` says how the region must reach the peer.
+ */
+struct NIMRTC_API_STABLE VideoIncrementalEncodeRequest {
+    /** True iff the request is meaningful. Default = false. */
+    bool enabled = false;
+
+    /** True iff the whole frame changed (no incremental benefit). */
+    bool full_frame = true;
+
+    /** The changed regions, in source pixels. */
+    std::vector<VideoRegion> regions;
+
+    /** True iff the encoder may skip the unchanged area. */
+    bool allow_skip_unchanged = false;
+
+    /** How the changed region is signalled to the peer. */
+    VideoRegionSignalling signalling = VideoRegionSignalling::kRegionRefresh;
+
+    /** True iff the request asks for an incremental encode of a sub-region. */
+    [[nodiscard]] bool is_incremental() const noexcept {
+        return enabled && !full_frame && !regions.empty();
     }
 };
 
@@ -437,7 +559,325 @@ struct NIMRTC_API_STABLE VideoCodecStats {
 };
 
 // ---------------------------------------------------------------------------
-// IVideoCodec
+// Codec capabilities (remote-desktop plan B1)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief What a codec implementation can actually do.
+ *
+ * ## Why this exists
+ *
+ * The plan's B1 row asks for a **capability query** on the split codec
+ * seam: "supported profiles, resolutions, pixel formats, fps, max
+ * bitrate, zero-copy".
+ *
+ * The reason is not politeness.  Before the query existed, a host
+ * asking for a geometry the codec cannot handle discovered the problem
+ * at the **first frame** -- the encoder returned an error, the frame was
+ * dropped, and the session looked like a network problem.  B1's
+ * acceptance criterion says it must be caught at `open()` instead:
+ *
+ *   > "the engine rejects an unsupported resolution at `open()` with a
+ *   >  clear error instead of failing at the first frame"
+ *
+ * The query is what makes that possible.
+ *
+ * ## The shape
+ *
+ * The capability struct describes the *limits*, not the configuration.
+ * A codec that can do 4K at 60 fps and 1080p at 120 fps reports both
+ * the maximum resolution and the maximum frame rate; it does not claim
+ * that every combination works.
+ */
+struct NIMRTC_API_STABLE VideoCodecCapabilities {
+    /** The pixel formats the codec accepts as input / produces as output. */
+    std::vector<VideoPixelFormat> pixel_formats{};
+
+    /** The codec profiles the implementation supports.
+     *
+     *  The values are codec-family specific (H.264: "baseline",
+     *  "main", "high"; AV1: "main", "high"; ...).  An empty list means
+     *  "the implementation does not enumerate its profiles", which is
+     *  the honest answer for a stub. */
+    std::vector<std::string> profiles{};
+
+    /** The largest width the codec accepts, in pixels (0 = unlimited). */
+    std::uint32_t max_width = 0;
+    /** The largest height the codec accepts, in pixels (0 = unlimited). */
+    std::uint32_t max_height = 0;
+    /** The smallest width the codec accepts, in pixels (0 = unlimited). */
+    std::uint32_t min_width = 0;
+    /** The smallest height the codec accepts, in pixels (0 = unlimited). */
+    std::uint32_t min_height = 0;
+
+    /** The largest frame rate the codec accepts (0 = unlimited). */
+    std::uint32_t max_fps = 0;
+
+    /** The largest bitrate the codec accepts, in bits per second
+     *  (0 = unlimited / the codec has no ceiling). */
+    std::uint32_t max_bitrate_bps = 0;
+
+    /** True iff the codec can consume a GPU handle without staging. */
+    bool zero_copy_encode = false;
+    /** True iff the codec can produce a GPU surface. */
+    bool zero_copy_decode = false;
+
+    /**
+     * @brief True iff the codec accepts the given geometry.
+     *
+     * A dimension of 0 in the *request* means "unconstrained" (the host
+     * did not pin it), and a dimension of 0 in the *capability* means
+     * "this codec has no limit in that direction".
+     */
+    [[nodiscard]] bool accepts_size(std::uint32_t width,
+                                    std::uint32_t height) const noexcept {
+        if (width == 0 || height == 0) return false;
+        if (max_width != 0 && width > max_width) return false;
+        if (max_height != 0 && height > max_height) return false;
+        if (min_width != 0 && width < min_width) return false;
+        if (min_height != 0 && height < min_height) return false;
+        return true;
+    }
+
+    /** True iff the codec accepts the given frame rate. */
+    [[nodiscard]] bool accepts_fps(std::uint32_t fps) const noexcept {
+        if (fps == 0) return true;
+        return max_fps == 0 || fps <= max_fps;
+    }
+
+    /** True iff the codec accepts the given bitrate. */
+    [[nodiscard]] bool accepts_bitrate(std::uint32_t bps) const noexcept {
+        if (bps == 0) return true;
+        return max_bitrate_bps == 0 || bps <= max_bitrate_bps;
+    }
+
+    /** True iff the codec accepts the given pixel format. */
+    [[nodiscard]] bool accepts_pixel_format(VideoPixelFormat fmt) const noexcept {
+        if (pixel_formats.empty()) return true;   // not enumerated
+        for (const auto f : pixel_formats) {
+            if (f == fmt) return true;
+        }
+        return false;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// IVideoEncoder
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The encode half of the codec seam.
+ *
+ * ## Why the split (plan B1)
+ *
+ * The combined `IVideoCodec` interface has a shape that does not match
+ * reality.  A hardware encoder (NVENC) and a hardware decoder (NVDEC)
+ * are *different libraries on different devices*; a composite wrapper
+ * was needed to present them as one object.  The same is true for
+ * asymmetric deployments: a camera gateway encodes but never decodes, a
+ * viewer decodes but never encodes.
+ *
+ * Splitting the seam lets each side be provided by the thing that
+ * actually implements it, and it removes the need for a composite.
+ *
+ * ## The compatibility promise
+ *
+ * `IVideoCodec` **stays**.  It is now a deprecated compatibility shim
+ * that derives from both halves, so existing code that implements or
+ * consumes `IVideoCodec` keeps compiling unchanged for one MINOR
+ * cycle (ADR-015 Decision 3).
+ */
+class NIMRTC_API_STABLE IVideoEncoder : public virtual IPlugin {
+public:
+    /** The codec family this encoder produces. */
+    virtual VideoCodecKind kind() const noexcept = 0;
+
+    /** Human-readable codec name (e.g. "h264"). */
+    virtual std::string_view codec_name() const noexcept = 0;
+
+    /**
+     * @brief Encode one raw frame to compressed bitstream.
+     *
+     * @param raw            Raw frame (must remain valid for the call).
+     * @param output         Caller-owned buffer for compressed output.
+     * @param output_capacity Capacity of @p output in bytes.
+     * @param encoded_out    On success, populated with the encoded frame.
+     * @return kOk on success; error code on failure.
+     */
+    virtual Status encode(const VideoFrame& raw,
+                          std::uint8_t* output,
+                          std::size_t   output_capacity,
+                          EncodedVideoFrame& encoded_out) noexcept = 0;
+
+    /** Force the encoder to emit a keyframe on the next encode() call.
+     *  Used by PLI / FIR feedback handlers. */
+    virtual Status force_keyframe() noexcept = 0;
+
+    /**
+     * @brief What this encoder can do (plan B1).
+     *
+     * The default implementation returns an *unconstrained* capability
+     * set: it accepts every size, frame rate, bitrate and pixel format.
+     * A codec that has real limits overrides this -- and an encoder
+     * that does not know its own limits is the reason the plan asks
+     * for the query at all.
+     */
+    virtual VideoCodecCapabilities capabilities() const noexcept {
+        return {};
+    }
+
+    /** True iff this encoder can consume a GPU handle directly. */
+    virtual bool supports_zero_copy_encode() const noexcept { return false; }
+
+    /** Encode one GPU-handle frame.  The caller MUST keep @p gpu alive
+     *  until this returns.  Default: kErrUnsupported. */
+    virtual Status encode_zero_copy(const GpuBuffer& gpu,
+                                    EncodedVideoFrame& encoded_out) noexcept {
+        (void)gpu; (void)encoded_out;
+        return kErrUnsupported;
+    }
+
+    /** The pool this encoder acquires its input surfaces from. */
+    virtual std::shared_ptr<GpuBufferPool> input_pool() const noexcept {
+        return nullptr;
+    }
+
+    /**
+     * @brief Push the encoder's parameter set (remote-desktop plan B12).
+     *
+     * The engine computes the whole set in one place and pushes it; the
+     * encoder is passive (it never asks a rate controller for anything).
+     */
+    virtual Status set_params(const VideoEncoderParams& params) noexcept = 0;
+
+    /** The encoder's current parameter set. */
+    virtual VideoEncoderParams params() const noexcept = 0;
+
+    // ---- Incremental (dirty-rect) encode — remote-desktop plan B9 ---------
+    //
+    // The request is **opt-in** and the capability query defaults to
+    // **false**, so a third-party codec that knows nothing about this
+    // compiles unchanged and behaves unchanged: it keeps coding whole
+    // frames, and the sender's fallback path reports it.
+
+    /**
+     * @brief True iff this encoder can code only the changed region.
+     *
+     *  A codec that cannot express a region answers false, and the
+     *  sender falls back to a full key frame — and *says so* through its
+     *  fallback counter (plan B9: "the mechanism is disabled when the
+     *  codec does not support it and the fallback is reported").
+     */
+    virtual bool supports_incremental_encode() const noexcept { return false; }
+
+    /**
+     * @brief Push the incremental-encode request for the next frame.
+     *
+     *  The request describes which region(s) of the next frame changed
+     *  and whether the encoder may skip the unchanged area.  The default
+     *  implementation returns `kErrUnsupported`, which is the honest
+     *  answer for a codec that does not implement the mechanism.
+     */
+    virtual Status set_incremental_request(
+            const VideoIncrementalEncodeRequest& request) noexcept {
+        (void)request;
+        return kErrUnsupported;
+    }
+
+    /** The incremental-encode request currently in force. */
+    virtual VideoIncrementalEncodeRequest incremental_request() const noexcept {
+        return {};
+    }
+
+    /**
+     * @brief The region the encoder actually coded in the last encode().
+     *
+     *  A codec that supports incremental encode reports the region it
+     *  coded, so the sender can verify that the encoded area is the one
+     *  that was requested (and can report a mismatch instead of
+     *  pretending).
+     */
+    virtual VideoRegion last_encoded_region() const noexcept { return {}; }
+
+    /** Snapshot of the encoder's statistics. */
+    virtual VideoCodecStats stats() const noexcept = 0;
+
+    /** The identifier of the backend this encoder runs on. */
+    virtual std::string_view backend_id() const noexcept { return "unknown"; }
+
+    /** True iff this encoder runs on a hardware accelerator. */
+    virtual bool is_hardware_accelerated() const noexcept { return false; }
+};
+
+// ---------------------------------------------------------------------------
+// IVideoDecoder
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The decode half of the codec seam.
+ *
+ * See `IVideoEncoder` for why the seam is split.
+ */
+class NIMRTC_API_STABLE IVideoDecoder : public virtual IPlugin {
+public:
+    /** The codec family this decoder consumes. */
+    virtual VideoCodecKind kind() const noexcept = 0;
+
+    /** Human-readable codec name (e.g. "h264"). */
+    virtual std::string_view codec_name() const noexcept = 0;
+
+    /**
+     * @brief Decode one compressed frame to raw pixels.
+     *
+     * @param encoded        Compressed payload (codec-specific format).
+     * @param raw_out        Caller-owned raw frame descriptor.
+     * @param output_buffers Pre-allocated pixel buffers, or nullptr to
+     *                       let the codec allocate its own (which is
+     *                       what the engine does, because only the
+     *                       codec knows the native geometry).
+     * @return kOk on success; error code on failure.
+     */
+    virtual Status decode(const EncodedVideoFrame& encoded,
+                          VideoFrame& raw_out,
+                          std::uint8_t* const* output_buffers) noexcept = 0;
+
+    /** True iff this decoder can produce a GPU surface. */
+    virtual bool supports_zero_copy_decode() const noexcept { return false; }
+
+    /** Decode one bitstream frame into a GPU surface.  Default:
+     *  kErrUnsupported. */
+    virtual Status decode_zero_copy(const EncodedVideoFrame& encoded,
+                                    GpuBuffer& out_surface) noexcept {
+        (void)encoded; (void)out_surface;
+        return kErrUnsupported;
+    }
+
+    /** The pool this decoder fills its output surfaces from. */
+    virtual std::shared_ptr<GpuBufferPool> output_pool() const noexcept {
+        return nullptr;
+    }
+
+    /**
+     * @brief What this decoder can do (plan B1).
+     *
+     * The default implementation returns an unconstrained capability set.
+     */
+    virtual VideoCodecCapabilities capabilities() const noexcept {
+        return {};
+    }
+
+    /** Snapshot of the decoder's statistics. */
+    virtual VideoCodecStats stats() const noexcept = 0;
+
+    /** The identifier of the backend this decoder runs on. */
+    virtual std::string_view backend_id() const noexcept { return "unknown"; }
+
+    /** True iff this decoder runs on a hardware accelerator. */
+    virtual bool is_hardware_accelerated() const noexcept { return false; }
+};
+
+// ---------------------------------------------------------------------------
+// IVideoCodec — the deprecated compatibility shim (plan B1)
 // ---------------------------------------------------------------------------
 
 /**
@@ -446,8 +886,32 @@ struct NIMRTC_API_STABLE VideoCodecStats {
  * One `IVideoCodec` instance owns the encoder state and decoder state for
  * one peer-connection / one stream. Thread-safety: NOT thread-safe; caller
  * must serialize encode() and decode() calls (engine does this).
+ *
+ * @deprecated This is the **compatibility shim** the plan's B1 row
+ * requires: "IVideoCodec stays as a deprecated compatibility shim for one
+ * MINOR cycle (ADR-015 Decision 3)".  New code should use
+ * `IVideoEncoder` and `IVideoDecoder`, which describe the two directions
+ * separately -- the shape the hardware reality has, where the encoder
+ * (NVENC) and the decoder (NVDEC) are different devices.
+ *
+ * The class derives from **both** halves, so:
+ *
+ *   - existing code that *implements* `IVideoCodec` keeps compiling --
+ *     it simply satisfies the two split interfaces at once;
+ *   - existing code that *consumes* `IVideoCodec` keeps compiling --
+ *     `IVideoCodec` is still an `IVideoEncoder` and an
+ *     `IVideoDecoder`.
+ *
+ * The deprecation is a *marker*, not a removal: nothing in the tree
+ * breaks, and a host that wants to migrate has a MINOR cycle to do it.
  */
-class NIMRTC_API_STABLE IVideoCodec : public IPlugin {
+class NIMRTC_API_STABLE [[deprecated(
+    "IVideoCodec is the deprecated compatibility shim for the split codec "
+    "seam (remote-desktop plan B1, ADR-015 Decision 3).  Use "
+    "IVideoEncoder and IVideoDecoder instead; this class will be removed "
+    "after one MINOR cycle.")]] IVideoCodec
+    : public IVideoEncoder,
+      public IVideoDecoder {
 public:
     // ---- Direction flags (one instance may support both) -------------------
 
@@ -485,6 +949,23 @@ public:
     virtual std::string_view codec_name() const noexcept = 0;
 
     // ---- Encode / decode ---------------------------------------------------
+
+    /**
+     * @brief What this codec can do (plan B1).
+     *
+     * The declaration is repeated here on purpose.  Both halves of the
+     * split declare `capabilities()`, and a class that inherits from
+     * both without repeating the declaration would have an *ambiguous*
+     * `capabilities()` — the name would be found in two different base
+     * sub-objects and the call would not compile.
+     *
+     * The repeated declaration resolves the ambiguity in favour of this
+     * class, and it becomes the single override point for a combined
+     * encoder + decoder.
+     */
+    virtual VideoCodecCapabilities capabilities() const noexcept {
+        return {};
+    }
 
     /**
      * @brief Encode one raw frame to compressed bitstream.
@@ -720,6 +1201,57 @@ public:
     IVideoCodec* create(VideoCodecConfig cfg) const override {
         return new T(std::move(cfg));
     }
+};
+
+// ---------------------------------------------------------------------------
+// The split factories (plan B1)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The factory for the *encode* half of the codec seam.
+ *
+ * The split seam (plan B1) is only half-useful if the two halves still
+ * have to be created through one combined factory: a host that only
+ * ever encodes (a camera gateway) would still have to instantiate a
+ * decoder, and a host that only decodes (a viewer) would still have to
+ * instantiate an encoder — neither of which exists on the other side of
+ * an asymmetric deployment.
+ *
+ * These two factories let a plugin register the halves it actually
+ * implements.  A plugin that implements both keeps using
+ * `IVideoCodecFactory` — the combined factory stays, and the
+ * deprecated `IVideoCodec` stays, so nothing that works today stops
+ * working.
+ *
+ * The engine does **not** require these: the engine resolves the
+ * combined factory (`pal::resolve_video_codec`) and drives one codec
+ * instance in both directions.  The split factories exist for the
+ * *asymmetric* case — a plugin that genuinely cannot do both — and for
+ * third-party hosts that want one direction only.
+ */
+class NIMRTC_API_STABLE IVideoEncoderFactory {
+public:
+    virtual ~IVideoEncoderFactory() = default;
+    virtual std::string_view id()           const noexcept = 0;
+    virtual std::string_view display_name() const noexcept = 0;
+
+    /** Create an encoder. The caller owns the returned instance. */
+    virtual IVideoEncoder* create_encoder(VideoCodecConfig cfg) const = 0;
+};
+
+/**
+ * @brief The factory for the *decode* half of the codec seam.
+ *
+ * @see IVideoEncoderFactory
+ */
+class NIMRTC_API_STABLE IVideoDecoderFactory {
+public:
+    virtual ~IVideoDecoderFactory() = default;
+    virtual std::string_view id()           const noexcept = 0;
+    virtual std::string_view display_name() const noexcept = 0;
+
+    /** Create a decoder. The caller owns the returned instance. */
+    virtual IVideoDecoder* create_decoder(VideoCodecConfig cfg) const = 0;
 };
 
 } // namespace nimrtc::plugins

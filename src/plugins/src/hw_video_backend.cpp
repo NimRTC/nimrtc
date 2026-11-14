@@ -116,11 +116,34 @@ void HwVideoBackendRegistry::install_stub_backends() noexcept {
 
 void HwVideoBackendRegistry::register_encoder(VideoEncoderBackend backend) noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
+    // Upsert by (id, codec_kind): re-registering the same backend
+    // *replaces* the row rather than appending a duplicate.
+    //
+    // A module's `register_default_video_backends()` is normally called
+    // exactly once (from the plugin registrar's one-shot initialiser),
+    // but it is a public entry point and a host or a test may call it
+    // again.  Appending a second row with the same id would (a) make
+    // the "every row has a unique id" invariant false and (b) give the
+    // selector two indistinguishable candidates.
+    for (auto& row : encoders_) {
+        if (row.id == backend.id && row.codec_kind == backend.codec_kind) {
+            row = std::move(backend);
+            return;
+        }
+    }
     encoders_.push_back(std::move(backend));
 }
 
 void HwVideoBackendRegistry::register_decoder(VideoDecoderBackend backend) noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
+    // The decoder side is the mirror of the encoder side — see the
+    // comment in register_encoder() for why this is an upsert.
+    for (auto& row : decoders_) {
+        if (row.id == backend.id && row.codec_kind == backend.codec_kind) {
+            row = std::move(backend);
+            return;
+        }
+    }
     decoders_.push_back(std::move(backend));
 }
 

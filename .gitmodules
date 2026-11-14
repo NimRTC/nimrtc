@@ -154,3 +154,38 @@
 	# nimrtc_vendor_portaudio.
 	# Default ON via NIMRTC_VENDORED_PORTAUDIO=ON.
 	branch = master
+[submodule "src/third_party/libsamplerate/src"]
+	path = src/third_party/libsamplerate/src
+	url = https://github.com/libsndfile/libsamplerate.git
+	# Pinned: 0844c208f683527c08ea8a80acc13b398aa9c8bf (see src/third_party/vendor.json)
+	# Sample-rate conversion (remote-desktop plan Track F, F5); BSD-2-Clause.
+	# Upstream ships its own stand-alone CMake project build, so the
+	# wrapper at src/third_party/libsamplerate/CMakeLists.txt compiles
+	# the upstream sources directly with CMake (and generates the
+	# config.h they require) and exposes the static archive as
+	# nimrtc_vendor_libsamplerate.
+	# Default ON via NIMRTC_VENDORED_LIBSAMPLERATE=ON.
+	branch = master
+[submodule "src/third_party/libvpx/src"]
+	url = https://github.com/webmproject/libvpx.git
+	path = src/third_party/libvpx/src
+	# Pinned: v1.17.0 (6df3ec34557879fff673706f4a1d9fbd0f3a6f0e) — see src/third_party/vendor.json
+	# Software VP8 / VP9 codec (remote-desktop plan B11); BSD-3-Clause.
+	# Upstream ships a hand-rolled `configure` script rather than a CMake
+	# project, so the wrapper at src/third_party/libvpx/CMakeLists.txt
+	# compiles the upstream sources directly with CMake.
+	# Default OFF via NIMRTC_VENDORED_LIBVPX=OFF.
+	branch = v1.17.0
+[submodule "src/third_party/svt-av1/src"]
+	url = https://github.com/AOMediaCodec/SVT-AV1.git
+	path = src/third_party/svt-av1/src
+	# Pinned: v4.3.0 (e3d63405f9ba8219913a7276c2c47d10e5d022fe) — see src/third_party/vendor.json
+	# Software AV1 encoder with the screen-content mode (intra block copy)
+	# the remote-desktop plan needs (remote-desktop plan B11);
+	# BSD-2-Clause Clear + AOM Patent License 1.0.
+	# Upstream ships its own CMake build, so the wrapper at
+	# src/third_party/svt-av1/CMakeLists.txt adds it with the NASM
+	# requirement relaxed (the build degrades to the portable C path when
+	# NASM is absent, and never fails because of it).
+	# Default OFF via NIMRTC_VENDORED_SVT_AV1=OFF.
+	branch = v4.3.0

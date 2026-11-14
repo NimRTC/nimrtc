@@ -1,0 +1,1778 @@
+{
+  "schema": 1,
+  "benchmark": "remote_desktop_weaknet",
+  "generated_at": "2026-11-14T03:27:52Z",
+  "plan": "docs/plan/remote-desktop-plan.md",
+  "plan_item": "J4",
+  "plan_item_secondary": "J6",
+  "seed": 20261114,
+  "deterministic": true,
+  "machine": {
+    "os": "Windows",
+    "os_release": "10",
+    "os_version": "10.0.26100",
+    "machine": "AMD64",
+    "python": "3.9.1",
+    "cpu_model": "12th Gen Intel(R) Core(TM) i5-12400F",
+    "cpu_cores_physical": 6,
+    "cpu_cores_logical": 12,
+    "gpus": [
+      {
+        "vendor": "nvidia",
+        "name": "NVIDIA GeForce RTX 3060",
+        "driver_version": "616.92",
+        "memory_total_mib": 12288
+      },
+      {
+        "vendor": "unknown",
+        "name": "Virtual Desktop Monitor",
+        "driver_version": null,
+        "memory_total_mib": null
+      },
+      {
+        "vendor": "unknown",
+        "name": "Todesk Virtual Display Adapter",
+        "driver_version": null,
+        "memory_total_mib": null
+      }
+    ],
+    "gpu_encoder_present": true
+  },
+  "scenario": {
+    "source_fps": 30,
+    "source_resolution": "1920x1080",
+    "duration_s": 60.0,
+    "encode_ms": 4.0,
+    "decode_ms": 4.0,
+    "render_ms": 1.0,
+    "packet_bytes": 1200,
+    "max_queue_ms": 500.0,
+    "freeze_threshold_ms": 150.0,
+    "input_interval_s": 0.25,
+    "control_delay_factor": 0.5,
+    "ladder": [
+      {
+        "level": 0,
+        "width": 1280,
+        "height": 720,
+        "fps": 15,
+        "bitrate_kbps": 700
+      },
+      {
+        "level": 1,
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrate_kbps": 1500
+      },
+      {
+        "level": 2,
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrate_kbps": 3500
+      },
+      {
+        "level": 3,
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrate_kbps": 6000
+      },
+      {
+        "level": 4,
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrate_kbps": 9000
+      }
+    ],
+    "resolution_floor": "1280x720",
+    "phases": [
+      {
+        "id": "clean",
+        "duration_s": 15.0,
+        "capacity_mbps": 20.0,
+        "loss": 0.0,
+        "jitter_ms": 4.0,
+        "base_delay_ms": 10.0
+      },
+      {
+        "id": "congested",
+        "duration_s": 15.0,
+        "capacity_mbps": 3.0,
+        "loss": 0.02,
+        "jitter_ms": 40.0,
+        "base_delay_ms": 30.0
+      },
+      {
+        "id": "collapse",
+        "duration_s": 15.0,
+        "capacity_mbps": 1.0,
+        "loss": 0.08,
+        "jitter_ms": 120.0,
+        "base_delay_ms": 80.0
+      },
+      {
+        "id": "recovery",
+        "duration_s": 15.0,
+        "capacity_mbps": 20.0,
+        "loss": 0.0,
+        "jitter_ms": 4.0,
+        "base_delay_ms": 10.0
+      }
+    ],
+    "controller": {
+      "congestion_queue_ms": 50.0,
+      "headroom_queue_ms": 10.0,
+      "downstream_hold_s": 1.0,
+      "upstream_hold_s": 3.0,
+      "upstream_headroom": 1.2
+    }
+  },
+  "transport_floor_reference": {
+    "source": "tools/benchmark_weaknet.py",
+    "tiers": [
+      {
+        "id": "loss-5pct",
+        "loss": 0.05,
+        "base_ms": 5.0,
+        "jitter_ms": 0.0,
+        "cap_mbps": 0.0
+      },
+      {
+        "id": "jitter-100ms",
+        "loss": 0.0,
+        "base_ms": 20.0,
+        "jitter_ms": 100.0,
+        "cap_mbps": 0.0
+      },
+      {
+        "id": "cap-1mbps",
+        "loss": 0.0,
+        "base_ms": 5.0,
+        "jitter_ms": 0.0,
+        "cap_mbps": 1.0
+      }
+    ]
+  },
+  "summary": {
+    "duration_s": 60.0,
+    "frames_sent": 1547,
+    "frames_delivered": 1358,
+    "frames_lost": 189,
+    "queue_overflows": 39,
+    "delivery_ratio": 0.8778280542986425,
+    "freeze_count": 41,
+    "freeze_total_ms": 8717.053,
+    "freeze_longest_ms": 334.517,
+    "freeze_ratio": 0.14528421666666666,
+    "latency_ms": {
+      "p50": 22.961,
+      "p95": 386.92,
+      "p99": 566.645,
+      "max": 668.019
+    },
+    "input_to_photon_ms": {
+      "p50": 56.228,
+      "p95": 451.921,
+      "max": 734.685,
+      "samples": 184
+    },
+    "ladder_changes": [
+      {
+        "t_s": 3.0,
+        "direction": "up",
+        "level": 3
+      },
+      {
+        "t_s": 6.033,
+        "direction": "up",
+        "level": 4
+      },
+      {
+        "t_s": 16.033,
+        "direction": "down",
+        "level": 3
+      },
+      {
+        "t_s": 17.067,
+        "direction": "down",
+        "level": 2
+      },
+      {
+        "t_s": 18.1,
+        "direction": "down",
+        "level": 1
+      },
+      {
+        "t_s": 31.1,
+        "direction": "down",
+        "level": 0
+      },
+      {
+        "t_s": 48.0,
+        "direction": "up",
+        "level": 1
+      },
+      {
+        "t_s": 51.033,
+        "direction": "up",
+        "level": 2
+      },
+      {
+        "t_s": 54.067,
+        "direction": "up",
+        "level": 3
+      },
+      {
+        "t_s": 57.1,
+        "direction": "up",
+        "level": 4
+      }
+    ],
+    "ladder_step_downs": 4,
+    "ladder_step_ups": 6,
+    "by_phase": [
+      {
+        "phase": "clean",
+        "capacity_mbps": 20.0,
+        "loss": 0.0,
+        "jitter_ms": 4.0,
+        "delivered_fps_mean": 28.5,
+        "ladder_level_min": 2,
+        "ladder_level_max": 4,
+        "latency_p50_ms_mean": 22.112,
+        "freeze_count_final": 0
+      },
+      {
+        "phase": "congested",
+        "capacity_mbps": 3.0,
+        "loss": 0.02,
+        "jitter_ms": 40.0,
+        "delivered_fps_mean": 23.5,
+        "ladder_level_min": 1,
+        "ladder_level_max": 4,
+        "latency_p50_ms_mean": 178.912,
+        "freeze_count_final": 8
+      },
+      {
+        "phase": "collapse",
+        "capacity_mbps": 1.0,
+        "loss": 0.08,
+        "jitter_ms": 120.0,
+        "delivered_fps_mean": 10.833,
+        "ladder_level_min": 0,
+        "ladder_level_max": 1,
+        "latency_p50_ms_mean": 230.635,
+        "freeze_count_final": 40
+      },
+      {
+        "phase": "recovery",
+        "capacity_mbps": 20.0,
+        "loss": 0.0,
+        "jitter_ms": 4.0,
+        "delivered_fps_mean": 26.2,
+        "ladder_level_min": 0,
+        "ladder_level_max": 4,
+        "latency_p50_ms_mean": 28.485,
+        "freeze_count_final": 41
+      }
+    ]
+  },
+  "curve": [
+    {
+      "t_s": 0.0,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 0.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0
+    },
+    {
+      "t_s": 0.5,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 15.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.695,
+      "latency_p95_ms": 22.995
+    },
+    {
+      "t_s": 1.0,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.703,
+      "latency_p95_ms": 22.959
+    },
+    {
+      "t_s": 1.5,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.796,
+      "latency_p95_ms": 22.978
+    },
+    {
+      "t_s": 2.0,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.823,
+      "latency_p95_ms": 22.98
+    },
+    {
+      "t_s": 2.5,
+      "phase": "clean",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.807,
+      "latency_p95_ms": 22.987
+    },
+    {
+      "t_s": 3.0,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.757,
+      "latency_p95_ms": 22.987
+    },
+    {
+      "t_s": 3.5,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.83,
+      "latency_p95_ms": 22.99
+    },
+    {
+      "t_s": 4.0,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.867,
+      "latency_p95_ms": 22.99
+    },
+    {
+      "t_s": 4.5,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.867,
+      "latency_p95_ms": 22.969
+    },
+    {
+      "t_s": 5.0,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.887,
+      "latency_p95_ms": 22.973
+    },
+    {
+      "t_s": 5.5,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.887,
+      "latency_p95_ms": 22.98
+    },
+    {
+      "t_s": 6.0,
+      "phase": "clean",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.904,
+      "latency_p95_ms": 22.981
+    },
+    {
+      "t_s": 6.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.928,
+      "latency_p95_ms": 22.998
+    },
+    {
+      "t_s": 7.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.943,
+      "latency_p95_ms": 22.998
+    },
+    {
+      "t_s": 7.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.945,
+      "latency_p95_ms": 22.993
+    },
+    {
+      "t_s": 8.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.927,
+      "latency_p95_ms": 22.993
+    },
+    {
+      "t_s": 8.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.931,
+      "latency_p95_ms": 22.986
+    },
+    {
+      "t_s": 9.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.932,
+      "latency_p95_ms": 22.997
+    },
+    {
+      "t_s": 9.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.927,
+      "latency_p95_ms": 22.993
+    },
+    {
+      "t_s": 10.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.877,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 10.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.883,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 11.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.881,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 11.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.896,
+      "latency_p95_ms": 22.992
+    },
+    {
+      "t_s": 12.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.943,
+      "latency_p95_ms": 22.998
+    },
+    {
+      "t_s": 12.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.904,
+      "latency_p95_ms": 22.986
+    },
+    {
+      "t_s": 13.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.888,
+      "latency_p95_ms": 22.976
+    },
+    {
+      "t_s": 13.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.879,
+      "latency_p95_ms": 22.986
+    },
+    {
+      "t_s": 14.0,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.932,
+      "latency_p95_ms": 22.992
+    },
+    {
+      "t_s": 14.5,
+      "phase": "clean",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.932,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 15.0,
+      "phase": "congested",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 0,
+      "latency_p50_ms": 22.932,
+      "latency_p95_ms": 22.995
+    },
+    {
+      "t_s": 15.5,
+      "phase": "congested",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 18.0,
+      "freeze_count": 2,
+      "latency_p50_ms": 22.957,
+      "latency_p95_ms": 345.302
+    },
+    {
+      "t_s": 16.0,
+      "phase": "congested",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 5.0,
+      "freeze_count": 3,
+      "latency_p50_ms": 345.302,
+      "latency_p95_ms": 578.797
+    },
+    {
+      "t_s": 16.5,
+      "phase": "congested",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 5.0,
+      "freeze_count": 5,
+      "latency_p50_ms": 545.228,
+      "latency_p95_ms": 578.797
+    },
+    {
+      "t_s": 17.0,
+      "phase": "congested",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 7.0,
+      "freeze_count": 7,
+      "latency_p50_ms": 544.528,
+      "latency_p95_ms": 578.137
+    },
+    {
+      "t_s": 17.5,
+      "phase": "congested",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 11.0,
+      "freeze_count": 7,
+      "latency_p50_ms": 544.528,
+      "latency_p95_ms": 545.511
+    },
+    {
+      "t_s": 18.0,
+      "phase": "congested",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 14.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 545.511,
+      "latency_p95_ms": 578.051
+    },
+    {
+      "t_s": 18.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 18.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 558.711,
+      "latency_p95_ms": 578.566
+    },
+    {
+      "t_s": 19.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 504.446,
+      "latency_p95_ms": 575.789
+    },
+    {
+      "t_s": 19.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 34.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 242.65,
+      "latency_p95_ms": 541.914
+    },
+    {
+      "t_s": 20.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 26.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 75.039,
+      "latency_p95_ms": 197.114
+    },
+    {
+      "t_s": 20.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 24.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.802,
+      "latency_p95_ms": 77.973
+    },
+    {
+      "t_s": 21.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 24.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 75.539,
+      "latency_p95_ms": 78.676
+    },
+    {
+      "t_s": 21.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 25.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 76.68,
+      "latency_p95_ms": 78.518
+    },
+    {
+      "t_s": 22.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 29.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.218,
+      "latency_p95_ms": 78.377
+    },
+    {
+      "t_s": 22.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 29.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 72.469,
+      "latency_p95_ms": 78.058
+    },
+    {
+      "t_s": 23.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 23.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.107,
+      "latency_p95_ms": 78.058
+    },
+    {
+      "t_s": 23.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 23.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.107,
+      "latency_p95_ms": 78.419
+    },
+    {
+      "t_s": 24.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 28.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 75.102,
+      "latency_p95_ms": 78.419
+    },
+    {
+      "t_s": 24.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 29.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.61,
+      "latency_p95_ms": 78.705
+    },
+    {
+      "t_s": 25.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.74,
+      "latency_p95_ms": 78.705
+    },
+    {
+      "t_s": 25.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 28.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.377,
+      "latency_p95_ms": 78.212
+    },
+    {
+      "t_s": 26.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 25.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.882,
+      "latency_p95_ms": 78.212
+    },
+    {
+      "t_s": 26.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 26.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 72.903,
+      "latency_p95_ms": 77.616
+    },
+    {
+      "t_s": 27.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 27.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.347,
+      "latency_p95_ms": 78.042
+    },
+    {
+      "t_s": 27.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 26.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.606,
+      "latency_p95_ms": 78.965
+    },
+    {
+      "t_s": 28.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 27.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 76.48,
+      "latency_p95_ms": 78.966
+    },
+    {
+      "t_s": 28.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 27.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 76.48,
+      "latency_p95_ms": 78.759
+    },
+    {
+      "t_s": 29.0,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 28.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 75.627,
+      "latency_p95_ms": 77.762
+    },
+    {
+      "t_s": 29.5,
+      "phase": "congested",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 29.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 74.447,
+      "latency_p95_ms": 77.762
+    },
+    {
+      "t_s": 30.0,
+      "phase": "collapse",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 29.0,
+      "freeze_count": 8,
+      "latency_p50_ms": 73.914,
+      "latency_p95_ms": 78.916
+    },
+    {
+      "t_s": 30.5,
+      "phase": "collapse",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 18.0,
+      "freeze_count": 9,
+      "latency_p50_ms": 76.079,
+      "latency_p95_ms": 284.465
+    },
+    {
+      "t_s": 31.0,
+      "phase": "collapse",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 10,
+      "latency_p50_ms": 372.807,
+      "latency_p95_ms": 457.417
+    },
+    {
+      "t_s": 31.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 11,
+      "latency_p50_ms": 457.417,
+      "latency_p95_ms": 581.849
+    },
+    {
+      "t_s": 32.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 12,
+      "latency_p50_ms": 581.849,
+      "latency_p95_ms": 668.019
+    },
+    {
+      "t_s": 32.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 14.0,
+      "freeze_count": 13,
+      "latency_p50_ms": 488.36,
+      "latency_p95_ms": 668.019
+    },
+    {
+      "t_s": 33.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 17.0,
+      "freeze_count": 14,
+      "latency_p50_ms": 388.797,
+      "latency_p95_ms": 551.552
+    },
+    {
+      "t_s": 33.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 15,
+      "latency_p50_ms": 249.436,
+      "latency_p95_ms": 367.936
+    },
+    {
+      "t_s": 34.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 8.0,
+      "freeze_count": 16,
+      "latency_p50_ms": 173.317,
+      "latency_p95_ms": 206.932
+    },
+    {
+      "t_s": 34.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 12.0,
+      "freeze_count": 17,
+      "latency_p50_ms": 196.484,
+      "latency_p95_ms": 206.932
+    },
+    {
+      "t_s": 35.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 13.0,
+      "freeze_count": 18,
+      "latency_p50_ms": 186.434,
+      "latency_p95_ms": 204.423
+    },
+    {
+      "t_s": 35.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 18,
+      "latency_p50_ms": 186.434,
+      "latency_p95_ms": 198.781
+    },
+    {
+      "t_s": 36.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 10.0,
+      "freeze_count": 18,
+      "latency_p50_ms": 195.476,
+      "latency_p95_ms": 207.046
+    },
+    {
+      "t_s": 36.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 8.0,
+      "freeze_count": 20,
+      "latency_p50_ms": 196.751,
+      "latency_p95_ms": 207.046
+    },
+    {
+      "t_s": 37.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 8.0,
+      "freeze_count": 22,
+      "latency_p50_ms": 185.339,
+      "latency_p95_ms": 207.933
+    },
+    {
+      "t_s": 37.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 23,
+      "latency_p50_ms": 201.61,
+      "latency_p95_ms": 208.212
+    },
+    {
+      "t_s": 38.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 24,
+      "latency_p50_ms": 203.815,
+      "latency_p95_ms": 208.212
+    },
+    {
+      "t_s": 38.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 10.0,
+      "freeze_count": 25,
+      "latency_p50_ms": 186.558,
+      "latency_p95_ms": 207.205
+    },
+    {
+      "t_s": 39.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 26,
+      "latency_p50_ms": 185.645,
+      "latency_p95_ms": 200.057
+    },
+    {
+      "t_s": 39.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 27,
+      "latency_p50_ms": 187.279,
+      "latency_p95_ms": 208.455
+    },
+    {
+      "t_s": 40.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 28,
+      "latency_p50_ms": 191.048,
+      "latency_p95_ms": 208.455
+    },
+    {
+      "t_s": 40.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 6.0,
+      "freeze_count": 30,
+      "latency_p50_ms": 199.138,
+      "latency_p95_ms": 208.153
+    },
+    {
+      "t_s": 41.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 8.0,
+      "freeze_count": 31,
+      "latency_p50_ms": 201.356,
+      "latency_p95_ms": 207.618
+    },
+    {
+      "t_s": 41.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 10.0,
+      "freeze_count": 32,
+      "latency_p50_ms": 201.356,
+      "latency_p95_ms": 208.729
+    },
+    {
+      "t_s": 42.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 8.0,
+      "freeze_count": 33,
+      "latency_p50_ms": 195.262,
+      "latency_p95_ms": 208.729
+    },
+    {
+      "t_s": 42.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 6.0,
+      "freeze_count": 34,
+      "latency_p50_ms": 184.429,
+      "latency_p95_ms": 208.66
+    },
+    {
+      "t_s": 43.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 36,
+      "latency_p50_ms": 188.433,
+      "latency_p95_ms": 208.66
+    },
+    {
+      "t_s": 43.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 37,
+      "latency_p50_ms": 200.127,
+      "latency_p95_ms": 208.249
+    },
+    {
+      "t_s": 44.0,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 9.0,
+      "freeze_count": 39,
+      "latency_p50_ms": 189.443,
+      "latency_p95_ms": 208.249
+    },
+    {
+      "t_s": 44.5,
+      "phase": "collapse",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 11.0,
+      "freeze_count": 40,
+      "latency_p50_ms": 194.653,
+      "latency_p95_ms": 206.026
+    },
+    {
+      "t_s": 45.0,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 12.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 196.814,
+      "latency_p95_ms": 204.128
+    },
+    {
+      "t_s": 45.5,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 15.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.967,
+      "latency_p95_ms": 203.567
+    },
+    {
+      "t_s": 46.0,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 17.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.718,
+      "latency_p95_ms": 199.79
+    },
+    {
+      "t_s": 46.5,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 15.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.155,
+      "latency_p95_ms": 22.887
+    },
+    {
+      "t_s": 47.0,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 15.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.155,
+      "latency_p95_ms": 22.796
+    },
+    {
+      "t_s": 47.5,
+      "phase": "recovery",
+      "ladder_level": 0,
+      "ladder_bitrate_kbps": 700,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 15.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.242,
+      "latency_p95_ms": 22.875
+    },
+    {
+      "t_s": 48.0,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 15.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.301,
+      "latency_p95_ms": 22.969
+    },
+    {
+      "t_s": 48.5,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 22.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.441,
+      "latency_p95_ms": 22.953
+    },
+    {
+      "t_s": 49.0,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.608,
+      "latency_p95_ms": 22.976
+    },
+    {
+      "t_s": 49.5,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.467,
+      "latency_p95_ms": 22.976
+    },
+    {
+      "t_s": 50.0,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.254,
+      "latency_p95_ms": 22.908
+    },
+    {
+      "t_s": 50.5,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.2,
+      "latency_p95_ms": 22.96
+    },
+    {
+      "t_s": 51.0,
+      "phase": "recovery",
+      "ladder_level": 1,
+      "ladder_bitrate_kbps": 1500,
+      "ladder_resolution": "1280x720",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.456,
+      "latency_p95_ms": 22.96
+    },
+    {
+      "t_s": 51.5,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.738,
+      "latency_p95_ms": 22.974
+    },
+    {
+      "t_s": 52.0,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.851,
+      "latency_p95_ms": 22.99
+    },
+    {
+      "t_s": 52.5,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.839,
+      "latency_p95_ms": 22.99
+    },
+    {
+      "t_s": 53.0,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.813,
+      "latency_p95_ms": 22.977
+    },
+    {
+      "t_s": 53.5,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.801,
+      "latency_p95_ms": 22.983
+    },
+    {
+      "t_s": 54.0,
+      "phase": "recovery",
+      "ladder_level": 2,
+      "ladder_bitrate_kbps": 3500,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.823,
+      "latency_p95_ms": 22.983
+    },
+    {
+      "t_s": 54.5,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.848,
+      "latency_p95_ms": 22.982
+    },
+    {
+      "t_s": 55.0,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.901,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 55.5,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.928,
+      "latency_p95_ms": 22.99
+    },
+    {
+      "t_s": 56.0,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.888,
+      "latency_p95_ms": 22.989
+    },
+    {
+      "t_s": 56.5,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.884,
+      "latency_p95_ms": 22.999
+    },
+    {
+      "t_s": 57.0,
+      "phase": "recovery",
+      "ladder_level": 3,
+      "ladder_bitrate_kbps": 6000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.851,
+      "latency_p95_ms": 22.988
+    },
+    {
+      "t_s": 57.5,
+      "phase": "recovery",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.891,
+      "latency_p95_ms": 22.989
+    },
+    {
+      "t_s": 58.0,
+      "phase": "recovery",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.906,
+      "latency_p95_ms": 22.991
+    },
+    {
+      "t_s": 58.5,
+      "phase": "recovery",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.919,
+      "latency_p95_ms": 22.998
+    },
+    {
+      "t_s": 59.0,
+      "phase": "recovery",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.942,
+      "latency_p95_ms": 22.997
+    },
+    {
+      "t_s": 59.5,
+      "phase": "recovery",
+      "ladder_level": 4,
+      "ladder_bitrate_kbps": 9000,
+      "ladder_resolution": "1920x1080",
+      "delivered_fps": 30.0,
+      "freeze_count": 41,
+      "latency_p50_ms": 22.953,
+      "latency_p95_ms": 22.995
+    }
+  ],
+  "freezes": [
+    {
+      "t_s": 15.176,
+      "duration_ms": 186.763
+    },
+    {
+      "t_s": 15.376,
+      "duration_ms": 199.103
+    },
+    {
+      "t_s": 15.776,
+      "duration_ms": 297.845
+    },
+    {
+      "t_s": 16.078,
+      "duration_ms": 199.34
+    },
+    {
+      "t_s": 16.277,
+      "duration_ms": 198.419
+    },
+    {
+      "t_s": 16.577,
+      "duration_ms": 198.711
+    },
+    {
+      "t_s": 16.811,
+      "duration_ms": 233.806
+    },
+    {
+      "t_s": 17.676,
+      "duration_ms": 197.301
+    },
+    {
+      "t_s": 30.359,
+      "duration_ms": 313.421
+    },
+    {
+      "t_s": 30.739,
+      "duration_ms": 182.914
+    },
+    {
+      "t_s": 31.15,
+      "duration_ms": 159.117
+    },
+    {
+      "t_s": 31.608,
+      "duration_ms": 226.263
+    },
+    {
+      "t_s": 32.006,
+      "duration_ms": 151.569
+    },
+    {
+      "t_s": 32.977,
+      "duration_ms": 194.724
+    },
+    {
+      "t_s": 33.337,
+      "duration_ms": 230.431
+    },
+    {
+      "t_s": 33.806,
+      "duration_ms": 304.769
+    },
+    {
+      "t_s": 34.404,
+      "duration_ms": 166.268
+    },
+    {
+      "t_s": 34.986,
+      "duration_ms": 205.884
+    },
+    {
+      "t_s": 36.109,
+      "duration_ms": 235.271
+    },
+    {
+      "t_s": 36.411,
+      "duration_ms": 158.085
+    },
+    {
+      "t_s": 36.675,
+      "duration_ms": 155.927
+    },
+    {
+      "t_s": 36.868,
+      "duration_ms": 170.933
+    },
+    {
+      "t_s": 37.208,
+      "duration_ms": 206.603
+    },
+    {
+      "t_s": 37.94,
+      "duration_ms": 334.517
+    },
+    {
+      "t_s": 38.112,
+      "duration_ms": 153.532
+    },
+    {
+      "t_s": 38.719,
+      "duration_ms": 188.635
+    },
+    {
+      "t_s": 39.137,
+      "duration_ms": 218.446
+    },
+    {
+      "t_s": 39.808,
+      "duration_ms": 209.014
+    },
+    {
+      "t_s": 40.073,
+      "duration_ms": 227.57
+    },
+    {
+      "t_s": 40.455,
+      "duration_ms": 255.513
+    },
+    {
+      "t_s": 40.938,
+      "duration_ms": 198.559
+    },
+    {
+      "t_s": 41.401,
+      "duration_ms": 272.061
+    },
+    {
+      "t_s": 41.851,
+      "duration_ms": 296.108
+    },
+    {
+      "t_s": 42.122,
+      "duration_ms": 184.597
+    },
+    {
+      "t_s": 42.509,
+      "duration_ms": 281.604
+    },
+    {
+      "t_s": 42.867,
+      "duration_ms": 199.691
+    },
+    {
+      "t_s": 43.096,
+      "duration_ms": 154.669
+    },
+    {
+      "t_s": 43.539,
+      "duration_ms": 179.641
+    },
+    {
+      "t_s": 43.856,
+      "duration_ms": 216.294
+    },
+    {
+      "t_s": 44.064,
+      "duration_ms": 170.65
+    },
+    {
+      "t_s": 44.664,
+      "duration_ms": 202.485
+    }
+  ],
+  "notes": [
+    "These are the numbers of a SYNTHETIC remote-desktop model, not of a real session: a source screen, a bitrate ladder, a rate-limited link with loss and jitter, a bounded transmit queue, a decoder and a display. The run is deterministic (seeded RNG), so the artifact is a regression baseline.",
+    "The response curve -- ladder level, delivered fps, cumulative freeze count and latency percentiles vs. time -- is the measurement the plan asks for (J4). A throughput number is not reported: throughput does not describe the feel.",
+    "The input-to-photon numbers (J6) pair the operator's input event with the first source frame captured after the event reaches the remote machine, and measure the event to that frame's display time.",
+    "The stage costs (encode 4 ms, decode 4 ms, present 1 ms) are the hardware-path figures from the plan's \u00a7B.6 budget table.",
+    "The impairment levels are the same family as the transport-floor tiers of tools/benchmark_weaknet.py; the two artifacts can be read side by side."
+  ]
+}

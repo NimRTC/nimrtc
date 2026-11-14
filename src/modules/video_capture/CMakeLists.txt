@@ -353,10 +353,78 @@ if(WIN32)
     endif()
 
     if(_nimrtc_sdk_root)
-        file(GLOB _nimrtc_cppwinrt_dirs
-             "${_nimrtc_sdk_root}/Include/*/cppwinrt")
-        if(_nimrtc_cppwinrt_dirs)
-            list(GET _nimrtc_cppwinrt_dirs 0 _nimrtc_cppwinrt_dir)
+        # Several SDK versions can be installed side by side, so the
+        # `cppwinrt` directory has to be picked from the SDK the
+        # *toolchain actually compiles against* -- not from whichever
+        # one the glob happens to return first.
+        #
+        # `file(GLOB)` returns its matches in lexicographic order, so
+        # `list(GET ... 0)` picks the OLDEST version, not the newest:
+        #
+        #   10.0.17763.0   (2018)  <-- what the glob used to select
+        #   10.0.22621.0   (2023)
+        #   10.0.26100.0   (2024)  <-- what the compiler is really using
+        #
+        # An old projection is not merely stale, it is *incompatible*:
+        # the 2018-era `winrt/base.h` hard-includes `<experimental/coroutine>`
+        # unconditionally, and that header `#error`s (C1189) as soon as
+        # `__cpp_impl_coroutine` is defined -- which `/std:c++20` does.
+        # The build then fails with an error that names `<experimental/coroutine>`
+        # and points nowhere near the include path that caused it.
+        #
+        # So the selection is, in order:
+        #   1. the SDK version the compiler is using ($ENV{WindowsSDKVersion},
+        #      set by vcvarsall / MSBuild),
+        #   2. otherwise the newest SDK version present on disk.
+        set(_nimrtc_cppwinrt_dir "")
+
+        # (1) The SDK the toolchain targets.
+        if(DEFINED ENV{WindowsSDKVersion})
+            # vcvarsall exports this with a trailing backslash
+            # ("10.0.26100.0\"), so strip it before turning the dotted
+            # version into a directory name.
+            string(REGEX REPLACE "[\\\\/]+$" "" _nimrtc_sdk_ver "$ENV{WindowsSDKVersion}")
+            string(REPLACE "." "/" _nimrtc_sdk_ver_slash "${_nimrtc_sdk_ver}")
+            if(IS_DIRECTORY "${_nimrtc_sdk_root}/Include/${_nimrtc_sdk_ver_slash}/cppwinrt")
+                set(_nimrtc_cppwinrt_dir
+                    "${_nimrtc_sdk_root}/Include/${_nimrtc_sdk_ver_slash}/cppwinrt")
+            endif()
+        endif()
+
+        if(_nimrtc_cppwinrt_dir)
+            # Sanity: the directory must actually carry the projection.
+            # A directory that exists but has no `winrt/base.h` would
+            # fail later as a confusing "cannot open include file"
+            # rather than as the selection error it actually is.
+            if(NOT EXISTS "${_nimrtc_cppwinrt_dir}/winrt/base.h")
+                message(WARNING
+                    "video_capture: ${_nimrtc_cppwinrt_dir} has no "
+                    "winrt/base.h -- falling back to the newest SDK")
+                set(_nimrtc_cppwinrt_dir "")
+            endif()
+        endif()
+
+        if(NOT _nimrtc_cppwinrt_dir)
+            file(GLOB _nimrtc_cppwinrt_dirs
+                 "${_nimrtc_sdk_root}/Include/*/cppwinrt")
+            set(_nimrtc_cppwinrt_newest "")
+            foreach(_dir IN LISTS _nimrtc_cppwinrt_dirs)
+                if(EXISTS "${_dir}/winrt/base.h")
+                    list(APPEND _nimrtc_cppwinrt_newest "${_dir}")
+                endif()
+            endforeach()
+            if(_nimrtc_cppwinrt_newest)
+                # Sort descending, then take the first.  Every SDK since
+                # 10.0.1xxxx uses a fixed-width four-digit build number,
+                # so a natural-order compare is correct for the versions
+                # that actually exist.
+                list(SORT _nimrtc_cppwinrt_newest
+                     COMPARE NATURAL ORDER DESCENDING)
+                list(GET _nimrtc_cppwinrt_newest 0 _nimrtc_cppwinrt_dir)
+            endif()
+        endif()
+
+        if(_nimrtc_cppwinrt_dir)
             target_include_directories(nimrtc_video_capture
                 PRIVATE "${_nimrtc_cppwinrt_dir}")
             message(STATUS

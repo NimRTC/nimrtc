@@ -40,16 +40,16 @@
 // `__cpp_lib_coroutine` is defined by `<yvals_core.h>`, which every
 // standard-library header pulls in -- but only once one has been
 // included.  The projection's own `winrt/base.h` does include the
-// standard library *before* the test, so the test normally wins.  It
-// loses when the projection header is reached through a Windows SDK
-// header (`windows.ui.composition.h`, `windows.graphics.capture.h`)
-// rather than through `winrt/base.h` itself: those headers open with
-// `windows.h`, and the SDK's copy of the projection can be reached
-// before any standard-library header has been included.
+// standard library *before* the test, so the test normally wins.
 //
 // Including `<coroutine>` first settles it by construction: the header
 // includes `<yvals_core.h>` and so defines `__cpp_lib_coroutine`
-// itself, whatever the SDK's projection does.
+// itself, whatever the SDK's projection does.  This is a cheap belt to
+// the braces the CMake side already wears -- the `cppwinrt` include
+// directory is pinned to the SDK the toolchain actually compiles against
+// (see `src/modules/video_capture/CMakeLists.txt`), because an *older*
+// projection hard-includes `<experimental/coroutine>` unconditionally and
+// cannot be fixed from here.
 #include <coroutine>
 
 #include <winrt/base.h>

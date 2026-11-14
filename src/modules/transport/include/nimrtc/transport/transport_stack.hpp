@@ -38,8 +38,15 @@
 #include <nimrtc/core/api_version.hpp>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+
+// The control-plane seam (remote-desktop plan G2) below uses
+// `plugins::Status` and `plugins::OnDatagramCb`, so the plugin base
+// header is needed here.  It was previously unnecessary because the
+// header only forward-declared the plugin interfaces.
+#include <nimrtc/plugins/base.hpp>
 
 namespace nimrtc {
 
@@ -144,6 +151,38 @@ public:
 
     // ---- Optional component (nullptr if not configured) -----------------
     virtual raw_udp::IRawUdpDatagram* raw_control() noexcept = 0;
+
+    // ---- The control-plane seam (remote-desktop plan G2) ----------------
+    //
+    // The remote-desktop profile wants the control plane on its own
+    // transport (RD-5): its own ICE-selected pair, its own congestion-
+    // control domain, so a saturated video path cannot starve the
+    // key/mouse events.
+    //
+    // The engine may not include the `raw_udp` module's header — that
+    // module is not on the ADR-025 exemption list — so it cannot call
+    // `raw_control()->send()` / `->on_recv()` directly (the type is
+    // only forward-declared here).  These three virtuals are the
+    // L4-compliant way for the engine to reach the control path: the
+    // *transport* module owns the concrete `IRawUdpDatagram` and
+    // forwards through it.
+    //
+    // Default implementations report "no control path", so a stack that
+    // does not implement the control plane (webrtc-classic, and the
+    // Slice-8 capability shell) needs no change.
+    //
+    // `on_control` registers the receive callback.  It fires on the
+    // transport's own thread, so the engine's caller must queue the
+    // bytes rather than run host code in place.
+    virtual bool has_control_path() const noexcept { return false; }
+
+    virtual plugins::Status send_control(
+        std::span<const std::uint8_t> data) noexcept {
+        (void)data;
+        return plugins::kErrUnsupported;
+    }
+
+    virtual void on_control(plugins::OnDatagramCb cb) noexcept { (void)cb; }
 
     // ---- Weak-ref DTLS accessor (v0.13.0, replaces raw-pointer capture)
     //

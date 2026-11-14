@@ -219,6 +219,15 @@ if(NIMRTC_MODULE_AV1 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/av1/CMakeLists.txt"
     add_subdirectory(av1)
 endif()
 
+# Remote-desktop plan B11 — the VP9 codec module.  It carries the
+# *optional* software VP9 encoder (the vendored libvpx, which is
+# option-gated behind NIMRTC_VENDORED_LIBVPX and defaults OFF).  The
+# module itself is self-contained: it depends on nimrtc::core,
+# nimrtc::plugins and nimrtc::video_frame only.
+if(NIMRTC_MODULE_VP9 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vp9/CMakeLists.txt")
+    add_subdirectory(vp9)
+endif()
+
 # -----------------------------------------------------------------------------
 # Video R2 modules — must each be self-contained, no cross-module deps
 # unless explicitly listed in the module's own CMakeLists.txt.

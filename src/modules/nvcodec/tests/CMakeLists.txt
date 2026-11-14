@@ -76,3 +76,74 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 120
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# test_vt_common — the platform-independent VideoToolbox helpers
+# -----------------------------------------------------------------------------
+# The VideoToolbox encoder / decoder are macOS-only, but the bitstream
+# plumbing they depend on (AV1 low-overhead OBU <-> Annex-B, AVCC ->
+# Annex-B, the Annex-B scanner, the OS-version gate) is pure byte
+# manipulation — so it is testable on every host, including the Windows
+# CI box.
+# -----------------------------------------------------------------------------
+add_executable(test_vt_common test_vt_common.cpp)
+
+set_target_properties(test_vt_common PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_vt_common LENIENT)
+
+target_include_directories(test_vt_common PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/modules/nvcodec/src")
+
+target_link_libraries(test_vt_common PRIVATE
+    nimrtc::nvcodec
+    nimrtc::video_frame
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_nvcodec_tests_test_vt_common
+         COMMAND test_vt_common)
+set_tests_properties(modules_nvcodec_tests_test_vt_common PROPERTIES TIMEOUT 30)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_vt_common
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# -----------------------------------------------------------------------------
+# test_hw_composite_codec — the composite adapter's telemetry forwarding
+# -----------------------------------------------------------------------------
+# A *pure unit* test: the composite is a forwarding adapter, so it is
+# tested with codec doubles rather than with a GPU.  That keeps the
+# "is the hardware flag reported?" question answerable on a machine with
+# no NVIDIA card at all — which matters because the J5 capture/encode
+# benchmark reads that flag to tell a hardware encode from a software
+# one.
+# -----------------------------------------------------------------------------
+add_executable(test_hw_composite_codec test_hw_composite_codec.cpp)
+
+set_target_properties(test_hw_composite_codec PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_hw_composite_codec LENIENT)
+
+target_link_libraries(test_hw_composite_codec PRIVATE
+    nimrtc::nvcodec
+    nimrtc::video_frame
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_nvcodec_tests_test_hw_composite_codec
+         COMMAND test_hw_composite_codec)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_hw_composite_codec
+        PROPERTIES TIMEOUT 60
+        DISCOVERY_TIMEOUT 10)
+endif()

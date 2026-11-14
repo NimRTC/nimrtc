@@ -4,7 +4,7 @@
  *
  * Both backends (DXGI Desktop Duplication and Windows Graphics Capture)
  * end up with the same thing: an `ID3D11Texture2D` in
- * `DXGI_FORMAT_B8G8R8A8_UNORM` (BGRA) 鈥?the format every desktop
+ * `DXGI_FORMAT_B8G8R8A8_UNORM` (BGRA) — the format every desktop
  * compositor produces natively.  This header holds the pieces that are
  * the same for both:
  *
@@ -20,7 +20,7 @@
  * `CopyResource` / `CopySubresourceRegion` into a texture we own), so
  * the pixels never leave the GPU: `bytes_copied` stays at 0 and the
  * frame is honestly a zero-copy frame.  The CPU fallback copies into
- * host memory and *does* count the bytes 鈥?the difference between the
+ * host memory and *does* count the bytes — the difference between the
  * two paths is visible in the statistics, never hidden.
  *
  * @note Internal to the video_capture module. Not a public header.
@@ -80,7 +80,7 @@ struct D3D11State {
 /** Map a DXGI format onto a `video_frame::PixelFormat`.
  *
  *  Returns `PixelFormat::kUnknown` for a format the capture layer does
- *  not know how to describe 鈥?the caller then reports an unsupported
+ *  not know how to describe — the caller then reports an unsupported
  *  format rather than mislabelling the pixels. */
 NIMRTC_API_STABLE video_frame::PixelFormat
 pixel_format_from_dxgi(DXGI_FORMAT fmt) noexcept;
@@ -109,7 +109,7 @@ public:
      *
      * The texture is recycled: handing out the next one may overwrite
      * the content of a previously handed-out texture.  That is exactly
-     * the lifetime contract the zero-copy path documents 鈥?the consumer
+     * the lifetime contract the zero-copy path documents — the consumer
      * uses the texture *within* the delivery callback.
      */
     ComPtr<ID3D11Texture2D> acquire(std::uint32_t width,

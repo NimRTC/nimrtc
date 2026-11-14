@@ -15,7 +15,7 @@
  *   2. A solid-colour source (mid-grey) survives a scale with no
  *      banding: the output luma's mean stays close to the source's and
  *      its spread (max - min) stays tight.
- *   3. The chroma planes are scaled too 鈥?the chroma mean tracks the
+ *   3. The chroma planes are scaled too — the chroma mean tracks the
  *      luma mean instead of being garbage.
  *   4. A scaled frame that is then encoded by the OpenH264 software
  *      encoder and decoded back still shows the solid colour.  Skipped
@@ -25,7 +25,7 @@
  *      and the scale call then returns a clean error rather than
  *      crashing.
  *   6. A `std::chrono` benchmark records ns/pixel at 1080p.  It asserts
- *      only that the run completes 鈥?a perf threshold would be flaky on
+ *      only that the run completes — a perf threshold would be flaky on
  *      shared CI.
  */
 
@@ -351,7 +351,7 @@ TEST(VideoFrameScaler, ChromaPlanesAreScaledToo) {
     EXPECT_LE(sv.spread(), 2);
 
     // The chroma mean must track the luma mean (the chroma planes belong
-    // to the *same* picture 鈥?a scaler that scaled only the luma would
+    // to the *same* picture — a scaler that scaled only the luma would
     // leave the chroma at the source's values, which for a different
     // source size would show up here as a mismatch).
     EXPECT_NEAR(sy.mean, 100.0, 2.0);
@@ -499,7 +499,7 @@ TEST(VideoFrameScaler, BgraToI420KeepsTheChannelsInOrder) {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark 鈥?ns/pixel at 1080p
+// Benchmark — ns/pixel at 1080p
 // ---------------------------------------------------------------------------
 
 TEST(VideoFrameScaler, BenchmarkRecordsNsPerPixelAt1080p) {
@@ -543,7 +543,7 @@ TEST(VideoFrameScaler, BenchmarkRecordsNsPerPixelAt1080p) {
     EXPECT_GT(elapsed_ns, 0.0);
     EXPECT_GT(ns_per_pixel, 0.0);
     EXPECT_LT(ns_per_pixel, 100000.0)
-        << "the benchmark did not complete in a sane time 鈥?something is "
+        << "the benchmark did not complete in a sane time — something is "
            "wrong with the timing harness";
 }
 

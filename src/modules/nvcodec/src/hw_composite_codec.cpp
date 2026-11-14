@@ -159,6 +159,16 @@ plugins::VideoCodecStats HwCompositeCodec::stats() const noexcept {
         out.bytes_encoded  = s.bytes_encoded;
         out.encode_errors  = s.encode_errors;
         out.frames_skipped += s.frames_skipped;
+        // The staged / zero-copy split is what tells a host *how* the
+        // picture reached the encoder.  A composite that dropped it
+        // would report "0 frames staged, 0 frames zero-copy" for every
+        // hardware session — which reads as "the encoder never ran".
+        out.frames_encoded_staged    = s.frames_encoded_staged;
+        out.frames_encoded_zero_copy = s.frames_encoded_zero_copy;
+        out.keyframes_encoded       = s.keyframes_encoded;
+        out.bytes_copied             = s.bytes_copied;
+        out.encode_latency_us_total  = s.encode_latency_us_total;
+        out.encode_latency_us_max    = s.encode_latency_us_max;
     }
     if (decoder_) {
         const auto s = decoder_->stats();
@@ -183,6 +193,17 @@ std::string_view HwCompositeCodec::backend_id() const noexcept {
     if (encoder_) return encoder_->backend_id();
     if (decoder_) return decoder_->backend_id();
     return "unknown";
+}
+
+bool HwCompositeCodec::is_hardware_accelerated() const noexcept {
+    // The *encoder* is the direction the engine's stats describe (and
+    // the direction §B.6's send-side budget is written against).  A
+    // composite with a hardware decoder and a software encoder is a
+    // software *send* path, and reporting it as accelerated would
+    // overstate what the machine is doing.
+    if (encoder_) return encoder_->is_hardware_accelerated();
+    if (decoder_) return decoder_->is_hardware_accelerated();
+    return false;
 }
 
 } // namespace nimrtc::nvcodec

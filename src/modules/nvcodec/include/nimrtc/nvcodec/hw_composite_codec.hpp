@@ -136,6 +136,22 @@ public:
      *  ("software-stub"). */
     std::string_view backend_id() const noexcept override;
 
+    /**
+     * @brief True iff the *encoder* runs on a hardware accelerator.
+     *
+     * The composite forwards the question to the encoder, because the
+     * engine's telemetry describes the *outbound* stream: a composite
+     * whose encoder is NVENC and whose decoder is OpenH264 is a
+     * hardware-accelerated *encode* path, and the budget the remote
+     * desktop plan's §B.6 writes is a send-side budget.
+     *
+     * Without this override the composite would inherit the interface's
+     * default `false`, and a machine that really was encoding on the
+     * GPU would be reported as software — which is exactly the claim
+     * the capture/encode benchmark exists to check.
+     */
+    bool is_hardware_accelerated() const noexcept override;
+
 private:
     plugins::VideoCodecConfig            cfg_;
     std::unique_ptr<plugins::IVideoCodec> encoder_;

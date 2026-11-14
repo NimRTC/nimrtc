@@ -25,6 +25,16 @@
 #include <nimrtc/video_capture/windows_capture.hpp>
 #endif
 
+#if defined(__APPLE__) || defined(__linux__)
+// The macOS / Linux capture backends register themselves alongside the
+// synthetic device, so a host that asks for "linux-pipewire" finds it.
+#include <nimrtc/video_capture/unix_capture.hpp>
+#endif
+
+// Remote-desktop plan A9: the camera path's own registration entry
+// point (the camera factories register under their own plug-in ids).
+#include <nimrtc/video_capture/camera_capture.hpp>
+
 namespace nimrtc::video_capture {
 
 namespace {
@@ -193,6 +203,20 @@ plugins::CaptureCapabilities SyntheticCapture::capabilities() const noexcept {
 plugins::Status SyntheticCapture::pop_frame(plugins::CaptureFrame& out) noexcept {
     if (!open_) return plugins::kErrNotReady;
     if (!queue_.pop(out)) return plugins::kErrNotReady;
+    // The synthetic device produces BGRA (see `render_frame`: the bytes
+    // are written in B, G, R, A order) — the format every desktop
+    // compositor hands over natively.
+    //
+    // The declaration matters: the engine reads `CaptureFrame::format`
+    // to decide whether it has to convert the picture to the codec's
+    // canonical layout, and an *undeclared* format is treated as planar
+    // I420.  A BGRA picture announced as I420 would be staged as three
+    // planes out of a packed buffer — garbage pixels, and a "convert"
+    // cost that is a memcpy rather than a colour transform.
+    out.format       = plugins::VideoPixelFormat::kBGRA;
+    out.gpu_backend  = plugins::GpuBackend::kNone;
+    out.has_gpu_handle = false;
+    out.gpu_handle   = nullptr;
     return plugins::kOk;
 }
 
@@ -322,6 +346,17 @@ void register_default_plugins() noexcept {
     // synthetic device, so the engine can pick one by name.
     register_windows_capture_plugins();
 #endif
+#if defined(__APPLE__) || defined(__linux__)
+    // Remote-desktop plan A4 / A5: the macOS (ScreenCaptureKit) and
+    // Linux (PipeWire + X11) backends land next to the synthetic
+    // device.  Only the backends this build supports are registered.
+    register_unix_capture_plugins();
+#endif
+    // Remote-desktop plan A9: the camera path registers under its
+    // *own* plug-in ids ("synthetic-camera", "camera-mediafoundation",
+    // "camera-avfoundation", "camera-v4l2"), separately from the
+    // screen path above.
+    register_camera_capture_plugins();
 }
 
 } // namespace nimrtc::video_capture

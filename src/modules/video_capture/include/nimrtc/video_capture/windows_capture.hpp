@@ -75,6 +75,7 @@
 #include <vector>
 
 #include <nimrtc/plugins/video_capture.hpp>
+#include <nimrtc/video_capture/cursor_source.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 
 namespace nimrtc::video_capture {
@@ -186,6 +187,25 @@ struct NIMRTC_API_STABLE WindowsCaptureOptions {
      *  `CaptureStats::bytes_copied` — it never pretends to be
      *  zero-copy. */
     bool allow_zero_copy = true;
+
+    /**
+     * @brief The cursor source to composite into the frames.
+     *
+     * Null means "no cursor layer" — the frames are delivered exactly as
+     * the backend produced them.  That is the right default for the WGC
+     * backend, which already composites the pointer.
+     *
+     * For the DXGI backend the pointer is *not* in the frame, so a
+     * source is what puts it there.  The source is **pluggable**: a
+     * host may attach the platform source
+     * (`make_platform_cursor_source()`) or its own.
+     *
+     * The device wraps whatever is attached in a `PinnedCursorFallback`,
+     * so a cursor that becomes unavailable does not make the pointer
+     * blink out of the picture — it is re-drawn at its last known
+     * position instead.
+     */
+    std::shared_ptr<ICursorSource> cursor_source = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -305,6 +325,27 @@ public:
 
     /** Attach a failure callback (consent refused, device lost, ...). */
     void set_error_callback(WindowsCaptureErrorCallback cb) noexcept;
+
+    /**
+     * @brief Attach (or detach) the cursor source.
+     *
+     * The cursor source is the *pluggable* half of plan A6: the device
+     * composites whatever the source yields into the frames it delivers.
+     * Passing null detaches the layer and the frames are delivered
+     * exactly as the backend produced them.
+     *
+     * The source is wrapped in a `PinnedCursorFallback` internally, so
+     * the pointer is re-drawn at its last known position whenever the
+     * platform cannot be read — the "cursor is always drawn at the last
+     * position" behaviour the plan asks for.
+     *
+     * Calling this while the device is open is allowed: the change
+     * takes effect on the next frame.
+     */
+    void set_cursor_source(std::shared_ptr<ICursorSource> source) noexcept;
+
+    /** The cursor source currently attached (may be null). */
+    [[nodiscard]] std::shared_ptr<ICursorSource> cursor_source() const noexcept;
 
     /** The last error the device reported. */
     [[nodiscard]] WindowsCaptureError last_error() const noexcept;

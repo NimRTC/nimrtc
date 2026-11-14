@@ -30,9 +30,9 @@ using winrt::Windows::Security::Authorization::AppCapabilityAccess::
  *
  * Two kinds exist and they mean different things:
  *
- *   - `Programmatic` 鈥?the app may capture a window's content without
+ *   - `Programmatic` — the app may capture a window's content without
  *     the user picking it in a dialog (Windows 11 22H2+).
- *   - `Borderless` 鈥?the app may capture a *borderless* window (a game,
+ *   - `Borderless` — the app may capture a *borderless* window (a game,
  *     a video player), which Windows has always gated behind the
  *     user's consent.
  *
@@ -40,7 +40,7 @@ using winrt::Windows::Security::Authorization::AppCapabilityAccess::
  * is granted: a monitor capture is granted through `Programmatic`, a
  * window capture through `Borderless`.  When neither is granted the
  * capture is refused, and the refusal is reported as
- * `kConsentDenied` 鈥?a distinct condition the host can act on (ask
+ * `kConsentDenied` — a distinct condition the host can act on (ask
  * the user to grant screen recording) rather than a generic failure.
  */
 bool has_consent(WindowsCaptureError& out_error) noexcept {
@@ -162,7 +162,7 @@ bool WgcCapture::open(WgcTargetKind target,
                       static_cast<std::int32_t>(pool_height)});
 
         session_ = pool_.CreateCaptureSession(item);
-        // The OS composites the pointer into the frame 鈥?this is the
+        // The OS composites the pointer into the frame — this is the
         // reason to prefer WGC over DXGI for a window capture.
         session_.IsCursorCaptureEnabled(want_cursor);
         session_.StartCapture();
@@ -208,7 +208,7 @@ bool WgcCapture::try_get_next(ComPtr<ID3D11Texture2D>& out_texture,
     }
 
     if (!frame) {
-        // No new frame yet 鈥?not an error.
+        // No new frame yet — not an error.
         out_error = WindowsCaptureError::kNone;
         return false;
     }

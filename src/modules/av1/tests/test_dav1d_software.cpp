@@ -8,7 +8,7 @@
  *   1. The backend table exposes a `dav1d_av1` decoder entry with
  *      priority above the synthetic stub, and the created codec reports
  *      `backend_id() == "dav1d"` (the stub reports "software-stub").
- *   2. A real AV1 key frame decodes to *non-zero pixels* 鈥?the stub
+ *   2. A real AV1 key frame decodes to *non-zero pixels* — the stub
  *      cannot do that (it paints a synthetic pattern), so this is the
  *      acceptance criterion for the AV1 leg of WP-B.
  *   3. The decoded picture has the geometry the sequence header
@@ -19,7 +19,7 @@
  * embedded below so the test needs no external fixture.
  *
  * The whole file is compiled only when `NIMRTC_PLUGINS_DAV1D_ON` is
- * defined 鈥?i.e. when the vendored source tree is present and the option
+ * defined — i.e. when the vendored source tree is present and the option
  * is on.
  */
 
@@ -210,7 +210,7 @@ TEST(Dav1dSoftware, DecodesKeyFrameToNonZeroPixels) {
         if (p != 0) ++non_zero;
     }
     EXPECT_GT(non_zero, dec_y.size() / 2)
-        << "the decoded luma plane is (mostly) zero 鈥?the AV1 decoder "
+        << "the decoded luma plane is (mostly) zero — the AV1 decoder "
            "did not reconstruct a real picture";
 
     const auto [min_it, max_it] = std::minmax_element(dec_y.begin(), dec_y.end());
@@ -220,7 +220,7 @@ TEST(Dav1dSoftware, DecodesKeyFrameToNonZeroPixels) {
     // grey, which would mean the decoder produced nothing but a
     // mid-level fill).
     EXPECT_GT(*max_it - *min_it, 20u)
-        << "decoded luma plane is constant 鈥?the decoder produced no "
+        << "decoded luma plane is constant — the decoder produced no "
            "reconstructed picture";
 
     // ---- Stats ------------------------------------------------------------

@@ -48,6 +48,8 @@
 #include <thread>
 #include <vector>
 
+#include <nimrtc/audio_device/aec_delay.hpp>
+#include <nimrtc/audio_device/playback_progress.hpp>
 #include <nimrtc/audio_device/ring_buffer.hpp>
 #include <nimrtc/plugins/audio_sink.hpp>
 #include <nimrtc/plugins/audio_source.hpp>
@@ -64,7 +66,8 @@ namespace nimrtc::audio_device {
  * Implements `plugins::IAudioSource`.
  */
 class NIMRTC_API_STABLE SyntheticAudioSource final
-    : public plugins::IAudioSource {
+    : public plugins::IAudioSource,
+      public IAecDelaySource {
 public:
     explicit SyntheticAudioSource(plugins::AudioSourceConfig cfg) noexcept;
     ~SyntheticAudioSource() override;
@@ -157,6 +160,23 @@ public:
     /** Set the frequency of the synthesised tone. */
     void set_tone_frequency_hz(double hz) noexcept { tone_hz_ = hz; }
 
+    // ---- IAecDelaySource (remote-desktop plan F4) --------------------------
+
+    /**
+     * Attach (or detach, with nullptr) the AEC-delay monitor.
+     *
+     * The monitor is fed with the samples the device captured, so the
+     * estimator can correlate them against the played-out signal.
+     */
+    void set_aec_delay_monitor(AecDelayMonitor* monitor) noexcept override {
+        aec_monitor_.store(monitor, std::memory_order_relaxed);
+    }
+
+    /** The attached monitor, or nullptr when none is attached. */
+    [[nodiscard]] AecDelayMonitor* aec_delay_monitor() const noexcept override {
+        return aec_monitor_.load(std::memory_order_relaxed);
+    }
+
 private:
     void produce_frame() noexcept;
     void realtime_loop(std::size_t frames_per_buffer) noexcept;
@@ -164,6 +184,9 @@ private:
     plugins::AudioSourceConfig cfg_;
     AudioRingBuffer queue_;
     plugins::AudioFrameCallback cb_;
+
+    /** The F4 monitor (not owned — the host keeps it alive). */
+    std::atomic<AecDelayMonitor*> aec_monitor_ {nullptr};
 
     std::vector<float> scratch_;
     std::atomic<bool> open_ {false};
@@ -191,7 +214,10 @@ private:
  * number to the engine's `set_render_delivered()` and the 3A gets an
  * aligned AEC reference.
  */
-class NIMRTC_API_STABLE SyntheticAudioSink final : public plugins::IAudioSink {
+class NIMRTC_API_STABLE SyntheticAudioSink final
+    : public plugins::IAudioSink,
+      public IPlaybackProgressSink,
+      public IAecDelaySink {
 public:
     explicit SyntheticAudioSink(plugins::AudioSinkConfig cfg) noexcept;
     ~SyntheticAudioSink() override;
@@ -277,12 +303,44 @@ public:
         return device_lost_.load();
     }
 
+    // ---- IPlaybackProgressSink (remote-desktop plan F3) --------------------
+
+    /** The sink's playback-progress tracker. */
+    [[nodiscard]] const PlaybackProgressTracker&
+    playback_progress() const noexcept override {
+        return progress_;
+    }
+
+    // ---- IAecDelaySink (remote-desktop plan F4) ----------------------------
+
+    /**
+     * Attach (or detach, with nullptr) the AEC-delay monitor.
+     *
+     * The monitor is fed with the samples the sink hands to the
+     * device, so the estimator can correlate them against the
+     * microphone capture.
+     */
+    void set_aec_delay_monitor(AecDelayMonitor* monitor) noexcept override {
+        aec_monitor_.store(monitor, std::memory_order_relaxed);
+    }
+
+    /** The attached monitor, or nullptr when none is attached. */
+    [[nodiscard]] AecDelayMonitor* aec_delay_monitor() const noexcept override {
+        return aec_monitor_.load(std::memory_order_relaxed);
+    }
+
 private:
     void realtime_loop(std::size_t frames_per_buffer) noexcept;
 
     plugins::AudioSinkConfig cfg_;
     AudioRingBuffer queue_;
     plugins::AudioPlaybackCallback progress_cb_;
+
+    /** The F3 bookkeeping: what was queued and what was played. */
+    PlaybackProgressTracker progress_;
+
+    /** The F4 monitor (not owned — the host keeps it alive). */
+    std::atomic<AecDelayMonitor*> aec_monitor_ {nullptr};
 
     std::vector<float> scratch_;
     std::atomic<bool> open_ {false};

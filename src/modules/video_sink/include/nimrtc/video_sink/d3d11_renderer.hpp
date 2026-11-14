@@ -125,6 +125,7 @@ public:
 
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
 
     const plugins::VideoFrameInfo* current_frame_info() const noexcept override;
 

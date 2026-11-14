@@ -57,6 +57,7 @@
 #include <nimrtc/core/api_version.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -256,6 +257,22 @@ struct NIMRTC_API_STABLE InputEvent {
 
     /** The committed text (text events only). */
     std::string text;
+
+    /**
+     * @brief The `ref_frame` id this event was generated against (G5).
+     *
+     * The id identifies the video frame the operator was looking at when
+     * the event was produced — plan G5's "the click happened on the frame
+     * the operator was looking at".  The id space is the engine's
+     * `ref_frame` space: on the wire it is the peer's `frame_seq`, and
+     * the receiver resolves it against *its own* displayed-frame table.
+     *
+     * `std::nullopt` means "no frame reference" — the event was produced
+     * before any frame was sent, or the producer does not track frames.
+     * It is a legal value, not an error, and it costs **zero** bytes on
+     * the wire when the encoder is not asked to include it.
+     */
+    std::optional<std::uint64_t> ref_frame;
 };
 
 /** Structural equality — the round-trip test needs it, and a host that
@@ -274,7 +291,8 @@ NIMRTC_API_STABLE inline bool operator==(const InputEvent& a,
         && a.key_code == b.key_code
         && a.modifiers == b.modifiers
         && a.repeat == b.repeat
-        && a.text == b.text;
+        && a.text == b.text
+        && a.ref_frame == b.ref_frame;
 }
 
 inline NIMRTC_API_STABLE bool operator!=(const InputEvent& a,

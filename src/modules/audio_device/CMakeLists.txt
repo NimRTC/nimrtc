@@ -33,9 +33,26 @@
 # ----------------------------------------------------------------------------
 set(NIMRTC_AUDIO_DEVICE_SOURCES
     src/audio_device.cpp
+    # The playback-progress tracker (remote-desktop plan F3): the sink
+    # reports how many samples it actually played out, so the 3A's AEC
+    # reference stays aligned.
+    src/playback_progress.cpp
+    # The AEC-delay estimator (remote-desktop plan F4): the
+    # loudspeaker -> microphone loop delay is measured (or configured).
+    src/aec_delay.cpp
+    # The two-source mixer (remote-desktop plan F6): the microphone and
+    # the system audio, mixed or kept separate by configuration.
+    src/mixer.cpp
     src/portaudio_backend.cpp
+    src/resampler.cpp
     src/ring_buffer.cpp
     src/synthetic_backend.cpp
+    # The system-audio (loopback) capture device (remote-desktop plan
+    # F6): the factory, the device identity and the CI-testable
+    # synthetic device, plus the platform half (WASAPI / Core Audio /
+    # PulseAudio).
+    src/system_audio.cpp
+    src/system_audio_platform.cpp
     )
 
 add_library(nimrtc_audio_device STATIC
@@ -63,6 +80,22 @@ target_compile_definitions(nimrtc_audio_device
 # compiles its "no PortAudio backend" path when the submodule is not
 # populated.
 nimrtc_link_vendor_portaudio(nimrtc_audio_device)
+
+# libsamplerate (BSD-2-Clause, vendored) — the sample-rate converter
+# behind the module's `Resampler` (remote-desktop plan F5).  The helper
+# sets NIMRTC_HAS_LIBSAMPLERATE=1 or =0 depending on whether the
+# vendored tree is available, so the module compiles its pure-C++
+# linear-interpolation fallback when the submodule is not populated or
+# the vendored switch is off.  No system samplerate is ever linked (L5).
+nimrtc_link_vendor_libsamplerate(nimrtc_audio_device)
+
+# The system-audio (loopback) backend on Windows uses WASAPI directly
+# (IMMDeviceEnumerator / IAudioClient with AUDCLNT_STREAMFLAGS_LOOPBACK).
+# The import libraries are the Windows SDK's, not a third-party
+# dependency, so L5 is unaffected.
+if(WIN32)
+    target_link_libraries(nimrtc_audio_device PRIVATE ole32)
+endif()
 
 add_library(nimrtc::audio_device ALIAS nimrtc_audio_device)
 

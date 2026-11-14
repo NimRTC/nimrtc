@@ -43,6 +43,7 @@
 
 #include <nimrtc/core/registry.hpp>
 #include <nimrtc/video_capture/capture_queue.hpp>
+#include <nimrtc/video_capture/cursor_compositor.hpp>
 
 #ifdef _WIN32
 #include "d3d11_support.hpp"
@@ -106,7 +107,6 @@ public:
         queue_.set_drop_policy(cfg_.drop_policy);
         if (cfg_.queue_depth > 0) queue_.set_depth(cfg_.queue_depth);
     }
-
     ~Impl() { stop_thread(); }
 
     // ---- Device lifecycle -------------------------------------------------
@@ -226,6 +226,12 @@ public:
             negotiated_width_ = cfg_.region.width;
             negotiated_height_ = cfg_.region.height;
         }
+
+        // The captured surface's origin on the virtual desktop.  The
+        // cursor source reports the pointer in *screen* coordinates, so
+        // this is what turns a screen position into a frame position.
+        origin_x_ = static_cast<std::int32_t>(chosen->desktop_x);
+        origin_y_ = static_cast<std::int32_t>(chosen->desktop_y);
 
         open_ = true;
         return true;
@@ -423,8 +429,40 @@ public:
 
         stats_.bytes_copied += static_cast<std::uint64_t>(pixels.size());
 
+        // ---- The cursor layer (plan A6) ---------------------------------
+        //
+        // DXGI Desktop Duplication does **not** composite the pointer
+        // into the picture it delivers, so this is where the pointer
+        // gets drawn.  The blend happens on the CPU copy, before the
+        // frame is queued, so the queued frame already carries the
+        // cursor and the encoder path is unchanged.
+        //
+        // The GPU (zero-copy) path cannot blend a cursor: the pixels
+        // never leave the GPU, and a CPU-side blend would defeat the
+        // whole point of that path.  So the cursor layer is a CPU-path
+        // feature — an honest trade, and the statistics still show the
+        // frame was staged.
+        plugins::CaptureDirtyRects composited_dirty = dirty;
+        if (cursor_source_) {
+            const auto cursor_box = composite_cursor(pixels, width, height, stride);
+            if (cursor_box.applied) {
+                // The cursor's box is part of what changed, so it joins
+                // the dirty rectangles.
+                plugins::CaptureRegion r;
+                r.x = cursor_box.x;
+                r.y = cursor_box.y;
+                r.width = cursor_box.width;
+                r.height = cursor_box.height;
+                if (composited_dirty.full_frame) {
+                    composited_dirty.rects.clear();
+                    composited_dirty.full_frame = false;
+                }
+                composited_dirty.rects.push_back(r);
+            }
+        }
+
         const auto outcome = queue_.push(pixels.data(), pixels.size(), stride,
-                                         width, height, ts, seq, dirty);
+                                         width, height, ts, seq, composited_dirty);
         switch (outcome) {
             case CaptureQueue::PushResult::kQueued:
                 ++stats_.frames_captured;
@@ -449,6 +487,49 @@ public:
                 cb_(view);
             }
         }
+    }
+
+    // ---- The cursor layer (plan A6) ---------------------------------------
+
+    /**
+     * @brief Blend the cursor into a staged BGRA frame.
+     *
+     * The frame is modified in place.  The source is polled through the
+     * pinned fallback, so a cursor that cannot be read right now is
+     * re-drawn at its last known position rather than blinking out.
+     *
+     * @return The bounding box that was touched (empty when nothing was
+     *         applied).
+     */
+    CursorCompositor::CompositeResult composite_cursor(std::vector<std::uint8_t>& pixels,
+                                                        std::uint32_t width,
+                                                        std::uint32_t height,
+                                                        std::int32_t stride) noexcept {
+        CursorCompositor::CompositeResult result;
+        if (pixels.empty() || width == 0 || height == 0) return result;
+
+        CursorSample sample;
+        const CursorSourceStatus status = pinned_cursor_ ? pinned_cursor_->poll(sample)
+                                                         : CursorSourceStatus::kUnsupported;
+        // `kNoOverlayNeeded` means the platform composites the pointer
+        // itself (macOS / ScreenCaptureKit); `kUnsupported` means there
+        // is no cursor at all.  Either way the frame is delivered
+        // unchanged — a frame without a pointer beats a corrupted one.
+        if (status != CursorSourceStatus::kOk) return result;
+        if (sample.hidden) return result;
+        if (!sample.image.valid()) return result;
+
+        // The source reports the position in *screen* coordinates; the
+        // frame's own space starts at the captured surface's origin.
+        const CursorPosition pos = CursorCompositor::screen_to_frame(
+            sample.screen_x, sample.screen_y, origin_x_, origin_y_, width, height);
+        if (!pos.inside) return result;
+
+        // The blend is applied to the *staged* copy, so the cursor is
+        // part of the queued frame and the encoder path is unchanged.
+        result = cursor_compositor_.composite(sample.image, pos.x, pos.y, pixels.data(),
+                                               pixels.size(), stride, width, height);
+        return result;
     }
 
     wcap::SourceRegion source_region(std::uint32_t src_w,
@@ -515,6 +596,28 @@ public:
     wcap::GpuTexturePool pool_;
     bool pool_initialised_ = false;
 
+    /**
+     * The cursor source (plan A6) and the fallback that wraps it.
+     *
+     * The fallback is created together with the source, so a source that
+     * becomes unavailable is served from the pinned sample instead of
+     * making the pointer blink out of the picture.
+     */
+    std::shared_ptr<ICursorSource> cursor_source_;
+    std::shared_ptr<ICursorSource> pinned_cursor_;
+    CursorCompositor cursor_compositor_;
+
+    /**
+     * The captured surface's origin in **screen** coordinates.
+     *
+     * The cursor sources report the pointer's position in screen
+     * coordinates; the frame's own coordinate space starts at the
+     * surface's top-left corner.  Without this translation a pointer
+     * on the second display would be drawn in the wrong place.
+     */
+    std::int32_t origin_x_ = 0;
+    std::int32_t origin_y_ = 0;
+
     std::uint32_t negotiated_width_ = 0;
     std::uint32_t negotiated_height_ = 0;
     std::uint32_t next_seq_ = 0;
@@ -534,7 +637,18 @@ WindowsCapture::WindowsCapture(plugins::CaptureConfig cfg,
                                WindowsCaptureOptions opts) noexcept
     : impl_(std::make_unique<Impl>(std::move(cfg), opts)),
       cfg_(impl_->cfg_),
-      opts_(impl_->opts_) {}
+      opts_(impl_->opts_) {
+    // The cursor source (plan A6) may have been named in the options.
+    // It is wrapped in the pinned fallback here, so the pointer stays
+    // at its last known position whenever the platform cannot be read.
+    if (impl_->cursor_source_ == nullptr && opts_.cursor_source) {
+        impl_->cursor_source_ = opts_.cursor_source;
+    }
+    if (impl_->cursor_source_) {
+        impl_->pinned_cursor_ =
+            std::make_shared<PinnedCursorFallback>(impl_->cursor_source_);
+    }
+}
 
 WindowsCapture::~WindowsCapture() = default;
 
@@ -702,6 +816,20 @@ void WindowsCapture::set_error_callback(WindowsCaptureErrorCallback cb) noexcept
     impl_->error_cb_ = std::move(cb);
 }
 
+void WindowsCapture::set_cursor_source(std::shared_ptr<ICursorSource> source) noexcept {
+    impl_->cursor_source_ = std::move(source);
+    // The fallback wraps the source, so a cursor that becomes
+    // unavailable is served from the pinned sample (the pointer stays
+    // at its last position instead of blinking out).
+    impl_->pinned_cursor_ =
+        impl_->cursor_source_ ? std::make_shared<PinnedCursorFallback>(impl_->cursor_source_)
+                               : nullptr;
+}
+
+std::shared_ptr<ICursorSource> WindowsCapture::cursor_source() const noexcept {
+    return impl_->cursor_source_;
+}
+
 WindowsCaptureError WindowsCapture::last_error() const noexcept {
     return impl_->last_error_;
 }
@@ -805,6 +933,14 @@ void WindowsCapture::set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept
 
 void WindowsCapture::set_error_callback(WindowsCaptureErrorCallback cb) noexcept {
     impl_->error_cb_ = std::move(cb);
+}
+
+void WindowsCapture::set_cursor_source(std::shared_ptr<ICursorSource> source) noexcept {
+    impl_->cursor_source_ = std::move(source);
+}
+
+std::shared_ptr<ICursorSource> WindowsCapture::cursor_source() const noexcept {
+    return impl_->cursor_source_;
 }
 
 WindowsCaptureError WindowsCapture::last_error() const noexcept {

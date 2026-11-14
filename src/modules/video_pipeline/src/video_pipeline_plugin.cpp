@@ -236,6 +236,10 @@ to_plugin_sender_stats(const SenderStats& s) noexcept {
     out.frames_marked_as_keyframe    = s.frames_marked_as_keyframe;
     out.packets_retransmitted        = s.packets_retransmitted;
     out.packets_retransmit_missed    = s.packets_retransmit_missed;
+    out.keyframe_requests            = s.keyframe_requests;
+    out.keyframes_granted            = s.keyframes_granted;
+    out.keyframes_deferred           = s.keyframes_deferred;
+    out.keyframes_rejected           = s.keyframes_rejected;
     return out;
 }
 
@@ -469,6 +473,35 @@ std::uint16_t SenderAdapter::next_seq() const noexcept {
 plugins::VideoSenderConfig SenderAdapter::config() const noexcept {
     if (!concrete_) return {};
     return to_plugin_sender_cfg(/* default concrete config */ SenderConfig{});
+}
+
+// ---------------------------------------------------------------------------
+// The key-frame storm limiter (remote-desktop plan B14)
+// ---------------------------------------------------------------------------
+
+void SenderAdapter::set_keyframe_limiter_config(
+        nimrtc::video_pipeline::KeyframeLimiterConfig cfg) noexcept {
+    if (concrete_) concrete_->set_keyframe_limiter_config(cfg);
+}
+
+nimrtc::video_pipeline::KeyframeLimiterConfig
+SenderAdapter::keyframe_limiter_config() const noexcept {
+    if (!concrete_) return {};
+    return concrete_->keyframe_limiter_config();
+}
+
+nimrtc::video_pipeline::KeyframeLimiterStats
+SenderAdapter::keyframe_limiter_stats() const noexcept {
+    if (!concrete_) return {};
+    return concrete_->keyframe_limiter_stats();
+}
+
+nimrtc::video_pipeline::KeyframeDecision SenderAdapter::request_keyframe(
+        nimrtc::video_pipeline::KeyframeReason reason,
+        std::int64_t now_us,
+        bool carries_parameter_sets) noexcept {
+    if (!concrete_) return nimrtc::video_pipeline::KeyframeDecision::kRejected;
+    return concrete_->request_keyframe(reason, now_us, carries_parameter_sets);
 }
 
 // ---------------------------------------------------------------------------

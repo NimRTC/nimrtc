@@ -69,6 +69,9 @@ inline constexpr std::uint8_t kPsfbPt = 206;
 // RTCP payload type for RTPFB (RFC 4585 §6.2): 205.
 inline constexpr std::uint8_t kRtpfbPt = 205;
 
+// RTCP payload type for APP (RFC 3550 §6.1): 204.
+NIMRTC_API_STABLE inline constexpr std::uint8_t kAppPt = 204;
+
 // FCI kinds (the value in the FMT field for each feedback type).
 inline constexpr std::uint8_t kFmtPli     = 1;
 inline constexpr std::uint8_t kFmtFir     = 4;
@@ -135,10 +138,117 @@ struct NackPacket {
 // returns 0. Callers should pre-size the buffer using kPliPacketSize +
 // entries * kXxxEntrySize.
 
-std::size_t build_pli (core::MutableByteSpan output, const PliPacket&  p) noexcept;
-std::size_t build_fir (core::MutableByteSpan output, const FirPacket&  p) noexcept;
-std::size_t build_sli (core::MutableByteSpan output, const SliPacket&  p) noexcept;
-std::size_t build_nack(core::MutableByteSpan output, const NackPacket& p) noexcept;
+// ---------------------------------------------------------------------------
+// Region refresh — the "loss-region refresh" of remote-desktop plan B9
+// ---------------------------------------------------------------------------
+//
+// ## Why this exists
+//
+// Plan B9: "the encoder encodes only the changed region and signals the
+// region to the peer (a region-invalidation / loss-region refresh
+// mechanism)".
+//
+// The existing PLI / FIR / SLI messages cannot carry a *rectangle*:
+//  - a PLI has no FCI at all (RFC 4585 §6.3.1),
+//  - a FIR's FCI entry carries an SSRC and a sequence number
+//    (RFC 5104 §4.3.1.1),
+//  - an SLI carries macroblock indices of *lost* slices and travels in
+//    the receiver -> sender direction (RFC 4585 §6.3.2).
+//
+// So the region needs its own message, and the RFC-sanctioned way to
+// carry application-defined payload in RTCP is the **APP** packet
+// (RFC 3550 §6.1).  The name field is "NRGN" (NimRTC ReGiOn), and the
+// application data is the media SSRC followed by the rectangles.
+//
+// The message travels **sender -> peer**: the sender has coded only the
+// changed region, and the peer needs to know *which* region to
+// invalidate in its decoder.
+//
+// Wire layout (all values big-endian):
+//
+//   0                   1                   2                   3
+//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |V=2|P| subtype |  PT=204 (APP) |          length               |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                     sender SSRC (32)                          |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                       name = "NRGN"                            |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |                     media  SSRC (32)                          |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//  |  x (32) | y (32) | width (32) | height (32)   [per region]    |
+//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+/** The RTCP APP name used by the region-refresh message ("NRGN"). */
+NIMRTC_API_STABLE inline constexpr std::uint8_t kRegionRefreshName[4] = {
+    'N', 'R', 'G', 'N'
+};
+
+/** The size of the region-refresh preamble: RTCP header (4) + sender SSRC
+ *  (4) + name (4) + media SSRC (4). */
+NIMRTC_API_STABLE inline constexpr std::size_t kRegionRefreshHeaderSize = 16;
+
+/** The size of one region in the region-refresh FCI: x, y, width, height
+ *  as four 32-bit big-endian values. */
+NIMRTC_API_STABLE inline constexpr std::size_t kRegionRefreshEntrySize = 16;
+
+/** One rectangle of the changed region, in source pixels. */
+struct NIMRTC_API_STABLE RegionRect {
+    std::uint32_t x      = 0;
+    std::uint32_t y      = 0;
+    std::uint32_t width  = 0;
+    std::uint32_t height = 0;
+};
+
+/** A region-refresh message: "these rectangles of `media_ssrc` changed". */
+struct NIMRTC_API_STABLE RegionRefreshPacket {
+    std::uint32_t             sender_ssrc = 0;
+    std::uint32_t             media_ssrc  = 0;
+    std::vector<RegionRect>   regions;
+};
+
+/** The number of bytes `build_region_refresh()` needs for `region_count`
+ *  rectangles. */
+NIMRTC_API_STABLE inline constexpr std::size_t region_refresh_size(
+        std::size_t region_count) noexcept {
+    return kRegionRefreshHeaderSize + region_count * kRegionRefreshEntrySize;
+}
+
+/** Build a region-refresh message.
+ *
+ *  @param output  Destination buffer (size it with `region_refresh_size()`).
+ *  @param p       The message to encode.
+ *  @return The number of bytes written; 0 when the destination is too
+ *          small or the message carries no region. */
+NIMRTC_API_STABLE std::size_t build_region_refresh(
+    core::MutableByteSpan output, const RegionRefreshPacket& p) noexcept;
+
+/** Parse a region-refresh message.
+ *
+ *  @param input  The received RTCP bytes (one APP packet).
+ *  @return The parsed message, or a ProtocolError when the input is not
+ *          a well-formed region-refresh APP packet. */
+NIMRTC_API_STABLE core::Result<RegionRefreshPacket> parse_region_refresh(
+    core::ByteSpan input) noexcept;
+
+/** True iff `input` looks like a region-refresh APP packet (PT=APP and
+ *  the "NRGN" name).  A cheap pre-check, so a demuxer can skip the other
+ *  APP packets without a full parse. */
+NIMRTC_API_STABLE bool is_region_refresh(core::ByteSpan input) noexcept;
+
+// ---------------------------------------------------------------------------
+// Builders
+// ---------------------------------------------------------------------------
+// Each returns the number of bytes written to `output`. If `output.size()`
+// is less than the wire size of the packet the function writes nothing and
+// returns 0. Callers should pre-size the buffer using kPliPacketSize +
+// entries * kXxxEntrySize.
+
+NIMRTC_API_STABLE std::size_t build_pli (core::MutableByteSpan output, const PliPacket&  p) noexcept;
+NIMRTC_API_STABLE std::size_t build_fir (core::MutableByteSpan output, const FirPacket&  p) noexcept;
+NIMRTC_API_STABLE std::size_t build_sli (core::MutableByteSpan output, const SliPacket&  p) noexcept;
+NIMRTC_API_STABLE std::size_t build_nack(core::MutableByteSpan output, const NackPacket& p) noexcept;
 
 // ---------------------------------------------------------------------------
 // Parsers
@@ -149,7 +259,7 @@ std::size_t build_nack(core::MutableByteSpan output, const NackPacket& p) noexce
 // fields (NackEntry, FirEntry, ...) are returned by value as the wire
 // representation is a copy of fixed-size integers anyway.
 
-core::Result<PliPacket>  parse_pli (core::ByteSpan input) noexcept;
+NIMRTC_API_STABLE core::Result<PliPacket>  parse_pli (core::ByteSpan input) noexcept;
 NIMRTC_API_STABLE core::Result<FirPacket>  parse_fir (core::ByteSpan input) noexcept;
 NIMRTC_API_STABLE core::Result<SliPacket>  parse_sli (core::ByteSpan input) noexcept;
 NIMRTC_API_STABLE core::Result<NackPacket> parse_nack(core::ByteSpan input) noexcept;
@@ -191,6 +301,19 @@ class NIMRTC_API_STABLE FirCoalescer {
 public:
     explicit FirCoalescer(std::uint32_t sender_ssrc) noexcept;
 
+    /** A coalescer with an explicit minimum interval.
+     *
+     *  The default interval is `kFirMinIntervalUs` (250 ms — RFC 5104
+     *  §4.3.1.1's "about 4 Hz").  The keyframe-storm limiter (remote-
+     *  desktop plan B14) needs the same mechanism with a *configurable*
+     *  interval, so the interval is a constructor argument rather than a
+     *  compile-time constant.
+     *
+     *  @param sender_ssrc     The SSRC this coalescer sends as.
+     *  @param min_interval_us The minimum interval between two grants,
+     *                         in microseconds.  0 disables the gate. */
+    FirCoalescer(std::uint32_t sender_ssrc, std::int64_t min_interval_us) noexcept;
+
     /** Returns true iff a FIR may be sent for `media_ssrc` at `now_us`.
      *  The first call for a given SSRC always returns true. Subsequent calls
      *  within `kFirMinIntervalUs` microseconds return false.
@@ -211,9 +334,13 @@ public:
     /** The next sequence number that will be issued by `make_entry()`. */
     std::uint8_t  next_seq_nr() const noexcept { return next_seq_nr_; }
 
+    /** The minimum interval between two grants, in microseconds. */
+    std::int64_t  min_interval_us() const noexcept { return min_interval_us_; }
+
 private:
     std::uint32_t                                       sender_ssrc_;
     std::uint8_t                                        next_seq_nr_;
+    std::int64_t                                        min_interval_us_;
     std::unordered_map<std::uint32_t, std::int64_t>     last_sent_us_;
 };
 

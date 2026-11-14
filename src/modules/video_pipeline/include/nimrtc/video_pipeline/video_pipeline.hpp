@@ -76,6 +76,7 @@
 #include <nimrtc/core/error.hpp>
 #include <nimrtc/video_frame/frame.hpp>
 #include <nimrtc/video_jb/video_jitter_buffer.hpp>
+#include <nimrtc/video_pipeline/keyframe_limiter.hpp>
 #include <nimrtc/video_rtcp_feedback/video_rtcp_feedback.hpp>
 #include <nimrtc/rtp/packet.hpp>
 
@@ -279,6 +280,15 @@ struct NIMRTC_API_STABLE SenderStats {
     /** NACKs that could not be answered because the packet had already
      *  left the retransmission cache (v1.1 Q3). */
     std::uint64_t packets_retransmit_missed    = 0;
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    /** Key-frame requests the limiter was offered. */
+    std::uint64_t keyframe_requests             = 0;
+    /** Key-frame requests the limiter granted (a key frame was produced). */
+    std::uint64_t keyframes_granted             = 0;
+    /** Key-frame requests the limiter deferred (held back, not dropped). */
+    std::uint64_t keyframes_deferred            = 0;
+    /** Key-frame requests the limiter rejected (the budget was spent). */
+    std::uint64_t keyframes_rejected            = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -370,6 +380,39 @@ public:
     /** Number of packets currently held in the retransmission cache. */
     std::size_t cached_packet_count() const noexcept;
 
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The pipeline is where a key-frame request becomes an actual IDR:
+    // `apply_feedback_rtcp()` sees the PLI / FIR, and the *encoder* is
+    // the one that has to produce the IDR.  The limiter sits between
+    // the two, so a burst of PLIs produces ONE key frame, not N.
+    //
+    // The limiter's default policy is the same interval the FIR
+    // coalescer uses (250 ms — RFC 5104 §4.3.1.1's "about 4 Hz"), so
+    // the two ends of the loop agree on the rate.
+
+    /** The limiter's configuration. */
+    void set_keyframe_limiter_config(KeyframeLimiterConfig cfg) noexcept;
+
+    /** The limiter's current configuration. */
+    KeyframeLimiterConfig keyframe_limiter_config() const noexcept;
+
+    /**
+     * @brief Offer a key-frame request to the limiter.
+     *
+     *  @param reason Why the key frame was asked for.
+     *  @param now_us Monotonic timestamp in microseconds.
+     *  @param carries_parameter_sets True iff the key frame must also
+     *        carry the codec's parameter sets (a resolution change).
+     *        Such a request is **never** deferred.
+     *  @return The limiter's verdict. */
+    KeyframeDecision request_keyframe(KeyframeReason reason,
+                                       std::int64_t now_us,
+                                       bool carries_parameter_sets = false) noexcept;
+
+    /** The limiter's counters. */
+    KeyframeLimiterStats keyframe_limiter_stats() const noexcept;
+
     /** Snapshot of sender counters. */
     SenderStats stats() const noexcept;
 
@@ -428,6 +471,10 @@ NIMRTC_API_STABLE std::size_t build_feedback_rtcp(
  *  The input may be a single feedback packet or a compound RTCP packet;
  *  every packet in the compound is processed.
  *
+ *  The key-frame requests are arbitrated by the sender's key-frame storm
+ *  limiter (remote-desktop plan B14): a burst of PLIs produces ONE key
+ *  frame, not N.
+ *
  *  @param sender The sender that answers the feedback.
  *  @param rtcp   The received RTCP bytes.
  *  @return The number of actions performed (packets retransmitted plus
@@ -436,5 +483,26 @@ NIMRTC_API_STABLE std::size_t build_feedback_rtcp(
 NIMRTC_API_STABLE core::Result<int> apply_feedback_rtcp(
     VideoSender& sender,
     core::ByteSpan rtcp) noexcept;
+
+/** Apply an incoming RTCP feedback packet to a sender, with an explicit
+ *  monotonic timestamp.
+ *
+ *  The timestamp is what the key-frame storm limiter compares against
+ *  its minimum interval (plan B14).  A caller that has its own clock
+ *  (the engine's tick thread) passes it in; a caller that does not uses
+ *  the overload above, which reads the steady clock.
+ *
+ *  @param sender The sender that answers the feedback.
+ *  @param rtcp   The received RTCP bytes.
+ *  @param now_us Monotonic timestamp in microseconds.
+ *  @return The number of actions performed. */
+NIMRTC_API_STABLE core::Result<int> apply_feedback_rtcp(
+    VideoSender& sender,
+    core::ByteSpan rtcp,
+    std::int64_t now_us) noexcept;
+
+/** The monotonic clock, in microseconds.  The same epoch as
+ *  `core::SteadyClock`. */
+NIMRTC_API_STABLE std::int64_t monotonic_now_us() noexcept;
 
 } // namespace nimrtc::video_pipeline

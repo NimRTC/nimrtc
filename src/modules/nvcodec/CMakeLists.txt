@@ -31,16 +31,22 @@
 #                                        nvdec_codec_available() /
 #                                        make_nvdec_codec()
 #   nimrtc/nvcodec/hw_composite_codec.hpp — the encoder+decoder adapter
+#   nimrtc/nvcodec/vt_backends.hpp    — the VideoToolbox (macOS) entry points
 #
-# The generic entry points are *always* present — they return false /
-# nullptr when the NVIDIA SDK is not compiled in — so the codec modules
-# need no `#if` guards of their own.
+# The VideoToolbox integration is *codec-parameterised* the same way the
+# NVIDIA one is: one `VTCompressionSession` code path serves H.264 and
+# HEVC, and one `VTDecompressionSession` code path serves both.  The
+# entry points are always present — they report "not available" and
+# return nullptr on a non-Apple build — so the codec modules need no
+# `#if` guards of their own.
 # ----------------------------------------------------------------------------
 add_library(nimrtc_nvcodec STATIC
     src/nv_codec_kind.cpp
     src/hw_composite_codec.cpp
     src/nvenc_encoder.cpp
     src/nvdec_decoder.cpp
+    src/videotoolbox_encoder.cpp
+    src/videotoolbox_decoder.cpp
     )
 
 nimrtc_apply_options(nimrtc_nvcodec)

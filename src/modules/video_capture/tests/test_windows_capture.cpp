@@ -24,6 +24,7 @@
 // ----------------------------------------------------------------------------
 
 #include <nimrtc/core/registry.hpp>
+#include <nimrtc/video_capture/cursor_source.hpp>
 #include <nimrtc/video_capture/synthetic_capture.hpp>
 #include <nimrtc/video_capture/windows_capture.hpp>
 
@@ -1021,4 +1022,81 @@ TEST(WindowsCapture, TheErrorCodesAreDistinct) {
     EXPECT_EQ(nimrtc::video_capture::windows_capture_error_name(
                   WindowsCaptureError::kDeviceLost),
               "device-lost");
+}
+
+// ---------------------------------------------------------------------------
+// The cursor layer (remote-desktop plan A6)
+//
+// DXGI Desktop Duplication does not composite the pointer into the
+// picture, so the DXGI device is the one that needs the cursor layer.
+// These tests pin down that the layer is *pluggable* (the device
+// accepts any source) and that the Windows source is real.
+// ---------------------------------------------------------------------------
+
+TEST(WindowsCursor, TheDeviceAcceptsACursorSource) {
+    // The cursor source is pluggable: the device takes any
+    // `ICursorSource`, not just the platform one.
+    const auto cap = make_capture(WindowsCaptureBackend::kDxgiDesktopDuplication);
+    EXPECT_EQ(cap->cursor_source(), nullptr);
+
+    auto source = nimrtc::video_capture::make_platform_cursor_source();
+    ASSERT_NE(source, nullptr);
+    cap->set_cursor_source(source);
+    EXPECT_EQ(cap->cursor_source(), source);
+
+    // Detaching is allowed: the frames then carry no cursor.
+    cap->set_cursor_source(nullptr);
+    EXPECT_EQ(cap->cursor_source(), nullptr);
+}
+
+TEST(WindowsCursor, ThePlatformSourceIsTheWindowsOne) {
+    auto source = nimrtc::video_capture::make_platform_cursor_source();
+    ASSERT_NE(source, nullptr);
+    EXPECT_EQ(source->id(), "windows-cursor");
+    EXPECT_EQ(nimrtc::video_capture::make_windows_cursor_source()->id(),
+              "windows-cursor");
+}
+
+TEST(WindowsCursor, ThePlatformSourceYieldsAUsableBitmapOrSaysItCannot) {
+    // The source either produces a sample with a usable bitmap, or it
+    // reports honestly that it cannot (a locked workstation, a secure
+    // desktop, a session with no console).  It never crashes and never
+    // produces a half-built sample.
+    auto source = nimrtc::video_capture::make_platform_cursor_source();
+    ASSERT_NE(source, nullptr);
+
+    nimrtc::video_capture::CursorSample sample;
+    const auto status = source->poll(sample);
+    EXPECT_TRUE(status == nimrtc::video_capture::CursorSourceStatus::kOk ||
+                status == nimrtc::video_capture::CursorSourceStatus::kUnavailable);
+
+    if (status == nimrtc::video_capture::CursorSourceStatus::kOk) {
+        if (!sample.hidden) {
+            EXPECT_TRUE(sample.image.valid());
+            EXPECT_GT(sample.image.width, 0u);
+            EXPECT_GT(sample.image.height, 0u);
+            // The bitmap is BGRA, so it is four bytes per pixel.
+            EXPECT_GE(sample.image.pixels.size(),
+                      static_cast<std::size_t>(sample.image.width) *
+                          sample.image.height * 4u);
+        }
+    }
+}
+
+TEST(WindowsCursor, ThePinnedFallbackKeepsTheCursorVisible) {
+    // The "cursor is always drawn at the last position" fallback.  A
+    // real source that has produced a sample is then asked again; when
+    // it cannot answer, the pinned sample is served.
+    auto source = nimrtc::video_capture::make_platform_cursor_source();
+    ASSERT_NE(source, nullptr);
+
+    nimrtc::video_capture::PinnedCursorFallback fallback(source);
+    nimrtc::video_capture::CursorSample sample;
+    const auto status = fallback.poll(sample);
+
+    if (status == nimrtc::video_capture::CursorSourceStatus::kOk) {
+        EXPECT_TRUE(fallback.has_pinned_sample());
+        EXPECT_NE(fallback.pinned_sample(), nullptr);
+        EXPECT_EQ(fallback.pinned_sample()->screen_x, sample.screen_x);
+    }
 }

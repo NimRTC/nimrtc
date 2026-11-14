@@ -23,7 +23,8 @@
  * ```
  *   byte 0 : format version (currently 1)
  *   byte 1 : event type   (InputEventType)
- *   byte 2 : flags        (bit 0 = "a timestamp follows")
+ *   byte 2 : flags        (bit 0 = "a timestamp follows",
+ *                          bit 1 = "a ref-frame id follows")
  * ```
  *
  * and continues with a type-specific body:
@@ -52,6 +53,13 @@
  * decoder self-describing: a decoder never has to *agree* with the sender
  * about whether a timestamp is present — it reads the flag.
  *
+ * The `ref_frame` id (plan G5 — the frame the operator was looking at)
+ * is carried the same way: `EncodeOptions::include_ref_frame` puts it on
+ * the wire as a varint immediately after the optional timestamp, and
+ * flags bit 1 says so.  A sender that does not bind its events to frames
+ * pays nothing for the feature — the flag bit stays clear and no bytes
+ * are added.
+ *
  * ## Versioning
  *
  * The version byte is the *first* byte of every event, so a decoder can
@@ -59,6 +67,40 @@
  * A decoder configured with `DecodeOptions::allow_newer_version` accepts a
  * version it does not know and parses it under the *current* rules — which
  * is only safe if the format is append-only, so the default is to reject.
+ *
+ * ### Unknown flag bits are **ignored**, not rejected
+ *
+ * The flags byte is the extension point that keeps the version at 1.
+ * A decoder reads only the bits it knows (bit 0 = timestamp, bit 1 =
+ * ref-frame id) and **ignores every other bit** — an event whose flags
+ * byte carries an unknown bit still decodes, and the bit does not
+ * change the outcome.  That is the append-only-friendly answer, and it
+ * is the documented choice.
+ *
+ * **The honest limit of that choice.**  The optional fields appear in a
+ * *fixed order* (timestamp, then ref-frame id) and each is
+ * self-describing through its own flag bit, but a decoder that does not
+ * know bit 1 has no way to *skip* the field it does not know — the
+ * varint's length is not knowable.  So:
+ *
+ *   - a **new** decoder reading an **old** event is fine (the flag is
+ *     clear, so no field is read);
+ *   - an **old** decoder reading a **new** event that carries a
+ *     ref-frame id is **not** fine: it ignores the flag bit and then
+ *     mis-reads the field's bytes as the event body.
+ *
+ * That asymmetry is why the **version byte is the strong guard** and
+ * the flags byte is only a soft one.  A decoder with
+ * `allow_newer_version == false` rejects an unknown version outright,
+ * so a future format change that is *not* backwards compatible must
+ * bump `kEventCodecVersion` — and a sender that sets the ref-frame
+ * flag should only do so against a peer known to support it (which in
+ * practice means: the host turns `EncodeOptions::include_ref_frame`
+ * on only when the peer negotiated the feature).
+ *
+ * The practical consequence, stated plainly: **the ref-frame extension
+ * is additive and costs nothing when it is off, but a peer that
+ * predates it must not be sent events that carry it.**
  *
  * ## Batch framing
  *
@@ -120,6 +162,10 @@ struct NIMRTC_API_STABLE EncodeOptions {
      *  receiver does not need it to apply the event, and it costs 5-6
      *  bytes per event. */
     bool include_timestamp = false;
+
+    /** Write the `ref_frame` id (plan G5) onto the wire.  Off by default:
+     *  a sender that does not bind its events to frames pays nothing. */
+    bool include_ref_frame = false;
 
     /** The version byte to write.  Defaults to `kEventCodecVersion`; a
      *  lower value exists so a test can prove that a decoder rejects an

@@ -86,3 +86,31 @@ if(COMMAND gtest_discover_tests)
         PROPERTIES TIMEOUT 120
         DISCOVERY_TIMEOUT 10)
 endif()
+
+# -----------------------------------------------------------------------------
+# test_video_frame_roi -- remote-desktop plan C4 (the shared rectangle
+# scaling rule that the ROI uses).
+# -----------------------------------------------------------------------------
+add_executable(test_video_frame_roi test_video_frame_roi.cpp)
+
+set_target_properties(test_video_frame_roi PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_video_frame_roi LENIENT)
+
+target_link_libraries(test_video_frame_roi PRIVATE
+    nimrtc::video_frame
+    nimrtc::core
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_video_frame_tests_test_video_frame_roi
+         COMMAND test_video_frame_roi)
+set_tests_properties(modules_video_frame_tests_test_video_frame_roi
+                     PROPERTIES TIMEOUT 30)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_video_frame_roi
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()

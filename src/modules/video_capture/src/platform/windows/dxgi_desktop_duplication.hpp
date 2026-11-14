@@ -1,6 +1,6 @@
 /**
  * @file modules/video_capture/src/platform/windows/dxgi_desktop_duplication.hpp
- * @brief The DXGI Desktop Duplication backend 鈥?display capture.
+ * @brief The DXGI Desktop Duplication backend — display capture.
  *
  * Desktop Duplication is the cheapest way to capture a *display* on
  * Windows: the compositor hands out the front buffer directly, with no
@@ -12,7 +12,7 @@
  * What it does **not** do is composite the pointer: the cursor is a
  * separate layer (remote-desktop plan item A6).
  *
- * The surface is `DXGI_FORMAT_B8G8R8A8_UNORM` 鈥?BGRA, the format
+ * The surface is `DXGI_FORMAT_B8G8R8A8_UNORM` — BGRA, the format
  * every desktop compositor produces natively.
  *
  * @note Internal to the video_capture module. Not a public header.
@@ -37,7 +37,7 @@ namespace nimrtc::video_capture::wcap {
 
 /** One display, as DXGI sees it. */
 struct DxgiOutput {
-    /** Stable device id 鈥?the DXGI device name, e.g. `\\.\DISPLAY1`. */
+    /** Stable device id — the DXGI device name, e.g. `\\.\DISPLAY1`. */
     std::string device_id;
     /** Human-readable name. */
     std::string name;
@@ -56,7 +56,7 @@ struct DxgiOutput {
 };
 
 /**
- * @brief The stable device id of a DXGI output 鈥?its device name, e.g.
+ * @brief The stable device id of a DXGI output — its device name, e.g.
  *  `"\\\\.\\DISPLAY1"`.
  */
 std::string output_device_id(const DXGI_OUTPUT_DESC& desc) noexcept;
@@ -65,7 +65,7 @@ std::string output_device_id(const DXGI_OUTPUT_DESC& desc) noexcept;
  * @brief Enumerate the displays DXGI can duplicate.
  *
  * Returns an empty vector on a machine with no display (a headless CI
- * leg) 鈥?the caller reports "no device" rather than crashing.
+ * leg) — the caller reports "no device" rather than crashing.
  */
 std::vector<DxgiOutput> enumerate_dxgi_outputs() noexcept;
 
@@ -74,7 +74,7 @@ std::vector<DxgiOutput> enumerate_dxgi_outputs() noexcept;
  *
  * The session owns the D3D11 device, the duplication object, and the
  * texture pool.  `acquire_next()` blocks on the compositor (with a
- * timeout) until a frame is available 鈥?it is called from the capture
+ * timeout) until a frame is available — it is called from the capture
  * device's own thread, never from the engine's tick thread.
  */
 class DxgiDesktopDuplication {

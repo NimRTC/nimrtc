@@ -21,6 +21,9 @@ add_library(nimrtc_h265 STATIC
     src/decoder.cpp
     src/codec_plugin.cpp
     src/hw_backends.cpp
+    src/vaapi_h265_encoder.cpp
+    src/qsv_h265_encoder.cpp
+    src/amf_h265_encoder.cpp
     )
 
 nimrtc_apply_options(nimrtc_h265)

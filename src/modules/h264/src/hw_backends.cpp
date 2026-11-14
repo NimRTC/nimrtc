@@ -34,6 +34,7 @@
 #include <nimrtc/h264/codec_plugin.hpp>
 #include <nimrtc/nvcodec/nv_backends.hpp>
 #include <nimrtc/nvcodec/nv_codec_kind.hpp>
+#include <nimrtc/nvcodec/vt_backends.hpp>
 #include <nimrtc/plugins/video_codec.hpp>
 
 namespace nimrtc::h264 {
@@ -159,6 +160,10 @@ plugins::VideoEncoderBackend make_openh264_encoder_backend() {
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return openh264_h264_available();
     };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "openh264: the vendored OpenH264 software encoder is not "
+               "available in this build";
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
         return make_openh264_h264_codec(std::move(cfg));
@@ -177,6 +182,10 @@ plugins::VideoDecoderBackend make_openh264_decoder_backend() {
     be.zero_copy_supported = false;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return openh264_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "openh264: the vendored OpenH264 software decoder is not "
+               "available in this build";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
@@ -205,6 +214,11 @@ plugins::VideoEncoderBackend make_nvenc_encoder_backend() {
     be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return nvcodec::nvenc_codec_available(nvcodec::NvCodec::kH264);
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "nvenc: no usable NVENC session for H.264 on this host — the "
+               "NVIDIA driver is absent, the GPU has no H.264 encoder, or "
+               "the session failed to open";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
@@ -235,6 +249,11 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return nvcodec::nvdec_codec_available(nvcodec::NvCodec::kH264);
     };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "nvdec: no usable NVDEC session for H.264 on this host — the "
+               "NVIDIA driver is absent, the GPU has no H.264 decoder, or "
+               "the session failed to open";
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
         return nvcodec::make_nvdec_codec(nvcodec::NvCodec::kH264, std::move(cfg));
@@ -243,35 +262,96 @@ plugins::VideoDecoderBackend make_nvdec_decoder_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// VideoToolbox —Apple. Priority 400. macOS only.
+// VideoToolbox —Apple. Priority 400.
+//
+// The entry is registered on *every* platform — not only on Apple — so
+// the seam id ("videotoolbox_h264") and the `HwBackend::VideoToolbox`
+// kind stay stable across the tree, and the honesty test can assert
+// that the seam *exists* on a non-Apple host.
+//
+// ## Why priority 400?
+//
+// The priority ladder follows Sunshine's: NVENC 450 (highest), NVDEC
+// 430, MediaCodec 420, **VideoToolbox 400**, AMF 380, VA-API 360, Quick
+// Sync 340, DXVA 320, the software codecs 50, the stub 0.
+//
+// VideoToolbox sits *below* the Android MediaCodec row and *above* the
+// AMD / Intel / Linux rows because:
+//
+//   - on a Mac it is the *only* hardware encoder, so its absolute
+//     position among the hardware rows does not matter — it wins by
+//     being the only one whose `available()` is true, and
+//   - it is above every desktop-Vendor row (AMF / VA-API / QSV) so
+//     that a shared priority table stays meaningful: a Mac never
+//     competes with an AMD card for the same seat, and the ordering
+//     reads as "the platform's own encoder first".
+//
+// It stays above the software path (50 / 0) by a wide margin, which is
+// the point of B5a: without it macOS falls back to software encoding,
+// which does not fit the plan's CPU budget at 1080p30.
+//
+// The availability probe is the real thing: it creates and tears down
+// a `VTCompressionSession` for H.264.  On a non-Apple build it
+// reports false (there is no VideoToolbox at all); on a Mac whose
+// silicon cannot do H.264 it also reports false.  Only a Mac with a
+// working H.264 encoder reports true.
+//
+// The decoder is registered alongside it: VideoToolbox does both
+// directions, and the decode path is what makes the macOS leg of the
+// remote-desktop pipeline work end to end.
 // ---------------------------------------------------------------------------
 
-#ifdef __APPLE__
 plugins::VideoEncoderBackend make_videotoolbox_encoder_backend() {
     plugins::VideoEncoderBackend be;
     be.id             = "videotoolbox_h264";
-    // NOT IMPLEMENTED — the entry exists so the seam id and the
-    // `HwBackend::VideoToolbox` kind stay stable, but `available()`
-    // returns false and `create()` returns nullptr.
-    be.description    = "Apple VideoToolbox H.264 encoder (NOT IMPLEMENTED — create() returns nullptr)";
+    be.description    = "Apple VideoToolbox H.264 encoder";
     be.backend        = plugins::HwBackend::VideoToolbox;
     be.priority       = 400;
     be.codec_kind     = plugins::VideoCodecKind::kH264;
     be.is_hw          = true;
-    // No encoder exists, so no GPU output surface can be produced.
-    be.zero_copy_supported = false;
+    // The encoder consumes and produces `CVPixelBufferRef` surfaces,
+    // which travel in the tree's GpuBuffer as
+    // `GpuBackend::kAppleCFPixelBuffer` — so the zero-copy path
+    // applies.
+    be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
-        // VTCompressionSessionCreate probe — TODO: implement when targeting macOS.
-        return false;
+        return nvcodec::vt_encoder_available(nvcodec::VtCodec::kH264);
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&)
+        -> std::string {
+        return nvcodec::vt_encoder_unavailable_reason(nvcodec::VtCodec::kH264);
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
-        (void)cfg;   // TODO: wire VideoToolbox encoder when macOS target
-        return nullptr;
+        return nvcodec::make_vt_encoder(nvcodec::VtCodec::kH264, std::move(cfg));
     };
     return be;
 }
-#endif
+
+plugins::VideoDecoderBackend make_videotoolbox_decoder_backend() {
+    plugins::VideoDecoderBackend be;
+    be.id             = "videotoolbox_h264";
+    be.description    = "Apple VideoToolbox H.264 decoder";
+    be.backend        = plugins::HwBackend::VideoToolbox;
+    be.priority       = 400;
+    be.codec_kind     = plugins::VideoCodecKind::kH264;
+    be.is_hw          = true;
+    // The decoder produces a `CVPixelBufferRef`, so it can fill a GPU
+    // output surface without a CPU round-trip.
+    be.zero_copy_supported = true;
+    be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
+        return nvcodec::vt_decoder_available(nvcodec::VtCodec::kH264);
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&)
+        -> std::string {
+        return nvcodec::vt_decoder_unavailable_reason(nvcodec::VtCodec::kH264);
+    };
+    be.create = [](plugins::VideoCodecConfig cfg)
+                -> std::unique_ptr<plugins::IVideoCodec> {
+        return nvcodec::make_vt_decoder(nvcodec::VtCodec::kH264, std::move(cfg));
+    };
+    return be;
+}
 
 // ---------------------------------------------------------------------------
 // VA-API —Linux Intel/AMD. Priority 360. available() probes vaInitialize.
@@ -289,6 +369,11 @@ plugins::VideoEncoderBackend make_vaapi_encoder_backend() {
     be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return vaapi_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "vaapi: no usable VA-API H.264 encoder on this host — the "
+               "VA-API runtime is absent, no DRM render node could be "
+               "opened, or the driver exposes no H.264 encoder entry point";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
@@ -321,6 +406,11 @@ plugins::VideoEncoderBackend make_mediacodec_encoder_backend() {
         // TODO: implement when targeting Android.
         return false;
     };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "mediacodec: the NDK MediaCodec integration is not implemented "
+               "in this tree, so the Android H.264 hardware encoder is not "
+               "available on any host";
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
         return nullptr;   // TODO: wire Android MediaCodec when Android target
@@ -345,6 +435,11 @@ plugins::VideoEncoderBackend make_amf_encoder_backend() {
     be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return amf_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "amf: no usable AMD AMF H.264 encoder on this host — the AMF "
+               "runtime is absent, no compatible AMD GPU was found, or the "
+               "encoder component failed to initialise";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
@@ -371,6 +466,11 @@ plugins::VideoEncoderBackend make_qsv_encoder_backend() {
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return qsv_h264_available();
     };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "quicksync: no usable Intel Quick Sync H.264 encoder on this "
+               "host — oneVPL / libvpl could not initialise, or no Intel iGPU "
+               "with an H.264 encoder was found";
+    };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
         return make_qsv_h264_codec(std::move(cfg));
@@ -396,6 +496,11 @@ plugins::VideoDecoderBackend make_dxva_decoder_backend() {
     be.zero_copy_supported = true;
     be.available = [](const plugins::VideoCodecConfig&) noexcept -> bool {
         return dxva_h264_available();
+    };
+    be.unavailable_reason = [](const plugins::VideoCodecConfig&) -> std::string {
+        return "dxva: no usable Microsoft DXVA / MediaFoundation H.264 "
+               "decoder on this host — the decoder MFT could not be created "
+               "or activated";
     };
     be.create = [](plugins::VideoCodecConfig cfg)
                 -> std::unique_ptr<plugins::IVideoCodec> {
@@ -432,10 +537,13 @@ void register_default_video_backends() noexcept {
     reg.register_encoder(make_nvenc_encoder_backend());
     reg.register_decoder(make_nvdec_decoder_backend());
 
-#ifdef __APPLE__
+    // The VideoToolbox entries are registered on *every* platform: the
+    // seam id and the `HwBackend::VideoToolbox` kind must stay stable
+    // across the tree, and the availability probe is what decides
+    // whether they are usable.  On a non-Apple host the probe reports
+    // false — which is the honest answer.
     reg.register_encoder(make_videotoolbox_encoder_backend());
-#endif
-
+    reg.register_decoder(make_videotoolbox_decoder_backend());
 #if HAS_VAAPI
     reg.register_encoder(make_vaapi_encoder_backend());
 #endif

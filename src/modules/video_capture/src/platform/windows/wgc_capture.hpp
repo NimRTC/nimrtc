@@ -1,6 +1,6 @@
 /**
  * @file modules/video_capture/src/platform/windows/wgc_capture.hpp
- * @brief The Windows Graphics Capture backend 鈥?display or window capture.
+ * @brief The Windows Graphics Capture backend — display or window capture.
  *
  * WGC is the *composited* path: the OS hands us exactly what the user
  * sees, pointer included (`GraphicsCaptureSession::
@@ -9,11 +9,11 @@
  * Two things distinguish it from DXGI Desktop Duplication:
  *
  *   - it needs the user's **consent** (`GraphicsCaptureAccess`), and a
- *     refusal has to be reported as a distinct error 鈥?not as "no
+ *     refusal has to be reported as a distinct error — not as "no
  *     frames", which is indistinguishable from a broken peer;
  *   - it reports **no dirty rectangles**.  The frame is a whole-frame
  *     picture, so the honest dirty-rect answer is "everything
- *     changed" 鈥?never an empty rect, which an incremental encoder
+ *     changed" — never an empty rect, which an incremental encoder
  *     would read as "nothing changed".
  *
  * The surface is `B8G8R8A8_UNORM` (BGRA).
@@ -101,7 +101,7 @@ public:
      * @param out_error   Receives the failure reason on failure.
      * @return true when a frame was available.
      *
-     * The texture stays valid until the next call 鈥?the caller must be
+     * The texture stays valid until the next call — the caller must be
      * done with it (or have copied it) before calling again.
      */
     bool try_get_next(ComPtr<ID3D11Texture2D>& out_texture,

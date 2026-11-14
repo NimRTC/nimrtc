@@ -9,6 +9,8 @@
 
 #include <nimrtc/audio_device/audio_device.hpp>
 #include <nimrtc/audio_device/ring_buffer.hpp>
+#include <nimrtc/audio_device/aec_delay.hpp>
+#include <nimrtc/audio_device/playback_progress.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -259,7 +261,8 @@ PaDeviceIndex default_output_device() noexcept {
  * A PortAudio callback runs on PortAudio's own thread.  It must not
  * block, so it copies the samples into the ring buffer and returns.
  */
-class PortAudioSource final : public plugins::IAudioSource {
+class PortAudioSource final : public plugins::IAudioSource,
+                              public IAecDelaySource {
 public:
     explicit PortAudioSource(plugins::AudioSourceConfig cfg) noexcept
         : cfg_(std::move(cfg)),
@@ -420,6 +423,16 @@ public:
         cb_ = std::move(cb);
     }
 
+    // ---- IAecDelaySource (remote-desktop plan F4) -------------------------
+
+    void set_aec_delay_monitor(AecDelayMonitor* monitor) noexcept override {
+        aec_monitor_.store(monitor, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] AecDelayMonitor* aec_delay_monitor() const noexcept override {
+        return aec_monitor_.load(std::memory_order_relaxed);
+    }
+
     plugins::Status read_samples(float* dst,
                                 std::size_t capacity,
                                 std::size_t* out_frames) noexcept override {
@@ -483,6 +496,13 @@ private:
         self->frames_processed_.fetch_add(frames);
         self->queue_.write(samples, frames);
 
+        // The signal the microphone captured is the *other* half of the
+        // AEC correlation (F4).
+        if (AecDelayMonitor* monitor =
+                self->aec_monitor_.load(std::memory_order_relaxed)) {
+            monitor->on_capture(samples, frames, now_us());
+        }
+
         if (self->cb_) {
             plugins::AudioFrame frame;
             frame.samples = samples;
@@ -499,6 +519,10 @@ private:
     plugins::AudioSourceConfig cfg_;
     AudioRingBuffer queue_;
     plugins::AudioFrameCallback cb_;
+
+    /** The F4 monitor (not owned — the host keeps it alive). */
+    std::atomic<AecDelayMonitor*> aec_monitor_ {nullptr};
+
     std::vector<float> scratch_;
     PaStream* stream_ = nullptr;
     std::size_t quantum_frames_ = kDefaultQuantum;
@@ -520,7 +544,9 @@ private:
  * still advances, because the device really did consume those samples
  * (they were silence).
  */
-class PortAudioSink final : public plugins::IAudioSink {
+class PortAudioSink final : public plugins::IAudioSink,
+                            public IPlaybackProgressSink,
+                            public IAecDelaySink {
 public:
     explicit PortAudioSink(plugins::AudioSinkConfig cfg) noexcept
         : cfg_(std::move(cfg)),
@@ -690,6 +716,10 @@ public:
             return plugins::kErrInvalidParam;
         }
         queue_.write(samples, num_samples);
+        // The sink accepted the frames: they are now "queued" as far as
+        // the AEC reference is concerned (F3).  The device has not
+        // played them yet, so the played counter does NOT move here.
+        progress_.on_samples_queued(num_samples);
         return plugins::kOk;
     }
 
@@ -700,6 +730,24 @@ public:
     void set_on_playback_progress(
         plugins::AudioPlaybackCallback cb) noexcept override {
         progress_cb_ = std::move(cb);
+    }
+
+    // ---- IPlaybackProgressSink (remote-desktop plan F3) -------------------
+
+    /** The sink's playback-progress tracker. */
+    [[nodiscard]] const PlaybackProgressTracker&
+    playback_progress() const noexcept override {
+        return progress_;
+    }
+
+    // ---- IAecDelaySink (remote-desktop plan F4) ---------------------------
+
+    void set_aec_delay_monitor(AecDelayMonitor* monitor) noexcept override {
+        aec_monitor_.store(monitor, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] AecDelayMonitor* aec_delay_monitor() const noexcept override {
+        return aec_monitor_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] plugins::AudioDeviceStats stats() const noexcept override {
@@ -757,6 +805,18 @@ private:
 
         self->frames_processed_.fetch_add(frames);
         const std::uint64_t total = self->played_.fetch_add(frames) + frames;
+
+        // The device consumed `frames` frames: that is what the AEC
+        // reference must be aligned to (F3).
+        self->progress_.on_samples_played(frames);
+
+        // The signal that reached the loudspeaker is the *other* half of
+        // the AEC correlation (F4).
+        if (AecDelayMonitor* monitor =
+                self->aec_monitor_.load(std::memory_order_relaxed)) {
+            monitor->on_render_played(out, frames, now_us());
+        }
+
         if (self->progress_cb_) {
             self->progress_cb_(total);
         }
@@ -766,6 +826,13 @@ private:
     plugins::AudioSinkConfig cfg_;
     AudioRingBuffer queue_;
     plugins::AudioPlaybackCallback progress_cb_;
+
+    /** The F3 bookkeeping: what was queued and what was played. */
+    PlaybackProgressTracker progress_;
+
+    /** The F4 monitor (not owned — the host keeps it alive). */
+    std::atomic<AecDelayMonitor*> aec_monitor_ {nullptr};
+
     std::vector<float> scratch_;
     PaStream* stream_ = nullptr;
     std::size_t quantum_frames_ = kDefaultQuantum;

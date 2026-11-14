@@ -96,6 +96,78 @@ TEST(PluginAdapter, ForwardsAllCalls) {
 }
 
 // ---------------------------------------------------------------------------
+// The reconfigure seam (remote-desktop plan E7)
+// ---------------------------------------------------------------------------
+//
+// The presentation geometry is a *runtime* property: the viewer resizes
+// the window and the picture has to follow.  The sink seam therefore
+// carries `set_config()`.
+
+TEST(SinkReconfigure, TheHeadlessSinkKeepsTheNewConfiguration) {
+    nimrtc::video_sink::HeadlessSink s({});
+    ASSERT_EQ(s.open(), np::kOk);
+
+    np::VideoSinkConfig cfg{};
+    cfg.width       = 1280;
+    cfg.height      = 720;
+    cfg.scale_mode  = np::VideoScaleMode::kCrop;
+    ASSERT_EQ(s.set_config(cfg), np::kOk);
+
+    EXPECT_EQ(s.config().width, 1280u);
+    EXPECT_EQ(s.config().height, 720u);
+    EXPECT_EQ(s.config().scale_mode, np::VideoScaleMode::kCrop);
+    s.close();
+}
+
+TEST(SinkReconfigure, ThePinnedSinkKeepsTheNewConfiguration) {
+    nimrtc::video_sink::PinnedSink s({});
+    ASSERT_EQ(s.open(), np::kOk);
+
+    np::VideoSinkConfig cfg{};
+    cfg.width  = 640;
+    cfg.height = 480;
+    ASSERT_EQ(s.set_config(cfg), np::kOk);
+    EXPECT_EQ(s.config().width, 640u);
+    EXPECT_EQ(s.config().height, 480u);
+    s.close();
+}
+
+TEST(SinkReconfigure, TheAdapterForwardsTheReconfigure) {
+    auto headless = nimrtc::video_sink::create_headless_sink({});
+    nimrtc::video_sink::PluginAdapter adapter(std::move(headless));
+    ASSERT_EQ(adapter.open(), np::kOk);
+
+    np::VideoSinkConfig cfg{};
+    cfg.width  = 1024;
+    cfg.height = 768;
+    ASSERT_EQ(adapter.set_config(cfg), np::kOk);
+    EXPECT_EQ(adapter.config().width, 1024u);
+    EXPECT_EQ(adapter.config().height, 768u);
+    adapter.close();
+}
+
+TEST(SinkReconfigure, TheDefaultImplementationIsAccepted) {
+    // A third-party sink that does not override `set_config()` keeps
+    // working: the call is accepted and the sink's own configuration is
+    // untouched.
+    class MinimalSink final : public np::IVideoSink {
+    public:
+        const char* name() const noexcept override { return "minimal"; }
+        np::Status open() noexcept override { return np::kOk; }
+        void close() noexcept override {}
+        np::VideoSinkStats stats() const noexcept override { return {}; }
+        np::VideoSinkConfig config() const noexcept override { return cfg_; }
+    private:
+        np::VideoSinkConfig cfg_{};
+    };
+
+    MinimalSink s;
+    np::VideoSinkConfig cfg{};
+    cfg.width = 320;
+    EXPECT_EQ(s.set_config(cfg), np::kOk);
+}
+
+// ---------------------------------------------------------------------------
 // Plugin factories
 // ---------------------------------------------------------------------------
 

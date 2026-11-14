@@ -15,6 +15,7 @@
 # ----------------------------------------------------------------------------
 add_library(nimrtc_video_frame STATIC
     src/frame.cpp
+    src/roi.cpp
     src/scaler.cpp
     )
 

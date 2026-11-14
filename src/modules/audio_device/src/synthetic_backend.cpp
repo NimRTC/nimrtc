@@ -262,6 +262,12 @@ void SyntheticAudioSource::produce_frame() noexcept {
 
     frames_processed_.fetch_add(1);
 
+    // The signal the microphone captured is the *other* half of the AEC
+    // correlation (F4).
+    if (AecDelayMonitor* monitor = aec_monitor_.load(std::memory_order_relaxed)) {
+        monitor->on_capture(scratch_.data(), frames, frame.capture_ts_us);
+    }
+
     // The pull path first (so a host that only pulls still sees the
     // frame), then the push path.
     queue_.write(scratch_.data(), frames);
@@ -391,6 +397,10 @@ plugins::Status SyntheticAudioSink::write(const float* samples,
         return plugins::kErrInvalidParam;
     }
     queue_.write(samples, num_samples);
+    // The sink accepted the frames: they are now "queued" as far as the
+    // AEC reference is concerned (F3).  The device has not played them
+    // yet, so the played counter does NOT move here.
+    progress_.on_samples_queued(num_samples);
     return plugins::kOk;
 }
 
@@ -434,6 +444,17 @@ plugins::Status SyntheticAudioSink::pump() noexcept {
 
     frames_processed_.fetch_add(1);
     const std::uint64_t total = played_.fetch_add(got) + got;
+
+    // The device consumed `got` frames: that is what the AEC reference
+    // must be aligned to (F3).
+    progress_.on_samples_played(got);
+
+    // The signal that reached the loudspeaker is the *other* half of
+    // the AEC correlation (F4).
+    if (AecDelayMonitor* monitor = aec_monitor_.load(std::memory_order_relaxed)) {
+        monitor->on_render_played(scratch_.data(), got, now_us());
+    }
+
     if (progress_cb_) {
         progress_cb_(total);
     }

@@ -136,6 +136,152 @@ TEST(HwBackends, PreferredNameRespected) {
 }
 
 // ---------------------------------------------------------------------------
+// VideoToolbox row (remote-desktop plan item B5a).
+//
+// The VideoToolbox entry is registered on *every* platform — the seam
+// id ("videotoolbox_h264") and the `HwBackend::VideoToolbox` kind must
+// stay stable across the tree.  On a non-Apple host the probe reports
+// `available() == false` **with a reason**, which is what these tests
+// assert.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const plugins::VideoEncoderBackend* find_encoder_by_id(
+    const char* id, plugins::VideoCodecKind kind) {
+    auto& reg = plugins::HwVideoBackendRegistry::instance();
+    for (const auto* be : reg.list_encoders(kind)) {
+        if (std::string(be->id) == id) return be;
+    }
+    return nullptr;
+}
+
+const plugins::VideoDecoderBackend* find_decoder_by_id(
+    const char* id, plugins::VideoCodecKind kind) {
+    auto& reg = plugins::HwVideoBackendRegistry::instance();
+    for (const auto* be : reg.list_decoders(kind)) {
+        if (std::string(be->id) == id) return be;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST(HwBackends, VideoToolboxEncoderEntryExists) {
+    h264::register_default_video_backends();
+
+    const auto* be = find_encoder_by_id("videotoolbox_h264",
+                                       plugins::VideoCodecKind::kH264);
+    ASSERT_NE(be, nullptr) << "the VideoToolbox H.264 seam must exist on "
+                               "every platform, not only on macOS";
+
+    EXPECT_EQ(be->priority, 400);
+    EXPECT_EQ(be->backend, plugins::HwBackend::VideoToolbox);
+    EXPECT_EQ(be->codec_kind, plugins::VideoCodecKind::kH264);
+    EXPECT_TRUE(be->is_hw);
+    // The zero-copy contract: CVPixelBuffer in → CVPixelBuffer out.
+    EXPECT_TRUE(be->zero_copy_supported);
+    ASSERT_TRUE(static_cast<bool>(be->available));
+    ASSERT_TRUE(static_cast<bool>(be->unavailable_reason));
+}
+
+TEST(HwBackends, VideoToolboxDecoderEntryExists) {
+    h264::register_default_video_backends();
+
+    const auto* be = find_decoder_by_id("videotoolbox_h264",
+                                       plugins::VideoCodecKind::kH264);
+    ASSERT_NE(be, nullptr);
+    EXPECT_EQ(be->priority, 400);
+    EXPECT_EQ(be->backend, plugins::HwBackend::VideoToolbox);
+    EXPECT_TRUE(be->zero_copy_supported);
+    ASSERT_TRUE(static_cast<bool>(be->available));
+    ASSERT_TRUE(static_cast<bool>(be->unavailable_reason));
+}
+
+TEST(HwBackends, VideoToolboxUnavailableOnNonAppleHostWithReason) {
+    h264::register_default_video_backends();
+
+    const auto* be = find_encoder_by_id("videotoolbox_h264",
+                                       plugins::VideoCodecKind::kH264);
+    ASSERT_NE(be, nullptr);
+
+    plugins::VideoCodecConfig cfg;
+    cfg.width = 1920;
+    cfg.height = 1080;
+
+#if defined(__APPLE__)
+    // On macOS the probe answers the truth about the *silicon*: either
+    // the session opens (available) or it does not (and the reason says
+    // why).  Both branches are legitimate; the reason must be present
+    // whenever the probe says "no".
+    if (!be->available(cfg)) {
+        const std::string reason = be->unavailable_reason(cfg);
+        EXPECT_FALSE(reason.empty());
+    }
+#else
+    // Off Apple there is no VideoToolbox at all — the seam must report
+    // "not available" *and say why*, rather than silently vanishing.
+    EXPECT_FALSE(be->available(cfg));
+    const std::string reason = be->unavailable_reason(cfg);
+    EXPECT_FALSE(reason.empty())
+        << "the VideoToolbox row must explain why it is unavailable";
+    EXPECT_NE(reason.find("VideoToolbox"), std::string::npos);
+
+    // And the factory must not hand out a half-built codec.
+    ASSERT_TRUE(static_cast<bool>(be->create));
+    EXPECT_FALSE(be->create(cfg));
+#endif
+}
+
+TEST(HwBackends, VideoToolboxPriorityIsAboveSoftwareAndBelowNvenc) {
+    h264::register_default_video_backends();
+
+    const auto* vt = find_encoder_by_id("videotoolbox_h264",
+                                        plugins::VideoCodecKind::kH264);
+    ASSERT_NE(vt, nullptr);
+
+    // The priority ladder: NVENC 450 > VideoToolbox 400 > the software
+    // path (OpenH264 50, stub 0).
+    if (const auto* nv = find_encoder_by_id("nvenc_h264",
+                                            plugins::VideoCodecKind::kH264)) {
+        EXPECT_GT(nv->priority, vt->priority);
+    }
+    for (const char* sw : {"openh264_h264", "stub_h264"}) {
+        if (const auto* be = find_encoder_by_id(sw, plugins::VideoCodecKind::kH264)) {
+            EXPECT_GT(vt->priority, be->priority)
+                << "VideoToolbox must outrank the software path (" << sw << ")";
+        }
+    }
+}
+
+#if !defined(__APPLE__)
+TEST(HwBackends, HardwarePreferenceFailsExplicitlyWithoutHardware) {
+    h264::register_default_video_backends();
+
+    // Asking for a hardware encoder on a host that has none must fail
+    // *explicitly* — the selector returns nullptr rather than silently
+    // handing back the software stub.
+    plugins::VideoCodecConfig cfg;
+    cfg.width = 640;
+    cfg.height = 480;
+    cfg.backend_preference = plugins::VideoCodecBackendPreference::kHardware;
+
+    // Only meaningful on a host with no usable hardware encoder at all.
+    bool any_hw = false;
+    for (const auto* be : plugins::HwVideoBackendRegistry::instance()
+                              .list_encoders(plugins::VideoCodecKind::kH264)) {
+        if (be->is_hw && be->available(cfg)) {
+            any_hw = true;
+            break;
+        }
+    }
+    if (!any_hw) {
+        EXPECT_EQ(h264::select_encoder_backend(cfg), nullptr);
+    }
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Helper functions — bitstream parsing
 // ---------------------------------------------------------------------------
 

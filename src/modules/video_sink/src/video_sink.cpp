@@ -6,6 +6,8 @@
  */
 
 #include <nimrtc/video_sink/d3d11_renderer.hpp>
+#include <nimrtc/video_sink/egl_renderer.hpp>
+#include <nimrtc/video_sink/metal_renderer.hpp>
 #include <nimrtc/video_sink/video_sink.hpp>
 
 #include <cassert>
@@ -66,6 +68,14 @@ plugins::VideoSinkStats HeadlessSink::stats() const noexcept {
 
 plugins::VideoSinkConfig HeadlessSink::config() const noexcept {
     return cfg_;
+}
+
+plugins::Status HeadlessSink::set_config(plugins::VideoSinkConfig cfg) noexcept {
+    // The headless sink drops the pixels, so the configuration is only
+    // bookkeeping — but it still has to be *kept*, because `config()` is
+    // what a host reads back to learn the presentation it is getting.
+    cfg_ = std::move(cfg);
+    return plugins::kOk;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +149,11 @@ plugins::VideoSinkConfig PinnedSink::config() const noexcept {
     return cfg_;
 }
 
+plugins::Status PinnedSink::set_config(plugins::VideoSinkConfig cfg) noexcept {
+    cfg_ = std::move(cfg);
+    return plugins::kOk;
+}
+
 // ---------------------------------------------------------------------------
 // Concrete-side factories
 // ---------------------------------------------------------------------------
@@ -195,6 +210,14 @@ plugins::VideoSinkConfig PluginAdapter::config() const noexcept {
     return concrete_ ? concrete_->config() : plugins::VideoSinkConfig{};
 }
 
+plugins::Status PluginAdapter::set_config(plugins::VideoSinkConfig cfg) noexcept {
+    // The adapter forwards the reconfigure to the sink it wraps: the
+    // adapter is what the engine sees, so a concrete sink that resizes
+    // its swap chain has to be reached through the adapter too.
+    return concrete_ ? concrete_->set_config(std::move(cfg))
+                     : plugins::kErrNotReady;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin factories
 // ---------------------------------------------------------------------------
@@ -243,12 +266,22 @@ void do_register_default_plugins() noexcept {
             // (so a configuration that names "d3d11" resolves), but on a
             // non-Windows build `open()` reports `kErrUnsupported`.
             static D3D11RendererFactory   s_d3d11{};
+            // Remote-desktop plan E3: the macOS Metal /
+            // AVSampleBufferDisplayLayer renderer.
+            static MetalRendererFactory   s_metal{};
+            // Remote-desktop plan E4: the Linux EGL / Wayland / X11
+            // renderer.
+            static EglRendererFactory     s_egl{};
             nimrtc::core::PluginRegistry::instance().register_video_sink(
                 s_headless.id(), &s_headless);
             nimrtc::core::PluginRegistry::instance().register_video_sink(
                 s_pinned.id(), &s_pinned);
             nimrtc::core::PluginRegistry::instance().register_video_sink(
                 s_d3d11.id(), &s_d3d11);
+            nimrtc::core::PluginRegistry::instance().register_video_sink(
+                s_metal.id(), &s_metal);
+            nimrtc::core::PluginRegistry::instance().register_video_sink(
+                s_egl.id(), &s_egl);
         }
     } s_registrar;
     (void)s_registrar;

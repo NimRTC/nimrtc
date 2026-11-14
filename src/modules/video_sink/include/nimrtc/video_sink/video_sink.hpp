@@ -66,6 +66,7 @@ public:
                            const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
 
     // ---- Capability probes ------------------------------------------------
     //
@@ -107,6 +108,7 @@ public:
                            const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
 
     // ---- Capability probes ------------------------------------------------
     bool supports_gpu_render() const noexcept override { return true; }
@@ -166,6 +168,7 @@ public:
                            const plugins::VideoFrameInfo& info) noexcept override;
     plugins::VideoSinkStats stats() const noexcept override;
     plugins::VideoSinkConfig config() const noexcept override;
+    plugins::Status set_config(plugins::VideoSinkConfig cfg) noexcept override;
 
     // ---- Capability probes ------------------------------------------------
     //

@@ -261,6 +261,12 @@ public:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += pos;
+        // OpenH264 consumes the CPU staging path — it has no zero-copy
+        // route — so every frame it encodes is a staged one.  Reporting
+        // that is what lets a host see that the picture really reached
+        // the encoder (a "0 frames staged, 0 frames zero-copy" report
+        // reads as "the encoder never ran").
+        stats_.frames_encoded_staged++;
         if (encoded_out.is_keyframe) stats_.keyframes_encoded++;
         return plugins::kOk;
     }

@@ -45,6 +45,7 @@
 #include <string_view>
 
 #include <nimrtc/core/bytes.hpp>                 // core::MutableByteSpan
+#include <nimrtc/video_pipeline/keyframe_limiter.hpp>   // KeyframeLimiter
 #include <nimrtc/video_pipeline/video_pipeline.hpp>   // concrete VideoReceiver / VideoSender
 #include <nimrtc/plugins/video_pipeline.hpp>          // plugins::IVideoReceiver / IVideoSender
 
@@ -147,6 +148,23 @@ public:
     plugins::VideoSenderStats stats() const noexcept override;
     std::uint16_t     next_seq() const noexcept override;
     plugins::VideoSenderConfig config() const noexcept override;
+
+    // ---- The key-frame storm limiter (remote-desktop plan B14) -----------
+    //
+    // The adapter is where the PLI / FIR path becomes a key frame, so
+    // this is where the limiter is configured and where its counters are
+    // read.
+    void set_keyframe_limiter_config(
+            nimrtc::video_pipeline::KeyframeLimiterConfig cfg) noexcept;
+    nimrtc::video_pipeline::KeyframeLimiterConfig
+        keyframe_limiter_config() const noexcept;
+    nimrtc::video_pipeline::KeyframeLimiterStats
+        keyframe_limiter_stats() const noexcept;
+    /** Offer a key-frame request to the limiter. */
+    nimrtc::video_pipeline::KeyframeDecision request_keyframe(
+            nimrtc::video_pipeline::KeyframeReason reason,
+            std::int64_t now_us,
+            bool carries_parameter_sets = false) noexcept;
 
 private:
     std::unique_ptr<VideoSender>                       concrete_;

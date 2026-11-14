@@ -23,10 +23,42 @@ if(NOT GTEST_FOUND)
 endif()
 
 # -----------------------------------------------------------------------------
+# test_hw_backends — the AV1 hardware backend table (remote-desktop plan
+# item B6).  The test verifies the *seam*: every row exists on every
+# platform, carries a defined priority, and reports `available() == false`
+# **with a reason** on a host that cannot use it.
+# -----------------------------------------------------------------------------
+add_executable(test_av1_hw_backends test_hw_backends.cpp)
+
+set_target_properties(test_av1_hw_backends PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_av1_hw_backends LENIENT)
+
+target_link_libraries(test_av1_hw_backends PRIVATE
+    nimrtc::av1
+    nimrtc::video_frame
+    nimrtc::video_payload
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+add_test(NAME modules_av1_tests_test_hw_backends
+         COMMAND test_av1_hw_backends)
+set_tests_properties(modules_av1_tests_test_hw_backends PROPERTIES TIMEOUT 30)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_av1_hw_backends
+        PROPERTIES TIMEOUT 30
+        DISCOVERY_TIMEOUT 10)
+endif()
+
+# -----------------------------------------------------------------------------
 # test_dav1d_software — the REAL software AV1 decoder (remote-desktop plan
 # WP-B).  Only built when the vendored dav1d source tree is present and
-# NIMRTC_PLUGINS_DAV1D=ON; otherwise the synthetic stub stays in charge and
-# there is nothing to test here.
+# NIMRTC_PLUGINS_DAV1D=ON; otherwise the synthetic stub stays in charge
+# and there is nothing to test here.
 # -----------------------------------------------------------------------------
 if(NIMRTC_PLUGINS_DAV1D AND NIMRTC_VENDORED_DAV1D AND
    EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/dav1d/src/include/dav1d/dav1d.h")

@@ -22,6 +22,9 @@ add_library(nimrtc_av1 STATIC
     src/decoder.cpp
     src/codec_plugin.cpp
     src/hw_backends.cpp
+    src/amf_av1_encoder.cpp
+    src/vaapi_av1_encoder.cpp
+    src/svt_av1_encoder.cpp
     )
 
 nimrtc_apply_options(nimrtc_av1)
@@ -47,6 +50,12 @@ target_compile_definitions(nimrtc_av1 PUBLIC NIMRTC_HAS_AV1=1)
 # no-op unless the vendored dav1d source tree is populated.
 include(NimRTHwPlugins)
 nimrtc_link_dav1d(nimrtc_av1)
+
+# The optional software AV1 encoder (remote-desktop plan B11).  The
+# helper is a no-op unless NIMRTC_VENDORED_SVT_AV1=ON AND the vendored
+# source tree is populated; with the option off the `svt_av1` row is
+# simply absent from the registry (the plan's B11 acceptance).
+nimrtc_link_svt_av1(nimrtc_av1)
 
 add_library(nimrtc::av1 ALIAS nimrtc_av1)
 

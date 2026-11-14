@@ -1,14 +1,14 @@
 ﻿/**
  * @file src/modules/video_frame/src/scaler.cpp
- * @brief VideoFrameScaler 鈥?libyuv-backed scaling + colour conversion.
+ * @brief VideoFrameScaler — libyuv-backed scaling + colour conversion.
  *
  * Implements the declarations in `nimrtc/video_frame/scaler.hpp`.
  *
  * Two build shapes are supported:
  *
- *   - `NIMRTC_USE_LIBYUV=1`  鈥?the vendored libyuv is linked in; every
+ *   - `NIMRTC_USE_LIBYUV=1`  — the vendored libyuv is linked in; every
  *                              call goes to the SIMD implementation.
- *   - otherwise               鈥?the module still compiles, `available()`
+ *   - otherwise               — the module still compiles, `available()`
  *                              returns false, and every call returns a
  *                              clean `NotImplemented` error.  This is the
  *                              `NIMRTC_VENDORED_LIBYUV=OFF` path (and the
@@ -33,7 +33,7 @@ namespace {
 
 /// libyuv's FilterMode and NimRTC's ScaleFilter share the same numbering
 /// (kFilterNone / kFilterLinear / kFilterBilinear / kFilterBox), so the
-/// translation is a cast 鈥?but it is written out as a switch so that a
+/// translation is a cast — but it is written out as a switch so that a
 /// future re-ordering of NimRTC's enum cannot silently pick the wrong
 /// libyuv filter.
 constexpr libyuv::FilterMode to_libyuv_filter(ScaleFilter f) noexcept {

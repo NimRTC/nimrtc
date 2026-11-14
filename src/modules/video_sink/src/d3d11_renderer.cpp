@@ -94,6 +94,15 @@ struct D3D11Renderer::Impl {
 
     plugins::VideoSinkConfig cfg_;
 
+    /// Guards `cfg_`.
+    ///
+    ///  The configuration is written by `set_config()` (which the engine
+    ///  calls from its own thread when the viewer resizes the window)
+    ///  and read by `config()`.  The presenter thread does *not* read
+    ///  it — the presentation cadence is captured when the presenter
+    ///  starts — so the lock only ever guards the config itself.
+    mutable std::mutex cfg_mutex_;
+
     // ---- Counters (atomic — `stats()` may be read from any thread) ----
     std::atomic<std::uint64_t> frames_rendered_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
@@ -165,6 +174,7 @@ struct D3D11Renderer::Impl {
 
     /** The presentation cadence, in frames per second. */
     std::uint32_t target_fps() const noexcept {
+        std::lock_guard<std::mutex> lock(cfg_mutex_);
         if (cfg_.target_fps > 0) return cfg_.target_fps;
         if (cfg_.max_fps > 0) return cfg_.max_fps;
         return kDefaultPresentFps;
@@ -821,7 +831,32 @@ plugins::VideoSinkStats D3D11Renderer::stats() const noexcept {
 }
 
 plugins::VideoSinkConfig D3D11Renderer::config() const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->cfg_mutex_);
     return impl_->cfg_;
+}
+
+plugins::Status D3D11Renderer::set_config(
+        plugins::VideoSinkConfig cfg) noexcept {
+    if (!impl_) return plugins::kErrNotReady;
+
+    // The presentation geometry is a *runtime* property: the viewer
+    // resizes the window, and the picture has to follow (plan E7).  The
+    // offscreen target therefore follows the new size; the swap chain
+    // cannot be resized here (its size is the window's), so the new
+    // geometry only takes effect there through the window itself.
+    std::lock_guard<std::mutex> lock(impl_->cfg_mutex_);
+    impl_->cfg_ = std::move(cfg);
+
+#if defined(_WIN32)
+    // The offscreen target follows the new geometry.  A failure is not
+    // fatal: the presenter resizes the target when the next frame of a
+    // different size arrives anyway.
+    if (impl_->device_ != nullptr && impl_->cfg_.width > 0 &&
+        impl_->cfg_.height > 0) {
+        (void)impl_->resize_offscreen(impl_->cfg_.width, impl_->cfg_.height);
+    }
+#endif
+    return plugins::kOk;
 }
 
 const plugins::VideoFrameInfo* D3D11Renderer::current_frame_info() const noexcept {

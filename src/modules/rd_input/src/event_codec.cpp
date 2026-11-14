@@ -140,11 +140,21 @@ private:
 /// The flag bit that says "a timestamp follows the header".
 constexpr std::uint8_t kFlagHasTimestamp = 0x01;
 
+/// The flag bit that says "a ref-frame id follows the header" (plan G5).
+constexpr std::uint8_t kFlagHasRefFrame = 0x02;
+
 /// The number of bytes the fixed header occupies.
 constexpr std::size_t kHeaderSize = 3;  // version + type + flags
 
+/// True when the ref-frame id is to be written.  The option asks for it,
+/// but an event that carries no id cannot be written — the flag then stays
+/// clear, so the decoder never expects a field that is not there.
+bool wants_ref_frame(const InputEvent& event, const EncodeOptions& options) noexcept {
+    return options.include_ref_frame && event.ref_frame.has_value();
+}
+
 /// Append the header (version, type, flags) and, when the flag says so,
-/// the timestamp.
+/// the timestamp and the ref-frame id.
 void append_header(std::vector<std::uint8_t>& out,
                    const InputEvent& event,
                    const EncodeOptions& options) {
@@ -154,16 +164,24 @@ void append_header(std::vector<std::uint8_t>& out,
     if (options.include_timestamp) {
         flags |= kFlagHasTimestamp;
     }
+    if (wants_ref_frame(event, options)) {
+        flags |= kFlagHasRefFrame;
+    }
     out.push_back(flags);
     if (options.include_timestamp) {
         append_varint(out, event.timestamp_us);
     }
+    if (wants_ref_frame(event, options)) {
+        append_varint(out, *event.ref_frame);
+    }
 }
 
-/// The number of bytes the header (plus the optional timestamp) occupies.
+/// The number of bytes the header (plus the optional timestamp and
+/// ref-frame id) occupies.
 std::size_t header_size(const InputEvent& event, const EncodeOptions& options) noexcept {
     std::size_t n = kHeaderSize;
     if (options.include_timestamp) n += varint_size(event.timestamp_us);
+    if (wants_ref_frame(event, options)) n += varint_size(*event.ref_frame);
     return n;
 }
 
@@ -217,6 +235,15 @@ core::Result<InputEvent> decode_event_from(Reader& reader,
                 core::ErrorCode::ProtocolError, "input event: truncated timestamp");
         }
         event.timestamp_us = ts;
+    }
+
+    if ((flags & kFlagHasRefFrame) != 0) {
+        std::uint64_t ref_frame = 0;
+        if (!reader.read_varint(ref_frame)) {
+            return core::Result<InputEvent>::fail(
+                core::ErrorCode::ProtocolError, "input event: truncated ref-frame id");
+        }
+        event.ref_frame = ref_frame;
     }
 
     switch (event.type) {

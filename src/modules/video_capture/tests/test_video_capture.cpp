@@ -289,6 +289,29 @@ TEST(SyntheticCapture, ProducesAndPopsAFrame) {
     EXPECT_EQ(cap.stats().frames_captured, 1u);
 }
 
+TEST(SyntheticCapture, TheFrameDeclaresItsPixelFormat) {
+    // The device produces BGRA (see `render_frame`: the bytes are
+    // written in B, G, R, A order).  It has to *say* so: the engine
+    // reads `CaptureFrame::format` to decide whether it has to convert
+    // the picture to the codec's canonical layout, and an undeclared
+    // format is read as planar I420 — which would stage a packed BGRA
+    // picture as three planes and produce garbage.
+    CaptureConfig cfg{};
+    cfg.format.width  = 320;
+    cfg.format.height = 240;
+    SyntheticCapture cap{cfg};
+    ASSERT_EQ(cap.open(), nimrtc::plugins::kOk);
+    ASSERT_EQ(cap.produce_one(), nimrtc::plugins::kOk);
+
+    CaptureFrame f{};
+    ASSERT_EQ(cap.pop_frame(f), nimrtc::plugins::kOk);
+    EXPECT_EQ(f.format, nimrtc::plugins::VideoPixelFormat::kBGRA);
+    // A CPU frame: no GPU surface, no handle.
+    EXPECT_FALSE(f.has_gpu_handle);
+    EXPECT_EQ(f.gpu_backend, nimrtc::plugins::GpuBackend::kNone);
+    EXPECT_EQ(f.gpu_handle, nullptr);
+}
+
 TEST(SyntheticCapture, AStaticDesktopHasNoDirtyRect) {
     CaptureConfig cfg{};
     cfg.format.width  = 320;

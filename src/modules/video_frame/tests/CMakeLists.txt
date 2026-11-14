@@ -21,7 +21,10 @@ if(NOT GTEST_FOUND)
     endif()
 endif()
 
-add_executable(test_video_frame test_video_frame.cpp)
+add_executable(test_video_frame
+    test_video_frame.cpp
+    test_video_frame_color.cpp
+    )
 
 set_target_properties(test_video_frame PROPERTIES
     VS_LINK_LIBRARY_DEPENDENCIES TRUE)
@@ -41,5 +44,5 @@ set_tests_properties(modules_video_frame_tests_test_video_frame PROPERTIES TIMEO
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_video_frame
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

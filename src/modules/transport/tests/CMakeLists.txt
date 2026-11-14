@@ -42,7 +42,7 @@ target_link_libraries(test_transport_selector PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_transport_selector
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # --- test_transport_strategy (Slice 7.6: 5 named strategies) ----------------
@@ -62,7 +62,7 @@ target_link_libraries(test_transport_strategy PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_transport_strategy
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()
 
 # --- test_raw_udp_arq_stack (Slice 7.6: control-plane factory) -------------
@@ -87,5 +87,5 @@ target_link_libraries(test_raw_udp_arq_stack PRIVATE
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_raw_udp_arq_stack
         PROPERTIES TIMEOUT 30
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
 endif()

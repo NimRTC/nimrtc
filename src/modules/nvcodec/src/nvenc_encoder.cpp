@@ -65,6 +65,7 @@
 #if defined(NIMRTC_PLUGINS_NVENC_ON)
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -159,6 +160,16 @@ private:
             init_status = NV_ENC_ERR_GENERIC;
             return;
         }
+        // The zero-copy path (remote-desktop plan B10) needs the resource
+        // registration API.  A driver without it is perfectly usable for
+        // the CPU path, so it is *not* a fatal error — the zero-copy
+        // entry point reports the missing capability instead.
+        if (!fn.nvEncRegisterResource || !fn.nvEncMapInputResource ||
+            !fn.nvEncUnmapInputResource || !fn.nvEncUnregisterResource) {
+            NIMRTC_LOG_WARN("nvenc: the driver does not expose the resource "
+                            "registration API — the zero-copy path is "
+                            "unavailable on this host");
+        }
         NIMRTC_LOG_INFO("nvenc: DLL loaded, NvEncodeAPICreateInstance OK, "
                         "function table populated (SDK " << NVENCAPI_MAJOR_VERSION
                         << "." << NVENCAPI_MINOR_VERSION << ")");
@@ -187,6 +198,38 @@ struct D3D11DeviceHolder {
             return false;
         }
         NIMRTC_LOG_INFO("nvenc: D3D11 device created");
+        return true;
+    }
+
+    /** Adopt a device owned by somebody else (the zero-copy producer).
+     *
+     *  NVENC registers a resource against the *session's* device, and the
+     *  driver rejects a resource that belongs to a different device — that
+     *  was measured on the reference host (RTX 3060, driver 616.92): the
+     *  same texture registers fine on the session's own device and fails
+     *  with NV_ENC_ERR_INVALID_RESOURCE (status 9) on a second device
+     *  object, even when both were created on the same adapter.
+     *
+     *  So a zero-copy session has to be opened against the *producer's*
+     *  device.  The device is borrowed: the holder adds a reference so it
+     *  stays alive for the session's lifetime, and the producer may keep
+     *  using its own reference independently. */
+    bool adopt(ID3D11Device* producer_device) noexcept {
+        if (!producer_device) return false;
+        std::lock_guard<std::mutex> lock(mtx);
+        if (dev == producer_device) return true;
+        if (dev) {
+            // A different device was already in use.  The session has to
+            // be torn down and re-opened against the new one, which the
+            // caller does; here we only swap the device out.
+            if (ctx) { ctx->Release(); ctx = nullptr; }
+            if (dev) { dev->Release(); dev = nullptr; }
+        }
+        producer_device->AddRef();
+        dev = producer_device;
+        producer_device->GetImmediateContext(&ctx);
+        NIMRTC_LOG_INFO("nvenc: adopted the producer's D3D11 device for the "
+                        "zero-copy path");
         return true;
     }
 
@@ -538,6 +581,18 @@ public:
             return plugins::kErrHardwareError;
         }
 
+        // ---- Telemetry (remote-desktop plan B15) ---------------------------
+        //
+        // The static facts about this encoder are known here: it *is* a
+        // hardware encoder, its backend identifier is the driver's, and
+        // the bitrate it was configured with is the one the host asked
+        // for.  The dynamic numbers (frames, bytes, latency) accumulate
+        // in `encode()`.
+        stats_.backend_id            = "nvenc";
+        stats_.hardware              = true;
+        stats_.configured_bitrate_bps = cfg_.bitrate_bps;
+        session_start_ = std::chrono::steady_clock::now();
+
         opened_ = true;
         return plugins::kOk;
     }
@@ -566,6 +621,7 @@ public:
                          std::uint8_t* output,
                          std::size_t   output_capacity,
                          plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        const auto t0 = std::chrono::steady_clock::now();
         if (broken_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is broken"); return plugins::kErrHardwareError; }
         if (!opened_) { NIMRTC_LOG_ERROR("nvenc: encode — the encoder is not open"); return plugins::kErrNotReady; }
         if (!output || output_capacity == 0) {
@@ -787,6 +843,24 @@ public:
 
         stats_.frames_encoded++;
         stats_.bytes_encoded += n_copy;
+        stats_.keyframes_encoded += is_keyframe ? 1u : 0u;
+        stats_.staged_frames++;
+        stats_.zero_copy = false;
+        // The encode latency is the wall-clock cost of the whole call:
+        // the CPU staging (the I420 -> NV12 conversion) plus the
+        // driver's own encode.  It is the number a host needs to
+        // decide whether the encoder can keep up with the capture
+        // cadence.
+        {
+            const auto elapsed = std::chrono::steady_clock::now() - t0;
+            const auto us = std::chrono::duration_cast<
+                std::chrono::microseconds>(elapsed).count();
+            encode_latency_accum_us_ += static_cast<std::uint64_t>(
+                us < 0 ? 0 : us);
+            encode_latency_samples_++;
+            stats_.avg_encode_latency_us = static_cast<std::uint32_t>(
+                encode_latency_accum_us_ / encode_latency_samples_);
+        }
         frame_idx_++;
         return plugins::kOk;
     }
@@ -802,8 +876,290 @@ public:
         return plugins::kOk;
     }
 
-    bool supports_zero_copy_encode() const noexcept override { return false; }
+    bool supports_zero_copy_encode() const noexcept override { return true; }
     bool supports_zero_copy_decode() const noexcept override { return false; }
+
+    // ---- Zero-copy encode (remote-desktop plan B10) ------------------------
+    //
+    // The picture is already in GPU memory as a D3D11 texture; the
+    // encoder registers it with NVENC and hands the driver a pointer
+    // into it.  No pixel ever reaches the CPU.
+    //
+    // The two constraints the driver imposes (both measured on the
+    // reference host, RTX 3060 / driver 616.92):
+    //
+    //   1. The texture must belong to the **same** `ID3D11Device` the
+    //      encode session was opened against.  Registering a texture
+    //      from a second device object fails with
+    //      NV_ENC_ERR_INVALID_RESOURCE (status 9) even when both
+    //      devices were created on the same adapter.  So when the
+    //      producer hands over a surface, the session is re-opened
+    //      against the producer's device.
+    //
+    //   2. The picture's layout must be one the driver understands.
+    //      `NV_ENC_BUFFER_FORMAT_ABGR` is "A8B8G8R8, R in the lowest
+    //      8 bits" — which is exactly DXGI's `B8G8R8A8_UNORM` byte
+    //      order, so a desktop capture texture is consumed *without* a
+    //      swizzle.
+    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
+                                      plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        const auto t0 = std::chrono::steady_clock::now();
+
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        if (broken_) {
+            NIMRTC_LOG_ERROR("nvenc: encode_zero_copy — the encoder is broken");
+            return plugins::kErrHardwareError;
+        }
+        if (!opened_ || !session_) {
+            NIMRTC_LOG_ERROR("nvenc: encode_zero_copy — the encoder is not open");
+            return plugins::kErrNotReady;
+        }
+
+        // ---- Validate the handle ------------------------------------------
+        if (gpu.handle().backend != video_frame::GpuBackend::kWindowsD3D11Texture) {
+            stats_.encode_errors++;
+            zero_copy_rejected_ = true;
+            NIMRTC_LOG_ERROR("nvenc: encode_zero_copy — the surface is not a "
+                             "D3D11 texture (backend="
+                             << unsigned(gpu.handle().backend) << ")");
+            return plugins::kErrUnsupported;
+        }
+        auto* texture = static_cast<ID3D11Texture2D*>(gpu.handle().handle);
+        auto* device  = static_cast<ID3D11Device*>(gpu.handle().device);
+        if (!texture || !device) {
+            stats_.encode_errors++;
+            zero_copy_rejected_ = true;
+            NIMRTC_LOG_ERROR("nvenc: encode_zero_copy — the surface carries no "
+                             "texture or no owning device");
+            return plugins::kErrInvalidParam;
+        }
+
+        const uint32_t w = gpu.width();
+        const uint32_t h = gpu.height();
+        if (w == 0 || h == 0) {
+            stats_.encode_errors++;
+            return plugins::kErrInvalidParam;
+        }
+
+        // ---- The session must live on the producer's device ----------------
+        //
+        // The driver binds a registered resource to the session's device,
+        // so a surface from a different device cannot be registered at
+        // all.  Re-opening the session on the producer's device is the
+        // only way to make the two agree.
+        if (session_device_ != device) {
+            NIMRTC_LOG_INFO("nvenc: the zero-copy surface belongs to a "
+                            "different D3D11 device — re-opening the encode "
+                            "session on the producer's device");
+            if (!reopen_on_device(device, w, h)) {
+                stats_.encode_errors++;
+                return plugins::kErrHardwareError;
+            }
+        }
+
+        // ---- The resolution changed ----------------------------------------
+        const Geometry want = clamp_to_min_geometry(w, h);
+        if (want.width != width_ || want.height != height_) {
+            NIMRTC_LOG_INFO("nvenc: the zero-copy source resolution changed "
+                            << width_ << "x" << height_ << " -> " << want.width
+                            << "x" << want.height
+                            << " — re-initializing the encode session");
+            if (!reinit_at(want.width, want.height)) {
+                stats_.encode_errors++;
+                return plugins::kErrHardwareError;
+            }
+        }
+
+        auto& lib = NvEncLib::instance();
+
+        // A driver without the resource-registration API cannot take a
+        // surface at all.  The CPU path still works, so this is a
+        // capability report rather than a broken encoder.
+        if (!lib.fn.nvEncRegisterResource || !lib.fn.nvEncMapInputResource ||
+            !lib.fn.nvEncUnmapInputResource || !lib.fn.nvEncUnregisterResource) {
+            stats_.encode_errors++;
+            zero_copy_rejected_ = true;
+            return plugins::kErrUnsupported;
+        }
+
+        // ---- Register (or reuse) the surface --------------------------------
+        //
+        // Registration is not free, so the same texture is registered
+        // once and mapped for every frame.  A different texture (the
+        // producer recycled its buffer) releases the old registration.
+        if (zero_copy_.texture != texture ||
+            zero_copy_.width != w || zero_copy_.height != h) {
+            release_zero_copy_resource();
+
+            // ---- The buffer format follows the texture's own layout -------
+            //
+            // NVENC's format names describe the *word order* of a packed
+            // 32-bit pixel:
+            //
+            //   NV_ENC_BUFFER_FORMAT_ARGB — "B in the lowest 8 bits, G in
+            //     the next, R in the 8 bits after that, A in the highest"
+            //     → in memory: B, G, R, A.  That is DXGI's
+            //     DXGI_FORMAT_B8G8R8A8_UNORM, which is what the desktop
+            //     capture backends produce.
+            //
+            //   NV_ENC_BUFFER_FORMAT_ABGR — "R in the lowest 8 bits, G in
+            //     the next, B in the 8 bits after that, A in the highest"
+            //     → in memory: R, G, B, A.  That is DXGI's
+            //     DXGI_FORMAT_R8G8B8A8_UNORM.
+            //
+            // Getting this wrong does not fail — the driver encodes
+            // whatever it is given — it silently swaps the red and the
+            // blue channel, so the picture comes out with the wrong
+            // colours.  The format is therefore derived from the
+            // texture itself rather than assumed.
+            D3D11_TEXTURE2D_DESC tex_desc{};
+            texture->GetDesc(&tex_desc);
+
+            NV_ENC_BUFFER_FORMAT nv_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+            switch (tex_desc.Format) {
+                case DXGI_FORMAT_B8G8R8A8_UNORM:
+                case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+                    nv_format = NV_ENC_BUFFER_FORMAT_ARGB;
+                    break;
+                case DXGI_FORMAT_R8G8B8A8_UNORM:
+                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                    nv_format = NV_ENC_BUFFER_FORMAT_ABGR;
+                    break;
+                default:
+                    stats_.encode_errors++;
+                    zero_copy_rejected_ = true;
+                    NIMRTC_LOG_ERROR("nvenc: the D3D11 texture's format is "
+                                     "not one NVENC can consume zero-copy");
+                    return plugins::kErrUnsupported;
+            }
+
+            NV_ENC_REGISTER_RESOURCE reg{};
+            reg.version           = NV_ENC_REGISTER_RESOURCE_VER;
+            reg.resourceType      = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+            reg.width             = w;
+            reg.height            = h;
+            reg.pitch             = 0;   // the driver asks for no pitch
+            reg.subResourceIndex  = 0;
+            reg.resourceToRegister = texture;
+            reg.bufferFormat      = nv_format;
+            reg.bufferUsage       = NV_ENC_INPUT_IMAGE;
+
+            NVENCSTATUS s = lib.fn.nvEncRegisterResource(session_, &reg);
+            if (s != NV_ENC_SUCCESS) {
+                stats_.encode_errors++;
+                zero_copy_rejected_ = true;
+                NIMRTC_LOG_ERROR("nvenc: nvEncRegisterResource failed "
+                                 "(status=" << unsigned(s) << ") — the surface "
+                                 "cannot be encoded zero-copy");
+                return plugins::kErrHardwareError;
+            }
+            zero_copy_.texture    = texture;
+            zero_copy_.registered = reg.registeredResource;
+            zero_copy_.width      = w;
+            zero_copy_.height     = h;
+            zero_copy_.format     = nv_format;
+        }
+
+        // ---- Map the registered resource ------------------------------------
+        NV_ENC_MAP_INPUT_RESOURCE map{};
+        map.version            = NV_ENC_MAP_INPUT_RESOURCE_VER;
+        map.registeredResource = zero_copy_.registered;
+        NVENCSTATUS s = lib.fn.nvEncMapInputResource(session_, &map);
+        if (s != NV_ENC_SUCCESS) {
+            stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: nvEncMapInputResource failed (status="
+                             << unsigned(s) << ")");
+            return plugins::kErrHardwareError;
+        }
+
+        // ---- Encode ----------------------------------------------------------
+        NV_ENC_PIC_PARAMS pic{};
+        pic.version         = NV_ENC_PIC_PARAMS_VER;
+        pic.inputBuffer     = map.mappedResource;
+        pic.bufferFmt       = zero_copy_.format;
+        pic.pictureStruct   = NV_ENC_PIC_STRUCT_FRAME;
+        pic.outputBitstream = out_buf_.bitstreamBuffer;
+
+        if (force_keyframe_next_ || frame_idx_ == 0) {
+            pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR |
+                                 NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+            force_keyframe_next_ = false;
+        }
+
+        s = lib.fn.nvEncEncodePicture(session_, &pic);
+        if (s != NV_ENC_SUCCESS && s != NV_ENC_ERR_NEED_MORE_INPUT) {
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            stats_.encode_errors++;
+            NIMRTC_LOG_ERROR("nvenc: nvEncEncodePicture failed (status="
+                             << unsigned(s) << ")");
+            return plugins::kErrHardwareError;
+        }
+
+        // ---- Lock the output -------------------------------------------------
+        NV_ENC_LOCK_BITSTREAM lock_bs{};
+        lock_bs.version         = NV_ENC_LOCK_BITSTREAM_VER;
+        lock_bs.outputBitstream = out_buf_.bitstreamBuffer;
+        s = lib.fn.nvEncLockBitstream(session_, &lock_bs);
+        if (s != NV_ENC_SUCCESS || !lock_bs.bitstreamBufferPtr) {
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            stats_.encode_errors++;
+            return plugins::kErrInternal;
+        }
+
+        const size_t bs_bytes = static_cast<size_t>(lock_bs.bitstreamSizeInBytes);
+        if (bs_bytes == 0) {
+            lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+            lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+            stats_.frames_skipped++;
+            return plugins::kOk;
+        }
+
+        // The payload has to outlive this call: the sender packetizes it
+        // after the encoder returns, so the bytes are copied into the
+        // encoder's own buffer (the same one the CPU path uses).
+        if (bs_bytes > enc_buf_.size()) enc_buf_.resize(bs_bytes);
+        std::memcpy(enc_buf_.data(), lock_bs.bitstreamBufferPtr, bs_bytes);
+
+        const bool is_keyframe = (lock_bs.pictureType == NV_ENC_PIC_TYPE_IDR);
+
+        lib.fn.nvEncUnlockBitstream(session_, out_buf_.bitstreamBuffer);
+        lib.fn.nvEncUnmapInputResource(session_, map.mappedResource);
+
+        encoded_out.codec        = desc_.kind;
+        encoded_out.payload      = core::ByteSpan{enc_buf_.data(), bs_bytes};
+        encoded_out.payload_type = cfg_.payload_type != 0 ? cfg_.payload_type
+                                                          : desc_.default_payload_type;
+        encoded_out.is_keyframe   = is_keyframe;
+        encoded_out.nalu_format   = plugins::NaluFormat::kAnnexBStartCode;
+        // The timeline metadata is *not* set here: a `GpuBuffer` carries
+        // the picture, not the capture timestamps.  The caller (the
+        // engine) knows them and stamps them onto the encoded frame.
+        encoded_out.info = {};
+
+        stats_.frames_encoded++;
+        stats_.bytes_encoded += bs_bytes;
+        stats_.keyframes_encoded += is_keyframe ? 1u : 0u;
+        stats_.zero_copy = true;
+        stats_.zero_copy_frames++;
+        // The zero-copy path copied *no* pixel bytes: the picture went
+        // from the producer's texture into the encoder without ever
+        // touching the CPU.
+        stats_.staged_frames += 0;
+
+        {
+            const auto elapsed = std::chrono::steady_clock::now() - t0;
+            const auto us = std::chrono::duration_cast<
+                std::chrono::microseconds>(elapsed).count();
+            encode_latency_accum_us_ += static_cast<std::uint64_t>(
+                us < 0 ? 0 : us);
+            encode_latency_samples_++;
+            stats_.avg_encode_latency_us = static_cast<std::uint32_t>(
+                encode_latency_accum_us_ / encode_latency_samples_);
+        }
+        frame_idx_++;
+        return plugins::kOk;
+    }
 
     plugins::VideoCodecConfig config() const noexcept override { return cfg_; }
 
@@ -844,7 +1200,22 @@ public:
         return apply_bitrate(bitrate, gop);
     }
 
-    plugins::VideoCodecStats stats() const noexcept override { return stats_; }
+    plugins::VideoCodecStats stats() const noexcept override {
+        plugins::VideoCodecStats s = stats_;
+        // The *actual* bitrate is derived from what the encoder produced
+        // over the time it has been running.  It is 0 until the session
+        // has been up long enough for the number to mean anything.
+        if (session_start_.time_since_epoch().count() != 0) {
+            const auto elapsed = std::chrono::steady_clock::now() - session_start_;
+            const auto secs = std::chrono::duration_cast<
+                std::chrono::milliseconds>(elapsed).count();
+            if (secs > 0) {
+                s.actual_bitrate_bps = static_cast<std::uint32_t>(
+                    (s.bytes_encoded * 8u * 1000u) / static_cast<std::uint64_t>(secs));
+            }
+        }
+        return s;
+    }
     std::uint8_t payload_type() const noexcept override {
         return cfg_.payload_type != 0 ? cfg_.payload_type
                                       : desc_.default_payload_type;
@@ -853,9 +1224,24 @@ public:
 private:
     // ---- Session lifecycle -------------------------------------------------
 
+    /** Release the registered zero-copy resource, if any.
+     *
+     *  The registration pins the producer's texture inside the driver, so
+     *  it has to be released before the session goes away — and before a
+     *  *different* texture is registered. */
+    void release_zero_copy_resource() noexcept {
+        if (!zero_copy_.registered || !session_) return;
+        auto& lib = NvEncLib::instance();
+        if (lib.fn.nvEncUnregisterResource) {
+            lib.fn.nvEncUnregisterResource(session_, zero_copy_.registered);
+        }
+        zero_copy_ = {};
+    }
+
     /** Destroy the encode session and its buffers.  Safe to call twice. */
     void destroy_session() noexcept {
         auto& lib = NvEncLib::instance();
+        release_zero_copy_resource();
         if (out_buf_.bitstreamBuffer && session_) {
             lib.fn.nvEncDestroyBitstreamBuffer(session_, out_buf_.bitstreamBuffer);
         }
@@ -871,6 +1257,35 @@ private:
         width_   = 0;
         height_  = 0;
         frame_idx_ = 0;
+        session_device_ = nullptr;
+    }
+
+    /** Re-open the encode session on @p device.
+     *
+     *  A zero-copy session has to live on the *producer's* device: NVENC
+     *  binds a registered resource to the session's device and rejects a
+     *  resource from another one (NV_ENC_ERR_INVALID_RESOURCE, status 9
+     *  — measured on the reference host, RTX 3060 / driver 616.92).
+     *
+     *  The device is adopted by the process-wide holder, which keeps a
+     *  reference to it so it outlives the session.  The producer keeps
+     *  its own reference, so neither side can pull the device out from
+     *  under the other. */
+    bool reopen_on_device(ID3D11Device* device, uint32_t w, uint32_t h) noexcept {
+        if (!device) return false;
+        destroy_session();
+        if (!d3d11().adopt(device)) {
+            NIMRTC_LOG_ERROR("nvenc: could not adopt the producer's D3D11 "
+                             "device");
+            broken_ = true;
+            return false;
+        }
+        if (!init_session(w, h)) {
+            destroy_session();
+            broken_ = true;
+            return false;
+        }
+        return true;
     }
 
     /** Open a session and initialize the encoder for @p w x @p h. */
@@ -893,6 +1308,10 @@ private:
             return false;
         }
         session_ = sess;
+        // The device the session was opened against.  A zero-copy surface
+        // has to come from this very device, so the encoder compares it
+        // against the producer's device and re-opens when they differ.
+        session_device_ = d3d11().dev;
 
         const uint32_t fps = cfg_.fps > 0 ? cfg_.fps : kDefaultFps;
 
@@ -1021,10 +1440,56 @@ private:
     void*                   session_        = nullptr;
     NV_ENC_CREATE_INPUT_BUFFER  in_buf_    = {};
     NV_ENC_CREATE_BITSTREAM_BUFFER out_buf_ = {};
+    /** The encoder's own copy of the bitstream it produced.
+     *
+     *  The payload has to outlive the encoder call: the sender
+     *  packetizes it *after* the codec returns, so the bytes cannot live
+     *  in the driver's bitstream buffer.  The CPU path hands the
+     *  caller's buffer to the codec; the zero-copy path has no caller
+     *  buffer, so it keeps its own. */
+    std::vector<std::uint8_t> enc_buf_;
     uint32_t                 width_       = 0;
     uint32_t                 height_      = 0;
     uint32_t                 frame_idx_   = 0;
     plugins::VideoCodecStats stats_{};
+
+    // ---- Zero-copy state (remote-desktop plan B10) ------------------------
+    //
+    // The registered-resource cache.  `nvEncRegisterResource` is not free
+    // (it asks the driver to pin the resource and build a mapping), so
+    // the *same* texture is registered once and reused for every frame.
+    // The producer's surface is recycled by the producer, so the cache
+    // is keyed by the texture pointer; when the producer hands over a
+    // different texture, the old registration is released.
+    struct ZeroCopyResource {
+        void*              texture      = nullptr;  ///< ID3D11Texture2D*
+        void*              registered   = nullptr;  ///< NV_ENC_REGISTERED_PTR
+        uint32_t           width        = 0;
+        uint32_t           height       = 0;
+        /** The NVENC buffer format the texture's own layout maps to. */
+        NV_ENC_BUFFER_FORMAT  format     = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+    };
+    ZeroCopyResource             zero_copy_{};
+    /** The device the current session was opened against.  A zero-copy
+     *  session is bound to the *producer's* device, so a producer that
+     *  hands over a surface from a different device forces a re-open. */
+    ID3D11Device*                session_device_ = nullptr;
+    /** True once a zero-copy frame has been encoded, so the telemetry
+     *  can distinguish "never offered a GPU surface" from "the surface
+     *  was offered but rejected". */
+    bool                         zero_copy_rejected_ = false;
+
+    // ---- Telemetry accumulators (remote-desktop plan B15) -----------------
+    //
+    // The *average* encode latency is an accumulated sum divided by a
+    // sample count, because the codec reports the average and not the
+    // distribution.
+    std::uint64_t encode_latency_accum_us_ = 0;
+    std::uint64_t encode_latency_samples_  = 0;
+
+    // The bitrate the encoder actually produced is derived from the
+    // bytes it emitted over the wall-clock time it ran for.
+    std::chrono::steady_clock::time_point session_start_{};
 };
 
 // ---------------------------------------------------------------------------

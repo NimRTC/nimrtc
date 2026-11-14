@@ -23,12 +23,26 @@ bool by_priority_desc(const B* a, const B* b) noexcept {
 template <typename B>
 const B* first_match(const std::vector<B>& all,
                      VideoCodecKind kind,
-                     std::string_view preferred_id) noexcept {
-    // 1. Explicit preferred id (must be available)
+                     std::string_view preferred_id,
+                     CodecBackend policy) noexcept {
+    // The policy filters the *eligible* set.  `kAuto` keeps everything,
+    // `kHardware` keeps only the hardware backends, `kSoftware` only
+    // the software ones.
+    const auto eligible = [&](const B& b) noexcept {
+        switch (policy) {
+            case CodecBackend::kHardware: return b.is_hw;
+            case CodecBackend::kSoftware: return !b.is_hw;
+            case CodecBackend::kAuto:
+            default:                      return true;
+        }
+    };
+
+    // 1. Explicit preferred id (must be available AND eligible)
     if (!preferred_id.empty()) {
         for (const auto& b : all) {
             if (b.id != preferred_id) continue;
             if (b.codec_kind != kind) continue;
+            if (!eligible(b)) continue;
             if (b.available && !b.available(VideoCodecConfig{})) continue;
             return &b;
         }
@@ -37,15 +51,21 @@ const B* first_match(const std::vector<B>& all,
     std::vector<const B*> sorted;
     sorted.reserve(all.size());
     for (const auto& b : all) {
-        if (b.codec_kind == kind && b.available && b.available(VideoCodecConfig{})) {
-            sorted.push_back(&b);
-        }
+        if (b.codec_kind != kind) continue;
+        if (!eligible(b)) continue;
+        if (b.available && !b.available(VideoCodecConfig{})) continue;
+        sorted.push_back(&b);
     }
     std::sort(sorted.begin(), sorted.end(), by_priority_desc<B>);
     if (!sorted.empty()) return sorted.front();
     // 3. ANY backend for this kind (even unavailable) — last-resort so caller
     //    sees why selection failed (returns a backend whose `create` will
     //    fail loudly rather than returning nullptr).
+    //
+    //    An *explicit* policy does NOT get this last-resort: asking for
+    //    hardware and getting an unavailable software backend would be
+    //    exactly the silent fallback the override exists to prevent.
+    if (policy != CodecBackend::kAuto) return nullptr;
     for (const auto& b : all) {
         if (b.codec_kind == kind) return &b;
     }
@@ -99,14 +119,30 @@ const VideoEncoderBackend*
 HwVideoBackendRegistry::select_encoder(VideoCodecKind kind,
                                        std::string_view preferred_id) const noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(encoders_, kind, preferred_id);
+    return first_match(encoders_, kind, preferred_id, CodecBackend::kAuto);
 }
 
 const VideoDecoderBackend*
 HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
                                        std::string_view preferred_id) const noexcept {
     std::lock_guard<std::mutex> lk(mutex_);
-    return first_match(decoders_, kind, preferred_id);
+    return first_match(decoders_, kind, preferred_id, CodecBackend::kAuto);
+}
+
+const VideoEncoderBackend*
+HwVideoBackendRegistry::select_encoder(VideoCodecKind kind,
+                                       std::string_view preferred_id,
+                                       CodecBackend policy) const noexcept {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return first_match(encoders_, kind, preferred_id, policy);
+}
+
+const VideoDecoderBackend*
+HwVideoBackendRegistry::select_decoder(VideoCodecKind kind,
+                                       std::string_view preferred_id,
+                                       CodecBackend policy) const noexcept {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return first_match(decoders_, kind, preferred_id, policy);
 }
 
 // ---------------------------------------------------------------------------

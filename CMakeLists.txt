@@ -16,6 +16,25 @@ project(nimrtc
     DESCRIPTION "Native C++ WebRTC engine focused on AI Agent and embedded scenarios"
     LANGUAGES CXX C)
 
+# ---------------------------------------------------------------------------
+# Objective-C++ (macOS only)
+#
+# The macOS ScreenCaptureKit capture backend (remote-desktop plan A4) is
+# written in Objective-C++: ScreenCaptureKit is an Objective-C framework
+# and its `SCStream` delivers IOSurface-backed `CVPixelBuffer`s.  The
+# language is enabled only on macOS — `enable_language(OBJCXX)` fails on
+# a host with no Objective-C toolchain, and the rest of the tree is
+# plain C++20.
+#
+# The backend's *portable* half lives in a plain `.cpp` translation unit
+# on every other platform, so the module still builds everywhere.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
+
 # -----------------------------------------------------------------------------
 # Build options
 # -----------------------------------------------------------------------------

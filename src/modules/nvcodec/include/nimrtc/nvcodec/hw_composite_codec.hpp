@@ -113,6 +113,32 @@ public:
 
     plugins::Status force_keyframe() noexcept override;
 
+    /** Encode one GPU-handle frame (remote-desktop plan B10).
+     *
+     * Forwarded to the *encoder* half — the composite's decode half
+     * cannot encode, and the encode half is the one that owns the
+     * hardware session the surface has to be registered with. */
+    plugins::Status encode_zero_copy(const plugins::GpuBuffer& gpu,
+                                     plugins::EncodedVideoFrame& encoded_out) noexcept override {
+        if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+        return encoder_->encode_zero_copy(gpu, encoded_out);
+    }
+
+    /** Decode one bitstream frame into a GPU surface. */
+    plugins::Status decode_zero_copy(const plugins::EncodedVideoFrame& encoded,
+                                     plugins::GpuBuffer& out_surface) noexcept override {
+        if (!decoder_ || !decoder_->can_decode()) return plugins::kErrUnsupported;
+        return decoder_->decode_zero_copy(encoded, out_surface);
+    }
+
+    /** Push a live parameter set into the encoder (remote-desktop plan
+     *  B12).  The decoder half is *not* reconfigured: its geometry is
+     *  an upper bound set by the bitstream, not by the local capture. */
+    plugins::Status set_params(const plugins::VideoEncoderParams& params) noexcept override {
+        if (!encoder_ || !encoder_->can_encode()) return plugins::kErrUnsupported;
+        return encoder_->set_params(params);
+    }
+
     bool supports_zero_copy_encode() const noexcept override;
     bool supports_zero_copy_decode() const noexcept override;
 

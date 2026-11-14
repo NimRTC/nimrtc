@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nimrtc.org/schema/profile-v1.2.json",
+  "title": "NimRTC Profile Schema v1.2",
+  "description": "Scenario assembly profile (v1.2 — adds the `video` block per docs/plan/remote-desktop-plan.md). Strictly ADDITIVE on top of v1.1: every v1.0/v1.1 profile loads unchanged; v1.2 profiles add the `video` top-level key. The C++ loader (src/modules/assembly/src/assembly.cpp) reads the block into `assembly::VideoSection`. The `video` block is what makes a *screen* stream expressible: content type, codec preference table, hardware-backend policy, ladder mode and the resolution floor, plus the colour range / matrix the compositor actually produces.",
+
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+  "properties": {
+    "name": { "type": "string" },
+
+    "transport_name": { "type": "string" },
+    "sdp_name":       { "type": "string" },
+    "rtp_name":       { "type": "string" },
+    "jb_name":        { "type": "string" },
+    "audio3a_name":   { "type": "string" },
+    "codec_name":     { "type": "string" },
+    "bwe_name":       { "type": "string" },
+    "scheduler_name": { "type": "string" },
+
+    "timeline_enabled":    { "type": "boolean" },
+    "datachannel_enabled": { "type": "boolean" },
+
+    "audio_sample_rate_hz": { "type": "integer", "minimum": 0 },
+    "audio_channels":       { "type": "integer", "minimum": 0, "maximum": 2 },
+    "audio_payload_type":   { "type": "integer", "minimum": 0, "maximum": 127 },
+
+    "bwe": { "type": "object" },
+    "jitter_buffer": { "type": "object" },
+    "scheduler": { "type": "object" },
+
+    "transport": { "$ref": "profile-v1.1.json#/properties/transport" },
+
+    "video": {
+      "type": "object",
+      "description": "v1.2 additive block — describes the *shape* of the outgoing video stream. A camera stream leaves this block empty (the default) and behaves exactly as it did in v1.1. A screen stream fills it in.",
+      "additionalProperties": false,
+      "properties": {
+        "codec_name": {
+          "type": "string",
+          "description": "Pin one codec (e.g. \"h264\", \"h265\", \"av1\"). Empty = pick from `codec_preference`."
+        },
+        "codec_preference": {
+          "type": "array",
+          "description": "Ordered codec preference table. The encoder walks it in order and takes the first codec that is actually available on this machine AND permitted by `codec_backend`. The screen-content table is [\"av1\", \"h265\", \"h264\"] — AV1's intra-frame coding dominates on flat, sharp-edged text; H.265 is the safe hardware fallback; H.264 is the universal fallback.",
+          "items": {
+            "type": "string",
+            "enum": ["h264", "h265", "av1", "vp8", "vp9"]
+          }
+        },
+        "codec_backend": {
+          "type": "string",
+          "description": "Backend policy for the video encoder. 'auto' = hardware first, software as a fallback (remote-desktop plan B2). The authoritative parser is the codec seam's `codec_backend_from_string`; this schema lists the accepted spellings but does not enforce the runtime availability.",
+          "enum": ["auto", "hardware", "software"]
+        },
+        "content_type": {
+          "type": "string",
+          "description": "What the encoder is looking at. 'screen' enables the screen-content coding tools (no temporal prediction on flat regions, sharper intra). 'motion' is a camera. 'text' is pure text/scroll.",
+          "enum": ["unspecified", "motion", "screen", "text"]
+        },
+        "ladder_mode": {
+          "type": "string",
+          "description": "How the resolution ladder spends its budget. 'quality' keeps the resolution high and lets the frame rate drop (correct for screen content: legibility first). 'smoothness' is the opposite (correct for a camera). 'fixed' disables the ladder.",
+          "enum": ["fixed", "smoothness", "quality"]
+        },
+        "resolution_floor": {
+          "description": "The ladder never crosses below this resolution. Configurable because the right value depends on the machine class: 1080p on a hardware-encoding box, 720p on a software-only one. Written as [width, height]; an object form {width, height} is also accepted by the loader.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "width":  { "type": "integer", "minimum": 0 },
+                "height": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "pixel_format": {
+          "type": "string",
+          "description": "The pixel format the encoder is fed with, before its own internal conversion.",
+          "enum": ["i420", "nv12", "yuy2", "rgba", "bgra", "argb", "abgr"]
+        },
+        "color_range": {
+          "type": "string",
+          "description": "The colour range of the source. A desktop compositor produces FULL range; a camera usually produces LIMITED. Getting this wrong looks like 'the codec is broken' (washed-out blacks or crushed highlights).",
+          "enum": ["", "full", "limited"]
+        },
+        "color_matrix": {
+          "type": "string",
+          "description": "The YUV matrix of the source. bt709 is the correct default for sRGB desktop content.",
+          "enum": ["", "bt709", "bt470bg", "smpte170m", "fcc", "bt2020"]
+        }
+      }
+    }
+  }
+}

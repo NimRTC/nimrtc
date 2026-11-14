@@ -37,6 +37,10 @@ ProfileRegistry::ProfileRegistry() {
     profiles_.emplace(std::string{kProfileAgentGateway.name},     kProfileAgentGateway);
     profiles_.emplace(std::string{kProfileRelayAgent.name},       kProfileRelayAgent);
     profiles_.emplace(std::string{kProfileAgentLowLatency.name},  kProfileAgentLowLatency);
+    // Remote-desktop plan K3: the remote-desktop profile (v1.2 `video`
+    // block).  It is the first profile that declares *screen* content
+    // rather than camera content.
+    profiles_.emplace(std::string{kProfileRemoteDesktop.name}, kProfileRemoteDesktop);
 }
 
 ProfileRegistry& ProfileRegistry::instance() {
@@ -213,8 +217,80 @@ static TransportSection transport_from_json(const json& root) {
 }
 
 // ---------------------------------------------------------------------------
-// profile_from_json_file
+// video_from_json — v1.2 `video` block parser
 // ---------------------------------------------------------------------------
+//
+// Reads the additive `video` block from a Profile JSON.  A missing or
+// null `video` returns a default-constructed `VideoSection` (which
+// describes a camera-like picture with no resolution floor — the
+// behaviour every v1.1 profile has today).
+//
+// The *spelling* of the enum values is validated here: an unknown
+// content type or ladder mode is a configuration error, and the loader
+// reports it rather than guessing.  The backend policy string is left
+// unvalidated on purpose — the codec seam's `codec_backend_from_string`
+// is the authoritative parser, and the assembly layer does not depend
+// on the codec seam.
+// ---------------------------------------------------------------------------
+static VideoSection video_from_json(const json& root) {
+    VideoSection out;
+    if (!root.contains("video") || !root["video"].is_object()) {
+        return out;
+    }
+    const auto& v = root["video"];
+
+    out.codec_name    = json_to_string(v.value("codec_name", ""));
+    out.codec_backend = json_to_string(v.value("codec_backend", "auto"));
+    out.pixel_format  = json_to_string(v.value("pixel_format", "i420"));
+    out.color_range   = json_to_string(v.value("color_range", ""));
+    out.color_matrix  = json_to_string(v.value("color_matrix", ""));
+
+    if (v.contains("codec_preference") && v["codec_preference"].is_array()) {
+        for (const auto& item : v["codec_preference"]) {
+            if (item.is_string()) {
+                out.codec_preference.push_back(item.get<std::string>());
+            }
+        }
+    }
+
+    if (v.contains("content_type")) {
+        const std::string s = json_to_string(v["content_type"]);
+        if (s == "motion")            out.content_type = VideoContentType::kMotion;
+        else if (s == "screen")       out.content_type = VideoContentType::kScreen;
+        else if (s == "text")         out.content_type = VideoContentType::kText;
+        else if (s == "unspecified")  out.content_type = VideoContentType::kUnspecified;
+        else {
+            throw std::runtime_error(
+                "assembly: unknown video.content_type '" + s +
+                "' (expected one of: unspecified, motion, screen, text)");
+        }
+    }
+
+    if (v.contains("ladder_mode")) {
+        const std::string s = json_to_string(v["ladder_mode"]);
+        if (s == "fixed")              out.ladder_mode = VideoLadderMode::kFixed;
+        else if (s == "smoothness")    out.ladder_mode = VideoLadderMode::kSmoothness;
+        else if (s == "quality")       out.ladder_mode = VideoLadderMode::kQuality;
+        else {
+            throw std::runtime_error(
+                "assembly: unknown video.ladder_mode '" + s +
+                "' (expected one of: fixed, smoothness, quality)");
+        }
+    }
+
+    if (v.contains("resolution_floor") && v["resolution_floor"].is_object()) {
+        const auto& f = v["resolution_floor"];
+        out.resolution_floor_width  = f.value("width", 0u);
+        out.resolution_floor_height = f.value("height", 0u);
+    } else if (v.contains("resolution_floor") &&
+               v["resolution_floor"].is_array() &&
+               v["resolution_floor"].size() == 2) {
+        out.resolution_floor_width  = v["resolution_floor"][0].get<std::uint32_t>();
+        out.resolution_floor_height = v["resolution_floor"][1].get<std::uint32_t>();
+    }
+
+    return out;
+}
 Profile profile_from_json_file(const std::string& file_path) {
     std::ifstream file{file_path};
     if (!file) {
@@ -326,6 +402,9 @@ Profile profile_from_json_file(const std::string& file_path) {
     // -- v1.1 transport section (additive) ------------------------------------
     p.transport = transport_from_json(root);
 
+    // -- v1.2 video section (additive) ----------------------------------------
+    p.video = video_from_json(root);
+
     return p;
 }
 
@@ -432,6 +511,54 @@ std::string profile_to_json_string(const Profile& p) {
             t["control"]["ttl_ms"] = *p.transport.control.ttl_ms;
         }
         root["transport"] = std::move(t);
+    }
+
+    // v1.2 additive `video` block.  Emitted when it carries something
+    // beyond the defaults, so a v1.1 profile round-trips byte-identically
+    // (no `video` field) while a remote-desktop profile carries the
+    // whole block.
+    if (!p.video.codec_name.empty() ||
+        !p.video.codec_preference.empty() ||
+        p.video.content_type != VideoContentType::kUnspecified ||
+        p.video.ladder_mode != VideoLadderMode::kFixed ||
+        p.video.resolution_floor_width != 0 ||
+        p.video.resolution_floor_height != 0) {
+        json v = json::object();
+        if (!p.video.codec_name.empty()) {
+            v["codec_name"] = p.video.codec_name;
+        }
+        if (!p.video.codec_preference.empty()) {
+            v["codec_preference"] = p.video.codec_preference;
+        }
+        v["codec_backend"] = p.video.codec_backend;
+        switch (p.video.content_type) {
+            case VideoContentType::kMotion:  v["content_type"] = "motion";  break;
+            case VideoContentType::kScreen:  v["content_type"] = "screen";  break;
+            case VideoContentType::kText:    v["content_type"] = "text";    break;
+            case VideoContentType::kUnspecified:
+            default:                        v["content_type"] = "unspecified"; break;
+        }
+        switch (p.video.ladder_mode) {
+            case VideoLadderMode::kSmoothness: v["ladder_mode"] = "smoothness"; break;
+            case VideoLadderMode::kQuality:    v["ladder_mode"] = "quality";    break;
+            case VideoLadderMode::kFixed:
+            default:                           v["ladder_mode"] = "fixed";      break;
+        }
+        if (p.video.resolution_floor_width != 0 ||
+            p.video.resolution_floor_height != 0) {
+            v["resolution_floor"] = json::array({p.video.resolution_floor_width,
+                                                 p.video.resolution_floor_height});
+        }
+        if (!p.video.pixel_format.empty()) {
+            v["pixel_format"] = p.video.pixel_format;
+        }
+        if (!p.video.color_range.empty()) {
+            v["color_range"] = p.video.color_range;
+        }
+        if (!p.video.color_matrix.empty()) {
+            v["color_matrix"] = p.video.color_matrix;
+        }
+        root["video"] = std::move(v);
     }
 
     return root.dump(/*indent=*/2);

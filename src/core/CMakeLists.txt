@@ -115,6 +115,7 @@ target_include_directories(nimrtc_core_objects
 # ---------------------------------------------------------------------------
 add_library(nimrtc_registry STATIC
     src/plugin_registry.cpp
+    src/gpu_device_registry.cpp
 )
 target_compile_definitions(nimrtc_registry PRIVATE
     NIMRTC_REGISTRY_EXPORTS=1)

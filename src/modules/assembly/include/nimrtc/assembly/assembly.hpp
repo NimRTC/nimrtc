@@ -262,6 +262,95 @@ struct NIMRTC_API_STABLE TransportSection {
 };
 
 // ---------------------------------------------------------------------------
+// VideoSection — Profile v1.2 additive `video` block
+// ---------------------------------------------------------------------------
+//
+// The `video` block describes how the *video* stream is shaped for the
+// scenario.  It exists because a remote-desktop session and a
+// video-call session want genuinely different things from the same
+// codec:
+//
+//   - a **call** wants a camera-like picture: a motion-oriented rate
+//     control and no resolution floor;
+//   - a **remote desktop** wants a screen-like picture: screen-content
+//     codec tuning, a *resolution floor* (dropping to 480p destroys
+//     the product — the operator has to read text), and a hardware
+//     encoder whenever the machine has one.
+//
+// The block is declarative configuration, not a branch in the engine:
+// the engine reads the values and pushes them into the codec seam
+// (`plugins::VideoEncoderParams`, remote-desktop plan B12) and into the
+// backend selection policy (plan B2).
+//
+// The block is **additive** on v1.1: a profile without it behaves
+// exactly as before (the defaults below).
+// ---------------------------------------------------------------------------
+
+/// Which kind of picture the encoder is looking at.
+enum class NIMRTC_API_STABLE VideoContentType : std::uint8_t {
+    /// No opinion — the codec uses its own default tuning.
+    kUnspecified = 0,
+    /// A camera pointed at a scene.
+    kMotion = 1,
+    /// A screen: flat regions, sharp edges, little motion.
+    kScreen = 2,
+    /// Text-heavy screen content (a terminal, a code editor).
+    kText = 3,
+};
+
+/// The rate-control mode the ladder uses.
+enum class NIMRTC_API_STABLE VideoLadderMode : std::uint8_t {
+    /// No ladder — the bitrate is fixed.
+    kFixed = 0,
+    /// Spend the budget on the frame rate.
+    kSmoothness = 1,
+    /// Spend the budget on the picture quality.
+    kQuality = 2,
+};
+
+struct NIMRTC_API_STABLE VideoSection {
+    /// The video codec plugin name.  Empty = the engine's default
+    /// ("h264").
+    std::string codec_name;
+
+    /// The codec *preference* for screen content, most preferred first.
+    /// The plan's B8 names the order: AV1 (screen tools) > HEVC >
+    /// H.264.  The list is *configuration*, not a hard-coded branch.
+    std::vector<std::string> codec_preference;
+
+    /// The backend policy: "auto" (hardware first), "hardware" (fail
+    /// loudly when there is none) or "software".  See
+    /// `plugins::CodecBackend`.
+    std::string codec_backend = "auto";
+
+    /// What kind of picture this is.
+    VideoContentType content_type = VideoContentType::kUnspecified;
+
+    /// The rate-control mode.
+    VideoLadderMode ladder_mode = VideoLadderMode::kFixed;
+
+    /// The resolution floor: the ladder never crosses it.  0 = no
+    /// floor (the ladder may drop as low as it likes).
+    ///
+    /// The floor is deliberately *configuration* and not a constant:
+    /// a 1080p floor is right on a hardware-encoding machine and
+    /// unaffordable on a software-only one (plan D2).
+    std::uint32_t resolution_floor_width  = 0;
+    std::uint32_t resolution_floor_height = 0;
+
+    /// The capture picture format the encoder expects ("i420").  The
+    /// capture path converts into it once (plan C3).
+    std::string pixel_format = "i420";
+
+    /// The colour description: "limited" / "full" (empty = unspecified).
+    std::string color_range;
+
+    /// The colour matrix: "bt601" / "bt709" / "bt2020" (empty =
+    /// unspecified).
+    std::string color_matrix;
+};
+
+// ---------------------------------------------------------------------------
 // Profile — scenario assembly unit
 // ---------------------------------------------------------------------------
 //
@@ -333,12 +422,27 @@ struct NIMRTC_API_STABLE Profile {
     /// applies (equivalent to `browser-call`). The block is otherwise
     /// additive on top of v1.0 — see `docs/plan/transport-strategies.md`.
     TransportSection transport;
+
+    // ---- v1.2 additive: video shaping --------------------------------------
+    ///
+    /// Optional. When the entire `video` block is absent from the JSON,
+    /// the section keeps its defaults (which describe a camera-like
+    /// picture with no resolution floor). The block is additive on top
+    /// of v1.1 — see ADR-021 / the remote-desktop plan.
+    ///
+    /// @note The explicit `= {}` is load-bearing: it gives the member a
+    ///       default member initializer, so that a designated
+    ///       initialiser that omits it (every built-in profile except
+    ///       `remote-desktop`) is *not* a missing-field-initialiser
+    ///       under GCC's `-Wmissing-field-initializers`, which the build
+    ///       promotes to an error.
+    VideoSection video = {};
 };
 
 // ---------------------------------------------------------------------------
 // ProfileRegistry — global singleton for named profile lookups
 // ---------------------------------------------------------------------------
-class ProfileRegistry {
+class NIMRTC_API_STABLE ProfileRegistry {
 public:
     /// Returns the singleton instance.
     static ProfileRegistry& instance();
@@ -373,7 +477,7 @@ private:
 //       .override_bwe({ .initial_bitrate_bps = 500'000 })
 //       .build();
 //
-class Builder {
+class NIMRTC_API_STABLE Builder {
 public:
     /// Load a named profile from the registry (mutates internal state).
     /// Returns *this for chaining. Logs a warning if the name is not found.
@@ -411,9 +515,9 @@ private:
 /// Load a Profile from a JSON file located at the given absolute path.
 /// Throws nlohmann::json::parse_error on malformed JSON.
 /// Empty/null plugin-name fields are converted to empty strings.
-Profile profile_from_json_file(const std::string& file_path);
+NIMRTC_API_STABLE Profile profile_from_json_file(const std::string& file_path);
 
 /// Serialise a Profile to a JSON string. Empty plugin names appear as "".
-std::string profile_to_json_string(const Profile& p);
+NIMRTC_API_STABLE std::string profile_to_json_string(const Profile& p);
 
 }  // namespace nimrtc::assembly

@@ -140,8 +140,22 @@ TEST_F(EngineVideoPlugins, source_can_produce_and_sink_can_render) {
 
     ASSERT_EQ(engine.video_source()->open(), np::kOk);
     ASSERT_EQ(engine.video_source()->start(), np::kOk);
-    // Run for ~200ms (6 frames at 30fps) to capture some frames.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Wait for the producer thread to deliver its first frame BEFORE
+    // sampling the counter.  A fixed sleep after start() races against
+    // the thread's cold-start latency: on a busy host (a parallel ctest
+    // run, or a runner that happens to be scheduling other work) the
+    // producer can miss the whole window and the test then reports zero
+    // frames for a source that is working perfectly.  The sibling test
+    // in src/modules/video_source/tests/test_video_source.cpp already
+    // polls for the same reason; this test needs the same guard.
+    using clk = std::chrono::steady_clock;
+    const auto warm_deadline = clk::now() + std::chrono::seconds(2);
+    while (src_frame_count.load(std::memory_order_acquire) == 0 &&
+           clk::now() < warm_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GE(src_frame_count.load(std::memory_order_acquire), 1)
+        << "the video source produced no frame within 2 s of start()";
     engine.video_source()->stop();
     EXPECT_GT(src_frame_count.load(), 0);
     EXPECT_EQ(src_frame_count.load(),

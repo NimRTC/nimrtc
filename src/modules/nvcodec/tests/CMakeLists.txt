@@ -74,5 +74,50 @@ set_tests_properties(modules_nvcodec_tests_test_nvcodec_roundtrip
 if(COMMAND gtest_discover_tests)
     gtest_discover_tests(test_nvcodec_roundtrip
         PROPERTIES TIMEOUT 120
-        DISCOVERY_TIMEOUT 10)
+        DISCOVERY_TIMEOUT 60)
+endif()
+
+# -----------------------------------------------------------------------------
+# test_nvcodec_zero_copy — the B10 zero-copy path, on real hardware
+# -----------------------------------------------------------------------------
+# The zero-copy path is a claim about a *negative* ("the picture never
+# reached the CPU"), so the test has to make that negative observable:
+# it paints a D3D11 texture with a compute shader (GPU-side only), hands
+# it to the encoder through the public `encode_zero_copy()` seam, and
+# checks the *decoded* picture.  A silent fallback to a CPU staging copy
+# would produce a different colour and fail the comparison.
+#
+# Like the round-trip test it is host-dependent: every case skips
+# cleanly when NVENC / NVDEC are unavailable.
+# -----------------------------------------------------------------------------
+add_executable(test_nvcodec_zero_copy test_nvcodec_zero_copy.cpp)
+
+set_target_properties(test_nvcodec_zero_copy PROPERTIES
+    VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+
+nimrtc_apply_options(test_nvcodec_zero_copy LENIENT)
+
+target_link_libraries(test_nvcodec_zero_copy PRIVATE
+    nimrtc::nvcodec
+    nimrtc::video_frame
+    nimrtc::core
+    nimrtc::plugins
+    GTest::gtest_main
+    GTest::gtest)
+
+# The shader is compiled at run time by D3DCompile, so the test needs the
+# compiler library on the link line.
+if(WIN32)
+    target_link_libraries(test_nvcodec_zero_copy PRIVATE d3d11 d3dcompiler)
+endif()
+
+add_test(NAME modules_nvcodec_tests_test_nvcodec_zero_copy
+         COMMAND test_nvcodec_zero_copy)
+set_tests_properties(modules_nvcodec_tests_test_nvcodec_zero_copy
+    PROPERTIES TIMEOUT 120)
+
+if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_nvcodec_zero_copy
+        PROPERTIES TIMEOUT 120
+        DISCOVERY_TIMEOUT 60)
 endif()

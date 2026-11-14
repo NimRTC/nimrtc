@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "benchmark": "remote_desktop_weaknet",
-  "generated_at": "2026-11-14T03:27:52Z",
+  "generated_at": "2026-11-14T03:32:28Z",
   "plan": "docs/plan/remote-desktop-plan.md",
   "plan_item": "J4",
   "plan_item_secondary": "J6",

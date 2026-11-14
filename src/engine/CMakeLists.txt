@@ -57,6 +57,8 @@ add_library(nimrtc_engine STATIC
     # flush and the inbound delivery.  The channel itself is a private
     # collaborator (`engine_control_seam.hpp`).
     src/engine_control.cpp
+    src/engine_qoe.cpp
+    src/engine_qoe_seam.cpp
     src/engine_control_seam.cpp
     # Remote-desktop plan E5 / E6 / E7 / E9: the receive-side render
     # state — the render clock (E5), the input echo (E6), the
@@ -252,6 +254,16 @@ endif()
 # above).
 if(NIMRTC_MODULE_RD_INPUT)
     target_link_libraries(nimrtc_engine PRIVATE nimrtc::rd_input)
+endif()
+
+# Remote-desktop plan Track J (J3 / J6): the remote-desktop QoE-metrics
+# module.  The engine never includes its header — the metrics are reached
+# through the `plugins::IQoeCollector` seam (Layout Invariant 4 /
+# ADR-025).  The link exists so the module's registrar entry point (in
+# `kDefaultRegistrars[]`) resolves at link time (same pattern as the
+# rd_input entry above).
+if(NIMRTC_MODULE_RD_QOE)
+    target_link_libraries(nimrtc_engine PRIVATE nimrtc::rd_qoe)
 endif()
 
 # The codec-specific SDP attribute module (architecture remediation plan

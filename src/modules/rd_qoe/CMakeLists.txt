@@ -17,22 +17,30 @@
 #          tools/benchmark_capture_encode.py)
 #
 # Why a module and not a seam (plan J3):
-#   The collector is *fed* by the host — it never pulls from the engine.
-#   That keeps it decoupled and unit-testable, so there is no
-#   `plugins::I*` interface and nothing in src/plugins/ — the module is
-#   self-contained (L2 / L3).
+#   The collector is *fed* — it never pulls from the engine.  That keeps
+#   it decoupled and unit-testable, so the *metrics* are self-contained.
+#
+#   The engine, however, may not include a concrete module's header
+#   (Layout Invariant 4 / ADR-025), so the module also ships a thin
+#   adapter (`src/qoe_plugin.cpp`) that implements the
+#   `plugins::IQoeCollector` seam from src/plugins/.  The adapter adds no
+#   policy: it is a translation layer, so there is exactly one
+#   implementation of each metric in the tree.
 #
 # Dependencies:
-#   - core    (always) — the byte / error / log vocabulary
+#   - core      (always) — the byte / error / log vocabulary
+#   - plugins   (the IQoeCollector seam the engine drives)
 # ----------------------------------------------------------------------------
 add_library(nimrtc_rd_qoe STATIC
     src/qoe_metrics.cpp
+    src/qoe_plugin.cpp
     )
 
 nimrtc_apply_options(nimrtc_rd_qoe)
 target_link_libraries(nimrtc_rd_qoe
     PUBLIC
         nimrtc::core
+        nimrtc::plugins
     )
 
 target_include_directories(nimrtc_rd_qoe

@@ -15,3 +15,7 @@
 # =============================================================================
 nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_qoe_metrics.cpp
     DEPS nimrtc::rd_qoe)
+
+# The `plugins::IQoeCollector` adapter (the seam the engine drives).
+nimrtc_add_test(${CMAKE_CURRENT_SOURCE_DIR}/test_qoe_plugin.cpp
+    DEPS nimrtc::rd_qoe nimrtc::core)

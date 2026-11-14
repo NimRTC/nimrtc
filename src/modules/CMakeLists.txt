@@ -302,11 +302,16 @@ endif()
 # -----------------------------------------------------------------------------
 # Remote-desktop plan Track J — the QoE metrics module (J3 / J6).
 #
-# Self-contained: it depends on nimrtc::core only, and it registers no
-# plugin (the collector is *fed* by the host — it never pulls from the
-# engine — so there is no `plugins::I*` seam and nothing in src/plugins/).
-# The engine wiring — pushing the presented-frame events into the
-# collector — is a separate item and does not live here.
+# The *metrics* are self-contained (they depend on nimrtc::core only), but
+# the engine may not include a concrete module's header (Layout Invariant 4
+# / ADR-025), so the module also ships a thin adapter that implements the
+# `plugins::IQoeCollector` seam from src/plugins/.  The adapter adds no
+# policy: it is a translation layer, so there is exactly one implementation
+# of each metric in the tree.
+#
+# The engine resolves the adapter through the registry's qoe-collector slot
+# (`EngineConfig::qoe_collector_name`) and pushes the presented-frame
+# events into it.
 # -----------------------------------------------------------------------------
 if(NIMRTC_MODULE_RD_QOE)
     add_subdirectory(rd_qoe)

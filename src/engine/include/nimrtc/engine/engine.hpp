@@ -119,6 +119,7 @@
 // the control plane through this interface and never includes the
 // `rd_input` module's headers (Layout Invariant 4 / ADR-025).
 #include <nimrtc/plugins/control_channel.hpp>
+#include <nimrtc/plugins/qoe_collector.hpp>      // plan J3 / J6 — QoE seam
 #include <nimrtc/plugins/xr_report.hpp>        // v1.2.0 (session plan X1) — RTCP XR seam
 
 // Forward declarations of concrete module types — full definitions live
@@ -310,6 +311,46 @@ struct NIMRTC_API_STABLE EngineConfig {
      *  not silently fall back to another backend (a typo'd id would
      *  otherwise mask an integrator error). */
     std::string control_channel_name;
+
+    // ---- The QoE collector (remote-desktop plan J3 / J6) ------------------
+    //
+    // The quality-of-experience metrics — the freeze count, the
+    // end-to-end latency percentiles, the sharpness proxy and the
+    // input-to-photon latency — are what a remote-desktop session is
+    // actually judged on.  They are computed by the `rd_qoe` module and
+    // reached through the `plugins::IQoeCollector` seam, so the engine
+    // never includes a concrete module's header (Layout Invariant 4 /
+    // ADR-025).
+    //
+    // The collector is **off by default**: a session that does not ask
+    // for the metrics does not pay for the reservoir, and the engine
+    // still publishes the frame counts (the presented / dropped
+    // counters are free).
+
+    /** The QoE-collector plugin id (plan J3 / J6).
+     *
+     *  The id names the *factory* the engine resolves through
+     *  `core::PluginRegistry::get_qoe_collector(...)`.  The built-in
+     *  implementation registers under `"rd-qoe"`.
+     *
+     *  Empty means "no QoE collector": the metrics are not measured and
+     *  `Stats::qoe` carries only the frame counters.  It is empty by
+     *  default.
+     *
+     *  An unknown id is a hard error at `open()` time — the engine does
+     *  not silently fall back (a typo'd id would otherwise mask an
+     *  integrator error). */
+    std::string qoe_collector_name;
+
+    /** The collector's configuration (plan J3 / J6).
+     *
+     *  The reservoir sizes are the collector's **memory bound**: the
+     *  latency percentiles are computed over the most recent N samples
+     *  and the running maximum is kept separately, so a session that
+     *  runs for hours cannot grow the process's memory.
+     *
+     *  Ignored when `qoe_collector_name` is empty. */
+    plugins::QoeConfig qoe_config;
 
     /** The transport the control channel rides (plan G1 / G2).
      *
@@ -2995,6 +3036,35 @@ public:
         std::span<const std::uint8_t> payload) noexcept;
 
     /**
+     * @brief Send one control message that carries an **input event**.
+     *
+     * This is `send_control_message()` plus one piece of information:
+     * the *event id* the frame that reflects the event will carry.  The
+     * engine uses it to measure the **input-to-photon latency** (plan
+     * item J6) — the latency that actually matters for remote control:
+     * from the operator's click to the frame that reflects it being
+     * displayed.
+     *
+     * The measurement is end-to-end: it includes the control transport,
+     * because the engine stamps the event when it goes **out** and the
+     * frame is stamped when it reaches the **sink**.
+     *
+     * @param payload   The message bytes (the input event).
+     * @param event_id  The event's identifier.  It must match the id
+     *                  the reflecting frame will carry — the host
+     *                  chooses it, and the same id space is used by
+     *                  `record_video_ref_frame()`.
+     * @return The same status `send_control_message()` returns.
+     *
+     * @note The event is only *measured* when a QoE collector is
+     *       configured (`EngineConfig::qoe_collector_name`).  Without
+     *       one the call is exactly `send_control_message()`.
+     */
+    NIMRTC_API_STABLE plugins::Status send_input_event(
+        std::span<const std::uint8_t> payload,
+        std::uint64_t event_id) noexcept;
+
+    /**
      * @brief Install the callback that receives inbound control messages.
      *
      * The callback fires on the engine's thread with one **whole**
@@ -3612,6 +3682,22 @@ public:
         std::uint64_t video_stage_total_us = 0;
         /** The summed p95 of the four outbound stages, in microseconds. */
         std::uint64_t video_stage_total_p95_us = 0;
+
+        /**
+         * @brief The quality-of-experience metrics (plan J3 / J6).
+         *
+         * The freeze count, the end-to-end latency percentiles, the
+         * viewer's frame rate, the sharpness proxy and the
+         * input-to-photon latency.
+         *
+         * The metrics are only measured when a QoE collector is
+         * configured (`EngineConfig::qoe_collector_name`).  Without one
+         * this snapshot carries the **frame counters** — the presented
+         * and dropped frame counts, which the engine keeps anyway — and
+         * zeroes for the metrics, which is the honest answer to "what was
+         * the latency percentile?" when it was not measured.
+         */
+        plugins::QoeSnapshot qoe{};
     };
     /** Out-of-line: depends on concrete SRTP/DTLS state stored in Impl.
      *
@@ -4357,6 +4443,43 @@ private:
      * domain must be told when it did not get one).
      */
     uint32_t resolve_control_channel() noexcept;
+
+    // ---- The QoE collector (plan J3 / J6) --------------------------------
+
+    /**
+     * @brief Resolve the QoE collector through the registry seam.
+     *
+     *  Called from `init_modules_once()`.  Resolution is **not** fatal
+     *  when the collector is simply not configured (the default): the
+     *  metrics are then not measured and `Stats::qoe` carries only the
+     *  frame counters.  A *configured but unknown* id IS an error — the
+     *  engine does not silently fall back, because a typo'd id would
+     *  otherwise mask an integrator error.
+     */
+    uint32_t resolve_qoe_collector() noexcept;
+
+    /**
+     * @brief Report that a frame reached the viewer.
+     *
+     *  The engine's single choke point for "the picture is on the
+     *  screen": it feeds the QoE collector's end-to-end latency
+     *  (plan item J3) and its presented frame rate.
+     *
+     *  @param capture_ts_us  the frame's capture timestamp, on the local
+     *                        timeline.
+     *  @param frame_id       the frame's sequence number.
+     *  @param source_fps     the source frame rate, or 0 when unknown.
+     */
+    void note_frame_presented(std::int64_t capture_ts_us,
+                               std::uint64_t frame_id,
+                               double source_fps) noexcept;
+
+    /**
+     * @brief Report that the pipeline dropped a frame.
+     *
+     *  Feeds the QoE collector's drop counter (plan item J3).
+     */
+    void note_frame_dropped(std::uint64_t count = 1) noexcept;
 
     /**
      * @brief Put the channel's queued messages on the wire.

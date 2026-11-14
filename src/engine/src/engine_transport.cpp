@@ -1254,6 +1254,8 @@ int NimRTCEngine::tick() noexcept {
                 for (std::uint64_t i = 0; i < delta; ++i) {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kJitterBufferTimeout);
+                    // Plan J3: the frame never reached the viewer.
+                    note_frame_dropped();
                 }
             }
             impl_->video_state.video_jb_incomplete_frames_prev = incomplete_now;

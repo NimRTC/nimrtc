@@ -1092,6 +1092,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                         note_displayed_frame(
                             static_cast<std::int64_t>(enc.info.capture_ts_us),
                             enc.info.frame_seq);
+                        // Plan J3: the frame reached the viewer — feed the
+                        // QoE collector's end-to-end latency and the
+                        // presented frame rate.
+                        note_frame_presented(
+                            static_cast<std::int64_t>(enc.info.capture_ts_us),
+                            enc.info.frame_seq,
+                            static_cast<double>(config_.video_fps));
                         return;
                     }
                     // The GPU path could not deliver this frame.  Fall
@@ -1118,6 +1125,8 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                             &hold_us)) {
                         impl_->video_state.video_stats.on_frame_dropped(
                             detail::VideoDropReason::kDecoderError);
+                        // Plan J3: the frame never reached the viewer.
+                        note_frame_dropped();
                         return;
                     }
                 }
@@ -1252,6 +1261,13 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
                     note_displayed_frame(
                         static_cast<std::int64_t>(enc.info.capture_ts_us),
                         enc.info.frame_seq);
+                    // Plan J3: the frame reached the viewer — feed the
+                    // QoE collector's end-to-end latency and the presented
+                    // frame rate.
+                    note_frame_presented(
+                        static_cast<std::int64_t>(enc.info.capture_ts_us),
+                        enc.info.frame_seq,
+                        static_cast<double>(config_.video_fps));
                 } else {
                     impl_->video_state.video_stats.on_frame_dropped(
                         detail::VideoDropReason::kDecoderError);
@@ -2860,6 +2876,17 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     // promised.  They come from the controller — the engine does not
     // re-derive them.
     out.video_sync = video_sync_stats();
+
+    // ---- The QoE metrics (remote-desktop plan J3 / J6) -------------------
+    //
+    // The snapshot comes from the collector the engine resolved through
+    // the `plugins::IQoeCollector` seam.  When no collector is configured
+    // the snapshot carries the frame counters (which the engine keeps
+    // anyway) and zeroes for the metrics — the honest answer to "what was
+    // the latency percentile?" when it was not measured.
+    if (impl_ != nullptr) {
+        out.qoe = impl_->qoe.snapshot();
+    }
 
     return out;
 }

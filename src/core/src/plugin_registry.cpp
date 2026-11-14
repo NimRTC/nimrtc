@@ -215,6 +215,12 @@ void PluginRegistry::register_datachannel(std::string_view id,
 // channel lives in `src/modules/rd_input/` and registers under
 // "control-channel"; the engine resolves it through
 // `EngineConfig::control_channel_name`.
+void PluginRegistry::register_qoe_collector(
+    std::string_view id,
+    const plugins::IQoeCollectorFactory* f) {
+    qoe_collector_.register_one(id, f);
+}
+
 void PluginRegistry::register_control_channel(
         std::string_view id,
         const plugins::IControlChannelFactory* f) {

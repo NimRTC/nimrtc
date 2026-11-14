@@ -435,38 +435,20 @@ REACHABILITY_ROOTS = {
 # tag) so it does not silently vanish from the consumption map, and it is
 # still reported when the waiver's stated reason no longer holds.
 #
-#   rd_input — remote-desktop plan Track G.  G3 (the input event codec),
-#   G4 (the coalescer / rate limiter) and G7 (the safety filter) are
-#   module-level work items with no engine dependency, and they land
-#   first.  The engine wiring is G1 (the NimRTC-native control channel
-#   over the DTLS app-data seam) and G2 (the control plane on its own
-#   transport), which are engine-level items and are owned separately.
-#   Remove this waiver when G1 links `nimrtc::rd_input` from the engine
-#   or from a shipped example.
+# The list is currently empty: both modules that used to be here have
+# been wired into the engine.
 #
-#   rd_qoe — remote-desktop plan Track J.  J3 (the QoE metrics: the
-#   freeze accounting, the sharpness proxy, the end-to-end latency
-#   percentiles, the viewer's frame rate) and J6 (the input-to-photon
-#   measurement) are module-level work items with no engine dependency:
-#   the collector is *fed* by the host and never pulls from the engine,
-#   so it lands first and stays unit-testable.  The engine wiring — the
-#   engine pushing the presented-frame events and the input-to-photon
-#   pairing into the collector — is an engine-level item (the J1 / J2
-#   timeline) and is owned separately.  Remove this waiver when the
-#   engine links `nimrtc::rd_qoe` (or when a shipped example consumes
-#   it).
-PENDING_WIRING: dict[str, str] = {
-    "rd_input": (
-        "remote-desktop plan G1 / G2 (the control channel and the control "
-        "transport) wire this module into the engine; G3 / G4 / G7 are "
-        "module-level items that land first"
-    ),
-    "rd_qoe": (
-        "remote-desktop plan J1 / J2 (the engine's per-stage timeline) "
-        "feed this module's collector; J3 / J6 are module-level items "
-        "that land first"
-    ),
-}
+#   rd_input — remote-desktop plan Track G.  The engine links
+#   `nimrtc::rd_input` and resolves its control channel through the
+#   `plugins::IControlChannel` seam, so the module is reachable from
+#   the composition root.
+#
+#   rd_qoe — remote-desktop plan Track J (J3 / J6).  The engine links
+#   `nimrtc::rd_qoe` and resolves its collector through the
+#   `plugins::IQoeCollector` seam; the engine pushes the presented
+#   frames, the drops and the input events into it, so the module is
+#   reachable from the composition root.
+PENDING_WIRING: dict[str, str] = {}
 
 
 def compute_reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:

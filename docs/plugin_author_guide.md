@@ -247,6 +247,7 @@ by an empty config knob.
 | Net feedback | `plugins/net_feedback.hpp`                       | `net_feedback_name`         | `NIMRTC_REGISTER_NET_FEEDBACK` | logged | The receiver-side collector that feeds the BWE estimator. |
 | XR report    | `plugins/xr_report.hpp`                          | `xr_report_name`            | `NIMRTC_REGISTER_XR_REPORT`    | logged | The RFC 3611 extended-report consumer. |
 | Control channel | `plugins/control_channel.hpp`                 | `control_channel_name`      | `NIMRTC_REGISTER_CONTROL_CHANNEL` | hard | Empty = no control plane (`send_control_message()` reports `kErrNotReady`). The built-in implementation registers under `"control-channel"`. An unknown id is a hard error at `open()` — the engine never falls back silently. |
+| QoE collector | `plugins/qoe_collector.hpp`                   | `qoe_collector_name`        | `NIMRTC_REGISTER_QOE_COLLECTOR` | hard | Empty = no QoE metrics (remote-desktop plan J3 / J6). The built-in implementation registers under `"rd-qoe"`. An unknown id is a hard error at `open()`. The engine *feeds* the collector (presented frames, drops, input events) and publishes the snapshot through `Stats::qoe`. |
 
 **Not pluggable today** (see §4.2): the RTP layer
 (`plugins/rtp.hpp`) and the SDP layer (`plugins/sdp.hpp`). The

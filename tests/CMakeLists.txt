@@ -1604,6 +1604,78 @@ if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VID
 endif()
 
 # ----------------------------------------------------------------------------
+# The engine's QoE wiring (remote-desktop plan J3 / J6).
+#
+# The `rd_qoe` module owns the metrics; the engine owns the events.  This
+# test drives the *engine* and asserts that the engine really pushes the
+# presented frames, the drops and the input events into the collector and
+# really publishes the result through `Stats::qoe`.
+#
+# It needs the capture module (the device the pump drives), so it reuses
+# the e2e loopback target's link set — the same shape as the
+# stage-timing test above.
+if(NIMRTC_MODULE_VIDEO_SOURCE AND NIMRTC_MODULE_VIDEO_SINK AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_H264)
+  add_executable(test_engine_qoe test_engine_qoe.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_qoe PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_qoe PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_qoe PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_qoe PRIVATE
+      nimrtc::engine
+      nimrtc::core
+      nimrtc::plugins
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_source
+      nimrtc::video_sink
+      nimrtc::video_pipeline
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::h264
+      GTest::gtest_main)
+  target_include_directories(test_engine_qoe PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_source/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_sink/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/h264/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_qoe PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_qoe PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_qoe LENIENT)
+  add_test(NAME test_engine_qoe
+      COMMAND $<TARGET_FILE:test_engine_qoe>)
+  set_tests_properties(test_engine_qoe PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_qoe
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+  nimrtc_copy_wolfssl_certs(test_engine_qoe)
+endif()
+
+# ----------------------------------------------------------------------------
 # The capture-*device* seam wiring (remote-desktop plan A1; architecture
 # remediation plan Phase 2 §2.2).
 #
@@ -1855,7 +1927,7 @@ target_link_libraries(test_registry_contract PRIVATE
 # symbol only exists when the module is compiled in.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input)
+              rd_input rd_qoe)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_registry_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -1940,7 +2012,7 @@ target_link_libraries(test_plugin_id_contract PRIVATE
 # only when it was actually built.
 foreach(_mod opus h264 h265 av1 video_source video_sink video_pipeline
               video_capture audio_rx dtmf srtp vp9 video_bitrate_control
-              rd_input)
+              rd_input rd_qoe)
     if(TARGET nimrtc::${_mod})
         target_link_libraries(test_plugin_id_contract PRIVATE nimrtc::${_mod})
     endif()
@@ -2653,6 +2725,46 @@ if(NIMRTC_BUILD_TESTS)
         message(STATUS
             "Python3 interpreter not found — skipping the dead-module guard "
             "(tools/check_dead_modules.py).  CI runs it as a dedicated step.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# The merge-gate guard.
+#
+# The repository's merge gate is a GitHub Ruleset, and it demands a list
+# of required status checks.  That list and the set of checks the CI
+# workflows actually produce drift apart, and the drift is invisible
+# until it blocks a merge:
+#
+#   * a required check that no workflow produces blocks every merge,
+#     forever, with nothing to fix from the PR page;
+#   * a check the matrix produces but the gate does not require costs
+#     runner time and catches nothing.
+#
+# `tools/check_ci_ruleset.py` compares `.github/rulesets/protect-main.json`
+# against the workflows and fails when the two sets differ.  It needs no
+# build and no network, so it runs on every push.
+#
+# Registered as a ctest case for the same reason as the dead-module
+# guard: a developer sees it next to the other gates, and `ctest` alone
+# is enough to catch the regression.  It is skipped (not failed) when no
+# Python interpreter is available -- a missing interpreter must not turn
+# into a red build on a machine that has no Python.
+# ---------------------------------------------------------------------------
+if(NIMRTC_BUILD_TESTS)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME test_ci_ruleset
+                 COMMAND ${Python3_EXECUTABLE}
+                         "${CMAKE_SOURCE_DIR}/tools/check_ci_ruleset.py"
+                         --repo-root "${CMAKE_SOURCE_DIR}")
+        set_tests_properties(test_ci_ruleset PROPERTIES
+            TIMEOUT 60
+            LABELS "ci;guard")
+    else()
+        message(STATUS
+            "Python3 interpreter not found — skipping the merge-gate guard "
+            "(tools/check_ci_ruleset.py).  CI runs it as a dedicated step.")
     endif()
 endif()
 

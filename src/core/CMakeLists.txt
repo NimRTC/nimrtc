@@ -209,6 +209,12 @@ endif()
 if(NIMRTC_MODULE_RD_INPUT)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_RD_INPUT=1)
 endif()
+# Remote-desktop plan Track J (J3 / J6): the QoE-metrics module's
+# registrar entry materialises only when the module is built.  Same
+# shape as the rd_input entry above.
+if(NIMRTC_MODULE_RD_QOE)
+    target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_RD_QOE=1)
+endif()
 if(NIMRTC_MODULE_OPUS)
     target_compile_definitions(nimrtc_core_objects PRIVATE NIMRTC_HAS_OPUS=1)
 endif()

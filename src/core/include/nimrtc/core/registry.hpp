@@ -108,6 +108,13 @@ class NIMRTC_API_STABLE IDataChannelFactory;
 // like the other factory types so the registry's TypedRegistry<> field
 // can reference it without pulling the seam header into core.
 class NIMRTC_API_STABLE IControlChannelFactory;
+// Remote-desktop plan J3 / J6: the QoE-collector seam.  The engine pushes
+// the pipeline's events into it and reads the aggregate back, and it
+// never includes the `rd_qoe` module's headers (Layout Invariant 4).
+// Forward-declared like the other factory types so the registry's
+// TypedRegistry<> field can reference it without pulling the seam header
+// into core (Layout Invariant 1).
+class NIMRTC_API_STABLE IQoeCollectorFactory;
 // v1.2.0 M1 (F2): the receiver-side network-feedback collector seam.
 // Forward-declared like the other factory types so the registry's
 // TypedRegistry<> field can reference it without pulling the seam header
@@ -226,6 +233,13 @@ namespace rd_input        { void register_default_plugins() noexcept; }
 #endif
 #ifdef NIMRTC_HAS_VIDEO_SINK
 namespace video_sink      { void register_default_plugins() noexcept; }
+#endif
+// Remote-desktop plan Track J (J3 / J6): the quality-of-experience
+// metrics module.  Its entry point populates the registry's qoe-collector
+// slot (register_qoe_collector) so `core::register_all_default_plugins()`
+// can wire the built-in collector through the unified table.
+#ifdef NIMRTC_HAS_RD_QOE
+namespace rd_qoe           { void register_default_plugins() noexcept; }
 #endif
 namespace bwe             { void register_default_plugins() noexcept; }
 namespace sched           { void register_default_plugins() noexcept; }
@@ -810,6 +824,28 @@ public:
         return control_channel_.list_ids();
     }
 
+    // -- QoE collector (remote-desktop plan J3 / J6) -----------------------
+    //
+    // Typed slot for `nimrtc::plugins::IQoeCollectorFactory*`.  The
+    // built-in implementation lives in `src/modules/rd_qoe/` and
+    // registers under the id "rd-qoe"; the engine resolves it through
+    // `EngineConfig::qoe_collector_name`.
+    void register_qoe_collector(std::string_view id,
+                                const plugins::IQoeCollectorFactory* f);
+    /// Remove a qoe-collector factory by id.  Returns true if a
+    /// matching entry was removed.  Test-only helper; the production
+    /// path always registers through static-init registration.
+    bool unregister_qoe_collector(std::string_view id) {
+        return qoe_collector_.unregister_one(id);
+    }
+    [[nodiscard]] const plugins::IQoeCollectorFactory*
+    get_qoe_collector(std::string_view id) const {
+        return qoe_collector_.get(id);
+    }
+    [[nodiscard]] std::vector<std::string> list_qoe_collectors() const {
+        return qoe_collector_.list_ids();
+    }
+
     // -- DTLS session (Transport PAL Slice 4 / Slice 8 hook) --------------
     //
     // Typed slot for `nimrtc::dtls::IDtlsSessionFactory*`. The built-in
@@ -991,6 +1027,10 @@ private:
     // channel registers under "control-channel"; the engine resolves it
     // through `EngineConfig::control_channel_name`.
     TypedRegistry<plugins::IControlChannelFactory> control_channel_{"control-channel"};
+    // Remote-desktop plan J3 / J6: the QoE-collector slot.  The built-in
+    // collector registers under "rd-qoe"; the engine resolves it through
+    // `EngineConfig::qoe_collector_name`.
+    TypedRegistry<plugins::IQoeCollectorFactory>  qoe_collector_{"qoe-collector"};
     // Transport PAL Slice 8 (v0.10.2) ??typed factory slots for the
     // DTLS / SCTP / raw_udp / transport-stack seams. Each module's
     // `register_default_plugins()` publishes a single factory into
@@ -1312,6 +1352,19 @@ private:
             ::nimrtc::core::detail::Registrar::Category::kControlChannel, \
             #id, factory_ptr }
 
+/** Register a QoE-collector-factory plugin by ID and factory pointer.
+ *  Remote-desktop plan J3 / J6 -- typed slot for
+ *  `plugins::IQoeCollectorFactory*`.
+ *
+ *  Usage: NIMRTC_REGISTER_QOE_COLLECTOR(rd_qoe, &factory); */
+#define NIMRTC_REGISTER_QOE_COLLECTOR(id, factory_ptr)                   \
+    NIMRTC_DETAIL_REGISTER_ID_GUARD(#id)                   \
+    static ::nimrtc::core::detail::Registrar                          \
+        NIMRTC_UNIQUE_NAME(_reg_qoe_collector_){                        \
+            ::nimrtc::core::PluginRegistry::instance(),                \
+            ::nimrtc::core::detail::Registrar::Category::kQoeCollector, \
+            #id, factory_ptr }
+
 /** Register a DTLS session-factory plugin by ID and factory pointer.
  *  Transport PAL Slice 4 / Slice 8 (v0.10.2) ??typed slot for
  *  `nimrtc::dtls::IDtlsSessionFactory*`. */
@@ -1457,6 +1510,9 @@ public:
         // Remote-desktop plan G1: the control-channel typed factory slot
         // — see register_control_channel().
         kControlChannel,
+        // Remote-desktop plan J3 / J6: the QoE-collector typed factory slot
+        // — see register_qoe_collector().
+        kQoeCollector,
         // Transport PAL Slice 8 (v0.10.2): typed factory slots for the
         // DTLS / SCTP / raw_udp / transport-stack seams. See the
         // NIMRTC_REGISTER_DTLS_SESSION / SCTP_SOCKET / RAW_UDP_DATAGRAM /
@@ -1570,6 +1626,10 @@ public:
             case Category::kControlChannel:
                 reg.register_control_channel(id,
                     static_cast<const plugins::IControlChannelFactory*>(factory));
+                break;
+            case Category::kQoeCollector:
+                reg.register_qoe_collector(id,
+                    static_cast<const plugins::IQoeCollectorFactory*>(factory));
                 break;
             case Category::kDtlsSession:
                 reg.register_dtls_session(id,

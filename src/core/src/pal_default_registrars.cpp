@@ -152,6 +152,14 @@ constexpr RegistrarFn kDefaultRegistrars[] = {
     // without naming a concrete module (Layout Invariant 4).
     &nimrtc::rd_input::register_default_plugins,
 #endif
+#ifdef NIMRTC_HAS_RD_QOE
+    // Remote-desktop plan Track J (J3 / J6): the QoE-metrics module.  Its
+    // entry point populates the registry's qoe-collector slot
+    // (register_qoe_collector) under the id "rd-qoe", so the engine can
+    // feed the collector through the seam without naming a concrete
+    // module (Layout Invariant 4).
+    &nimrtc::rd_qoe::register_default_plugins,
+#endif
 #ifdef NIMRTC_HAS_VIDEO_SINK
     &nimrtc::video_sink::register_default_plugins,
 #endif

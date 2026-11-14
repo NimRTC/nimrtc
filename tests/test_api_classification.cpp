@@ -534,11 +534,16 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   - vp9/decoder.hpp (the VP9 software decoder)
     //   - vp9/hw_backends.hpp (the VP9 HW backend ids)
     //
+    // Remote-desktop plan Track J (J3 / J6) bump: +1 public header
+    // (185 -> 186) for the QoE-collector seam:
+    //   - plugins/qoe_collector.hpp (the IQoeCollector seam + its
+    //     factory, the config and the snapshot value types)
+    //
     // The baseline above is the total on disk.  Several track bumps
     // landed concurrently (Track J / K / L / F), so the per-track
     // ranges above do not simply add up to it -- the total is what the
     // walker measures and what this constant must match.
-    constexpr std::size_t kBaselineHeaderCount = 185;
+    constexpr std::size_t kBaselineHeaderCount = 186;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

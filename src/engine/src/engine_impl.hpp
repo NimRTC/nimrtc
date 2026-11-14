@@ -41,6 +41,7 @@
  *   | `detail::RenderState`           | `engine_render_state.hpp`     |
  *   | `detail::ControlChannelInbox`   | `engine_control_inbox.hpp`    |
  *   | `detail::ControlChannelSeam`    | `engine_control_seam.hpp`     |
+ *   | `detail::QoeSeam`               | `engine_qoe_seam.hpp`         |
  *
  * The rule is simple: a member that only one feature reads or writes
  * belongs to that feature's collaborator, not to `Impl`.  The engine's
@@ -92,6 +93,7 @@
 #include "engine_audio_state.hpp"
 #include "engine_control_inbox.hpp"
 #include "engine_control_seam.hpp"
+#include "engine_qoe_seam.hpp"
 #include "engine_rtcp_helpers.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
@@ -393,6 +395,13 @@ struct NimRTCEngine::Impl {
     // `plugins::IControlChannel` seam (the framing lives in the
     // `rd_input` module — see `engine_control_seam.hpp`).
     detail::ControlChannelSeam control_seam;
+
+    // ---- The QoE collector (plan J3 / J6) -------------------------------
+    //
+    // The metrics live in the `rd_qoe` module, reached through the
+    // `plugins::IQoeCollector` seam; the engine pushes the events it
+    // knows about into it.  See `engine_qoe_seam.hpp`.
+    detail::QoeSeam qoe;
 
     // ---- Cross-end timeline (ADR-017) ---------------------------------
     //

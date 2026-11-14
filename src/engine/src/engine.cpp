@@ -205,6 +205,15 @@ uint32_t NimRTCEngine::init_modules_once() noexcept {
     // stack's raw-UDP path) depends on it.
     if (const uint32_t rc = resolve_control_channel(); rc != 0) return rc;
 
+    // ---- The QoE collector (plan J3 / J6) -------------------------------
+    //
+    // The collector is resolved through the registry's qoe-collector
+    // slot (`EngineConfig::qoe_collector_name`), so the engine never
+    // includes a concrete module's header (Layout Invariant 4).  It is
+    // off by default: a session that does not ask for the metrics does
+    // not pay for the reservoir.
+    if (const uint32_t rc = resolve_qoe_collector(); rc != 0) return rc;
+
     return 0;
 }
 
@@ -380,6 +389,10 @@ uint32_t NimRTCEngine::open() noexcept {
 
 void NimRTCEngine::close() noexcept {
     if (state_ != State::kOpen) return;
+    // Plan J3 / J6: the QoE collector is closed with the session — the
+    // metrics are a property of the session, and a closed session's
+    // reservoir is not worth keeping.
+    impl_->qoe.close();
     if (ice_t_) ice_t_->close();
     if (audio3a_plugin_) audio3a_plugin_->close();
     if (codec_plugin_) codec_plugin_->close();

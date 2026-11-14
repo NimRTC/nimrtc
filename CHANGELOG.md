@@ -9,6 +9,69 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The QoE collector seam and the engine's QoE wiring (v1.4, remote-desktop
+  plan J3 / J6).**  The `rd_qoe` module shipped the *metrics* but nothing in
+  the product ever *fed* them: the engine's `Stats` carried the per-stream
+  counters and the per-stage timings, not the experience metrics, and the
+  input-to-photon latency — the number that actually decides whether a
+  remote-desktop session feels responsive — was not measured at all.  That
+  is the dead-module state the architecture-remediation plan D2 calls out:
+  a complete implementation with a full test suite that nothing calls.
+
+  The fix follows the shape every other pluggable family already uses: the
+  *contract* is a seam, the *implementation* is a module, and the engine
+  only ever talks to the seam.
+
+    - **New public API** (all `NIMRTC_API_STABLE`, all **additive**):
+      `src/plugins/include/nimrtc/plugins/qoe_collector.hpp` declares
+      `plugins::IQoeCollector` (the event sink + snapshot out),
+      `plugins::IQoeCollectorFactory`, `plugins::QoeConfig` (the reservoir
+      sizes — the collector's memory bound) and `plugins::QoeSnapshot` (the
+      flat value type the engine publishes).
+    - **The registry slot** `core::PluginRegistry::register_qoe_collector()`
+      / `get_qoe_collector()` / `list_qoe_collectors()`, the registrar
+      category, and the `NIMRTC_REGISTER_QOE_COLLECTOR` macro — the same
+      pattern as the control channel, the bitrate controller and the
+      capture device.
+    - **The module side**: `src/modules/rd_qoe/src/qoe_plugin.cpp` adapts
+      the existing `rd_qoe::QoeCollector` to the seam and registers under
+      the id `"rd-qoe"`.
+    - **The engine side**: `EngineConfig::qoe_collector_name` selects the
+      collector (empty = no QoE metrics; an **unknown id is a hard error**
+      at `open()` — the engine never falls back silently).
+      `NimRTCEngine::Stats` gained a `plugins::QoeSnapshot qoe` field.
+      The engine pushes the events it already knows about — a frame
+      reached the viewer, a frame was dropped, an input event went out —
+      and reads the aggregate back.
+    - **New public API** (all `NIMRTC_API_STABLE`):
+      `NimRTCEngine::send_input_event(payload, event_id)` sends an input
+      event over the control plane **and** stamps it for the
+      input-to-photon measurement.  The event is stamped only when the
+      control channel *accepted* it: a refused event never reached the
+      peer, so there is no honest latency to report for it.
+    - **The pairing** (J6): the engine pairs an event with the first
+      presented frame whose ref-frame id is **strictly greater** than the
+      event's — the operator acted on the frame they were looking at, so
+      the frame that reflects the action is a later frame in the same id
+      space.  An event that was *not* bound to a frame (id 0) pairs with
+      the next presented frame outright.
+    - **Honesty about what was measured**: without a collector the engine
+      still publishes the **frame counters** — the presented and dropped
+      frame counts, which it keeps anyway — and zeroes for the *metrics*,
+      which is the honest answer to "what was the latency percentile?"
+      when nothing measured it.
+    - New tests: `tests/test_engine_qoe.cpp` (8 cases — the registry
+      resolution, the presented-frame counting, the negative control that
+      proves the engine really feeds the collector, the unknown-id
+      configuration error, the input-to-photon measurement over the DTLS
+      app-data seam, the unbound-event pairing, the refused-event
+      exclusion and the empty-payload rejection) and
+      `src/modules/rd_qoe/tests/test_qoe_plugin.cpp` (the module-side
+      adapter).
+    - `tools/check_dead_modules.py`'s `PENDING_WIRING` list is now
+      **empty**: both `rd_input` and `rd_qoe` are reachable from the
+      composition root, so neither needs a waiver.
+
 
 - **The multi-stream video plane (v1.4, remote-desktop plan H1 / H2 / H4).**
   The engine held exactly **one** of each video plugin
@@ -418,9 +481,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   built by default (`NIMRTC_MODULE_RD_QOE`, default ON) and installs as
   `nimrtc_rd_qoe` / `nimrtc::rd_qoe`.  The engine wiring — pushing the
   presented-frame events and the input-to-photon pairing into the
-  collector — is a separate, engine-level item, so
-  `tools/check_dead_modules.py` carries `rd_qoe` in its `PENDING_WIRING`
-  list.
+  collector — landed later through the `plugins::IQoeCollector` seam
+  (see the entry above); the module registers under `"rd-qoe"` and the
+  engine resolves it through the registry's qoe-collector slot.
 
 - **The remote-desktop weak-network benchmark (v1.4, remote-desktop plan
   J4 / J6).**  A throughput number says nothing about the feel, so the

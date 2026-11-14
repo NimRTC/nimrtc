@@ -17,6 +17,29 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The remote-desktop input module (v1.4, remote-desktop plan G3 / G4 /
+  G7).**  The control plane had no payload format and no input-side
+  policy, so there was nothing to put on the wire and nothing to stop a
+  viewer from sending a dangerous key combination.  The new self-contained
+  module `src/modules/rd_input/` carries all three pieces:
+
+  | Piece | What it does |
+  |-------|--------------|
+  | `nimrtc/rd_input/event_codec.hpp` | The compact, **versioned** binary codec for mouse move / button / wheel / key down-up / text.  A mouse-move delta is **5 bytes** (LEB128 + zigzag deltas); a batch carries a count and a per-event length prefix. |
+  | `nimrtc/rd_input/coalescer.hpp` | The pointer coalescer and the input-path rate limiter: pointer motion is accumulated and released at most once per display frame, while key / button / text events are queued **losslessly**. |
+  | `nimrtc/rd_input/safety_filter.hpp` | The configurable allow / deny filter: a denied key never reaches the remote side, and the denial is **logged** through the one `core::log::Logger`. |
+
+  The module is **a module, not a seam** (plan G3): it depends on
+  `nimrtc::core` only, registers no plugin, and adds nothing to
+  `src/plugins/`.  It is built by default (`NIMRTC_MODULE_RD_INPUT`,
+  default ON) and installs as `nimrtc_rd_input` / `nimrtc::rd_input`.
+
+  The engine wiring — the NimRTC-native control channel (G1) and the
+  control plane's own transport (G2) — is a separate, engine-level item
+  and is *not* part of this change.  `tools/check_dead_modules.py`
+  therefore carries `rd_input` in its new `PENDING_WIRING` list, which
+  names the work item that removes the waiver.
+
 - **The real software codecs (v1.3, remote-desktop plan WP-B / B3).**  The
   CPU bring-up baseline carried no codec: the H.264 and AV1 plug-ins
   delegated to *stubs* that emitted synthetic bitstreams and painted

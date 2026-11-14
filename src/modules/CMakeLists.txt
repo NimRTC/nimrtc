@@ -267,6 +267,18 @@ if(NIMRTC_MODULE_VIDEO_SINK)
 endif()
 
 # -----------------------------------------------------------------------------
+# Remote-desktop control plane — the input module (plan Track G).
+#
+# Self-contained: it depends on nimrtc::core only, and it registers no
+# plugin (G3 says it is "a module, not a seam" — the transport is a
+# DataChannel and only the payload format is NimRTC's).  The engine wiring
+# for the control path is a separate item (G1 / G2) and does not live here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_RD_INPUT)
+    add_subdirectory(rd_input)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan Track F — the audio-device module (F1's seams are in
 # src/plugins/; this is their implementation).
 #

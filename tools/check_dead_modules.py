@@ -413,6 +413,45 @@ REACHABILITY_ROOTS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Pending-wiring waivers
+# ---------------------------------------------------------------------------
+#
+# A module may legitimately land *before* the item that wires it into the
+# product, when the plan schedules them that way: the module carries the
+# substance (a format, an algorithm, a policy), and a later item adds the
+# engine / example wiring.  Without a waiver the guard reports such a
+# module as `[orphan]` -- which is exactly the right verdict for a module
+# nobody ever intends to wire, and exactly the wrong one for a module
+# whose wiring is a scheduled, separately-owned work item.
+#
+# A waiver is therefore *named*, *dated* and *annotated with the work item
+# that removes it*.  Widening this list is a visible act, the same shape as
+# the ADR-025 exemption list in `check_engine_layering.py`: the point is
+# that a reader can see which module is waiting for what, and a reviewer
+# can tell when the waiver has outlived its work item.
+#
+# A waived module is still reported by `--verbose` (with the `pending`
+# tag) so it does not silently vanish from the consumption map, and it is
+# still reported when the waiver's stated reason no longer holds.
+#
+#   rd_input — remote-desktop plan Track G.  G3 (the input event codec),
+#   G4 (the coalescer / rate limiter) and G7 (the safety filter) are
+#   module-level work items with no engine dependency, and they land
+#   first.  The engine wiring is G1 (the NimRTC-native control channel
+#   over the DTLS app-data seam) and G2 (the control plane on its own
+#   transport), which are engine-level items and are owned separately.
+#   Remove this waiver when G1 links `nimrtc::rd_input` from the engine
+#   or from a shipped example.
+PENDING_WIRING: dict[str, str] = {
+    "rd_input": (
+        "remote-desktop plan G1 / G2 (the control channel and the control "
+        "transport) wire this module into the engine; G3 / G4 / G7 are "
+        "module-level items that land first"
+    ),
+}
+
+
 def compute_reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:
     """Targets reachable from `roots` through the (consumer → dependency)
     link edges, restricted to non-test consumers."""
@@ -480,6 +519,19 @@ def check(root: Path, verbose: bool = False) -> list[str]:
                     tag = "ok-reg "
                     who = "registrar table"
                 print(f"  [{tag}] {name:24s} <- {who}")
+            continue
+
+        # ---- pending wiring: named, documented, and still reported ------
+        #
+        # The module has no path from the composition root *yet*, but a
+        # scheduled work item owns that wiring (see PENDING_WIRING above).
+        # It is reported as `[pending]` rather than as a failure, so the
+        # module stays visible in the consumption map and a reviewer can
+        # see it is waiting for a named item rather than being forgotten.
+        if name in PENDING_WIRING:
+            if verbose:
+                print(f"  [pending] {name:24s} <- awaiting wiring: "
+                      f"{PENDING_WIRING[name]}")
             continue
 
         # ---- neither: the module is dead ---------------------------------

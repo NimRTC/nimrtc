@@ -153,6 +153,12 @@ option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK
        "Build video sink module (headless / pinned render sinks)" ON)
+# Remote-desktop plan Track G (G3 / G4 / G7): the remote-desktop input
+# module — the input event codec, the pointer coalescer / rate limiter and
+# the input safety filter.  A module, not a seam: the control transport is
+# a DataChannel and only the payload format is NimRTC's.
+option(NIMRTC_MODULE_RD_INPUT
+       "Build remote-desktop input module (event codec, coalescer, safety filter)" ON)
 # Remote-desktop plan Track F (F2): the audio-device module — the
 # PortAudio-backed capture + playback devices, the shared ring buffer
 # and the synthetic device the module's tests run on.

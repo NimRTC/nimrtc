@@ -447,7 +447,15 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   use:
     //     - video_frame/scaler.hpp (VideoFrameScaler / ScaleFilter)
     //
-    // Track F bump: +6 public headers (142 -> 148) for the audio-device
+    // Track G bump: +4 public headers (142 -> 146) for the remote-desktop
+    //   input module (remote-desktop plan G3 / G4 / G7) -- the module
+    //   `src/modules/rd_input/`, which does not exist before this change:
+    //     - rd_input/input_event.hpp (the input event vocabulary)
+    //     - rd_input/event_codec.hpp (the compact, versioned binary codec)
+    //     - rd_input/coalescer.hpp (the pointer coalescer + rate limiter)
+    //     - rd_input/safety_filter.hpp (the allow / deny safety filter)
+    //
+    // Track F bump: +6 public headers (146 -> 152) for the audio-device
     //   layer (remote-desktop plan F1 / F2) -- the capture / playback
     //   seams and the module that implements them:
     //     - plugins/audio_device.hpp (the shared device vocabulary)
@@ -456,7 +464,7 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //     - audio_device/audio_device.hpp (the module's public API)
     //     - audio_device/ring_buffer.hpp (the shared PCM ring buffer)
     //     - audio_device/synthetic_device.hpp (the CI-testable backend)
-    constexpr std::size_t kBaselineHeaderCount = 148;
+    constexpr std::size_t kBaselineHeaderCount = 152;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

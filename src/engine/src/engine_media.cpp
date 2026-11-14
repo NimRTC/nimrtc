@@ -2826,6 +2826,11 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
             dst.p95_us  = t.percentile_us(stage, 95);
             dst.max_us  = t.max_us(stage);
             dst.total_us = t.total_us(stage);
+            // The exact (nanosecond) view, so a sub-microsecond stage is
+            // not reported as "free".
+            dst.mean_ns  = t.mean_ns(stage);
+            dst.max_ns   = t.max_ns(stage);
+            dst.total_ns = t.total_ns(stage);
         };
 
         fill(Stage::kCapture,   out.video_stage_capture);

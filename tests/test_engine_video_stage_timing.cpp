@@ -24,6 +24,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,7 @@ public:
             const std::size_t chroma = luma / 4u;
             pixels_.assign(luma + 2u * chroma, 96);
         }
+        scratch_.resize(pixels_.size());
     }
 
     ~TimedCaptureDevice() override { close(); }
@@ -98,11 +100,21 @@ public:
 
     np::Status pop_frame(np::CaptureFrame& out) noexcept override {
         if (!open_) return np::kErrNotReady;
+        // Copy the picture, the way a real device hands over its pixels.
+        //
+        // This matters for the *test*, not for the engine: the capture
+        // stage is measured around this call, and a device that only
+        // fills a descriptor struct costs tens of nanoseconds -- which
+        // rounds to ZERO microseconds.  The stage would then be reported
+        // as "free", and an assertion that it cost something would be a
+        // coin flip rather than a property.  A real memcpy makes the
+        // measurement unambiguous.
+        std::memcpy(scratch_.data(), pixels_.data(), pixels_.size());
         out.width     = kWidth;
         out.height    = kHeight;
         out.format    = fmt_;
-        out.pixels    = pixels_.data();
-        out.size      = pixels_.size();
+        out.pixels    = scratch_.data();
+        out.size      = scratch_.size();
         out.stride    = static_cast<std::int32_t>(
             fmt_ == np::VideoPixelFormat::kBGRA ? kWidth * 4u : kWidth);
         out.frame_seq = static_cast<std::uint32_t>(produced_++);
@@ -121,6 +133,7 @@ private:
     np::CaptureConfig cfg_{};
     np::VideoPixelFormat fmt_ = np::VideoPixelFormat::kI420;
     std::vector<std::uint8_t> pixels_;
+    std::vector<std::uint8_t> scratch_;
     std::uint64_t produced_ = 0;
     bool open_ = false;
 };
@@ -246,8 +259,21 @@ TEST(EngineVideoStageTiming, TheCaptureStageIsMeasured) {
     // The capture stage runs once per pump tick that found a frame.
     EXPECT_GT(stats.video_stage_capture.samples, 0u)
         << "the capture stage must have been measured";
-    EXPECT_GT(stats.video_stage_capture.total_us, 0u)
+
+    // The stage must have consumed a non-zero amount of time.  The
+    // assertion is on the *nanosecond* view, which is the exact one: a
+    // stage that costs less than a microsecond rounds to zero in the
+    // microsecond view, and "0 us" would say "this stage is free" rather
+    // than "this stage is sub-microsecond".
+    EXPECT_GT(stats.video_stage_capture.total_ns, 0u)
         << "the capture stage must have consumed some time";
+
+    // The two views must agree: the microsecond one is the nanosecond
+    // one rounded, never a different measurement.
+    EXPECT_LE(stats.video_stage_capture.total_us,
+              (stats.video_stage_capture.total_ns + 999u) / 1000u + 1u)
+        << "the microsecond view must be the rounded nanosecond view";
+
     // The mean is a real number, not an artefact of a zero division.
     EXPECT_LE(stats.video_stage_capture.mean_us,
               stats.video_stage_capture.max_us);

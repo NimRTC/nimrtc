@@ -3553,6 +3553,27 @@ public:
             std::uint64_t max_us = 0;
             /** The total time spent in this stage, in microseconds. */
             std::uint64_t total_us = 0;
+
+            // ---- The nanosecond view -------------------------------------
+            //
+            // The microsecond fields above are the budget-facing ones
+            // (the plan's section B.6 is written in microseconds).  But a
+            // stage that costs less than a microsecond rounds to *zero*
+            // microseconds, and "0 us" reads as "this stage is free" when
+            // the truth is "this stage is sub-microsecond".  A host that
+            // wants to know whether the capture stage costs anything at
+            // all reads the nanosecond fields, which do not lose the
+            // sub-microsecond stages.
+            //
+            // Both views are the same measurement at two resolutions;
+            // the nanosecond one is exact, the microsecond one is
+            // rounded.
+            /** The mean duration, in nanoseconds. */
+            std::uint64_t mean_ns = 0;
+            /** The largest single sample, in nanoseconds. */
+            std::uint64_t max_ns = 0;
+            /** The total time spent in this stage, in nanoseconds. */
+            std::uint64_t total_ns = 0;
         };
 
         /** The time spent popping the frame from the capture device. */

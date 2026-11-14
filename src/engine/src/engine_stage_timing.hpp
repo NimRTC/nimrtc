@@ -163,6 +163,31 @@ public:
         return idx < kStageCount ? ns_to_us(totals_ns_[idx]) : 0;
     }
 
+    /**
+     * @brief The total time spent in a stage, in nanoseconds.
+     *
+     * The exact value: the microsecond view rounds, so a stage that
+     * costs less than a microsecond reports zero there.
+     */
+    [[nodiscard]] std::uint64_t total_ns(Stage stage) const noexcept {
+        const auto idx = static_cast<std::size_t>(stage);
+        return idx < kStageCount ? totals_ns_[idx] : 0;
+    }
+
+    /** The largest single sample for a stage, in nanoseconds. */
+    [[nodiscard]] std::uint64_t max_ns(Stage stage) const noexcept {
+        const auto idx = static_cast<std::size_t>(stage);
+        return idx < kStageCount ? maxima_ns_[idx] : 0;
+    }
+
+    /** The mean time for a stage, in nanoseconds (0 when never sampled). */
+    [[nodiscard]] std::uint64_t mean_ns(Stage stage) const noexcept {
+        const auto idx = static_cast<std::size_t>(stage);
+        if (idx >= kStageCount) return 0;
+        const auto n = samples_[idx];
+        return n ? totals_ns_[idx] / n : 0;
+    }
+
     /** The number of samples recorded for a stage. */
     [[nodiscard]] std::uint64_t samples(Stage stage) const noexcept {
         const auto idx = static_cast<std::size_t>(stage);

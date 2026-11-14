@@ -67,7 +67,27 @@ if(NIMRTC_VENDORED_WEBRTC_APM)
         # .github/workflows/release.yml (W3) and
         # docs/plan/ci-workarounds.md §4.
         target_link_libraries(nimrtc_audio3a PUBLIC nimrtc_vendor_webrtc_apm)
-        target_compile_definitions(nimrtc_audio3a PRIVATE NIMRTC_USE_WEBRTC_APM=1)
+        # NIMRTC_USE_WEBRTC_APM selects the *real* APM code path in
+        # webrtc_audio3a.cpp, which includes <api/audio/audio_processing.h>.
+        # That header only exists when the APM source tree has been
+        # cloned (tools/fetch_webrtc_apm.py) AND the prebuilt has been
+        # built.  Turning the define on without the source would make
+        # this module un-compilable, so the define follows the SOURCE,
+        # not the option.
+        #
+        # With the source absent the module still builds: it compiles
+        # the stub implementation and the plugin adapter reports
+        # DEGRADED at runtime, which is the honest state.
+        if(EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/webrtc_audio_processing/src/meson.build")
+            target_compile_definitions(nimrtc_audio3a PRIVATE NIMRTC_USE_WEBRTC_APM=1)
+        else()
+            message(STATUS
+                "audio3a: the WebRTC APM source tree is not present, so the "
+                "module builds its stub implementation.  AEC/ANS/AGC/VAD "
+                "will report DEGRADED at runtime.  Run "
+                "`python tools/fetch_webrtc_apm.py` and reconfigure to "
+                "enable real 3A processing.")
+        endif()
         # Forward WebRTC APM INTERFACE include dirs from the imported target so
         # <api/audio/audio_processing.h> resolves in this compilation unit.
         target_include_directories(nimrtc_audio3a

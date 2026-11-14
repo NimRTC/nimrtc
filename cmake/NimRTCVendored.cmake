@@ -38,6 +38,11 @@ option(NIMRTC_VENDORED_DAV1D        "Use vendored dav1d (default ON)"     ON)
 # names as the default (RD-10) and it builds on every platform NimRTC
 # ships (Windows / macOS / Linux / Android / iOS).
 option(NIMRTC_VENDORED_LIBYUV       "Use vendored libyuv (default ON)"    ON)
+# Remote-desktop plan Track F (F2) — PortAudio (MIT, cross-platform audio
+# I/O).  Default ON: it is the ONE platform dependency of the audio-device
+# module, and it replaces the WASAPI + CoreAudio + ALSA/PulseAudio triple
+# that RD-10 forbids hand-writing.
+option(NIMRTC_VENDORED_PORTAUDIO    "Use vendored PortAudio (default ON)"  ON)
 
 # -----------------------------------------------------------------------------
 # Public target names (primary)
@@ -53,6 +58,8 @@ set(NIMRTC_VENDOR_LIBS
     nimrtc_vendor_dav1d
     # Remote-desktop plan Track C — libyuv (YUV / RGB scale + convert).
     nimrtc_vendor_libyuv
+    # Remote-desktop plan Track F (F2) — PortAudio (cross-platform audio I/O).
+    nimrtc_vendor_portaudio
     # P1+
     # nimrtc_vendor_libvpx
     # P2+
@@ -381,5 +388,39 @@ function(nimrtc_link_vendor_libyuv target)
     else()
         message(STATUS "  libyuv            : NIMRTC_VENDORED_LIBYUV=OFF — "
                        "the video_frame scaler reports 'unavailable'")
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F (F2) — PortAudio.
+#
+# PortAudio has NO system fallback for the same reason openh264 / dav1d /
+# libyuv do not: L5 forbids linking a system audio library, and the whole
+# point of the vendored copy is that ONE implementation covers Windows /
+# macOS / Linux (RD-10) instead of three hand-written platform backends.
+#
+# When the vendored switch is off, or the submodule is absent, the audio
+# device module compiles its "unavailable" path instead: the PortAudio
+# backend reports available() == false and every call returns a clean
+# error, while the synthetic backend stays in charge.
+# -----------------------------------------------------------------------------
+function(nimrtc_link_vendor_portaudio target)
+    if(TARGET nimrtc_vendor_portaudio)
+        # The vendor target carries NIMRTC_USE_PORTAUDIO=1 (real library)
+        # or NIMRTC_USE_PORTAUDIO=0 (the "unavailable" stub) as an
+        # INTERFACE definition, so linking it is what flips the module's
+        # "unavailable" compile-time path on or off.
+        target_link_libraries(${target} PRIVATE nimrtc_vendor_portaudio)
+    endif()
+
+    if(NIMRTC_VENDORED_PORTAUDIO AND
+       EXISTS "${CMAKE_SOURCE_DIR}/src/third_party/portaudio/src/src/common/pa_front.c")
+        # Nothing to report — the PortAudio backend is in.
+    elseif(NIMRTC_VENDORED_PORTAUDIO)
+        message(STATUS "  PortAudio          : vendored source tree not populated — "
+                       "the audio-device module has no PortAudio backend")
+    else()
+        message(STATUS "  PortAudio          : NIMRTC_VENDORED_PORTAUDIO=OFF — "
+                       "the audio-device module has no PortAudio backend")
     endif()
 endfunction()

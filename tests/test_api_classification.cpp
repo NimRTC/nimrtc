@@ -446,7 +446,17 @@ TEST(public_header_classification, total_header_count_matches_baseline) {
     //   BGRA <-> I420 conversion the capture -> encode and display paths
     //   use:
     //     - video_frame/scaler.hpp (VideoFrameScaler / ScaleFilter)
-    constexpr std::size_t kBaselineHeaderCount = 142;
+    //
+    // Track F bump: +6 public headers (142 -> 148) for the audio-device
+    //   layer (remote-desktop plan F1 / F2) -- the capture / playback
+    //   seams and the module that implements them:
+    //     - plugins/audio_device.hpp (the shared device vocabulary)
+    //     - plugins/audio_source.hpp (IAudioSource + factory seam)
+    //     - plugins/audio_sink.hpp (IAudioSink + factory seam)
+    //     - audio_device/audio_device.hpp (the module's public API)
+    //     - audio_device/ring_buffer.hpp (the shared PCM ring buffer)
+    //     - audio_device/synthetic_device.hpp (the CI-testable backend)
+    constexpr std::size_t kBaselineHeaderCount = 148;
 
     EXPECT_EQ(headers.size(), kBaselineHeaderCount)
         << "Public header count drifted from the v1.0.0-beta.1 baseline "

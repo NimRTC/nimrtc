@@ -85,6 +85,24 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libyuv/CMakeLists.txt")
 endif()
 
 # -----------------------------------------------------------------------------
+# Remote-desktop plan Track F (F2) — PortAudio (cross-platform audio I/O).
+#
+# PortAudio ships its OWN CMakeLists.txt at the submodule root, so the
+# wrapper next to `src/` is added EXPLICITLY rather than through the
+# helper above (the helper looks for `src/CMakeLists.txt`, which
+# PortAudio does not have — its root is the submodule root).
+#
+# The wrapper creates the target unconditionally — as an empty INTERFACE
+# stub when the submodule is absent or the vendored switch is off — so
+# the option can be flipped without a CMake error; the audio-device
+# module then reports the PortAudio backend as unavailable and the
+# synthetic backend stays in charge.
+# -----------------------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/portaudio/CMakeLists.txt")
+    add_subdirectory(portaudio)
+endif()
+
+# -----------------------------------------------------------------------------
 # Remote-desktop plan WP-B — real software codecs.
 #
 #   openh264 : Cisco's BSD-2-Clause H.264 encoder + decoder.  Built from

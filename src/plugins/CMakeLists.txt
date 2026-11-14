@@ -71,6 +71,9 @@ target_link_libraries(nimrtc_plugins
 # plugins/video_source.hpp — IVideoSource, IVideoSourceFactory
 # plugins/video_sink.hpp — IVideoSink, IVideoSinkFactory
 # plugins/video_pipeline.hpp — IVideoReceiver, IVideoSender
+# plugins/audio_device.hpp — the shared audio-device vocabulary
+# plugins/audio_source.hpp — IAudioSource, IAudioSourceFactory
+# plugins/audio_sink.hpp   — IAudioSink, IAudioSinkFactory
 # plugins/bwe.hpp        — IBwe, IBweFactory
 # plugins/scheduler.hpp  — IScheduler, ISchedulerFactory
 # plugins/datachannel.hpp — IDataChannel, IDataChannelFactory (P1: interface only)

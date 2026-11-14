@@ -153,6 +153,11 @@ option(NIMRTC_MODULE_VIDEO_PIPELINE
        "Build video pipeline module (VideoReceiver/VideoSender glue)" ON)
 option(NIMRTC_MODULE_VIDEO_SINK
        "Build video sink module (headless / pinned render sinks)" ON)
+# Remote-desktop plan Track F (F2): the audio-device module — the
+# PortAudio-backed capture + playback devices, the shared ring buffer
+# and the synthetic device the module's tests run on.
+option(NIMRTC_MODULE_AUDIO_DEVICE
+       "Build audio device module (PortAudio capture/playback + synthetic device)" ON)
 
 # Vendored libwebrtc-audio-processing-2.a (audio3a WebRTC APM wrapper) is
 # pre-built with MinGW/gcc in Release /MD mode.  When MSVC links it into a

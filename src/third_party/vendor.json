@@ -168,6 +168,17 @@
       "build": "add_subdirectory(src) — see src/third_party/libyuv/CMakeLists.txt (upstream CMake, static `yuv` target re-exported as nimrtc_vendor_libyuv) — active whenever NIMRTC_VENDORED_LIBYUV=ON (default ON)",
       "notes": "YUV/RGB scale + convert library (remote-desktop plan C1, Track C 'Pixel'). The cross-platform default the plan names under RD-10: one implementation covers every platform NimRTC ships, with SSSE3 + AVX2 on x86-64 and NEON / SVE2 / SME on arm64. BSD-3-Clause, so it clears the RD-2 licence filter. Upstream ships its own CMakeLists.txt, so the wrapper adds it with BUILD_SHARED_LIBS=OFF, UNIT_TEST=OFF and LIBYUV_DISABLE_JPEG=ON; the upstream static `yuv` archive is re-exported as nimrtc_vendor_libyuv (alias nimrtc::vendor::libyuv) with the upstream include dir as a SYSTEM include. Platform matrix (K8b): Windows (MSVC, x86-64, SSSE3/AVX2), macOS (arm64, NEON), Linux x86-64 (SSSE3/AVX2), Linux aarch64 (NEON/SVE2/SME), Android (arm64/x86, NEON/SSSE3), iOS (arm64, NEON). No system library is linked (L5): the whole point is that every platform gets the SAME scale output (the plan's 'same-result check').",
       "size_estimate": "~4 MB / 200 files"
+    },
+    {
+      "name": "portaudio",
+      "upstream_url": "https://github.com/PortAudio/portaudio.git",
+      "upstream_version": "master",
+      "commit_sha": "8b6333ff8744b22afaa694bc4b8b22f6f0dba6dd",
+      "submodule_path": "src/third_party/portaudio/src",
+      "license": "MIT",
+      "build": "sources compiled directly via src/third_party/portaudio/CMakeLists.txt wrapper into STATIC nimrtc_vendor_portaudio — active whenever NIMRTC_VENDORED_PORTAUDIO=ON (default ON)",
+      "notes": "Cross-platform audio I/O (remote-desktop plan Track F, F2). ONE implementation covers every platform NimRTC ships, which is what RD-10 asks for — instead of three hand-written platform backends. The upstream tree ships its own stand-alone CMake build, so the wrapper compiles the upstream sources directly with CMake (the same pattern as openh264 / dav1d) and avoids entering upstream's project() / install() rules. Platform matrix (K8b): Windows (MSVC, x86-64) — WASAPI + MME (waveIn/waveOut) + DirectSound; macOS (arm64/x86-64) — Core Audio; Linux x86-64 — ALSA + PulseAudio, each enabled only when the build host carries the development package. ASIO is deliberately OFF (the Steinberg ASIO SDK may not be redistributed and upstream's CMake downloads it at configure time); WDM-KS and JACK are OFF for the same dependency reason. No system audio library is required: without any backend the library still compiles and PortAudio reports 'no host API' at runtime, so the module reports the device layer as unavailable rather than the build failing. MIT-licensed, so it clears the RD-2 licence filter.",
+      "size_estimate": "~5 MB / 300 files"
     }
   ],
 

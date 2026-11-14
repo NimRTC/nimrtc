@@ -17,6 +17,7 @@ nimrtc_apply_options(demo-agent-gateway)
 # module a *live* part of the product rather than a schema nobody reads.
 target_link_libraries(demo-agent-gateway PRIVATE
     nimrtc::assembly_engine
+    nimrtc::audio_device
     nimrtc::engine
     nimrtc::datachannel)
 

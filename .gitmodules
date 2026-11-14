@@ -143,3 +143,14 @@
 	# static `yuv` archive as nimrtc_vendor_libyuv.
 	# Default ON via NIMRTC_VENDORED_LIBYUV=ON.
 	branch = master
+[submodule "src/third_party/portaudio/src"]
+	path = src/third_party/portaudio/src
+	url = https://github.com/PortAudio/portaudio.git
+	# Pinned: 8b6333ff8744b22afaa694bc4b8b22f6f0dba6dd (see src/third_party/vendor.json)
+	# Cross-platform audio I/O (remote-desktop plan Track F, F2); MIT.
+	# Upstream ships its own stand-alone CMake build, so the wrapper at
+	# src/third_party/portaudio/CMakeLists.txt compiles the upstream
+	# sources directly with CMake and exposes the static archive as
+	# nimrtc_vendor_portaudio.
+	# Default ON via NIMRTC_VENDORED_PORTAUDIO=ON.
+	branch = master

@@ -266,6 +266,19 @@ if(NIMRTC_MODULE_VIDEO_SINK)
     add_subdirectory(video_sink)
 endif()
 
+# -----------------------------------------------------------------------------
+# Remote-desktop plan Track F — the audio-device module (F1's seams are in
+# src/plugins/; this is their implementation).
+#
+# Self-contained: it depends on nimrtc::core + nimrtc::plugins (the seams
+# it implements) and on the vendored PortAudio.  The engine wiring for the
+# audio-device path (plan F3 — reporting the played-out samples to the 3A)
+# is a separate item and does not live here.
+# -----------------------------------------------------------------------------
+if(NIMRTC_MODULE_AUDIO_DEVICE)
+    add_subdirectory(audio_device)
+endif()
+
 # CTest discovery: enable_testing() at this level so that each module's
 # tests subdirectory (added via add_subdirectory(tests) in the module's
 # own CMakeLists.txt) appears in the src/modules/CTestTestfile.cmake.

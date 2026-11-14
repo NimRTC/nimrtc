@@ -138,6 +138,39 @@ This product includes software developed by the LibYuv Project Authors
               or shipped.
 
 ============================================================
+Audio I/O (capture + playback)
+============================================================
+
+This product includes software developed by the PortAudio contributors
+(PortAudio Portable Real-Time Audio Library).
+  - Source:   https://github.com/PortAudio/portaudio
+  - Version:  master @ 8b6333ff8744b22afaa694bc4b8b22f6f0dba6dd
+              (vendored at src/third_party/portaudio/; pinned SHA in
+               src/third_party/SOURCE_VERSIONS)
+  - License:  MIT  (the notice is embedded verbatim at the top of
+                   every upstream source file; the full text is in
+                   src/third_party/portaudio/src/LICENSE.txt)
+  - Scope:    runtime, statically linked (NIMRTC_VENDORED_PORTAUDIO=ON,
+              the default).  Built from source.  Serves as the audio
+              I/O backend behind `nimrtc::audio_device` (the
+              remote-desktop plan's Track F "Device" work item) — ONE
+              implementation replaces the WASAPI + CoreAudio +
+              ALSA/PulseAudio triple that RD-10 forbids hand-writing.
+  - Platforms (cross-platform vendoring policy K8b):
+              Windows (MSVC)  — x86-64, WASAPI + MME + DirectSound
+              macOS           — arm64 / x86-64, Core Audio
+              Linux x86-64    — ALSA + PulseAudio (each enabled only
+                                when the build host carries the
+                                corresponding development package)
+              The library is built from the same source on every
+              platform.  No system audio library is *required*: without
+              any backend the library still compiles and PortAudio
+              reports "no host API" at runtime.
+  - Note:     ASIO, WDM-KS and JACK are deliberately NOT built — the
+              Steinberg ASIO SDK may not be redistributed, and neither
+              libjack nor the KS driver is a NimRTC dependency.
+
+============================================================
 SCTP (P2)
 ============================================================
 

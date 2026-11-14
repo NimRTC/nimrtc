@@ -38,6 +38,7 @@ gmssl                     v3.2.0         7c9f029   7c9f02904ef33e59c87b4f16621cc
 openh264                  v2.6.0         652bdb7   652bdb7719f30b52b08e506645a7322ff1b2cc6f   2026-11-13   https://github.com/cisco/openh264
 dav1d                     v1.5.1         42b2b24   42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa   2026-11-13   https://code.videolan.org/videolan/dav1d
 libyuv                    master         209763a   209763ad77fed3df2d57503d3ef40761e9473649   2026-11-14   https://github.com/lemenkov/libyuv.git
+portaudio                 master         8b6333f   8b6333ff8744b22afaa694bc4b8b22f6f0dba6dd   2026-11-14   https://github.com/PortAudio/portaudio.git
 
 # Patches applied on top of the upstream tree
 #

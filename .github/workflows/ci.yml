@@ -30,11 +30,13 @@ on:
   # `main` itself and the release branches, plus every PR that targets
   # `main`.  A push to a working branch gets the fast leg
   # (`ci-fast.yml`) instead -- see the comment there for the throughput
-  # argument.  The five checks the repository ruleset gates on
-  # (`windows / msvc`, `windows / build`, `linux-gcc / x86_64`,
-  # `macos-clang / arm64`, `docs / markdown links`) are all produced
-  # here or in `interop.yml`, and both still run on `main` and on every
-  # PR into `main`.
+  # argument.  The eleven checks the repository ruleset gates on are
+  # exactly the ones produced here or in `interop.yml`, and both still
+  # run on `main` and on every PR into `main`.
+  #
+  # `tools/check_ci_ruleset.py` is what keeps that sentence true: it
+  # compares `.github/rulesets/protect-main.json` against the
+  # workflows and fails when the two disagree.
   push:
     branches: [main, release/**]
   pull_request:
@@ -325,6 +327,23 @@ jobs:
 
       - name: Self-test the engine-layering guard
         run: python tools/check_engine_layering.py --self-test
+
+      # The merge gate is a GitHub Ruleset that demands a list of
+      # required status checks, and that list has to agree with the set
+      # of checks the workflows actually produce.  The two drift apart
+      # silently: a required check no workflow produces blocks every
+      # merge, forever, with nothing to fix from the PR page, and a
+      # check the matrix produces but the gate does not require costs
+      # runner time and catches nothing.
+      #
+      # `windows / fast` is the trap this guard exists for: it comes
+      # from `ci-fast.yml`, which does not run on `main`, so requiring
+      # it would deadlock the repository.
+      - name: Check the merge gate against the CI matrix
+        run: python tools/check_ci_ruleset.py --verbose
+
+      - name: Self-test the merge-gate guard
+        run: python tools/check_ci_ruleset.py --self-test
 
       # ADR-026: a `.h` under `src/**/include/` is a promise that a C
       # host can include it.  `sched_c.h` is the first public header

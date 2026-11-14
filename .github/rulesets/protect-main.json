@@ -1,0 +1,158 @@
+{
+  "_comment": [
+    "The merge gate for `main`, mirrored from the GitHub Ruleset.",
+    "",
+    "This file is the reviewable source of truth for the gate.  The",
+    "Ruleset in the GitHub repository settings is applied from it, so",
+    "a change to the gate is a change to this file and a pull request,",
+    "not a click in the web UI that leaves no trace.",
+    "",
+    "Apply it with:",
+    "    python tools/apply_ci_ruleset.py --apply",
+    "",
+    "The gate and the CI matrix have to agree, and `check_ci_ruleset.py`",
+    "is what says they do.  A required check that no workflow produces",
+    "blocks every merge, forever, with nothing to fix from the PR page;",
+    "a check the matrix produces but the gate does not require costs",
+    "runner time and catches nothing.  That is why the check compares",
+    "the two sets for equality rather than for containment.",
+    "",
+    "The Ruleset id is 27017055 and it is named",
+    "`protect-main-and-releases` in the repository settings; the name is",
+    "historical -- the ruleset now covers `main` only.  See the note on",
+    "`conditions.ref_name.include` below for why the release branches",
+    "are not covered."
+  ],
+  "name": "protect-main-and-releases",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/main"
+      ],
+      "_comment": [
+        "`main` only.",
+        "",
+        "The ruleset used to cover `refs/heads/release/*` as well, and",
+        "that combination was unusable: `ci.yml` and `interop.yml`",
+        "declare `pull_request: branches: [main]`, which filters on the",
+        "PR's *base* branch, so a pull request into `release/1.1`",
+        "triggered neither workflow.  Measured: such a PR reported zero",
+        "checks and was `blocked`, while a direct push was refused with",
+        "\"Changes must be made through a pull request\".  The release",
+        "branches therefore could not be updated at all -- while",
+        "RELEASING.md 3.2 requires hot-fixes to be cherry-picked onto",
+        "`release/X.Y`.",
+        "",
+        "The release branches are frozen release lines that receive",
+        "cherry-picked hot-fixes by a maintainer.  They do not take",
+        "unreviewed pushes, and the full matrix was never satisfiable",
+        "there.  `main` is the branch that merges every day, and that is",
+        "where the gate belongs."
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion",
+      "_comment": "The protected branch cannot be deleted."
+    },
+    {
+      "type": "non_fast_forward",
+      "_comment": "No force-push: the history is the evidence."
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "allowed_merge_methods": [
+          "merge",
+          "squash",
+          "rebase"
+        ],
+        "_comment": [
+          "`required_approving_review_count` is 0, and it has to stay 0",
+          "until the repository has a second account that can approve.",
+          "",
+          "The repository is owned by a personal account (`NimRTC`) with",
+          "exactly one collaborator, so GitHub does not count the",
+          "author's own approval: raising this to 1 would make every",
+          "pull request permanently unmergeable.",
+          "",
+          "The same argument applies to `require_last_push_approval`",
+          "(it demands an approval from somebody who is not the",
+          "pusher) and to `require_code_owner_review` (the teams in",
+          "CODEOWNERS -- `@nimrtc/maintainers`, `@nimrtc/agent-*` -- do",
+          "not exist in a personal-account repository).",
+          "",
+          "`required_review_thread_resolution` is on: a review comment",
+          "left unresolved is not a review that happened."
+        ]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "windows / msvc"
+          },
+          {
+            "context": "windows / build"
+          },
+          {
+            "context": "windows / e2e acceptance"
+          },
+          {
+            "context": "linux-gcc / x86_64"
+          },
+          {
+            "context": "linux-gcc / aarch64"
+          },
+          {
+            "context": "macos-clang / arm64"
+          },
+          {
+            "context": "linux-sanitizers / asan-ubsan"
+          },
+          {
+            "context": "linux-sanitizers / tsan.clang"
+          },
+          {
+            "context": "linux-fuzz / clang"
+          },
+          {
+            "context": "gmssl-vendored / msvc"
+          },
+          {
+            "context": "docs / markdown links"
+          }
+        ],
+        "_comment": [
+          "The eleven checks the CI matrix produces on `main` and on",
+          "every pull request into `main`.",
+          "",
+          "Strict mode is on: the pull request head has to be up to date",
+          "with the base, or a PR can merge on the checks of a commit",
+          "that is no longer an ancestor of `main`.",
+          "",
+          "`windows / fast` is deliberately absent.  It comes from",
+          "`ci-fast.yml`, which does not run on `main`",
+          "(`branches-ignore: [main, 'release/**']`), so requiring it",
+          "would block every merge forever."
+        ]
+      }
+    }
+  ]
+}

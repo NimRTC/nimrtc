@@ -7,15 +7,8 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-> Work that lands after `v1.1.0`.
->
-> The audio pipeline's development body lands here. Its work packages are
-> specified in `docs/plan/audio-pipeline-spec.md` and scheduled in
-> `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
-> 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
-> nothing here is a feature release of the `v1.1` line.
-
 ### Added
+
 
 - **The multi-stream video plane (v1.4, remote-desktop plan H1 / H2 / H4).**
   The engine held exactly **one** of each video plugin
@@ -1723,102 +1716,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `additionalProperties`-as-schema, `propertyNames` and `minLength`
     keywords the new block needs).
 
-### Fixed
-
-- **The per-stream bandwidth share was assigned to the wrong stream
-  (remote-desktop plan D5).**  `bandwidth_allocation.hpp`'s
-  `allocate_bandwidth()` reserves index 0 for audio, index 1 for the
-  default video stream, and gives the extra video streams the indices
-  `[2 + i]`.  The engine's write-back loop iterated the extra-stream
-  vector starting at index 1, so the **default** stream's share was
-  written to the first extra stream and the **last** extra stream was
-  never written at all.  The split now uses the `[2 + i]` indexing, and
-  the write-back is covered by
-  `tests/test_engine_video_stream_shares.cpp`.
-  - The share computation was also coupled to the pacing path: it only
-    ran inside `update_pacing_rates()`, which early-exits when the
-    scheduler or the media pacer is disabled.  The split is now computed
-    by its own function (`compute_video_stream_shares()` in
-    `src/engine/src/engine_transport.cpp`), called once per tick
-    whenever the BWE has an estimate, so each stream's
-    `IVideoBitrateController` receives its share regardless of whether
-    pacing is enabled.
-  - The per-stream weights are configurable
-    (`NimRTCEngine::set_video_stream_weight()` /
-    `NimRTCEngine::video_stream_weight()`), and the resulting share is
-    observable (`NimRTCEngine::video_stream_share_bps()` and the new
-    `VideoStreamStats::bandwidth_share_bps` /
-    `VideoStreamStats::bandwidth_weight` fields).
-  - Covered by `tests/test_engine_video_stream_shares.cpp` (nine cases:
-    the default weight, custom weights, the split's proportionality, the
-    stats reporting, and the zero-weight / stream-removal dynamics).
-
-- **The vendored libopus registered its own test suite in NimRTC's ctest
-  run, and all five of those tests failed.**  Upstream libopus decides
-  whether to build *its* tests from the **global** `BUILD_TESTING` cache
-  entry, not from its own `OPUS_BUILD_TESTING` option:
-
-  ```cmake
-  if(OPUS_BUILD_TESTING OR BUILD_TESTING)
-    set(OPUS_BUILD_TESTING ON)
-    set(BUILD_TESTING ON)
-  endif()
-  ...
-  if(BUILD_TESTING AND NOT BUILD_SHARED_LIBS)
-    add_test(NAME test_opus_decode ...)
-    add_test(NAME test_opus_padding ...)
-    add_test(NAME test_opus_api ...)
-    add_test(NAME test_opus_encode ...)
-    add_test(NAME test_opus_extensions ...)
-  endif()
-  ```
-
-  NimRTC sets `OPUS_BUILD_TESTING=OFF` explicitly, but the upstream
-  `add_subdirectory()` call inherits NimRTC's own `BUILD_TESTING=ON`, so
-  the `add_test()` calls landed in NimRTC's ctest run.  The test
-  *executables* live in an `EXCLUDE_FROM_ALL` subdirectory and are never
-  built, so `test_opus_decode`, `test_opus_padding`, `test_opus_api`,
-  `test_opus_encode` and `test_opus_extensions` all failed with "the
-  test executable does not exist".  `src/third_party/libopus/CMakeLists.txt`
-  now shadows the cache entry with a directory-scope `BUILD_TESTING OFF`
-  for the duration of the `add_subdirectory()` call (a normal variable
-  takes precedence over the cache in that scope), and restores the
-  original value afterwards so the rest of the NimRTC tree still builds
-  its own tests.  Upstream's tests are not part of NimRTC's quality gate;
-  the NimRTC-owned Opus tests in `src/modules/opus/tests/` are.
-
-- **The BWE plugin seam test asserted against an empty registry.**
-  `BwePluginSeam.ListBwesContainsAimd` called
-  `core::PluginRegistry::instance().list_bwes()` and expected to find
-  `"aimd"` — but the test never registered the factory first.  That
-  worked when the whole binary ran as one gtest process, because an
-  earlier test in the same binary had called
-  `nimrtc::bwe::register_default_plugins()`.  NimRTC registers every
-  gtest case as its **own** ctest entry (`gtest_discover_tests`), so
-  each case runs in a fresh process and the registry starts empty; the
-  case therefore failed in isolation.  The test now calls
-  `register_default_plugins()` itself (it is idempotent), matching the
-  four sibling cases in the same file.
-
-- **`tools/check_prerequisites.py` could not read the MSVC version on a
-  localized toolchain.**  The check ran `cl` and matched the version with
-  `Version\s+(\d+)\.(\d+)` — but MSVC's banner is **localized**, and a
-  Chinese-locale toolchain prints
-
-  ```
-  用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.43.34809
-  ```
-
-  with no English word in front of the number at all.  The regex therefore
-  found nothing and the check reported `unknown version (could not parse cl
-  output)` on a perfectly good VS 2022 install — 8/9 instead of 9/9, with
-  the advice "Install Visual Studio 2022 Build Tools", which the machine
-  already had.  The check now reads the version from `cl /Bv` with a
-  locale-independent `19.xx` pattern, and falls back to the toolset
-  directory name under `VC\Tools\MSVC\` if the banner does not parse.
-  Both the English and the Chinese banner now resolve to `19.43`.
 
 ### Changed
+
 
 - **`IVideoCodec` is deprecated in favour of the split `IVideoEncoder` /
   `IVideoDecoder` seams (v1.4, remote-desktop plan B1, ADR-015
@@ -2333,175 +2233,136 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a=ssrc` line, which is what makes Chrome count our inbound RTP at
     all. The demo no longer appends a stale constant SSRC of its own.
 
-### Performance
-
-- **The media hot paths no longer allocate per frame or per packet
-  (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
-  the seven C items landed here; C7 (the video path's RTP-packet
-  concatenation) was already removed in Phase 1.3.
-  - **C1 / C2 -- the staged video frames are pooled.**
-    `stage_source_frame()` allocated a fresh `VideoFrameBuffer` per
-    frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
-    3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
-    I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
-    whole buffer -- its pixel storage *and* its control block.  The pool
-    parks the buffer and hands out an **aliasing** `shared_ptr` that
-    shares the parked buffer's control block, so recycling a frame
-    allocates neither a new control block nor new pixel memory; the
-    steady state performs no allocation and no full-frame memset.
-  - **C3 -- the GPU zero-copy video send path is open.**
-    `send_video()` always staged the frame into a CPU I420 buffer before
-    handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
-    de-interleave for an NV12 source.  `plugins::VideoSourceFrame`
-    gained three **additive** fields (`gpu_backend`, `gpu_handle`,
-    `gpu_pitch_bytes`), and `EngineConfig::video_zero_copy` (default:
-    off) opts the host in.  The zero-copy path is taken only when the
-    flag is on **and** the frame carries a live GPU handle **and** the
-    codec reports `supports_zero_copy_encode()`; otherwise the CPU
-    staging path runs exactly as before, so turning the flag on is
-    always safe.  When the codec supports the handle but the encode
-    fails, the engine falls back to the CPU path rather than dropping
-    the frame.  `Stats::video_zero_copy_frames` and
-    `Stats::video_zero_copy_fallbacks` make the decision observable.
-  - **C4 -- `PacketBuilder::build_into()`.**  `build()` allocated a new
-    `core::ByteBuffer` on every packet (50 Hz audio, 30 Hz video).  The
-    new overload serialises directly into caller-provided memory, and
-    the engine keeps **per-path** scratch buffers (audio, video and DTMF
-    separately) so the three threads never share one buffer.
-  - **C5 -- the SRTP scratch high-water mark.**  The libsrtp backend
-    called `resize(out_len)` before encrypt / decrypt and `resize(actual)`
-    after, so the vector was repeatedly shrunk and grown -- and each
-    `resize` value-initialises (zeroes) the memory.  The scratch is now
-    sized to the **high-water mark** and never shrinks during the
-    session's lifetime, which removes the memset churn entirely.
-  - **C6 -- the RTCP compound demux.**  `demux_rtcp()` returned a
-    `std::vector<RtcpBlock>` **by value** -- one heap allocation per
-    RTCP datagram.  The new overload clears and refills a caller-owned
-    scratch vector, keeping its capacity across calls.
-  - **The Phase 0.3 hot-path benchmark harness ships with the fix**
-    (remediation plan §0.3), so the numbers are reproducible rather than
-    asserted: `tests/bench_engine_hotpath.cpp` (an allocation probe --
-    overridden `operator new` / `operator delete` backed by CRT
-    `malloc` / `free` with an atomic arming flag, plus latency
-    percentiles for `send_video()`, `tick()` and the scheduler under
-    contention) and `tools/benchmark_hotpath.py` (the capture/compare
-    wrapper).
-    Measured on one machine at 1080p30 over 300 frames, `main` versus
-    this branch:
-
-    | metric | `main` | this branch | delta |
-    | --- | --- | --- | --- |
-    | `send_video` bytes/frame | 3 112 483 | 2 023 | **-99.9 %** |
-    | `send_video` mean latency | 902.97 us | 134.34 us | **-85.1 %** |
-    | `send_video` p50 latency | 861.55 us | 129.75 us | **-84.9 %** |
-    | `send_video` p99 latency | 1 387.36 us | 169.32 us | **-87.8 %** |
-    | `send_video` allocations/frame | 23.18 | 22.18 | -4.3 % |
-    | `tick` p99 | 0.3 us | 0.2 us | -33 % |
-
-    The allocation *count* barely moves because `main` staged each frame
-    with one 3 MB allocation; what C1 / C2 removed is the **volume**
-    (3.1 MB of allocator traffic per frame, plus the full-frame memset
-    that came with it), not the number of `new` calls.  The remaining
-    ~22 allocations per frame are in the encode / packetise path (the
-    codec's own output buffer and the RTP packet vector), not in the
-    frame staging.
-
-- **`send_video()` is now allocation-free end to end (v1.2.0,
-  remediation Phase 3 §3.5).**  The C class above removed the *volume*
-  of allocator traffic, but the allocation *count* was still 22 per
-  frame.  This change drives it to **zero** — the number the plan's
-  §3.5 acceptance criterion asks for.
-  - **The video frame pool recycles the buffer object, not just its
-    storage.**  The pool used to hand out a fresh `shared_ptr` per
-    frame, and a `shared_ptr` that owns its object carries a
-    heap-allocated control block.  The pool now parks the buffer and
-    hands out an **aliasing** `shared_ptr` that shares the parked
-    buffer's control block (`shared_ptr<T>(owner, owner.get())`), so
-    recycling a frame allocates neither a control block nor pixel
-    memory.  A buffer is reusable once the caller has released its
-    alias, which is visible as the owner's `use_count()` dropping back
-    to one.
-  - **The packetizer works on spans, not copies.**  `parse_annex_b()`
-    and `parse_length_prefixed()` returned a
-    `std::vector<std::vector<std::uint8_t>>` -- one heap allocation
-    per NAL unit, per frame, plus a copy of every NAL's bytes.  The
-    caller owns the bitstream for the whole `push_frame()` call, so
-    the NAL units are now **spans into the source**, parsed into a
-    reusable vector.  The FU-A fragment buffer, the STAP-A output
-    buffer, the aggregation group and the FU-A flags are reusable
-    members as well, pre-reserved so a frame with an unusual number of
-    NAL units does not grow them.
-  - **The retransmission ring is pre-sized.**  Each cached slot is
-    reserved to the MTU when the ring is built, so caching a packet is
-    a memcpy into an existing buffer instead of a fresh allocation per
-    outgoing packet.
-  - **The ref-frame registry is a fixed-size table.**  It was a
-    `std::map` plus a `std::deque` -- two heap allocations per sent
-    frame (a map node and a deque block), forever.  It is now an
-    open-addressed table with backward-shift deletion plus a
-    fixed-size insertion ring, both allocated once at construction.
-    The timestamp→id lookup selects the lowest matching id explicitly,
-    so the observable behaviour is identical to the `std::map`'s.
-  - **The outbound packet buffer is reused on the no-scheduler path.**
-    With a scheduler the packet comes from the scheduler's pool; on
-    the "transport" profile the engine wrote straight to ICE and
-    allocated a fresh vector per packet.  It now uses the engine's own
-    scratch buffer.  This relies on `ITransport::send()` treating its
-    `BufferView` as **borrowed** -- the transport must copy the bytes
-    it needs before returning -- which is now written down explicitly
-    in the seam's documentation.
-  - **The measurement is a gate, not a claim.**  The benchmark gained
-    an `--assert-zero-allocs` flag, and the ctest case
-    `hotpath_zero_allocs` runs it at 1080p.  The count is exact rather
-    than a threshold: the engine runs no background threads in the
-    benchmark's profile, so every allocation counted during the
-    measured region belongs to the `send_video()` call itself.  A
-    regression that reintroduces a per-frame allocation fails the
-    build.
-
-    Measured after this change, over 300 frames per resolution:
-
-    | resolution | allocations/frame | bytes/frame |
-    | --- | --- | --- |
-    | 1920x1080 | **0.000000** | **0.000000** |
-    | 1280x720 | **0.000000** | **0.000000** |
-    | 854x480 | **0.000000** | **0.000000** |
-
-    The §3.5 criterion "`send_video()` 1080p30 的 per-call 堆分配次数 =
-    0" is met.
-
-- **The audio send path has a zero per-packet allocation budget too
-  (remediation Phase 3 §3.5).**  The plan's second allocation
-  criterion -- "音频路径 per-packet 堆分配次数 = 0" -- now has a gate of
-  its own, in `tests/test_engine_audio_alloc.cpp`.
-  - The metric is **per packet**, not per call: the host may hand the
-    engine an arbitrary block size, and the engine accumulates samples
-    until it has a whole 20 ms frame.
-  - The audio path is unreachable without a completed DTLS handshake
-    (otherwise the engine would put plaintext RTP on the wire), so the
-    test drives the engine through a fake ICE transport and a fake DTLS
-    session, the same pair `tests/test_engine_audio_send.cpp` uses.
-  - The fake transport only *counts* the bytes it is handed.  A fake
-    that copied them would allocate once per packet and land right in
-    the measured region, so the test would have been measuring the fake
-    rather than the engine.
-  - The criterion is asserted as "the allocation count does not grow
-    with the packet count" (a 50-packet run and a 250-packet run must
-    cost the same), not as "every single call allocates nothing".  The
-    engine's periodic work -- the RTCP sender report, the SRTP context
-    rollover -- may allocate on *some* calls; what must not happen is
-    one allocation per packet, forever.
-  - The probe lives in its own binary on purpose: replacing the global
-    `operator new` collides with a sanitizer runtime's own definition,
-    so the video side of the same criterion stays in the benchmark
-    binary (`hotpath_zero_allocs`) and the audio side is here.
-
-    The remaining §3.5 items -- the `tick()` p99 reduction and the
-    scheduler's drain / enqueue non-blocking property -- are covered by
-    the Phase 0.3 benchmark's other two sections and are tracked
-    separately.
 
 ### Fixed
+
+
+- **A fresh clone now configures and builds.**  `cmake -S . -B build` on
+  a clean checkout failed outright: the WebRTC APM vendor wrapper raised
+  a `FATAL_ERROR` whenever the prebuilt static library was missing, but
+  the APM source tree is cloned at build time by
+  `tools/fetch_webrtc_apm.py` -- so on a clean clone the prebuilt can
+  never be built and the configure was impossible.  The fatal error now
+  fires only when the source **is** present (so the build script was
+  started and did not finish); otherwise the wrapper defines the stub
+  target and says so.  The `audio3a` module's `NIMRTC_USE_WEBRTC_APM`
+  define now follows the **source** rather than the option, so the
+  module builds its stub implementation and reports `DEGRADED` at
+  runtime -- the honest state -- instead of failing to compile.
+- **The stage-timing test was flaky** (it failed on roughly a third of
+  its runs).  It asserted that the capture stage cost more than zero
+  *microseconds*, but popping a frame from a queue costs tens of
+  nanoseconds, so the microsecond view rounded to zero.  Two changes:
+  the public `Stats::StageTiming` gained the nanosecond view
+  (`mean_ns` / `max_ns` / `total_ns`), so a sub-microsecond stage is no
+  longer reported as "free" (the microsecond fields stay, because the
+  plan's §B.6 budget is written in them); and the test's capture device
+  now copies its picture the way a real device does, so the measurement
+  is unambiguous.  The negative control confirms the test still catches
+  a broken measurement.
+
+> Work that lands after `v1.1.0`.
+>
+> The audio pipeline's development body lands here. Its work packages are
+> specified in `docs/plan/audio-pipeline-spec.md` and scheduled in
+> `docs/plan/audio-pipeline-dev-plan.md`; the ladder the owner fixed on
+> 2026-11-06 puts the whole audio body (WP-0 .. WP-11) into `v1.2.0`, so
+> nothing here is a feature release of the `v1.1` line.
+
+
+- **The per-stream bandwidth share was assigned to the wrong stream
+  (remote-desktop plan D5).**  `bandwidth_allocation.hpp`'s
+  `allocate_bandwidth()` reserves index 0 for audio, index 1 for the
+  default video stream, and gives the extra video streams the indices
+  `[2 + i]`.  The engine's write-back loop iterated the extra-stream
+  vector starting at index 1, so the **default** stream's share was
+  written to the first extra stream and the **last** extra stream was
+  never written at all.  The split now uses the `[2 + i]` indexing, and
+  the write-back is covered by
+  `tests/test_engine_video_stream_shares.cpp`.
+  - The share computation was also coupled to the pacing path: it only
+    ran inside `update_pacing_rates()`, which early-exits when the
+    scheduler or the media pacer is disabled.  The split is now computed
+    by its own function (`compute_video_stream_shares()` in
+    `src/engine/src/engine_transport.cpp`), called once per tick
+    whenever the BWE has an estimate, so each stream's
+    `IVideoBitrateController` receives its share regardless of whether
+    pacing is enabled.
+  - The per-stream weights are configurable
+    (`NimRTCEngine::set_video_stream_weight()` /
+    `NimRTCEngine::video_stream_weight()`), and the resulting share is
+    observable (`NimRTCEngine::video_stream_share_bps()` and the new
+    `VideoStreamStats::bandwidth_share_bps` /
+    `VideoStreamStats::bandwidth_weight` fields).
+  - Covered by `tests/test_engine_video_stream_shares.cpp` (nine cases:
+    the default weight, custom weights, the split's proportionality, the
+    stats reporting, and the zero-weight / stream-removal dynamics).
+
+- **The vendored libopus registered its own test suite in NimRTC's ctest
+  run, and all five of those tests failed.**  Upstream libopus decides
+  whether to build *its* tests from the **global** `BUILD_TESTING` cache
+  entry, not from its own `OPUS_BUILD_TESTING` option:
+
+  ```cmake
+  if(OPUS_BUILD_TESTING OR BUILD_TESTING)
+    set(OPUS_BUILD_TESTING ON)
+    set(BUILD_TESTING ON)
+  endif()
+  ...
+  if(BUILD_TESTING AND NOT BUILD_SHARED_LIBS)
+    add_test(NAME test_opus_decode ...)
+    add_test(NAME test_opus_padding ...)
+    add_test(NAME test_opus_api ...)
+    add_test(NAME test_opus_encode ...)
+    add_test(NAME test_opus_extensions ...)
+  endif()
+  ```
+
+  NimRTC sets `OPUS_BUILD_TESTING=OFF` explicitly, but the upstream
+  `add_subdirectory()` call inherits NimRTC's own `BUILD_TESTING=ON`, so
+  the `add_test()` calls landed in NimRTC's ctest run.  The test
+  *executables* live in an `EXCLUDE_FROM_ALL` subdirectory and are never
+  built, so `test_opus_decode`, `test_opus_padding`, `test_opus_api`,
+  `test_opus_encode` and `test_opus_extensions` all failed with "the
+  test executable does not exist".  `src/third_party/libopus/CMakeLists.txt`
+  now shadows the cache entry with a directory-scope `BUILD_TESTING OFF`
+  for the duration of the `add_subdirectory()` call (a normal variable
+  takes precedence over the cache in that scope), and restores the
+  original value afterwards so the rest of the NimRTC tree still builds
+  its own tests.  Upstream's tests are not part of NimRTC's quality gate;
+  the NimRTC-owned Opus tests in `src/modules/opus/tests/` are.
+
+- **The BWE plugin seam test asserted against an empty registry.**
+  `BwePluginSeam.ListBwesContainsAimd` called
+  `core::PluginRegistry::instance().list_bwes()` and expected to find
+  `"aimd"` — but the test never registered the factory first.  That
+  worked when the whole binary ran as one gtest process, because an
+  earlier test in the same binary had called
+  `nimrtc::bwe::register_default_plugins()`.  NimRTC registers every
+  gtest case as its **own** ctest entry (`gtest_discover_tests`), so
+  each case runs in a fresh process and the registry starts empty; the
+  case therefore failed in isolation.  The test now calls
+  `register_default_plugins()` itself (it is idempotent), matching the
+  four sibling cases in the same file.
+
+- **`tools/check_prerequisites.py` could not read the MSVC version on a
+  localized toolchain.**  The check ran `cl` and matched the version with
+  `Version\s+(\d+)\.(\d+)` — but MSVC's banner is **localized**, and a
+  Chinese-locale toolchain prints
+
+  ```
+  用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.43.34809
+  ```
+
+  with no English word in front of the number at all.  The regex therefore
+  found nothing and the check reported `unknown version (could not parse cl
+  output)` on a perfectly good VS 2022 install — 8/9 instead of 9/9, with
+  the advice "Install Visual Studio 2022 Build Tools", which the machine
+  already had.  The check now reads the version from `cl /Bv` with a
+  locale-independent `19.xx` pattern, and falls back to the toolset
+  directory name under `VC\Tools\MSVC\` if the banner does not parse.
+  Both the English and the Chinese banner now resolve to `19.43`.
+
 
 - **The TURN-over-TCP test could not start its TURN server on a host
   whose TCP port exclusions differed from its UDP ones
@@ -3240,7 +3101,179 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `alloc_probe_enabled: false` in that build — a sanitizer build is
   about races and memory errors, not about allocation counts.
 
+
+### Performance
+
+
+- **The media hot paths no longer allocate per frame or per packet
+  (v1.2.0, architecture remediation plan §3 -- the C class).**  Six of
+  the seven C items landed here; C7 (the video path's RTP-packet
+  concatenation) was already removed in Phase 1.3.
+  - **C1 / C2 -- the staged video frames are pooled.**
+    `stage_source_frame()` allocated a fresh `VideoFrameBuffer` per
+    frame (`make_shared` plus a full-frame `memset` at 1080p30 -- about
+    3 MB allocated *and* zeroed every 33 ms) and then did an NV12 ->
+    I420 de-interleave on top.  `VideoFrameBufferPool` now owns the
+    whole buffer -- its pixel storage *and* its control block.  The pool
+    parks the buffer and hands out an **aliasing** `shared_ptr` that
+    shares the parked buffer's control block, so recycling a frame
+    allocates neither a new control block nor new pixel memory; the
+    steady state performs no allocation and no full-frame memset.
+  - **C3 -- the GPU zero-copy video send path is open.**
+    `send_video()` always staged the frame into a CPU I420 buffer before
+    handing it to the codec -- a ~3 MB copy per frame at 1080p30, plus a
+    de-interleave for an NV12 source.  `plugins::VideoSourceFrame`
+    gained three **additive** fields (`gpu_backend`, `gpu_handle`,
+    `gpu_pitch_bytes`), and `EngineConfig::video_zero_copy` (default:
+    off) opts the host in.  The zero-copy path is taken only when the
+    flag is on **and** the frame carries a live GPU handle **and** the
+    codec reports `supports_zero_copy_encode()`; otherwise the CPU
+    staging path runs exactly as before, so turning the flag on is
+    always safe.  When the codec supports the handle but the encode
+    fails, the engine falls back to the CPU path rather than dropping
+    the frame.  `Stats::video_zero_copy_frames` and
+    `Stats::video_zero_copy_fallbacks` make the decision observable.
+  - **C4 -- `PacketBuilder::build_into()`.**  `build()` allocated a new
+    `core::ByteBuffer` on every packet (50 Hz audio, 30 Hz video).  The
+    new overload serialises directly into caller-provided memory, and
+    the engine keeps **per-path** scratch buffers (audio, video and DTMF
+    separately) so the three threads never share one buffer.
+  - **C5 -- the SRTP scratch high-water mark.**  The libsrtp backend
+    called `resize(out_len)` before encrypt / decrypt and `resize(actual)`
+    after, so the vector was repeatedly shrunk and grown -- and each
+    `resize` value-initialises (zeroes) the memory.  The scratch is now
+    sized to the **high-water mark** and never shrinks during the
+    session's lifetime, which removes the memset churn entirely.
+  - **C6 -- the RTCP compound demux.**  `demux_rtcp()` returned a
+    `std::vector<RtcpBlock>` **by value** -- one heap allocation per
+    RTCP datagram.  The new overload clears and refills a caller-owned
+    scratch vector, keeping its capacity across calls.
+  - **The Phase 0.3 hot-path benchmark harness ships with the fix**
+    (remediation plan §0.3), so the numbers are reproducible rather than
+    asserted: `tests/bench_engine_hotpath.cpp` (an allocation probe --
+    overridden `operator new` / `operator delete` backed by CRT
+    `malloc` / `free` with an atomic arming flag, plus latency
+    percentiles for `send_video()`, `tick()` and the scheduler under
+    contention) and `tools/benchmark_hotpath.py` (the capture/compare
+    wrapper).
+    Measured on one machine at 1080p30 over 300 frames, `main` versus
+    this branch:
+
+    | metric | `main` | this branch | delta |
+    | --- | --- | --- | --- |
+    | `send_video` bytes/frame | 3 112 483 | 2 023 | **-99.9 %** |
+    | `send_video` mean latency | 902.97 us | 134.34 us | **-85.1 %** |
+    | `send_video` p50 latency | 861.55 us | 129.75 us | **-84.9 %** |
+    | `send_video` p99 latency | 1 387.36 us | 169.32 us | **-87.8 %** |
+    | `send_video` allocations/frame | 23.18 | 22.18 | -4.3 % |
+    | `tick` p99 | 0.3 us | 0.2 us | -33 % |
+
+    The allocation *count* barely moves because `main` staged each frame
+    with one 3 MB allocation; what C1 / C2 removed is the **volume**
+    (3.1 MB of allocator traffic per frame, plus the full-frame memset
+    that came with it), not the number of `new` calls.  The remaining
+    ~22 allocations per frame are in the encode / packetise path (the
+    codec's own output buffer and the RTP packet vector), not in the
+    frame staging.
+
+- **`send_video()` is now allocation-free end to end (v1.2.0,
+  remediation Phase 3 §3.5).**  The C class above removed the *volume*
+  of allocator traffic, but the allocation *count* was still 22 per
+  frame.  This change drives it to **zero** — the number the plan's
+  §3.5 acceptance criterion asks for.
+  - **The video frame pool recycles the buffer object, not just its
+    storage.**  The pool used to hand out a fresh `shared_ptr` per
+    frame, and a `shared_ptr` that owns its object carries a
+    heap-allocated control block.  The pool now parks the buffer and
+    hands out an **aliasing** `shared_ptr` that shares the parked
+    buffer's control block (`shared_ptr<T>(owner, owner.get())`), so
+    recycling a frame allocates neither a control block nor pixel
+    memory.  A buffer is reusable once the caller has released its
+    alias, which is visible as the owner's `use_count()` dropping back
+    to one.
+  - **The packetizer works on spans, not copies.**  `parse_annex_b()`
+    and `parse_length_prefixed()` returned a
+    `std::vector<std::vector<std::uint8_t>>` -- one heap allocation
+    per NAL unit, per frame, plus a copy of every NAL's bytes.  The
+    caller owns the bitstream for the whole `push_frame()` call, so
+    the NAL units are now **spans into the source**, parsed into a
+    reusable vector.  The FU-A fragment buffer, the STAP-A output
+    buffer, the aggregation group and the FU-A flags are reusable
+    members as well, pre-reserved so a frame with an unusual number of
+    NAL units does not grow them.
+  - **The retransmission ring is pre-sized.**  Each cached slot is
+    reserved to the MTU when the ring is built, so caching a packet is
+    a memcpy into an existing buffer instead of a fresh allocation per
+    outgoing packet.
+  - **The ref-frame registry is a fixed-size table.**  It was a
+    `std::map` plus a `std::deque` -- two heap allocations per sent
+    frame (a map node and a deque block), forever.  It is now an
+    open-addressed table with backward-shift deletion plus a
+    fixed-size insertion ring, both allocated once at construction.
+    The timestamp→id lookup selects the lowest matching id explicitly,
+    so the observable behaviour is identical to the `std::map`'s.
+  - **The outbound packet buffer is reused on the no-scheduler path.**
+    With a scheduler the packet comes from the scheduler's pool; on
+    the "transport" profile the engine wrote straight to ICE and
+    allocated a fresh vector per packet.  It now uses the engine's own
+    scratch buffer.  This relies on `ITransport::send()` treating its
+    `BufferView` as **borrowed** -- the transport must copy the bytes
+    it needs before returning -- which is now written down explicitly
+    in the seam's documentation.
+  - **The measurement is a gate, not a claim.**  The benchmark gained
+    an `--assert-zero-allocs` flag, and the ctest case
+    `hotpath_zero_allocs` runs it at 1080p.  The count is exact rather
+    than a threshold: the engine runs no background threads in the
+    benchmark's profile, so every allocation counted during the
+    measured region belongs to the `send_video()` call itself.  A
+    regression that reintroduces a per-frame allocation fails the
+    build.
+
+    Measured after this change, over 300 frames per resolution:
+
+    | resolution | allocations/frame | bytes/frame |
+    | --- | --- | --- |
+    | 1920x1080 | **0.000000** | **0.000000** |
+    | 1280x720 | **0.000000** | **0.000000** |
+    | 854x480 | **0.000000** | **0.000000** |
+
+    The §3.5 criterion "`send_video()` 1080p30 的 per-call 堆分配次数 =
+    0" is met.
+
+- **The audio send path has a zero per-packet allocation budget too
+  (remediation Phase 3 §3.5).**  The plan's second allocation
+  criterion -- "音频路径 per-packet 堆分配次数 = 0" -- now has a gate of
+  its own, in `tests/test_engine_audio_alloc.cpp`.
+  - The metric is **per packet**, not per call: the host may hand the
+    engine an arbitrary block size, and the engine accumulates samples
+    until it has a whole 20 ms frame.
+  - The audio path is unreachable without a completed DTLS handshake
+    (otherwise the engine would put plaintext RTP on the wire), so the
+    test drives the engine through a fake ICE transport and a fake DTLS
+    session, the same pair `tests/test_engine_audio_send.cpp` uses.
+  - The fake transport only *counts* the bytes it is handed.  A fake
+    that copied them would allocate once per packet and land right in
+    the measured region, so the test would have been measuring the fake
+    rather than the engine.
+  - The criterion is asserted as "the allocation count does not grow
+    with the packet count" (a 50-packet run and a 250-packet run must
+    cost the same), not as "every single call allocates nothing".  The
+    engine's periodic work -- the RTCP sender report, the SRTP context
+    rollover -- may allocate on *some* calls; what must not happen is
+    one allocation per packet, forever.
+  - The probe lives in its own binary on purpose: replacing the global
+    `operator new` collides with a sanitizer runtime's own definition,
+    so the video side of the same criterion stays in the benchmark
+    binary (`hotpath_zero_allocs`) and the audio side is here.
+
+    The remaining §3.5 items -- the `tick()` p99 reduction and the
+    scheduler's drain / enqueue non-blocking property -- are covered by
+    the Phase 0.3 benchmark's other two sections and are tracked
+    separately.
+
+
 ### Tooling
+
 
 - **The plugin author guide for the capture / codec / sink / audio-device
   seams (v1.4, remote-desktop plan K5).**  The existing
@@ -3308,7 +3341,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `docs/zh/architecture.md` §6 gained the matching honest inventory
     ("视频侧实际交付的编解码器与设备").
 
-### Tooling
 
 - **A CI leg that actually runs the sanitizers, and a gate that knows
   whose bug it found.** The project had sanitizer *options*

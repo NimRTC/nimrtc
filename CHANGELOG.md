@@ -1879,6 +1879,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | `detail::VideoState` | `engine_video_state.hpp` | video send/receive state, the negotiation result, the quality counters |
   | `detail::SessionState` | `engine_session_state.hpp` | the session model, the transceivers, the mids |
   | `detail::ScratchBuffers` | `engine_scratch.hpp` | every reusable scratch buffer |
+  | `detail::FeedbackState` | `engine_feedback_state.hpp` | the network-feedback counters, the RTCP XR routing counter, the pacing split |
 
   The rule the split follows is simple: *a member that only one feature
   reads or writes belongs to that feature's collaborator, not to
@@ -1895,6 +1896,15 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Verified with a full build (zero errors, zero warnings) and the whole
   `ctest` suite: **1454 / 1454 passing**.
+
+  The header grew again as the remote-desktop multi-stream / QoE planes
+  landed (394 → 423 lines, back over the 400-line target).  The
+  members that work added — the network-feedback counters, the RTCP XR
+  routing counter and the pacing split — are all "what the engine
+  observed on the RTCP path", so they moved into
+  `detail::FeedbackState` (`engine_feedback_state.hpp`): **423 → 381
+  lines**, back under the target.  Re-verified: full build clean,
+  `ctest` **1942 / 1942 passing**.
 
 - **The plugin ID naming contract is now written down, and the docs
   that describe the config surface now match the code (v1.2.0,
@@ -2299,6 +2309,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Windows cursor source crashed the process on every poll.**  The
+  cursor layer (remote-desktop plan A6) read the icon's monochrome
+  mask with `GetDIBits`, and the call was wrong in three separate ways:
+
+    - The `BITMAPINFO` was **null**.  `GetDIBits` reads the
+      destination's layout through it unconditionally, so the call
+      faulted with an access violation (`0xC0000005`) inside
+      `gdi32full.dll` — reproducible on every host, on the first poll.
+    - The destination had **no room for the colour table**.  A
+      1-bit-per-pixel `BI_RGB` destination carries a 2-entry palette
+      and `GetDIBits` writes it after the header, but a plain
+      `BITMAPINFO` has room for only one entry: the call wrote 4 bytes
+      past the end of the structure, a stack buffer overflow that the
+      debug runtime's stack check turned into a hard failure.
+    - The mask was read **one scan line at a time** (`biHeight = 1`,
+      `cLines = 1`).  Such a request reports success but leaves the
+      destination buffer untouched for every line past the first, so
+      the loop silently re-read the *same* row — and applied it to
+      every row of the cursor.
+
+  The mask is now read in a **single top-down** `GetDIBits` call into a
+  destination with an explicit 2-entry palette, so the mask rows line
+  up with the (top-down) drawn DIB and the bitmap is the cursor's real
+  shape.
+
+- **`WindowsCapture.DxgiReportsDirtyRects` failed on an idle desktop.**
+  The test waited for 3 Desktop Duplication frames, but DXGI only
+  delivers a frame when the screen *changes* — so on a static desktop
+  the wait timed out and the test failed roughly half the time.  The
+  test now nudges the desktop while it waits, exactly as its sibling
+  `DxgiReportsANonEmptyDirtyRectWhenTheDesktopChanges` already did.
 
 - **A fresh clone now configures and builds.**  `cmake -S . -B build` on
   a clean checkout failed outright: the WebRTC APM vendor wrapper raised

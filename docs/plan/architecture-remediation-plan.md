@@ -903,6 +903,38 @@ TURN-over-TCP 端口按 TCP 探测、relay 端口区间按 UDP 探测。这样�
 `Impl` 本身仍持有"跨功能"的散装成员（RTCP 计数器、pacing demand 列表、
 SR 状态等）。真正把这些成员也归位，需要先有上面那几个行为协作者。
 
+#### 4.3 执行结果 · 补充（2026-11-15）：远程桌面的工作把头文件推回了 400 行以上
+
+远程桌面的多流 / 同步 / 控制 / QoE 平面落地后，`engine_impl.hpp` 又从
+394 行涨到了 **423 行**，重新突破了 §4.3 的 `< 400` 验收线。
+这些新成员（RTCP 反馈计数器、pacing 拆分结果）属于同一件事 ——
+"引擎在 RTCP 路径上观察到了什么"，所以它们被收进一个新的协作者：
+
+| 协作者 | 头文件 | 装什么 |
+|---|---|---|
+| `detail::FeedbackState` | `engine_feedback_state.hpp` | 网络反馈循环的计数器与去重状态、RTCP XR 路由计数器、pacing 拆分的需求列表与结果、视频编码器上限 |
+
+结果：`engine_impl.hpp` **423 → 381 行**，重新达标。
+
+**验证**：全量 `ctest` **1942 / 1942 通过**，构建零 error 零 warning。
+
+**这一轮同时修掉的两条既有失败**（都不是 D1 拆分造成的，但它们让"全绿"
+无法成立，所以一并处理了）：
+
+- `WindowsCursor.ThePlatformSourceYieldsAUsableBitmapOrSaysItCannot` 与
+  `WindowsCursor.ThePinnedFallbackKeepsTheCursorVisible` —— Windows 光标源
+  读图标单色掩码的 `GetDIBits` 调用有三处错误：传了空的 `BITMAPINFO`
+  （`GetDIBits` 会无条件解引用它 → 访问违例）、目标结构放不下 2 项调色板
+  （1bpp `BI_RGB` 需要 2 项，而 `BITMAPINFO` 只放得下 1 项 → 4 字节栈溢出）、
+  以及逐行读取（`biHeight = 1` 的请求只写第一行，其余行静默不写 → 同一行被
+  反复套用到光标的每一行）。现在改成**一次 top-down 调用**读整张掩码，目标
+  结构带显式的 2 项调色板。
+- `WindowsCapture.DxgiReportsDirtyRects` —— 该用例等待 3 个 Desktop
+  Duplication 帧，但 DXGI 只在**画面变化**时才送帧，所以桌面静止时必然超时
+  （约一半概率失败）。现在等待期间像它的兄弟用例
+  `DxgiReportsANonEmptyDirtyRectWhenTheDesktopChanges` 那样主动"戳"一下桌面。
+
+
 ### 4.4 修 D5：C ABI **保留**（Q1 决策的连带修正）
 
 > **决策修正**：1.6 改为"保留 `select_next_packet`"后，S-family 的 C ABI 入口**不再删除**。
@@ -1139,13 +1171,19 @@ codec factory（包装 `h264::CodecPluginAdapter`），用引擎**自己的**编
 
 ### 4.6 修 B7/B9 的最终形态 + Phase 4 验收
 
-- `ctest` 全绿 —— ✅ **1454 / 1454**（Windows MSVC Release，2026-11-13 复验；
-  §4.5.1 落地后的数字是 1436 / 1436，其后因 ADR-023 的契约测试与 ADR-025 /
-  ADR-026 两个守卫的 self-test 而增长）
-- `engine_impl.hpp` 行数 < 400 —— ✅ **394**
+- `ctest` 全绿 —— ✅ **1942 / 1942**（Windows MSVC Debug，2026-11-15 复验；
+  §4.5.1 落地后的数字是 1436 / 1436，其后因 ADR-023 的契约测试、ADR-025 /
+  ADR-026 两个守卫的 self-test 与远程桌面的新测试而增长。
+  之前记录的 2 个失败 —— Windows 光标源的 `GetDIBits` 崩溃，以及
+  `WindowsCapture.DxgiReportsDirtyRects` 在静止桌面上的超时 —— 已在
+  §4.3 的补充里一并修掉，见那里。）
+- `engine_impl.hpp` 行数 < 400 —— ✅ **381**
   （ADR-025 的 layering guard 落地时把一条 11 行的说明注释加进了这个头，
   把它推到 401 行；那条注释的完整理由本来就记在
-  `tools/check_engine_layering.py` 里，于是把它压缩成一行指向 —— 回到 394。）
+  `tools/check_engine_layering.py` 里，于是把它压缩成一行指向 —— 回到 394。
+  随后远程桌面的多流 / QoE 平面又把它推到 423 行，
+  2026-11-15 用 `detail::FeedbackState` 收走 RTCP 反馈 / pacing 那组成员
+  —— 回到 **381**。）
 - 无死模块（每个模块或被引擎加载，或被删除）—— ✅
   `tools/check_dead_modules.py`：37 / 37 模块通过，`--self-test` 通过
 - `ARCHITECTURE.md` 的 Layout Invariant 4 描述与代码一致 —— ✅

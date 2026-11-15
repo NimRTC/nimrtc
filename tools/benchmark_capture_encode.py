@@ -439,6 +439,39 @@ def print_summary(doc: dict) -> None:
               f"{c['produce_mean_us']:>11.1f}  {c['pop_mean_us']:>8.1f}")
     print()
 
+    # ---- The platform backends ------------------------------------------
+    platform = doc.get("platform_capture", [])
+    if platform:
+        print("capture throughput (platform backends)")
+        print(f"  {'backend':>16}  {'res':>11}  {'fps':>8}  {'fps/MP':>8}  "
+              f"{'zero-copy':>9}  {'staged':>7}  {'copied MiB':>10}")
+        for c in platform:
+            zc = c.get("frames_zero_copy", 0)
+            staged = c.get("frames_cpu_staged", 0)
+            copied = c.get("bytes_copied", 0) / (1024.0 * 1024.0)
+            print(f"  {c['backend']:>16}  {c['width']:>5}x{c['height']:<5}  "
+                  f"{c['fps']:>8.1f}  {c['fps_per_megapixel']:>8.1f}  "
+                  f"{zc:>9}  {staged:>7}  {copied:>10.1f}")
+            if c.get("error"):
+                print(f"  {'':>16}  note: {c['error']}")
+        print()
+
+    # ---- The zero-copy evidence ------------------------------------------
+    zero_copy = doc.get("zero_copy", [])
+    if zero_copy:
+        print("zero-copy evidence (GPU surface path)")
+        print(f"  {'backend':>16}  {'gpu frames':>11}  {'zero-copy':>9}  "
+              f"{'staged':>7}  {'copied':>8}  {'verdict':>12}")
+        for z in zero_copy:
+            print(f"  {z['backend']:>16}  {z.get('gpu_frames_received', 0):>11}  "
+                  f"{z.get('frames_zero_copy', 0):>9}  "
+                  f"{z.get('frames_cpu_staged', 0):>7}  "
+                  f"{z.get('bytes_copied', 0):>8}  "
+                  f"{('proved' if z.get('zero_copy') else 'not proven'):>12}")
+            if z.get("error"):
+                print(f"  {'':>16}  note: {z['error']}")
+        print()
+
     print("per-frame CPU cost by stage (microseconds, mean)")
     header = (f"  {'pref':>9} {'res':>11} {'backend':<10} {'hw':>4} "
               f"{'capture':>8} {'convert':>8} {'encode':>8} {'packet':>7} "
@@ -530,6 +563,48 @@ def build_headline(doc: dict) -> dict:
             }
             break
 
+    # ---- The platform backends' rate, and the zero-copy evidence ---------
+    #
+    # The plan's M1 exit criterion asks for two things the synthetic
+    # device cannot answer: the *real* capture rate on the platform
+    # backends, and proof that the GPU path really is zero-copy.  Both
+    # are lifted to the headline here, with the caveat that they may be
+    # missing on a machine that cannot produce them.
+    platform: list[dict] = []
+    for c in doc.get("platform_capture", []):
+        platform.append({
+            "backend": c.get("backend"),
+            "opened": bool(c.get("opened")),
+            "width": c.get("width"),
+            "height": c.get("height"),
+            "fps": c.get("fps"),
+            "fps_per_megapixel": c.get("fps_per_megapixel"),
+            "frames": c.get("frames"),
+            "seconds": c.get("seconds"),
+            "frames_zero_copy": c.get("frames_zero_copy"),
+            "frames_cpu_staged": c.get("frames_cpu_staged"),
+            "bytes_copied": c.get("bytes_copied"),
+            "note": c.get("error"),
+        })
+    if platform:
+        headline["platform_capture"] = platform
+
+    zero_copy: list[dict] = []
+    for z in doc.get("zero_copy", []):
+        zero_copy.append({
+            "backend": z.get("backend"),
+            "opened": bool(z.get("opened")),
+            "gpu_frames_received": z.get("gpu_frames_received"),
+            "frames_zero_copy": z.get("frames_zero_copy"),
+            "frames_cpu_staged": z.get("frames_cpu_staged"),
+            "bytes_copied": z.get("bytes_copied"),
+            "zero_copy": bool(z.get("zero_copy")),
+            "note": z.get("error"),
+        })
+    if zero_copy:
+        headline["zero_copy"] = zero_copy
+        headline["zero_copy_proved"] = any(z.get("zero_copy") for z in zero_copy)
+
     # ---- The two per-frame costs, side by side ---------------------------
     comparison: dict = {}
     for name, run in (("hardware", hw), ("software", sw)):
@@ -574,6 +649,12 @@ def main() -> int:
                     help="measured frames per resolution per backend (default: 120)")
     ap.add_argument("--warmup", type=int, default=30,
                     help="warm-up frames excluded from the measurement (default: 30)")
+    ap.add_argument("--platform-only", action="store_true",
+                    help="merge only the platform_capture / zero_copy "
+                         "sections into the existing artifact instead of "
+                         "rewriting the whole document. Use this when the "
+                         "machine has no hardware encoder but the platform "
+                         "capture backends are what is being measured.")
     args = ap.parse_args()
 
     binary = find_binary(args.build_dir)
@@ -592,6 +673,34 @@ def main() -> int:
 
     machine = describe_machine()
 
+    out = args.out or (args.build_dir / "bench_capture_encode.json")
+
+    # ---- The platform-only merge ----------------------------------------
+    #
+    # The capture and zero-copy measurements come from a different
+    # machine than the encode measurements often do (a machine with a
+    # GPU but no hardware encoder SDK still has real DXGI / WGC
+    # backends).  Merging keeps the committed artifact's existing
+    # hardware numbers intact while adding the platform evidence, and
+    # records which machine produced which part.
+    if args.platform_only:
+        if not out.is_file():
+            raise SystemExit(
+                f"error: --platform-only needs an existing artifact at "
+                f"{out}; it merges into it rather than creating one")
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        doc["generated_at"] = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        doc["platform_capture"] = raw.get("platform_capture", [])
+        doc["zero_copy"] = raw.get("zero_copy", [])
+        doc["platform_capture_machine"] = machine
+        doc.setdefault("headline", {})
+        doc["headline"].update(build_headline(doc))
+        out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {out}")
+        print_summary(doc)
+        return 0
+
     doc = {
         "schema": 1,
         "benchmark": "capture_encode",
@@ -606,12 +715,25 @@ def main() -> int:
         "hardware_backend_available": hardware_available,
         "headline": {},
         "capture": raw.get("capture", []),
+        "platform_capture": raw.get("platform_capture", []),
+        "zero_copy": raw.get("zero_copy", []),
         "pipeline": pipeline,
         "budget_check": check_budget(pipeline),
         "notes": [
             "The capture numbers are the portable synthetic capture device "
             "(src/modules/video_capture) driven directly: they are the "
             "portable layer's cost, not a platform capture backend's.",
+            "The platform_capture numbers are the real Windows backends "
+            "(DXGI Desktop Duplication and WGC) driven through the "
+            "IVideoCapture seam over a two-second window. Both deliver a "
+            "frame only when the desktop *changes*, so a static desktop "
+            "yields no frames; that is recorded as an observation, not as "
+            "a zero-fps backend.",
+            "The zero_copy numbers are the GPU-surface path: a GPU consumer "
+            "is attached exactly as a hardware encoder would, and the "
+            "device's own counters say how many frames never crossed the "
+            "PCI bus. `zero_copy: true` means the callback received frames "
+            "AND bytes_copied is 0.",
             "The per-stage numbers are the engine's own J1 instrumentation "
             "(Stats::video_stage_capture / _convert / _encode / _packetize), "
             "measured around the real capture -> convert -> encode -> "
@@ -626,7 +748,6 @@ def main() -> int:
         ],
     }
 
-    out = args.out or (args.build_dir / "bench_capture_encode.json")
     doc["headline"] = build_headline(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")

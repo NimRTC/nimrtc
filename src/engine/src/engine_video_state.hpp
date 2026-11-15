@@ -42,6 +42,7 @@
 #include <nimrtc/plugins/video_pipeline.hpp>
 
 #include "audio_routing.hpp"
+#include "engine_gpu_mailbox.hpp"
 #include "engine_ref_frame_table.hpp"
 #include "engine_render_state.hpp"
 #include "engine_stage_timing.hpp"
@@ -281,6 +282,32 @@ struct VideoState {
 
     /** Metadata-only frames the pump skipped (no pixels to encode). */
     std::uint64_t video_capture_pumped_metadata = 0;
+
+    // ---- The GPU-frame mailbox (remote-desktop plan B10) ----------------
+    //
+    // The zero-copy capture seam delivers a GPU surface on the
+    // *capture device's* thread; the codec may only be touched on the
+    // *tick* thread (RD-6).  The mailbox is the boundary between them:
+    // a single-slot hand-off whose semantics are "the newest frame is
+    // the truth".
+    //
+    // It lives in the video state because the pump is the only reader
+    // and the capture wiring is the only writer.
+    detail::GpuFrameMailbox gpu_mailbox;
+
+    /** True once the engine has wired the capture device's GPU callback
+     *  to the mailbox.  A host that wants to know whether the
+     *  zero-copy path is *live* (not merely requested) reads this
+     *  together with `video_capture_gpu_frames`. */
+    bool capture_gpu_wired = false;
+
+    /** Frames the tick thread encoded straight from a GPU surface —
+     *  the count that proves the zero-copy hand-off actually ran. */
+    std::uint64_t video_capture_gpu_frames = 0;
+
+    /** Frames the GPU path handed to the encoder but the encoder
+     *  refused (so the CPU path had to be used instead). */
+    std::uint64_t video_capture_gpu_errors = 0;
 
     /** True once the pump has established its media-clock origin. */
     bool capture_rtp_base_valid = false;

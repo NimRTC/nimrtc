@@ -550,6 +550,58 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         }
     }
 
+    // ---- The shared GPU device (remote-desktop plan B10) ----------------
+    //
+    // The zero-copy capture seam has two halves, and both of them are
+    // established *here*, before the codec is created:
+    //
+    //   1. The capture device publishes the D3D11 device its surfaces
+    //      live on (`gpu_context()`).  The codec has to open its encode
+    //      session on **that** device: NVENC registers the input
+    //      surface per session and the driver refuses a texture that
+    //      was created on a different `ID3D11Device` — even on the same
+    //      physical adapter — with `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`
+    //      (status 9).  So the context is put into the codec's config
+    //      *before* the codec is created, and the codec adopts it.
+    //
+    //   2. The capture device's GPU callback is attached to the mailbox.
+    //      The callback runs on the **capture device's own thread**; the
+    //      codec may only be touched on the **tick thread** (RD-6).  The
+    //      mailbox is the boundary between the two (see
+    //      `engine_gpu_mailbox.hpp`).
+    //
+    // A capture device that publishes no context (the CPU-only devices)
+    // simply does not get the seam: the codec opens its own device and
+    // the pump falls back to the CPU path.  That is the pre-B10
+    // behaviour, and it is honest.
+    plugins::GpuContext capture_gpu_context{};
+    impl_->video_state.capture_gpu_wired = false;
+    if (video_capture_ && video_capture_->supports_gpu_frames()) {
+        capture_gpu_context = video_capture_->gpu_context();
+
+        // ---- The GPU callback → the mailbox ------------------------------
+        //
+        // The callback runs on the **capture device's own thread**.  It
+        // does exactly one thing: hand the surface to the mailbox.  It
+        // never touches the codec, never blocks, and never calls back
+        // into the host — all of that happens later, on the tick thread
+        // (RD-6), in `pump_video_capture_gpu()`.
+        //
+        // The mailbox drops the stale frame when a newer one arrives
+        // (see `engine_gpu_mailbox.hpp`): the newest picture is the
+        // truth, and a screen that changes at 30 fps must not cost a
+        // backlog of 30 encodes.
+        video_capture_->set_gpu_frame_callback(
+            [this](plugins::GpuCaptureFrame&& frame) {
+                impl_->video_state.gpu_mailbox.push(std::move(frame));
+            });
+
+        // The flag makes the seam observable: a host that wants to know
+        // whether the zero-copy path is *live* (not merely requested)
+        // reads it together with `video_capture_gpu_frames`.
+        impl_->video_state.capture_gpu_wired = true;
+    }
+
     // ---- Video Sink --------------------------------------------------------
     if (!video_sink_) {
         // PAL Slice 1.5 — replaces the 5-step "factory → create → null-check
@@ -677,6 +729,12 @@ uint32_t NimRTCEngine::init_video_plugins() noexcept {
         cfg.codec = detail::codec_kind_of(codec_family);
         cfg.payload_type = config_.video_receiver_tuning.payload_type;
         cfg.name = config_.video_codec_name;
+
+        // Plan B10: the codec opens its session on the *capture's* device
+        // when the capture device publishes one.  This has to happen
+        // before the codec is created — the session is opened in
+        // `open()`, and the device is fixed for the session's lifetime.
+        cfg.gpu_context = capture_gpu_context;
 
         // ---- The backend preference (remote-desktop plan B2) --------------
         //
@@ -1401,6 +1459,14 @@ void NimRTCEngine::shutdown_video_plugins() noexcept {
     // The capture device (remote-desktop plan A1) is a *device*: it may
     // own an OS handle (a DXGI duplication, a PipeWire stream), so it
     // has to be closed explicitly rather than merely dropped.
+    //
+    // The mailbox is cleared **before** the device is closed: the device's
+    // producer thread pushes into it, and a pending frame would hold a
+    // `GpuBuffer` whose texture belongs to the device that is about to
+    // be torn down.  Clearing it first drops that reference while the
+    // device is still alive.
+    impl_->video_state.gpu_mailbox.clear();
+    impl_->video_state.capture_gpu_wired = false;
     close_all(video_capture_);
     // Remote-desktop plan H1 / H2: the *extra* video streams own their
     // own plugin instances, so they are closed with the rest of the
@@ -2117,6 +2183,21 @@ void NimRTCEngine::apply_video_encoder_params(
         impl_->video_state.video_format_source = frame.format;
     }
 
+    // The tail of this function is shared with the zero-copy pump (plan
+    // B10): the GPU path encodes on its own and then needs exactly the
+    // same push.  Sharing the tail is what keeps the two paths from
+    // drifting apart.
+    return push_encoded_video_frame(encoded, frame.rtp_timestamp,
+                                    frame.frame_seq, frame.capture_ts_us);
+}
+
+plugins::Status NimRTCEngine::push_encoded_video_frame(
+    const plugins::EncodedVideoFrame& encoded,
+    std::uint32_t rtp_timestamp,
+    std::uint32_t frame_seq,
+    std::int64_t capture_ts_us) noexcept {
+    if (!video_sender_) return plugins::kErrNotReady;
+
     // Mark keyframe so the sender packet callback gives it kVideoKeyframe
     // priority (consumed on the marker=true packet).
     if (encoded.is_keyframe) {
@@ -2128,7 +2209,7 @@ void NimRTCEngine::apply_video_encoder_params(
     // how much detail the encoder had to drop to hit the bitrate — so it
     // belongs to the outbound stream, not to the inbound one.
     impl_->video_state.video_stats.on_frame_encoded(
-        static_cast<std::int64_t>(encoded.info.capture_ts_us),
+        static_cast<std::int64_t>(capture_ts_us),
         static_cast<std::uint32_t>(encoded.payload.size()),
         encoded.is_keyframe,
         static_cast<int>(encoded.qp));
@@ -2141,7 +2222,7 @@ void NimRTCEngine::apply_video_encoder_params(
     // the whole `push_frame` call, so it covers the RTP header assembly,
     // the STAP-A / FU-A fragmentation and the SRTP protection.
     const auto packetize_start = std::chrono::steady_clock::now();
-    const auto push_rc = video_sender_->push_frame(encoded, frame.rtp_timestamp);
+    const auto push_rc = video_sender_->push_frame(encoded, rtp_timestamp);
     const auto packetize_end = std::chrono::steady_clock::now();
     impl_->video_state.stage_timings.record(
         Stage::kPacketize,
@@ -2152,8 +2233,8 @@ void NimRTCEngine::apply_video_encoder_params(
         // v1.1 V1: one encoded frame accepted by the sender pipeline.
         ++impl_->video_state.video_frames_sent;
         // v1.1 T1: record the outbound ref_frame mapping (id == frame_seq).
-        record_video_ref_frame(static_cast<std::uint64_t>(frame.frame_seq),
-                               static_cast<std::int64_t>(frame.capture_ts_us));
+        record_video_ref_frame(static_cast<std::uint64_t>(frame_seq),
+                               static_cast<std::int64_t>(capture_ts_us));
     }
     return push_rc;
 }
@@ -2830,6 +2911,16 @@ NimRTCEngine::Stats NimRTCEngine::stats() const noexcept {
     out.video_capture_pumped_frames   = impl_->video_state.video_capture_pumped_frames;
     out.video_capture_pump_errors     = impl_->video_state.video_capture_pump_errors;
     out.video_capture_pumped_metadata = impl_->video_state.video_capture_pumped_metadata;
+
+    // ---- The zero-copy seam (remote-desktop plan B10) ------------------
+    //
+    // `video_capture_gpu_wired` says whether the engine attached the
+    // capture device's GPU callback at all; the two counters say what
+    // happened afterwards.  Together they are the observable proof of
+    // the seam: `gpu_frames` moving while `bytes_copied` stays at zero.
+    out.video_capture_gpu_wired  = impl_->video_state.capture_gpu_wired;
+    out.video_capture_gpu_frames = impl_->video_state.video_capture_gpu_frames;
+    out.video_capture_gpu_errors = impl_->video_state.video_capture_gpu_errors;
 
     // ---- Format normalisation (remote-desktop plan C3) ------------------
     //

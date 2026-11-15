@@ -1734,6 +1734,78 @@ if(NIMRTC_MODULE_VIDEO_CAPTURE)
   endif()
 endif()
 
+# ----------------------------------------------------------------------------
+# The capture → encoder zero-copy seam (remote-desktop plan B10 / M1).
+#
+# The seam between the capture device and the hardware encoder is not
+# "hand the texture across": NVENC registers the DirectX input surface
+# per encode session, and the driver accepts the registration ONLY if
+# the texture was created on the same `ID3D11Device` the session was
+# opened with (a texture from another device is refused with
+# `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`, status 9).
+#
+# So the seam is "share the device and hand the texture across", and
+# that is what the test drives — through the **engine**, because the
+# engine is what wires the capture's GPU callback into the mailbox and
+# hands the capture's device to the codec.  A module-level test would
+# prove the pieces but not the wiring.
+#
+# It needs the capture module (the real Windows backend is exercised on
+# a host with a display, and skipped elsewhere), the video pipeline
+# (the reference sender the frames go out on) and the frame vocabulary.
+# ----------------------------------------------------------------------------
+if(NIMRTC_MODULE_VIDEO_CAPTURE AND NIMRTC_MODULE_VIDEO_PIPELINE
+   AND NIMRTC_MODULE_VIDEO_FRAME)
+  add_executable(test_engine_capture_zero_copy test_engine_capture_zero_copy.cpp)
+  if(WIN32)
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE ws2_32)
+  elseif(APPLE)
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE c++ pthread)
+  else()
+    target_link_libraries(test_engine_capture_zero_copy PRIVATE atomic)
+  endif()
+  target_link_libraries(test_engine_capture_zero_copy PRIVATE
+      nimrtc::engine
+      nimrtc::ice
+      nimrtc::rtp
+      nimrtc::sdp
+      nimrtc::jb
+      nimrtc::audio3a
+      nimrtc::dtls_seam
+      nimrtc::sctp
+      nimrtc::raw_udp
+      nimrtc::transport
+      nimrtc::datachannel
+      nimrtc::net_feedback
+      nimrtc::web_transport
+      nimrtc::session
+      nimrtc::video_capture
+      nimrtc::video_frame
+      nimrtc::video_pipeline
+      GTest::gtest_main)
+  target_include_directories(test_engine_capture_zero_copy PRIVATE
+      "${CMAKE_SOURCE_DIR}/src/core/include"
+      "${CMAKE_SOURCE_DIR}/src/plugins/include"
+      "${CMAKE_SOURCE_DIR}/src/engine/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_capture/include"
+      "${CMAKE_SOURCE_DIR}/src/modules/video_pipeline/include")
+  if(WIN32)
+    target_compile_definitions(test_engine_capture_zero_copy PRIVATE _WIN32_WINNT=0x0601)
+  endif()
+  set_target_properties(test_engine_capture_zero_copy PROPERTIES
+      VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+  nimrtc_apply_options(test_engine_capture_zero_copy LENIENT)
+  add_test(NAME test_engine_capture_zero_copy
+      COMMAND $<TARGET_FILE:test_engine_capture_zero_copy>)
+  set_tests_properties(test_engine_capture_zero_copy PROPERTIES TIMEOUT 90)
+  if(COMMAND gtest_discover_tests)
+    gtest_discover_tests(test_engine_capture_zero_copy
+        PROPERTIES TIMEOUT 90
+        DISCOVERY_TIMEOUT 10)
+  endif()
+endif()
+
 # R2.5 validation: engine consumes PluginRegistry for plugin slots.
 nimrtc_add_engine_test(test_engine_plugin_loading test_engine_plugin_loading.cpp)
 
@@ -2733,6 +2805,46 @@ if(TARGET nimrtc::video_capture)
         VS_LINK_LIBRARY_DEPENDENCIES TRUE)
     nimrtc_apply_options(bench_capture_encode LENIENT)
     nimrtc_copy_wolfssl_certs(bench_capture_encode)
+endif()
+
+# ---------------------------------------------------------------------------
+# The zero-copy *seam* probe (remote-desktop M1).
+#
+# `bench_capture_encode` proves the *capture* side of the zero-copy claim
+# (`bytes_copied == 0` on the DXGI / WGC GPU path).  This probe answers
+# the other half — what the hardware encoder actually accepts on its
+# DirectX input path — because the answer decides the *shape* of the
+# capture → encoder seam:
+#
+#   - an NV12 texture on the encoder's own D3D11 device,
+#   - a BGRA texture on the encoder's own device (the shape the capture
+#     device produces), and
+#   - an NV12 texture on a *different* device (the shape a plain
+#     "hand the texture across" seam would produce).
+#
+# It is NOT a ctest case: it is a measurement whose numbers are
+# machine- and driver-dependent, and every case answers "accepted" or
+# "refused" rather than asserting a threshold.
+# ---------------------------------------------------------------------------
+if(TARGET nimrtc::nvcodec AND WIN32)
+    add_executable(bench_zc_seam bench/bench_zc_seam.cpp)
+    set_target_properties(bench_zc_seam PROPERTIES
+        VS_LINK_LIBRARY_DEPENDENCIES TRUE)
+    target_link_libraries(bench_zc_seam PRIVATE
+        nimrtc::nvcodec
+        nimrtc::video_frame
+        nimrtc::core
+        nimrtc::plugins
+        d3d11)
+    target_include_directories(bench_zc_seam PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core/include"
+        "${CMAKE_SOURCE_DIR}/src/plugins/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/video_frame/include"
+        "${CMAKE_SOURCE_DIR}/src/modules/nvcodec/include")
+    target_compile_definitions(bench_zc_seam PRIVATE
+        NIMRTC_PLUGINS_NVENC_ON=1
+        _WIN32_WINNT=0x0A00)
+    nimrtc_apply_options(bench_zc_seam LENIENT)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,88 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The capture → encoder zero-copy seam (v1.3, remote-desktop plan
+  B10 / M1).**  The two halves of the zero-copy claim were each proven
+  on their own — the capture device delivers a GPU surface with
+  `bytes_copied == 0`, and NVENC consumes a registered DirectX surface
+  — but the *seam* between them was not.  And the seam is not "hand
+  the texture across": NVENC registers the DirectX input surface per
+  encode session, and the driver accepts the registration **only if the
+  texture was created on the same `ID3D11Device` the session was opened
+  with**.  A texture from a different device — even on the same
+  physical adapter — is refused with `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`
+  (status 9).  So the seam is "**share the device** and hand the
+  texture across", and that is what landed.
+
+    - `video_frame::GpuContext` — a portable, refcounted *device* handle
+      (`backend` / `device` / `immediate` / `keepalive`), so a producer
+      can publish the device its surfaces live on without either side
+      including a platform header.  `plugins::` re-exports it, so
+      plug-in code stays in one namespace.
+    - `plugins::IVideoCapture` grew three **additive** virtuals:
+      `set_gpu_frame_callback()`, `gpu_context()` and
+      `supports_gpu_frames()`.  All three have default implementations,
+      so an existing capture plug-in compiles and runs unchanged; a
+      plug-in that does not implement them simply never delivers a
+      surface, and the engine falls back to the CPU path.
+    - `plugins::GpuCaptureFrame` carries a refcounted
+      `std::shared_ptr<video_frame::GpuBuffer>` plus the dirty
+      rectangles, the timestamps and the colour description (plan C5).
+      A *borrowed* handle would die with the next `pop_frame()`, which
+      is the wrong shape for a consumer that holds the surface across
+      its own async work.
+    - `plugins::VideoCodecConfig` gained `gpu_context`, and the engine
+      fills it from the capture device **before** the codec is opened —
+      the encode session has to live on the capture's device, so the
+      device has to be known before `open()`.
+    - The Windows DXGI / WGC backends publish their D3D11 device, and
+      their texture pool now tracks the **busy** slots (the
+      `weak_ptr` of the buffer it handed out) so a texture nobody has
+      released is never overwritten.
+    - `src/engine/src/engine_gpu_mailbox.hpp` — `detail::GpuFrameMailbox`,
+      a single-slot drop-oldest exchange.  The capture device delivers
+      on **its own thread**; the mailbox is the boundary that keeps the
+      codec on the **tick thread** (RD-6).  The newest frame is the
+      truth, so the stale one is dropped.
+    - The **engine** wires the seam together, in `init_video_plugins()`:
+      it attaches the capture device's GPU callback to the mailbox,
+      publishes the capture's `GpuContext` into
+      `VideoCodecConfig::gpu_context` **before** the codec is created
+      (the encode session has to live on the capture's device, so the
+      device has to be known before `open()`), and reports the seam's
+      counters in the stats snapshot.  On teardown the mailbox is
+      cleared **before** the capture device is closed, so a pending
+      frame never holds a texture that belongs to a device that is
+      going away.
+    - The NVENC encoder **adopts** the capture's device instead of
+      creating its own, verifies that the texture it was handed lives
+      on that device, and accepts the BGRA input the desktop compositor
+      produces natively (`DXGI_FORMAT_B8G8R8A8_UNORM` declared as
+      `NV_ENC_BUFFER_FORMAT_ARGB`) — no shader / VideoProcessor
+      conversion pass in between.
+    - `Stats::video_capture_gpu_frames` / `video_capture_gpu_errors` /
+      `video_capture_gpu_wired` expose the seam's own counters, so a
+      host can see the GPU path running (or not) rather than infer it.
+    - `tests/test_engine_capture_zero_copy.cpp` drives the **engine**
+      (not the two modules) and proves the four facts together: the
+      wiring happens, the codec receives the *capture's* device, the
+      surface reaches the encoder with `video_capture_bytes_copied == 0`
+      and `video_capture_frames_cpu_staged == 0`, and the codec is
+      called **only** from the tick thread.
+    - `tests/bench/bench_zc_seam.cpp` measures the driver-level seam on
+      real hardware: on the reference host NVENC accepts an NV12 and a
+      BGRA surface created on the session's own device and **refuses**
+      one created on another device (status 9) — which is exactly the
+      constraint the shared-device design exists to satisfy.
+
+- **The RTP packet builder moved into the engine (v1.4, ADR-025
+  Decision 4).**  The engine is exempt from Layout Invariant 4 for
+  `sdp::` and `rtp::` — but the exemption now has a *visible boundary*:
+  the outbound RTP packets are built in exactly one file,
+  `src/engine/src/rtp_packetizer.cpp`, and
+  `tools/check_engine_layering.py` enforces it at the symbol level
+  (`rtp::PacketBuilder` may only be named there).
+
 - **The session limits and the administrative kill switch (v1.4,
   remote-desktop plan I6).**  The reference signalling service had no
   bounds at all: every device that presented a pairing code got a
@@ -2465,6 +2547,70 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
 ### Fixed
+
+- **Every shipped example compiled and then refused to start.**  The
+  remote-desktop clients (`rd_device`, `rd_viewer`) and the other
+  examples (`demo-p2p`, `loopback-p2p`, `demo-wtserver`,
+  `demo-agent-gateway`) all link `nimrtc::web_transport`, which pulls in
+  the msquic **shared** library.  On Windows that library is a DLL, and
+  the loader looks for it *next to the executable* — so an example
+  without `msquic.dll` beside it dies with `STATUS_DLL_NOT_FOUND`
+  (0xc0000135) **before `main()` is entered**, with no message and no
+  log line.  The exit code was the only symptom, and it read like a
+  crash in the program rather than a missing file.
+
+  The test tree had always handled this — `gtest_discover_tests` *runs*
+  the executable to enumerate its cases, so the missing DLL showed up as
+  a build failure — and `cmake/NimRTCTest.cmake` grew a
+  `nimrtc_copy_msquic_dll()` helper for it.  The **examples** had no
+  such handler, so the whole example tree was in the worst shape a
+  shipped artefact can be in: the build was green and every binary was
+  unusable.
+
+    - **New module `cmake/NimRTCRuntime.cmake`** — the runtime staging
+      helpers, shared by the test tree and the example tree so there is
+      one implementation:
+      - `nimrtc_stage_msquic_dll(<target>)` copies the per-config
+        `msquic.dll` out of the vendored build tree
+        (`src/third_party/msquic/bin/$<CONFIG>/`) next to the
+        executable.  A no-op off Windows and when the vendored msquic
+        target is absent.
+      - `nimrtc_stage_dtls_certs(<target>)` copies the **Chrome-friendly**
+        DTLS certificate into `<target-dir>/certs/`.  This matters
+        because the absolute fallback compiled into `nimrtc::dtls` points
+        at the *upstream* wolfSSL certificate, which carries no
+        `subjectAltName` — and Chrome (BoringSSL) rejects it with fatal
+        alert 46 ("certificate_unknown").  A NimRTC-to-NimRTC session
+        works with either; a browser session only works with the staged
+        one.
+      - `nimrtc_stage_runtime(<target>)` — the one call a shipped
+        executable needs; it does both.
+    - `cmake/NimRTCTest.cmake`'s `nimrtc_copy_msquic_dll()` now delegates
+      to the shared helper, so the historical name keeps working.
+    - `examples/CMakeLists.txt` and
+      `examples/demo-agent-gateway/CMakeLists.txt` call
+      `nimrtc_stage_runtime()` on every example, which also replaces the
+      three hand-rolled certificate-copy blocks that had grown up
+      independently in `demo-p2p`, `loopback-p2p` and
+      `demo-agent-gateway`.
+    - **Verified**: all six examples now start and exit 0 on `--help`,
+      and a local `rd_device` ↔ `rd_viewer` session over the
+      stdin/stdout signalling dialect completes the full handshake — one
+      offer (51 SDP lines, with both a video and an audio m-line), one
+      answer, and eleven relayed ICE candidates.
+
+- **The Windows capture device's GPU context released the D3D11 device
+  one time too many.**  `WindowsCapture::gpu_context()` hands the caller
+  a `GpuContext` whose `keepalive` is a `shared_ptr` that owns *one*
+  reference to the `ID3D11Device` — so a consumer that outlives the
+  capture device never sees a dangling device pointer.  The keepalive
+  was built from a `ComPtr` **copy** of the device, and the deleter
+  called `Release()` on it: the copy's own destructor released the
+  reference *again*, so the device's refcount went to zero while the
+  context was still alive, and the next use faulted with an access
+  violation (`0xC0000005`).  The keepalive now takes its **own**
+  reference (`AddRef`) before the copy goes out of scope, so the
+  reference count is exactly balanced.
 
 - **The Windows cursor source crashed the process on every poll.**  The
   cursor layer (remote-desktop plan A6) read the icon's monochrome

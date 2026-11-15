@@ -172,12 +172,53 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// D3D11 device singleton (refcounted)
+// D3D11 device (refcounted)
 // ---------------------------------------------------------------------------
+//
+// ## The device is a *shared* resource
+//
+// NVENC's DirectX input path registers the input texture with the
+// encode session, and the driver accepts the registration **only if the
+// texture was created on the very same `ID3D11Device` the session was
+// opened with**.  A texture from a *different* device — even on the
+// *same* physical adapter — is refused with
+// `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).  This was measured
+// on the reference host (RTX 3060, driver 5xx) with a dedicated probe:
+// the same texture registered on a second `ID3D11Device` was rejected
+// with status 9, while the identical texture on the session's own
+// device encoded a valid IDR NALU.
+//
+// So the encoder does **not** always own its device.  When the config
+// carries a `GpuContext` (the capture device published one), the encoder
+// uses *that* device — the same one the frames were captured on — and
+// keeps it alive through the context's keepalive.
+//
+// When there is no context, the encoder falls back to its own private
+// device, which is correct for the CPU path (the frames reach the
+// encoder as host pixels, and the device is only a formality).
 
 struct D3D11DeviceHolder {
+    /** The device the encoder's session is opened on.
+     *
+     *  Either the one we created ourselves (`owned_dev`) or the one the
+     *  capture device published (`foreign_dev`).  A foreign device
+     *  wins: it is the only one on which the captured textures can be
+     *  registered. */
     ID3D11Device*        dev  = nullptr;
     ID3D11DeviceContext* ctx  = nullptr;
+
+    /** A device we created ourselves (released by this holder). */
+    ID3D11Device*        owned_dev  = nullptr;
+    ID3D11DeviceContext* owned_ctx  = nullptr;
+
+    /** A device the capture device owns (borrowed; kept alive by the
+     *  keepalive, released by whoever created it). */
+    ID3D11Device*        foreign_dev = nullptr;
+    ID3D11DeviceContext* foreign_ctx = nullptr;
+
+    /** The keepalive for a *foreign* device (one the capture device
+     *  owns).  Null when the device is ours. */
+    std::shared_ptr<void> keepalive;
     mutable std::mutex    mtx;
 
     bool create() noexcept {
@@ -186,20 +227,68 @@ struct D3D11DeviceHolder {
         HRESULT hr = D3D11CreateDevice(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-            nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr, &ctx);
-        if (FAILED(hr) || !dev) {
+            nullptr, 0, D3D11_SDK_VERSION, &owned_dev, nullptr, &owned_ctx);
+        if (FAILED(hr) || !owned_dev) {
             NIMRTC_LOG_ERROR("nvenc: D3D11CreateDevice failed (hr=0x"
                             << std::hex << hr << std::dec << ")");
+            owned_dev = nullptr;
+            owned_ctx = nullptr;
             return false;
         }
+        dev = owned_dev;
+        ctx = owned_ctx;
         NIMRTC_LOG_INFO("nvenc: D3D11 device created");
+        return true;
+    }
+
+    /**
+     * @brief Adopt a *foreign* device — one the capture device owns.
+     *
+     * The device is used as-is; the encoder never creates a second one.
+     * The keepalive keeps it alive for as long as the encoder holds it.
+     *
+     * A foreign device always wins over an owned one: the captured
+     * textures only exist on the foreign device, so a session opened on
+     * the owned one could not register them.
+     */
+    bool adopt(void* device, void* immediate,
+               std::shared_ptr<void> keepalive_in) noexcept {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (!device) return false;
+
+        // Already adopted: the same device is fine, a different one is
+        // not — the driver would refuse the registration.
+        if (foreign_dev) {
+            return foreign_dev == device;
+        }
+
+        foreign_dev = static_cast<ID3D11Device*>(device);
+        foreign_ctx = static_cast<ID3D11DeviceContext*>(immediate);
+        // The context is optional — a consumer that only registers a
+        // surface does not need the immediate context.
+        if (!foreign_ctx) {
+            foreign_dev->GetImmediateContext(&foreign_ctx);
+        }
+        keepalive = std::move(keepalive_in);
+
+        // The foreign device takes over as *the* device.
+        dev = foreign_dev;
+        ctx = foreign_ctx;
+
+        NIMRTC_LOG_INFO("nvenc: using the capture device's D3D11 device "
+                        "(shared zero-copy device)");
         return true;
     }
 
     ~D3D11DeviceHolder() {
         std::lock_guard<std::mutex> lock(mtx);
-        if (ctx)  { ctx->Release();  ctx  = nullptr; }
-        if (dev)  { dev->Release();  dev  = nullptr; }
+        // The foreign device belongs to somebody else — it is released
+        // by its owner, not here.  Only the keepalive is dropped.
+        keepalive.reset();
+        if (owned_ctx)  { owned_ctx->Release();  owned_ctx  = nullptr; }
+        if (owned_dev)  { owned_dev->Release();  owned_dev  = nullptr; }
+        dev = nullptr;
+        ctx = nullptr;
     }
 };
 
@@ -514,7 +603,23 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         if (opened_) return plugins::kOk;
 
-        if (!d3d11().create()) {
+        // ---- The device (remote-desktop plan B10) --------------------------
+        //
+        // The encoder uses the *capture device's* device when the config
+        // publishes one, and its own otherwise.  The distinction is not
+        // cosmetic: NVENC registers the input texture with the encode
+        // session and the driver refuses a texture that was not created
+        // on the session's own device (status 9,
+        // NV_ENC_ERR_RESOURCE_REGISTER_FAILED).
+        if (cfg_.gpu_context.valid()) {
+            if (!d3d11().adopt(cfg_.gpu_context.device,
+                               cfg_.gpu_context.immediate,
+                               cfg_.gpu_context.keepalive)) {
+                NIMRTC_LOG_ERROR("nvenc: the shared GPU device could not be "
+                                 "adopted");
+                return plugins::kErrHardwareError;
+            }
+        } else if (!d3d11().create()) {
             NIMRTC_LOG_ERROR("nvenc: cannot create D3D11 device");
             return plugins::kErrHardwareError;
         }
@@ -838,13 +943,21 @@ public:
     //
     //   - the resource must be a **D3D11 texture** (the DirectX input
     //     resource type);
-    //   - the texture must be **NV12** — the only format the driver
-    //     accepts for a registered DirectX input surface.  A BGRA
-    //     surface (what a DXGI Desktop Duplication capture produces)
-    //     is *not* acceptable, and converting it would need a video
-    //     processing shader that this module does not carry.  Such a
-    //     surface is **refused** with `kErrUnsupported`, and the engine
-    //     then takes the CPU staging path (the universal fallback);
+    //   - the texture must live on the **session's own device** — the
+    //     driver refuses a texture created on another `ID3D11Device`
+    //     with `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9), even
+    //     when both devices sit on the same physical adapter.  This is
+    //     why the capture device publishes its device as a
+    //     `GpuContext` and the encoder adopts it;
+    //   - the texture must be **NV12** or **BGRA** — both are accepted
+    //     for a registered DirectX input surface, and the driver does
+    //     the colour conversion itself.  BGRA matters: it is the
+    //     format every desktop compositor produces, so the capture →
+    //     NVENC hand-off needs no shader and no host round-trip.
+    //     (Measured on the reference host, RTX 3060 / driver 5xx: a
+    //     BGRA texture registered as `NV_ENC_BUFFER_FORMAT_ARGB` maps
+    //     to `mappedBufferFmt = 0x01000000` and encodes a valid IDR
+    //     NALU — 127 bytes, no error.)
     //   - the geometry must match the session's — a resolution change
     //     needs a fresh session, which the CPU path handles.
     //
@@ -875,13 +988,58 @@ public:
         auto* texture = static_cast<ID3D11Texture2D*>(gpu.handle().handle);
         if (!texture) return plugins::kErrInvalidParam;
 
+        // ---- It must live on the session's own device ----------------------
+        //
+        // This is the constraint the whole seam exists for.  NVENC
+        // registers the texture with the encode session, and the driver
+        // accepts the registration only when the texture was created on
+        // the session's own `ID3D11Device`.  A texture from a different
+        // device — even on the same physical adapter — is refused with
+        // `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).
+        //
+        // Checking it here turns an opaque driver status into an
+        // actionable message, and lets the engine fall back to the CPU
+        // path with a reason.
+        {
+            ID3D11Device* tex_device = nullptr;
+            texture->GetDevice(&tex_device);
+            const bool same_device = (tex_device == d3d11().dev);
+            if (tex_device) tex_device->Release();
+            if (!same_device) {
+                NIMRTC_LOG_WARN("nvenc: the surface was created on a different "
+                                "D3D11 device than the encode session — the "
+                                "driver would refuse the registration "
+                                "(status 9). The capture device's device must "
+                                "be shared with the encoder.");
+                return plugins::kErrUnsupported;
+            }
+        }
+
         // ---- Its format must be one the driver accepts --------------------
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
-        if (desc.Format != DXGI_FORMAT_NV12) {
-            // The driver accepts only NV12 for a registered DirectX input
-            // surface.  Anything else (BGRA, for instance) is refused
-            // here, and the caller falls back to the CPU staging path.
+
+        // The driver accepts two layouts for a registered DirectX input
+        // surface, and the format we *declare* has to match the layout
+        // of the texture:
+        //
+        //   - NV12  -> `NV_ENC_BUFFER_FORMAT_NV12`
+        //   - BGRA  -> `NV_ENC_BUFFER_FORMAT_ARGB`
+        //
+        // The ARGB declaration is *word-ordered* A8R8G8B8: a pixel is a
+        // 32-bit word with B in the lowest byte.  A DXGI BGRA texture
+        // (`DXGI_FORMAT_B8G8R8A8_UNORM`) has exactly that byte order
+        // in memory, so the driver reads it as ARGB without a
+        // conversion pass on our side.
+        NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_NV12;
+        if (desc.Format == DXGI_FORMAT_NV12) {
+            buffer_format = NV_ENC_BUFFER_FORMAT_NV12;
+        } else if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                   desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+            buffer_format = NV_ENC_BUFFER_FORMAT_ARGB;
+        } else {
+            // Anything else (RGBA, a planar YUV, ...) is refused here,
+            // and the caller falls back to the CPU staging path.
             return plugins::kErrUnsupported;
         }
 
@@ -912,7 +1070,7 @@ public:
         reg.pitch            = 0;   // the driver derives it for DirectX
         reg.subResourceIndex = 0;
         reg.resourceToRegister = texture;
-        reg.bufferFormat     = NV_ENC_BUFFER_FORMAT_NV12;
+        reg.bufferFormat     = buffer_format;
         reg.bufferUsage      = NV_ENC_INPUT_IMAGE;
 
         NVENCSTATUS s = lib.fn.nvEncRegisterResource(session_, &reg);

@@ -245,6 +245,7 @@ endif()
 
 include(NimRTCOptions)        # sets C++ standard + warnings + visibility
 include(NimRTCVendored)       # declares vendor library targets (no-op if unused)
+include(NimRTCRuntime)        # declares the runtime staging helpers
 include(NimRTCTest)            # declares nimrtc_add_test() (no-op if tests OFF)
 
 # -----------------------------------------------------------------------------

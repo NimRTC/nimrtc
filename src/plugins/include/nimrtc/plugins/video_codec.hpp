@@ -79,6 +79,7 @@ using NIMRTC_API_STABLE GpuBackend       = video_frame::GpuBackend;
 using NIMRTC_API_STABLE GpuHandle        = video_frame::GpuHandle;
 using NIMRTC_API_STABLE GpuBuffer        = video_frame::GpuBuffer;
 using NIMRTC_API_STABLE GpuBufferPool    = video_frame::GpuBufferPool;
+using NIMRTC_API_STABLE GpuContext       = video_frame::GpuContext;
 
 inline NIMRTC_API_STABLE std::string_view pixel_format_name(VideoPixelFormat f) noexcept {
     return video_frame::pixel_format_name(f);
@@ -237,6 +238,31 @@ struct NIMRTC_API_STABLE VideoCodecConfig {
      */
     VideoCodecBackendPreference backend_preference =
         VideoCodecBackendPreference::kAuto;
+
+    /**
+     * @brief The GPU device the encoder should create its session on.
+     *
+     * ## Why this is in the config and not discovered later
+     *
+     * A hardware encoder registers the input surface with the driver's
+     * encode session, and the driver accepts the registration **only
+     * if the surface was created on the same device the session was
+     * opened with**.  On Windows this is not a policy choice — a
+     * texture from a different `ID3D11Device` (even on the same
+     * physical adapter) is refused with
+     * `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).
+     *
+     * So the encoder has to be told *which* device to use, and the
+     * answer comes from the capture device that produces the frames.
+     * The engine fills this in from the capture device's
+     * `gpu_context()` before the codec is opened.
+     *
+     * Left empty (the default), the encoder creates its **own** device —
+     * which is correct for a codec that only ever sees CPU pixels, and
+     * wrong for one that is handed foreign surfaces.  A host that feeds
+     * its own GPU frames sets this explicitly.
+     */
+    GpuContext gpu_context;
 };
 
 // ---------------------------------------------------------------------------

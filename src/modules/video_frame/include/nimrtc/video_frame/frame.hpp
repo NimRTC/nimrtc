@@ -526,6 +526,122 @@ NIMRTC_API_STABLE inline std::string_view gpu_backend_name(GpuBackend b) noexcep
 }
 
 // ---------------------------------------------------------------------------
+// GpuContext — the *shared* GPU device between producer and consumer
+// ---------------------------------------------------------------------------
+//
+// ## Why this exists
+//
+// A `GpuBuffer` carries a *surface* (a texture, a pixel buffer).  It does
+// **not** carry the *device* that surface was created on — and on Windows
+// that omission is fatal for the zero-copy path.
+//
+// NVENC's DirectX input path registers the texture with the encode
+// session, and the driver accepts the registration **only if the texture
+// was created on the very same `ID3D11Device` the session was opened
+// with**.  A texture from a *different* device — even on the *same*
+// physical adapter — is refused with
+// `NV_ENC_ERR_RESOURCE_REGISTER_FAILED` (status 9).  This is not a
+// policy choice by the driver; it is how the resource is handed to the
+// encoder's engine.
+//
+// So a capture device and an encoder that want to share a surface must
+// also share the *device*.  That is what `GpuContext` is: the
+// device handle, carried alongside the frames, so the two can agree on
+// it before the first frame flows.
+//
+// ## The contract
+//
+//   - The context is **created once**, by whoever owns the device (in
+//     practice: the capture device, or the host that owns the GPU).
+//   - It is **copied** by value into every consumer that needs it.  The
+//     copy is cheap; the *device* is shared, not duplicated.
+//   - A consumer that receives a context **must** create its own
+//     resources on that device, never on a private one.  A resource
+//     created elsewhere cannot be registered with the encoder.
+//
+// ## What it is NOT
+//
+// It is deliberately **not** a platform header.  It carries an opaque
+// `void*` plus a `GpuBackend` tag — exactly the same shape as
+// `GpuHandle`, so no module has to include `d3d11.h` to talk about it.
+// The concrete module casts it (and only the concrete module knows what
+// the pointer actually is).
+
+/**
+ * @brief The shared GPU device / context between a producer and a consumer.
+ *
+ * @see GpuContext for the contract and the reason it exists.
+ */
+struct NIMRTC_API_STABLE GpuContext {
+    /** The device family this context belongs to.  `kNone` means "no
+     *  context" — the default, and the honest answer for a CPU path. */
+    GpuBackend backend = GpuBackend::kNone;
+
+    /** The native device handle.
+     *
+     *  For `GpuBackend::kWindowsD3D11Texture` this is an
+     *  `ID3D11Device*`.  Null when there is no context. */
+    void* device = nullptr;
+
+    /** The native device context / command queue, when the backend has
+     *  a separate one (`ID3D11DeviceContext*` on Windows).  May be
+     *  null — a consumer that only *registers* a surface does not need
+     *  the immediate context. */
+    void* immediate = nullptr;
+
+    /** Keeps the native device alive.
+     *
+     *  The producer owns the device and hands out a *borrowed* pointer
+     *  to it.  Without a keepalive, a consumer that outlives the
+     *  producer would hold a dangling `ID3D11Device*` — and a dangling
+     *  device pointer is not a crash you can debug, it is a crash
+     *  somewhere else entirely.
+     *
+     *  The producer installs a `shared_ptr` that owns the device here;
+     *  the consumer keeps a copy.  The device is released when the last
+     *  holder lets go.
+     *
+     *  Null when there is no context, or when the producer does not
+     *  want to transfer ownership (in which case the producer must
+     *  guarantee the device outlives every consumer). */
+    std::shared_ptr<void> keepalive;
+
+    /** True iff a device is actually present. */
+    [[nodiscard]] bool valid() const noexcept {
+        return backend != GpuBackend::kNone && device != nullptr;
+    }
+
+    /** True iff this context and @p other refer to the same device.
+     *
+     *  The comparison is by pointer identity: two contexts are the same
+     *  only when they name the same device object.  (Two *different*
+     *  `ID3D11Device` objects on the same adapter are still two
+     *  devices, and the driver treats them as such — see the header
+     *  comment.) */
+    [[nodiscard]] bool same_device(const GpuContext& other) const noexcept {
+        return backend == other.backend && device == other.device;
+    }
+};
+
+/** Human-readable GpuContext device name (for logging). */
+NIMRTC_API_STABLE inline std::string_view gpu_context_device_name(
+        GpuContext c) noexcept {
+    if (!c.valid()) return "none";
+    switch (c.backend) {
+        case GpuBackend::kWindowsD3D11Texture: return "win-d3d11-device";
+        case GpuBackend::kNvidiaCudaArray:
+        case GpuBackend::kNvidiaCudaDevicePtr: return "cuda-device";
+        case GpuBackend::kLinuxVaapiSurface:
+        case GpuBackend::kLinuxVaapiDRM:       return "vaapi-device";
+        case GpuBackend::kAppleMTLTexture:
+        case GpuBackend::kMetalIOSurface:      return "metal-device";
+        case GpuBackend::kVulkanImage:         return "vulkan-device";
+        case GpuBackend::kOpenGLTexture:       return "gl-context";
+        default:                               return "custom-device";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GpuBuffer — refcounted GPU surface / texture with optional CPU mirror
 // ---------------------------------------------------------------------------
 //

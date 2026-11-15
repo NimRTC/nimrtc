@@ -498,6 +498,86 @@ using NIMRTC_API_STABLE CaptureFrameCallback =
     std::function<void(const CaptureFrame& frame)>;
 
 // ---------------------------------------------------------------------------
+// GPU frame delivery (remote-desktop plan B10 — the zero-copy seam)
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One captured frame, delivered as a GPU surface.
+ *
+ * ## Why this is a *separate* delivery path
+ *
+ * `CaptureFrame` carries CPU pixels and a *borrowed* GPU handle that
+ * dies with the next `pop_frame()`.  That is the right shape for a
+ * polling consumer, but it is the **wrong** shape for a hardware
+ * encoder: NVENC's DirectX input path registers the texture with the
+ * encode session and the driver accepts the registration only if the
+ * texture lives on the *same* `ID3D11Device` the session was opened
+ * with (a texture from another device is refused with
+ * `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`, status 9).
+ *
+ * So the zero-copy path needs three things the CPU path does not:
+ *
+ *   1. a **shared device** — the producer publishes the device it
+ *      captures on (`GpuContext`), and the consumer creates its encode
+ *      session on *that* device;
+ *   2. a **surface the consumer owns** — the producer hands over a
+ *      refcounted `GpuBuffer` rather than a borrowed pointer, so the
+ *      consumer can hold it across its own async work;
+ *   3. **no intermediate queue** — the frame goes straight from the
+ *      producer's thread to the consumer's, because a queue that
+ *      copies the pixels is exactly what the zero-copy path exists to
+ *      avoid.
+ *
+ * ## The lifetime contract
+ *
+ * The receiver owns the `GpuBuffer` for as long as it needs the
+ * texture (i.e. until its encode call returns).  Releasing it is the
+ * receiver's job.  The producer never touches it again.
+ */
+struct NIMRTC_API_STABLE GpuCaptureFrame {
+    /** The captured surface.
+     *
+     *  Its handle is an `ID3D11Texture2D` for the Windows backends
+     *  (`GpuBackend::kWindowsD3D11Texture`), in `B8G8R8A8_UNORM`
+     *  (BGRA) — the format every desktop compositor produces natively.
+     *
+     *  The surface was created on the device named by the producer's
+     *  `GpuContext`; a consumer that registers it with a hardware
+     *  encoder must use that same device. */
+    std::shared_ptr<GpuBuffer> gpu_buffer;
+
+    /** The changed region(s) of this frame, in source pixels.
+     *
+     *  The DXGI backend fills this from `GetFrameDirtyRects` /
+     *  `GetFrameMoveRects`.  A backend with no per-pixel diff
+     *  information reports `full_frame = true` — the honest answer,
+     *  not an empty rect that would mean "nothing changed". */
+    CaptureDirtyRects dirty;
+
+    /** Capture timestamp, microseconds (monotonic). */
+    std::int64_t capture_ts_us = 0;
+
+    /** Per-device frame sequence number (strictly increasing). */
+    std::uint32_t frame_seq = 0;
+
+    /** The colour description of the captured picture (plan C5).
+     *
+     *  A desktop compositor delivers full-range pixels; a camera in
+     *  the default studio setup delivers limited-range ones. */
+    VideoColorDescription color;
+};
+
+/**
+ * @brief Callback invoked with a GPU frame.
+ *
+ * Invoked on the capture plug-in's own thread.  It must not block: the
+ * implementation is expected to hand the frame straight to the encoder
+ * and return.
+ */
+using NIMRTC_API_STABLE GpuCaptureFrameCallback =
+    std::function<void(GpuCaptureFrame&& frame)>;
+
+// ---------------------------------------------------------------------------
 // IVideoCapture
 // ---------------------------------------------------------------------------
 
@@ -568,6 +648,60 @@ public:
      *  Optional: a consumer that only polls `pop_frame()` need not set
      *  it. */
     virtual void set_frame_callback(CaptureFrameCallback cb) noexcept = 0;
+
+    // ---- GPU frame delivery (remote-desktop plan B10) --------------------
+    //
+    // The zero-copy seam.  It is **additive**: a capture plug-in that
+    // does not implement it keeps working exactly as before (the
+    // default implementations below), so an existing plug-in compiles
+    // and runs unchanged.  A plug-in that *does* implement it must
+    // also publish a `GpuContext` — the consumer has to know which
+    // device the surfaces live on.
+
+    /**
+     * Attach a GPU consumer.
+     *
+     * With a GPU callback attached, the device delivers the surface
+     * *inside* the callback and does **not** push the frame through
+     * the CPU copy queue — the point of the zero-copy path is that the
+     * pixels never enter host memory.  Without one, the device stages
+     * to the CPU and uses the queue, exactly like the portable layer
+     * expects.
+     *
+     * The default implementation does nothing: a plug-in that cannot
+     * deliver GPU surfaces simply never calls the callback, and the
+     * consumer falls back to the CPU path.
+     */
+    virtual void set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept {
+        (void)cb;
+    }
+
+    /**
+     * The GPU device this capture device captures on.
+     *
+     * A consumer that wants to hand the surfaces to a hardware encoder
+     * **must** create its encoder session on this device: a surface
+     * created on a different device cannot be registered with the
+     * encoder, and the driver refuses the registration.
+     *
+     * The default is "no context" — a CPU-only capture device.
+     */
+    [[nodiscard]] virtual GpuContext gpu_context() const noexcept {
+        return {};
+    }
+
+    /**
+     * True iff this device can deliver surfaces without a host-memory
+     * round-trip.
+     *
+     * This is the *device-wide* statement, and it mirrors
+     * `CaptureCapabilities::zero_copy`.  A device that reports true
+     * must honour the GPU callback; a device that reports false must
+     * not call it.
+     */
+    [[nodiscard]] virtual bool supports_gpu_frames() const noexcept {
+        return false;
+    }
 
     /** Counters. */
     [[nodiscard]] virtual CaptureStats stats() const noexcept = 0;

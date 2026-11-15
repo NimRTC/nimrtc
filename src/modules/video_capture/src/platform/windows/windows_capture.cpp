@@ -398,11 +398,21 @@ public:
                 auto buffer = wcap::make_gpu_buffer(owned, region.width,
                                                    region.height, format);
                 if (buffer) {
+                    // The consumer may hold this buffer past the
+                    // callback (the engine hands it to its tick thread),
+                    // so the pool must not hand the texture out again
+                    // while the buffer is alive.
+                    pool.mark_busy(buffer);
                     GpuCaptureFrame frame;
                     frame.gpu_buffer = std::move(buffer);
                     frame.dirty = dirty;
                     frame.capture_ts_us = ts;
                     frame.frame_seq = seq;
+                    // The desktop compositor delivers **full-range**
+                    // BT.709 pixels (plan C5).  Saying so is what lets
+                    // the encoder code the picture correctly.
+                    frame.color.range = plugins::VideoColorRange::kFull;
+                    frame.color.matrix = plugins::VideoColorMatrix::kBt709;
                     ++stats_.frames_captured;
                     ++stats_.frames_zero_copy;
                     gpu_cb_(std::move(frame));
@@ -564,6 +574,67 @@ public:
         if (dxgi_) return dxgi_->d3d().device;
         if (wgc_) return wgc_->d3d().device;
         return nullptr;
+    }
+
+    /**
+     * @brief The GPU device this capture device captures on.
+     *
+     * Published so that a consumer — typically a hardware encoder —
+     * can create its own resources on the *same* device.  NVENC's
+     * DirectX input path refuses a texture that was created on another
+     * `ID3D11Device` (even on the same physical adapter) with
+     * `NV_ENC_ERR_RESOURCE_REGISTER_FAILED`, so sharing the device is
+     * what makes the zero-copy hand-off possible at all.
+     *
+     * The device is *borrowed* — it belongs to the DXGI / WGC backend.
+     * The keepalive below keeps it alive for as long as a consumer
+     * holds the context, so a consumer that outlives the capture
+     * device never sees a dangling `ID3D11Device*`.
+     */
+    plugins::GpuContext gpu_context() const noexcept {
+        const wcap::ComPtr<ID3D11Device> device = current_device();
+        if (!device) return {};
+
+        plugins::GpuContext ctx;
+        ctx.backend = plugins::GpuBackend::kWindowsD3D11Texture;
+        ctx.device  = device.Get();
+        ctx.immediate = immediate_context().Get();
+        // The keepalive owns a *reference* to the device, so the device
+        // survives the capture device's own teardown.
+        ctx.keepalive = device_keepalive();
+        return ctx;
+    }
+
+    /** True iff the backend can deliver surfaces without a host round-trip. */
+    [[nodiscard]] bool supports_gpu_frames() const noexcept {
+        if (!opts_.allow_zero_copy) return false;
+        return dxgi_ != nullptr || wgc_ != nullptr;
+    }
+
+    /**
+     * @brief A `shared_ptr` that keeps the D3D11 device alive.
+     *
+     * The device is owned by the DXGI / WGC backend's `D3D11State`,
+     * which releases it when the backend is torn down.  A consumer that
+     * holds a `GpuContext` may outlive that, so the context carries a
+     * `shared_ptr` that holds its *own* reference to the device.
+     *
+     * The reference is taken here, on the capture thread, and released
+     * when the last consumer lets go of the context.
+     */
+    std::shared_ptr<void> device_keepalive() const noexcept {
+        const wcap::ComPtr<ID3D11Device> device = current_device();
+        if (!device) return nullptr;
+        // The `ComPtr` copy above already holds *one* reference, and it
+        // releases it when this function returns.  The `shared_ptr` needs
+        // a reference of its *own*, or the device's refcount would drop
+        // to zero while the context is still alive — and the crash would
+        // surface far away from here, in the consumer.
+        device->AddRef();
+        // A `shared_ptr` that owns one reference to the device.
+        return std::shared_ptr<void>(device.Get(), [](void* p) {
+            static_cast<ID3D11Device*>(p)->Release();
+        });
     }
 
     // ---- Errors -----------------------------------------------------------
@@ -812,6 +883,14 @@ void WindowsCapture::set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept
     impl_->gpu_cb_ = std::move(cb);
 }
 
+plugins::GpuContext WindowsCapture::gpu_context() const noexcept {
+    return impl_->gpu_context();
+}
+
+bool WindowsCapture::supports_gpu_frames() const noexcept {
+    return impl_->supports_gpu_frames();
+}
+
 void WindowsCapture::set_error_callback(WindowsCaptureErrorCallback cb) noexcept {
     impl_->error_cb_ = std::move(cb);
 }
@@ -929,6 +1008,14 @@ plugins::CaptureStats WindowsCapture::stats() const noexcept {
 
 void WindowsCapture::set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept {
     impl_->gpu_cb_ = std::move(cb);
+}
+
+plugins::GpuContext WindowsCapture::gpu_context() const noexcept {
+    return {};
+}
+
+bool WindowsCapture::supports_gpu_frames() const noexcept {
+    return false;
 }
 
 void WindowsCapture::set_error_callback(WindowsCaptureErrorCallback cb) noexcept {

@@ -219,27 +219,14 @@ struct NIMRTC_API_STABLE WindowsCaptureOptions {
  * hold it alive for as long as it uses the texture (i.e. until the
  * encode call returns).  Releasing it afterwards is the receiver's
  * job.
+ *
+ * This is the *plugin-level* type (`plugins::GpuCaptureFrame`): the
+ * zero-copy seam lives in the plugin interface, so a third-party
+ * capture plug-in can implement it without depending on this module.
+ * The alias is here because this module's public header is what a host
+ * that uses the Windows backends directly already includes.
  */
-struct NIMRTC_API_STABLE GpuCaptureFrame {
-    /** The captured surface.  Its handle is a `ID3D11Texture2D`
-     *  (`GpuBackend::kWindowsD3D11Texture`), in `B8G8R8A8_UNORM`
-     *  (BGRA) — the format the desktop compositor produces natively. */
-    std::shared_ptr<video_frame::GpuBuffer> gpu_buffer;
-
-    /** The changed region(s) of this frame, in source pixels.
-     *
-     *  The DXGI backend fills this from `GetFrameDirtyRects` /
-     *  `GetFrameMoveRects`.  The WGC backend has no dirty-rect
-     *  information, so it reports `full_frame = true` — the honest
-     *  answer, not an empty rect that would mean "nothing changed". */
-    plugins::CaptureDirtyRects dirty;
-
-    /** Capture timestamp, microseconds (monotonic). */
-    std::int64_t capture_ts_us = 0;
-
-    /** Per-device frame sequence number (strictly increasing). */
-    std::uint32_t frame_seq = 0;
-};
+using GpuCaptureFrame = plugins::GpuCaptureFrame;
 
 /**
  * @brief Callback invoked with a GPU frame.
@@ -248,8 +235,7 @@ struct NIMRTC_API_STABLE GpuCaptureFrame {
  * implementation is expected to hand the frame straight to the encoder
  * and return.  The reference is valid for the duration of the call.
  */
-using NIMRTC_API_STABLE GpuCaptureFrameCallback =
-    std::function<void(GpuCaptureFrame&& frame)>;
+using GpuCaptureFrameCallback = plugins::GpuCaptureFrameCallback;
 
 /**
  * @brief Callback invoked when the capture device fails.
@@ -309,7 +295,13 @@ public:
 
     [[nodiscard]] plugins::CaptureStats stats() const noexcept override;
 
-    // ---- Windows-specific -------------------------------------------------
+    // ---- The zero-copy seam (plugins::IVideoCapture) ---------------------
+    //
+    // The plugin-level seam and the concrete one are the *same* hook:
+    // `plugins::GpuCaptureFrame` is the same shape as this module's
+    // `GpuCaptureFrame` (this module's name is an alias), so the
+    // concrete class simply overrides the plugin-level method.  A host
+    // that uses the concrete class can use either spelling.
 
     /**
      * Attach a GPU consumer.
@@ -321,7 +313,19 @@ public:
      * device stages to the CPU and uses the queue, exactly like the
      * portable layer expects.
      */
-    void set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept;
+    void set_gpu_frame_callback(GpuCaptureFrameCallback cb) noexcept override;
+
+    /** The GPU device this capture device captures on.
+     *
+     *  A consumer that hands the surfaces to a hardware encoder must
+     *  create its encoder session on *this* device: the driver refuses
+     *  to register a surface that lives on another device. */
+    [[nodiscard]] plugins::GpuContext gpu_context() const noexcept override;
+
+    /** True iff this device can deliver surfaces without a host round-trip. */
+    [[nodiscard]] bool supports_gpu_frames() const noexcept override;
+
+    // ---- Windows-specific -------------------------------------------------
 
     /** Attach a failure callback (consent refused, device lost, ...). */
     void set_error_callback(WindowsCaptureErrorCallback cb) noexcept;

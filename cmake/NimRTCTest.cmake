@@ -119,10 +119,13 @@ endfunction()
 # with STATUS_DLL_NOT_FOUND (0xc0000135) on Windows, or dyld errors on
 # macOS / Linux.
 #
-# This helper appends a POST_BUILD custom command to the given test
-# target that copies the msquic runtime DLL from the msquic build tree
-# into the test's output directory. The DLL is per-config, so the path
-# uses `$<CONFIG>`-style generator expressions.
+# The copy itself lives in `cmake/NimRTCRuntime.cmake`, because the
+# **examples** need it just as much — a shipped binary that cannot
+# start is not a shipped binary.  This wrapper keeps the historical
+# name working for the test tree.
+#
+# The DLL is per-config, so the path uses `$<CONFIG>`-style generator
+# expressions.
 #
 # Pair this with `DISCOVERY_MODE PRE_TEST` on gtest_discover_tests so
 # the discovery probe (which runs the .exe to enumerate cases) defers
@@ -131,31 +134,7 @@ endfunction()
 # POST_BUILD copy hasn't fired yet, so the .exe is still DLL-less.
 # -----------------------------------------------------------------------------
 function(nimrtc_copy_msquic_dll target)
-    # Guard against double-call (this file may be included multiple times
-    # across different test subdirectory includes).
-    if(TARGET _nimrtc_msquic_dll_copier_${target})
-        return()
-    endif()
-    if(NOT WIN32)
-        # Non-Windows platforms use a .so or .dylib shared library and do not
-        # require the runtime DLL to be co-located with the test binary.
-        return()
-    endif()
-    if(NOT TARGET msquic)
-        # Vendored msquic library was not built; nothing to copy.
-        return()
-    endif()
-    # Determine the source DLL location using the same multi-config logic
-    # the msquic build uses. QUIC_OUTPUT_DIR is set inside the msquic
-    # CMakeLists.txt and is bin/$<IF:$<CONFIG:Debug>,Debug,Release>.
-    set(_msquic_dll_src
-        "${CMAKE_BINARY_DIR}/src/third_party/msquic/bin/$<CONFIG>/msquic.dll")
-    add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<IF:$<BOOL:$<CONFIG>>,${_msquic_dll_src},${_msquic_dll_src}>"
-            "$<TARGET_FILE_DIR:${target}>/"
-        COMMENT "Copy msquic.dll to test output directory for ${target}"
-        VERBATIM)
+    nimrtc_stage_msquic_dll(${target})
 endfunction()
 
 # -----------------------------------------------------------------------------

@@ -92,6 +92,19 @@ pixel_format_from_dxgi(DXGI_FORMAT fmt) noexcept;
  * duplication hands out is recycled by DXGI the moment the frame is
  * released).  The pool keeps a small ring of them and hands them out
  * round-robin, so the steady state allocates nothing.
+ *
+ * ## Why the pool tracks the *buffer*, not just the texture
+ *
+ * The consumer of a zero-copy frame holds the `GpuBuffer` for as long
+ * as it needs the texture — which may be *past* the delivery callback
+ * (the engine's mailbox hands the frame to the tick thread).  Handing
+ * out a texture somebody is still reading would corrupt the picture.
+ *
+ * So the pool remembers the `weak_ptr` of the buffer it handed out and
+ * **skips the busy slots**: a texture is only reused once nobody holds
+ * its buffer any more.  When every slot is busy the pool allocates a
+ * new texture instead — the steady state (a consumer that keeps up)
+ * never gets there.
  */
 class GpuTexturePool {
 public:
@@ -108,18 +121,34 @@ public:
      * Acquire a texture of the given size and format.
      *
      * The texture is recycled: handing out the next one may overwrite
-     * the content of a previously handed-out texture.  That is exactly
-     * the lifetime contract the zero-copy path documents — the consumer
-     * uses the texture *within* the delivery callback.
+     * the content of a previously handed-out texture — *unless* the
+     * consumer still holds that texture's buffer, in which case the
+     * pool hands out a different one.
      */
     ComPtr<ID3D11Texture2D> acquire(std::uint32_t width,
                                     std::uint32_t height,
                                     DXGI_FORMAT format) noexcept;
 
+    /**
+     * Note that @p buffer holds the texture handed out by the last
+     * `acquire()` call, so the pool does not hand it out again while
+     * the buffer is alive.
+     */
+    void mark_busy(const std::shared_ptr<video_frame::GpuBuffer>& buffer) noexcept;
+
 private:
+    /** One slot: the texture and the buffer that was handed out for it. */
+    struct Slot {
+        ComPtr<ID3D11Texture2D> texture;
+        std::weak_ptr<video_frame::GpuBuffer> handed_out;
+    };
+
     ComPtr<ID3D11Device> device_;
-    std::vector<ComPtr<ID3D11Texture2D>> textures_;
+    std::vector<Slot> textures_;
     std::size_t next_ = 0;
+    /** The slot the last `acquire()` handed out. */
+    std::size_t last_ = 0;
+    bool has_last_ = false;
 };
 
 /**

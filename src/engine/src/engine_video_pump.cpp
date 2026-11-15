@@ -58,6 +58,25 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     if (!video_capture_) return false;
     if (!video_codec_ || !video_sender_) return false;
 
+    auto& vstate = impl_->video_state;
+
+    // ---- The zero-copy path (remote-desktop plan B10) -------------------
+    //
+    // The GPU mailbox is checked **first**: when the capture device is
+    // delivering surfaces, that is the freshest picture, and the CPU
+    // queue (if the device also fills one) holds an older copy of the
+    // same desktop.  Taking the GPU frame and the CPU frame in the
+    // same tick would send the desktop twice.
+    //
+    // The mailbox is drained here, on the **tick thread** — so the
+    // codec is touched from exactly one thread, whatever the capture
+    // backend does internally (RD-6).
+    if (vstate.capture_gpu_wired) {
+        if (pump_video_capture_gpu()) {
+            return true;
+        }
+    }
+
     // ---- Pop one frame (non-blocking) ----------------------------------
     //
     // The device's queue is empty most of the time: the capture cadence
@@ -89,7 +108,6 @@ bool NimRTCEngine::pump_video_capture() noexcept {
     // later frame is placed relative to it.  The origin is monotonic, so
     // the media clock never jumps backwards even if the device's
     // timestamp does.
-    auto& vstate = impl_->video_state;
     if (!vstate.capture_rtp_base_valid) {
         vstate.capture_rtp_base_valid = true;
         vstate.capture_rtp_base_us     = captured.capture_ts_us;
@@ -216,6 +234,105 @@ bool NimRTCEngine::pump_video_capture() noexcept {
         ++vstate.video_capture_pump_errors;
     }
     return rc == plugins::kOk;
+}
+
+// ---------------------------------------------------------------------------
+// The zero-copy pump (remote-desktop plan B10)
+// ---------------------------------------------------------------------------
+
+bool NimRTCEngine::pump_video_capture_gpu() noexcept {
+    if (!is_open()) return false;
+    if (!video_capture_ || !video_codec_ || !video_sender_) return false;
+
+    auto& vstate = impl_->video_state;
+
+    // ---- Take the pending frame (tick thread) ---------------------------
+    //
+    // The mailbox holds at most one frame.  If a newer one arrived
+    // while this tick was busy, the older one was already dropped (the
+    // newest frame is the truth).
+    auto pending = vstate.gpu_mailbox.pop();
+    if (!pending) return false;
+
+    const plugins::GpuCaptureFrame& frame = *pending;
+    if (!frame.gpu_buffer) {
+        // A frame without a surface is metadata-only.  It still counts
+        // as "seen", so the counters move.
+        ++vstate.video_capture_pumped_metadata;
+        return false;
+    }
+
+    // ---- The media clock ------------------------------------------------
+    //
+    // The same rule as the CPU path: the first GPU frame establishes
+    // the origin, and every later frame is placed relative to it.  The
+    // origin is shared with the CPU path, so a session that switches
+    // between the two does not jump.
+    if (!vstate.capture_rtp_base_valid) {
+        vstate.capture_rtp_base_valid = true;
+        vstate.capture_rtp_base_us     = frame.capture_ts_us;
+        vstate.capture_rtp_base_ts     = vstate.video_rtp_timestamp;
+    }
+
+    std::int64_t delta_us = frame.capture_ts_us - vstate.capture_rtp_base_us;
+    if (delta_us < 0) delta_us = 0;
+    const std::uint32_t rtp_timestamp =
+        vstate.capture_rtp_base_ts +
+        static_cast<std::uint32_t>((delta_us * kVideoClockRateHz) / 1'000'000);
+
+    // ---- The dirty rectangles (remote-desktop plan B9) -----------------
+    //
+    // The GPU path reports the same metadata as the CPU path, so the
+    // incremental-encode machinery is identical.
+    {
+        plugins::CaptureFrame as_capture;
+        as_capture.dirty = frame.dirty;
+        offer_dirty_rects_to_sender(as_capture);
+    }
+
+    // ---- Encode the surface straight into the codec --------------------
+    //
+    // The surface is handed to the encoder *as is* — no staging copy, no
+    // colour conversion, no host round-trip.  The `GpuBuffer` owns the
+    // texture and is alive for the whole call, which is the lifetime
+    // `encode_zero_copy()` documents.
+    if (!video_codec_->supports_zero_copy_encode()) {
+        // The codec cannot take a surface.  The frame is lost — there
+        // is no CPU mirror to fall back to, and manufacturing one would
+        // defeat the path the host asked for.
+        ++vstate.video_capture_gpu_errors;
+        core::log::Logger::instance().warn(
+            "engine: the capture device delivered a GPU surface but the "
+            "video codec cannot consume one — the frame was dropped");
+        return false;
+    }
+
+    plugins::EncodedVideoFrame encoded{};
+    const plugins::Status rc = video_codec_->encode_zero_copy(
+        *frame.gpu_buffer, encoded);
+    if (rc != plugins::kOk) {
+        ++vstate.video_capture_gpu_errors;
+        core::log::Logger::instance().warn(
+            "engine: the zero-copy encode of a captured surface failed");
+        return false;
+    }
+
+    ++vstate.video_capture_gpu_frames;
+    ++vstate.video_format_zero_copy;
+
+    // ---- Packetize and push --------------------------------------------
+    //
+    // The *same* push path the CPU path uses, so the two cannot drift
+    // apart.  The sender owns the RTP stamping and the priority
+    // handling.
+    const plugins::Status push_rc = push_encoded_video_frame(
+        encoded, rtp_timestamp, frame.frame_seq, frame.capture_ts_us);
+    if (push_rc == plugins::kOk) {
+        ++vstate.video_capture_pumped_frames;
+    } else {
+        ++vstate.video_capture_pump_errors;
+    }
+    return push_rc == plugins::kOk;
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,8 @@ void GpuTexturePool::set_device(const ComPtr<ID3D11Device>& device) noexcept {
     device_ = device;
     textures_.clear();
     next_ = 0;
+    last_ = 0;
+    has_last_ = false;
 }
 
 ComPtr<ID3D11Texture2D> GpuTexturePool::acquire(std::uint32_t width,
@@ -74,20 +76,32 @@ ComPtr<ID3D11Texture2D> GpuTexturePool::acquire(std::uint32_t width,
     // Round-robin over the textures that match the request: the caller
     // copies the freshly captured frame into the texture it gets, so a
     // texture the consumer may still be reading must not be handed out
-    // again immediately.  With a ring of N textures, the consumer has
-    // N frames of slack before a texture is overwritten.
+    // again.  With a ring of N textures, the consumer has N frames of
+    // slack before a texture is overwritten.
+    //
+    // A slot whose buffer is *still held* by the consumer is skipped
+    // entirely — overwriting it would corrupt a picture the consumer
+    // is about to encode.
     const std::size_t count = textures_.size();
     for (std::size_t offset = 0; offset < count; ++offset) {
         const std::size_t index = (next_ + offset) % count;
-        ComPtr<ID3D11Texture2D>& tex = textures_[index];
-        if (!tex) continue;
+        Slot& slot = textures_[index];
+        if (!slot.texture) continue;
         D3D11_TEXTURE2D_DESC desc{};
-        tex->GetDesc(&desc);
-        if (desc.Width == width && desc.Height == height &&
-            desc.Format == format) {
-            next_ = (index + 1) % count;
-            return tex;
+        slot.texture->GetDesc(&desc);
+        if (desc.Width != width || desc.Height != height ||
+            desc.Format != format) {
+            continue;
         }
+        // Busy?  The consumer still holds the buffer for this texture.
+        if (!slot.handed_out.expired()) {
+            continue;
+        }
+        next_ = (index + 1) % count;
+        last_ = index;
+        has_last_ = true;
+        slot.handed_out.reset();
+        return slot.texture;
     }
 
     D3D11_TEXTURE2D_DESC desc{};
@@ -104,9 +118,20 @@ ComPtr<ID3D11Texture2D> GpuTexturePool::acquire(std::uint32_t width,
     HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &texture);
     if (FAILED(hr)) return nullptr;
 
-    textures_.push_back(texture);
+    Slot slot;
+    slot.texture = texture;
+    textures_.push_back(std::move(slot));
+    last_ = textures_.size() - 1;
+    has_last_ = true;
     next_ = textures_.size();
     return texture;
+}
+
+void GpuTexturePool::mark_busy(
+        const std::shared_ptr<video_frame::GpuBuffer>& buffer) noexcept {
+    if (!buffer || !has_last_) return;
+    if (last_ >= textures_.size()) return;
+    textures_[last_].handed_out = buffer;
 }
 
 namespace {

@@ -3563,6 +3563,30 @@ public:
         std::uint64_t video_capture_pump_errors     = 0;
         std::uint64_t video_capture_pumped_metadata = 0;
 
+        // ---- The zero-copy hand-off (remote-desktop plan B10) ------------
+        //
+        // The counters that prove the capture → encoder hand-off ran
+        // *without* a CPU staging step.
+        //
+        //   - `video_capture_gpu_frames` counts the frames the tick
+        //     thread encoded **straight from the captured surface** — no
+        //     host copy, no colour conversion.
+        //   - `video_capture_gpu_errors` counts the frames the GPU path
+        //     could not hand to the encoder (the codec refused the
+        //     surface, or the codec cannot consume surfaces at all).
+        //   - `video_capture_gpu_wired` says whether the zero-copy seam
+        //     was wired at all — a host that asked for zero-copy and
+        //     sees this false knows the *capture* side never offered a
+        //     surface.
+        //
+        // The acceptance criterion of B10 is `video_capture_gpu_frames`
+        // moving **while** `video_capture_bytes_copied` stays at zero:
+        // the picture went from the compositor to the encoder without
+        // entering host memory.
+        std::uint64_t video_capture_gpu_frames  = 0;
+        std::uint64_t video_capture_gpu_errors  = 0;
+        bool          video_capture_gpu_wired   = false;
+
         // ---- Format normalisation (remote-desktop plan C3) --------------
         //
         // The capture path may deliver BGRA / NV12 / I420; the encoder
@@ -4334,6 +4358,21 @@ private:
      *          to the encoder; false when there was nothing to do. */
     bool pump_video_capture() noexcept;
 
+    /**
+     * @brief Drain one GPU frame from the mailbox and encode it.
+     *
+     * The zero-copy counterpart of `pump_video_capture()` (remote-desktop
+     * plan B10).  The capture device delivers its surfaces on its own
+     * thread; this drains one of them on the **tick thread** and hands
+     * it to the encoder — so the codec is still touched from exactly one
+     * thread (RD-6), and the pixels never enter host memory.
+     *
+     * @return true when a frame was taken and handed to the encoder;
+     *         false when the mailbox was empty or the encoder refused
+     *         the surface.
+     */
+    bool pump_video_capture_gpu() noexcept;
+
     /** Hand the capture device's dirty rectangles to the video sender
      *  (remote-desktop plan B9).
      *
@@ -4373,6 +4412,27 @@ private:
      *  @return kOk when the frame was encoded and pushed. */
     plugins::Status encode_and_send_video_frame(
         const plugins::VideoSourceFrame& frame) noexcept;
+
+    /**
+     * @brief Packetize an already-encoded frame and push it to the sender.
+     *
+     * The tail of `encode_and_send_video_frame()`, split out so the
+     * zero-copy pump (plan B10) can reuse it: the GPU path encodes on
+     * its own (the codec writes into its own scratch) and then needs
+     * exactly the same push.  Sharing the tail is what keeps the two
+     * paths from drifting apart.
+     *
+     * @param encoded     The encoded bitstream.
+     * @param rtp_timestamp The outbound RTP timestamp (90 kHz).
+     * @param frame_seq   The capture frame sequence number (for the
+     *                    ref-frame table).
+     * @param capture_ts_us The capture timestamp (for the statistics).
+     * @return kOk when the sender accepted the frame. */
+    plugins::Status push_encoded_video_frame(
+        const plugins::EncodedVideoFrame& encoded,
+        std::uint32_t rtp_timestamp,
+        std::uint32_t frame_seq = 0,
+        std::int64_t capture_ts_us = 0) noexcept;
 
     /** Recompute the encoder's parameter set and push it to the codec
      *  (remote-desktop plan B12 / B13).
